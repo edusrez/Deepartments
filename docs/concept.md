@@ -22,12 +22,24 @@ consolidates the IDEA→DSH mapping **with no pending cells**, defines the
 | 1 | Distribution | **npm plugin bundle package** (not a profile) | The Deepartments repo **IS** the plugin package: package.json with `dsh.bundle`, `cordis.patch.yml`, `src/`→`lib/`. An example `deepartments` profile may be documented, but it is not the product. |
 | 2 | UI | **Headless-first** | The MVP has no client plugin; the UI (total observer) comes in phase 3+. |
 | 3 | Legacy workspace fate | **Residual** — "we keep only the idea adapted to the DSH harness" | The idea migrates to Deepartments; the legacy workspace remains as legacy and as the preset's workspace (the previous workspace's preset keeps working from there until Deepartments replaces it). **MVP dogfooding on the Deepartments repo itself**: the first department —programming— builds the plugin that runs it (auto-bootstrap). |
-| 4 | Previous workspace's preset | **Frozen de facto**; its content is absorbed as plugin content | The multi-agent flow skill, the role templates (orchestrator, builders, reviewer) and the report convention become Deepartments content. The preset keeps operating, with no new features. |
+| 4 | Previous workspace's preset | **Frozen de facto**; its content is absorbed as plugin content | The multi-agent flow skill, the role templates (Asistente, builders, reviewer) and the report convention become Deepartments content. The preset keeps operating, with no new features. |
 | 5 | License | **MIT** | Already materialized: the repo has an MIT `LICENSE`. |
 | 6 | Name | **Deepartments**; package `dsh-deepartments`; the proposed deployment name is **voided** | Justification in §1.1: the first deployment is simply called "the first deployment" (the programming organization). |
 | 7 | Witness | **YAML frontmatter + markdown body** | The current `_reports/` convention; compatible with the already established inter-agent memory. It is the human layer over the native mechanism (session events, §3). |
 | 8 | MVP governance | **Minimal** | Operational delegated to the group head; design/direction go up to the CEO (`ask_user_question`). Editable policy in phase 3. |
 | 9 | Sleeping post | **Continuable subagent + witness in file** | `send_message`/`followup` resumes the post's conversation; the frontmatter/body witness is the handoff; the research adds `session.append` + `sessionProjections` as the programmatic layer of the same state. |
+
+**Owner decision register (2026-08-16, second batch) — BINDING.**
+
+| # | Decision | Choice (decided) | Implication |
+|---|---|---|---|
+| 10 | Milestone reorder | **First milestone = board room + research department inter-agent flow** (former MVP programming dogfooding becomes the NEXT milestone) | Success criterion: the owner invokes the Asistente with a research request → the Asistente forks into the board-of-directors room → short conversation with the research coordinator → returns to the owner's office chat with the result; the structure persists across sessions. |
+| 11 | Organization structure | **Nested rooms**: owner office (CEO ↔ Asistente) → board of directors room (Asistente's representative + department heads) → department rooms (head + workers). Rooms are **part of the program's architecture**, defined by us in the plugin configuration — **never created by agents** (a future internal programming department will iterate on the harness and the plugin). One representative per principal in each room; a newer fork **supersedes** the older one. | |
+| 12 | Room model | **A room is a passive board**: append-only ID-addressable message log + per-member read cursors + **agenda** of structured items (owner, lifecycle state ∈ {submitted, working, input-required, completed, failed, canceled}, cursor-of-last-touch) + **addressed envelopes** (to/cc; silent by default). Members read only their addressed deltas since their cursor; joiners get an **onboarding kit** (agenda snapshot + decision log + charter + pointers), never the full archive. Validated by inter-agent communication research (report `.dsh/reports/researcher/2026-08-16-interagent-communication.md`): board coordination beats SOTA topologies; broadcast redundancy costs 28-73% of tokens (AgentPrune). | |
+| 13 | Supersession merge | The successor fork merges from three layers: (1) fork seed (the Asistente's conversation), (2) **board delta scoped to its thread**, (3) the predecessor's **1:1 relevo witness** (private state: what was asked, what is awaited, the plan). The predecessor is interrupted/retired (cursor frozen, agenda ownership transferred to the successor). LLM-session context splicing between fork generations is **forbidden** — the board is the merge bus. | |
+| 14 | Witness format (refines D7) | **Schema-constrained YAML frontmatter** (provenance: author, timestamp, board cursor covered; decisions; constraints; open items) + markdown body as the human layer | Research: structured handoffs 0.96 vs narrative 0.48 feasibility (arXiv 2607.18265) — the witness **never collapses into prose**. |
+| 15 | Federation + sleep | Nested rooms federate through **explicit permission scoping** (what each agent may see/change), not shared context. Scheduled sleep cycles are **consolidation time** (agenda upkeep, witness refresh), not idleness (Letta sleep-time compute). | |
+| 16 | Rename | The owner-facing main agent is called **Asistente** (formerly "orchestrator" as its name) | Internal role names (builder, reviewer, researcher, scribe, explore) unchanged. |
 
 ### 1.1 Naming (decision 6) — justified proposal
 
@@ -89,14 +101,14 @@ the plugin that runs it.
 | **Activations — rhythms (scheduled)** | **`dsh-schedule`**: `schedule_create/list/delete`; state lives in the session log (`schedule/change`); on expiry, the agent wakes with a normal **`followup()`** when idle (one-shot `at`/`after_seconds`, recurrence `every_seconds` ≥5min). "This is the native mechanism for post 'activations'." Note: requires mounting after sessions/agents/tools/sessionPersistence; runtime children do not receive it. | [native] |
 | **Activations — world events (reactive)** | System events (full `session/event` stream, `agent/pre-step`, `agent/turn-stopping`…) + **MCP client** (`dsh-mcp-client`) for the external world. The plugin **maps events→activations** (listener + `startContinuable`/`followup`). | [plugin code] (on native events) |
 | **Activations — assignments** (one session wakes another) | `send_message` / `followup(parent, childId, content)` to a sleeping continuable subagent; the "inbox" = persisted state of the post (session events + projection). | [native] |
-| **Activation — the CEO** (the human's word) | User message in the GUI + `ask_user_question` as the veto/microdecision channel. Not an exception: one more event that wakes the orchestrator. | [native] |
-| **Orchestrator** (CEO's right hand) | **Agent preset** — the previous workspace's preset already exists (agent.cordis.yml + preset.yml + skills/); API `ctx.agentPresets` (list/resolve/read/copy/mount/recompose). Deepartments generalizes and productizes it. Plane rule: a preset contributes to the agent (tools, persona, prompt sections); registries belong to the host; a preset-owned service requires a group with `isolate: true`. | [native] |
+| **Activation — the CEO** (the human's word) | User message in the GUI + `ask_user_question` as the veto/microdecision channel. Not an exception: one more event that wakes the Asistente. | [native] |
+| **Asistente** (CEO's right hand) | **Agent preset** — the previous workspace's preset already exists (agent.cordis.yml + preset.yml + skills/); API `ctx.agentPresets` (list/resolve/read/copy/mount/recompose). Deepartments generalizes and productizes it. Plane rule: a preset contributes to the agent (tools, persona, prompt sections); registries belong to the host; a preset-owned service requires a group with `isolate: true`. | [native] |
 | **SESSION memory** (short-term) | Active context + compaction (`dsh-compaction-basic`) + token-meter. Ephemeral by nature, as in IDEA. | [native] |
 | **WITNESS memory** | See "Witness": session events + projection + `_reports/` convention. | [native + convention] |
 | **ROOM memory** | Group workspace (directory with its memory: files, reports, board) + `_reports/<agent>/`. | [convention to build] |
 | **ORGANIZATIONAL memory** | Global repo, living docs (AGENTS.md, docs/), skills, `_research/`, session history (`ctx.sessions.get/list`). Queryable from all "rooms". | [convention (already in use)] |
 | **Contextualizer** (3 modes) | Mode 1 (on wake): system-prompt / agent-instructions + skill injected by preset. Mode 2 (on demand): grep/glob, `scripts/report_search.py`, web. Mode 3 (proactive / cross-reads): **`ctx.sessionReferenceResolver`** — read-only snapshots of other sessions injected as model context (maxReferences=3 by default). | [native (mode 3) + convention (modes 1-2)] |
-| **Governance** (operational/design/direction; policy with exceptions) | Plugin declarative config + orchestrator persona + `ask_user_question` as the veto channel. There is no "permission policy" primitive: it is modeled in config and prompts. MVP: minimal (decision 8); editable policy in phase 3. | [plugin code + convention] |
+| **Governance** (operational/design/direction; policy with exceptions) | Plugin declarative config + Asistente persona + `ask_user_question` as the veto channel. There is no "permission policy" primitive: it is modeled in config and prompts. MVP: minimal (decision 8); editable policy in phase 3. | [plugin code + convention] |
 | **Channeled escalation** (the system proposes, the CEO approves/vetoes) | Convention: the system proposes in reports/documents; the CEO decides via `ask_user_question`; the CEO creates groups directly when he decides so. | [convention] |
 | **Self-modification** (structure and implementation) | Builders edit presets/skills/the plugin itself (`ctx.agentPresets` + repo files; precedent: `trustedHosts` patch in STATUS.md). Dogfooding: the first department (programming) builds the plugin. Safeguards and recoverable "default structure": design decision. | [native + plugin code] |
 | **Self-observation** (functioning, results, evolution) | Raw **native** signals: `sessionProjections`, token-meter, job registry, `list_agents`, session history, `goal/change` events. Interpretation is agentic (quality group, phase 4). | [native (signals) + plugin code (interpretation)] |
@@ -114,15 +126,22 @@ witness's human layer, the governance policy, the events→activations mapping
 and the interpretation of signals (quality). The differentiating value is
 kept and reinforced: **DSH delegates; Deepartments organizes.**
 
-## 4. Definitive MVP (phase 2)
+## 4. Milestones (reordered 2026-08-16)
 
-**MVP goal:** formalize as a plugin what we currently do by hand with the
+**First milestone — board room + research department (decision 10).** The
+owner invokes the Asistente with a research request → the Asistente forks
+into the board-of-directors room → short conversation with the research
+coordinator → returns to the owner's office chat with the result; the
+structure persists across sessions.
+
+**Second milestone — "one department, sleeping posts, dogfooding"** (the
+former MVP scope; decision 10 reorders it after the first milestone).
+
+**Goal:** formalize as a plugin what we currently do by hand with the
 previous workspace's preset (which stays frozen, decision 4) and add the one
 thing the preset does not have: **persistent posts with a witness between
 sessions**, with the lifecycle managed by the plugin (decision 9 +
 research).
-
-**MVP scope — "one department, sleeping posts, dogfooding":**
 
 1. **One department: programming.** Roles absorbed from the previous setup
    (decision 4): group head, builders (tiers builder/builder-pro/builder-max)
@@ -133,11 +152,11 @@ research).
    markdown body (decision 7) + session events
    (`session.append('deepartments/*')` + post projection) as the programmatic
    layer.
-3. **The CEO flow.** Owner → orchestrator (preset) → department head →
+3. **The CEO flow.** Owner → Asistente (preset) → department head →
    **N builders in parallel** (disjoint files) → reviewer → verification →
    commit. On completion (or when context runs out), the head's post falls
    asleep leaving a witness; the **plugin** manages sleep/wake/witness — not
-   the manual glue orchestrator.
+   the manual glue Asistente.
 4. **Dogfooding (decision 3).** The CEO's first real assignment to the
    programming department is **building the plugin itself**: auto-bootstrap —
    the first department builds the tool that runs it, on the Deepartments
@@ -145,13 +164,13 @@ research).
 5. **Headless (decision 2).** No client plugin; verification is via
    `--dump-config` + headless smoke + tests (CLI/reports), not visual.
 
-**MVP success criteria (measurable, inherited from v1):**
+**Second milestone success criteria (measurable, inherited from v1):**
 
-1. A CEO assignment goes through CEO → orchestrator → head → N builders in
+1. A CEO assignment goes through CEO → Asistente → head → N builders in
    parallel → reviewer → verification → commit **and**, halfway, the head's
    post (or a builder's) falls asleep and resumes the task in a new session
    **without loss of information**: the witness works.
-2. The flow works **without the manual orchestrator acting as glue**: the
+2. The flow works **without the manual Asistente acting as glue**: the
    plugin (or the group head via `dept_*` tools) manages sleep/wake/witness.
 
 **What is NOT in the MVP:** multiple rooms and visit reception; scheduled
