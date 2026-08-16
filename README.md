@@ -1,21 +1,21 @@
 # Deepartments
 
-Deepartments es una **capa de organización agéntica para DeepSeek Harness (DSH)** —
-departamentos, puestos que duermen y despiertan, testigos, activaciones y
-gobernanza — construida como **plugin npm (bundle)** del runtime. La idea del
-workspace legado se materializa aquí como software: DSH responde a *cómo se
-ejecuta* (sesiones, subagentes, schedule, skills, jobs, tools); Deepartments
-responde a *cómo se organiza* (qué es un puesto, un departamento, una sala, un
-testigo, una activación, una política de gobernanza).
+Deepartments is an **agentic organization layer for DeepSeek Harness (DSH)** —
+departments, posts that sleep and wake, witnesses, activations and
+governance — built as an **npm plugin (bundle)** of the runtime. The idea of
+the legacy workspace is materialized here as software: DSH answers *how things
+run* (sessions, subagents, schedule, skills, jobs, tools); Deepartments
+answers *how things are organized* (what a post, a department, a room, a
+witness, an activation, a governance policy is).
 
-## Estado
+## Status
 
-- **Fase 2 (MVP) en desarrollo** — ver [docs/ROADMAP.md](docs/ROADMAP.md).
-- **Versión:** `0.1.0-rc.1` (paquete `dsh-deepartments`).
-- **Licencia:** MIT.
-- **Documentación:** [docs/IDEA.md](docs/IDEA.md) (la idea) ·
-  [docs/concept.md](docs/concept.md) (decisiones y mapeo) ·
-  [docs/ROADMAP.md](docs/ROADMAP.md) (fases y kickoff).
+- **Phase 2 (MVP) in development** — see [docs/ROADMAP.md](docs/ROADMAP.md).
+- **Version:** `0.1.0-rc.1` (package `dsh-deepartments`).
+- **License:** MIT.
+- **Documentation:** [docs/IDEA.md](docs/IDEA.md) (the idea) ·
+  [docs/concept.md](docs/concept.md) (decisions and mapping) ·
+  [docs/ROADMAP.md](docs/ROADMAP.md) (phases and kickoff).
 
 ## Quick-start
 
@@ -23,20 +23,20 @@ testigo, una activación, una política de gobernanza).
 dsh plugin --profile <x> add dsh-deepartments
 ```
 
-Instala el bundle en el profile `<x>` y aporta su capa de configuración y
-servicios al runtime. En desarrollo se usa el profile aislado
-`deepartments-dev` (ver [AGENTS.md](AGENTS.md) — verificación TIERED).
+Installs the bundle into profile `<x>` and contributes its configuration layer
+and services to the runtime. Development uses the isolated profile
+`deepartments-dev` (see [AGENTS.md](AGENTS.md) — TIERED verification).
 
-## Documentación
+## Documentation
 
-- **`docs/IDEA.md`** — la idea reenmarcada: la organización agéntica como capa
-  sobre DSH, con cada concepto y su mecanismo nativo.
-- **`docs/concept.md`** — la memoria de las decisiones (2026-08-16) y del
-  mapeo IDEA→DSH resuelto, el MVP y los riesgos.
-- **`docs/ROADMAP.md`** — las fases 0-4 con criterios de salida y las tareas
-  del kickoff de fase 2.
+- **`docs/IDEA.md`** — the reframed idea: the agentic organization as a layer
+  over DSH, with each concept and its native mechanism.
+- **`docs/concept.md`** — the record of the decisions (2026-08-16) and of the
+  resolved IDEA→DSH mapping, the MVP and the risks.
+- **`docs/ROADMAP.md`** — phases 0-4 with exit criteria and the phase 2
+  kickoff tasks.
 
-## Contrato de trabajo
+## Working agreement
 
-Para construir el plugin: lee [AGENTS.md](AGENTS.md) y carga el skill
+To build the plugin: read [AGENTS.md](AGENTS.md) and load the skill
 `dsh-plugin-dev` (`.dsh/skills/dsh-plugin-dev/SKILL.md`).

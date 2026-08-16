@@ -1,64 +1,73 @@
-# AGENTS.md — contrato de trabajo del repo Deepartments
+# AGENTS.md — Deepartments repo working agreement
 
-## Qué es este repo
+## Language policy (binding)
 
-El repo **es** el bundle `dsh-deepartments`: un paquete npm de plugin para
-DeepSeek Harness (DSH) que aporta una capa de organización agéntica
-(departamentos, puestos que duermen y despiertan, testigos, activaciones,
-gobernanza). DSH responde al *cómo se ejecuta*; Deepartments al *cómo se
-organiza*. Contexto: [docs/IDEA.md](docs/IDEA.md) (la idea),
-[docs/concept.md](docs/concept.md) (decisiones y mapeo),
-[docs/ROADMAP.md](docs/ROADMAP.md) (fases y kickoff).
+All repository content, code, comments, commit messages, reports and
+documentation are written in **English**. Spanish is reserved exclusively for
+direct owner communication (chat). Any file written in another language must
+be translated.
 
-## Estructura
+## What this repo is
 
-- `package.json` — name `dsh-deepartments`, versión `0.1.0-rc.1`, `type:
+The repo **is** the `dsh-deepartments` bundle: an npm plugin package for
+DeepSeek Harness (DSH) that provides an agentic organization layer
+(departments, posts that sleep and wake, witnesses, activations,
+governance). DSH answers *how things run*; Deepartments answers *how things
+are organized*. Context: [docs/IDEA.md](docs/IDEA.md) (the idea),
+[docs/concept.md](docs/concept.md) (decisions and mapping),
+[docs/ROADMAP.md](docs/ROADMAP.md) (phases and kickoff).
+
+## Structure
+
+- `package.json` — name `dsh-deepartments`, version `0.1.0-rc.1`, `type:
   module`, `main: lib/index.js`, `dsh.bundle` (patch → `cordis.patch.yml`),
-  `peerDependencies` en canal rc (`^0.1.0-rc.x`; un `^0.0.1` no matchea rc).
-- `cordis.patch.yml` — la capa de configuración: top-level YAML array de
-  entradas de patch; la fila referencia el paquete por nombre (`name:
+  `peerDependencies` on the rc channel (`^0.1.0-rc.x`; a `^0.0.1` does not
+  match rc).
+- `cordis.patch.yml` — the configuration layer: top-level YAML array of
+  patch entries; the row references the package by name (`name:
   dsh-deepartments`).
-- `src/` → `lib/` — el plugin Cordis; compila con **tsc NodeNext** a `lib/`.
-- `docs/` — IDEA, concept, ROADMAP (memoria del proyecto).
-- `.dsh/skills/` — skills de autoría interna (raíz de descubrimiento
-  `<project>/.dsh/skills`, rango 100): `dsh-plugin-dev` para escribir el
+- `src/` → `lib/` — the Cordis plugin; compiled with **tsc NodeNext** to
+  `lib/`.
+- `docs/` — IDEA, concept, ROADMAP (project memory).
+- `.dsh/skills/` — internal authorship skills (discovery root
+  `<project>/.dsh/skills`, rank 100): `dsh-plugin-dev` for writing the
   plugin.
 
-## Verificación TIERED
+## TIERED verification
 
-1. `pnpm build` — tsc NodeNext compila (src → lib), sin errores de tipos.
-2. `dsh plugin --profile deepartments-dev add /home/esuarez/projects/deepartments` — instala el bundle en el profile de desarrollo.
-3. `dsh --profile deepartments-dev --dump-config` — compone el árbol SIN bootear; **debe mostrar la capa `# == dsh-deepartments`**.
-4. Smoke headless real en el profile `deepartments-dev` (port independiente) que ejercita el tool/servicio tocado.
+1. `pnpm build` — tsc NodeNext compiles (src → lib), no type errors.
+2. `dsh plugin --profile deepartments-dev add /home/esuarez/projects/deepartments` — installs the bundle in the development profile.
+3. `dsh --profile deepartments-dev --dump-config` — composes the tree WITHOUT booting; **must show the `# == dsh-deepartments` layer**.
+4. Real headless smoke in the `deepartments-dev` profile (independent port) exercising the touched tool/service.
 
-Desarrollo y smoke SIEMPRE en `deepartments-dev` — **nunca contra el profile
-web en uso**. Reinicio requerido tras `add` (manifest y metadata de client se
-cachean); los edits de `cordis.patch.yml` del usuario sí son HMR.
+Development and smoke ALWAYS in `deepartments-dev` — **never against the web
+profile in use**. Restart required after `add` (manifest and client metadata
+are cached); user edits to `cordis.patch.yml` are HMR.
 
-## Reglas no negociables
+## Non-negotiable rules
 
-1. **Sin `export default`** (postmortem 0001 — rompe `inject`).
-2. **`!!js` solo dentro de `config`**, nunca en campos de metadatos
+1. **No `export default`** (postmortem 0001 — breaks `inject`).
+2. **`!!js` only inside `config`**, never in metadata fields
    (postmortem 0002).
-3. **`defineTool` con `output.{schema,render}` obligatorio**; `parameters`
-   flat con `required: true`.
-4. Todo registro como **effect reversible**; sin estado mutable global fuera
-   de `apply`.
-5. **Tests que pasen por el Loader real** (nunca solo mount manual).
-6. Desarrollo y smoke en **profile/port independientes** (`deepartments-dev`).
-7. Aislar servicios renombrables: `ctx.get('webServer') ?? ctx.get('httpServer')`.
-8. `peerDependencies` en canal rc (`^0.1.0-rc.x`) y **pin del CLI**:
+3. **`defineTool` with `output.{schema,render}` mandatory**; `parameters`
+   flat with `required: true`.
+4. Every registration as a **reversible effect**; no global mutable state
+   outside `apply`.
+5. **Tests that go through the real Loader** (never only manual mount).
+6. Development and smoke in **independent profiles/ports** (`deepartments-dev`).
+7. Isolate renamable services: `ctx.get('webServer') ?? ctx.get('httpServer')`.
+8. `peerDependencies` on the rc channel (`^0.1.0-rc.x`) and **CLI pin**:
    `npx -p @deepseek-ai/dsh@0.1.0-rc.6`.
 
-Detalle y motivos de cada regla: skill `dsh-plugin-dev`
+Details and rationale for each rule: skill `dsh-plugin-dev`
 (`.dsh/skills/dsh-plugin-dev/SKILL.md`).
 
-## Ritual de sesión
+## Session ritual
 
-- **START**: lee este AGENTS.md y `docs/ROADMAP.md`; comprueba git
-  (`git status`, `git log --oneline -5`); presenta el plan de la sesión.
-- **WORK**: carga el skill `dsh-plugin-dev`; tareas atómicas; verificación
-  TIERED; revisión independiente tras cada cambio.
-- **END**: verificación verde, commit con el estilo del repo (`git log
-  --oneline -5` para verlo), estado actualizado en `docs/ROADMAP.md` si
-  aplica.
+- **START**: read this AGENTS.md and `docs/ROADMAP.md`; check git
+  (`git status`, `git log --oneline -5`); present the session plan.
+- **WORK**: load the `dsh-plugin-dev` skill; atomic tasks; TIERED
+  verification; independent review after every change.
+- **END**: green verification, commit with the repo's style (`git log
+  --oneline -5` to see it), status updated in `docs/ROADMAP.md` if
+  applicable.

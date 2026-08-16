@@ -1,143 +1,142 @@
-# IDEA — la organización agéntica como capa sobre DeepSeek Harness
+# IDEA — the agentic organization as a layer over DeepSeek Harness
 
-> El "giro": en lugar de hablar con un único agente que despacha subagentes, se
-> habla con un **equipo de agentes** — una organización que se especializa con
-> el tiempo y que puede cambiar su propia estructura. Este documento reenmarca
-> la idea original **adaptada al harness de DeepSeek Harness (DSH)**: cada
-> concepto describe su naturaleza y su mecanismo "en DSH". Las decisiones y el
-> mapeo detallado viven en [concept.md](concept.md); el plan en
+> The "turn": instead of talking to a single agent that dispatches subagents,
+> you talk to a **team of agents** — an organization that specializes over
+> time and can change its own structure. This document reframes the original
+> idea **adapted to the DeepSeek Harness (DSH) harness**: each concept
+> describes its nature and its mechanism "in DSH". The decisions and the
+> detailed mapping live in [concept.md](concept.md); the plan in
 > [ROADMAP.md](ROADMAP.md).
 
-## Naturaleza: una organización genérica y auto-mutable sobre DSH
+## Nature: a generic, self-mutating organization over DSH
 
-Una organización agéntica (no solo de programación) compuesta por
-**departamentos** y **puestos**. Los puestos no son procesos: son roles
-persistentes que **duermen y despiertan**, ocupados por agentes. La
-organización se observa, se evalúa y se modifica a sí misma, con gobernanza
-y salvaguardas.
+An agentic organization (not only a programming one) composed of
+**departments** and **posts**. Posts are not processes: they are persistent
+roles that **sleep and wake**, occupied by agents. The organization observes,
+evaluates and modifies itself, with governance and safeguards.
 
-**En DSH:** DSH es "todo es un plugin" sobre Cordis. Deepartments es un
-**paquete npm bundle** (`dsh-deepartments`) que aporta su capa de
-configuración y servicios al runtime. DSH delega (sesiones, subagentes,
-schedule, skills, jobs, tools); Deepartments organiza (puestos,
-departamentos, salas, testigos, activaciones, gobernanza).
+**In DSH:** DSH is "everything is a plugin" on Cordis. Deepartments is an
+**npm bundle package** (`dsh-deepartments`) that contributes its configuration
+layer and services to the runtime. DSH delegates (sessions, subagents,
+schedule, skills, jobs, tools); Deepartments organizes (posts,
+departments, rooms, witnesses, activations, governance).
 
-## Puesto, sesión y testigo
+## Post, session and witness
 
-- **Puesto**: un rol persistente de la organización. Un agente lo ocupa
-  mientras está activo; al terminar su turno, el puesto **se duerme** y deja
-  un **testigo** (el relevo entre sesiones, escrito por el sistema, no por el
-  agente). Al despertar, retoma desde donde quedó.
-- **Sesión**: cada activación abre una **sesión finita** — el turno de
-  trabajo del puesto. La sesión termina; el puesto permanece.
-- **Testigo**: el puente entre sesiones: qué se hizo, qué quedó pendiente,
-  qué contexto necesita el siguiente turno.
+- **Post**: a persistent role of the organization. An agent occupies it while
+  active; when its turn ends, the post **falls asleep** and leaves a
+  **witness** (the handoff between sessions, written by the system, not by the
+  agent). On waking, it resumes where it left off.
+- **Session**: each activation opens a **finite session** — the post's work
+  turn. The session ends; the post remains.
+- **Witness**: the bridge between sessions: what was done, what remains
+  pending, what context the next turn needs.
 
-**En DSH:** puestos = `ctx.subagents.startContinuable(spec)` → hijo durable
-con **cold-resume desde su sesión persistida**; despertar =
-`followup(parent, childId, content)` (literalmente "un puesto que despierta").
-Sesiones = sesiones headless **persistidas event-sourced** (JSONL zstd por
-workspace). Testigo = **doble capa**: nativa (`session.append(
-'deepartments/<evento>', data)` + `ctx.sessionProjections` para el estado
-vivo del puesto; la escritura al dormirse se hace con un listener sobre
-`agent/turn-stopping`) + convención humana (frontmatter YAML + cuerpo
-markdown).
+**In DSH:** posts = `ctx.subagents.startContinuable(spec)` → durable child
+with **cold-resume from its persisted session**; waking =
+`followup(parent, childId, content)` (literally "a post that wakes up").
+Sessions = headless sessions **persisted event-sourced** (JSONL zstd per
+workspace). Witness = **two layers**: native (`session.append(
+'deepartments/<event>', data)` + `ctx.sessionProjections` for the live state
+of the post; the write on sleep is done with a listener on
+`agent/turn-stopping`) + human convention (YAML frontmatter + markdown
+body).
 
-## Sistema de salas
+## Rooms system
 
-La comunicación entre agentes se organiza en **salas**: de 2 a N agentes,
-una sala a la vez. La sala es la memoria viva del grupo (sus archivos, sus
-reportes, su pizarra).
+Communication between agents is organized in **rooms**: 2 to N agents,
+one room at a time. The room is the group's living memory (its files, its
+reports, its board).
 
-**En DSH:** no hay chat grupal nativo — la comunicación es 1-a-1
-(`subagent`/`send_message`/`report`) o vía workspace compartido. La sala se
-modela como **convención**: directorio del grupo (workspace) + agentes
-dedicados (jefe, recepción) + lecturas cruzadas nativas vía
-`ctx.sessionReferenceResolver` (snapshots read-only de otras sesiones
-inyectados como contexto, límites configurables). Salas múltiples con
-recepción y visitas: fase 3.
+**In DSH:** there is no native group chat — communication is 1-to-1
+(`subagent`/`send_message`/`report`) or via the shared workspace. The room is
+modeled as a **convention**: group directory (workspace) + dedicated agents
+(head, reception) + native cross-reads via
+`ctx.sessionReferenceResolver` (read-only snapshots of other sessions
+injected as context, configurable limits). Multiple rooms with
+reception and visits: phase 3.
 
-## Sistema de activaciones
+## Activation system
 
-Cuatro vías por las que un puesto despierta:
+Four ways a post wakes up:
 
-1. **El CEO** — la palabra del humano.
-2. **Encargos** — una sesión despierta a otra.
-3. **Ritmos** — programáticas, por calendario o intervalo.
-4. **Eventos del mundo** — reactivas, del sistema o externas.
+1. **The CEO** — the human's word.
+2. **Assignments** — one session wakes another.
+3. **Rhythms** — scheduled, by calendar or interval.
+4. **World events** — reactive, from the system or external.
 
-**En DSH:** CEO = mensaje del usuario en la GUI + `ask_user_question` como
-canal de veto (no es una excepción: un evento más que despierta al
-orchestrator). Encargos = `send_message`/`followup` a un subagente
-continuable dormido (la "bandeja" = estado persistido del puesto). Ritmos =
-`dsh-schedule` (`schedule_create/list/delete`; al vencer, el agente se
-despierta con un `followup()` cuando está idle) — fase 3. Eventos = eventos
-del sistema (`session/event`, `agent/pre-step`, `agent/turn-stopping`…) +
-MCP client para el mundo externo, mapeados eventos→activaciones por el
-plugin — fase 3. El MVP solo lleva CEO y encargos manuales.
+**In DSH:** CEO = user message in the GUI + `ask_user_question` as the veto
+channel (not an exception: one more event that wakes the orchestrator).
+Assignments = `send_message`/`followup` to a sleeping continuable subagent
+(the "inbox" = persisted state of the post). Rhythms =
+`dsh-schedule` (`schedule_create/list/delete`; on expiry, the agent wakes
+up with a `followup()` when idle) — phase 3. Events = system events
+(`session/event`, `agent/pre-step`, `agent/turn-stopping`…) + MCP client
+for the external world, mapped events→activations by the plugin —
+phase 3. The MVP only carries CEO and manual assignments.
 
-## Memoria en cuatro niveles
+## Memory in four levels
 
-1. **SESIÓN** (corto plazo) — el contexto activo del turno.
-2. **TESTIGO** (relevo entre sesiones) — lo que sobrevive al dormirse.
-3. **SALA** (memoria del grupo) — el workspace del departamento.
-4. **ORGANIZACIONAL** — el repo global, consultable desde todas las salas.
+1. **SESSION** (short-term) — the turn's active context.
+2. **WITNESS** (handoff between sessions) — what survives sleeping.
+3. **ROOM** (group memory) — the department's workspace.
+4. **ORGANIZATIONAL** — the global repo, queryable from all rooms.
 
-**En DSH:** SESIÓN = contexto activo + compactación + token-meter (efímera
-por naturaleza). TESTIGO = `session.append` + proyecciones + convención
-`_reports/`. SALA = workspace del grupo (directorio con su memoria) +
-`_reports/<agente>/`. ORGANIZACIONAL = repo global, docs vivos (AGENTS.md,
-docs/), skills, investigación, historial de sesiones (`ctx.sessions.get/
+**In DSH:** SESSION = active context + compaction + token-meter (ephemeral
+by nature). WITNESS = `session.append` + projections + `_reports/`
+convention. ROOM = group workspace (directory with its memory) +
+`_reports/<agent>/`. ORGANIZATIONAL = global repo, living docs (AGENTS.md,
+docs/), skills, research, session history (`ctx.sessions.get/
 list`).
 
-## Orchestrator y cadena de mando
+## Orchestrator and chain of command
 
-El **orchestrator** es la mano derecha del CEO: descompone, planifica y
-delega. La cadena es CEO → orchestrator → jefe de departamento →
-trabajadores; los puestos intermedios también duermen y dejan testigo.
+The **orchestrator** is the CEO's right hand: decomposes, plans and
+delegates. The chain is CEO → orchestrator → department head →
+workers; intermediate posts also sleep and leave a witness.
 
-**En DSH:** el orchestrator es un **agent preset** (agent.cordis.yml +
-preset.yml + skills/) que contribuye tools, persona y prompt sections.
-Deepartments generaliza y productiza el patrón de preset como cadena de
-mando.
+**In DSH:** the orchestrator is an **agent preset** (agent.cordis.yml +
+preset.yml + skills/) that contributes tools, persona and prompt sections.
+Deepartments generalizes and productizes the preset pattern as a chain of
+command.
 
-## Gobernanza
+## Governance
 
-Tres niveles: **operativo** (delegado al jefe de grupo), **diseño**
-(dirección de producto) y **dirección** (decisiones de fondo). La política
-admite excepciones; el sistema propone, el CEO aprueba o veta.
+Three levels: **operational** (delegated to the group head), **design**
+(product direction) and **direction** (fundamental decisions). The policy
+allows exceptions; the system proposes, the CEO approves or vetoes.
 
-**En DSH:** no hay primitiva de "política de permisos": se modela en config
-declarativa del plugin + persona del orchestrator + `ask_user_question` como
-canal de veto. MVP: gobernanza **mínima** (operativo delegado, diseño/
-dirección suben al CEO); política editable en fase 3.
+**In DSH:** there is no "permission policy" primitive: it is modeled in the
+plugin's declarative config + orchestrator persona + `ask_user_question` as
+the veto channel. MVP: **minimal** governance (operational delegated,
+design/direction go up to the CEO); editable policy in phase 3.
 
-## Auto-modificación y auto-observación
+## Self-modification and self-observation
 
-La organización puede **cambiarse a sí misma** (estructura e
-implementación, con salvaguardas y estructura por defecto recuperable) y
-**observarse** (funcionamiento, resultados, evolución).
+The organization can **change itself** (structure and implementation, with
+safeguards and a recoverable default structure) and **observe itself**
+(functioning, results, evolution).
 
-**En DSH:** los builders editan presets, skills y el propio plugin
-(`ctx.agentPresets` + ficheros del repo). Dogfooding: el primer departamento
-(programación) construye el plugin que lo ejecuta. Señales crudas nativas:
-`sessionProjections`, token-meter, job registry, `list_agents`, historial de
-sesiones, eventos `goal/change`; la interpretación es agéntica (grupo de
-calidad, fase 4).
+**In DSH:** builders edit presets, skills and the plugin itself
+(`ctx.agentPresets` + repo files). Dogfooding: the first department
+(programming) builds the plugin that runs it. Raw native signals:
+`sessionProjections`, token-meter, job registry, `list_agents`, session
+history, `goal/change` events; interpretation is agentic (quality group,
+phase 4).
 
-## Calidad como principio
+## Quality as a principle
 
-El sistema se evalúa a sí mismo: revisión independiente tras cada cambio y
-**entrevista post-sesión** ("sueño") en la que el sistema se examina con los
-datos de la sesión.
+The system evaluates itself: independent review after every change and a
+**post-session interview** ("dream") in which the system examines itself
+with the session data.
 
-**En DSH:** el reviewer es el germen del grupo de calidad (fase 4). El
-"sueño" = listener sobre `agent/turn-stopping` que despacha un agente de
-calidad con los datos de la sesión — los hooks de ciclo de vida existen.
+**In DSH:** the reviewer is the germ of the quality group (phase 4). The
+"dream" = listener on `agent/turn-stopping` that dispatches a quality agent
+with the session data — the lifecycle hooks exist.
 
-## El MVP en una frase
+## The MVP in one sentence
 
-Un departamento (programación) con puestos que duermen y despiertan con
-testigo, ciclo de vida gestionado por el plugin, haciendo dogfooding sobre el
-propio repo Deepartments, headless. Detalles y criterios de éxito en
-[concept.md](concept.md) y [ROADMAP.md](ROADMAP.md).
+A department (programming) with posts that sleep and wake with a witness,
+lifecycle managed by the plugin, dogfooding on the Deepartments repo itself,
+headless. Details and success criteria in [concept.md](concept.md) and
+[ROADMAP.md](ROADMAP.md).
