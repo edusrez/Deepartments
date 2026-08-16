@@ -66,7 +66,7 @@ Four ways a post wakes up:
 4. **World events** — reactive, from the system or external.
 
 **In DSH:** CEO = user message in the GUI + `ask_user_question` as the veto
-channel (not an exception: one more event that wakes the orchestrator).
+channel (not an exception: one more event that wakes the Asistente).
 Assignments = `send_message`/`followup` to a sleeping continuable subagent
 (the "inbox" = persisted state of the post). Rhythms =
 `dsh-schedule` (`schedule_create/list/delete`; on expiry, the agent wakes
@@ -89,13 +89,13 @@ convention. ROOM = group workspace (directory with its memory) +
 docs/), skills, research, session history (`ctx.sessions.get/
 list`).
 
-## Orchestrator and chain of command
+## Asistente and chain of command
 
-The **orchestrator** is the CEO's right hand: decomposes, plans and
-delegates. The chain is CEO → orchestrator → department head →
+The **Asistente** is the CEO's right hand: decomposes, plans and
+delegates. The chain is CEO → Asistente → department head →
 workers; intermediate posts also sleep and leave a witness.
 
-**In DSH:** the orchestrator is an **agent preset** (agent.cordis.yml +
+**In DSH:** the Asistente is an **agent preset** (agent.cordis.yml +
 preset.yml + skills/) that contributes tools, persona and prompt sections.
 Deepartments generalizes and productizes the preset pattern as a chain of
 command.
@@ -107,7 +107,7 @@ Three levels: **operational** (delegated to the group head), **design**
 allows exceptions; the system proposes, the CEO approves or vetoes.
 
 **In DSH:** there is no "permission policy" primitive: it is modeled in the
-plugin's declarative config + orchestrator persona + `ask_user_question` as
+plugin's declarative config + Asistente persona + `ask_user_question` as
 the veto channel. MVP: **minimal** governance (operational delegated,
 design/direction go up to the CEO); editable policy in phase 3.
 
