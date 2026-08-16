@@ -60,6 +60,12 @@ export interface DepartmentConfig {
 /** Plugin config: workspace state dir + the static organization structure. */
 export interface Config {
   stateDir: string
+  /**
+   * Subagent provider name for the Asistente fork spawned by dept_invoke
+   * (default 'fork' — the context-inheriting provider). The coordinator post
+   * always uses 'spawn' (fresh child, no inherited context).
+   */
+  forkProvider?: string
   org: {
     rooms: RoomConfig[]
     departments: DepartmentConfig[]
@@ -74,6 +80,7 @@ export interface Config {
  */
 export const Config: z<any, any> = z.object({
   stateDir: z.string().default('.deepartments'),
+  forkProvider: z.string(),
   org: z.object({
     rooms: z.array(z.object({
       id: z.string().required(),
@@ -389,15 +396,44 @@ function recordsToSeedEvents(records: readonly BoardRecord[]): SessionEvent[] {
 }
 
 /**
+ * Board-append listener (the wake relay of src/invoke.ts): called with the
+ * appended record and the room id, AFTER the session append and the file
+ * mirror. org.ts stays ignorant of followup logic — it only exposes the hook
+ * (Batch 2 handoff). The listener set is module-level mutable state, a
+ * deliberate exception to rule 4 prescribed by the handoff: listeners are
+ * registered through `setBoardRecordListener`, which returns a disposer the
+ * invoke service owns as a reversible effect.
+ */
+export type BoardRecordListener = (record: BoardRecord, roomId: string) => void
+
+const boardRecordListeners = new Set<BoardRecordListener>()
+
+/**
+ * Register a listener for every appended board record. Returns the disposer
+ * (reversible; call it to stop receiving notifications).
+ */
+export function setBoardRecordListener(listener: BoardRecordListener): () => void {
+  boardRecordListeners.add(listener)
+  return () => {
+    boardRecordListeners.delete(listener)
+  }
+}
+
+/**
  * THE emit site for every board record: append it to the live room session
  * (live signal) and mirror the SAME record into the board file (cold truth)
  * immediately after. The file is the durable copy on rc.6; the session
  * append carries the same bytes for live consumers and the projection.
  * Batch 2 message/agenda emitters MUST go through this helper.
+ *
+ * Listener order (Batch 2 handoff): session append → file append → board
+ * record listeners (the wake relay must only fire once the durable mirror
+ * exists).
  */
-async function emitRoomRecord(session: Session, filePath: string, record: BoardRecord): Promise<void> {
+export async function emitRoomRecord(session: Session, filePath: string, record: BoardRecord, roomId: string): Promise<void> {
   session.append(boardEventType(record.kind), record)
   await appendRecord(filePath, record)
+  for (const listener of boardRecordListeners) listener(record, roomId)
 }
 
 /**
@@ -437,7 +473,7 @@ export function applyOrg(ctx: Context, config: Config) {
           }
         }
       }
-      await emitRoomRecord(session, filePath, record)
+      await emitRoomRecord(session, filePath, record, room.id)
       // The cordis logger is exporter-based and never reaches stdout;
       // journald only sees raw stdout (same convention as dsh-smooth-stream
       // and src/index.ts).

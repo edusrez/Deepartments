@@ -3,9 +3,14 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { applyOrg } from './org.js'
 import type { Config } from './org.js'
+import { applyInvoke } from './invoke.js'
 export { Config } from './org.js'
 
 export const name = 'deepartments'
+// agents/subagents are resolved OPTIONALLY inside applyInvoke (ctx.get): the
+// board-room core must keep working in minimal compositions (e.g. the
+// hermetic real-Loader tests of batch 1.5 mount neither), while dept_invoke
+// fails loud at call time when the continuation services are absent.
 export const inject = ['tools', 'sessions', 'sessionProjections']
 
 export function apply(ctx: Context, config: Config) {
@@ -19,4 +24,7 @@ export function apply(ctx: Context, config: Config) {
   // boot instantiation of the configured rooms (all registrations are
   // reversible effects on this plugin's fiber).
   applyOrg(ctx, config)
+
+  // Task 5 (Batch 2): dept_invoke + board toolset + wake relay.
+  applyInvoke(ctx, config)
 }
