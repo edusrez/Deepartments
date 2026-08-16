@@ -9,7 +9,7 @@
 ## 1. Summary and decision register
 
 **Summary.** Deepartments phase 1 (debate and shape) closes. The owner's 9
-decisions, plus the second binding register (decisions 10-16, 2026-08-16),
+decisions, plus the second binding register (decisions 10-17, 2026-08-16),
 fix the product — a **DSH npm plugin bundle package**, **headless-first**,
 with dogfooding on the repo itself — and the research confirms the plugin
 API (`@deepseek-ai/dsh@0.1.0-rc.6`). This concept consolidates the IDEA→DSH
