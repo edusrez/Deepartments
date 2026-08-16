@@ -1,0 +1,11 @@
+# Local agent memory (never committed)
+.dsh/reports/
+
+# Node / build artifacts
+node_modules/
+dist/
+lib/
+*.tgz
+
+# OS
+.DS_Store
