@@ -59,3 +59,14 @@ of the research — so no builder needs to re-research.)
   GUI profile. Follow-ups queued: durable read cursors, respawn of posts
   whose parent is no longer live, dept_room_read truncation of long messages,
   then task 7 (dept_post_create).
+- **2026-08-16** — LLM provider migrated from `deepseek-official` to
+  `opencode-go` (from `@earendil-works/pi-ai`, registered by
+  `@deepseek-ai/dsh-llm-pi-ai`) in both homes (stable `/opt/dsh/.dsh`, dev
+  `/opt/dsh/.dsh-dev`) and the plugin coordinator post (cordis.patch.yml),
+  keeping the same DeepSeek models `deepseek-v4-pro` (Pro) and
+  `deepseek-v4-flash` (Flash). Key insight: the harness `apiKeyEnv` field is a
+  **credential-ref** resolved against `$DSH_HOME/.credentials.yaml`, not a
+  physical env var name. TIERED ladder green (build, plugin add, dump-config,
+  headless smoke self-identifies pro/flash); reviewer PASS; committed
+  `ed907ef`. Follow-ups remain queued: durable read cursors, respawn of
+  orphaned posts, dept_room_read truncation, then task 7 (dept_post_create).
