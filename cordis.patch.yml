@@ -5,3 +5,34 @@
       name: dsh-deepartments
       config:
         stateDir: .deepartments
+        # The static organization architecture (owner decisions 11-12): rooms
+        # are program architecture defined HERE, never created by agents.
+        # The board room is the coordination room; research-head is a member
+        # of BOTH the board room and the research department room.
+        # agentOptions values verified against this deployment's providers
+        # (dsh-llm-deepseek registers models deepseek-v4-flash / deepseek-v4-pro;
+        # settings.yaml's agent-default-model uses provider deepseek-official).
+        org:
+          rooms:
+            - id: board
+              name: Board of directors
+              purpose: Coordination room of department heads
+              members:
+                - asistente
+                - research-head
+            - id: research
+              name: Research department
+              purpose: Research department room
+              members:
+                - research-head
+          departments:
+            - id: research
+              name: Research
+              roomId: research
+              coordinator:
+                postId: research-head
+                role: Research department head
+                provider: deepseek-official
+                agentOptions:
+                  provider: deepseek-official
+                  model: deepseek-v4-flash
