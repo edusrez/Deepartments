@@ -1,5 +1,5 @@
-// dsh-deepartments — organization service (ROADMAP task 4, batch 1): the
-// static board-of-directors architecture.
+// dsh-deepartments — organization service (ROADMAP task 4, batches 1/1.5):
+// the static board-of-directors architecture.
 //
 // Per owner decisions 11-12 (docs/concept.md): rooms are PART of the program's
 // architecture, defined in the plugin configuration — never created by
@@ -7,9 +7,11 @@
 // log + per-member read cursors + a structured agenda. This module:
 //   1. declares the organization config schema (Schemastery),
 //   2. declares the room-state session projection (zod v4) and registers it,
-//   3. instantiates one live room session per configured room at boot and
-//      emits a `deepartments/room-ready` event per room,
-//   4. exports the pure projection fold for later batches (dept_* tools).
+//   3. instantiates one live room session per configured room at boot,
+//      seeds it from the room's board file (decision 17: the file is the
+//      cold source of truth) and emits a `deepartments/room-ready` record
+//      mirrored into the file,
+//   4. exports the pure record fold for later batches (dept_* tools).
 //
 // Coordinator posts are NOT created at runtime yet (Batch 2: dept_invoke) —
 // only their spec is declared in config.
@@ -21,6 +23,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
+import { appendRecord, boardEventType, loadRecords, resolveBoardPath } from './board-store.js'
+import type { AgendaStatus, BoardRecord } from './board-store.js'
+export type { AgendaStatus, BoardKind, BoardRecord } from './board-store.js'
 
 // ---------------------------------------------------------------------------
 // Config schema (Schemastery, same pattern as src/subagent.ts). The
@@ -98,9 +103,6 @@ export const Config: z<any, any> = z.object({
 // Room state: the projection wire types (`deepartments/room`).
 // ---------------------------------------------------------------------------
 
-/** Lifecycle states of an agenda item (decision 12). */
-export type AgendaStatus = 'submitted' | 'working' | 'input-required' | 'completed' | 'failed' | 'canceled'
-
 /** One addressed envelope on the room's append-only log. */
 export interface RoomMessage {
   id: string
@@ -134,42 +136,15 @@ export interface RoomState {
 
 // ---------------------------------------------------------------------------
 // Session event types (log-only, never surface events — no surface opts).
+// The payload of every deepartments/* event is the BOARD RECORD it mirrors
+// into the board file — one wire shape, one fold (decision 17).
 // ---------------------------------------------------------------------------
-
-/** Payload of `deepartments/room-message` (append to the room log). */
-export interface RoomMessageEventData {
-  id: string
-  from: string
-  to: string[]
-  cc: string[]
-  threadId?: string
-  kind: string
-  text: string
-}
-
-/** Payload of `deepartments/agenda-update` (upsert one agenda item). */
-export interface AgendaUpdateEventData {
-  id: string
-  title: string
-  owner: string
-  status: AgendaStatus
-}
-
-/** Payload of `deepartments/room-ready` (boot marker; informational). */
-export interface RoomReadyEventData {
-  room: {
-    id: string
-    name: string
-    purpose: string
-    members: string[]
-  }
-}
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
-    'deepartments/room-message': RoomMessageEventData
-    'deepartments/agenda-update': AgendaUpdateEventData
-    'deepartments/room-ready': RoomReadyEventData
+    'deepartments/room-message': BoardRecord
+    'deepartments/agenda-update': BoardRecord
+    'deepartments/room-ready': BoardRecord
   }
 }
 
@@ -187,8 +162,12 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
 
 export const ROOM_PROJECTION_KEY = 'deepartments/room'
 
-/** Bump on any serialized-state/fold-semantics change. */
-export const ROOM_PROJECTION_STATE_VERSION = 1
+/**
+ * Bump on any serialized-state/fold-semantics change. Batch 1.5: records now
+ * carry their own seq/ts and the fold derives everything from the record
+ * (cursorOfLastTouch references the FILE seq — board-store.ts).
+ */
+export const ROOM_PROJECTION_STATE_VERSION = 2
 
 const agendaStatusSchema = zod.enum(['submitted', 'working', 'input-required', 'completed', 'failed', 'canceled'])
 
@@ -224,48 +203,69 @@ export function initRoomState(): RoomState {
 }
 
 /**
- * Pure transition over one committed session event. Deterministic: message
- * timestamps fold from `event.time`, agenda touch cursors from `event.seq`.
- * The writer's own cursor advances when it posts a message (recipient
- * cursors advance when THEY read — Batch 2 read tools).
+ * THE pure transition — ONE function shared by the board-file initialization
+ * and the live session events (decision 17). Deterministic: message
+ * timestamps fold from `record.ts`, agenda touch cursors from `record.seq`
+ * (the FILE seq — never the session envelope seq, see board-store.ts). The
+ * writer's own cursor advances when it posts a message (recipient cursors
+ * advance when THEY read — Batch 2 read tools). Uninterested input (ready
+ * markers, unknown kinds) returns the SAME state reference.
  */
-export function applyRoomEvent(state: RoomState, event: SessionEvent): RoomState {
-  if (event.type === 'deepartments/room-message') {
-    const data = event.data
+export function foldRoomRecord(state: RoomState, record: BoardRecord): RoomState {
+  if (record.kind === 'message') {
+    const payload = record.payload
     const message: RoomMessage = {
-      id: data.id,
-      ts: event.time,
-      from: data.from,
-      to: [...data.to],
-      cc: [...data.cc],
-      threadId: data.threadId ?? null,
-      kind: data.kind,
-      text: data.text
+      id: record.id,
+      ts: record.ts,
+      from: record.from,
+      to: [...record.to],
+      cc: [...record.cc],
+      threadId: record.threadId,
+      kind: payload.kind,
+      text: payload.text
     }
     return {
       messages: [...state.messages, message],
-      cursors: { ...state.cursors, [data.from]: data.id },
+      cursors: { ...state.cursors, [record.from]: record.id },
       agenda: state.agenda
     }
   }
-  if (event.type === 'deepartments/agenda-update') {
-    const data = event.data
+  if (record.kind === 'agenda') {
+    const payload = record.payload
     const item: AgendaItem = {
-      id: data.id,
-      title: data.title,
-      owner: data.owner,
-      status: data.status,
-      cursorOfLastTouch: event.seq
+      id: record.id,
+      title: payload.title,
+      owner: payload.owner,
+      status: payload.status,
+      cursorOfLastTouch: record.seq
     }
-    const index = state.agenda.findIndex((candidate) => candidate.id === data.id)
+    const index = state.agenda.findIndex((candidate) => candidate.id === record.id)
     const agenda = index < 0
       ? [...state.agenda, item]
       : state.agenda.map((candidate, i) => i === index ? item : candidate)
     return { ...state, agenda }
   }
-  // `deepartments/room-ready` and every other event type: no state change.
-  // Returning the SAME reference produces zero downstream work.
+  // `ready` and anything else: no state change. Returning the SAME reference
+  // produces zero downstream work (the registry's zero-work contract).
   return state
+}
+
+/**
+ * Projection transition over one committed session event. `apply` folds LIVE
+ * session events only and is PURE — no file I/O (rule 4 hygiene: the emit
+ * site mirrors into the board file, never the fold). The file history enters
+ * the cell through the session's constructor seed (resolveRoomSession), which
+ * the registry folds exactly once — never re-folded on load (anti-double-count).
+ */
+export function applyRoomEvent(state: RoomState, event: SessionEvent): RoomState {
+  switch (event.type) {
+    case 'deepartments/room-message':
+    case 'deepartments/agenda-update':
+    case 'deepartments/room-ready':
+      return foldRoomRecord(state, event.data as unknown as BoardRecord)
+    default:
+      return state
+  }
 }
 
 /** State → wire value. The internal state IS the wire shape. */
@@ -274,14 +274,22 @@ export function viewRoomState(state: RoomState): RoomState {
 }
 
 /**
- * Pure fold from an empty log over a list of events — the read helper for
- * later batches (dept_* tools can fold a persisted log without a live
- * session). In-process live reads go through the registry instead:
- * `ctx.sessionProjections.snapshot(session).values['deepartments/room']`.
+ * Pure fold from an empty log over a list of session events — the read
+ * helper for in-process reads of a session log without a live registry.
  */
 export function foldRoomState(events: readonly SessionEvent[]): RoomState {
   let state = initRoomState()
   for (const event of events) state = applyRoomEvent(state, event)
+  return state
+}
+
+/**
+ * Pure fold from an empty log over board-file records — the cold-restart
+ * read helper (decision 17: the file is the cold source of truth).
+ */
+export function foldRoomRecords(records: readonly BoardRecord[]): RoomState {
+  let state = initRoomState()
+  for (const record of records) state = foldRoomRecord(state, record)
   return state
 }
 
@@ -317,18 +325,24 @@ interface PersistenceLike {
  *
  * 1. Already live in this process → reuse it.
  * 2. A readable persisted log exists (previous boot) → replay it as the
- *    session seed so the room log survives restarts (decision 10: the
- *    structure persists across sessions).
- * 3. Otherwise (first boot, absent, or unreadable) → fresh empty log.
+ *    session seed (decision 10: the structure persists across sessions).
+ * 3. Otherwise (first boot, absent, or unreadable) → fresh log SEEDED FROM
+ *    THE BOARD FILE (decision 17: the file is the cold source of truth, and
+ *    rc.6 refuses cold reads of the stored room log — see below).
+ *
+ * Anti-double-count: the seed comes from exactly ONE source per boot (the
+ * stored log in branch 2, the board file in branch 3) — never both. The
+ * projection cell folds the seed exactly once (constructor seeds do not
+ * emit `session/event`), and live events fold on top in `apply`.
  *
  * Known rc.6 limitation: the persistence READ path refuses event types
  * outside the harness's build-time catalog unless the writer marks them
  * `ignorable`, and `session.append` exposes no way to set that marker for
  * log-only custom events. The room events therefore persist (write path is
  * open) but a later cold re-read may refuse the log, in which case branch 3
- * starts fresh — the in-process room state stays fully functional.
+ * starts from the board file instead.
  */
-async function resolveRoomSession(ctx: Context, roomId: string): Promise<Session> {
+async function resolveRoomSession(ctx: Context, roomId: string, records: readonly BoardRecord[]): Promise<Session> {
   const id = SessionId(roomSessionId(roomId))
   const live = ctx.sessions.get(id)
   if (live !== void 0) return live
@@ -341,10 +355,49 @@ async function resolveRoomSession(ctx: Context, roomId: string): Promise<Session
         meta: stored.meta.cwd === void 0 ? {} : { cwd: stored.meta.cwd }
       })
     } catch (error) {
-      ctx.logger.info(`[deepartments] room ${roomId}: no readable persisted log (${error instanceof Error ? error.message : String(error)}) — starting a fresh room log`)
+      ctx.logger.info(`[deepartments] room ${roomId}: no readable persisted log (${error instanceof Error ? error.message : String(error)}) — starting from the board file`)
     }
   }
-  return ctx.sessions.create(id, { meta: { cwd: process.cwd() } })
+  try {
+    return ctx.sessions.create(id, {
+      seed: recordsToSeedEvents(records),
+      meta: { cwd: process.cwd() }
+    })
+  } catch (error) {
+    // Malformed/renumbered seed (e.g. a hand-edited file): fail loud at boot
+    // but keep the room functional in-memory; the file is still intact.
+    ctx.logger.info(`[deepartments] room ${roomId}: board file replay failed (${error instanceof Error ? error.message : String(error)}) — starting an empty room log`)
+    return ctx.sessions.create(id, { meta: { cwd: process.cwd() } })
+  }
+}
+
+/**
+ * Board records → session constructor seed. The harness's seed contiguity
+ * contract (envelope seq === index, 0-based) holds directly because the
+ * board file seq IS the record index (board-store.ts). The harness then
+ * appends its own `session/end-seed` marker, which is why the session's
+ * envelope seqs drift +1 from file seqs on resumed boots — folds never read
+ * the envelope seq; the record carries its own.
+ */
+function recordsToSeedEvents(records: readonly BoardRecord[]): SessionEvent[] {
+  return records.map((record) => ({
+    type: boardEventType(record.kind),
+    seq: record.seq,
+    time: record.ts,
+    data: record
+  }) as SessionEvent)
+}
+
+/**
+ * THE emit site for every board record: append it to the live room session
+ * (live signal) and mirror the SAME record into the board file (cold truth)
+ * immediately after. The file is the durable copy on rc.6; the session
+ * append carries the same bytes for live consumers and the projection.
+ * Batch 2 message/agenda emitters MUST go through this helper.
+ */
+async function emitRoomRecord(session: Session, filePath: string, record: BoardRecord): Promise<void> {
+  session.append(boardEventType(record.kind), record)
+  await appendRecord(filePath, record)
 }
 
 /**
@@ -358,15 +411,33 @@ export function applyOrg(ctx: Context, config: Config) {
 
   ctx.effect(async () => {
     for (const room of config.org.rooms) {
-      const session = await resolveRoomSession(ctx, room.id)
-      session.append('deepartments/room-ready', {
-        room: {
-          id: room.id,
-          name: room.name,
-          purpose: room.purpose,
-          members: [...room.members]
+      const filePath = resolveBoardPath(config.stateDir, room.id)
+      // Decision 17: the board file is the cold source of truth — load it
+      // (empty/missing → empty history), seed the live session from it, then
+      // mirror this boot's room-ready record into it. Seq = last file seq + 1
+      // (0 for an empty file).
+      const records = await loadRecords(filePath)
+      const session = await resolveRoomSession(ctx, room.id, records)
+      const seq = records.length === 0 ? 0 : records[records.length - 1].seq + 1
+      const record: BoardRecord = {
+        id: `ready-${room.id}-${seq}`,
+        seq,
+        ts: Date.now(),
+        from: 'system',
+        to: [...room.members],
+        cc: [],
+        threadId: null,
+        kind: 'ready',
+        payload: {
+          room: {
+            id: room.id,
+            name: room.name,
+            purpose: room.purpose,
+            members: [...room.members]
+          }
         }
-      })
+      }
+      await emitRoomRecord(session, filePath, record)
       // The cordis logger is exporter-based and never reaches stdout;
       // journald only sees raw stdout (same convention as dsh-smooth-stream
       // and src/index.ts).
