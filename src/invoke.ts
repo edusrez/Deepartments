@@ -22,7 +22,7 @@
 //
 // Documented choices:
 //   - Coordinator subagent provider = 'spawn' (constant): the handoff's
-//     coordinator.agentOptions.provider ('deepseek-official') names an LLM
+//     coordinator.agentOptions.provider ('opencode-go') names an LLM
 //     adapter route, NOT a registered subagent provider (dsh-base registers
 //     only spawn/fork — see dsh-base/cordis.patch.yml). agentOptions rides
 //     the request as the child's LLM route; spawn gives the department head

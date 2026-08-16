@@ -9,9 +9,7 @@
         # are program architecture defined HERE, never created by agents.
         # The board room is the coordination room; research-head is a member
         # of BOTH the board room and the research department room.
-        # agentOptions values verified against this deployment's providers
-        # (dsh-llm-deepseek registers models deepseek-v4-flash / deepseek-v4-pro;
-        # settings.yaml's agent-default-model uses provider deepseek-official).
+        # agentOptions values verified: models served via the opencode-go provider (registered by @deepseek-ai/dsh-llm-pi-ai); deepseek-v4-flash / deepseek-v4-pro available under it.
         org:
           rooms:
             - id: board
@@ -32,7 +30,7 @@
               coordinator:
                 postId: research-head
                 role: Research department head
-                provider: deepseek-official
+                provider: opencode-go
                 agentOptions:
-                  provider: deepseek-official
+                  provider: opencode-go
                   model: deepseek-v4-flash
