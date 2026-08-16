@@ -37,3 +37,7 @@ of the research — so no builder needs to re-research.)
   `/opt/dsh/.dsh-dev`; GUI profile `deepartments-dev` on port 3090/Tailscale
   8445; headless twin `deepartments-dev-headless` for smoke); task 4
   (`dept_post_create`) ready to start.
+- **2026-08-16** — owner decision: subagent dispatch must never block. New
+  plugin entry `dsh-deepartments/subagent` provides the four delegation tools
+  always-async (no `run_in_background`; settlement notices continue dependent
+  chains); installed in the stable profile (restart pending owner's go).
