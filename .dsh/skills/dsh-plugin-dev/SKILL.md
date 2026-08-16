@@ -174,3 +174,19 @@ dsh --profile deepartments-dev "real smoke"     # headless boot + test
 - [ ] `--dump-config` shows the `# == dsh-deepartments` layer
 - [ ] real headless smoke runs the tool/service
 - [ ] test that goes through the real Loader
+
+## Verified notes (2026-08-16 session)
+
+- Profiles composing `@deepseek-ai/dsh-web-app` reject CLI prompt arguments
+  ("too many arguments"): for automated smoke create a headless twin profile
+  (bundles `@deepseek-ai/dsh-base` + `@deepseek-ai/dsh-headless` + your
+  bundle) in the same DSH_HOME.
+- `dsh plugin --profile <name> add <package>` initializes a MISSING profile
+  with only `["@deepseek-ai/dsh-base"]` — to control the bundle set, create
+  the profile manually first (mirror an existing profile template) and then
+  run `add`.
+- In cordis 4.0.1 `ctx.logger` never reaches stdout/journald
+  (exporter-based); use `console.log` for boot-visible log lines (convention
+  also used by dsh-smooth-stream).
+- `ctx.effect` callbacks must RETURN the disposer function (TS2769
+  otherwise).
