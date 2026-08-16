@@ -1,0 +1,7 @@
+# dsh-deepartments configuration layer — top-level YAML array of patch entries.
+# The row references the package by NAME (bundles → profile → $DSH_HOME → --patch, last wins per row).
+- insert:
+    - id: deepartments
+      name: dsh-deepartments
+      config:
+        stateDir: .deepartments
