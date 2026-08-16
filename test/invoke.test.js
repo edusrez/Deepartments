@@ -99,6 +99,14 @@ class StubAgents extends Service {
 
   async create(options) {
     this.createCalls.push(options)
+    // Replicate the REAL agent factory's caller-signal wiring (dsh-agent-loop
+    // prepare(): callerSignal.addEventListener("abort", onCallerAbort) →
+    // creation-scoped abort). If dept_invoke passed exec.signal, the child
+    // would see this listener fire when the tool execution ends.
+    let callerSignalAborted = false
+    options.signal?.addEventListener('abort', () => {
+      callerSignalAborted = true
+    }, { once: true })
     const agent = {
       id: options.sessionId,
       options: options.agentOptions ?? {},
@@ -113,6 +121,7 @@ class StubAgents extends Service {
       },
       inboxMessages: [],
       ctx: undefined,
+      callerSignalAborted: () => callerSignalAborted,
       followup(message) {
         this.inboxMessages.push(message)
       },
@@ -362,6 +371,57 @@ test('dept_invoke: ensures the coordinator, forks, posts the assignment, and ret
         () => tool.execute({ room: 'board', assignment: 'x' }, { signal: new AbortController().signal }),
         /requires a calling agent/
       )
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('detached signals: the coordinator and fork outlive the dept_invoke tool execution', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent())
+      const tool = pluginCtx().tools.get('dept_invoke')
+      assert.ok(tool)
+
+      // The tool execution's own signal (what exec.signal is in production).
+      const execAbort = new AbortController()
+      const result = await tool.execute(
+        { room: 'board', assignment: 'ping the research coordinator' },
+        { agent: parent, signal: execAbort.signal }
+      )
+      assert.equal(result.kind, 'continuable')
+      assert.equal(agents.createCalls.length, 2)
+
+      // The signals handed to startContinuable are NOT the tool-execution
+      // signal — they are detached (the regression this test guards).
+      const coordinatorCreate = agents.createCalls[0]
+      const forkCreate = agents.createCalls[1]
+      assert.ok(coordinatorCreate.signal, 'a signal is provided (the manager requires one)')
+      assert.notEqual(coordinatorCreate.signal, execAbort.signal)
+      assert.notEqual(forkCreate.signal, execAbort.signal)
+
+      // Simulate the tool execution ending / the parent turn being cancelled:
+      // the children must not observe any abort and must keep working.
+      execAbort.abort(new Error('tool execution ended'))
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      assert.equal(coordinatorCreate.signal.aborted, false, 'coordinator creation signal never aborted')
+      assert.equal(forkCreate.signal.aborted, false, 'fork creation signal never aborted')
+      assert.equal(agents.childAgents[0].callerSignalAborted(), false, 'coordinator saw no caller abort')
+      assert.equal(agents.childAgents[1].callerSignalAborted(), false, 'fork saw no caller abort')
+
+      // The children keep working after the tool return: the wake relay still
+      // delivers a board message to the coordinator.
+      const posts = await readPosts(stateDir)
+      const forkPostId = Object.keys(posts).find((key) => key.startsWith('asistente-fork-'))
+      const coordinator = agents.childAgents[0]
+      const before = coordinator.inboxMessages.length
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      const seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, forkPostId, ['research-head'], 'still alive?'), 'board')
+      assert.equal(coordinator.inboxMessages.length, before + 1, 'wake delivery works after the tool return')
     } finally {
       await dispose()
     }

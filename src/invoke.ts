@@ -198,6 +198,19 @@ export function applyInvoke(ctx: Context, config: Config) {
    * excluded (sender skipped); unknown members and non-live parents are
    * skipped (the latter with a warning — documented rc.6 limitation).
    */
+  /**
+   * The signal handed to startContinuable. DETACHED (never aborted): the
+   * ContinuableStartSpec contract is that the signal owns the operation ONLY
+   * until inbox acceptance — a continuable child must outlive the spawning
+   * tool execution, and a cancelled parent turn must not cancel the child.
+   * The harness forwards spec.signal into agents.create (continuation.js →
+   * dsh-agent-loop prepare wires the caller signal into the child's
+   * creation-scoped abort controller), so passing exec.signal would couple
+   * the child's lifecycle to the tool run; the in-process start is too fast
+   * to cancel meaningfully in the pre-acceptance window anyway.
+   */
+  const detachedSignal = (): AbortSignal => new AbortController().signal
+
   const relay = (record: BoardRecord, roomId: string) => {
     if (record.kind !== 'message' || agents === void 0 || subagents === void 0) return
     for (const member of record.to) {
@@ -446,7 +459,7 @@ export function applyInvoke(ctx: Context, config: Config) {
                 ...coordinator.role !== void 0 ? { persona: coordinator.role } : {},
                 ...coordinator.agentOptions !== void 0 ? { agentOptions: { ...coordinator.agentOptions, ...llmProvider !== void 0 ? { provider: llmProvider } : {} } } : {}
               },
-              signal: exec.signal
+              signal: detachedSignal()
             })).childId as string
             registerEntry({
               postId: coordinator.postId,
@@ -479,7 +492,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           } as const],
           parent
         },
-        signal: exec.signal
+        signal: detachedSignal()
       })).childId as string
       const forkPostId = `${FORK_POST_PREFIX}${forkChildId}`
       registerEntry({
