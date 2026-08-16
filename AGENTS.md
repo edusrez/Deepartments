@@ -36,13 +36,13 @@ are organized*. Context: [docs/IDEA.md](docs/IDEA.md) (the idea),
 ## TIERED verification
 
 1. `pnpm build` — tsc NodeNext compiles (src → lib), no type errors.
-2. `dsh plugin --profile deepartments-dev add /home/esuarez/projects/deepartments` — installs the bundle in the development profile.
-3. `dsh --profile deepartments-dev --dump-config` — composes the tree WITHOUT booting; **must show the `# == dsh-deepartments` layer**.
-4. Real headless smoke in the `deepartments-dev` profile (independent port) exercising the touched tool/service.
+2. `DSH_HOME=/opt/dsh/.dsh-dev dsh plugin --profile deepartments-dev add /home/esuarez/projects/deepartments` — installs the bundle in the development profile (isolated DSH_HOME `/opt/dsh/.dsh-dev`, never the default `/opt/dsh/.dsh` which is the stable instance).
+3. `DSH_HOME=/opt/dsh/.dsh-dev dsh --profile deepartments-dev --dump-config` — composes the tree WITHOUT booting; **must show the `# == dsh-deepartments` layer**.
+4. Real headless smoke in the twin profile: `DSH_HOME=/opt/dsh/.dsh-dev dsh --profile deepartments-dev-headless "<prompt>"` (the GUI profile `deepartments-dev` rejects CLI prompt arguments).
 
 Development and smoke ALWAYS in `deepartments-dev` — **never against the web
 profile in use**. Restart required after `add` (manifest and client metadata
-are cached); user edits to `cordis.patch.yml` are HMR.
+are cached); user edits to `cordis.patch.yml` are HMR. All dsh commands for development MUST set `DSH_HOME=/opt/dsh/.dsh-dev` (isolated home: GUI profile `deepartments-dev` on port 3090, Tailscale 8445; headless twin `deepartments-dev-headless` for CLI smoke); the stable instance lives in `/opt/dsh/.dsh` (port 3080, Tailscale 8444).
 
 ## Non-negotiable rules
 
@@ -54,7 +54,7 @@ are cached); user edits to `cordis.patch.yml` are HMR.
 4. Every registration as a **reversible effect**; no global mutable state
    outside `apply`.
 5. **Tests that go through the real Loader** (never only manual mount).
-6. Development and smoke in **independent profiles/ports** (`deepartments-dev`).
+6. Development and smoke in the isolated DSH_HOME `/opt/dsh/.dsh-dev` (`deepartments-dev` GUI profile, port 3090; `deepartments-dev-headless` twin for CLI smoke). Never against the web profile in use.
 7. Isolate renamable services: `ctx.get('webServer') ?? ctx.get('httpServer')`.
 8. `peerDependencies` on the rc channel (`^0.1.0-rc.x`) and **CLI pin**:
    `npx -p @deepseek-ai/dsh@0.1.0-rc.6`.
