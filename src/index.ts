@@ -4,7 +4,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import { applyOrg } from './org.js'
 import type { Config } from './org.js'
 import { applyInvoke } from './invoke.js'
+import { applyWebFetch } from './webfetch.js'
+import type { WebFetchConfig } from './webfetch.js'
 export { Config } from './org.js'
+export type { WebFetchConfig } from './webfetch.js'
 
 export const name = 'deepartments'
 // agents/subagents are resolved OPTIONALLY inside applyInvoke (ctx.get): the
@@ -27,4 +30,9 @@ export function apply(ctx: Context, config: Config) {
 
   // Task 5 (Batch 2): dept_invoke + board toolset + wake relay.
   applyInvoke(ctx, config)
+
+  // Web-fetch provider: custom `ctx.web` fetch backend (URL rewrites to
+  // API/JSON endpoints + WEB_BLOCKED detection). The web seam is resolved
+  // OPTIONALLY, so this is a no-op in minimal compositions.
+  applyWebFetch(ctx, config.webfetch ?? {})
 }

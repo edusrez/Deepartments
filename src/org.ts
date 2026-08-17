@@ -25,6 +25,7 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import { appendRecord, boardEventType, loadRecords, resolveBoardPath } from './board-store.js'
 import type { AgendaStatus, BoardRecord } from './board-store.js'
+import type { WebFetchConfig } from './webfetch.js'
 export type { AgendaStatus, BoardKind, BoardRecord } from './board-store.js'
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,11 @@ export interface Config {
     rooms: RoomConfig[]
     departments: DepartmentConfig[]
   }
+  /**
+   * Custom `ctx.web` fetch provider config (URL rewrites + blocking detection).
+   * Optional; defaults are applied in src/webfetch.ts.
+   */
+  webfetch?: WebFetchConfig
 }
 
 /**
@@ -103,7 +109,30 @@ export const Config: z<any, any> = z.object({
         }).default(void 0 as unknown as { provider: string; model: string; maxTokens: number })
       }).default(void 0 as unknown as { postId: string; role: string; provider: string; agentOptions: { provider: string; model: string; maxTokens: number } })
     })).default([])
-  }).required()
+  }).required(),
+  webfetch: z.object({
+    enabled: z.boolean(),
+    userAgent: z.string(),
+    accept: z.string(),
+    rewrites: z.object({
+      npm: z.boolean(),
+      github: z.boolean(),
+      rawGithub: z.boolean()
+    }),
+    maxUrlLength: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    timeoutMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    maxResponseBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    maxRedirects: z.number().step(1).min(0).max(100).default(5)
+  }).default(void 0 as unknown as {
+    enabled: boolean
+    userAgent: string
+    accept: string
+    rewrites: { npm: boolean; github: boolean; rawGithub: boolean }
+    maxUrlLength: number
+    timeoutMs: number
+    maxResponseBytes: number
+    maxRedirects: number
+  })
 })
 
 // ---------------------------------------------------------------------------

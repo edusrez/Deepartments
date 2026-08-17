@@ -34,3 +34,20 @@
                 agentOptions:
                   provider: opencode-go
                   model: deepseek-v4-flash
+        # Custom ctx.web fetch provider (webfetch.ts): rewrites blocked hosts
+        # to their API/JSON endpoints and reports blocking as WEB_BLOCKED.
+        # Plain scalars only — no !!js outside the runtime config engine.
+        webfetch:
+          enabled: true
+          # userAgent and accept default to the bundle's honest product UA and
+          # a JSON-preferring Accept; uncomment to override.
+          # userAgent: deepartments/0.1.0 (DeepSeek Harness plugin; +https://github.com/esuarez/deepartments)
+          # accept: application/vnd.github.raw+json, application/json;q=0.9, text/markdown;q=0.8, text/html;q=0.5
+          rewrites:
+            npm: true
+            github: true
+            rawGithub: true
+          maxUrlLength: 2048
+          timeoutMs: 30000
+          maxResponseBytes: 5000000
+          maxRedirects: 5
