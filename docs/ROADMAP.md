@@ -70,3 +70,16 @@ of the research — so no builder needs to re-research.)
   headless smoke self-identifies pro/flash); reviewer PASS; committed
   `ed907ef`. Follow-ups remain queued: durable read cursors, respawn of
   orphaned posts, dept_room_read truncation, then task 7 (dept_post_create).
+- **2026-08-17** — **J-Space evaluated and SKIPPED** (owner decision 2026-08-17):
+  the third-party "cognitive enhancement" skills suite
+  (J-Space-Cognition-Suite-V3.6) + its self-published benchmark claiming
+  DeepSeek V4 capability gains will **not** be adopted as a default. Why
+  rejected: no demonstrated benefit (an independent A/B in the plugin's own
+  issue tracker showed no correctness gain at ~3× tokens and +17–36% time); a
+  headline benchmark (TB2.1) was not reproducible and a reviewer suggested
+  some entries were "fake boosts" — single-run, vendor-reported, not
+  reproducible; it duplicates our existing AGENTS.md/workflow discipline; and
+  open-code-go compatibility is unanswered. Reference:
+  `.dsh/reports/researcher/2026-08-17-jspace-evaluation.md` (report path is
+  gitignored; filename cited here). If ever re-considered: pilot only on a
+  throwaway dev agent with an A/B measuring correctness + tokens + time.
