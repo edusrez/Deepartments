@@ -68,6 +68,7 @@ Details and rationale for each rule: skill `dsh-plugin-dev`
   (`git status`, `git log --oneline -5`); present the session plan.
 - **WORK**: load the `dsh-plugin-dev` skill; atomic tasks; TIERED
   verification; independent review after every change.
+- **WEB-FETCH HABIT**: the Asistente defaults `web_fetch` to API/JSON endpoints (registry.npmjs.org, api.github.com, cdn.jsdelivr.net), retries once on transient 502/429, and never trusts truncated HTML shells of Cloudflare-walled pages — cheatsheet: `.dsh/reports/scribe/2026-08-17-webfetch-endpoint-habit.md`.
 - **END**: green verification, commit with the repo's style (`git log
   --oneline -5` to see it), status updated in `docs/ROADMAP.md` if
   applicable.
