@@ -2,7 +2,7 @@
 //
 // Rule 5 (AGENTS.md): tests go through the REAL Cordis Loader. The web seam
 // (@deepseek-ai/dsh-web) is the REAL service; the dsh-deepartments bundle
-// registers its custom 'deepartments-fetch' provider into it. The rewrite /
+// registers its custom 'deepartments-fetch' provider into it. The classification /
 // detection / URL-hygiene logic is also exercised PURELY (network-free), and
 // the provider's actual fetch + WEB_BLOCKED detection is proven against a
 // local loopback HTTP server (hermetic: no external network, no live DSH_HOME).
