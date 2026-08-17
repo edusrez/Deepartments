@@ -31,8 +31,8 @@ export function apply(ctx: Context, config: Config) {
   // Task 5 (Batch 2): dept_invoke + board toolset + wake relay.
   applyInvoke(ctx, config)
 
-  // Web-fetch provider: custom `ctx.web` fetch backend (URL rewrites to
-  // API/JSON endpoints + WEB_BLOCKED detection). The web seam is resolved
-  // OPTIONALLY, so this is a no-op in minimal compositions.
+  // Web-fetch provider: custom `ctx.web` fetch backend (blocking detection
+  // WEB_BLOCKED + investigate hint). The web seam is resolved OPTIONALLY,
+  // so this is a no-op in minimal compositions.
   applyWebFetch(ctx, config.webfetch ?? {})
 }

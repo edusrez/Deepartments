@@ -6,13 +6,10 @@
 // bounded URL length, same-origin-only redirects) so we never degrade the
 // SSRF/redirect safeguards, and ADDS two things the default cannot:
 //
-//   1. URL REWRITES — known blocked hosts are transparently rewritten to their
-//      API/JSON endpoints (npm package → registry, GitHub repo → api.github.com,
-//      raw README → the GitHub readme endpoint) before the fetch, config-driven
-//      per host.
-//   2. BLOCKING DETECTION — HTTP 403 (Cloudflare) / 429 (rate-limit) surface as
-//      a `WebError` with code `WEB_BLOCKED` whose message suggests the API
-//      endpoint to retry, so the caller can machine-route the retry.
+//   1. BLOCKING DETECTION — HTTP 403 (Cloudflare) / 429 (rate-limit) surface as
+//      a `WebError` with code `WEB_BLOCKED` whose message instructs the caller
+//      (the model) to investigate whether the host exposes an API/JSON endpoint
+//      or mirror and retry that URL directly.
 //
 // The web seam is resolved OPTIONALLY (`ctx.get('web')`), exactly like the
 // subagents/agents services: this bundle must keep loading in minimal
@@ -35,22 +32,15 @@ export const DEFAULT_USER_AGENT = 'deepartments/0.1.0 (DeepSeek Harness plugin; 
 
 /**
  * Default Accept string. One configurable string (the seam offers no per-host
- * hook, and we cannot always control per-host headers): it prefers JSON — which
- * the GitHub API honors (returning raw when the special media type is present)
- * and the npm registry serves natively — while still accepting HTML as a
- * fallback for ordinary hosts.
+ * hook, and we cannot always control per-host headers). `application/json`
+ * leads so the npm registry serves JSON natively and GitHub's /readme returns
+ * base64 JSON `content` (the caller base64-decodes); text/markdown and
+ * text/html follow as a fallback for ordinary hosts. We deliberately avoid a
+ * multi-value vendor media type (e.g. `application/vnd.github.raw+json`) in
+ * the default: GitHub's /readme endpoint echoes a comma-joined Accept list
+ * back as a malformed Content-Type.
  */
-export const DEFAULT_ACCEPT = 'application/vnd.github.raw+json, application/json;q=0.9, text/markdown;q=0.8, text/html;q=0.5'
-
-/** Rewrites toggle map (all default on). */
-export interface WebFetchRewrites {
-  /** www.npmjs.com/package/<pkg> → registry.npmjs.org/<pkg>. */
-  npm?: boolean
-  /** github.com/<owner>/<repo> (exact path) → api.github.com/repos/<owner>/<repo>. */
-  github?: boolean
-  /** raw.githubusercontent.com/<owner>/<repo>/<branch>/README* → api.github.com/repos/<owner>/<repo>/readme. */
-  rawGithub?: boolean
-}
+export const DEFAULT_ACCEPT = 'application/json, text/markdown;q=0.9, text/html;q=0.5'
 
 /** The provider configuration (nested under the `webfetch` config key). */
 export interface WebFetchConfig {
@@ -60,8 +50,6 @@ export interface WebFetchConfig {
   userAgent?: string
   /** Accept header. */
   accept?: string
-  /** Per-host rewrite toggles. All default on. */
-  rewrites?: WebFetchRewrites
   /** Upper bound on URL length (inclusive). Default 2048, matches the default provider. */
   maxUrlLength?: number
   /** Single-fetch timeout in ms. Default 30000. */
@@ -79,7 +67,6 @@ export interface WebFetchConfig {
 export interface ResolvedWebFetchConfig {
   userAgent: string
   accept: string
-  rewrites: Required<WebFetchRewrites>
   maxUrlLength: number
   timeoutMs: number
   maxResponseBytes: number
@@ -91,11 +78,6 @@ export function resolveWebFetchConfig(config: WebFetchConfig = {}): ResolvedWebF
   return {
     userAgent: config.userAgent ?? DEFAULT_USER_AGENT,
     accept: config.accept ?? DEFAULT_ACCEPT,
-    rewrites: {
-      npm: config.rewrites?.npm ?? true,
-      github: config.rewrites?.github ?? true,
-      rawGithub: config.rewrites?.rawGithub ?? true
-    },
     maxUrlLength: config.maxUrlLength ?? 2048,
     timeoutMs: config.timeoutMs ?? 30000,
     maxResponseBytes: config.maxResponseBytes ?? 5000000,
@@ -129,97 +111,6 @@ function isRedirectStatus(status: number): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// URL rewrite logic (pure, network-free — unit-testable).
-// ---------------------------------------------------------------------------
-
-/**
- * Rewrite a known blocked-host URL to its API/JSON endpoint, honouring the
- * per-host toggles. Returns the rewritten URL string, or `null` when this URL
- * should be fetched as-is (detection then applies).
- */
-export function rewriteWebFetchUrl(input: string, rewrites: Required<WebFetchRewrites>): string | null {
-  let url: URL
-  try {
-    url = new URL(input)
-  } catch {
-    return null // leave to validateFetchUrl for a proper WEB_INVALID_URL
-  }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null
-  const host = url.hostname.toLowerCase()
-
-  // npmjs.com/package/<pkg> → registry.npmjs.org/<pkg> (package name only; a
-  // scoped package — `@scope/name` — is its own two-segment token). Subpaths,
-  // versions and query are intentionally dropped: the registry root is JSON.
-  if (rewrites.npm && (host === 'www.npmjs.com' || host === 'npmjs.com')) {
-    // Either `name` or `@scope/name`, then the end of the path (or a `/`
-    // boundary for version/tab subpaths, which we drop).
-    const match = /^\/package\/((@[^/]+\/[^/]+)|([^/]+))/.exec(url.pathname)
-    if (match !== null && match[1].length > 0) {
-      const pkg = decodeURIComponent(match[1])
-      return `https://registry.npmjs.org/${pkg}`
-    }
-    return null
-  }
-
-  // github.com/<owner>/<repo> (EXACT two-segment path, no subpath) →
-  // api.github.com/repos/<owner>/<repo>.
-  if (rewrites.github && host === 'github.com') {
-    const match = /^\/([^/]+)\/([^/]+)\/?$/.exec(url.pathname)
-    if (match !== null) {
-      const owner = match[1]
-      const repo = match[2]
-      if (owner.length > 0 && repo.length > 0 && owner !== 'login' && owner !== 'settings' && owner !== 'orgs') {
-        return `https://api.github.com/repos/${owner}/${repo}`
-      }
-    }
-    return null
-  }
-
-  // raw.githubusercontent.com/<owner>/<repo>/<branch>/<path> → readme endpoint
-  // ONLY when the trailing path segment starts with "README" (case-insensitive).
-  if (rewrites.rawGithub && host === 'raw.githubusercontent.com') {
-    const match = /^\/([^/]+)\/([^/]+)\/[^/]+\/(.+)$/.exec(url.pathname)
-    if (match !== null) {
-      const owner = match[1]
-      const repo = match[2]
-      const filePath = match[3]
-      const last = filePath.split('/').pop() ?? ''
-      if (/^readme/i.test(last)) {
-        return `https://api.github.com/repos/${owner}/${repo}/readme`
-      }
-    }
-    return null
-  }
-
-  return null
-}
-
-/**
- * Suggest the API endpoint a blocked `url` should be retried against. Best
- * effort: only the hosts we know how to rewrite get a suggestion; `null`
- * otherwise (the caller still has the `WEB_BLOCKED` code + message).
- */
-export function suggestApiEndpoint(url: URL): string | null {
-  const host = url.hostname.toLowerCase()
-  if (host === 'www.npmjs.com' || host === 'npmjs.com') {
-    const match = /^\/package\/((@[^/]+\/[^/]+)|([^/]+))/.exec(url.pathname)
-    if (match !== null && match[1].length > 0) return `https://registry.npmjs.org/${decodeURIComponent(match[1])}`
-    return null
-  }
-  if (host === 'github.com') {
-    const match = /^\/([^/]+)\/([^/]+)\/?$/.exec(url.pathname)
-    if (match !== null && match[1].length > 0 && match[2].length > 0) return `https://api.github.com/repos/${match[1]}/${match[2]}`
-    return null
-  }
-  if (host === 'raw.githubusercontent.com') {
-    const match = /^\/([^/]+)\/([^/]+)\/[^/]+\/(.+)$/.exec(url.pathname)
-    if (match !== null && /^readme/i.test(match[3].split('/').pop() ?? '')) return `https://api.github.com/repos/${match[1]}/${match[2]}/readme`
-    return null
-  }
-  return null
-}
-
-// ---------------------------------------------------------------------------
 // Blocking detection (pure, network-free — unit-testable).
 // ---------------------------------------------------------------------------
 
@@ -237,12 +128,14 @@ export function detectBlock(status: number): 'blocked' | 'rate-limited' | null {
 
 /**
  * Build the `WEB_BLOCKED` message for a blocked response. `host` is the
- * hostname that blocked us and `api` the suggested API endpoint (or `null`).
- * Kept pure so the message shape is assertable without a live fetch.
+ * hostname that blocked us. The message instructs the caller (the model) to
+ * investigate whether the host exposes an API/JSON endpoint or mirror, rather
+ * than suggesting any host-specific URL. Kept pure so the message shape is
+ * assertable without a live fetch.
  */
-export function blockErrorMessage(kind: 'blocked' | 'rate-limited', host: string, api: string | null): string {
-  const hint = api !== null ? ` (retry the API endpoint: ${api})` : ''
-  return `web fetch ${kind} by ${host} (HTTP ${kind === 'rate-limited' ? 429 : 403})${hint}`
+export function blockErrorMessage(kind: 'blocked' | 'rate-limited', host: string): string {
+  const code = kind === 'rate-limited' ? 429 : 403
+  return `web fetch ${kind === 'rate-limited' ? 'rate-limited' : 'blocked'} by ${host} (HTTP ${code}). This may be anti-bot protection or rate-limiting against a datacenter IP. Investigate whether ${host} exposes an API or JSON endpoint (e.g. a registry/API host, a raw content URL, or a CDN mirror) and retry that URL directly instead.`
 }
 
 // ---------------------------------------------------------------------------
@@ -250,8 +143,11 @@ export function blockErrorMessage(kind: 'blocked' | 'rate-limited', host: string
 // ---------------------------------------------------------------------------
 
 /** Classify a response Content-Type into a decodable `WebFetchBody` kind. */
-function classifyContentType(contentType: string | null): 'html' | 'text' | undefined {
-  const mime = (contentType ?? '').replace(/;.*$/s, '').trim().toLowerCase()
+export function classifyContentType(contentType: string | null): 'html' | 'text' | undefined {
+  // Parse ONLY the first media type (before the first `,` or `;`, whichever
+  // comes first): GitHub's /readme endpoint echoes a comma-joined Accept list
+  // into a malformed Content-Type, and only the leading type is meaningful.
+  const mime = (contentType ?? '').split(/[,;]/)[0].trim().toLowerCase()
   if (mime === 'text/html' || mime === 'application/xhtml+xml') return 'html'
   if (mime.startsWith('text/')) return 'text'
   if (mime === 'application/json' || mime === 'application/xml' || mime.endsWith('+json') || mime.endsWith('+xml')) return 'text'
@@ -259,8 +155,8 @@ function classifyContentType(contentType: string | null): 'html' | 'text' | unde
 }
 
 /**
- * The custom fetch provider: rewrite → native fetch (same-origin redirects,
- * signal + timeout honoured) → block/response decoding.
+ * The custom fetch provider: native fetch (same-origin redirects, signal +
+ * timeout honoured) → block/response decoding.
  */
 export class DeepartmentsFetchProvider implements WebFetchProvider {
   readonly id = WEBFETCH_PROVIDER_ID
@@ -275,15 +171,10 @@ export class DeepartmentsFetchProvider implements WebFetchProvider {
   async fetch(request: WebFetchRequest, signal?: AbortSignal): Promise<WebFetchResult> {
     if (signal?.aborted) throw new WebError('web fetch aborted', 'WEB_ABORTED')
 
-    // 1. Rewrite a known blocked-host URL to its API/JSON endpoint (same signal
-    //    is forwarded to the rewritten fetch below).
-    const rewritten = rewriteWebFetchUrl(request.url, this.limits.rewrites)
-    const initial = rewritten ?? request.url
-
-    // 2. Validate + fetch with a timeout composed over the incoming signal. The
+    // 1. Validate + fetch with a timeout composed over the incoming signal. The
     //    timeout signal is a reusable resource: dispose() clears its timer and
     //    removes the upstream listener on EVERY path (success, abort, throw).
-    const validated = validateFetchUrl(initial, this.limits.maxUrlLength)
+    const validated = validateFetchUrl(request.url, this.limits.maxUrlLength)
     const timeout = withTimeout(signal, this.limits.timeoutMs)
     const timeoutSignal = timeout.signal
     try {
@@ -332,9 +223,8 @@ export class DeepartmentsFetchProvider implements WebFetchProvider {
       // 4. Blocking detection: Cloudflare 403 or a 429 rate-limit.
       const blocked = detectBlock(response.status)
       if (blocked !== null) {
-        const api = rewritten === null ? suggestApiEndpoint(currentUrl) : rewritten
         await response.body?.cancel()
-        throw new WebError(blockErrorMessage(blocked, currentUrl.hostname, api), 'WEB_BLOCKED')
+        throw new WebError(blockErrorMessage(blocked, currentUrl.hostname), 'WEB_BLOCKED')
       }
 
       // 5. Decode the body.

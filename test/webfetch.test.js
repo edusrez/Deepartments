@@ -17,79 +17,12 @@ import {
   DeepartmentsFetchProvider,
   WEBFETCH_PROVIDER_ID,
   blockErrorMessage,
+  classifyContentType,
   detectBlock,
-  resolveWebFetchConfig,
-  rewriteWebFetchUrl,
-  suggestApiEndpoint
+  resolveWebFetchConfig
 } from '../lib/webfetch.js'
 
-// --- pure rewrite / suggestion / config tests ---------------------------------
-
-test('rewriteWebFetchUrl: npm package URLs rewrite to the registry JSON endpoint', () => {
-  const rewrites = { npm: true, github: true, rawGithub: true }
-  assert.equal(
-    rewriteWebFetchUrl('https://www.npmjs.com/package/express', rewrites),
-    'https://registry.npmjs.org/express'
-  )
-  assert.equal(
-    rewriteWebFetchUrl('https://npmjs.com/package/@scope/pkg', rewrites),
-    'https://registry.npmjs.org/@scope/pkg'
-  )
-  // Other npmjs.com paths are left alone (detection applies).
-  assert.equal(rewriteWebFetchUrl('https://www.npmjs.com/', rewrites), null)
-  assert.equal(rewriteWebFetchUrl('https://www.npmjs.com/package/express/v/4.0.0', rewrites), 'https://registry.npmjs.org/express')
-})
-
-test('rewriteWebFetchUrl: exact github owner/repo rewrites to api.github.com; subpaths left alone', () => {
-  const rewrites = { npm: true, github: true, rawGithub: true }
-  assert.equal(
-    rewriteWebFetchUrl('https://github.com/esuarez/deepartments', rewrites),
-    'https://api.github.com/repos/esuarez/deepartments'
-  )
-  assert.equal(
-    rewriteWebFetchUrl('https://github.com/esuarez/deepartments/', rewrites),
-    'https://api.github.com/repos/esuarez/deepartments'
-  )
-  // Subpaths and special top-level pages are NOT rewritten.
-  assert.equal(rewriteWebFetchUrl('https://github.com/esuarez/deepartments/blob/main/README.md', rewrites), null)
-  assert.equal(rewriteWebFetchUrl('https://github.com/login', rewrites), null)
-  assert.equal(rewriteWebFetchUrl('https://github.com/settings', rewrites), null)
-})
-
-test('rewriteWebFetchUrl: raw README rewrites to the GitHub readme endpoint; other raw files left alone', () => {
-  const rewrites = { npm: true, github: true, rawGithub: true }
-  assert.equal(
-    rewriteWebFetchUrl('https://raw.githubusercontent.com/esuarez/deepartments/main/README.md', rewrites),
-    'https://api.github.com/repos/esuarez/deepartments/readme'
-  )
-  assert.equal(
-    rewriteWebFetchUrl('https://raw.githubusercontent.com/esuarez/deepartments/main/docs/readme.txt', rewrites),
-    'https://api.github.com/repos/esuarez/deepartments/readme'
-  )
-  // Non-README raw paths are left to detection.
-  assert.equal(rewriteWebFetchUrl('https://raw.githubusercontent.com/esuarez/deepartments/main/src/index.ts', rewrites), null)
-})
-
-test('rewriteWebFetchUrl: per-host toggles disable individual rewrites', () => {
-  const all = { npm: true, github: true, rawGithub: true }
-  assert.equal(rewriteWebFetchUrl('https://www.npmjs.com/package/x', { ...all, npm: false }), null)
-  assert.equal(rewriteWebFetchUrl('https://github.com/a/b', { ...all, github: false }), null)
-  assert.equal(rewriteWebFetchUrl('https://raw.githubusercontent.com/a/b/main/README.md', { ...all, rawGithub: false }), null)
-})
-
-test('rewriteWebFetchUrl: non-http(s) and unknown hosts are never rewritten', () => {
-  const rewrites = { npm: true, github: true, rawGithub: true }
-  assert.equal(rewriteWebFetchUrl('ftp://github.com/a/b', rewrites), null)
-  assert.equal(rewriteWebFetchUrl('https://example.com/a/b', rewrites), null)
-  assert.equal(rewriteWebFetchUrl('not a url', rewrites), null)
-})
-
-test('suggestApiEndpoint: proposes the API endpoint for known blocked hosts', () => {
-  assert.equal(suggestApiEndpoint(new URL('https://www.npmjs.com/package/express')), 'https://registry.npmjs.org/express')
-  assert.equal(suggestApiEndpoint(new URL('https://github.com/a/b')), 'https://api.github.com/repos/a/b')
-  assert.equal(suggestApiEndpoint(new URL('https://raw.githubusercontent.com/a/b/main/README.md')), 'https://api.github.com/repos/a/b/readme')
-  assert.equal(suggestApiEndpoint(new URL('https://example.com/x')), null)
-})
+// --- pure config / detection / message tests --------------------------------
 
 test('resolveWebFetchConfig: applies defaults and honours overrides', () => {
   const defaults = resolveWebFetchConfig()
@@ -97,12 +30,9 @@ test('resolveWebFetchConfig: applies defaults and honours overrides', () => {
   assert.equal(defaults.timeoutMs, 30000)
   assert.equal(defaults.maxResponseBytes, 5000000)
   assert.equal(defaults.maxRedirects, 5)
-  assert.deepEqual(defaults.rewrites, { npm: true, github: true, rawGithub: true })
   assert.match(defaults.userAgent, /deepartments\/0\.1\.0/)
-  const overridden = resolveWebFetchConfig({ userAgent: 'x', rewrites: { npm: false }, maxUrlLength: 1, maxRedirects: 2 })
+  const overridden = resolveWebFetchConfig({ userAgent: 'x', maxUrlLength: 1, maxRedirects: 2 })
   assert.equal(overridden.userAgent, 'x')
-  assert.equal(overridden.rewrites.npm, false)
-  assert.equal(overridden.rewrites.github, true) // untouched defaults carry through
   assert.equal(overridden.maxUrlLength, 1)
   assert.equal(overridden.maxRedirects, 2)
 })
@@ -115,15 +45,28 @@ test('detectBlock: classifies 403/429 as blocking and everything else as non-blo
   assert.equal(detectBlock(503), null)
 })
 
-test('blockErrorMessage: carries the kind, host, and the API endpoint suggestion', () => {
-  const msg = blockErrorMessage('blocked', 'github.com', 'https://api.github.com/repos/a/b')
+test('blockErrorMessage: instructs API/JSON investigation and carries the kind + host', () => {
+  const msg = blockErrorMessage('blocked', 'github.com')
   assert.match(msg, /blocked by github\.com/)
   assert.match(msg, /HTTP 403/)
-  assert.match(msg, /retry the API endpoint: https:\/\/api\.github\.com\/repos\/a\/b/)
-  const rate = blockErrorMessage('rate-limited', 'registry.npmjs.org', null)
+  assert.match(msg, /Investigate whether github\.com exposes an API or JSON endpoint/i)
+  const rate = blockErrorMessage('rate-limited', 'registry.npmjs.org')
   assert.match(rate, /rate-limited by registry\.npmjs\.org/)
   assert.match(rate, /HTTP 429/)
-  assert.doesNotMatch(rate, /retry the API endpoint/)
+  assert.match(rate, /Investigate whether registry\.npmjs\.org exposes an API or JSON endpoint/i)
+})
+
+test('classifyContentType: parses only the first media type (malformed comma-joined Content-Type)', () => {
+  // GitHub /readme echoes the whole Accept list into a malformed Content-Type;
+  // only the leading media type is meaningful.
+  assert.equal(classifyContentType('application/vnd.github.raw+json,application/json,text/markdown,text/html; charset=utf-8'), 'text')
+  assert.equal(classifyContentType('text/html; charset=utf-8'), 'html')
+  assert.equal(classifyContentType('application/json'), 'text')
+  assert.equal(classifyContentType('application/xml; charset=utf-8'), 'text')
+  assert.equal(classifyContentType('text/plain'), 'text')
+  assert.equal(classifyContentType('application/xhtml+xml'), 'html')
+  assert.equal(classifyContentType('application/octet-stream'), undefined)
+  assert.equal(classifyContentType(null), undefined)
 })
 
 // --- provider fetch behaviour (hermetic loopback), pure block detection ------
@@ -142,21 +85,20 @@ function startServer(handler) {
   })
 }
 
-test('provider.fetch: 403 Cloudflare → WEB_BLOCKED with the API endpoint suggestion', async () => {
+test('provider.fetch: 403 Cloudflare → WEB_BLOCKED', async () => {
   const server = await startServer((req, res) => {
     res.writeHead(403, { 'content-type': 'text/html' })
     res.end('<html>cf blocked</html>')
   })
   try {
     const provider = new DeepartmentsFetchProvider(resolveWebFetchConfig())
-    // A github.com-shaped URL on OUR loopback host has no known rewrite, so the
-    // suggestion derives from the path shape via suggestApiEndpoint.
     await assert.rejects(
       provider.fetch({ url: server.url('/a/b') }),
       (error) => {
         assert.ok(error instanceof WebError, 'throws a WebError')
         assert.equal(error.code, 'WEB_BLOCKED')
         assert.match(error.message, /HTTP 403/)
+        assert.match(error.message, /Investigate/i)
         return true
       }
     )

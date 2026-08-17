@@ -72,7 +72,7 @@ export interface Config {
     departments: DepartmentConfig[]
   }
   /**
-   * Custom `ctx.web` fetch provider config (URL rewrites + blocking detection).
+   * Custom `ctx.web` fetch provider config (blocking detection).
    * Optional; defaults are applied in src/webfetch.ts.
    */
   webfetch?: WebFetchConfig
@@ -114,11 +114,6 @@ export const Config: z<any, any> = z.object({
     enabled: z.boolean(),
     userAgent: z.string(),
     accept: z.string(),
-    rewrites: z.object({
-      npm: z.boolean(),
-      github: z.boolean(),
-      rawGithub: z.boolean()
-    }),
     maxUrlLength: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
     timeoutMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
     maxResponseBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
@@ -127,7 +122,6 @@ export const Config: z<any, any> = z.object({
     enabled: boolean
     userAgent: string
     accept: string
-    rewrites: { npm: boolean; github: boolean; rawGithub: boolean }
     maxUrlLength: number
     timeoutMs: number
     maxResponseBytes: number
