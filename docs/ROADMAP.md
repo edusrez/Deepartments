@@ -83,3 +83,23 @@ of the research — so no builder needs to re-research.)
   `.dsh/reports/researcher/2026-08-17-jspace-evaluation.md` (report path is
   gitignored; filename cited here). If ever re-considered: pilot only on a
   throwaway dev agent with an A/B measuring correctness + tokens + time.
+
+- **2026-08-18** — **`dshmarket@1.13.1`** adopted as the plugin store on both
+  DSH instances (owner decision; research report
+  `.dsh/reports/researcher/2026-08-18-dsh-plugin-store-selection.md`):
+  stable profile `web` (`/opt/dsh/.dsh`, port 3080) and dev GUI profile
+  `deepartments-dev` (`/opt/dsh/.dsh-dev`, port 3090), installed via
+  `dsh plugin add dshmarket@1.13.1` (exact pin, auto-appended to
+  `dsh.profile.bundles`). Chosen as the ecosystem-convergence winner over the
+  awesome-dsh-plugin catalog: 951★, ~25k npm downloads/day, recommended by
+  the awesome list, default preset of two DSH desktop apps, peerDeps matching
+  our rc.7 exactly. `allowRestart: false` set in both profiles'
+  `cordis.patch.yml` because both instances run under systemd
+  (`dsh.service` / `dsh-deepartments-dev.service`) — the market's one-click
+  restart is disabled. Reviewer PASS; both services restarted;
+  `/dsh-market/status` reports `version 1.13.1` and `restart:false` on
+  3080 and 3090. Headless twin `deepartments-dev-headless` intentionally not
+  touched (market is web-GUI-only). Follow-ups: builder
+  `2026-08-18-dshmarket-allowrestart` reported but did not write its report
+  (process gap); re-evaluate store choice if DSH ships an official
+  marketplace.
