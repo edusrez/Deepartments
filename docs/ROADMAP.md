@@ -194,3 +194,30 @@ of the research — so no builder needs to re-research.)
   before addressing, secret hygiene on the shared board, persistent
   per-member cursors, minor guards (self-writes, inject canonical postId,
   resolve `anyParentId()` ambiguity).
+- **2026-08-19** — **Fork identity + mission-as-official-context**: after
+  the live cross-session test exposed role-confusion (a fork receiving its
+  mission as a user-role start prompt read it as an injection and refused),
+  the explore report
+  `.dsh/reports/explore-deep/2026-08-19-fork-identity-context-delivery.md`
+  established that rc.7 has no `role:'system'` channel: "official context"
+  is a user-role message with a distinguished `source` (settlement
+  `{kind:'subagent-settled', form:'notice'}`; report `{kind:'subagent-report',
+  form:'relay'}`; the plugin's wake relay already used `{kind:'coordinator',
+  form:'relay'}`), and `request.prompt` is always delivered as plain user.
+  Fix (owner design): (1) new child tool `dept_whereami` answering spatial
+  identity — `kind:'post'` (postId/roomId/members/posts+parentLive) for a
+  registered board post vs `kind:'host'` (the Asistente in its private
+  room), fixing the `'unknown'` fallback; (2) `dept_invoke` deploys with a
+  neutral role prompt and delivers the mission as OFFICIAL context via
+  `subagents.followup` with source `{kind:'coordinator', form:'relay'}`
+  (deployment snapshot: where you are, who was present on entry, your
+  mission), never writing the mission to the board (secret hygiene);
+  `messageId` removed from the return; (3) hardening: a failed deliver
+  followup no longer leaves a silent orphan — it rolls back the
+  just-registered post (awaiting the last registry write to avoid a
+  lost-update race) and rejects with an actionable error. Verification:
+  `pnpm build` clean, invoke tests 10/10, full suite 24/24, TIERED ladder
+  green (plugin add, dump-config layer, headless smoke pong). Two reviewers
+  PASS. Committed as `bd518cc`. Next (pending live re-test): a fork
+  receives its deployment context and mission via the official channel,
+  multi-session password test.
