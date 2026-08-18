@@ -131,3 +131,31 @@ of the research — so no builder needs to re-research.)
   `deepartments/AGENTS.md` gained an explicit i18n carve-out sanctioning the
   README.zh.md pair (English still canonical). Reviewer PASS on both batches;
   all three repos pushed (deepartments also published its 24-commit backlog).
+
+- **2026-08-19** — **`dept_invoke` generalized**: `dept_invoke` gained an
+  optional `to` parameter so an assignment can be addressed to ARBITRARY
+  board members (a sibling fork post id `asistente-fork-<id>` or a department
+  head), replacing the hardcoded coordinator-only addressing. Coordinator
+  ensure/wake preserved as the default (no-`to`) path only. Fork prompt
+  rewritten mission-driven and room-generic (room + assignment + named
+  addressees), keeping the resident-post close (concludes with a report to
+  its principal; the post stays resumable/registered in posts.json and is
+  re-woken by the relay). Return shape unchanged. Verification: `pnpm build`
+  clean, `node --test test/invoke.test.js` 5/5, full `node --test` 19/19,
+  TIERED ladder green (plugin add + dump-config layer + headless smoke on the
+  twin). Reviewer PASS. Committed as `05abad1`. Purpose: enable the
+  cross-session resident-post test (two GUI sessions sharing the board room,
+  fork↔fork addressing, settlement-delivered reports).
+- **2026-08-19** — **Twin-profile env fix**: the `deepartments-dev-headless`
+  twin linked `dsh-smart-restart` via its dev path, whose repo had its
+  declared dep `@deepseek-ai/dsh-home-paths` missing from node_modules
+  (caused `ERR_MODULE_NOT_FOUND` in the headless smoke). Fixed by `pnpm
+  install` in `/home/esuarez/projects/dsh-smart-restart`. Headless smoke now
+  green.
+- **2026-08-19** — **Next**: the owner will signal when ready to restart the
+  `deepartments-dev` GUI service to load the new build, then run the
+  cross-session live test (session 1 fork A resident in the board room →
+  session 2 fork B → message to fork A → wake relay → settlement report back
+  to session 1). Technical validation: the explore report
+  `.dsh/reports/explore-deep/2026-08-19-continuable-settle-and-cross-parent-wake.md`
+  (NO-BLOCKER verdict).
