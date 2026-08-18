@@ -307,7 +307,7 @@ function executeDeptInvoke(pluginCtx, parent, args = { room: 'board', assignment
 
 // --- tests ---------------------------------------------------------------------
 
-test('dept_invoke: ensures the coordinator, forks, posts the assignment, and returns the continuable id', async () => {
+test('dept_invoke: ensures the coordinator, forks, delivers the mission as official followup context, and returns the continuable id', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, spawnStub, forkStub, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
@@ -316,11 +316,11 @@ test('dept_invoke: ensures the coordinator, forks, posts the assignment, and ret
 
       const result = await executeDeptInvoke(pluginCtx(), parent)
 
-      // Returns the continuable shape immediately.
+      // Returns the continuable shape immediately (no board messageId now: the
+      // mission rides followup context, not the board file).
       assert.equal(result.kind, 'continuable')
       assert.ok(typeof result.subagentId === 'string' && result.subagentId.length > 0)
       assert.equal(result.roomId, 'board')
-      assert.ok(typeof result.messageId === 'string' && result.messageId.length > 0)
 
       // Coordinator ensured (create #0) + fork started (create #1), through
       // the REAL continuation manager and the stub providers.
@@ -348,23 +348,42 @@ test('dept_invoke: ensures the coordinator, forks, posts the assignment, and ret
       assert.equal(posts[forkPostId].childId, forkChildId)
       assert.equal(posts[forkPostId].roomId, 'board')
 
-      // The assignment rides the board file with the expected addressing.
-      const records = await loadRecords(resolveBoardPath(stateDir, 'board'))
-      const assignment = records.find((record) => record.kind === 'message')
-      assert.ok(assignment, 'assignment record in board.jsonl')
-      assert.equal(assignment.from, 'asistente')
-      assert.deepEqual(assignment.to, ['research-head'])
-      assert.equal(assignment.payload.text, 'ping the research coordinator')
-      assert.equal(result.messageId, assignment.id)
+      // The mission is NOT written to the board file (Fix B): dept_invoke emits
+      // nothing to the board — the assignment is delivered as official followup
+      // context to the fork instead. (Only the boot-time 'room-ready' control
+      // record exists, and no record carries the assignment text.)
+      const boardRecords = await loadRecords(resolveBoardPath(stateDir, 'board'))
+      assert.equal(boardRecords.some((record) => record.payload?.text === 'ping the research coordinator'), false, 'no board record carries the assignment (mission rides followup context only)')
+      assert.equal(boardRecords.some((record) => record.kind === 'message'), false, 'dept_invoke emits no board message')
 
-      // The wake relay woke the coordinator (the board delta lands in its inbox).
+      // The coordinator is created but receives only its own start prompt
+      // (inbox[0]) — it is NOT woken with the assignment (there is no board
+      // message carrying the mission).
       const coordinator = agents.childAgents[0]
-      assert.ok(coordinator.inboxMessages.length >= 1, 'coordinator received the wake')
-      const wake = coordinator.inboxMessages.at(-1)
-      assert.match(wake.content[0].text, /Board delta in board/)
-      assert.match(wake.content[0].text, /new message \S+ from asistente/)
-      assert.doesNotMatch(wake.content[0].text, /ping the research coordinator/, 'relay does not embed the message body (pointer-only)')
-      assert.equal(wake.source.kind, 'coordinator')
+      assert.equal(coordinator.inboxMessages.length, 1, 'coordinator got only its start prompt, no assignment wake')
+      assert.doesNotMatch(coordinator.inboxMessages[0].content[0].text, /ping the research coordinator/, 'coordinator not woken with the assignment')
+
+      // The fork's FIRST message (the start prompt, delivered as a {kind:'user'}
+      // message) is the NEUTRAL role framing and does NOT carry the mission.
+      const fork = agents.childAgents[1]
+      assert.equal(fork.inboxMessages.length, 2, 'fork received the neutral prompt + the deployment-context followup')
+      const promptText = fork.inboxMessages[0].content[0].text
+      assert.doesNotMatch(promptText, /ping the research coordinator/, 'mission is not embedded in the start prompt')
+      assert.match(promptText, /Asistente's representative/, 'start prompt keeps the role framing')
+      assert.doesNotMatch(promptText, /research-head/, 'addressees are not hardcoded into the start prompt')
+
+      // The mission arrives as an OFFICIAL followup with the distinguished
+      // coordinator/relay source (the same channel as settlement/report notices).
+      const deploy = fork.inboxMessages[1]
+      assert.equal(deploy.source.kind, 'coordinator')
+      assert.equal(deploy.source.form, 'relay')
+      assert.equal(deploy.source.senderSessionId, parent.id)
+      const deployText = deploy.content[0].text
+      assert.match(deployText, /Deployment context/)
+      assert.match(deployText, /room "board"/)
+      assert.match(deployText, new RegExp(forkPostId), 'deployment context names the fork post')
+      assert.match(deployText, /ping the research coordinator/, 'the assignment (mission) rides the followup context')
+      assert.match(deployText, /static members: asistente, research-head/, 'deployment context includes the room presence snapshot')
 
       // Error path: no calling agent.
       const tool = pluginCtx().tools.get('dept_invoke')
@@ -443,8 +462,13 @@ test('wake relay: addressed members are woken through the live shared parent; se
       const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
       assert.ok(boardSession)
 
-      const coordBefore = coordinator.inboxMessages.length // 1: the assignment wake
-      const forkBefore = fork.inboxMessages.length
+      // No initial assignment wake: dept_invoke no longer posts the mission to
+      // the board (Fix B delivers it as followup context to the fork). The
+      // coordinator starts with only its own start prompt; the fork starts with
+      // its neutral prompt + the deployment-context followup. All assertions
+      // below are relative deltas from these baselines.
+      const coordBefore = coordinator.inboxMessages.length // 1: its start prompt only
+      const forkBefore = fork.inboxMessages.length // 2: prompt + deployment followup
 
       // 1. fork → coordinator: the coordinator is woken.
       let seq = await nextSeq(stateDir, 'board')
@@ -498,18 +522,20 @@ test('registerContinuableSetup: the board toolset is installed into every contin
       const forkPostId = Object.keys(posts).find((key) => key.startsWith('asistente-fork-'))
       const fork = agents.childAgents[1]
 
-      // Both children (coordinator + fork) received the four tools.
+      // Both children (coordinator + fork) received the five tools.
       assert.equal(agents.childContexts.length, 2)
       for (const { ctx: childCtx, key } of agents.childContexts) {
         assert.ok(childCtx.tools.get('dept_room_read', key), 'dept_room_read installed')
         assert.ok(childCtx.tools.get('dept_room_write', key), 'dept_room_write installed')
         assert.ok(childCtx.tools.get('dept_witness_write', key), 'dept_witness_write installed')
         assert.ok(childCtx.tools.get('dept_room_who', key), 'dept_room_who installed')
+        assert.ok(childCtx.tools.get('dept_whereami', key), 'dept_whereami installed')
       }
       // Scoped to the children — never global.
       assert.equal(root.tools.get('dept_room_read'), undefined)
       assert.equal(root.tools.get('dept_witness_write'), undefined)
       assert.equal(root.tools.get('dept_room_who'), undefined)
+      assert.equal(root.tools.get('dept_whereami'), undefined)
 
       const forkCtx = agents.childContexts[1].ctx
       const forkKey = agents.childContexts[1].key
@@ -580,22 +606,27 @@ test('dept_invoke: explicit `to` addresses a sibling fork post and leaves the co
       assert.equal(forkStub.prepareCalls.length, 1, 'fork created on the fork provider')
       assert.equal(agents.createCalls.length, 1, 'only the fork materialized')
 
-      // The assignment board record addresses the sibling fork post.
+      // The mission is NOT written to the board file (Fix B): no board message
+      // and no record carries the assignment — it is delivered as followup context.
       const records = await loadRecords(resolveBoardPath(stateDir, 'board'))
-      const assignment = records.find((record) => record.kind === 'message')
-      assert.ok(assignment, 'assignment record in board.jsonl')
-      assert.equal(assignment.from, 'asistente')
-      assert.deepEqual(assignment.to, ['asistente-fork-sibling'])
-      assert.equal(assignment.payload.text, 'a message for the other fork')
+      assert.equal(records.some((record) => record.payload?.text === 'a message for the other fork'), false, 'no board record carries the assignment with an explicit `to` either')
+      assert.equal(records.some((record) => record.kind === 'message'), false, 'dept_invoke emits no board message')
 
-      // The fork prompt (delivered as the fork's first inbox message) carries
-      // the mission and the target member id, and is mission-driven rather than
-      // a hardcoded coordinator-only script.
-      const forkPrompt = agents.childAgents[0].inboxMessages[0].content[0].text
-      assert.match(forkPrompt, /a message for the other fork/)
-      assert.match(forkPrompt, /asistente-fork-sibling/)
-      assert.match(forkPrompt, /The assignment is addressed to: asistente-fork-sibling/)
+      // The fork's start prompt (inbox[0]) is the NEUTRAL role framing and does
+      // NOT carry the mission; the mission arrives as the official followup.
+      const fork = agents.childAgents[0]
+      assert.equal(fork.inboxMessages.length, 2, 'fork received the neutral prompt + the deployment-context followup')
+      const forkPrompt = fork.inboxMessages[0].content[0].text
+      assert.doesNotMatch(forkPrompt, /a message for the other fork/, 'mission is not embedded in the start prompt')
       assert.doesNotMatch(forkPrompt, /research coordinator/, 'no coordinator-only forced prompt with an explicit `to`')
+      assert.match(forkPrompt, /Asistente's representative/, 'role framing kept in the start prompt')
+
+      const deploy = fork.inboxMessages[1]
+      assert.equal(deploy.source.kind, 'coordinator')
+      assert.equal(deploy.source.form, 'relay')
+      const deployText = deploy.content[0].text
+      assert.match(deployText, /a message for the other fork/, 'the assignment rides the official followup context')
+      assert.match(deployText, /room "board"/)
     } finally {
       await dispose()
     }
@@ -644,6 +675,123 @@ test('dept_room_who: lists static members and only the room\'s registered live p
       assert.equal(missing.room, 'nope')
       assert.deepEqual(missing.members, [])
       assert.deepEqual(missing.posts, [])
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('dept_whereami: a registered post gets its spatial identity; the host gets the host shape', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent())
+      await executeDeptInvoke(pluginCtx(), parent)
+      const posts = await readPosts(stateDir)
+      const forkPostId = Object.keys(posts).find((key) => key.startsWith('asistente-fork-'))
+      const fork = agents.childAgents[1]
+      const forkCtx = agents.childContexts[1].ctx
+      const forkKey = agents.childContexts[1].key
+      const signal = new AbortController().signal
+      const tool = forkCtx.tools.get('dept_whereami', forkKey)
+      assert.ok(tool, 'dept_whereami available on the fork')
+
+      // Post path: the fork is a registered board post in room 'board'.
+      const post = await tool.execute({}, { agent: fork, signal })
+      assert.equal(post.kind, 'post')
+      assert.equal(post.postId, forkPostId)
+      assert.equal(post.roomId, 'board')
+      assert.equal(post.childId, fork.id)
+      assert.equal(post.parentId, parent.id)
+      assert.equal(post.provider, 'fork')
+      assert.deepEqual(post.members, ['asistente', 'research-head'], 'static room members in config order')
+      assert.equal(post.posts.length, 1, 'only the fork post is registered in the board room')
+      assert.equal(post.posts[0].postId, forkPostId)
+      assert.equal(post.posts[0].parentLive, true, 'fake parent is live')
+
+      // The coordinator is a registered post too, in its own room 'research'.
+      const coord = agents.childAgents[0]
+      const coordCtx = agents.childContexts[0].ctx
+      const coordKey = agents.childContexts[0].key
+      const whereCoord = await coordCtx.tools.get('dept_whereami', coordKey).execute({}, { agent: coord, signal })
+      assert.equal(whereCoord.kind, 'post')
+      assert.equal(whereCoord.postId, 'research-head')
+      assert.equal(whereCoord.roomId, 'research')
+      assert.deepEqual(whereCoord.members, ['research-head'])
+      assert.equal(whereCoord.posts.length, 1)
+      assert.equal(whereCoord.posts[0].postId, 'research-head')
+
+      // Host path: the Asistente (fake parent) has NO post entry → host shape.
+      const host = await tool.execute({}, { agent: parent, signal })
+      assert.equal(host.kind, 'host')
+      assert.equal(host.postId, null)
+      assert.equal(host.roomId, null)
+      assert.match(host.message, /NOT a board post/)
+
+      // Parent removed from agents.store → the fork's post now reports parentLive false.
+      agents.store.delete(parent.id)
+      const relisted = await tool.execute({}, { agent: fork, signal })
+      assert.equal(relisted.kind, 'post')
+      assert.equal(relisted.posts[0].parentId, parent.id)
+      assert.equal(relisted.posts[0].parentLive, false, 'parent offline flagged in the presence snapshot')
+
+      // Error path: no calling agent.
+      await assert.rejects(
+        () => tool.execute({}, { signal: new AbortController().signal }),
+        /dept_whereami requires a calling agent/
+      )
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('dept_invoke: a failed deployment-context followup rolls back the fork post and rejects (no silent orphan)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    // Simulate a delivery failure of the fork's deployment-context followup:
+    // the spy passes everything through to the REAL runtime unless the message
+    // is the mission-bearing deployment context, which it rejects. dept_invoke
+    // must surface this (reject) and roll the just-registered fork post back.
+    const realFollowup = root.subagents.followup.bind(root.subagents)
+    root.subagents.followup = async (parent, childId, content, options) => {
+      const text = content?.[0]?.text ?? ''
+      if (/Deployment context/.test(text)) {
+        throw new Error('simulated deployment delivery failure')
+      }
+      return realFollowup(parent, childId, content, options)
+    }
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent())
+
+      // The caller learns deployment FAILED — no success result is returned.
+      await assert.rejects(
+        () => executeDeptInvoke(pluginCtx(), parent),
+        /deployment-context delivery failed|rolled back/,
+        'dept_invoke rejects when the fork deployment-context delivery fails'
+      )
+
+      // The fork (and the coordinator) were created, but the registry no longer
+      // holds the orphaned fork post; the coordinator entry may remain.
+      assert.equal(agents.createCalls.length, 2, 'fork + coordinator both created before the rollback')
+      assert.equal(agents.childAgents.length, 2)
+      // The registry write is fire-and-forget (persistPosts), so a poll can
+      // transiently observe a torn/interleaved write; skip parse errors and
+      // re-poll until the rolled-back state settles.
+      await waitFor(async () => {
+        let posts
+        try {
+          posts = JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8'))
+        } catch {
+          return false
+        }
+        return !Object.keys(posts).some((key) => key.startsWith('asistente-fork-'))
+      }, 5000, 'fork post rolled back out of posts.json')
+      const posts = await readPosts(stateDir)
+      assert.equal(Object.keys(posts).some((key) => key.startsWith('asistente-fork-')), false, 'no orphaned fork post in the registry')
+      assert.ok(Object.hasOwn(posts, 'research-head'), 'coordinator entry remains intact')
     } finally {
       await dispose()
     }
