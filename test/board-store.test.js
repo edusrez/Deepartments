@@ -234,16 +234,16 @@ test('cold restart: a pre-seeded board file folds into the projection; new live 
       assert.equal(after.messages[1].text, 'live-message')
       assert.deepEqual(after.cursors, { 'research-head': 'm-4' })
 
-      // This boot's room-ready record accumulated in the SAME file.
-      await waitFor(async () => (await loadRecords(boardPath)).length === 4, 5000, 'board file grew to 4 records')
+      // Batch D (ready single-once): the file ALREADY holds a ready record for
+      // this room, so THIS boot appends NO new ready marker — the board file is
+      // left at the pre-seeded 3 records (no ~41% ready boot noise accumulates).
+      await waitFor(async () => (await loadRecords(boardPath)).length === 3, 5000, 'board file stays at 3 records after a cold restart')
       const records = await loadRecords(boardPath)
       assert.equal(records[0].kind, 'message')
       assert.equal(records[1].kind, 'agenda')
       assert.equal(records[2].kind, 'ready')
       assert.equal(records[2].seq, 2)
-      assert.equal(records[3].kind, 'ready')
-      assert.equal(records[3].id, 'ready-board-3')
-      assert.equal(records[3].seq, 3, 'board seq continues after the seeded history')
+      assert.equal(records.length, 3, 'no second ready record re-emitted on a restarted room')
     } finally {
       await dispose()
     }

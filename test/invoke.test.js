@@ -15,7 +15,7 @@
 // via StubAgents.resume — the faithful production path for bringing a
 // registered resident back.
 import assert from 'node:assert/strict'
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -316,6 +316,30 @@ function messageRecord(seq, from, to, text, ack = false) {
     kind: 'message',
     payload: ack ? { kind: 'note', text, ack: true } : { kind: 'note', text }
   }
+}
+
+/** Pre-seed a room's board file with raw records BEFORE boot (a prior
+ * session's cold truth) — the restart scenario for the cursor test. */
+async function seedBoardRecords(stateDir, roomId, records) {
+  const filePath = resolveBoardPath(stateDir, roomId)
+  await mkdir(path.dirname(filePath), { recursive: true })
+  await writeFile(filePath, `${records.map((record) => JSON.stringify(record)).join('\n')}\n`, 'utf8')
+}
+
+/** Read the persisted per-member cursor file (created on boot/advance). Retries
+ * until the file is present AND parses as JSON (the write is fire-and-forget). */
+async function readCursors(stateDir) {
+  const cursorsPath = path.join(stateDir, 'cursors.json')
+  let parsed
+  await waitFor(async () => {
+    try {
+      parsed = JSON.parse(await readFile(cursorsPath, 'utf8'))
+      return true
+    } catch {
+      return false
+    }
+  }, 5000, 'cursors.json readable')
+  return parsed
 }
 
 /**
@@ -1140,6 +1164,155 @@ test('Batch C dept_room_write ack:true tags a pure acknowledgement (payload.ack)
       assert.equal(tagged.payload.ack, true, 'ack:true records payload.ack=true')
       assert.equal(tagged.payload.kind, 'note', 'ack keeps kind note')
       assert.equal(plain.payload.ack, undefined, 'plain write carries payload.ack undefined')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- Batch D: persistent read cursors + ready single-once + fork-ghost sweep ---
+// The log audit (2026-08-19) found: (1) per-member read cursors were IN-MEMORY
+// only, so a resident replayed its ENTIRE addressed backlog after a service
+// restart (wasted tokens, dropped missions); (2) the board file accumulated a
+// `kind:'ready'` boot record on EVERY service start (~41%/46-of-111 records of
+// pure noise); (3) retired `asistente-fork-*` ghosts were never garbage
+// collected from posts.json (~77M tokens doing nothing).
+//
+// Batch D fixes: cursors persist to `<stateDir>/cursors.json` and dept_room_read
+// serves ONLY `seq > lastMessageSeq` (a durable high-water mark), so a restarted
+// member reads only-new while a fresh member reads full history; `ready` is
+// emitted ONCE per room across boots; the retired fork provider's leftovers are
+// swept on boot while spawn heads are never touched.
+
+test('Batch D persistent cursor: a persisted high-water `lastMessageSeq` makes a restarted member read ONLY-new, while a fresh member reads full history', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const parentId = SessionId('session-parent-cursor')
+    const resumedChild = SessionId('session-child-resumed')
+    const freshChild = SessionId('session-child-fresh')
+    const resumedPost = 'research-head'
+    const freshPost = 'acceptor-head'
+    await seedPost(stateDir, { postId: resumedPost, childId: resumedChild, parentId, roomId: 'board', provider: 'spawn' })
+    await seedPost(stateDir, { postId: freshPost, childId: freshChild, parentId, roomId: 'board', provider: 'spawn' })
+
+    // Historical backlog (a prior session's board file): research-head already
+    // consumed seq 0,1 (its persisted cursor is at lastMessageSeq 1); the fresh
+    // acceptor-head has no cursor entry and must see its full history.
+    await seedBoardRecords(stateDir, 'board', [
+      messageRecord(0, 'asistente', [resumedPost], 'rh-hist-0'),
+      messageRecord(1, 'asistente', [resumedPost], 'rh-hist-1'),
+      messageRecord(2, 'asistente', [freshPost], 'ac-hist-0'),
+      messageRecord(3, 'asistente', [freshPost], 'ac-hist-1')
+    ])
+    // Persisted cursor artifact from the prior session (the "restart" state).
+    await writeFile(path.join(stateDir, 'cursors.json'),
+      JSON.stringify({ 'board:research-head': { lastMessageId: null, lastMessageSeq: 1, lastAgendaSeq: -1 } }, null, 2),
+      'utf8')
+
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent(parentId))
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+
+      // (a) FRESH member: cold-resume the fresh post and read — it must see the
+      // full historical backlog addressed to it (ac-hist-0, ac-hist-1).
+      let seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, `host-${parent.id}`, [freshPost], 'fresh-wake'), 'board')
+      await waitFor(() => agents.store.has(freshChild), 5000, 'fresh post cold-resumed')
+      const fresh = agents.store.get(freshChild)
+      const freshEntry = agents.childContexts.find((c) => c.ctx.agent?.id === freshChild)
+      assert.ok(freshEntry, 'fresh post child context available')
+      const freshRead = freshEntry.ctx.tools.get('dept_room_read', freshEntry.key)
+      const freshDelta = (await freshRead.execute({ room: 'board' }, { agent: fresh, signal: new AbortController().signal })).delta
+      assert.match(freshDelta, /ac-hist-0/, 'fresh member sees full addressed history (ac-hist-0)')
+      assert.match(freshDelta, /ac-hist-1/, 'fresh member sees full addressed history (ac-hist-1)')
+
+      // (b) RESUMED member: cold-resume and read — its persisted cursor
+      // (lastMessageSeq 1) must suppress the historical backlog; only the new
+      // wake message shows, never rh-hist-0/rh-hist-1.
+      seq = await nextSeq(stateDir, 'board')
+      const resumedWakeText = 'fresh-note-for-resumed'
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, `host-${parent.id}`, [resumedPost], resumedWakeText), 'board')
+      await waitFor(() => agents.store.has(resumedChild), 5000, 'resumed post cold-resumed')
+      const resumed = agents.store.get(resumedChild)
+      const resumedEntry = agents.childContexts.find((c) => c.ctx.agent?.id === resumedChild)
+      assert.ok(resumedEntry, 'resumed post child context available')
+      const resumedRead = resumedEntry.ctx.tools.get('dept_room_read', resumedEntry.key)
+      const resumedDelta = (await resumedRead.execute({ room: 'board' }, { agent: resumed, signal: new AbortController().signal })).delta
+      assert.match(resumedDelta, new RegExp(resumedWakeText), 'resumed member gets the only-new message')
+      assert.doesNotMatch(resumedDelta, /rh-hist-0/, 'resumed member does NOT replay its historical backlog (rh-hist-0)')
+      assert.doesNotMatch(resumedDelta, /rh-hist-1/, 'resumed member does NOT replay its historical backlog (rh-hist-1)')
+
+      // The high-water mark was mirrored to disk on the read.
+      await waitFor(async () => {
+        const cursors = await readCursors(stateDir)
+        const resumedCursor = cursors['board:research-head']
+        return resumedCursor !== undefined && resumedCursor.lastMessageSeq >= seq
+      }, 5000, 'advanced cursor persisted to cursors.json')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch D ready single-once: a second boot into the same stateDir does NOT re-emit a ready record per room', async () => {
+  const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-ready-'))
+  try {
+    const readyCount = async (roomId) => (await loadRecords(resolveBoardPath(stateDir, roomId))).filter((r) => r.kind === 'ready').length
+
+    const b1 = await bootPlugin(stateDir)
+    await waitForRooms(b1.root)
+    assert.equal(await readyCount('board'), 1, 'one ready record for board after first boot')
+    assert.equal(await readyCount('research'), 1, 'one ready record for research after first boot')
+    await b1.dispose()
+
+    // Restart into the SAME stateDir: the ready record already persisted, so no
+    // second ready record may be appended.
+    const b2 = await bootPlugin(stateDir)
+    await waitForRooms(b2.root)
+    assert.equal(await readyCount('board'), 1, 'still one ready record for board after second boot')
+    assert.equal(await readyCount('research'), 1, 'still one ready record for research after second boot')
+    await b2.dispose()
+  } finally {
+    await rm(stateDir, { recursive: true, force: true })
+  }
+})
+
+test('Batch D fork-ghost sweep: retired fork-provider posts are removed from posts.json on boot while a spawn head remains', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const parentId = SessionId('session-parent-sweep')
+    const headChild = SessionId('session-head-sweep')
+    const ghostA = SessionId('session-ghost-a')
+    const ghostB = SessionId('session-ghost-b')
+    await seedPost(stateDir, { postId: 'research-head', childId: headChild, parentId, roomId: 'board', provider: 'spawn' })
+
+    // Inject retired fork-provider ghosts directly into posts.json (the legacy
+    // pre-Batch-A `asistente-fork-*` clones).
+    const postsPath = path.join(stateDir, 'posts.json')
+    const current = JSON.parse(await readFile(postsPath, 'utf8'))
+    for (const [postId, childId] of [['asistente-fork-a', ghostA], ['asistente-fork-b', ghostB]]) {
+      current[postId] = { childId, parentId, roomId: 'board', provider: 'fork' }
+      postAdoption.set(childId, parentId)
+    }
+    await writeFile(postsPath, JSON.stringify(current, null, 2), 'utf8')
+
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      // The spawn head survives; the fork ghosts are swept from BOTH memory and
+      // the persisted posts.json.
+      await waitFor(async () => {
+        const posts = await readPosts(stateDir)
+        return posts['asistente-fork-a'] === undefined && posts['asistente-fork-b'] === undefined && posts['research-head'] !== undefined
+      }, 5000, 'fork ghosts swept while spawn head remains')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['research-head'].provider, 'spawn', 'spawn head kept with provider spawn')
+      assert.equal(posts['asistente-fork-a'], undefined, 'fork ghost A removed')
+      assert.equal(posts['asistente-fork-b'], undefined, 'fork ghost B removed')
+
+      // The live registry agrees (dept_room_who lists no fork ghosts).
+      const who = await root.tools.get('dept_room_who').execute({ room: 'board' })
+      assert.ok(!who.posts.some((p) => p.postId.startsWith('asistente-fork-')), 'no fork ghost in the live roster')
     } finally {
       await dispose()
     }

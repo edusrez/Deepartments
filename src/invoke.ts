@@ -78,10 +78,16 @@
 //     it would erase a legitimate host's identity; instead we keep it and the
 //     relay SKIPS+WARNS when the target session is not live. Only a real
 //     join (lazy ensureHost on a live tool call) registers/refreshes a host.
-//   - Per-member read cursors are an IN-MEMORY map keyed by member id (no
-//     'cursor' board record kind: BoardKind is closed by board-store.ts).
-//     Cursors are therefore lost on process restart — the member re-reads
-//     addressed messages it already saw (idempotent).
+//   - Per-member read cursors (Batch D): the in-memory map keyed by member id
+//     is the FAST PATH (no 'cursor' board record kind: BoardKind is closed by
+//     board-store.ts), and it is now MIRRORED to `<stateDir>/cursors.json`
+//     (write-through fire-and-forget, last-write) so a restart restores it.
+//     Because the board seq is monotonic and append-only, a persisted
+//     `lastMessageSeq` is a correct durable HIGH-WATER MARK: dept_room_read
+//     serves ONLY records with `seq > cursor.lastMessageSeq` (never "from
+//     index 0"), so a resumed member does NOT replay its historical backlog
+//     after a restart. Semantics: FRESH member (no persisted cursor) = full
+//     history; RESUMED member (cursor present) = only-new.
 //   - The wake relay needs the live shared parent for POST targets (rc.6
 //     limitation): when ctx.agents.get(parentId) is undefined, the post wake
 //     is SKIPPED with a warning. Host wakes are orthogonal — they target the
@@ -241,6 +247,11 @@ export function applyInvoke(ctx: Context, config: Config) {
   const ackCounters = new Map<string, { count: number; lastTs: number }>()
   const roomQueues = new Map<string, Promise<unknown>>()
   const postsPath = path.join(config.stateDir, 'posts.json')
+  // Batch D: per-member read cursors persisted to `<stateDir>/cursors.json`,
+  // keyed by `${roomId}:${memberId}` (last-write, fire-and-forget). The
+  // in-memory `memberCursors` map is the fast path and is rebuilt from this
+  // file at boot so a restart does NOT replay the historical backlog.
+  const cursorsPath = path.join(config.stateDir, 'cursors.json')
 
   // --- host registry (hostId → entry, plus sessionId → hostId reverse) ------
   const hosts = new Map<string, HostEntry>()
@@ -290,6 +301,26 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   const postIdForChild = (childId: string): string | undefined => byChild.get(childId)
 
+  // --- per-member read cursors: durable mirror (Batch D) ----------------------
+  // Disk key is `${roomId}:${memberId}`; the in-memory fast path collapses a
+  // multi-room member's entries to the highest high-water seq per member id.
+  const persistedCursors = new Map<string, CursorState>()
+  const cursorKey = (roomId: string, memberId: string): string => `${roomId}:${memberId}`
+
+  // Fire-and-forget write-through of ONE advanced cursor (mirrors the posts/
+  // hosts persist pattern; last-write wins). The stateDir may not exist yet
+  // on a first boot, so mkdir -p first.
+  const persistCursors = (roomId: string, memberId: string, cursor: CursorState): void => {
+    persistedCursors.set(cursorKey(roomId, memberId), cursor)
+    const data: Record<string, CursorState> = {}
+    for (const [key, value] of persistedCursors) data[key] = value
+    mkdir(path.dirname(cursorsPath), { recursive: true }).then(() =>
+      writeFile(cursorsPath, JSON.stringify(data, null, 2), 'utf8')
+    ).catch((error: unknown) => {
+      ctx.logger.warn(`[deepartments] cursors.json write failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
+
   /**
    * Resolve the board member id of a calling agent: a registered post first,
    * else a (lazily registered) host. A bare agent with no post IS a host.
@@ -331,12 +362,29 @@ export function applyInvoke(ctx: Context, config: Config) {
   const registryLoaded = readFile(postsPath, 'utf8')
     .then((text) => {
       const parsed = JSON.parse(text) as Record<string, Omit<PostEntry, 'postId'>>
+      // Batch D: one-time data sweep for the RETIRED fork provider. The old
+      // pre-Batch-A `asistente-fork-*` clones carry `provider: 'fork'` and are
+      // ABANDONED ghosts (they consumed ~77M tokens doing nothing). Permanent
+      // department heads are `provider: 'spawn'` and are NEVER touched — even
+      // when their parent session is inactive (a head must re-materialize per
+      // Batch B). We therefore delete ONLY fork-provider leftovers here.
+      let sweptForks = 0
       for (const [postId, entry] of Object.entries(parsed)) {
+        if (entry?.provider === 'fork') {
+          // Orphaned fork ghost: never register it, remove its reverse map if
+          // somehow present, and count it for the boot summary.
+          byChild.delete(entry.childId)
+          sweptForks++
+          continue
+        }
         if (typeof entry.childId === 'string' && typeof entry.parentId === 'string') {
           registerEntry({ postId, ...entry })
         }
       }
-      ctx.logger.info(`[deepartments] loaded ${byPost.size} post registry entries from posts.json`)
+      // Persist after the sweep so the fork ghosts disappear from posts.json
+      // too (they are only in memory until the write lands).
+      if (sweptForks > 0) persistPosts()
+      ctx.logger.info(`[deepartments] loaded ${byPost.size} post registry entries from posts.json${sweptForks > 0 ? `; swept ${sweptForks} retired fork-provider ghost(s)` : ''}`)
     })
     .catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -367,6 +415,36 @@ export function applyInvoke(ctx: Context, config: Config) {
     .catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         ctx.logger.warn(`[deepartments] hosts.json load failed (starting with an empty registry): ${error instanceof Error ? error.message : String(error)}`)
+      }
+    })
+
+  // Best-effort cold load of the persisted per-member read cursors (Batch D).
+  // A fresh/missing file (ENOENT) → empty map: every member starts as a FRESH
+  // reader (full history). A present file restores the durable high-water
+  // `lastMessageSeq` so a RESUMED member reads only-new after a restart.
+  const cursorsLoaded = readFile(cursorsPath, 'utf8')
+    .then((text) => {
+      const parsed = JSON.parse(text) as Record<string, CursorState>
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value?.lastMessageSeq !== 'number' || typeof value?.lastAgendaSeq !== 'number') continue
+        persistedCursors.set(key, value)
+        // Collapse to the per-member fast path: keep the highest high-water seq
+        // (a multi-room member's entries coexist on disk, last-write wins here).
+        const memberId = key.slice(key.indexOf(':') + 1)
+        const existing = memberCursors.get(memberId)
+        if (existing === void 0 || value.lastMessageSeq > existing.lastMessageSeq) {
+          memberCursors.set(memberId, {
+            lastMessageId: value.lastMessageId ?? undefined,
+            lastMessageSeq: value.lastMessageSeq,
+            lastAgendaSeq: value.lastAgendaSeq
+          })
+        }
+      }
+      ctx.logger.info(`[deepartments] loaded ${memberCursors.size} member read cursors from cursors.json`)
+    })
+    .catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        ctx.logger.warn(`[deepartments] cursors.json load failed (starting with fresh per-member cursors): ${error instanceof Error ? error.message : String(error)}`)
       }
     })
 
@@ -686,10 +764,12 @@ export function applyInvoke(ctx: Context, config: Config) {
       // TOC mode: compact table of contents of new addressed messages since
       // the last read, paged by limit/offset, plus agenda updates.
       const cursor = memberCursors.get(memberId) ?? { lastMessageId: undefined, lastMessageSeq: -1, lastAgendaSeq: -1 }
-      const start = cursor.lastMessageId === void 0 ? 0 : state.messages.findIndex((message) => message.id === cursor.lastMessageId) + 1
+      // Seq high-water slicing (Batch D): serve ONLY records with `seq` above
+      // the member's durable `lastMessageSeq`. `state.messages` is seq-ordered;
+      // a persisted cursor therefore skips the historical backlog after a
+      // restart, while a fresh member (cursor at -1) sees full history.
       const candidates = state.messages
-        .slice(Math.max(start, 0))
-        .filter((message) => message.to.includes(memberId) || message.from === memberId)
+        .filter((message) => message.seq > cursor.lastMessageSeq && (message.to.includes(memberId) || message.from === memberId))
       const limit = Math.max(args.limit ?? 20, 1)
       const offset = Math.max(args.offset ?? 0, 0)
       const page = candidates.slice(offset, offset + limit)
@@ -706,6 +786,9 @@ export function applyInvoke(ctx: Context, config: Config) {
       for (const item of agenda) if (item.cursorOfLastTouch > maxAgendaSeq) maxAgendaSeq = item.cursorOfLastTouch
       if (maxAgendaSeq >= 0) cursor.lastAgendaSeq = maxAgendaSeq
       memberCursors.set(memberId, cursor)
+      // Batch D: mirror the advanced cursor to disk (write-through fire-and-forget)
+      // so a restart restores the high-water mark instead of replaying history.
+      persistCursors(args.room, memberId, cursor)
       const delta = lines.length === 0 ? 'No board messages addressed to you.' : `Board delta (room ${args.room}) for ${memberId}:\n${lines.join('\n')}`
       return { room: args.room, member: memberId, delta }
     }
@@ -1060,10 +1143,12 @@ export function applyInvoke(ctx: Context, config: Config) {
             return { room: args.room, member: memberId, delta }
           }
           const cursor = memberCursors.get(memberId) ?? { lastMessageId: undefined, lastMessageSeq: -1, lastAgendaSeq: -1 }
-          const start = cursor.lastMessageId === void 0 ? 0 : state.messages.findIndex((message) => message.id === cursor.lastMessageId) + 1
+          // Seq high-water slicing (Batch D): serve ONLY records with `seq`
+          // above the member's durable `lastMessageSeq`. `state.messages` is
+          // seq-ordered; a persisted cursor skips the historical backlog after
+          // a restart, while a fresh member (cursor at -1) sees full history.
           const candidates = state.messages
-            .slice(Math.max(start, 0))
-            .filter((message) => message.to.includes(memberId) || message.from === memberId)
+            .filter((message) => message.seq > cursor.lastMessageSeq && (message.to.includes(memberId) || message.from === memberId))
           const limit = Math.max(args.limit ?? 20, 1)
           const offset = Math.max(args.offset ?? 0, 0)
           const page = candidates.slice(offset, offset + limit)
@@ -1078,6 +1163,8 @@ export function applyInvoke(ctx: Context, config: Config) {
           for (const item of agenda) if (item.cursorOfLastTouch > maxAgendaSeq) maxAgendaSeq = item.cursorOfLastTouch
           if (maxAgendaSeq >= 0) cursor.lastAgendaSeq = maxAgendaSeq
           memberCursors.set(memberId, cursor)
+          // Batch D: mirror the advanced cursor to disk (write-through fire-and-forget).
+          persistCursors(args.room, memberId, cursor)
           const delta = lines.length === 0 ? 'No board messages addressed to you.' : `Board delta (room ${args.room}) for ${memberId}:\n${lines.join('\n')}`
           return { room: args.room, member: memberId, delta }
         }

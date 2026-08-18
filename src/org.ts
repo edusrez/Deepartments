@@ -490,31 +490,46 @@ export function applyOrg(ctx: Context, config: Config) {
       // (empty/missing → empty history), seed the live session from it, then
       // mirror this boot's room-ready record into it. Seq = last file seq + 1
       // (0 for an empty file).
+      //
+      // Batch D (ready single-once): the `ready` marker is emitted ONCE per
+      // room, on the FIRST boot that persists the room — never again on
+      // subsequent boots. The room's existence and members already live in
+      // config.org.rooms; the ready record's only consumers are the projection
+      // initial state and the relay (which ignores non-message kinds). We check
+      // whether a ready record for this room ALREADY exists in the board file
+      // (it persists), and skip the re-emission if so — idempotent, and it
+      // stops the board file from accumulating ~41% `ready` boot noise.
       const records = await loadRecords(filePath)
       const session = await resolveRoomSession(ctx, room.id, records)
-      const seq = records.length === 0 ? 0 : records[records.length - 1].seq + 1
-      const record: BoardRecord = {
-        id: `ready-${room.id}-${seq}`,
-        seq,
-        ts: Date.now(),
-        from: 'system',
-        to: [...room.members],
-        cc: [],
-        threadId: null,
-        kind: 'ready',
-        payload: {
-          room: {
-            id: room.id,
-            name: room.name,
-            purpose: room.purpose,
-            members: [...room.members]
+      const alreadySeeded = records.some(
+        (record) => record.kind === 'ready' && record.payload.room.id === room.id
+      )
+      if (!alreadySeeded) {
+        const seq = records.length === 0 ? 0 : records[records.length - 1].seq + 1
+        const record: BoardRecord = {
+          id: `ready-${room.id}-${seq}`,
+          seq,
+          ts: Date.now(),
+          from: 'system',
+          to: [...room.members],
+          cc: [],
+          threadId: null,
+          kind: 'ready',
+          payload: {
+            room: {
+              id: room.id,
+              name: room.name,
+              purpose: room.purpose,
+              members: [...room.members]
+            }
           }
         }
+        await emitRoomRecord(session, filePath, record, room.id)
       }
-      await emitRoomRecord(session, filePath, record, room.id)
       // The cordis logger is exporter-based and never reaches stdout;
       // journald only sees raw stdout (same convention as dsh-smooth-stream
-      // and src/index.ts).
+      // and src/index.ts). The log line reports the room READY regardless of
+      // whether a record was emitted this boot (the room exists).
       console.log(`[deepartments] room ready: ${room.id}`)
       ctx.logger.info(`[deepartments] room ready: ${room.id}`)
     }
