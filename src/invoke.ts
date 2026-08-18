@@ -104,7 +104,7 @@ import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { emitRoomRecord, roomSessionId, setBoardRecordListener } from './org.js'
 import type { Config, CoordinatorConfig, RoomState } from './org.js'
 import { loadRecords, resolveBoardPath } from './board-store.js'
-import type { BoardRecord } from './board-store.js'
+import type { BoardRecord, MessagePayload } from './board-store.js'
 
 /**
  * Message source for a board wake relayed to a HOST Asistente session. The
@@ -178,6 +178,9 @@ interface HostRow {
   hostId: string
   sessionId: string
   roomId: string
+  /** Batch E: whether the host's agent session is LIVE right now (agents.get
+   * defined). A cold-boot non-live host is listed truthfully with false. */
+  sessionLive: boolean
 }
 
 /** dept_whereami spatial-identity result. */
@@ -211,7 +214,13 @@ type WhereAmI =
  */
 function formatTocMessage(message: RoomState['messages'][number]): string {
   const preview = message.text.length > 140 ? `${message.text.slice(0, 140)}…` : message.text
-  return `- ${message.id} | ${message.from} → ${message.to.join(', ') || '(all)'} | ${preview}`
+  // Batch E sender-trust: surface the sensitive flag + registry-verified
+  // sender in the rendered delta so a recipient can decide how to act. This is
+  // a MODEL-FACING trust signal, NOT a hard enforcement block.
+  const flag = message.sensitive
+    ? `[sensitive — sender verified: ${message.senderVerified === true ? 'yes' : 'no'}] `
+    : ''
+  return `- ${message.id} | ${message.from} → ${message.to.join(', ') || '(all)'} | ${flag}${preview}`
 }
 
 /**
@@ -464,13 +473,22 @@ export function applyInvoke(ctx: Context, config: Config) {
    * is tagged `payload.ack = true` so the relay's ack-loop guard can recognize
    * it and stop confirmation ping-pong.
    */
-  const emitBoardMessage = (roomId: string, from: string, to: string[], text: string, threadId: string | null = null, ack = false): Promise<{ record: BoardRecord; session: Session }> =>
+  const emitBoardMessage = (roomId: string, from: string, to: string[], text: string, threadId: string | null = null, ack = false, sensitive = false): Promise<{ record: BoardRecord; session: Session }> =>
     serialize(roomId, async () => {
       const session = ctx.sessions.get(SessionId(roomSessionId(roomId)))
       if (session === void 0) throw new Error(`[deepartments] room "${roomId}" is not live (no session) — is the room configured?`)
       const filePath = resolveBoardPath(config.stateDir, roomId)
       const records = await loadRecords(filePath)
       const seq = records.length === 0 ? 0 : records[records.length - 1].seq + 1
+      // Batch E sender-trust: a sensitive message records the sensitive flag
+      // AND a senderVerified flag computed from the registry (registered post,
+      // or a live registered host). Surface signal, not enforcement.
+      const payload: MessagePayload = { kind: 'note', text }
+      if (ack) payload.ack = true
+      if (sensitive) {
+        payload.sensitive = true
+        payload.senderVerified = computeSenderVerified(from)
+      }
       const record: BoardRecord = {
         id: `m-${roomId}-${seq}`,
         seq,
@@ -480,7 +498,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         cc: [],
         threadId,
         kind: 'message',
-        payload: ack ? { kind: 'note', text, ack: true } : { kind: 'note', text }
+        payload
       }
       await emitRoomRecord(session, filePath, record, roomId)
       return { record, session }
@@ -493,6 +511,27 @@ export function applyInvoke(ctx: Context, config: Config) {
    */
   const isKnownAddressee = (addressee: string): boolean =>
     byPost.has(addressee) || hosts.has(addressee) || config.org.rooms.some((room) => room.members.includes(addressee))
+
+  /**
+   * Batch E sender-trust: resolve whether a recorded board member id (`from`)
+   * is REGISTRY-VERIFIED — a registered post, or a registered host whose agent
+   * session is currently live. Returned as the `senderVerified` flag on a
+   * sensitive message. HONEST TRUST BOUND: this proves only that the sender
+   * is a registry-admitted board member at emit time — it is NOT a
+   * cryptographic signature and does not authenticate the content's author
+   * beyond that registry admission. It is a pragmatic signal the recipient
+   * sees, not an enforcement block (the audit's own recommendation was to
+   * surface the trust signal, not to hard-block).
+   */
+  const computeSenderVerified = (from: string): boolean => {
+    if (byPost.has(from)) return true // a registered post is registry-verified
+    const host = hosts.get(from)
+    if (host !== void 0) {
+      // A host is verified only when its agent session is actually live.
+      return agents !== void 0 && agents.get(SessionId(host.sessionId)) !== undefined
+    }
+    return false
+  }
 
   /**
    * The signal handed to startContinuable for post wakes. DETACHED (never
@@ -757,7 +796,10 @@ export function applyInvoke(ctx: Context, config: Config) {
         if (message === void 0) {
           return { room: args.room, member: memberId, delta: `No board message with id "${args.messageId}" was found in room "${args.room}".` }
         }
-        const delta = `Full text of ${message.id} (from ${message.from} → ${message.to.join(', ') || '(all)'}):\n${message.text}`
+        const flag = message.sensitive
+          ? `[sensitive — sender verified: ${message.senderVerified === true ? 'yes' : 'no'}] `
+          : ''
+        const delta = `Full text of ${message.id} (from ${message.from} → ${message.to.join(', ') || '(all)'}):\n${flag}${message.text}`
         return { room: args.room, member: memberId, delta }
       }
 
@@ -796,7 +838,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   const globalWrite = ctx.tools.register(defineTool({
     name: 'dept_room_write',
-    description: 'Post an addressed message to one board room. The message is recorded from your board member id; addressed recipients are woken to read it. Addressees must be a registered post, a registered host (host-<sessionId>), or a static member — unknown addressees are rejected. Set ack:true when this is a PURE acknowledgement/receipt (no new content) so the wake relay does not loop on a confirmation ping-pong.',
+    description: 'Post an addressed message to one board room. The message is recorded from your board member id; addressed recipients are woken to read it. Addressees must be a registered post, a registered host (host-<sessionId>), or a static member — unknown addressees are rejected. Set ack:true when this is a PURE acknowledgement/receipt (no new content) so the wake relay does not loop on a confirmation ping-pong. Mark sensitive:true to flag a sensitive/mission-critical message so recipients can see the sender is registry-verified.',
     parameters: {
       room: { type: 'string', required: true, description: 'Room id to post to (e.g. "board").' },
       to: {
@@ -806,7 +848,8 @@ export function applyInvoke(ctx: Context, config: Config) {
         description: 'Board member ids this message is addressed to (e.g. ["research-head"]).'
       },
       text: { type: 'string', required: true, description: 'The message text.' },
-      ack: { type: 'boolean', description: 'Set true when this is a pure acknowledgement/receipt (no new content) so the relay does not loop on it.' }
+      ack: { type: 'boolean', description: 'Set true when this is a pure acknowledgement/receipt (no new content) so the relay does not loop on it.' },
+      sensitive: { type: 'boolean', description: 'Mark this message as sensitive; recipients will see the sender is registry-verified and the message is flagged. A pragmatic trust signal, not a crypto signature.' }
     },
     output: {
       schema: {
@@ -831,14 +874,14 @@ export function applyInvoke(ctx: Context, config: Config) {
       if (unknown.length > 0) {
         throw new Error(`[deepartments] dept_room_write: unknown addressee(s) ${unknown.join(', ')} — use dept_room_who for the roster`)
       }
-      const { record } = await emitBoardMessage(args.room, memberId, [...args.to], args.text, null, args.ack === true)
+      const { record } = await emitBoardMessage(args.room, memberId, [...args.to], args.text, null, args.ack === true, args.sensitive === true)
       return { room: args.room, from: memberId, to: [...args.to], messageId: record.id }
     }
   }))
 
   const globalWho = ctx.tools.register(defineTool({
     name: 'dept_room_who',
-    description: 'Enumerate who is present in a board room from the live registries: the room\'s static members plus every registered post in that room (with whether its parent is live) and every live host (host-<sessionId>) that has joined it. Use this for the authoritative roster instead of inferring presence from stale board history.',
+    description: 'Enumerate who is present in a board room from the live registries: the room\'s static members plus every registered post in that room (with whether its parent is live) and every registered host (host-<sessionId>) that has joined it, each with whether its agent session is currently live (sessionLive). Use this for the authoritative roster instead of inferring presence from stale board history.',
     parameters: {
       room: { type: 'string', required: true, description: 'Room id to list who is present in (e.g. "board").' }
     },
@@ -872,7 +915,8 @@ export function applyInvoke(ctx: Context, config: Config) {
               properties: {
                 hostId: { type: 'string', required: true },
                 sessionId: { type: 'string', required: true },
-                roomId: { type: 'string', required: true }
+                roomId: { type: 'string', required: true },
+                sessionLive: { type: 'boolean', required: true }
               }
             }
           }
@@ -882,11 +926,11 @@ export function applyInvoke(ctx: Context, config: Config) {
         const memberLine = value.members.length === 0 ? '  (none configured)' : value.members.map((member) => `  - ${member}`).join('\n')
         const postLines = value.posts.map((post) => `  - ${post.postId}${post.parentLive ? ' (live)' : ' (parent offline)'}`)
         const postBlock = postLines.length === 0 ? '  (no registered posts)' : postLines.join('\n')
-        const hostLines = value.hosts.map((host) => `  - ${host.hostId} (session ${host.sessionId})`)
-        const hostBlock = hostLines.length === 0 ? '  (no live hosts)' : hostLines.join('\n')
+        const hostLines = value.hosts.map((host) => `  - ${host.hostId} (session ${host.sessionId}, ${host.sessionLive ? 'live' : 'not live'})`)
+        const hostBlock = hostLines.length === 0 ? '  (no registered hosts)' : hostLines.join('\n')
         return [{
           type: 'text',
-          text: `Room ${value.room} roster:\nStatic members:\n${memberLine}\nRegistered posts:\n${postBlock}\nLive hosts:\n${hostBlock}`
+          text: `Room ${value.room} roster:\nStatic members:\n${memberLine}\nRegistered posts:\n${postBlock}\nRegistered hosts:\n${hostBlock}`
         } as const]
       }
     },
@@ -907,7 +951,10 @@ export function applyInvoke(ctx: Context, config: Config) {
       const hostsInRoom: HostRow[] = []
       for (const entry of hosts.values()) {
         if (entry.roomId !== args.room) continue
-        hostsInRoom.push({ hostId: entry.hostId, sessionId: entry.sessionId, roomId: entry.roomId })
+        // Batch E liveness: report the host's REAL session liveness — a
+        // cold-boot non-live host shows sessionLive:false, never "live".
+        const sessionLive = agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined
+        hostsInRoom.push({ hostId: entry.hostId, sessionId: entry.sessionId, roomId: entry.roomId, sessionLive })
       }
       return { room: args.room, members, posts, hosts: hostsInRoom }
     }
@@ -977,8 +1024,19 @@ export function applyInvoke(ctx: Context, config: Config) {
       const postId = postIdForChild(agent.id as string)
       // The Asistente host (and any unregistered agent) has no post entry.
       if (postId === undefined) {
-        const hostId = hostForSession.get(agent.id as string)
-        if (hostId !== undefined && hosts.has(hostId)) {
+        // Batch E ensureHost (reviewer note 2): calling whereami counts as a
+        // board tool call, so a host-only agent is REGISTERED here — it must
+        // not stay addressless. Reuse its existing room when already
+        // registered; an unregistered host joins the first configured room.
+        const existingId = hostForSession.get(agent.id as string)
+        const existing = existingId !== void 0 ? hosts.get(existingId) : undefined
+        if (existing !== void 0) {
+          ensureHost(agent.id as string, existing.roomId)
+          return { kind: 'host', postId: null, roomId: null, hostId: existing.hostId, sessionId: existing.sessionId, hostRoomId: existing.roomId, message: 'You are the Asistente in your private room with the owner; you are a registered host on the board, not a post.' }
+        }
+        const joinRoom = config.org.rooms[0]?.id
+        if (joinRoom !== void 0) {
+          const hostId = ensureHost(agent.id as string, joinRoom)
           const entry = hosts.get(hostId) as HostEntry
           return { kind: 'host', postId: null, roomId: null, hostId, sessionId: entry.sessionId, hostRoomId: entry.roomId, message: 'You are the Asistente in your private room with the owner; you are a registered host on the board, not a post.' }
         }
@@ -1065,7 +1123,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     subagents.registerContinuableSetup((childCtx) => {
       const disposeWrite = childCtx.tools.register(defineTool({
         name: 'dept_room_write',
-        description: 'Post an addressed message to one board room. The message is recorded from your board member id; addressed recipients are woken to read it. Addressees must be a registered post, a registered host (host-<sessionId>), or a static member — unknown addressees are rejected. Set ack:true when this is a PURE acknowledgement/receipt (no new content) so the wake relay does not loop on a confirmation ping-pong.',
+        description: 'Post an addressed message to one board room. The message is recorded from your board member id; addressed recipients are woken to read it. Addressees must be a registered post, a registered host (host-<sessionId>), or a static member — unknown addressees are rejected. Set ack:true when this is a PURE acknowledgement/receipt (no new content) so the wake relay does not loop on a confirmation ping-pong. Mark sensitive:true to flag a sensitive/mission-critical message so recipients can see the sender is registry-verified.',
         parameters: {
           room: { type: 'string', required: true, description: 'Room id to post to (e.g. "board").' },
           to: {
@@ -1075,7 +1133,8 @@ export function applyInvoke(ctx: Context, config: Config) {
             description: 'Board member ids this message is addressed to (e.g. ["research-head"]).'
           },
           text: { type: 'string', required: true, description: 'The message text.' },
-          ack: { type: 'boolean', description: 'Set true when this is a pure acknowledgement/receipt (no new content) so the relay does not loop on it.' }
+          ack: { type: 'boolean', description: 'Set true when this is a pure acknowledgement/receipt (no new content) so the relay does not loop on it.' },
+          sensitive: { type: 'boolean', description: 'Mark this message as sensitive; recipients will see the sender is registry-verified and the message is flagged. A pragmatic trust signal, not a crypto signature.' }
         },
         output: {
           schema: {
@@ -1098,7 +1157,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           if (unknown.length > 0) {
             throw new Error(`[deepartments] dept_room_write: unknown addressee(s) ${unknown.join(', ')} — use dept_room_who for the roster`)
           }
-          const { record } = await emitBoardMessage(args.room, memberId, [...args.to], args.text, null, args.ack === true)
+          const { record } = await emitBoardMessage(args.room, memberId, [...args.to], args.text, null, args.ack === true, args.sensitive === true)
           return { room: args.room, from: memberId, to: [...args.to], messageId: record.id }
         }
       }))
@@ -1139,7 +1198,10 @@ export function applyInvoke(ctx: Context, config: Config) {
             if (message === void 0) {
               return { room: args.room, member: memberId, delta: `No board message with id "${args.messageId}" was found in room "${args.room}".` }
             }
-            const delta = `Full text of ${message.id} (from ${message.from} → ${message.to.join(', ') || '(all)'}):\n${message.text}`
+            const flag = message.sensitive
+              ? `[sensitive — sender verified: ${message.senderVerified === true ? 'yes' : 'no'}] `
+              : ''
+            const delta = `Full text of ${message.id} (from ${message.from} → ${message.to.join(', ') || '(all)'}):\n${flag}${message.text}`
             return { room: args.room, member: memberId, delta }
           }
           const cursor = memberCursors.get(memberId) ?? { lastMessageId: undefined, lastMessageSeq: -1, lastAgendaSeq: -1 }
@@ -1220,7 +1282,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
       const disposeWho = childCtx.tools.register(defineTool({
         name: 'dept_room_who',
-        description: 'Enumerate who is present in a board room from the live registries: the room\'s static members plus every registered post in that room (with whether its parent is live) and every live host (host-<sessionId>) that has joined it. Use this for the authoritative roster instead of inferring presence from stale board history.',
+        description: 'Enumerate who is present in a board room from the live registries: the room\'s static members plus every registered post in that room (with whether its parent is live) and every registered host (host-<sessionId>) that has joined it, each with whether its agent session is currently live (sessionLive). Use this for the authoritative roster instead of inferring presence from stale board history.',
         parameters: {
           room: { type: 'string', required: true, description: 'Room id to list who is present in (e.g. "board").' }
         },
@@ -1254,7 +1316,8 @@ export function applyInvoke(ctx: Context, config: Config) {
                   properties: {
                     hostId: { type: 'string', required: true },
                     sessionId: { type: 'string', required: true },
-                    roomId: { type: 'string', required: true }
+                    roomId: { type: 'string', required: true },
+                    sessionLive: { type: 'boolean', required: true }
                   }
                 }
               }
@@ -1264,11 +1327,11 @@ export function applyInvoke(ctx: Context, config: Config) {
             const memberLine = value.members.length === 0 ? '  (none configured)' : value.members.map((member) => `  - ${member}`).join('\n')
             const postLines = value.posts.map((post) => `  - ${post.postId}${post.parentLive ? ' (live)' : ' (parent offline)'}`)
             const postBlock = postLines.length === 0 ? '  (no registered posts)' : postLines.join('\n')
-            const hostLines = value.hosts.map((host) => `  - ${host.hostId} (session ${host.sessionId})`)
-            const hostBlock = hostLines.length === 0 ? '  (no live hosts)' : hostLines.join('\n')
+            const hostLines = value.hosts.map((host) => `  - ${host.hostId} (session ${host.sessionId}, ${host.sessionLive ? 'live' : 'not live'})`)
+            const hostBlock = hostLines.length === 0 ? '  (no registered hosts)' : hostLines.join('\n')
             return [{
               type: 'text',
-              text: `Room ${value.room} roster:\nStatic members:\n${memberLine}\nRegistered posts:\n${postBlock}\nLive hosts:\n${hostBlock}`
+              text: `Room ${value.room} roster:\nStatic members:\n${memberLine}\nRegistered posts:\n${postBlock}\nRegistered hosts:\n${hostBlock}`
             } as const]
           }
         },
@@ -1289,7 +1352,9 @@ export function applyInvoke(ctx: Context, config: Config) {
           const hostsInRoom: HostRow[] = []
           for (const entry of hosts.values()) {
             if (entry.roomId !== args.room) continue
-            hostsInRoom.push({ hostId: entry.hostId, sessionId: entry.sessionId, roomId: entry.roomId })
+            // Batch E liveness: report the host's REAL session liveness.
+            const sessionLive = agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined
+            hostsInRoom.push({ hostId: entry.hostId, sessionId: entry.sessionId, roomId: entry.roomId, sessionLive })
           }
           return { room: args.room, members, posts, hosts: hostsInRoom }
         }
@@ -1358,8 +1423,19 @@ export function applyInvoke(ctx: Context, config: Config) {
           if (!agent) throw new Error('dept_whereami requires a calling agent (exec.agent was undefined)')
           const postId = postIdForChild(agent.id as string)
           if (postId === undefined) {
-            const hostId = hostForSession.get(agent.id as string)
-            if (hostId !== undefined && hosts.has(hostId)) {
+            // Batch E ensureHost (reviewer note 2): calling whereami counts as a
+            // board tool call, so a host-only agent is REGISTERED here — it must
+            // not stay addressless. Reuse its existing room when already
+            // registered; an unregistered host joins the first configured room.
+            const existingId = hostForSession.get(agent.id as string)
+            const existing = existingId !== void 0 ? hosts.get(existingId) : undefined
+            if (existing !== void 0) {
+              ensureHost(agent.id as string, existing.roomId)
+              return { kind: 'host', postId: null, roomId: null, hostId: existing.hostId, sessionId: existing.sessionId, hostRoomId: existing.roomId, message: 'You are the Asistente in your private room with the owner; you are a registered host on the board, not a post.' }
+            }
+            const joinRoom = config.org.rooms[0]?.id
+            if (joinRoom !== void 0) {
+              const hostId = ensureHost(agent.id as string, joinRoom)
               const entry = hosts.get(hostId) as HostEntry
               return { kind: 'host', postId: null, roomId: null, hostId, sessionId: entry.sessionId, hostRoomId: entry.roomId, message: 'You are the Asistente in your private room with the owner; you are a registered host on the board, not a post.' }
             }

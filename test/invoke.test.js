@@ -1318,3 +1318,205 @@ test('Batch D fork-ghost sweep: retired fork-provider posts are removed from pos
     }
   })
 })
+
+// --- Batch E: roster liveness, whereami ensureHost, sender-trust verification ---
+// Closes Batch A reviewer notes 1-2 and the audit's self-asserted-identity
+// finding: (1) dept_room_who now reports truthful host session liveness
+// (sessionLive) — a cold-boot non-live host is no longer listed as "live";
+// (2) dept_whereami now calls ensureHost on its host branch, so a host that
+// only calls whereami is REGISTERED (addressable) instead of staying
+// addressless; (3) dept_room_write gains a `sensitive` flag that records
+// payload.sensitive + a senderVerified flag (registry-verified sender) as a
+// PRAGMATIC sender-trust SIGNAL — surfaced in the read delta, not an
+// enforcement block or a crypto signature.
+
+test('Batch E dept_room_who: a non-live host lists with sessionLive:false, a live host with sessionLive:true; posts still report parentLive', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const parentId = SessionId('session-parent-whoE')
+    const childId = SessionId('session-post-whoE')
+    const postId = 'research-head'
+    await seedPost(stateDir, { postId, childId, parentId, roomId: 'board', provider: 'spawn' })
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent(parentId))
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      let seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, `host-${parent.id}`, [postId], 'wake'), 'board')
+      await waitFor(() => agents.store.has(childId), 5000, 'post cold-resumed')
+      const post = agents.store.get(childId)
+      const { ctx: childCtx, key } = agents.childContexts[0]
+      const who = childCtx.tools.get('dept_room_who', key)
+      const signal = new AbortController().signal
+
+      // A live host joins (registering it in the room).
+      const liveHost = agents.put(fakeParentAgent())
+      await root.tools.get('dept_room_write').execute({ room: 'board', to: [postId], text: 'join' }, { agent: liveHost, signal })
+
+      // Now kill that host's agent — it stays in the registry (Batch A
+      // reconciliation) but is NOT live. It must list with sessionLive:false.
+      agents.store.delete(liveHost.id)
+
+      const result = await who.execute({ room: 'board' }, { agent: post })
+      // The post's own liveness flag is unchanged.
+      assert.equal(result.posts[0].postId, postId)
+      assert.equal(result.posts[0].parentLive, true)
+      // The dead host is still registered but truthfully NOT live.
+      const dead = result.hosts.find((h) => h.hostId === `host-${liveHost.id}`)
+      assert.ok(dead, 'the registered-but-dead host is still listed in the roster')
+      assert.equal(dead.sessionLive, false, 'a cold-boot/non-live host reports sessionLive:false, never "live"')
+      assert.equal(dead.sessionId, liveHost.id)
+      assert.equal(dead.roomId, 'board')
+
+      // A genuinely live host reports sessionLive:true.
+      const liveAgain = agents.put(fakeParentAgent())
+      await root.tools.get('dept_room_write').execute({ room: 'board', to: [postId], text: 'join again' }, { agent: liveAgain, signal })
+      const result2 = await who.execute({ room: 'board' }, { agent: post })
+      const alive = result2.hosts.find((h) => h.hostId === `host-${liveAgain.id}`)
+      assert.ok(alive && alive.sessionLive === true, 'a live host reports sessionLive:true')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch E dept_whereami host branch: a host-only agent calling whereami is REGISTERED (addressable, hostForSession populated)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      // A host that NEVER called read/write — whereami is its first board tool call.
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const whereami = root.tools.get('dept_whereami')
+
+      const where = await whereami.execute({}, { agent: host, signal })
+      assert.equal(where.kind, 'host')
+      assert.equal(where.postId, null)
+      assert.equal(where.roomId, null)
+      // ensureHost ran: the host is now registered AND addressable.
+      assert.equal(where.hostId, `host-${host.id}`, 'a whereami-only host is registered and addressable')
+      assert.equal(where.sessionId, host.id)
+      assert.equal(where.hostRoomId, 'board', 'unregistered host joins the first configured room')
+
+      // The reverse map is populated: hosts.json holds the host in room 'board'.
+      const hosts = await readHosts(stateDir)
+      assert.deepEqual(hosts[`host-${host.id}`], { sessionId: host.id, roomId: 'board' }, 'hostForSession/hosts.json populated by a whereami-only call')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch E dept_room_write sensitive:true records payload.sensitive + senderVerified (true for a live registered sender, false for a non-live/unverified host sender)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const parentId = SessionId('session-parent-writeE')
+    const childId = SessionId('session-post-writeE')
+    const postId = 'research-head'
+    await seedPost(stateDir, { postId, childId, parentId, roomId: 'board', provider: 'spawn' })
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent(parentId))
+      const signal = new AbortController().signal
+      const writeTool = root.tools.get('dept_room_write')
+
+      // (1) LIVE registered host sender + sensitive → senderVerified true.
+      const host = agents.put(fakeParentAgent())
+      const live = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'mission critical from live host', sensitive: true }, { agent: host, signal })
+      const records = await loadRecords(resolveBoardPath(stateDir, 'board'))
+      const liveRec = records.find((r) => r.id === live.messageId)
+      assert.equal(liveRec.payload.sensitive, true, 'sensitive:true records payload.sensitive=true')
+      assert.equal(liveRec.payload.senderVerified, true, 'a live registered host sender is registry-verified')
+
+      // (2) REGISTERED POST sender + sensitive → senderVerified true.
+      // Cold-resume the post and use its own write tool.
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      let seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, `host-${host.id}`, [postId], 'resume'), 'board')
+      await waitFor(() => agents.store.has(childId), 5000, 'post cold-resumed')
+      const post = agents.store.get(childId)
+      const { ctx: childCtx, key } = agents.childContexts[0]
+      const postWrite = childCtx.tools.get('dept_room_write', key)
+      const postMsg = await postWrite.execute({ room: 'board', to: ['asistente'], text: 'post secret', sensitive: true }, { agent: post, signal })
+      const recs2 = await loadRecords(resolveBoardPath(stateDir, 'board'))
+      const postRec = recs2.find((r) => r.id === postMsg.messageId)
+      assert.equal(postRec.from, postId)
+      assert.equal(postRec.payload.sensitive, true)
+      assert.equal(postRec.payload.senderVerified, true, 'a registered post sender is registry-verified')
+
+      // (3) NON-LIVE host sender + sensitive → senderVerified FALSE (the audit
+      // concern: a message whose sender session is not live is surfaced as
+      // verified:no). We delete the host's agent, then emit via that same host
+      // object — exec.agent only needs the id; from resolves to the registered
+      // hostId whose session is no longer live, so computeSenderVerified is false.
+      agents.store.delete(host.id)
+      const dead = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'unverified secret', sensitive: true }, { agent: host, signal })
+      const recs3 = await loadRecords(resolveBoardPath(stateDir, 'board'))
+      const deadRec = recs3.find((r) => r.id === dead.messageId)
+      assert.equal(deadRec.from, `host-${host.id}`)
+      assert.equal(deadRec.payload.sensitive, true)
+      assert.equal(deadRec.payload.senderVerified, false, 'a non-live host sender is NOT registry-verified (verified:no)')
+
+      // (4) Plain (non-sensitive) write does NOT carry the flags.
+      const plain = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'ordinary note' }, { agent: agents.put(fakeParentAgent()), signal })
+      const recs4 = await loadRecords(resolveBoardPath(stateDir, 'board'))
+      const plainRec = recs4.find((r) => r.id === plain.messageId)
+      assert.equal(plainRec.payload.sensitive, undefined, 'plain write carries payload.sensitive undefined')
+      assert.equal(plainRec.payload.senderVerified, undefined, 'plain write carries payload.senderVerified undefined')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch E dept_room_read surfaces the [sensitive — sender verified] flag in the rendered delta (TOC + fetch)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const parentId = SessionId('session-parent-readE')
+    const childId = SessionId('session-post-readE')
+    const postId = 'research-head'
+    await seedPost(stateDir, { postId, childId, parentId, roomId: 'board', provider: 'spawn' })
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent(parentId))
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      let seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, `host-${parent.id}`, [postId], 'first wake'), 'board')
+      await waitFor(() => agents.store.has(childId), 5000, 'post cold-resumed')
+      const post = agents.store.get(childId)
+      const { ctx: childCtx, key } = agents.childContexts[0]
+      const read = childCtx.tools.get('dept_room_read', key)
+      const signal = new AbortController().signal
+      const writeTool = root.tools.get('dept_room_write')
+
+      // A live host posts a sensitive message addressed to the post.
+      const host = agents.put(fakeParentAgent())
+      const live = await writeTool.execute({ room: 'board', to: [postId], text: 'top-secret for the head', sensitive: true }, { agent: host, signal })
+
+      // TOC mode surfaces the verified flag.
+      const toc = await read.execute({ room: 'board' }, { agent: post, signal })
+      assert.match(toc.delta, new RegExp(`${live.messageId}`), 'sensitive message is in the delta')
+      assert.match(toc.delta, /\[sensitive — sender verified: yes\]/, 'TOC surfaces [sensitive — sender verified: yes] for a live registered host sender')
+
+      // Fetch mode surfaces the flag too.
+      const fetched = await read.execute({ room: 'board', messageId: live.messageId }, { agent: post, signal })
+      assert.match(fetched.delta, /\[sensitive — sender verified: yes\]/, 'fetch surfaces the verified flag')
+      assert.match(fetched.delta, /top-secret for the head/, 'fetch still returns the full body')
+
+      // A non-live host sender surfaces verified:no in the delta.
+      seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, `host-${host.id}`, [postId], 'resume read'), 'board')
+      const dead = agents.put(fakeParentAgent())
+      // Re-register `dead` under a stable identity by having it join first.
+      await writeTool.execute({ room: 'board', to: [postId], text: 'dead join' }, { agent: dead, signal })
+      agents.store.delete(dead.id)
+      const unverified = await writeTool.execute({ room: 'board', to: [postId], text: 'shady secret', sensitive: true }, { agent: dead, signal })
+      const toc2 = await read.execute({ room: 'board' }, { agent: post, signal })
+      assert.match(toc2.delta, new RegExp(`${unverified.messageId}`))
+      assert.match(toc2.delta, /\[sensitive — sender verified: no\]/, 'a non-live host sender surfaces verified:no')
+    } finally {
+      await dispose()
+    }
+  })
+})

@@ -64,6 +64,25 @@ export interface MessagePayload {
    * to its sender no longer re-wakes the other party past the ack-loop budget.
    */
   ack?: boolean
+  /**
+   * Optional SENSITIVE flag (Batch E, sender-trust): set true when the sender
+   * marks the message sensitive/mission-critical via dept_room_write
+   * `sensitive:true`. Recipients surface it in the read delta so they can see
+   * a message was flagged sensitive by its sender. It is a MODEL-FACING
+   * TRUST SIGNAL ONLY — a PRAGMATIC sender-verification marker, NOT a
+   * cryptographic signature or an enforcement block. See the honest trust
+   * bound documented in src/invoke.ts.
+   */
+  sensitive?: boolean
+  /**
+   * Optional sender-verification flag (Batch E): present only when
+   * `sensitive` is set; TRUE iff the recorded sender (`from`) resolved to a
+   * live registry entry at emit time — a registered post, or a registered
+   * host whose agent session is live. It tells a recipient that the message
+   * came from a registry-verified board member, but it does NOT prove the
+   * content's authenticity beyond that registry admission (trust bound).
+   */
+  senderVerified?: boolean
 }
 
 /**

@@ -157,6 +157,17 @@ export interface RoomMessage {
   threadId: string | null
   kind: string
   text: string
+  /**
+   * Optional sensitive flag (Batch E sender-trust): present when the sender
+   * marked the message sensitive/mission-critical. Model-facing trust signal,
+   * not an enforcement block — recipients decide how to act.
+   */
+  sensitive?: boolean
+  /**
+   * Optional sender-verification flag (Batch E): present only with `sensitive`;
+   * TRUE iff the sender resolved to a live registry entry at emit.
+   */
+  senderVerified?: boolean
 }
 
 /** One structured agenda item (owner, lifecycle state, cursor-of-last-touch). */
@@ -223,7 +234,9 @@ const roomMessageSchema = zod.object({
   cc: zod.array(zod.string()),
   threadId: zod.string().nullable(),
   kind: zod.string(),
-  text: zod.string()
+  text: zod.string(),
+  sensitive: zod.boolean().optional(),
+  senderVerified: zod.boolean().optional()
 }).strict()
 
 const agendaItemSchema = zod.object({
@@ -267,7 +280,13 @@ export function foldRoomRecord(state: RoomState, record: BoardRecord): RoomState
       cc: [...record.cc],
       threadId: record.threadId,
       kind: payload.kind,
-      text: payload.text
+      text: payload.text,
+      // Batch E sender-trust: fold the optional trusting flags through so the
+      // read tools can surface them. Present ONLY on sensitive messages
+      // (additive presence — ordinary messages carry no `sensitive` key).
+      ...(payload.sensitive === true
+        ? { sensitive: true, senderVerified: payload.senderVerified === true }
+        : {})
     }
     return {
       messages: [...state.messages, message],
