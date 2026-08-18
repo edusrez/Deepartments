@@ -12,8 +12,8 @@ export type { WebFetchConfig } from './webfetch.js'
 export const name = 'deepartments'
 // agents/subagents are resolved OPTIONALLY inside applyInvoke (ctx.get): the
 // board-room core must keep working in minimal compositions (e.g. the
-// hermetic real-Loader tests of batch 1.5 mount neither), while dept_invoke
-// fails loud at call time when the continuation services are absent.
+// hermetic real-Loader tests of batch 1.5 mount neither), while the host-plane
+// board tools and wake relay fail loud at use when the services are absent.
 export const inject = ['tools', 'sessions', 'sessionProjections']
 
 export function apply(ctx: Context, config: Config) {
@@ -28,7 +28,11 @@ export function apply(ctx: Context, config: Config) {
   // reversible effects on this plugin's fiber).
   applyOrg(ctx, config)
 
-  // Task 5 (Batch 2): dept_invoke + board toolset + wake relay.
+  // Task 5 (Batch A): the board-as-bus backbone — host identity registry,
+  // host-plane board tools (dept_room_read/write/who/whereami registered
+  // globally so the host and every agent can use the bus) + the wake relay
+  // (wakes addressed posts through the live parent and hosts via the raw
+  // agent path). dept_invoke/fork is retired.
   applyInvoke(ctx, config)
 
   // Web-fetch provider: custom `ctx.web` fetch backend (blocking detection

@@ -13,8 +13,9 @@
 //      mirrored into the file,
 //   4. exports the pure record fold for later batches (dept_* tools).
 //
-// Coordinator posts are NOT created at runtime yet (Batch 2: dept_invoke) —
-// only their spec is declared in config.
+// Coordinator posts are NOT created at runtime (the batch-A board-as-bus
+// model registers only HOST sessions; resident post creation is retired with
+// dept_invoke) — only the coordinator spec is declared in config.
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 import z from '@deepseek-ai/schemastery'
@@ -62,9 +63,10 @@ export interface DepartmentConfig {
 export interface Config {
   stateDir: string
   /**
-   * Subagent provider name for the Asistente fork spawned by dept_invoke
-   * (default 'fork' — the context-inheriting provider). The coordinator post
-   * always uses 'spawn' (fresh child, no inherited context).
+   * Optional subagent provider name retained for config compatibility with
+   * legacy dept_invoke forks (the fork path is RETIRED in Batch A). Kept in
+   * the schema because cordis.patch.yml may declare it; no runtime reference
+   * remains after the fork machinery was removed.
    */
   forkProvider?: string
   org: {
