@@ -495,16 +495,18 @@ test('registerContinuableSetup: the board toolset is installed into every contin
       const forkPostId = Object.keys(posts).find((key) => key.startsWith('asistente-fork-'))
       const fork = agents.childAgents[1]
 
-      // Both children (coordinator + fork) received the three tools.
+      // Both children (coordinator + fork) received the four tools.
       assert.equal(agents.childContexts.length, 2)
       for (const { ctx: childCtx, key } of agents.childContexts) {
         assert.ok(childCtx.tools.get('dept_room_read', key), 'dept_room_read installed')
         assert.ok(childCtx.tools.get('dept_room_write', key), 'dept_room_write installed')
         assert.ok(childCtx.tools.get('dept_witness_write', key), 'dept_witness_write installed')
+        assert.ok(childCtx.tools.get('dept_room_who', key), 'dept_room_who installed')
       }
       // Scoped to the children — never global.
       assert.equal(root.tools.get('dept_room_read'), undefined)
       assert.equal(root.tools.get('dept_witness_write'), undefined)
+      assert.equal(root.tools.get('dept_room_who'), undefined)
 
       const forkCtx = agents.childContexts[1].ctx
       const forkKey = agents.childContexts[1].key
@@ -591,6 +593,54 @@ test('dept_invoke: explicit `to` addresses a sibling fork post and leaves the co
       assert.match(forkPrompt, /asistente-fork-sibling/)
       assert.match(forkPrompt, /The assignment is addressed to: asistente-fork-sibling/)
       assert.doesNotMatch(forkPrompt, /research coordinator/, 'no coordinator-only forced prompt with an explicit `to`')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('dept_room_who: lists static members and only the room\'s registered live posts', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent())
+      await executeDeptInvoke(pluginCtx(), parent)
+      const posts = await readPosts(stateDir)
+      const forkPostId = Object.keys(posts).find((key) => key.startsWith('asistente-fork-'))
+      const fork = agents.childAgents[1]
+      const forkCtx = agents.childContexts[1].ctx
+      const forkKey = agents.childContexts[1].key
+      const signal = new AbortController().signal
+      const tool = forkCtx.tools.get('dept_room_who', forkKey)
+      assert.ok(tool, 'dept_room_who available on the fork')
+
+      // Board roster: static members in config order + the fork's post only.
+      const result = await tool.execute({ room: 'board' }, { agent: fork, signal })
+      assert.equal(result.room, 'board')
+      assert.deepEqual(result.members, ['asistente', 'research-head'], 'static members in config order')
+      assert.equal(result.posts.length, 1, 'only the fork post is registered in the board room')
+      assert.equal(result.posts[0].postId, forkPostId)
+      assert.equal(result.posts[0].childId, fork.id)
+      assert.equal(result.posts[0].parentId, parent.id)
+      assert.equal(result.posts[0].parentLive, true, 'fake parent is live in agents.store')
+
+      // No coordinator post leaks in: it lives in room 'research'.
+      const allPosts = result.posts
+      assert.equal(allPosts.some((post) => post.postId === 'research-head'), false, 'coordinator post not in the board roster')
+
+      // Parent removed from agents.store → the post now reports parentLive false.
+      agents.store.delete(parent.id)
+      const relisted = await tool.execute({ room: 'board' }, { agent: fork, signal })
+      assert.equal(relisted.posts.length, 1)
+      assert.equal(relisted.posts[0].postId, forkPostId)
+      assert.equal(relisted.posts[0].parentLive, false, 'parent offline flagged')
+
+      // Non-configured room: empty members and posts, no throw.
+      const missing = await tool.execute({ room: 'nope' }, { agent: fork, signal })
+      assert.equal(missing.room, 'nope')
+      assert.deepEqual(missing.members, [])
+      assert.deepEqual(missing.posts, [])
     } finally {
       await dispose()
     }

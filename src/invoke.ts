@@ -381,10 +381,68 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
     }))
 
+    const disposeWho = childCtx.tools.register(defineTool({
+      name: 'dept_room_who',
+      description: 'Enumerate who is present in a board room from the live post registry: the room\'s static members plus every registered post in that room (with whether its parent is live). Use this for the authoritative roster instead of inferring presence from stale board history.',
+      parameters: {
+        room: { type: 'string', required: true, description: 'Room id to list who is present in (e.g. "board").' }
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            room: { type: 'string', required: true },
+            members: { type: 'array', items: { type: 'string' }, required: true },
+            posts: {
+              type: 'array',
+              required: true,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  postId: { type: 'string', required: true },
+                  childId: { type: 'string', required: true },
+                  parentId: { type: 'string', required: true },
+                  parentLive: { type: 'boolean', required: true }
+                }
+              }
+            }
+          }
+        },
+        render: (_args, value) => {
+          const memberLine = value.members.length === 0 ? '  (none configured)' : value.members.map((member) => `  - ${member}`).join('\n')
+          const postLines = value.posts.map((post) => `  - ${post.postId}${post.parentLive ? ' (live)' : ' (parent offline)'}`)
+          const postBlock = postLines.length === 0 ? '  (no registered posts)' : postLines.join('\n')
+          return [{
+            type: 'text',
+            text: `Room ${value.room} roster:\nStatic members:\n${memberLine}\nRegistered posts:\n${postBlock}`
+          } as const]
+        }
+      },
+      async execute(args): Promise<{ room: string; members: string[]; posts: { postId: string; childId: string; parentId: string; parentLive: boolean }[] }> {
+        const room = config.org.rooms.find((candidate) => candidate.id === args.room)
+        const members = room === void 0 ? [] : [...room.members]
+        const posts: { postId: string; childId: string; parentId: string; parentLive: boolean }[] = []
+        for (const entry of byPost.values()) {
+          if (entry.roomId !== args.room) continue
+          const parentLive = agents !== void 0 && agents.get(SessionId(entry.parentId)) !== undefined
+          posts.push({
+            postId: entry.postId,
+            childId: entry.childId,
+            parentId: entry.parentId,
+            parentLive
+          })
+        }
+        return { room: args.room, members, posts }
+      }
+    }))
+
     return () => {
       disposeRead()
       disposeWrite()
       disposeWitness()
+      disposeWho()
     }
   })
   }
