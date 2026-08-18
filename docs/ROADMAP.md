@@ -221,3 +221,36 @@ of the research — so no builder needs to re-research.)
   PASS. Committed as `bd518cc`. Next (pending live re-test): a fork
   receives its deployment context and mission via the official channel,
   multi-session password test.
+- **2026-08-19** — **Dept_invoke now deploys a spatial-only clone — "the fork
+  is you, divided"**: per the owner model, `dept_invoke` no longer carries a
+  mission. It only deploys a continuable clone (fork) to the board room with
+  a SPATIAL deployment context and injects a spatial notice into the copy
+  that stays with the owner. Removed: the `assignment`/`threadId`/`to`
+  parameters and the entire coordinator-ensure path (department lookup,
+  spawn-provider coordinator, coordinatorInFlight) — `dept_invoke` only
+  carries `room` and only ever materializes the fork. Kept: post registry,
+  wake relay (kind 'coordinator'/form 'relay'), board toolset
+  (dept_room_read/write/witness/who/whereami), registerContinuableSetup,
+  rollback-on-followup-failure hardening, and the new non-fatal parent
+  context injection (via Agent.inject with a non-user plugin source —
+  renders CONTEXT). The fork start prompt is minimal identity framing; the
+  deployment followup is spatial-only (official-context prefix, kind
+  'post'/postId/room, presence snapshot, dept_whereami pointer) with NO
+  mission text — the clone is an identical copy of the Asistente and knows
+  what to do, only where it is. Added `@deepseek-ai/dsh-llm` to
+  peerDependencies (rc channel, rule 8). Background mechanics (verified):
+  the LLM never sees a message's source — the only model-visible "official"
+  marker is a textual prefix (per
+  `.dsh/reports/explore-deep/2026-08-19-context-input-delivery.md`);
+  `request.prompt` is unavoidably a user-role row in rc.7; deployment via
+  `subagents.followup` with `{kind:'coordinator', form:'relay'}` already
+  renders as CONTEXT in the UI and survives end-to-end. Verification:
+  `pnpm build` clean, invoke tests 11/11, full suite 25/25, `pnpm peers
+  check` clean (single-instance dsh-llm), TIERED ladder green (plugin add,
+  dump-config layer, headless smoke pong). Two reviewers PASS. Committed as
+  `45233da`. Follow-up note: `CoordinatorConfig` schema remains declared in
+  `src/org.ts` (unused by dept_invoke now; harmless — optional separate
+  schema-pruning). The skill now fixes the model: "## The fork is you,
+  divided" (WHERE not WHO; no role-confusion resistance; spatial identity
+  via dept_whereami). Next (pending): live multi-session password test with
+  the spatial clone (no mission).
