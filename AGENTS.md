@@ -7,6 +7,12 @@ documentation are written in **English**. Spanish is reserved exclusively for
 direct owner communication (chat). Any file written in another language must
 be translated.
 
+Supplemental i18n translations are exempt from the English-only rule:
+`README.zh.md` (Chinese) is allowed and must mirror the canonical
+`README.md` (English), kept in sync by the reviewer gate. Any file other
+than this sanctioned i18n README pair written in another language must
+still be translated.
+
 ## What this repo is
 
 The repo **is** the `dsh-deepartments` bundle: an npm plugin package for

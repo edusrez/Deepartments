@@ -1,5 +1,7 @@
 # Deepartments
 
+English | [中文](README.zh.md)
+
 Deepartments is an **agentic organization layer for DeepSeek Harness (DSH)** —
 departments, posts that sleep and wake, witnesses, activations and
 governance — built as an **npm plugin (bundle)** of the runtime. The idea of
