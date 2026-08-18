@@ -159,3 +159,17 @@ of the research — so no builder needs to re-research.)
   to session 1). Technical validation: the explore report
   `.dsh/reports/explore-deep/2026-08-19-continuable-settle-and-cross-parent-wake.md`
   (NO-BLOCKER verdict).
+- **2026-08-19** — **`dept_room_who` board roster tool**: added a read-only
+  roster tool to the continuable-child board toolset in `src/invoke.ts`:
+  `dept_room_who(room)` lists the room's static org members plus every
+  registered post in that room from the live `byPost` registry, with per-post
+  `parentLive` (parent agent resident in ctx.agents; false when the agents
+  service is absent). It lets a coordinator/fork enumerate the authoritative
+  occupants of a room instead of inferring presence from stale board history.
+  Root cause this fixes (observed live in the first cross-session test):
+  research-head addressed a ghost post `asistente-fork-e7cd9ad5...` left over
+  from the 2026-08-16 milestone and visible in the ancient board.jsonl, which
+  was NOT in posts.json and thus not wakeable. Verification: `pnpm build`
+  clean, invoke tests 6/6, full suite 20/20, TIERED ladder green (plugin add,
+  dump-config layer, headless smoke pong). Reviewer PASS. Committed as
+  `2aa6561`.
