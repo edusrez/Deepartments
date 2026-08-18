@@ -173,3 +173,24 @@ of the research — so no builder needs to re-research.)
   clean, invoke tests 6/6, full suite 20/20, TIERED ladder green (plugin add,
   dump-config layer, headless smoke pong). Reviewer PASS. Committed as
   `2aa6561`.
+- **Silent-truncation fix + full-message fetch (2026-08-19):** live
+  cross-session log analysis (4 reviewers, consolidated at
+  `.dsh/reports/scribe/2026-08-19-cross-session-log-analysis-consolidated.md`)
+  found the wake relay was silently slicing every addressed message to 200
+  chars (invoke.ts:228) with no marker, while `dept_room_read` sliced to 240
+  and capped the digest at 10 lines — which caused two forks to accuse each
+  other of fabricating truncation, and left no way to recover full text
+  except dumping the whole shared `board.jsonl`. Fix (owner choice, option
+  A): the wake relay is now pointer-only (message id + from, never body);
+  `dept_room_read` supports optional `messageId` full untruncated fetch
+  (never advances the cursor), `limit` (default 20) and `offset` pagination,
+  with TOC previews `- <id> | from -> to | <preview>` and an explicit `…`
+  at 140 chars; the 10-line `digestDelta` cap was removed. Empty reads keep
+  the exact `No board messages addressed to you.`. Verification: `pnpm
+  build` clean, invoke tests 8/8, full suite 22/22, TIERED ladder green
+  (plugin add, dump-config layer, headless smoke pong). Reviewer PASS.
+  Committed as `530049a`. The same analysis also surfaced following
+  candidates (documented, not yet scheduled): identity/roster validation
+  before addressing, secret hygiene on the shared board, persistent
+  per-member cursors, minor guards (self-writes, inject canonical postId,
+  resolve `anyParentId()` ambiguity).
