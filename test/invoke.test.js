@@ -24,6 +24,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadRecords, resolveBoardPath } from '../lib/board-store.js'
 import { emitRoomRecord, roomSessionId } from '../lib/org.js'
@@ -416,17 +417,18 @@ test('host wake: a board message addressed to host-<sessionId> raw-wakes the hos
       const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
       const seq = await nextSeq(stateDir, 'board')
       const before = host.inboxMessages.length
-      // research-head (a static member) addresses the host.
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'research-head', [hostId], 'please respond'), 'board')
+      // 'asistente' (a static member that is NOT materialized as a post — the
+      // configured head research-head is a registered post now) addresses the host.
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [hostId], 'please respond'), 'board')
       assert.equal(host.inboxMessages.length, before + 1, 'the host agent was raw-woken')
       const wake = host.inboxMessages.at(-1)
       assert.match(wake.content[0].text, /Board delta in board/)
-      assert.match(wake.content[0].text, new RegExp(`new message \\S+ from research-head`))
+      assert.match(wake.content[0].text, new RegExp(`new message \\S+ from asistente`))
       assert.doesNotMatch(wake.content[0].text, /please respond/, 'pointer-only wake (no body)')
       assert.equal(wake.source.kind, 'board', 'host wake source kind is board')
       assert.equal(wake.source.form, 'notice')
-      assert.equal(wake.source.from, 'research-head')
-      assert.equal(wake.source.senderSessionId, 'research-head')
+      assert.equal(wake.source.from, 'asistente')
+      assert.equal(wake.source.senderSessionId, 'asistente')
     } finally {
       await dispose()
     }
@@ -448,12 +450,13 @@ test('sender attribution: a host-posted message records from=host-<sessionId> an
       await root.tools.get('dept_room_write').execute({ room: 'board', to: ['research-head'], text: 'B registers' }, { agent: hostB, signal })
       const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
       const seq = await nextSeq(stateDir, 'board')
-      // Host B is addressed by the (registered) static member research-head.
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'research-head', [hostBId], 'note for B'), 'board')
+      // 'asistente' (a static member that is NOT a materialized post) addresses
+      // host B; its sender session falls back to its own id (no anyParentId).
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [hostBId], 'note for B'), 'board')
       assert.equal(hostB.inboxMessages.length, 1, 'host B was woken once')
       const wake = hostB.inboxMessages.at(-1)
       assert.equal(wake.source.kind, 'board')
-      assert.equal(wake.source.senderSessionId, 'research-head', 'post sender resolves to its own id (no anyParentId fabrication)')
+      assert.equal(wake.source.senderSessionId, 'asistente', 'non-post sender resolves to its own id (no anyParentId fabrication)')
 
       // A host posting records from=<hostId>; the relay attributes the wake's
       // senderSession to that host's SESSION (via hosts.get(from).sessionId).
@@ -788,6 +791,175 @@ test('dept_room_read: limit + offset page through the delta (per-member cursor)'
 
       const after = await read({ limit: 1, offset: 0 })
       assert.equal(after.delta, 'No board messages addressed to you.')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- Batch B: permanent department heads (spawn + lean toolFilter + deploy) --
+
+/**
+ * Trigger lazy head materialization by having a live host register on the
+ * board (its first host-plane board tool call → ensureHost → materializeHeads).
+ * Returns the materialized head's childId once it exists.
+ */
+async function materializeConfiguredHead(stateDir, root, agents, host) {
+  const signal = new AbortController().signal
+  await root.tools.get('dept_room_write').execute({ room: 'board', to: ['asistente'], text: 'join' }, { agent: host, signal })
+  const posts = await readPosts(stateDir)
+  assert.ok(posts['research-head'], 'the configured head was materialized into posts.json')
+  const childId = posts['research-head'].childId
+  await waitFor(() => agents.store.has(childId), 5000, 'head child agent materialized')
+  return childId
+}
+
+test('boot materializes the configured department head as a permanent spawn post (provider spawn, persona role, lean toolFilter, no-mission prompt)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const childId = await materializeConfiguredHead(stateDir, root, agents, host)
+
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['research-head'].provider, 'spawn', 'provider is spawn')
+      assert.equal(posts['research-head'].parentId, host.id, 'parent is the live host')
+      assert.equal(posts['research-head'].roomId, 'research', 'head room comes from the department config')
+
+      // startContinuable used provider 'spawn' with a lean allow-list + persona.
+      const createCall = agents.createCalls.find((c) => c.seed?.some?.((e) => e.type === 'subagent/descriptor' && e.data?.label === 'research-head'))
+      assert.ok(createCall, 'a continuable head was created via agents.create')
+      const desc = createCall.seed.find((e) => e.type === 'subagent/descriptor').data
+      assert.equal(desc.provider, 'spawn')
+      assert.equal(desc.persona, 'Research department head', 'persona is the coordinator role')
+      assert.deepEqual(desc.toolFilter, { allow: [] }, 'toolFilter imposes the lean allow-list')
+
+      // Initial prompt is minimal identity framing, NO mission payload.
+      await waitFor(() => agents.store.get(childId).inboxMessages.length >= 1, 5000, 'head received its initial prompt')
+      const head = agents.store.get(childId)
+      const prompt = head.inboxMessages[0].content[0].text
+      assert.match(prompt, /permanent department head/)
+      assert.match(prompt, /research-head/)
+      assert.doesNotMatch(prompt, /mission/i, 'no mission in the initial prompt')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('a spawned head is lean: own-layer board tools present, inherited host-plane tools stripped by the allow-list', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      // Register a host-plane-only tool GLOBALLY that the lean head must NOT inherit.
+      const probeDispose = root.tools.register(defineTool({
+        name: 'host_insider_tool',
+        description: 'host-plane only (probe)',
+        parameters: {},
+        output: { schema: { type: 'object', additionalProperties: false, properties: {} }, render: () => [] },
+        async execute() { return {} }
+      }))
+      const host = agents.put(fakeParentAgent())
+      const childId = await materializeConfiguredHead(stateDir, root, agents, host)
+
+      const childCtxEntry = agents.childContexts.find((c) => c.ctx.agent?.id === childId)
+      assert.ok(childCtxEntry, 'head child context is available')
+      const { ctx: childCtx, key } = childCtxEntry
+      // Own-layer board tools survive the allow-list.
+      for (const name of ['dept_room_read', 'dept_room_write', 'dept_room_who', 'dept_whereami', 'dept_witness_write']) {
+        assert.ok(childCtx.tools.get(name, key), `${name} installed in the head own layer`)
+      }
+      // The inherited global host-plane tool is stripped by toolFilter { allow: [] }.
+      assert.equal(childCtx.tools.get('host_insider_tool', key), undefined, 'the restrict filter strips inherited (global) tools')
+      // Retire is an admin/host-plane tool, not a head capability.
+      assert.equal(childCtx.tools.get('dept_post_retire', key), undefined, 'retire is host-plane only')
+      probeDispose?.()
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('head materialization is idempotent: a second live-host join does NOT respawn an existing head', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const hostA = agents.put(fakeParentAgent())
+      const childId = await materializeConfiguredHead(stateDir, root, agents, hostA)
+
+      const countHeadSpawns = () => agents.createCalls.filter((c) => c.seed?.some?.((e) => e.type === 'subagent/descriptor' && e.data?.label === 'research-head')).length
+      assert.equal(countHeadSpawns(), 1, 'exactly one spawn after the first join')
+
+      // A second live host joins → materializeHeads runs again but skips byPost.
+      const hostB = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      await root.tools.get('dept_room_write').execute({ room: 'board', to: ['asistente'], text: 'B joins' }, { agent: hostB, signal })
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      assert.equal(countHeadSpawns(), 1, 'no second spawn after a second join (idempotent)')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['research-head'].childId, childId, 'the durable child id is unchanged')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('head deployment delivers official spatial context (source coordinator/relay, room + postId + presence, no mission)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const childId = await materializeConfiguredHead(stateDir, root, agents, host)
+      const head = agents.store.get(childId)
+      // prompt (0) then official spatial deployment (1).
+      await waitFor(() => head.inboxMessages.length >= 2, 5000, 'spatial deployment delivered via followup')
+      const deploy = head.inboxMessages[1]
+      assert.equal(deploy.source.kind, 'coordinator')
+      assert.equal(deploy.source.form, 'relay')
+      assert.equal(deploy.source.senderSessionId, host.id)
+      const text = deploy.content[0].text
+      assert.match(text, /Spatial deployment/)
+      assert.match(text, /department head "research-head"/)
+      assert.match(text, /room "research"/)
+      assert.match(text, /dept_whereami/)
+      assert.match(text, /Room presence: static members: research-head/)
+      assert.match(text, new RegExp(`host-${host.id}`))
+      assert.doesNotMatch(text, /mission/i, 'no mission payload in the deployment context')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('dept_post_retire removes a head from the registry, persists, and posts a withdrawal note; unknown postId rejects loudly', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const childId = await materializeConfiguredHead(stateDir, root, agents, host)
+      const boardSession = root.sessions.get(SessionId(roomSessionId('research')))
+      const beforeCount = boardSession.events.length
+
+      const retireTool = root.tools.get('dept_post_retire')
+      assert.ok(retireTool, 'dept_post_retire is registered (host plane)')
+      const signal = new AbortController().signal
+      const result = await retireTool.execute({ postId: 'research-head' }, { agent: host, signal })
+      assert.equal(result.retired, true)
+      assert.equal(result.roomId, 'research')
+
+      // Registry + persisted posts.json no longer contain the head.
+      await waitFor(async () => (await readPosts(stateDir))['research-head'] === undefined, 5000, 'head removed from posts.json')
+
+      // A withdrawal note was posted in the head's room.
+      await waitFor(() => boardSession.events.length > beforeCount, 5000, 'withdrawal note emitted')
+
+      // Unknown postId → loud rejection.
+      await assert.rejects(() => retireTool.execute({ postId: 'ghost' }, { agent: host, signal }), /not a registered post/, 'unknown postId rejected loudly')
     } finally {
       await dispose()
     }

@@ -1,7 +1,15 @@
-// dsh-deepartments — board AS A BUS (host-plane tools + wake relay). The
-// Asistente host talks DIRECTLY to department heads (resident posts) and to
-// OTHER Asistente sessions through the shared board room — NO fork/clone
-// intermediary. dept_invoke and the fork machinery are retired (Batch A).
+// dsh-deepartments — board AS A BUS (host-plane tools + wake relay + permanent
+// department heads). The Asistente host talks DIRECTLY to department heads
+// (resident posts) and to OTHER Asistente sessions through the shared board
+// room — NO fork/clone intermediary. dept_invoke and the fork machinery are
+// retired (Batch A).
+//
+// Batch B adds department HEADS: configured coordinators are materialized once
+// as PERMANENT, MINIMAL-CONTEXT spawn posts (provider 'spawn', persona = role,
+// lean `toolFilter: { allow: [] }`) — long-lived employees, not Asistente
+// clones — with an official spatial-deployment context delivery and a minimal
+// `dept_post_retire` cleanup affordance. The full nap/sleep lifecycle journal
+// is Batch G and is NOT implemented here.
 //
 // Mechanics (per .dsh/reports/explore-deep/2026-08-19-host-board-channel.md,
 // ...-lateral-assistant-addressing.md, ...-minimal-context-resident-posts.md):
@@ -62,7 +70,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { emitRoomRecord, roomSessionId, setBoardRecordListener } from './org.js'
-import type { Config, RoomState } from './org.js'
+import type { Config, CoordinatorConfig, RoomState } from './org.js'
 import { loadRecords, resolveBoardPath } from './board-store.js'
 import type { BoardRecord } from './board-store.js'
 
@@ -220,6 +228,9 @@ export function applyInvoke(ctx: Context, config: Config) {
     hosts.set(hostId, { hostId, sessionId, roomId })
     hostForSession.set(sessionId, hostId)
     persistHosts()
+    // A live host just joined: this is the lazy trigger for boot-deferred head
+    // materialization (a head needs a live registered parent; see above).
+    materializeHeads()
     return hostId
   }
 
@@ -370,6 +381,101 @@ export function applyInvoke(ctx: Context, config: Config) {
    * the waking event.
    */
   const detachedSignal = (): AbortSignal => new AbortController().signal
+
+  // --- department HEADS: permanent spawn posts (Batch B) ----------------------
+  // Configured department coordinators are materialized ONCE as PERMANENT,
+  // MINIMAL-CONTEXT resident posts: provider 'spawn' (fresh, empty seed — no
+  // inherited Asistente conversation), persona = the coordinator's role, and a
+  // lean `toolFilter: { allow: [] }` that strips the inherited host/preset
+  // surface (bash/write/subagent/edit/web_fetch/...) while the own-layer board
+  // tools (dept_room_*) survive — a restriction never filters a scope's OWN
+  // layer (dsh-tools view). A head is registered once and REUSED: materialization
+  // is idempotent by postId (already-present → skip). The full nap/sleep
+  // lifecycle journal is Batch G and is NOT implemented here — a head simply
+  // concludes turns as an inactive-but-resumable resident.
+  //
+  // Documented parent choice: a spawn child needs a LIVE parent so it can
+  // settle/report (the subagent-settled notice travels to the parent), so a
+  // head is NEVER created without one. We pick the FIRST registered live host
+  // session (any host-<sessionId> whose agent is resident). At boot there is
+  // typically no live host yet, so materialization DEFERS: it runs once on
+  // boot (after the hosts registry cold-load) and again lazily on the first
+  // live board-tool call (ensureHost). A head whose parent later goes offline
+  // stays durable in the registry; the relay already SKIPS+WARNS on non-live
+  // parents (existing behavior) — we never delete a head on boot.
+  const materializing = new Set<string>()
+
+  const pickLiveParent = () => {
+    if (agents === void 0) return undefined
+    for (const entry of hosts.values()) {
+      const live = agents.get(SessionId(entry.sessionId))
+      if (live !== void 0) return live
+    }
+    return undefined
+  }
+  type LiveAgent = NonNullable<ReturnType<typeof pickLiveParent>>
+
+  /** Minimal identity framing for a permanent head — NO mission (missions
+   * arrive later as addressed board messages). */
+  const headPrompt = (postId: string): string =>
+    `You are "${postId}", a permanent department head acting on your role. The board is your channel: read addressed messages with dept_room_read and reply with dept_room_write. Verify your identity and roster with dept_whereami and dept_room_who.`
+
+  /** Official spatial-deployment context (no mission) for a freshly spawned head. */
+  const deploymentContext = (parent: LiveAgent, postId: string, roomId: string): string => {
+    const hostId = hostForSession.get(parent.id)
+    const presence = formatPresence(roomId)
+    return `Spatial deployment (official context — who and where you are): you are department head "${postId}" in room "${roomId}". The board is your channel. Address the Asistente host as "${hostId ?? 'host-<sessionId>'}" and other posts by postId. Verify with dept_whereami / dept_room_who. Room presence: ${presence}.`
+  }
+
+  const spawnHead = async (coordinator: CoordinatorConfig, roomId: string, parent: LiveAgent): Promise<void> => {
+    const postId = coordinator.postId
+    if (materializing.has(postId)) return
+    materializing.add(postId)
+    try {
+      const spawned = await subagents!.startContinuable({
+        provider: 'spawn', // permanent resident spawn provider (fresh, empty seed)
+        label: postId,
+        request: {
+          prompt: [{ type: 'text', text: headPrompt(postId) }] as const,
+          parent,
+          persona: coordinator.role,
+          toolFilter: { allow: [] },
+          ...(coordinator.agentOptions !== void 0 ? { agentOptions: coordinator.agentOptions } : {})
+        },
+        signal: detachedSignal()
+      })
+      const childId = spawned.childId as string
+      // Idempotency guard: a concurrent materialization may have landed first.
+      if (byPost.has(postId)) return
+      registerEntry({ postId, childId, parentId: parent.id, roomId, provider: 'spawn' })
+      // Official spatial deployment (no mission), via the reusable official-
+      // context followup channel (Batch A / 45233da).
+      const source = { kind: 'coordinator', form: 'relay', senderSessionId: SessionId(parent.id) } as const
+      subagents!.followup(parent, SessionId(childId), [{ type: 'text', text: deploymentContext(parent, postId, roomId) } as const], { source, signal: detachedSignal() })
+        .catch((error: unknown) => {
+          ctx.logger.warn(`[deepartments] head "${postId}" deployment followup failed: ${error instanceof Error ? error.message : String(error)}`)
+        })
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] head "${postId}" materialization failed (deferred; a later live host parent will retry): ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      materializing.delete(postId)
+    }
+  }
+
+  const materializeHeads = (): void => {
+    if (subagents === void 0 || agents === void 0) return
+    const parent = pickLiveParent()
+    if (parent === void 0) return // no live host yet — defer until one joins
+    for (const department of config.org.departments) {
+      const coordinator = department.coordinator
+      if (coordinator === void 0 || byPost.has(coordinator.postId)) continue
+      void spawnHead(coordinator, department.roomId, parent)
+    }
+  }
+
+  // Best-effort boot attempt (usually defers: no live host at boot). The
+  // primary trigger is the lazy ensureHost join (below).
+  void hostsLoaded.then(() => { materializeHeads() })
 
   const relay = (record: BoardRecord, roomId: string) => {
     if (record.kind !== 'message' || agents === void 0 || subagents === void 0) return
@@ -755,11 +861,45 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }))
 
+  const globalRetire = ctx.tools.register(defineTool({
+    name: 'dept_post_retire',
+    description: 'Retire a registered board post cleanly: post a withdrawal note in its room (addressed to the post), then unregister it from the post/child registries and persist. Minimal retirement for department heads — no lifecycle journal (Batch G). Unknown postIds are rejected loudly.',
+    parameters: {
+      postId: { type: 'string', required: true, description: 'The post id to retire (e.g. "research-head").' }
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          postId: { type: 'string', required: true },
+          roomId: { type: 'string', required: true },
+          retired: { type: 'boolean', required: true }
+        }
+      },
+      render: (_args, value) => [{ type: 'text', text: `retired post ${value.postId} (room ${value.roomId})` } as const]
+    },
+    async execute(args, exec): Promise<{ postId: string; roomId: string; retired: boolean }> {
+      const entry = byPost.get(args.postId)
+      if (entry === void 0) throw new Error(`[deepartments] dept_post_retire: "${args.postId}" is not a registered post`)
+      const agent = exec.agent
+      if (!agent) throw new Error('dept_post_retire requires a calling agent (exec.agent was undefined)')
+      // Withdrawal note FIRST (while the post is still registered, so the relay
+      // still wakes the targeted post), then unregister + persist.
+      await emitBoardMessage(entry.roomId, memberIdFor(agent.id as string, entry.roomId), [args.postId], `[withdrawal] post "${args.postId}" is retired and unregistered from the board.`)
+      byPost.delete(args.postId)
+      byChild.delete(entry.childId)
+      persistPosts()
+      return { postId: args.postId, roomId: entry.roomId, retired: true }
+    }
+  }))
+
   ctx.effect(() => () => {
     globalRead()
     globalWrite()
     globalWho()
     globalWhereami()
+    globalRetire()
   }, 'deepartments: host-plane board tools')
 
   // --- child toolset (installed into EVERY continuable child — own layer, so

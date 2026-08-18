@@ -13,9 +13,13 @@
 //      mirrored into the file,
 //   4. exports the pure record fold for later batches (dept_* tools).
 //
-// Coordinator posts are NOT created at runtime (the batch-A board-as-bus
-// model registers only HOST sessions; resident post creation is retired with
-// dept_invoke) — only the coordinator spec is declared in config.
+// Coordinator config is DECLARED here (postId/role/provider/agentOptions). The
+// coordinator spec is the CONFIG for a permanent department head. Runtime head
+// materialization lives in src/invoke.ts (Batch B): a configured coordinator is
+// spawned ONCE as a permanent, minimal-context resident post (provider 'spawn',
+// persona = role, lean `toolFilter: { allow: [] }`) with an official
+// spatial-deployment context, or retired via `dept_post_retire`. The old
+// dept_invoke fork path is retired (Batch A) and is NOT restored.
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 import z from '@deepseek-ai/schemastery'
