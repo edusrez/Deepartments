@@ -103,3 +103,21 @@ of the research — so no builder needs to re-research.)
   `2026-08-18-dshmarket-allowrestart` reported but did not write its report
   (process gap); re-evaluate store choice if DSH ships an official
   marketplace.
+
+- **2026-08-18** — **`dsh-smart-restart`** (edusrez/dsh-smart-restart, npm + GitHub, MIT)
+  built, dogfooded and installed on both instances (stable `web` 3080, dev
+  `deepartments-dev` 3090). After any DSH restart it wakes the session that was
+  active: via the `smart_restart` tool (explicit — records the caller session +
+  reason, restarts the systemd unit detached) or, for a plain `systemctl
+  restart` made while an agent was active, via a SIGTERM/SIGINT shutdown hook
+  that persists the last-active session and pins the post-restart notice to it
+  within a configurable grace (`shutdownGraceMs`, default 10 min). Live-verified
+  end-to-end multiple times (auto-wakes without the owner prompting). A critical
+  issue was caught in an isolated smoke before release: a SIGTERM handler that
+  does not re-raise the signal suppresses Node's default termination and hangs
+  systemd restarts to TimeoutStopSec/SIGKILL (fixed — handler now re-raises).
+  Versions 0.1.0 → 0.2.0 → 0.3.0 published (npm + tagged GitHub); installed as
+  `dsh-smart-restart@0.3.0` in both profiles with per-profile `restartUnit`
+  (`dsh.service` / `dsh-deepartments-dev.service`). Research reports:
+  `.dsh/reports/researcher/2026-08-18-dsh-boot-notify-plugins.md`,
+  `.dsh/reports/explore-deep/2026-08-18-dsh-boot-notify-apis.md`.
