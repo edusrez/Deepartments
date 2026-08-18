@@ -142,6 +142,13 @@ export const Config: z<any, any> = z.object({
 /** One addressed envelope on the room's append-only log. */
 export interface RoomMessage {
   id: string
+  /**
+   * Board file sequence, folded from the carrying event (Batch C): the wake
+   * relay's empty-delta dedup compares a member's read cursor against the
+   * record's numeric seq — lexicographic id comparison is unreliable once a
+   * room crosses a seq digit boundary (`m-board-10` < `m-board-9`).
+   */
+  seq: number
   /** Epoch ms, folded from the carrying event's `time`. */
   ts: number
   from: string
@@ -209,6 +216,7 @@ const agendaStatusSchema = zod.enum(['submitted', 'working', 'input-required', '
 
 const roomMessageSchema = zod.object({
   id: zod.string(),
+  seq: zod.number().int().nonnegative(),
   ts: zod.number().int().nonnegative(),
   from: zod.string(),
   to: zod.array(zod.string()),
@@ -252,6 +260,7 @@ export function foldRoomRecord(state: RoomState, record: BoardRecord): RoomState
     const payload = record.payload
     const message: RoomMessage = {
       id: record.id,
+      seq: record.seq,
       ts: record.ts,
       from: record.from,
       to: [...record.to],

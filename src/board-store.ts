@@ -57,6 +57,13 @@ export interface MessagePayload {
   kind: string
   text: string
   parts?: unknown[]
+  /**
+   * Optional pure-acknowledgement flag (Batch C): set true when the message is
+   * a content-free confirmation/receipt (no new substance). The wake relay uses
+   * it to suppress confirmation ping-pong — a content-free ack addressed back
+   * to its sender no longer re-wakes the other party past the ack-loop budget.
+   */
+  ack?: boolean
 }
 
 /**

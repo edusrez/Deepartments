@@ -181,6 +181,7 @@ test('pure fold: deterministic, and same-reference no-op on irrelevant input', (
   assert.equal(stateA.messages.length, 1)
   assert.deepEqual(stateA.messages[0], {
     id: 'm-0',
+    seq: 0,
     ts: 1700000000000,
     from: 'research-head',
     to: ['asistente'],

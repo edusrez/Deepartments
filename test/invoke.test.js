@@ -304,7 +304,7 @@ async function nextSeq(stateDir, roomId) {
   return records.length === 0 ? 0 : records[records.length - 1].seq + 1
 }
 
-function messageRecord(seq, from, to, text) {
+function messageRecord(seq, from, to, text, ack = false) {
   return {
     id: `t-${seq}-${from}`,
     seq,
@@ -314,7 +314,7 @@ function messageRecord(seq, from, to, text) {
     cc: [],
     threadId: null,
     kind: 'message',
-    payload: { kind: 'note', text }
+    payload: ack ? { kind: 'note', text, ack: true } : { kind: 'note', text }
   }
 }
 
@@ -325,9 +325,9 @@ function messageRecord(seq, from, to, text) {
  */
 async function seedPost(stateDir, { postId, childId, parentId, roomId, provider = 'spawn' }) {
   const postsPath = path.join(stateDir, 'posts.json')
-  const existing = {}
+  let existing = {}
   try {
-    existing[postId] = JSON.parse(await readFile(postsPath, 'utf8'))
+    existing = JSON.parse(await readFile(postsPath, 'utf8'))
   } catch {
     /* no prior seed */
   }
@@ -960,6 +960,186 @@ test('dept_post_retire removes a head from the registry, persists, and posts a w
 
       // Unknown postId → loud rejection.
       await assert.rejects(() => retireTool.execute({ postId: 'ghost' }, { agent: host, signal }), /not a registered post/, 'unknown postId rejected loudly')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- Batch C: wake-relay guards against acknowledgment ping-pong --------------
+// The log audit found an unbounded ack-echo loop (board seq 86-110) where two
+// residents replying "Confirmado… leído completo" re-woke each other forever.
+// The relay now (a) tags pure acks via dept_room_write `ack:true` →
+// payload.ack, (b) suppresses ack wakes past a per-pair budget (N≥3 within
+// T=120s with no intervening non-ack message), (c) dedups empty-delta wakes
+// when the member's read cursor already consumed the record, and (d) still
+// never wakes on kind 'ready'. Tests below exercise each guard against the
+// REAL relay (setBoardRecordListener → emitRoomRecord).
+
+test('Batch C ack-loop: a content-free confirmation ping-pong saturates and terminates (no wake past the per-pair budget); a non-ack resets the counter and wakes normally', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const parentId = SessionId('session-parent-ackloop')
+    const childA = SessionId('session-post-ackA')
+    const childB = SessionId('session-post-ackB')
+    const postA = 'research-head'
+    const postB = 'acceptor-head'
+    await seedPost(stateDir, { postId: postA, childId: childA, parentId, roomId: 'board', provider: 'spawn' })
+    await seedPost(stateDir, { postId: postB, childId: childB, parentId, roomId: 'board', provider: 'spawn' })
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      agents.put(fakeParentAgent(parentId))
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      let seq = await nextSeq(stateDir, 'board')
+
+      const emitAck = (from, to, text) =>
+        emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq++, from, [to], text, true), 'board')
+      const inboxOf = (childId) => (agents.store.get(childId)?.inboxMessages?.length ?? 0)
+
+      // Warm up 3 acks in each direction — each must still wake (budget N>=3
+      // has not yet accumulated on the pair).
+      await emitAck(postA, postB, 'a1')
+      await waitFor(() => agents.store.has(childB), 5000, 'post B cold-resumed')
+      await emitAck(postB, postA, 'b1')
+      await waitFor(() => agents.store.has(childA), 5000, 'post A cold-resumed')
+      await emitAck(postA, postB, 'a2')
+      await emitAck(postB, postA, 'b2')
+      await emitAck(postA, postB, 'a3')
+      await emitAck(postB, postA, 'b3')
+      await waitFor(() => inboxOf(childA) >= 3 && inboxOf(childB) >= 3, 5000, 'three wakes each direction')
+      const satA = inboxOf(childA)
+      const satB = inboxOf(childB)
+      assert.equal(satA, 3, `post A woken by its 3 expected acks (got ${satA})`)
+      assert.equal(satB, 3, `post B woken by its 3 expected acks (got ${satB})`)
+
+      // Once each pair has exchanged N>=3 acks, further acks must NOT wake.
+      await emitAck(postA, postB, 'a4')
+      await emitAck(postB, postA, 'b4')
+      await emitAck(postA, postB, 'a5')
+      await emitAck(postB, postA, 'b5')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      assert.equal(inboxOf(childA), satA, 'post A not re-woken by suppressed acks')
+      assert.equal(inboxOf(childB), satB, 'post B not re-woken by suppressed acks')
+
+      // A non-ack message on the SAME pair direction RESETS its counter: the
+      // next ack on that pair wakes normally again.
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq++, postB, [postA], 'new substance'), 'board')
+      await waitFor(() => inboxOf(childA) === satA + 1, 5000, 'non-ack message re-wakes post A')
+      await emitAck(postB, postA, 'b6-after-reset')
+      await waitFor(() => inboxOf(childA) === satA + 2, 5000, 'post A woken again after counter reset')
+      assert.equal(inboxOf(childB), satB, 'suppressed acks on the other direction (A|B) still do not wake post B')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch C ready-guard: a kind:ready boot marker wakes neither a host nor a registered post', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const parentId = SessionId('session-parent-readyguard')
+    const childId = SessionId('session-post-readyguard')
+    const postId = 'research-head'
+    await seedPost(stateDir, { postId, childId, parentId, roomId: 'board', provider: 'spawn' })
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent(parentId))
+      const hostId = `host-${parent.id}`
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      let seq = await nextSeq(stateDir, 'board')
+      // A real host joins so it is a known wake target (and the post resumes).
+      const signal = new AbortController().signal
+      await root.tools.get('dept_room_write').execute({ room: 'board', to: [postId], text: 'join' }, { agent: parent, signal })
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq++, `host-${parent.id}`, [postId], 'resume'), 'board')
+      await waitFor(() => agents.store.has(childId), 5000, 'post cold-resumed')
+      const post = agents.store.get(childId)
+      const hostBefore = parent.inboxMessages.length
+      const postBefore = post.inboxMessages.length
+
+      // Emit a ready marker addressed to both the host and the post.
+      const readyRec = {
+        id: `ready-board-${seq}`,
+        seq: seq++,
+        ts: Date.now(),
+        from: 'system',
+        to: [hostId, postId],
+        cc: [],
+        threadId: null,
+        kind: 'ready',
+        payload: { room: { id: 'board', name: 'Board', purpose: '', members: [] } }
+      }
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), readyRec, 'board')
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      assert.equal(parent.inboxMessages.length, hostBefore, 'no host wake on kind:ready')
+      assert.equal(post.inboxMessages.length, postBefore, 'no post wake on kind:ready')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch C cursor-dedup: a record the member\'s read cursor already consumed does not re-wake the member', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const parentId = SessionId('session-parent-dedup')
+    const childId = SessionId('session-post-dedup')
+    const postId = 'research-head'
+    await seedPost(stateDir, { postId, childId, parentId, roomId: 'board', provider: 'spawn' })
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent(parentId))
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      const seq0 = await nextSeq(stateDir, 'board')
+
+      // Message M1 wakes the post; the post then READS it, advancing the cursor.
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq0, `host-${parent.id}`, [postId], 'one'), 'board')
+      await waitFor(() => agents.store.has(childId), 5000, 'post cold-resumed')
+      const post = agents.store.get(childId)
+      const { ctx: childCtx, key } = agents.childContexts[0]
+      const read = childCtx.tools.get('dept_room_read', key)
+      const signal = new AbortController().signal
+      await read.execute({ room: 'board' }, { agent: post, signal })
+      const before = post.inboxMessages.length
+      assert.ok(before >= 1, 'post woken by M1')
+
+      // A record the cursor already consumed (same seq) must NOT re-wake.
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq0, `host-${parent.id}`, [postId], 'replay'), 'board')
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      assert.equal(post.inboxMessages.length, before, 'no redundant wake for an already-consumed record')
+
+      // A genuinely NEWER record still wakes.
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq0 + 1, `host-${parent.id}`, [postId], 'two'), 'board')
+      await waitFor(() => post.inboxMessages.length === before + 1, 5000, 'newer record re-wakes')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch C dept_room_write ack:true tags a pure acknowledgement (payload.ack) without changing the output schema; ack omitted stays untagged', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const writeTool = root.tools.get('dept_room_write')
+
+      const ackResult = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'confirm read in full', ack: true }, { agent: host, signal })
+      assert.deepEqual(Object.keys(ackResult).sort(), ['from', 'messageId', 'room', 'to'], 'output schema unchanged when ack:true')
+      assert.equal(ackResult.from, `host-${host.id}`)
+      assert.deepEqual(ackResult.to, ['research-head'])
+
+      const plainResult = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'real content' }, { agent: host, signal })
+
+      const records = await loadRecords(resolveBoardPath(stateDir, 'board'))
+      const messages = records.filter((r) => r.kind === 'message' && r.from === `host-${host.id}`)
+      assert.equal(messages.length, 2)
+      const tagged = messages.find((m) => m.id === ackResult.messageId)
+      const plain = messages.find((m) => m.id === plainResult.messageId)
+      assert.equal(tagged.payload.ack, true, 'ack:true records payload.ack=true')
+      assert.equal(tagged.payload.kind, 'note', 'ack keeps kind note')
+      assert.equal(plain.payload.ack, undefined, 'plain write carries payload.ack undefined')
     } finally {
       await dispose()
     }

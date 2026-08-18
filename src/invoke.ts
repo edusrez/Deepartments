@@ -38,6 +38,32 @@
 //                               simpler wake (no parent hop, no lineage).
 //     Self-wakes and echo loops are excluded; unknown members and non-live
 //     hosts/parents are skipped with a warning.
+//
+// Batch C — wake-relay guards against confirmation ping-pong (the unbounded
+// ack-echo loop the log audit found in seq 86-110): two residents replying
+// "Confirmado… leído completo" to each other re-woke each other forever,
+// because every ack is addressed back to its sender, each triggering a fresh
+// wake. The relay now applies three guards BEFORE waking each addressed member
+// (post branch AND host branch):
+//   * Ack-loop suppression: a PURE acknowledgement (payload.ack === true) on a
+//     sender→target pair that has already exchanged N≥3 acks within the last
+//     T=120s WITHOUT an intervening non-ack message is a confirmation loop —
+//     the relay logs a debug line and does NOT wake a further turn. Each pair
+//     key is `${from}|${to}`; any non-ack message between the pair resets its
+//     counter. Acks are detected ONLY by the explicit `ack` flag (a first-class
+//     affordance on dept_room_write, Batch C); free-text ack detection is
+//     deliberately NOT attempted (unreliable).
+//   * No self-wake (unchanged): `member === record.from` → continue.
+//   * Boot-noise guard (unchanged): `record.kind !== 'message'` → return
+//     (ready/agenda records wake nobody).
+//   * Empty-delta wake dedup: if the member's read cursor has already advanced
+//     past record R (`memberCursors[member].lastMessageSeq >= record.seq`), a
+//     wake would serve nothing new, so the relay skips it. If the cursor was
+//     lost (in-memory, reset on restart), the member wakes anyway — the
+//     idempotent re-read is then acceptable.
+//   The exact numbers (N≥3, T=120s) are module constants ACK_LOOP_THRESHOLD and
+//   ACK_LOOP_WINDOW_MS below; the header comment and the constants must stay in
+//   sync if either is ever tuned.
 //   - `senderSession` resolves deterministically: a post sender via
 //     byPost.get(from)?.childId, a host sender via hosts.get(from)?.sessionId.
 //     The old `anyParentId()` fabrication is GONE.
@@ -100,6 +126,13 @@ declare module '@deepseek-ai/dsh-llm' {
 /** Prefix of a runtime host-address registry entry: `host-<sessionId>`. */
 const HOST_ID_PREFIX = 'host-'
 
+// Batch C — ack-loop budget. A sender→target pair that has exchanged this many
+// pure acks (payload.ack) within this window, with no intervening non-ack
+// message, is treated as a confirmation loop: the relay stops waking it. Keep
+// in sync with the relay header comment.
+const ACK_LOOP_THRESHOLD = 3
+const ACK_LOOP_WINDOW_MS = 120_000
+
 /** One durable post registry entry. */
 interface PostEntry {
   postId: string
@@ -120,6 +153,8 @@ interface HostEntry {
 interface CursorState {
   /** Last addressed message id the member has seen. */
   lastMessageId: string | undefined
+  /** Last addressed message seq the member has seen (Batch C empty-delta dedup). */
+  lastMessageSeq: number
   /** Last agenda touch seq (board FILE seq) the member has seen. */
   lastAgendaSeq: number
 }
@@ -200,6 +235,10 @@ export function applyInvoke(ctx: Context, config: Config) {
   const byPost = new Map<string, PostEntry>()
   const byChild = new Map<string, string>()
   const memberCursors = new Map<string, CursorState>()
+  // Batch C: per sender→target pair ack budget. Key `${from}|${to}` → how many
+  // consecutive pure acks (payload.ack) that pair has exchanged and when the
+  // last one landed. Any non-ack message between the pair resets it (delete).
+  const ackCounters = new Map<string, { count: number; lastTs: number }>()
   const roomQueues = new Map<string, Promise<unknown>>()
   const postsPath = path.join(config.stateDir, 'posts.json')
 
@@ -342,9 +381,12 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   /**
    * Emit one addressed board message through org's emit site (session append
-   * + file mirror + listener), assigning the next board file seq.
+   * + file mirror + listener), assigning the next board file seq. When `ack` is
+   * true the message is a pure acknowledgement/receipt (no new substance) and
+   * is tagged `payload.ack = true` so the relay's ack-loop guard can recognize
+   * it and stop confirmation ping-pong.
    */
-  const emitBoardMessage = (roomId: string, from: string, to: string[], text: string, threadId: string | null = null): Promise<{ record: BoardRecord; session: Session }> =>
+  const emitBoardMessage = (roomId: string, from: string, to: string[], text: string, threadId: string | null = null, ack = false): Promise<{ record: BoardRecord; session: Session }> =>
     serialize(roomId, async () => {
       const session = ctx.sessions.get(SessionId(roomSessionId(roomId)))
       if (session === void 0) throw new Error(`[deepartments] room "${roomId}" is not live (no session) — is the room configured?`)
@@ -360,7 +402,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         cc: [],
         threadId,
         kind: 'message',
-        payload: { kind: 'note', text }
+        payload: ack ? { kind: 'note', text, ack: true } : { kind: 'note', text }
       }
       await emitRoomRecord(session, filePath, record, roomId)
       return { record, session }
@@ -481,6 +523,35 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (record.kind !== 'message' || agents === void 0 || subagents === void 0) return
     for (const member of record.to) {
       if (member === record.from) continue
+
+      // Guard (Batch C) — empty-delta wake dedup: if the member's read cursor
+      // has ALREADY advanced past this record, a wake would serve nothing new
+      // (the relay-vs-read cursor divergence, audit C2/H5). Compare by numeric
+      // seq, never lexicographic ids. A lost cursor (in-memory, reset on
+      // restart) misses the map → we wake anyway: the idempotent re-read is
+      // acceptable then.
+      const cursor = memberCursors.get(member)
+      if (cursor !== void 0 && cursor.lastMessageSeq >= record.seq) {
+        ctx.logger.debug(`[deepartments] empty-delta wake dedup: skip "${member}" (${record.id} already consumed by its read cursor at seq ${cursor.lastMessageSeq})`)
+        continue
+      }
+
+      // Guard (Batch C) — ack-loop suppression: a pure ack (payload.ack) on a
+      // pair that has already exchanged N≥3 acks within the last T=120s without
+      // an intervening non-ack message is a confirmation loop; stop waking it.
+      // Any non-ack message between the pair resets the counter. Detected ONLY
+      // by the explicit `ack` flag (never free text).
+      const isAck = (record.payload as { ack?: boolean }).ack === true
+      const pairKey = `${record.from}|${member}`
+      const now = Date.now()
+      const priorPair = ackCounters.get(pairKey)
+      const suppressAckLoop = isAck && priorPair !== void 0 && priorPair.count >= ACK_LOOP_THRESHOLD && (now - priorPair.lastTs) <= ACK_LOOP_WINDOW_MS
+      if (isAck) ackCounters.set(pairKey, { count: (priorPair?.count ?? 0) + 1, lastTs: now })
+      else ackCounters.delete(pairKey)
+      if (suppressAckLoop) {
+        ctx.logger.debug(`[deepartments] ack-loop suppressed: no wake to "${member}" (pair ${pairKey} exchanged ${priorPair!.count} acks within ${ACK_LOOP_WINDOW_MS / 1000}s)`)
+        continue
+      }
 
       // --- post branch: wake the registered post through the live shared
       // parent (UNCHANGED from the pre-Batch-A relay). ---
@@ -614,7 +685,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
       // TOC mode: compact table of contents of new addressed messages since
       // the last read, paged by limit/offset, plus agenda updates.
-      const cursor = memberCursors.get(memberId) ?? { lastMessageId: undefined, lastAgendaSeq: -1 }
+      const cursor = memberCursors.get(memberId) ?? { lastMessageId: undefined, lastMessageSeq: -1, lastAgendaSeq: -1 }
       const start = cursor.lastMessageId === void 0 ? 0 : state.messages.findIndex((message) => message.id === cursor.lastMessageId) + 1
       const candidates = state.messages
         .slice(Math.max(start, 0))
@@ -630,7 +701,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       for (const item of agenda) lines.push(formatDeltaAgenda(item))
       // Advance the cursor to the last TOC entry shown so the next read
       // serves only newer messages.
-      if (page.length > 0) cursor.lastMessageId = page[page.length - 1].id
+      if (page.length > 0) { cursor.lastMessageId = page[page.length - 1].id; cursor.lastMessageSeq = page[page.length - 1].seq }
       let maxAgendaSeq = -1
       for (const item of agenda) if (item.cursorOfLastTouch > maxAgendaSeq) maxAgendaSeq = item.cursorOfLastTouch
       if (maxAgendaSeq >= 0) cursor.lastAgendaSeq = maxAgendaSeq
@@ -642,7 +713,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   const globalWrite = ctx.tools.register(defineTool({
     name: 'dept_room_write',
-    description: 'Post an addressed message to one board room. The message is recorded from your board member id; addressed recipients are woken to read it. Addressees must be a registered post, a registered host (host-<sessionId>), or a static member — unknown addressees are rejected.',
+    description: 'Post an addressed message to one board room. The message is recorded from your board member id; addressed recipients are woken to read it. Addressees must be a registered post, a registered host (host-<sessionId>), or a static member — unknown addressees are rejected. Set ack:true when this is a PURE acknowledgement/receipt (no new content) so the wake relay does not loop on a confirmation ping-pong.',
     parameters: {
       room: { type: 'string', required: true, description: 'Room id to post to (e.g. "board").' },
       to: {
@@ -651,7 +722,8 @@ export function applyInvoke(ctx: Context, config: Config) {
         required: true,
         description: 'Board member ids this message is addressed to (e.g. ["research-head"]).'
       },
-      text: { type: 'string', required: true, description: 'The message text.' }
+      text: { type: 'string', required: true, description: 'The message text.' },
+      ack: { type: 'boolean', description: 'Set true when this is a pure acknowledgement/receipt (no new content) so the relay does not loop on it.' }
     },
     output: {
       schema: {
@@ -676,7 +748,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       if (unknown.length > 0) {
         throw new Error(`[deepartments] dept_room_write: unknown addressee(s) ${unknown.join(', ')} — use dept_room_who for the roster`)
       }
-      const { record } = await emitBoardMessage(args.room, memberId, [...args.to], args.text)
+      const { record } = await emitBoardMessage(args.room, memberId, [...args.to], args.text, null, args.ack === true)
       return { room: args.room, from: memberId, to: [...args.to], messageId: record.id }
     }
   }))
@@ -910,7 +982,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     subagents.registerContinuableSetup((childCtx) => {
       const disposeWrite = childCtx.tools.register(defineTool({
         name: 'dept_room_write',
-        description: 'Post an addressed message to one board room. The message is recorded from your board member id; addressed recipients are woken to read it. Addressees must be a registered post, a registered host (host-<sessionId>), or a static member — unknown addressees are rejected.',
+        description: 'Post an addressed message to one board room. The message is recorded from your board member id; addressed recipients are woken to read it. Addressees must be a registered post, a registered host (host-<sessionId>), or a static member — unknown addressees are rejected. Set ack:true when this is a PURE acknowledgement/receipt (no new content) so the wake relay does not loop on a confirmation ping-pong.',
         parameters: {
           room: { type: 'string', required: true, description: 'Room id to post to (e.g. "board").' },
           to: {
@@ -919,7 +991,8 @@ export function applyInvoke(ctx: Context, config: Config) {
             required: true,
             description: 'Board member ids this message is addressed to (e.g. ["research-head"]).'
           },
-          text: { type: 'string', required: true, description: 'The message text.' }
+          text: { type: 'string', required: true, description: 'The message text.' },
+          ack: { type: 'boolean', description: 'Set true when this is a pure acknowledgement/receipt (no new content) so the relay does not loop on it.' }
         },
         output: {
           schema: {
@@ -942,7 +1015,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           if (unknown.length > 0) {
             throw new Error(`[deepartments] dept_room_write: unknown addressee(s) ${unknown.join(', ')} — use dept_room_who for the roster`)
           }
-          const { record } = await emitBoardMessage(args.room, memberId, [...args.to], args.text)
+          const { record } = await emitBoardMessage(args.room, memberId, [...args.to], args.text, null, args.ack === true)
           return { room: args.room, from: memberId, to: [...args.to], messageId: record.id }
         }
       }))
@@ -986,7 +1059,7 @@ export function applyInvoke(ctx: Context, config: Config) {
             const delta = `Full text of ${message.id} (from ${message.from} → ${message.to.join(', ') || '(all)'}):\n${message.text}`
             return { room: args.room, member: memberId, delta }
           }
-          const cursor = memberCursors.get(memberId) ?? { lastMessageId: undefined, lastAgendaSeq: -1 }
+          const cursor = memberCursors.get(memberId) ?? { lastMessageId: undefined, lastMessageSeq: -1, lastAgendaSeq: -1 }
           const start = cursor.lastMessageId === void 0 ? 0 : state.messages.findIndex((message) => message.id === cursor.lastMessageId) + 1
           const candidates = state.messages
             .slice(Math.max(start, 0))
@@ -1000,7 +1073,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           if (remaining > 0) lines.push(`- … (${remaining} more messages; read again or page with offset)`)
           const agenda = state.agenda.filter((item) => item.cursorOfLastTouch > cursor.lastAgendaSeq)
           for (const item of agenda) lines.push(formatDeltaAgenda(item))
-          if (page.length > 0) cursor.lastMessageId = page[page.length - 1].id
+          if (page.length > 0) { cursor.lastMessageId = page[page.length - 1].id; cursor.lastMessageSeq = page[page.length - 1].seq }
           let maxAgendaSeq = -1
           for (const item of agenda) if (item.cursorOfLastTouch > maxAgendaSeq) maxAgendaSeq = item.cursorOfLastTouch
           if (maxAgendaSeq >= 0) cursor.lastAgendaSeq = maxAgendaSeq
