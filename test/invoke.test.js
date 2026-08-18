@@ -296,11 +296,11 @@ async function readPosts(stateDir) {
   return JSON.parse(await readFile(postsPath, 'utf8'))
 }
 
-function executeDeptInvoke(pluginCtx, parent) {
+function executeDeptInvoke(pluginCtx, parent, args = { room: 'board', assignment: 'ping the research coordinator' }) {
   const tool = pluginCtx.tools.get('dept_invoke')
   assert.ok(tool, 'dept_invoke registered on the plugin scope')
   return tool.execute(
-    { room: 'board', assignment: 'ping the research coordinator' },
+    { ...args },
     { agent: parent, signal: new AbortController().signal }
   )
 }
@@ -545,6 +545,52 @@ test('registerContinuableSetup: the board toolset is installed into every contin
       assert.match(witnessText, /open_items: \["review witness"\]/)
       assert.match(witnessText, /constraints: \["keep it concise"\]/)
       assert.match(witnessText, /assignment satisfied/)
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('dept_invoke: explicit `to` addresses a sibling fork post and leaves the coordinator untouched', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, spawnStub, forkStub, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent())
+
+      const result = await executeDeptInvoke(pluginCtx(), parent, {
+        room: 'board',
+        assignment: 'a message for the other fork',
+        to: ['asistente-fork-sibling']
+      })
+
+      // Returns the continuable shape as usual; the sibling fork is the subagent.
+      assert.equal(result.kind, 'continuable')
+      assert.ok(typeof result.subagentId === 'string' && result.subagentId.length > 0)
+      assert.equal(result.roomId, 'board')
+
+      // With an explicit `to`, the coordinator is NOT ensured/created: only the
+      // fork is materialized.
+      assert.equal(spawnStub.prepareCalls.length, 0, 'no coordinator creation with an explicit `to`')
+      assert.equal(forkStub.prepareCalls.length, 1, 'fork created on the fork provider')
+      assert.equal(agents.createCalls.length, 1, 'only the fork materialized')
+
+      // The assignment board record addresses the sibling fork post.
+      const records = await loadRecords(resolveBoardPath(stateDir, 'board'))
+      const assignment = records.find((record) => record.kind === 'message')
+      assert.ok(assignment, 'assignment record in board.jsonl')
+      assert.equal(assignment.from, 'asistente')
+      assert.deepEqual(assignment.to, ['asistente-fork-sibling'])
+      assert.equal(assignment.payload.text, 'a message for the other fork')
+
+      // The fork prompt (delivered as the fork's first inbox message) carries
+      // the mission and the target member id, and is mission-driven rather than
+      // a hardcoded coordinator-only script.
+      const forkPrompt = agents.childAgents[0].inboxMessages[0].content[0].text
+      assert.match(forkPrompt, /a message for the other fork/)
+      assert.match(forkPrompt, /asistente-fork-sibling/)
+      assert.match(forkPrompt, /The assignment is addressed to: asistente-fork-sibling/)
+      assert.doesNotMatch(forkPrompt, /research coordinator/, 'no coordinator-only forced prompt with an explicit `to`')
     } finally {
       await dispose()
     }

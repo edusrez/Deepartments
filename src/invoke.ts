@@ -393,7 +393,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   ctx.tools.register(defineTool({
     name: 'dept_invoke',
-    description: 'Send the Asistente to the board room: spawn a continuable representative (fork) that inherits this conversation, ensure the research coordinator post is awake, and post the assignment to the board. The fork converses with the coordinator through the board; when it settles, the runtime delivers its final report back to you automatically. Returns the fork\'s durable id immediately — never blocks.',
+    description: 'Send the Asistente to the board room: spawn a continuable representative (fork) that inherits this conversation, post the assignment to the board, and address it to the board members you specify (or the room\'s department coordinator by default). The fork converses with the members you address on the board; when it settles, the runtime delivers its final report back to you automatically. Returns the fork\'s durable id immediately — never blocks.',
     parameters: {
       room: {
         type: 'string',
@@ -403,7 +403,12 @@ export function applyInvoke(ctx: Context, config: Config) {
       assignment: {
         type: 'string',
         required: true,
-        description: 'The assignment message for the research coordinator (what the owner wants answered).'
+        description: 'The assignment message (what the owner wants answered).'
+      },
+      to: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Board member ids to address the assignment to (e.g. ["research-head"], or a sibling fork post id such as ["asistente-fork-<id>"]). Defaults to the room\'s department coordinator.'
       },
       threadId: {
         type: 'string',
@@ -431,16 +436,31 @@ export function applyInvoke(ctx: Context, config: Config) {
       await registryLoaded
       const room = config.org.rooms.find((candidate) => candidate.id === args.room)
       if (room === void 0) throw new Error(`[deepartments] dept_invoke: room "${args.room}" is not configured — rooms: ${config.org.departments.map((department) => department.roomId).join(', ') || '(none)'}`)
-      // The coordinator post spec: the department whose coordinator answers in
-      // this room, else the first configured coordinator (MVP: one).
+      // Resolve the assignment's addressees. With an explicit `to` the caller
+      // names the board members (a department head OR a sibling fork) and the
+      // coordinator is left untouched; otherwise the assignment defaults to the
+      // room's department coordinator, which must be ensured/woken below.
+      const explicitTo = args.to && args.to.length > 0 ? args.to : undefined
       const department = config.org.departments.find((candidate) => candidate.roomId === args.room && candidate.coordinator !== void 0)
         ?? config.org.departments.find((candidate) => candidate.coordinator !== void 0)
       const coordinator: CoordinatorConfig | undefined = department?.coordinator
-      if (coordinator === void 0) throw new Error('[deepartments] dept_invoke: no coordinator post configured in org.departments')
+      let targets: string[]
+      if (explicitTo !== undefined) {
+        targets = explicitTo
+      } else {
+        if (coordinator === void 0) throw new Error('[deepartments] dept_invoke: no addressee — pass `to` or configure a coordinator for the room')
+        // The coordinator post spec: the department whose coordinator answers in
+        // this room, else the first configured coordinator (MVP: one).
+        targets = [coordinator.postId]
+      }
 
       // 1. Ensure the coordinator post (create once per registry; reuse after).
-      let coordinatorChildId = byPost.get(coordinator.postId)?.childId
-      if (coordinatorChildId === void 0) {
+      //    Only on the default path — an explicit `to` leaves the coordinator
+      //    untouched (it is not the forced addressee). When `to` is omitted the
+      //    coordinator is guaranteed non-undefined (validated in the branch above).
+      if (explicitTo === undefined && coordinator !== undefined) {
+        let coordinatorChildId = byPost.get(coordinator.postId)?.childId
+        if (coordinatorChildId === void 0) {
         const inflight = coordinatorInFlight.get(coordinator.postId)
         if (inflight !== void 0) coordinatorChildId = await inflight
         else {
@@ -479,16 +499,19 @@ export function applyInvoke(ctx: Context, config: Config) {
           }
         }
       }
+      }
 
-      // 2. Start the fork: the Asistente's continuable representative.
+      // 2. Start the fork: the Asistente's continuable representative. The
+      //    mission and addressees come from the assignment, never hardcoded.
       const forkProvider = config.forkProvider ?? 'fork'
+      const addresseeLine = `The assignment is addressed to: ${targets.join(', ')} — converse with the addressed board member(s).`
       const forkChildId = (await subagents.startContinuable({
         provider: forkProvider,
         label: 'asistente-fork',
         request: {
           prompt: [{
             type: 'text',
-            text: `You are the Asistente's representative in the board-of-directors room "${args.room}". Read your board delta with dept_room_read. Drive the conversation with the research coordinator (board member "${coordinator.postId}") to answer the owner's assignment: ${args.assignment} Post addressed messages with dept_room_write (room "${args.room}", to ["${coordinator.postId}"]); wait for the coordinator's replies (you will be woken when they arrive). If you have no new delta, post your next question or the assignment itself to "${coordinator.postId}" rather than going silent. When the assignment is satisfied, write your relevo witness with dept_witness_write and CONCLUDE with the final merged report as your message.`
+            text: `You are the Asistente's representative in the room "${args.room}". Your mission: ${args.assignment} ${addresseeLine} Read your board delta with dept_room_read (room "${args.room}") and post addressed messages with dept_room_write (room "${args.room}", to your addressees). If your board delta is empty, post your next step — a question or the assignment itself — to your addressees rather than going silent (you will be woken when they reply). When your mission is satisfied, write your relevo witness with dept_witness_write and CONCLUDE with a concise report to your principal (the Asistente) as your final message. You remain a resident post in the room and will be woken again when new messages are addressed to you.`
           } as const],
           parent
         },
@@ -505,7 +528,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
       // 3. Emit the assignment to the board (the wake relay wakes the
       //    coordinator). Never block: the fork and coordinator run on their own.
-      const { record } = await emitBoardMessage(args.room, 'asistente', [coordinator.postId], args.assignment, args.threadId ?? null)
+      const { record } = await emitBoardMessage(args.room, 'asistente', targets, args.assignment, args.threadId ?? null)
 
       return { kind: 'continuable', subagentId: forkChildId, roomId: args.room, messageId: record.id }
     }
