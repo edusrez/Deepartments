@@ -73,11 +73,15 @@ interface CursorState {
 }
 
 /**
- * Format one addressed message for the model-facing delta (compact).
+ * Format one addressed message as a compact TOC line for the model-facing
+ * delta: message id + sender → recipients + a short preview. The preview is
+ * truncated to 140 chars with an explicit '…' when longer — never silently
+ * shortened: the message id on the line lets the model fetch the FULL text
+ * by id (dept_room_read with messageId).
  */
-function formatDeltaMessage(message: RoomState['messages'][number]): string {
-  const text = message.text.length > 240 ? `${message.text.slice(0, 240)}…` : message.text
-  return `- ${message.from} → ${message.to.join(', ') || '(all)'}: ${text}`
+function formatTocMessage(message: RoomState['messages'][number]): string {
+  const preview = message.text.length > 140 ? `${message.text.slice(0, 140)}…` : message.text
+  return `- ${message.id} | ${message.from} → ${message.to.join(', ') || '(all)'} | ${preview}`
 }
 
 /**
@@ -85,12 +89,6 @@ function formatDeltaMessage(message: RoomState['messages'][number]): string {
  */
 function formatDeltaAgenda(item: RoomState['agenda'][number]): string {
   return `- agenda "${item.title}" (${item.status}, owner ${item.owner})`
-}
-
-/** Truncate a delta to a bounded, model-friendly digest. */
-function digestDelta(lines: string[], cap = 10): string {
-  if (lines.length <= cap) return lines.join('\n')
-  return `${lines.slice(0, cap).join('\n')}\n… (${lines.length - cap} more entries; read again to continue)`
 }
 
 /** YAML-ish flow list rendering for witness frontmatter arrays. */
@@ -223,9 +221,14 @@ export function applyInvoke(ctx: Context, config: Config) {
         continue
       }
       const senderSession = byPost.get(record.from)?.childId ?? (record.from === 'asistente' ? anyParentId() : record.from) ?? record.from
+      // Pointer-only wake: NEVER embed the message body here (a silently
+      // truncated relay caused two forks to accuse each other of fabricating
+      // text). Identify the message by id + sender and point to the tools; the
+      // child fetches the full text via dept_room_read (messageId) if it
+      // needs it.
       const content = [{
         type: 'text',
-        text: `Board delta in ${roomId}: ${record.from} → you: "${record.payload.text.slice(0, 200)}". Read your new messages with dept_room_read and reply with dept_room_write addressed to the sender of the latest message.`
+        text: `Board delta in ${roomId}: new message ${record.id} from ${record.from} addressed to you. Read it with dept_room_read (room "${roomId}") and reply with dept_room_write addressed to the sender of the latest message you read.`
       } as const]
       const source = {
         kind: 'coordinator',
@@ -251,9 +254,12 @@ export function applyInvoke(ctx: Context, config: Config) {
     subagents.registerContinuableSetup((childCtx) => {
     const disposeRead = childCtx.tools.register(defineTool({
       name: 'dept_room_read',
-      description: 'Read this agent\'s new board messages in one room: the delta of messages addressed to you (or sent by you) plus agenda updates since your last read. Pass the room id (e.g. "board").',
+      description: 'Read this agent\'s new board messages in one room: the delta of messages addressed to you (or sent by you) plus agenda updates since your last read. By default returns a compact table-of-contents of new addressed messages since your last read (message id + sender + short preview, with \'…\' when the preview is truncated). Pass messageId to fetch the FULL text of one message (never truncated); pass limit/offset to page through the delta. Pass the room id (e.g. "board").',
       parameters: {
-        room: { type: 'string', required: true, description: 'Room id to read (e.g. "board").' }
+        room: { type: 'string', required: true, description: 'Room id to read (e.g. "board").' },
+        messageId: { type: 'string', description: 'Optional: fetch the FULL text of this one message by id (never truncated). Does not advance the read cursor.' },
+        limit: { type: 'number', description: 'Optional: max TOC entries per read (default 20).' },
+        offset: { type: 'number', description: 'Optional: skip that many candidate messages in TOC mode (default 0).' }
       },
       output: {
         schema: {
@@ -273,27 +279,49 @@ export function applyInvoke(ctx: Context, config: Config) {
         const memberId = postIdForChild(agent.id as string) ?? 'unknown'
         const session = ctx.sessions.get(SessionId(roomSessionId(args.room)))
         if (session === void 0) throw new Error(`[deepartments] room "${args.room}" is not live (no session)`)
-        const cursor = memberCursors.get(memberId) ?? { lastMessageId: undefined, lastAgendaSeq: -1 }
         const snapshot = ctx.sessionProjections.snapshot(session)
         const state = snapshot.values['deepartments/room'] as RoomState | undefined
-        const lines: string[] = []
         if (state === void 0) {
           // Projection unit absent (should not happen): serve nothing.
           return { room: args.room, member: memberId, delta: 'No board messages addressed to you.' }
         }
+
+        // Fetch mode: return the FULL, untruncated text of one message by id.
+        // Never advances the cursor and never touches memberCursors, so a
+        // subsequent default read still serves the message.
+        if (args.messageId !== undefined) {
+          const message = state.messages.find((candidate) => candidate.id === args.messageId)
+          if (message === void 0) {
+            return { room: args.room, member: memberId, delta: `No board message with id "${args.messageId}" was found in room "${args.room}".` }
+          }
+          const delta = `Full text of ${message.id} (from ${message.from} → ${message.to.join(', ') || '(all)'}):\n${message.text}`
+          return { room: args.room, member: memberId, delta }
+        }
+
+        // TOC mode: compact table of contents of new addressed messages since
+        // the last read, paged by limit/offset, plus agenda updates.
+        const cursor = memberCursors.get(memberId) ?? { lastMessageId: undefined, lastAgendaSeq: -1 }
         const start = cursor.lastMessageId === void 0 ? 0 : state.messages.findIndex((message) => message.id === cursor.lastMessageId) + 1
-        const addressed = state.messages
+        const candidates = state.messages
           .slice(Math.max(start, 0))
           .filter((message) => message.to.includes(memberId) || message.from === memberId)
+        const limit = Math.max(args.limit ?? 20, 1)
+        const offset = Math.max(args.offset ?? 0, 0)
+        const page = candidates.slice(offset, offset + limit)
+        const remaining = Math.max(candidates.length - (offset + limit), 0)
+        const lines: string[] = []
+        for (const message of page) lines.push(formatTocMessage(message))
+        if (remaining > 0) lines.push(`- … (${remaining} more messages; read again or page with offset)`)
         const agenda = state.agenda.filter((item) => item.cursorOfLastTouch > cursor.lastAgendaSeq)
-        for (const message of addressed) lines.push(formatDeltaMessage(message))
         for (const item of agenda) lines.push(formatDeltaAgenda(item))
-        if (addressed.length > 0) cursor.lastMessageId = addressed[addressed.length - 1].id
+        // Advance the cursor to the last TOC entry shown so the next read
+        // serves only newer messages.
+        if (page.length > 0) cursor.lastMessageId = page[page.length - 1].id
         let maxAgendaSeq = -1
         for (const item of agenda) if (item.cursorOfLastTouch > maxAgendaSeq) maxAgendaSeq = item.cursorOfLastTouch
         if (maxAgendaSeq >= 0) cursor.lastAgendaSeq = maxAgendaSeq
         memberCursors.set(memberId, cursor)
-        const delta = lines.length === 0 ? 'No board messages addressed to you.' : `Board delta (room ${args.room}) for ${memberId}:\n${digestDelta(lines)}`
+        const delta = lines.length === 0 ? 'No board messages addressed to you.' : `Board delta (room ${args.room}) for ${memberId}:\n${lines.join('\n')}`
         return { room: args.room, member: memberId, delta }
       }
     }))

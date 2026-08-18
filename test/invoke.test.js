@@ -362,7 +362,8 @@ test('dept_invoke: ensures the coordinator, forks, posts the assignment, and ret
       assert.ok(coordinator.inboxMessages.length >= 1, 'coordinator received the wake')
       const wake = coordinator.inboxMessages.at(-1)
       assert.match(wake.content[0].text, /Board delta in board/)
-      assert.match(wake.content[0].text, /ping the research coordinator/)
+      assert.match(wake.content[0].text, /new message \S+ from asistente/)
+      assert.doesNotMatch(wake.content[0].text, /ping the research coordinator/, 'relay does not embed the message body (pointer-only)')
       assert.equal(wake.source.kind, 'coordinator')
 
       // Error path: no calling agent.
@@ -451,7 +452,8 @@ test('wake relay: addressed members are woken through the live shared parent; se
       assert.equal(coordinator.inboxMessages.length, coordBefore + 1)
       const wake = coordinator.inboxMessages.at(-1)
       assert.match(wake.content[0].text, /Board delta in board/)
-      assert.match(wake.content[0].text, /question one/)
+      assert.match(wake.content[0].text, new RegExp(`new message \\S+ from ${forkPostId}`))
+      assert.doesNotMatch(wake.content[0].text, /question one/, 'relay does not embed the message body (pointer-only)')
       assert.equal(wake.source.kind, 'coordinator')
       assert.equal(wake.source.senderSessionId, fork.id, 'sender session is the fork child session')
 
@@ -470,7 +472,8 @@ test('wake relay: addressed members are woken through the live shared parent; se
       seq += 1
       await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'research-head', [forkPostId], 'answer one'), 'board')
       assert.equal(fork.inboxMessages.length, forkBefore + 1)
-      assert.match(fork.inboxMessages.at(-1).content[0].text, /answer one/)
+      assert.match(fork.inboxMessages.at(-1).content[0].text, /new message \S+ from research-head/)
+      assert.doesNotMatch(fork.inboxMessages.at(-1).content[0].text, /answer one/, 'relay does not embed the message body (pointer-only)')
 
       // 5. parent not live: wake skipped (documented rc.6 limitation) — no crash.
       agents.store.delete(parent.id)
@@ -641,6 +644,112 @@ test('dept_room_who: lists static members and only the room\'s registered live p
       assert.equal(missing.room, 'nope')
       assert.deepEqual(missing.members, [])
       assert.deepEqual(missing.posts, [])
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('truncation fix: pointer-only relay, full fetch by id without cursor advance, and explicit TOC preview truncation', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent())
+      await executeDeptInvoke(pluginCtx(), parent)
+      const posts = await readPosts(stateDir)
+      const forkPostId = Object.keys(posts).find((key) => key.startsWith('asistente-fork-'))
+      const coordinator = agents.childAgents[0]
+      const fork = agents.childAgents[1]
+      const forkCtx = agents.childContexts[1].ctx
+      const forkKey = agents.childContexts[1].key
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      assert.ok(boardSession)
+      const signal = new AbortController().signal
+      const read = (args) => forkCtx.tools.get('dept_room_read', forkKey).execute({ room: 'board', ...args }, { agent: fork, signal })
+
+      // (a) wake relay is pointer-only: it identifies the message by id + from
+      // but NEVER embeds the body text, even for a long message.
+      const longRelay = 'Z'.repeat(300)
+      let seq = await nextSeq(stateDir, 'board')
+      const longRec = messageRecord(seq, forkPostId, ['research-head'], longRelay)
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), longRec, 'board')
+      const relayWake = coordinator.inboxMessages.at(-1)
+      assert.match(relayWake.content[0].text, new RegExp(`new message ${longRec.id} from ${forkPostId}`))
+      assert.ok(!relayWake.content[0].text.includes(longRelay.slice(0, 25)), 'relay carries no body text at all')
+
+      // (b) fetch by messageId returns the FULL text of a message longer than
+      // 240 chars, and does NOT advance the cursor (a default read still serves it).
+      const longBody = 'X'.repeat(500)
+      seq += 1
+      const longMsg = messageRecord(seq, 'research-head', [forkPostId], longBody)
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), longMsg, 'board')
+      const fetched = await read({ messageId: longMsg.id })
+      assert.match(fetched.delta, new RegExp(`Full text of ${longMsg.id}`))
+      assert.equal(fetched.delta.endsWith(longBody), true, 'full text present, untruncated')
+      assert.doesNotMatch(fetched.delta, /…/, 'no truncation marker in fetch mode')
+
+      // Unknown message id: a clear not-found, no throw.
+      const notFound = await read({ messageId: 'm-no-such' })
+      assert.match(notFound.delta, /No board message with id "m-no-such" was found/)
+
+      // (c) a subsequent default read still serves the long message (the fetch
+      // did not advance the cursor); its TOC preview is truncated with '…'.
+      seq += 1
+      const shortA = messageRecord(seq, forkPostId, ['research-head'], 'alpha one')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), shortA, 'board')
+      seq += 1
+      const shortB = messageRecord(seq, 'research-head', [forkPostId], 'beta two')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), shortB, 'board')
+
+      const toc = await read({})
+      assert.match(toc.delta, new RegExp(`${'X'.repeat(140)}…`), 'long preview truncated with the explicit … marker')
+      assert.doesNotMatch(toc.delta, /X{200,}/, 'no unmarked long body leaked into the TOC')
+      assert.match(toc.delta, /alpha one/)
+      assert.match(toc.delta, /beta two/)
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('dept_room_read: limit + offset page through the delta (per-member cursor)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent())
+      await executeDeptInvoke(pluginCtx(), parent)
+      const posts = await readPosts(stateDir)
+      const forkPostId = Object.keys(posts).find((key) => key.startsWith('asistente-fork-'))
+      const fork = agents.childAgents[1]
+      const forkCtx = agents.childContexts[1].ctx
+      const forkKey = agents.childContexts[1].key
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      assert.ok(boardSession)
+      const signal = new AbortController().signal
+      const read = (args) => forkCtx.tools.get('dept_room_read', forkKey).execute({ room: 'board', ...args }, { agent: fork, signal })
+
+      // Two candidates for the fork (both from /= the fork member id). The
+      // coordinator assignment is not addressed to the fork, so the fork's
+      // candidate list is exactly [M1, M2].
+      let seq = await nextSeq(stateDir, 'board')
+      const m1 = messageRecord(seq, forkPostId, ['research-head'], 'page one')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), m1, 'board')
+      seq += 1
+      const m2 = messageRecord(seq, forkPostId, ['research-head'], 'page two')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), m2, 'board')
+
+      // On a fresh cursor, limit:1 + offset:1 reaches the SECOND message
+      // (offset skips the first; limit caps the page at one entry).
+      const paged = await read({ limit: 1, offset: 1 })
+      assert.match(paged.delta, /page two/, 'offset reached the second message')
+      assert.doesNotMatch(paged.delta, /page one/, 'offset skipped the first message')
+
+      // Another offset:0 read from the advanced cursor pages forward one more
+      // entry only (nothing new remains).
+      const after = await read({ limit: 1, offset: 0 })
+      assert.equal(after.delta, 'No board messages addressed to you.')
     } finally {
       await dispose()
     }
