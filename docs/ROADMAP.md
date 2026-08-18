@@ -121,3 +121,13 @@ of the research — so no builder needs to re-research.)
   (`dsh.service` / `dsh-deepartments-dev.service`). Research reports:
   `.dsh/reports/researcher/2026-08-18-dsh-boot-notify-plugins.md`,
   `.dsh/reports/explore-deep/2026-08-18-dsh-boot-notify-apis.md`.
+
+- **2026-08-18** — **Bilingual Chinese README** (owner decision 2026-08-18):
+  `README.zh.md` (Simplified Chinese) added to the three DSH repos
+  (`edusrez/Deepartments`, `edusrez/dsh-smart-restart`,
+  `edusrez/dsh-tool-web-enhanced`), following the official deepseek-harness
+  convention — English `README.md` stays canonical/default, the zh file is a
+  full mirror, and each `README.md` opens with `English | [中文](README.zh.md)`.
+  `deepartments/AGENTS.md` gained an explicit i18n carve-out sanctioning the
+  README.zh.md pair (English still canonical). Reviewer PASS on both batches;
+  all three repos pushed (deepartments also published its 24-commit backlog).
