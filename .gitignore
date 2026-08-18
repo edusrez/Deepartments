@@ -10,3 +10,6 @@ lib/
 # OS
 .DS_Store
 .deepartments/
+
+# Local convenience: pnpm release-age exclusion (never committed)
+pnpm-workspace.yaml
