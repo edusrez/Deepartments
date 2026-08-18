@@ -2,14 +2,14 @@
 // Batch 2): the Asistente's trip to the board room.
 //
 // Mechanics (per .dsh/reports/explore-deep/2026-08-16-continuation-mechanics.md,
-// verified against @deepseek-ai/dsh-subagent@0.1.0-rc.6):
+// verified against @deepseek-ai/dsh-subagent@0.1.0-rc.7):
 //   - dept_invoke is ALWAYS async (same shape as src/subagent.ts): it ensures
 //     the coordinator post (a continuable child of the Asistente on the
 //     'spawn' provider — a FRESH child, own persona, no inherited context),
 //     starts a continuable FORK (provider 'fork', inherits the Asistente's
 //     completed turns), emits the assignment as an addressed board message,
 //     and returns the fork's durable id immediately.
-//   - Sibling→sibling messaging does not exist in rc.6: followup() authority
+//   - Sibling→sibling messaging does not exist in rc.7: followup() authority
 //     is possession of the exact live direct-parent Agent. Both children's
 //     durable parent is the Asistente, so the wake relay resolves the live
 //     Asistente via ctx.agents.get() and relays every addressed board append

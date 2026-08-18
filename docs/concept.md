@@ -12,7 +12,7 @@
 decisions, plus the second binding register (decisions 10-17, 2026-08-16),
 fix the product — a **DSH npm plugin bundle package**, **headless-first**,
 with dogfooding on the repo itself — and the research confirms the plugin
-API (`@deepseek-ai/dsh@0.1.0-rc.6`). This concept consolidates the IDEA→DSH
+API (`@deepseek-ai/dsh@0.1.0-rc.7`). This concept consolidates the IDEA→DSH
 mapping **with no pending cells**, defines the **reordered milestones**
 (first milestone = board room + research department; the former MVP becomes
 the second milestone) and records the package naming proposal.
@@ -187,9 +187,9 @@ plugin configuration).
 ## 5. Risks (updated with the research mitigation)
 
 1. **Plugin API in rc with promised breaking changes.** The runtime is
-   0.1.0-rc.6 and the README declares "THERE WILL BE COMPATIBILITY-BREAKING
+   0.1.0-rc.7 and the README declares "THERE WILL BE COMPATIBILITY-BREAKING
    CHANGES" (rc.2 already renamed `httpServer`→`webServer`). *Mitigation
-   (research):* **CLI pin** (`npx -p @deepseek-ai/dsh@0.1.0-rc.6`),
+   (research):* **CLI pin** (`npx -p @deepseek-ai/dsh@0.1.0-rc.7`),
    build against Cordis's stable API (`apply/ctx/inject/events/
    effects`) and the long-lived services (sessions, tools, skills,
    agentPresets), **isolate renamable services** with `ctx.get('webServer') ??

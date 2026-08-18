@@ -6,7 +6,7 @@ description: Authorship of plugins for DeepSeek Harness (DSH) in the Deepartment
 # dsh-plugin-dev — DSH plugin authorship
 
 Rules carried over from `_research/2026-08-16-dsh-plugin-api.md`. Audited
-runtime: `@deepseek-ai/dsh@0.1.0-rc.6` — developer preview, breaking changes
+runtime: `@deepseek-ai/dsh@0.1.0-rc.7` — developer preview, breaking changes
 expected.
 
 ## Mental model
@@ -41,7 +41,7 @@ dsh-deepartments/
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.7"
   }
 }
 ```
@@ -166,7 +166,7 @@ dsh --profile deepartments-dev "real smoke"     # headless boot + test
 6. Development and smoke in **independent profiles/ports** (deepartments-dev).
 7. Isolate renamable services: `ctx.get('webServer') ?? ctx.get('httpServer')`.
 8. `peerDependencies` on the rc channel (`^0.1.0-rc.x`; a `^0.0.1` does not
-   match rc) and CLI pin: `npx -p @deepseek-ai/dsh@0.1.0-rc.6`.
+   match rc) and CLI pin: `npx -p @deepseek-ai/dsh@0.1.0-rc.7`.
 
 ## Verification checklist (before reporting)
 

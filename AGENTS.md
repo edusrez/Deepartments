@@ -57,7 +57,7 @@ are cached); user edits to `cordis.patch.yml` are HMR. All dsh commands for deve
 6. Development and smoke in the isolated DSH_HOME `/opt/dsh/.dsh-dev` (`deepartments-dev` GUI profile, port 3090; `deepartments-dev-headless` twin for CLI smoke). Never against the web profile in use.
 7. Isolate renamable services: `ctx.get('webServer') ?? ctx.get('httpServer')`.
 8. `peerDependencies` on the rc channel (`^0.1.0-rc.x`) and **CLI pin**:
-   `npx -p @deepseek-ai/dsh@0.1.0-rc.6`.
+   `npx -p @deepseek-ai/dsh@0.1.0-rc.7`.
 
 Details and rationale for each rule: skill `dsh-plugin-dev`
 (`.dsh/skills/dsh-plugin-dev/SKILL.md`).
