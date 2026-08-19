@@ -10,7 +10,7 @@ and mapping in [concept.md](concept.md); the idea in [IDEA.md](IDEA.md).
 |---|---|---|---|
 | **0. Research** | ✅ **COMPLETE** (2026-08-16) | Research of the DSH plugin API: mapping cells resolved; feasibility confirmed (rc.6, native mechanisms for posts/activations/witness); decisions 1-2. | Report delivered; feasibility verdict: **positive**; mapping with no pending items blocking the MVP. |
 | **1. Concept** | ✅ **COMPLETE** (2026-08-16) | v1 draft + debate; 10 v1 questions → 9 binding decisions + naming proposal; the concept (docs/concept.md). | Decisions taken; concept approved; phase 2 authorized. |
-| **2. MVP** | 🚧 **IN PROGRESS** | **Milestone 1 (first, reordered 2026-08-16): board room + research department** — coordination room, research department and coordinator post in the plugin config; addressed envelopes + agenda; `dept_invoke` owner flow. First milestone (board room + research department) done 2026-08-16; next = programming-department dogfooding. **Milestone 2 (former MVP):** one department (programming) with roles absorbed from the previous setup; persistent posts (continuable + witness); CEO → Asistente → head → parallel builders → reviewer → verification → commit flow; sleep/wake cycle managed by the plugin; dogfooding on the repo itself; headless. | MVP success criteria (concept.md §4): end-to-end assignment with a post that falls asleep midway and resumes without loss; cycle managed without manual glue. |
+| **2. MVP** | 🚧 **IN PROGRESS** | **Milestone 1 (first, reordered 2026-08-16): board room + research department** — coordination room, research department and coordinator post in the plugin config; addressed envelopes + agenda; `dept_invoke` owner flow. First milestone (board room + research department) done 2026-08-16; next = programming-department dogfooding. **Milestone 2 (former MVP):** one department (programming) with roles absorbed from the previous setup; persistent posts (continuable + witness); CEO → Asistente → head → parallel builders → reviewer → verification → commit flow; sleep/wake cycle managed by the plugin; dogfooding on the repo itself; headless. — Superseded by the 2026-08-19 aggressive restructure A-G (board-as-bus, permanent lean department heads, host direct channel, nap/sleep lifecycle), which now implements this milestone's success criteria (a post falling asleep midway and resuming without loss) under the new model. | MVP success criteria (concept.md §4): end-to-end assignment with a post that falls asleep midway and resumes without loss; cycle managed without manual glue. |
 | **3. Rooms and activations** | Pending | Multiple rooms with reception and visits; scheduled (`dsh-schedule`) and reactive (events/MCP) activations; assignments between posts; editable governance policy; **client plugin UI — total observer** (decision 2); archiving/querying dead rooms. | Two departments coordinating via head → Asistente; a scheduled rhythm running without human intervention; a dead room archived and queryable; a governance exception applied; the UI shows the organization's state. |
 | **4. Self-observation, quality, self-modification** | Pending | Quality group + dream/post-session interview; proactive contextualizer; operational channeled escalation; self-modification of structure and implementation with safeguards and recovery (default structure). | The organization proposes a structure or implementation change, the CEO approves it, it is applied with quality gates, and the way back (default structure) works. |
 
@@ -254,3 +254,29 @@ of the research — so no builder needs to re-research.)
   divided" (WHERE not WHO; no role-confusion resistance; spatial identity
   via dept_whereami). Next (pending): live multi-session password test with
   the spatial clone (no mission).
+- **2026-08-19** — **Aggressive restructure A-G (2026-08-19):** after an
+  11-auditor critical log review (reports
+  `.dsh/reports/reviewer/2026-08-19-logaudit-*.md`, consolidated
+  `.dsh/reports/scribe/2026-08-19-cross-session-log-analysis-consolidated.md`)
+  found ~271M tokens spent 95% on cache re-reads of inherited context,
+  unbounded confirmation ping-pong, ghost posts, in-memory cursor replays,
+  and self-asserted identity, the owner approved retiring the fork model
+  entirely and restructuring to the "board-as-bus, departments = company"
+  model. Commits: `46215d0` (A: host bus — retire dept_invoke/fork, global
+  board tools for the host, hosts.json registry, raw host wake kind:'board',
+  no anyParentId), `22b5af4` (B: permanent department heads — spawn fresh +
+  toolFilter {allow:[]} lean + persona role + spatial deploy +
+  dept_post_retire), `27e51ed` (C: wake-relay guard — ack:true flag +
+  ack-loop suppression N>=3/T=120s + cursor dedup), `3c8be93` (D: persistent
+  cursors.json high-water, ready single-once, fork-ghost sweep), `6fe60cf`
+  (E: roster host liveness, whereami self-registration, sensitive/
+  senderVerified trust signal), `83b4999` (F: O(1) board writes via per-room
+  seq counter, boot compaction with mandatory cursor reset, dev-state
+  clean), `72a86c4` (G: head lifecycle — dept_nap siesta keeps context,
+  dept_memo_write journal, dept_sleep dormir resets context and respawns
+  fresh with journal-as-context; reviewer FAIL on respawn state-ordering
+  fixed with deliver-before-commit). Each batch: builder → reviewer → TIERED
+  ladder → commit. Final: build green, 51/51 tests, `ready` single-once (1
+  record/room), dev state clean, GUI restarted on the new bus. Next: live
+  test of the direct bus (Asistente↔heads↔Asistentes) and the nap/sleep
+  lifecycle.
