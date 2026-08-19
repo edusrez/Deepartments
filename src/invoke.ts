@@ -320,6 +320,20 @@ export function applyInvoke(ctx: Context, config: Config) {
     )
   }
 
+  // --- persistent UI config (sidebars etc.), mirroring the hosts.json pattern.
+  // Served/updated over the `/deepartments` RPC (`ui/config` / `ui/config/set`)
+  // so the client toggle works from ANY origin (Tailscale + loopback). Persisted
+  // to `<stateDir>/ui.json`; missing/corrupt file keeps the default. ---
+  const uiConfig: { sidebarEnabled: boolean } = { sidebarEnabled: true }
+  const uiConfigPath = path.join(config.stateDir, 'ui.json')
+
+  // Fire-and-forget persistence of the UI config (callers never await it).
+  const persistUiConfig = (): void => {
+    writeFile(uiConfigPath, JSON.stringify(uiConfig, null, 2), 'utf8').catch(
+      (error: unknown) => { ctx.logger.warn(`[deepartments] ui.json write failed: ${error instanceof Error ? error.message : String(error)}`) }
+    )
+  }
+
   /**
    * Lazy host registration: called from a host-plane board tool when the
    * calling agent has no post entry (it is a HOST Asistente session). Records
@@ -479,6 +493,23 @@ export function applyInvoke(ctx: Context, config: Config) {
     .catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         ctx.logger.warn(`[deepartments] hosts.json load failed (starting with an empty registry): ${error instanceof Error ? error.message : String(error)}`)
+      }
+    })
+
+  // Best-effort cold load of the persistent UI config. A fresh/missing file
+  // (ENOENT) keeps the default; a corrupt file keeps the default too (we never
+  // throw — the RPC/poll reconciles live on the client side regardless).
+  const uiConfigLoaded = readFile(uiConfigPath, 'utf8')
+    .then((text) => {
+      const parsed = JSON.parse(text) as { sidebarEnabled?: unknown }
+      if (typeof parsed?.sidebarEnabled === 'boolean') {
+        uiConfig.sidebarEnabled = parsed.sidebarEnabled
+      }
+      ctx.logger.info(`[deepartments] loaded ui.json (sidebarEnabled=${uiConfig.sidebarEnabled})`)
+    })
+    .catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        ctx.logger.warn(`[deepartments] ui.json load failed (keeping default UI config): ${error instanceof Error ? error.message : String(error)}`)
       }
     })
 
@@ -1448,22 +1479,50 @@ export function applyInvoke(ctx: Context, config: Config) {
   }, 'deepartments: host-plane board tools')
 
   // --- main-agents sidebar RPC (server half) ---------------------------------
-  // Serves agent-row status to the client sidebar over the `/deepartments`
-  // loopback channel. The pure row computation lives in src/agents.ts
-  // (buildAgentRows / computeHeadStatus — directly testable); this effect only
-  // wires it to the live registries + the board read model. `ctx.connection`
-  // comes from the SEPARATE dsh-client-connection plugin and is NOT present in
-  // headless profiles, so it is resolved OPTIONALLY via ctx.get('connection')
-  // — the same optional-service pattern as the agents/subagents accessors
-  // above (never added to inject, per the explore report seam).
+  // Serves agent-row status AND the persistent UI config to the client sidebar
+  // over the `/deepartments` channel (trusted-host authority — see below). The
+  // pure row computation lives in src/agents.ts (buildAgentRows /
+  // computeHeadStatus — directly testable); this effect only wires it to the
+  // live registries + the board read model. `ctx.connection` comes from the
+  // SEPARATE dsh-client-connection plugin and is NOT present in headless
+  // profiles, so it is resolved OPTIONALLY via ctx.get('connection') — the same
+  // optional-service pattern as the agents/subagents accessors above (never
+  // added to inject, per the explore report seam).
   const connection = ctx.get('connection') as ConnectionLike | undefined
   if (connection !== void 0 && connection.rpc !== void 0) {
     const disposeRpc = connection.rpc.handle('/deepartments', async (endpoint, payload) => {
       try {
-        // Only the `agents` and its alias `list` endpoints exist. Anything else
-        // is a bad-request (the endpoint name is surfaced in the message; the
-        // closed RpcErrorDetailsMap['bad-request'] type carries `issues`, so a
-        // contextual details object is not representable — see the report).
+        // `ui/config` (read) and `ui/config/set` (write) serve the persistent
+        // UI config (`sidebarEnabled`); `agents` + alias `list` serve the
+        // sidebar rows. Anything else is a bad-request (the endpoint name is
+        // surfaced in the message; the closed RpcErrorDetailsMap['bad-request']
+        // type carries `issues`, so a contextual details object is not
+        // representable — see the report).
+        if (endpoint === 'ui/config') {
+          return {
+            ok: true,
+            value: { sidebarEnabled: uiConfig.sidebarEnabled }
+          } as const
+        }
+        if (endpoint === 'ui/config/set') {
+          const raw = (typeof payload === 'object' && payload !== null ? payload : {}) as { sidebarEnabled?: unknown }
+          if (typeof raw.sidebarEnabled !== 'boolean') {
+            return {
+              ok: false,
+              error: {
+                code: 'bad-request',
+                message: 'sidebarEnabled must be a boolean',
+                details: { issues: [] }
+              }
+            } as const
+          }
+          uiConfig.sidebarEnabled = raw.sidebarEnabled
+          persistUiConfig()
+          return {
+            ok: true,
+            value: { sidebarEnabled: uiConfig.sidebarEnabled }
+          } as const
+        }
         if (endpoint !== 'agents' && endpoint !== 'list') {
           return {
             ok: false,
@@ -1536,7 +1595,12 @@ export function applyInvoke(ctx: Context, config: Config) {
           error: { code: 'internal', message: String(error), details: {} }
         } as const
       }
-    }, { authority: 'loopback' })
+      // authority: 'trusted-host' — this deployment runs behind Tailscale and
+      // the owner's GUI origin is a declared trusted host
+      // (laagencia.taildb5a7a.ts.net:8445), which 'loopback' would reject. A
+      // trusted-host channel also accepts loopback, so both the Tailscale board
+      // and any localhost front-end keep working.
+    }, { authority: 'trusted-host' })
     ctx.effect(() => () => { void disposeRpc() }, 'deepartments: main-agents sidebar RPC channel')
   }
 
