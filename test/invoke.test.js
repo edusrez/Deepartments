@@ -347,7 +347,7 @@ async function readCursors(stateDir) {
  * adoption so a cold resume restores it under the same child id. Mirrors what
  * a production posts.json holds for a previously-registered resident post.
  */
-async function seedPost(stateDir, { postId, childId, parentId, roomId, provider = 'spawn' }) {
+async function seedPost(stateDir, { postId, childId, parentId, roomId, provider = 'spawn', sleepEpoch, previousChildId }) {
   const postsPath = path.join(stateDir, 'posts.json')
   let existing = {}
   try {
@@ -355,9 +355,37 @@ async function seedPost(stateDir, { postId, childId, parentId, roomId, provider 
   } catch {
     /* no prior seed */
   }
-  existing[postId] = { childId, parentId, roomId, provider }
+  const entry = { childId, parentId, roomId, provider }
+  // Batch G: a slept head carries the durable sleep-mark (and its previous
+  // incarnation's childId) in posts.json — seeded so the relay can respawn it.
+  if (sleepEpoch !== undefined) entry.sleepEpoch = sleepEpoch
+  if (previousChildId !== undefined) entry.previousChildId = previousChildId
+  existing[postId] = entry
   await writeFile(postsPath, JSON.stringify(existing, null, 2), 'utf8')
   postAdoption.set(childId, parentId)
+}
+
+/** Pre-author a post's long-term memory journal at
+ * `<stateDir>/journals/<postId>.md` (the durable file dept_memo_write writes)
+ * so a slept head's next wake can load it as its redeployed context. */
+async function seedJournal(stateDir, postId, summary) {
+  const journalPath = path.join(stateDir, 'journals', `${postId}.md`)
+  await mkdir(path.dirname(journalPath), { recursive: true })
+  const content = [
+    '---',
+    `author: ${postId}`,
+    `timestamp: ${new Date().toISOString()}`,
+    'board_cursor: none',
+    'decisions: []',
+    'constraints: []',
+    'open_items: []',
+    '---',
+    '',
+    summary,
+    ''
+  ].join('\n')
+  await writeFile(journalPath, content, 'utf8')
+  return journalPath
 }
 
 async function readPosts(stateDir) {
@@ -1699,6 +1727,301 @@ test('Board F boot compaction: an oversized board is rewritten keeping only regi
       // assert the first kept message is present, not the truncated tail.
       assert.match(delta, /kept-0/, 'resumed member re-reads the renumbered kept set (first kept message) after compaction')
       assert.match(delta, /more messages/, 'the delta exposes the full remaining kept set (still paged/available)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- Batch G: department-head lifecycle — nap (siesta) vs sleep (dormir) with
+// a long-term memory journal ------------------------------------------------
+// The owner's model: heads are PERMANENT agents. NAP = conclude and wait, KEEPING
+// the context window (a concluded continuable is already inactive-but-resumable —
+// dept_nap is the model-facing marker + nothing resets). SLEEP = persist memory
+// to a journal (dept_memo_write), then mark the post (dept_sleep → sleepEpoch);
+// on the NEXT wake the relay re-materializes a FRESH spawn incarnation under the
+// same postId with the journal loaded as its long-term memory (context reset +
+// reload), recording the previous incarnation as previousChildId and clearing the
+// flag so the new head wakes normally thereafter.
+
+test('Batch G dept_memo_write persists a head\'s long-term memory journal (author/timestamp frontmatter, durable path)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const parentId = SessionId('session-parent-memo')
+    const childId = SessionId('session-post-memo')
+    const postId = 'research-head'
+    await seedPost(stateDir, { postId, childId, parentId, roomId: 'board', provider: 'spawn' })
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent(parentId))
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      const seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, `host-${parent.id}`, [postId], 'wake'), 'board')
+      await waitFor(() => agents.store.has(childId), 5000, 'post cold-resumed')
+      const post = agents.store.get(childId)
+      const { ctx: childCtx, key } = agents.childContexts[0]
+      const memo = childCtx.tools.get('dept_memo_write', key)
+      assert.ok(memo, 'dept_memo_write is installed in the head own layer')
+
+      const result = await memo.execute(
+        { summary: 'Research department steered to a conclusion.', decisions: ['adopted vanilla'], constraints: ['keep records'], openItems: ['archive logs'] },
+        { agent: post, signal: new AbortController().signal }
+      )
+      assert.equal(result.member, postId)
+      assert.equal(result.memoPath, path.join(stateDir, 'journals', `${postId}.md`))
+      // Durable: the journal file exists with frontmatter + free-form body.
+      const content = await readFile(result.memoPath, 'utf8')
+      assert.match(content, /^author: research-head$/m)
+      assert.match(content, /Research department steered to a conclusion\./)
+      assert.match(content, /decisions: \["adopted vanilla"\]/)
+      assert.match(content, /open_items: \["archive logs"\]/)
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch G dept_nap is a quiet conclude marker that changes NO registry state (context retained)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const parentId = SessionId('session-parent-nap')
+    const childId = SessionId('session-post-nap')
+    const postId = 'research-head'
+    await seedPost(stateDir, { postId, childId, parentId, roomId: 'board', provider: 'spawn' })
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent(parentId))
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      const seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, `host-${parent.id}`, [postId], 'wake'), 'board')
+      await waitFor(() => agents.store.has(childId), 5000, 'post cold-resumed')
+      const post = agents.store.get(childId)
+      const { ctx: childCtx, key } = agents.childContexts[0]
+      const nap = childCtx.tools.get('dept_nap', key)
+      assert.ok(nap, 'dept_nap installed in the head own layer')
+
+      const result = await nap.execute({}, { agent: post, signal: new AbortController().signal })
+      assert.match(result.message, /napping \(context retained\)/)
+      // No registry mutation: same childId, no sleepEpoch, no previousChildId.
+      const posts = await readPosts(stateDir)
+      assert.equal(posts[postId].childId, childId, 'childId unchanged by nap')
+      assert.equal(posts[postId].sleepEpoch, undefined, 'nap sets no sleepEpoch (context retained, no reset)')
+      assert.equal(posts[postId].previousChildId, undefined, 'nap records no previous incarnation')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch G dept_sleep requires a saved journal (throws otherwise / rejects a host), then marks sleepEpoch durably', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const parentId = SessionId('session-parent-sleep')
+    const childId = SessionId('session-post-sleep')
+    const postId = 'research-head'
+    await seedPost(stateDir, { postId, childId, parentId, roomId: 'board', provider: 'spawn' })
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent(parentId))
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      const seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, `host-${parent.id}`, [postId], 'wake'), 'board')
+      await waitFor(() => agents.store.has(childId), 5000, 'post cold-resumed')
+      const post = agents.store.get(childId)
+      const { ctx: childCtx, key } = agents.childContexts[0]
+      const sleep = childCtx.tools.get('dept_sleep', key)
+      const memo = childCtx.tools.get('dept_memo_write', key)
+      const signal = new AbortController().signal
+      assert.ok(sleep, 'dept_sleep installed in the head own layer')
+
+      // No journal yet → loud rejection.
+      await assert.rejects(() => sleep.execute({}, { agent: post, signal }), /call dept_memo_write to save your memory first/, 'sleep without a journal rejects loudly')
+
+      // A host is not a sleepable post.
+      await assert.rejects(() => root.tools.get('dept_sleep').execute({}, { agent: parent, signal }), /department head \(registered post\), not the host/, 'dept_sleep rejects a host caller')
+
+      // Save the journal, then sleep.
+      await memo.execute({ summary: 'Memory saved before sleeping.' }, { agent: post, signal })
+      const result = await sleep.execute({}, { agent: post, signal })
+      assert.equal(result.member, postId)
+      assert.equal(result.memoPath, path.join(stateDir, 'journals', `${postId}.md`))
+      assert.ok(typeof result.sleepEpoch === 'number' && result.sleepEpoch > 0)
+
+      // Durable: posts.json carries the sleep-mark; dept_room_who surfaces it.
+      await waitFor(async () => (await readPosts(stateDir))[postId].sleepEpoch !== undefined, 5000, 'sleepEpoch persisted to posts.json')
+      const posts = await readPosts(stateDir)
+      assert.ok(typeof posts[postId].sleepEpoch === 'number', 'sleepEpoch persisted durably')
+      const who = await root.tools.get('dept_room_who').execute({ room: 'board' })
+      assert.equal(who.posts[0].sleeping, true, 'dept_room_who surfaces the sleeping head')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch G a slept head re-materializes fresh on its next wake: new spawn incarnation with journal-as-context, previousChildId recorded, sleepEpoch cleared', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const parentId = SessionId('session-parent-sleeprespawn')
+    const oldChildId = SessionId('session-post-sleeprespawn')
+    const postId = 'research-head'
+    const journalText = 'RESPAWN-MEMORY: the research department settled on vanilla; carry this forward.'
+    await seedPost(stateDir, { postId, childId: oldChildId, parentId, roomId: 'board', provider: 'spawn', sleepEpoch: 1700000000000 })
+    await seedJournal(stateDir, postId, journalText)
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent(parentId))
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      const seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, `host-${parent.id}`, [postId], 'wake'), 'board')
+
+      // The respawn lands asynchronously: wait for a NEW childId to be registered.
+      await waitFor(async () => {
+        const posts = await readPosts(stateDir)
+        return posts[postId].childId !== oldChildId
+      }, 5000, 'slept head re-registered under a fresh childId')
+      const posts = await readPosts(stateDir)
+      const newChildId = posts[postId].childId
+      assert.notEqual(newChildId, oldChildId, 'a fresh incarnation childId replaced the old one')
+      assert.equal(posts[postId].sleepEpoch, undefined, 'sleepEpoch cleared after the respawn')
+      assert.equal(posts[postId].previousChildId, oldChildId, 'previous incarnation recorded honestly for trace')
+      await waitFor(() => agents.store.has(newChildId), 5000, 'fresh incarnation materialized')
+
+      // The fresh head received its journal as long-term memory (deployment
+      // context). inbox[0] is the initial head prompt; inbox[1] is the
+      // journal-as-memory deployment followup.
+      const fresh = agents.store.get(newChildId)
+      await waitFor(() => fresh.inboxMessages.length >= 2, 5000, 'fresh incarnation received its memo context')
+      const deploy = fresh.inboxMessages[1]
+      assert.match(deploy.content[0].text, /long-term memory/, 'memory is identified as the fresh head\u2019s long-term memory')
+      assert.match(deploy.content[0].text, /RESPAWN-MEMORY:/, 'journal is loaded as the fresh incarnation\'s memory')
+
+      // The OLD dormant continuable was never resumed by the relay.
+      assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === oldChildId).length, 0, 'the old continuable was NOT resumed')
+
+      // The new incarnation wakes normally thereafter: a later addressed message
+      // (sleepEpoch now cleared) resumes THIS fresh child via the normal relay
+      // followup — not another respawn.
+      const wakeSeq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(wakeSeq, `host-${parent.id}`, [postId], 'second-wake'), 'board')
+      await waitFor(() => fresh.inboxMessages.length >= 3, 5000, 'fresh head woken normally on a later message')
+      assert.equal(fresh.inboxMessages.at(-1).source.kind, 'coordinator', 'later wake uses the normal relay path')
+      assert.doesNotMatch(fresh.inboxMessages.at(-1).content[0].text, /long-term memory/, 'later wake is a pointer-only normal relay, not another respawn')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch G fix: a failed journal delivery leaves the OLD child + sleepEpoch intact (a retry re-spawns) and rethrows — the memo is never lost', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const parentId = SessionId('session-parent-sleepretry')
+    const oldChildId = SessionId('session-post-sleepretry')
+    const postId = 'research-head'
+    const journalText = 'RETRY-MEMORY: the roadmap was reprioritized; carry it forward.'
+    await seedPost(stateDir, { postId, childId: oldChildId, parentId, roomId: 'board', provider: 'spawn', sleepEpoch: 1700000000000 })
+    await seedJournal(stateDir, postId, journalText)
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent(parentId))
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+
+      // Spy the journal-delivery followup: reject it on the FIRST respawn attempt
+      // only. The delivery is distinguished by its "long-term memory" content.
+      const originalFollowup = root.subagents.followup.bind(root.subagents)
+      let failJournal = true
+      const journalDeliveries = []
+      root.subagents.followup = (parentAgent, childId, content, options) => {
+        const text = content?.[0]?.text ?? ''
+        if (text.includes('long-term memory')) {
+          journalDeliveries.push(text)
+          if (failJournal) return Promise.reject(new Error('journal-delivery-failed'))
+        }
+        return originalFollowup(parentAgent, childId, content, options)
+      }
+
+      // (a) Wake 1 — the journal delivery is attempted FIRST (the memo is the
+      // critical step) and REJECTS. Because the reorder defers ALL registry
+      // mutation until after the delivery succeeds, the failure is not lost into
+      // a committed state — nothing was committed (asserted in (b)), so a later
+      // wake retries the respawn. (Asserting on the spy records the delivery
+      // attempt + rejection; a detached rethrow would surface only as a Node
+      // unhandledRejection, which the test runner treats as a fatal, so the
+      // retry-safety guarantee lives in the reorder + the assertions below.)
+      //
+      // The plugin writes posts.json fire-and-forget (registerEntry -> persistPosts
+      // is an un-awaited writeFile), so a read can catch the file mid-truncate.
+      // Poll via a retry-on-parse-error read rather than the raw readPosts helper.
+      const readPostsSettled = async () => {
+        let lastErr
+        for (let i = 0; i < 200; i++) {
+          try {
+            return await readPosts(stateDir)
+          } catch (err) {
+            lastErr = err
+            await new Promise((resolve) => setTimeout(resolve, 25))
+          }
+        }
+        throw lastErr
+      }
+      const seq1 = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq1, `host-${parent.id}`, [postId], 'wake-1'), 'board')
+      await waitFor(() => journalDeliveries.length >= 1, 5000, 'the journal delivery was attempted on the failed wake')
+      assert.match(journalDeliveries[0], /RETRY-MEMORY:/, 'the memo is what was being delivered (delivered before any commit)')
+      assert.ok(failJournal, 'journal delivery was configured to reject on this wake')
+
+      // (b) Nothing was committed: the registry STILL points at the OLD child with
+      // sleepEpoch STILL SET, so a subsequent wake would retry the respawn.
+      let posts = await readPostsSettled()
+      assert.equal(posts[postId].childId, oldChildId, 'registry still points at the OLD childId after a failed delivery')
+      assert.equal(posts[postId].sleepEpoch, 1700000000000, 'sleepEpoch STILL SET (a retry would respawn)')
+      assert.equal(posts[postId].previousChildId, undefined, 'no previousChildId recorded on a failed respawn')
+
+      // (c) Retry with the delivery working: the next wake re-materializes fresh,
+      // clears the flag, and delivers the memo — no journal-less normal resume.
+      failJournal = false
+      const seq2 = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq2, `host-${parent.id}`, [postId], 'wake-2'), 'board')
+      await waitFor(async () => {
+        const p = await readPostsSettled()
+        return p[postId].childId !== oldChildId && p[postId].sleepEpoch === undefined
+      }, 5000, 'retry respawn succeeded: fresh child + flag cleared')
+      posts = await readPostsSettled()
+      const newChildId = posts[postId].childId
+      assert.notEqual(newChildId, oldChildId, 'a fresh incarnation childId was registered on the retry')
+      assert.equal(posts[postId].previousChildId, oldChildId, 'previous incarnation recorded on the retry')
+      await waitFor(() => agents.store.has(newChildId), 5000, 'fresh incarnation materialized on the retry')
+      const fresh = agents.store.get(newChildId)
+      await waitFor(() => fresh.inboxMessages.length >= 2, 5000, 'fresh incarnation received its memo on the retry')
+      assert.match(fresh.inboxMessages[1].content[0].text, /RETRY-MEMORY:/, 'the journal was delivered on the retry (memo not lost)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch G regression: a head that never slept wakes via the normal resume path (no respawn, no journal, childId unchanged)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const parentId = SessionId('session-parent-regress')
+    const childId = SessionId('session-post-regress')
+    const postId = 'research-head'
+    await seedPost(stateDir, { postId, childId, parentId, roomId: 'board', provider: 'spawn' })
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const parent = agents.put(fakeParentAgent(parentId))
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      const seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, `host-${parent.id}`, [postId], 'question'), 'board')
+      await waitFor(() => agents.store.has(childId), 5000, 'post cold-resumed under its seeded childId')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts[postId].childId, childId, 'childId unchanged (normal resume)')
+      assert.equal(posts[postId].sleepEpoch, undefined, 'no sleep-mark on a never-slept head')
+      assert.equal(posts[postId].previousChildId, undefined, 'no previous incarnation recorded')
+      const post = agents.store.get(childId)
+      await waitFor(() => post.inboxMessages.length >= 1, 5000, 'post woken via normal relay followup')
+      assert.equal(post.inboxMessages.at(-1).source.kind, 'coordinator', 'post wake keeps the coordinator/relay source')
     } finally {
       await dispose()
     }

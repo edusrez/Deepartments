@@ -8,8 +8,13 @@
 // as PERMANENT, MINIMAL-CONTEXT spawn posts (provider 'spawn', persona = role,
 // lean `toolFilter: { allow: [] }`) — long-lived employees, not Asistente
 // clones — with an official spatial-deployment context delivery and a minimal
-// `dept_post_retire` cleanup affordance. The full nap/sleep lifecycle journal
-// is Batch G and is NOT implemented here.
+// `dept_post_retire` cleanup affordance. Batch G adds the nap/sleep lifecycle:
+// a head NAPS (siesta) by simply concluding as an inactive-but-resumable
+// continuable (a no-op dept_nap marks the intent), or SLEEPS (dormir) by
+// persisting its long-term memory to a journal (dept_memo_write) and marking
+// itself (dept_sleep → sleepEpoch) so the next wake re-materializes a FRESH
+// incarnation with the journal as its deployment context (context reset +
+// reload memory), recording the previous childId for honest trace.
 //
 // Mechanics (per .dsh/reports/explore-deep/2026-08-19-host-board-channel.md,
 // ...-lateral-assistant-addressing.md, ...-minimal-context-resident-posts.md):
@@ -146,6 +151,15 @@ interface PostEntry {
   parentId: string
   roomId: string
   provider: string
+  /** Batch G: set when the head SLEPT (memoized + marked). On the next wake the
+   * relay re-materializes a FRESH incarnation (context reset + journal reload)
+   * instead of resuming the old continuable; cleared once the respawn lands.
+   * Absent/undefined = never slept (a normal resumable nap). */
+  sleepEpoch?: number
+  /** Batch G: the childId of the PREVIOUS incarnation (recording where a slept
+   * head's old session lives in the DSH store), kept so settlement/trace stays
+   * honest. Absent = first incarnation. */
+  previousChildId?: string
 }
 
 /** One durable host registry entry (hostId → host session in a room). */
@@ -171,6 +185,9 @@ interface PostRow {
   childId: string
   parentId: string
   parentLive: boolean
+  /** Batch G: whether the post is currently SLEEPING (sleepEpoch set — it will
+   * be re-materialized fresh instead of resumed on its next wake). */
+  sleeping: boolean
 }
 
 /** One host row in dept_room_who output. */
@@ -304,7 +321,18 @@ export function applyInvoke(ctx: Context, config: Config) {
   // Fire-and-forget persistence of the post registry (callers never await it).
   const persistPosts = (): void => {
     const data: Record<string, Omit<PostEntry, 'postId'>> = {}
-    for (const entry of byPost.values()) data[entry.postId] = { childId: entry.childId, parentId: entry.parentId, roomId: entry.roomId, provider: entry.provider }
+    for (const entry of byPost.values()) {
+      data[entry.postId] = {
+        childId: entry.childId,
+        parentId: entry.parentId,
+        roomId: entry.roomId,
+        provider: entry.provider,
+        // Batch G: persist the optional sleep lifecycle fields only when set
+        // (backward-compatible: absent = never slept / no previous incarnation).
+        ...(entry.sleepEpoch !== void 0 ? { sleepEpoch: entry.sleepEpoch } : {}),
+        ...(entry.previousChildId !== void 0 ? { previousChildId: entry.previousChildId } : {})
+      }
+    }
     writeFile(postsPath, JSON.stringify(data, null, 2), 'utf8').catch(
       (error: unknown) => { ctx.logger.warn(`[deepartments] posts.json write failed: ${error instanceof Error ? error.message : String(error)}`) }
     )
@@ -575,9 +603,11 @@ export function applyInvoke(ctx: Context, config: Config) {
   // surface (bash/write/subagent/edit/web_fetch/...) while the own-layer board
   // tools (dept_room_*) survive — a restriction never filters a scope's OWN
   // layer (dsh-tools view). A head is registered once and REUSED: materialization
-  // is idempotent by postId (already-present → skip). The full nap/sleep
-  // lifecycle journal is Batch G and is NOT implemented here — a head simply
-  // concludes turns as an inactive-but-resumable resident.
+  // is idempotent by postId (already-present → skip). The nap/sleep lifecycle
+  // (Batch G): a head concludes turns as an inactive-but-resumable resident
+  // (nap), or, when its task ends or its context saturates, persists a journal
+  // (dept_memo_write) and sleeps (dept_sleep) so the next wake re-materializes it
+  // fresh with the journal as memory.
   //
   // Documented parent choice: a spawn child needs a LIVE parent so it can
   // settle/report (the subagent-settled notice travels to the parent), so a
@@ -601,9 +631,13 @@ export function applyInvoke(ctx: Context, config: Config) {
   type LiveAgent = NonNullable<ReturnType<typeof pickLiveParent>>
 
   /** Minimal identity framing for a permanent head — NO mission (missions
-   * arrive later as addressed board messages). */
+   * arrive later as addressed board messages). Batch G adds the nap/sleep
+   * lifecycle guidance (model-facing, purely additive): idle → dept_nap (context
+   * retained); task complete or context near its limit → dept_memo_write to save
+   * your long-term memory to your journal, then dept_sleep to reset your context
+   * window (you are re-materialized fresh with your journal on the next wake). */
   const headPrompt = (postId: string): string =>
-    `You are "${postId}", a permanent department head acting on your role. The board is your channel: read addressed messages with dept_room_read and reply with dept_room_write. Verify your identity and roster with dept_whereami and dept_room_who.`
+    `You are "${postId}", a permanent department head acting on your role. The board is your channel: read addressed messages with dept_room_read and reply with dept_room_write. Verify your identity and roster with dept_whereami and dept_room_who. You are permanent: when idle, conclude with dept_nap (your context is retained; you will be woken when an addressed message arrives). When a task concludes or your context window approaches its limit, write dept_memo_write to save your memory to your journal, then conclude with dept_sleep — on your next wake you will be re-materialized fresh with your journal as your long-term memory.`
 
   /** Official spatial-deployment context (no mission) for a freshly spawned head. */
   const deploymentContext = (parent: LiveAgent, postId: string, roomId: string): string => {
@@ -658,6 +692,118 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  // --- Batch G: the journal (long-term memory) + sleep lifecycle ---------------
+  // A permanent head CHOOSES to persist its memory before sleeping: it writes an
+  // explicit agent-authored memo to `<stateDir>/journals/<memberId>.md`
+  // (dept_memo_write), then calls dept_sleep to mark the post and reset its
+  // context window. On the next wake the relay re-materializes a FRESH
+  // incarnation with the journal loaded as its deployment context. This is a
+  // dedicated affordance and deliberately does NOT reuse dept_witness_write
+  // (the owner's "guardado de memoria en un status o log del diario" is a
+  // head-authored handoff note, not the relevo witness).
+
+  /** Durable path of a post's long-term memory journal. */
+  const journalPathFor = (memberId: string): string => path.join(config.stateDir, 'journals', `${memberId}.md`)
+
+  /** Write the journal file (author/timestamp/board_cursor frontmatter + runs of
+   * decisions/constraints/openItems + the free-form summary body). Returns the
+   * durable memo path. */
+  const writeJournal = async (memberId: string, roomId: string, summary: string, decisions: string[], constraints: string[], openItems: string[]): Promise<string> => {
+    const cursor = memberCursors.get(memberId)
+    const content = [
+      '---',
+      `author: ${memberId}`,
+      `room: ${roomId}`,
+      `timestamp: ${new Date().toISOString()}`,
+      `board_cursor: ${cursor?.lastMessageId ?? 'none'}`,
+      `decisions: ${yamlList(decisions)}`,
+      `constraints: ${yamlList(constraints)}`,
+      `open_items: ${yamlList(openItems)}`,
+      '---',
+      '',
+      summary,
+      ''
+    ].join('\n')
+    const memoPath = journalPathFor(memberId)
+    await mkdir(path.dirname(memoPath), { recursive: true })
+    await writeFile(memoPath, content, 'utf8')
+    return memoPath
+  }
+
+  /** Read a post's journal (undefined when absent). */
+  const readJournal = async (memberId: string): Promise<string | undefined> => {
+    try {
+      return await readFile(journalPathFor(memberId), 'utf8')
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    }
+  }
+
+  /** The configured coordinator (for persona/agentOptions) of a postId, if any.
+   * Not every resident post maps to a configured department (a postId is usually
+   * a coordinator, but the lifecycle should not hard-depend on one). */
+  const coordinatorForPost = (postId: string): CoordinatorConfig | undefined => {
+    for (const department of config.org.departments) {
+      if (department.coordinator?.postId === postId) return department.coordinator
+    }
+    return undefined
+  }
+
+  // Batch G — the "new incarnation reloads its memory" path. A post whose
+  // sleepEpoch is set (it slept: memoized + marked) is NOT woken by resuming the
+  // OLD continuable child; instead a FRESH spawn incarnation is started under the
+  // SAME postId (persona = role, lean toolFilter) with the journal delivered as
+  // its deployment context, the OLD childId retired from the active map but
+  // recorded as previousChildId, and the flag cleared so the new incarnation
+  // wakes normally thereafter. ORDERING (Batch G fix): deliver the journal to
+  // the FRESH child FIRST and only then commit the flag-clear/registry-repoint —
+  // so a delivery failure can never be lost. If the read, the spawn, or the
+  // journal delivery throws, the OLD child stays in the registry with sleepEpoch
+  // STILL SET and the exception propagates (fail loud), so the next wake retries
+  // the respawn (the memo is not dropped). TRADEOFF (documented): the old
+  // incarnation's session must remain in the DSH store (there is no destroy API)
+  // but is never woken again; the registry points only at the new childId.
+  const respawnAsleepPost = async (entry: PostEntry, roomId: string, parentAgent: LiveAgent): Promise<void> => {
+    const coordinator = coordinatorForPost(entry.postId)
+    // 1. Read the journal FIRST (may throw — nothing has been committed yet, so
+    //    a failure here leaves the OLD child + sleepEpoch intact for a retry).
+    const journal = await readJournal(entry.postId) ?? '(no journal found)'
+    const hostId = hostForSession.get(parentAgent.id)
+    const content = `You woke from sleep (context reset): you are the re-materialized department head "${entry.postId}" in room "${roomId}". Your author-saved long-term memory (journal) — read it and resume your department's work:\n\n--- journal ---\n${journal}\n--- end journal ---\n\nAddress the Asistente host as "${hostId ?? 'host-<sessionId>'}" and read addressed messages with dept_room_read.`
+    const source = { kind: 'coordinator', form: 'relay', senderSessionId: SessionId(parentAgent.id) } as const
+
+    // 2. Start the FRESH spawn child, then DELIVER the journal to it — the
+    //    delivery is the CRITICAL step. Nothing below runs until it succeeds.
+    const spawned = await subagents!.startContinuable({
+      provider: 'spawn',
+      label: entry.postId,
+      request: {
+        prompt: [{ type: 'text', text: headPrompt(entry.postId) }] as const,
+        parent: parentAgent,
+        persona: coordinator?.role ?? entry.postId,
+        toolFilter: { allow: [] },
+        ...(coordinator?.agentOptions !== void 0 ? { agentOptions: coordinator.agentOptions } : {})
+      },
+      signal: detachedSignal()
+    })
+    const newChildId = spawned.childId as string
+    // Idempotency guard: a concurrent (or re-entrant) respawn may have landed
+    // first — if the registry no longer points at the OLD childId, bail and
+    // leave the already-fresh incarnation in place.
+    const current = byPost.get(entry.postId)
+    if (current === void 0 || current.childId !== entry.childId) return
+    await subagents!.followup(parentAgent, SessionId(newChildId), [{ type: 'text', text: content } as const], { source, signal: detachedSignal() })
+
+    // 3. ONLY after the memo has been delivered: retire the old child, repoint
+    //    the registry at the fresh child, clear the sleep flag, and persist.
+    //    If any of steps 1-2 threw, we never reach here, so the OLD child and
+    //    its sleepEpoch remain in place and the next wake retries the respawn.
+    byChild.delete(entry.childId)
+    const previousChildId = entry.childId
+    registerEntry({ ...entry, childId: newChildId, parentId: parentAgent.id, previousChildId, sleepEpoch: undefined })
+  }
+
   // Best-effort boot attempt (usually defers: no live host at boot). The
   // primary trigger is the lazy ensureHost join (below).
   void hostsLoaded.then(() => { materializeHeads() })
@@ -703,6 +849,27 @@ export function applyInvoke(ctx: Context, config: Config) {
         const parentAgent = agents.get(SessionId(entry.parentId))
         if (parentAgent === void 0) {
           ctx.logger.warn(`[deepartments] wake skipped for "${member}": parent session "${entry.parentId}" is not live (the relay needs the live shared parent — rc.6 limitation)`)
+          continue
+        }
+        // Batch G — a post that SLEPT (sleepEpoch set): do NOT resume the OLD
+        // continuable child; start a FRESH incarnation with the journal loaded
+        // as its memory (context reset + reload memory). The flag is cleared
+        // inside the respawn so the new incarnation wakes normally thereafter.
+        // This reset applies regardless of process (the flag is durable in
+        // posts.json and loaded at boot), covering a cold boot between the
+        // sleep-mark and this wake.
+        if (entry.sleepEpoch !== void 0) {
+          // The respawn is fire-and-forget from the relay's perspective (the wake
+          // is a detached board-write side effect). respawnAsleepPost's reorder
+          // guarantees that on any read/spawn/delivery failure NOTHING has been
+          // committed — the OLD child with sleepEpoch STILL SET stays in the
+          // registry — so a later wake retries the respawn and the memo is never
+          // lost. A detached rethrow here would surface only as a Node
+          // unhandledRejection (the test runner treats that as a fatal), so we
+          // log loud instead; the retry-safety guarantee lives in the reorder.
+          void respawnAsleepPost(entry, roomId, parentAgent).catch((error: unknown) => {
+            ctx.logger.warn(`[deepartments] sleep-respawn for "${member}" failed (old child + sleepEpoch retained for retry): ${error instanceof Error ? error.message : String(error)}`)
+          })
           continue
         }
         const senderSession = byPost.get(record.from)?.childId ?? hosts.get(record.from)?.sessionId ?? record.from
@@ -948,7 +1115,8 @@ export function applyInvoke(ctx: Context, config: Config) {
                 postId: { type: 'string', required: true },
                 childId: { type: 'string', required: true },
                 parentId: { type: 'string', required: true },
-                parentLive: { type: 'boolean', required: true }
+                parentLive: { type: 'boolean', required: true },
+                sleeping: { type: 'boolean', required: true }
               }
             }
           },
@@ -970,7 +1138,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       },
       render: (_args, value) => {
         const memberLine = value.members.length === 0 ? '  (none configured)' : value.members.map((member) => `  - ${member}`).join('\n')
-        const postLines = value.posts.map((post) => `  - ${post.postId}${post.parentLive ? ' (live)' : ' (parent offline)'}`)
+        const postLines = value.posts.map((post) => `  - ${post.postId}${post.parentLive ? ' (live)' : ' (parent offline)'}${post.sleeping ? ' (sleeping)' : ''}`)
         const postBlock = postLines.length === 0 ? '  (no registered posts)' : postLines.join('\n')
         const hostLines = value.hosts.map((host) => `  - ${host.hostId} (session ${host.sessionId}, ${host.sessionLive ? 'live' : 'not live'})`)
         const hostBlock = hostLines.length === 0 ? '  (no registered hosts)' : hostLines.join('\n')
@@ -991,7 +1159,8 @@ export function applyInvoke(ctx: Context, config: Config) {
           postId: entry.postId,
           childId: entry.childId,
           parentId: entry.parentId,
-          parentLive
+          parentLive,
+          sleeping: entry.sleepEpoch !== void 0
         })
       }
       const hostsInRoom: HostRow[] = []
@@ -1047,7 +1216,8 @@ export function applyInvoke(ctx: Context, config: Config) {
                     postId: { type: 'string', required: true },
                     childId: { type: 'string', required: true },
                     parentId: { type: 'string', required: true },
-                    parentLive: { type: 'boolean', required: true }
+                    parentLive: { type: 'boolean', required: true },
+                    sleeping: { type: 'boolean', required: true }
                   }
                 }
               }
@@ -1104,7 +1274,8 @@ export function applyInvoke(ctx: Context, config: Config) {
           postId: candidate.postId,
           childId: candidate.childId,
           parentId: candidate.parentId,
-          parentLive
+          parentLive,
+          sleeping: candidate.sleepEpoch !== void 0
         })
       }
       return {
@@ -1122,7 +1293,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   const globalRetire = ctx.tools.register(defineTool({
     name: 'dept_post_retire',
-    description: 'Retire a registered board post cleanly: post a withdrawal note in its room (addressed to the post), then unregister it from the post/child registries and persist. Minimal retirement for department heads — no lifecycle journal (Batch G). Unknown postIds are rejected loudly.',
+    description: 'Retire a registered board post cleanly: post a withdrawal note in its room (addressed to the post), then unregister it from the post/child registries and persist. A hard unregister for permanent posts (the lifecycle journal in Batch G covers the gentler nap/sleep path). Unknown postIds are rejected loudly.',
     parameters: {
       postId: { type: 'string', required: true, description: 'The post id to retire (e.g. "research-head").' }
     },
@@ -1153,12 +1324,110 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }))
 
+  // --- Batch G: memo (journal), nap (siesta), sleep (dormir) — host plane -----
+  // The owner's lifecycle model: department heads are PERMANENT agents that NAP
+  // (siesta — wait, keeping their context; the default concluded state is
+  // already an inactive-but-resumable continuable) or SLEEP (dormir — persist
+  // memory to a journal then reset the context window; a fresh incarnation
+  // reloads the journal on the next wake). dept_memo_write persists the head's
+  // long-term memory to its journal; dept_nap is the model-facing "I am napping"
+  // conclude marker (context retained, no reset); dept_sleep requires a prior
+  // memo, marks the post (sleepEpoch), and the relay re-materializes it fresh.
+
+  const globalMemo = ctx.tools.register(defineTool({
+    name: 'dept_memo_write',
+    description: 'Write this department head\'s long-term memory to its journal: a durable, schema-constrained markdown memo at <stateDir>/journals/<memberId>.md (author/timestamp/board_cursor frontmatter + decisions/constraints/openItems + a free-form summary). Use it BEFORE sleeping to hand your memory to your future (re-materialized) self. Returns the durable memo path.',
+    parameters: {
+      summary: { type: 'string', required: true, description: 'The memo body: a summary of your state, conclusions, and what your next incarnation must know.' },
+      decisions: { type: 'array', items: { type: 'string' }, description: 'Decisions taken (optional).' },
+      constraints: { type: 'array', items: { type: 'string' }, description: 'Constraints your future self must respect (optional).' },
+      openItems: { type: 'array', items: { type: 'string' }, description: 'Open items for your future self (optional).' }
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          room: { type: 'string', required: true },
+          member: { type: 'string', required: true },
+          memoPath: { type: 'string', required: true }
+        }
+      },
+      render: (_args, value) => [{ type: 'text', text: `journal written: ${value.memoPath}` } as const]
+    },
+    async execute(args, exec): Promise<{ room: string; member: string; memoPath: string }> {
+      const agent = exec.agent
+      if (!agent) throw new Error('dept_memo_write requires a calling agent (exec.agent was undefined)')
+      const memberId = postIdForChild(agent.id as string) ?? 'unknown'
+      const entry = byPost.get(memberId)
+      const roomId = entry?.roomId ?? 'unknown'
+      const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [])
+      return { room: roomId, member: memberId, memoPath }
+    }
+  }))
+
+  const globalNap = ctx.tools.register(defineTool({
+    name: 'dept_nap',
+    description: 'Nap (siesta): conclude the current turn quietly with a "napping" notice. Your context is RETAINED (nothing is reset) — you are just waiting and will be woken when an addressed board message arrives. Use this as a first-class way to end an idle waiting turn so the logs distinguish "napping" from active work.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          message: { type: 'string', required: true }
+        }
+      },
+      render: (_args, value) => [{ type: 'text', text: value.message } as const]
+    },
+    async execute(): Promise<{ message: string }> {
+      return { message: 'napping (context retained); you will be woken when an addressed message arrives.' }
+    }
+  }))
+
+  const globalSleep = ctx.tools.register(defineTool({
+    name: 'dept_sleep',
+    description: 'Sleep (dormir): persist your memory to your journal (dept_memo_write MUST be called first — this is enforced) and mark yourself for a context RESET. Conclude the turn after calling this; on your NEXT wake you will be re-materialized as a fresh incarnation with your journal loaded as your long-term memory. Your previous session is retired from the active map (recorded as previousChildId) and never woken again. Rejects loudly if no journal has been saved.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          room: { type: 'string', required: true },
+          member: { type: 'string', required: true },
+          memoPath: { type: 'string', required: true },
+          sleepEpoch: { type: 'number', required: true }
+        }
+      },
+      render: (_args, value) => [{ type: 'text', text: `sleeping: ${value.member} marked for context reset (epoch ${value.sleepEpoch}); journal: ${value.memoPath}` } as const]
+    },
+    async execute(_args, exec): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }> {
+      const agent = exec.agent
+      if (!agent) throw new Error('dept_sleep requires a calling agent (exec.agent was undefined)')
+      const memberId = postIdForChild(agent.id as string)
+      if (memberId === undefined) throw new Error('[deepartments] dept_sleep is for a department head (registered post), not the host')
+      const entry = byPost.get(memberId)
+      if (entry === void 0) throw new Error(`[deepartments] dept_sleep: "${memberId}" is not a registered post`)
+      const journal = await readJournal(memberId)
+      if (journal === void 0 || journal.trim() === '') {
+        throw new Error('[deepartments] dept_sleep requires a saved journal — call dept_memo_write to save your memory first')
+      }
+      entry.sleepEpoch = Date.now()
+      persistPosts()
+      return { room: entry.roomId, member: memberId, memoPath: journalPathFor(memberId), sleepEpoch: entry.sleepEpoch }
+    }
+  }))
+
   ctx.effect(() => () => {
     globalRead()
     globalWrite()
     globalWho()
     globalWhereami()
     globalRetire()
+    globalMemo()
+    globalNap()
+    globalSleep()
   }, 'deepartments: host-plane board tools')
 
   // --- child toolset (installed into EVERY continuable child — own layer, so
@@ -1349,7 +1618,8 @@ export function applyInvoke(ctx: Context, config: Config) {
                     postId: { type: 'string', required: true },
                     childId: { type: 'string', required: true },
                     parentId: { type: 'string', required: true },
-                    parentLive: { type: 'boolean', required: true }
+                    parentLive: { type: 'boolean', required: true },
+                    sleeping: { type: 'boolean', required: true }
                   }
                 }
               },
@@ -1371,7 +1641,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           },
           render: (_args, value) => {
             const memberLine = value.members.length === 0 ? '  (none configured)' : value.members.map((member) => `  - ${member}`).join('\n')
-            const postLines = value.posts.map((post) => `  - ${post.postId}${post.parentLive ? ' (live)' : ' (parent offline)'}`)
+            const postLines = value.posts.map((post) => `  - ${post.postId}${post.parentLive ? ' (live)' : ' (parent offline)'}${post.sleeping ? ' (sleeping)' : ''}`)
             const postBlock = postLines.length === 0 ? '  (no registered posts)' : postLines.join('\n')
             const hostLines = value.hosts.map((host) => `  - ${host.hostId} (session ${host.sessionId}, ${host.sessionLive ? 'live' : 'not live'})`)
             const hostBlock = hostLines.length === 0 ? '  (no registered hosts)' : hostLines.join('\n')
@@ -1392,7 +1662,8 @@ export function applyInvoke(ctx: Context, config: Config) {
               postId: entry.postId,
               childId: entry.childId,
               parentId: entry.parentId,
-              parentLive
+              parentLive,
+              sleeping: entry.sleepEpoch !== void 0
             })
           }
           const hostsInRoom: HostRow[] = []
@@ -1447,7 +1718,8 @@ export function applyInvoke(ctx: Context, config: Config) {
                         postId: { type: 'string', required: true },
                         childId: { type: 'string', required: true },
                         parentId: { type: 'string', required: true },
-                        parentLive: { type: 'boolean', required: true }
+                        parentLive: { type: 'boolean', required: true },
+                        sleeping: { type: 'boolean', required: true }
                       }
                     }
                   }
@@ -1501,7 +1773,8 @@ export function applyInvoke(ctx: Context, config: Config) {
               postId: candidate.postId,
               childId: candidate.childId,
               parentId: candidate.parentId,
-              parentLive
+              parentLive,
+              sleeping: candidate.sleepEpoch !== void 0
             })
           }
           return {
@@ -1517,12 +1790,104 @@ export function applyInvoke(ctx: Context, config: Config) {
         }
       }))
 
+      // --- Batch G lifecycle tools in the child own layer (same bodies as the
+      // host plane): memo (journal), nap (siesta), sleep (dormir). A lean
+      // toolFilter allow-list does not strip own-layer tools, so a permanent
+      // head sees them. ---
+      const disposeMemo = childCtx.tools.register(defineTool({
+        name: 'dept_memo_write',
+        description: 'Write this department head\'s long-term memory to its journal: a durable, schema-constrained markdown memo at <stateDir>/journals/<memberId>.md (author/timestamp/board_cursor frontmatter + decisions/constraints/openItems + a free-form summary). Use it BEFORE sleeping to hand your memory to your future (re-materialized) self. Returns the durable memo path.',
+        parameters: {
+          summary: { type: 'string', required: true, description: 'The memo body: a summary of your state, conclusions, and what your next incarnation must know.' },
+          decisions: { type: 'array', items: { type: 'string' }, description: 'Decisions taken (optional).' },
+          constraints: { type: 'array', items: { type: 'string' }, description: 'Constraints your future self must respect (optional).' },
+          openItems: { type: 'array', items: { type: 'string' }, description: 'Open items for your future self (optional).' }
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              room: { type: 'string', required: true },
+              member: { type: 'string', required: true },
+              memoPath: { type: 'string', required: true }
+            }
+          },
+          render: (_args, value) => [{ type: 'text', text: `journal written: ${value.memoPath}` } as const]
+        },
+        async execute(args, exec): Promise<{ room: string; member: string; memoPath: string }> {
+          const agent = exec.agent
+          if (!agent) throw new Error('dept_memo_write requires a calling agent (exec.agent was undefined)')
+          const memberId = postIdForChild(agent.id as string) ?? 'unknown'
+          const entry = byPost.get(memberId)
+          const roomId = entry?.roomId ?? 'unknown'
+          const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [])
+          return { room: roomId, member: memberId, memoPath }
+        }
+      }))
+
+      const disposeNap = childCtx.tools.register(defineTool({
+        name: 'dept_nap',
+        description: 'Nap (siesta): conclude the current turn quietly with a "napping" notice. Your context is RETAINED (nothing is reset) — you are just waiting and will be woken when an addressed board message arrives. Use this as a first-class way to end an idle waiting turn so the logs distinguish "napping" from active work.',
+        parameters: {},
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              message: { type: 'string', required: true }
+            }
+          },
+          render: (_args, value) => [{ type: 'text', text: value.message } as const]
+        },
+        async execute(): Promise<{ message: string }> {
+          return { message: 'napping (context retained); you will be woken when an addressed message arrives.' }
+        }
+      }))
+
+      const disposeSleep = childCtx.tools.register(defineTool({
+        name: 'dept_sleep',
+        description: 'Sleep (dormir): persist your memory to your journal (dept_memo_write MUST be called first — this is enforced) and mark yourself for a context RESET. Conclude the turn after calling this; on your NEXT wake you will be re-materialized as a fresh incarnation with your journal loaded as your long-term memory. Your previous session is retired from the active map (recorded as previousChildId) and never woken again. Rejects loudly if no journal has been saved.',
+        parameters: {},
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              room: { type: 'string', required: true },
+              member: { type: 'string', required: true },
+              memoPath: { type: 'string', required: true },
+              sleepEpoch: { type: 'number', required: true }
+            }
+          },
+          render: (_args, value) => [{ type: 'text', text: `sleeping: ${value.member} marked for context reset (epoch ${value.sleepEpoch}); journal: ${value.memoPath}` } as const]
+        },
+        async execute(_args, exec): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }> {
+          const agent = exec.agent
+          if (!agent) throw new Error('dept_sleep requires a calling agent (exec.agent was undefined)')
+          const memberId = postIdForChild(agent.id as string)
+          if (memberId === undefined) throw new Error('[deepartments] dept_sleep is for a department head (registered post), not the host')
+          const entry = byPost.get(memberId)
+          if (entry === void 0) throw new Error(`[deepartments] dept_sleep: "${memberId}" is not a registered post`)
+          const journal = await readJournal(memberId)
+          if (journal === void 0 || journal.trim() === '') {
+            throw new Error('[deepartments] dept_sleep requires a saved journal — call dept_memo_write to save your memory first')
+          }
+          entry.sleepEpoch = Date.now()
+          persistPosts()
+          return { room: entry.roomId, member: memberId, memoPath: journalPathFor(memberId), sleepEpoch: entry.sleepEpoch }
+        }
+      }))
+
       return () => {
         disposeRead()
         disposeWrite()
         disposeWitness()
         disposeWho()
         disposeWhereami()
+        disposeMemo()
+        disposeNap()
+        disposeSleep()
       }
     })
   }
