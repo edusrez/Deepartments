@@ -5,6 +5,7 @@
 node_modules/
 dist/
 lib/
+client/
 *.tgz
 
 # OS

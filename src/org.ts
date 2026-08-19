@@ -51,6 +51,9 @@ export interface RoomConfig {
 export interface CoordinatorConfig {
   postId: string
   role: string
+  /** Optional display title (e.g. "Head of Research") for the client sidebar /
+   * agent-row presentation. Falls back to `role`, then `postId`. */
+  title?: string
   provider?: string
   agentOptions?: { provider?: string; model?: string; maxTokens?: number }
 }
@@ -107,13 +110,14 @@ export const Config: z<any, any> = z.object({
       coordinator: z.object({
         postId: z.string().required(),
         role: z.string().default(''),
+        title: z.string().default(''),
         provider: z.string(),
         agentOptions: z.object({
           provider: z.string(),
           model: z.string(),
           maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
         }).default(void 0 as unknown as { provider: string; model: string; maxTokens: number })
-      }).default(void 0 as unknown as { postId: string; role: string; provider: string; agentOptions: { provider: string; model: string; maxTokens: number } })
+      }).default(void 0 as unknown as { postId: string; role: string; title: string; provider: string; agentOptions: { provider: string; model: string; maxTokens: number } })
     })).default([])
   }).required(),
   webfetch: z.object({

@@ -7,20 +7,30 @@
   "types": "lib/index.d.ts",
   "exports": {
     ".": "./lib/index.js",
-    "./subagent": "./lib/subagent.js"
+    "./subagent": "./lib/subagent.js",
+    "./client": "./client/client.js"
   },
   "files": [
     "lib",
+    "client",
     "cordis.patch.yml",
     "assets"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-connection"
+      ],
+      "platform": "web"
     }
   },
   "scripts": {
     "build": "tsc",
+    "build:client": "tsdown && node scripts/normalize-client-banner.mjs",
     "test": "node --test"
   },
   "peerDependencies": {
@@ -32,6 +42,9 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
+    "@deepseek-ai/dsh-client-connection": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-client-runtime": "0.1.0-rc.7",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.0-rc.7",
     "@deepseek-ai/dsh-web": "0.1.0-rc.7",
     "@deepseek-ai/dsh-scope": "0.1.0-rc.7",
     "@deepseek-ai/dsh-llm": "0.1.0-rc.7",
@@ -49,6 +62,9 @@
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.7",
     "@deepseek-ai/schemastery": "^3.18.1",
     "@types/node": "^22.0.0",
+    "@types/react": "~18.3.1",
+    "react": "^18.3.1",
+    "tsdown": "^0.22.14",
     "typescript": "^5.6.0",
     "zod": "^4.4.3"
   },

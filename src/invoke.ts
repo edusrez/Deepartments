@@ -110,6 +110,8 @@ import { emitRoomRecord, roomSessionId, setBoardRecordListener, setRoomCompactio
 import type { Config, CoordinatorConfig, RoomState } from './org.js'
 import { loadRecords, resolveBoardPath } from './board-store.js'
 import type { BoardRecord, MessagePayload } from './board-store.js'
+import { buildAgentRows } from './agents.js'
+import type { PostEntryLike } from './agents.js'
 
 /**
  * Message source for a board wake relayed to a HOST Asistente session. The
@@ -198,6 +200,23 @@ interface HostRow {
   /** Batch E: whether the host's agent session is LIVE right now (agents.get
    * defined). A cold-boot non-live host is listed truthfully with false. */
   sessionLive: boolean
+}
+
+/**
+ * Loose structural view of `ctx.connection` — the optional Host Connection
+ * service provided by the SEPARATE dsh-client-connection plugin (NOT present
+ * in headless profiles). Mirroring the existing `PersistenceLike` pattern in
+ * src/org.ts: we avoid a hard (peer) dependency on the client-connection
+ * package by declaring only the one surface the sidebar RPC registration needs.
+ */
+interface ConnectionLike {
+  rpc: {
+    handle(
+      channel: string,
+      handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>,
+      options: { authority: 'loopback' | 'trusted-host' }
+    ): () => Promise<void>
+  }
 }
 
 /** dept_whereami spatial-identity result. */
@@ -1446,6 +1465,99 @@ export function applyInvoke(ctx: Context, config: Config) {
     globalNap()
     globalSleep()
   }, 'deepartments: host-plane board tools')
+
+  // --- main-agents sidebar RPC (server half) ---------------------------------
+  // Serves agent-row status to the client sidebar over the `/deepartments`
+  // loopback channel. The pure row computation lives in src/agents.ts
+  // (buildAgentRows / computeHeadStatus — directly testable); this effect only
+  // wires it to the live registries + the board read model. `ctx.connection`
+  // comes from the SEPARATE dsh-client-connection plugin and is NOT present in
+  // headless profiles, so it is resolved OPTIONALLY via ctx.get('connection')
+  // — the same optional-service pattern as the agents/subagents accessors
+  // above (never added to inject, per the explore report seam).
+  const connection = ctx.get('connection') as ConnectionLike | undefined
+  if (connection !== void 0 && connection.rpc !== void 0) {
+    const disposeRpc = connection.rpc.handle('/deepartments', async (endpoint, payload) => {
+      try {
+        // Only the `agents` and its alias `list` endpoints exist. Anything else
+        // is a bad-request (the endpoint name is surfaced in the message; the
+        // closed RpcErrorDetailsMap['bad-request'] type carries `issues`, so a
+        // contextual details object is not representable — see the report).
+        if (endpoint !== 'agents' && endpoint !== 'list') {
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: 'unknown endpoint: ' + endpoint,
+              details: { issues: [] }
+            }
+          } as const
+        }
+        // Resolve the caller host member id (host-<sessionId>) from its
+        // sessionId. If the caller host is not (yet) registered in `hosts`,
+        // unread counts as 0 for all heads (nothing to count against).
+        let sessionId: string | undefined
+        if (typeof payload === 'object' && payload !== null) {
+          const raw = payload as { sessionId?: unknown }
+          if (typeof raw.sessionId === 'string') sessionId = raw.sessionId
+        }
+        let hostMemberId: string | undefined
+        if (sessionId !== undefined) {
+          for (const entry of hosts.values()) {
+            if (entry.sessionId === sessionId) { hostMemberId = entry.hostId; break }
+          }
+        }
+        // Board room read model: load the durable board records ONCE (the FILE
+        // is the cold source of truth and carries MessagePayload.ack, which the
+        // folded room projection deliberately omits). `loadRecords` and
+        // `resolveBoardPath` are the board-store accessors already in scope.
+        const boardRoom = config.org.rooms.find((room) => room.id === 'board')
+        const boardRecords = boardRoom === void 0 ? [] : await loadRecords(resolveBoardPath(config.stateDir, boardRoom.id))
+        // Unread addressed-to-host messages per head: board message with
+        // seq > cursor.lastMessageSeq AND from === postId AND (to is empty OR
+        // includes the caller host member id) AND payload.ack !== true —
+        // mirroring the TOC filter at dept_room_read (invoke.ts).
+        const unreadFor = (postId: string): number => {
+          if (hostMemberId === undefined || boardRoom === void 0) return 0
+          const cursor = memberCursors.get(hostMemberId)
+          const lastSeq = cursor === void 0 ? -1 : cursor.lastMessageSeq
+          let count = 0
+          for (const record of boardRecords) {
+            if (record.kind !== 'message') continue
+            if (record.seq <= lastSeq) continue
+            if (record.from !== postId) continue
+            if ((record.payload as MessagePayload).ack === true) continue
+            if (record.to.length > 0 && !record.to.includes(hostMemberId)) continue
+            count++
+          }
+          return count
+        }
+        const rows = buildAgentRows({
+          departments: config.org.departments,
+          posts: byPost as unknown as Map<string, PostEntryLike>,
+          agentRunning: (childId) => agents !== void 0 && agents.get(SessionId(childId))?.status === 'running',
+          parentLive: (parentId) => agents !== void 0 && agents.get(SessionId(parentId)) !== undefined,
+          unreadFor,
+          sessionId
+        })
+        return {
+          ok: true,
+          value: {
+            host: { id: 'asistente', name: 'Asistente', department: "User's Office" },
+            agents: rows
+          }
+        } as const
+      } catch (error) {
+        // Never throw across the RPC boundary — fold any internal failure into
+        // the `internal` error branch.
+        return {
+          ok: false,
+          error: { code: 'internal', message: String(error), details: {} }
+        } as const
+      }
+    }, { authority: 'loopback' })
+    ctx.effect(() => () => { void disposeRpc() }, 'deepartments: main-agents sidebar RPC channel')
+  }
 
   // --- child toolset (installed into EVERY continuable child — own layer, so
   // a lean toolFilter allow-list does not strip them; the same tool bodies as

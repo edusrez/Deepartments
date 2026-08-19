@@ -18,18 +18,36 @@
               members:
                 - asistente
                 - research-head
+                - programming-head
             - id: research
               name: Research department
               purpose: Research department room
               members:
                 - research-head
+            - id: programming
+              name: Internal Programming department
+              purpose: Internal Programming department room
+              members:
+                - programming-head
           departments:
             - id: research
-              name: Research
+              name: Research Department
               roomId: research
               coordinator:
                 postId: research-head
+                title: Head of Research
                 role: Research department head
+                provider: opencode-go
+                agentOptions:
+                  provider: opencode-go
+                  model: deepseek-v4-flash
+            - id: programming
+              name: Internal Programming Department
+              roomId: programming
+              coordinator:
+                postId: programming-head
+                title: Head of Internal Programming
+                role: Internal Programming department head
                 provider: opencode-go
                 agentOptions:
                   provider: opencode-go
