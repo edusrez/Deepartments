@@ -281,6 +281,9 @@ export function AgentList(props: AgentsOwner) {
   const [host, setHost] = useState<AgentsValue["host"] | null>(null);
   const [heads, setHeads] = useState<AgentHead[]>([]);
   const [snapshot, setSnapshot] = useState(() => sessionSnapshot());
+  // Session ids archived via workspace.archiveSession (still present in the
+  // sessions snapshot but should not appear as Assistant rows).
+  const [archivedSet, setArchivedSet] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let disposed = false;
@@ -301,15 +304,45 @@ export function AgentList(props: AgentsOwner) {
       if (!disposed) setSnapshot(sessionSnapshot());
     };
 
+    // Fetch archived session ids from the Host API workspace.list. The result
+    // carries archived session ids (top-level or per-item); we only need the
+    // archived set. Non-blocking: on failure keep the last known set.
+    const fetchArchived = async () => {
+      try {
+        const res = await fetch("/api/workspace.list", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ type: "client-request", rpcId: crypto.randomUUID(), method: "workspace.list", payload: {} }),
+        });
+        if (disposed) return;
+        if (!res.ok) return;
+        const json = await res.json();
+        if (disposed) return;
+        const value = (json && json.result && json.result.value) || (json && json.value);
+        const archived: string[] =
+          (value && Array.isArray(value.archivedSessionIds) && value.archivedSessionIds) ||
+          (value && Array.isArray(value.items)
+            ? value.items.flatMap((i: any) => (Array.isArray(i.archivedSessionIds) ? i.archivedSessionIds : []))
+            : []) ||
+          [];
+        setArchivedSet(new Set<string>(archived));
+      } catch {
+        // Keep last set; the next poll retries silently.
+      }
+    };
+
     fetchAgents();
     refreshSessions();
+    fetchArchived();
     const interval = window.setInterval(() => {
       fetchAgents();
       refreshSessions();
+      fetchArchived();
     }, 5000);
     const onFocus = () => {
       fetchAgents();
       refreshSessions();
+      fetchArchived();
     };
     window.addEventListener("focus", onFocus);
 
@@ -321,19 +354,19 @@ export function AgentList(props: AgentsOwner) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Assistant rows = non-blank host-origin sessions in host-list creation order.
-  // Filters:
+  // Assistant rows = non-blank, non-archived host-origin sessions in host-list
+  // creation order. Filters:
   //  - !s.blank   : server `blank` bit — "only show after the first message"
   //                 (a session disappears until it has content).
   //  - origin     : hide subagent child sessions (origin === 'subagent');
   //                 hosts carry no origin (undefined → kept). This hides the
   //                 builder/subagent children that are not Assistants.
-  // Archived(old) Assistants are not filtered here: the snapshot exposes no
-  // archived flag and adding a workspace.list fetch is out of scope; they are
-  // removed by archiving old sessions separately.
+  //  - archived   : hide session ids in `archivedSet` (from workspace.list),
+  //                 i.e. old Assistants archived via workspace.archiveSession.
   const byId = (snapshot && snapshot.byId) || {};
   const ids = snapshot && snapshot.ids;
-  const isAssistant = (s: any) => !!(s && !s.blank && s.origin !== 'subagent');
+  const isAssistant = (s: any) =>
+    !!(s && !s.blank && s.origin !== 'subagent' && !archivedSet.has(s.id || s.sessionId));
   const assistantRows: any[] = ids && ids.length
     ? ids.map((id: string) => byId[id]).filter(isAssistant)
     : Object.values(byId).filter(isAssistant);
