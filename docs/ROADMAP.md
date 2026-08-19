@@ -274,9 +274,31 @@ of the research — so no builder needs to re-research.)
   seq counter, boot compaction with mandatory cursor reset, dev-state
   clean), `72a86c4` (G: head lifecycle — dept_nap siesta keeps context,
   dept_memo_write journal, dept_sleep dormir resets context and respawns
-  fresh with journal-as-context; reviewer FAIL on respawn state-ordering
-  fixed with deliver-before-commit). Each batch: builder → reviewer → TIERED
-  ladder → commit. Final: build green, 51/51 tests, `ready` single-once (1
-  record/room), dev state clean, GUI restarted on the new bus. Next: live
-  test of the direct bus (Asistente↔heads↔Asistentes) and the nap/sleep
-  lifecycle.
+  fresh with the journal in its first-turn start prompt; reviewer FAIL on
+  respawn state-ordering fixed with deliver-before-commit). Each batch:
+  builder → reviewer → TIERED ladder → commit. Final: build green, 51/51
+  tests, `ready` single-once (1 record/room), dev state clean, GUI restarted
+  on the new bus. Next: live test of the direct bus
+  (Asistente↔heads↔Asistentes) and the nap/sleep lifecycle.
+
+- **2026-08-19** — **Batch G follow-up: the slept head's journal rides the
+  spawn START PROMPT (first-turn memory)**: the respawn path delivered the
+  journal as a SECOND turn (a post-start `subagents.followup`), so a
+  re-materialized head could answer its first wake before seeing its memory.
+  Fix: `respawnAsleepPost` builds the spawn start prompt as the neutral
+  `headPrompt(postId)` plus a sleep-resume section carrying the FULL journal
+  text, and passes it to `startContinuable` — the real manager submits that
+  prompt as the child's first inbox turn and resolves only after acceptance,
+  so the start IS the delivery and still precedes the registry commit
+  (read → build prompt → start → commit; on any failure the OLD child +
+  sleepEpoch stay set and the next wake retries the respawn). The post-start
+  journal followup is removed entirely; later wakes are pointer-only relays
+  that never re-carry journal text (tests assert this, secret-phrase
+  included). The fork-era lesson stands: the plain-user start prompt is
+  framed as the head's OWN authored memory (neutral head identity + persona
+  = role), never as a mission. Tests: the two Batch G lifecycle tests now
+  spy `startContinuable` (success: journal + secret phrase in `inbox[0]`
+  with source kind 'user', no separate followup; failure: rejected first
+  start leaves the registry untouched, retry succeeds). Verification: build
+  green, 35/35 invoke tests, 51/51 full suite, TIERED ladder green.
+  Committed as `c39de68`.
