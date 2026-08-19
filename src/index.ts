@@ -6,6 +6,7 @@ import type { Config } from './org.js'
 import { applyInvoke } from './invoke.js'
 import { applyWebFetch } from './webfetch.js'
 import type { WebFetchConfig } from './webfetch.js'
+import { applySettings } from './settings.js'
 export { Config } from './org.js'
 export type { WebFetchConfig } from './webfetch.js'
 
@@ -39,4 +40,9 @@ export function apply(ctx: Context, config: Config) {
   // WEB_BLOCKED + investigate hint). The web seam is resolved OPTIONALLY,
   // so this is a no-op in minimal compositions.
   applyWebFetch(ctx, config.webfetch ?? {})
+
+  // Settings namespace: a "Deepartments" tab in the DSH Settings UI with a
+  // switch that toggles the main-agents sidebar. Resolved OPTIONALLY, so this
+  // is a no-op on hosts without the settings provider.
+  applySettings(ctx, config)
 }
