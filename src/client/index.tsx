@@ -304,28 +304,21 @@ export function AgentList(props: AgentsOwner) {
       if (!disposed) setSnapshot(sessionSnapshot());
     };
 
-    // Fetch archived session ids from the Host API workspace.list. The result
-    // carries archived session ids (top-level or per-item); we only need the
-    // archived set. Non-blocking: on failure keep the last known set.
+    // Fetch archived session ids via the injected trusted-host RPC transport
+    // (ctx.connection.rpc) — the same rpc.call path used for agents/config
+    // above, not a raw fetch. The response envelopes { result.intent, value }
+    // where value.archivedSessionIds is top-level only. Non-blocking: on
+    // failure keep the last known set.
     const fetchArchived = async () => {
       try {
-        const res = await fetch("/api/workspace.list", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ type: "client-request", rpcId: crypto.randomUUID(), method: "workspace.list", payload: {} }),
-        });
-        if (disposed) return;
+        const res = await rpc.call("/api", "workspace.list", {});
         if (!res.ok) return;
-        const json = await res.json();
-        if (disposed) return;
-        const value = (json && json.result && json.result.value) || (json && json.value);
-        const archived: string[] =
-          (value && Array.isArray(value.archivedSessionIds) && value.archivedSessionIds) ||
-          (value && Array.isArray(value.items)
-            ? value.items.flatMap((i: any) => (Array.isArray(i.archivedSessionIds) ? i.archivedSessionIds : []))
-            : []) ||
-          [];
-        setArchivedSet(new Set<string>(archived));
+        const value = res.value as any;
+        const archived: string[] = Array.isArray(value?.archivedSessionIds) ? value.archivedSessionIds : [];
+        const next = new Set<string>(archived);
+        setArchivedSet((prev) =>
+          next.size !== prev.size || [...next].some((id) => !prev.has(id)) ? next : prev
+        );
       } catch {
         // Keep last set; the next poll retries silently.
       }
