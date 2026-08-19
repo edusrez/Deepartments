@@ -1859,12 +1859,12 @@ test('Batch G dept_sleep requires a saved journal (throws otherwise / rejects a 
   })
 })
 
-test('Batch G a slept head re-materializes fresh on its next wake: new spawn incarnation with journal-as-context, previousChildId recorded, sleepEpoch cleared', async () => {
+test('Batch G a slept head re-materializes fresh on its next wake: new spawn incarnation with journal in its FIRST-TURN start prompt, previousChildId recorded, sleepEpoch cleared', async () => {
   await withTempStateDir(async (stateDir) => {
     const parentId = SessionId('session-parent-sleeprespawn')
     const oldChildId = SessionId('session-post-sleeprespawn')
     const postId = 'research-head'
-    const journalText = 'RESPAWN-MEMORY: the research department settled on vanilla; carry this forward.'
+    const journalText = 'RESPAWN-MEMORY: the research department settled on vanilla; carry this forward. SECRET-PHRASE-respawn-v1'
     await seedPost(stateDir, { postId, childId: oldChildId, parentId, roomId: 'board', provider: 'spawn', sleepEpoch: 1700000000000 })
     await seedJournal(stateDir, postId, journalText)
     const { root, agents, dispose } = await bootPlugin(stateDir)
@@ -1872,6 +1872,17 @@ test('Batch G a slept head re-materializes fresh on its next wake: new spawn inc
       await waitForRooms(root)
       const parent = agents.put(fakeParentAgent(parentId))
       const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+
+      // Capture the spawn start: with the deliver-in-prompt contract the journal
+      // rides in the START PROMPT passed to startContinuable (the very first
+      // turn of the fresh child — no post-start journal followup exists).
+      const respawnStarts = []
+      const originalStart = root.subagents.startContinuable.bind(root.subagents)
+      root.subagents.startContinuable = async (spec) => {
+        respawnStarts.push(spec)
+        return originalStart(spec)
+      }
+
       const seq = await nextSeq(stateDir, 'board')
       await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, `host-${parent.id}`, [postId], 'wake'), 'board')
 
@@ -1887,38 +1898,52 @@ test('Batch G a slept head re-materializes fresh on its next wake: new spawn inc
       assert.equal(posts[postId].previousChildId, oldChildId, 'previous incarnation recorded honestly for trace')
       await waitFor(() => agents.store.has(newChildId), 5000, 'fresh incarnation materialized')
 
-      // The fresh head received its journal as long-term memory (deployment
-      // context). inbox[0] is the initial head prompt; inbox[1] is the
-      // journal-as-memory deployment followup.
+      // The spawn start prompt itself carries the FULL journal text (the
+      // deliver-in-prompt contract: the prompt passed to startContinuable).
+      assert.equal(respawnStarts.length, 1, 'exactly one respawn start (the slept head was not boot-spawned)')
+      const startPromptText = respawnStarts[0].request.prompt[0].text
+      assert.match(startPromptText, /permanent department head/, 'start prompt keeps the head identity framing')
+      assert.match(startPromptText, /long-term memory/, 'the sleep-resume section identifies the journal as long-term memory')
+      assert.match(startPromptText, /RESPAWN-MEMORY:/, 'the journal text is embedded in the spawn start prompt')
+      assert.match(startPromptText, /SECRET-PHRASE-respawn-v1/, 'the FULL journal text (secret phrase included) is in the start prompt')
+
+      // The fresh head received that same journal-carrying prompt as its
+      // FIRST-TURN inbox message (inbox[0]) — the first inference already has
+      // the memory, and there is NO separate journal followup (inbox length
+      // stays 1 until the later normal wake arrives below).
       const fresh = agents.store.get(newChildId)
-      await waitFor(() => fresh.inboxMessages.length >= 2, 5000, 'fresh incarnation received its memo context')
-      const deploy = fresh.inboxMessages[1]
-      assert.match(deploy.content[0].text, /long-term memory/, 'memory is identified as the fresh head\u2019s long-term memory')
-      assert.match(deploy.content[0].text, /RESPAWN-MEMORY:/, 'journal is loaded as the fresh incarnation\'s memory')
+      await waitFor(() => fresh.inboxMessages.length >= 1, 5000, 'fresh incarnation received its journal-carrying start prompt')
+      const start = fresh.inboxMessages[0]
+      assert.equal(start.source.kind, 'user', 'the start prompt is the initial user-role prompt, not a relay followup')
+      assert.match(start.content[0].text, /RESPAWN-MEMORY:/, 'journal is the FIRST-TURN content of the fresh incarnation')
+      assert.match(start.content[0].text, /SECRET-PHRASE-respawn-v1/, 'the full journal (secret phrase) is in the first-turn prompt')
+      assert.equal(fresh.inboxMessages.length, 1, 'no separate journal followup — the journal is the first-turn start prompt')
 
       // The OLD dormant continuable was never resumed by the relay.
       assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === oldChildId).length, 0, 'the old continuable was NOT resumed')
 
       // The new incarnation wakes normally thereafter: a later addressed message
       // (sleepEpoch now cleared) resumes THIS fresh child via the normal relay
-      // followup — not another respawn.
+      // followup — not another respawn, and carrying NO journal text.
       const wakeSeq = await nextSeq(stateDir, 'board')
       await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(wakeSeq, `host-${parent.id}`, [postId], 'second-wake'), 'board')
-      await waitFor(() => fresh.inboxMessages.length >= 3, 5000, 'fresh head woken normally on a later message')
+      await waitFor(() => fresh.inboxMessages.length >= 2, 5000, 'fresh head woken normally on a later message')
       assert.equal(fresh.inboxMessages.at(-1).source.kind, 'coordinator', 'later wake uses the normal relay path')
       assert.doesNotMatch(fresh.inboxMessages.at(-1).content[0].text, /long-term memory/, 'later wake is a pointer-only normal relay, not another respawn')
+      assert.doesNotMatch(fresh.inboxMessages.at(-1).content[0].text, /SECRET-PHRASE-respawn-v1/, 'the journal text is NOT re-delivered on a later wake (first-turn memory only)')
+      assert.equal(respawnStarts.length, 1, 'no second respawn on the later wake (flag cleared)')
     } finally {
       await dispose()
     }
   })
 })
 
-test('Batch G fix: a failed journal delivery leaves the OLD child + sleepEpoch intact (a retry re-spawns) and rethrows — the memo is never lost', async () => {
+test('Batch G fix: a failed respawn start (journal-carrying prompt not accepted) leaves the OLD child + sleepEpoch intact (a retry re-spawns) and rethrows — the memo is never lost', async () => {
   await withTempStateDir(async (stateDir) => {
     const parentId = SessionId('session-parent-sleepretry')
     const oldChildId = SessionId('session-post-sleepretry')
     const postId = 'research-head'
-    const journalText = 'RETRY-MEMORY: the roadmap was reprioritized; carry it forward.'
+    const journalText = 'RETRY-MEMORY: the roadmap was reprioritized; carry it forward. SECRET-PHRASE-retry-v1'
     await seedPost(stateDir, { postId, childId: oldChildId, parentId, roomId: 'board', provider: 'spawn', sleepEpoch: 1700000000000 })
     await seedJournal(stateDir, postId, journalText)
     const { root, agents, dispose } = await bootPlugin(stateDir)
@@ -1927,28 +1952,24 @@ test('Batch G fix: a failed journal delivery leaves the OLD child + sleepEpoch i
       const parent = agents.put(fakeParentAgent(parentId))
       const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
 
-      // Spy the journal-delivery followup: reject it on the FIRST respawn attempt
-      // only. The delivery is distinguished by its "long-term memory" content.
-      const originalFollowup = root.subagents.followup.bind(root.subagents)
-      let failJournal = true
-      const journalDeliveries = []
-      root.subagents.followup = (parentAgent, childId, content, options) => {
-        const text = content?.[0]?.text ?? ''
-        if (text.includes('long-term memory')) {
-          journalDeliveries.push(text)
-          if (failJournal) return Promise.reject(new Error('journal-delivery-failed'))
-        }
-        return originalFollowup(parentAgent, childId, content, options)
+      // Spy the respawn START: with the deliver-in-prompt contract the journal
+      // rides in the spawn START PROMPT (the delivery IS the start — there is no
+      // post-start journal followup to fail). Reject it on the FIRST respawn
+      // attempt only.
+      const originalStart = root.subagents.startContinuable.bind(root.subagents)
+      let failStart = true
+      const spawnStarts = []
+      root.subagents.startContinuable = async (spec) => {
+        spawnStarts.push(spec)
+        if (failStart) return Promise.reject(new Error('spawn-start-failed'))
+        return originalStart(spec)
       }
 
-      // (a) Wake 1 — the journal delivery is attempted FIRST (the memo is the
-      // critical step) and REJECTS. Because the reorder defers ALL registry
-      // mutation until after the delivery succeeds, the failure is not lost into
+      // (a) Wake 1 — the respawn start (with the journal-carrying prompt) is
+      // attempted FIRST and REJECTS. Because the reorder defers ALL registry
+      // mutation until after the start succeeds, the failure is not lost into
       // a committed state — nothing was committed (asserted in (b)), so a later
-      // wake retries the respawn. (Asserting on the spy records the delivery
-      // attempt + rejection; a detached rethrow would surface only as a Node
-      // unhandledRejection, which the test runner treats as a fatal, so the
-      // retry-safety guarantee lives in the reorder + the assertions below.)
+      // wake retries the respawn.
       //
       // The plugin writes posts.json fire-and-forget (registerEntry -> persistPosts
       // is an un-awaited writeFile), so a read can catch the file mid-truncate.
@@ -1967,20 +1988,23 @@ test('Batch G fix: a failed journal delivery leaves the OLD child + sleepEpoch i
       }
       const seq1 = await nextSeq(stateDir, 'board')
       await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq1, `host-${parent.id}`, [postId], 'wake-1'), 'board')
-      await waitFor(() => journalDeliveries.length >= 1, 5000, 'the journal delivery was attempted on the failed wake')
-      assert.match(journalDeliveries[0], /RETRY-MEMORY:/, 'the memo is what was being delivered (delivered before any commit)')
-      assert.ok(failJournal, 'journal delivery was configured to reject on this wake')
+      await waitFor(() => spawnStarts.length >= 1, 5000, 'the respawn start was attempted on the failed wake')
+      const attemptedPrompt = spawnStarts[0].request.prompt[0].text
+      assert.match(attemptedPrompt, /RETRY-MEMORY:/, 'the memo is what the start prompt carries (delivered in-prompt before any commit)')
+      assert.match(attemptedPrompt, /SECRET-PHRASE-retry-v1/, 'the FULL journal text (secret phrase included) is in the attempted start prompt')
+      assert.ok(failStart, 'respawn start was configured to reject on this wake')
 
       // (b) Nothing was committed: the registry STILL points at the OLD child with
       // sleepEpoch STILL SET, so a subsequent wake would retry the respawn.
       let posts = await readPostsSettled()
-      assert.equal(posts[postId].childId, oldChildId, 'registry still points at the OLD childId after a failed delivery')
+      assert.equal(posts[postId].childId, oldChildId, 'registry still points at the OLD childId after a failed start')
       assert.equal(posts[postId].sleepEpoch, 1700000000000, 'sleepEpoch STILL SET (a retry would respawn)')
       assert.equal(posts[postId].previousChildId, undefined, 'no previousChildId recorded on a failed respawn')
 
-      // (c) Retry with the delivery working: the next wake re-materializes fresh,
-      // clears the flag, and delivers the memo — no journal-less normal resume.
-      failJournal = false
+      // (c) Retry with the start working: the next wake re-materializes fresh,
+      // clears the flag, and the journal lands as the fresh child's FIRST-TURN
+      // start prompt — no journal-less normal resume.
+      failStart = false
       const seq2 = await nextSeq(stateDir, 'board')
       await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq2, `host-${parent.id}`, [postId], 'wake-2'), 'board')
       await waitFor(async () => {
@@ -1993,8 +2017,10 @@ test('Batch G fix: a failed journal delivery leaves the OLD child + sleepEpoch i
       assert.equal(posts[postId].previousChildId, oldChildId, 'previous incarnation recorded on the retry')
       await waitFor(() => agents.store.has(newChildId), 5000, 'fresh incarnation materialized on the retry')
       const fresh = agents.store.get(newChildId)
-      await waitFor(() => fresh.inboxMessages.length >= 2, 5000, 'fresh incarnation received its memo on the retry')
-      assert.match(fresh.inboxMessages[1].content[0].text, /RETRY-MEMORY:/, 'the journal was delivered on the retry (memo not lost)')
+      await waitFor(() => fresh.inboxMessages.length >= 1, 5000, 'fresh incarnation received its journal-carrying first-turn prompt on the retry')
+      assert.equal(fresh.inboxMessages.length, 1, 'journal delivered as the start prompt only (no separate followup on the retry)')
+      assert.match(fresh.inboxMessages[0].content[0].text, /RETRY-MEMORY:/, 'the journal arrived in the fresh child\'s FIRST-TURN start prompt (memo not lost)')
+      assert.match(fresh.inboxMessages[0].content[0].text, /SECRET-PHRASE-retry-v1/, 'the full journal (secret phrase) is in the retry start prompt')
     } finally {
       await dispose()
     }

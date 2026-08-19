@@ -13,8 +13,8 @@
 // continuable (a no-op dept_nap marks the intent), or SLEEPS (dormir) by
 // persisting its long-term memory to a journal (dept_memo_write) and marking
 // itself (dept_sleep → sleepEpoch) so the next wake re-materializes a FRESH
-// incarnation with the journal as its deployment context (context reset +
-// reload memory), recording the previous childId for honest trace.
+// incarnation whose FIRST-TURN start prompt carries the journal (context
+// reset + reload memory), recording the previous childId for honest trace.
 //
 // Mechanics (per .dsh/reports/explore-deep/2026-08-19-host-board-channel.md,
 // ...-lateral-assistant-addressing.md, ...-minimal-context-resident-posts.md):
@@ -697,7 +697,8 @@ export function applyInvoke(ctx: Context, config: Config) {
   // explicit agent-authored memo to `<stateDir>/journals/<memberId>.md`
   // (dept_memo_write), then calls dept_sleep to mark the post and reset its
   // context window. On the next wake the relay re-materializes a FRESH
-  // incarnation with the journal loaded as its deployment context. This is a
+  // incarnation whose FIRST-TURN start prompt carries the journal (the spawn
+  // start IS the delivery, accepted before any registry commit). This is a
   // dedicated affordance and deliberately does NOT reuse dept_witness_write
   // (the owner's "guardado de memoria en un status o log del diario" is a
   // head-authored handoff note, not the relevo witness).
@@ -753,33 +754,48 @@ export function applyInvoke(ctx: Context, config: Config) {
   // Batch G — the "new incarnation reloads its memory" path. A post whose
   // sleepEpoch is set (it slept: memoized + marked) is NOT woken by resuming the
   // OLD continuable child; instead a FRESH spawn incarnation is started under the
-  // SAME postId (persona = role, lean toolFilter) with the journal delivered as
-  // its deployment context, the OLD childId retired from the active map but
+  // SAME postId (persona = role, lean toolFilter) with the journal embedded in
+  // its START PROMPT — the journal is the FRESH child's FIRST-TURN content by
+  // construction (the very first inference already carries the memory; a
+  // post-start followup would arrive as a SECOND turn, after the head already
+  // responded to the wake). The OLD childId is retired from the active map but
   // recorded as previousChildId, and the flag cleared so the new incarnation
   // wakes normally thereafter. ORDERING (Batch G fix): deliver the journal to
-  // the FRESH child FIRST and only then commit the flag-clear/registry-repoint —
-  // so a delivery failure can never be lost. If the read, the spawn, or the
-  // journal delivery throws, the OLD child stays in the registry with sleepEpoch
-  // STILL SET and the exception propagates (fail loud), so the next wake retries
-  // the respawn (the memo is not dropped). TRADEOFF (documented): the old
-  // incarnation's session must remain in the DSH store (there is no destroy API)
-  // but is never woken again; the registry points only at the new childId.
+  // the FRESH child FIRST (the prompt-carrying start) and only then commit the
+  // flag-clear/registry-repoint — so a delivery failure can never be lost. If
+  // the read or the spawn-and-prompt-submit throws, the OLD child stays in the
+  // registry with sleepEpoch STILL SET and the exception propagates (fail loud),
+  // so the next wake retries the respawn (the memo is not dropped). TRADEOFF
+  // (documented): the old incarnation's session must remain in the DSH store
+  // (there is no destroy API) but is never woken again; the registry points only
+  // at the new childId.
   const respawnAsleepPost = async (entry: PostEntry, roomId: string, parentAgent: LiveAgent): Promise<void> => {
     const coordinator = coordinatorForPost(entry.postId)
     // 1. Read the journal FIRST (may throw — nothing has been committed yet, so
     //    a failure here leaves the OLD child + sleepEpoch intact for a retry).
     const journal = await readJournal(entry.postId) ?? '(no journal found)'
-    const hostId = hostForSession.get(parentAgent.id)
-    const content = `You woke from sleep (context reset): you are the re-materialized department head "${entry.postId}" in room "${roomId}". Your author-saved long-term memory (journal) — read it and resume your department's work:\n\n--- journal ---\n${journal}\n--- end journal ---\n\nAddress the Asistente host as "${hostId ?? 'host-<sessionId>'}" and read addressed messages with dept_room_read.`
-    const source = { kind: 'coordinator', form: 'relay', senderSessionId: SessionId(parentAgent.id) } as const
 
-    // 2. Start the FRESH spawn child, then DELIVER the journal to it — the
-    //    delivery is the CRITICAL step. Nothing below runs until it succeeds.
+    // 2. Build the spawn START prompt: the neutral headPrompt PLUS a clear
+    //    sleep-resume section carrying the FULL journal text (memory, not a
+    //    mission — no mission payload is added). The journal rides in the FRESH
+    //    child's first-turn prompt so the first inference already has it.
+    const hostId = hostForSession.get(parentAgent.id)
+    const startPrompt =
+      `${headPrompt(entry.postId)}\n\n` +
+      `You woke from sleep (context reset): you are the re-materialized department head "${entry.postId}" in room "${roomId}". ` +
+      `Your author-saved long-term memory (journal) — read it and resume your department's work:\n\n` +
+      `--- journal ---\n${journal}\n--- end journal ---\n\n` +
+      `Address the Asistente host as "${hostId ?? 'host-<sessionId>'}" and read addressed messages with dept_room_read.`
+
+    // 3. Start the FRESH spawn child WITH the journal in its start prompt — the
+    //    start IS the delivery (startContinuable resolves only after the prompt
+    //    was accepted as the child's first turn). Nothing below runs until it
+    //    succeeds.
     const spawned = await subagents!.startContinuable({
       provider: 'spawn',
       label: entry.postId,
       request: {
-        prompt: [{ type: 'text', text: headPrompt(entry.postId) }] as const,
+        prompt: [{ type: 'text', text: startPrompt }] as const,
         parent: parentAgent,
         persona: coordinator?.role ?? entry.postId,
         toolFilter: { allow: [] },
@@ -790,15 +806,16 @@ export function applyInvoke(ctx: Context, config: Config) {
     const newChildId = spawned.childId as string
     // Idempotency guard: a concurrent (or re-entrant) respawn may have landed
     // first — if the registry no longer points at the OLD childId, bail and
-    // leave the already-fresh incarnation in place.
+    // leave the already-fresh incarnation in place (its journal-carrying start
+    // prompt was already accepted as its first turn).
     const current = byPost.get(entry.postId)
     if (current === void 0 || current.childId !== entry.childId) return
-    await subagents!.followup(parentAgent, SessionId(newChildId), [{ type: 'text', text: content } as const], { source, signal: detachedSignal() })
 
-    // 3. ONLY after the memo has been delivered: retire the old child, repoint
-    //    the registry at the fresh child, clear the sleep flag, and persist.
-    //    If any of steps 1-2 threw, we never reach here, so the OLD child and
-    //    its sleepEpoch remain in place and the next wake retries the respawn.
+    // 4. ONLY after the journal-carrying start was accepted: retire the old
+    //    child, repoint the registry at the fresh child, clear the sleep flag,
+    //    and persist. If any of steps 1-3 threw, we never reach here, so the OLD
+    //    child and its sleepEpoch remain in place and the next wake retries the
+    //    respawn.
     byChild.delete(entry.childId)
     const previousChildId = entry.childId
     registerEntry({ ...entry, childId: newChildId, parentId: parentAgent.id, previousChildId, sleepEpoch: undefined })
@@ -861,12 +878,12 @@ export function applyInvoke(ctx: Context, config: Config) {
         if (entry.sleepEpoch !== void 0) {
           // The respawn is fire-and-forget from the relay's perspective (the wake
           // is a detached board-write side effect). respawnAsleepPost's reorder
-          // guarantees that on any read/spawn/delivery failure NOTHING has been
-          // committed — the OLD child with sleepEpoch STILL SET stays in the
-          // registry — so a later wake retries the respawn and the memo is never
-          // lost. A detached rethrow here would surface only as a Node
-          // unhandledRejection (the test runner treats that as a fatal), so we
-          // log loud instead; the retry-safety guarantee lives in the reorder.
+          // guarantees that on any read/spawn/start-prompt-submit failure
+          // NOTHING has been committed — the OLD child with sleepEpoch STILL SET
+          // stays in the registry — so a later wake retries the respawn and the
+          // memo is never lost. A detached rethrow here would surface only as a
+          // Node unhandledRejection (the test runner treats that as a fatal), so
+          // we log loud instead; the retry-safety guarantee lives in the reorder.
           void respawnAsleepPost(entry, roomId, parentAgent).catch((error: unknown) => {
             ctx.logger.warn(`[deepartments] sleep-respawn for "${member}" failed (old child + sleepEpoch retained for retry): ${error instanceof Error ? error.message : String(error)}`)
           })
