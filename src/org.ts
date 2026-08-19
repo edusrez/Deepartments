@@ -28,7 +28,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
-import { appendRecord, boardEventType, loadRecords, resolveBoardPath } from './board-store.js'
+import { appendRecord, boardEventType, compactBoardFile, durableMemberIds, loadBoardText, parseBoardRecords, resolveBoardPath, shouldCompact } from './board-store.js'
 import type { AgendaStatus, BoardRecord } from './board-store.js'
 import type { WebFetchConfig } from './webfetch.js'
 export type { AgendaStatus, BoardKind, BoardRecord } from './board-store.js'
@@ -477,6 +477,31 @@ export function setBoardRecordListener(listener: BoardRecordListener): () => voi
 }
 
 /**
+ * Room-compaction reset hook: called once per compacted room, AFTER
+ * `compactBoardFile` has rewritten the board file renumbered 0..N-1 and reset
+ * the room's DURABLE cursors. org.ts is ignorant of what the consumer does with
+ * the signal; it only exposes the hook (Batch F reviewer fix). The set is
+ * module-level mutable state, a deliberate exception to rule 4, mirroring
+ * `boardRecordListeners` above: consumers register with
+ * `setRoomCompactionResetter`, which returns a disposer the consumer owns as a
+ * reversible effect.
+ */
+export type RoomCompactionResetter = (roomId: string) => void
+
+const roomCompactionResetters = new Set<RoomCompactionResetter>()
+
+/**
+ * Register a callback invoked after a room's board has been compacted at boot.
+ * Returns the disposer (reversible; call it to stop receiving notifications).
+ */
+export function setRoomCompactionResetter(resetter: RoomCompactionResetter): () => void {
+  roomCompactionResetters.add(resetter)
+  return () => {
+    roomCompactionResetters.delete(resetter)
+  }
+}
+
+/**
  * THE emit site for every board record: append it to the live room session
  * (live signal) and mirror the SAME record into the board file (cold truth)
  * immediately after. The file is the durable copy on rc.6; the session
@@ -518,7 +543,38 @@ export function applyOrg(ctx: Context, config: Config) {
       // whether a ready record for this room ALREADY exists in the board file
       // (it persists), and skip the re-emission if so — idempotent, and it
       // stops the board file from accumulating ~41% `ready` boot noise.
-      const records = await loadRecords(filePath)
+      // The cordis logger is exporter-based and never reaches stdout;
+      // journald only sees raw stdout (same convention as dsh-smooth-stream
+      // and src/index.ts). For the compaction line, report both ways: a rare,
+      // explicit room-wide reset should be visible in the journald stream.
+      let rawText = await loadBoardText(filePath)
+      let records: readonly BoardRecord[] = parseBoardRecords(rawText)
+      // Batch F (D2): boot-time compaction. When the raw board file exceeds a
+      // threshold (records>COMPACTION_LINE_THRESHOLD or bytes>COMPACTION_BYTE_THRESHOLD),
+      // compact it FIRST — rewrite keeping only live-relevant records renumbered
+      // 0..N-1 with fresh ids AND reset this room's cursors (D3/D4/D5) — THEN
+      // seed the session below from the compacted file, so the in-memory read
+      // model is rebuilt from the renumbered history. Never auto-compacts
+      // mid-conversation (the projection is not re-seedable mid-process; see
+      // board-store.ts header). The keep-rule uses the durable∪static
+      // registered-member set (posts.json ∪ hosts.json ∪ config rooms' members).
+      if (shouldCompact(records, rawText)) {
+        const memberIds = await durableMemberIds(config.stateDir, config)
+        const keepFn = (record: BoardRecord): boolean =>
+          record.kind === 'message' && memberIds.has(record.from) && record.to.some((entry) => memberIds.has(entry))
+        const { before, after } = await compactBoardFile(filePath, records, keepFn, room.id)
+        console.log(`[deepartments] room ${room.id}: compacted board ${before} -> ${after} records (renumbered 0..${after - 1}, cursors reset)`)
+        ctx.logger.info(`[deepartments] room ${room.id}: compacted board ${before} -> ${after} records (renumbered 0..${after - 1}, cursors reset)`)
+        // Batch F reviewer fix: `compactBoardFile` reset the room's DURABLE
+        // cursors, but invoke's in-memory `memberCursors` cold-loads the file
+        // earlier and is never re-read after compaction. Signal every registered
+        // resetter so the consumer clears the affected room's IN-MEMORY cursors
+        // too (a high stale cursor must not skip the renumbered kept set).
+        for (const resetter of roomCompactionResetters) resetter(room.id)
+        // Re-read the now-compacted, renumbered file for seeding.
+        rawText = await loadBoardText(filePath)
+        records = parseBoardRecords(rawText)
+      }
       const session = await resolveRoomSession(ctx, room.id, records)
       const alreadySeeded = records.some(
         (record) => record.kind === 'ready' && record.payload.room.id === room.id

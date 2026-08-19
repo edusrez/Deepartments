@@ -1520,3 +1520,187 @@ test('Batch E dept_room_read surfaces the [sensitive — sender verified] flag i
     }
   })
 })
+
+// --- Board F (Batch F): O(1) emit counter + boot-time compaction ---------------
+
+/** A genuine `m-board-<seq>`-style message (matches the re-id pattern). */
+function boardFMsg(seq, from, to, text) {
+  return {
+    id: `m-board-${seq}`,
+    seq,
+    ts: 1700000000000 + seq,
+    from,
+    to,
+    cc: [],
+    threadId: null,
+    kind: 'message',
+    payload: { kind: 'note', text }
+  }
+}
+
+test('Board F O(1) emit: a 5000-record pre-seeded board seeds the counter once; the next emit gets seq 5000 (not 0)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // A full prior history: 5000 records — one ready seed followed by 4999
+    // registered→registered messages (both endpoints are static members, so
+    // the keep-rule preserves every one and boot renumber is a 0..4999 no-op).
+    // The ready seed means this boot appends NO second ready, so the file's
+    // last seq stays 4999 and the counter must seed from it (NOT from 0) —
+    // otherwise the next emit seq would collide with a kept record.
+    const seeded = [{ ...boardFMsg(0, 'system', ['asistente', 'research-head'], 'seed-ready'), id: 'ready-board-0', seq: 0, kind: 'ready', payload: { room: { id: 'board', name: 'Board', purpose: 'p', members: ['asistente', 'research-head'] } } }]
+    for (let i = 1; i < 5000; i++) seeded.push(boardFMsg(i, 'asistente', ['research-head'], `pre-${i}`))
+    await seedBoardRecords(stateDir, 'board', seeded)
+
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+
+      // One host-plane emit through the real tool (emitBoardMessage → counter).
+      const writeTool = pluginCtx().tools.get('dept_room_write')
+      const writeResult = await writeTool.execute(
+        { room: 'board', to: ['asistente'], text: 'seq-after-5000' },
+        { agent: host, signal }
+      )
+
+      // The counter was seeded from the file (last seq 4999 → next 5000), so
+      // the new record continues at 5000 — not at 0.
+      assert.equal(writeResult.messageId, 'm-board-5000', 'new record id embeds seq 5000 (counter seeded from file)')
+
+      const after = await loadRecords(resolveBoardPath(stateDir, 'board'))
+      assert.equal(after.length, 5001, 'board now has 5001 records (5000 seeded + 1 emitted)')
+      assert.equal(after[after.length - 1].seq, 5000, 'last record seq is 5000')
+      assert.equal(after[after.length - 1].id, 'm-board-5000')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Board F boot compaction: an oversized board is rewritten keeping only registered messages + a single ready, renumbered below the threshold, with the room\'s cursors reset', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // A HIGH persisted cursor for a board member from a prior (pre-compaction)
+    // session — exactly the "resumed member would SKIP unread kept messages"
+    // hazard the Batch D advisory flags. The research room is untouched.
+    await writeFile(path.join(stateDir, 'cursors.json'), JSON.stringify({
+      'board:research-head': { lastMessageId: 'm-board-1799', lastMessageSeq: 1799, lastAgendaSeq: 12 },
+      'research:research-head': { lastMessageId: 'm-2', lastMessageSeq: 2, lastAgendaSeq: -1 }
+    }, null, 2), 'utf8')
+
+    // Oversized board (2052 records > COMPACTION_LINE_THRESHOLD): 1800 kept
+    // registered→registered messages, 250 ghost-sender messages, one ready
+    // seed and a duplicate ready.
+    const records = []
+    for (let i = 0; i < 1800; i++) records.push(boardFMsg(i, 'asistente', ['research-head'], `kept-${i}`))
+    for (let i = 0; i < 250; i++) records.push({ ...boardFMsg(1800 + i, 'ghost', ['asistente'], `ghost-${i}`) })
+    records.push({
+      id: 'ready-board-a',
+      seq: 2050,
+      ts: 1700000000000 + 2050,
+      from: 'system',
+      to: ['asistente', 'research-head'],
+      cc: [],
+      threadId: null,
+      kind: 'ready',
+      payload: { room: { id: 'board', name: 'Board', purpose: 'p', members: ['asistente', 'research-head'] } }
+    })
+    records.push({
+      id: 'ready-board-b',
+      seq: 2051,
+      ts: 1700000000000 + 2051,
+      from: 'system',
+      to: ['asistente', 'research-head'],
+      cc: [],
+      threadId: null,
+      kind: 'ready',
+      payload: { room: { id: 'board', name: 'Board', purpose: 'p', members: ['asistente', 'research-head'] } }
+    })
+    await seedBoardRecords(stateDir, 'board', records)
+
+    // A durable resident `research-head` post (the same member the stale high
+    // cursor belongs to) so it cold-resumes as a member and its IN-MEMORY read
+    // cursor can be observed after compaction — proving the compaction resetter
+    // cleared it (not just the durable file).
+    const parentId = SessionId('session-parent-compaction')
+    const childId = SessionId('session-child-compaction')
+    await seedPost(stateDir, { postId: 'research-head', childId, parentId, roomId: 'board', provider: 'spawn' })
+
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      // Full-boot readiness: org's room-boot effect compacts the board, resets
+      // the durable cursors, fires the compaction resetter (in-memory), and
+      // resolveRoomSession's the live board session — all asynchronously. Wait
+      // for the ENTIRE state before any assertion so we never race mid-boot:
+      //   (1) the compacted board file is below the line threshold,
+      //   (2) the IN-MEMORY board session is live (resolveRoomSession done),
+      //   (3) the durable `board:research-head` cursor is RESET to fresh
+      //       (lastMessageSeq === -1) — reading cursors.json inside the
+      //       predicate with a try/catch tolerates transient mid-reset parse
+      //       errors / ENOENT until compaction's reset write has landed.
+      // The durable reset occurs inside compactBoardFile, and org fires the
+      // in-memory compaction resetter immediately after it returns, so once
+      // (3) holds the resetter has already cleared memberCursors too.
+      await waitFor(async () => {
+        const current = await loadRecords(resolveBoardPath(stateDir, 'board'))
+        if (!(current.length > 0 && current.length < 2000)) return false
+        if (root.sessions.get(SessionId(roomSessionId('board'))) === undefined) return false
+        let parsed
+        try {
+          parsed = JSON.parse(await readFile(path.join(stateDir, 'cursors.json'), 'utf8'))
+        } catch {
+          return false // cursors.json not yet readable (ENOENT / mid-reset parse)
+        }
+        const boardCursor = parsed['board:research-head']
+        return typeof boardCursor?.lastMessageSeq === 'number' && boardCursor.lastMessageSeq === -1
+      }, 5000, 'full boot readiness: board compacted, session live, board cursor reset')
+
+      const compacted = await loadRecords(resolveBoardPath(stateDir, 'board'))
+      // 1800 kept messages + exactly ONE ready seed = 1801 < 2000.
+      assert.equal(compacted.length, 1801, 'board after compaction: 1801 records (< 2000 threshold)')
+      const ghosts = compacted.filter((r) => r.from === 'ghost')
+      assert.equal(ghosts.length, 0, 'ghost-sender messages dropped')
+      const readies = compacted.filter((r) => r.kind === 'ready')
+      assert.equal(readies.length, 1, 'exactly one ready seed kept (duplicate dropped)')
+      // Contiguous renumbered seqs 0..N-1, ids re-derived from the new seq.
+      compacted.forEach((r, index) => {
+        assert.equal(r.seq, index, `seq renumbered contiguous at index ${index}`)
+      })
+      assert.equal(compacted[1800].id, 'ready-board-1800', 'the kept ready re-ids with the new seq')
+      assert.equal(compacted[0].id, 'm-board-0', 'kept message re-ids with the new seq')
+
+      // The room\'s cursors were RESET to fresh so NO member skips the kept set;
+      // the other room\'s cursor is untouched.
+      const cursors = JSON.parse(await readFile(path.join(stateDir, 'cursors.json'), 'utf8'))
+      assert.deepEqual(cursors['board:research-head'], { lastMessageId: null, lastMessageSeq: -1, lastAgendaSeq: -1 })
+      assert.deepEqual(cursors['research:research-head'], { lastMessageId: 'm-2', lastMessageSeq: 2, lastAgendaSeq: -1 })
+
+      // --- Post-compaction IN-MEMORY read (Batch F reviewer fix): the resumed
+      // research-head post's in-memory cursor (cold-loaded BEFORE compaction)
+      // must have been CLEARED by the compaction resetter so it re-reads the
+      // renumbered kept set instead of skipping it. Without the fix, the stale
+      // high cursor (lastMessageSeq 1799) suppresses every kept message. ---
+      const parent = agents.put(fakeParentAgent(parentId))
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      assert.ok(boardSession, 'live board session available after the full-boot readiness wait')
+      // Wake the durable research-head post; its read seat is the in-memory
+      // memberCursors, which the compaction resetter cleared to fresh.
+      const wakeSeq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(wakeSeq, `host-${parent.id}`, ['research-head'], 'compaction-wake'), 'board')
+      await waitFor(() => agents.store.has(childId), 5000, 'compacted research-head post cold-resumed')
+      const resumed = agents.store.get(childId)
+      const resumedEntry = agents.childContexts.find((c) => c.ctx.agent?.id === childId)
+      assert.ok(resumedEntry, 'resumed post child context available')
+      const resumedRead = resumedEntry.ctx.tools.get('dept_room_read', resumedEntry.key)
+      const delta = (await resumedRead.execute({ room: 'board' }, { agent: resumed, signal: new AbortController().signal })).delta
+      // `kept-0` is the definitive proof the stale high cursor did NOT suppress
+      // the renumbered kept set: without the compaction resetter, every kept
+      // message (seq 0..1799, all <= the stale lastMessageSeq 1799) would be
+      // filtered out of the delta. The rendered TOC is page-limited, so we only
+      // assert the first kept message is present, not the truncated tail.
+      assert.match(delta, /kept-0/, 'resumed member re-reads the renumbered kept set (first kept message) after compaction')
+      assert.match(delta, /more messages/, 'the delta exposes the full remaining kept set (still paged/available)')
+    } finally {
+      await dispose()
+    }
+  })
+})

@@ -28,8 +28,37 @@
 // workspace resolves a different board file for the same room id. This
 // batch does NOT change the resolution scheme (owner decision).
 //
+// ────────────────────────────────────────────────────────────────────────────
+// COMPACTION (Batch F) — semantics.
+// The board file grows without bound (every emit appends) and — because board
+// seq == record index — the ONLY ordering source the read model uses. Batch F
+// adds a BOOT-ONLY compaction pass (src/org.ts): when a room's raw board file
+// exceeds COMPACTION_LINE_THRESHOLD records or COMPACTION_BYTE_THRESHOLD bytes,
+// it is rewritten keeping only records a fresh reader still needs (a single
+// ready seed + messages between two registered members; everything else
+// dropped), renumbering seq 0..N-1 and re-deriving ids from the new seq, and
+// resetting that room's read cursors to the FRESH state (D3/D4/D5). Up next,
+// the O(1) emit counter (D6, src/invoke.ts) removes the per-emit full-file
+// re-read that made total writes O(n²) (audit finding H2).
+//
+// Compaction NEVER runs mid-conversation: the live room session projection is
+// seeded from the board file at boot and is NOT re-seedable mid-process (the
+// Session is append-only; SessionStore.create throws on a duplicate live id
+// and there is no public remove). Compaction therefore runs only inside the
+// room-boot effect, BEFORE the session is seeded, so the in-memory read model
+// is rebuilt from the compacted, renumbered file. A mid-process compact cannot
+// reseed the projection, so NO runtime `dept_compact` tool exists (by design).
+//
+// Sequence-source consistency: after a boot compaction renumbers the file, the
+// invoke counter (seedNextSeq, src/invoke.ts) lazily re-reads that SAME
+// post-boot file on its first emit and seeds from it, so the counter and the
+// file always agree (both originate from the same post-boot bytes). Because
+// compaction resets every member's cursor to fresh, it is an explicit, RARE,
+// ROOM-WIDE reset of read progress (members re-read the small kept set once) —
+// never a continuous process.
+//
 // NO export default (pitfall 0001 — breaks `inject`).
-import { appendFile, mkdir, readFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 // ---------------------------------------------------------------------------
@@ -168,6 +197,20 @@ export async function loadRecords(filePath: string): Promise<BoardRecord[]> {
 }
 
 /**
+ * Read the raw board file text; a missing file → empty string. Used by the org
+ * boot path to evaluate `shouldCompact` (byte threshold) without a double
+ * read (the same text is then `parseBoardRecords`'d for the seed).
+ */
+export async function loadBoardText(filePath: string): Promise<string> {
+  try {
+    return await readFile(filePath, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''
+    throw error
+  }
+}
+
+/**
  * Append one record as a JSON line (mkdir -p the file's directory first).
  * Single-process assumption: the room boot fiber is the only writer per
  * room, so no locking is needed. A non-JSON-serializable record throws here
@@ -176,4 +219,178 @@ export async function loadRecords(filePath: string): Promise<BoardRecord[]> {
 export async function appendRecord(filePath: string, record: BoardRecord): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true })
   await appendFile(filePath, JSON.stringify(record) + '\n', 'utf8')
+}
+
+// ---------------------------------------------------------------------------
+// Compaction (Batch F): boot-only board rewrite + cursor reset. See the header
+// comment for the full semantics (renumbering, re-id, cursor reset, boot-only).
+// ---------------------------------------------------------------------------
+
+/**
+ * Number of records above which a room's board file is compacted at boot.
+ * MUST stay in sync with the "Line" branch of `shouldCompact` below and with
+ * the org boot trigger (src/org.ts). Tuned so the default test fixtures (tiny
+ * boards) never reach it.
+ */
+export const COMPACTION_LINE_THRESHOLD = 2000
+
+/**
+ * Raw file bytes above which a room's board file is compacted at boot. MUST
+ * stay in sync with the "Bytes" branch of `shouldCompact`. The default test
+ * fixtures stay far below it.
+ */
+export const COMPACTION_BYTE_THRESHOLD = 256 * 1024
+
+/**
+ * Pure trigger predicate: compact when the record count OR the raw file
+ * byte-length exceeds its threshold. `text` is the raw board file text so the
+ * byte-length check reflects the on-disk size (`Buffer.byteLength`).
+ */
+export function shouldCompact(records: readonly BoardRecord[], text: string): boolean {
+  return records.length > COMPACTION_LINE_THRESHOLD ||
+    Buffer.byteLength(text, 'utf8') > COMPACTION_BYTE_THRESHOLD
+}
+
+/**
+ * Re-derive a kept record's `id` from its NEW seq (D4), so post-compaction ids
+ * stay unique against future emits (`m-${roomId}-${newSeq}` can never collide).
+ * Only ids matching `/^(m-|ready-|agenda-)/` are rewritten as
+ * `<prefix><roomId>-<newSeq>`; an opaque id that does not match is left
+ * unchanged (it stays unique). Example: `m-board-87` → `m-board-0`.
+ */
+export function reIdForSeq(id: string, roomId: string, newSeq: number): string {
+  const match = /^(m-|ready-|agenda-)/.exec(id)
+  if (match === null) return id
+  return `${match[1]}${roomId}-${newSeq}`
+}
+
+/**
+ * Disk shape of one member's cursor in `<stateDir>/cursors.json`
+ * (`lastMessageId` is `null` when fresh — the wire mirror of invoke.ts's
+ * in-memory `CursorState`, which uses `undefined`).
+ */
+interface PersistedCursor {
+  lastMessageId: string | null
+  lastMessageSeq: number
+  lastAgendaSeq: number
+}
+
+/**
+ * The disk cursor shape for a fresh (never-seen) history — what a reset writes.
+ */
+const FRESH_CURSOR: PersistedCursor = { lastMessageId: null, lastMessageSeq: -1, lastAgendaSeq: -1 }
+
+/**
+ * Pure compaction: filter to the records a fresh reader still needs, renumber
+ * seq 0..N-1 in ORIGINAL file order (deterministic), and re-id from the new seq.
+ *
+ * Keep-rule (D3): a `ready` record is kept only ONCE per room (the FIRST ready
+ * in the file; duplicate re-emitted ready noise is dropped); a `message` record
+ * is kept only when `keepFn(record)` is true (built by the caller from the
+ * durable+static registered-member set — D2/D7); everything else (agenda,
+ * ghost-sender messages, messages addressed only to ghosts) is dropped. This
+ * is consistent with the fold, which ignores `kind:'ready'` and for which
+ * agenda only affects dropped agenda records.
+ */
+export function compactRecords(
+  records: readonly BoardRecord[],
+  keepFn: (record: BoardRecord) => boolean,
+  roomId: string
+): BoardRecord[] {
+  const kept: BoardRecord[] = []
+  let readySeen = false
+  for (const record of records) {
+    if (record.kind === 'ready') {
+      if (readySeen) continue // drop duplicate ready noise (D3)
+      readySeen = true
+      kept.push(record)
+      continue
+    }
+    if (keepFn(record)) kept.push(record)
+  }
+  return kept.map((record, index) => ({
+    ...record,
+    seq: index,
+    id: reIdForSeq(record.id, roomId, index)
+  }))
+}
+
+/**
+ * Durable cursor reset (D5): rewrite `<stateDir>/cursors.json` setting every
+ * key with prefix `${roomId}:` to the FRESH state (`{ lastMessageId: null,
+ * lastMessageSeq: -1, lastAgendaSeq: -1 }`), preserving all other rooms' keys.
+ * Missing file → no-op. `mkdir -p` the directory before writing.
+ */
+export async function resetRoomCursorsFile(cursorsPath: string, roomId: string): Promise<void> {
+  let parsed: Record<string, PersistedCursor> = {}
+  try {
+    parsed = JSON.parse(await readFile(cursorsPath, 'utf8')) as Record<string, PersistedCursor>
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return // nothing to reset
+    throw error
+  }
+  const prefix = `${roomId}:`
+  let changed = false
+  for (const key of Object.keys(parsed)) {
+    if (key.startsWith(prefix)) {
+      parsed[key] = { ...FRESH_CURSOR }
+      changed = true
+    }
+  }
+  if (!changed) return
+  await mkdir(path.dirname(cursorsPath), { recursive: true })
+  await writeFile(cursorsPath, JSON.stringify(parsed, null, 2), 'utf8')
+}
+
+/**
+ * Registered (durable ∪ static) member ids for the compaction keep-rule (D3):
+ * the keys of `<stateDir>/posts.json` and `<stateDir>/hosts.json` (durable
+ * registered ids) unioned with every configured room's `members` (static).
+ * Best-effort: a missing registry file (ENOENT) contributes an empty set;
+ * static config members still apply.
+ */
+export async function durableMemberIds(
+  stateDir: string,
+  config: { org: { rooms: { members: string[] }[] } }
+): Promise<Set<string>> {
+  const ids = new Set<string>()
+  for (const room of config.org.rooms) {
+    for (const member of room.members) ids.add(member)
+  }
+  // Best-effort durable registries: a missing or unreadable registry must not
+  // block compaction — the keep-rule just falls back to static members.
+  for (const file of ['posts.json', 'hosts.json']) {
+    try {
+      const parsed = JSON.parse(await readFile(path.join(stateDir, file), 'utf8')) as Record<string, unknown>
+      for (const key of Object.keys(parsed)) ids.add(key)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      // A malformed registry is treated as best-effort empty (same resilience).
+      continue
+    }
+  }
+  return ids
+}
+
+/**
+ * Compaction driver (D1/D2/D4/D5): apply the keep-rule, rewrite the board file
+ * renumbered+re-id'd, then reset the affected room's cursors in
+ * `<stateDir>/cursors.json` (derived from the board path). Returns the record
+ * count before → after (for logging). Boot-only (see header semantics).
+ */
+export async function compactBoardFile(
+  filePath: string,
+  records: readonly BoardRecord[],
+  keepFn: (record: BoardRecord) => boolean,
+  roomId: string
+): Promise<{ before: number; after: number }> {
+  const compacted = compactRecords(records, keepFn, roomId)
+  const text = compacted.map((record) => JSON.stringify(record)).join('\n') + '\n'
+  await mkdir(path.dirname(filePath), { recursive: true })
+  await writeFile(filePath, text, 'utf8')
+  // The board path is `<stateDir>/rooms/<roomId>/board.jsonl` (see
+  // resolveBoardPath); walk up three dirs to recover `<stateDir>`.
+  const stateDir = path.dirname(path.dirname(path.dirname(filePath)))
+  await resetRoomCursorsFile(path.join(stateDir, 'cursors.json'), roomId)
+  return { before: records.length, after: compacted.length }
 }

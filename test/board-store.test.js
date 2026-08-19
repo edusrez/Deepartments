@@ -6,14 +6,14 @@
 // systemPrompt inject]). Hermetic: temp stateDirs, no network, no live
 // DSH_HOME. Tests run against the compiled lib/ (pnpm build first).
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { appendRecord, loadRecords, resolveBoardPath } from '../lib/board-store.js'
+import { appendRecord, compactRecords, loadRecords, resetRoomCursorsFile, resolveBoardPath } from '../lib/board-store.js'
 import {
   applyRoomEvent,
   foldRoomRecord,
@@ -247,5 +247,76 @@ test('cold restart: a pre-seeded board file folds into the projection; new live 
     } finally {
       await dispose()
     }
+  })
+})
+
+test('Board F compactRecords: keep-rule keeps a registered→registered message + the single ready seed, drops ghost-sender/to-ghost messages, duplicate ready and agenda; renumbers seq 0..N-1 and re-ids', () => {
+  // Registered (durable ∪ static) members — here all static config members.
+  const memberIds = new Set(['asistente', 'research-head'])
+  const keepFn = (record) =>
+    record.kind === 'message' && memberIds.has(record.from) && record.to.some((entry) => memberIds.has(entry))
+
+  // Original file order (deterministic filter): a kept message, a ghost-sender
+  // message, a to-ghost message, a ready seed, a DUPLICATE ready, a dropped
+  // agenda, another kept message.
+  const ready = readyRecord(3, 'board')
+  const records = [
+    messageRecord(0, 'kept one'),
+    { ...messageRecord(1, 'ghost from'), from: 'spook', to: ['asistente'] },
+    { ...messageRecord(2, 'to a ghost only'), from: 'asistente', to: ['ghost'] },
+    ready,
+    readyRecord(4, 'board'), // duplicate ready — must be dropped
+    agendaRecord(5, 'dropped agenda'),
+    messageRecord(6, 'kept two')
+  ]
+
+  const compacted = compactRecords(records, keepFn, 'board')
+
+  // Only the single ready + the two registered→registered messages survive.
+  assert.equal(compacted.length, 3, 'kept: one ready + two registered messages')
+  // Contiguous renumbered seq 0..N-1 in original order (deterministic).
+  assert.deepEqual(compacted.map((r) => r.seq), [0, 1, 2], 'seqs contiguous 0..N-1')
+  // Re-ids embed the NEW seq (D4): m-board-0, ready-board-0, m-board-2.
+  const [keptOne, readyKept, keptTwo] = compacted
+  assert.equal(keptOne.kind, 'message')
+  assert.equal(keptOne.payload.text, 'kept one')
+  assert.equal(keptOne.id, 'm-board-0')
+  assert.equal(readyKept.kind, 'ready')
+  assert.equal(readyKept.payload.room.id, 'board')
+  assert.equal(readyKept.id, 'ready-board-1')
+  assert.equal(keptTwo.kind, 'message')
+  assert.equal(keptTwo.payload.text, 'kept two')
+  assert.equal(keptTwo.id, 'm-board-2')
+  // Dropped: ghost sender, to-ghost, duplicate ready, agenda.
+  assert.ok(!compacted.some((r) => r.payload?.text === 'ghost from'), 'ghost-sender message dropped')
+  assert.ok(!compacted.some((r) => r.payload?.text === 'to a ghost only'), 'to-ghost message dropped')
+  assert.ok(!compacted.some((r) => r.payload?.text === 'dropped agenda'), 'agenda dropped')
+  assert.equal(compacted.filter((r) => r.kind === 'ready').length, 1, 'exactly one ready seed kept')
+  // Round-trip through the pure fold: the two kept messages fold in.
+  const state = foldRoomRecords(compacted)
+  assert.equal(state.messages.length, 2)
+  assert.equal(state.messages[0].id, 'm-board-0')
+  assert.equal(state.messages[1].id, 'm-board-2')
+})
+
+test('Board F resetRoomCursorsFile: resets only the target room\'s keys to fresh, leaves other rooms untouched', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const cursorsPath = path.join(stateDir, 'cursors.json')
+    await writeFile(cursorsPath, JSON.stringify({
+      'board:asistente': { lastMessageId: 'm-9', lastMessageSeq: 9, lastAgendaSeq: 8 },
+      'board:research-head': { lastMessageId: 'm-5', lastMessageSeq: 5, lastAgendaSeq: 4 },
+      'research:research-head': { lastMessageId: 'm-3', lastMessageSeq: 3, lastAgendaSeq: 2 }
+    }, null, 2), 'utf8')
+
+    await resetRoomCursorsFile(cursorsPath, 'board')
+
+    const parsed = JSON.parse(await readFile(cursorsPath, 'utf8'))
+    assert.deepEqual(parsed['board:asistente'], { lastMessageId: null, lastMessageSeq: -1, lastAgendaSeq: -1 })
+    assert.deepEqual(parsed['board:research-head'], { lastMessageId: null, lastMessageSeq: -1, lastAgendaSeq: -1 })
+    // The other room's cursor is preserved untouched.
+    assert.deepEqual(parsed['research:research-head'], { lastMessageId: 'm-3', lastMessageSeq: 3, lastAgendaSeq: 2 })
+
+    // Missing file → no-op (no throw).
+    await resetRoomCursorsFile(path.join(stateDir, 'does-not-exist.json'), 'board')
   })
 })

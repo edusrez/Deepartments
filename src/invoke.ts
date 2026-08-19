@@ -101,7 +101,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
-import { emitRoomRecord, roomSessionId, setBoardRecordListener } from './org.js'
+import { emitRoomRecord, roomSessionId, setBoardRecordListener, setRoomCompactionResetter } from './org.js'
 import type { Config, CoordinatorConfig, RoomState } from './org.js'
 import { loadRecords, resolveBoardPath } from './board-store.js'
 import type { BoardRecord, MessagePayload } from './board-store.js'
@@ -255,6 +255,14 @@ export function applyInvoke(ctx: Context, config: Config) {
   // last one landed. Any non-ack message between the pair resets it (delete).
   const ackCounters = new Map<string, { count: number; lastTs: number }>()
   const roomQueues = new Map<string, Promise<unknown>>()
+  // Batch F (D6): per-room monotonic next-seq counter, seeded ONCE from the
+  // board file (lazy-once on the first emit). Replaces the O(n) re-read +
+  // reparse of the whole board file on every emit (audit H2 — total write cost
+  // was O(n²)) with an O(1) counter increment. This counter is the per-process
+  // monotonic sequence source; boot compaction (board-store.ts) renumbers the
+  // file at boot BEFORE any emit seeds the counter, so the counter and the
+  // file stay consistent (both originate from the same post-boot file).
+  const nextSeq = new Map<string, number>()
   const postsPath = path.join(config.stateDir, 'posts.json')
   // Batch D: per-member read cursors persisted to `<stateDir>/cursors.json`,
   // keyed by `${roomId}:${memberId}` (last-write, fire-and-forget). The
@@ -467,6 +475,22 @@ export function applyInvoke(ctx: Context, config: Config) {
   }
 
   /**
+   * Batch F (D6): seed the per-room next-seq counter ONCE from the board file
+   * (lazy-once on first emit). Reads the file exactly once, sets
+   * `nextSeq[roomId]` to (last seq + 1, or 0 for an empty file), and returns
+   * it. The first read happens AFTER boot, so it reflects any `ready` record
+   * applyOrg appended during boot AND any boot compaction that renumbered the
+   * file — keeping the counter and the file consistent.
+   */
+  const seedNextSeq = async (roomId: string): Promise<number> => {
+    const filePath = resolveBoardPath(config.stateDir, roomId)
+    const records = await loadRecords(filePath)
+    const seq = records.length === 0 ? 0 : records[records.length - 1].seq + 1
+    nextSeq.set(roomId, seq)
+    return seq
+  }
+
+  /**
    * Emit one addressed board message through org's emit site (session append
    * + file mirror + listener), assigning the next board file seq. When `ack` is
    * true the message is a pure acknowledgement/receipt (no new substance) and
@@ -478,8 +502,10 @@ export function applyInvoke(ctx: Context, config: Config) {
       const session = ctx.sessions.get(SessionId(roomSessionId(roomId)))
       if (session === void 0) throw new Error(`[deepartments] room "${roomId}" is not live (no session) — is the room configured?`)
       const filePath = resolveBoardPath(config.stateDir, roomId)
-      const records = await loadRecords(filePath)
-      const seq = records.length === 0 ? 0 : records[records.length - 1].seq + 1
+      // Batch F (D6): O(1) seq from the per-room counter (lazy-once seed on the
+      // first emit). Never re-reads the board file on subsequent emits.
+      const seq = nextSeq.get(roomId) ?? await seedNextSeq(roomId)
+      nextSeq.set(roomId, seq + 1)
       // Batch E sender-trust: a sensitive message records the sensitive flag
       // AND a senderVerified flag computed from the registry (registered post,
       // or a live registered host). Surface signal, not enforcement.
@@ -743,6 +769,26 @@ export function applyInvoke(ctx: Context, config: Config) {
   }
   const removeListener = setBoardRecordListener(relay)
   ctx.effect(() => removeListener, 'deepartments: board record listener')
+
+  // Batch F reviewer fix: clear the affected room's IN-MEMORY read cursors when
+  // a boot compaction rewrites (renumbers) that room's board. The durable
+  // cursors file is already reset by org's compactBoardFile; without this hook,
+  // `memberCursors` cold-loaded the stale pre-reset high cursor and skips most
+  // of the renumbered kept set — exactly the "resumed member skips unread kept
+  // messages" hazard Batch D forbids. `memberCursors` is the collapsed per-member
+  // fast path (highest high-water across rooms), so resetting the member to
+  // FRESH is the correct in-memory mirror; the collapsed single-room design
+  // already accepts member-global high-water. The member reset targets members
+  // that hold a durable `${roomId}:<member>` cursor key — the same population
+  // the durable reset affects.
+  const removeCompactionResetter = setRoomCompactionResetter((roomId) => {
+    for (const memberId of [...memberCursors.keys()]) {
+      if (persistedCursors.has(`${roomId}:${memberId}`)) {
+        memberCursors.set(memberId, { lastMessageId: undefined, lastMessageSeq: -1, lastAgendaSeq: -1 })
+      }
+    }
+  })
+  ctx.effect(() => removeCompactionResetter, 'deepartments: room compaction resetter')
 
   // --- tool definitions (shared by the GLOBAL host plane and the child's OWN
   // layer so a lean toolFilter still exposes them to resident posts) ---------
