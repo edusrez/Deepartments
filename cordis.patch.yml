@@ -9,7 +9,7 @@
         # are program architecture defined HERE, never created by agents.
         # The board room is the coordination room; research-head is a member
         # of BOTH the board room and the research department room.
-        # agentOptions values verified: models served via the opencode-go-responses provider (registered by @deepseek-ai/dsh-llm-pi-ai; Responses API); muse-spark-1.2-contributor available under it (reasoningEffort xhigh set globally in settings.yaml — not repeated per head here).
+        # agentOptions values verified: models served via the opencode-go provider (registered by @deepseek-ai/dsh-llm-pi-ai); deepseek-v4-flash / deepseek-v4-pro available under it.
         org:
           rooms:
             - id: board
@@ -37,10 +37,10 @@
                 postId: research-head
                 title: Head of Research
                 role: Research department head
-                provider: opencode-go-responses
+                provider: opencode-go
                 agentOptions:
-                  provider: opencode-go-responses
-                  model: muse-spark-1.2-contributor
+                  provider: opencode-go
+                  model: deepseek-v4-flash
             - id: programming
               name: Internal Programming Department
               roomId: programming
@@ -48,10 +48,10 @@
                 postId: programming-head
                 title: Head of Internal Programming
                 role: Internal Programming department head
-                provider: opencode-go-responses
+                provider: opencode-go
                 agentOptions:
-                  provider: opencode-go-responses
-                  model: muse-spark-1.2-contributor
+                  provider: opencode-go
+                  model: deepseek-v4-flash
         # Custom ctx.web fetch provider (webfetch.ts): detects blocking
         # (403/429) and reports WEB_BLOCKED with a message that instructs
         # API/JSON-endpoint investigation instead of guessing host endpoints.
