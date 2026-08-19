@@ -83,7 +83,11 @@ interface ClientCtx {
   };
   sessions: {
     list: {
-      getSnapshot(): { current: string | undefined; byId?: Record<string, any> };
+      getSnapshot(): {
+        current: string | undefined;
+        byId?: Record<string, any>;
+        ids?: string[];
+      };
     };
     open(id: string): unknown;
   };
@@ -103,7 +107,8 @@ interface AgentsOwner {
   expandSidebar: () => void;
   openSession: (id: string) => void;
   currentSessionId: () => string | undefined;
-  sessionNode: () => any;
+  /** Full sessions list snapshot (SessionListState): for the multi-Assistant rows. */
+  sessionSnapshot: () => any;
   startSession: () => void;
   rpc: ClientCtx["connection"]["rpc"];
 }
@@ -142,6 +147,7 @@ const AGENT_CSS = /* css */ `
 .dp-agent-row:hover{background:var(--dsw-alias-interactive-bg-hover);}
 .dp-agent-row--static{cursor:default;}
 .dp-agent-row--static:hover{background:var(--dsw-alias-interactive-bg-hover);}
+.dp-agent-row--active{background:var(--dsw-alias-interactive-bg-hover,#eef0f4);}
 .dp-agent-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--dsw-alias-label-primary);}
 
 /* status glyphs */
@@ -271,10 +277,10 @@ function HeadStatusDot({ status }: { status: HeadStatus }) {
 // AgentList — renders the main agents into the sidebar.workspaces hole.
 // ---------------------------------------------------------------------------
 export function AgentList(props: AgentsOwner) {
-  const { wide, expandSidebar, openSession, currentSessionId, sessionNode, startSession, rpc } = props;
+  const { wide, expandSidebar, openSession, currentSessionId, sessionSnapshot, startSession, rpc } = props;
   const [host, setHost] = useState<AgentsValue["host"] | null>(null);
   const [heads, setHeads] = useState<AgentHead[]>([]);
-  const [node, setNode] = useState(() => sessionNode());
+  const [snapshot, setSnapshot] = useState(() => sessionSnapshot());
 
   useEffect(() => {
     let disposed = false;
@@ -291,19 +297,19 @@ export function AgentList(props: AgentsOwner) {
       // On { ok: false } keep last data; the next poll retries silently.
     };
 
-    const refreshNode = () => {
-      if (!disposed) setNode(sessionNode());
+    const refreshSessions = () => {
+      if (!disposed) setSnapshot(sessionSnapshot());
     };
 
     fetchAgents();
-    refreshNode();
+    refreshSessions();
     const interval = window.setInterval(() => {
       fetchAgents();
-      refreshNode();
+      refreshSessions();
     }, 5000);
     const onFocus = () => {
       fetchAgents();
-      refreshNode();
+      refreshSessions();
     };
     window.addEventListener("focus", onFocus);
 
@@ -315,30 +321,32 @@ export function AgentList(props: AgentsOwner) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const onAsistenteClick = () => {
-    if (!wide) expandSidebar();
-    const id = currentSessionId();
-    if (id !== undefined) {
-      openSession(id);
-    } else {
-      startSession();
-    }
-  };
+  // Assistant rows = non-blank sessions in host-list creation order. The blank
+  // filter (server `blank` bit) implements "only show after the first message":
+  // a session disappears until it has content. There is no archiving API in
+  // this base, so the archived check is skipped (spec item 2).
+  const byId = (snapshot && snapshot.byId) || {};
+  const ids = snapshot && snapshot.ids;
+  const assistantRows: any[] = ids && ids.length
+    ? ids.map((id: string) => byId[id]).filter((s: any) => s && !s.blank)
+    : Object.values(byId).filter((s: any) => s && !s.blank);
 
-  // Collapsed mode: compact vertical stack of status dots, no labels.
+  const current = currentSessionId();
+
+  // Collapsed mode: compact vertical stack of status dots, no labels. One dot
+  // per assistant session (in the same filtered ordered list) + one per head.
   if (!wide) {
-    const aState = asistenteStatus(node);
     return (
       <div className="dp-agents-collapsed" aria-hidden="true">
-        <StateDot state={aState} size={10} />
+        {assistantRows.map((a) => (
+          <StateDot key={a.id} state={asistenteStatus(a)} size={10} />
+        ))}
         {heads.map((h) => (
           <HeadStatusDot key={h.id} status={h.status} />
         ))}
       </div>
     );
   }
-
-  const aState = asistenteStatus(node);
 
   return (
     <div style={{ paddingTop: 4 }}>
@@ -347,10 +355,24 @@ export function AgentList(props: AgentsOwner) {
       </button>
       <h2 className="dp-agents-heading">Agents</h2>
       <div className="dp-agents-list">
-        <button type="button" className="dp-agent-row" onClick={onAsistenteClick}>
-          <StateDot state={aState} size={10} />
-          <span className="dp-agent-name">Assistant</span>
-        </button>
+        {assistantRows.map((a, i) => {
+          const name = i === 0 ? "Assistant" : `Assistant ${i + 1}`;
+          const active = a.id === current;
+          return (
+            <button
+              key={a.id}
+              type="button"
+              className={"dp-agent-row" + (active ? " dp-agent-row--active" : "")}
+              onClick={() => {
+                if (!wide) expandSidebar();
+                openSession(a.id);
+              }}
+            >
+              <StateDot state={asistenteStatus(a)} size={10} />
+              <span className="dp-agent-name">{name}</span>
+            </button>
+          );
+        })}
         {heads.map((h) => (
           <div key={h.id} className="dp-agent-row dp-agent-row--static" aria-disabled="true">
             <HeadStatusDot status={h.status} />
@@ -553,11 +575,7 @@ function registerSidebar(ctx: ClientCtx): (() => void) | undefined {
       inject: () => ({
         openSession: (id: string) => ctx.sessions.open(id),
         currentSessionId: () => ctx.sessions.list.getSnapshot().current,
-        sessionNode: () => {
-          const s = ctx.sessions.list.getSnapshot();
-          const id = s.current;
-          return id !== undefined ? s.byId?.[id] : undefined;
-        },
+        sessionSnapshot: () => ctx.sessions.list.getSnapshot(),
         startSession: () => ctx.workspaces.startSession(),
         rpc: ctx.connection.rpc
       })
