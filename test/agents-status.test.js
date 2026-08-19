@@ -5,6 +5,11 @@
 // / computeHeadStatus have no side effects and receive live signals injected
 // as functions.
 //
+// Batch 1b (root-agent model): a department head is a FIRST-CLASS ROOT AGENT
+// keyed by a STABLE session id `head-<postId>` — no child/parent. The resolver
+// args are `sessionLive(sessionId)` (+ optional `sessionRunning`) and unread,
+// and the row exposes `sessionLive` instead of the removed `parentLive`.
+//
 // Tests run against the compiled lib/ (pnpm build first), same as the other
 // suite files.
 import assert from 'node:assert/strict'
@@ -51,10 +56,8 @@ const NO_TITLE = {
 function post(overrides = {}) {
   return {
     postId: 'research-head',
-    childId: 'child-research',
-    parentId: 'parent-research',
+    sessionId: 'head-research-head',
     roomId: 'research',
-    provider: 'opencode-go',
     ...overrides
   }
 }
@@ -62,25 +65,21 @@ function post(overrides = {}) {
 // --- computeHeadStatus: full precedence --------------------------------------
 
 test('computeHeadStatus: sleeping wins over all', () => {
-  assert.equal(computeHeadStatus({ sleeping: true, unread: 5, running: true, parentLive: true }), 'sleeping')
-  assert.equal(computeHeadStatus({ sleeping: true, unread: 0, running: false, parentLive: false }), 'sleeping')
+  assert.equal(computeHeadStatus({ sleeping: true, unread: 5, running: true }), 'sleeping')
+  assert.equal(computeHeadStatus({ sleeping: true, unread: 0, running: false }), 'sleeping')
 })
 
 test('computeHeadStatus: unread (completed-notice) beats running', () => {
-  assert.equal(computeHeadStatus({ sleeping: false, unread: 1, running: true, parentLive: true }), 'completed-notice')
-  assert.equal(computeHeadStatus({ sleeping: false, unread: 2, running: false, parentLive: true }), 'completed-notice')
+  assert.equal(computeHeadStatus({ sleeping: false, unread: 1, running: true }), 'completed-notice')
+  assert.equal(computeHeadStatus({ sleeping: false, unread: 2, running: false }), 'completed-notice')
 })
 
 test('computeHeadStatus: running (working) beats idle', () => {
-  assert.equal(computeHeadStatus({ sleeping: false, unread: 0, running: true, parentLive: true }), 'working')
+  assert.equal(computeHeadStatus({ sleeping: false, unread: 0, running: true }), 'working')
 })
 
-test('computeHeadStatus: parent-not-live falls back to idle', () => {
-  assert.equal(computeHeadStatus({ sleeping: false, unread: 0, running: false, parentLive: false }), 'idle')
-})
-
-test('computeHeadStatus: live idle head with no unread is idle', () => {
-  assert.equal(computeHeadStatus({ sleeping: false, unread: 0, running: false, parentLive: true }), 'idle')
+test('computeHeadStatus: no signals falls back to idle', () => {
+  assert.equal(computeHeadStatus({ sleeping: false, unread: 0, running: false }), 'idle')
 })
 
 // --- buildAgentRows: missing post entry --------------------------------------
@@ -89,8 +88,7 @@ test('buildAgentRows: missing post entry emits idle row with no signals', () => 
   const rows = buildAgentRows({
     departments: [RESEARCH],
     posts: new Map(),
-    agentRunning: () => false,
-    parentLive: () => false,
+    sessionLive: () => false,
     unreadFor: () => 0
   })
   assert.equal(rows.length, 1)
@@ -103,7 +101,7 @@ test('buildAgentRows: missing post entry emits idle row with no signals', () => 
     unread: 0,
     running: false,
     sleeping: false,
-    parentLive: false
+    sessionLive: false
   })
 })
 
@@ -114,8 +112,7 @@ test('buildAgentRows: name falls back title → role → postId', () => {
   const byTitle = buildAgentRows({
     departments: [RESEARCH],
     posts: new Map(),
-    agentRunning: () => false,
-    parentLive: () => false,
+    sessionLive: () => false,
     unreadFor: () => 0
   })
   assert.equal(byTitle[0].name, 'Head of Research')
@@ -124,8 +121,7 @@ test('buildAgentRows: name falls back title → role → postId', () => {
   const byRole = buildAgentRows({
     departments: [{ ...NO_TITLE, coordinator: { ...NO_TITLE.coordinator, title: undefined } }],
     posts: new Map([[NO_TITLE.coordinator.postId, post({ postId: NO_TITLE.coordinator.postId })]]),
-    agentRunning: () => false,
-    parentLive: () => false,
+    sessionLive: () => false,
     unreadFor: () => 0
   })
   assert.equal(byRole[0].name, 'Plain department head')
@@ -134,8 +130,7 @@ test('buildAgentRows: name falls back title → role → postId', () => {
   const byPostId = buildAgentRows({
     departments: [{ ...NO_TITLE, coordinator: { postId: 'plain-head', role: undefined, provider: 'opencode-go' } }],
     posts: new Map(),
-    agentRunning: () => false,
-    parentLive: () => false,
+    sessionLive: () => false,
     unreadFor: () => 0
   })
   assert.equal(byPostId[0].name, 'plain-head')
@@ -145,48 +140,76 @@ test('buildAgentRows: department with no coordinator is skipped', () => {
   const rows = buildAgentRows({
     departments: [RESEARCH, { id: 'ghost', name: 'Ghost', roomId: 'ghost', coordinator: undefined }],
     posts: new Map(),
-    agentRunning: () => false,
-    parentLive: () => false,
+    sessionLive: () => false,
     unreadFor: () => 0
   })
   assert.equal(rows.length, 1)
   assert.equal(rows[0].id, 'research-head')
 })
 
-// --- buildAgentRows: live running head, unread/status mapping ----------------
+// --- buildAgentRows: live signals + status mapping (root-agent model) --------
 
-test('buildAgentRows: live running head maps running + parentLive + unread', () => {
+test('buildAgentRows: live running head maps sessionLive + unread', () => {
   const rows = buildAgentRows({
     departments: [RESEARCH],
     posts: new Map([[RESEARCH.coordinator.postId, post()]]),
-    agentRunning: (childId) => childId === 'child-research',
-    parentLive: (parentId) => parentId === 'parent-research',
+    sessionLive: (sid) => sid === 'head-research-head',
+    sessionRunning: (sid) => sid === 'head-research-head',
     unreadFor: (postId) => (postId === 'research-head' ? 3 : 0)
   })
   assert.equal(rows.length, 1)
+  assert.equal(rows[0].sessionLive, true)
   assert.equal(rows[0].running, true)
-  assert.equal(rows[0].parentLive, true)
   assert.equal(rows[0].unread, 3)
   assert.equal(rows[0].status, 'completed-notice') // unread > 0 beats running
 })
 
-test('buildAgentRows: running with zero unread is working', () => {
+test('buildAgentRows: live-but-idle session (no sessionRunning) falls back to sessionLive', () => {
+  // No `sessionRunning` resolver provided: any live session counts as running.
   const rows = buildAgentRows({
     departments: [RESEARCH],
     posts: new Map([[RESEARCH.coordinator.postId, post()]]),
-    agentRunning: () => true,
-    parentLive: () => true,
+    sessionLive: () => true,
     unreadFor: () => 0
   })
+  assert.equal(rows[0].sessionLive, true)
+  assert.equal(rows[0].running, true)
   assert.equal(rows[0].status, 'working')
+})
+
+test('buildAgentRows: sessionRunning refines running to status==="running"', () => {
+  // Live but not running (e.g. status between turns) → not working → idle.
+  const rows = buildAgentRows({
+    departments: [RESEARCH],
+    posts: new Map([[RESEARCH.coordinator.postId, post()]]),
+    sessionLive: () => true,
+    sessionRunning: () => false,
+    unreadFor: () => 0
+  })
+  assert.equal(rows[0].sessionLive, true)
+  assert.equal(rows[0].running, false)
+  assert.equal(rows[0].status, 'idle')
+})
+
+test('buildAgentRows: session not live with zero unread is idle', () => {
+  const rows = buildAgentRows({
+    departments: [RESEARCH],
+    posts: new Map([[RESEARCH.coordinator.postId, post()]]),
+    sessionLive: () => false,
+    sessionRunning: () => false,
+    unreadFor: () => 0
+  })
+  assert.equal(rows[0].sessionLive, false)
+  assert.equal(rows[0].running, false)
+  assert.equal(rows[0].status, 'idle')
 })
 
 test('buildAgentRows: sleeping head (sleepEpoch set) is sleeping regardless of signals', () => {
   const rows = buildAgentRows({
     departments: [RESEARCH],
-    posts: new Map([[RESEARCH.coordinator.postId, post({ sleepEpoch: 123, previousChildId: 'old-child' })]]),
-    agentRunning: () => true,
-    parentLive: () => true,
+    posts: new Map([[RESEARCH.coordinator.postId, post({ sleepEpoch: 123, previousChildId: 'head-research-head' })]]),
+    sessionLive: () => true,
+    sessionRunning: () => true,
     unreadFor: () => 5
   })
   assert.equal(rows[0].sleeping, true)
@@ -197,8 +220,7 @@ test('buildAgentRows: order follows department config order', () => {
   const rows = buildAgentRows({
     departments: [PROGRAMMING, RESEARCH],
     posts: new Map(),
-    agentRunning: () => false,
-    parentLive: () => false,
+    sessionLive: () => false,
     unreadFor: () => 0
   })
   assert.deepEqual(rows.map((row) => row.id), ['programming-head', 'research-head'])

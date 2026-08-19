@@ -193,16 +193,9 @@ interface PostEntry {
   /** Batch G: the sessionId of the PREVIOUS incarnation (recording where a slept
    * head's old live session went), kept so trace stays honest. Absent = first. */
   previousChildId?: string
-  /** Legacy-compat view read by src/agents.ts `PostEntryLike` (frozen in Batch
-   * 1b): `childId` mirrors `sessionId`, `parentId` is '' for a root head (no
-   * parent), `provider` is the 'head' marker. NOT persisted. */
-  childId: string
-  parentId: string
-  provider: string
 }
 
-/** The DURABLE shape persisted to posts.json (the legacy-compat
- * childId/parentId/provider are derived, never stored). */
+/** The DURABLE shape persisted to posts.json. */
 interface PostEntryPersisted {
   sessionId: string
   roomId: string
@@ -551,11 +544,7 @@ export function applyInvoke(ctx: Context, config: Config) {
             roomId: entry.roomId,
             agentPreset: entry.agentPreset,
             ...(sleepEpoch !== void 0 ? { sleepEpoch } : {}),
-            ...(previousChildId !== void 0 ? { previousChildId } : {}),
-            // Legacy-compat view for agents.ts PostEntryLike (Batch 1b cleans up):
-            childId: sessionId,
-            parentId: '',
-            provider: 'head'
+            ...(previousChildId !== void 0 ? { previousChildId } : {})
           })
         } else {
           // Legacy continuable-subagent entry (or a malformed one): leave out of
@@ -1421,15 +1410,12 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (handle !== void 0) byHeadHandle.set(String(sessionId), handle)
   }
 
-  /** Build a PostEntry for a configured head (legacy-compat fields mirror). */
+  /** Build a PostEntry for a configured head (root-agent shape, Batch 1b). */
   const makeEntry = (coordinator: CoordinatorConfig, roomId: string, sessionId: string): PostEntry => ({
     postId: coordinator.postId,
     sessionId,
     roomId,
-    agentPreset: PRESET_ID,
-    childId: sessionId,
-    parentId: '',
-    provider: 'head'
+    agentPreset: PRESET_ID
   })
 
   /** Ensure EVERY configured department head is a live root agent (boot, after
@@ -1464,10 +1450,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       registerEntry({
         ...entry,
         previousChildId: previousSession,
-        sleepEpoch: undefined,
-        childId: entry.sessionId,
-        parentId: '',
-        provider: 'head'
+        sleepEpoch: undefined
       })
     }
     const live = agents.get(String(sessionId))
@@ -2216,8 +2199,13 @@ export function applyInvoke(ctx: Context, config: Config) {
         const rows = buildAgentRows({
           departments: config.org.departments,
           posts: byPost as unknown as Map<string, PostEntryLike>,
-          agentRunning: (childId) => agents !== void 0 && agents.get(SessionId(childId))?.status === 'running',
-          parentLive: (parentId) => agents !== void 0 && agents.get(SessionId(parentId)) !== undefined,
+          // Heads are FIRST-CLASS ROOT AGENTS (Batch 1a/1b): identified by a
+          // STABLE session id (`head-<postId>`) with NO parent/owner, so the
+          // only live resolvers a head needs are sessionLive (present in the
+          // agents registry) and the optional sessionRunning refinement.
+          // `parentLive` is gone — a root head has no parent to be live for.
+          sessionLive: (sessionId) => agents !== void 0 && agents.get(SessionId(sessionId)) !== undefined,
+          sessionRunning: (sessionId) => agents !== void 0 && agents.get(SessionId(sessionId))?.status === 'running',
           unreadFor,
           sessionId
         })

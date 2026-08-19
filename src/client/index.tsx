@@ -11,6 +11,12 @@ import { StateDot } from "@deepseek-ai/dsh-client-ui-primitives";
  * stays fully reversible (every registration/effect is torn down via the
  * cordis `ctx.effect` disposer).
  *
+ * Batch 1a/1b: department heads are FIRST-CLASS ROOT AGENTS (session id
+ * `head-<postId>`, origin undefined), so they also appear in the native
+ * sessions snapshot. This shadow keeps its custom chrome/status dots as the
+ * single roster source and EXCLUDES `head-*` sessions from the Assistant rows
+ * (see isAssistant) so each head renders exactly once.
+ *
  * A "Deepartments" tab in the DSH Settings UI exposes a two-option segment
  * selector (Enabled/Disabled) that toggles the sidebar shadow + injected
  * `<style>`, persisted via the `/deepartments` RPC (`ui/config/set`) to
@@ -39,7 +45,10 @@ interface AgentHead {
   unread: number;
   running: boolean;
   sleeping: boolean;
-  parentLive: boolean;
+  /** Live signal: the head's stable root-agent session is present in the
+   * agents registry (Batch 1b — replaced the legacy `parentLive`; heads are
+   * root agents with no parent, so there is no parent-liveness anymore). */
+  sessionLive: boolean;
 }
 
 interface AgentsValue {
@@ -272,6 +281,17 @@ const HEAD_TITLES: Record<HeadStatus, string> = {
   sleeping: "Sleeping"
 };
 
+// Stable session-id prefix of the first-class ROOT-AGENT department heads
+// (server: HeadSessionId = `head-<postId>`, Batch 1a/1b). Since a head is a
+// non-subagent root agent, it now appears in the NATIVE sessions snapshot too
+// (origin absent → `isAssistant` would otherwise list it). We exclude these
+// ids from the Assistant rows so a head is rendered exactly ONCE — by the RPC
+// `heads` list below (which carries the richer custom status dots) — and not
+// double-listed as an "Assistant" row as well. Mirrors the deploy contract the
+// server persists; the roster source is the `/deepartments` RPC, not the
+// native tree.
+const HEAD_SESSION_PREFIX = "head-";
+
 function HeadStatusDot({ status }: { status: HeadStatus }) {
   const title = HEAD_TITLES[status] ?? "";
   if (status === "working") {
@@ -395,12 +415,23 @@ export function AgentList(props: AgentsOwner) {
   //  - origin     : hide subagent child sessions (origin === 'subagent');
   //                 hosts carry no origin (undefined → kept). This hides the
   //                 builder/subagent children that are not Assistants.
+  //  - not-head   : hide the first-class department-head sessions
+  //                 (id `head-<postId>`), which are ALSO non-subagent root
+  //                 agents in the snapshot — they are rendered once by the RPC
+  //                 `heads` list (custom status dots), so excluding them here
+  //                 prevents a duplicate "Assistant" row (Batch 1b).
   //  - archived   : hide session ids in `archivedSet` (from workspace.list),
   //                 i.e. old Assistants archived via workspace.archiveSession.
   const byId = (snapshot && snapshot.byId) || {};
   const ids = snapshot && snapshot.ids;
   const isAssistant = (s: any) =>
-    !!(s && !s.blank && s.origin !== 'subagent' && !archivedSet.has(s.id || s.sessionId));
+    !!(
+      s &&
+      !s.blank &&
+      s.origin !== "subagent" &&
+      !(s.id || s.sessionId || "").startsWith(HEAD_SESSION_PREFIX) &&
+      !archivedSet.has(s.id || s.sessionId)
+    );
   let assistantRows: any[] = ids && ids.length
     ? ids.map((id: string) => byId[id]).filter(isAssistant)
     : Object.values(byId).filter(isAssistant);

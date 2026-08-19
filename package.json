@@ -15,7 +15,8 @@
     "lib",
     "client",
     "cordis.patch.yml",
-    "assets"
+    "assets",
+    "presets"
   ],
   "dsh": {
     "bundle": {
