@@ -306,3 +306,35 @@ of the research — so no builder needs to re-research.)
 - **2026-08-19** — **Live test battery PASSED (2026-08-19):** the restructured bus was exercised end-to-end in the live dev GUI: (1) direct host↔head channel — the Asistente host posted an assignment to research-head on the board (no fork), the wake relay woke the spawn head, the head replied, and the relay RAW-woke the host with the kind:'board' source; (2) spatial identity — dept_whereami returns kind host (address host-session-<uuid>) for the Asistente and kind post for the head; (3) nap/sleep lifecycle — the head wrote its journal via dept_memo_write, slept via dept_sleep (durable sleepEpoch), re-materialized as a FRESH incarnation (new childId, previousChildId chain) with the journal in its FIRST-turn start prompt (fix c39de68, found by the incarnation's own honest report that the pre-fix journal arrived as a second turn), and recovered a secret phrase that existed ONLY in the journal (0 occurrences on the board); (4) trust signal — the head saw [sensitive — sender verified: yes]; (5) ack-loop guard — terminal acks did not ping-pong; (6) TWO HOSTS LATERAL — the owner's second session registered host-session-8f1009e1, each host raw-woke the other bidirectionally (m-board-14/15) and both saw a consistent roster (2 live hosts). All autonomous tests were verified with independent evidence (registry files, session logs), not the agents' word. Commits: c39de68 (journal-first-turn fix) + deed386 (docs). Next: departmental multi-head/multi-post scenarios and the programming-department dogfooding on the new bus.
 
 - **2026-08-19** — **`muse-spark-1.2-contributor` enabled and WORKING** via new LLM provider route `opencode-go-responses` (api `openai-responses`, baseURL `https://opencode.ai/zen/go/v1`, model `muse-spark-1.2-contributor`, 1M context, maxTokens 131072; dev home `/opt/dsh/.dsh-dev/settings.yaml` only). Region gate (403 `RegionError: not available in your country` from the EU Hetzner IP) solved with a **scoped Proton WireGuard egress** for `opencode.ai` only: `/opt/dsh/proton/{activate,deactivate}-egress.sh` + persistent unit `dsh-proton-egress.service` (AllowedIPs `172.65.90.20/30` plus Cloudflare trace IPs `1.1.1.1/32,1.0.0.1/32`, `/etc/hosts` pin `opencode.ai→172.65.90.20` so Node picks IPv4; all other server traffic and Tailscale untouched; no DSH restart). End-to-end headless smoke PASS (exit 0, `MUSE_SMOKE_OK`). NOTE: `reasoningEffort` for muse must be one of `none|minimal|low|medium|high|xhigh` (`max` is rejected with 400; `high` verified working). Research: `.dsh/reports/researcher/2026-08-19-opencode-go-muse-spark.md` and `.dsh/reports/researcher/2026-08-19-opencode-muse-ip-egress.md`; route analysis: `.dsh/reports/explore-deep/2026-08-19-opencode-go-muse-route.md`. Operational: Contributor tier = Meta trains on prompts/completions (Not ZDR) → non-sensitive work only; keep the OpenCode Go console **Muse toggle** on; config unversioned (harness home + /opt/dsh/proton).
+
+- **2026-08-20** — **Main agents sidebar**: the left DSH sidebar's workspaces
+  region is replaced by a list of main agents (host row always first +
+  department heads), shipped as a CLIENT bundle inside `dsh-deepartments`
+  (fully reversible; shadows `sidebar.workspaces` at priority -1). Server:
+  new `/deepartments` loopback RPC (`agents`/`list`) via `ctx.connection.rpc`
+  (resolved optionally via `ctx.get('connection')`, skipped in headless
+  profiles); pure status computation in `src/agents.ts` (precedence sleeping →
+  completed-notice(unread addressed-to-host) → working(running) → napping);
+  optional `title` display field on coordinators; new **Internal Programming**
+  department (room `programming`, post `programming-head`, board member) and
+  research dept renamed to Research Department. Client: `dsh.client` (web) +
+  `exports["./client"]` + tsdown `build:client` wrapped by
+  `scripts/normalize-client-banner.mjs`; host row "Assistant — User's Office"
+  with DSH default status dots (ongoing/warning/done), head rows with
+  lifecycle dots (spinner working, green completed-notice, gray napping, gray
+  moon sleeping) fed by 5s+focus RPC polling; clicking the host row opens the
+  current session (`ctx.sessions.open`) or starts a new one when none; the New
+  Session button is hidden via CSS targeting `.hHd-Xa_newSession` ONLY — the
+  shared aria-label selector was removed because the brand button bears the
+  same aria-label and the logo disappeared. Commits: `9ead681` (feature),
+  `bb7b734` (export `./package.json` — `dsh-client-modules` resolves
+  `<pkg>/package.json` and our bundle 404'd until exported, matching
+  dshmarket), `bd82d67` (version the client source — the `client/` gitignore
+  rule was matching `src/client/` too, so the source was untracked; now
+  anchored to `/client/` — plus native-token styling + Assistant naming).
+  Verification: `pnpm build`, `node --test` 63/63, build:client envelope
+  checks, plugin add, dump-config `# == dsh-deepartments` layer with
+  programming, headless smoke (`room ready: programming`), reviewer PASS. Dev
+  GUI restarted twice with owner approval; `/plugins/dsh-deepartments/client.js`
+  serves (HTTP 200) and the `/deepartments` RPC route is mounted; owner visual
+  confirmation of the sidebar pending (refresh :3090).
