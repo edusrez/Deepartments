@@ -93,6 +93,7 @@ interface ClientCtx {
   };
   workspaces: {
     startSession(workspaceId?: string): unknown;
+    archiveSession(sessionId: string): Promise<void>;
   };
   connection: {
     rpc: {
@@ -111,6 +112,8 @@ interface AgentsOwner {
   sessionSnapshot: () => any;
   startSession: () => void;
   rpc: ClientCtx["connection"]["rpc"];
+  /** Archive a session (stopping it and its subagents); removed from the list. */
+  archiveSession: (id: string) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +140,7 @@ const AGENT_CSS = /* css */ `
 }
 .dp-agents-list{display:flex;flex-direction:column;gap:6px;padding:0 8px;}
 .dp-agent-row{
+  position:relative;
   display:flex;align-items:center;gap:8px;
   padding:6px 8px;border-radius:8px;
   background:transparent;border:none;font:inherit;
@@ -148,7 +152,42 @@ const AGENT_CSS = /* css */ `
 .dp-agent-row--static{cursor:default;}
 .dp-agent-row--static:hover{background:var(--dsw-alias-interactive-bg-hover);}
 .dp-agent-row--active{background:var(--dsw-alias-interactive-bg-hover,#eef0f4);}
+/* main open-area button inside an assistant row (transparent, fills the row) */
+.dp-agent-open{
+  flex:1;min-width:0;display:flex;align-items:center;gap:8px;
+  padding:0;background:transparent;border:none;font:inherit;
+  color:inherit;text-align:left;
+  cursor:pointer;user-select:none;box-sizing:border-box;
+}
 .dp-agent-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--dsw-alias-label-primary);}
+
+/* trailing ⋯ menu button — visible on row hover or while the menu is open */
+.dp-agent-menu-btn{
+  flex:none;display:inline-flex;align-items:center;justify-content:center;
+  width:22px;height:22px;border-radius:6px;margin-right:2px;
+  background:transparent;border:none;font:inherit;font-size:15px;line-height:1;
+  color:var(--dsw-alias-label-secondary);cursor:pointer;user-select:none;
+  opacity:0;transition:opacity .12s ease;
+}
+.dp-agent-menu-btn:hover{background:var(--dsw-alias-interactive-bg-hover,#eef0f4);}
+.dp-agent-menu-btn:focus-visible{opacity:1;}
+.dp-agent-row:hover .dp-agent-menu-btn,
+.dp-agent-row--menu-open .dp-agent-menu-btn{opacity:1;}
+
+/* ⋯ dropdown */
+.dp-agent-menu{
+  position:absolute;right:8px;top:calc(100% + 4px);z-index:50;
+  min-width:140px;padding:4px;border-radius:8px;
+  background:var(--dsw-alias-bg-layer-1,#fff);
+  border:1px solid var(--dsw-alias-border-l2,#e5e7eb);
+  box-shadow:0 4px 16px #0000001a;
+}
+.dp-agent-menu button{
+  display:block;width:100%;padding:6px 10px;border:none;border-radius:6px;
+  background:transparent;font:inherit;font-size:13px;text-align:left;
+  color:var(--dsw-alias-label-primary,#1f2328);cursor:pointer;user-select:none;
+}
+.dp-agent-menu button:hover{background:var(--dsw-alias-interactive-bg-hover,#eef0f4);}
 
 /* status glyphs */
 .dp-dot{display:inline-flex;align-items:center;justify-content:center;width:10px;height:10px;flex:none;}
@@ -277,13 +316,15 @@ function HeadStatusDot({ status }: { status: HeadStatus }) {
 // AgentList — renders the main agents into the sidebar.workspaces hole.
 // ---------------------------------------------------------------------------
 export function AgentList(props: AgentsOwner) {
-  const { wide, expandSidebar, openSession, currentSessionId, sessionSnapshot, startSession, rpc } = props;
+  const { wide, expandSidebar, openSession, currentSessionId, sessionSnapshot, startSession, rpc, archiveSession } = props;
   const [host, setHost] = useState<AgentsValue["host"] | null>(null);
   const [heads, setHeads] = useState<AgentHead[]>([]);
   const [snapshot, setSnapshot] = useState(() => sessionSnapshot());
   // Session ids archived via workspace.archiveSession (still present in the
   // sessions snapshot but should not appear as Assistant rows).
   const [archivedSet, setArchivedSet] = useState<Set<string>>(new Set());
+  // Which Assistant row has its ⋯ (archive) menu open.
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -360,9 +401,22 @@ export function AgentList(props: AgentsOwner) {
   const ids = snapshot && snapshot.ids;
   const isAssistant = (s: any) =>
     !!(s && !s.blank && s.origin !== 'subagent' && !archivedSet.has(s.id || s.sessionId));
-  const assistantRows: any[] = ids && ids.length
+  let assistantRows: any[] = ids && ids.length
     ? ids.map((id: string) => byId[id]).filter(isAssistant)
     : Object.values(byId).filter(isAssistant);
+  // Creation order, oldest first: the snapshot `ids` list is most-recent-first
+  // (newer sessions land on top), so reverse it so the original Assistant stays
+  // on top and newer Assistants number up (Assistant, Assistant 2, ...).
+  // Session rows expose only `updatedAt` (an activity timestamp, NOT creation),
+  // so when a real createdAt is present sort by it ascending, else reverse the
+  // ids baseline to reconstruct creation order.
+  if (assistantRows.some((s: any) => s.createdAt)) {
+    assistantRows = assistantRows
+      .slice()
+      .sort((a: any, b: any) => (a.createdAt || 0) - (b.createdAt || 0));
+  } else {
+    assistantRows = assistantRows.slice().reverse();
+  }
 
   const current = currentSessionId();
 
@@ -391,19 +445,58 @@ export function AgentList(props: AgentsOwner) {
         {assistantRows.map((a, i) => {
           const name = i === 0 ? "Assistant" : `Assistant ${i + 1}`;
           const active = a.id === current;
+          const menuOpen = openMenuId === a.id;
           return (
-            <button
+            <div
               key={a.id}
-              type="button"
-              className={"dp-agent-row" + (active ? " dp-agent-row--active" : "")}
-              onClick={() => {
-                if (!wide) expandSidebar();
-                openSession(a.id);
-              }}
+              className={
+                "dp-agent-row" +
+                (active ? " dp-agent-row--active" : "") +
+                (menuOpen ? " dp-agent-row--menu-open" : "")
+              }
             >
-              <StateDot state={asistenteStatus(a)} size={10} />
-              <span className="dp-agent-name">{name}</span>
-            </button>
+              <button
+                type="button"
+                className="dp-agent-open"
+                onClick={() => {
+                  if (!wide) expandSidebar();
+                  openSession(a.id);
+                }}
+              >
+                <StateDot state={asistenteStatus(a)} size={10} />
+                <span className="dp-agent-name">{name}</span>
+              </button>
+              <button
+                type="button"
+                className="dp-agent-menu-btn"
+                aria-label="Agent menu"
+                aria-expanded={menuOpen}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setOpenMenuId(menuOpen ? null : a.id);
+                }}
+              >
+                ⋯
+              </button>
+              {menuOpen && (
+                <div className="dp-agent-menu">
+                  <button
+                    type="button"
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      setOpenMenuId(null);
+                      try {
+                        await archiveSession(a.id);
+                      } catch {
+                        // Ignored: the 5s archived poll reconciles the row out.
+                      }
+                    }}
+                  >
+                    Archive agent
+                  </button>
+                </div>
+              )}
+            </div>
           );
         })}
         {heads.map((h) => (
@@ -610,7 +703,8 @@ function registerSidebar(ctx: ClientCtx): (() => void) | undefined {
         currentSessionId: () => ctx.sessions.list.getSnapshot().current,
         sessionSnapshot: () => ctx.sessions.list.getSnapshot(),
         startSession: () => ctx.workspaces.startSession(),
-        rpc: ctx.connection.rpc
+        rpc: ctx.connection.rpc,
+        archiveSession: (id: string) => ctx.workspaces.archiveSession(id)
       })
     },
     AgentList
