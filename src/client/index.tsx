@@ -89,6 +89,7 @@ interface ClientCtx {
   };
   workspaces: {
     startSession(workspaceId?: string): unknown;
+    archiveSession(sessionId: string): Promise<void>;
   };
   connection: {
     rpc: {
@@ -104,6 +105,9 @@ interface AgentsOwner {
   openSession: (id: string) => void;
   currentSessionId: () => string | undefined;
   sessionNode: () => any;
+  sessionSnapshot: () => { current: string | undefined; byId?: Record<string, any> };
+  archivedIds: () => readonly string[];
+  archiveSession: (id: string) => Promise<void>;
   startSession: () => void;
   rpc: ClientCtx["connection"]["rpc"];
 }
@@ -143,7 +147,6 @@ const AGENT_CSS = /* css */ `
 .dp-agent-row--static{cursor:default;}
 .dp-agent-row--static:hover{background:var(--dsw-alias-interactive-bg-hover);}
 .dp-agent-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--dsw-alias-label-primary);}
-.dp-agent-dept{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--dsw-alias-label-secondary);}
 
 /* status glyphs */
 .dp-dot{display:inline-flex;align-items:center;justify-content:center;width:10px;height:10px;flex:none;}
@@ -156,6 +159,58 @@ const AGENT_CSS = /* css */ `
 .dp-agents-collapsed .dp-dot[data-state="idle"]{background:#9ca3af;}
 .dp-agents-collapsed .dp-moon{width:8px;height:8px;}
 .dp-agents-collapsed .dp-dot[data-state="done"],.dp-agents-collapsed .dp-dot[data-state="warning"],.dp-agents-collapsed .dp-dot[data-state="ongoing"]{background:var(--dsw-alias-state-success-primary);}
+
+/* ---- New session button ---- */
+.dp-new-session-btn{
+  display:flex;align-items:center;justify-content:center;gap:6px;
+  width:calc(100% - 16px);margin:0 8px 12px;
+  padding:8px 12px;border-radius:8px;
+  border:1px solid var(--dsw-alias-border-l2,#e5e7eb);
+  background:var(--dsw-alias-bg-layer-1,#fff);
+  font:inherit;font-size:13px;font-weight:500;
+  color:var(--dsw-alias-label-primary,#1f2328);
+  cursor:pointer;user-select:none;box-sizing:border-box;
+}
+.dp-new-session-btn:hover{background:var(--dsw-alias-interactive-bg-hover,#eef0f4);}
+.dp-new-session-btn:active{background:var(--dsw-alias-bg-layer-2,#f2f3f5);}
+
+/* ---- sessions list (assistant sessions) ---- */
+.dp-sessions-list{display:flex;flex-direction:column;gap:2px;padding:4px 8px;}
+.dp-session-row{
+  display:flex;align-items:center;gap:8px;
+  padding:6px 8px;border-radius:8px;
+  background:transparent;border:none;font:inherit;
+  color:var(--dsw-alias-label-secondary);
+  text-align:left;
+  cursor:pointer;user-select:none;width:100%;box-sizing:border-box;
+  position:relative;
+}
+.dp-session-row:hover{background:var(--dsw-alias-interactive-bg-hover);}
+.dp-session-row--active{background:var(--dsw-alias-bg-layer-2,#f2f3f5);}
+.dp-session-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--dsw-alias-label-primary);}
+.dp-session-menu-btn{
+  flex:none;width:20px;height:20px;
+  display:inline-flex;align-items:center;justify-content:center;
+  border-radius:4px;border:none;background:transparent;
+  font-size:14px;line-height:1;
+  color:var(--dsw-alias-label-tertiary,#8b93a1);
+  cursor:pointer;user-select:none;
+}
+.dp-session-menu-btn:hover{background:var(--dsw-alias-interactive-bg-hover);}
+.dp-session-menu{
+  position:absolute;right:8px;top:calc(100% + 4px);
+  min-width:140px;padding:4px;border-radius:8px;
+  border:1px solid var(--dsw-alias-border-l2,#e5e7eb);
+  background:var(--dsw-alias-bg-layer-1,#fff);
+  box-shadow:0 4px 12px rgba(0,0,0,0.12);z-index:10;
+}
+.dp-session-menu button{
+  display:block;width:100%;text-align:left;
+  padding:6px 8px;border:none;background:transparent;
+  font:inherit;font-size:13px;color:var(--dsw-alias-label-primary);
+  border-radius:4px;cursor:pointer;
+}
+.dp-session-menu button:hover{background:var(--dsw-alias-interactive-bg-hover);}
 `;
 
 // Settings section + segment selector styles. Kept OUT of AGENT_CSS because
@@ -258,9 +313,11 @@ function HeadStatusDot({ status }: { status: HeadStatus }) {
 // AgentList — renders the main agents into the sidebar.workspaces hole.
 // ---------------------------------------------------------------------------
 export function AgentList(props: AgentsOwner) {
-  const { wide, expandSidebar, openSession, currentSessionId, sessionNode, startSession, rpc } = props;
+  const { wide, expandSidebar, openSession, currentSessionId, sessionNode, sessionSnapshot, archivedIds, archiveSession, startSession, rpc } = props;
   const [host, setHost] = useState<AgentsValue["host"] | null>(null);
   const [heads, setHeads] = useState<AgentHead[]>([]);
+  const [snap, setSnap] = useState(() => sessionSnapshot());
+  const [openMenuId, setOpenMenuId] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     let disposed = false;
@@ -277,10 +334,19 @@ export function AgentList(props: AgentsOwner) {
       // On { ok: false } keep last data; the next poll retries silently.
     };
 
+    const refreshSnap = () => {
+      if (!disposed) setSnap(sessionSnapshot());
+    };
+
     fetchAgents();
-    const interval = window.setInterval(fetchAgents, 5000);
+    refreshSnap();
+    const interval = window.setInterval(() => {
+      fetchAgents();
+      refreshSnap();
+    }, 5000);
     const onFocus = () => {
       fetchAgents();
+      refreshSnap();
     };
     window.addEventListener("focus", onFocus);
 
@@ -316,26 +382,79 @@ export function AgentList(props: AgentsOwner) {
     );
   }
 
-  const hostDept = host?.department ?? "User's Office";
   const aState = asistenteStatus(sessionNode());
+  const archived = new Set(archivedIds());
+  const sessions = Object.values((snap.byId ?? {}) as Record<string, any>).filter(
+    (s: any) => s && typeof s.id === "string" && !archived.has(s.id)
+  ) as any[];
 
   return (
     <div style={{ paddingTop: 4 }}>
+      <button type="button" className="dp-new-session-btn" onClick={() => startSession()}>
+        + New session with Assistant
+      </button>
       <h2 className="dp-agents-heading">Agents</h2>
       <div className="dp-agents-list">
         <button type="button" className="dp-agent-row" onClick={onAsistenteClick}>
           <StateDot state={aState} size={10} />
           <span className="dp-agent-name">Assistant</span>
-          <span className="dp-agent-dept">{hostDept}</span>
         </button>
         {heads.map((h) => (
           <div key={h.id} className="dp-agent-row dp-agent-row--static" aria-disabled="true">
             <HeadStatusDot status={h.status} />
             <span className="dp-agent-name">{h.name}</span>
-            {h.department ? <span className="dp-agent-dept">{h.department}</span> : null}
           </div>
         ))}
       </div>
+      {sessions.length > 0 ? (
+        <div className="dp-sessions-list">
+          <h3 className="dp-agents-heading" style={{ marginTop: 12 }}>
+            Sessions
+          </h3>
+          {sessions.map((s: any) => {
+            const id: string = s.id;
+            const isActive = id === currentSessionId();
+            const title: string = s.title ?? s.displayTitle ?? id.slice(0, 8);
+            const node = (snap.byId as any)?.[id];
+            const sState = asistenteStatus(node);
+            return (
+              <div key={id} className={"dp-session-row" + (isActive ? " dp-session-row--active" : "")} onClick={() => openSession(id)}>
+                <StateDot state={sState} size={8} />
+                <span className="dp-session-title">{title}</span>
+                <button
+                  type="button"
+                  className="dp-session-menu-btn"
+                  aria-label="Session menu"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setOpenMenuId(openMenuId === id ? undefined : id);
+                  }}
+                >
+                  ⋯
+                </button>
+                {openMenuId === id ? (
+                  <div className="dp-session-menu">
+                    <button
+                      type="button"
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        setOpenMenuId(undefined);
+                        try {
+                          await archiveSession(id);
+                        } catch {
+                          // ignore; next poll will reconcile
+                        }
+                      }}
+                    >
+                      Close session
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -536,6 +655,19 @@ function registerSidebar(ctx: ClientCtx): (() => void) | undefined {
           const id = s.current;
           return id !== undefined ? s.byId?.[id] : undefined;
         },
+        sessionSnapshot: () => ctx.sessions.list.getSnapshot(),
+        archivedIds: () => {
+          try {
+            const w: any = (ctx as any).workspaces ?? (ctx as any).workspacesManager ?? {};
+            if (Array.isArray(w.archivedSessionIds)) return w.archivedSessionIds as readonly string[];
+            if (typeof w.getSnapshot === "function") {
+              const snap = w.getSnapshot();
+              if (Array.isArray(snap?.archivedSessionIds)) return snap.archivedSessionIds as readonly string[];
+            }
+          } catch {}
+          return [] as readonly string[];
+        },
+        archiveSession: (id: string) => ctx.workspaces.archiveSession(id),
         startSession: () => ctx.workspaces.startSession(),
         rpc: ctx.connection.rpc
       })
