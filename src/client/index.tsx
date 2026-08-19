@@ -321,15 +321,22 @@ export function AgentList(props: AgentsOwner) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Assistant rows = non-blank sessions in host-list creation order. The blank
-  // filter (server `blank` bit) implements "only show after the first message":
-  // a session disappears until it has content. There is no archiving API in
-  // this base, so the archived check is skipped (spec item 2).
+  // Assistant rows = non-blank host-origin sessions in host-list creation order.
+  // Filters:
+  //  - !s.blank   : server `blank` bit — "only show after the first message"
+  //                 (a session disappears until it has content).
+  //  - origin     : hide subagent child sessions (origin === 'subagent');
+  //                 hosts carry no origin (undefined → kept). This hides the
+  //                 builder/subagent children that are not Assistants.
+  // Archived(old) Assistants are not filtered here: the snapshot exposes no
+  // archived flag and adding a workspace.list fetch is out of scope; they are
+  // removed by archiving old sessions separately.
   const byId = (snapshot && snapshot.byId) || {};
   const ids = snapshot && snapshot.ids;
+  const isAssistant = (s: any) => !!(s && !s.blank && s.origin !== 'subagent');
   const assistantRows: any[] = ids && ids.length
-    ? ids.map((id: string) => byId[id]).filter((s: any) => s && !s.blank)
-    : Object.values(byId).filter((s: any) => s && !s.blank);
+    ? ids.map((id: string) => byId[id]).filter(isAssistant)
+    : Object.values(byId).filter(isAssistant);
 
   const current = currentSessionId();
 
