@@ -64,6 +64,11 @@ are cached); user edits to `cordis.patch.yml` are HMR. All dsh commands for deve
 7. Isolate renamable services: `ctx.get('webServer') ?? ctx.get('httpServer')`.
 8. `peerDependencies` on the rc channel (`^0.1.0-rc.x`) and **CLI pin**:
    `npx -p @deepseek-ai/dsh@0.1.0-rc.7`.
+9. **Never poll subagents.** After dispatching via `subagent`/`subagent_fork`
+   (always-async, no blocking), END THE TURN. Do not run `sleep`,
+   `list_agents`, `job_list`, `cat`/`grep` loops to check completion. The
+   harness wakes you with a settlement notice; continue dependent work only
+   when that notice arrives. One `send_message` per follow-up turn.
 
 Details and rationale for each rule: skill `dsh-plugin-dev`
 (`.dsh/skills/dsh-plugin-dev/SKILL.md`).
