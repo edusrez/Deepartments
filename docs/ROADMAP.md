@@ -307,34 +307,10 @@ of the research — so no builder needs to re-research.)
 
 - **2026-08-19** — **`muse-spark-1.2-contributor` enabled and WORKING** via new LLM provider route `opencode-go-responses` (api `openai-responses`, baseURL `https://opencode.ai/zen/go/v1`, model `muse-spark-1.2-contributor`, 1M context, maxTokens 131072; dev home `/opt/dsh/.dsh-dev/settings.yaml` only). Region gate (403 `RegionError: not available in your country` from the EU Hetzner IP) solved with a **scoped Proton WireGuard egress** for `opencode.ai` only: `/opt/dsh/proton/{activate,deactivate}-egress.sh` + persistent unit `dsh-proton-egress.service` (AllowedIPs `172.65.90.20/30` plus Cloudflare trace IPs `1.1.1.1/32,1.0.0.1/32`, `/etc/hosts` pin `opencode.ai→172.65.90.20` so Node picks IPv4; all other server traffic and Tailscale untouched; no DSH restart). End-to-end headless smoke PASS (exit 0, `MUSE_SMOKE_OK`). NOTE: `reasoningEffort` for muse must be one of `none|minimal|low|medium|high|xhigh` (`max` is rejected with 400; `high` verified working). Research: `.dsh/reports/researcher/2026-08-19-opencode-go-muse-spark.md` and `.dsh/reports/researcher/2026-08-19-opencode-muse-ip-egress.md`; route analysis: `.dsh/reports/explore-deep/2026-08-19-opencode-go-muse-route.md`. Operational: Contributor tier = Meta trains on prompts/completions (Not ZDR) → non-sensitive work only; keep the OpenCode Go console **Muse toggle** on; config unversioned (harness home + /opt/dsh/proton).
 
-- **2026-08-20** — **Main agents sidebar**: the left DSH sidebar's workspaces
-  region is replaced by a list of main agents (host row always first +
-  department heads), shipped as a CLIENT bundle inside `dsh-deepartments`
-  (fully reversible; shadows `sidebar.workspaces` at priority -1). Server:
-  new `/deepartments` loopback RPC (`agents`/`list`) via `ctx.connection.rpc`
-  (resolved optionally via `ctx.get('connection')`, skipped in headless
-  profiles); pure status computation in `src/agents.ts` (precedence sleeping →
-  completed-notice(unread addressed-to-host) → working(running) → napping);
-  optional `title` display field on coordinators; new **Internal Programming**
-  department (room `programming`, post `programming-head`, board member) and
-  research dept renamed to Research Department. Client: `dsh.client` (web) +
-  `exports["./client"]` + tsdown `build:client` wrapped by
-  `scripts/normalize-client-banner.mjs`; host row "Assistant — User's Office"
-  with DSH default status dots (ongoing/warning/done), head rows with
-  lifecycle dots (spinner working, green completed-notice, gray napping, gray
-  moon sleeping) fed by 5s+focus RPC polling; clicking the host row opens the
-  current session (`ctx.sessions.open`) or starts a new one when none; the New
-  Session button is hidden via CSS targeting `.hHd-Xa_newSession` ONLY — the
-  shared aria-label selector was removed because the brand button bears the
-  same aria-label and the logo disappeared. Commits: `9ead681` (feature),
-  `bb7b734` (export `./package.json` — `dsh-client-modules` resolves
-  `<pkg>/package.json` and our bundle 404'd until exported, matching
-  dshmarket), `bd82d67` (version the client source — the `client/` gitignore
-  rule was matching `src/client/` too, so the source was untracked; now
-  anchored to `/client/` — plus native-token styling + Assistant naming).
-  Verification: `pnpm build`, `node --test` 63/63, build:client envelope
-  checks, plugin add, dump-config `# == dsh-deepartments` layer with
-  programming, headless smoke (`room ready: programming`), reviewer PASS. Dev
-  GUI restarted twice with owner approval; `/plugins/dsh-deepartments/client.js`
-  serves (HTTP 200) and the `/deepartments` RPC route is mounted; owner visual
-  confirmation of the sidebar pending (refresh :3090).
+- **2026-08-20** — **Main agents sidebar**: the left DSH sidebar's workspaces region is replaced by a list of main agents (host row always first + department heads), shipped as a CLIENT bundle inside `dsh-deepartments` (fully reversible; shadows `sidebar.workspaces` at priority -1). Server: new `/deepartments` loopback RPC (`agents`/`list`) via `ctx.connection.rpc` (resolved optionally via `ctx.get('connection')`, skipped in headless profiles); pure status computation in `src/agents.ts` (precedence sleeping → completed-notice(unread addressed-to-host) → working(running) → idle); optional `title` display field on coordinators; new **Internal Programming** department (room `programming`, post `programming-head`, board member) and research dept renamed to Research Department. Client: `dsh.client` (web) + `exports["./client"]` + tsdown `build:client` wrapped by `scripts/normalize-client-banner.mjs`; host row "Assistant — User's Office" with DSH default status dots (ongoing/warning/done), head rows with lifecycle dots (spinner working, green completed-notice, gray idle, gray moon sleeping) fed by 5s+focus RPC polling; clicking the host row opens the current session (`ctx.sessions.open`) or starts a new one when none; the New Session button is hidden via CSS targeting `.hHd-Xa_newSession` ONLY — the shared aria-label selector was removed because the brand button bears the same aria-label and the logo disappeared. Commits: `9ead681` (feature), `bb7b734` (export `./package.json`), `bd82d67` (version client source — `/client/` gitignore anchored). Verification: `pnpm build`, `node --test` 63/63, build:client envelope checks, plugin add, dump-config `# == dsh-deepartments` layer with programming, headless smoke (`room ready: programming`), reviewer PASS. Dev GUI restarted twice with owner approval; `/plugins/dsh-deepartments/client.js` serves (HTTP 200) and the `/deepartments` RPC route is mounted.
+
+- **2026-08-20** — **Deepartments Settings tab + trusted-host rework**: owner wanted a Settings tab with a slider to enable/disable the Deepartments UI, but the initial DSH settingsScope is loopback-only (owner on Tailscale → switch disabled). Reworked to persist toggle in `<stateDir>/ui.json` served over `/deepartments` RPC `ui/config` / `ui/config/set` with authority `trusted-host` (declared Tailscale hosts, loopback still allowed) so it works from any origin; Deleted `src/settings.ts` and `dsh-settings` deps. Client now drives a live gate polling `ui/config` and a segmented Enabled/Disabled selector (DSH options style). Commits: `30901ea` then `2c4ba9c` (rework).
+
+- **2026-08-20** — **Agents-only sidebar + multiple Assistants**: sidebar made agents-only (removed Sessions section). Assistant sessions now appear as separate agents (Assistant, Assistant 2, ...) in creation order oldest-first, only after first message (blank filter), each clickable to open its session, active highlighted, collapsed dots per assistant. Subagents hidden (`origin !== 'subagent'`) and archived Assistants hidden via `archivedSessionIds` from `workspace.list` (rpc). Ordering fix: original Assistant stays on top, new below; restored ⋯ hover menu per Assistant with Archive agent via `workspaces.archiveSession`. Commits: `bdb972f`, `02f1c5b`, `37915b0`, `bf6e4e9`, `f768971`, `de367da`.
+
+- **2026-08-20** — **Dept nap removal**: `dept_nap` was a no-op conclude marker; DSH wake relay / settlement injection wakes heads regardless, so the tool was redundant. Removed both host-plane and child-layer definitions, rewrote head spawn prompt, cleaned lifecycle comments, deleted Batch G nap test, renamed head status `napping`→`idle` across `src/agents.ts` and `src/client/index.tsx`. Commit `8c2c3fe`. 62/62 tests.
