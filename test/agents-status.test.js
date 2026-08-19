@@ -71,21 +71,21 @@ test('computeHeadStatus: unread (completed-notice) beats running', () => {
   assert.equal(computeHeadStatus({ sleeping: false, unread: 2, running: false, parentLive: true }), 'completed-notice')
 })
 
-test('computeHeadStatus: running (working) beats idle nap', () => {
+test('computeHeadStatus: running (working) beats idle', () => {
   assert.equal(computeHeadStatus({ sleeping: false, unread: 0, running: true, parentLive: true }), 'working')
 })
 
-test('computeHeadStatus: parent-not-live falls back to napping', () => {
-  assert.equal(computeHeadStatus({ sleeping: false, unread: 0, running: false, parentLive: false }), 'napping')
+test('computeHeadStatus: parent-not-live falls back to idle', () => {
+  assert.equal(computeHeadStatus({ sleeping: false, unread: 0, running: false, parentLive: false }), 'idle')
 })
 
-test('computeHeadStatus: live idle head with no unread is napping', () => {
-  assert.equal(computeHeadStatus({ sleeping: false, unread: 0, running: false, parentLive: true }), 'napping')
+test('computeHeadStatus: live idle head with no unread is idle', () => {
+  assert.equal(computeHeadStatus({ sleeping: false, unread: 0, running: false, parentLive: true }), 'idle')
 })
 
 // --- buildAgentRows: missing post entry --------------------------------------
 
-test('buildAgentRows: missing post entry emits napping row with no signals', () => {
+test('buildAgentRows: missing post entry emits idle row with no signals', () => {
   const rows = buildAgentRows({
     departments: [RESEARCH],
     posts: new Map(),
@@ -99,7 +99,7 @@ test('buildAgentRows: missing post entry emits napping row with no signals', () 
     name: 'Head of Research',
     department: 'Research Department',
     kind: 'post',
-    status: 'napping',
+    status: 'idle',
     unread: 0,
     running: false,
     sleeping: false,

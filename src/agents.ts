@@ -7,14 +7,14 @@
 //
 // The row status precedence (see computeHeadStatus):
 //   sleeping (sleepEpoch set) → completed-notice (unread addressed-to-host
-//   message > 0) → working (live agent running) → napping (everything else,
+//   message > 0) → working (live agent running) → idle (everything else,
 //   including a missing/not-live parent — the safe fallback).
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 import type { DepartmentConfig } from './org.js'
 
 /** The coarse life-cycle status of one department-head agent row. */
-export type HeadStatus = 'sleeping' | 'completed-notice' | 'working' | 'napping'
+export type HeadStatus = 'sleeping' | 'completed-notice' | 'working' | 'idle'
 
 /**
  * Loose structural view of one durable post-registry entry (see PostEntry in
@@ -57,7 +57,7 @@ export interface AgentRow {
  * The precedence that turns raw signals into a display status. `parentLive` is
  * accepted for signature symmetry with buildAgentRows but does not change the
  * outcome directly — a not-live (or missing) parent simply falls through to
- * the safe `napping` default, exactly like a live-but-idle head.
+ * the safe `idle` default, exactly like a live-but-idle head.
  */
 export function computeHeadStatus(input: {
   sleeping: boolean
@@ -68,7 +68,7 @@ export function computeHeadStatus(input: {
   if (input.sleeping) return 'sleeping'
   if (input.unread > 0) return 'completed-notice'
   if (input.running) return 'working'
-  return 'napping'
+  return 'idle'
 }
 
 /**
@@ -78,7 +78,7 @@ export function computeHeadStatus(input: {
  * registries.
  *
  * A department whose coordinator post has never been spawned (no registry
- * entry) still gets a row — status 'napping', no activity signals — because the
+ * entry) still gets a row — status 'idle', no activity signals — because the
  * head exists in config and the sidebar must show it.
  */
 export function buildAgentRows(args: {
@@ -101,13 +101,13 @@ export function buildAgentRows(args: {
     const entry = args.posts.get(postId)
     if (entry === undefined) {
       // Configured head that has never been spawned/resumed this boot — no
-      // live signals. The safe default is napping.
+      // live signals. The safe default is idle.
       rows.push({
         id: postId,
         name,
         department: department.name,
         kind: 'post',
-        status: 'napping',
+        status: 'idle',
         unread: 0,
         running: false,
         sleeping: false,

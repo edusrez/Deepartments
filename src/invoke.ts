@@ -8,9 +8,9 @@
 // as PERMANENT, MINIMAL-CONTEXT spawn posts (provider 'spawn', persona = role,
 // lean `toolFilter: { allow: [] }`) — long-lived employees, not Asistente
 // clones — with an official spatial-deployment context delivery and a minimal
-// `dept_post_retire` cleanup affordance. Batch G adds the nap/sleep lifecycle:
-// a head NAPS (siesta) by simply concluding as an inactive-but-resumable
-// continuable (a no-op dept_nap marks the intent), or SLEEPS (dormir) by
+// `dept_post_retire` cleanup affordance. Batch G adds the sleep lifecycle:
+// a head goes IDLE by simply concluding as an inactive-but-resumable
+// continuable (the wake relay re-wakes it regardless), or SLEEPS (dormir) by
 // persisting its long-term memory to a journal (dept_memo_write) and marking
 // itself (dept_sleep → sleepEpoch) so the next wake re-materializes a FRESH
 // incarnation whose FIRST-TURN start prompt carries the journal (context
@@ -156,7 +156,7 @@ interface PostEntry {
   /** Batch G: set when the head SLEPT (memoized + marked). On the next wake the
    * relay re-materializes a FRESH incarnation (context reset + journal reload)
    * instead of resuming the old continuable; cleared once the respawn lands.
-   * Absent/undefined = never slept (a normal resumable nap). */
+   * Absent/undefined = never slept (a normal resumable wait). */
   sleepEpoch?: number
   /** Batch G: the childId of the PREVIOUS incarnation (recording where a slept
    * head's old session lives in the DSH store), kept so settlement/trace stays
@@ -622,9 +622,9 @@ export function applyInvoke(ctx: Context, config: Config) {
   // surface (bash/write/subagent/edit/web_fetch/...) while the own-layer board
   // tools (dept_room_*) survive — a restriction never filters a scope's OWN
   // layer (dsh-tools view). A head is registered once and REUSED: materialization
-  // is idempotent by postId (already-present → skip). The nap/sleep lifecycle
-  // (Batch G): a head concludes turns as an inactive-but-resumable resident
-  // (nap), or, when its task ends or its context saturates, persists a journal
+  // is idempotent by postId (already-present → skip). The sleep lifecycle
+  // (Batch G): a head concludes turns as an inactive-but-resumable resident,
+  // or, when its task ends or its context saturates, persists a journal
   // (dept_memo_write) and sleeps (dept_sleep) so the next wake re-materializes it
   // fresh with the journal as memory.
   //
@@ -650,13 +650,14 @@ export function applyInvoke(ctx: Context, config: Config) {
   type LiveAgent = NonNullable<ReturnType<typeof pickLiveParent>>
 
   /** Minimal identity framing for a permanent head — NO mission (missions
-   * arrive later as addressed board messages). Batch G adds the nap/sleep
-   * lifecycle guidance (model-facing, purely additive): idle → dept_nap (context
-   * retained); task complete or context near its limit → dept_memo_write to save
-   * your long-term memory to your journal, then dept_sleep to reset your context
-   * window (you are re-materialized fresh with your journal on the next wake). */
+   * arrive later as addressed board messages). Batch G adds the sleep
+   * lifecycle guidance (model-facing, purely additive): idle and simply end
+   * your turn (the wake relay re-wakes you); task complete or context near
+   * its limit → dept_memo_write to save your long-term memory to your journal,
+   * then dept_sleep to reset your context window (you are re-materialized
+   * fresh with your journal on the next wake). */
   const headPrompt = (postId: string): string =>
-    `You are "${postId}", a permanent department head acting on your role. The board is your channel: read addressed messages with dept_room_read and reply with dept_room_write. Verify your identity and roster with dept_whereami and dept_room_who. You are permanent: when idle, conclude with dept_nap (your context is retained; you will be woken when an addressed message arrives). When a task concludes or your context window approaches its limit, write dept_memo_write to save your memory to your journal, then conclude with dept_sleep — on your next wake you will be re-materialized fresh with your journal as your long-term memory.`
+    `You are "${postId}", a permanent department head acting on your role. The board is your channel: read addressed messages with dept_room_read and reply with dept_room_write. Verify your identity and roster with dept_whereami and dept_room_who. You are permanent: when idle, simply end your turn — you will be woken when an addressed message arrives. When a task concludes or your context window approaches its limit, write dept_memo_write to save your memory to your journal, then conclude with dept_sleep — on your next wake you will be re-materialized fresh with your journal as your long-term memory.`
 
   /** Official spatial-deployment context (no mission) for a freshly spawned head. */
   const deploymentContext = (parent: LiveAgent, postId: string, roomId: string): string => {
@@ -1329,7 +1330,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   const globalRetire = ctx.tools.register(defineTool({
     name: 'dept_post_retire',
-    description: 'Retire a registered board post cleanly: post a withdrawal note in its room (addressed to the post), then unregister it from the post/child registries and persist. A hard unregister for permanent posts (the lifecycle journal in Batch G covers the gentler nap/sleep path). Unknown postIds are rejected loudly.',
+    description: 'Retire a registered board post cleanly: post a withdrawal note in its room (addressed to the post), then unregister it from the post/child registries and persist. A hard unregister for permanent posts (the lifecycle journal in Batch G covers the gentler sleep lifecycle path). Unknown postIds are rejected loudly.',
     parameters: {
       postId: { type: 'string', required: true, description: 'The post id to retire (e.g. "research-head").' }
     },
@@ -1360,15 +1361,15 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }))
 
-  // --- Batch G: memo (journal), nap (siesta), sleep (dormir) — host plane -----
-  // The owner's lifecycle model: department heads are PERMANENT agents that NAP
-  // (siesta — wait, keeping their context; the default concluded state is
-  // already an inactive-but-resumable continuable) or SLEEP (dormir — persist
-  // memory to a journal then reset the context window; a fresh incarnation
-  // reloads the journal on the next wake). dept_memo_write persists the head's
-  // long-term memory to its journal; dept_nap is the model-facing "I am napping"
-  // conclude marker (context retained, no reset); dept_sleep requires a prior
-  // memo, marks the post (sleepEpoch), and the relay re-materializes it fresh.
+  // --- Batch G: memo (journal) and sleep (dormir) — host plane --------------
+  // The owner's lifecycle model: department heads are PERMANENT agents that go
+  // IDLE (wait, keeping their context; the default concluded state is already
+  // an inactive-but-resumable continuable — the wake relay re-wakes them
+  // regardless) or SLEEP (dormir — persist memory to a journal then reset the
+  // context window; a fresh incarnation reloads the journal on the next wake).
+  // dept_memo_write persists the head's long-term memory to its journal;
+  // dept_sleep requires a prior memo, marks the post (sleepEpoch), and the
+  // relay re-materializes it fresh.
 
   const globalMemo = ctx.tools.register(defineTool({
     name: 'dept_memo_write',
@@ -1399,25 +1400,6 @@ export function applyInvoke(ctx: Context, config: Config) {
       const roomId = entry?.roomId ?? 'unknown'
       const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [])
       return { room: roomId, member: memberId, memoPath }
-    }
-  }))
-
-  const globalNap = ctx.tools.register(defineTool({
-    name: 'dept_nap',
-    description: 'Nap (siesta): conclude the current turn quietly with a "napping" notice. Your context is RETAINED (nothing is reset) — you are just waiting and will be woken when an addressed board message arrives. Use this as a first-class way to end an idle waiting turn so the logs distinguish "napping" from active work.',
-    parameters: {},
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          message: { type: 'string', required: true }
-        }
-      },
-      render: (_args, value) => [{ type: 'text', text: value.message } as const]
-    },
-    async execute(): Promise<{ message: string }> {
-      return { message: 'napping (context retained); you will be woken when an addressed message arrives.' }
     }
   }))
 
@@ -1462,7 +1444,6 @@ export function applyInvoke(ctx: Context, config: Config) {
     globalWhereami()
     globalRetire()
     globalMemo()
-    globalNap()
     globalSleep()
   }, 'deepartments: host-plane board tools')
 
@@ -1920,7 +1901,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       }))
 
       // --- Batch G lifecycle tools in the child own layer (same bodies as the
-      // host plane): memo (journal), nap (siesta), sleep (dormir). A lean
+      // host plane): memo (journal) and sleep (dormir). A lean
       // toolFilter allow-list does not strip own-layer tools, so a permanent
       // head sees them. ---
       const disposeMemo = childCtx.tools.register(defineTool({
@@ -1952,25 +1933,6 @@ export function applyInvoke(ctx: Context, config: Config) {
           const roomId = entry?.roomId ?? 'unknown'
           const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [])
           return { room: roomId, member: memberId, memoPath }
-        }
-      }))
-
-      const disposeNap = childCtx.tools.register(defineTool({
-        name: 'dept_nap',
-        description: 'Nap (siesta): conclude the current turn quietly with a "napping" notice. Your context is RETAINED (nothing is reset) — you are just waiting and will be woken when an addressed board message arrives. Use this as a first-class way to end an idle waiting turn so the logs distinguish "napping" from active work.',
-        parameters: {},
-        output: {
-          schema: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              message: { type: 'string', required: true }
-            }
-          },
-          render: (_args, value) => [{ type: 'text', text: value.message } as const]
-        },
-        async execute(): Promise<{ message: string }> {
-          return { message: 'napping (context retained); you will be woken when an addressed message arrives.' }
         }
       }))
 
@@ -2015,7 +1977,6 @@ export function applyInvoke(ctx: Context, config: Config) {
         disposeWho()
         disposeWhereami()
         disposeMemo()
-        disposeNap()
         disposeSleep()
       }
     })

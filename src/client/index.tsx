@@ -20,7 +20,7 @@ export const inject = ["slots", "sessions", "workspaces", "connection"];
 // ---------------------------------------------------------------------------
 // RPC data shapes (mirror the server's /deepartments 'agents' endpoint)
 // ---------------------------------------------------------------------------
-type HeadStatus = "working" | "completed-notice" | "napping" | "sleeping";
+type HeadStatus = "working" | "completed-notice" | "idle" | "sleeping";
 
 interface AgentHead {
   id: string;
@@ -120,13 +120,13 @@ const AGENT_CSS = /* css */ `
 
 /* status glyphs */
 .dp-dot{display:inline-flex;align-items:center;justify-content:center;width:10px;height:10px;flex:none;}
-.dp-dot[data-state="nap"]{width:8px;height:8px;border-radius:50%;background:#9ca3af;}
+.dp-dot[data-state="idle"]{width:8px;height:8px;border-radius:50%;background:#9ca3af;}
 .dp-moon{display:inline-block;width:10px;height:10px;flex:none;}
 
 /* collapsed mode: compact vertical dot stack, no labels */
 .dp-agents-collapsed{display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px 0;}
 .dp-agents-collapsed .dp-dot{width:8px;height:8px;border-radius:50%;background:#9ca3af;}
-.dp-agents-collapsed .dp-dot[data-state="nap"]{background:#9ca3af;}
+.dp-agents-collapsed .dp-dot[data-state="idle"]{background:#9ca3af;}
 .dp-agents-collapsed .dp-moon{width:8px;height:8px;}
 .dp-agents-collapsed .dp-dot[data-state="done"],.dp-agents-collapsed .dp-dot[data-state="warning"],.dp-agents-collapsed .dp-dot[data-state="ongoing"]{background:var(--dsw-alias-state-success-primary);}
 `;
@@ -144,7 +144,7 @@ function asistenteStatus(node: any): "done" | "warning" | "ongoing" {
 const HEAD_TITLES: Record<HeadStatus, string> = {
   working: "Working",
   "completed-notice": "Completed notification",
-  napping: "Napping",
+  idle: "Idle",
   sleeping: "Sleeping"
 };
 
@@ -182,9 +182,9 @@ function HeadStatusDot({ status }: { status: HeadStatus }) {
       </svg>
     );
   }
-  // napping: static gray dot.
+  // idle: static gray dot.
   return (
-    <span className="dp-dot" data-state="nap" title={title} aria-hidden="true" />
+    <span className="dp-dot" data-state="idle" title={title} aria-hidden="true" />
   );
 }
 

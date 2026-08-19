@@ -1733,11 +1733,12 @@ test('Board F boot compaction: an oversized board is rewritten keeping only regi
   })
 })
 
-// --- Batch G: department-head lifecycle — nap (siesta) vs sleep (dormir) with
+// --- Batch G: department-head lifecycle — sleep (dormir) with
 // a long-term memory journal ------------------------------------------------
-// The owner's model: heads are PERMANENT agents. NAP = conclude and wait, KEEPING
-// the context window (a concluded continuable is already inactive-but-resumable —
-// dept_nap is the model-facing marker + nothing resets). SLEEP = persist memory
+// The owner's model: heads are PERMANENT agents. Idle = conclude and wait,
+// KEEPING the context window (a concluded continuable is already
+// inactive-but-resumable — the wake relay re-wakes them regardless, no
+// marker needed). SLEEP = persist memory
 // to a journal (dept_memo_write), then mark the post (dept_sleep → sleepEpoch);
 // on the NEXT wake the relay re-materializes a FRESH spawn incarnation under the
 // same postId with the journal loaded as its long-term memory (context reset +
@@ -1775,38 +1776,6 @@ test('Batch G dept_memo_write persists a head\'s long-term memory journal (autho
       assert.match(content, /Research department steered to a conclusion\./)
       assert.match(content, /decisions: \["adopted vanilla"\]/)
       assert.match(content, /open_items: \["archive logs"\]/)
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-test('Batch G dept_nap is a quiet conclude marker that changes NO registry state (context retained)', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const parentId = SessionId('session-parent-nap')
-    const childId = SessionId('session-post-nap')
-    const postId = 'research-head'
-    await seedPost(stateDir, { postId, childId, parentId, roomId: 'board', provider: 'spawn' })
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      const parent = agents.put(fakeParentAgent(parentId))
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      const seq = await nextSeq(stateDir, 'board')
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, `host-${parent.id}`, [postId], 'wake'), 'board')
-      await waitFor(() => agents.store.has(childId), 5000, 'post cold-resumed')
-      const post = agents.store.get(childId)
-      const { ctx: childCtx, key } = agents.childContexts[0]
-      const nap = childCtx.tools.get('dept_nap', key)
-      assert.ok(nap, 'dept_nap installed in the head own layer')
-
-      const result = await nap.execute({}, { agent: post, signal: new AbortController().signal })
-      assert.match(result.message, /napping \(context retained\)/)
-      // No registry mutation: same childId, no sleepEpoch, no previousChildId.
-      const posts = await readPosts(stateDir)
-      assert.equal(posts[postId].childId, childId, 'childId unchanged by nap')
-      assert.equal(posts[postId].sleepEpoch, undefined, 'nap sets no sleepEpoch (context retained, no reset)')
-      assert.equal(posts[postId].previousChildId, undefined, 'nap records no previous incarnation')
     } finally {
       await dispose()
     }
