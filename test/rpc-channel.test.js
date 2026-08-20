@@ -81,6 +81,15 @@ test('dispatchDeepartmentsEndpoint: agents builds one row per configured head', 
   assert.equal(value.agents.length, 2) // one per configured department
   const ids = value.agents.map((row) => row.id)
   assert.deepEqual(ids, ['research-head', 'programming-head'])
+  // Batch 4a: every row exposes the head's OPENABLE session id — the live head
+  // from its registry entry, a never-spawned configured head deterministically
+  // (`head-<postId>`). id stays the postId, name the title.
+  const sessionIds = Object.fromEntries(value.agents.map((row) => [row.id, row.sessionId]))
+  assert.equal(sessionIds['research-head'], 'head-research-head')
+  assert.equal(sessionIds['programming-head'], 'head-programming-head')
+  const research = value.agents.find((row) => row.id === 'research-head')
+  assert.equal(research.name, 'Head of Research')
+  assert.equal(research.id, 'research-head')
   // A configured head that has never been spawned stays idle.
   const programming = value.agents.find((row) => row.id === 'programming-head')
   assert.equal(programming.status, 'idle')

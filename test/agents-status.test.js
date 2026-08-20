@@ -94,6 +94,7 @@ test('buildAgentRows: missing post entry emits idle row with no signals', () => 
   assert.equal(rows.length, 1)
   assert.deepEqual(rows[0], {
     id: 'research-head',
+    sessionId: 'head-research-head',
     name: 'Head of Research',
     department: 'Research Department',
     kind: 'post',

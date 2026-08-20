@@ -49,6 +49,11 @@ interface AgentHead {
    * agents registry (Batch 1b — replaced the legacy `parentLive`; heads are
    * root agents with no parent, so there is no parent-liveness anymore). */
   sessionLive: boolean;
+  /** The head's stable root-agent session id (`head-<postId>`); opens it via
+   * openSession exactly like an Assistant row (Batch 4a ships this field; if an
+   * older server omits it the fallback below requires it, so a missing value
+   * renders nothing clickable). */
+  sessionId: string;
 }
 
 interface AgentsValue {
@@ -158,8 +163,6 @@ const AGENT_CSS = /* css */ `
   cursor:pointer;user-select:none;width:100%;box-sizing:border-box;
 }
 .dp-agent-row:hover{background:var(--dsw-alias-interactive-bg-hover);}
-.dp-agent-row--static{cursor:default;}
-.dp-agent-row--static:hover{background:var(--dsw-alias-interactive-bg-hover);}
 .dp-agent-row--active{background:var(--dsw-alias-interactive-bg-hover,#eef0f4);}
 /* main open-area button inside an assistant row (transparent, fills the row) */
 .dp-agent-open{
@@ -198,17 +201,14 @@ const AGENT_CSS = /* css */ `
 }
 .dp-agent-menu button:hover{background:var(--dsw-alias-interactive-bg-hover,#eef0f4);}
 
-/* status glyphs */
-.dp-dot{display:inline-flex;align-items:center;justify-content:center;width:10px;height:10px;flex:none;}
-.dp-dot[data-state="idle"]{width:8px;height:8px;border-radius:50%;background:#9ca3af;}
-.dp-moon{display:inline-block;width:10px;height:10px;flex:none;}
-
-/* collapsed mode: compact vertical dot stack, no labels */
+/* collapsed mode: compact vertical dot stack, no labels. Both Assistant and head
+   rows render the standard StateDot (no custom glyph containers). */
 .dp-agents-collapsed{display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px 0;}
-.dp-agents-collapsed .dp-dot{width:8px;height:8px;border-radius:50%;background:#9ca3af;}
-.dp-agents-collapsed .dp-dot[data-state="idle"]{background:#9ca3af;}
-.dp-agents-collapsed .dp-moon{width:8px;height:8px;}
-.dp-agents-collapsed .dp-dot[data-state="done"],.dp-agents-collapsed .dp-dot[data-state="warning"],.dp-agents-collapsed .dp-dot[data-state="ongoing"]{background:var(--dsw-alias-state-success-primary);}
+
+/* head idle/sleeping status: a muted dot at the exact StateDot size (10px) —
+   overrides only the fill, keeping the identical footprint as the native
+   StateDot so the head row matches an Assistant row in size. */
+.dp-dot-muted{background:#9ca3af;}
 
 /* ---- New session button ---- */
 .dp-new-session-btn{
@@ -274,62 +274,39 @@ function asistenteStatus(node: any): "done" | "warning" | "ongoing" {
   return "done";
 }
 
-const HEAD_TITLES: Record<HeadStatus, string> = {
-  working: "Working",
-  "completed-notice": "Completed notification",
-  idle: "Idle",
-  sleeping: "Sleeping"
-};
-
 // Stable session-id prefix of the first-class ROOT-AGENT department heads
 // (server: HeadSessionId = `head-<postId>`, Batch 1a/1b). Since a head is a
 // non-subagent root agent, it now appears in the NATIVE sessions snapshot too
 // (origin absent → `isAssistant` would otherwise list it). We exclude these
 // ids from the Assistant rows so a head is rendered exactly ONCE — by the RPC
-// `heads` list below (which carries the richer custom status dots) — and not
-// double-listed as an "Assistant" row as well. Mirrors the deploy contract the
-// server persists; the roster source is the `/deepartments` RPC, not the
-// native tree.
+// `heads` list below (which renders the same native status dots as the
+// Assistant rows) — and not double-listed as an "Assistant" row as well.
+// Mirrors the deploy contract the server persists; the roster source is the
+// `/deepartments` RPC, not the native tree.
 const HEAD_SESSION_PREFIX = "head-";
 
+// Status dot for department heads — reuses the SAME standard StateDot rendering
+// as the Assistant rows so sizes/fonts are visually identical (no custom moon
+// glyph, no oversized container). Maps the richer head status onto the same
+// 4-state StateDot axis the Assistants use. NOTE: StateDot exposes only
+// 'done' | 'warning' | 'ongoing' | 'error' (no 'idle'), so idle/sleeping render
+// as a muted "done"-sized dot via a size-preserving background override:
+//   working           -> StateDot ongoing   (blue running ring)
+//   completed-notice  -> StateDot done      (green)
+//   sleeping          -> muted dot          (same 10px footprint)
+//   idle              -> muted dot          (same 10px footprint)
 function HeadStatusDot({ status }: { status: HeadStatus }) {
-  const title = HEAD_TITLES[status] ?? "";
   if (status === "working") {
-    return (
-      <span className="dp-dot" title={title} aria-hidden="true">
-        <StateDot state="ongoing" size={10} />
-      </span>
-    );
+    return <StateDot state="ongoing" size={10} />;
   }
   if (status === "completed-notice") {
-    return (
-      <span className="dp-dot" title={title} aria-hidden="true">
-        <StateDot state="done" size={10} />
-      </span>
-    );
+    return <StateDot state="done" size={10} />;
   }
-  if (status === "sleeping") {
-    return (
-      <svg
-        className="dp-moon"
-        viewBox="0 0 16 16"
-        width="10"
-        height="10"
-        aria-hidden="true"
-        role="img"
-      >
-        <title>{title}</title>
-        <path
-          d="M13.6 9.7A6 6 0 0 1 6.3 2.4 6 6 0 1 0 13.6 9.7Z"
-          fill="#9ca3af"
-        />
-      </svg>
-    );
-  }
-  // idle: static gray dot.
-  return (
-    <span className="dp-dot" data-state="idle" title={title} aria-hidden="true" />
-  );
+  // sleeping / idle: a small muted dot at the exact StateDot size (no custom
+  // glyph, no oversized container). StateDot carries no `title`/text, so the
+  // head's name text (dp-agent-name) is the accessible label; the muted override
+  // only swaps the fill, keeping the identical 10px footprint.
+  return <StateDot state="done" size={10} className="dp-dot-muted" />;
 }
 
 // ---------------------------------------------------------------------------
@@ -530,12 +507,33 @@ export function AgentList(props: AgentsOwner) {
             </div>
           );
         })}
-        {heads.map((h) => (
-          <div key={h.id} className="dp-agent-row dp-agent-row--static" aria-disabled="true">
-            <HeadStatusDot status={h.status} />
-            <span className="dp-agent-name">{h.name}</span>
-          </div>
-        ))}
+        {heads.map((h) => {
+          const active = h.sessionId === current;
+          return (
+            <div
+              key={h.id}
+              className={
+                "dp-agent-row" +
+                (active ? " dp-agent-row--active" : "")
+              }
+            >
+              <button
+                type="button"
+                className="dp-agent-open"
+                onClick={() => {
+                  if (!wide) expandSidebar();
+                  // sessionId ships with Batch 4a; if an older server omits it,
+                  // do nothing (BEFORE it shipped, the head row was static and
+                  // non-navigable anyway) rather than fall back to postId.
+                  if (h.sessionId) openSession(h.sessionId);
+                }}
+              >
+                <HeadStatusDot status={h.status} />
+                <span className="dp-agent-name">{h.name}</span>
+              </button>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

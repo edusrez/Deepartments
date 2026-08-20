@@ -28,6 +28,15 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadRecords, resolveBoardPath } from '../lib/board-store.js'
 import { emitRoomRecord, roomSessionId } from '../lib/org.js'
+import {
+  HEAD_PRESET_BASE_ID,
+  headPresetIdFor,
+  headPresetNameCore,
+  headPresetNameFor,
+  headRoleLine,
+  buildHeadPresetComposition,
+  buildHeadPresetMetadata
+} from '../lib/head-presets.js'
 
 // --- test organization (mirrors cordis.patch.yml, with a stub LLM route) -----
 
@@ -618,7 +627,7 @@ test('head setup: the board toolset is registered scoped to the head agent (own 
       assert.equal(whoResult.posts[0].postId, 'research-head')
       assert.equal(whoResult.posts[0].sessionId, 'head-research-head')
       assert.equal(whoResult.posts[0].sessionLive, true)
-      assert.equal(whoResult.posts[0].agentPreset, 'deepartments-head')
+      assert.equal(whoResult.posts[0].agentPreset, 'deepartments-head-research')
     } finally {
       await dispose()
     }
@@ -875,7 +884,7 @@ test('dept_room_who: lists static members and the registered live heads', async 
       assert.equal(result.posts[0].postId, postId)
       assert.equal(result.posts[0].sessionId, `head-${postId}`)
       assert.equal(result.posts[0].sessionLive, true, 'head agent is live')
-      assert.equal(result.posts[0].agentPreset, 'deepartments-head')
+      assert.equal(result.posts[0].agentPreset, 'deepartments-head-research')
 
       // non-configured room: empty, no throw.
       const missing = await tool.execute({ room: 'nope' }, { agent: head })
@@ -907,7 +916,7 @@ test('dept_whereami: a registered head gets its spatial identity; the host gets 
       assert.equal(where.postId, postId)
       assert.equal(where.roomId, 'research')
       assert.equal(where.sessionId, `head-${postId}`)
-      assert.equal(where.agentPreset, 'deepartments-head')
+      assert.equal(where.agentPreset, 'deepartments-head-research')
       assert.equal(where.sessionLive, true)
       assert.deepEqual(where.members, ['research-head'])
       assert.equal(where.posts.length, 1)
@@ -1012,10 +1021,11 @@ test('dept_room_read: limit + offset page through the delta (per-member cursor)'
 // A configured coordinator is materialized once as its OWN root agent (NOT a
 // continuable subagent) via ctx.agents.create/resume from the plugin's root
 // service context, with a stable session id `head-<postId>`, meta.agentPreset
-// 'deepartments-head', coordinator agentOptions, and a setup that registers
-// the board toolset + mounts the head preset.
+// the PER-HEAD preset (deepartments-head-<departmentId>, Batch 4a), coordinator
+// agentOptions, and a setup that registers the board toolset + mounts the
+// per-head preset.
 
-test('create-when-absent: boot materializes the configured head as a root agent (stable session id, meta.agentPreset, coordinator agentOptions) into posts.json', async () => {
+test('create-when-absent: boot materializes the configured head as a root agent (stable session id, PER-HEAD meta.agentPreset, coordinator agentOptions) into posts.json', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
@@ -1026,15 +1036,18 @@ test('create-when-absent: boot materializes the configured head as a root agent 
       const createCall = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
       assert.equal(String(createCall.sessionId), 'head-research-head', 'stable per-post session id')
       assert.equal(createCall.meta.cwd, path.resolve(path.dirname(new URL(import.meta.url).pathname), '..'), 'meta.cwd is the repo root')
-      assert.equal(createCall.meta.agentPreset, 'deepartments-head', 'the dedicated head preset is requested')
+      // Batch 4a: the head session is created under its PER-HEAD preset so it
+      // is a NATIVE, openable session labeled with the head preset.
+      assert.equal(createCall.meta.agentPreset, 'deepartments-head-research', 'the PER-HEAD preset is requested (deepartments-head-<departmentId>)')
       assert.equal(createCall.meta.origin, undefined, 'no origin (a root/main agent, not a subagent)')
       assert.deepEqual(createCall.agentOptions, { provider: 'stub-coord', model: 'deepseek-v4-flash' }, 'coordinator agentOptions are passed through')
 
-      // Durable posts.json reflects the root-agent identity (no parentId/provider).
+      // Durable posts.json reflects the root-agent identity (no parentId/provider)
+      // AND the per-head agentPreset marker.
       const posts = await readPosts(stateDir)
       assert.equal(posts['research-head'].sessionId, 'head-research-head')
       assert.equal(posts['research-head'].roomId, 'research', 'head room comes from the department config')
-      assert.equal(posts['research-head'].agentPreset, 'deepartments-head')
+      assert.equal(posts['research-head'].agentPreset, 'deepartments-head-research', 'posts.json carries the per-head preset (Batch 4a)')
       assert.equal(posts['research-head'].parentId, undefined, 'no parent for a root head')
       assert.equal(posts['research-head'].provider, undefined, 'no continuation provider for a root head')
     } finally {
@@ -2202,6 +2215,125 @@ test('retired worker is NOT re-materialized by ensureAllHeads (workers are runti
       }
     } finally {
       void 0
+    }
+  })
+})
+
+// --- Batch 4a: PER-HEAD agent presets (openable native head sessions) ---------
+// Each configured head materializes its own preset `deepartments-head-<id>`,
+// derived from the generic `deepartments-head` base + the department role, so
+// the head session is a NATIVE, openable session labeled with the per-head
+// preset. The pure content builders live in src/head-presets.ts and are tested
+// here directly (hermetic, no DSH_HOME / no real agent-presets service). The
+// final test exercises the REAL materialization through the REAL
+// @deepseek-ai/dsh-agent-presets service (Rule 5) with DSH_HOME pointed at a
+// temp dir so per-head presets land in the harness-home user root and the real
+// agentPreset.list()/resolve() can see them.
+
+test('head-presets: per-head preset id + display name derive from the department (title/role fallback)', async () => {
+  // id = deepartments-head-<departmentId>
+  assert.equal(headPresetIdFor('research'), 'deepartments-head-research')
+  assert.equal(headPresetIdFor('programming'), 'deepartments-head-programming')
+  // name = "<coordinator.title> - Deepartments"
+  assert.equal(headPresetNameFor({ postId: 'research-head', title: 'Head of Research', role: 'Research department head' }), 'Head of Research - Deepartments')
+  // fallback: title → role → postId
+  assert.equal(headPresetNameFor({ postId: 'research-head', role: 'Research department head' }), 'Research department head - Deepartments')
+  assert.equal(headPresetNameFor({ postId: 'research-head' }), 'research-head - Deepartments')
+  assert.equal(HEAD_PRESET_BASE_ID, 'deepartments-head', 'the generic base preset stays the template/fallback id')
+  // role line names the head + its department
+  assert.equal(headRoleLine('Head of Research', 'Research'), 'Head of Research, the head of the "Research" department')
+})
+
+test('head-presets: buildHeadPresetComposition injects the role line into the base persona (self-identifying)', async () => {
+  const base = [
+    'text: >-',
+    '      You are a permanent department head in the Deepartments organization',
+    '      (DeepSeek Harness). You are a first-class agent in your own right.',
+    '      BE IDLE UNLESS ADDRESSED.'
+  ].join('\n')
+  const composed = buildHeadPresetComposition(base, 'Head of Research', 'Research')
+  // The role line is inserted into the FIRST persona sentence; the rest of the
+  // neutral persona is unchanged.
+  assert.ok(composed.includes('You are Head of Research, the head of the "Research" department. You are a permanent department head in the Deepartments organization'), 'role line names the head + department in the first sentence')
+  assert.ok(composed.includes('You are a first-class agent in your own right.'), 'rest of the neutral persona preserved')
+  assert.ok(composed.includes('BE IDLE UNLESS ADDRESSED.'), 'base persona tail preserved')
+  assert.equal(composed.length > base.length, true, 'composition grew with the role line')
+  // Unknown anchor → base returned unchanged (non-fatal, deterministic).
+  assert.equal(buildHeadPresetComposition(base.replace(/deepartments/gi, 'NOPE'), 'X', 'Y'), base.replace(/deepartments/gi, 'NOPE'))
+})
+
+test('head-presets: buildHeadPresetMetadata writes name: "<title> - Deepartments"', async () => {
+  const yml = buildHeadPresetMetadata('Head of Research - Deepartments')
+  assert.ok(yml.startsWith('name: "Head of Research - Deepartments"'), 'metadata name is the per-head display name')
+  assert.match(yml, /order: 30/)
+  assert.match(yml, /description:/)
+})
+
+test('materialization materializes per-head presets into the harness-home user root (REAL agent-presets service)', async () => {
+  const dshHome = await mkdtemp(path.join(tmpdir(), 'dsh-home-'))
+  const prev = process.env.DSH_HOME
+  const cleanup = async () => {
+    if (prev === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = prev
+    await rm(dshHome, { recursive: true, force: true })
+  }
+  process.env.DSH_HOME = dshHome
+  await withTempStateDir(async (stateDir) => {
+    try {
+      // Boot the REAL Loader WITH the real @deepseek-ai/dsh-agent-presets
+      // service so ensureAllHeads runs the REAL preset materialization into
+      // the temp $DSH_HOME/.agent-presets/ user root.
+      const root = new Context()
+      const loaderFiber = await root.plugin(Loader, { baseUrl: new URL('.', import.meta.url).href })
+      const loader = root.loader
+      loader.create({ id: 'sessions', name: '@deepseek-ai/dsh-session' })
+      loader.create({ id: 'projections', name: '@deepseek-ai/dsh-session-projection' })
+      loader.create({ id: 'systemPrompt', name: '@deepseek-ai/dsh-system-prompt' })
+      loader.create({ id: 'tools', name: '@deepseek-ai/dsh-tools' })
+      loader.create({ id: 'agentPresets', name: '@deepseek-ai/dsh-agent-presets', config: { default: 'deepartments-head', roots: [] } })
+      const agents = new StubAgents(root)
+      const persistence = new StubPersistence(root)
+      await root.plugin(SubagentRuntime)
+      const spawnStub = stubProvider('spawn')
+      const forkStub = stubProvider('fork')
+      root.subagents.registerProvider(spawnStub)
+      root.subagents.registerProvider(forkStub)
+      loader.create({
+        id: 'deepartments',
+        name: '../lib/index.js',
+        config: { stateDir, org: TEST_ORG }
+      })
+      await loader.await()
+      agents.scopeAnchor = loader.resolve('tools').fiber?.ctx ?? root
+      try {
+        // The per-head preset materializes at boot. The materialize loop is
+        // async + fire-and-forget via ensureAllHeads, so poll for the file.
+        await waitFor(async () => {
+          try { await access(path.join(dshHome, '.agent-presets', 'deepartments-head-research', 'agent.cordis.yml')); return true } catch { return false }
+        }, 5000, 'per-head preset agent.cordis.yml materialized')
+        // preset.yml carries the per-head display name.
+        const presetYml = await readFile(path.join(dshHome, '.agent-presets', 'deepartments-head-research', 'preset.yml'), 'utf8')
+        assert.ok(presetYml.includes('name: "Research department head - Deepartments"'), 'per-head metadata name materialized')
+        // agent.cordis.yml carries the neutral persona + the role line.
+        const composition = await readFile(path.join(dshHome, '.agent-presets', 'deepartments-head-research', 'agent.cordis.yml'), 'utf8')
+        assert.ok(composition.includes('You are Research department head, the head of the "Research" department.'), 'per-head role line present in the composition')
+        assert.ok(composition.includes('BE IDLE UNLESS ADDRESSED'), 'neutral persona preserved in the per-head composition')
+        // The real agent-presets service can RESOLVE the per-head preset (the
+        // native picker will surface it).
+        const presets = root.get('agentPresets')
+        const resolved = await presets.resolve('deepartments-head-research')
+        assert.equal(resolved.id, 'deepartments-head-research', 'per-head preset resolvable by the real roster')
+        // The generic base preset remains materialized too.
+        await access(path.join(dshHome, '.agent-presets', 'deepartments-head', 'agent.cordis.yml'))
+        // Boot created the head under its per-head preset.
+        await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
+        const createCall = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
+        assert.equal(createCall.meta.agentPreset, 'deepartments-head-research', 'head session created under its per-head preset')
+      } finally {
+        loaderFiber.dispose()
+      }
+    } finally {
+      await cleanup()
     }
   })
 })

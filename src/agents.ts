@@ -57,6 +57,11 @@ export interface PostEntryLike {
 export interface AgentRow {
   /** Post id (the durable board member id), e.g. 'research-head'. */
   id: string
+  /** The head's STABLE root-agent session id (`head-<postId>`) — the OPENABLE
+   * native session the client opens on click. Deterministic even when the head
+   * has no registry entry yet (`head-<postId>`). Added in Batch 4a so the
+   * sidebar click opens the session natively. */
+  sessionId: string
   /** Display label: coordinator.title || coordinator.role || postId. */
   name: string
   /** Department display name (config.org.departments[].name). */
@@ -132,6 +137,7 @@ export function buildAgentRows(args: {
       // live signals. The safe default is idle.
       rows.push({
         id: postId,
+        sessionId: `head-${postId}`,
         name,
         department: department.name,
         kind: 'post',
@@ -148,6 +154,7 @@ export function buildAgentRows(args: {
     const sleeping = entry.sleepEpoch !== undefined
     rows.push({
       id: postId,
+      sessionId: entry.sessionId,
       name,
       department: department.name,
       kind: 'post',

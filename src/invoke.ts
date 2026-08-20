@@ -127,6 +127,14 @@ import { loadRecords, resolveBoardPath } from './board-store.js'
 import type { BoardRecord, MessagePayload } from './board-store.js'
 import { buildAgentRows } from './agents.js'
 import type { PostEntryLike } from './agents.js'
+import {
+  HEAD_PRESET_BASE_ID,
+  headPresetIdFor,
+  headPresetNameCore,
+  headPresetNameFor,
+  buildHeadPresetComposition,
+  buildHeadPresetMetadata
+} from './head-presets.js'
 
 /**
  * Message source for a board wake relayed to a HOST Asistente session. The
@@ -1197,7 +1205,14 @@ export function applyInvoke(ctx: Context, config: Config) {
   // --- department HEADS: FIRST-CLASS ROOT AGENTS (Batch 1a) ------------------
   // A configured coordinator is materialized as its OWN root agent (NOT a
   // continuable subagent): created/resumed via ctx.agents.create/resume from
-  const PRESET_ID = 'deepartments-head'
+  // the plugin's ROOT service context (so it lands in agents.roots(), with no
+  // origin === 'subagent', and the GUI/sidebar renders it as a main-agent row
+  // exactly like "Assistant"). Batch 4a: each head materializes a PER-HEAD
+  // preset (`deepartments-head-<departmentId>`, derived from the generic base +
+  // the department role) so the head is a NATIVE, openable session. PRESET_ID
+  // (the generic `deepartments-head` base) remains as the TEMPLATE and as the
+  // FALLBACK for a head whose department cannot be resolved.
+  const PRESET_ID = HEAD_PRESET_BASE_ID
   /** Batch 3a: the dedicated DISPOSABLE-worker preset (mirrors the head preset
    * but framed as a temporary rank-and-file researcher). Materialized into the
    * harness-home user preset root alongside the head preset. */
@@ -1275,6 +1290,45 @@ export function applyInvoke(ctx: Context, config: Config) {
       // Non-fatal: if the preset cannot be materialized (e.g. source absent), the
       // matching setup simply mounts nothing and still gets its board tools.
       ctx.logger.warn(`[deepartments] preset "${presetId}" materialization skipped: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** Write one generated preset file to a destination, skipping when the same
+   * content is already present (idempotent materialization — mirrors the
+   * skip-on-identical check in `materializePreset`). */
+  const writePresetFile = async (dst: string, content: string, presetId: string): Promise<void> => {
+    try {
+      const existing = await readFile(dst, 'utf8')
+      if (existing === content) return
+    } catch {
+      /* destination absent/corrupt → (re)write */
+    }
+    await writeFile(dst, content, 'utf8')
+    ctx.logger.info(`[deepartments] preset "${presetId}" file ${dst} written`)
+  }
+
+  /** Idempotently generate + materialize ONE PER-HEAD preset
+   * (`deepartments-head-<departmentId>`) into the harness home's `.agent-presets/`
+   * user root (Batch 4a). The composition is derived from the generic
+   * `deepartments-head` base template + the department role line; the metadata
+   * is `name: "<head title> - Deepartments"`. Non-fatal: a failed materialization
+   * just means the head's setup mounts the generic fallback (board tools are
+   * always installed regardless). */
+  const materializeHeadPreset = async (department: DepartmentConfig): Promise<void> => {
+    const coordinator = department.coordinator
+    if (coordinator === undefined) return
+    const presetId = headPresetIdFor(department.id)
+    const dstDir = path.join(dshHome(), '.agent-presets', presetId)
+    try {
+      await mkdir(dstDir, { recursive: true })
+      const headName = headPresetNameCore(coordinator)
+      const baseComposition = await readFile(path.join(repoRoot, 'presets', PRESET_ID, 'agent.cordis.yml'), 'utf8')
+      const composition = buildHeadPresetComposition(baseComposition, headName, department.name)
+      await writePresetFile(path.join(dstDir, 'agent.cordis.yml'), composition, presetId)
+      await writePresetFile(path.join(dstDir, 'preset.yml'), buildHeadPresetMetadata(headPresetNameFor(coordinator)), presetId)
+      ctx.logger.info(`[deepartments] per-head preset "${presetId}" materialized at ${dstDir}`)
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] per-head preset "${presetId}" materialization skipped: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -1934,8 +1988,8 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   /** The setup for a PERMANENT department head (manager — can create/retire
    * workers). Mounts the 'deepartments-head' preset. */
-  const headSetup = (postId: string, roomId: string, role: string): ((agentCtx: Context) => void | { commit(): void }) =>
-    postSetup(postId, roomId, role, { preset: 'deepartments-head', manager: true })
+  const headSetup = (postId: string, roomId: string, role: string, presetId: string = PRESET_ID): ((agentCtx: Context) => void | { commit(): void }) =>
+    postSetup(postId, roomId, role, { preset: presetId, manager: true })
 
   /** The setup for a DISPOSABLE department WORKER (no create/retire). Mounts
    * the 'deepartments-worker' preset. */
@@ -2004,8 +2058,13 @@ export function applyInvoke(ctx: Context, config: Config) {
    * restartable create/resume fallback, tolerating a resume that fails because
    * no durable session exists yet (then create). Always (re)records the
    * registry entry keyed by the stable session id. */
-  const ensureHead = async (coordinator: CoordinatorConfig, roomId: string): Promise<void> => {
+  const ensureHead = async (department: DepartmentConfig, roomId: string): Promise<void> => {
+    const coordinator = department.coordinator
+    if (coordinator === void 0) return
     const postId = coordinator.postId
+    // Batch 4a: the head uses its PER-HEAD preset (deepartments-head-<departmentId>)
+    // so the session is NATIVE/openable and labeled with its head preset.
+    const presetId = headPresetIdFor(department.id)
     const sessionId = SessionId(headSessionId(postId))
     if (agents === void 0) return
     let handle: AgentHandleLike | undefined
@@ -2015,61 +2074,70 @@ export function applyInvoke(ctx: Context, config: Config) {
       // live without a registry entry if the harness pre-created it).
       const existing = byPost.get(postId)
       if (existing === void 0) {
-        registerEntry(makeEntry(coordinator, roomId, String(sessionId)))
+        registerEntry(makeEntry(department, roomId, String(sessionId)))
       }
       return
     }
     const coordinatorRole = coordinator.role || postId
-    const setup = headSetup(postId, roomId, coordinatorRole)
+    const setup = headSetup(postId, roomId, coordinatorRole, presetId)
     const agentOptions = coordinator.agentOptions
     const durableSession = byPost.get(postId) !== void 0
     if (durableSession) {
       try {
         handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions, setup })
-        registerEntry(makeEntry(coordinator, roomId, String(sessionId)))
+        registerEntry(makeEntry(department, roomId, String(sessionId)))
       } catch (error: unknown) {
         // Resume failed (e.g. no durable session in the persistence store after
         // a stateDir wipe): fall back to creating a fresh session.
         ctx.logger.warn(`[deepartments] head "${postId}" resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
         handle = await agents.create({
           sessionId: String(sessionId),
-          meta: { cwd: repoRoot, origin: undefined, agentPreset: PRESET_ID },
+          meta: { cwd: repoRoot, origin: undefined, agentPreset: presetId },
           agentOptions,
           setup
         })
-        registerEntry(makeEntry(coordinator, roomId, String(sessionId)))
+        registerEntry(makeEntry(department, roomId, String(sessionId)))
       }
     } else {
       handle = await agents.create({
         sessionId: String(sessionId),
-        meta: { cwd: repoRoot, origin: undefined, agentPreset: PRESET_ID },
+        meta: { cwd: repoRoot, origin: undefined, agentPreset: presetId },
         agentOptions,
         setup
       })
-      registerEntry(makeEntry(coordinator, roomId, String(sessionId)))
+      registerEntry(makeEntry(department, roomId, String(sessionId)))
     }
     if (handle !== void 0) byHeadHandle.set(String(sessionId), handle)
   }
 
-  /** Build a PostEntry for a configured head (root-agent shape, Batch 1b). */
-  const makeEntry = (coordinator: CoordinatorConfig, roomId: string, sessionId: string): PostEntry => ({
-    postId: coordinator.postId,
+  /** Build a PostEntry for a configured head (root-agent shape, Batch 1b). The
+   * durable `agentPreset` is the PER-HEAD preset (Batch 4a) so a restart resumes
+   * the head under the same per-head composition it was created with. */
+  const makeEntry = (department: DepartmentConfig, roomId: string, sessionId: string): PostEntry => ({
+    postId: department.coordinator!.postId,
     sessionId,
     roomId,
-    agentPreset: PRESET_ID
+    agentPreset: headPresetIdFor(department.id)
   })
 
   /** Ensure EVERY configured department head is a live root agent (boot, after
    * the registries load; also safe to re-run — idempotent per head). */
   const ensureAllHeads = async (): Promise<void> => {
     if (agents === void 0) return
-    // Only materialize the presets into the harness-home user root when the
-    // agentPresets service is present (hermetic compositions that never resolve
-    // presets should not write outside the stateDir). BOTH the head preset and
-    // the disposable-worker preset are made resolvable here.
-    if (agentPresets !== void 0) {
-      await materializePreset('deepartments-head')
+    // The generic head preset (template + fallback), the disposable-worker
+    // preset, AND every PER-HEAD preset are materialized into the harness-home
+    // user root. We re-read the agentPresets service HERE (not the apply-time
+    // capture) because materialization runs asynchronously after the registries
+    // load — by then the roster is composed, so this is deterministic regardless
+    // of Loader ordering of the (optional) agentPresets service. Hermetic
+    // compositions that never resolve presets write nothing outside the stateDir.
+    const presets = ctx.get('agentPresets') as AgentPresetsLike | undefined
+    if (presets !== void 0) {
+      await materializePreset(PRESET_ID)
       await materializePreset(WORKER_PRESET_ID)
+      for (const department of config.org.departments) {
+        await materializeHeadPreset(department)
+      }
     }
     // CRITICAL (Batch 3a guarantee): ensureAllHeads ONLY ever iterates the
     // CONFIGURED departments' coordinators (`config.org.departments`). Workers
@@ -2080,7 +2148,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     for (const department of config.org.departments) {
       const coordinator = department.coordinator
       if (coordinator === void 0) continue
-      await ensureHead(coordinator, department.roomId)
+      await ensureHead(department, department.roomId)
     }
   }
 
@@ -2151,11 +2219,16 @@ export function applyInvoke(ctx: Context, config: Config) {
       // Role fallback (Batch 3a): a worker has NO coordinator config, so fall
       // back to its durable captured role, else a neutral 'department worker'.
       const role = coordinator?.role ?? entry.role ?? 'department worker'
+      // Batch 4a: a head wakes under its PERSISTED per-head preset
+      // (`entry.agentPreset` = deepartments-head-<departmentId>, set by
+      // makeEntry; generic `deepartments-head` for a legacy/unknown head). A
+      // worker always mounts the disposable-worker preset.
+      const headPreset = entry.agentPreset ?? PRESET_ID
       const setup = isWorker
         ? workerSetup(entry.postId, entry.roomId, role)
-        : headSetup(entry.postId, entry.roomId, role)
+        : headSetup(entry.postId, entry.roomId, role, headPreset)
       const agentOptions = coordinator?.agentOptions
-      const preset: string = isWorker ? WORKER_PRESET_ID : PRESET_ID
+      const preset: string = isWorker ? WORKER_PRESET_ID : headPreset
       let handle: AgentHandleLike | undefined
       try {
         handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions, setup })
