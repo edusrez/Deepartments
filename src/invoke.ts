@@ -2875,16 +2875,24 @@ export function applyInvoke(ctx: Context, config: Config) {
     const host = hostCtx as Context & { webServer?: WebServerLike }
     const webServer = (host.webServer ?? host.get('httpServer')) as WebServerLike | undefined
     if (webServer === void 0) return
-    // Trusted authorities from the DEPLOYED connection service: the same list the
-    // rc.8 client-connection channel already vets every request against (seeded
-    // by `--trusted-host laagencia.taildb5a7a.ts.net:8445` on the systemd unit).
+    // Trusted authorities from the DEPLOYED web app: dsh-web-app's `webRuntime`
+    // service (`resolveLanTrust` — dsh-web-app/lib/index.js:28,175) carries the
+    // REAL populated list `{ ..., trustedHosts: [...lanAddresses, ...extra] }`
+    // where `extra` is the `--trusted-host` list (e.g.
+    // `laagencia.taildb5a7a.ts.net:8445` on the systemd unit). The deployment's
+    // trusted hosts are configured on dsh-web-app, NOT dsh-client-connection, so
+    // `connection.trustedHosts` is EMPTY at runtime and the real browser host is
+    // denied (403) if we read only that — which is why we prefer `webRuntime`
+    // FIRST. We fall back to `connection.trustedHosts` (the same list the rc.8
+    // client-connection channel vets against) and to `[]` (loopback-only) when
+    // both are absent.
     // NOTE: this Cordis build exposes NO `ctx.getConfig('...')` API (verified
     // absent from the cordis type surface and used by no dsh plugin), so the
-    // trusted hosts are read from the live `connection.trustedHosts` field —
-    // its public, schema-backed value — rather than the getConfig('web-app') /
-    // getConfig('client-connection') fallbacks (documented deviation). Empty when
-    // the service is absent / headless.
-    const trustedHosts = connection?.trustedHosts ?? []
+    // trusted hosts are read from the live services' public, schema-backed
+    // fields rather than the getConfig('web-app') / getConfig('client-connection')
+    // fallbacks (documented deviation). Empty when the services are absent /
+    // headless.
+    const trustedHosts = (hostCtx.get('webRuntime') as { trustedHosts?: string[] } | undefined)?.trustedHosts ?? connection?.trustedHosts ?? []
     const sidebarDeps: DeepartmentsEndpointDeps = {
       uiConfig,
       persistUiConfig,
