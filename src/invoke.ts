@@ -171,6 +171,30 @@ function headSessionId(postId: string): string {
 const ACK_LOOP_THRESHOLD = 3
 const ACK_LOOP_WINDOW_MS = 120_000
 
+// Fix A2 — stuck-head wake resilience. A live head whose resident loop has made
+// NO observable session progress within this window is treated as STUCK (Batch
+// 1c: a head's boot turn wedged on an empty-arguments tool call and froze
+// resident-but-stuck; the wake relay would otherwise enqueue a followup into
+// the frozen loop's in-memory inbox and LOSE it on restart). When stuck, the
+// relay disposes the frozen handle and cold-resumes the durable session, so the
+// wake is re-delivered from the DURABLE board record, never lost.
+const STUCK_HEAD_MS = 120_000
+
+/** Fix A2 — injectable clock for the stuck-head window. Production reads the
+ * REAL wall clock (env unset → `Date.now()`), so a healthy head is judged
+ * against true elapsed time. Hermetic Loader tests (Rule 5) set
+ * `DEEPARTMENTS_TEST_NOW` to a fixed epoch and advance it between wake pushes,
+ * so the STUCK_HEAD_MS stall can elapse deterministically WITHOUT sleeping 120s
+ * in a test. IMPORTANT: the progress baseline stamp (`markHeadProgress.at`) and
+ * the stall comparator (`isHeadStuck`) MUST read the SAME clock or elapsed is
+ * internally inconsistent; both go through this helper. */
+const stuckNow = (): number => {
+  const raw = process.env.DEEPARTMENTS_TEST_NOW
+  if (raw === undefined) return Date.now()
+  const override = Number(raw)
+  return Number.isFinite(override) ? override : Date.now()
+}
+
 /** One durable post registry entry — a FIRST-CLASS ROOT-AGENT department head
  * (Batch 1a). Keyed by postId; the durable root-agent session id is `sessionId`
  * (= `head-<postId>`). Drops the old continuable-subagent `parentId`/`provider`
@@ -272,6 +296,12 @@ interface AgentLike {
   id: string
   status: string
   ctx: Context
+  /** The agent's durable session event log. Present on the real loop Agent
+   * (`this.session.events`) and on the test stub. Its length is the Fix A2
+   * stuck-head progress signature (every appended step/turn/assistant event
+   * is observable lifecycle progress). Declared structurally; absent/undefined
+   * → treated as no signal (never misclassified as progression). */
+  session?: { events: unknown[] }
   followup(message: { content: readonly { type: string; text: string }[]; source: Record<string, unknown> }): void
   cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void
   whenIdle(): Promise<void>
@@ -394,6 +424,28 @@ export function applyInvoke(ctx: Context, config: Config) {
   // 155-158), so `dept_sleep` can tear a head down. Held by the plugin owner,
   // never by the head agent itself. Cleared when a head sleeps.
   const byHeadHandle = new Map<string, AgentHandleLike>()
+  // Fix A2 — per-head wake progress tracker: headSessionId → { at, eventCount }.
+  // `at` = when we last observed this head, `eventCount` = the watermark of its
+  // session event log (AgentLike.session.events.length) at that time. The relay
+  // uses it to tell a HEALTHY live-but-busy head (event log still growing —
+  // its turn/step/assistant events keep appending) from a STUCK one (status
+  // 'running' with NO new event for STUCK_HEAD_MS — the resident loop is wedged).
+  // Purely in-memory and intentionally NOT durable: the durable board record is
+  // the re-delivery source, so an in-memory reset is always safe.
+  const headProgress = new Map<string, { at: number; eventCount: number }>()
+  // Fix A2 — serialize the DISPOSE-then-cold-resume stuck-recovery per head
+  // session. The relay is synchronous and a stuck path must dispose its frozen
+  // handle BEFORE wakeHead cold-resumes it (otherwise wakeHead would find the
+  // stale live handle and followup the wedged loop again). A per-session tail
+  // promise makes concurrent wake pushes to the SAME head run the recovery one
+  // at a time — the "never double-resume" guard stays true across bursts.
+  const headRecoveryQueues = new Map<string, Promise<unknown>>()
+  const serializeHeadRecovery = <T>(sessionId: string, task: () => Promise<T>): Promise<T> => {
+    const previous = headRecoveryQueues.get(sessionId) ?? Promise.resolve()
+    const run = previous.then(task, task)
+    headRecoveryQueues.set(sessionId, run.then(() => void 0, () => void 0))
+    return run
+  }
   const memberCursors = new Map<string, CursorState>()
   // Batch C: per sender→target pair ack budget. Key `${from}|${to}` → how many
   // consecutive pure acks (payload.ack) that pair has exchanged and when the
@@ -1311,7 +1363,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     sp.section({
       name: `deepartments:head:role:${postId}`,
       order: 1,
-      text: `You are "${postId}", the ${role || 'department head'} of the "${roomId}" department room. You are a permanent, first-class agent: you do not edit the repository, run builders, or spawn other agents. Your world is the board — read with dept_room_read, reply with dept_room_write, orient with dept_whereami/dept_room_who, and persist memory with dept_memo_write before dept_sleep.`
+      text: `You are "${postId}", the ${role || 'department head'} of the "${roomId}" department room. You are a permanent, first-class agent: you do not edit the repository, run builders, or spawn other agents. Your world is the board — read with dept_room_read, reply with dept_room_write, orient with dept_whereami/dept_room_who, and persist memory with dept_memo_write before dept_sleep. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed board message arrives; you never proactively write to the board.`
     })
   }
 
@@ -1433,6 +1485,42 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  /** Fix A2 — the observable progress signature of a live head: the length of
+   * its durable session event log. Every appended step/turn/assistant event is
+   * lifecycle progress. Absent/session-less agents yield 0 (no progress signal
+   * → never judged stuck on the basis of this). */
+  const headEventCount = (live: AgentLike): number =>
+    live.session === undefined ? 0 : (live.session.events?.length ?? 0)
+
+  /** Fix A2 — record that we just observed `live` making progress: stamp `at`
+   * and snapshot the current event watermark. Call whenever a wake successfully
+   * reaches a functioning head (live followup, cold resume) so the next stuck
+   * check starts from a fresh baseline and a healthy busy head is never misjudged. */
+  const markHeadProgress = (sessionId: string, live: AgentLike): void => {
+    headProgress.set(sessionId, { at: stuckNow(), eventCount: headEventCount(live) })
+  }
+
+  /** Fix A2 — is `live` a wedged resident head? True ONLY when it is status
+   * 'running' (a phase is actually underway) AND its session event log has not
+   * grown since the last observation AND that stall exceeds STUCK_HEAD_MS. An
+   * idle head is always followup-able (a wake starts a fresh turn), and a head
+   * whose event log is growing is progressing normally — neither is stuck. */
+  const isHeadStuck = (sessionId: string, live: AgentLike): boolean => {
+    if (live.status !== 'running') return false
+    const prior = headProgress.get(sessionId)
+    if (prior === void 0) {
+      // First observation of a running head: record the baseline, do not judge
+      // it stuck yet (a healthy turn needs time to produce its first event).
+      markHeadProgress(sessionId, live)
+      return false
+    }
+    if (headEventCount(live) > prior.eventCount) {
+      markHeadProgress(sessionId, live)
+      return false
+    }
+    return stuckNow() - prior.at > STUCK_HEAD_MS
+  }
+
   /** Cold-resume (or respawn-from-sleep) + wake one head with the pointer-only
    * board delta. Called by the relay when the head is not live (cold boot or
    * slept+disposed). On respawn-from-sleep we first dispose any stale live
@@ -1474,6 +1562,9 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
     const target = agents.get(String(sessionId))
     if (target === void 0) throw new Error(`[deepartments] head "${entry.postId}" could not be materialized for wake`)
+    // Fix A2 — fresh baseline for the (re)materialized incarnation so the relay
+    // never misjudges a just-cold-resumed head as stuck before it can speak.
+    markHeadProgress(String(sessionId), target)
     const senderSession = byPost.get(record.from)?.sessionId ?? hosts.get(record.from)?.sessionId ?? record.from
     target.followup(createUserMessage({
       content: [{
@@ -1533,14 +1624,17 @@ export function applyInvoke(ctx: Context, config: Config) {
         continue
       }
 
-      // --- head branch (Batch 1a): wake a registered department head via the
-      // RAW root-agent path. A head is a first-class root agent (NOT a
+      // --- head branch (Batch 1a + Fix 2c-A): wake a registered department head
+      // via the RAW root-agent path. A head is a first-class root agent (NOT a
       // continuable child), so the relay targets its own agent id directly —
       // `agents.get(SessionId(entry.sessionId)).followup(...)` — exactly like
       // the host branch below. This REMOVES the rc.6 "parent must be live"
-      // limitation: no parent hop, no lineage. A head that is LIVE is woken
-      // inline; a cold/slept head (not live — disposed or after a restart) is
-      // cold-resumed (or respawned from sleep) by wakeHead then woken.
+      // limitation: no parent hop, no lineage. A head that is LIVE AND
+      // PROGRESSING is woken inline; a cold/slept head (not live — disposed or
+      // after a restart) is cold-resumed (or respawned from sleep) by wakeHead
+      // then woken; a live-but-STUCK head (running with no session progress past
+      // STUCK_HEAD_MS — Batch 1c frozen-resident loop) is disposed and
+      // cold-resumed so the wake is re-delivered from the durable board record.
       const entry = byPost.get(member)
       if (entry !== void 0) {
         const sessionId = SessionId(entry.sessionId)
@@ -1556,6 +1650,36 @@ export function applyInvoke(ctx: Context, config: Config) {
           })
           continue
         }
+        // Fix A2 — stuck-head wake resilience. A live-but-running head whose
+        // resident loop has produced NO new session event for STUCK_HEAD_MS is a
+        // wedged frozen agent (Batch 1c). Waking it inline would only enqueue a
+        // followup into the frozen loop's in-memory inbox and LOSE it on restart
+        // (the "Board delta" text never appears in the head session). Instead we
+        // dispose the frozen handle and fall through to the COLD path: the
+        // DURABLE board record is the re-delivery source, so the wake survives
+        // even though the in-memory queue dies with the disposed handle. dispose
+        // never throws (it catches internally), and the recovery is serialized
+        // per head so the relay never double-resumes — it never throws.
+        if (isHeadStuck(String(sessionId), live)) {
+          ctx.logger.warn(`[deepartments] head "${member}" live but stuck (no session progress for ${STUCK_HEAD_MS / 1000}s) — disposing + cold-resuming from the durable board record`)
+          const sid = String(sessionId)
+          void serializeHeadRecovery(sid, async () => {
+            // Dispose the frozen handle first; once gone, agents.get(sid) is
+            // undefined again and wakeHead takes the COLD resume path.
+            await disposeHeadHandle(sid)
+            // Reset progress baseline so the fresh incarnation is judged fresh.
+            headProgress.delete(sid)
+            try {
+              await wakeHead(entry, record, roomId)
+            } catch (error: unknown) {
+              ctx.logger.warn(`[deepartments] stuck-head wake to "${member}" failed after dispose: ${error instanceof Error ? error.message : String(error)}`)
+            }
+          })
+          continue
+        }
+        // Healthy live head: enqueue after the current turn as today, and record
+        // progress so the next stuck check measures from a fresh baseline.
+        markHeadProgress(String(sessionId), live)
         const senderSession = byPost.get(record.from)?.sessionId ?? hosts.get(record.from)?.sessionId ?? record.from
         try {
           live.followup(createUserMessage({

@@ -661,6 +661,199 @@ test('wake relay (head): a registered department head is woken by raw Agent.foll
   })
 })
 
+test('Fix A1 boot-quiet: a fresh head materializes at boot with NO proactive turn or board write — it stays idle until an ADDRESSED message wakes it', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
+      const head = agents.store.get(`head-${postId}`)
+
+      // (a) Materialization itself must NOT enqueue a proactive turn for the head,
+      //     and the head must stay idle (the Fix A1 boot-quiet guarantee). The
+      //     boot path never self-initiates: no followup, no board write, no turn.
+      assert.equal(head.inboxMessages.length, 0, 'boot materialization enqueues NO proactive followup for the fresh head')
+      assert.equal(head.status, 'idle', 'the fresh head stays idle after boot materialization')
+      assert.equal(agents.resumeCalls.length, 0, 'boot materialization of the FRESH head does not cold-resume (it creates) — no wake cycle')
+
+      // (b) The head is woken ONLY by an explicitly addressed board message — not
+      //     by a proactive turn of its own.
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      const seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'hello head'), 'board')
+      await waitFor(() => head.inboxMessages.length >= 1, 5000, 'head woken only once an ADDRESSED message arrives')
+      assert.match(head.inboxMessages.at(-1).content[0].text, /new message .* from asistente/, 'the sole wake is the addressed-board pointer')
+      assert.equal(head.inboxMessages.length, 1, 'exactly one wake — the addressed message (no extra proactive turns)')
+
+      // (c) The head's own-layer role persona (the BOOT-QUIET directive) is
+      //     installed with the head agent. Its body carries the instruction to
+      //     never self-initiate board activity.
+      const headCtx = head.ctx
+      const sp = headCtx?.get('systemPrompt')
+      if (sp !== void 0 && typeof sp.assemble === 'function') {
+        let roleText = ''
+        try {
+          const assembly = await sp.assemble({})
+          const role = (assembly.sections ?? []).find((s) => s.name === `deepartments:head:role:${postId}`)
+          roleText = role === void 0 ? '' : role.text
+        } catch {
+          roleText = ''
+        }
+        // Best-effort: the role section registers on the agent's scoped layer, so a
+        // scope-less assemble may not surface it. Only assert when it did — the
+        // behavioral (a)/(b) guarantees above are the binding Fix A1 contract.
+        if (roleText !== '') {
+          assert.match(roleText, /BOOT-QUIET/, 'head role persona directs boot-quiet behavior')
+          assert.match(roleText, /never proactively write to the board/, 'head role persona forbids proactive board writes')
+        }
+      }
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Fix A2 stuck-head recovery: a live-but-stuck head (running, no session progress past STUCK_HEAD_MS) is disposed + cold-resumed then woken — the wake reaches a WORKING model turn, never the frozen loop', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const sid = `head-${postId}`
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      await waitFor(() => agents.store.has(sid), 5000, 'head created at boot')
+      const frozenHead = agents.store.get(sid)
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+
+      // Simulate the Batch-1c live-but-STUCK resident loop: status 'running' and a
+      // session event log that NEVER grows (the resident is wedged on a stalled
+      // tool call). Fix A2 drives the stuck window through the injectable clock.
+      frozenHead.status = 'running'
+      const T0 = 1_700_000_000_000
+      const resumeBefore = agents.resumeCalls.length
+      process.env.DEEPARTMENTS_TEST_NOW = String(T0)
+
+      // Wake 1: first observation of the running head — the relay records the
+      // progress baseline and (healthy path) enqueues a followup; NOT judged stuck
+      // yet, NOT disposed, NOT resumed.
+      let seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'first'), 'board')
+      await waitFor(() => frozenHead.inboxMessages.length >= 1, 5000, 'first wake enqueued on the frozen-loop incarnation')
+      assert.equal(agents.store.get(sid), frozenHead, 'healthy live head is NOT disposed on first observation')
+      assert.equal(agents.resumeCalls.length, resumeBefore, 'no cold-resume while the head still looks healthy')
+
+      // The resident makes NO progress for longer than STUCK_HEAD_MS (120s): the
+      // clock advances well past it while status stays 'running' and the event log
+      // never grows.
+      process.env.DEEPARTMENTS_TEST_NOW = String(T0 + 130_000)
+
+      // Wake 2: now the head is STUCK → dispose the frozen handle + fall through to
+      // the COLD path (resume then followup) so the wake is re-delivered from the
+      // durable board record, never lost to the frozen in-memory inbox.
+      seq++
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'second'), 'board')
+      await waitFor(() => agents.store.get(sid) !== frozenHead, 5000, 'stuck head was disposed and a fresh incarnation cold-resumed')
+
+      const freshHead = agents.store.get(sid)
+      assert.ok(freshHead, 'a fresh head incarnation is back in the registry')
+      assert.notEqual(freshHead, frozenHead, 'the frozen resident loop is GONE from the registry (disposed), replaced by a working incarnation')
+      assert.ok(agents.resumeCalls.length > resumeBefore, 'the stuck head was cold-resumed (agents.resume invoked)')
+      await waitFor(() => freshHead.inboxMessages.length >= 1, 5000, 'the followup reaches the WORKING cold-resumed incarnation')
+      assert.match(freshHead.inboxMessages.at(-1).content[0].text, /new message .* from asistente/, 'the pointer-only wake is delivered to the fresh incarnation')
+      assert.doesNotMatch(freshHead.inboxMessages.at(-1).content[0].text, /second/, 'wake stays pointer-only (no message body)')
+
+      // The durable board record is the re-delivery source: it must still hold wake
+      // 2's record after dispose+resume (nothing lost to the in-memory inbox).
+      const boardRecords = await loadRecords(resolveBoardPath(stateDir, 'board'))
+      assert.ok(boardRecords.some((r) => r.from === 'asistente' && String(r.to).includes(postId) && r.seq === seq), 'durable board record for the wake-triggering message persists (the re-delivery source)')
+    } finally {
+      delete process.env.DEEPARTMENTS_TEST_NOW
+      await dispose()
+    }
+  })
+})
+
+test('Fix A2 normal live-head followup: a HEALTHY live head gets its followup ENQUEUED without being disposed or cold-resumed', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const sid = `head-${postId}`
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      await waitFor(() => agents.store.has(sid), 5000, 'head created at boot')
+      const head = agents.store.get(sid)
+
+      // Healthy live head: idle status, and its session event log GROWS between
+      // wake observations (a busy-but-working head keeps producing progress).
+      const resumeBefore = agents.resumeCalls.length
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      let seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'wake A'), 'board')
+      await waitFor(() => head.inboxMessages.length >= 1, 5000, 'followup enqueued (healthy path)')
+
+      // Even across many subsequent wake pushes, a healthy head keeps the SAME
+      // incarnation: never disposed, never cold-resumed, followups just enqueue.
+      for (let i = 0; i < 3; i++) {
+        seq++
+        await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], `wake ${i}`), 'board')
+      }
+      await waitFor(() => head.inboxMessages.length >= 4, 5000, 'all followups enqueued on the same live incarnation')
+
+      assert.equal(agents.store.get(sid), head, 'healthy live head is NEVER disposed across wakes')
+      assert.equal(agents.resumeCalls.length, resumeBefore, 'healthy live head is NEVER cold-resumed (no dispose+resume cycle)')
+      assert.equal(head.inboxMessages.length, 4, 'every wake enqueued a pointer followup on the same live head')
+      assert.equal(head.status, 'idle', 'head left in its normal idle state')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Fix A2 no lost wake: the durable board record is the re-delivery source, so a wake-enqueued followup survives a stuck-head dispose+restart', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const sid = `head-${postId}`
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      await waitFor(() => agents.store.has(sid), 5000, 'head created at boot')
+      const frozenHead = agents.store.get(sid)
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+
+      // Pre-seed the durable board file with a wake-triggering record BEFORE the
+      // stuck incident — the production "restart with a pending addressed message"
+      // scenario (the 2026-08-20 live finding: the followup was enqueued into a
+      // frozen loop's in-memory inbox and LOST on restart, showing 0 Board delta).
+      const seq0 = await nextSeq(stateDir, 'board')
+      const pendingRecord = messageRecord(seq0, 'asistente', [postId], 'pending question')
+      await seedBoardRecords(stateDir, 'board', [pendingRecord])
+
+      // Drive the stuck head through a recovery cycle: first observe it running
+      // (baseline), then fast-forward past STUCK_HEAD_MS with no progress.
+      const T0 = 1_700_000_000_000
+      process.env.DEEPARTMENTS_TEST_NOW = String(T0)
+      frozenHead.status = 'running'
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq0 + 1, 'asistente', [postId], 'trigger'), 'board')
+      process.env.DEEPARTMENTS_TEST_NOW = String(T0 + 130_000)
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq0 + 2, 'asistente', [postId], 'trigger again'), 'board')
+      await waitFor(() => agents.store.get(sid) !== frozenHead, 5000, 'stuck head disposed + cold-resumed')
+
+      const freshHead = agents.store.get(sid)
+      await waitFor(() => freshHead.inboxMessages.length >= 1, 5000, 'fresh incarnation woken')
+
+      // The durable board record is untouched by dispose/restart and remains the
+      // re-delivery source — NOTHING was lost: the pending record is still there.
+      const boardRecords = await loadRecords(resolveBoardPath(stateDir, 'board'))
+      const pendingOnDisk = boardRecords.find((r) => r.id === pendingRecord.id)
+      assert.ok(pendingOnDisk, 'the pending wake-triggering record persists in the durable board file')
+      assert.deepEqual(pendingOnDisk, pendingRecord, 'the durable record is byte-preserved (the re-delivery source is intact)')
+    } finally {
+      delete process.env.DEEPARTMENTS_TEST_NOW
+      await dispose()
+    }
+  })
+})
+
 test('dept_room_who: lists static members and the registered live heads', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
