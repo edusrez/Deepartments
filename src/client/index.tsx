@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { Fragment, memo, useCallback, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import { StateDot } from "@deepseek-ai/dsh-client-ui-primitives";
 
@@ -79,6 +79,81 @@ const uiStore = (() => {
   };
 })();
 
+// ---------------------------------------------------------------------------
+// Change-detection helpers (Batch 6b). The plugin's sidebar poll must NOT
+// re-render when nothing changed: these compare poll payloads BY CONTENT so we
+// can push into the agentStore only on real changes (reference-equality alone
+// is useless — buildAgentRows allocates fresh arrays every poll).
+// ---------------------------------------------------------------------------
+
+// Heads may arrive in any order → compare as an id-keyed signature multiset.
+function headSig(h: AgentHead): string {
+  return [
+    h.id, h.name, h.department ?? "", h.status, h.unread, h.running,
+    h.sleeping, h.sessionLive, h.sessionId,
+  ].join("\u0001");
+}
+function headsDiffer(a: AgentHead[], b: AgentHead[]): boolean {
+  if (a.length !== b.length) return true;
+  if (a.length === 0) return false;
+  const bSigs = new Set(b.map(headSig));
+  for (const h of a) if (!bSigs.has(headSig(h))) return true;
+  // Same length + every a present in b (with equal signatures, incl. the id) ⇒
+  // same multiset unless there are duplicate ids; guard the degenerate case.
+  const aIds = new Set(a.map((h) => h.id));
+  if (aIds.size !== a.length) return true;
+  return false;
+}
+function hostDiffer(a: AgentsValue["host"] | null, b: AgentsValue["host"] | null): boolean {
+  if (!a || !b) return a !== b;
+  return a.id !== b.id || a.name !== b.name || a.department !== b.department;
+}
+function setsDiffer(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return true;
+  for (const id of a) if (!b.has(id)) return true;
+  return false;
+}
+
+// Shared external store for the polled roster (host + heads + archived session
+// ids). ONE heartbeat (in apply) owns the RPC cadence and pushes here; AgentList
+// consumes it reactively via useSyncExternalStore. getSnapshot returns a STABLE
+// reference (replaced only on an actual content change) so uSES does not spin.
+const agentStore = (() => {
+  let state: { host: AgentsValue["host"] | null; heads: AgentHead[]; archived: Set<string> } = {
+    host: null,
+    heads: [],
+    archived: new Set<string>(),
+  };
+  const listeners = new Set<() => void>();
+  return {
+    get: (): typeof state => state,
+    set: (patch: {
+      host?: AgentsValue["host"];
+      heads?: AgentHead[];
+      archived?: Set<string>;
+    }) => {
+      const next = { ...state };
+      let changed = false;
+      if (patch.host !== undefined) {
+        if (hostDiffer(state.host, patch.host)) { next.host = patch.host; changed = true; }
+        else next.host = state.host;
+      }
+      if (patch.heads !== undefined) {
+        if (headsDiffer(state.heads, patch.heads)) { next.heads = patch.heads; changed = true; }
+        else next.heads = state.heads;
+      }
+      if (patch.archived !== undefined) {
+        if (setsDiffer(state.archived, patch.archived)) { next.archived = patch.archived; changed = true; }
+        else next.archived = state.archived;
+      }
+      if (!changed) return;
+      state = next;
+      for (const l of listeners) l();
+    },
+    subscribe: (fn: () => void): (() => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; },
+  };
+})();
+
 // Minimal client root-context surface we rely on (provided by base bundles).
 interface ClientCtx {
   effect(fn: () => void | (() => void), label?: string): void;
@@ -97,6 +172,8 @@ interface ClientCtx {
   };
   sessions: {
     list: {
+      /** The native sessions projection store (reactive: subscribe → uSES). */
+      subscribe(fn: () => void): () => void;
       getSnapshot(): {
         current: string | undefined;
         byId?: Record<string, any>;
@@ -124,6 +201,8 @@ interface AgentsOwner {
   currentSessionId: () => string | undefined;
   /** Full sessions list snapshot (SessionListState): for the multi-Assistant rows. */
   sessionSnapshot: () => any;
+  /** Subscribe to the native sessions projection store (for reactive highlight). */
+  sessionsListSubscribe: (fn: () => void) => () => void;
   startSession: () => void;
   rpc: ClientCtx["connection"]["rpc"];
   /** Archive a session (stopping it and its subagents); removed from the list. */
@@ -205,6 +284,13 @@ const AGENT_CSS = /* css */ `
    rows render the standard StateDot (no custom glyph containers). */
 .dp-agents-collapsed{display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px 0;}
 
+/* head status-dot footprint helpers (Batch 6a, owner spec 2026-08-20). Both
+   reserve the SAME 10px footprint as a <StateDot size={10} /> so every head row
+   keeps identical alignment/margins whether or not it shows a dot. No fill
+   override of StateDot. */
+.dp-dot-sleep{flex:none;width:10px;height:10px;border-radius:50%;background:#9ca3af;}
+.dp-dot-empty{flex:none;width:10px;height:10px;}
+
 /* ---- New session button ---- */
 .dp-new-session-btn{
   display:flex;align-items:center;justify-content:center;gap:6px;
@@ -280,25 +366,29 @@ function asistenteStatus(node: any): "done" | "warning" | "ongoing" {
 // `/deepartments` RPC, not the native tree.
 const HEAD_SESSION_PREFIX = "head-";
 
-// Status dot for department heads — maps the head's richer status onto the SAME
-// StateDot rendering an Assistant session in the equivalent state produces, so
-// sizes/fonts/glyphs are pixel-identical. NO custom pseudo-dot, NO wrapper
-// classes that change the glyph (owner feedback 2026-08-20: heads must not look
-// different — same green round dot as an idle/active Assistant, not a muted or
-// square override). Batch 5: `idle`/`sleeping` now render the native `done`
-// (green round) dot, identical to what an idle Assistant renders.
-//   working           -> StateDot ongoing    (blue running ring)
-//   completed-notice  -> StateDot done       (green round)
-//   idle              -> StateDot done       (green round, same as Assistant idle)
-//   sleeping          -> StateDot done       (green round, same as Assistant idle)
-function headStatusState(status: HeadStatus): "done" | "ongoing" {
-  switch (status) {
+// Status dot for department heads — owner spec 2026-08-20 (Batch 6a). Pure,
+// render-safe: maps ONE head (its RPC status + native snapshot node) onto a
+// single dot element with fixed precedence. Assistant rows keep their own
+// native `asistenteStatus` mapping untouched.
+//   pendingInteraction (native snapshot) -> StateDot warning   (orange)
+//   status working                      -> StateDot ongoing    (spinner)
+//   status completed-notice             -> StateDot done       (green novelty)
+//   status sleeping                     -> .dp-dot-sleep       (gray round)
+//   else (idle)                         -> .dp-dot-empty       (no dot, reserved)
+function headDotFor(head: AgentHead, snapshot: any): ReactNode {
+  const node = snapshot?.byId?.[head.sessionId];
+  if (node?.pendingInteraction === true) {
+    return <StateDot state="warning" size={10} />;
+  }
+  switch (head.status) {
     case "working":
-      return "ongoing";
+      return <StateDot state="ongoing" size={10} />;
     case "completed-notice":
-    case "idle":
+      return <StateDot state="done" size={10} />;
     case "sleeping":
-      return "done";
+      return <span className="dp-dot-sleep" aria-hidden="true" />;
+    default:
+      return <span className="dp-dot-empty" aria-hidden="true" />;
   }
 }
 
@@ -367,80 +457,125 @@ function AgentRowView({ name, dot, active, onOpen, menuOpen, onToggleMenu, menuI
 }
 
 // ---------------------------------------------------------------------------
+// Memoized row renderers (Batch 6b). AgentRowView itself is a plain function;
+// these thin React.memo wrappers are what the AgentList maps over, so a poll
+// that re-renders AgentList (e.g. one head's status changed) does NOT re-render
+// the unchanged rows. Each wrapper builds its own dot + handlers from STABLE
+// props (session/head references, primitives, useCallback'd callbacks), so the
+// shallow memo comparison actually holds across re-renders.
+// ---------------------------------------------------------------------------
+
+interface AssistantRowViewProps {
+  session: any;
+  name: string;
+  active: boolean;
+  menuOpen: boolean;
+  wide: boolean;
+  expandSidebar: () => void;
+  handleOpen: (id: string) => void;
+  handleToggleMenu: (id: string) => void;
+  handleArchive: (id: string) => void;
+}
+const AssistantRowView = memo(function AssistantRowView({
+  session, name, active, menuOpen, wide, expandSidebar,
+  handleOpen, handleToggleMenu, handleArchive,
+}: AssistantRowViewProps) {
+  const id = session.id ?? session.sessionId;
+  return (
+    <AgentRowView
+      name={name}
+      dot={<StateDot state={asistenteStatus(session)} size={10} />}
+      active={active}
+      onOpen={() => {
+        if (!wide) expandSidebar();
+        handleOpen(id);
+      }}
+      menuOpen={menuOpen}
+      onToggleMenu={() => handleToggleMenu(id)}
+      menuItems={[
+        {
+          label: "Archive agent",
+          onSelect: () => { handleArchive(id); },
+        },
+      ]}
+    />
+  );
+});
+
+interface HeadRowViewProps {
+  head: AgentHead;
+  snapshot: any;
+  active: boolean;
+  menuOpen: boolean;
+  wide: boolean;
+  expandSidebar: () => void;
+  handleOpen: (id: string) => void;
+  handleToggleMenu: (id: string) => void;
+  handleArchive: (id: string) => void;
+}
+const HeadRowView = memo(function HeadRowView({
+  head, snapshot, active, menuOpen, wide, expandSidebar,
+  handleOpen, handleToggleMenu, handleArchive,
+}: HeadRowViewProps) {
+  const id = head.sessionId;
+  return (
+    <AgentRowView
+      name={head.name}
+      dot={headDotFor(head, snapshot)}
+      active={active}
+      onOpen={() => {
+        if (!wide) expandSidebar();
+        // sessionId ships with Batch 4a; if an older server omits it, do
+        // nothing rather than fall back to postId.
+        if (id) handleOpen(id);
+      }}
+      menuOpen={menuOpen}
+      onToggleMenu={() => handleToggleMenu(id)}
+      menuItems={[
+        {
+          label: "Archive agent",
+          onSelect: () => { if (id) handleArchive(id); },
+        },
+      ]}
+    />
+  );
+});
+
+// ---------------------------------------------------------------------------
 // AgentList — renders the main agents into the sidebar.workspaces hole.
 // ---------------------------------------------------------------------------
 export function AgentList(props: AgentsOwner) {
-  const { wide, expandSidebar, openSession, currentSessionId, sessionSnapshot, startSession, rpc, archiveSession } = props;
-  const [host, setHost] = useState<AgentsValue["host"] | null>(null);
-  const [heads, setHeads] = useState<AgentHead[]>([]);
-  const [snapshot, setSnapshot] = useState(() => sessionSnapshot());
-  // Session ids archived via workspace.archiveSession (still present in the
-  // sessions snapshot but should not appear as Assistant rows).
-  const [archivedSet, setArchivedSet] = useState<Set<string>>(new Set());
+  const { wide, expandSidebar, openSession, sessionSnapshot, sessionsListSubscribe, startSession, archiveSession } = props;
+  // Roster (host + heads + archived ids) is pushed by the SHARED heartbeat in
+  // apply() into agentStore; we consume it reactively. getSnapshot returns a
+  // stable reference unless content actually changed, so a no-op poll does not
+  // re-render us (Batch 6b, change-guard).
+  const { heads, archived: archivedSet } = useSyncExternalStore(agentStore.subscribe, agentStore.get);
+  // The native sessions projection store is ALREADY reactive (subscribe + uSES,
+  // same as DeepartmentsSettings). Reading it here — instead of a 5s poll —
+  // makes the active-row highlight update the moment the selection changes and
+  // keeps the Assistant roster current without any extra polling.
+  const snapshot = useSyncExternalStore(sessionsListSubscribe, sessionSnapshot);
   // Which Assistant row has its ⋯ (archive) menu open.
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
 
-  useEffect(() => {
-    let disposed = false;
-
-    const fetchAgents = async () => {
-      const sid = currentSessionId();
-      const res = await rpc.call("/deepartments", "agents", { sessionId: sid ?? undefined });
-      if (disposed) return;
-      if (res.ok) {
-        const value = res.value as AgentsValue;
-        setHost(value.host);
-        setHeads(Array.isArray(value.agents) ? value.agents : []);
-      }
-      // On { ok: false } keep last data; the next poll retries silently.
-    };
-
-    const refreshSessions = () => {
-      if (!disposed) setSnapshot(sessionSnapshot());
-    };
-
-    // Fetch archived session ids via the injected trusted-host RPC transport
-    // (ctx.connection.rpc) — the same rpc.call path used for agents/config
-    // above, not a raw fetch. The response envelopes { result.intent, value }
-    // where value.archivedSessionIds is top-level only. Non-blocking: on
-    // failure keep the last known set.
-    const fetchArchived = async () => {
-      try {
-        const res = await rpc.call("/api", "workspace.list", {});
-        if (!res.ok) return;
-        const value = res.value as any;
-        const archived: string[] = Array.isArray(value?.archivedSessionIds) ? value.archivedSessionIds : [];
-        const next = new Set<string>(archived);
-        setArchivedSet((prev) =>
-          next.size !== prev.size || [...next].some((id) => !prev.has(id)) ? next : prev
-        );
-      } catch {
-        // Keep last set; the next poll retries silently.
-      }
-    };
-
-    fetchAgents();
-    refreshSessions();
-    fetchArchived();
-    const interval = window.setInterval(() => {
-      fetchAgents();
-      refreshSessions();
-      fetchArchived();
-    }, 5000);
-    const onFocus = () => {
-      fetchAgents();
-      refreshSessions();
-      fetchArchived();
-    };
-    window.addEventListener("focus", onFocus);
-
-    return () => {
-      disposed = true;
-      window.clearInterval(interval);
-      window.removeEventListener("focus", onFocus);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  // Stable per-row callbacks (useCallback) so the memoized row wrappers skip
+  // re-render when only the AgentList re-renders.
+  const handleOpen = useCallback(
+    (id: string) => {
+      if (!wide) expandSidebar();
+      openSession(id);
+    },
+    [wide, expandSidebar, openSession]
+  );
+  const handleToggleMenu = useCallback((id: string) => {
+    setOpenMenuId((prev) => (prev === id ? null : id));
   }, []);
+  const handleArchive = useCallback((id: string) => {
+    setOpenMenuId(null);
+    // Ignored: the heartbeat's archived poll reconciles the row out.
+    void archiveSession(id).catch(() => {});
+  }, [archiveSession]);
 
   // Assistant rows = non-blank, non-archived host-origin sessions in host-list
   // creation order. Filters:
@@ -483,7 +618,7 @@ export function AgentList(props: AgentsOwner) {
     assistantRows = assistantRows.slice().reverse();
   }
 
-  const current = currentSessionId();
+  const current = snapshot?.current;
 
   // Collapsed mode: compact vertical stack of status dots, no labels. One dot
   // per assistant session (in the same filtered ordered list) + one per head.
@@ -494,7 +629,7 @@ export function AgentList(props: AgentsOwner) {
           <StateDot key={a.id} state={asistenteStatus(a)} size={10} />
         ))}
         {heads.map((h) => (
-          <StateDot key={h.id} state={headStatusState(h.status)} size={10} />
+          <Fragment key={h.id}>{headDotFor(h, snapshot)}</Fragment>
         ))}
       </div>
     );
@@ -509,30 +644,19 @@ export function AgentList(props: AgentsOwner) {
       <div className="dp-agents-list">
         {assistantRows.map((a, i) => {
           const name = i === 0 ? "Assistant" : `Assistant ${i + 1}`;
-          const active = a.id === current;
-          const menuOpen = openMenuId === a.id;
+          const id = a.id ?? a.sessionId;
           return (
-            <AgentRowView
-              key={a.id}
+            <AssistantRowView
+              key={id}
+              session={a}
               name={name}
-              dot={<StateDot state={asistenteStatus(a)} size={10} />}
-              active={active}
-              onOpen={() => {
-                if (!wide) expandSidebar();
-                openSession(a.id);
-              }}
-              menuOpen={menuOpen}
-              onToggleMenu={() => setOpenMenuId(menuOpen ? null : a.id)}
-              menuItems={[
-                {
-                  label: "Archive agent",
-                  onSelect: () => {
-                    setOpenMenuId(null);
-                    // Ignored: the 5s archived poll reconciles the row out.
-                    void archiveSession(a.id).catch(() => {});
-                  },
-                },
-              ]}
+              active={id === current}
+              menuOpen={openMenuId === id}
+              wide={wide}
+              expandSidebar={expandSidebar}
+              handleOpen={handleOpen}
+              handleToggleMenu={handleToggleMenu}
+              handleArchive={handleArchive}
             />
           );
         })}
@@ -543,39 +667,20 @@ export function AgentList(props: AgentsOwner) {
             persists — a deliberate, harmless behavior). */}
         {heads
           .filter((h) => !archivedSet.has(h.sessionId))
-          .map((h) => {
-            const active = h.sessionId === current;
-            const menuOpen = openMenuId === h.sessionId;
-            return (
-              <AgentRowView
-                key={h.id}
-                name={h.name}
-                dot={<StateDot state={headStatusState(h.status)} size={10} />}
-                active={active}
-                onOpen={() => {
-                  if (!wide) expandSidebar();
-                  // sessionId ships with Batch 4a; if an older server omits it,
-                  // do nothing (BEFORE it shipped, the head row was static and
-                  // non-navigable anyway) rather than fall back to postId.
-                  if (h.sessionId) openSession(h.sessionId);
-                }}
-                menuOpen={menuOpen}
-                onToggleMenu={() => setOpenMenuId(menuOpen ? null : h.sessionId)}
-                menuItems={[
-                  {
-                    label: "Archive agent",
-                    onSelect: () => {
-                      setOpenMenuId(null);
-                      // Same action as an Assistant row: archive the head's
-                      // stable session. Ignored: the 5s archived poll reconciles
-                      // the row out (re-materializes on next boot by design).
-                      if (h.sessionId) void archiveSession(h.sessionId).catch(() => {});
-                    },
-                  },
-                ]}
-              />
-            );
-          })}
+          .map((h) => (
+            <HeadRowView
+              key={h.id}
+              head={h}
+              snapshot={snapshot}
+              active={h.sessionId === current}
+              menuOpen={openMenuId === h.sessionId}
+              wide={wide}
+              expandSidebar={expandSidebar}
+              handleOpen={handleOpen}
+              handleToggleMenu={handleToggleMenu}
+              handleArchive={handleArchive}
+            />
+          ))}
       </div>
     </div>
   );
@@ -687,40 +792,62 @@ export function apply(ctx: ClientCtx) {
     "deepartments-client: settings.section"
   );
 
-  // ---- Live sidebar gate — reactively driven by the /deepartments RPC ------
-  // Polls `ui/config` every 5s + on window focus and pushes the value into the
-  // shared uiStore; the uiStore subscription mounts/unmounts the sidebar shadow
-  // + injected style. Runs in apply regardless of the sidebar being mounted.
+  // ---- Live sidebar gate — ONE shared heartbeat (Batch 6b) -----------------
+  // A SINGLE setInterval + focus/visibility handling drives BOTH the ui/config
+  // gate poll (mounts/unmounts the sidebar shadow) AND the AgentList roster
+  // fetch (agents + archived). Previously two independent 5s intervals ran
+  // concurrently (~3 RPCs per tick even when idle). Polling pauses while the
+  // tab is hidden (visibilityState) and resumes on focus/visibilitychange.
+  // The ui/config poll runs ALWAYS (so the toggle is honored while the sidebar
+  // is off); the roster (agents + archived) RPCs run ONLY while the sidebar is
+  // mounted, mirroring the old AgentList-mounted polling.
   ctx.effect(
     () => {
-      let active = false;
+      let disposed = false;
+      let sideActive = false;
       let disposers: (() => void)[] = [];
 
-      const sync = () => {
-        const enabled = uiStore.get().sidebarEnabled;
-        if (enabled && !active) {
-          const next: (() => void)[] = [];
-          const removeStyle = injectSidebarStyle();
-          if (removeStyle) next.push(removeStyle);
-          const unregister = registerSidebar(ctx);
-          if (unregister) next.push(unregister);
-          disposers = next;
-          active = true;
-        } else if (!enabled && active) {
-          for (const dispose of disposers) dispose();
-          disposers = [];
-          active = false;
+      const visible = () =>
+        typeof document === "undefined" ? true : document.visibilityState !== "hidden";
+
+      // Fetch the roster (host + heads) + archived ids ONLY while the sidebar
+      // shadow is mounted. Change-guarded: agentStore pushes only on real
+      // content change, so an idle poll does not re-render AgentList.
+      const fetchRoster = async () => {
+        if (!sideActive) return;
+        try {
+          const sid = ctx.sessions.list.getSnapshot().current;
+          const res = await rpc.call("/deepartments", "agents", { sessionId: sid ?? undefined });
+          if (disposed || !res.ok) return;
+          const value = res.value as AgentsValue;
+          agentStore.set({
+            host: value.host,
+            heads: Array.isArray(value.agents) ? value.agents : [],
+          });
+        } catch {
+          // Keep last data; the next poll retries silently.
+        }
+        try {
+          const ares = await rpc.call("/api", "workspace.list", {});
+          if (disposed || !ares.ok) return;
+          const value = ares.value as any;
+          const archived: string[] = Array.isArray(value?.archivedSessionIds)
+            ? value.archivedSessionIds
+            : [];
+          agentStore.set({ archived: new Set<string>(archived) });
+        } catch {
+          // Keep last set; the next poll retries silently.
         }
       };
 
-      const poll = async () => {
+      // ui/config gate poll — ALWAYS (so the selector is honored while off).
+      const pollConfig = async () => {
         try {
           const res = await rpc.call("/deepartments", "ui/config", {});
-          if (res.ok) {
-            const sidebarEnabled = (res.value as any)?.sidebarEnabled;
-            if (typeof sidebarEnabled === "boolean") {
-              uiStore.set({ sidebarEnabled });
-            }
+          if (disposed || !res.ok) return;
+          const sidebarEnabled = (res.value as any)?.sidebarEnabled;
+          if (typeof sidebarEnabled === "boolean") {
+            uiStore.set({ sidebarEnabled });
           }
           // On { ok: false } keep the last value; the next poll retries.
         } catch {
@@ -728,22 +855,51 @@ export function apply(ctx: ClientCtx) {
         }
       };
 
-      const interval = window.setInterval(poll, 5000);
-      const onFocus = () => {
-        poll();
+      const sync = () => {
+        const enabled = uiStore.get().sidebarEnabled;
+        if (enabled && !sideActive) {
+          const next: (() => void)[] = [];
+          const removeStyle = injectSidebarStyle();
+          if (removeStyle) next.push(removeStyle);
+          const unregister = registerSidebar(ctx);
+          if (unregister) next.push(unregister);
+          disposers = next;
+          sideActive = true;
+          // Sidebar just mounted: populate the roster immediately.
+          void fetchRoster();
+        } else if (!enabled && sideActive) {
+          for (const dispose of disposers) dispose();
+          disposers = [];
+          sideActive = false;
+        }
+      };
+
+      const run = () => {
+        if (!visible()) return;
+        void pollConfig();
+        void fetchRoster();
+      };
+
+      const interval = window.setInterval(run, 5000);
+      const onFocus = () => run();
+      const onVisibility = () => {
+        if (visible()) run();
       };
       window.addEventListener("focus", onFocus);
-      void poll(); // initial read
+      document.addEventListener("visibilitychange", onVisibility);
+      void pollConfig(); // initial config read (even while sidebar is off)
 
       const unsub = uiStore.subscribe(sync);
       sync(); // initial read from the store default
       return () => {
+        disposed = true;
         window.clearInterval(interval);
         window.removeEventListener("focus", onFocus);
+        document.removeEventListener("visibilitychange", onVisibility);
         unsub();
         for (const dispose of disposers) dispose();
         disposers = [];
-        active = false;
+        sideActive = false;
       };
     },
     "deepartments-client: sidebar.workspaces (live)"
@@ -773,6 +929,7 @@ function registerSidebar(ctx: ClientCtx): (() => void) | undefined {
         openSession: (id: string) => ctx.sessions.open(id),
         currentSessionId: () => ctx.sessions.list.getSnapshot().current,
         sessionSnapshot: () => ctx.sessions.list.getSnapshot(),
+        sessionsListSubscribe: (fn: () => void) => ctx.sessions.list.subscribe(fn),
         startSession: () => ctx.workspaces.startSession(),
         rpc: ctx.connection.rpc,
         archiveSession: (id: string) => ctx.workspaces.archiveSession(id)
