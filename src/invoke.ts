@@ -1436,16 +1436,37 @@ export function applyInvoke(ctx: Context, config: Config) {
   /** Durable path of a post's long-term memory journal. */
   const journalPathFor = (memberId: string): string => path.join(config.stateDir, 'journals', `${memberId}.md`)
 
-  /** Write the journal file (author/timestamp/board_cursor frontmatter + runs of
-   * decisions/constraints/openItems + the free-form summary body). Returns the
-   * durable memo path. */
-  const writeJournal = async (memberId: string, roomId: string, summary: string, decisions: string[], constraints: string[], openItems: string[]): Promise<string> => {
+  /** Write the journal file (author/room/timestamp/wake_counter/last_wake/
+   * board_cursor frontmatter + runs of decisions/constraints/openItems +
+   * optional current_step + the free-form summary body, closing with a short
+   * wake-routine footer). Returns the durable memo path. */
+  const writeJournal = async (memberId: string, roomId: string, summary: string, decisions: string[], constraints: string[], openItems: string[], currentStep?: string): Promise<string> => {
+    // Batch W2 identity + cursor block: derive the monotonic wake counter and
+    // the boundary the previous incarnation left at from the PRIOR journal so a
+    // re-materialized head/Asistente can verify its state on wake (lost-cursor /
+    // stale detection). ENOENT-tolerant: a first-ever write has no prior journal
+    // → wake_counter 1, last_wake none.
+    let prevCounter = 0
+    let prevTimestamp: string | undefined
+    try {
+      const prior = await readFile(journalPathFor(memberId), 'utf8')
+      const counterMatch = prior.match(/^wake_counter:\s*(\d+)/m)
+      if (counterMatch !== null) prevCounter = Number(counterMatch[1])
+      const tsMatch = prior.match(/^timestamp:\s*(.+)$/m)
+      if (tsMatch !== null) prevTimestamp = tsMatch[1].trim()
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+
     const cursor = memberCursors.get(memberId)
     const content = [
       '---',
       `author: ${memberId}`,
       `room: ${roomId}`,
       `timestamp: ${new Date().toISOString()}`,
+      `wake_counter: ${prevCounter + 1}`,
+      `last_wake: ${prevTimestamp ?? 'none'}`,
+      ...(currentStep !== undefined ? [`current_step: ${currentStep}`] : []),
       `board_cursor: ${cursor?.lastMessageId ?? 'none'}`,
       `decisions: ${yamlList(decisions)}`,
       `constraints: ${yamlList(constraints)}`,
@@ -1453,7 +1474,8 @@ export function applyInvoke(ctx: Context, config: Config) {
       '---',
       '',
       summary,
-      ''
+      '',
+      `Wake routine: dept_whereami → re-read this journal → dept_room_read("${roomId}") delta → health check → decide. Full sequence in skill deepartments-workflow ("Wake routine").`
     ].join('\n')
     const memoPath = journalPathFor(memberId)
     await mkdir(path.dirname(memoPath), { recursive: true })
@@ -1864,12 +1886,13 @@ export function applyInvoke(ctx: Context, config: Config) {
 
     disposers.push(agentCtx.tools.register(defineTool({
       name: 'dept_memo_write',
-      description: 'Write this department head\'s long-term memory to its journal: a durable, schema-constrained markdown memo at <stateDir>/journals/<memberId>.md (author/timestamp/board_cursor frontmatter + decisions/constraints/openItems + a free-form summary). Use it BEFORE sleeping to hand your memory to your future (re-materialized) self. Returns the durable memo path.',
+      description: 'Write this department head\'s long-term memory to its journal: a durable, schema-constrained markdown memo at <stateDir>/journals/<memberId>.md (frontmatter author/room/timestamp/wake_counter/last_wake/board_cursor + decisions/constraints/openItems (+ optional current_step) + a free-form summary with a wake-routine footer). Use it BEFORE sleeping to hand your memory to your future (re-materialized) self. Returns the durable memo path.',
       parameters: {
         summary: { type: 'string', required: true, description: 'The memo body: a summary of your state, conclusions, and what your next incarnation must know.' },
         decisions: { type: 'array', items: { type: 'string' }, description: 'Decisions taken (optional).' },
         constraints: { type: 'array', items: { type: 'string' }, description: 'Constraints your future self must respect (optional).' },
-        openItems: { type: 'array', items: { type: 'string' }, description: 'Open items for your future self (optional).' }
+        openItems: { type: 'array', items: { type: 'string' }, description: 'Open items for your future self (optional).' },
+        currentStep: { type: 'string', description: 'Where you currently are (explicit durable state): a short status line the next wake can verify against (current_step in the journal). Optional.' }
       },
       output: {
         schema: {
@@ -1889,7 +1912,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         const memberId = postIdForChild(agent.id as string) ?? 'unknown'
         const entry = byPost.get(memberId)
         const roomId = entry?.roomId ?? 'unknown'
-        const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [])
+        const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [], args.currentStep)
         return { room: roomId, member: memberId, memoPath }
       }
     })))
@@ -2932,12 +2955,13 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   const globalMemo = ctx.tools.register(defineTool({
     name: 'dept_memo_write',
-    description: 'Write this department head\'s — or, from the host plane, the HOST Asistente\'s — long-term memory to its journal: a durable, schema-constrained markdown memo at <stateDir>/journals/<memberId>.md (author/timestamp/board_cursor frontmatter + decisions/constraints/openItems + a free-form summary). A registered head writes journals/<postId>.md; a HOST (no registered post) writes journals/host-<sessionId>.md. Use it BEFORE sleeping to hand your memory to your future (re-materialized) self. Returns the durable memo path.',
+    description: 'Write this department head\'s — or, from the host plane, the HOST Asistente\'s — long-term memory to its journal: a durable, schema-constrained markdown memo at <stateDir>/journals/<memberId>.md (frontmatter author/room/timestamp/wake_counter/last_wake/board_cursor + decisions/constraints/openItems (+ optional current_step) + a free-form summary with a wake-routine footer). A registered head writes journals/<postId>.md; a HOST (no registered post) writes journals/host-<sessionId>.md. Use it BEFORE sleeping to hand your memory to your future (re-materialized) self. Returns the durable memo path.',
     parameters: {
       summary: { type: 'string', required: true, description: 'The memo body: a summary of your state, conclusions, and what your next incarnation must know.' },
       decisions: { type: 'array', items: { type: 'string' }, description: 'Decisions taken (optional).' },
       constraints: { type: 'array', items: { type: 'string' }, description: 'Constraints your future self must respect (optional).' },
-      openItems: { type: 'array', items: { type: 'string' }, description: 'Open items for your future self (optional).' }
+      openItems: { type: 'array', items: { type: 'string' }, description: 'Open items for your future self (optional).' },
+      currentStep: { type: 'string', description: 'Where you currently are (explicit durable state): a short status line the next wake can verify against (current_step in the journal). Optional.' }
     },
     output: {
       schema: {
@@ -2963,7 +2987,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       const entry = byPost.get(memberId)
       const hostEntry = hosts.get(memberId)
       const roomId = entry?.roomId ?? hostEntry?.roomId ?? 'board'
-      const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [])
+      const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [], args.currentStep)
       return { room: roomId, member: memberId, memoPath }
     }
   }))

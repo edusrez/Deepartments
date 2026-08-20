@@ -2403,6 +2403,48 @@ test('Batch 7 host dept_memo_write writes journals/host-<sessionId>.md (no more 
   })
 })
 
+test('Batch W2 dept_memo_write: identity+cursor block — wake_counter increments, last_wake tracks the prior timestamp, current_step persisted', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      const host = agents.put(fakeParentAgent())
+      const memo = root.tools.get('dept_memo_write')
+      assert.ok(memo, 'dept_memo_write registered globally (host plane)')
+      const hostId = `host-${host.id}`
+      const signal = new AbortController().signal
+
+      // First write: no currentStep → wake_counter 1, last_wake none, footer.
+      const first = await memo.execute({ summary: 'Summary A: first wake.' }, { agent: host, signal })
+      const firstContent = await readFile(first.memoPath, 'utf8')
+      const firstTimestamp = firstContent.match(/^timestamp:\s*(.+)$/m)?.[1]
+      assert.ok(firstTimestamp, 'first journal carries a timestamp')
+      assert.match(firstContent, /^author: host-/m, 'author frontmatter present')
+      assert.match(firstContent, /^wake_counter: 1$/m, 'first wake_counter is 1')
+      assert.match(firstContent, /^last_wake: none$/m, 'first last_wake is none')
+      assert.match(firstContent, /Summary A: first wake\./, 'summary A body present')
+      assert.ok(/^Wake routine: dept_whereami/m.test(firstContent), 'wake-routine footer present')
+      assert.ok(!/^current_step:/m.test(firstContent), 'no current_step when not passed')
+
+      // Second write: currentStep passed → wake_counter 2, last_wake = prior
+      // timestamp, current_step persisted.
+      const second = await memo.execute(
+        { summary: 'Summary B: second wake.', currentStep: 'processing board backlog' },
+        { agent: host, signal }
+      )
+      const secondContent = await readFile(second.memoPath, 'utf8')
+      assert.equal(second.member, hostId)
+      assert.equal(second.memoPath, first.memoPath, 'host journal rewritten in place')
+      assert.match(secondContent, /^wake_counter: 2$/m, 'second wake_counter is 2')
+      assert.equal(secondContent.match(/^last_wake:\s*(.+)$/m)?.[1], firstTimestamp, 'last_wake tracks the prior journal timestamp')
+      assert.match(secondContent, /^current_step: processing board backlog$/m, 'current_step persisted')
+      assert.match(secondContent, /Summary B: second wake\./, 'summary B body present')
+      assert.ok(!/Summary A: first wake\./.test(secondContent), 'prior summary body replaced')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal sets sleepEpoch durably + resets the live surface to exactly the journal (deriveMessages = ONE node) + concludes the turn', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
