@@ -272,6 +272,13 @@ interface HostEntry {
   hostId: string
   sessionId: string
   roomId: string
+  /** Batch 7: set when the host SLEPT (dept_sleep, host branch — journal
+   * persisted + surface reset to the journal). Durable marker: "the Asistente
+   * slept at T". A host does NOT dispose its live AgentHandle (the web
+   * api-proxy owns it — see explore-deep/2026-08-20-host-sleep.md), so unlike
+   * a head it stays live after sleep; the marker records that a context reset
+   * happened and the journal IS the current surface. Absent = never slept. */
+  sleepEpoch?: number
 }
 
 /** Compact per-member read cursors (in-memory — see header comment). */
@@ -307,6 +314,9 @@ interface HostRow {
   /** Batch E: whether the host's agent session is LIVE right now (agents.get
    * defined). A cold-boot non-live host is listed truthfully with false. */
   sessionLive: boolean
+  /** Batch 7: whether the host is currently marked SLEPT (HostEntry.sleepEpoch
+   * set — its live surface was reset in place to its journal). */
+  sleeping: boolean
 }
 
 /**
@@ -443,6 +453,67 @@ function formatDeltaAgenda(item: RoomState['agenda'][number]): string {
 /** YAML-ish flow list rendering for witness frontmatter arrays. */
 function yamlList(items: readonly string[]): string {
   return `[${items.map((item) => JSON.stringify(item)).join(', ')}]`
+}
+
+// ---------------------------------------------------------------------------
+// Batch 7 — HOST sleep helpers (PURE, exported, unit-tested).
+//
+// The owner decision "vaciar en sitio" (in-place surface reset, NOT a new
+// session, NOT an LLM summary): when the HOST (the Asistente) calls the
+// host-branch of dept_sleep, we replace the ENTIRE model-visible surface of its
+// live session down to ONE node — the agent's own journal — using the SAME
+// surface primitive dsh-compaction drives (explore-deep/2026-08-20-
+// compaction-reset.md §4): a `user/message` append with
+// `surfaceOp:{op:'replace', start:firstNode, end:lastNode}` +
+// `sourceEventSeqs: allNodes`. `Session.append` (dsh-session index.d.ts:1444)
+// validates + splices the current surface (`foldSurface`/`applySurfacePlan`,
+// surface.js) so after the append `deriveMessages()` returns exactly the
+// journal node. These two helpers compute the inputs purely so they are
+// directly testable; the live dept_sleep wiring is thin.
+// ---------------------------------------------------------------------------
+
+/** The surface-op arguments (a full-window replace, or a bare append when the
+ * surface is empty — a replace needs at least one existing node to shadow). */
+export interface HostSleepSurfacePlan {
+  surfaceOp: { op: 'replace'; start: number; end: number } | 'append'
+  /** Present for the replace branch: every currently-shadowed surface node. */
+  sourceEventSeqs?: number[]
+}
+
+/** Compute the surface-intent for an in-place reset from the CURRENT live
+ * surface nodes. Replicates the dsh-compaction shape exactly: `start`/`end`
+ * are the first/last current node seqs (inclusive) and `sourceEventSeqs` cites
+ * every shadowed node (assertProvenance requires complete coverage). An empty
+ * surface (no nodes) cannot be replaced — fall back to a plain append so the
+ * journal still lands as the sole node. */
+export function computeHostSleepSurfacePlan(nodes: readonly number[]): HostSleepSurfacePlan {
+  if (nodes.length === 0) {
+    return { surfaceOp: 'append' }
+  }
+  return {
+    surfaceOp: { op: 'replace', start: nodes[0], end: nodes[nodes.length - 1] },
+    sourceEventSeqs: [...nodes]
+  }
+}
+
+/**
+ * Build the single landing node for a host surface reset: the agent's journal
+ * as a `user/message` whose `source` is `kind:'plugin' / form:'notice'` (NOT
+ * `kind:'user'`) so it renders as a collapsed context/notice row in the GUI,
+ * not as if the owner said it (the KEY property: `deriveMessages()` folds the
+ * node's content verbatim on the next turn). The frame is bound via
+ * `boundContextSummary` per the dsh-llm notice contract.
+ */
+export function buildSleepJournalMessage(journalText: string) {
+  return createUserMessage({
+    content: [{ type: 'text', text: journalText }],
+    source: {
+      kind: 'plugin',
+      plugin: 'deepartments',
+      form: 'notice',
+      summary: boundContextSummary('Reopened after sleep — in-place surface reset to your journal (long-term memory).')
+    }
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -886,7 +957,15 @@ export function applyInvoke(ctx: Context, config: Config) {
   // Fire-and-forget persistence of the host registry (callers never await it).
   const persistHosts = (): void => {
     const data: Record<string, Omit<HostEntry, 'hostId'>> = {}
-    for (const entry of hosts.values()) data[entry.hostId] = { sessionId: entry.sessionId, roomId: entry.roomId }
+    for (const entry of hosts.values()) {
+      data[entry.hostId] = {
+        sessionId: entry.sessionId,
+        roomId: entry.roomId,
+        // Batch 7: persist the optional host sleep marker only when set (absent
+        // = never slept).
+        ...(entry.sleepEpoch !== void 0 ? { sleepEpoch: entry.sleepEpoch } : {})
+      }
+    }
     writeFile(hostsPath, JSON.stringify(data, null, 2), 'utf8').catch(
       (error: unknown) => { ctx.logger.warn(`[deepartments] hosts.json write failed: ${error instanceof Error ? error.message : String(error)}`) }
     )
@@ -919,6 +998,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     persistHosts()
     return hostId
   }
+
+  /** Deterministic durable member id for a HOST session (Batch 7): the same
+   * `host-<sessionId>` address used for the journal path and hosts.json. */
+  const hostIdForSession = (sessionId: string): string => `${HOST_ID_PREFIX}${sessionId}`
 
   // Fire-and-forget persistence of the post registry (callers never await it).
   const persistPosts = (): void => {
@@ -1048,7 +1131,15 @@ export function applyInvoke(ctx: Context, config: Config) {
         if (typeof entry.sessionId === 'string' && typeof entry.roomId === 'string' && hostId.startsWith(HOST_ID_PREFIX)) {
           const sessionId = hostId.slice(HOST_ID_PREFIX.length)
           if (sessionId === entry.sessionId) {
-            hosts.set(hostId, { hostId, ...entry })
+            // Batch 7: sanitize the optional sleep marker so a corrupt value
+            // never survives into the in-memory registry.
+            const sleepEpoch = typeof entry.sleepEpoch === 'number' ? entry.sleepEpoch : undefined
+            hosts.set(hostId, {
+              hostId,
+              sessionId: entry.sessionId,
+              roomId: entry.roomId,
+              ...(sleepEpoch !== void 0 ? { sleepEpoch } : {})
+            })
             hostForSession.set(entry.sessionId, hostId)
           }
         }
@@ -1604,7 +1695,8 @@ export function applyInvoke(ctx: Context, config: Config) {
                   hostId: { type: 'string', required: true },
                   sessionId: { type: 'string', required: true },
                   roomId: { type: 'string', required: true },
-                  sessionLive: { type: 'boolean', required: true }
+                  sessionLive: { type: 'boolean', required: true },
+                  sleeping: { type: 'boolean', required: true }
                 }
               }
             }
@@ -1614,7 +1706,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           const memberLine = value.members.length === 0 ? '  (none configured)' : value.members.map((member) => `  - ${member}`).join('\n')
           const postLines = value.posts.map((post) => `  - ${post.postId}${post.sessionLive ? ' (live)' : ' (offline)'}${post.sleeping ? ' (sleeping)' : ''}`)
           const postBlock = postLines.length === 0 ? '  (no registered heads)' : postLines.join('\n')
-          const hostLines = value.hosts.map((host) => `  - ${host.hostId} (session ${host.sessionId}, ${host.sessionLive ? 'live' : 'not live'})`)
+          const hostLines = value.hosts.map((host) => `  - ${host.hostId} (session ${host.sessionId}, ${host.sessionLive ? 'live' : 'not live'}${host.sleeping ? ', sleeping' : ''})`)
           const hostBlock = hostLines.length === 0 ? '  (no registered hosts)' : hostLines.join('\n')
           return [{
             type: 'text',
@@ -1642,7 +1734,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         for (const entry of hosts.values()) {
           if (entry.roomId !== args.room) continue
           const sessionLive = agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined
-          hostsInRoom.push({ hostId: entry.hostId, sessionId: entry.sessionId, roomId: entry.roomId, sessionLive })
+          hostsInRoom.push({ hostId: entry.hostId, sessionId: entry.sessionId, roomId: entry.roomId, sessionLive, sleeping: entry.sleepEpoch !== void 0 })
         }
         return { room: args.room, members, posts, hosts: hostsInRoom }
       }
@@ -2664,7 +2756,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         // Batch E liveness: report the host's REAL session liveness — a
         // cold-boot non-live host shows sessionLive:false, never "live".
         const sessionLive = agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined
-        hostsInRoom.push({ hostId: entry.hostId, sessionId: entry.sessionId, roomId: entry.roomId, sessionLive })
+        hostsInRoom.push({ hostId: entry.hostId, sessionId: entry.sessionId, roomId: entry.roomId, sessionLive, sleeping: entry.sleepEpoch !== void 0 })
       }
       return { room: args.room, members, posts, hosts: hostsInRoom }
     }
@@ -2828,7 +2920,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   const globalMemo = ctx.tools.register(defineTool({
     name: 'dept_memo_write',
-    description: 'Write this department head\'s long-term memory to its journal: a durable, schema-constrained markdown memo at <stateDir>/journals/<memberId>.md (author/timestamp/board_cursor frontmatter + decisions/constraints/openItems + a free-form summary). Use it BEFORE sleeping to hand your memory to your future (re-materialized) self. Returns the durable memo path.',
+    description: 'Write this department head\'s — or, from the host plane, the HOST Asistente\'s — long-term memory to its journal: a durable, schema-constrained markdown memo at <stateDir>/journals/<memberId>.md (author/timestamp/board_cursor frontmatter + decisions/constraints/openItems + a free-form summary). A registered head writes journals/<postId>.md; a HOST (no registered post) writes journals/host-<sessionId>.md. Use it BEFORE sleeping to hand your memory to your future (re-materialized) self. Returns the durable memo path.',
     parameters: {
       summary: { type: 'string', required: true, description: 'The memo body: a summary of your state, conclusions, and what your next incarnation must know.' },
       decisions: { type: 'array', items: { type: 'string' }, description: 'Decisions taken (optional).' },
@@ -2850,9 +2942,15 @@ export function applyInvoke(ctx: Context, config: Config) {
     async execute(args, exec): Promise<{ room: string; member: string; memoPath: string }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_memo_write requires a calling agent (exec.agent was undefined)')
-      const memberId = postIdForChild(agent.id as string) ?? 'unknown'
+      // Batch 7 host-aware member resolution: a registered HEAD writes under
+      // its postId (unchanged); a HOST (no post entry) writes under the durable
+      // `host-<sessionId>` member id instead of the old `'unknown'` fallback, so
+      // its journal lives at journals/host-<sessionId>.md for the host sleep
+      // branch to reload.
+      const memberId = postIdForChild(agent.id as string) ?? hostIdForSession(agent.id as string)
       const entry = byPost.get(memberId)
-      const roomId = entry?.roomId ?? 'unknown'
+      const hostEntry = hosts.get(memberId)
+      const roomId = entry?.roomId ?? hostEntry?.roomId ?? 'board'
       const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [])
       return { room: roomId, member: memberId, memoPath }
     }
@@ -2860,7 +2958,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   const globalSleep = ctx.tools.register(defineTool({
     name: 'dept_sleep',
-    description: 'Sleep (dormir): persist your memory to your journal (dept_memo_write MUST be called first — this is enforced) and mark yourself for a context RESET. Conclude the turn after calling this; on your NEXT wake you will be re-materialized as a fresh incarnation with your journal loaded as your long-term memory. Your previous session is retired from the active map (recorded as previousChildId) and never woken again. Rejects loudly if no journal has been saved.',
+    description: 'Sleep (dormir): persist your memory to your journal (dept_memo_write MUST be called first — this is enforced) and mark yourself for a context RESET. For a department HEAD this marks the post + disposes its AgentHandle (fresh resume on next wake). For the HOST Asistente it sets a durable host sleepEpoch and IN-PLACE resets its live session\'s model-visible context to exactly its journal (the "vaciar en sitio" owner decision — no new session, no LLM summary), then concludes the turn. Rejects loudly if no journal has been saved.',
     parameters: {},
     output: {
       schema: {
@@ -2879,7 +2977,61 @@ export function applyInvoke(ctx: Context, config: Config) {
       const agent = exec.agent
       if (!agent) throw new Error('dept_sleep requires a calling agent (exec.agent was undefined)')
       const memberId = postIdForChild(agent.id as string)
-      if (memberId === undefined) throw new Error('[deepartments] dept_sleep is for a department head (registered post), not the host')
+
+      // ---- Batch 7: HOST branch (the sleeping Asistente) ---------------------
+      // The caller has no registered post entry → it is a HOST. Owner decision
+      // 2026-08-20 ("vaciar en sitio"): persist its journal, set a durable host
+      // sleepEpoch, then IN-PLACE reset its live session's model-visible surface
+      // to exactly the journal (surfaceOp replace over the full window —
+      // explore-deep/2026-08-20-compaction-reset.md §4) and conclude the turn.
+      // The web api-proxy owns the host's AgentHandle, so we do NOT dispose it
+      // (unlike a head): the session stays live, only its surface is wiped to
+      // the journal. Heads never reach this branch (a head calls its own-layer
+      // dept_sleep, which dispose+resumes — unaffected).
+      if (memberId === undefined) {
+        const sessionId = agent.id as string
+        const hostId = hostIdForSession(sessionId)
+        const existing = hosts.get(hostId)
+        const journal = await readJournal(hostId)
+        if (journal === void 0 || journal.trim() === '') {
+          throw new Error(`[deepartments] dept_sleep requires a saved journal — call dept_memo_write to save your memory first (no journal for host ${hostId})`)
+        }
+        // Register/refresh the durable host identity, then persist the sleep
+        // marker ("the Asistente slept at T"). ensureHost is idempotent for an
+        // existing entry and refuses to change its roomId away from what it has.
+        ensureHost(sessionId, existing?.roomId ?? 'board')
+        const hostEntry = hosts.get(hostId) as HostEntry
+        hostEntry.sleepEpoch = Date.now()
+        persistHosts()
+        // In-place surface reset: replace the ENTIRE model-visible surface of the
+        // caller's OWN live session (exec.agent → agent.session) with ONE landing
+        // node — the journal — via the same primitive dsh-compaction uses
+        // (session.append 'user/message' with surfaceOp:{op:'replace', start:first,
+        // end:last} + sourceEventSeqs: allNodes). After the append,
+        // deriveMessages() returns exactly the journal node. Guarded so an
+        // agent-less / stub context (no real Session surface) degrades safely.
+        const session = agent.session
+        const surfaceNodes = session?.surface?.nodes as readonly number[] | undefined
+        if (session !== undefined && typeof session.append === 'function') {
+          const plan = computeHostSleepSurfacePlan(surfaceNodes ?? [])
+          const message = buildSleepJournalMessage(journal)
+          session.append('user/message', message, {
+            surfaceOp: plan.surfaceOp,
+            ...(plan.sourceEventSeqs !== undefined ? { sourceEventSeqs: plan.sourceEventSeqs } : {})
+          })
+        }
+        // Conclude the sleeping Asistente's turn (the loop stops after this
+        // successful tool result) — the host analog of a head ending its turn.
+        // Guarded: dsh-tools ToolRunContext exposes concludeTurn(); a bare
+        // { agent, signal } test exec does not.
+        if (typeof (exec as { concludeTurn?: unknown }).concludeTurn === 'function') {
+          (exec as { concludeTurn: () => void }).concludeTurn()
+        }
+        return { room: hostEntry.roomId, member: hostId, memoPath: journalPathFor(hostId), sleepEpoch: hostEntry.sleepEpoch }
+      }
+
+      // ---- head path (a registered post calling the host plane — preserved,
+      // effectively a no-op today since heads call their own-layer tool). ----
       const entry = byPost.get(memberId)
       if (entry === void 0) throw new Error(`[deepartments] dept_sleep: "${memberId}" is not a registered post`)
       const journal = await readJournal(memberId)

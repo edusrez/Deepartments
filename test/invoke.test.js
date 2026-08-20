@@ -23,11 +23,12 @@ import { test } from 'node:test'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { createScope } from '@deepseek-ai/dsh-scope'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadRecords, resolveBoardPath } from '../lib/board-store.js'
 import { emitRoomRecord, roomSessionId } from '../lib/org.js'
+import { buildSleepJournalMessage, computeHostSleepSurfacePlan } from '../lib/invoke.js'
 import {
   HEAD_PRESET_BASE_ID,
   headPresetIdFor,
@@ -1877,9 +1878,10 @@ test('Batch G dept_sleep requires a saved journal (throws otherwise / rejects a 
       // No journal yet → loud rejection.
       await assert.rejects(() => sleep.execute({}, { agent: head, signal }), /call dept_memo_write to save your memory first/, 'sleep without a journal rejects loudly')
 
-      // A host is not a sleepable head.
+      // A host with no saved journal is not sleepable either (Batch 7 host
+      // branch mirrors the head's require-a-journal rule).
       const host = agents.put(fakeParentAgent())
-      await assert.rejects(() => root.tools.get('dept_sleep').execute({}, { agent: host, signal }), /department head \(registered post\), not the host/, 'dept_sleep rejects a host caller')
+      await assert.rejects(() => root.tools.get('dept_sleep').execute({}, { agent: host, signal }), /requires a saved journal — call dept_memo_write to save your memory first \(no journal for host host-/, 'dept_sleep rejects a host with no saved journal')
 
       // Save the journal, then sleep.
       await memo.execute({ summary: 'Memory saved before sleeping.' }, { agent: head, signal })
@@ -2337,3 +2339,164 @@ test('materialization materializes per-head presets into the harness-home user r
     }
   })
 })
+
+// --- Batch 7: HOST sleep — "vaciar en sitio" (in-place surface reset) --------
+// The Asistente host gets a HOST branch of dept_memo_write (journals/host-
+// <sessionId>.md) and a HOST branch of dept_sleep: require a journal, persist a
+// durable host sleepEpoch, then IN-PLACE reset the live session's model-visible
+// surface to exactly the journal (surfaceOp replace over the full window) and
+// conclude the turn. Owner decision 2026-08-20: in-place, NOT a new session,
+// NOT an LLM summary.
+
+test('Batch 7 pure helper: computeHostSleepSurfacePlan computes the full-window replace (or a bare append on empty)', async () => {
+  // Empty surface → cannot replace; fall back to a plain append so the journal
+  // still lands as the sole node.
+  assert.deepEqual(computeHostSleepSurfacePlan([]), { surfaceOp: 'append' })
+  // Non-empty surface → a full-window inclusive replace covering every node,
+  // with sourceEventSeqs citing every shadowed node (assertProvenance requires
+  // complete coverage).
+  assert.deepEqual(computeHostSleepSurfacePlan([0, 1, 2, 3]), {
+    surfaceOp: { op: 'replace', start: 0, end: 3 },
+    sourceEventSeqs: [0, 1, 2, 3]
+  })
+  assert.deepEqual(computeHostSleepSurfacePlan([5]), {
+    surfaceOp: { op: 'replace', start: 5, end: 5 },
+    sourceEventSeqs: [5]
+  })
+})
+
+test('Batch 7 pure helper: buildSleepJournalMessage frames the journal as a plugin/notice context (never a user-typed message)', async () => {
+  const msg = buildSleepJournalMessage('MY-JOURNAL')
+  assert.equal(msg.role, 'user')
+  assert.equal(msg.content[0].type, 'text')
+  assert.equal(msg.content[0].text, 'MY-JOURNAL')
+  // NOT source.kind 'user' — a plugin context/notice so it renders as a
+  // collapsed row, not as if the owner said it.
+  assert.equal(msg.source.kind, 'plugin')
+  assert.equal(msg.source.plugin, 'deepartments')
+  assert.equal(msg.source.form, 'notice')
+  assert.ok(typeof msg.source.summary === 'string' && msg.source.summary.length > 0)
+})
+
+test('Batch 7 host dept_memo_write writes journals/host-<sessionId>.md (no more unknown.md)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      const host = agents.put(fakeParentAgent())
+      const memo = root.tools.get('dept_memo_write')
+      assert.ok(memo, 'dept_memo_write registered globally (host plane)')
+      const result = await memo.execute(
+        { summary: 'Host memory to hand to my future self.', decisions: ['in place'], constraints: ['no new session'] },
+        { agent: host, signal: new AbortController().signal }
+      )
+      const hostId = `host-${host.id}`
+      assert.equal(result.member, hostId)
+      assert.equal(result.memoPath, path.join(stateDir, 'journals', `${hostId}.md`))
+      // Durable: the host journal file exists with frontmatter + body.
+      const content = await readFile(result.memoPath, 'utf8')
+      assert.match(content, /host memory to hand to my future self\./i)
+      assert.match(content, /author: host-/)
+      assert.match(content, /decisions: \["in place"\]/)
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal sets sleepEpoch durably + resets the live surface to exactly the journal (deriveMessages = ONE node) + concludes the turn', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      const host = agents.put(fakeParentAgent())
+      const sleepTool = root.tools.get('dept_sleep')
+      const signal = new AbortController().signal
+      const hostId = `host-${host.id}`
+
+      // No journal yet → loud rejection (mirror the head's require-a-journal rule).
+      await assert.rejects(
+        () => sleepTool.execute({}, { agent: host, signal }),
+        /requires a saved journal — call dept_memo_write to save your memory first \(no journal for host host-/,
+        'host sleep without a journal rejects loudly'
+      )
+
+      // Pre-author the host journal (as dept_memo_write would have written it).
+      const journalSummary = 'HOST-SLEEP-MEMORY: in-place surface reset carried forward.'
+      await seedJournal(stateDir, hostId, journalSummary)
+
+      // Give the host's live session a REAL dsh Session with an existing full
+      // surface (2 prior user messages) so we can assert the replace truly
+      // collapses the whole window to the single journal node.
+      const realSession = Session.create(SessionId(String(host.id)))
+      realSession.append('user/message', { role: 'user', content: [{ type: 'text', text: 'prior turn 1' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
+      realSession.append('user/message', { role: 'user', content: [{ type: 'text', text: 'prior turn 2' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
+      assert.ok(realSession.surface.nodes.length === 2, 'surface seeded with 2 nodes before the reset')
+      host.session = realSession
+
+      let concluded = false
+      const result = await sleepTool.execute({}, {
+        agent: host,
+        signal,
+        concludeTurn: () => { concluded = true }
+      })
+
+      // Return contract: host member, its journal path, a durable sleepEpoch.
+      assert.equal(result.member, hostId)
+      assert.equal(result.memoPath, path.join(stateDir, 'journals', `${hostId}.md`))
+      assert.ok(typeof result.sleepEpoch === 'number' && result.sleepEpoch > 0)
+
+      // Durable: hosts.json carries the host's sleepEpoch.
+      await waitFor(async () => (await readHosts(stateDir))[hostId].sleepEpoch !== undefined, 5000, 'host sleepEpoch persisted to hosts.json')
+      const hostsFile = await readHosts(stateDir)
+      assert.ok(typeof hostsFile[hostId].sleepEpoch === 'number', 'host sleepEpoch persisted durably')
+
+      // In-place surface reset: the live session's model-visible surface is now
+      // EXACTLY ONE node — the journal.
+      const nodes = realSession.surface.nodes
+      assert.equal(nodes.length, 1, 'surface collapsed to exactly one node after the in-place reset')
+      const derived = realSession.deriveMessages()
+      assert.equal(derived.length, 1, 'deriveMessages() returns exactly one node')
+      assert.equal(derived[0].role, 'user')
+      assert.ok(derived[0].content[0].text.includes(journalSummary), 'the single surface node is the journal')
+      assert.match(derived[0].content[0].text, /^author: /m, 'the landing node carries the journal frontmatter')
+      assert.equal(derived[0].source.kind, 'plugin', 'landing node rendered as plugin context (not a user-typed message)')
+      assert.equal(derived[0].source.form, 'notice')
+
+      // The sleeping Asistente's turn concluded after the successful result.
+      assert.equal(concluded, true, 'dept_sleep concluded the host turn')
+
+      // The roster surfaces the sleeping host in its (default) board room.
+      const who = await root.tools.get('dept_room_who').execute({ room: 'board' })
+      const sleepingHost = who.hosts.find((h) => h.hostId === hostId)
+      assert.ok(sleepingHost, 'the sleeping host is in the board roster')
+      assert.equal(sleepingHost.sleeping, true, 'dept_room_who surfaces the sleeping host')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch 7 head regression: a head still sleeps through its own-layer dept_sleep (journal + sleepEpoch + dispose; no surface reset)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
+    try {
+      const head = agents.store.get(`head-${postId}`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      const signal = new AbortController().signal
+      await memo.execute({ summary: 'Head memory before sleep (regression).' }, { agent: head, signal })
+      const result = await sleep.execute({}, { agent: head, signal })
+      assert.equal(result.member, postId)
+      assert.equal(result.memoPath, path.join(stateDir, 'journals', `${postId}.md`))
+      assert.ok(typeof result.sleepEpoch === 'number' && result.sleepEpoch > 0)
+      // The head path DISPOSES the handle (fresh resume on next wake) — it does
+      // NOT run the host in-place surface reset.
+      await waitFor(() => agents.store.has(`head-${postId}`) === false, 5000, 'head handle disposed after sleep')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
