@@ -28,7 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadRecords, resolveBoardPath } from '../lib/board-store.js'
 import { emitRoomRecord, roomSessionId } from '../lib/org.js'
-import { buildSleepJournalMessage, computeHostSleepSurfacePlan } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan } from '../lib/invoke.js'
 import {
   HEAD_PRESET_BASE_ID,
   headPresetIdFor,
@@ -2423,7 +2423,8 @@ test('Batch W2 dept_memo_write: identity+cursor block — HOST wake_counter stay
       assert.match(firstContent, /^wake_counter: 1$/m, 'first wake_counter is 1')
       assert.match(firstContent, /^last_wake: none$/m, 'first last_wake is none')
       assert.match(firstContent, /Summary A: first wake\./, 'summary A body present')
-      assert.ok(/^Wake routine: dept_whereami/m.test(firstContent), 'wake-routine footer present')
+      assert.ok(/^Wake routine: .+Deepartments context injection/m.test(firstContent), 'wake-routine footer present (Batch W4 canonical routine)')
+      assert.ok(firstContent.includes(HOST_WAKE_ROUTINE_TEXT), 'footer carries the canonical wake routine verbatim')
       assert.ok(!/^current_step:/m.test(firstContent), 'no current_step when not passed')
 
       // Second write WITHIN THE SAME awake session (no dept_sleep in between):
@@ -2449,7 +2450,7 @@ test('Batch W2 dept_memo_write: identity+cursor block — HOST wake_counter stay
   })
 })
 
-test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes the sleep-time wake_counter bump into the on-disk file, sets sleepEpoch durably, resets the live surface to exactly the BUMPED journal (deriveMessages = ONE node) + concludes the turn', async () => {
+test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes the sleep-time wake_counter bump into the on-disk file, sets sleepEpoch durably, resets the live surface to exactly the BUMPED journal + the Deepartments wake pack (deriveMessages = TWO nodes: journal + pack) + concludes the turn', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
@@ -2509,20 +2510,42 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes t
       assert.match(postSleepContent, /^board_cursor: none$/m, 'board_cursor untouched by the bump')
       assert.ok(postSleepContent.includes(journalSummary), 'summary body untouched by the bump')
 
-      // In-place surface reset: the live session's model-visible surface is now
-      // EXACTLY ONE node — the BUMPED journal.
+      // In-place surface reset (Batch W4): the live session's model-visible
+      // surface is now EXACTLY TWO nodes — the journal AND the wake context
+      // pack. The journal node stays byte-identical to what
+      // buildSleepJournalMessage(seeded) produces; the pack node rides after it.
       const nodes = realSession.surface.nodes
-      assert.equal(nodes.length, 1, 'surface collapsed to exactly one node after the in-place reset')
+      assert.equal(nodes.length, 2, 'surface collapsed to exactly two nodes after the in-place reset (journal + wake pack)')
       const derived = realSession.deriveMessages()
-      assert.equal(derived.length, 1, 'deriveMessages() returns exactly one node')
+      assert.equal(derived.length, 2, 'deriveMessages() returns exactly two nodes')
       assert.equal(derived[0].role, 'user')
-      assert.ok(derived[0].content[0].text.includes(journalSummary), 'the single surface node is the journal')
-      assert.match(derived[0].content[0].text, /^author: /m, 'the landing node carries the journal frontmatter')
+      assert.ok(derived[0].content[0].text.includes(journalSummary), 'the first surface node is the journal')
+      assert.match(derived[0].content[0].text, /^author: /m, 'the journal node carries the journal frontmatter')
       // (b) The live surface reset carries the BUMPED content (wake_counter 2),
       // not the stale pre-bump file verbatim.
-      assert.match(derived[0].content[0].text, /^wake_counter: 2$/m, 'landing node shows the BUMPED wake_counter 2')
-      assert.equal(derived[0].source.kind, 'plugin', 'landing node rendered as plugin context (not a user-typed message)')
+      assert.match(derived[0].content[0].text, /^wake_counter: 2$/m, 'journal node shows the BUMPED wake_counter 2')
+      assert.equal(derived[0].source.kind, 'plugin', 'journal node rendered as plugin context (not a user-typed message)')
       assert.equal(derived[0].source.form, 'notice')
+      // The journal node must match buildSleepJournalMessage(seeded) byte-for-byte
+      // in content (createUserMessage assigns a random per-call `id`, so compare
+      // the model-visible content + source rather than the whole object).
+      const rebuiltJournal = buildSleepJournalMessage(postSleepContent)
+      assert.equal(derived[0].content[0].text, rebuiltJournal.content[0].text, 'journal node content byte-identical to buildSleepJournalMessage(seeded)')
+      assert.deepEqual(derived[0].source, rebuiltJournal.source, 'journal node source identical to buildSleepJournalMessage(seeded)')
+      // The wake context pack node rides after it: plugin/notice framing, the
+      // `## Deepartments wake pack` header, journal-path pointer, roster, and
+      // the full skill body — the injected surface the woken host must NOT re-fetch.
+      assert.equal(derived[1].source.kind, 'plugin', 'wake pack node rendered as plugin context')
+      assert.equal(derived[1].source.form, 'notice')
+      const packText = derived[1].content[0].text
+      assert.match(packText, /^## Deepartments wake pack$/m, 'the wake pack header opens the pack node')
+      assert.match(packText, /## Journal \(long-term memory\)/, 'the wake pack carries the journal section')
+      assert.match(packText, /Pre-resolved journal path.*host-/, 'the wake pack pre-resolves the journal path')
+      assert.match(packText, /The journal body is the adjacent injected node\./, 'the wake pack points at the adjacent injected node')
+      assert.match(packText, /## Condensed roster/, 'the wake pack carries the condensed roster')
+      assert.match(packText, /Liveness \(sessionLive\): not baked in/, 'the wake pack roster never embeds live session liveness')
+      assert.match(packText, /## deepartments-workflow skill \(full body\)/, 'the wake pack embeds the full skill body')
+      assert.ok(packText.includes(HOST_WAKE_ROUTINE_TEXT), 'the wake pack guidance carries the canonical wake routine verbatim')
 
       // The sleeping Asistente's turn concluded after the successful result.
       assert.equal(concluded, true, 'dept_sleep concluded the host turn')
@@ -2532,6 +2555,134 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes t
       const sleepingHost = who.hosts.find((h) => h.hostId === hostId)
       assert.ok(sleepingHost, 'the sleeping host is in the board roster')
       assert.equal(sleepingHost.sleeping, true, 'dept_room_who surfaces the sleeping host')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch W4 pure: buildWakePack composes all 9 sections in order (identity, journal path, delta TOC, roster, git, system, ROADMAP tail, skill body, guidance)', async () => {
+  const pack = buildWakePack({
+    memberId: 'host-session-abc',
+    role: 'host',
+    room: 'board',
+    journalPath: '/state/journals/host-session-abc.md',
+    boardDelta: 'Cursor: seq 3\n- m-4 | sender-1 → host-session-abc | preview text',
+    roster: 'Static members: owner\n- research-head (deepartments-head)',
+    git: 'status: clean working tree\nlast 2 commits:\n  abc123 feat(x)\n  def456 fix(y)',
+    systemState: '- DSH dev home: /opt/dsh/.dsh-dev',
+    roadmapTail: '- **2026-08-20** — W3 committed.',
+    skillBody: '# deepartments-workflow\nwake routine body',
+    includeGuidance: true
+  })
+
+  // Every section header present, in order 1-9.
+  const headers = [
+    '## Deepartments wake pack',
+    '## Journal (long-term memory)',
+    '## Board delta since cursor',
+    '## Condensed roster',
+    '## Git bearings',
+    '## System state',
+    '## ROADMAP current status (tail)',
+    '## deepartments-workflow skill (full body)',
+    '## Guidance (wake routine)'
+  ]
+  let lastIdx = -1
+  for (const header of headers) {
+    const idx = pack.indexOf(header)
+    assert.ok(idx !== -1, `section header present: ${header}`)
+    assert.ok(idx > lastIdx, `section header in order: ${header}`)
+    lastIdx = idx
+  }
+
+  assert.match(pack, /Pre-resolved journal path: `\/state\/journals\/host-session-abc\.md`/, 'journal path is pre-resolved')
+  assert.match(pack, /- m-4 \| sender-1 → host-session-abc \| preview text/, 'board delta TOC included')
+  assert.match(pack, /wake routine body/, 'full skill body embedded')
+  // The roster body is caller-provided verbatim (the non-pure buildCondensedRoster
+  // adds the "Liveness (sessionLive): not baked in" line — asserted in the
+  // snapshot and host-sleep behaviour tests).
+  assert.ok(pack.includes(HOST_WAKE_ROUTINE_TEXT), 'guidance carries the canonical wake routine verbatim')
+  assert.ok(pack.includes('next step: pick the highest-priority unfinished open item'), 'guidance carries the next-step line')
+})
+
+test('Batch W4 pure: buildWakePack renders an EMPTY board-delta section when there are no new messages, and a lean snapshot (sections 1/3/4 only) when only identity+delta+roster are provided', async () => {
+  const pack = buildWakePack({
+    memberId: 'host-session-abc',
+    role: 'host',
+    room: 'board',
+    boardDelta: '',
+    roster: 'Static members: owner',
+    includeGuidance: false
+  })
+
+  // Sections 1, 3, 4 present.
+  assert.match(pack, /## Deepartments wake pack/, 'identity header present')
+  assert.match(pack, /## Board delta since cursor/, 'board delta section present')
+  assert.match(pack, /## Condensed roster/, 'roster section present')
+
+  // Empty delta → the section body after the header is empty (no cursor line,
+  // no TOC lines) before the next section.
+  const deltaBody = pack.split('## Board delta since cursor')[1].split('## Condensed roster')[0]
+  assert.ok(!deltaBody.includes('Cursor:'), 'no cursor line for an empty delta')
+  assert.ok(!deltaBody.includes('|'), 'no TOC lines for an empty delta')
+  assert.match(deltaBody, /^\s*$/, 'delta section body is empty when no new messages')
+
+  // Lean snapshot shape: sections 2,5,6,7,8,9 absent.
+  assert.ok(!pack.includes('## Journal (long-term memory)'), 'no journal section for a lean snapshot')
+  assert.ok(!pack.includes('## Git bearings'), 'no git section for a lean snapshot')
+  assert.ok(!pack.includes('## System state'), 'no system-state section for a lean snapshot')
+  assert.ok(!pack.includes('## Guidance (wake routine)'), 'no guidance section for a lean snapshot')
+})
+
+test('Batch W4 pure: buildWakePack degrades gracefully — undefined optional inputs are skipped (never throws) and (unavailable) markers pass through untouched', async () => {
+  // Undefined git/skill/system/roadmap → those sections are omitted, no crash.
+  const lean = buildWakePack({ memberId: 'h', role: 'host', room: 'board', boardDelta: 'Cursor: seq 0', roster: 'x' })
+  assert.ok(!lean.includes('## Git bearings'), 'undefined git omitted gracefully')
+  assert.ok(!lean.includes('## deepartments-workflow skill'), 'undefined skill omitted gracefully')
+  assert.ok(!lean.includes('## System state'), 'undefined system state omitted gracefully')
+
+  // Markers produced by the NON-pure assembly layer pass through untouched.
+  const degraded = buildWakePack({
+    memberId: 'h', role: 'host', room: 'board', boardDelta: '', roster: 'x',
+    git: '(git unavailable)', skillBody: '(skill unavailable)', systemState: '(-)', roadmapTail: '(-)',
+    includeGuidance: true
+  })
+  assert.match(degraded, /\(git unavailable\)/, 'git unavailable marker passes through')
+  assert.match(degraded, /\(skill unavailable\)/, 'skill unavailable marker passes through')
+})
+
+test('Batch W4 pure: buildWakePackMessage frames the wake pack as a plugin/notice context (never a user-typed message)', async () => {
+  const msg = buildWakePackMessage('## Deepartments wake pack\ncontent')
+  assert.equal(msg.source.kind, 'plugin')
+  assert.equal(msg.source.form, 'notice')
+  assert.equal(msg.content[0].text, '## Deepartments wake pack\ncontent')
+})
+
+test('Batch W4 dept_wake_snapshot: registers globally (host plane), and ONE call returns the identity+delta+roster shape with NO live sessionLive liveness', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const tool = root.tools.get('dept_wake_snapshot')
+      assert.ok(tool, 'dept_wake_snapshot registered globally (host plane)')
+
+      const host = agents.put(fakeParentAgent())
+      const result = await tool.execute({}, { agent: host, signal: new AbortController().signal })
+
+      assert.ok(typeof result.snapshot === 'string' && result.snapshot.length > 0, 'snapshot returns a non-empty text string')
+      assert.match(result.snapshot, /^## Deepartments wake pack$/m, 'snapshot opens with the wake pack header')
+      assert.match(result.snapshot, new RegExp(`identity: host-${host.id}`), 'snapshot carries identity + host address')
+      assert.match(result.snapshot, /## Board delta since cursor/, 'snapshot carries the board delta section')
+      assert.match(result.snapshot, /Cursor: seq/, 'snapshot carries the board cursor')
+      assert.match(result.snapshot, /## Condensed roster/, 'snapshot carries the condensed roster section')
+      assert.match(result.snapshot, /Liveness \(sessionLive\): not baked in/, 'snapshot roster never embeds live session liveness')
+
+      // Lean on-demand snapshot: no journal/git/skill/guidance sections.
+      assert.ok(!result.snapshot.includes('## Journal (long-term memory)'), 'lean snapshot has no journal section')
+      assert.ok(!result.snapshot.includes('## Git bearings'), 'lean snapshot has no git section')
+      assert.ok(!result.snapshot.includes('## deepartments-workflow skill'), 'lean snapshot has no skill section')
+      assert.ok(!result.snapshot.includes('## Guidance (wake routine)'), 'lean snapshot has no guidance section')
     } finally {
       await dispose()
     }

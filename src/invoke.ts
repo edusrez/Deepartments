@@ -116,6 +116,8 @@ import { mkdir, readFile, writeFile, readdir, copyFile, stat, rename, unlink } f
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
+import { execFile as execFileCb } from 'node:child_process'
+import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
@@ -432,7 +434,7 @@ type WhereAmI =
  * shortened: the message id on the line lets the model fetch the FULL text
  * by id (dept_room_read with messageId).
  */
-function formatTocMessage(message: RoomState['messages'][number]): string {
+function formatTocMessage(message: Pick<RoomState['messages'][number], 'id' | 'seq' | 'from' | 'to' | 'text' | 'sensitive' | 'senderVerified'>): string {
   const preview = message.text.length > 140 ? `${message.text.slice(0, 140)}…` : message.text
   // Batch E sender-trust: surface the sensitive flag + registry-verified
   // sender in the rendered delta so a recipient can decide how to act. This is
@@ -514,6 +516,144 @@ export function buildSleepJournalMessage(journalText: string) {
       summary: boundContextSummary('Reopened after sleep — in-place surface reset to your journal (long-term memory).')
     }
   })
+}
+
+/**
+ * Build the SECOND wake node: the Deepartments context pack, framed exactly like
+ * the journal node (`kind:'plugin' / form:'notice'` → collapsed notice row, NOT
+ * a user-typed message, so `deriveMessages()` folds its content verbatim on the
+ * next turn). Kept separate from `buildSleepJournalMessage` so the journal node
+ * stays byte-identical; the pack gets its own notice summary.
+ */
+export function buildWakePackMessage(packText: string) {
+  return createUserMessage({
+    content: [{ type: 'text', text: packText }],
+    source: {
+      kind: 'plugin',
+      plugin: 'deepartments',
+      form: 'notice',
+      summary: boundContextSummary('Deepartments wake context pack — injected orientation (identity, journal path, board delta, roster, git, system state, full deepartments-workflow skill).')
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Batch W4 — WAKE CONTEXT PACK (owner doctrine: inject, don't let the model
+// re-derive). The freshly-woken host MUST receive ALL orientation info + the
+// full workflow skill body sealed into its initial surface, the same way DSH
+// injects skill-catalog and dsh-system-prompt — NOT pushed to on-demand/lazy.
+// The pack is assembled by a NON-pure closure in applyInvoke (live git/board/
+// ROADMAP/skill reads) but rendered by this PURE, exported `buildWakePack`
+// helper so it is directly unit-testable. `dept_wake_snapshot` reuses the SAME
+// pure builder for on-demand freshness mid-session (P1 fusion).
+//
+// Deep rule (stale-liveness): the pack NEVER statically embeds true live
+// session liveness (`sessionLive`) — a stale false claim is worse than one
+// on-demand `dept_room_who`. Roster carries only durable registry flags
+// (sleeping), listing flags that are live-registry reads never baked in.
+// ---------------------------------------------------------------------------
+
+/** Canonical host wake routine (verbatim — used BOTH as the journal footer AND
+ * as wake-pack section 9 guidance; must stay byte-identical in both places). */
+export const HOST_WAKE_ROUTINE_TEXT =
+  'Start-of-session: your Deepartments context injection already carries identity, the pre-resolved journal path + journal body, the board delta TOC, the condensed roster, git bearings, system state, and the full deepartments-workflow skill. Read it — do not re-fetch what the pack provides. Only call board tools for LIVE needs the pack cannot cache: true session liveness (dept_room_who), full text of a message you must answer (dept_room_read messageId), writes, or dept_sleep. Then pick the highest-priority unfinished open item and present a concise plan. Full sequence: skill deepartments-workflow ("Wake routine").'
+
+/** The closing guidance line that follows the canonical routine in the pack. */
+export const HOST_WAKE_NEXT_STEP =
+  'next step: pick the highest-priority unfinished open item from the journal and present a concise plan.'
+
+/**
+ * The pre-rendered parts `buildWakePack` composes. Every field except
+ * memberId/role/room/boardDelta/roster is OPTIONAL: the wake injection supplies
+ * all of them (sections 1-9), while the on-demand `dept_wake_snapshot` supplies
+ * only identity+boardDelta+roster (sections 1, 3, 4). A section is rendered
+ * exactly when its content is present — so the SAME pure builder produces both
+ * the full wake pack and the lean live snapshot.
+ */
+export interface WakePackParts {
+  memberId: string
+  role: string
+  room: string
+  /** Pre-resolved durable journal path (wake injection only; section 2). */
+  journalPath?: string
+  /** Cursor + board-delta TOC body. '' → empty section (no new messages). */
+  boardDelta: string
+  /** Condensed roster (registry flags only — NEVER live session liveness). */
+  roster: string
+  /** Git bearings (section 5; wake injection only). */
+  git?: string
+  /** System state (section 6; wake injection only). */
+  systemState?: string
+  /** ROADMAP "Current status" tail (section 7; wake injection only). */
+  roadmapTail?: string
+  /** Full deepartments-workflow skill body (section 8; wake injection only). */
+  skillBody?: string
+  /** Include the closing guidance (section 9)? Defaults true (wake injection). */
+  includeGuidance?: boolean
+}
+
+/** Compose the Deepartments context pack as a string, sections 1-9 in order.
+ * PURE: no I/O, no registry/live reads — every section body is provided by the
+ * caller. Enforces the deep rule by construction: there is simply no channel to
+ * inject live `sessionLive` liveness here. */
+export function buildWakePack(parts: WakePackParts): string {
+  const sections: string[] = []
+
+  // 1 — header + identity
+  sections.push([
+    '## Deepartments wake pack',
+    `- identity: ${parts.memberId} (role: ${parts.role}, room: ${parts.room})`
+  ].join('\n'))
+
+  // 2 — journal pointer (wake injection only)
+  if (parts.journalPath !== undefined && parts.journalPath.trim() !== '') {
+    sections.push([
+      '## Journal (long-term memory)',
+      `Pre-resolved journal path: \`${parts.journalPath}\``,
+      'The journal body is the adjacent injected node.'
+    ].join('\n'))
+  }
+
+  // 3 — board delta TOC since cursor (always rendered; body may be empty)
+  sections.push(
+    parts.boardDelta.trim() === ''
+      ? '## Board delta since cursor'
+      : `## Board delta since cursor\n${parts.boardDelta}`
+  )
+
+  // 4 — condensed roster (always rendered)
+  sections.push(`## Condensed roster\n${parts.roster}`)
+
+  // 5 — git bearings
+  if (parts.git !== undefined && parts.git.trim() !== '') {
+    sections.push(`## Git bearings\n${parts.git}`)
+  }
+
+  // 6 — system state
+  if (parts.systemState !== undefined && parts.systemState.trim() !== '') {
+    sections.push(`## System state\n${parts.systemState}`)
+  }
+
+  // 7 — ROADMAP "Current status" tail
+  if (parts.roadmapTail !== undefined && parts.roadmapTail.trim() !== '') {
+    sections.push(`## ROADMAP current status (tail)\n${parts.roadmapTail}`)
+  }
+
+  // 8 — full skill body
+  if (parts.skillBody !== undefined && parts.skillBody.trim() !== '') {
+    sections.push(`## deepartments-workflow skill (full body)\n${parts.skillBody}`)
+  }
+
+  // 9 — guidance (canonical routine + next step; wake injection only)
+  if (parts.includeGuidance !== false) {
+    sections.push([
+      '## Guidance (wake routine)',
+      HOST_WAKE_ROUTINE_TEXT,
+      HOST_WAKE_NEXT_STEP
+    ].join('\n'))
+  }
+
+  return sections.join('\n\n')
 }
 
 // ---------------------------------------------------------------------------
@@ -1486,7 +1626,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       '',
       summary,
       '',
-      `Wake routine: dept_whereami → re-read this journal → dept_room_read("${roomId}") delta → health check → decide. Full sequence in skill deepartments-workflow ("Wake routine").`
+      `Wake routine: ${HOST_WAKE_ROUTINE_TEXT}`
     ].join('\n')
     const memoPath = journalPathFor(memberId)
     await mkdir(path.dirname(memoPath), { recursive: true })
@@ -1551,6 +1691,188 @@ export function applyInvoke(ctx: Context, config: Config) {
       if (department.coordinator?.postId === postId) return department.coordinator
     }
     return undefined
+  }
+
+  // --- Batch W4: NON-pure wake-pack assembly (live reads; buildWakePack is pure).
+  // These gather the fresh-ish inputs (git bearings, ROADMAP tail, skill body,
+  // board delta, condensed roster, system state) and hand them to the pure
+  // buildWakePack builder. Every read degrades gracefully — a pack section that
+  // cannot be computed emits its "(… unavailable)" marker and the wake proceeds;
+  // these helpers NEVER throw to the caller.
+  const execFileP = promisify(execFileCb)
+
+  /** git status (short) + last 8 `git log --oneline` lines for the repo,
+   * computed at assembly time in the repo dir. Unreachable git/repo → static
+   * `(git unavailable)` (degrade gracefully, never throw). */
+  const readWakeGitBearings = async (): Promise<string> => {
+    try {
+      const status = await execFileP('git', ['status', '--short'], { cwd: repoRoot })
+      const log = await execFileP('git', ['log', '--oneline', '-8'], { cwd: repoRoot })
+      const statusLines = status.stdout.split('\n').map((l) => l.trim()).filter((l) => l !== '')
+      const logLines = log.stdout.split('\n').map((l) => l.trim()).filter((l) => l !== '')
+      const body: string[] = []
+      body.push(`status: ${statusLines.length === 0 ? 'clean working tree' : statusLines.join('; ')}`)
+      body.push(`last ${logLines.length} commits:`)
+      body.push(...logLines.map((l) => `  ${l}`))
+      return body.join('\n')
+    } catch {
+      return '(git unavailable)'
+    }
+  }
+
+  /** The 2-3 NEWEST bullets from the ROADMAP "Current status" section (the
+   * newest entries sit at its tail). Missing/unreadable ROADMAP → graceful
+   * marker. */
+  const readWakeRoadmapTail = async (count = 3): Promise<string> => {
+    try {
+      const text = await readFile(path.join(repoRoot, 'docs', 'ROADMAP.md'), 'utf8')
+      const lines = text.split('\n')
+      const start = lines.findIndex((l) => l.startsWith('## Current status'))
+      if (start === -1) return '(ROADMAP "Current status" section not found)'
+      const entries: string[][] = []
+      let current: string[] | undefined
+      for (let i = start + 1; i < lines.length; i++) {
+        const line = lines[i]
+        if (line.startsWith('## ')) break
+        if (/^\s*- /.test(line)) {
+          current = [line]
+          entries.push(current)
+        } else if (current !== undefined && line.trim() !== '') {
+          current.push(line)
+        }
+      }
+      const newest = entries.slice(-count)
+      if (newest.length === 0) return '(ROADMAP "Current status" has no bullets)'
+      const folded = newest
+        .map((entry) => `- ${entry.join(' ').replace(/\s+/g, ' ').trim().replace(/^-\s*/, '')}`)
+        .join('\n')
+      return folded
+    } catch {
+      return '(ROADMAP unavailable)'
+    }
+  }
+
+  /** Full body of the `deepartments-workflow` skill, resolved via the PRESET
+   * path (a symlink into the repo) with the repo-tracked copy as fallback.
+   * Missing/unreadable → graceful `(skill unavailable)`. */
+  const readWakeSkillBody = async (): Promise<string> => {
+    const candidates = [
+      '/opt/dsh/.dsh-dev/.agent-presets/deepartments/skills/deepartments-workflow/SKILL.md',
+      path.join(repoRoot, '.dsh', 'skills', 'deepartments-workflow', 'SKILL.md')
+    ]
+    for (const candidate of candidates) {
+      try {
+        const body = await readFile(candidate, 'utf8')
+        if (body.trim() !== '') return body
+      } catch {
+        /* try next */
+      }
+    }
+    return '(skill unavailable)'
+  }
+
+  /** Condensed static system-state block (homes, ports, profiles, plugins,
+   * live stateDir, repo root). Fully static at seed time. */
+  const buildWakeSystemState = (): string => [
+    '- DSH dev home: /opt/dsh/.dsh-dev (GUI profile "deepartments-dev", port 3090 / Tailscale 8445; headless twin "deepartments-dev-headless" for CLI smoke)',
+    '- DSH stable home: /opt/dsh/.dsh (port 3080 / Tailscale 8444)',
+    '- Plugins: dshmarket, dsh-smooth-stream, dsh-smart-restart',
+    `- Live stateDir: ${config.stateDir}`,
+    `- Repo root: ${repoRoot}`
+  ].join('\n')
+
+  /** Condensed roster of ONE room: static members + registered posts/hosts with
+   * their durable REGISTRY sleeping flags. NEVER embeds live `sessionLive`
+   * liveness (deep rule — a stale liveness claim is worse than one on-demand
+   * `dept_room_who`); a pointer line keeps the on-demand escape hatch explicit. */
+  const buildCondensedRoster = (roomId: string): string => {
+    const lines: string[] = []
+    const room = config.org.rooms.find((candidate) => candidate.id === roomId)
+    const members = room === void 0 ? [] : [...room.members]
+    if (members.length > 0) lines.push(`Static members: ${members.join(', ')}`)
+    for (const entry of byPost.values()) {
+      if (entry.roomId !== roomId) continue
+      lines.push(`- ${entry.postId}${entry.sleepEpoch !== void 0 ? ' (sleeping)' : ''} (${entry.agentPreset})`)
+    }
+    for (const entry of hosts.values()) {
+      if (entry.roomId !== roomId) continue
+      lines.push(`- ${entry.hostId}${entry.sleepEpoch !== void 0 ? ' (sleeping)' : ''}`)
+    }
+    if (lines.length === 0) lines.push('(no registered members/posts/hosts)')
+    lines.push('Liveness (sessionLive): not baked in — call dept_room_who on demand.')
+    return lines.join('\n')
+  }
+
+  /** Board delta TOC since the member's cursor (read-only — never advances the
+   * cursor): the cursor high-water line + the message TOC lines (id + sender →
+   * recipients + preview) for messages after the cursor addressed to the member
+   * or sent by it, mirroring dept_room_read's addressed-only semantics. Missing/
+   * unreadable board file → cursor-only line (never throw). */
+  const readWakeBoardDelta = async (memberId: string, roomId: string): Promise<string> => {
+    let records: BoardRecord[]
+    try {
+      records = await loadRecords(resolveBoardPath(config.stateDir, roomId))
+    } catch {
+      records = []
+    }
+    const cursor = memberCursors.get(memberId) ?? { lastMessageId: undefined, lastMessageSeq: -1, lastAgendaSeq: -1 }
+    const cursorLine = `Cursor: seq ${cursor.lastMessageSeq}${cursor.lastMessageId !== undefined ? ` / last id ${cursor.lastMessageId}` : ''}`
+    const lines: string[] = [cursorLine]
+    for (const record of records) {
+      if (record.kind !== 'message') continue
+      if (record.seq <= cursor.lastMessageSeq) continue
+      if (!(record.to.includes(memberId) || record.from === memberId)) continue
+      lines.push(formatTocMessage({
+        id: record.id,
+        seq: record.seq,
+        from: record.from,
+        to: record.to,
+        text: record.payload.text,
+        sensitive: record.payload.sensitive,
+        senderVerified: record.payload.senderVerified
+      }))
+    }
+    return lines.join('\n')
+  }
+
+  /** Assemble the FULL wake context pack (sections 1-9) for the host wake
+   * injection: identity + pre-resolved journal path + live board delta + roster
+   * + git + system state + ROADMAP tail + full skill body + guidance. */
+  const assembleWakePack = async (memberId: string, roomId: string, journalPath: string): Promise<string> => {
+    const [boardDelta, git, roadmapTail, skillBody] = await Promise.all([
+      readWakeBoardDelta(memberId, roomId),
+      readWakeGitBearings(),
+      readWakeRoadmapTail(),
+      readWakeSkillBody()
+    ])
+    return buildWakePack({
+      memberId,
+      role: 'host',
+      room: roomId,
+      journalPath,
+      boardDelta,
+      roster: buildCondensedRoster(roomId),
+      git,
+      systemState: buildWakeSystemState(),
+      roadmapTail,
+      skillBody,
+      includeGuidance: true
+    })
+  }
+
+  /** Assemble the LEAN on-demand wake snapshot (sections 1, 3, 4 only — identity,
+   * board delta/cursor, condensed roster) via the SAME pure `buildWakePack`
+   * builder. Used by `dept_wake_snapshot` for live freshness mid-session. */
+  const assembleWakeSnapshot = async (memberId: string, roomId: string): Promise<string> => {
+    const boardDelta = await readWakeBoardDelta(memberId, roomId)
+    return buildWakePack({
+      memberId,
+      role: 'host',
+      room: roomId,
+      boardDelta,
+      roster: buildCondensedRoster(roomId),
+      includeGuidance: false
+    })
   }
 
   /** Disposer closure per tool the head own-layer registers. */
@@ -2954,6 +3276,37 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }))
 
+  // Batch W4 P1 — ON-DEMAND wake-context snapshot (host plane): the live-
+  // freshness counterpart of the host wake injection. Returns identity/room,
+  // the board cursor + delta TOC, and the condensed roster in ONE call using
+  // the SAME pure `buildWakePack` builder. Deliberately does NOT change
+  // dept_whereami / dept_room_read / dept_room_who behaviour — it is additive,
+  // for when the model needs a refresh the wake pack cannot cache.
+  const globalWakeSnapshot = ctx.tools.register(defineTool({
+    name: 'dept_wake_snapshot',
+    description: 'On-demand Deepartments wake-context snapshot (host plane): returns, in ONE call and as text, your identity + room, the board read cursor, the board delta TOC since that cursor, and the condensed roster (static members + registered posts/hosts with their durable registry sleeping flags). It NEVER embeds live session liveness — a stale liveness claim is worse than one dept_room_who, so liveness stays on-demand via dept_room_who. This is the live-freshness counterpart of the automatic host wake context pack; for LIVE needs the pack cannot cache (true session liveness, full message text), call dept_room_who / dept_room_read messageId. Does not advance your read cursor.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          snapshot: { type: 'string', required: true }
+        }
+      },
+      render: (_args, value) => [{ type: 'text', text: value.snapshot } as const]
+    },
+    async execute(_args, exec): Promise<{ snapshot: string }> {
+      const agent = exec.agent
+      if (!agent) throw new Error('dept_wake_snapshot requires a calling agent (exec.agent was undefined)')
+      const sessionId = agent.id as string
+      const hostId = hostIdForSession(sessionId)
+      const roomId = hosts.get(hostId)?.roomId ?? config.org.rooms[0]?.id ?? 'board'
+      const snapshot = await assembleWakeSnapshot(hostId, roomId)
+      return { snapshot }
+    }
+  }))
+
   const globalRetire = ctx.tools.register(defineTool({
     name: 'dept_post_retire',
     description: 'Retire a registered board post cleanly: post a withdrawal note in its room (addressed to the post), then unregister it from the post/child registries and persist. A hard unregister for permanent posts (the lifecycle journal in Batch G covers the gentler sleep lifecycle path). Unknown postIds are rejected loudly.',
@@ -3085,12 +3438,17 @@ export function applyInvoke(ctx: Context, config: Config) {
         ensureHost(sessionId, existing?.roomId ?? 'board')
         const hostEntry = hosts.get(hostId) as HostEntry
         // Step 3 — in-place surface reset: replace the ENTIRE model-visible surface
-        // of the caller's OWN live session (exec.agent → agent.session) with ONE
-        // landing node — the journal — via the same primitive dsh-compaction uses
-        // (session.append 'user/message' with surfaceOp:{op:'replace', start:first,
-        // end:last} + sourceEventSeqs: allNodes). After the append,
-        // deriveMessages() returns exactly the journal node. Guarded so an
-        // agent-less / stub context (no real Session surface) degrades safely.
+        // of the caller's OWN live session (exec.agent → agent.session) with the
+        // journal node AND the wake context pack node — two `user/message` landing
+        // nodes — via the same primitive dsh-compaction uses (session.append
+        // 'user/message' with surfaceOp:{op:'replace', start:first, end:last} +
+        // sourceEventSeqs: allNodes). The journal node is byte-identical to before
+        // (buildSleepJournalMessage); the pack node rides after it as a plain
+        // append so the woken model's FIRST visible surface = journal + pack
+        // (Batch W4 owner doctrine: inject, do not push to on-demand/lazy).
+        // After the appends, deriveMessages() returns exactly those two nodes.
+        // Guarded so an agent-less / stub context (no real Session surface)
+        // degrades safely.
         const session = agent.session
         const surfaceNodes = session?.surface?.nodes as readonly number[] | undefined
         if (session !== undefined && typeof session.append === 'function') {
@@ -3100,6 +3458,12 @@ export function applyInvoke(ctx: Context, config: Config) {
             surfaceOp: plan.surfaceOp,
             ...(plan.sourceEventSeqs !== undefined ? { sourceEventSeqs: plan.sourceEventSeqs } : {})
           })
+          // Batch W4 — assemble + append the wake context pack as the SECOND node.
+          // It is assembled AFTER the bump (its journal path / board delta / cursor
+          // are current) and BEFORE the surface append completes the reset. `hostId`
+          // (=memberId) and `hostEntry.roomId` are in scope from the host branch.
+          const wakePack = await assembleWakePack(hostId, hostEntry.roomId, journalPathFor(hostId))
+          session.append('user/message', buildWakePackMessage(wakePack), { surfaceOp: 'append' })
         }
         // Step 4 — ONLY AFTER the surface append is committed, set+persist the
         // durable sleep marker ("the Asistente slept at T"). This ordering closes
@@ -3137,6 +3501,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     globalWrite()
     globalWho()
     globalWhereami()
+    globalWakeSnapshot()
     globalRetire()
     globalMemo()
     globalSleep()
