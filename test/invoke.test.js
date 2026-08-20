@@ -2523,8 +2523,8 @@ test('Batch W2 dept_memo_write: identity+cursor block — HOST wake_counter stay
       assert.match(firstContent, /^wake_counter: 1$/m, 'first wake_counter is 1')
       assert.match(firstContent, /^last_wake: none$/m, 'first last_wake is none')
       assert.match(firstContent, /Summary A: first wake\./, 'summary A body present')
-      assert.ok(/^Wake routine: .+Deepartments context injection/m.test(firstContent), 'wake-routine footer present (Batch W4 canonical routine)')
-      assert.ok(firstContent.includes(HOST_WAKE_ROUTINE_TEXT), 'footer carries the canonical wake routine verbatim')
+      assert.match(firstContent, /^wake routine: see skill 'Wake routine \(injected wake\)'$/m, 'journal footer is now the one-line wake-routine pointer (Batch C P1 dedupe — no canonical-text duplication per wake)')
+      assert.ok(!firstContent.includes(HOST_WAKE_ROUTINE_TEXT), 'journal footer no longer embeds the full canonical wake routine (it still comes in once via wake-pack section 9 / skill body)')
       assert.ok(!/^current_step:/m.test(firstContent), 'no current_step when not passed')
 
       // Second write WITHIN THE SAME awake session (no dept_sleep in between):
@@ -2550,7 +2550,7 @@ test('Batch W2 dept_memo_write: identity+cursor block — HOST wake_counter stay
   })
 })
 
-test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes the sleep-time wake_counter bump into the on-disk file, sets sleepEpoch durably, resets the live surface to exactly the BUMPED journal + the Deepartments wake pack (deriveMessages = TWO nodes: journal + pack) + concludes the turn', async () => {
+test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes the sleep-time wake_counter bump into the on-disk file, sets sleepEpoch durably, resets the live surface to exactly the BUMPED journal (ONE node — the wake pack is now injected fresh at the next pre-step, Batch C) + concludes the turn', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
@@ -2610,16 +2610,20 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes t
       assert.match(postSleepContent, /^board_cursor: none$/m, 'board_cursor untouched by the bump')
       assert.ok(postSleepContent.includes(journalSummary), 'summary body untouched by the bump')
 
-      // In-place surface reset (Batch W4): the live session's model-visible
-      // surface is now EXACTLY TWO nodes — the journal AND the wake context
-      // pack. The journal node stays byte-identical to what
-      // buildSleepJournalMessage(seeded) produces; the pack node rides after it.
+      // In-place surface reset (Batch W4 + Batch C): the live session's
+      // model-visible surface is now EXACTLY ONE node — the journal (durable
+      // memory). The wake context pack is NO LONGER frozen into the surface at
+      // dept_sleep: it is injected FRESH at the next `agent/pre-step`
+      // (message-arrival) time by the host pre-step injector (Batch C), so its
+      // board delta / git / roster are current when the next user message
+      // arrives, not stale from sleep. The journal node stays byte-identical to
+      // what buildSleepJournalMessage(seeded) produces.
       const nodes = realSession.surface.nodes
-      assert.equal(nodes.length, 2, 'surface collapsed to exactly two nodes after the in-place reset (journal + wake pack)')
+      assert.equal(nodes.length, 1, 'surface collapsed to exactly ONE node after the in-place reset (the journal; the pack is now injected at pre-step)')
       const derived = realSession.deriveMessages()
-      assert.equal(derived.length, 2, 'deriveMessages() returns exactly two nodes')
+      assert.equal(derived.length, 1, 'deriveMessages() returns exactly one node')
       assert.equal(derived[0].role, 'user')
-      assert.ok(derived[0].content[0].text.includes(journalSummary), 'the first surface node is the journal')
+      assert.ok(derived[0].content[0].text.includes(journalSummary), 'the surface node is the journal')
       assert.match(derived[0].content[0].text, /^author: /m, 'the journal node carries the journal frontmatter')
       // (b) The live surface reset carries the BUMPED content (wake_counter 2),
       // not the stale pre-bump file verbatim.
@@ -2632,20 +2636,8 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes t
       const rebuiltJournal = buildSleepJournalMessage(postSleepContent)
       assert.equal(derived[0].content[0].text, rebuiltJournal.content[0].text, 'journal node content byte-identical to buildSleepJournalMessage(seeded)')
       assert.deepEqual(derived[0].source, rebuiltJournal.source, 'journal node source identical to buildSleepJournalMessage(seeded)')
-      // The wake context pack node rides after it: plugin/notice framing, the
-      // `## Deepartments wake pack` header, journal-path pointer, roster, and
-      // the full skill body — the injected surface the woken host must NOT re-fetch.
-      assert.equal(derived[1].source.kind, 'plugin', 'wake pack node rendered as plugin context')
-      assert.equal(derived[1].source.form, 'notice')
-      const packText = derived[1].content[0].text
-      assert.match(packText, /^## Deepartments wake pack$/m, 'the wake pack header opens the pack node')
-      assert.match(packText, /## Journal \(long-term memory\)/, 'the wake pack carries the journal section')
-      assert.match(packText, /Pre-resolved journal path.*host-/, 'the wake pack pre-resolves the journal path')
-      assert.match(packText, /The journal body is the adjacent injected node\./, 'the wake pack points at the adjacent injected node')
-      assert.match(packText, /## Condensed roster/, 'the wake pack carries the condensed roster')
-      assert.match(packText, /Liveness \(sessionLive\): not baked in/, 'the wake pack roster never embeds live session liveness')
-      assert.match(packText, /## deepartments-workflow skill \(full body\)/, 'the wake pack embeds the full skill body')
-      assert.ok(packText.includes(HOST_WAKE_ROUTINE_TEXT), 'the wake pack guidance carries the canonical wake routine verbatim')
+      // NO pack node in the sleep surface anymore (Batch C — it moved to pre-step).
+      assert.ok(!derived.some((m) => m.content?.[0]?.text?.includes('## Deepartments wake pack')), 'no wake-pack node in the dept_sleep surface (pack is injected fresh at the next pre-step)')
 
       // The sleeping Asistente's turn concluded after the successful result.
       assert.equal(concluded, true, 'dept_sleep concluded the host turn')
@@ -2655,6 +2647,132 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes t
       const sleepingHost = who.hosts.find((h) => h.hostId === hostId)
       assert.ok(sleepingHost, 'the sleeping host is in the board roster')
       assert.equal(sleepingHost.sleeping, true, 'dept_room_who surfaces the sleeping host')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- Batch C: FRESH wake-pack injection at `agent/pre-step` (message-arrival
+// time). The pack is no longer frozen into the dept_sleep surface (see the
+// Batch 7 host test above — the sleep surface is now just the journal). It is
+// instead assembled from LIVE reads each time the host's first pre-step of an
+// awake session runs, and injected as a plugin/notice node onto decision.messages
+// at the same point the standard DSH context injections land. The tests below
+// fire the real `agent/pre-step` Cordis waterfall on the plugin ctx (the SAME
+// event the dsh-agent-loop drives per model step) and assert the injected node.
+
+function preStepClaimed(text = 'the user message') {
+  return [{ role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } }]
+}
+
+async function runPreStep(pluginCtx, agent, messages, signal) {
+  return pluginCtx().waterfall(
+    'agent/pre-step',
+    { agent, messages, signal },
+    () => ({ kind: 'enter', messages })
+  )
+}
+
+test('Batch C pre-step: a HOST session\'s first message-time pre-step injects a FRESH wake pack (pack-v1 sentinel + fresh board delta + wake_counter KPI) onto decision.messages', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const hostId = `host-${host.id}`
+
+      // Pre-author the host journal WITH open items so the KPI line is real
+      // (dept_memo_write is the real tool; wake_counter 1 on first write).
+      const memo = root.tools.get('dept_memo_write')
+      await memo.execute(
+        { summary: 'PRE-STEP fresh wake orientation.', openItems: ['finish pre-step wiring', 'ship wake timing'] },
+        { agent: host, signal }
+      )
+
+      // A board message addressed to the host arrives AFTER any "sleep" — the
+      // fresh delta the pack MUST capture (this is the anti-staleness core).
+      const writeTool = root.tools.get('dept_room_write')
+      const written = await writeTool.execute(
+        { room: 'board', to: [hostId], text: 'fresh message for the pre-step pack' },
+        { agent: host, signal }
+      )
+      assert.equal(written.from, hostId, 'board write from the host recorded')
+
+      const claimed = preStepClaimed()
+      const decision = await runPreStep(pluginCtx, host, claimed, signal)
+
+      assert.equal(decision.kind, 'enter', 'pre-step decision is enter')
+      // claimed (1 user message) + the 1 injected pack node.
+      assert.equal(decision.messages.length, claimed.length + 1, 'pre-step injects exactly ONE extra node (the wake pack)')
+      const packNode = decision.messages[decision.messages.length - 1]
+      assert.equal(packNode.source.kind, 'plugin', 'injected pack node is a plugin context')
+      assert.equal(packNode.source.form, 'notice', 'injected pack node is a notice (collapsed row, not a user-typed message)')
+      const packText = packNode.content[0].text
+      assert.match(packText, /^## Deepartments wake pack$/m, 'injected pack opens with the wake pack header')
+      assert.match(packText, /pack-v1: present/, 'injected pack carries the deterministic P1 presence sentinel')
+      assert.match(packText, /fresh message for the pre-step pack/, 'injected pack carries FRESH board-delta content (read at message time, not frozen at the previous dept_sleep)')
+      assert.match(packText, /- kpi: wake_counter 1; top open item: finish pre-step wiring/, 'injected pack carries the wake_counter + top open-item KPI from the journal')
+      assert.match(packText, /Pre-resolved journal path.*host-/, 'injected pack pre-resolves the host journal path')
+      assert.match(packText, /## deepartments-workflow skill \(full body\)/, 'injected pack embeds the full skill body')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch C pre-step: a NEVER-SLEPT host (no journal seed) injects a DEGRADED wake pack without throwing', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      // NO journal seeded — the host has never slept and has no durable memory.
+
+      const claimed = preStepClaimed('first ever message')
+      const decision = await runPreStep(pluginCtx, host, claimed, signal)
+
+      // Never throws: the injection proceeds with degraded reads.
+      assert.equal(decision.kind, 'enter', 'never-slept pre-step still returns enter (no throw)')
+      const packNode = decision.messages[decision.messages.length - 1]
+      assert.equal(packNode.source.kind, 'plugin', 'never-slept host still gets a plugin-context pack node')
+      const packText = packNode.content[0].text
+      assert.match(packText, /pack-v1: present/, 'never-slept pack carries the presence sentinel')
+      assert.match(packText, /wake_counter \(unavailable\); top open item: \(unavailable\)/, 'KPI degrades gracefully with no journal')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch C pre-step: repeated pre-step within ONE awake session does NOT re-inject once the pack is present (session-scoped gate)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const hostId = `host-${host.id}`
+      await seedJournal(stateDir, hostId, 'PRE-STEP gate: single injection per awake session.')
+
+      const claimed = preStepClaimed()
+      const first = await runPreStep(pluginCtx, host, claimed, signal)
+      assert.equal(first.messages.length, claimed.length + 1, 'first pre-step injects the pack')
+
+      // A second pre-step (e.g. the next tool-call step of the SAME awake
+      // session) must NOT re-inject the ~5kB pack — decision.messages stays at
+      // the claimed input only (the per-step decision contract does not carry
+      // prior injected nodes; the session-scoped presence flag is the gate).
+      const second = await runPreStep(pluginCtx, host, claimed, signal)
+      assert.equal(second.kind, 'enter')
+      assert.equal(second.messages.length, claimed.length, 'second pre-step does NOT re-inject (gate holds)')
+      assert.ok(!second.messages.some((m) => m.content?.[0]?.text?.includes('## Deepartments wake pack')), 'no wake pack node on the repeated pre-step')
+
+      // A THIRD pre-step (the follow-up continuation) also stays gated.
+      const third = await runPreStep(pluginCtx, host, claimed, signal)
+      assert.equal(third.messages.length, claimed.length, 'third pre-step still gated (no re-injection)')
     } finally {
       await dispose()
     }
@@ -2673,8 +2791,15 @@ test('Batch W4 pure: buildWakePack composes all 9 sections in order (identity, j
     systemState: '- DSH dev home: /opt/dsh/.dsh-dev',
     roadmapTail: '- **2026-08-20** — W3 committed.',
     skillBody: '# deepartments-workflow\nwake routine body',
+    kpi: 'wake_counter 3; top open item: finish W4',
     includeGuidance: true
   })
+
+  // Batch C — the P1 presence sentinel opens pack section 1 (deterministic
+  // detectability for the pre-step gate / health checks), and the P2 KPI line
+  // carries wake_counter + top open item.
+  assert.match(pack, /pack-v1: present/, 'pack carries the deterministic `pack-v1: present` sentinel in section 1')
+  assert.match(pack, /- kpi: wake_counter 3; top open item: finish W4/, 'pack section 1 carries the wake_counter + top open-item KPI line')
 
   // Every section header present, in order 1-9.
   const headers = [
@@ -2718,6 +2843,7 @@ test('Batch W4 pure: buildWakePack renders an EMPTY board-delta section when the
 
   // Sections 1, 3, 4 present.
   assert.match(pack, /## Deepartments wake pack/, 'identity header present')
+  assert.match(pack, /pack-v1: present/, 'P1 presence sentinel present even in the lean snapshot (shared buildWakePack section 1)')
   assert.match(pack, /## Board delta since cursor/, 'board delta section present')
   assert.match(pack, /## Condensed roster/, 'roster section present')
 

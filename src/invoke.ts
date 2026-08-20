@@ -519,11 +519,14 @@ export function buildSleepJournalMessage(journalText: string) {
 }
 
 /**
- * Build the SECOND wake node: the Deepartments context pack, framed exactly like
- * the journal node (`kind:'plugin' / form:'notice'` → collapsed notice row, NOT
- * a user-typed message, so `deriveMessages()` folds its content verbatim on the
- * next turn). Kept separate from `buildSleepJournalMessage` so the journal node
- * stays byte-identical; the pack gets its own notice summary.
+ * Build the Deepartments wake context pack message, framed like the journal node
+ * (`kind:'plugin' / form:'notice'` → collapsed notice row, NOT a user-typed
+ * message, so `deriveMessages()` folds its content verbatim on the next turn).
+ * Injected FRESH via `agent/pre-step` at message-arrival time by the host
+ * pre-step injector (not frozen into the surface at dept_sleep), so its board
+ * delta / git / roster / cursor are current when the user's message arrives.
+ * Kept separate from `buildSleepJournalMessage` so the journal node stays
+ * byte-identical; the pack gets its own notice summary.
  */
 export function buildWakePackMessage(packText: string) {
   return createUserMessage({
@@ -574,6 +577,15 @@ export interface WakePackParts {
   memberId: string
   role: string
   room: string
+  /** Deterministic presence sentinel line injected as the FIRST element of
+   * section 1 (see `buildWakePack`) so the wake-pack node's presence is
+   * detectable by health checks / the pre-step gate without parsing the JSON
+   * identity. Present in EVERY pack via this shared builder (wake injection
+   * and the on-demand snapshot). */
+  /** wake_counter + top-1 open-item KPI line (wake injection only; section 1).
+   * `assembleWakePack` computes it live from the journal, degrading gracefully
+   * when the journal is absent — so a never-slept session still gets a KPI line. */
+  kpi?: string
   /** Pre-resolved durable journal path (wake injection only; section 2). */
   journalPath?: string
   /** Cursor + board-delta TOC body. '' → empty section (no new messages). */
@@ -599,11 +611,17 @@ export interface WakePackParts {
 export function buildWakePack(parts: WakePackParts): string {
   const sections: string[] = []
 
-  // 1 — header + identity
-  sections.push([
+  // 1 — header + identity (+ the P1 presence sentinel as the very first body
+  // element, and the P2 wake_counter/top-open-item KPI line when supplied).
+  const identityLines = [
     '## Deepartments wake pack',
+    'pack-v1: present',
     `- identity: ${parts.memberId} (role: ${parts.role}, room: ${parts.room})`
-  ].join('\n'))
+  ]
+  if (parts.kpi !== undefined && parts.kpi.trim() !== '') {
+    identityLines.push(`- kpi: ${parts.kpi}`)
+  }
+  sections.push(identityLines.join('\n'))
 
   // 2 — journal pointer (wake injection only)
   if (parts.journalPath !== undefined && parts.journalPath.trim() !== '') {
@@ -1069,6 +1087,17 @@ export function applyInvoke(ctx: Context, config: Config) {
     return run
   }
   const memberCursors = new Map<string, CursorState>()
+  // Batch C — which LIVE agent sessions have already had the (freshly-injected)
+  // Deepartments wake pack placed in their context THIS awake session. The pack
+  // is now injected at `agent/pre-step` message-arrival time (NOT frozen at
+  // dept_sleep), so this set stops the per-turn injector from re-injecting the
+  // ~5kB pack on every model step of a long session. Keyed by the agent SESSION
+  // id (`agent.id`), because the pre-step decision.messages only carries the
+  // per-step claimed input and does NOT retain prior injected nodes (the
+  // `pack-v1: present` sentinel is NOT visible across steps), so a durable
+  // session-scoped flag is the reliable presence gate. Cleared in the host
+  // dept_sleep branch so a post-sleep wake re-injects a FRESH pack.
+  const wakePackInjected = new Set<string>()
   // Batch C: per sender→target pair ack budget. Key `${from}|${to}` → how many
   // consecutive pure acks (payload.ack) that pair has exchanged and when the
   // last one landed. Any non-ack message between the pair resets it (delete).
@@ -1626,7 +1655,14 @@ export function applyInvoke(ctx: Context, config: Config) {
       '',
       summary,
       '',
-      `Wake routine: ${HOST_WAKE_ROUTINE_TEXT}`
+      // Batch C — P1 routine-footer dedupe: the journal footer is now a ONE-LINE
+      // pointer to the canonical wake routine instead of embedding the full
+      // HOST_WAKE_ROUTINE_TEXT (~620 bytes). The canonical text still comes in
+      // ONCE per wake via wake-pack section 9 (buildWakePack, ~651) and via the
+      // full skill body the pack embeds — so dropping it from the footer here
+      // kills ~1/3 of the per-wake routine redundancy without touching the const,
+      // the skill file, or the pack's §9.
+      'wake routine: see skill \'Wake routine (injected wake)\''
     ].join('\n')
     const memoPath = journalPathFor(memberId)
     await mkdir(path.dirname(memoPath), { recursive: true })
@@ -1862,20 +1898,46 @@ export function applyInvoke(ctx: Context, config: Config) {
     return lines.join('\n')
   }
 
+  /** KPI line for pack section 1 (P2): `wake_counter N; top open item: …`
+   * computed live from the journal file (the same durable file dept_sleep
+   * seeds), so the first turn after wake is confirm-and-go instead of
+   * cross-reading the journal. Missing/unreadable journal → a clear degraded
+   * line; NEVER throws. */
+  const readWakeJournalKpi = async (journalPath: string): Promise<string> => {
+    try {
+      const text = await readFile(journalPath, 'utf8')
+      const counterMatch = text.match(/^wake_counter:\s*(\d+)/m)
+      const counter = counterMatch !== null ? counterMatch[1] : '?'
+      let top = '(none)'
+      const openMatch = text.match(/^open_items:\s*(\[.*\])/m)
+      if (openMatch !== null) {
+        try {
+          const parsed = JSON.parse(openMatch[1]) as unknown
+          if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'string') top = parsed[0]
+        } catch { /* fallthrough to (none) */ }
+      }
+      return `wake_counter ${counter}; top open item: ${top}`
+    } catch {
+      return 'wake_counter (unavailable); top open item: (unavailable)'
+    }
+  }
+
   /** Assemble the FULL wake context pack (sections 1-9) for the host wake
-   * injection: identity + pre-resolved journal path + live board delta + roster
-   * + git + system state + ROADMAP tail + full skill body + guidance. */
+   * injection: identity + KPI + pre-resolved journal path + live board delta +
+   * roster + git + system state + ROADMAP tail + full skill body + guidance. */
   const assembleWakePack = async (memberId: string, roomId: string, journalPath: string): Promise<string> => {
-    const [boardDelta, git, roadmapTail, skillBody] = await Promise.all([
+    const [boardDelta, git, roadmapTail, skillBody, kpi] = await Promise.all([
       readWakeBoardDelta(memberId, roomId),
       readWakeGitBearings(),
       readWakeRoadmapTail(),
-      readWakeSkillBody()
+      readWakeSkillBody(),
+      readWakeJournalKpi(journalPath)
     ])
     return buildWakePack({
       memberId,
       role: 'host',
       room: roomId,
+      kpi,
       journalPath,
       boardDelta,
       roster: buildCondensedRoster(roomId),
@@ -1901,6 +1963,54 @@ export function applyInvoke(ctx: Context, config: Config) {
       includeGuidance: false
     })
   }
+
+  // ---------------------------------------------------------------------------
+  // Batch C — FRESH wake-pack injection at message-arrival time (owner
+  // directive: the pack must arrive AFTER the user's message, together with the
+  // standard DSH context injections, so its board delta / git bearings / roster
+  // / cursor are fresh at message arrival, NOT frozen at the previous
+  // dept_sleep). Driven by the SAME `agent/pre-step` Cordis waterfall the
+  // runtime-context + skill-catalog use (no dsh-core change — the canonical
+  // pattern is dsh-tool-skill/lib/index.js:181). We REUSE assembleWakePack /
+  // buildWakePackMessage — no new pack builder.
+  //
+  // GATE — inject ONCE per awake session, never per turn: `agent/pre-step` runs
+  // before EVERY model step (not just the first message of a session), so a
+  // naive listener would re-inject the ~5kB pack on every tool-call step. The
+  // recommended `decision.messages` presence check does NOT work here: `claim()`
+  // (dsh-agent/lib/index.js:56) returns ONLY the per-step pending input, so
+  // `decision.messages` carries the previously-injected pack node NO ACROSS
+  // steps (verified against the agent-loop preStep, lib/index.js:496-508). We
+  // therefore gate on a SESSION-SCOPED presence flag (`wakePackInjected`, keyed
+  // by the agent session id) that is cleared only at the host dept_sleep
+  // boundary, so a post-sleep wake (or a fresh never-slept session) injects
+  // exactly once. Never injects into a registered POST (head/worker) — those
+  // keep their lean board-delta wake, not the host pack.
+  // ---------------------------------------------------------------------------
+  ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+    const decision = await next()
+    if (decision.kind === 'reject') return decision
+    const sessionId = agent?.id
+    if (typeof sessionId !== 'string') return decision
+    // Host-only: a registered post (head/worker) already has its own lean wake
+    // surface; the host wake pack is for HOST Asistente sessions only.
+    if (postIdForChild(sessionId) !== undefined) return decision
+    if (wakePackInjected.has(sessionId)) return decision
+    signal?.throwIfAborted?.()
+    const hostId = hostIdForSession(sessionId)
+    const hostEntry = hosts.get(hostId)
+    const roomId = hostEntry?.roomId ?? config.org.rooms[0]?.id ?? 'board'
+    // Deterministic journal path even for a never-slept host (no durable
+    // journal yet): assembleWakePack's sections degrade to '(… unavailable)'
+    // and readWakeJournalKpi returns a degraded KPI line — the injector never
+    // throws for a missing journal/file, so a brand-new host still gets a pack.
+    const pack = await assembleWakePack(hostId, roomId, journalPathFor(hostId))
+    wakePackInjected.add(sessionId)
+    return {
+      kind: 'enter',
+      messages: [...decision.messages, buildWakePackMessage(pack)]
+    }
+  })
 
   /** Disposer closure per tool the head own-layer registers. */
   type HeadToolDisposers = { dispose: () => void }
@@ -3475,15 +3585,15 @@ export function applyInvoke(ctx: Context, config: Config) {
         const hostEntry = hosts.get(hostId) as HostEntry
         // Step 3 — in-place surface reset: replace the ENTIRE model-visible surface
         // of the caller's OWN live session (exec.agent → agent.session) with the
-        // journal node AND the wake context pack node — two `user/message` landing
-        // nodes — via the same primitive dsh-compaction uses (session.append
-        // 'user/message' with surfaceOp:{op:'replace', start:first, end:last} +
-        // sourceEventSeqs: allNodes). The journal node is byte-identical to before
-        // (buildSleepJournalMessage); the pack node rides after it as a plain
-        // append so the woken model's FIRST visible surface = journal + pack
-        // (Batch W4 owner doctrine: inject, do not push to on-demand/lazy).
-        // After the appends, deriveMessages() returns exactly those two nodes.
-        // Guarded so an agent-less / stub context (no real Session surface)
+        // journal node alone — a single `user/message` landing node — via the same
+        // primitive dsh-compaction uses (session.append 'user/message' with
+        // surfaceOp:{op:'replace', start:first, end:last} + sourceEventSeqs:
+        // allNodes). The journal node is byte-identical to before
+        // (buildSleepJournalMessage); it is the ONLY durable surface the next
+        // wake resumes from (Batch C owner doctrine: the wake context pack is NOT
+        // frozen here — it is injected FRESH at the next `agent/pre-step`, see
+        // Batch C below). After the append, deriveMessages() returns that single
+        // node. Guarded so an agent-less / stub context (no real Session surface)
         // degrades safely.
         const session = agent.session
         const surfaceNodes = session?.surface?.nodes as readonly number[] | undefined
@@ -3494,13 +3604,15 @@ export function applyInvoke(ctx: Context, config: Config) {
             surfaceOp: plan.surfaceOp,
             ...(plan.sourceEventSeqs !== undefined ? { sourceEventSeqs: plan.sourceEventSeqs } : {})
           })
-          // Batch W4 — assemble + append the wake context pack as the SECOND node.
-          // It is assembled AFTER the bump (its journal path / board delta / cursor
-          // are current) and BEFORE the surface append completes the reset. `hostId`
-          // (=memberId) and `hostEntry.roomId` are in scope from the host branch.
-          const wakePack = await assembleWakePack(hostId, hostEntry.roomId, journalPathFor(hostId))
-          session.append('user/message', buildWakePackMessage(wakePack), { surfaceOp: 'append' })
         }
+        // Batch C — the wake context pack is NO LONGER frozen into the surface
+        // at dept_sleep. It is now injected FRESH at the next `agent/pre-step`
+        // (message-arrival time) by the host pre-step injector, so its board
+        // delta / git / roster / cursor are current at the moment the user's
+        // message arrives, not stale from the previous sleep. The reset surface
+        // here is just the journal node (the durable memory). Clear the
+        // wake-pack presence flag so the next wake's first pre-step re-injects.
+        wakePackInjected.delete(sessionId)
         // Step 4 — ONLY AFTER the surface append is committed, set+persist the
         // durable sleep marker ("the Asistente slept at T"). This ordering closes
         // the crash window where sleepEpoch was durably persisted but the journal
