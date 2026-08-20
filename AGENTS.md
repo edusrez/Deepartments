@@ -38,7 +38,7 @@ are organized*. Context: [docs/IDEA.md](docs/IDEA.md) (the idea),
 - `.dsh/skills/` — internal authorship skills (discovery root
   `<project>/.dsh/skills`, rank 100): `dsh-plugin-dev` for writing the
   plugin; `deepartments-workflow` (the conversational-orchestrator workflow,
-  incl. the "Wake routine (deterministic orientation)") — canonical copy is
+  incl. the "Wake routine (injected wake)") — canonical copy is
   repo-tracked here at `.dsh/skills/deepartments-workflow/SKILL.md`, and the
   dev + stable agent presets symlink their skills dirs to this repo copy
   (legacy preset backups: `deepartments-workflow.bak-20260816/`).
@@ -79,8 +79,14 @@ Details and rationale for each rule: skill `dsh-plugin-dev`
 
 ## Session ritual
 
-- **START**: read this AGENTS.md and `docs/ROADMAP.md`; check git
-  (`git status`, `git log --oneline -5`); present the session plan.
+- **START** (injected wake, see "Wake routine"): the Deepartments wake pack is
+  ALREADY in your initial context — identity, the pre-resolved journal path +
+  body, the board delta TOC, condensed roster, git bearings, system state, and
+  the full deepartments-workflow skill. Do not re-fetch any of it at wake. Call
+  board tools only for LIVE needs the pack cannot cache (liveness, full message
+  text, writes, dept_sleep); do NOT re-read AGENTS.md or the full ROADMAP or
+  list state dirs (the journal is the memory) → present the session plan to the
+  owner.
 - **WORK**: load the `dsh-plugin-dev` skill; atomic tasks; TIERED
   verification; independent review after every change.
 - **WEB-FETCH HABIT**: the Asistente defaults `web_fetch` to API/JSON endpoints (registry.npmjs.org, api.github.com, cdn.jsdelivr.net), retries once on transient 502/429, and never trusts truncated HTML shells of Cloudflare-walled pages — cheatsheet: `.dsh/reports/scribe/2026-08-17-webfetch-endpoint-habit.md`.

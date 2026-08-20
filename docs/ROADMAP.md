@@ -326,7 +326,7 @@ of the research — so no builder needs to re-research.)
   optional `current_step`) plus a Wake-routine footer per journal; both
   `dept_memo_write` tools gained an optional `currentStep` parameter; 98/98
   tests and the TIERED ladder green; reviewer PASS (`w2-journal-review`). The
-  lean wake routine ("Wake routine (deterministic orientation)") — identity →
+  lean wake routine ("Wake routine (injected wake)") — identity →
   read journal → board delta → health check → decide, loading
   AGENTS/ROADMAP-tail lazily — is encoded in the `deepartments-workflow`
   skill. Owner microdecisions 2026-08-20: audit+fix+optimize the wake
