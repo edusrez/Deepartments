@@ -2475,6 +2475,45 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal sets sl
   })
 })
 
+test('Batch 7 regression: GLOBAL dept_room_who schema declares hosts[].sleeping (A3 — no more copy-paste drift crashing host wake)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const signal = new AbortController().signal
+
+      // (a) A sleeping host must be reported by the GLOBAL (host-plane) roster.
+      // Put a sleeping host into the registry via the host dept_sleep path (the
+      // same mechanism Batch 7 uses), so sleepEpoch is set durably in hosts.json.
+      const host = agents.put(fakeParentAgent())
+      const hostId = `host-${host.id}`
+      await seedJournal(stateDir, hostId, 'HOST-SLEEP-MEMORY: global who sleeping reporting.')
+      const sleepResult = await root.tools.get('dept_sleep').execute({}, { agent: host, signal })
+      assert.ok(sleepResult.sleepEpoch > 0, 'host slept for the regression test')
+
+      const who = root.tools.get('dept_room_who')
+      const result = await who.execute({ room: 'board' }, { agent: host, signal })
+      const sleepingHost = result.hosts.find((h) => h.hostId === hostId)
+      assert.ok(sleepingHost, 'the sleeping host is in the global roster')
+      assert.equal(sleepingHost.sleeping, true, 'global dept_room_who reports the sleeping host')
+
+      // (b) The DECLARED output schema must actually allow `sleeping` on a host —
+      // additionalProperties:false on the host item forces this to be declared
+      // explicitly, so a copy-paste drift like A3 can never pass silently again.
+      // (dsh-tools compiles each property's `required: true` annotation into the
+      // object's top-level `required: [...]` array.)
+      const hostsItem = who.output.schema.properties.hosts.items
+      const sleepingSchema = hostsItem.properties.sleeping
+      assert.ok(sleepingSchema, 'hosts.items.properties.sleeping is declared in the output schema')
+      assert.equal(sleepingSchema.type, 'boolean', 'hosts[].sleeping is a boolean')
+      assert.ok(hostsItem.required.includes('sleeping'), 'hosts[].sleeping is required (in the item required[] array)')
+      assert.equal(hostsItem.additionalProperties, false, 'host item keeps additionalProperties:false (field must be declared)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('Batch 7 head regression: a head still sleeps through its own-layer dept_sleep (journal + sleepEpoch + dispose; no surface reset)', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'

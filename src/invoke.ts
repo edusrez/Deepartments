@@ -112,7 +112,7 @@
 //     registry's `agentPreset: 'deepartments-head'` field is the marker.
 //
 // NO export default (pitfall 0001 — breaks `inject`).
-import { mkdir, readFile, writeFile, readdir, copyFile, stat } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, readdir, copyFile, stat, rename, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -1457,7 +1457,18 @@ export function applyInvoke(ctx: Context, config: Config) {
     ].join('\n')
     const memoPath = journalPathFor(memberId)
     await mkdir(path.dirname(memoPath), { recursive: true })
-    await writeFile(memoPath, content, 'utf8')
+    // Atomic write: write to a sibling temp path on the same filesystem, then
+    // rename over the target. A crash mid-write must never leave a truncated
+    // journal, because the journal is the next wake's ONLY durable surface.
+    const tmpPath = `${memoPath}.tmp`
+    try {
+      await writeFile(tmpPath, content, 'utf8')
+      await rename(tmpPath, memoPath)
+    } catch (error: unknown) {
+      // Best-effort cleanup of the temp file; ignore cleanup errors.
+      try { await unlink(tmpPath) } catch { /* ignore */ }
+      throw error
+    }
     return memoPath
   }
 
@@ -2716,7 +2727,8 @@ export function applyInvoke(ctx: Context, config: Config) {
                 hostId: { type: 'string', required: true },
                 sessionId: { type: 'string', required: true },
                 roomId: { type: 'string', required: true },
-                sessionLive: { type: 'boolean', required: true }
+                sessionLive: { type: 'boolean', required: true },
+                sleeping: { type: 'boolean', required: true }
               }
             }
           }
@@ -2996,16 +3008,16 @@ export function applyInvoke(ctx: Context, config: Config) {
         if (journal === void 0 || journal.trim() === '') {
           throw new Error(`[deepartments] dept_sleep requires a saved journal — call dept_memo_write to save your memory first (no journal for host ${hostId})`)
         }
-        // Register/refresh the durable host identity, then persist the sleep
-        // marker ("the Asistente slept at T"). ensureHost is idempotent for an
-        // existing entry and refuses to change its roomId away from what it has.
+        // Step 1 — journal REQUIRED (dept_memo_write must have run first): the
+        // journal is the ONLY durable surface the next wake resumes from.
+        // Step 2 — register/refresh the durable host identity. ensureHost is
+        // idempotent for an existing entry and refuses to change its roomId away
+        // from what it has.
         ensureHost(sessionId, existing?.roomId ?? 'board')
         const hostEntry = hosts.get(hostId) as HostEntry
-        hostEntry.sleepEpoch = Date.now()
-        persistHosts()
-        // In-place surface reset: replace the ENTIRE model-visible surface of the
-        // caller's OWN live session (exec.agent → agent.session) with ONE landing
-        // node — the journal — via the same primitive dsh-compaction uses
+        // Step 3 — in-place surface reset: replace the ENTIRE model-visible surface
+        // of the caller's OWN live session (exec.agent → agent.session) with ONE
+        // landing node — the journal — via the same primitive dsh-compaction uses
         // (session.append 'user/message' with surfaceOp:{op:'replace', start:first,
         // end:last} + sourceEventSeqs: allNodes). After the append,
         // deriveMessages() returns exactly the journal node. Guarded so an
@@ -3020,8 +3032,15 @@ export function applyInvoke(ctx: Context, config: Config) {
             ...(plan.sourceEventSeqs !== undefined ? { sourceEventSeqs: plan.sourceEventSeqs } : {})
           })
         }
-        // Conclude the sleeping Asistente's turn (the loop stops after this
-        // successful tool result) — the host analog of a head ending its turn.
+        // Step 4 — ONLY AFTER the surface append is committed, set+persist the
+        // durable sleep marker ("the Asistente slept at T"). This ordering closes
+        // the crash window where sleepEpoch was durably persisted but the journal
+        // had NOT been injected into the live surface yet (a stale resume while
+        // marked slept).
+        hostEntry.sleepEpoch = Date.now()
+        persistHosts()
+        // Step 5 — conclude the sleeping Asistente's turn (the loop stops after
+        // this successful tool result) — the host analog of a head ending its turn.
         // Guarded: dsh-tools ToolRunContext exposes concludeTurn(); a bare
         // { agent, signal } test exec does not.
         if (typeof (exec as { concludeTurn?: unknown }).concludeTurn === 'function') {
