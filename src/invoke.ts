@@ -1581,21 +1581,22 @@ export function applyInvoke(ctx: Context, config: Config) {
    * optional current_step + the free-form summary body, closing with a short
    * wake-routine footer). Returns the durable memo path.
    *
-   * wake_counter semantics split by member kind (2026-08-20):
-   *  - HOST (`host-<sessionId>`): the counter is the ORDINAL of the current
-   *    awake session and ADVANCES ONLY AT dept_sleep (see bumpHostSleepCounter),
-   *    never at write — so a second dept_memo_write within one awake session
-   *    keeps the SAME ordinal (first-ever → 1, later → the current value).
-   *  - REGISTERED POST (any other id): the counter still advances on every
-   *    write (`prevCounter + 1`) — a head's own-layer sleep lifecycle is a
-   *    follow-up; heads keep the old behavior. */
+   * wake_counter semantics — now UNIFORM across hosts and registered posts
+   * (heads + workers, 2026-08-20 parity): the counter is the ORDINAL of the
+   * current awake session and ADVANCES ONLY AT dept_sleep (see
+   * bumpHostSleepCounter / bumpPostSleepCounter), never at write — so a second
+   * dept_memo_write within one awake session keeps the SAME ordinal (first-ever
+   * → 1, later → the current value). The +1 at the seed boundary happens in the
+   * sleep layer, giving hosts, heads and workers identical ordinal semantics. */
   const writeJournal = async (memberId: string, roomId: string, summary: string, decisions: string[], constraints: string[], openItems: string[], currentStep?: string): Promise<string> => {
     // Batch W2 identity + cursor block: derive the counter and the boundary the
     // previous incarnation left at from the PRIOR journal so a re-materialized
     // head/Asistente can verify its state on wake (lost-cursor / stale
     // detection). ENOENT-tolerant: a first-ever write has no prior journal →
-    // wake_counter 1, last_wake none. For hosts the counter is NOT advanced by
-    // the write itself (see the doc comment above); posts keep prevCounter + 1.
+    // wake_counter 1, last_wake none. The counter is NEVER advanced by the
+    // write itself (for hosts, heads AND workers indistinguishably — parity):
+    // the ordinal increments only at the dept_sleep seed boundary via
+    // bumpHostSleepCounter / bumpPostSleepCounter.
     let prevCounter = 0
     let prevTimestamp: string | undefined
     try {
@@ -1608,14 +1609,13 @@ export function applyInvoke(ctx: Context, config: Config) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
 
-    const isHost = memberId.startsWith('host-')
     const cursor = memberCursors.get(memberId)
     const content = [
       '---',
       `author: ${memberId}`,
       `room: ${roomId}`,
       `timestamp: ${new Date().toISOString()}`,
-      `wake_counter: ${isHost ? Math.max(prevCounter, 1) : prevCounter + 1}`,
+      `wake_counter: ${Math.max(prevCounter, 1)}`,
       `last_wake: ${prevTimestamp ?? 'none'}`,
       ...(currentStep !== undefined ? [`current_step: ${currentStep}`] : []),
       `board_cursor: ${cursor?.lastMessageId ?? 'none'}`,
@@ -1658,6 +1658,33 @@ export function applyInvoke(ctx: Context, config: Config) {
     const counterLine = content.match(/^wake_counter:\s*(\d+)$/m)
     if (counterLine === null) {
       throw new Error(`[deepartments] bumpHostSleepCounter: journal for ${memberId} has no "wake_counter:" frontmatter line — cannot advance the wake ordinal`)
+    }
+    const bumped = content.replace(/^wake_counter:\s*\d+$/m, `wake_counter: ${Number(counterLine[1]) + 1}`)
+    const memoPath = journalPathFor(memberId)
+    const tmpPath = `${memoPath}.tmp`
+    try {
+      await writeFile(tmpPath, bumped, 'utf8')
+      await rename(tmpPath, memoPath)
+    } catch (error: unknown) {
+      // Best-effort cleanup of the temp file; ignore cleanup errors.
+      try { await unlink(tmpPath) } catch { /* ignore */ }
+      throw error
+    }
+    return bumped
+  }
+
+  /** Advance a REGISTERED POST's (head OR worker) journal `wake_counter` by
+   * exactly 1 at the dept_sleep seed boundary and persist atomically — the
+   * post/worker analogue of bumpHostSleepCounter, giving heads + workers the
+   * SAME ordinal semantics as the host (the counter advances ONLY here at
+   * sleep, never on a plain write; see writeJournal). Pure counter bump: the
+   * base author/room/timestamp/last_wake/current_step/board_cursor frontmatter
+   * and the body are left UNTOUCHED. Returns the NEW full content string.
+   * Throws loudly if the journal has no `wake_counter:` frontmatter line. */
+  const bumpPostSleepCounter = async (memberId: string, content: string): Promise<string> => {
+    const counterLine = content.match(/^wake_counter:\s*(\d+)$/m)
+    if (counterLine === null) {
+      throw new Error(`[deepartments] bumpPostSleepCounter: journal for ${memberId} has no "wake_counter:" frontmatter line — cannot advance the wake ordinal`)
     }
     const bumped = content.replace(/^wake_counter:\s*\d+$/m, `wake_counter: ${Number(counterLine[1]) + 1}`)
     const memoPath = journalPathFor(memberId)
@@ -2306,6 +2333,15 @@ export function applyInvoke(ctx: Context, config: Config) {
         if (journal === void 0 || journal.trim() === '') {
           throw new Error('[deepartments] dept_sleep requires a saved journal — call dept_memo_write to save your memory first')
         }
+        // Head/worker wake_counter parity (owner decision: heads + workers, so
+        // BOTH a manager head and a disposable worker route here through the
+        // own-layer dept_sleep — the host never does, it is rejected above).
+        // Bump the ordinal at this SAME seed boundary the host uses (see
+        // bumpHostSleepCounter/bumpPostSleepCounter): the counter advances
+        // exactly +1 on disk BEFORE the handle is disposed, so the next wake's
+        // fresh materialization (cold resume from the journal) reads the
+        // incremented ordinal — mirroring host semantics.
+        await bumpPostSleepCounter(memberId, journal)
         // Mark first (durable), then dispose the live AgentHandle. Dispose
         // tears the agent+session OUT of the in-memory registry (rc.8
         // dsh-agent-loop prepare() dispose, index.js:1132-1152 — it detaches

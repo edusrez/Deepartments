@@ -1863,6 +1863,73 @@ test('Batch G dept_memo_write persists a head\'s long-term memory journal (autho
   })
 })
 
+test('Batch G head wake_counter parity: a SECOND dept_memo_write within one awake session does NOT inflate the ordinal (advances only at dept_sleep)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const { agents, dispose } = await bootPlugin(stateDir)
+    await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
+    try {
+      const head = agents.store.get(`head-${postId}`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      const signal = new AbortController().signal
+
+      // First write (no prior journal) → wake_counter 1.
+      const first = await memo.execute({ summary: 'Head memo A.' }, { agent: head, signal })
+      const firstContent = await readFile(first.memoPath, 'utf8')
+      assert.match(firstContent, /^wake_counter: 1$/m, 'head first write is wake_counter 1')
+
+      // Second write WITHIN the SAME awake session (no dept_sleep between):
+      // the ordinal must NOT advance — only the dept_sleep seed boundary bumps it.
+      const second = await memo.execute({ summary: 'Head memo B, still awake.' }, { agent: head, signal })
+      const secondContent = await readFile(second.memoPath, 'utf8')
+      assert.equal(second.memoPath, first.memoPath, 'head journal rewritten in place')
+      assert.match(secondContent, /^wake_counter: 1$/m, 'head wake_counter STAYS 1 on a within-session write (no inflation)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch G head wake_counter parity: dept_sleep bumps the ordinal (1→2) at the seed boundary on disk; the cold-resumed next incarnation reads the bumped ordinal', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const journalText = 'HEAD-SLEEP-COUNTER: carry the bumped ordinal into the next incarnation.'
+    await seedJournal(stateDir, postId, journalText)
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
+    try {
+      const head = agents.store.get(`head-${postId}`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      const signal = new AbortController().signal
+
+      // Memo write keeps the seeded ordinal (1) — a write does not inflate.
+      const memoResult = await memo.execute({ summary: journalText }, { agent: head, signal })
+      const preSleepContent = await readFile(memoResult.memoPath, 'utf8')
+      assert.match(preSleepContent, /^wake_counter: 1$/m, 'head memo write does not advance the seeded ordinal')
+
+      // Sleep: bumps the on-disk journal 1 → 2 at the seed boundary.
+      await sleep.execute({}, { agent: head, signal })
+      await waitFor(() => agents.store.has(`head-${postId}`) === false, 5000, 'handle disposed after sleep')
+      const postSleepContent = await readFile(memoResult.memoPath, 'utf8')
+      assert.match(postSleepContent, /^wake_counter: 2$/m, 'head wake_counter advanced 1 → 2 at dept_sleep (ordinal bump on disk)')
+
+      // Next wake: the cold-resumed fresh incarnation sees the bumped ordinal (2).
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      const seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'wake up'), 'board')
+      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'slept head cold-resumed')
+      assert.equal(agents.createCalls.filter((c) => String(c.sessionId) === `head-${postId}`).length, 1, 'head cold-resumed, not re-created')
+      const resumedContent = await readFile(memoResult.memoPath, 'utf8')
+      assert.match(resumedContent, /^wake_counter: 2$/m, 'bumped ordinal (2) persists for the next incarnation')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('Batch G dept_sleep requires a saved journal (throws otherwise / rejects a host), then marks sleepEpoch durably AND disposes the AgentHandle', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
@@ -2126,6 +2193,39 @@ test('worker sleep + respawn: a slept worker is cold-resumed as a fresh incarnat
       const posts = await readPosts(stateDir)
       assert.equal(posts['researcher-alpha'].sleepEpoch, undefined, 'sleepEpoch cleared after the wake')
       assert.equal(posts['researcher-alpha'].provider, 'worker', 'disposable marker survives sleep/respawn')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('worker wake_counter parity: a WRITE does not inflate the ordinal, but dept_sleep bumps it (1→2) at the seed boundary on disk', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const createTool = headCtx.tools.get('dept_post_create', key)
+      await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+
+      const workerAgent = agents.store.get('worker-researcher-alpha')
+      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, 'worker-researcher-alpha')
+      const memo = workerCtx.tools.get('dept_memo_write', workerKey)
+      const sleep = workerCtx.tools.get('dept_sleep', workerKey)
+
+      // First write (no prior journal) → wake_counter 1; a second within-session
+      // write stays 1 (the write never inflates the ordinal).
+      const first = await memo.execute({ summary: 'worker memo A' }, { agent: workerAgent, signal })
+      const firstContent = await readFile(first.memoPath, 'utf8')
+      assert.match(firstContent, /^wake_counter: 1$/m, 'worker first write is wake_counter 1')
+      const second = await memo.execute({ summary: 'worker memo B, still awake' }, { agent: workerAgent, signal })
+      const secondContent = await readFile(second.memoPath, 'utf8')
+      assert.match(secondContent, /^wake_counter: 1$/m, 'worker wake_counter STAYS 1 on a within-session write (no inflation)')
+
+      // Sleep: bumps the worker ordinal 1 → 2 at the seed boundary on disk.
+      await sleep.execute({}, { agent: workerAgent, signal })
+      await waitFor(() => agents.store.has('worker-researcher-alpha') === false, 5000, 'worker handle disposed on sleep')
+      const postSleepContent = await readFile(first.memoPath, 'utf8')
+      assert.match(postSleepContent, /^wake_counter: 2$/m, 'worker wake_counter advanced 1 → 2 at dept_sleep (ordinal bump on disk)')
     } finally {
       await dispose()
     }
