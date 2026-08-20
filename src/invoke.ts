@@ -164,6 +164,21 @@ function headSessionId(postId: string): string {
   return `${HEAD_SESSION_PREFIX}${postId}`
 }
 
+/** Prefix of a DISPOSABLE department WORKER's stable root-agent session id:
+ * `worker-<postId>`. Namespaced so it NEVER collides with a configured head's
+ * `head-<postId>` id, and — critically — **never re-materialized by
+ * ensureAllHeads**, which ONLY ever iterates CONFIGURED coordinators
+ * (`config.org.departments[].coordinator`). A worker is created at runtime by
+ * `dept_post_create` (not config), so after `dept_post_retire` removes its
+ * registry entry there is NO boot path that re-spawns it: the "retired worker
+ * stays retired" guarantee holds trivially. */
+const WORKER_SESSION_PREFIX = 'worker-'
+
+/** The stable root-agent session id of a disposable department worker. */
+function workerSessionId(postId: string): string {
+  return `${WORKER_SESSION_PREFIX}${postId}`
+}
+
 // Batch C — ack-loop budget. A sender→target pair that has exchanged this many
 // pure acks (payload.ack) within this window, with no intervening non-ack
 // message, is treated as a confirmation loop: the relay stops waking it. Keep
@@ -203,12 +218,26 @@ const stuckNow = (): number => {
  * CONFIGURED permanent head (vs a future disposable worker). */
 interface PostEntry {
   postId: string
-  /** Stable root-agent session id (`head-<postId>`), shared by the agent
-   * registry and its persisted session; the wake/dispose/resume identity. */
+  /** Stable root-agent session id (`head-<postId>` for a configured head,
+   * `worker-<postId>` for a DISPOSABLE worker), shared by the agent registry
+   * and its persisted session; the wake/dispose/resume identity. */
   sessionId: string
   roomId: string
-  /** The head preset id this root agent mounts (marker: configured permanent head). */
+  /** The root-agent preset id this post mounts. `'deepartments-head'` marks a
+   * CONFIGURED permanent head; `'deepartments-worker'` marks a DISPOSABLE
+   * worker created at runtime by dept_post_create. */
   agentPreset: string
+  /** Batch 3a: disposable-worker marker. Only set (`'worker'`) for workers
+   * created by `dept_post_create`. Absent/undefined = a configured permanent
+   * head. This registry-level flag is what lets `dept_post_retire` (head path)
+   * retire workers without ever touching permanent heads, and it is NOT read by
+   * `ensureAllHeads` (which only iterates config coordinators). */
+  provider?: 'worker'
+  /** Batch 3a: the ROLE captured at create time (e.g. 'rank-and-file
+   * researcher'). Used as the persona/role fallback when waking a worker —
+   * `coordinatorForPost` is undefined for workers (they have no config), so the
+   * durable entry carries the role the creating head supplied. */
+  role?: string
   /** Batch G: set when the head SLEPT (memoized + marked). On the next wake the
    * relay cold-resumes the SAME durable session (context reset + journal reload)
    * instead of waking a live incarnation; cleared once the respawn lands.
@@ -224,6 +253,8 @@ interface PostEntryPersisted {
   sessionId: string
   roomId: string
   agentPreset: string
+  provider?: 'worker'
+  role?: string
   sleepEpoch?: number
   previousChildId?: string
 }
@@ -435,7 +466,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   const headProgress = new Map<string, { at: number; eventCount: number }>()
   // Fix A2 — serialize the DISPOSE-then-cold-resume stuck-recovery per head
   // session. The relay is synchronous and a stuck path must dispose its frozen
-  // handle BEFORE wakeHead cold-resumes it (otherwise wakeHead would find the
+  // handle BEFORE wakePost cold-resumes it (otherwise wakePost would find the
   // stale live handle and followup the wedged loop again). A per-session tail
   // promise makes concurrent wake pushes to the SAME head run the recovery one
   // at a time — the "never double-resume" guard stays true across bursts.
@@ -519,6 +550,10 @@ export function applyInvoke(ctx: Context, config: Config) {
         sessionId: entry.sessionId,
         roomId: entry.roomId,
         agentPreset: entry.agentPreset,
+        // Batch 3a: persist the disposable-worker marker + captured role only
+        // for workers (absent for configured permanent heads).
+        ...(entry.provider !== void 0 ? { provider: entry.provider } : {}),
+        ...(entry.role !== void 0 ? { role: entry.role } : {}),
         // Batch G: persist the optional sleep lifecycle fields only when set
         // (absent = never slept / no previous incarnation).
         ...(entry.sleepEpoch !== void 0 ? { sleepEpoch: entry.sleepEpoch } : {}),
@@ -590,11 +625,19 @@ export function applyInvoke(ctx: Context, config: Config) {
         if (sessionId !== undefined && typeof entry?.roomId === 'string' && typeof entry?.agentPreset === 'string') {
           const sleepEpoch = typeof entry.sleepEpoch === 'number' ? entry.sleepEpoch : undefined
           const previousChildId = typeof entry.previousChildId === 'string' ? entry.previousChildId : undefined
+          // Batch 3a: a disposable worker is cold-loaded like any post, carrying
+          // its durable `provider: 'worker'` marker + captured role. It is NOT
+          // re-materialized by ensureAllHeads (config-only), so a retired worker
+          // whose entry was removed stays gone across restarts.
+          const provider = entry.provider === 'worker' ? 'worker' as const : undefined
+          const role = typeof entry.role === 'string' ? entry.role : undefined
           registerEntry({
             postId,
             sessionId,
             roomId: entry.roomId,
             agentPreset: entry.agentPreset,
+            ...(provider !== void 0 ? { provider } : {}),
+            ...(role !== void 0 ? { role } : {}),
             ...(sleepEpoch !== void 0 ? { sleepEpoch } : {}),
             ...(previousChildId !== void 0 ? { previousChildId } : {})
           })
@@ -783,6 +826,10 @@ export function applyInvoke(ctx: Context, config: Config) {
   // A configured coordinator is materialized as its OWN root agent (NOT a
   // continuable subagent): created/resumed via ctx.agents.create/resume from
   const PRESET_ID = 'deepartments-head'
+  /** Batch 3a: the dedicated DISPOSABLE-worker preset (mirrors the head preset
+   * but framed as a temporary rank-and-file researcher). Materialized into the
+   * harness-home user preset root alongside the head preset. */
+  const WORKER_PRESET_ID = 'deepartments-worker'
   /** Repo root, used as the head agent's stable `meta.cwd` and as the preset
    * source. `new URL('.', import.meta.url)` already yields the compiled `lib/`
    * directory (of lib/invoke.js in dev), so one `'..'` up is the repo root. */
@@ -824,11 +871,13 @@ export function applyInvoke(ctx: Context, config: Config) {
   const presetSourceDir = (presetId: string): string =>
     path.join(repoRoot, 'presets', presetId)
 
-  /** Idempotently materialize `presets/deepartments-head/` into the harness
-   * home's `.agent-presets/` user root so the head preset is resolvable. The
-   * copy is skipped when the destination already has the preset directory. */
-  const materializeHeadPreset = async (): Promise<void> => {
-    const presetId = 'deepartments-head'
+  /** Idempotently materialize `presets/<presetId>/` into the harness home's
+   * `.agent-presets/` user root so the given preset is resolvable. Used for the
+   * head preset AND the disposable-worker preset (Batch 3a). The copy is
+   * skipped when the destination already has the same file. Non-fatal: a failed
+   * materialization just means the matching setup mounts nothing (board tools
+   * are always installed regardless). */
+  const materializePreset = async (presetId: string): Promise<void> => {
     const srcDir = presetSourceDir(presetId)
     const dstDir = path.join(dshHome(), '.agent-presets', presetId)
     try {
@@ -849,11 +898,11 @@ export function applyInvoke(ctx: Context, config: Config) {
         }
         await copyFile(src, dst)
       }
-      ctx.logger.info(`[deepartments] head preset materialized at ${dstDir}`)
+      ctx.logger.info(`[deepartments] preset "${presetId}" materialized at ${dstDir}`)
     } catch (error: unknown) {
       // Non-fatal: if the preset cannot be materialized (e.g. source absent), the
-      // head setup simply mounts nothing and still gets its board tools.
-      ctx.logger.warn(`[deepartments] head preset materialization skipped: ${error instanceof Error ? error.message : String(error)}`)
+      // matching setup simply mounts nothing and still gets its board tools.
+      ctx.logger.warn(`[deepartments] preset "${presetId}" materialization skipped: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -918,13 +967,21 @@ export function applyInvoke(ctx: Context, config: Config) {
   /** Disposer closure per tool the head own-layer registers. */
   type HeadToolDisposers = { dispose: () => void }
 
-  /** Install the head's board toolset scoped to `agentCtx` (the head's OWN
+  /** Install the post's board toolset scoped to `agentCtx` (the post's OWN
    * layer — no toolFilter needed for a root agent). The same tool bodies the
-   * host plane registers, reused for a head: dept_room_read/write,
+   * host plane registers, reused for any resident post: dept_room_read/write,
    * dept_witness_write, dept_room_who, dept_whereami, dept_memo_write,
-   * dept_sleep. dept_sleep's HEAD version also disposes the head's
-   * AgentHandle (the plugin's byHeadHandle map) after marking sleepEpoch. */
-  const installHeadBoardTools = (agentCtx: Context): HeadToolDisposers => {
+   * dept_sleep. dept_sleep's head version also disposes the post's AgentHandle
+   * (the plugin's byHeadHandle map) after marking sleepEpoch.
+   *
+   * Batch 3a — `manager: true` (a department HEAD, not a worker) additionally
+   * registers the department-lifecycle tools `dept_post_create` and
+   * `dept_post_retire`, so a head can create/retire the WORKERS of its own
+   * department. A worker (`manager: false`) gets ONLY the read/write board
+   * tools — never the create/retire life-cycle controls (and a HOST never gets
+   * them either: these register ONLY in the head own-layer, never the global
+   * host plane). */
+  const installHeadBoardTools = (agentCtx: Context, manager = false): HeadToolDisposers => {
     const disposers: Array<() => void> = []
 
     disposers.push(agentCtx.tools.register(defineTool({
@@ -1351,53 +1408,172 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
     })))
 
+    // --- Batch 3a: department-lifecycle tools — HEAD (manager) only ------
+    // A department HEAD creates and retires DISPOSABLE WORKERS in its own
+    // department room. These register ONLY here, in the head own-layer, so a
+    // worker (manager:false) and a HOST (global plane) never see them — the
+    // "host-CANNOT" invariant is structural (tool simply absent).
+    if (manager) {
+      disposers.push(agentCtx.tools.register(defineTool({
+        name: 'dept_post_create',
+        description: 'Create a DISPOSABLE department worker in YOUR department room: spawn a fresh root agent (sessionId worker-<postId>), register it in posts.json as a disposable entry (provider:"worker"), and deliver its first message on the board. The worker lives in the department room and sees the shared board; it works your assigned task and sleeps when done; you retire it later with dept_post_retire. The first message (firstMessage, or prompt) is posted as a durable board message addressed to the worker. Emits a `deepartments/post-created` board message as its signal.',
+        parameters: {
+          postId: { type: 'string', required: true, description: 'Short slug for the worker, e.g. "researcher-alpha" (unique; not already registered).' },
+          role: { type: 'string', required: true, description: 'The worker role, e.g. "rank-and-file researcher".' },
+          room: { type: 'string', description: 'Department room id for the worker. Defaults to your own department room.' },
+          prompt: { type: 'string', description: 'Initial assignment to the worker (alias of firstMessage).' },
+          firstMessage: { type: 'string', description: 'The worker\'s initial assignment, delivered as a durable board message addressed to it.' }
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              postId: { type: 'string', required: true },
+              sessionId: { type: 'string', required: true },
+              roomId: { type: 'string', required: true }
+            }
+          },
+          render: (_args, value) => [{ type: 'text', text: `created worker ${value.postId} (session ${value.sessionId}) in room ${value.roomId}` } as const]
+        },
+        async execute(args, exec): Promise<{ postId: string; sessionId: string; roomId: string }> {
+          const agent = exec.agent
+          if (!agent) throw new Error('dept_post_create requires a calling agent (exec.agent was undefined)')
+          if (agents === void 0) throw new Error('[deepartments] dept_post_create requires the agents service')
+          const headId = postIdForChild(agent.id as string)
+          if (headId === void 0) throw new Error('[deepartments] dept_post_create is for a department HEAD (registered post), not the host')
+          const headEntry = byPost.get(headId)
+          if (headEntry === void 0) throw new Error(`[deepartments] dept_post_create: head "${headId}" is not registered`)
+          // postId must be unique — reject an already-registered post AND a
+          // configured head (a worker must never shadow a head's identity).
+          if (byPost.has(args.postId)) throw new Error(`[deepartments] dept_post_create: postId "${args.postId}" is already registered`)
+          if (coordinatorForPost(args.postId) !== void 0) throw new Error(`[deepartments] dept_post_create: postId "${args.postId}" is a configured department head, not a worker`)
+          // Room: default to the creating head's own department room; must be a
+          // known configured room.
+          const roomId = args.room ?? headEntry.roomId
+          const knownRoom = config.org.rooms.some((room) => room.id === roomId)
+          if (!knownRoom) throw new Error(`[deepartments] dept_post_create: "${roomId}" is not a known department room`)
+          const sessionId = workerSessionId(args.postId)
+          if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_post_create: a live agent already exists for session "${sessionId}"`)
+          const firstMessage = args.firstMessage ?? args.prompt
+          const setup = workerSetup(args.postId, roomId, args.role)
+          const handle = await agents.create({
+            sessionId: String(SessionId(sessionId)),
+            meta: { cwd: repoRoot, origin: undefined, agentPreset: WORKER_PRESET_ID },
+            agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+            setup
+          })
+          registerEntry({
+            postId: args.postId,
+            sessionId: String(SessionId(sessionId)),
+            roomId,
+            agentPreset: WORKER_PRESET_ID,
+            provider: 'worker',
+            role: args.role
+          })
+          byHeadHandle.set(String(SessionId(sessionId)), handle)
+          // Deliver the initial assignment (or a creation note) as a DURABLE
+          // board message from the head addressed to the worker — this IS the
+          // `deepartments/post-created` event, and the wake relay wakes the
+          // worker to read it. No direct followup needed; the board is durable.
+          const text = firstMessage ?? `[created] worker "${args.postId}" (${args.role || 'department worker'}) is registered in this room. You are disposable — work your assigned task, then dept_memo_write and dept_sleep; your head retires you when done.`
+          await emitBoardMessage(roomId, headId, [args.postId], text)
+          return { postId: args.postId, sessionId: String(SessionId(sessionId)), roomId }
+        }
+      })))
+
+      disposers.push(agentCtx.tools.register(defineTool({
+        name: 'dept_post_retire',
+        description: 'Retire a DISPOSABLE WORKER of YOUR department: post a withdrawal note addressed to the worker, dispose its live AgentHandle, and unregister it from the registry (persisted). Scope: you may only retire workers in YOUR OWN department room, and only disposable workers (provider:"worker") — permanent department heads are NOT retired by this path. Unknown postIds are rejected loudly.',
+        parameters: {
+          postId: { type: 'string', required: true, description: 'The worker post id to retire (e.g. "researcher-alpha").' }
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              postId: { type: 'string', required: true },
+              roomId: { type: 'string', required: true },
+              retired: { type: 'boolean', required: true }
+            }
+          },
+          render: (_args, value) => [{ type: 'text', text: `retired worker ${value.postId} (room ${value.roomId})` } as const]
+        },
+        async execute(args, exec): Promise<{ postId: string; roomId: string; retired: boolean }> {
+          const agent = exec.agent
+          if (!agent) throw new Error('dept_post_retire requires a calling agent (exec.agent was undefined)')
+          return retirePost(args.postId, agent.id as string)
+        }
+      })))
+    }
+
     return { dispose: () => { for (const d of disposers) d() } }
   }
 
-  /** The agent's coordinator.role as a prompt section (persona = role, NOT a
-   * mission — missions arrive as addressed board messages). Registered on the
-   * head's own systemPrompt layer when that service is composed. */
-  const installRoleSection = (agentCtx: Context, role: string, postId: string, roomId: string): void => {
+  /** The role of a post as a prompt section (persona = role, NOT a mission —
+   * missions arrive as addressed board messages). Registered on the post's own
+   * systemPrompt layer when that service is composed. `isWorker` switches the
+   * framing between a PERMANENT department head (manager) and a TEMPORARY
+   * DISPOSABLE worker. Both are BOOT-QUIET (never act unaddressed). */
+  const installRoleSection = (agentCtx: Context, role: string, postId: string, roomId: string, isWorker: boolean): void => {
     const sp = agentCtx.get('systemPrompt')
     if (sp === void 0 || typeof (sp as { section?: unknown }).section !== 'function') return
     sp.section({
-      name: `deepartments:head:role:${postId}`,
+      name: `deepartments:${isWorker ? 'worker' : 'head'}:role:${postId}`,
       order: 1,
-      text: `You are "${postId}", the ${role || 'department head'} of the "${roomId}" department room. You are a permanent, first-class agent: you do not edit the repository, run builders, or spawn other agents. Your world is the board — read with dept_room_read, reply with dept_room_write, orient with dept_whereami/dept_room_who, and persist memory with dept_memo_write before dept_sleep. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed board message arrives; you never proactively write to the board.`
+      text: isWorker
+        ? `You are "${postId}", a ${role || 'rank-and-file researcher'} DISPOSABLE department worker in the "${roomId}" department room of Deepartments (DeepSeek Harness). Your department HEAD created you as a temporary worker agent; your whole world is the department board and the shared room you live in. You do not edit the repository, run builders, or spawn other agents. Read addressed messages with dept_room_read, reply in the room with dept_room_write, orient with dept_whereami/dept_room_who, and persist your findings/memory with dept_memo_write. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed board message arrives. Work the task your department head assigns you; when you are DONE, write dept_memo_write to save your results, then conclude with dept_sleep. You are DISPOSABLE: your head retires you with dept_post_retire when you are finished.`
+        : `You are "${postId}", the ${role || 'department head'} of the "${roomId}" department room. You are a permanent, first-class agent: you do not edit the repository, run builders, or spawn other agents. Your world is the board — read with dept_room_read, reply with dept_room_write, orient with dept_whereami/dept_room_who, and persist memory with dept_memo_write before dept_sleep. You may create and retire DISPOSABLE WORKERS of your department with dept_post_create and dept_post_retire. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed board message arrives; you never proactively write to the board.`
     })
   }
 
-  /** Build the `setup(agentCtx)` for one head: mount the 'deepartments-head'
-   * preset and register the head's board toolset + coordinator role, scoped to
-   * the head agent. Runs pre-publication on the fresh agent's scoped context
-   * (rc.8 CreateAgentOptions.setup, index.d.ts:117). */
-  const headSetup = (postId: string, roomId: string, role: string): ((agentCtx: Context) => void | { commit(): void }) => {
+  /** Build the `setup(agentCtx)` for one post (head OR worker): mount the post's
+   * dedicated preset and register its board toolset + role, scoped to the post
+   * agent. Runs pre-publication on the fresh agent's scoped context
+   * (rc.8 CreateAgentOptions.setup, index.d.ts:117). The `manager` flag gates
+   * the department-lifecycle tools (a head creates/retires; a worker cannot). */
+  const postSetup = (postId: string, roomId: string, role: string, opts: { preset: string; manager: boolean }): ((agentCtx: Context) => void | { commit(): void }) => {
+    const presetId = opts.preset
+    const kind = opts.manager ? 'head' : 'worker'
     return (agentCtx) => {
       // (0) LEAN tool restriction: a root agent has no startContinuable
-      // toolFilter, so we hide the GLOBAL host-plane tools from the head with an
+      // toolFilter, so we hide the GLOBAL host-plane tools from the post with an
       // `allow: []` mask on the inherited surface (rc.8 dsh-tools restrict —
       // index.d.ts:611 "A restriction filters what a scope inherits... a
       // restricted-away global reads as absent"; it never touches the scope's
-      // OWN layer). The head therefore sees ONLY its own-layer board tools.
-      const restrictHead = agentCtx.tools.restrict({ allow: [] })
-      // (a) Mount the dedicated head preset if the service is present.
+      // OWN layer). The post therefore sees ONLY its own-layer board tools.
+      const restrictOwn = agentCtx.tools.restrict({ allow: [] })
+      // (a) Mount the dedicated preset if the service is present.
       if (agentPresets !== void 0) {
-        void agentPresets.mount(agentCtx, 'deepartments-head').catch((error: unknown) => {
-          ctx.logger.warn(`[deepartments] head "${postId}" preset mount failed (board tools still installed): ${error instanceof Error ? error.message : String(error)}`)
+        void agentPresets.mount(agentCtx, presetId).catch((error: unknown) => {
+          ctx.logger.warn(`[deepartments] ${kind} "${postId}" preset mount failed (board tools still installed): ${error instanceof Error ? error.message : String(error)}`)
         })
       }
-      // (b) Register the board toolset scoped to this agent.
-      const tools = installHeadBoardTools(agentCtx)
-      // (c) Persona = coordinator.role (not a mission).
-      installRoleSection(agentCtx, role, postId, roomId)
+      // (b) Register the board toolset scoped to this agent (manager gates the
+      // department-lifecycle create/retire tools for heads).
+      const tools = installHeadBoardTools(agentCtx, opts.manager)
+      // (c) Persona = the role (a head's role or a worker's role), NOT a mission.
+      installRoleSection(agentCtx, role, postId, roomId, opts.manager === false)
       // Ensure the agent-scoped registrations unwind with the agent.
-      agentCtx.effect(() => () => { tools.dispose(); restrictHead() }, `deepartments: head board tools (${postId})`)
+      agentCtx.effect(() => () => { tools.dispose(); restrictOwn() }, `deepartments: ${kind} board tools (${postId})`)
     }
   }
 
+  /** The setup for a PERMANENT department head (manager — can create/retire
+   * workers). Mounts the 'deepartments-head' preset. */
+  const headSetup = (postId: string, roomId: string, role: string): ((agentCtx: Context) => void | { commit(): void }) =>
+    postSetup(postId, roomId, role, { preset: 'deepartments-head', manager: true })
+
+  /** The setup for a DISPOSABLE department WORKER (no create/retire). Mounts
+   * the 'deepartments-worker' preset. */
+  const workerSetup = (postId: string, roomId: string, role: string): ((agentCtx: Context) => void | { commit(): void }) =>
+    postSetup(postId, roomId, role, { preset: WORKER_PRESET_ID, manager: false })
+
   /** Dispose one head's live AgentHandle (its only teardown capability; the
    * bare `agents.get(id)` returns no dispose — rc.8 index.d.ts:349 vs 155-158).
-   * Idempotent. The durable session survives for a later resume. */
+   * Idempotent. The durable session survives for a later resume. Shared by heads
+   * and workers (both keyed in byHeadHandle by their session id). */
   const disposeHeadHandle = async (sessionId: string): Promise<void> => {
     const handle = byHeadHandle.get(sessionId)
     if (handle === void 0) return
@@ -1407,6 +1583,47 @@ export function applyInvoke(ctx: Context, config: Config) {
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] head dispose for ${sessionId} failed: ${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  /** Retire a registered post cleanly — the SHARED retirement path used by the
+   * global HOST-plane `dept_post_retire` AND the head own-layer `dept_post_retire`.
+   *
+   * Retirement = (a) post a withdrawal note addressed to the post WHILE it is
+   * still registered (so the relay wakes it), (b) dispose its live AgentHandle
+   * (if any), (c) unregister it from byPost/byChild and persist. The persisted
+   * durable session remains (no native delete — researcher M1), but the registry
+   * stops addressing it, so it is never woken again; a retired CONFIGURED head is
+   * simply re-materialized by ensureAllHeads as before (documented gap), whereas
+   * a retired DISPOSABLE WORKER is never re-materialized (workers are runtime-only,
+   * not config — see ensureAllHeads).
+   *
+   * Scope: a HOST caller (`postIdForChild(callerId) === undefined`) may retire
+   * ANY post (today's semantics). A HEAD caller is restricted to DISPOSABLE
+   * WORKERS of ITS OWN department room — a head can never retire a permanent
+   * head or a worker of another head's room via this path. */
+  const retirePost = async (postId: string, callerAgentId: string): Promise<{ postId: string; roomId: string; retired: true }> => {
+    const entry = byPost.get(postId)
+    if (entry === void 0) throw new Error(`[deepartments] dept_post_retire: "${postId}" is not a registered post`)
+    // Scope check for HEAD callers (a caller that IS a registered post is a
+    // department head; a caller with no post entry is a HOST).
+    const callerId = postIdForChild(callerAgentId)
+    if (callerId !== void 0) {
+      const callerEntry = byPost.get(callerId)
+      if (callerEntry === void 0) throw new Error(`[deepartments] dept_post_retire: caller "${callerId}" is not a registered post`)
+      // A head may only retire DISPOSABLE WORKERS...
+      if (entry.provider !== 'worker') throw new Error(`[deepartments] dept_post_retire: "${postId}" is not a disposable worker — a head may only retire workers, never a permanent head`)
+      // ...and only in ITS OWN department room.
+      if (entry.roomId !== callerEntry.roomId) throw new Error(`[deepartments] dept_post_retire: "${postId}" lives in room "${entry.roomId}" but you are head "${callerId}" of room "${callerEntry.roomId}" — you may only retire workers in your own department room`)
+    }
+    // Withdrawal note FIRST (while the post is still registered, so the relay
+    // still wakes the targeted post), then unregister + persist.
+    await emitBoardMessage(entry.roomId, memberIdFor(callerAgentId, entry.roomId), [postId], `[withdrawal] post "${postId}" is retired and unregistered from the board.`)
+    byPost.delete(postId)
+    byChild.delete(entry.sessionId)
+    // Also dispose any live handle (retiring a post should not leave it live).
+    void disposeHeadHandle(entry.sessionId)
+    persistPosts()
+    return { postId, roomId: entry.roomId, retired: true }
   }
 
   /** Ensure ONE configured head is materialized as a live root agent.
@@ -1474,10 +1691,20 @@ export function applyInvoke(ctx: Context, config: Config) {
    * the registries load; also safe to re-run — idempotent per head). */
   const ensureAllHeads = async (): Promise<void> => {
     if (agents === void 0) return
-    // Only materialize the preset into the harness-home user root when the
+    // Only materialize the presets into the harness-home user root when the
     // agentPresets service is present (hermetic compositions that never resolve
-    // presets should not write outside the stateDir).
-    if (agentPresets !== void 0) await materializeHeadPreset()
+    // presets should not write outside the stateDir). BOTH the head preset and
+    // the disposable-worker preset are made resolvable here.
+    if (agentPresets !== void 0) {
+      await materializePreset('deepartments-head')
+      await materializePreset(WORKER_PRESET_ID)
+    }
+    // CRITICAL (Batch 3a guarantee): ensureAllHeads ONLY ever iterates the
+    // CONFIGURED departments' coordinators (`config.org.departments`). Workers
+    // are created at RUNTIME by dept_post_create and are NEVER present in this
+    // config — so a retired worker (whose registry entry was removed) is never
+    // re-materialized by a later boot. The "retired worker stays retired"
+    // invariant holds structurally.
     for (const department of config.org.departments) {
       const coordinator = department.coordinator
       if (coordinator === void 0) continue
@@ -1521,12 +1748,18 @@ export function applyInvoke(ctx: Context, config: Config) {
     return stuckNow() - prior.at > STUCK_HEAD_MS
   }
 
-  /** Cold-resume (or respawn-from-sleep) + wake one head with the pointer-only
-   * board delta. Called by the relay when the head is not live (cold boot or
-   * slept+disposed). On respawn-from-sleep we first dispose any stale live
-   * handle, clear sleepEpoch, keep the previousChildId trace, then resume. */
-  const wakeHead = async (entry: PostEntry, record: BoardRecord, roomId: string): Promise<void> => {
-    if (agents === void 0) throw new Error('[deepartments] wakeHead requires the agents service')
+  /** Cold-resume (or respawn-from-sleep) + wake one post (head OR worker) with
+   * the pointer-only board delta. Called by the relay when the post is not live
+   * (cold boot or slept+disposed). On respawn-from-sleep we first dispose any
+   * stale live handle, clear sleepEpoch, keep the previousChildId trace, then
+   * resume. Batch 3a: a WORKER is woken through the SAME raw root-agent path as
+   * a head — `coordinatorForPost` is undefined for workers, so the role falls
+   * back to the entry's captured `role` ('department worker' default), and the
+   * create/resume materializes the 'deepartments-worker' preset. Sleep/respawn
+   * is post-agnostic (keyed by sessionId) and needs no worker-specific change. */
+  const wakePost = async (entry: PostEntry, record: BoardRecord, roomId: string): Promise<void> => {
+    if (agents === void 0) throw new Error('[deepartments] wakePost requires the agents service')
+    const isWorker = entry.provider === 'worker'
     const sessionId = SessionId(entry.sessionId)
     const coordinator = coordinatorForPost(entry.postId)
     if (entry.sleepEpoch !== void 0) {
@@ -1543,17 +1776,22 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
     const live = agents.get(String(sessionId))
     if (live === void 0) {
-      const role = coordinator?.role ?? entry.postId
-      const setup = headSetup(entry.postId, entry.roomId, role)
+      // Role fallback (Batch 3a): a worker has NO coordinator config, so fall
+      // back to its durable captured role, else a neutral 'department worker'.
+      const role = coordinator?.role ?? entry.role ?? 'department worker'
+      const setup = isWorker
+        ? workerSetup(entry.postId, entry.roomId, role)
+        : headSetup(entry.postId, entry.roomId, role)
       const agentOptions = coordinator?.agentOptions
+      const preset: string = isWorker ? WORKER_PRESET_ID : PRESET_ID
       let handle: AgentHandleLike | undefined
       try {
         handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions, setup })
       } catch (error: unknown) {
-        ctx.logger.warn(`[deepartments] head "${entry.postId}" wake-resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
+        ctx.logger.warn(`[deepartments] ${isWorker ? 'worker' : 'head'} "${entry.postId}" wake-resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
         handle = await agents.create({
           sessionId: String(sessionId),
-          meta: { cwd: repoRoot, origin: undefined, agentPreset: PRESET_ID },
+          meta: { cwd: repoRoot, origin: undefined, agentPreset: preset },
           agentOptions,
           setup
         })
@@ -1561,9 +1799,9 @@ export function applyInvoke(ctx: Context, config: Config) {
       if (handle !== void 0) byHeadHandle.set(String(sessionId), handle)
     }
     const target = agents.get(String(sessionId))
-    if (target === void 0) throw new Error(`[deepartments] head "${entry.postId}" could not be materialized for wake`)
+    if (target === void 0) throw new Error(`[deepartments] ${isWorker ? 'worker' : 'head'} "${entry.postId}" could not be materialized for wake`)
     // Fix A2 — fresh baseline for the (re)materialized incarnation so the relay
-    // never misjudges a just-cold-resumed head as stuck before it can speak.
+    // never misjudges a just-cold-resumed post as stuck before it can speak.
     markHeadProgress(String(sessionId), target)
     const senderSession = byPost.get(record.from)?.sessionId ?? hosts.get(record.from)?.sessionId ?? record.from
     target.followup(createUserMessage({
@@ -1631,7 +1869,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // the host branch below. This REMOVES the rc.6 "parent must be live"
       // limitation: no parent hop, no lineage. A head that is LIVE AND
       // PROGRESSING is woken inline; a cold/slept head (not live — disposed or
-      // after a restart) is cold-resumed (or respawned from sleep) by wakeHead
+      // after a restart) is cold-resumed (or respawned from sleep) by wakePost
       // then woken; a live-but-STUCK head (running with no session progress past
       // STUCK_HEAD_MS — Batch 1c frozen-resident loop) is disposed and
       // cold-resumed so the wake is re-delivered from the durable board record.
@@ -1643,9 +1881,9 @@ export function applyInvoke(ctx: Context, config: Config) {
           // Not live (cold) or slept: materialize (resume/respawn) then wake.
           // Fire-and-forget from the relay's perspective (a detached board-write
           // side effect); failures are logged, and the durable registry state
-          // (sleepEpoch etc.) is only mutated inside wakeHead AFTER the resume
+          // (sleepEpoch etc.) is only mutated inside wakePost AFTER the resume
           // succeeds, so a later wake retries cleanly.
-          void wakeHead(entry, record, roomId).catch((error: unknown) => {
+          void wakePost(entry, record, roomId).catch((error: unknown) => {
             ctx.logger.warn(`[deepartments] head wake to "${member}" failed: ${error instanceof Error ? error.message : String(error)}`)
           })
           continue
@@ -1665,12 +1903,12 @@ export function applyInvoke(ctx: Context, config: Config) {
           const sid = String(sessionId)
           void serializeHeadRecovery(sid, async () => {
             // Dispose the frozen handle first; once gone, agents.get(sid) is
-            // undefined again and wakeHead takes the COLD resume path.
+            // undefined again and wakePost takes the COLD resume path.
             await disposeHeadHandle(sid)
             // Reset progress baseline so the fresh incarnation is judged fresh.
             headProgress.delete(sid)
             try {
-              await wakeHead(entry, record, roomId)
+              await wakePost(entry, record, roomId)
             } catch (error: unknown) {
               ctx.logger.warn(`[deepartments] stuck-head wake to "${member}" failed after dispose: ${error instanceof Error ? error.message : String(error)}`)
             }
@@ -2124,19 +2362,12 @@ export function applyInvoke(ctx: Context, config: Config) {
       render: (_args, value) => [{ type: 'text', text: `retired post ${value.postId} (room ${value.roomId})` } as const]
     },
     async execute(args, exec): Promise<{ postId: string; roomId: string; retired: boolean }> {
-      const entry = byPost.get(args.postId)
-      if (entry === void 0) throw new Error(`[deepartments] dept_post_retire: "${args.postId}" is not a registered post`)
       const agent = exec.agent
       if (!agent) throw new Error('dept_post_retire requires a calling agent (exec.agent was undefined)')
-      // Withdrawal note FIRST (while the post is still registered, so the relay
-      // still wakes the targeted post), then unregister + persist.
-      await emitBoardMessage(entry.roomId, memberIdFor(agent.id as string, entry.roomId), [args.postId], `[withdrawal] head "${args.postId}" is retired and unregistered from the board.`)
-      byPost.delete(args.postId)
-      byChild.delete(entry.sessionId)
-      // Also dispose any live handle (retiring a head should not leave it live).
-      void disposeHeadHandle(entry.sessionId)
-      persistPosts()
-      return { postId: args.postId, roomId: entry.roomId, retired: true }
+      // Delegate to the shared retirement path (Batch 3a). From the HOST plane
+      // the caller is not a registered post → a HOST, so any post may be retired
+      // (today's semantics preserved).
+      return retirePost(args.postId, agent.id as string)
     }
   }))
 

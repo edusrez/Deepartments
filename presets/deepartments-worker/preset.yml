@@ -1,0 +1,3 @@
+name: Deepartments — Department Worker
+description: Temporary, disposable department worker ("rank-and-file researcher") for the Deepartments organization — created at runtime by its department head via dept_post_create. Its whole world is its department's board room (dept_room_read/write, dept_whereami, dept_memo_write, dept_sleep). No host, builder, or lifecycle (create/retire) tools. The per-worker role/assignment is delivered by the plugin's worker setup().
+order: 21

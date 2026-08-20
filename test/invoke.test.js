@@ -348,7 +348,7 @@ async function readCursors(stateDir) {
  * stable session id (`head-<postId>`). Mirrors what a production posts.json
  * holds for a previously-materialized head.
  */
-async function seedPost(stateDir, { postId, sessionId = `head-${postId}`, roomId, agentPreset = 'deepartments-head', sleepEpoch, previousChildId }) {
+async function seedPost(stateDir, { postId, sessionId = `head-${postId}`, roomId, agentPreset = 'deepartments-head', provider, role, sleepEpoch, previousChildId }) {
   const postsPath = path.join(stateDir, 'posts.json')
   let existing = {}
   try {
@@ -357,6 +357,9 @@ async function seedPost(stateDir, { postId, sessionId = `head-${postId}`, roomId
     /* no prior seed */
   }
   const entry = { sessionId, roomId, agentPreset }
+  // Batch 3a: a disposable worker carries its provider:'worker' marker + role.
+  if (provider !== undefined) entry.provider = provider
+  if (role !== undefined) entry.role = role
   // Batch G: a slept head carries the durable sleep-mark (and its previous
   // incarnation's sessionId) in posts.json — seeded so the relay can respawn it.
   if (sleepEpoch !== undefined) entry.sleepEpoch = sleepEpoch
@@ -1055,7 +1058,7 @@ test('resume-when-durable: a durable head session (sessionId in posts.json) is r
   })
 })
 
-test('a head is lean: own-layer board tools present, host-plane tools NOT exposed', async () => {
+test('a head is lean: own-layer board tools present, host-plane tools NOT exposed; head gets the department-lifecycle (create/retire) tools', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
@@ -1067,8 +1070,12 @@ test('a head is lean: own-layer board tools present, host-plane tools NOT expose
       for (const name of ['dept_room_read', 'dept_room_write', 'dept_room_who', 'dept_whereami', 'dept_witness_write', 'dept_memo_write', 'dept_sleep']) {
         assert.ok(headCtx.tools.get(name, key), `${name} installed in the head own layer`)
       }
-      // No host/builder/delegation tools — retire and delegation are host-plane.
-      assert.equal(headCtx.tools.get('dept_post_retire', key), undefined, 'retire is host-plane only, not a head capability')
+      // Batch 3a: a department HEAD (manager) additionally gets the
+      // department-lifecycle tools, scoped to its own layer — the create tool
+      // and the worker-scoped retire tool. These are NOT on the global host
+      // plane as head-capabilities; they are the head own-layer versions.
+      assert.ok(headCtx.tools.get('dept_post_create', key), 'dept_post_create installed in the head own layer (a head creates its workers)')
+      assert.ok(headCtx.tools.get('dept_post_retire', key), 'dept_post_retire installed in the head own layer (a head retires its workers)')
       assert.ok(head.ctx.agent === head, 'the head context is scoped to the head agent')
     } finally {
       await dispose()
@@ -1948,6 +1955,253 @@ test('Batch G regression: a head that never slept wakes normally via the live fo
       assert.equal(posts[postId].previousChildId, undefined, 'no previous incarnation recorded')
     } finally {
       await dispose()
+    }
+  })
+})
+
+// --- Batch 3a: department-worker lifecycle (dept_post_create / worker wake /
+// sleep-respawn / dept_post_retire scope). A configured head (manager) creates
+// DISPOSABLE workers (root agents, sessionId worker-<postId>, provider:'worker')
+// in its department room, coordinates them via the board, and retires them.
+
+/** Find the child (scope) for a live agent by its session id in the stub. The
+ * stub keeps a PARALLEL pair: `childAgents` (the agent objects, in creation
+ * order) and `childContexts` (their {ctx,key} scopes, same order). */
+function childContextFor(agents, sessionId) {
+  const index = agents.childAgents.findIndex((agent) => agent && agent.id === sessionId)
+  if (index < 0) return undefined
+  return { ctx: agents.childContexts[index].ctx, key: agents.childContexts[index].key }
+}
+
+/** Get the head agent + its own-layer scoped toolset (the configured head
+ * `head-research-head` is the first materialized agent at boot). */
+async function bootWithHead(stateDir) {
+  const env = await bootPlugin(stateDir)
+  await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'head created at boot')
+  const head = env.agents.store.get('head-research-head')
+  const { ctx: headCtx, key } = childContextFor(env.agents, 'head-research-head')
+  return { ...env, head, headCtx, key }
+}
+
+test('dept_post_create (head): a head creates a DISPOSABLE worker root agent (sessionId worker-<postId>, provider:"worker"), delivers its first message on the board, and the host has NO dept_post_create', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const createTool = headCtx.tools.get('dept_post_create', key)
+      assert.ok(createTool, 'dept_post_create installed in the head own layer')
+      // Host-CANNOT: dept_post_create exists ONLY in the head own layer, never
+      // on the global host plane.
+      assert.equal(root.tools.get('dept_post_create'), undefined, 'host plane has NO dept_post_create')
+
+      const signal = new AbortController().signal
+      const result = await createTool.execute(
+        { postId: 'researcher-alpha', role: 'rank-and-file researcher', firstMessage: 'investigate X and report on the board' },
+        { agent: head, signal }
+      )
+      assert.equal(result.postId, 'researcher-alpha')
+      assert.equal(result.sessionId, 'worker-researcher-alpha')
+      assert.equal(result.roomId, 'research', 'worker defaults to the creating head room')
+
+      // The worker root agent was created via ctx.agents.create (meta
+      // agentPreset deepartments-worker, origin undefined) and is LIVE.
+      assert.equal(agents.store.has('worker-researcher-alpha'), true, 'worker agent is live after create')
+      const createCall = agents.createCalls.find((c) => String(c.sessionId) === 'worker-researcher-alpha')
+      assert.ok(createCall, 'a ctx.agents.create call for the worker')
+      assert.equal(createCall.meta.agentPreset, 'deepartments-worker', 'worker mounts the deepartments-worker preset')
+      assert.equal(createCall.meta.origin, undefined, 'worker is a root/main agent (no origin)')
+
+      // Durable registry: disposable entry.
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['researcher-alpha'].sessionId, 'worker-researcher-alpha')
+      assert.equal(posts['researcher-alpha'].roomId, 'research')
+      assert.equal(posts['researcher-alpha'].agentPreset, 'deepartments-worker')
+      assert.equal(posts['researcher-alpha'].provider, 'worker', 'disposable marker persisted')
+
+      // First message delivered as a durable board message → the relay wakes
+      // the worker to read it (worker inbox receives the board followup).
+      const worker = agents.store.get('worker-researcher-alpha')
+      await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'worker woken by its first board message')
+      assert.equal(worker.inboxMessages.at(-1).source.kind, 'board', 'worker wake uses the board followup source')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('dept_post_create validation: duplicate postId rejects; a configured-head postId rejects; unknown room rejects', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const createTool = headCtx.tools.get('dept_post_create', key)
+      await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      // Duplicate postId → loud rejection.
+      await assert.rejects(
+        () => createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal }),
+        /already registered/, 'duplicate postId rejected loudly'
+      )
+      // A configured head postId is already-registered (the head was materialized
+      // at boot), so it can never be (re)claimed as a worker.
+      await assert.rejects(
+        () => createTool.execute({ postId: 'research-head', role: 'rank-and-file researcher' }, { agent: head, signal }),
+        /already registered/, 'a configured head postId is rejected as a worker'
+      )
+      // Unknown room → rejects.
+      await assert.rejects(
+        () => createTool.execute({ postId: 'researcher-beta', role: 'rank', room: 'nope' }, { agent: head, signal }),
+        /not a known department room/, 'unknown room rejected loudly'
+      )
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('a worker is lean: board tools present, the department-lifecycle (create/retire) tools are NOT exposed to it', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const createTool = headCtx.tools.get('dept_post_create', key)
+      await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, 'worker-researcher-alpha')
+      // Worker gets the board toolset...
+      for (const name of ['dept_room_read', 'dept_room_write', 'dept_room_who', 'dept_whereami', 'dept_witness_write', 'dept_memo_write', 'dept_sleep']) {
+        assert.ok(workerCtx.tools.get(name, workerKey), `${name} installed in the worker own layer`)
+      }
+      // ...but NOT the department-lifecycle controls (workers never create/retire).
+      assert.equal(workerCtx.tools.get('dept_post_create', workerKey), undefined, 'worker has NO dept_post_create')
+      assert.equal(workerCtx.tools.get('dept_post_retire', workerKey), undefined, 'worker has NO dept_post_retire')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('worker sleep + respawn: a slept worker is cold-resumed as a fresh incarnation on its next wake (deepartments-worker setup)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, root, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const createTool = headCtx.tools.get('dept_post_create', key)
+      await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+
+      // The worker saves its journal and SLEEPS (disposes its handle, marks sleepEpoch).
+      const workerAgent = agents.store.get('worker-researcher-alpha')
+      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, 'worker-researcher-alpha')
+      const memo = workerCtx.tools.get('dept_memo_write', workerKey)
+      await memo.execute({ summary: 'found X; retiring to sleep' }, { agent: workerAgent, signal })
+      const sleep = workerCtx.tools.get('dept_sleep', workerKey)
+      const sleepResult = await sleep.execute({}, { agent: workerAgent, signal })
+      assert.ok(sleepResult.sleepEpoch > 0, 'worker sleep marked')
+      // The worker handle is disposed → not live anymore; the durable entry
+      // (provider:'worker') + sleepEpoch persist.
+      assert.equal(agents.store.has('worker-researcher-alpha'), false, 'worker AgentHandle disposed on sleep')
+      // A durable board message to it cold-resumes + wakes it.
+      const boardSession = root.sessions.get(SessionId(roomSessionId('research')))
+      const seq = await nextSeq(stateDir, 'research')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'research'), messageRecord(seq, 'research-head', ['researcher-alpha'], 'wake up'), 'research')
+      await waitFor(() => agents.store.has('worker-researcher-alpha'), 5000, 'slept worker cold-resumed')
+      const resumed = agents.store.get('worker-researcher-alpha')
+      await waitFor(() => resumed.inboxMessages.length >= 1, 5000, 'resumed worker woken')
+      assert.equal(resumed.inboxMessages.at(-1).source.kind, 'board', 'worker wake uses the board followup source')
+      // Same durable session id reused (resume, not a second create).
+      assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === 'worker-researcher-alpha').length >= 1, true, 'worker cold-resumed via ctx.agents.resume')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['researcher-alpha'].sleepEpoch, undefined, 'sleepEpoch cleared after the wake')
+      assert.equal(posts['researcher-alpha'].provider, 'worker', 'disposable marker survives sleep/respawn')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('dept_post_retire (head): a head retires a worker of ITS OWN room (withdrawal note + disposed handle + unregistered); unknown postId rejects; a permanent head is not retired', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, root, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const createTool = headCtx.tools.get('dept_post_create', key)
+      await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const boardSession = root.sessions.get(SessionId(roomSessionId('research')))
+      const beforeCount = boardSession.events.length
+
+      const retireTool = headCtx.tools.get('dept_post_retire', key)
+      assert.ok(retireTool, 'head own layer has dept_post_retire')
+      const result = await retireTool.execute({ postId: 'researcher-alpha' }, { agent: head, signal })
+      assert.equal(result.retired, true)
+      assert.equal(result.roomId, 'research')
+
+      // Handle disposed + unregistered + persisted removal.
+      await waitFor(async () => (await readPosts(stateDir))['researcher-alpha'] === undefined, 5000, 'worker removed from posts.json')
+      assert.equal(agents.store.has('worker-researcher-alpha'), false, 'worker AgentHandle disposed on retire')
+      // Withdrawal note posted in the room.
+      await waitFor(() => boardSession.events.length > beforeCount, 5000, 'withdrawal note emitted')
+
+      // Unknown target → loud rejection.
+      await assert.rejects(() => retireTool.execute({ postId: 'ghost' }, { agent: head, signal }), /not a registered post/, 'unknown postId rejected loudly')
+      // A head can never retire a PERMANENT head via this path.
+      await assert.rejects(() => retireTool.execute({ postId: 'research-head' }, { agent: head, signal }), /not a disposable worker/, 'head cannot retire a permanent head')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('dept_post_retire scope: a head CANNOT retire a worker of ANOTHER department room', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const createTool = headCtx.tools.get('dept_post_create', key)
+      // Create a worker explicitly in the 'board' room (a known room) — NOT the
+      // head's own 'research' room.
+      await createTool.execute({ postId: 'researcher-elsewhere', role: 'rank', room: 'board' }, { agent: head, signal })
+      const retireTool = headCtx.tools.get('dept_post_retire', key)
+      await assert.rejects(
+        () => retireTool.execute({ postId: 'researcher-elsewhere' }, { agent: head, signal }),
+        /may only retire workers in your own department room/, 'head scoped to its own department room'
+      )
+      // The worker is still registered (scope rejection left it intact).
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['researcher-elsewhere'].provider, 'worker', 'worker not retired by a rejecting call')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('retired worker is NOT re-materialized by ensureAllHeads (workers are runtime-only, never booted from config)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Seed a durable WORKER entry (provider:'worker') directly into posts.json
+    // BEFORE boot — exactly like a durable worker left in a previous boot. On
+    // boot, ensureAllHeads iterates ONLY configured coordinators, so the worker
+    // is NOT materialized automatically.
+    await seedPost(stateDir, { postId: 'researcher-alpha', sessionId: 'worker-researcher-alpha', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker' })
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'configured head still materialized at boot')
+      // The seeded worker is NOT created by ensureAllHeads.
+      assert.equal(agents.store.has('worker-researcher-alpha'), false, 'ensureAllHeads never materializes a disposable worker (config-only)')
+      // Retire it; it must not re-materialize.
+      const retireTool = headCtx.tools.get('dept_post_retire', key)
+      const signal = new AbortController().signal
+      await retireTool.execute({ postId: 'researcher-alpha' }, { agent: head, signal })
+      await waitFor(async () => (await readPosts(stateDir))['researcher-alpha'] === undefined, 5000, 'worker retired+removed')
+      assert.equal(agents.store.has('worker-researcher-alpha'), false, 'worker disposed on retire')
+      // dispose + re-boot the SAME stateDir: ensureAllHeads does NOT revive it.
+      await dispose()
+      const env2 = await bootPlugin(stateDir)
+      try {
+        await waitFor(() => env2.agents.store.has('head-research-head'), 5000, 'configured head back at re-boot')
+        assert.equal(env2.agents.store.has('worker-researcher-alpha'), false, 'retired worker NOT re-materialized after re-boot')
+        const posts = await readPosts(stateDir)
+        assert.equal(posts['researcher-alpha'], undefined, 'retired worker stays out of posts.json after re-boot')
+      } finally {
+        await env2.dispose()
+      }
+    } finally {
+      void 0
     }
   })
 })
