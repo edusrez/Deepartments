@@ -2855,24 +2855,25 @@ export function applyInvoke(ctx: Context, config: Config) {
   // (`ctx.get('webServer') ?? ctx.get('httpServer')`); when absent (headless /
   // host-less) the channel — a GUI feature — is skipped silently, exactly like
   // the old `connection !== void 0` gate (the client is the only consumer).
-  const connection = ctx.get('connection') as (ConnectionLike & { trustedHosts?: string[] }) | undefined
-  // rc.8 INJECT FIX: the bare `ctx.get('webServer') ?? ctx.get('httpServer')`
-  // lookup did NOT resolve the live webServer in OUR plugin scope (the mount
-  // silently skipped → the deployed routes returned HTTP 405). The PROVEN
-  // pattern (dshmarket + dsh-client-connection + dsh-web-app themselves) is to
-  // declare the service via `ctx.inject(['webServer'], (hostCtx) => ...)`:
-  // Cordis `inject` binds the service into the callback's scope, so
-  // `hostCtx.webServer` is guaranteed to be the live service. We keep rule 7's
-  // `httpServer` fallback, and skip silently (headless / host-less) if neither
-  // is present — the channel is a GUI feature and the client is the only
-  // consumer, exactly like the old `connection !== void 0` gate.
-  ctx.inject(['webServer'], (hostCtx) => {
+  //
+  // rc.8 INJECT FIX: the bare `ctx.get('webServer')` / `ctx.get('connection')`
+  // lookups did NOT resolve the live services in OUR plugin scope (the mount
+  // silently skipped → the deployed routes returned HTTP 405 for HTTPS and
+  // HTTP 403 for the Tailscale browser). The PROVEN pattern (dshmarket +
+  // dsh-client-connection + dsh-web-app themselves) is to DECLARE the services
+  // via `ctx.inject([...], (hostCtx) => ...)`: Cordis `inject` binds each named
+  // service into the callback's scope, so `hostCtx.webServer` / the
+  // `webRuntime` and `connection` bindings are guaranteed live here. We keep
+  // rule 7's `httpServer` fallback, and skip silently (headless / host-less)
+  // if webServer is absent — the channel is a GUI feature and the client is
+  // the only consumer, exactly like the old `connection !== void 0` gate.
+  ctx.inject(['webServer', 'webRuntime', 'connection'], (hostCtx) => {
     // Rule 7: prefer the injected webServer; fall back to the renamable
     // httpServer when webServer is undefined (headless host); skip if neither.
     // cordis' static Context type has no `webServer` property (services are
     // dynamically injected), so we widen the host context structurally — the
     // injected `webServer` is the live service bound into this callback scope.
-    const host = hostCtx as Context & { webServer?: WebServerLike }
+    const host = hostCtx as Context & { webServer?: WebServerLike; webRuntime?: { trustedHosts?: string[] } }
     const webServer = (host.webServer ?? host.get('httpServer')) as WebServerLike | undefined
     if (webServer === void 0) return
     // Trusted authorities from the DEPLOYED web app: dsh-web-app's `webRuntime`
@@ -2892,7 +2893,18 @@ export function applyInvoke(ctx: Context, config: Config) {
     // fields rather than the getConfig('web-app') / getConfig('client-connection')
     // fallbacks (documented deviation). Empty when the services are absent /
     // headless.
-    const trustedHosts = (hostCtx.get('webRuntime') as { trustedHosts?: string[] } | undefined)?.trustedHosts ?? connection?.trustedHosts ?? []
+    // src/invoke.ts BINDS `connection` (the dsh-client-connection HostConnectionService)
+    // into this callback via the inject declaration above, so it is read here
+    // from the injected scope (`hostCtx.get('connection')`) rather than a bare
+    // `ctx.get(...)` captured outside the inject — the bare lookup stayed
+    // UNDEFINED in our scope, which is exactly why the Tailscale browser 403'd.
+    const trustedHosts =
+      (host.webRuntime as { trustedHosts?: string[] } | undefined)?.trustedHosts ??
+      (hostCtx.get('connection') as ConnectionLike | undefined)?.trustedHosts ??
+      []
+    console.log(
+      `[deepartments] /deepartments channel mounted; trustedHosts=${JSON.stringify(trustedHosts)}; routes: agents/list/ui/config/ui/config/set`
+    )
     const sidebarDeps: DeepartmentsEndpointDeps = {
       uiConfig,
       persistUiConfig,
