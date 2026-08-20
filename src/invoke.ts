@@ -2856,8 +2856,25 @@ export function applyInvoke(ctx: Context, config: Config) {
   // host-less) the channel — a GUI feature — is skipped silently, exactly like
   // the old `connection !== void 0` gate (the client is the only consumer).
   const connection = ctx.get('connection') as (ConnectionLike & { trustedHosts?: string[] }) | undefined
-  const webServer = (ctx.get('webServer') ?? ctx.get('httpServer')) as WebServerLike | undefined
-  if (webServer !== void 0) {
+  // rc.8 INJECT FIX: the bare `ctx.get('webServer') ?? ctx.get('httpServer')`
+  // lookup did NOT resolve the live webServer in OUR plugin scope (the mount
+  // silently skipped → the deployed routes returned HTTP 405). The PROVEN
+  // pattern (dshmarket + dsh-client-connection + dsh-web-app themselves) is to
+  // declare the service via `ctx.inject(['webServer'], (hostCtx) => ...)`:
+  // Cordis `inject` binds the service into the callback's scope, so
+  // `hostCtx.webServer` is guaranteed to be the live service. We keep rule 7's
+  // `httpServer` fallback, and skip silently (headless / host-less) if neither
+  // is present — the channel is a GUI feature and the client is the only
+  // consumer, exactly like the old `connection !== void 0` gate.
+  ctx.inject(['webServer'], (hostCtx) => {
+    // Rule 7: prefer the injected webServer; fall back to the renamable
+    // httpServer when webServer is undefined (headless host); skip if neither.
+    // cordis' static Context type has no `webServer` property (services are
+    // dynamically injected), so we widen the host context structurally — the
+    // injected `webServer` is the live service bound into this callback scope.
+    const host = hostCtx as Context & { webServer?: WebServerLike }
+    const webServer = (host.webServer ?? host.get('httpServer')) as WebServerLike | undefined
+    if (webServer === void 0) return
     // Trusted authorities from the DEPLOYED connection service: the same list the
     // rc.8 client-connection channel already vets every request against (seeded
     // by `--trusted-host laagencia.taildb5a7a.ts.net:8445` on the systemd unit).
@@ -2897,10 +2914,10 @@ export function applyInvoke(ctx: Context, config: Config) {
       path,
       handler: (req: unknown, res: unknown) => handleDeepartmentsRequest(req, res, endpoint, trustedHosts, sidebarDeps)
     }))
-    ctx.effect(() => {
+    hostCtx.effect(() => {
       const disposers = routes.map((route) => webServer.register(route))
       return () => { for (const dispose of disposers) dispose() }
     }, 'deepartments: main-agents sidebar RPC channel')
-  }
+  })
 
 }
