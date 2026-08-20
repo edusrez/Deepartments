@@ -1439,13 +1439,23 @@ export function applyInvoke(ctx: Context, config: Config) {
   /** Write the journal file (author/room/timestamp/wake_counter/last_wake/
    * board_cursor frontmatter + runs of decisions/constraints/openItems +
    * optional current_step + the free-form summary body, closing with a short
-   * wake-routine footer). Returns the durable memo path. */
+   * wake-routine footer). Returns the durable memo path.
+   *
+   * wake_counter semantics split by member kind (2026-08-20):
+   *  - HOST (`host-<sessionId>`): the counter is the ORDINAL of the current
+   *    awake session and ADVANCES ONLY AT dept_sleep (see bumpHostSleepCounter),
+   *    never at write — so a second dept_memo_write within one awake session
+   *    keeps the SAME ordinal (first-ever → 1, later → the current value).
+   *  - REGISTERED POST (any other id): the counter still advances on every
+   *    write (`prevCounter + 1`) — a head's own-layer sleep lifecycle is a
+   *    follow-up; heads keep the old behavior. */
   const writeJournal = async (memberId: string, roomId: string, summary: string, decisions: string[], constraints: string[], openItems: string[], currentStep?: string): Promise<string> => {
-    // Batch W2 identity + cursor block: derive the monotonic wake counter and
-    // the boundary the previous incarnation left at from the PRIOR journal so a
-    // re-materialized head/Asistente can verify its state on wake (lost-cursor /
-    // stale detection). ENOENT-tolerant: a first-ever write has no prior journal
-    // → wake_counter 1, last_wake none.
+    // Batch W2 identity + cursor block: derive the counter and the boundary the
+    // previous incarnation left at from the PRIOR journal so a re-materialized
+    // head/Asistente can verify its state on wake (lost-cursor / stale
+    // detection). ENOENT-tolerant: a first-ever write has no prior journal →
+    // wake_counter 1, last_wake none. For hosts the counter is NOT advanced by
+    // the write itself (see the doc comment above); posts keep prevCounter + 1.
     let prevCounter = 0
     let prevTimestamp: string | undefined
     try {
@@ -1458,13 +1468,14 @@ export function applyInvoke(ctx: Context, config: Config) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
 
+    const isHost = memberId.startsWith('host-')
     const cursor = memberCursors.get(memberId)
     const content = [
       '---',
       `author: ${memberId}`,
       `room: ${roomId}`,
       `timestamp: ${new Date().toISOString()}`,
-      `wake_counter: ${prevCounter + 1}`,
+      `wake_counter: ${isHost ? Math.max(prevCounter, 1) : prevCounter + 1}`,
       `last_wake: ${prevTimestamp ?? 'none'}`,
       ...(currentStep !== undefined ? [`current_step: ${currentStep}`] : []),
       `board_cursor: ${cursor?.lastMessageId ?? 'none'}`,
@@ -1492,6 +1503,34 @@ export function applyInvoke(ctx: Context, config: Config) {
       throw error
     }
     return memoPath
+  }
+
+  /** Advance a HOST journal's `wake_counter` by exactly 1 at the dept_sleep
+   * boundary and persist atomically to `<stateDir>/journals/<memberId>.md`
+   * (same tmp+rename pattern as writeJournal) — a PURE counter bump: the base
+   * author/room/timestamp/last_wake/current_step/board_cursor frontmatter and
+   * the body are left UNTOUCHED. Returns the NEW full content string (the
+   * dept_sleep host path seeds the live surface's reset from this), so the
+   * next wake's fresh context already reflects the incremented ordinal before
+   * the just-completed sleep. Throws loudly if the journal has no
+   * `wake_counter:` frontmatter line (malformed journal). */
+  const bumpHostSleepCounter = async (memberId: string, content: string): Promise<string> => {
+    const counterLine = content.match(/^wake_counter:\s*(\d+)$/m)
+    if (counterLine === null) {
+      throw new Error(`[deepartments] bumpHostSleepCounter: journal for ${memberId} has no "wake_counter:" frontmatter line — cannot advance the wake ordinal`)
+    }
+    const bumped = content.replace(/^wake_counter:\s*\d+$/m, `wake_counter: ${Number(counterLine[1]) + 1}`)
+    const memoPath = journalPathFor(memberId)
+    const tmpPath = `${memoPath}.tmp`
+    try {
+      await writeFile(tmpPath, bumped, 'utf8')
+      await rename(tmpPath, memoPath)
+    } catch (error: unknown) {
+      // Best-effort cleanup of the temp file; ignore cleanup errors.
+      try { await unlink(tmpPath) } catch { /* ignore */ }
+      throw error
+    }
+    return bumped
   }
 
   /** Read a post's journal (undefined when absent). */
@@ -3034,6 +3073,12 @@ export function applyInvoke(ctx: Context, config: Config) {
         }
         // Step 1 — journal REQUIRED (dept_memo_write must have run first): the
         // journal is the ONLY durable surface the next wake resumes from.
+        // Step 1.5 — advance the HOST's wake ordinal at the sleep boundary,
+        // BEFORE the surface is rebuilt/seeded, so the NEXT wake's fresh context
+        // already shows the incremented counter (wake K → sleep → the woken
+        // session is wake K+1). bumpHostSleepCounter persists the bump atomically
+        // and returns the NEW full content used to seed the reset below.
+        const seeded = await bumpHostSleepCounter(hostId, journal)
         // Step 2 — register/refresh the durable host identity. ensureHost is
         // idempotent for an existing entry and refuses to change its roomId away
         // from what it has.
@@ -3050,7 +3095,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         const surfaceNodes = session?.surface?.nodes as readonly number[] | undefined
         if (session !== undefined && typeof session.append === 'function') {
           const plan = computeHostSleepSurfacePlan(surfaceNodes ?? [])
-          const message = buildSleepJournalMessage(journal)
+          const message = buildSleepJournalMessage(seeded)
           session.append('user/message', message, {
             surfaceOp: plan.surfaceOp,
             ...(plan.sourceEventSeqs !== undefined ? { sourceEventSeqs: plan.sourceEventSeqs } : {})

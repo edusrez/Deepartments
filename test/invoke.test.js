@@ -389,6 +389,7 @@ async function seedJournal(stateDir, postId, summary) {
     '---',
     `author: ${postId}`,
     `timestamp: ${new Date().toISOString()}`,
+    'wake_counter: 1',
     'board_cursor: none',
     'decisions: []',
     'constraints: []',
@@ -2403,7 +2404,7 @@ test('Batch 7 host dept_memo_write writes journals/host-<sessionId>.md (no more 
   })
 })
 
-test('Batch W2 dept_memo_write: identity+cursor block — wake_counter increments, last_wake tracks the prior timestamp, current_step persisted', async () => {
+test('Batch W2 dept_memo_write: identity+cursor block — HOST wake_counter stays put within one awake session, last_wake tracks the prior timestamp, current_step persisted', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
@@ -2425,8 +2426,11 @@ test('Batch W2 dept_memo_write: identity+cursor block — wake_counter increment
       assert.ok(/^Wake routine: dept_whereami/m.test(firstContent), 'wake-routine footer present')
       assert.ok(!/^current_step:/m.test(firstContent), 'no current_step when not passed')
 
-      // Second write: currentStep passed → wake_counter 2, last_wake = prior
-      // timestamp, current_step persisted.
+      // Second write WITHIN THE SAME awake session (no dept_sleep in between):
+      // a HOST's wake_counter is the ORDINAL of the current awake session and
+      // advances ONLY at dept_sleep — so a second memo write must NOT advance
+      // it. currentStep passed → current_step persisted; last_wake still tracks
+      // the prior timestamp.
       const second = await memo.execute(
         { summary: 'Summary B: second wake.', currentStep: 'processing board backlog' },
         { agent: host, signal }
@@ -2434,7 +2438,7 @@ test('Batch W2 dept_memo_write: identity+cursor block — wake_counter increment
       const secondContent = await readFile(second.memoPath, 'utf8')
       assert.equal(second.member, hostId)
       assert.equal(second.memoPath, first.memoPath, 'host journal rewritten in place')
-      assert.match(secondContent, /^wake_counter: 2$/m, 'second wake_counter is 2')
+      assert.match(secondContent, /^wake_counter: 1$/m, 'second host wake_counter STAYS 1 (advances only at dept_sleep, not at write)')
       assert.equal(secondContent.match(/^last_wake:\s*(.+)$/m)?.[1], firstTimestamp, 'last_wake tracks the prior journal timestamp')
       assert.match(secondContent, /^current_step: processing board backlog$/m, 'current_step persisted')
       assert.match(secondContent, /Summary B: second wake\./, 'summary B body present')
@@ -2445,7 +2449,7 @@ test('Batch W2 dept_memo_write: identity+cursor block — wake_counter increment
   })
 })
 
-test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal sets sleepEpoch durably + resets the live surface to exactly the journal (deriveMessages = ONE node) + concludes the turn', async () => {
+test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes the sleep-time wake_counter bump into the on-disk file, sets sleepEpoch durably, resets the live surface to exactly the BUMPED journal (deriveMessages = ONE node) + concludes the turn', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
@@ -2461,9 +2465,12 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal sets sl
         'host sleep without a journal rejects loudly'
       )
 
-      // Pre-author the host journal (as dept_memo_write would have written it).
+      // Pre-author the host journal (as dept_memo_write would have written it);
+      // seedJournal writes wake_counter 1 for the pre-sleep file.
       const journalSummary = 'HOST-SLEEP-MEMORY: in-place surface reset carried forward.'
-      await seedJournal(stateDir, hostId, journalSummary)
+      const preSleepPath = await seedJournal(stateDir, hostId, journalSummary)
+      const preSleepContent = await readFile(preSleepPath, 'utf8')
+      assert.match(preSleepContent, /^wake_counter: 1$/m, 'pre-sleep on-disk journal has wake_counter 1')
 
       // Give the host's live session a REAL dsh Session with an existing full
       // surface (2 prior user messages) so we can assert the replace truly
@@ -2491,8 +2498,19 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal sets sl
       const hostsFile = await readHosts(stateDir)
       assert.ok(typeof hostsFile[hostId].sleepEpoch === 'number', 'host sleepEpoch persisted durably')
 
+      // (a) The on-disk journal now has wake_counter N+1 (1 → 2): the bump is
+      // persisted at the sleep boundary so the NEXT wake's fresh context (which
+      // is seeded from this same file) already shows the incremented ordinal.
+      const postSleepContent = await readFile(result.memoPath, 'utf8')
+      assert.match(postSleepContent, /^wake_counter: 2$/m, 'on-disk journal advanced to wake_counter 2 at dept_sleep')
+      // The bump is a PURE counter change: the rest of the frontmatter + body
+      // are untouched (base fields and summary preserved verbatim).
+      assert.match(postSleepContent, /^author: host-/m, 'author frontmatter untouched by the bump')
+      assert.match(postSleepContent, /^board_cursor: none$/m, 'board_cursor untouched by the bump')
+      assert.ok(postSleepContent.includes(journalSummary), 'summary body untouched by the bump')
+
       // In-place surface reset: the live session's model-visible surface is now
-      // EXACTLY ONE node — the journal.
+      // EXACTLY ONE node — the BUMPED journal.
       const nodes = realSession.surface.nodes
       assert.equal(nodes.length, 1, 'surface collapsed to exactly one node after the in-place reset')
       const derived = realSession.deriveMessages()
@@ -2500,6 +2518,9 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal sets sl
       assert.equal(derived[0].role, 'user')
       assert.ok(derived[0].content[0].text.includes(journalSummary), 'the single surface node is the journal')
       assert.match(derived[0].content[0].text, /^author: /m, 'the landing node carries the journal frontmatter')
+      // (b) The live surface reset carries the BUMPED content (wake_counter 2),
+      // not the stale pre-bump file verbatim.
+      assert.match(derived[0].content[0].text, /^wake_counter: 2$/m, 'landing node shows the BUMPED wake_counter 2')
       assert.equal(derived[0].source.kind, 'plugin', 'landing node rendered as plugin context (not a user-typed message)')
       assert.equal(derived[0].source.form, 'notice')
 
