@@ -205,11 +205,6 @@ const AGENT_CSS = /* css */ `
    rows render the standard StateDot (no custom glyph containers). */
 .dp-agents-collapsed{display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px 0;}
 
-/* head idle/sleeping status: a muted dot at the exact StateDot size (10px) —
-   overrides only the fill, keeping the identical footprint as the native
-   StateDot so the head row matches an Assistant row in size. */
-.dp-dot-muted{background:#9ca3af;}
-
 /* ---- New session button ---- */
 .dp-new-session-btn{
   display:flex;align-items:center;justify-content:center;gap:6px;
@@ -285,28 +280,90 @@ function asistenteStatus(node: any): "done" | "warning" | "ongoing" {
 // `/deepartments` RPC, not the native tree.
 const HEAD_SESSION_PREFIX = "head-";
 
-// Status dot for department heads — reuses the SAME standard StateDot rendering
-// as the Assistant rows so sizes/fonts are visually identical (no custom moon
-// glyph, no oversized container). Maps the richer head status onto the same
-// 4-state StateDot axis the Assistants use. NOTE: StateDot exposes only
-// 'done' | 'warning' | 'ongoing' | 'error' (no 'idle'), so idle/sleeping render
-// as a muted "done"-sized dot via a size-preserving background override:
-//   working           -> StateDot ongoing   (blue running ring)
-//   completed-notice  -> StateDot done      (green)
-//   sleeping          -> muted dot          (same 10px footprint)
-//   idle              -> muted dot          (same 10px footprint)
-function HeadStatusDot({ status }: { status: HeadStatus }) {
-  if (status === "working") {
-    return <StateDot state="ongoing" size={10} />;
+// Status dot for department heads — maps the head's richer status onto the SAME
+// StateDot rendering an Assistant session in the equivalent state produces, so
+// sizes/fonts/glyphs are pixel-identical. NO custom pseudo-dot, NO wrapper
+// classes that change the glyph (owner feedback 2026-08-20: heads must not look
+// different — same green round dot as an idle/active Assistant, not a muted or
+// square override). Batch 5: `idle`/`sleeping` now render the native `done`
+// (green round) dot, identical to what an idle Assistant renders.
+//   working           -> StateDot ongoing    (blue running ring)
+//   completed-notice  -> StateDot done       (green round)
+//   idle              -> StateDot done       (green round, same as Assistant idle)
+//   sleeping          -> StateDot done       (green round, same as Assistant idle)
+function headStatusState(status: HeadStatus): "done" | "ongoing" {
+  switch (status) {
+    case "working":
+      return "ongoing";
+    case "completed-notice":
+    case "idle":
+    case "sleeping":
+      return "done";
   }
-  if (status === "completed-notice") {
-    return <StateDot state="done" size={10} />;
-  }
-  // sleeping / idle: a small muted dot at the exact StateDot size (no custom
-  // glyph, no oversized container). StateDot carries no `title`/text, so the
-  // head's name text (dp-agent-name) is the accessible label; the muted override
-  // only swaps the fill, keeping the identical 10px footprint.
-  return <StateDot state="done" size={10} className="dp-dot-muted" />;
+}
+
+// ONE shared row for BOTH Assistant sessions and department-head rows, so they
+// are pixel-identical in anatomy, size, dots and the ⋯ menu (owner feedback
+// 2026-08-20). The caller supplies the name, the exact <StateDot> element, and
+// the open handler; optional menuItems render into the shared ⋯ dropdown.
+interface AgentRowViewProps {
+  name: string;
+  /** The exact `<StateDot .../>` element to render (identity for Assistants). */
+  dot: ReactNode;
+  active: boolean;
+  onOpen: () => void;
+  /** Whether this row's ⋯ dropdown is the currently-open one. */
+  menuOpen: boolean;
+  onToggleMenu: () => void;
+  /** Rows without items still render the ⋯ button (enabled) with no dropdown. */
+  menuItems?: { label: string; onSelect: () => void }[];
+}
+
+function AgentRowView({ name, dot, active, onOpen, menuOpen, onToggleMenu, menuItems }: AgentRowViewProps) {
+  const rowClass =
+    "dp-agent-row" +
+    (active ? " dp-agent-row--active" : "") +
+    (menuOpen ? " dp-agent-row--menu-open" : "");
+  return (
+    <div className={rowClass}>
+      <button
+        type="button"
+        className="dp-agent-open"
+        onClick={onOpen}
+      >
+        {dot}
+        <span className="dp-agent-name">{name}</span>
+      </button>
+      <button
+        type="button"
+        className="dp-agent-menu-btn"
+        aria-label="Agent menu"
+        aria-expanded={menuOpen}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleMenu();
+        }}
+      >
+        ⋯
+      </button>
+      {menuOpen && (
+        <div className="dp-agent-menu">
+          {menuItems?.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                item.onSelect();
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -437,7 +494,7 @@ export function AgentList(props: AgentsOwner) {
           <StateDot key={a.id} state={asistenteStatus(a)} size={10} />
         ))}
         {heads.map((h) => (
-          <HeadStatusDot key={h.id} status={h.status} />
+          <StateDot key={h.id} state={headStatusState(h.status)} size={10} />
         ))}
       </div>
     );
@@ -455,85 +512,70 @@ export function AgentList(props: AgentsOwner) {
           const active = a.id === current;
           const menuOpen = openMenuId === a.id;
           return (
-            <div
+            <AgentRowView
               key={a.id}
-              className={
-                "dp-agent-row" +
-                (active ? " dp-agent-row--active" : "") +
-                (menuOpen ? " dp-agent-row--menu-open" : "")
-              }
-            >
-              <button
-                type="button"
-                className="dp-agent-open"
-                onClick={() => {
-                  if (!wide) expandSidebar();
-                  openSession(a.id);
-                }}
-              >
-                <StateDot state={asistenteStatus(a)} size={10} />
-                <span className="dp-agent-name">{name}</span>
-              </button>
-              <button
-                type="button"
-                className="dp-agent-menu-btn"
-                aria-label="Agent menu"
-                aria-expanded={menuOpen}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setOpenMenuId(menuOpen ? null : a.id);
-                }}
-              >
-                ⋯
-              </button>
-              {menuOpen && (
-                <div className="dp-agent-menu">
-                  <button
-                    type="button"
-                    onClick={async (e) => {
-                      e.stopPropagation();
-                      setOpenMenuId(null);
-                      try {
-                        await archiveSession(a.id);
-                      } catch {
-                        // Ignored: the 5s archived poll reconciles the row out.
-                      }
-                    }}
-                  >
-                    Archive agent
-                  </button>
-                </div>
-              )}
-            </div>
+              name={name}
+              dot={<StateDot state={asistenteStatus(a)} size={10} />}
+              active={active}
+              onOpen={() => {
+                if (!wide) expandSidebar();
+                openSession(a.id);
+              }}
+              menuOpen={menuOpen}
+              onToggleMenu={() => setOpenMenuId(menuOpen ? null : a.id)}
+              menuItems={[
+                {
+                  label: "Archive agent",
+                  onSelect: () => {
+                    setOpenMenuId(null);
+                    // Ignored: the 5s archived poll reconciles the row out.
+                    void archiveSession(a.id).catch(() => {});
+                  },
+                },
+              ]}
+            />
           );
         })}
-        {heads.map((h) => {
-          const active = h.sessionId === current;
-          return (
-            <div
-              key={h.id}
-              className={
-                "dp-agent-row" +
-                (active ? " dp-agent-row--active" : "")
-              }
-            >
-              <button
-                type="button"
-                className="dp-agent-open"
-                onClick={() => {
+        {/* Department heads: rendered through the SAME shared row as Assistants
+            (pixel-identical anatomy/dot/⋯ menu). Filtered by the archived set
+            exactly like Assistant rows, so archiving a head hides it (it
+            re-materializes on the next boot because its posts.json entry
+            persists — a deliberate, harmless behavior). */}
+        {heads
+          .filter((h) => !archivedSet.has(h.sessionId))
+          .map((h) => {
+            const active = h.sessionId === current;
+            const menuOpen = openMenuId === h.sessionId;
+            return (
+              <AgentRowView
+                key={h.id}
+                name={h.name}
+                dot={<StateDot state={headStatusState(h.status)} size={10} />}
+                active={active}
+                onOpen={() => {
                   if (!wide) expandSidebar();
                   // sessionId ships with Batch 4a; if an older server omits it,
                   // do nothing (BEFORE it shipped, the head row was static and
                   // non-navigable anyway) rather than fall back to postId.
                   if (h.sessionId) openSession(h.sessionId);
                 }}
-              >
-                <HeadStatusDot status={h.status} />
-                <span className="dp-agent-name">{h.name}</span>
-              </button>
-            </div>
-          );
-        })}
+                menuOpen={menuOpen}
+                onToggleMenu={() => setOpenMenuId(menuOpen ? null : h.sessionId)}
+                menuItems={[
+                  {
+                    label: "Archive agent",
+                    onSelect: () => {
+                      setOpenMenuId(null);
+                      // Same action as an Assistant row: archive the head's
+                      // stable session. Ignored: the 5s archived poll reconciles
+                      // the row out (re-materializes on next boot by design).
+                      if (h.sessionId) void archiveSession(h.sessionId).catch(() => {});
+                    },
+                  },
+                ]}
+              />
+            );
+          })}
       </div>
     </div>
   );
