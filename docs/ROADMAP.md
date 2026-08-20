@@ -305,6 +305,40 @@ of the research — so no builder needs to re-research.)
 
 - **2026-08-19** — **Live test battery PASSED (2026-08-19):** the restructured bus was exercised end-to-end in the live dev GUI: (1) direct host↔head channel — the Asistente host posted an assignment to research-head on the board (no fork), the wake relay woke the spawn head, the head replied, and the relay RAW-woke the host with the kind:'board' source; (2) spatial identity — dept_whereami returns kind host (address host-session-<uuid>) for the Asistente and kind post for the head; (3) nap/sleep lifecycle — the head wrote its journal via dept_memo_write, slept via dept_sleep (durable sleepEpoch), re-materialized as a FRESH incarnation (new childId, previousChildId chain) with the journal in its FIRST-turn start prompt (fix c39de68, found by the incarnation's own honest report that the pre-fix journal arrived as a second turn), and recovered a secret phrase that existed ONLY in the journal (0 occurrences on the board); (4) trust signal — the head saw [sensitive — sender verified: yes]; (5) ack-loop guard — terminal acks did not ping-pong; (6) TWO HOSTS LATERAL — the owner's second session registered host-session-8f1009e1, each host raw-woke the other bidirectionally (m-board-14/15) and both saw a consistent roster (2 live hosts). All autonomous tests were verified with independent evidence (registry files, session logs), not the agents' word. Commits: c39de68 (journal-first-turn fix) + deed386 (docs). Next: departmental multi-head/multi-post scenarios and the programming-department dogfooding on the new bus.
 
+- **2026-08-20** — **Wake optimization (W1 + W2)**: audited and hardened the
+  deterministic wake machinery for host and head agents. **W1** (commit
+  `cfaffe9`, "fix(org): wake machinery — atomic journal write,
+  dept_room_who global schema, host-sleep ordering (Batch W1)") shipped three
+  fixes from the wake audit: (A3) the GLOBAL `dept_room_who` hosts output
+  schema now declares `sleeping` (it was crashing with
+  `additionalProperties:false` after host sleep — root cause was copy-paste
+  drift from the head own-layer copy when Batch 7 landed); (A1) `writeJournal`
+  is now atomic (tmp file + rename); (A5) host `dept_sleep` persists
+  `sleepEpoch` only AFTER the in-place surface-reset append, closing the crash
+  window (Session.append is synchronous, verified by reviewer). Regression
+  test added; 97/97 tests and the TIERED ladder green; reviewer PASS; audit +
+  fixes + builder reports `.dsh/reports/reviewer/2026-08-20-wake-audit.md`,
+  `.dsh/reports/reviewer/2026-08-20-wake-fixes-review.md`,
+  `.dsh/reports/builder/2026-08-20-wake-fixes.md` (all gitignored; filenames
+  cited). **W2** (commit `109272b`, "feat(org): wake identity+cursor block in
+  journals + version deepartments-workflow skill in repo (Batch W2)") adds a
+  journal identity+cursor block (`wake_counter` monotonic, `last_wake`,
+  optional `current_step`) plus a Wake-routine footer per journal; both
+  `dept_memo_write` tools gained an optional `currentStep` parameter; 98/98
+  tests and the TIERED ladder green; reviewer PASS (`w2-journal-review`). The
+  lean wake routine ("Wake routine (deterministic orientation)") — identity →
+  read journal → board delta → health check → decide, loading
+  AGENTS/ROADMAP-tail lazily — is encoded in the `deepartments-workflow`
+  skill. Owner microdecisions 2026-08-20: audit+fix+optimize the wake
+  (reviewer examined the wake sequence live; researcher investigated SOTA —
+  `.dsh/reports/researcher/2026-08-20-agent-wake-best-practices.md`); scope
+  "Completa" (lean routine + journal identity/cursor block + health check);
+  the routine is encoded in BOTH the skill and the journal; the skill is
+  versioned in the repo under `.dsh/skills/deepartments-workflow/` and both
+  dev + stable presets symlink to it (backups preserved as
+  `deepartments-workflow.bak-20260816/` siblings). Both DSH homes (dev
+  `/opt/dsh/.dsh-dev` and stable `/opt/dsh/.dsh`) verified on DSH 0.1.0-rc.8 —
+  AGENTS.md CLI pin updated (rule 8).
 - **2026-08-20** — **Main agents sidebar**: the left DSH sidebar's workspaces region is replaced by a list of main agents (host row always first + department heads), shipped as a CLIENT bundle inside `dsh-deepartments` (fully reversible; shadows `sidebar.workspaces` at priority -1). Server: new `/deepartments` loopback RPC (`agents`/`list`) via `ctx.connection.rpc` (resolved optionally via `ctx.get('connection')`, skipped in headless profiles); pure status computation in `src/agents.ts` (precedence sleeping → completed-notice(unread addressed-to-host) → working(running) → idle); optional `title` display field on coordinators; new **Internal Programming** department (room `programming`, post `programming-head`, board member) and research dept renamed to Research Department. Client: `dsh.client` (web) + `exports["./client"]` + tsdown `build:client` wrapped by `scripts/normalize-client-banner.mjs`; host row "Assistant — User's Office" with DSH default status dots (ongoing/warning/done), head rows with lifecycle dots (spinner working, green completed-notice, gray idle, gray moon sleeping) fed by 5s+focus RPC polling; clicking the host row opens the current session (`ctx.sessions.open`) or starts a new one when none; the New Session button is hidden via CSS targeting `.hHd-Xa_newSession` ONLY — the shared aria-label selector was removed because the brand button bears the same aria-label and the logo disappeared. Commits: `9ead681` (feature), `bb7b734` (export `./package.json`), `bd82d67` (version client source — `/client/` gitignore anchored). Verification: `pnpm build`, `node --test` 63/63, build:client envelope checks, plugin add, dump-config `# == dsh-deepartments` layer with programming, headless smoke (`room ready: programming`), reviewer PASS. Dev GUI restarted twice with owner approval; `/plugins/dsh-deepartments/client.js` serves (HTTP 200) and the `/deepartments` RPC route is mounted.
 
 - **2026-08-20** — **Deepartments Settings tab + trusted-host rework**: owner wanted a Settings tab with a slider to enable/disable the Deepartments UI, but the initial DSH settingsScope is loopback-only (owner on Tailscale → switch disabled). Reworked to persist toggle in `<stateDir>/ui.json` served over `/deepartments` RPC `ui/config` / `ui/config/set` with authority `trusted-host` (declared Tailscale hosts, loopback still allowed) so it works from any origin; Deleted `src/settings.ts` and `dsh-settings` deps. Client now drives a live gate polling `ui/config` and a segmented Enabled/Disabled selector (DSH options style). Commits: `30901ea` then `2c4ba9c` (rework).
