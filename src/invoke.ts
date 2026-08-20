@@ -122,7 +122,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { emitRoomRecord, roomSessionId, setBoardRecordListener, setRoomCompactionResetter } from './org.js'
-import type { Config, CoordinatorConfig, RoomState } from './org.js'
+import type { Config, CoordinatorConfig, DepartmentConfig, RoomState } from './org.js'
 import { loadRecords, resolveBoardPath } from './board-store.js'
 import type { BoardRecord, MessagePayload } from './board-store.js'
 import { buildAgentRows } from './agents.js'
@@ -316,6 +316,12 @@ interface ConnectionLike {
       options: { authority: 'loopback' | 'trusted-host' }
     ): () => Promise<void>
   }
+  /** The deployment's trusted authorities this connection channel vets every
+   * request against (dsh-client-connection HostConnectionService.trustedHosts,
+   * seeded by `--trusted-host ...` on the systemd unit). Read here as the
+   * authoritative trusted-hosts source for the self-mounted `/deepartments`
+   * routes (see the RPC effect below). */
+  trustedHosts?: string[]
 }
 
 /** Loose structural view of a live `Agent` (the shape `ctx.agents.get(id)`
@@ -429,6 +435,372 @@ function formatDeltaAgenda(item: RoomState['agenda'][number]): string {
 /** YAML-ish flow list rendering for witness frontmatter arrays. */
 function yamlList(items: readonly string[]): string {
   return `[${items.map((item) => JSON.stringify(item)).join(', ')}]`
+}
+
+// ---------------------------------------------------------------------------
+// `/deepartments` sidebar RPC channel — server half.
+//
+// rc.8 TRANSPORT FIX (see the effect below): the channel is served over
+// self-mounted `kind:'exact'` POST routes on the live `webServer` (the pattern
+// dshmarket + dsh-client-connection prove works in rc.8), NOT via
+// `ctx.connection.rpc.handle(...)` (which rc.8 does not mount as an HTTP route,
+// so a browser POST fell through to the SPA fallback → 405 and the sidebar was
+// always empty). The client contract is unchanged and the extraction below is
+// deliberately PURE + exportable so it is directly unit-testable without
+// node:http (test/rpc-channel.test.js) — mirroring how buildAgentRows is tested.
+// ---------------------------------------------------------------------------
+
+/** Loose structural view of a `webServer`/`httpServer` HTTP route. */
+export interface WebServerRouteLike {
+  kind: 'exact' | 'prefix'
+  path: string
+  handler: (req: unknown, res: unknown) => void | Promise<void>
+}
+
+/** Loose structural view of the renamable `webServer`/`httpServer` service
+ * (AGENTS.md rule 7; resolved via `ctx.get('webServer') ?? ctx.get('httpServer')`). */
+export interface WebServerLike {
+  register(route: WebServerRouteLike): () => void
+}
+
+/** Loose structural view of one host-registry entry (hosts.json value). */
+export interface HostEntryLike {
+  hostId: string
+  sessionId: string
+  roomId?: string
+}
+
+/** Injected data/closure bundle the PURE endpoint dispatcher reads. The caller
+ * (the route handler in applyInvoke) wires these to the live registries; tests
+ * construct this directly. */
+export interface DeepartmentsEndpointDeps {
+  /** The mutable UI config the client reads/writes (`sidebarEnabled`). */
+  uiConfig: { sidebarEnabled: boolean }
+  /** Fire-and-forget persistence of the UI config. */
+  persistUiConfig(): void
+  /** config.org.departments — one row built per (coordinator-bearing) department. */
+  departments: DepartmentConfig[]
+  /** The durable post registry (postId → entry). */
+  byPost: Map<string, PostEntryLike>
+  /** The host registry, iterated to resolve a caller host member id by sessionId. */
+  hosts: Iterable<HostEntryLike>
+  /** Per-host-member read cursors, keyed by hostMemberId (lastMessageSeq watermark). */
+  memberCursors: ReadonlyMap<string, { lastMessageSeq: number }>
+  /** Live signal: the head's session is present in the agents registry. */
+  sessionLive(sessionId: string): boolean
+  /** Optional refinement: the head's session is currently running (status). */
+  sessionRunning?: (sessionId: string) => boolean
+  /** Load the durable `board` room records ONCE (undefined when no board room).
+   * The board FILE is the cold source of truth and carries MessagePayload.ack,
+   * which the folded room projection omits. */
+  loadBoardRecords(): Promise<BoardRecord[] | undefined>
+}
+
+/** The RpcResult-shaped value the client already understands
+ * (serverResponseSchema.result: `{ok:true, value}` | `{ok:false, error}`). */
+export type DeepartmentsDispatchResult =
+  | { ok: true; value: unknown }
+  | { ok: false; error: { code: string; message: string; details: Record<string, unknown> } }
+
+/**
+ * PURE endpoint dispatcher for the `/deepartments` channel — the SAME endpoint
+ * logic the legacy `ctx.connection.rpc.handle('/deepartments', ...)` served,
+ * extracted into a testable function (no node:http imports). Handles
+ * `ui/config` (read), `ui/config/set` (write + persist), and `agents`/`list`
+ * (sidebar rows with per-host unread counts). Never throws for a normal call:
+ * an unknown endpoint is a bad-request result, and internal failures are left
+ * to the caller to fold (the route handler maps them to the `internal` branch).
+ */
+export async function dispatchDeepartmentsEndpoint(
+  endpoint: string,
+  payload: unknown,
+  deps: DeepartmentsEndpointDeps
+): Promise<DeepartmentsDispatchResult> {
+  if (endpoint === 'ui/config') {
+    return { ok: true, value: { sidebarEnabled: deps.uiConfig.sidebarEnabled } }
+  }
+  if (endpoint === 'ui/config/set') {
+    const raw = (typeof payload === 'object' && payload !== null ? payload : {}) as { sidebarEnabled?: unknown }
+    if (typeof raw.sidebarEnabled !== 'boolean') {
+      return {
+        ok: false,
+        error: {
+          code: 'bad-request',
+          message: 'sidebarEnabled must be a boolean',
+          details: { issues: [] }
+        }
+      }
+    }
+    deps.uiConfig.sidebarEnabled = raw.sidebarEnabled
+    deps.persistUiConfig()
+    return { ok: true, value: { sidebarEnabled: deps.uiConfig.sidebarEnabled } }
+  }
+  if (endpoint !== 'agents' && endpoint !== 'list') {
+    return {
+      ok: false,
+      error: {
+        code: 'bad-request',
+        message: 'unknown endpoint: ' + endpoint,
+        details: { issues: [] }
+      }
+    }
+  }
+  // Resolve the caller host member id (host-<sessionId>) from its sessionId.
+  // If the caller host is not (yet) registered in `hosts`, unread counts as 0
+  // for all heads (nothing to count against).
+  let sessionId: string | undefined
+  if (typeof payload === 'object' && payload !== null) {
+    const rawSession = (payload as { sessionId?: unknown }).sessionId
+    if (typeof rawSession === 'string') sessionId = rawSession
+  }
+  let hostMemberId: string | undefined
+  if (sessionId !== undefined) {
+    for (const entry of deps.hosts) {
+      if (entry.sessionId === sessionId) { hostMemberId = entry.hostId; break }
+    }
+  }
+  const boardRecords = await deps.loadBoardRecords()
+  // Unread addressed-to-host messages per head: board message with
+  // seq > cursor.lastMessageSeq AND from === postId AND (to is empty OR
+  // includes the caller host member id) AND payload.ack !== true — mirroring
+  // the TOC filter at dept_room_read.
+  const unreadFor = (postId: string): number => {
+    if (hostMemberId === undefined || boardRecords === undefined) return 0
+    const cursor = deps.memberCursors.get(hostMemberId)
+    const lastSeq = cursor === undefined ? -1 : cursor.lastMessageSeq
+    let count = 0
+    for (const record of boardRecords) {
+      if (record.kind !== 'message') continue
+      if (record.seq <= lastSeq) continue
+      if (record.from !== postId) continue
+      if ((record.payload as MessagePayload).ack === true) continue
+      if (record.to.length > 0 && !record.to.includes(hostMemberId)) continue
+      count++
+    }
+    return count
+  }
+  const rows = buildAgentRows({
+    departments: deps.departments,
+    posts: deps.byPost as unknown as Map<string, PostEntryLike>,
+    sessionLive: deps.sessionLive,
+    sessionRunning: deps.sessionRunning,
+    unreadFor,
+    sessionId
+  })
+  return {
+    ok: true,
+    value: {
+      host: { id: 'asistente', name: 'Asistente', department: "User's Office" },
+      agents: rows
+    }
+  }
+}
+
+/** Whether a normalized URL hostname names the local loopback authority
+ * (localhost, IPv6 `[::1]`, or any IPv4 address in 127/8). Pure — mirrors
+ * dsh-client-connection isLoopbackHostname. */
+export function isLoopbackHostname(hostname: string): boolean {
+  if (hostname === 'localhost' || hostname === '[::1]') return true
+  const parts = hostname.split('.')
+  return parts.length === 4 && parts[0] === '127' &&
+    parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+}
+
+/** Normalized URL of a Host-header authority, or undefined when unparsable. */
+export function parseAuthority(authority: string): URL | undefined {
+  try {
+    return new URL(`http://${authority}`)
+  } catch {
+    return undefined
+  }
+}
+
+/** Whether the parsed request authority matches a `trustedHosts` entry (an
+ * exact host:port, or a port-less host matching the hostname on any port).
+ * Pure — mirrors dsh-client-connection isTrustedAuthority. */
+export function isTrustedAuthority(hostUrl: URL, trustedHosts: string[]): boolean {
+  return trustedHosts.some((entry) => {
+    const entryUrl = parseAuthority(entry)
+    if (entryUrl === undefined) return false
+    const port = entryUrl.port !== '' ? entryUrl.port : new URL(`https://${entry}`).port
+    const canonical = port === '' ? entryUrl.hostname : `${entryUrl.hostname}:${port}`
+    // An entry with no explicit port matches the hostname on ANY port; an entry
+    // with an explicit port matches that exact host:port.
+    return canonical === entryUrl.hostname
+      ? entryUrl.hostname === hostUrl.hostname
+      : entryUrl.host === hostUrl.host
+  })
+}
+
+/** Plain request-header facts (no node:http / Headers dependency) the trust
+ * fence reads; unit-testable directly. */
+export interface HostTrustFacts {
+  host?: unknown
+  origin?: unknown
+  secFetchSite?: unknown
+}
+
+/** Decide whether one request's headers may reach the channel: loopback hosts
+ * always accepted; otherwise the Host:port must be a declared trusted host;
+ * a `cross-site` fetch or a cross-origin page never passes. Pure — mirrors
+ * dsh-client-connection isTrustedApiRequest without node/http types. */
+export function isTrustedHostFact(facts: HostTrustFacts, trustedHosts: string[]): boolean {
+  const host = typeof facts.host === 'string' ? facts.host : undefined
+  if (host === undefined) return false
+  const hostUrl = parseAuthority(host)
+  if (hostUrl === undefined) return false
+  if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, trustedHosts)) return false
+  if (facts.secFetchSite === 'cross-site') return false
+  if (facts.origin === undefined) return true
+  try {
+    return new URL(String(facts.origin)).host === hostUrl.host
+  } catch {
+    return false
+  }
+}
+
+/** A validated `client-request` envelope (client-proxy schema). */
+export interface ClientEnvelope {
+  rpcId: string
+  method: string
+  payload: unknown
+}
+
+export type ParseClientEnvelopeResult =
+  | { ok: true; message: ClientEnvelope }
+  | { ok: false; issues: unknown[] }
+
+/** Validate the client-request envelope `{type, rpcId, method, payload}`.
+ * Pure — no deps, mirrors the reference clientRequestSchema constraints. */
+export function parseClientEnvelope(body: unknown): ParseClientEnvelopeResult {
+  if (typeof body !== 'object' || body === null) return { ok: false, issues: ['body is not an object'] }
+  const raw = body as Record<string, unknown>
+  const issues: unknown[] = []
+  if (raw.type !== 'client-request') issues.push('type must be "client-request"')
+  if (typeof raw.rpcId !== 'string') issues.push('rpcId must be a string')
+  if (typeof raw.method !== 'string') issues.push('method must be a string')
+  if (issues.length > 0) return { ok: false, issues }
+  return { ok: true, message: { rpcId: raw.rpcId as string, method: raw.method as string, payload: raw.payload } }
+}
+
+// ---- thin node:http wiring (NOT pure; kept minimal — the logic lives above) --
+
+/** Loose structural view of the node:http request the route handler receives. */
+interface HttpRequestLike {
+  method?: string
+  headers?: Record<string, string | string[] | undefined>
+  [Symbol.asyncIterator](): AsyncIterator<Buffer>
+}
+
+/** Loose structural view of the node:http response the route handler owns. */
+interface HttpResponseLike {
+  writeHead(status: number, headers?: Record<string, string>): unknown
+  end(chunk?: string): unknown
+}
+
+/** Carrier cap for channel bodies (tiny JSON; bound resident memory defensively). */
+const MAX_REQUEST_BODY_BYTES = 160 * 1024 * 1024
+
+function headerValue(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value
+}
+
+async function readRequestBody(req: HttpRequestLike): Promise<string> {
+  const chunks: Buffer[] = []
+  let received = 0
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    received += buf.byteLength
+    if (received > MAX_REQUEST_BODY_BYTES) throw new Error('request body too large')
+    chunks.push(buf)
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+function respondJson(res: HttpResponseLike, rpcId: string, result: DeepartmentsDispatchResult): void {
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(JSON.stringify({ type: 'server-response', rpcId, result }))
+}
+
+/** Echo-token for an invalid envelope: the request's rpcId when readable, else
+ * the dsh-reference sentinel `invalid-request`. */
+function envelopeRpcId(body: unknown): string {
+  const raw = body as { rpcId?: unknown } | null
+  return typeof raw?.rpcId === 'string' ? raw.rpcId : 'invalid-request'
+}
+
+/** One exact `/deepartments/<endpoint>` POST route handler. Enforces the trust
+ * fence (method + authority), decodes + validates the envelope, checks the
+ * method↔endpoint match, then delegates to the PURE dispatch and answers the
+ * standard `{type:'server-response', rpcId, result}` the client validates.
+ * A dispatch THROW is folded into the `internal` error result — never crossed
+ * the wire as a parse failure. */
+async function handleDeepartmentsRequest(
+  req: unknown,
+  res: unknown,
+  endpoint: string,
+  trustedHosts: string[],
+  deps: DeepartmentsEndpointDeps
+): Promise<void> {
+  const httpReq = req as HttpRequestLike
+  const httpRes = res as HttpResponseLike
+  // Only the channel's POST endpoints are served; any other method on these
+  // EXACT paths returns 405 so the SPA fallback never leaks index.html for the
+  // channel (the old rc.8 behavior handed those GETs the SPA HTML).
+  if (httpReq.method !== 'POST') {
+    httpRes.writeHead(405, { 'content-type': 'text/plain; charset=utf-8' })
+    httpRes.end('method not allowed')
+    return
+  }
+  // Trust fence: loopback always accepted; otherwise the request Host:port must
+  // be in the deployment's trusted hosts (mirrors isTrustedApiRequest loopback
+  // behavior + the connection channel's trusted-host authority).
+  if (!isTrustedHostFact({
+    host: headerValue(httpReq.headers?.['host']),
+    origin: headerValue(httpReq.headers?.['origin']),
+    secFetchSite: headerValue(httpReq.headers?.['sec-fetch-site'])
+  }, trustedHosts)) {
+    httpRes.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+    httpRes.end('forbidden')
+    return
+  }
+  let body: unknown
+  try {
+    body = JSON.parse(await readRequestBody(httpReq))
+  } catch {
+    httpRes.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
+    httpRes.end('body is not JSON')
+    return
+  }
+  const parsed = parseClientEnvelope(body)
+  if (!parsed.ok) {
+    respondJson(httpRes, envelopeRpcId(body), {
+      ok: false,
+      error: { code: 'bad-request', message: 'invalid client-request message', details: { issues: parsed.issues } }
+    })
+    return
+  }
+  const { rpcId, method } = parsed.message
+  if (method !== endpoint) {
+    respondJson(httpRes, rpcId, {
+      ok: false,
+      error: {
+        code: 'bad-request',
+        message: `method ${JSON.stringify(method)} does not match endpoint ${JSON.stringify(endpoint)}`,
+        details: { issues: [] }
+      }
+    })
+    return
+  }
+  try {
+    const result = await dispatchDeepartmentsEndpoint(endpoint, parsed.message.payload, deps)
+    respondJson(httpRes, rpcId, result)
+  } catch (error) {
+    respondJson(httpRes, rpcId, {
+      ok: false,
+      error: { code: 'internal', message: String(error), details: {} }
+    })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2457,135 +2829,78 @@ export function applyInvoke(ctx: Context, config: Config) {
     globalSleep()
   }, 'deepartments: host-plane board tools')
 
-  // --- main-agents sidebar RPC (server half) ---------------------------------
+  // --- main-agents sidebar RPC (server half, HTTP self-mount) ---------------
   // Serves agent-row status AND the persistent UI config to the client sidebar
-  // over the `/deepartments` channel (trusted-host authority — see below). The
-  // pure row computation lives in src/agents.ts (buildAgentRows /
-  // computeHeadStatus — directly testable); this effect only wires it to the
-  // live registries + the board read model. `ctx.connection` comes from the
-  // SEPARATE dsh-client-connection plugin and is NOT present in headless
-  // profiles, so it is resolved OPTIONALLY via ctx.get('connection') — the same
-  // optional-service pattern as the agents/subagents accessors above (never
-  // added to inject, per the explore report seam).
-  const connection = ctx.get('connection') as ConnectionLike | undefined
-  if (connection !== void 0 && connection.rpc !== void 0) {
-    const disposeRpc = connection.rpc.handle('/deepartments', async (endpoint, payload) => {
-      try {
-        // `ui/config` (read) and `ui/config/set` (write) serve the persistent
-        // UI config (`sidebarEnabled`); `agents` + alias `list` serve the
-        // sidebar rows. Anything else is a bad-request (the endpoint name is
-        // surfaced in the message; the closed RpcErrorDetailsMap['bad-request']
-        // type carries `issues`, so a contextual details object is not
-        // representable — see the report).
-        if (endpoint === 'ui/config') {
-          return {
-            ok: true,
-            value: { sidebarEnabled: uiConfig.sidebarEnabled }
-          } as const
-        }
-        if (endpoint === 'ui/config/set') {
-          const raw = (typeof payload === 'object' && payload !== null ? payload : {}) as { sidebarEnabled?: unknown }
-          if (typeof raw.sidebarEnabled !== 'boolean') {
-            return {
-              ok: false,
-              error: {
-                code: 'bad-request',
-                message: 'sidebarEnabled must be a boolean',
-                details: { issues: [] }
-              }
-            } as const
-          }
-          uiConfig.sidebarEnabled = raw.sidebarEnabled
-          persistUiConfig()
-          return {
-            ok: true,
-            value: { sidebarEnabled: uiConfig.sidebarEnabled }
-          } as const
-        }
-        if (endpoint !== 'agents' && endpoint !== 'list') {
-          return {
-            ok: false,
-            error: {
-              code: 'bad-request',
-              message: 'unknown endpoint: ' + endpoint,
-              details: { issues: [] }
-            }
-          } as const
-        }
-        // Resolve the caller host member id (host-<sessionId>) from its
-        // sessionId. If the caller host is not (yet) registered in `hosts`,
-        // unread counts as 0 for all heads (nothing to count against).
-        let sessionId: string | undefined
-        if (typeof payload === 'object' && payload !== null) {
-          const raw = payload as { sessionId?: unknown }
-          if (typeof raw.sessionId === 'string') sessionId = raw.sessionId
-        }
-        let hostMemberId: string | undefined
-        if (sessionId !== undefined) {
-          for (const entry of hosts.values()) {
-            if (entry.sessionId === sessionId) { hostMemberId = entry.hostId; break }
-          }
-        }
-        // Board room read model: load the durable board records ONCE (the FILE
-        // is the cold source of truth and carries MessagePayload.ack, which the
-        // folded room projection deliberately omits). `loadRecords` and
-        // `resolveBoardPath` are the board-store accessors already in scope.
+  // over the `/deepartments` channel (trusted-host authority). The pure row + UI
+  // computation lives in dispatchDeepartmentsEndpoint (exported, unit-tested in
+  // test/rpc-channel.test.js); this effect only wires it to the live registries
+  // + the board read model and mounts the HTTP routes.
+  //
+  // rc.8 TRANSPORT FIX: `ctx.connection.rpc.handle('/deepartments', ...)` did NOT
+  // mount an HTTP route in rc.8 — dsh-client-connection registers ONLY the `/api`
+  // prefix + its in-memory channel SERVICE via webServer; a channel registered on
+  // `.rpc.handle` is NOT exposed as an HTTP endpoint. So a browser
+  // `POST /deepartments/agents` never reached the old handler: the POST fell
+  // through to the SPA fallback (405) and a GET returned the SPA HTML — the
+  // sidebar heads were always empty. The CONFIRMED WORKING rc.8 pattern
+  // (dshmarket) is to self-mount `kind:'exact'` routes on the live webServer
+  // (dsh-web-app resolves ctx.get('webServer'); dsh-client-connection mounts /api
+  // via ctx.webServer.register). We do the same, serving the SAME client wire
+  // contract the client already speaks:
+  //   request : POST ${origin}/deepartments/<endpoint>
+  //             body { type:'client-request', rpcId, method:<endpoint>, payload }
+  //   response: 200 JSON { type:'server-response', rpcId, result:{ok,value|error} }
+  // Trust mirrors the connection channel (loopback always; otherwise the request
+  // Host:port must be a declared trusted host). `webServer` is resolved by rule 7
+  // (`ctx.get('webServer') ?? ctx.get('httpServer')`); when absent (headless /
+  // host-less) the channel — a GUI feature — is skipped silently, exactly like
+  // the old `connection !== void 0` gate (the client is the only consumer).
+  const connection = ctx.get('connection') as (ConnectionLike & { trustedHosts?: string[] }) | undefined
+  const webServer = (ctx.get('webServer') ?? ctx.get('httpServer')) as WebServerLike | undefined
+  if (webServer !== void 0) {
+    // Trusted authorities from the DEPLOYED connection service: the same list the
+    // rc.8 client-connection channel already vets every request against (seeded
+    // by `--trusted-host laagencia.taildb5a7a.ts.net:8445` on the systemd unit).
+    // NOTE: this Cordis build exposes NO `ctx.getConfig('...')` API (verified
+    // absent from the cordis type surface and used by no dsh plugin), so the
+    // trusted hosts are read from the live `connection.trustedHosts` field —
+    // its public, schema-backed value — rather than the getConfig('web-app') /
+    // getConfig('client-connection') fallbacks (documented deviation). Empty when
+    // the service is absent / headless.
+    const trustedHosts = connection?.trustedHosts ?? []
+    const sidebarDeps: DeepartmentsEndpointDeps = {
+      uiConfig,
+      persistUiConfig,
+      departments: config.org.departments,
+      byPost: byPost as unknown as Map<string, PostEntryLike>,
+      hosts: hosts.values() as Iterable<HostEntryLike>,
+      memberCursors: memberCursors as unknown as ReadonlyMap<string, { lastMessageSeq: number }>,
+      sessionLive: (sid) => agents !== void 0 && agents.get(SessionId(sid)) !== undefined,
+      sessionRunning: (sid) => agents !== void 0 && agents.get(SessionId(sid))?.status === 'running',
+      loadBoardRecords: async () => {
+        // The board FILE is the cold source of truth and carries
+        // MessagePayload.ack, which the folded room projection omits.
         const boardRoom = config.org.rooms.find((room) => room.id === 'board')
-        const boardRecords = boardRoom === void 0 ? [] : await loadRecords(resolveBoardPath(config.stateDir, boardRoom.id))
-        // Unread addressed-to-host messages per head: board message with
-        // seq > cursor.lastMessageSeq AND from === postId AND (to is empty OR
-        // includes the caller host member id) AND payload.ack !== true —
-        // mirroring the TOC filter at dept_room_read (invoke.ts).
-        const unreadFor = (postId: string): number => {
-          if (hostMemberId === undefined || boardRoom === void 0) return 0
-          const cursor = memberCursors.get(hostMemberId)
-          const lastSeq = cursor === void 0 ? -1 : cursor.lastMessageSeq
-          let count = 0
-          for (const record of boardRecords) {
-            if (record.kind !== 'message') continue
-            if (record.seq <= lastSeq) continue
-            if (record.from !== postId) continue
-            if ((record.payload as MessagePayload).ack === true) continue
-            if (record.to.length > 0 && !record.to.includes(hostMemberId)) continue
-            count++
-          }
-          return count
-        }
-        const rows = buildAgentRows({
-          departments: config.org.departments,
-          posts: byPost as unknown as Map<string, PostEntryLike>,
-          // Heads are FIRST-CLASS ROOT AGENTS (Batch 1a/1b): identified by a
-          // STABLE session id (`head-<postId>`) with NO parent/owner, so the
-          // only live resolvers a head needs are sessionLive (present in the
-          // agents registry) and the optional sessionRunning refinement.
-          // `parentLive` is gone — a root head has no parent to be live for.
-          sessionLive: (sessionId) => agents !== void 0 && agents.get(SessionId(sessionId)) !== undefined,
-          sessionRunning: (sessionId) => agents !== void 0 && agents.get(SessionId(sessionId))?.status === 'running',
-          unreadFor,
-          sessionId
-        })
-        return {
-          ok: true,
-          value: {
-            host: { id: 'asistente', name: 'Asistente', department: "User's Office" },
-            agents: rows
-          }
-        } as const
-      } catch (error) {
-        // Never throw across the RPC boundary — fold any internal failure into
-        // the `internal` error branch.
-        return {
-          ok: false,
-          error: { code: 'internal', message: String(error), details: {} }
-        } as const
+        return boardRoom === void 0 ? undefined : loadRecords(resolveBoardPath(config.stateDir, boardRoom.id))
       }
-      // authority: 'trusted-host' — this deployment runs behind Tailscale and
-      // the owner's GUI origin is a declared trusted host
-      // (laagencia.taildb5a7a.ts.net:8445), which 'loopback' would reject. A
-      // trusted-host channel also accepts loopback, so both the Tailscale board
-      // and any localhost front-end keep working.
-    }, { authority: 'trusted-host' })
-    ctx.effect(() => () => { void disposeRpc() }, 'deepartments: main-agents sidebar RPC channel')
+    }
+    // Register each client path as a `kind:'exact'` POST route. `webServer.register`
+    // returns a disposer; the effect folds them into one reversible registration
+    // (AGENTS.md: every registration is a reversible effect).
+    const routes: WebServerRouteLike[] = [
+      { path: '/deepartments/agents', endpoint: 'agents' },
+      { path: '/deepartments/list', endpoint: 'list' },
+      { path: '/deepartments/ui/config', endpoint: 'ui/config' },
+      { path: '/deepartments/ui/config/set', endpoint: 'ui/config/set' }
+    ].map(({ path, endpoint }) => ({
+      kind: 'exact' as const,
+      path,
+      handler: (req: unknown, res: unknown) => handleDeepartmentsRequest(req, res, endpoint, trustedHosts, sidebarDeps)
+    }))
+    ctx.effect(() => {
+      const disposers = routes.map((route) => webServer.register(route))
+      return () => { for (const dispose of disposers) dispose() }
+    }, 'deepartments: main-agents sidebar RPC channel')
   }
 
 }
