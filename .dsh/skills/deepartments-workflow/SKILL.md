@@ -244,12 +244,14 @@ channel peerDependencies with CLI pin) live in AGENTS.md and the
 
 ## Session ritual
 
-- **START** (lean wake, see "Wake routine"): one git batch
-  (`git status && git log --oneline -5`) + the ROADMAP "Current status" tail →
-  parallel `dept_whereami` + `dept_room_read("<room>")` → `dept_room_who` only if
-  a roster is strictly needed → do NOT re-read AGENTS.md or the full ROADMAP or
-  list state dirs (the journal is the memory) → load this skill only when
-  planning an actual mission → present the session plan to the owner.
+- **START** (injected wake, see "Wake routine"): the Deepartments wake pack is
+  ALREADY in your initial context — identity, the pre-resolved journal path +
+  body, the board delta TOC, condensed roster, git bearings, system state, and
+  the full deepartments-workflow skill. Do not re-fetch any of it at wake. Call
+  board tools only for LIVE needs the pack cannot cache (liveness, full message
+  text, writes, dept_sleep); do NOT re-read AGENTS.md or the full ROADMAP or
+  list state dirs (the journal is the memory) → present the session plan to the
+  owner.
 - **WORK**: break into atomic tasks → dispatch builders (parallel if no file
   overlap) → reviewer gate after each batch → commit after each green batch.
 - **END**: verification, commit, update `docs/ROADMAP.md` (transient status
@@ -258,40 +260,70 @@ channel peerDependencies with CLI pin) live in AGENTS.md and the
   structure, tier) → `ask_user_question` BEFORE dispatching. Present options;
   the owner decides. No silent defaults.
 
-## Wake routine (deterministic orientation)
+## Wake routine (injected wake)
 
-Before ANY real work, run this fixed, cheap checklist (the model must not
-improvise here — deterministic steps first, decide only after):
+Start-of-session: the Deepartments wake pack is ALREADY injected as part of
+your initial context — identity, journal path + body, board delta TOC,
+condensed roster, git bearings, system state, and this full skill. Do not
+re-fetch any of it at wake (no dept_whereami / dept_room_read / dept_room_who /
+skill / git calls just to orient — it is all in the pack).
 
-1. **Identity + bearings** (one batch): `dept_whereami` (host = host-<sessionId>,
-   head = post id) + `pwd`/git mental note. Catches wrong-workspace wakes.
-2. **Read the journal — the ONLY unconditional read.** It arrived as the wake's
-   first surface; re-confirm the frontmatter (author/room/board_cursor + wake
-   counter/current_step when present). Never act before reading it (anti-memory-theater).
-3. **Board delta scan** (cheap, not a full dump): `dept_room_read("<room>")` —
-   TOC of messages addressed to you since your last cursor; fetch full text only
-   for messages you must answer (dept_room_read messageId full-fetch).
-4. **Health check (fail-loud, don't guess)**: verify the last-known-good state
-   still holds — the journal's cursor resolves in the room, your room exists,
-   and the board tools respond (dept_whereami/dept_room_read succeed). If health
-   fails (lost cursor, missing room, tool error), STOP and surface it before any
-   new work; ask the human when a state is stale/ambiguous.
-5. **Then decide**: from the journal's open_items, pick the highest-priority
+Only call board tools for LIVE needs the pack cannot cache: true session
+liveness (dept_room_who — registry flags in the pack are NOT liveness), full
+text of a message you must answer (dept_room_read messageId), writes, or
+dept_sleep. Use dept_wake_snapshot when you need a fresh consolidated snapshot
+mid-session.
+
+Then decide: pick the highest-priority unfinished open item from the journal
+and present a concise plan to the owner; ask the human only on divergence.
+
+The canonical routine text (mirrored verbatim in the journal footer, i.e. what
+the code builder injects at the host's dept_sleep seed):
+
+> Start-of-session: your Deepartments context injection already carries identity,
+> the pre-resolved journal path + journal body, the board delta TOC, the condensed
+> roster, git bearings, system state, and the full deepartments-workflow skill.
+> Read it — do not re-fetch what the pack provides. Only call board tools for LIVE
+> needs the pack cannot cache: true session liveness (dept_room_who), full text of
+> a message you must answer (dept_room_read messageId), writes, or dept_sleep.
+> Then pick the highest-priority unfinished open item and present a concise plan.
+> Full sequence: skill deepartments-workflow ("Wake routine").
+
+### Wake-routine checklist (pack-read + minimal calls)
+
+Run this fixed, cheap set (the model must not improvise here — the pack read
+comes first, tool calls only for live needs, decide after):
+
+1. **Read the injected pack** — identity, journal path + body (re-confirm the
+   frontmatter: author/room/board_cursor + wake counter/current_step when
+   present), board delta TOC, condensed roster, git bearings, system state, and
+   the skill body are all already in your first context. Never act before
+   reading the journal (anti-memory-theater); do NOT re-fetch any pack section.
+2. **Live needs only** — call `dept_room_who` when true session liveness
+   matters (the pack's registry flags are NOT liveness); `dept_room_read
+   messageId` for the full text of a message you must answer; write or
+   `dept_sleep` as needed; `dept_wake_snapshot` for a fresh consolidated
+   snapshot mid-session.
+3. **Health check (fail-loud, don't guess)** — only if the pack itself is
+   stale/ambiguous (lost cursor, missing room, tool error): STOP and surface it
+   before any new work; ask the human when a state is stale/ambiguous.
+4. **Then decide**: from the journal's open_items, pick the highest-priority
    unfinished item and present a concise session plan; ask the human only on
    divergence (ambiguous priority, lost state, novel decision).
 
-Load lazily / just-in-time — never pre-load:
+Never pre-load:
 - `AGENTS.md` / `docs/ROADMAP.md`: read the "Current status" TAIL only (newest
   entries; the section is reverse-chronological) or on demand when the journal
-  indicates they changed — do not re-read the whole files every wake.
-- `~/.dsh/skills` / preset skills: load the `deepartments-workflow` skill only
-  when planning an actual mission, not as a bare formality.
+  indicates they changed — do not re-read the whole files every wake. The pack
+  injects only the facts, not the full docs.
 - State dirs (`<stateDir>/rooms|journals|hosts.json`): the journal IS the memory
-  snapshot; do not re-list them on wake unless the journal points at a missing
+  snapshot; do not re-list them on wake unless the pack points at a missing
   room/file.
-
-Git at wake: one batch `git status && git log --oneline -5` (per AGENTS.md), not
-separate calls.
+- If the pack is somehow absent or you distrust a section (brand-new
+  never-slept session with no dept_sleep seed yet), fall back to the lean
+  manual orientation (dept_whereami + dept_room_read delta + git batch +
+  skill load) — but never on a normal seeded wake.
 
 This routine is mirrored as a short reminder header in journals written after
-2026-08-20 (see dept_memo_write). Follow it on EVERY wake — host and head alike.
+2026-08-20 (see dept_memo_write) — the canonical text above is what the code
+builder injects. Follow it on EVERY wake — host and head alike.
