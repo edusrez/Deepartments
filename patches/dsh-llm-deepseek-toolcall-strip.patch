@@ -1,0 +1,96 @@
+# === dsh-deepartments patch: dsh-llm-deepseek tool-call consecutiveness strip (STAGE 2) ===
+#
+# WHAT THIS FIXES
+#   STAGE 2 of the defense-in-depth series, applied ON TOP of the stage-1
+#   orphan role:'tool' sweep (patches/dsh-llm-deepseek-orphan-sweep.patch).
+#   The strict DeepSeek direct API requires tool responses to CONSECUTIVELY
+#   follow the assistant message that issued the tool_calls (one immediate
+#   set - no interleaved user/system messages). A dept_sleep close under
+#   Fix A can leave [assistant(tool_calls) -> user(journal) -> tool(result)]
+#   on the wire (the deferred sleep-replace map is in-memory and empty after
+#   a process restart), and the strict validator rejects that interleave with
+#   a 400 "insufficient tool messages following tool_calls". This stage adds a
+#   post-pass to BOTH serializers of the installed @deepseek-ai/dsh-llm-deepseek
+#   lib:
+#     - serializeMessages           (plain path)
+#     - serializeMessagesWithImages (image/vision path)
+#   For every assistant wire message with tool_calls, the post-pass collects
+#   the tool responses that follow CONSECUTIVELY (until the first non-tool
+#   message); if any tool_call_id lacks its consecutive response, it STRIPS
+#   the whole tool_calls array from that assistant (text/reasoning kept) and
+#   drops the tool responses of the stripped calls (they would otherwise be
+#   orphaned {role:'tool'} messages - the stage-1 400 class). Clean consecutive
+#   pairs pass through byte-identical (never mutated; verified by probe in
+#   .dsh/reports/builder/2026-08-21-patch-toolcall-strip.md).
+#
+# TARGET FILE (after dsh upgrade, in the global install tree)
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js
+#   Diff base: the STAGE-1-patched file (md5 da90e47fccdeae16f93472159aee0e1c).
+#   The patch is self-contained (relative paths a/lib/index.js b/lib/index.js);
+#   scripts/reapply-dsh-patches.sh rewrites them to the resolved absolute path
+#   before applying.
+#
+# FINGERPRINTS (md5)
+#   f82d2ea38a6a27ae0c7f691d384b3949  pristine @deepseek-ai/dsh 0.1.1-rc.2 lib/index.js (78 334 B)
+#   da90e47fccdeae16f93472159aee0e1c  stage 1 applied (orphan sweep, 78 712 B) - the BASE this patch applies onto
+#   3390675e5d48a82fe906ba365d91713f  stage 2 applied (this patch, tool-call strip)
+#   Restoration backups: /opt/dsh/backups/llm-deepseek-index.js-* (see patches/README.md)
+#
+# WHY NOT UPSTREAM
+#   Owner decision: fold as a repo patch, no upstream PR (same as stage 1).
+#   The fix lives inside the installed dsh tree and is lost on every dsh
+#   upgrade -> re-apply after each upgrade with scripts/reapply-dsh-patches.sh
+#   (fingerprint-gated; stages 1+2 chained, each verified).
+#
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -123,6 +123,33 @@
+ 	};
+ }
+ /**
++* Defense-in-depth post-pass over the wire list: the strict DeepSeek API
++* requires tool responses to CONSECUTIVELY follow the assistant that issued
++* the tool_calls (one immediate set - no interleaved user/system messages).
++* Any assistant whose tool responses are missing, partial, or non-consecutive
++* would be rejected (400 "insufficient tool messages following tool_calls")
++* by the upstream validator; this pass STRIPS `tool_calls` from such an
++* assistant (text/reasoning kept) and drops the tool responses of the
++* stripped calls (they would otherwise be orphaned {role:'tool'} messages -
++* the Fix B 400 class). Clean consecutive pairs pass through byte-identical
++* (never mutated).
++*/
++function stripIncompleteToolCalls(wire) {
++	for (let i = 0; i < wire.length; i++) {
++		const assistant = wire[i];
++		if (assistant.role !== "assistant" || !Array.isArray(assistant.tool_calls) || assistant.tool_calls.length === 0) continue;
++		const required = assistant.tool_calls.map((toolCall) => toolCall.id);
++		const followed = new Set();
++		for (let j = i + 1; j < wire.length && wire[j].role === "tool"; j++) followed.add(wire[j].tool_call_id);
++		if (required.every((id) => followed.has(id))) continue;
++		delete assistant.tool_calls;
++		const stripped = new Set(required);
++		for (let k = wire.length - 1; k >= 0; k--) {
++			if (wire[k].role === "tool" && stripped.has(wire[k].tool_call_id)) wire.splice(k, 1);
++		}
++	}
++}
++/**
+ * Serialize the conversation. `tool-result` blocks become standalone
+ * `{role: 'tool'}` messages; the harness puts each tool result in its own
+ * user-role message, so a mixed user message contributes its text first and
+@@ -159,6 +186,7 @@
+ 			content: flattenText(result.content) || "(no output)"
+ 		});
+ 	}
++	stripIncompleteToolCalls(wire);
+ 	return wire;
+ }
+ /**
+@@ -224,6 +252,7 @@
+ 		}
+ 	}
+ 	flushToolImages();
++	stripIncompleteToolCalls(wire);
+ 	return wire;
+ }
+ /** Assemble request fields shared by text-only and image-capable conversion. */
