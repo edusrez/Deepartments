@@ -1,0 +1,85 @@
+# === dsh-deepartments patch: dsh-llm-deepseek orphan role:'tool' sweep (Fix B) ===
+#
+# WHAT THIS FIXES
+#   Orphaned {role:'tool'} messages break the strict DeepSeek direct API:
+#   the host dept_sleep close can leave a tool-result block whose toolCallId
+#   was never issued by any PRECEDING assistant message's tool-call block
+#   (broken interleave on the dept close path). The upstream strict validator
+#   rejects that with a 400 INVALID_REQUEST. This patch sweeps orphans in BOTH
+#   serializers of the installed @deepseek-ai/dsh-llm-deepseek lib so the wire
+#   never carries a tool message whose id was not previously issued:
+#     - serializeMessages           (plain path;  Set, collect, guard)
+#     - serializeMessagesWithImages (image/vision path; Set, collect, guard)
+#   The sweep is never-throw (Set.add/has only) and clean sequences pass
+#   through byte-identical (verified by simulation 13/13 in
+#   .dsh/reports/builder/2026-08-21-llm-deepseek-orphan-sweep-rc2.md).
+#
+# TARGET FILE (after dsh upgrade, in the global install tree)
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-deepseek/lib/index.js
+#   The patch is self-contained (relative paths a/lib/index.js b/lib/index.js);
+#   scripts/reapply-dsh-patches.sh rewrites them to the resolved absolute path
+#   before applying.
+#
+# FINGERPRINTS (md5)
+#   f82d2ea38a6a27ae0c7f691d384b3949  pristine @deepseek-ai/dsh 0.1.1-rc.2 lib/index.js (78 334 B)
+#   da90e47fccdeae16f93472159aee0e1c  patched (this patch applied, 78 712 B)
+#   (historical) 8d23bbe5afd6cb08c7f105817852cf6b  rc.1 patched backup (pre-rc2, 38 331 B)
+#   Restoration backups: /opt/dsh/backups/llm-deepseek-index.js-* (see patches/README.md)
+#
+# WHY NOT UPSTREAM
+#   Owner decision: fold as a repo patch, no upstream PR. The fix lives inside
+#   the installed dsh tree and is lost on every dsh upgrade -> re-apply after
+#   each upgrade with scripts/reapply-dsh-patches.sh (fingerprint-gated).
+#
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -132,6 +132,7 @@
+ */
+ function serializeMessages(messages) {
+ 	const wire = [];
++	const issuedToolCallIds = new Set();
+ 	for (const message of messages) {
+ 		assertTextOnly(message.content);
+ 		if (message.role === "system") {
+@@ -142,6 +143,7 @@
+ 			continue;
+ 		}
+ 		if (message.role === "assistant") {
++			for (const block of message.content) if (block.type === "tool-call") issuedToolCallIds.add(block.id);
+ 			wire.push(serializeAssistant(message));
+ 			continue;
+ 		}
+@@ -151,7 +153,7 @@
+ 			role: "user",
+ 			content: text
+ 		});
+-		for (const result of toolResults) wire.push({
++		for (const result of toolResults) if (issuedToolCallIds.has(result.toolCallId)) wire.push({
+ 			role: "tool",
+ 			tool_call_id: result.toolCallId,
+ 			content: flattenText(result.content) || "(no output)"
+@@ -170,6 +172,7 @@
+ async function serializeMessagesWithImages(messages, images) {
+ 	assertSupportedImageRoles(messages);
+ 	const wire = [];
++	const issuedToolCallIds = new Set();
+ 	let pendingToolImages = [];
+ 	const flushToolImages = () => {
+ 		if (pendingToolImages.length === 0) return;
+@@ -193,6 +196,7 @@
+ 			continue;
+ 		}
+ 		if (message.role === "assistant") {
++			for (const block of message.content) if (block.type === "tool-call") issuedToolCallIds.add(block.id);
+ 			flushToolImages();
+ 			wire.push(serializeAssistant(message));
+ 			continue;
+@@ -207,7 +211,7 @@
+ 				content
+ 			});
+ 		}
+-		for (const result of toolResults) {
++		for (const result of toolResults) if (issuedToolCallIds.has(result.toolCallId)) {
+ 			const parts = await contentParts(result.content, images, messageIndex + 1, nextImage);
+ 			const imageParts = parts.filter((part) => part.type !== "text");
+ 			const text = parts.filter((part) => part.type === "text").map((part) => part.text).join("");
