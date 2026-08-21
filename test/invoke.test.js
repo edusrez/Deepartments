@@ -226,6 +226,27 @@ class StubPersistence extends Service {
 // The bundle resolves `sessionPersistence`/`sessionQuery` OPTIONALLY via
 // `ctx.get` (see src/index.ts note), so the plugin boots without them.
 
+// Batch S1 live-fix: an OPT-IN real-API-shaped persistence for the real-capture
+// tests. `readRaw` IS present — a BOUND class method that uses `this` (mirroring
+// the jsonl backend's `readRaw` at dsh-session-persistence-jsonl lib/index.js:869),
+// so an unbound extraction-and-call would crash with a raw TypeError, exactly
+// like the live bug — and it returns a canned artifact only when one is
+// configured (`undefined` otherwise, exercising the "service present but no
+// stored artifact" degrade path). bootPlugin mounts it when passed
+// `{ rawPersistence: true }`.
+class StubPersistenceWithRaw extends StubPersistence {
+  artifact = undefined
+
+  setRawArtifact(content) {
+    this.artifact = content
+  }
+
+  async readRaw(id) {
+    if (this.artifact === undefined) return undefined
+    return { meta: { id }, filename: 'session.jsonl', content: this.artifact }
+  }
+}
+
 /** A live parent agent as the registry would hold it (exact identity). */
 function fakeParentAgent(id = SessionId(randomUUID())) {
   return {
@@ -258,7 +279,7 @@ function fakeParentAgent(id = SessionId(randomUUID())) {
  * stub agents/persistence services, two stub subagent providers, and the
  * dsh-deepartments bundle itself.
  */
-async function bootPlugin(stateDir) {
+async function bootPlugin(stateDir, opts = {}) {
   const root = new Context()
   const loaderFiber = await root.plugin(Loader, { baseUrl: new URL('.', import.meta.url).href })
   const loader = root.loader
@@ -268,7 +289,10 @@ async function bootPlugin(stateDir) {
   loader.create({ id: 'tools', name: '@deepseek-ai/dsh-tools' })
 
   const agents = new StubAgents(root)
-  const persistence = new StubPersistence(root)
+  // Batch S1 live-fix: a boot opt swaps in the real-API-shaped persistence
+  // (readRaw present) so the real-capture tests exercise the bound call shape;
+  // the default stays readRaw-less so the harness keeps degrading to the stub.
+  const persistence = opts.rawPersistence === true ? new StubPersistenceWithRaw(root) : new StubPersistence(root)
   await root.plugin(SubagentRuntime)
 
   const spawnStub = stubProvider('spawn')
@@ -289,6 +313,7 @@ async function bootPlugin(stateDir) {
   return {
     root,
     agents,
+    persistence,
     spawnStub,
     forkStub,
     pluginCtx: () => loader.resolve('deepartments').fiber?.ctx ?? loader.resolve('deepartments').ctx,
@@ -3362,6 +3387,85 @@ test('T1 lean pack: after archive writes, the injected wake pack + readWakeJourn
       assert.ok(!packText.includes('transcript: unavailable'), 'no session-log stub leaks into the wake pack')
       assert.ok(!packText.includes('journals/sessions/'), 'no session-log citation leaks into the wake pack')
       assert.ok(!packText.includes('archive_seq:'), 'no archive_seq citation leaks into the wake pack')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('T1 live-fix: a REAL live session + persisted artifact captures the REAL transcript (bound flush/readRaw runs — not the stub)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, persistence, dispose } = await bootPlugin(stateDir, { rawPersistence: true })
+    try {
+      const rawId = `session-livefix-${randomUUID()}`
+      // Make the session TRULY live in the REAL dsh-session store — the same
+      // service `captureSessionLog` resolves — so the bound real
+      // `sessions.flush(live)` runs against a genuine live entry (the exact
+      // call shape the live host takes; the old unbound extraction crashed
+      // here with `Cannot read properties of undefined (reading
+      // 'liveEntryFor')` in the live deployment).
+      const live = root.sessions.create(SessionId(rawId), { meta: { cwd: stateDir } })
+      assert.ok(live !== undefined && root.sessions.get(SessionId(rawId)) === live, 'live session entered in the real store')
+      // A durable JSONL artifact exactly as the jsonl backend's readRaw returns it.
+      persistence.setRawArtifact([
+        '{"type":"session","version":0}',
+        '{"type":"user/message","seq":1,"time":1750000000000,"data":{"message":{"content":"T1 LIVE probe: first instruction"}}}',
+        '{"type":"assistant/message","seq":2,"time":1750000001000,"data":{"message":{"content":"T1 live reply"}}}',
+        '{"type":"tool/call","seq":3,"time":1750000002000,"data":{"name":"bash","arguments":"{\\"command\\":\\"echo hi\\"}"}}',
+        '{"type":"tool/result","seq":4,"time":1750000003000,"data":{"message":{"content":"hi"},"meta":{}}}',
+        '{"type":"turn/end","seq":5,"time":1750000004000,"data":{"turn":1,"reason":"complete"}}'
+      ].join('\n'))
+
+      // The host's agent.id IS the session id the real store keys by, so the
+      // memo write's capture finds the live entry, flushes it, reads the
+      // artifact and serializes the REAL transcript (first-ever cycle → whole log).
+      const host = agents.put(fakeParentAgent(SessionId(rawId)))
+      const hostId = `host-${rawId}`
+      const signal = new AbortController().signal
+      const memo = root.tools.get('dept_memo_write')
+      await memo.execute({ summary: 'S1 live-fix: real transcript capture.' }, { agent: host, signal })
+
+      const logPath = path.join(stateDir, 'journals', 'sessions', `${hostId}-1.md`)
+      const logText = await readFile(logPath, 'utf8')
+      assert.ok(!logText.includes('transcript: unavailable'), 'memo-path capture is REAL, not the stub')
+      assert.match(logText, /^- \*\*user:\*\* T1 LIVE probe: first instruction$/m, 'real user/message serialized')
+      assert.match(logText, /^- \*\*assistant:\*\* T1 live reply$/m, 'real assistant/message serialized')
+      assert.match(logText, /^- \*\*tool\*\* `bash` → \*called\*: .*echo hi/m, 'real tool/call serialized')
+      assert.match(logText, /^- \*\*toolresult\*\* → \*ok\*: hi$/m, 'real tool/result serialized')
+      assert.match(logText, /^start_seq: 1$/m, 'first-ever cycle slices from the first event')
+      assert.match(logText, /^end_seq: 5$/m, 'end_seq reflects the last event')
+      assert.match(logText, new RegExp(`^session_id: ${rawId}$`, 'm'), 'session_id carried through the real capture')
+
+      // The host-plane dept_sleep's sleep-boundary capture (bumped ordinal 2)
+      // runs the SAME bound capture from the bump* hook — also real. The memo
+      // already wrote the journal dept_sleep requires.
+      const sleep = root.tools.get('dept_sleep')
+      await sleep.execute({}, { agent: host, signal })
+      const sleepLogText = await readFile(path.join(stateDir, 'journals', 'sessions', `${hostId}-2.md`), 'utf8')
+      assert.ok(!sleepLogText.includes('transcript: unavailable'), 'sleep-boundary capture is REAL, not the stub')
+      assert.match(sleepLogText, /^wake_counter: 2$/m, 'sleep log named by the BUMPED ordinal (2)')
+      assert.match(sleepLogText, /^- \*\*user:\*\* T1 LIVE probe: first instruction$/m, 'sleep-boundary capture carries the real transcript too')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('T1 live-fix degrade: service present but NO stored artifact still degrades silently to the stub with a USEFUL reason (never a raw TypeError)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir, { rawPersistence: true })
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const memo = root.tools.get('dept_memo_write')
+      const result = await memo.execute({ summary: 'Degrade with a useful reason.' }, { agent: host, signal })
+
+      const hostId = `host-${host.id}`
+      const stubLog = await readFile(path.join(stateDir, 'journals', 'sessions', `${hostId}-1.md`), 'utf8')
+      assert.match(stubLog, /^transcript: unavailable$/m, 'stub form when no stored artifact is present')
+      assert.match(stubLog, /^reason: no stored session artifact \(readRaw returned nothing\)$/m, 'stub reason carries the ACTUAL meaningful error — no raw TypeError leaks')
+      const checkpoint = await readFile(result.memoPath, 'utf8')
+      assert.match(checkpoint, /^wake_counter: 1$/m, 'memo write succeeded despite the stub capture (never throws)')
     } finally {
       await dispose()
     }

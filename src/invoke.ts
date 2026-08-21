@@ -1872,20 +1872,28 @@ export function applyInvoke(ctx: Context, config: Config) {
     const journalPath = journalPathFor(memberId)
     try {
       // 1. Flush the live session's in-memory tail so readRaw reflects it
-      //    (mirrors flushLiveSessionLog, session-export.js:95-101).
-      const sessions = ctx.get('sessions')
+      //    (mirrors flushLiveSessionLog, session-export.js:95-101). Invoke the
+      //    real service methods as BOUND method calls — `this` must survive:
+      //    dsh-session's `flush(session)` reads `this.liveEntryFor(session)`
+      //    (dsh-session lib/index.js:1792, rc.8) and the jsonl backend's
+      //    `readRaw(id)` reads `this.findLog(...)` (dsh-session-persistence-jsonl
+      //    lib/index.js:869). The earlier extraction-then-call form
+      //    (`const f = sessions.flush; await f(live)`) lost `this` and crashed
+      //    live captures with `Cannot read properties of undefined (reading
+      //    'liveEntryFor')` — every live session log degraded to the stub
+      //    (Batch S1 in-the-wild fix; spec §Capture flow 2 documents the bound
+      //    `ctx.get('sessions').flush(session)` shape).
+      const sessions = ctx.get('sessions') as { get?: (id: string) => unknown; flush?: (session: unknown) => Promise<unknown> } | undefined
       if (sessions !== undefined && sessionId !== undefined) {
-        const live = sessions.get(SessionId(sessionId))
-        const flush = (sessions as { flush?: (s: unknown) => Promise<unknown> }).flush
-        if (live !== undefined && typeof flush === 'function') await flush(live)
+        const live = sessions.get?.(SessionId(sessionId))
+        if (live !== undefined && typeof sessions.flush === 'function') await sessions.flush(live)
       }
       // 2. In-process read of the durable JSONL artifact (readRaw).
-      const persistence = ctx.get('sessionPersistence')
-      const readRaw = (persistence as { readRaw?: (id: unknown, signal?: AbortSignal) => Promise<{ content: string } | undefined> } | undefined)?.readRaw
-      if (persistence === undefined || typeof readRaw !== 'function') {
+      const persistence = ctx.get('sessionPersistence') as { readRaw?: (id: SessionId, signal?: AbortSignal) => Promise<{ content: string } | undefined> } | undefined
+      if (persistence === undefined || typeof persistence.readRaw !== 'function') {
         throw new Error('sessionPersistence unavailable (no readRaw)')
       }
-      const raw = await (readRaw as (id: unknown) => Promise<{ content: string } | undefined>)(SessionId(sessionId))
+      const raw = await persistence.readRaw(SessionId(sessionId))
       if (raw === undefined || typeof raw.content !== 'string' || raw.content === '') {
         throw new Error('no stored session artifact (readRaw returned nothing)')
       }
