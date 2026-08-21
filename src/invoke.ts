@@ -604,14 +604,16 @@ export function buildSubagentOrientationMessage(role: SubagentRole, roomId: stri
 // (sleeping), listing flags that are live-registry reads never baked in.
 // ---------------------------------------------------------------------------
 
-/** Canonical host wake routine (verbatim — used BOTH as the journal footer AND
- * as wake-pack section 9 guidance; must stay byte-identical in both places). */
+/** Canonical host wake routine (verbatim — wake-pack section 9 guidance; the
+ * skill's "Wake routine (injected wake)" section + checklist mirror it). The
+ * journal footer is one-line pointer to the skill, so this text is NOT
+ * duplicated in dept_sleep seeds (Batch C P1 dedupe, see ~2051). */
 export const HOST_WAKE_ROUTINE_TEXT =
-  'Start-of-session: your Deepartments context injection already carries identity, the pre-resolved journal path + journal body, the board delta TOC, the condensed roster, git bearings, system state, and the full deepartments-workflow skill. Read it — do not re-fetch what the pack provides. Only call board tools for LIVE needs the pack cannot cache: true session liveness (dept_room_who), full text of a message you must answer (dept_room_read messageId), writes, or dept_sleep. Then pick the highest-priority unfinished open item and present a concise plan. Full sequence: skill deepartments-workflow ("Wake routine").'
+  'Start-of-session: your Deepartments context injection already carries identity, the pre-resolved journal path + journal body, the board delta TOC, the condensed roster, git bearings, system state, and the full deepartments-workflow skill. Read it — do not re-fetch what the pack provides. Only call board tools for LIVE needs the pack cannot cache: true session liveness (dept_room_who), full text of a message you must answer (dept_room_read messageId), writes, or dept_sleep. REPLY FIRST: your first output of the wake turn is the owner-facing message — greeting + a <=5-line top-item plan + the explicit ask "what do you want this session?" — before ANY tool call (the only exception: the fail-loud health check when the pack itself is stale/ambiguous, which still surfaces the situation to the owner before working). The plan is PROPOSED, not authorized: do NOT dispatch subagents, explore the codebase, or start the item until the human answers; to ground the plan, at most 1–2 reads of a journal-referenced report and zero src/checkout exploration or bash before go-ahead. Then pick the highest-priority unfinished open item, present a concise plan, and WAIT for the owner\'s answer before working. Full sequence: skill deepartments-workflow ("Wake routine").'
 
 /** The closing guidance line that follows the canonical routine in the pack. */
 export const HOST_WAKE_NEXT_STEP =
-  'next step: pick the highest-priority unfinished open item from the journal and present a concise plan.'
+  'next step: pick the highest-priority unfinished open item from the journal and present a concise plan — but reply FIRST: your first output of the wake turn is the owner-facing message (greeting + a <=5-line plan + "what do you want this session?") before ANY tool call, and the plan stays PROPOSED until the human answers: do NOT dispatch subagents, explore the codebase, or start the item, and keep grounding to at most 1–2 reads of a journal-referenced report with zero src/checkout bash before go-ahead.'
 
 /**
  * The pre-rendered parts `buildWakePack` composes. Every field except

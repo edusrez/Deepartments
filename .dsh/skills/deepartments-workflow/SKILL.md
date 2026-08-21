@@ -223,11 +223,18 @@ text of a message you must answer (dept_room_read messageId), writes, or
 dept_sleep. Use dept_wake_snapshot when you need a fresh consolidated snapshot
 mid-session.
 
-Then decide: pick the highest-priority unfinished open item from the journal
-and present a concise plan to the owner; ask the human only on divergence.
+Reply first, then decide: your FIRST output of the wake turn is the
+owner-facing message — greeting + a <=5-line top-item plan + the explicit ask
+"what do you want this session?" — before ANY tool call (the only exception is
+the fail-loud health check when the pack itself is stale/ambiguous, which still
+surfaces the situation to the owner before working). The plan is PROPOSED, not
+authorized: do NOT dispatch subagents, explore the codebase, or start the item
+until the human answers. Then pick the highest-priority unfinished open item
+from the journal and present the concise plan to the owner; ask the human only
+on divergence.
 
-The canonical routine text (mirrored verbatim in the journal footer, i.e. what
-the code builder injects at the host's dept_sleep seed):
+The canonical routine text (injected verbatim as wake-pack section 9 guidance
+and mirrored here — the boot-time wording the model follows on every wake):
 
 > Start-of-session: your Deepartments context injection already carries identity,
 > the pre-resolved journal path + journal body, the board delta TOC, the condensed
@@ -235,14 +242,29 @@ the code builder injects at the host's dept_sleep seed):
 > Read it — do not re-fetch what the pack provides. Only call board tools for LIVE
 > needs the pack cannot cache: true session liveness (dept_room_who), full text of
 > a message you must answer (dept_room_read messageId), writes, or dept_sleep.
-> Then pick the highest-priority unfinished open item and present a concise plan.
-> Full sequence: skill deepartments-workflow ("Wake routine").
+> REPLY FIRST: your first output of the wake turn is the owner-facing message —
+> greeting + a <=5-line top-item plan + the explicit ask "what do you want this
+> session?" — before ANY tool call (the only exception: the fail-loud health check
+> when the pack itself is stale/ambiguous, which still surfaces the situation to
+> the owner before working). The plan is PROPOSED, not authorized: do NOT dispatch
+> subagents, explore the codebase, or start the item until the human answers; to
+> ground the plan, at most 1–2 reads of a journal-referenced report and zero
+> src/checkout exploration or bash before go-ahead. Then pick the highest-priority
+> unfinished open item, present a concise plan, and WAIT for the owner's answer
+> before working. Full sequence: skill deepartments-workflow ("Wake routine").
 
 ### Wake-routine checklist (pack-read + minimal calls)
 
-Run this fixed, cheap set (the model must not improvise here — the pack read
-comes first, tool calls only for live needs, decide after):
+Run this fixed, cheap set (the model must not improvise here — the REPLY comes
+first, tool calls only for live needs, and the owner's answer gates all work):
 
+0. **Reply-first (hard rule)** — your FIRST output of the wake turn is the
+   owner-facing message: greeting (state: delta empty/items, git clean) + the
+   top-item plan (<=5 lines) + the explicit ask "what do you want this
+   session?" — before ANY tool call (only exception: the fail-loud health check
+   when the pack itself is stale/ambiguous, which still surfaces the situation
+   to the owner before working). The pack already carries everything needed to
+   speak; exploration follows the owner's answer, never precedes it.
 1. **Read the injected pack** — identity, journal path + body (re-confirm the
    frontmatter: author/room/board_cursor + wake counter/current_step when
    present), board delta TOC, condensed roster, git bearings, system state, and
@@ -256,9 +278,13 @@ comes first, tool calls only for live needs, decide after):
 3. **Health check (fail-loud, don't guess)** — only if the pack itself is
    stale/ambiguous (lost cursor, missing room, tool error): STOP and surface it
    before any new work; ask the human when a state is stale/ambiguous.
-4. **Then decide**: from the journal's open_items, pick the highest-priority
-   unfinished item and present a concise session plan; ask the human only on
-   divergence (ambiguous priority, lost state, novel decision).
+4. **Then decide — ask first (permission gate)**: from the journal's
+   open_items, pick the highest-priority unfinished item and present a concise
+   session plan, then ask the human what they want this session. The plan is
+   PROPOSED, not authorized: do NOT dispatch subagents, explore the codebase,
+   or start the item until the human answers. The order is reply → plan → gate
+   → (go-ahead) → explore → work; ask the human only on divergence (ambiguous
+   priority, lost state, novel decision).
 
 Never pre-load:
 - `AGENTS.md` / `docs/ROADMAP.md`: read the "Current status" TAIL only (newest
@@ -268,6 +294,10 @@ Never pre-load:
 - State dirs (`<stateDir>/rooms|journals|hosts.json`): the journal IS the memory
   snapshot; do not re-list them on wake unless the pack points at a missing
   room/file.
+- Grounding cap: to ground the plan, at most 1–2 reads of a report the journal
+  references (e.g. the cited reviewer report). No source/checkout/diff
+  exploration and no bash forensics before the owner answers; that work starts
+  only after go-ahead.
 - If the pack is somehow absent or you distrust a section (brand-new
   never-slept session with no dept_sleep seed yet), fall back to the lean
   manual orientation (dept_whereami + dept_room_read delta + git batch +
