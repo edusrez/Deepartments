@@ -15,14 +15,17 @@ subagents.
 | Role | Dispatch tool | Model | Notes |
 |-----|----------------|-------|-------|
 | **Asistente** (the main agent, Pro) | (this agent) | Pro | All tools, but NEVER edits; conversation, planning, microdecisions, dispatch |
-| **builder** | `subagent` | Flash | Atomic edits with a clear spec; ALL builders run Flash, no Pro tier |
-| **reviewer** | `subagent` | Flash | Read-only verifier after each builder/batch; PASS/FAIL |
-| **researcher** | `subagent` | Flash | Web research; reports to `.dsh/reports/researcher/` |
-| **scribe** | `subagent` | Flash | Doc drafts to `.dsh/reports/scribe/` (never auto-commits) |
-| **explore** | `subagent` | Flash | Read-only; code search, flow analysis |
+| **builder** | `subagent` | deepseek-v4-flash-vision-exp | Atomic edits with a clear spec; ALL builders run Flash, no Pro tier |
+| **reviewer** | `subagent` | deepseek-v4-flash-vision-exp | Read-only verifier after each builder/batch; PASS/FAIL |
+| **researcher** | `subagent` | deepseek-v4-flash-vision-exp | Web research; reports to `.dsh/reports/researcher/` |
+| **scribe** | `subagent` | deepseek-v4-flash-vision-exp | Doc drafts to `.dsh/reports/scribe/` (never auto-commits) |
+| **explore** | `subagent` | deepseek-v4-flash-vision-exp | Read-only; code search, flow analysis |
 
 There is no rigid roster: every subagent is dispatched via `subagent` or
-`subagent_fork` (both Flash model on `opencode-go`). The `_fork` variants
+`subagent_fork` (all Flash-tier, defaulting to `deepseek-v4-flash-vision-exp`
+via the direct DeepSeek API — provider `deepseek-official`, reasoning_effort
+`max`, endpoint/API key wired in the dev profile; stable profile untouched).
+The `_fork` variants
 inherit the conversation: use them for context-inheriting follow-ups. The
 per-role contract is NOT re-written into the prompt — it is INJECTED at the
 child's first pre-step from the bundled ROLE_CONTRACTS map (Task T4): pass the
