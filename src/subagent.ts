@@ -14,6 +14,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { assertSubagentMaxDepth } from '@deepseek-ai/dsh-subagent'
 import type { AssembleContext } from '@deepseek-ai/dsh-system-prompt'
+import { rememberRole } from './role-orient.js'
 
 export const name = 'deepartments-subagent'
 export const inject = ['tools', 'subagents', 'systemPrompt']
@@ -95,6 +96,10 @@ export function apply(ctx: Context, config: Config) {
           type: 'string',
           required: true,
           description: wording.promptDescription
+        },
+        role: {
+          type: 'string',
+          description: 'Optional Deepartments role for the child (builder|reviewer|researcher|scribe|explore; default generic). Drives the slim role-contract context injection instead of the full host wake pack; unknown roles fall back to generic.'
         }
       },
       output: {
@@ -138,14 +143,23 @@ export function apply(ctx: Context, config: Config) {
         // The ONLY branch: start a durable continuable child and hand its id
         // back immediately. There is no blocking path — the model cannot wait
         // inline for the child even if it wanted to.
+        const child = await ctx.subagents.startContinuable({
+          provider: config.provider,
+          label: args.description,
+          request,
+          signal: exec.signal
+        })
+        // Task T4: record the dispatch-time role keyed by the child session id so
+        // the pre-step injector can give THIS transient subagent a slim per-role
+        // contract block instead of the full host wake pack (see src/role-orient.ts).
+        // The child id is available synchronously after startContinuable; the same
+        // code path serves BOTH `subagent` and the `subagent_fork` provider (they
+        // differ only by inheritsParentContext/mount), so the role plumbing covers
+        // both variants automatically.
+        rememberRole(child.childId as string, args.role)
         return {
           kind: 'continuable',
-          subagentId: (await ctx.subagents.startContinuable({
-            provider: config.provider,
-            label: args.description,
-            request,
-            signal: exec.signal
-          })).childId as string
+          subagentId: child.childId as string
         }
       }
     }))

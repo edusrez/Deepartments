@@ -29,6 +29,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadRecords, resolveBoardPath } from '../lib/board-store.js'
 import { emitRoomRecord, roomSessionId } from '../lib/org.js'
 import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan } from '../lib/invoke.js'
+import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import {
   HEAD_PRESET_BASE_ID,
   headPresetIdFor,
@@ -425,15 +426,20 @@ async function readPosts(stateDir) {
 
 async function readHosts(stateDir) {
   const hostsPath = path.join(stateDir, 'hosts.json')
+  // Task T4 (test hardening): retry until the file is present AND parses.
+  // persistHosts is fire-and-forget, so a reader could otherwise catch the file
+  // mid-write and a torn JSON.parse would throw straight through the enclosing
+  // waitFor (the ~1/6 flake in test 74 "Batch 7 host dept_sleep").
+  let parsed
   await waitFor(async () => {
     try {
-      await access(hostsPath)
+      parsed = JSON.parse(await readFile(hostsPath, 'utf8'))
       return true
     } catch {
       return false
     }
-  }, 5000, 'hosts.json written')
-  return JSON.parse(await readFile(hostsPath, 'utf8'))
+  }, 5000, 'hosts.json readable')
+  return parsed
 }
 
 // --- tests ---------------------------------------------------------------------
@@ -2601,8 +2607,10 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes t
       assert.equal(result.memoPath, path.join(stateDir, 'journals', `${hostId}.md`))
       assert.ok(typeof result.sleepEpoch === 'number' && result.sleepEpoch > 0)
 
-      // Durable: hosts.json carries the host's sleepEpoch.
-      await waitFor(async () => (await readHosts(stateDir))[hostId].sleepEpoch !== undefined, 5000, 'host sleepEpoch persisted to hosts.json')
+      // Durable: hosts.json carries the host's sleepEpoch. Deterministic settling
+      // (Task T4 test hardening): tolerate a still-missing key / torn write by
+      // retrying rather than throwing out of the predicate (the ~1/6 flake).
+      await waitFor(async () => (await readHosts(stateDir))?.[hostId]?.sleepEpoch !== undefined, 5000, 'host sleepEpoch persisted to hosts.json')
       const hostsFile = await readHosts(stateDir)
       assert.ok(typeof hostsFile[hostId].sleepEpoch === 'number', 'host sleepEpoch persisted durably')
 
@@ -2780,6 +2788,143 @@ test('Batch C pre-step: repeated pre-step within ONE awake session does NOT re-i
       // A THIRD pre-step (the follow-up continuation) also stays gated.
       const third = await runPreStep(pluginCtx, host, claimed, signal)
       assert.equal(third.messages.length, claimed.length, 'third pre-step still gated (no re-injection)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- Task T4: ROLE-FOCUSED context injection for TRANSIENT subagents --------
+// Every tool-dispatched subagent (origin === 'subagent') now gets a slim
+// per-role contract block at its first pre-step instead of the FULL host wake
+// pack (~4.6-4.9k tokens). Registered hosts/heads/workers (origin undefined)
+// keep the full pack untouched (existing Batch C tests are the regression
+// guard).
+
+/** A transient dispatched subagent as dsh-subagent creates it: a bare UUID
+ * session whose durable header meta carries origin 'subagent' (+ parentSession). */
+function fakeSubagentAgent(id = SessionId(randomUUID())) {
+  return {
+    id,
+    options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+    status: 'idle',
+    session: {
+      header: { id, meta: { origin: 'subagent', parentSession: 'host-some-orchestrator' } },
+      events: []
+    },
+    ctx: { get: () => undefined },
+    inboxMessages: [],
+    injectedMessages: [],
+    followup(message) { this.inboxMessages.push(message) },
+    steer() {},
+    inject(message) { this.injectedMessages.push(message) },
+    send() {},
+    cancel() {},
+    whenIdle() { return new Promise(() => {}) }
+  }
+}
+
+test('Task T4 pre-step: a TRANSIENT subagent (origin=subagent, role=reviewer) is injected a slim ROLE-focused block AND NOT the full host wake pack', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const reviewer = agents.put(fakeSubagentAgent())
+      // Dispatch-time role recording is what src/subagent.ts execute does; the
+      // shared module registry is the same instance the real-loader injector reads.
+      rememberRole(String(reviewer.id), 'reviewer')
+      const signal = new AbortController().signal
+
+      const claimed = preStepClaimed('review the change please')
+      const decision = await runPreStep(pluginCtx, reviewer, claimed, signal)
+
+      assert.equal(decision.kind, 'enter')
+      assert.equal(decision.messages.length, claimed.length + 1, 'subagent pre-step injects exactly ONE extra node (the slim role block)')
+      const node = decision.messages[decision.messages.length - 1]
+      assert.equal(node.source.kind, 'plugin', 'subagent orientation is a plugin context')
+      assert.equal(node.source.form, 'notice', 'subagent orientation is a notice')
+      const text = node.content[0].text
+
+      // Slim role-focused block present:
+      assert.match(text, /^## Deepartments context$/m, 'subagent orientation opens with its OWN header, not the wake pack header')
+      assert.match(text, /pack-v1: present/, 'carries the deterministic presence sentinel')
+      assert.match(text, /identity: Deepartments subagent \(role: reviewer, room: board\)/, 'identity is a Deepartments subagent with the REVIEWER role — never a host')
+      assert.match(text, /## Your role contract/, 'role contract section present')
+      assert.match(text, /READ-ONLY: you do NOT write or edit code\./, 'reviewer contract injected')
+      assert.match(text, /VERDICT: PASS \(1-2 line note\) or FAIL/, 'reviewer contract verdict line injected')
+
+      // NO full host wake pack markers:
+      assert.ok(!text.includes('## Deepartments wake pack'), 'no host wake pack header')
+      assert.ok(!/host-[0-9a-f-]+ \(role: host\)/.test(text), 'no host-… (role: host) branding')
+      assert.ok(!text.includes('Pre-resolved journal path'), 'no journal pointer')
+      assert.ok(!text.includes('## Board delta since cursor'), 'no board delta section')
+      assert.ok(!text.includes('## Condensed roster'), 'no roster')
+      assert.ok(!text.includes('## Git bearings'), 'no git bearings section')
+      assert.ok(!text.includes('## System state'), 'no system state section')
+      assert.ok(!text.includes('## ROADMAP current status (tail)'), 'no ROADMAP tail')
+      assert.ok(!text.includes('## deepartments-workflow skill (full body)'), 'no full skill body')
+      assert.ok(!text.includes('## Guidance (wake routine)'), 'no wake-routine guidance')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Task T4 pre-step: role plumbing — known role injects its contract; unknown/absent roles fall back to GENERIC', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const signal = new AbortController().signal
+
+      // normalizeRole is the authoritative normalizer.
+      assert.equal(normalizeRole('builder'), 'builder')
+      assert.equal(normalizeRole('explore'), 'explore')
+      assert.equal(normalizeRole('bogus'), 'generic')
+      assert.equal(normalizeRole(undefined), 'generic')
+      assert.equal(normalizeRole(''), 'generic')
+
+      // A role with NO registry entry (cold-resume / absent role param) → generic.
+      const cold = agents.put(fakeSubagentAgent())
+      const claimedCold = preStepClaimed('one-off')
+      const coldDecision = await runPreStep(pluginCtx, cold, claimedCold, signal)
+      assert.equal(coldDecision.kind, 'enter')
+      const coldNode = coldDecision.messages[coldDecision.messages.length - 1]
+      assert.match(coldNode.content[0].text, /identity: Deepartments subagent \(role: generic/, 'absent role resolves to generic')
+      assert.match(coldNode.content[0].text, /DO THE ONE TASK GIVEN in your dispatch prompt/, 'generic contract injected when role unknown')
+
+      // A caller explicitly recording an UNKNOWN role also resolves to generic.
+      const bogus = agents.put(fakeSubagentAgent())
+      rememberRole(String(bogus.id), 'totally-unknown')
+      const claimedBogus = preStepClaimed('do the thing')
+      const bogusDecision = await runPreStep(pluginCtx, bogus, claimedBogus, signal)
+      assert.equal(bogusDecision.kind, 'enter')
+      assert.match(bogusDecision.messages[bogusDecision.messages.length - 1].content[0].text, /role: generic/, 'unknown role falls back to generic')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Task T4 dept_sleep: a transient subagent calling the global dept_sleep is REFUSED (no host misclassification, no context reset)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      const sub = agents.put(fakeSubagentAgent())
+      const sleepTool = root.tools.get('dept_sleep')
+      const signal = new AbortController().signal
+      // Even with a pre-authored "host" journal (so the host branch would
+      // otherwise have proceeded), the subagent is refused BEFORE any reset.
+      const bogusHostId = `host-${sub.id}`
+      await seedJournal(stateDir, bogusHostId, 'subagent should never sleep')
+      await assert.rejects(
+        () => sleepTool.execute({}, { agent: sub, signal }),
+        /dept_sleep is refused for a transient delegated subagent — a subagent cannot sleep/,
+        'dept_sleep refuses a transient subagent'
+      )
+      // No context reset occurred: the throw came before the host branch, so the
+      // live surface is untouched (nothing collapsed to a journal node).
+      assert.equal(sub.session.header.id, sub.id, 'subagent session untouched by the refused sleep')
     } finally {
       await dispose()
     }

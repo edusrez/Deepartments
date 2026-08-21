@@ -137,6 +137,24 @@ import {
   buildHeadPresetComposition,
   buildHeadPresetMetadata
 } from './head-presets.js'
+import { roleForSession, buildSubagentOrientation } from './role-orient.js'
+import type { SubagentRole } from './role-orient.js'
+
+/**
+ * Task T4 — session header as observed at runtime: the base `SessionHeader`
+ * type omits the durable `meta` record that dsh-session attaches on creation
+ * (cwd/parentSession/origin/delegationDepth/agentPreset). Transient dispatched
+ * subagents carry `meta.origin === 'subagent'` (dsh-subagent childSessionMeta);
+ * registered hosts/heads/workers carry `origin: undefined`. We cast through this
+ * shape for subagent-origin detection (injector + dept_sleep guard).
+ */
+interface SessionHeaderWithMeta {
+  meta?: {
+    origin?: unknown
+    parentSession?: unknown
+    delegationDepth?: unknown
+  }
+}
 
 /**
  * Message source for a board wake relayed to a HOST Asistente session. The
@@ -547,6 +565,25 @@ export function buildWakePackMessage(packText: string) {
       plugin: 'deepartments',
       form: 'notice',
       summary: boundContextSummary('Deepartments wake context pack — injected orientation (identity, journal path, board delta, roster, git, system state, full deepartments-workflow skill).')
+    }
+  })
+}
+
+/**
+ * Task T4 — the compact ROLE-focused orientation injected into a TRANSIENT
+ * dispatched subagent (origin === 'subagent') at its first pre-step, in place
+ * of the full ~4.6-4.9k-token host wake pack. One org line + the per-role
+ * contract block (from src/role-orient.ts) + a reporting pointer. Same
+ * plugin/notice surface as the host pack so it lands as a collapsed row.
+ */
+export function buildSubagentOrientationMessage(role: SubagentRole, roomId: string) {
+  return createUserMessage({
+    content: [{ type: 'text', text: buildSubagentOrientation(role, roomId) }],
+    source: {
+      kind: 'plugin',
+      plugin: 'deepartments',
+      form: 'notice',
+      summary: boundContextSummary('Deepartments · subagent — role-focused orientation (role contract injected; no host wake pack).')
     }
   })
 }
@@ -2381,6 +2418,25 @@ export function applyInvoke(ctx: Context, config: Config) {
     // surface; the host wake pack is for HOST Asistente sessions only.
     if (postIdForChild(sessionId) !== undefined) return decision
     if (wakePackInjected.has(sessionId)) return decision
+    // ---- Task T4: TRANSIENT dispatched subagent → slim ROLE-focused block, NOT
+    // the full ~4.6-4.9k host pack. `origin === 'subagent'` is the robust
+    // discriminator DSH sets ONLY on startContinuable children (dsh-subagent
+    // childSessionMeta); a root host/head/worker carries origin undefined. A
+    // one-shot atomic-task worker needs its role contract + a one-line org
+    // identity, never journal/git/system/ROADMAP/roster/full-skill. The role
+    // comes from the in-process dispatch-time registry (src/role-orient.ts),
+    // defaulting to `generic` when unknown or after a cold resume.
+    const subagentMeta = (agent?.session?.header as SessionHeaderWithMeta | undefined)?.meta
+    if (subagentMeta?.origin === 'subagent') {
+      signal?.throwIfAborted?.()
+      const role = roleForSession(sessionId)
+      const roomId = config.org.rooms[0]?.id ?? 'board'
+      wakePackInjected.add(sessionId)
+      return {
+        kind: 'enter',
+        messages: [...decision.messages, buildSubagentOrientationMessage(role, roomId)]
+      }
+    }
     signal?.throwIfAborted?.()
     const hostId = hostIdForSession(sessionId)
     const hostEntry = hosts.get(hostId)
@@ -3941,6 +3997,18 @@ export function applyInvoke(ctx: Context, config: Config) {
     async execute(_args, exec): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_sleep requires a calling agent (exec.agent was undefined)')
+      // ---- Task T4: REFUSE a TRANSIENT SUBAGENT. A one-shot delegated worker
+      // has no durable post identity and must NEVER enter the host sleep/reset
+      // branch below — which would misclassify it as a HOST and bump a bogus
+      // `host-<subagentUuid>` wake counter (and historically left headless
+      // one-shots hanging after sleep). `origin === 'subagent'` is set only on
+      // startContinuable children; registered members (host, head, worker) carry
+      // origin undefined and are unaffected. Fail loud; no context reset.
+      const deptSleepMeta = (agent.session?.header as SessionHeaderWithMeta | undefined)?.meta
+      if (deptSleepMeta?.origin === 'subagent') {
+        ctx.logger.warn(`[deepartments] dept_sleep refused for transient subagent ${agent.id as string}`)
+        throw new Error('dept_sleep is refused for a transient delegated subagent — a subagent cannot sleep; its task ends with the settlement notice (role-scoped context reset is not supported).')
+      }
       const memberId = postIdForChild(agent.id as string)
 
       // ---- Batch 7: HOST branch (the sleeping Asistente) ---------------------
