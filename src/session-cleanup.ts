@@ -645,19 +645,25 @@ export async function runSleepCleanup(hostSessionId: string, opts: SleepCleanupO
   // (invoke.ts) KEEPS the pending flag and retries at a boot where the
   // session is verifiably NOT materialized (mirrors the archive step's
   // per-child live guard — but for the host itself, the GUI-critical piece).
+  // The SAME skipped shape is returned by the TOCTOU re-check immediately
+  // before the truncate (below): a session that became live BETWEEN this
+  // entry guard and the truncate (e.g. a smart-restart resume via the agent
+  // registry while the boot awaited its file reads) must also be left
+  // completely untouched, with the flag kept for the next boot.
+  const skippedReport = (): SleepCleanupReport => ({
+    hostSessionId,
+    skipped: true,
+    skipReason: 'session-live',
+    truncate: undefined,
+    truncateError: undefined,
+    projCacheRemoved: 0,
+    projCacheError: undefined,
+    archive: undefined,
+    archiveError: undefined
+  })
   if (opts.isLive?.(hostSessionId) === true) {
     opts.log?.warn(`[deepartments] web-ui sleep cleanup: SKIPPED for live host session ${hostSessionId} (session-live): the session is materialized, so truncation would corrupt its artifact — pending flag kept for the next boot`)
-    return {
-      hostSessionId,
-      skipped: true,
-      skipReason: 'session-live',
-      truncate: undefined,
-      truncateError: undefined,
-      projCacheRemoved: 0,
-      projCacheError: undefined,
-      archive: undefined,
-      archiveError: undefined
-    }
+    return skippedReport()
   }
   const report: SleepCleanupReport = { hostSessionId, projCacheRemoved: 0, truncate: undefined, truncateError: undefined, projCacheError: undefined, archive: undefined, archiveError: undefined }
   const warn = (msg: string): void => { opts.log?.warn(`[deepartments] web-ui sleep cleanup: ${msg}`) }
@@ -667,13 +673,27 @@ export async function runSleepCleanup(hostSessionId: string, opts: SleepCleanupO
   //    carries truncateError and truncate stays undefined → the pending flag
   //    is kept for the next boot — see invoke.ts).
   if (opts.artifactPath !== undefined) {
+    // TOCTOU RE-CHECK (defense against the window between this function's
+    // entry guard and the truncate — the wake-11 race reproduced in wake-12:
+    // smart-restart resumed the host via the AGENT REGISTRY while the boot
+    // awaited its file reads, so the entry probe said "not live" and the
+    // truncate ran on a live session). Re-probe IMMEDIATELY before the
+    // truncate; a live session now skips the ENTIRE remaining cleanup with
+    // the same skipped report (no truncate, no archive, no projcache
+    // mutation) — the caller keeps the pending flag and retries at a boot
+    // where the session is verifiably not materialized.
+    if (opts.isLive?.(hostSessionId) === true) {
+      opts.log?.warn(`[deepartments] web-ui sleep cleanup: SKIPPED for host session ${hostSessionId} (session-live): the session became materialized mid-cleanup (TOCTOU re-check before the truncate) — nothing was mutated, pending flag kept for the next boot`)
+      return skippedReport()
+    }
     try {
       report.truncate = await truncateSessionArtifact(opts.artifactPath, {
         archiveDir: opts.archiveDir,
         sessionId: hostSessionId,
-        // Defense-in-depth: the top-of-runSleepCleanup guard already returned
-        // for a live host; passing the probe down keeps the truncate step's
-        // own direct-call guard coherent (it can never fire from here).
+        // Defense-in-depth: the top-of-runSleepCleanup guard AND the
+        // pre-truncate TOCTOU re-check already returned for a live host;
+        // passing the probe down keeps the truncate step's own direct-call
+        // guard coherent (it can never fire from here).
         isLive: opts.isLive
       })
     } catch (error) {

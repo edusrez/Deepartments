@@ -623,7 +623,67 @@ test('cleanup: shouldClearCleanupPending clears the pending flag ONLY when the c
   assert.equal(shouldClearCleanupPending({ ...skipped, truncate: ran.truncate }), false, 'a skipped report never clears the flag')
 })
 
+test('cleanup: TOCTOU re-check — runSleepCleanup skips safely (nothing mutated, flag kept) when the host session becomes live AFTER the entry guard but BEFORE the truncate', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const fixture = await buildFixtureTree(stateDir, { pending: false, childCount: 1 })
+    const originalArtifact = await readFile(fixture.hostArtifact)
+    const originalCache = await readFile(fixture.projCachePath, 'utf8')
+    const archiveDir = path.join(stateDir, 'archive')
+    // Simulate the race (wake-12's smart-restart resume): the probe reports
+    // NOT live at the entry guard (call #1) but LIVE at the immediate
+    // pre-truncate re-check (call #2) — the session was materialized (e.g. via
+    // the agent registry) while the boot awaited its file reads.
+    let calls = 0
+    const isLive = () => { calls += 1; return calls >= 2 }
+    const report = await runSleepCleanup(HOST_SESSION, {
+      artifactPath: fixture.hostArtifact,
+      projCachePath: fixture.projCachePath,
+      sessionsRoot: fixture.sessionsRoot,
+      archiveDir,
+      isLive,
+      log: { warn: () => {} }
+    })
+    assert.equal(calls, 2, 'liveness re-probed immediately before the truncate')
+    assert.equal(report.skipped, true, 'mid-cleanup liveness skips the whole cleanup')
+    assert.equal(report.skipReason, 'session-live', 'skip reason is session-live')
+    assert.equal(report.truncate, undefined, 'no truncate result')
+    assert.equal(report.truncateError, undefined, 'no truncate error (skipped, not failed)')
+    assert.equal(report.projCacheRemoved, 0, 'no projcache mutation')
+    assert.equal(report.archive, undefined, 'no child archiving (the whole cleanup is skipped)')
+    assert.equal(shouldClearCleanupPending(report), false, 'flag gate: skipped-live keeps the pending flag for the next boot')
+    assert.deepEqual(await readFile(fixture.hostArtifact), originalArtifact, 'artifact byte-identical (the truncate was never attempted on the live session)')
+    assert.equal(await readFile(fixture.projCachePath, 'utf8'), originalCache, 'projcache byte-unchanged')
+    await assert.rejects(() => readdir(archiveDir), 'no archive dir created')
+  })
+})
+
 // --- real-Loader integration tests -------------------------------------------
+
+/** Stub agents service holding sessions WITHOUT registering them in the dsh
+ * sessions store — the smart-restart resume shape (dsh-smart-restart delivers
+ * its boot notice via `agent.followup(...)` on a session attached to the AGENT
+ * REGISTRY only; the sessions-store map gains it later). The boot cleanup's
+ * `isLive` (invoke.ts) must count a registry-held session as LIVE, or the
+ * truncate would open a mid-log seq seam (the wake-11 corruption class —
+ * explore-deep/2026-08-21-first-turn-api-orphan.md §1.2). */
+class StubAgentsRegistryOnly extends Service {
+  constructor(ctx) {
+    super(ctx, 'agents')
+    this.store = new Map()
+  }
+
+  get(id) {
+    return this.store.get(id)
+  }
+
+  list() {
+    return [...this.store.values()]
+  }
+
+  roots() {
+    return [...this.store.values()]
+  }
+}
 
 /** Stub persistence carrying a root (so the boot cleanup can resolve the
  * sessions root + the derived state-home paths, like the real jsonl
@@ -701,6 +761,50 @@ test('Real Loader: the FIRST boot with webUiCleanupPending performs the web-UI c
     }
     const afterText = await readArtifactText(fixture.hostArtifact)
     assert.equal(afterText, beforeText, 'artifact unchanged by the second boot')
+  })
+})
+
+test('Real Loader: the boot web-UI cleanup SKIPS when the host session is held by the AGENT REGISTRY only (smart-restart resume shape) — artifact byte-identical, no backup, flag kept; the same fixture without the registry guest truncates + clears (positive control)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const fixture = await buildFixtureTree(stateDir, { pending: true, childCount: 1 })
+    const boot1 = await bootPlugin(stateDir, { persistenceRoot: fixture.sessionsRoot })
+    try {
+      // Simulate the smart-restart resume BEFORE the boot cleanup's liveness
+      // probe runs: attach the host session to the AGENT REGISTRY only (the
+      // dsh sessions store never sees it in this boot — isLive must count it
+      // via ctx.get('agents')). The probe sits behind a file-read await in the
+      // cleanup hook, so registering right after the boot is deterministically
+      // earlier.
+      const agentsSvc = new StubAgentsRegistryOnly(boot1.root)
+      agentsSvc.store.set(HOST_SESSION, { id: HOST_SESSION, status: 'idle' })
+      const originalBytes = await readFile(fixture.hostArtifact)
+      // Let the boot cleanup hook evaluate the registry (house pattern: the
+      // second-boot no-op test settles with a fixed wait).
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      assert.deepEqual(await readFile(fixture.hostArtifact), originalBytes, 'artifact byte-identical (no truncation on the registry-live session)')
+      const hosts1 = JSON.parse(await readFile(fixture.hostsPath, 'utf8'))
+      assert.equal(hosts1[HOST_ID]?.webUiCleanupPending, true, 'pending flag KEPT (cleanup skipped — retried at a boot where the session is verifiably not materialized)')
+      // No backup written (a truncation would have archived the original under
+      // the state-home archive dir first).
+      await assert.rejects(() => readdir(path.join(stateDir, 'archive')), 'no archive dir created (no truncation happened)')
+    } finally {
+      await boot1.dispose()
+    }
+    // Positive control: the SAME fixture booted WITHOUT the registry guest
+    // truncates the artifact and clears the flag — proves the guard, not the
+    // fixture, caused the boot-1 skip.
+    const boot2 = await bootPlugin(stateDir, { persistenceRoot: fixture.sessionsRoot })
+    try {
+      await waitFor(async () => {
+        const hosts = JSON.parse(await readFile(fixture.hostsPath, 'utf8'))
+        return hosts[HOST_ID]?.webUiCleanupPending !== true
+      }, 5000, 'positive control: the cleanup cleared the flag')
+    } finally {
+      await boot2.dispose()
+    }
+    const afterEvents = parseSessionLog(await readArtifactText(fixture.hostArtifact)).events
+    assert.deepEqual(afterEvents.map((e) => e.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message'], 'positive control really truncated (setup + journal only)')
+    await access(path.join(stateDir, 'archive'))
   })
 })
 

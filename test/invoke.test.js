@@ -28,6 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadRecords, resolveBoardPath } from '../lib/board-store.js'
 import { emitRoomRecord, roomSessionId } from '../lib/org.js'
+import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
 import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
@@ -247,6 +248,20 @@ class StubPersistenceWithRaw extends StubPersistence {
   }
 }
 
+/** Stub persistence carrying a `root` (so the boot web-UI cleanup hook can
+ * resolve the sessions root + derived state-home paths, like the real jsonl
+ * backend's public `root` — mirrors session-cleanup.test.js). Used by the
+ * Fix wake-12 restart tests to author a witness artifact the boot cleanup
+ * truncates: the cleanup hook is chained AFTER the hosts loader restored the
+ * deferred seed, so observing its flag-clear is the deterministic "the restore
+ * has happened" marker before the wake pre-step runs. */
+class StubPersistenceWithRoot extends StubPersistence {
+  constructor(ctx, root) {
+    super(ctx)
+    this.root = root
+  }
+}
+
 /** A live parent agent as the registry would hold it (exact identity). */
 function fakeParentAgent(id = SessionId(randomUUID())) {
   return {
@@ -292,7 +307,13 @@ async function bootPlugin(stateDir, opts = {}) {
   // Batch S1 live-fix: a boot opt swaps in the real-API-shaped persistence
   // (readRaw present) so the real-capture tests exercise the bound call shape;
   // the default stays readRaw-less so the harness keeps degrading to the stub.
-  const persistence = opts.rawPersistence === true ? new StubPersistenceWithRaw(root) : new StubPersistence(root)
+  // Fix wake-12: a boot opt mounts a root-carrying persistence so the boot
+  // web-UI cleanup hook can resolve the sessions root (restart tests).
+  const persistence = opts.rawPersistence === true
+    ? new StubPersistenceWithRaw(root)
+    : opts.persistenceRoot !== undefined
+      ? new StubPersistenceWithRoot(root, opts.persistenceRoot)
+      : new StubPersistence(root)
   await root.plugin(SubagentRuntime)
 
   const spawnStub = stubProvider('spawn')
@@ -2801,6 +2822,203 @@ test('Fix A regression: a host dept_sleep cycle leaves NO assistant-less role:to
       assert.equal(realSession.surface.nodes.length, 1, 'second pre-step does not re-collapse (deferred intent consumed once)')
     } finally {
       await dispose()
+    }
+  })
+})
+
+// --- Fix wake-12: deferred sleep-replace seed DURABILITY (sleep→restart) ------
+// The deferred full-window replace intent (Fix A) lives in an IN-MEMORY map
+// that dies with the process. A dept_sleep → process-restart cycle therefore
+// restored an empty map, the first pre-step of the new process skipped the
+// fold, and the journal-interleaved close tail [assistant(tool_calls) · journal
+// · tool] shipped in the first request — the strict deepseek-official API 400
+// ("insufficient tool messages following tool_calls"), the wake-12 first-turn
+// failure (explore-deep/2026-08-21-first-turn-api-orphan.md). The fix persists
+// the seed into hosts.json at dept_sleep (HostEntry.deferredJournalSeed) and
+// RESTORES it via the real hosts loader at boot; these tests drive the REAL
+// Loader through an actual dispose → re-boot to prove the restored fold.
+
+/** Strict-consecutiveness probe (the wake-12 400 rule): every assistant wire
+ * message carrying `tool_calls` must be IMMEDIATELY followed — starting at the
+ * NEXT wire message — by the matching role:'tool' responses, one per call id,
+ * with NO other message in between (the DeepSeek strict OpenAI-compatible
+ * validator: "An assistant message with 'tool_calls' must be followed by tool
+ * messages responding to each 'tool_call_id'"). Returns the list of violations
+ * (empty = consecutive), so the tests can assert both the RED (pre-fold) and
+ * the GREEN (post-fold) sides of the fix. */
+function findConsecutivenessViolations(messages) {
+  const violations = []
+  for (let i = 0; i < messages.length; i++) {
+    const calls = Array.isArray(messages[i].tool_calls) ? messages[i].tool_calls : []
+    if (calls.length === 0) continue
+    let consecutive = true
+    for (let k = 0; k < calls.length; k++) {
+      const next = messages[i + 1 + k]
+      if (next?.role !== 'tool' || next.tool_call_id !== calls[k].id) {
+        violations.push({ at: i, callId: calls[k].id, got: next?.role ?? null })
+        consecutive = false
+        break
+      }
+    }
+    if (consecutive) i += calls.length // skip the consumed tool responses
+  }
+  return violations
+}
+
+/** Author a minimal valid host artifact (header frame + one event frame with
+ * setup + a real-looking journal node) under a scratch sessions root. The boot
+ * web-UI cleanup hook truncates it (keeps setup + journal, renumbers 0..k) and
+ * clears the pending flag — and the hook is chained AFTER the hosts loader
+ * restored the deferred seed, so observing that flag-clear is the deterministic
+ * "the restore has happened" marker before the wake pre-step runs. */
+async function authorCleanupWitnessArtifact(sessionsRoot, sessionId, journalText) {
+  const headerLine = JSON.stringify({
+    type: 'session', version: 0, id: sessionId, createdAt: 1787000000000, cwd: '/root', delegationDepth: 0, agentPreset: 'deepartments'
+  })
+  const events = [
+    JSON.stringify({ type: 'permission/preset', seq: 0, time: 1, data: { preset: 'danger-full-access' } }),
+    JSON.stringify({ type: 'sandbox/mode', seq: 1, time: 2, data: { mode: 'danger-full-access' } }),
+    JSON.stringify({ type: 'approval/policy', seq: 2, time: 3, data: { policy: 'never' } }),
+    JSON.stringify({ type: 'user/message', seq: 3, time: 4, data: { content: [{ type: 'text', text: journalText }], source: { kind: 'plugin', plugin: 'deepartments', form: 'notice', summary: 'witness' }, role: 'user', id: 'w-journal' }, surfaceOp: 'append' })
+  ]
+  const dir = path.join(sessionsRoot, '--root--', encodeSegment(sessionId))
+  await mkdir(dir, { recursive: true })
+  const headerFrame = await compressZstdFrame(`${headerLine}\n`)
+  const eventFrame = await compressZstdFrame(`${events.join('\n')}\n`)
+  await writeFile(path.join(dir, 'session.jsonl.zstd'), Buffer.concat([headerFrame, eventFrame]))
+}
+
+test('Fix wake-12: a dept_sleep → process-restart cycle restores the deferred sleep-replace seed from hosts.json and the FIRST pre-step folds the journal-interleaved close tail back to the journal (the wake-12 first-turn 400 fix)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const sessionId = SessionId(randomUUID())
+    const hostId = `host-${sessionId}`
+    const journalSummary = 'WAKE-12-SEED: carried durably across the restart.'
+
+    // Phase A — boot 1: a real dept_sleep persists the seed durably.
+    const a = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(a.root)
+      const hostA = a.agents.put(fakeParentAgent(sessionId))
+      await seedJournal(stateDir, hostId, journalSummary)
+      // A real dsh Session so the host branch's surface append + deferred
+      // intent run (the map intent AND its durable mirror).
+      const realSessionA = Session.create(sessionId)
+      realSessionA.append('user/message', { role: 'user', content: [{ type: 'text', text: 'prior turn 1' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
+      hostA.session = realSessionA
+      await a.root.tools.get('dept_sleep').execute({}, { agent: hostA, signal: new AbortController().signal, concludeTurn: () => {} })
+      // Deferred seed mirror: hosts.json carries deferredJournalSeed alongside
+      // sleepEpoch/webUiCleanupPending (persistHosts is fire-and-forget →
+      // waitFor).
+      await waitFor(async () => {
+        const hostsFile = await readHosts(stateDir)
+        return typeof hostsFile[hostId]?.deferredJournalSeed === 'string'
+      }, 5000, 'deferredJournalSeed persisted to hosts.json at dept_sleep')
+      const hostsFile = await readHosts(stateDir)
+      const journalFile = await readFile(path.join(stateDir, 'journals', `${hostId}.md`), 'utf8')
+      assert.equal(hostsFile[hostId].deferredJournalSeed, journalFile, 'persisted seed is the seeded journal text (the bump output)')
+      assert.match(hostsFile[hostId].deferredJournalSeed, /^wake_counter: 2$/m, 'persisted seed carries the BUMPED ordinal')
+      assert.equal(hostsFile[hostId].webUiCleanupPending, true, 'cleanup marker persisted at the same sleep (reload witness)')
+    } finally {
+      await a.dispose()
+    }
+
+    // Phase B — boot 2 (RESTART): the fresh process must re-arm the fold from
+    // hosts.json. The boot web-UI cleanup hook (hostsLoaded.then → the restore
+    // is UPSTREAM of hostsLoaded) truncates a witness artifact + clears the
+    // flag ONLY AFTER the loader restored the seed, so its flag-clear is the
+    // deterministic "restore done" marker.
+    const witnessRoot = path.join(stateDir, 'witness-sessions')
+    await authorCleanupWitnessArtifact(witnessRoot, String(sessionId), `---\nauthor: ${hostId}\nwake_counter: 2\n---\n\nwitness`)
+    const b = await bootPlugin(stateDir, { persistenceRoot: witnessRoot })
+    try {
+      await waitForRooms(b.root)
+      await waitFor(async () => {
+        const hostsFile = await readHosts(stateDir)
+        return hostsFile[hostId]?.webUiCleanupPending !== true
+      }, 5000, 'boot cleanup ran after the loader restore (witness)')
+      const hostsAfterCleanup = await readHosts(stateDir)
+      assert.equal(typeof hostsAfterCleanup[hostId]?.deferredJournalSeed, 'string', 'the durable seed SURVIVED the cleanup (only the fold consumes it)')
+      const restoredSeed = hostsAfterCleanup[hostId].deferredJournalSeed
+      // The resumed host session carries the wake-11 close tail shape:
+      // [assistant(dept_sleep tool_calls) · journal · tool result] — the exact
+      // wire the wake-12 first request shipped (RED: the strict-API 400 case).
+      const hostB = b.agents.put(fakeParentAgent(sessionId))
+      const realSessionB = Session.create(sessionId)
+      const assistantSeq = realSessionB.append('assistant/message', {
+        turn: 1, step: 0,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Persisting memory, then sleeping.' }],
+          tool_calls: [{ id: 'call_dept_sleep', type: 'function', function: { name: 'dept_sleep', arguments: '{}' } }]
+        }
+      }, { surfaceOp: 'append', sourceEventSeqs: [] }).seq
+      realSessionB.append('user/message', buildSleepJournalMessage(restoredSeed), { surfaceOp: 'append' })
+      realSessionB.append('tool/result', {
+        turn: 1, step: 0,
+        message: { role: 'tool', tool_call_id: 'call_dept_sleep', content: [{ type: 'text', text: `sleeping: ${hostId} marked for context reset` }] }
+      }, { surfaceOp: 'append', sourceEventSeqs: [assistantSeq] })
+      hostB.session = realSessionB
+      // RED probe: the UNFOLDED surface violates strict tool-response
+      // consecutiveness (the journal sits between the assistant tool_calls and
+      // its tool response) — the wake-12 400 condition, deterministically.
+      const redViolations = findConsecutivenessViolations(realSessionB.deriveMessages())
+      assert.ok(redViolations.length > 0, 'UNFOLDED close tail violates strict tool-response consecutiveness (the 400 condition)')
+      // The FIRST pre-step of the RESTARTED process performs the deferred fold.
+      const claimed = preStepClaimed('wake up — what is the plan?')
+      const signalB = new AbortController().signal
+      const decision = await runPreStep(b.pluginCtx, hostB, claimed, signalB)
+      assert.equal(decision.kind, 'enter', 'pre-step decision is enter')
+      const folded = realSessionB.deriveMessages()
+      assert.equal(folded.length, 1, 'surface collapsed to exactly ONE node (the folded journal)')
+      assert.equal(folded[0].role, 'user', 'the fold lands a single journal node')
+      assert.equal(folded[0].content[0].text, restoredSeed, 'folded journal node re-lands the restored seed byte-for-byte')
+      assert.equal(folded[0].source.kind, 'plugin', 'journal node rendered as plugin context (never a user-typed message)')
+      assert.equal(findConsecutivenessViolations(folded).length, 0, 'post-fold first-request messages are CONSECUTIVE — no 400 class remains')
+      // The wake pack is still injected fresh (Batch C unchanged).
+      assert.equal(decision.messages.length, claimed.length + 1, 'pre-step injects exactly ONE extra node (the wake pack)')
+      assert.match(decision.messages.at(-1).content[0].text, /pack-v1: present/, 'wake pack injected on the restored boot')
+      // Consume-once: the fold clears the DURABLE seed too (a later mid-wake
+      // restart must NOT restore it and re-fold — next test).
+      await waitFor(async () => {
+        const hostsFile = await readHosts(stateDir)
+        return hostsFile[hostId]?.deferredJournalSeed === undefined
+      }, 5000, 'durable seed cleared when the fold consumed the intent')
+      // Second pre-step stays gated (no re-fold, no re-inject).
+      const second = await runPreStep(b.pluginCtx, hostB, claimed, signalB)
+      assert.equal(second.messages.length, claimed.length, 'second pre-step does NOT re-inject (gate holds)')
+      assert.equal(findConsecutivenessViolations(realSessionB.deriveMessages()).length, 0, 'no re-fold (surface stays the folded journal)')
+    } finally {
+      await b.dispose()
+    }
+  })
+})
+
+test('Fix wake-12: a boot WITHOUT a persisted deferred seed preserves the pre-existing behavior — the first pre-step does NOT fold (the wake surface survives) and only injects the pack', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const sessionId = SessionId(randomUUID())
+    const hostId = `host-${sessionId}`
+    // Author the registry as a mid-wake state (slept before; the fold already
+    // consumed its seed in a previous process): host entry WITHOUT
+    // deferredJournalSeed, cleanup flag absent (already cleared).
+    const hostsPath = path.join(stateDir, 'hosts.json')
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(hostsPath, JSON.stringify({ [hostId]: { sessionId: String(sessionId), roomId: 'board', sleepEpoch: 1787261780000, boundarySeq: 10 } }, null, 2))
+    const b = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(b.root)
+      const host = b.agents.put(fakeParentAgent(sessionId))
+      const realSession = Session.create(sessionId)
+      realSession.append('user/message', { role: 'user', content: [{ type: 'text', text: 'wake turn 1' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
+      host.session = realSession
+      const claimed = preStepClaimed('continue')
+      const decision = await runPreStep(b.pluginCtx, host, claimed, new AbortController().signal)
+      assert.equal(decision.kind, 'enter', 'pre-step decision is enter')
+      assert.equal(realSession.surface.nodes.length, 1, 'no fold (no deferred seed restored) — surface intact')
+      assert.equal(realSession.deriveMessages().length, 1, 'the wake turn survives the first pre-step')
+      assert.equal(decision.messages.length, claimed.length + 1, 'pre-step injects exactly ONE extra node (the wake pack)')
+      assert.match(decision.messages.at(-1).content[0].text, /pack-v1: present/, 'wake pack still injected fresh')
+    } finally {
+      await b.dispose()
     }
   })
 })

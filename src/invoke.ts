@@ -330,6 +330,19 @@ interface HostEntry {
    * process's boot perform the cleanup exactly once per sleep cycle; mid-wake
    * restarts (flag cleared) are exact no-ops. Absent = no cleanup pending. */
   webUiCleanupPending?: boolean
+  /** Fix wake-12 (explore-deep/2026-08-21-first-turn-api-orphan.md): the
+   * DURABLE seed for Fix A's deferred sleep surface replace. dept_sleep (host
+   * branch) records it alongside the in-memory `deferredSleepReplace` intent
+   * (the seeded journal text the wake fold re-inserts); the boot hosts loader
+   * restores it into that map so the FIRST pre-step of a RESTARTED process
+   * still performs the full-window fold. Without the restore the in-memory map
+   * (which dies with the process) is empty, the fold is skipped, and the
+   * journal-interleaved close tail [assistant(tool_calls)·journal·tool] ships
+   * in the first request — the strict deepseek-official API 400s ("insufficient
+   * tool messages following tool_calls"). Cleared when the fold consumes the
+   * intent (a mid-wake restart must never re-fold the whole wake surface back
+   * to the journal). Absent = no deferred replace pending. */
+  deferredJournalSeed?: string
 }
 
 /** Compact per-member read cursors (in-memory — see header comment). */
@@ -1202,6 +1215,11 @@ export function applyInvoke(ctx: Context, config: Config) {
   // role-error.md). The seeded text is carried (NOT re-read) so the wake
   // replace re-lands a byte-identical journal node and still works if the file
   // vanished meanwhile. Consumed once at the first post-sleep pre-step.
+  // Fix wake-12: this map is IN-MEMORY ONLY — it dies with the process — so
+  // the same seed is mirrored durably into HostEntry.deferredJournalSeed
+  // (hosts.json) at dept_sleep and RESTORED into this map by the hosts loader
+  // at boot; a sleep→restart cycle therefore still folds at the first pre-step
+  // of the new process (see the loader + the pre-step consume below).
   const deferredSleepReplace = new Map<string, string>()
   // Batch C: per sender→target pair ack budget. Key `${from}|${to}` → how many
   // consecutive pure acks (payload.ack) that pair has exchanged and when the
@@ -1241,7 +1259,10 @@ export function applyInvoke(ctx: Context, config: Config) {
         // Task T1: persist the optional cycle-boundary seq only when set.
         ...(entry.boundarySeq !== void 0 ? { boundarySeq: entry.boundarySeq } : {}),
         // Web-UI sleep cleanup: persist the pending flag only when set.
-        ...(entry.webUiCleanupPending === true ? { webUiCleanupPending: true } : {})
+        ...(entry.webUiCleanupPending === true ? { webUiCleanupPending: true } : {}),
+        // Fix wake-12: persist the deferred sleep-replace seed only when set
+        // (absent = no fold pending; see HostEntry.deferredJournalSeed).
+        ...(entry.deferredJournalSeed !== void 0 ? { deferredJournalSeed: entry.deferredJournalSeed } : {})
       }
     }
     writeFile(hostsPath, JSON.stringify(data, null, 2), 'utf8').catch(
@@ -1416,18 +1437,32 @@ export function applyInvoke(ctx: Context, config: Config) {
             // never survives into the in-memory registry.
             const sleepEpoch = typeof entry.sleepEpoch === 'number' ? entry.sleepEpoch : undefined
             const boundarySeq = typeof entry.boundarySeq === 'number' ? entry.boundarySeq : undefined
+            // Fix wake-12: sanitize the deferred sleep-replace seed (a string;
+            // a corrupt value must never survive into the registry).
+            const deferredJournalSeed = typeof entry.deferredJournalSeed === 'string' ? entry.deferredJournalSeed : undefined
             hosts.set(hostId, {
               hostId,
               sessionId: entry.sessionId,
               roomId: entry.roomId,
               ...(sleepEpoch !== void 0 ? { sleepEpoch } : {}),
               ...(boundarySeq !== void 0 ? { boundarySeq } : {}),
+              ...(deferredJournalSeed !== void 0 ? { deferredJournalSeed } : {}),
               // Web-UI sleep cleanup: restore the pending marker (a real
               // dept_sleep set it; the first boot after clears it once the
               // artifact truncation succeeded).
               ...(entry.webUiCleanupPending === true ? { webUiCleanupPending: true } : {})
             })
             hostForSession.set(entry.sessionId, hostId)
+            // Fix wake-12: re-arm the DEFERRED REPLACE intent for the first
+            // pre-step of this restarted process. The in-memory
+            // `deferredSleepReplace` map died with the previous process; only
+            // hosts.json carried the folded-journal seed. Without this restore
+            // the first pre-step skips the fold (invoke.ts:2620) and the
+            // journal-interleaved close tail ships to the strict API → the
+            // wake-12 first-turn 400. The fold consumes (deletes) the map
+            // entry AND clears the durable field, so a later mid-wake restart
+            // is a true no-op (never re-folds the wake surface).
+            if (deferredJournalSeed !== void 0) deferredSleepReplace.set(entry.sessionId, deferredJournalSeed)
           }
         }
       }
@@ -1479,7 +1514,20 @@ export function applyInvoke(ctx: Context, config: Config) {
     const projCachePath = path.join(stateHome, 'storages', 'session_projcache.json')
     const archiveDir = path.join(stateHome, 'archive')
     const sessions = ctx.get('sessions') as { get?: (id: unknown) => unknown } | undefined
-    const isLive = (sessionId: string): boolean => sessions?.get?.(sessionId) !== undefined
+    // Fix wake-12 (race-2): the session-store check ALONE misses a host session
+    // resumed via the AGENT REGISTRY — dsh-smart-restart's boot resume delivers
+    // through `agent.followup(...)` (dsh-smart-restart/src/index.ts:262-280),
+    // which attaches the session to `ctx.agents` while it is not yet in the
+    // `sessions` store map. With the store-only probe the boot cleanup once
+    // truncated a resumed host artifact (mid-log seq seam — the wake-11
+    // corruption class, see explore-deep/2026-08-21-first-turn-api-orphan.md
+    // §1.2). A host is LIVE when EITHER service holds it; `agents` is resolved
+    // OPTIONALLY (absent in minimal/hermetic compositions → the probe degrades
+    // to the pre-existing store-only behavior).
+    const agents = ctx.get('agents') as AgentsLike | undefined
+    const isLive = (sessionId: string): boolean =>
+      sessions?.get?.(sessionId) !== undefined ||
+      (agents !== void 0 && agents.get(SessionId(sessionId)) !== undefined)
     for (const { hostId, sessionId } of pending) {
       const entry = hosts.get(hostId)
       if (entry === void 0 || entry.sessionId !== sessionId) continue
@@ -2620,6 +2668,17 @@ export function applyInvoke(ctx: Context, config: Config) {
     const deferredJournal = deferredSleepReplace.get(sessionId)
     if (deferredJournal !== undefined) {
       deferredSleepReplace.delete(sessionId)
+      // Fix wake-12: consuming the in-memory intent must ALSO clear the
+      // DURABLE seed (HostEntry.deferredJournalSeed) — the same consume-once
+      // contract. If the durable seed survived, a mid-wake restart would
+      // restore it and the first pre-step would re-fold the WHOLE wake surface
+      // (journal + every wake turn) back to the journal — silently losing the
+      // wake conversation. Clearing here makes the restart after a fold a true
+      // no-op. Fire-and-forget persist like every other hosts.json write.
+      if (hostEntry !== undefined && hostEntry.deferredJournalSeed !== undefined) {
+        hostEntry.deferredJournalSeed = undefined
+        persistHosts()
+      }
       const session = agent?.session
       if (session !== undefined && typeof session.append === 'function') {
         const nodes = (session.surface?.nodes as readonly number[] | undefined) ?? []
@@ -4254,6 +4313,13 @@ export function applyInvoke(ctx: Context, config: Config) {
           const message = buildSleepJournalMessage(seeded)
           session.append('user/message', message, { surfaceOp: 'append' })
           deferredSleepReplace.set(sessionId, seeded)
+          // Fix wake-12: mirror the in-memory intent into the DURABLE host
+          // entry so a process restart BETWEEN this dept_sleep and the wake
+          // pre-step still folds the surface at the first pre-step of the new
+          // process (the map does not survive the process; hosts.json does —
+          // restored by the hosts loader at boot). persistHosts() below writes
+          // it. Cleared when the fold consumes the intent.
+          hostEntry.deferredJournalSeed = seeded
         }
         // Step 3.5 — web-UI sleep cleanup marker (Option A; src/session-
         // cleanup.ts): record the pending flag ONLY. The physical cleanup
