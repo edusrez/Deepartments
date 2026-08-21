@@ -30,6 +30,7 @@ import { loadRecords, resolveBoardPath } from '../lib/board-store.js'
 import { emitRoomRecord, roomSessionId } from '../lib/org.js'
 import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
+import { apply as subagentForkApply } from '../lib/subagent.js'
 import {
   HEAD_PRESET_BASE_ID,
   headPresetIdFor,
@@ -2900,6 +2901,48 @@ test('Task T4 pre-step: role plumbing — known role injects its contract; unkno
       const bogusDecision = await runPreStep(pluginCtx, bogus, claimedBogus, signal)
       assert.equal(bogusDecision.kind, 'enter')
       assert.match(bogusDecision.messages[bogusDecision.messages.length - 1].content[0].text, /role: generic/, 'unknown role falls back to generic')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Task T4 follow-up: the roleRegistry entry is EVICTED at the subagent/end lifecycle edge, and a malformed payload is a NO-OP', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+
+      // Mount the REAL subagent tool fork (src/subagent.ts apply) the way the
+      // agent preset does, so ITS `subagent/end` listener is actually
+      // registered when we fire the lifecycle edge below (the fork plugin is
+      // not part of the bootPlugin loader composition).
+      await root.plugin({ name: 'deepartments-subagent', inject: ['tools', 'subagents', 'systemPrompt'], apply: subagentForkApply }, { provider: 'spawn', toolName: 'subagent' })
+
+      // Seed a dispatch-time role and confirm it is readable pre-settlement.
+      rememberRole('child-abc', 'reviewer')
+      assert.equal(roleForSession('child-abc'), 'reviewer', 'dispatch-time role recorded before settlement')
+
+      // Fire the lifecycle edge through the real ctx the subagent.ts listener
+      // is registered on (the plugin fiber ctx), with the production payload
+      // shape { id, provider, runId, local, stopReason, ... }. The listener
+      // reads payload.id and evicts the registry key.
+      pluginCtx().emit('subagent/end', {
+        id: 'child-abc',
+        provider: 'spawn',
+        runId: randomUUID(),
+        local: true,
+        stopReason: 'completed'
+      })
+      await waitFor(() => roleForSession('child-abc') === 'generic', 5000, 'registry entry evicted on subagent/end')
+
+      // Malformed payloads must be silent no-ops: no id at all, and a
+      // non-string id. The entry survives both.
+      rememberRole('child-noop', 'builder')
+      assert.equal(roleForSession('child-noop'), 'builder', 'entry seeded for the malformed-payload probe')
+      pluginCtx().emit('subagent/end', { stopReason: 'completed' })
+      pluginCtx().emit('subagent/end', { id: 123, stopReason: 'completed' })
+      assert.equal(roleForSession('child-noop'), 'builder', 'malformed subagent/end payloads (no id / non-string id) are a no-op — the entry survives')
     } finally {
       await dispose()
     }

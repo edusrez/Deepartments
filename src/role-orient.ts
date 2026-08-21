@@ -11,10 +11,14 @@
 // This module is the SINGLE SOURCE OF TRUTH for the role contract blocks injected
 // instead. The per-role contracts below are distilled from the repo-tracked
 // skill (`.dsh/skills/deepartments-workflow/SKILL.md`) "Dispatch templates":
-// hard, role-defining, AGENTS.md-consistent. The skill's light dispatch templates
-// reference these blocks ("your role contract is injected by Deepartments — follow
-// it"), so a change to a role's contract here MUST stay byte-consistent with that
-// skill text. Keep them SHORT: the whole point is LOW prompt weight.
+// hard, role-defining, AGENTS.md-consistent. Those two surfaces are COMPLEMENTARY,
+// not byte-identical: the SKILL.md light dispatch templates are the HANDOFF
+// contract (Objective / Files in scope / Spec / Verification) written by the
+// Asistente in the dispatch prompt, while ROLE_CONTRACTS here are the injected
+// DISCIPLINE rules the child follows. They are kept consistent-by-design — a
+// divergence would send the child mixed instructions — so a change to a role's
+// contract here should be mirrored in the skill wording (and vice versa). Keep
+// them SHORT: the whole point is LOW prompt weight.
 //
 // NO export default (pitfall 0001).
 
@@ -53,12 +57,30 @@ export function normalizeRole(role: unknown): SubagentRole {
  * registry entry) → defaults to `generic`; the subagent `origin` is durable in
  * the session meta, so it still gets the slim role-oriented block, never the
  * full host pack.
+ *
+ * LIFECYCLE (keeps the map bounded by in-flight children — no unbounded global
+ * mutable state, per AGENTS.md rule 4): a session id is WRITTEN once at dispatch
+ * (`rememberRole` from subagent.ts `execute`), READ once at the child's first
+ * pre-step (`roleForSession` from invoke.ts), and EVICTED when the child settles
+ * (`forgetRole` from the `subagent/end` listener in subagent.ts). Because every
+ * entry is removed on settlement, the map never grows past the set of children
+ * currently dispatched-but-not-yet-settled in this process.
  */
 export const roleRegistry = new Map<string, SubagentRole>()
 
 /** Record the dispatch-time role for a child session id (called once at spawn). */
 export function rememberRole(childSessionId: string, role: unknown): void {
   roleRegistry.set(childSessionId, normalizeRole(role))
+}
+
+/**
+ * Evict the dispatch-time role for a child session id (called once at child
+ * settlement). A superset of `rememberRole`: writing the same key twice just
+ * overwrites, and deleting a missing key is a silent no-op — so this call is
+ * safe to run unconditionally at the `subagent/end` lifecycle edge.
+ */
+export function forgetRole(childSessionId: string): void {
+  roleRegistry.delete(childSessionId)
 }
 
 /** Resolve the role for a session id, defaulting to `generic` when unknown. */
@@ -69,8 +91,10 @@ export function roleForSession(sessionId: string): SubagentRole {
 /**
  * Concise per-role contract blocks injected at the first `agent/pre-step` of a
  * transient subagent, replacing the ~4.6-4.9k-token full host pack. Distilled,
- * hard, AGENTS.md-consistent. Byte-consistent with the repo skill's light
- * dispatch templates.
+ * hard, AGENTS.md-consistent. COMPLEMENTARY to (NOT byte-consistent with) the
+ * repo skill's light dispatch templates: those are the handoff contract
+ * (Objective/Files/Spec/Verification) written in the dispatch prompt, these are
+ * the injected discipline rules — consistent-by-design, not identical.
  */
 export const ROLE_CONTRACTS: Record<SubagentRole, string> = {
   builder:

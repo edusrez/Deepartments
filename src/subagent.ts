@@ -14,7 +14,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { assertSubagentMaxDepth } from '@deepseek-ai/dsh-subagent'
 import type { AssembleContext } from '@deepseek-ai/dsh-system-prompt'
-import { rememberRole } from './role-orient.js'
+import { rememberRole, forgetRole } from './role-orient.js'
 
 export const name = 'deepartments-subagent'
 export const inject = ['tools', 'subagents', 'systemPrompt']
@@ -171,6 +171,18 @@ export function apply(ctx: Context, config: Config) {
     if (name !== config.provider || disposeTool === void 0) return
     disposeTool()
     disposeTool = void 0
+  })
+  // Task T4 follow-up: evict the dispatch-time role from the in-process
+  // roleRegistry the moment a child settles, so the map stays bounded by
+  // in-flight children (no unbounded global mutable state, AGENTS.md rule 4).
+  // Registered ONCE here at module scope inside `apply` — NOT inside `mount()`,
+  // which would double-register for the two mounted providers. The payload's
+  // `id` is the child session id — the exact key `rememberRole` wrote. Guard on
+  // `typeof id === 'string'` and never throw: an unexpected payload shape is a
+  // silent no-op (a malformed edge must not break settlement teardown).
+  ctx.on('subagent/end', (payload) => {
+    const id = (payload as { id?: unknown } | undefined)?.id
+    if (typeof id === 'string') forgetRole(id)
   })
   const present = ctx.subagents.getProvider(config.provider)
   if (present !== void 0) mount(present)
