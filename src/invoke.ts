@@ -124,6 +124,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { emitRoomRecord, roomSessionId, setBoardRecordListener, setRoomCompactionResetter } from './org.js'
+import { findSessionArtifact, runSleepCleanup } from './session-cleanup.js'
 import type { Config, CoordinatorConfig, DepartmentConfig, RoomState } from './org.js'
 import { loadRecords, resolveBoardPath } from './board-store.js'
 import type { BoardRecord, MessagePayload } from './board-store.js'
@@ -320,6 +321,15 @@ interface HostEntry {
    * previous dept_sleep boundary, for exact one-cycle session-log slicing. See
    * PostEntry.boundarySeq. Absent = first-ever cycle. */
   boundarySeq?: number
+  /** Web-UI sleep cleanup (Option A): set at dept_sleep (host branch), cleared
+   * by the FIRST boot that successfully truncates the host session artifact.
+   * The truncation CANNOT run inside dept_sleep (the harness appends the tool
+   * result + step/end + turn/end AFTER execute() returns at LIVE in-memory
+   * seqs, and the Session constructor requires events contiguous from seq 0 —
+   * see src/session-cleanup.ts header), so this durable marker makes the next
+   * process's boot perform the cleanup exactly once per sleep cycle; mid-wake
+   * restarts (flag cleared) are exact no-ops. Absent = no cleanup pending. */
+  webUiCleanupPending?: boolean
 }
 
 /** Compact per-member read cursors (in-memory — see header comment). */
@@ -1216,7 +1226,9 @@ export function applyInvoke(ctx: Context, config: Config) {
         // = never slept).
         ...(entry.sleepEpoch !== void 0 ? { sleepEpoch: entry.sleepEpoch } : {}),
         // Task T1: persist the optional cycle-boundary seq only when set.
-        ...(entry.boundarySeq !== void 0 ? { boundarySeq: entry.boundarySeq } : {})
+        ...(entry.boundarySeq !== void 0 ? { boundarySeq: entry.boundarySeq } : {}),
+        // Web-UI sleep cleanup: persist the pending flag only when set.
+        ...(entry.webUiCleanupPending === true ? { webUiCleanupPending: true } : {})
       }
     }
     writeFile(hostsPath, JSON.stringify(data, null, 2), 'utf8').catch(
@@ -1396,7 +1408,11 @@ export function applyInvoke(ctx: Context, config: Config) {
               sessionId: entry.sessionId,
               roomId: entry.roomId,
               ...(sleepEpoch !== void 0 ? { sleepEpoch } : {}),
-              ...(boundarySeq !== void 0 ? { boundarySeq } : {})
+              ...(boundarySeq !== void 0 ? { boundarySeq } : {}),
+              // Web-UI sleep cleanup: restore the pending marker (a real
+              // dept_sleep set it; the first boot after clears it once the
+              // artifact truncation succeeded).
+              ...(entry.webUiCleanupPending === true ? { webUiCleanupPending: true } : {})
             })
             hostForSession.set(entry.sessionId, hostId)
           }
@@ -1409,6 +1425,74 @@ export function applyInvoke(ctx: Context, config: Config) {
         ctx.logger.warn(`[deepartments] hosts.json load failed (starting with an empty registry): ${error instanceof Error ? error.message : String(error)}`)
       }
     })
+
+  // --- Web-UI sleep cleanup at boot (Option A; src/session-cleanup.ts) -------
+  // After a REAL host dept_sleep set `webUiCleanupPending`, the FIRST boot
+  // performs the GUI cleanup exactly once — truncate the host session artifact
+  // to header + permission + the last append-origin journal node (renumbered
+  // 0..k so the next resume accepts it), reset its projection-cache row, and
+  // archive+delete the direct child subagent dirs — then clears the flag so
+  // mid-wake restarts are exact no-ops (one cleanup per sleep cycle). The
+  // physical truncation CANNOT run inside dept_sleep (the harness appends the
+  // tool result AFTER the tool returns at LIVE in-memory seqs and the Session
+  // constructor demands contiguous-from-0 events — see the module header), so
+  // this boot-time hook is the race-free point: it runs before the GUI can
+  // materialize/open the host session. Best-effort: each piece warns on
+  // failure; the flag stays for the next boot when the truncate failed
+  // (idempotent retry), and is cleared once the truncate succeeded.
+  const runPendingWebUiCleanups = async (): Promise<void> => {
+    const pending: Array<{ hostId: string; sessionId: string }> = []
+    for (const hostEntry of hosts.values()) {
+      if (hostEntry.webUiCleanupPending === true) pending.push({ hostId: hostEntry.hostId, sessionId: hostEntry.sessionId })
+    }
+    if (pending.length === 0) return
+    ctx.logger.info(`[deepartments] web-ui sleep cleanup pending for ${pending.length} host(s)`)
+    // Resolve the runtime seams the cleanup needs (OPTIONALLY — the cleanup
+    // degrades gracefully when the persistence backend is absent, e.g. in
+    // minimal compositions / hermetic harnesses).
+    const persistence = ctx.get('sessionPersistence') as { root?: string } | undefined
+    const sessionsRoot = typeof persistence?.root === 'string' && persistence.root !== ''
+      ? persistence.root
+      : path.join(config.stateDir, '..', 'sessions')
+    const stateHome = path.dirname(sessionsRoot)
+    const projCachePath = path.join(stateHome, 'storages', 'session_projcache.json')
+    const archiveDir = path.join(stateHome, 'archive')
+    const sessions = ctx.get('sessions') as { get?: (id: unknown) => unknown } | undefined
+    const isLive = (sessionId: string): boolean => sessions?.get?.(sessionId) !== undefined
+    for (const { hostId, sessionId } of pending) {
+      const entry = hosts.get(hostId)
+      if (entry === void 0 || entry.sessionId !== sessionId) continue
+      try {
+        const artifactPath = await findSessionArtifact(sessionsRoot, sessionId)
+        if (artifactPath === undefined) {
+          ctx.logger.warn(`[deepartments] web-ui sleep cleanup: no stored artifact for ${sessionId} — skipping truncate`)
+        }
+        const report = await runSleepCleanup(sessionId, {
+          artifactPath,
+          projCachePath,
+          sessionsRoot,
+          archiveDir,
+          isLive,
+          log: ctx.logger
+        })
+        ctx.logger.info(
+          `[deepartments] web-ui sleep cleanup for ${sessionId}: truncate ${report.truncate?.beforeEvents ?? 'n/a'}→${report.truncate?.afterEvents ?? 'n/a'} events` +
+          `, projcache rows dropped ${report.projCacheRemoved}, subagent children archived ${report.archive?.archivedDirs.length ?? 0}`
+        )
+        // The GUI-critical piece (the artifact) succeeded → the cycle is
+        // complete; clear the flag (the other pieces are independently
+        // best-effort and idempotent on retry, but only a failed truncation
+        // keeps the flag for the next boot).
+        if (report.truncate !== undefined && report.truncateError === undefined) {
+          entry.webUiCleanupPending = undefined
+          persistHosts()
+        }
+      } catch (error) {
+        ctx.logger.warn(`[deepartments] web-ui sleep cleanup failed for ${sessionId} (flag kept for the next boot): ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  }
+  hostsLoaded.then(() => { void runPendingWebUiCleanups() }, () => { void runPendingWebUiCleanups() })
 
   // Best-effort cold load of the persistent UI config. A fresh/missing file
   // (ENOENT) keeps the default; a corrupt file keeps the default too (we never
@@ -4140,6 +4224,17 @@ export function applyInvoke(ctx: Context, config: Config) {
           session.append('user/message', message, { surfaceOp: 'append' })
           deferredSleepReplace.set(sessionId, seeded)
         }
+        // Step 3.5 — web-UI sleep cleanup marker (Option A; src/session-
+        // cleanup.ts): record the pending flag ONLY. The physical cleanup
+        // (truncate the host session artifact, reset its projcache row,
+        // archive+delete the child subagent dirs) must NOT run in this live
+        // process — the harness appends the dept_sleep tool result + step/end
+        // + turn/end AFTER execute() returns with the LIVE in-memory seqs, and
+        // dsh-session's Session requires every persisted artifact to be
+        // contiguous from seq 0 (else the next process's resume throws). The
+        // next BOOT (which cold-boots from the truncated artifact by design)
+        // performs the cleanup exactly once and clears this flag.
+        hostEntry.webUiCleanupPending = true
         // Batch C — the wake context pack is NO LONGER frozen into the surface
         // at dept_sleep. It is now injected FRESH at the next `agent/pre-step`
         // (message-arrival time) by the host pre-step injector, so its board
