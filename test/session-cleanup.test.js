@@ -46,6 +46,7 @@ import {
   runSleepCleanup,
   truncateSessionArtifact
 } from '../lib/session-cleanup.js'
+import { shouldClearCleanupPending } from '../lib/invoke.js'
 
 const TEST_ORG = {
   rooms: [
@@ -518,6 +519,108 @@ test('cleanup: no backup is created on the idempotent second run (already-minima
     assert.deepEqual(backupsAfterSecond, backupsAfterFirst, 'no duplicate backup on the second run')
     assert.equal(second.truncate.beforeEvents, 4, 'second run sees the already-minimal artifact')
   })
+})
+
+// --- live-session guard (wake-11 mid-log-seam corruption fix) ---------------
+// Root cause (explore-deep/2026-08-21-corrupt-session-log-diagnosis.md): the
+// boot-time cleanup truncated the host artifact UNCONDITIONALLY, even while the
+// host session was ALREADY materialized — the live session kept appending at
+// its ORIGINAL seqs onto the truncated file → a mid-log seq seam the reader
+// rejects. The fix: runSleepCleanup skips the ENTIRE cleanup when the host is
+// live (mirroring the archive step's per-child guard) and reports it
+// `skipped: true, skipReason: 'session-live'`; the invoke.ts hook then KEEPS
+// the pending flag so the next boot retries.
+
+test('cleanup: a LIVE host session skips the whole cleanup — artifact byte-identical, no children archived, no projcache reset, report skipped-live', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const fixture = await buildFixtureTree(stateDir, { pending: false, childCount: 2 })
+    const archiveDir = path.join(stateDir, 'archive')
+    // Capture the FULL original bytes BEFORE the call (the live guard must not
+    // write anything — no truncation, no backup, no archive, no projcache).
+    const originalBytes = await readFile(fixture.hostArtifact)
+    const originalCache = await readFile(fixture.projCachePath, 'utf8')
+
+    const report = await runSleepCleanup(HOST_SESSION, {
+      artifactPath: fixture.hostArtifact,
+      projCachePath: fixture.projCachePath,
+      sessionsRoot: fixture.sessionsRoot,
+      archiveDir,
+      isLive: () => true
+    })
+
+    // The report marks the skip explicitly with its machine-readable reason,
+    // and every mutation slot stays untouched (undefined / 0) so the invoke.ts
+    // flag gate (`shouldClearCleanupPending`) provably keeps the flag.
+    assert.equal(report.skipped, true, 'report marks the cleanup as skipped')
+    assert.equal(report.skipReason, 'session-live', 'skip reason is session-live')
+    assert.equal(report.truncate, undefined, 'no truncate result on a live session')
+    assert.equal(report.truncateError, undefined, 'skip is not an error')
+    assert.equal(report.archive, undefined, 'no child archiving on a live session')
+    assert.equal(report.archiveError, undefined)
+    assert.equal(report.projCacheRemoved, 0, 'no projcache rows dropped')
+    assert.equal(report.projCacheError, undefined)
+
+    // Byte-identical artifact: nothing was even read-rewritten.
+    const afterBytes = await readFile(fixture.hostArtifact)
+    assert.deepEqual(afterBytes, originalBytes, 'artifact byte-identical (no truncation written)')
+    // Children still on disk, and no archive dir was ever created.
+    await access(path.join(fixture.sessionsRoot, '--root--', fixture.childIds[0], 'session.jsonl.zstd'))
+    await access(path.join(fixture.sessionsRoot, '--root--', fixture.childIds[1], 'session.jsonl.zstd'))
+    await assert.rejects(() => readdir(archiveDir), 'no archive directory created for a skipped cleanup')
+    // Projcache untouched: host row + both child rows still projected.
+    assert.equal(await readFile(fixture.projCachePath, 'utf8'), originalCache, 'projcache byte-unchanged')
+    // The pending flag contract (invoke.ts keys off the skipped report):
+    assert.equal(report.truncate === undefined && report.skipped === true, true, 'flag gate: skipped-live keeps the pending flag for the next boot')
+  })
+})
+
+test('cleanup: truncateSessionArtifact refuses a LIVE session at the direct-call site (defensive guard) and truncates normally when not live', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const fixture = await buildFixtureTree(stateDir, { pending: false, childCount: 1 })
+    const originalBytes = await readFile(fixture.hostArtifact)
+    const archiveDir = path.join(stateDir, 'archive')
+
+    // Direct call with a live probe → REFUSED, artifact untouched.
+    await assert.rejects(
+      () => truncateSessionArtifact(fixture.hostArtifact, { sessionId: HOST_SESSION, isLive: () => true }),
+      /session-live/,
+      'the truncate step itself refuses a live session'
+    )
+    const afterRefusal = await readFile(fixture.hostArtifact)
+    assert.deepEqual(afterRefusal, originalBytes, 'artifact byte-identical after the refusal')
+
+    // Without a live probe / with a false probe → the pre-existing behavior is
+    // unchanged (normal truncate with the crash-safe backup).
+    const result = await truncateSessionArtifact(fixture.hostArtifact, {
+      archiveDir,
+      sessionId: HOST_SESSION,
+      isLive: () => false
+    })
+    assert.equal(result.afterEvents, 4, 'non-live truncation proceeds exactly as before')
+    assert.equal(result.backupCreated, true, 'backup written on the non-live path')
+    const afterTruncate = await readFile(fixture.hostArtifact)
+    assert.notDeepEqual(afterTruncate, originalBytes, 'non-live path really truncates')
+  })
+})
+
+test('cleanup: shouldClearCleanupPending clears the pending flag ONLY when the cleanup ran and the truncation succeeded — skipped-live (and failed-truncate) reports keep it for the next boot', async () => {
+  const ran = {
+    hostSessionId: 'x',
+    skipped: undefined,
+    truncate: { beforeEvents: 10, afterEvents: 4, journalLine: undefined, artifactPath: '/x' },
+    truncateError: undefined
+  }
+  const skipped = { ...ran, skipped: true, skipReason: 'session-live', truncate: undefined }
+  const failedTruncate = { ...ran, truncate: undefined, truncateError: 'backup failed' }
+  const noTruncate = { ...ran, truncate: undefined }
+
+  assert.equal(shouldClearCleanupPending(ran), true, 'ran + truncate succeeded → flag cleared (one cleanup per sleep cycle)')
+  assert.equal(shouldClearCleanupPending(skipped), false, 'skipped-live → flag KEPT (the next boot retries when the session is not materialized)')
+  assert.equal(shouldClearCleanupPending(failedTruncate), false, 'failed truncate → flag KEPT (idempotent retry)')
+  assert.equal(shouldClearCleanupPending(noTruncate), false, 'no truncate result → flag KEPT')
+  // Belt and suspenders: even a skipped report that somehow still carried a
+  // truncate result must NOT clear — the skip dominates.
+  assert.equal(shouldClearCleanupPending({ ...skipped, truncate: ran.truncate }), false, 'a skipped report never clears the flag')
 })
 
 // --- real-Loader integration tests -------------------------------------------

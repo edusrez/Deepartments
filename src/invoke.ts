@@ -124,7 +124,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { emitRoomRecord, roomSessionId, setBoardRecordListener, setRoomCompactionResetter } from './org.js'
-import { findSessionArtifact, runSleepCleanup } from './session-cleanup.js'
+import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './session-cleanup.js'
 import type { Config, CoordinatorConfig, DepartmentConfig, RoomState } from './org.js'
 import { loadRecords, resolveBoardPath } from './board-store.js'
 import type { BoardRecord, MessagePayload } from './board-store.js'
@@ -1119,6 +1119,19 @@ async function handleDeepartmentsRequest(
   }
 }
 
+/** Flag-clear decision for the boot web-UI cleanup (PURE + exported so the
+ * regression suite unit-tests the exact production rule): the durable
+ * `webUiCleanupPending` marker is cleared ONLY when the cleanup actually RAN
+ * AND the GUI-critical truncation succeeded. A skipped report (host session
+ * live — `skipped: true, skipReason: 'session-live'`) or a failed/absent
+ * truncate (`truncateError` set / `truncate` undefined) KEEPS the flag so the
+ * NEXT boot retries — a live-skipped cleanup is retried at a boot where the
+ * session is verifiably NOT materialized (see runSleepCleanup's live guard;
+ * the wake-11 mid-log-seam corruption fix). */
+export function shouldClearCleanupPending(report: Pick<SleepCleanupReport, 'skipped' | 'truncate' | 'truncateError'>): boolean {
+  return report.skipped !== true && report.truncate !== undefined && report.truncateError === undefined
+}
+
 // ---------------------------------------------------------------------------
 // Service (called from src/index.ts).
 // ---------------------------------------------------------------------------
@@ -1440,6 +1453,14 @@ export function applyInvoke(ctx: Context, config: Config) {
   // materialize/open the host session. Best-effort: each piece warns on
   // failure; the flag stays for the next boot when the truncate failed
   // (idempotent retry), and is cleared once the truncate succeeded.
+  // LIVE-SESSION RETRY (the wake-11 corruption fix — see the diagnosis report
+  // .dsh/reports/explore-deep/2026-08-21-corrupt-session-log-diagnosis.md): a
+  // boot where the host session is ALREADY materialized (a resident agent
+  // holds it) must NOT truncate — runSleepCleanup then reports the cleanup as
+  // SKIPPED (`skipped: true, skipReason: 'session-live'`) and this hook KEEPS
+  // the pending flag, so the SAME cleanup is retried at the next boot, when
+  // the session is verifiably not materialized. The clear decision is the
+  // pure `shouldClearCleanupPending` gate below (unit-tested).
   const runPendingWebUiCleanups = async (): Promise<void> => {
     const pending: Array<{ hostId: string; sessionId: string }> = []
     for (const hostEntry of hosts.values()) {
@@ -1479,13 +1500,23 @@ export function applyInvoke(ctx: Context, config: Config) {
           `[deepartments] web-ui sleep cleanup for ${sessionId}: truncate ${report.truncate?.beforeEvents ?? 'n/a'}→${report.truncate?.afterEvents ?? 'n/a'} events` +
           `, projcache rows dropped ${report.projCacheRemoved}, subagent children archived ${report.archive?.archivedDirs.length ?? 0}`
         )
-        // The GUI-critical piece (the artifact) succeeded → the cycle is
-        // complete; clear the flag (the other pieces are independently
-        // best-effort and idempotent on retry, but only a failed truncation
-        // keeps the flag for the next boot).
-        if (report.truncate !== undefined && report.truncateError === undefined) {
+        // RETRY SEMANTICS — the flag is cleared ONLY when the cleanup actually
+        // RAN and the GUI-critical piece (the artifact truncation) succeeded
+        // (pure `shouldClearCleanupPending` gate, unit-tested):
+        //   * SKIPPED (host session live — `report.skipped === true`, reason
+        //     'session-live') → flag KEPT: the session was materialized while
+        //     the boot ran the cleanup, so truncation would corrupt its
+        //     artifact (mid-log seq seam); the NEXT boot retries when the
+        //     session is verifiably not materialized.
+        //   * truncate FAILED/absent (`truncateError` set or `truncate`
+        //     undefined) → flag KEPT: idempotent next-boot retry.
+        //   * ran + truncate SUCCEEDED → flag CLEARED: one cleanup per sleep
+        //     cycle; mid-wake restarts are exact no-ops.
+        if (shouldClearCleanupPending(report)) {
           entry.webUiCleanupPending = undefined
           persistHosts()
+        } else if (report.skipped === true) {
+          ctx.logger.info(`[deepartments] web-ui sleep cleanup for ${sessionId} SKIPPED (${report.skipReason ?? 'unknown'}): host session live — pending flag KEPT, the next boot retries`)
         }
       } catch (error) {
         ctx.logger.warn(`[deepartments] web-ui sleep cleanup failed for ${sessionId} (flag kept for the next boot): ${error instanceof Error ? error.message : String(error)}`)

@@ -102,6 +102,14 @@ export interface ArchiveResult {
 
 export interface SleepCleanupReport {
   hostSessionId: string
+  /** true when the ENTIRE cleanup was SKIPPED without running any mutation
+   * (the host session is ALREADY materialized/live — a live session keeps
+   * appending at its ORIGINAL seqs, so rewriting its artifact mid-life would
+   * open a mid-log seq seam; see the module header + the live guard in
+   * runSleepCleanup). A skipped cleanup keeps the pending flag (invoke.ts). */
+  skipped?: boolean
+  /** Machine-readable reason for a skipped cleanup ('session-live'). */
+  skipReason?: 'session-live'
   truncate: TruncateResult | undefined
   truncateError: string | undefined
   projCacheRemoved: number
@@ -402,9 +410,27 @@ export interface TruncateOptions {
   archiveDir?: string
   /** The host session id, used to name/locate `session-<id>-pre-cleanup-*`. */
   sessionId?: string
+  /** Live-session probe — DEFENSIVE guard for DIRECT callers of
+   * truncateSessionArtifact. When `sessionId` is supplied and the session is
+   * live, the truncation REFUSES to run (throws). The canonical guard lives in
+   * runSleepCleanup (which skips the whole cleanup, archive + projcache
+   * included — the truncate guard alone is NOT sufficient); this one protects
+   * code paths that call the truncate step directly. */
+  isLive?: (sessionId: string) => boolean
 }
 
 export async function truncateSessionArtifact(artifactPath: string, opts: TruncateOptions = {}): Promise<TruncateResult> {
+  // DEFENSIVE LIVE GUARD (direct-call site): when the session is reported
+  // live, REFUSE — rewriting a LIVE session's artifact to a minimal log while
+  // its in-memory history keeps the original seq cursor makes the session's
+  // next append land at an ORIGINAL seq onto the truncated file, a mid-log
+  // seq seam the reader rejects on any cold read. The canonical guard sits at
+  // the top of runSleepCleanup (the whole cleanup — truncate, archive,
+  // projcache — is skipped for a live host); this guard protects direct
+  // callers so the truncate step itself can never corrupt a live session.
+  if (opts.sessionId !== undefined && opts.isLive?.(opts.sessionId) === true) {
+    throw new Error(`refusing to truncate the session artifact of LIVE session ${opts.sessionId} (session-live): a live session appends at its original seqs onto the truncated file, producing a mid-log seq seam — retry at a boot where the session is not materialized`)
+  }
   const buffer = await readFile(artifactPath)
   const content = buffer.length >= 4 && buffer.readUInt32LE(0) === 4247762216
     ? await decodeZstdArtifact(buffer)
@@ -606,6 +632,33 @@ export interface SleepCleanupOptions {
 /** Run the whole cleanup for ONE host session. Never throws: each piece is
  * contained and its failure lands in the report + log. */
 export async function runSleepCleanup(hostSessionId: string, opts: SleepCleanupOptions): Promise<SleepCleanupReport> {
+  // LIVE-SESSION GUARD — FIRST, before ANY mutation (truncate, projcache
+  // reset, children archive). This is the wake-11 corruption ROOT-CAUSE fix:
+  // the boot-time cleanup once truncated the host artifact UNCONDITIONALLY
+  // (the archive step already skipped live CHILDREN, but the host artifact
+  // itself was truncated even while the host session was ALREADY materialized
+  // — a resident agent holding the full history in memory). The live session
+  // then kept appending at its ORIGINAL seqs onto the truncated file → a
+  // mid-log seq seam the reader rejects ("complete frame contains a torn
+  // JSONL record"). When the host is live, skip the ENTIRE cleanup and mark
+  // the report `skipped: true, skipReason: 'session-live'` so the caller
+  // (invoke.ts) KEEPS the pending flag and retries at a boot where the
+  // session is verifiably NOT materialized (mirrors the archive step's
+  // per-child live guard — but for the host itself, the GUI-critical piece).
+  if (opts.isLive?.(hostSessionId) === true) {
+    opts.log?.warn(`[deepartments] web-ui sleep cleanup: SKIPPED for live host session ${hostSessionId} (session-live): the session is materialized, so truncation would corrupt its artifact — pending flag kept for the next boot`)
+    return {
+      hostSessionId,
+      skipped: true,
+      skipReason: 'session-live',
+      truncate: undefined,
+      truncateError: undefined,
+      projCacheRemoved: 0,
+      projCacheError: undefined,
+      archive: undefined,
+      archiveError: undefined
+    }
+  }
   const report: SleepCleanupReport = { hostSessionId, projCacheRemoved: 0, truncate: undefined, truncateError: undefined, projCacheError: undefined, archive: undefined, archiveError: undefined }
   const warn = (msg: string): void => { opts.log?.warn(`[deepartments] web-ui sleep cleanup: ${msg}`) }
   // 1. Truncate the host artifact (the GUI-critical piece). The crash-safe
@@ -617,7 +670,11 @@ export async function runSleepCleanup(hostSessionId: string, opts: SleepCleanupO
     try {
       report.truncate = await truncateSessionArtifact(opts.artifactPath, {
         archiveDir: opts.archiveDir,
-        sessionId: hostSessionId
+        sessionId: hostSessionId,
+        // Defense-in-depth: the top-of-runSleepCleanup guard already returned
+        // for a live host; passing the probe down keeps the truncate step's
+        // own direct-call guard coherent (it can never fire from here).
+        isLive: opts.isLive
       })
     } catch (error) {
       report.truncateError = error instanceof Error ? error.message : String(error)
