@@ -2589,10 +2589,11 @@ test('Batch W2 dept_memo_write: identity+cursor block — HOST wake_counter stay
   })
 })
 
-test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes the sleep-time wake_counter bump into the on-disk file, sets sleepEpoch durably, resets the live surface to exactly the BUMPED journal (ONE node — the wake pack is now injected fresh at the next pre-step, Batch C) + concludes the turn', async () => {
+test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes the sleep-time wake_counter bump into the on-disk file, sets sleepEpoch durably, PLAIN-APPENDS the journal node at close (the full-window collapse is DEFERRED to the next pre-step — Fix A) + concludes the turn; the next pre-step collapses the surface to the ONE BUMPED journal node and injects the wake pack', async () => {
   await withTempStateDir(async (stateDir) => {
-    const { root, agents, dispose } = await bootPlugin(stateDir)
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
+      await waitForRooms(root)
       const host = agents.put(fakeParentAgent())
       const sleepTool = root.tools.get('dept_sleep')
       const signal = new AbortController().signal
@@ -2613,8 +2614,9 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes t
       assert.match(preSleepContent, /^wake_counter: 1$/m, 'pre-sleep on-disk journal has wake_counter 1')
 
       // Give the host's live session a REAL dsh Session with an existing full
-      // surface (2 prior user messages) so we can assert the replace truly
-      // collapses the whole window to the single journal node.
+      // surface (2 prior user messages) so we can assert the close append lands
+      // WITHOUT shadowing (Fix A) and the first pre-step collapses the whole
+      // window to the single journal node.
       const realSession = Session.create(SessionId(String(host.id)))
       realSession.append('user/message', { role: 'user', content: [{ type: 'text', text: 'prior turn 1' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
       realSession.append('user/message', { role: 'user', content: [{ type: 'text', text: 'prior turn 2' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
@@ -2651,34 +2653,29 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes t
       assert.match(postSleepContent, /^board_cursor: none$/m, 'board_cursor untouched by the bump')
       assert.ok(postSleepContent.includes(journalSummary), 'summary body untouched by the bump')
 
-      // In-place surface reset (Batch W4 + Batch C): the live session's
-      // model-visible surface is now EXACTLY ONE node — the journal (durable
-      // memory). The wake context pack is NO LONGER frozen into the surface at
-      // dept_sleep: it is injected FRESH at the next `agent/pre-step`
-      // (message-arrival) time by the host pre-step injector (Batch C), so its
-      // board delta / git / roster are current when the next user message
-      // arrives, not stale from sleep. The journal node stays byte-identical to
-      // what buildSleepJournalMessage(seeded) produces.
-      const nodes = realSession.surface.nodes
-      assert.equal(nodes.length, 1, 'surface collapsed to exactly ONE node after the in-place reset (the journal; the pack is now injected at pre-step)')
-      const derived = realSession.deriveMessages()
-      assert.equal(derived.length, 1, 'deriveMessages() returns exactly one node')
-      assert.equal(derived[0].role, 'user')
-      assert.ok(derived[0].content[0].text.includes(journalSummary), 'the surface node is the journal')
-      assert.match(derived[0].content[0].text, /^author: /m, 'the journal node carries the journal frontmatter')
-      // (b) The live surface reset carries the BUMPED content (wake_counter 2),
-      // not the stale pre-bump file verbatim.
-      assert.match(derived[0].content[0].text, /^wake_counter: 2$/m, 'journal node shows the BUMPED wake_counter 2')
-      assert.equal(derived[0].source.kind, 'plugin', 'journal node rendered as plugin context (not a user-typed message)')
-      assert.equal(derived[0].source.form, 'notice')
+      // (b) Fix A close semantics: the journal node is PLAIN-APPENDED — the
+      // full-window replace is DEFERRED to the next pre-step, so the close does
+      // NOT shadow the prior surface (replacing here would orphan the pending
+      // dept_sleep tool result the harness appends right after — the wake-7
+      // role:\'tool\' 400 root cause). The live surface keeps ALL 3 nodes, with
+      // the BUMPED journal node at the TAIL (the durable reset content).
+      assert.ok(realSession.surface.nodes.length === 3, 'close PLAIN-APPENDS the journal node (no shadowing — Fix A deferral)')
+      const derivedAtClose = realSession.deriveMessages()
+      assert.equal(derivedAtClose.length, 3, 'deriveMessages() still folds the prior nodes + the appended journal at close')
+      const tail = derivedAtClose[derivedAtClose.length - 1]
+      assert.equal(tail.role, 'user')
+      assert.ok(tail.content[0].text.includes(journalSummary), 'the appended journal node carries the journal summary')
+      assert.match(tail.content[0].text, /^wake_counter: 2$/m, 'the appended journal node shows the BUMPED wake_counter 2')
+      assert.equal(tail.source.kind, 'plugin', 'journal node rendered as plugin context (not a user-typed message)')
+      assert.equal(tail.source.form, 'notice')
       // The journal node must match buildSleepJournalMessage(seeded) byte-for-byte
       // in content (createUserMessage assigns a random per-call `id`, so compare
       // the model-visible content + source rather than the whole object).
       const rebuiltJournal = buildSleepJournalMessage(postSleepContent)
-      assert.equal(derived[0].content[0].text, rebuiltJournal.content[0].text, 'journal node content byte-identical to buildSleepJournalMessage(seeded)')
-      assert.deepEqual(derived[0].source, rebuiltJournal.source, 'journal node source identical to buildSleepJournalMessage(seeded)')
+      assert.equal(tail.content[0].text, rebuiltJournal.content[0].text, 'journal node content byte-identical to buildSleepJournalMessage(seeded)')
+      assert.deepEqual(tail.source, rebuiltJournal.source, 'journal node source identical to buildSleepJournalMessage(seeded)')
       // NO pack node in the sleep surface anymore (Batch C — it moved to pre-step).
-      assert.ok(!derived.some((m) => m.content?.[0]?.text?.includes('## Deepartments wake pack')), 'no wake-pack node in the dept_sleep surface (pack is injected fresh at the next pre-step)')
+      assert.ok(!derivedAtClose.some((m) => m.content?.[0]?.text?.includes('## Deepartments wake pack')), 'no wake-pack node in the dept_sleep surface (pack is injected fresh at the next pre-step)')
 
       // The sleeping Asistente's turn concluded after the successful result.
       assert.equal(concluded, true, 'dept_sleep concluded the host turn')
@@ -2688,6 +2685,120 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes t
       const sleepingHost = who.hosts.find((h) => h.hostId === hostId)
       assert.ok(sleepingHost, 'the sleeping host is in the board roster')
       assert.equal(sleepingHost.sleeping, true, 'dept_room_who surfaces the sleeping host')
+
+      // (c) The FIRST wake pre-step performs the DEFERRED full-window replace:
+      // the surface collapses to EXACTLY ONE node — the journal (durable
+      // memory) — and the wake pack is injected fresh onto decision.messages
+      // (Batch C), its board delta / git / roster read at message time.
+      const claimed = preStepClaimed('wake up — what is the plan?')
+      const decision = await runPreStep(pluginCtx, host, claimed, signal)
+      assert.equal(decision.kind, 'enter', 'pre-step decision is enter')
+      assert.equal(decision.messages.length, claimed.length + 1, 'pre-step injects exactly ONE extra node (the wake pack)')
+      const packNode = decision.messages[decision.messages.length - 1]
+      assert.equal(packNode.source.kind, 'plugin', 'injected pack node is a plugin context')
+      assert.match(packNode.content[0].text, /^## Deepartments wake pack$/m, 'injected pack opens with the wake pack header')
+      assert.match(packNode.content[0].text, /pack-v1: present/, 'injected pack carries the deterministic P1 presence sentinel')
+      assert.equal(realSession.surface.nodes.length, 1, 'surface collapsed to exactly ONE node at the first pre-step (the deferred full-window replace)')
+      const derived = realSession.deriveMessages()
+      assert.equal(derived.length, 1, 'deriveMessages() returns exactly one node')
+      assert.equal(derived[0].role, 'user')
+      assert.ok(derived[0].content[0].text.includes(journalSummary), 'the wake surface node is the journal (front)')
+      assert.match(derived[0].content[0].text, /^author: /m, 'the journal node carries the journal frontmatter')
+      assert.match(derived[0].content[0].text, /^wake_counter: 2$/m, 'the wake journal node shows the BUMPED wake_counter 2')
+      assert.equal(derived[0].source.kind, 'plugin', 'journal node rendered as plugin context')
+      assert.equal(derived[0].source.form, 'notice')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Fix A regression: a host dept_sleep cycle leaves NO assistant-less role:tool message on the wake surface — the deferred full-window replace at the next pre-step (over ALL nodes INCLUDING the pending tool result) folds the surface back to the journal, which stays at the FRONT of the wake surface', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const hostId = `host-${host.id}`
+      const journalSummary = 'FIX-A-SLEEP-MEMORY: the wake surface must start with this journal.'
+
+      // A REAL dsh Session for the host, seeded exactly like the harness leaves
+      // it at the dept_sleep call site: the assistant message CARRYING the
+      // dept_sleep tool-call is the last surface node (the sleep turn's step).
+      const realSession = Session.create(SessionId(String(host.id)))
+      const assistantSeq = realSession.append('assistant/message', {
+        turn: 1,
+        step: 0,
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Persisting memory, then sleeping.' }],
+          tool_calls: [{ id: 'call_dept_sleep', type: 'function', function: { name: 'dept_sleep', arguments: '{}' } }]
+        }
+      }, { surfaceOp: 'append', sourceEventSeqs: [] }).seq
+      host.session = realSession
+
+      await seedJournal(stateDir, hostId, journalSummary)
+      const sleepTool = root.tools.get('dept_sleep')
+      await sleepTool.execute({}, { agent: host, signal, concludeTurn: () => {} })
+
+      // Fix A close semantics: the journal node is PLAIN-APPENDED (no
+      // full-window replace at close — replacing would shadow the assistant
+      // tool-call message, orphaning the pending result). The assistant
+      // tool-call node is NOT shadowed yet.
+      assert.equal(realSession.surface.nodes.length, 2, 'close appends the journal node without shadowing the assistant tool-call message')
+
+      // THE HARNESS then records the dept_sleep tool result AFTER the close
+      // append — exactly the sequence that used to orphan a role:tool message
+      // (session-cf5225e4… line 40484; the surface ends [assistant(tool_calls),
+      // journal, tool] and the strict deepseek-official API rejected it with
+      // 400 INVALID_REQUEST: "Messages with role 'tool' must be a response to
+      // a preceding message with 'tool_calls'").
+      realSession.append('tool/result', {
+        turn: 1,
+        step: 0,
+        message: { role: 'tool', tool_call_id: 'call_dept_sleep', content: [{ type: 'text', text: `sleeping: ${hostId} marked for context reset` }] }
+      }, { surfaceOp: 'append', sourceEventSeqs: [assistantSeq] })
+
+      // Pre-wake surface = the OLD behavior's wire shape: a role:tool message
+      // whose IMMEDIATE predecessor is the journal (user), NOT the assistant
+      // that issued the call → the strict-API rejection case.
+      const preWake = realSession.deriveMessages()
+      const toolIdx = preWake.findIndex((m) => m.role === 'tool')
+      assert.ok(toolIdx >= 0, 'the pending tool result is on the pre-wake surface')
+      assert.equal(preWake[toolIdx - 1]?.role, 'user', 'pre-wake tool message is assistant-less (its predecessor is the journal) — the strict-API rejection case')
+
+      // The WAKE pre-step (first message after sleep) MUST sanitize the surface:
+      // the deferred full-window replace covers ALL current nodes INCLUDING the
+      // pending tool result, then the wake pack is injected (Batch C unchanged).
+      const claimed = preStepClaimed('wake up — what is the plan?')
+      const decision = await runPreStep(pluginCtx, host, claimed, signal)
+
+      // (1) The wake surface contains NO role:tool message at all: the orphan is
+      // shadowed by the replace and never reaches the strict API.
+      const wakeFold = realSession.deriveMessages()
+      assert.ok(!wakeFold.some((m) => m.role === 'tool'), 'wake surface contains NO role:tool message (the orphan is shadowed by the deferred replace)')
+      // (2) The journal is the FIRST (front) node of the wake surface, carrying
+      // the bump the cycle advanced at sleep (wake_counter 1 → 2).
+      assert.equal(wakeFold.length, 1, 'wake surface collapsed to exactly ONE node (the journal)')
+      const first = wakeFold[0]
+      assert.equal(first.role, 'user', 'the front node is a user message')
+      assert.ok(first.content[0].text.includes(journalSummary), 'wake surface STARTS with the journal content (front)')
+      assert.match(first.content[0].text, /^author: host-/m, 'the front journal node carries the journal frontmatter')
+      assert.match(first.content[0].text, /^wake_counter: 2$/m, 'the front journal node carries the BUMPED wake_counter 2')
+      assert.equal(first.source.kind, 'plugin', 'the front journal node is plugin context')
+      assert.equal(first.source.form, 'notice', 'the front journal node is a notice (collapsed row)')
+      // (3) The wake pack is still injected onto decision.messages (unchanged).
+      assert.equal(decision.kind, 'enter', 'pre-step decision is enter')
+      assert.equal(decision.messages.length, claimed.length + 1, 'pre-step injects exactly ONE extra node (the wake pack)')
+      const packNode = decision.messages[decision.messages.length - 1]
+      assert.equal(packNode.source.kind, 'plugin', 'injected pack node is a plugin context')
+      assert.match(packNode.content[0].text, /pack-v1: present/, 'wake pack injected as before (Fix A preserves wake-pack injection)')
+      // (4) A second pre-step of the same awake session stays gated: no
+      // re-replace (the deferred intent was consumed once), no pack re-injection.
+      const second = await runPreStep(pluginCtx, host, claimed, signal)
+      assert.equal(second.messages.length, claimed.length, 'second pre-step does NOT re-inject (gate holds)')
+      assert.equal(realSession.surface.nodes.length, 1, 'second pre-step does not re-collapse (deferred intent consumed once)')
     } finally {
       await dispose()
     }
@@ -2696,7 +2807,8 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes t
 
 // --- Batch C: FRESH wake-pack injection at `agent/pre-step` (message-arrival
 // time). The pack is no longer frozen into the dept_sleep surface (see the
-// Batch 7 host test above — the sleep surface is now just the journal). It is
+// Batch 7 host test above — the close PLAIN-APPENDS the journal; the full-window
+// collapse to that journal is DEFERRED to this injector, Fix A). It is
 // instead assembled from LIVE reads each time the host's first pre-step of an
 // awake session runs, and injected as a plugin/notice node onto decision.messages
 // at the same point the standard DSH context injections land. The tests below

@@ -491,16 +491,25 @@ function yamlList(items: readonly string[]): string {
 //
 // The owner decision "vaciar en sitio" (in-place surface reset, NOT a new
 // session, NOT an LLM summary): when the HOST (the Asistente) calls the
-// host-branch of dept_sleep, we replace the ENTIRE model-visible surface of its
-// live session down to ONE node — the agent's own journal — using the SAME
-// surface primitive dsh-compaction drives (explore-deep/2026-08-20-
-// compaction-reset.md §4): a `user/message` append with
+// host-branch of dept_sleep, the ENTIRE model-visible surface of its live
+// session is eventually collapsed down to ONE node — the agent's own journal —
+// using the SAME surface primitive dsh-compaction drives (explore-deep/2026-08-
+// 20-compaction-reset.md §4): a `user/message` append with
 // `surfaceOp:{op:'replace', start:firstNode, end:lastNode}` +
 // `sourceEventSeqs: allNodes`. `Session.append` (dsh-session index.d.ts:1444)
 // validates + splices the current surface (`foldSurface`/`applySurfacePlan`,
 // surface.js) so after the append `deriveMessages()` returns exactly the
 // journal node. These two helpers compute the inputs purely so they are
 // directly testable; the live dept_sleep wiring is thin.
+//
+// Fix A (2026-08-21 — the wake-7 tool-role 400 root cause, explore-deep/
+// 2026-08-21-failedmessages-tool-role-error.md): the replace itself is
+// DEFERRED. The close branch only plain-appends the journal node (durability)
+// and records the intent; the NEXT `agent/pre-step` (the Batch C injector)
+// performs the full-window replace over ALL current nodes INCLUDING the still
+// pending dept_sleep tool result — so the assistant tool-call message and its
+// result stay a legal sequence and an orphaned role:'tool' node never reaches
+// the strict deepseek-official API.
 // ---------------------------------------------------------------------------
 
 /** The surface-op arguments (a full-window replace, or a bare append when the
@@ -1148,6 +1157,19 @@ export function applyInvoke(ctx: Context, config: Config) {
   // session-scoped flag is the reliable presence gate. Cleared in the host
   // dept_sleep branch so a post-sleep wake re-injects a FRESH pack.
   const wakePackInjected = new Set<string>()
+  // Fix A — deferred in-place surface reset intent for the host dept_sleep
+  // branch (see the Batch 7 helper comment + dept_sleep Step 3): the close
+  // branch PLAIN-APPENDS the journal node and records sessionId → the
+  // seeded/bumped journal text here; the NEXT `agent/pre-step` (the injector
+  // below) performs the full-window replace over ALL current nodes INCLUDING
+  // the still-pending dept_sleep tool result, so the assistant tool-call
+  // message and its result remain a legal sequence and no orphaned role:'tool'
+  // node ever reaches the strict deepseek-official API (wake-7 400
+  // INVALID_REQUEST root cause — explore-deep/2026-08-21-failedmessages-tool-
+  // role-error.md). The seeded text is carried (NOT re-read) so the wake
+  // replace re-lands a byte-identical journal node and still works if the file
+  // vanished meanwhile. Consumed once at the first post-sleep pre-step.
+  const deferredSleepReplace = new Map<string, string>()
   // Batch C: per sender→target pair ack budget. Key `${from}|${to}` → how many
   // consecutive pure acks (payload.ack) that pair has exchanged and when the
   // last one landed. Any non-ack message between the pair resets it (delete).
@@ -2451,6 +2473,32 @@ export function applyInvoke(ctx: Context, config: Config) {
     const hostId = hostIdForSession(sessionId)
     const hostEntry = hosts.get(hostId)
     const roomId = hostEntry?.roomId ?? config.org.rooms[0]?.id ?? 'board'
+    // Fix A — deferred in-place surface reset (see the Batch 7 helper comment +
+    // dept_sleep Step 3): the FIRST pre-step after a host dept_sleep performs
+    // the full-window replace the close branch no longer runs. By this point
+    // the harness has appended the dept_sleep tool result AFTER the close
+    // journal append, so the live surface ends with a pending role:'tool' node
+    // whose assistant tool-call parent sits BEFORE the journal node. Replacing
+    // the ENTIRE window — start: first node → end: LAST node (the tool result
+    // included; computeHostSleepSurfacePlan derives the plan from the CURRENT
+    // surface so provenance covers every node exactly) — folds the surface back
+    // to the journal BEFORE any request is built (the agent-loop requests
+    // session.deriveMessages() AFTER the pre-step waterfall), so the strict
+    // deepseek-official API never sees the orphaned tool message. Degrades
+    // silently when the session is a stub (no append) — same guard as close.
+    const deferredJournal = deferredSleepReplace.get(sessionId)
+    if (deferredJournal !== undefined) {
+      deferredSleepReplace.delete(sessionId)
+      const session = agent?.session
+      if (session !== undefined && typeof session.append === 'function') {
+        const nodes = (session.surface?.nodes as readonly number[] | undefined) ?? []
+        const plan = computeHostSleepSurfacePlan(nodes)
+        session.append('user/message', buildSleepJournalMessage(deferredJournal), {
+          surfaceOp: plan.surfaceOp,
+          ...(plan.sourceEventSeqs !== undefined ? { sourceEventSeqs: plan.sourceEventSeqs } : {})
+        })
+      }
+    }
     // Deterministic journal path even for a never-slept host (no durable
     // journal yet): assembleWakePack's sections degrade to '(… unavailable)'
     // and readWakeJournalKpi returns a degraded KPI line — the injector never
@@ -4052,27 +4100,28 @@ export function applyInvoke(ctx: Context, config: Config) {
         // from what it has.
         ensureHost(sessionId, existing?.roomId ?? 'board')
         const hostEntry = hosts.get(hostId) as HostEntry
-        // Step 3 — in-place surface reset: replace the ENTIRE model-visible surface
-        // of the caller's OWN live session (exec.agent → agent.session) with the
-        // journal node alone — a single `user/message` landing node — via the same
-        // primitive dsh-compaction uses (session.append 'user/message' with
-        // surfaceOp:{op:'replace', start:first, end:last} + sourceEventSeqs:
-        // allNodes). The journal node is byte-identical to before
-        // (buildSleepJournalMessage); it is the ONLY durable surface the next
-        // wake resumes from (Batch C owner doctrine: the wake context pack is NOT
-        // frozen here — it is injected FRESH at the next `agent/pre-step`, see
-        // Batch C below). After the append, deriveMessages() returns that single
-        // node. Guarded so an agent-less / stub context (no real Session surface)
-        // degrades safely.
+        // Step 3 — in-place surface reset, DEFERRED to the wake pre-step (Fix A,
+        // root cause of the wake-7 tool-role 400s — explore-deep/2026-08-21-
+        // failedmessages-tool-role-error.md): append the journal node NOW as a
+        // PLAIN append (durability unchanged — the journal FILE is persisted by
+        // bumpHostSleepCounter above and this node is recorded durably in the
+        // session log), but DO NOT run the full-window replace here. Replacing
+        // at close would shadow the assistant message carrying the dept_sleep
+        // tool-call while the harness still appends the tool's own result AFTER
+        // the replace — orphaning a role:'tool' node on the wake surface that
+        // the strict deepseek-official API rejects (400 INVALID_REQUEST). The
+        // full-window replace is therefore DEFERRED: the intent (sessionId →
+        // seeded journal text) is recorded in `deferredSleepReplace` and the
+        // NEXT `agent/pre-step` (the Batch C injector below) performs it over
+        // ALL current nodes INCLUDING the pending tool result — the assistant
+        // tool-call and its result stay a legal sequence and the orphan never
+        // reaches the API. Guarded so an agent-less / stub context (no real
+        // Session surface) degrades safely (no append, no deferred intent).
         const session = agent.session
-        const surfaceNodes = session?.surface?.nodes as readonly number[] | undefined
         if (session !== undefined && typeof session.append === 'function') {
-          const plan = computeHostSleepSurfacePlan(surfaceNodes ?? [])
           const message = buildSleepJournalMessage(seeded)
-          session.append('user/message', message, {
-            surfaceOp: plan.surfaceOp,
-            ...(plan.sourceEventSeqs !== undefined ? { sourceEventSeqs: plan.sourceEventSeqs } : {})
-          })
+          session.append('user/message', message, { surfaceOp: 'append' })
+          deferredSleepReplace.set(sessionId, seeded)
         }
         // Batch C — the wake context pack is NO LONGER frozen into the surface
         // at dept_sleep. It is now injected FRESH at the next `agent/pre-step`
