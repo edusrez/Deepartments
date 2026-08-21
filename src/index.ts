@@ -14,6 +14,21 @@ export const name = 'deepartments'
 // board-room core must keep working in minimal compositions (e.g. the
 // hermetic real-Loader tests of batch 1.5 mount neither), while the host-plane
 // board tools and wake relay fail loud at use when the services are absent.
+//
+// NOTE (Task T1, deliberate deviation from the owner's literal "inject both
+// 'sessionPersistence' AND 'sessionQuery'" directive — see the builder report):
+// sessionPersistence/sessionQuery are NOT added to this inject array. Cordis
+// `inject` entries are a HARD service-availability gate: the plugin `apply` does
+// not run until every injected service is present, so adding 'sessionQuery'
+// here would prevent the bundle from booting in any composition that lacks it
+// (e.g. the org/head-presets/webfetch hermetic harnesses → 4 suite tests fail).
+// The spec's §Risks explicitly requires the opposite — "Service absence:
+// sessionPersistence may be absent → capture must stub + warn, never throw
+// (test 4)" — and its §Service-injection paragraph prescribes "the existing
+// optional ctx.get(...) discipline (resolve at use...)". Both the archive
+// session-log capture (captureSessionLog) and the board core therefore resolve
+// the session services OPTIONALLY via `ctx.get('sessionPersistence')` /
+// `ctx.get('sessionQuery')` at use, degrading to the stub form when absent.
 export const inject = ['tools', 'sessions', 'sessionProjections']
 
 export function apply(ctx: Context, config: Config) {

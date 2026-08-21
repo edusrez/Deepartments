@@ -112,7 +112,7 @@
 //     registry's `agentPreset: 'deepartments-head'` field is the marker.
 //
 // NO export default (pitfall 0001 — breaks `inject`).
-import { mkdir, readFile, writeFile, readdir, copyFile, stat, rename, unlink } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, readdir, copyFile, stat, rename, unlink, appendFile } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -253,6 +253,12 @@ interface PostEntry {
    * instead of waking a live incarnation; cleared once the respawn lands.
    * Absent/undefined = never slept. */
   sleepEpoch?: number
+  /** Task T1 (Session Memory Archive): the session event `seq` recorded at the
+   * previous dept_sleep boundary (agent.session.seq immediately after the
+   * boundary append). Stored so the next cycle's session-log capture can slice
+   * events with `seq > boundarySeq` EXACTLY (clock-independent). Absent = first
+   * ever cycle (falls back to the `time > lastWakeMs` timestamp slice). */
+  boundarySeq?: number
   /** Batch G: the sessionId of the PREVIOUS incarnation (recording where a slept
    * head's old live session went), kept so trace stays honest. Absent = first. */
   previousChildId?: string
@@ -266,6 +272,7 @@ interface PostEntryPersisted {
   provider?: 'worker'
   role?: string
   sleepEpoch?: number
+  boundarySeq?: number
   previousChildId?: string
 }
 
@@ -281,6 +288,10 @@ interface HostEntry {
    * a head it stays live after sleep; the marker records that a context reset
    * happened and the journal IS the current surface. Absent = never slept. */
   sleepEpoch?: number
+  /** Task T1 (Session Memory Archive): the session-event `seq` recorded at the
+   * previous dept_sleep boundary, for exact one-cycle session-log slicing. See
+   * PostEntry.boundarySeq. Absent = first-ever cycle. */
+  boundarySeq?: number
 }
 
 /** Compact per-member read cursors (in-memory — see header comment). */
@@ -1132,7 +1143,9 @@ export function applyInvoke(ctx: Context, config: Config) {
         roomId: entry.roomId,
         // Batch 7: persist the optional host sleep marker only when set (absent
         // = never slept).
-        ...(entry.sleepEpoch !== void 0 ? { sleepEpoch: entry.sleepEpoch } : {})
+        ...(entry.sleepEpoch !== void 0 ? { sleepEpoch: entry.sleepEpoch } : {}),
+        // Task T1: persist the optional cycle-boundary seq only when set.
+        ...(entry.boundarySeq !== void 0 ? { boundarySeq: entry.boundarySeq } : {})
       }
     }
     writeFile(hostsPath, JSON.stringify(data, null, 2), 'utf8').catch(
@@ -1189,6 +1202,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         // Batch G: persist the optional sleep lifecycle fields only when set
         // (absent = never slept / no previous incarnation).
         ...(entry.sleepEpoch !== void 0 ? { sleepEpoch: entry.sleepEpoch } : {}),
+        ...(entry.boundarySeq !== void 0 ? { boundarySeq: entry.boundarySeq } : {}),
         ...(entry.previousChildId !== void 0 ? { previousChildId: entry.previousChildId } : {})
       }
     }
@@ -1256,6 +1270,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         const sessionId = typeof entry?.sessionId === 'string' ? entry.sessionId : undefined
         if (sessionId !== undefined && typeof entry?.roomId === 'string' && typeof entry?.agentPreset === 'string') {
           const sleepEpoch = typeof entry.sleepEpoch === 'number' ? entry.sleepEpoch : undefined
+          const boundarySeq = typeof entry.boundarySeq === 'number' ? entry.boundarySeq : undefined
           const previousChildId = typeof entry.previousChildId === 'string' ? entry.previousChildId : undefined
           // Batch 3a: a disposable worker is cold-loaded like any post, carrying
           // its durable `provider: 'worker'` marker + captured role. It is NOT
@@ -1271,6 +1286,7 @@ export function applyInvoke(ctx: Context, config: Config) {
             ...(provider !== void 0 ? { provider } : {}),
             ...(role !== void 0 ? { role } : {}),
             ...(sleepEpoch !== void 0 ? { sleepEpoch } : {}),
+            ...(boundarySeq !== void 0 ? { boundarySeq } : {}),
             ...(previousChildId !== void 0 ? { previousChildId } : {})
           })
         } else {
@@ -1303,11 +1319,13 @@ export function applyInvoke(ctx: Context, config: Config) {
             // Batch 7: sanitize the optional sleep marker so a corrupt value
             // never survives into the in-memory registry.
             const sleepEpoch = typeof entry.sleepEpoch === 'number' ? entry.sleepEpoch : undefined
+            const boundarySeq = typeof entry.boundarySeq === 'number' ? entry.boundarySeq : undefined
             hosts.set(hostId, {
               hostId,
               sessionId: entry.sessionId,
               roomId: entry.roomId,
-              ...(sleepEpoch !== void 0 ? { sleepEpoch } : {})
+              ...(sleepEpoch !== void 0 ? { sleepEpoch } : {}),
+              ...(boundarySeq !== void 0 ? { boundarySeq } : {})
             })
             hostForSession.set(entry.sessionId, hostId)
           }
@@ -1605,6 +1623,333 @@ export function applyInvoke(ctx: Context, config: Config) {
   /** Durable path of a post's long-term memory journal. */
   const journalPathFor = (memberId: string): string => path.join(config.stateDir, 'journals', `${memberId}.md`)
 
+  // --- Task T1: SESSION MEMORY ARCHIVE (append-only history + one-cycle session
+  // log + searchable index). Best-effort/non-fatal everywhere: a failure here
+  // must NEVER fail the memo write or the sleep. The injected wake pack reads
+  // ONLY the single checkpoint (journalPathFor via readWakeJournalKpi), so these
+  // artifacts living under journals/archive|sessions|index.json are structurally
+  // invisible to the lean wake surface (spec §Goal 1, test 5 locks this).
+  //
+  // Bounded serializer constants (scribe spec §4 — keep in sync with the doc).
+  const MAX_TOOL_ARGS = 800
+  const MAX_TOOL_RESULT = 2000
+  const MAX_TEXT = 2000
+  const MAX_FILE_BYTES = 512 * 1024
+
+  /** Path of one member's append-only archive. */
+  const archivePathFor = (memberId: string): string => path.join(config.stateDir, 'journals', 'archive', `${memberId}.md`)
+  /** Path of the per-member search index. */
+  const indexPathFor = (): string => path.join(config.stateDir, 'journals', 'index.json')
+  /** Path of one member+ordinal one-cycle session log. */
+  const sessionLogPathFor = (memberId: string, wakeCounter: number): string => path.join(config.stateDir, 'journals', 'sessions', `${memberId}-${wakeCounter}.md`)
+
+  /** Deterministic per-write UNIQUE archive marker so interleaved appends across
+   * the shared stateDir stay parseable (spec §Artifacts (a) — each
+   * `=== ENTRY … ===` block stays intact even if blocks interleave). */
+  const archiveUniqueSeq = (): string => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+
+  /** Truncate a string to `max` chars, eliding the tail with `… [truncated]`. */
+  const truncateText = (text: string, max: number): string =>
+    text.length <= max ? text : `${text.slice(0, max)}… [truncated]`
+
+  /** Best-effort heuristic extraction of top keyword tokens from the journal
+   * summary (spec §Index schema — best-effort; absent → []). */
+  const extractKeywords = (summary: string): string[] => {
+    const words = (summary.match(/[A-Za-z][A-Za-z0-9_-]{3,}/g) ?? [])
+      .filter((w) => !/^(the|and|for|with|this|that|from|into|were|has|had|our|their|when|what|will|been|were|over|under|about|after|before)$/i.test(w))
+    return [...new Set(words)].slice(0, 12)
+  }
+
+  /** Best-effort heuristic extraction of file paths / report paths from the
+   * journal summary (spec §Index schema — best-effort; absent → []). */
+  const extractPaths = (summary: string): string[] => {
+    const paths = [...summary.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]).filter((p) => /[/.]/.test(p))
+    return [...new Set(paths)].slice(0, 12)
+  }
+
+  /** Best-effort heuristic extraction of commit-style lines from the summary
+   * (spec §Index schema — best-effort; absent → []). */
+  const extractCommits = (summary: string): string[] => {
+    return (summary.match(/^[-*]\s*(?:feat|fix|docs|refactor|chore)\([^)]*\)[^:\n]*:.*$/gm) ?? []).slice(0, 12)
+  }
+
+  /** Reduce a DSH content block array to a single bounded text string
+   * (keeps attachmentId references, never bytes / data: URIs). */
+  const contentToText = (content: unknown, max: number): string => {
+    if (!Array.isArray(content)) return truncateText(String(content ?? ''), max)
+    const parts: string[] = []
+    for (const block of content) {
+      if (typeof block !== 'object' || block === null) continue
+      const b = block as Record<string, unknown>
+      if (b.type === 'text' && typeof b.text === 'string') parts.push(b.text)
+      else if (b.type === 'image' && typeof b.attachment === 'object' && b.attachment !== null) {
+        const ref = b.attachment as Record<string, unknown>
+        if (ref.attachmentId !== undefined) parts.push(`[image:${String(ref.attachmentId)}]`)
+      } else if (Array.isArray(b.content)) parts.push(contentToText(b.content, Number.POSITIVE_INFINITY) as string)
+    }
+    return truncateText(parts.join(' '), max)
+  }
+
+  /** Bounded markdown line for one session event (spec §Artifacts (b) body). */
+  const serializeSessionEvent = (type: string, data: Record<string, unknown> | undefined): string | undefined => {
+    if (data === undefined || typeof data !== 'object') return undefined
+    switch (type) {
+      case 'user/message':
+        return `- **user:** ${contentToText(data.message !== undefined ? (data.message as Record<string, unknown>).content : data.content, MAX_TEXT)}`
+      case 'assistant/message': {
+        const message = data.message as Record<string, unknown> | undefined
+        return `- **assistant:** ${contentToText(message?.content ?? data.content, MAX_TEXT)}`
+      }
+      case 'tool/call':
+        return `- **tool** \`${truncateText(String(data.name ?? '?'), 120)}\` → *called*: ${truncateText(String(data.arguments ?? '{}'), MAX_TOOL_ARGS)}`
+      case 'tool/result': {
+        const ok = data.error === undefined
+        const message = data.message as Record<string, unknown> | undefined
+        const resultText = ok
+          ? truncateText(typeof message?.content === 'string' ? message.content : JSON.stringify(data.meta ?? data.result ?? message?.content ?? ''), MAX_TOOL_RESULT)
+          : `failed (${String((data.error as Record<string, unknown>)?.name ?? 'error')})`
+        return `- **toolresult** → *${ok ? 'ok' : 'failed'}*: ${resultText}`
+      }
+      case 'turn/start':
+        return `- **turn** ${String(data.turn)} start`
+      case 'turn/end':
+        return `- **turn** ${String(data.turn)} end (${String((data as Record<string, unknown>).reason ?? '')})`
+      case 'step/start':
+        return `- **step** ${String(data.turn)}.${String(data.step)} start`
+      case 'step/end':
+        return `- **step** ${String(data.turn)}.${String(data.step)} end`
+      default:
+        return undefined
+    }
+  }
+
+  /** Build the bounded markdown body from a sliced event list (spec §Artifacts
+   * (b) §4). Bounded by MAX_FILE_BYTES — on overflow drop chunk/step noise first,
+   * then truncate the oldest tool lines, then stop. */
+  const serializeSessionLog = (memberId: string, roomId: string, sessionId: string, wakeCounter: number, events: Array<{ type: string; seq: number; time: number; data: unknown }>, boundarySeq: number | undefined): string => {
+    const first = events[0]
+    const last = events[events.length - 1]
+    const startSeq = boundarySeq !== undefined ? boundarySeq + 1 : first?.seq ?? 0
+    const lines: string[] = [
+      '---',
+      `member: ${memberId}`,
+      `room: ${roomId}`,
+      `session_id: ${sessionId}`,
+      `wake_counter: ${wakeCounter}`,
+      `start_seq: ${startSeq}`,
+      `end_seq: ${last?.seq ?? startSeq}`,
+      `start_time: ${first !== undefined ? new Date(first.time).toISOString() : ''}`,
+      `end_time: ${last !== undefined ? new Date(last.time).toISOString() : ''}`,
+      `journal: journals/${memberId}.md`,
+      '---',
+      '## cycle'
+    ]
+    for (const event of events) {
+      const line = serializeSessionEvent(event.type, (event.data ?? {}) as Record<string, unknown>)
+      if (line === undefined) continue // skip assistant/chunk and unknown noise
+      // Hard byte cap: drop the line rather than grow an unbounded file.
+      if (lines.join('\n').length + line.length + 1 > MAX_FILE_BYTES) break
+      lines.push(line)
+    }
+    return lines.join('\n')
+  }
+
+  /** Stub form when the transcript cannot be captured (spec §Capture flow 6):
+   * frontmatter + `transcript: unavailable` + reason + pointer to the checkpoint.
+   * Never throws; used so the memo write / dept_sleep still succeeds. */
+  const buildSessionLogStub = (memberId: string, roomId: string, sessionId: string, wakeCounter: number, reason: string): string =>
+    [
+      '---',
+      `member: ${memberId}`,
+      `room: ${roomId}`,
+      `session_id: ${sessionId}`,
+      `wake_counter: ${wakeCounter}`,
+      'transcript: unavailable',
+      `reason: ${reason}`,
+      `journal: journals/${memberId}.md`,
+      '---',
+      '## cycle',
+      `No DSH transcript captured for this cycle (reason: ${reason}). Journal checkpoint follows at journals/${memberId}.md.`
+    ].join('\n')
+
+  /** Best-effort heuristic population of the mutable search index fields from
+   * the checkpoint text/summary (spec §Index schema — best-effort; absent → []).
+   * The AUTHORITATIVE fields (timestamp/wake_counter/session_log_path/archive_seq)
+   * are always set. */
+  const deriveIndexEntry = (memberId: string, content: string, wakeCounter: number, archiveSeq: string): {
+    timestamp: string; wake_counter: number; current_step?: string; keywords: string[];
+    files_touched: string[]; commits: string[]; open_items: string[]; report_paths: string[];
+    session_log_path: string; archive_seq: string
+  } => {
+    const tsMatch = content.match(/^timestamp:\s*(.+)$/m)
+    const stepMatch = content.match(/^current_step:\s*(.+)$/m)
+    const openMatch = content.match(/^open_items:\s*(\[.*\])$/m)
+    let openItems: string[] = []
+    if (openMatch !== null) {
+      try {
+        const parsed = JSON.parse(openMatch[1]) as unknown
+        if (Array.isArray(parsed)) openItems = parsed.filter((x): x is string => typeof x === 'string')
+      } catch { /* keep [] */ }
+    }
+    const summary = content.replace(/^---$[\s\S]*?^---$/m, '').replace(/^wake routine:.*$/m, '').trim()
+    const filesTouched = extractPaths(summary)
+    const reportPaths = filesTouched.filter((p) => p.includes('.dsh/reports/') || p.startsWith('.dsh/'))
+    const entry: {
+      timestamp: string; wake_counter: number; current_step?: string; keywords: string[];
+      files_touched: string[]; commits: string[]; open_items: string[]; report_paths: string[];
+      session_log_path: string; archive_seq: string
+    } = {
+      timestamp: tsMatch !== null ? tsMatch[1].trim() : new Date().toISOString(),
+      wake_counter: wakeCounter,
+      keywords: extractKeywords(summary),
+      files_touched: filesTouched,
+      commits: extractCommits(summary),
+      open_items: openItems,
+      report_paths: reportPaths,
+      // Durable, machine-readable citation (relative to the stateDir).
+      session_log_path: `journals/sessions/${memberId}-${wakeCounter}.md`,
+      archive_seq: archiveSeq
+    }
+    if (stepMatch !== null) entry.current_step = stepMatch[1].trim()
+    return entry
+  }
+
+  /** Local-time marker fragment for the archive delimiter (`ts=`). */
+  const archiveLocalTs = (): string => {
+    const d = new Date()
+    const pad = (n: number): string => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  }
+
+  /** Task T1 — capture the ONE-CYCLE session log (WAKE→memo) for a member's
+   * current cycle and write it bounded to `journals/sessions/<memberId>-<wake_counter>.md`
+   * (atomic tmp+rename). Slices by exact event `seq > boundarySeq` (the seq
+   * persisted at the previous dept_sleep), falling back to `event.time > lastWakeMs`
+   * (from the prior journal's `last_wake`) for the first-ever cycle. BEST-EFFORT:
+   * on ANY failure writes the STUB form and warns — never throws into the memo
+   * write or sleep. Returns the session-log path (real or stub). */
+  const captureSessionLog = async (memberId: string, roomId: string, sessionId: string, wakeCounter: number, boundarySeq: number | undefined): Promise<string> => {
+    const logPath = sessionLogPathFor(memberId, wakeCounter)
+    const journalPath = journalPathFor(memberId)
+    try {
+      // 1. Flush the live session's in-memory tail so readRaw reflects it
+      //    (mirrors flushLiveSessionLog, session-export.js:95-101).
+      const sessions = ctx.get('sessions')
+      if (sessions !== undefined && sessionId !== undefined) {
+        const live = sessions.get(SessionId(sessionId))
+        const flush = (sessions as { flush?: (s: unknown) => Promise<unknown> }).flush
+        if (live !== undefined && typeof flush === 'function') await flush(live)
+      }
+      // 2. In-process read of the durable JSONL artifact (readRaw).
+      const persistence = ctx.get('sessionPersistence')
+      const readRaw = (persistence as { readRaw?: (id: unknown, signal?: AbortSignal) => Promise<{ content: string } | undefined> } | undefined)?.readRaw
+      if (persistence === undefined || typeof readRaw !== 'function') {
+        throw new Error('sessionPersistence unavailable (no readRaw)')
+      }
+      const raw = await (readRaw as (id: unknown) => Promise<{ content: string } | undefined>)(SessionId(sessionId))
+      if (raw === undefined || typeof raw.content !== 'string' || raw.content === '') {
+        throw new Error('no stored session artifact (readRaw returned nothing)')
+      }
+      // 3. Parse the JSONL events (skipping malformed/noise lines defensively).
+      const events: Array<{ type: string; seq: number; time: number; data: unknown }> = []
+      for (const line of raw.content.split('\n')) {
+        if (line.trim() === '') continue
+        try {
+          const ev = JSON.parse(line) as { type?: unknown; seq?: unknown; time?: unknown; data?: unknown }
+          if (ev !== null && typeof ev === 'object' && typeof ev.type === 'string' && typeof ev.seq === 'number' && typeof ev.time === 'number') {
+            events.push({ type: ev.type, seq: ev.seq, time: ev.time, data: ev.data })
+          }
+        } catch { /* skip malformed line */ }
+      }
+      // 4. Slice one cycle: exact by seq, else by time from the prior journal.
+      let lastWakeMs: number | undefined
+      if (boundarySeq === undefined) {
+        try {
+          const prior = await readFile(journalPath, 'utf8')
+          const m = prior.match(/^last_wake:\s*(.+)$/m)
+          if (m !== null) { const t = Date.parse(m[1].trim()); if (!Number.isNaN(t)) lastWakeMs = t }
+        } catch { /* no prior journal → include whole log */ }
+      }
+      const sliced = events.filter((ev) =>
+        boundarySeq !== undefined ? ev.seq > boundarySeq
+          : lastWakeMs !== undefined ? ev.time > lastWakeMs
+            : true)
+      const markdown = serializeSessionLog(memberId, roomId, sessionId, wakeCounter, sliced, boundarySeq)
+      // 5. Atomic write (tmp+rename).
+      const tmpPath = `${logPath}.tmp`
+      await mkdir(path.dirname(logPath), { recursive: true })
+      await writeFile(tmpPath, markdown, 'utf8')
+      await rename(tmpPath, logPath)
+      return logPath
+    } catch (error) {
+      // 6. Best-effort: stub form + warn; never throw.
+      const reason = error instanceof Error ? error.message : String(error)
+      ctx.logger?.warn(`[deepartments] session log capture skipped: ${reason}`)
+      const markdown = buildSessionLogStub(memberId, roomId, sessionId, wakeCounter, reason)
+      try {
+        const tmpPath = `${logPath}.tmp`
+        await mkdir(path.dirname(logPath), { recursive: true })
+        await writeFile(tmpPath, markdown, 'utf8')
+        await rename(tmpPath, logPath)
+      } catch { /* give up silently on the stub write — never throw */ }
+      return logPath
+    }
+  }
+
+  /** Task T1 — append a member's full journal entry to the append-only archive
+   * `journals/archive/<memberId>.md` (per-write unique delimiter so interleaved
+   * appends across the shared stateDir stay parseable) and rewrite the mutable
+   * `journals/index.json` atomically (last-write-wins, documented acceptable).
+   * BEST-EFFORT/NON-FATAL: a throw here must not fail the memo write or sleep.
+   * Returns the archive marker line. `exec` is accepted for signature stability
+   * (the spec's helper contract) but is not consumed. */
+  const archiveJournalEntry = async (memberId: string, roomId: string, _ctx: unknown, _exec: unknown, opts: { checkpointText: string; wakeCounter: number; lastWakeMs?: number; boundarySeq?: number; archiveSeq?: string }): Promise<string> => {
+    const marker = opts.archiveSeq ?? `=== ENTRY ts=${archiveLocalTs()} wake_counter=${opts.wakeCounter} seq=${archiveUniqueSeq()} ===`
+    const block = [marker, opts.checkpointText, '=== END ENTRY ===', ''].join('\n')
+    const archivePath = archivePathFor(memberId)
+    await mkdir(path.dirname(archivePath), { recursive: true })
+    await appendFile(archivePath, block, 'utf8')
+    // Rewrite the per-member search index atomically (last-write-wins).
+    const entry = deriveIndexEntry(memberId, opts.checkpointText, opts.wakeCounter, marker)
+    const indexPath = indexPathFor()
+    let existing: unknown
+    try { existing = JSON.parse(await readFile(indexPath, 'utf8')) } catch { existing = undefined }
+    const index: { version: number; members: Record<string, { entries: unknown[] }> } =
+      existing !== undefined && typeof existing === 'object' && (existing as { version?: unknown }).version === 1
+        ? existing as { version: number; members: Record<string, { entries: unknown[] }> }
+        : { version: 1, members: {} }
+    if (index.members === undefined || index.members === null || typeof index.members !== 'object') index.members = {}
+    if (index.members[memberId] === undefined) index.members[memberId] = { entries: [] }
+    index.members[memberId].entries.push(entry)
+    const tmpPath = `${indexPath}.tmp`
+    await mkdir(path.dirname(indexPath), { recursive: true })
+    await writeFile(tmpPath, JSON.stringify(index, null, 2), 'utf8')
+    await rename(tmpPath, indexPath)
+    return marker
+  }
+
+  /** Task T1 — the SHARED best-effort checkpoint hook: capture the one-cycle
+   * session log (when a live session id is known) and archive the entry, invoked
+   * from writeJournal and the bump* siblings after their atomic commit. The
+   * capture and the archive are INDEPENDENTLY best-effort — a failure in either
+   * must NEVER fail the memo write or sleep, and a capture failure must not
+   * skip the archive (spec §Capture flow — "always let writeJournal's memo
+   * commit proceed"). Warns on failure; never throws. */
+  const archiveCycle = async (memberId: string, roomId: string, sessionId: string | undefined, wakeCounter: number, checkpointText: string, boundarySeq: number | undefined, lastWakeMs: number | undefined, archiveSeq?: string): Promise<void> => {
+    if (sessionId !== undefined) {
+      try {
+        await captureSessionLog(memberId, roomId, sessionId, wakeCounter, boundarySeq)
+      } catch (error) {
+        ctx.logger?.warn(`[deepartments] session log capture failed despite fallback: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    try {
+      await archiveJournalEntry(memberId, roomId, undefined, undefined, { checkpointText, wakeCounter, lastWakeMs, boundarySeq, ...(archiveSeq !== undefined ? { archiveSeq } : {}) })
+    } catch (error) {
+      ctx.logger?.warn(`[deepartments] journal archive skipped: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   /** Write the journal file (author/room/timestamp/wake_counter/last_wake/
    * board_cursor frontmatter + runs of decisions/constraints/openItems +
    * optional current_step + the free-form summary body, closing with a short
@@ -1617,7 +1962,7 @@ export function applyInvoke(ctx: Context, config: Config) {
    * dept_memo_write within one awake session keeps the SAME ordinal (first-ever
    * → 1, later → the current value). The +1 at the seed boundary happens in the
    * sleep layer, giving hosts, heads and workers identical ordinal semantics. */
-  const writeJournal = async (memberId: string, roomId: string, summary: string, decisions: string[], constraints: string[], openItems: string[], currentStep?: string): Promise<string> => {
+  const writeJournal = async (memberId: string, roomId: string, summary: string, decisions: string[], constraints: string[], openItems: string[], currentStep?: string, archive?: { sessionId?: string; wakeCounter?: number; archiveSeq?: string; lastWakeMs?: number; boundarySeq?: number }): Promise<string> => {
     // Batch W2 identity + cursor block: derive the counter and the boundary the
     // previous incarnation left at from the PRIOR journal so a re-materialized
     // head/Asistente can verify its state on wake (lost-cursor / stale
@@ -1639,18 +1984,29 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
 
     const cursor = memberCursors.get(memberId)
+    const wakeCounter = archive?.wakeCounter ?? Math.max(prevCounter, 1)
+    // Task T1 — the journal entry cites BOTH archive artifacts (additive
+    // frontmatter lines after `open_items:`/before the closing `---`; the KPI
+    // regex anchors `^wake_counter:` and `^open_items:` per-line, so extra later
+    // lines are safe — spec §Journal-body citation). The archive marker is
+    // precomputed here so the checkpoint can cite the exact fence that the
+    // post-commit append will write.
+    const archiveFence = archive?.archiveSeq ?? `=== ENTRY ts=${archiveLocalTs()} wake_counter=${wakeCounter} seq=${archiveUniqueSeq()} ===`
+    const sessionLogCite = `journals/sessions/${memberId}-${wakeCounter}.md`
     const content = [
       '---',
       `author: ${memberId}`,
       `room: ${roomId}`,
       `timestamp: ${new Date().toISOString()}`,
-      `wake_counter: ${Math.max(prevCounter, 1)}`,
+      `wake_counter: ${wakeCounter}`,
       `last_wake: ${prevTimestamp ?? 'none'}`,
       ...(currentStep !== undefined ? [`current_step: ${currentStep}`] : []),
       `board_cursor: ${cursor?.lastMessageId ?? 'none'}`,
       `decisions: ${yamlList(decisions)}`,
       `constraints: ${yamlList(constraints)}`,
       `open_items: ${yamlList(openItems)}`,
+      `archive_seq: ${archiveFence}`,
+      `session_log: ${sessionLogCite}`,
       '---',
       '',
       summary,
@@ -1678,6 +2034,15 @@ export function applyInvoke(ctx: Context, config: Config) {
       try { await unlink(tmpPath) } catch { /* ignore */ }
       throw error
     }
+    // Task T1 — AFTER the checkpoint commit, archive this entry + capture the
+    // one-cycle session log (best-effort/non-fatal; a failure must NOT fail the
+    // memo write). Runs only when a live session id is supplied (the memo tool
+    // passes the calling agent's durable id).
+    if (archive?.sessionId !== undefined) {
+      const boundarySeq = archive.boundarySeq ?? hosts.get(memberId)?.boundarySeq ?? byPost.get(memberId)?.boundarySeq
+      const lastWakeMs = archive.lastWakeMs ?? (prevTimestamp !== undefined ? Date.parse(prevTimestamp) : undefined)
+      await archiveCycle(memberId, roomId, archive.sessionId, wakeCounter, content, boundarySeq, lastWakeMs, archiveFence)
+    }
     return memoPath
   }
 
@@ -1690,12 +2055,13 @@ export function applyInvoke(ctx: Context, config: Config) {
    * next wake's fresh context already reflects the incremented ordinal before
    * the just-completed sleep. Throws loudly if the journal has no
    * `wake_counter:` frontmatter line (malformed journal). */
-  const bumpHostSleepCounter = async (memberId: string, content: string): Promise<string> => {
+  const bumpHostSleepCounter = async (memberId: string, content: string, archive?: { sessionId?: string; roomId?: string; boundarySeq?: number }): Promise<string> => {
     const counterLine = content.match(/^wake_counter:\s*(\d+)$/m)
     if (counterLine === null) {
       throw new Error(`[deepartments] bumpHostSleepCounter: journal for ${memberId} has no "wake_counter:" frontmatter line — cannot advance the wake ordinal`)
     }
-    const bumped = content.replace(/^wake_counter:\s*\d+$/m, `wake_counter: ${Number(counterLine[1]) + 1}`)
+    const bumpedWake = Number(counterLine[1]) + 1
+    const bumped = content.replace(/^wake_counter:\s*\d+$/m, `wake_counter: ${bumpedWake}`)
     const memoPath = journalPathFor(memberId)
     const tmpPath = `${memoPath}.tmp`
     try {
@@ -1705,6 +2071,15 @@ export function applyInvoke(ctx: Context, config: Config) {
       // Best-effort cleanup of the temp file; ignore cleanup errors.
       try { await unlink(tmpPath) } catch { /* ignore */ }
       throw error
+    }
+    // Task T1 — AFTER the sleep-boundary commit, archive the bumped entry +
+    // capture the just-ended cycle's session log (best-effort/non-fatal).
+    if (archive?.sessionId !== undefined) {
+      const boundarySeq = archive.boundarySeq ?? hosts.get(memberId)?.boundarySeq
+      let lastWakeMs: number | undefined
+      const lw = bumped.match(/^last_wake:\s*(.+)$/m)
+      if (lw !== null) { const t = Date.parse(lw[1].trim()); if (!Number.isNaN(t)) lastWakeMs = t }
+      await archiveCycle(memberId, archive.roomId ?? 'board', archive.sessionId, bumpedWake, bumped, boundarySeq, lastWakeMs)
     }
     return bumped
   }
@@ -1717,12 +2092,13 @@ export function applyInvoke(ctx: Context, config: Config) {
    * base author/room/timestamp/last_wake/current_step/board_cursor frontmatter
    * and the body are left UNTOUCHED. Returns the NEW full content string.
    * Throws loudly if the journal has no `wake_counter:` frontmatter line. */
-  const bumpPostSleepCounter = async (memberId: string, content: string): Promise<string> => {
+  const bumpPostSleepCounter = async (memberId: string, content: string, archive?: { sessionId?: string; roomId?: string; boundarySeq?: number }): Promise<string> => {
     const counterLine = content.match(/^wake_counter:\s*(\d+)$/m)
     if (counterLine === null) {
       throw new Error(`[deepartments] bumpPostSleepCounter: journal for ${memberId} has no "wake_counter:" frontmatter line — cannot advance the wake ordinal`)
     }
-    const bumped = content.replace(/^wake_counter:\s*\d+$/m, `wake_counter: ${Number(counterLine[1]) + 1}`)
+    const bumpedWake = Number(counterLine[1]) + 1
+    const bumped = content.replace(/^wake_counter:\s*\d+$/m, `wake_counter: ${bumpedWake}`)
     const memoPath = journalPathFor(memberId)
     const tmpPath = `${memoPath}.tmp`
     try {
@@ -1732,6 +2108,15 @@ export function applyInvoke(ctx: Context, config: Config) {
       // Best-effort cleanup of the temp file; ignore cleanup errors.
       try { await unlink(tmpPath) } catch { /* ignore */ }
       throw error
+    }
+    // Task T1 — AFTER the sleep-boundary commit, archive the bumped entry +
+    // capture the just-ended cycle's session log (best-effort/non-fatal).
+    if (archive?.sessionId !== undefined) {
+      const boundarySeq = archive.boundarySeq ?? byPost.get(memberId)?.boundarySeq
+      let lastWakeMs: number | undefined
+      const lw = bumped.match(/^last_wake:\s*(.+)$/m)
+      if (lw !== null) { const t = Date.parse(lw[1].trim()); if (!Number.isNaN(t)) lastWakeMs = t }
+      await archiveCycle(memberId, archive.roomId ?? 'board', archive.sessionId, bumpedWake, bumped, boundarySeq, lastWakeMs)
     }
     return bumped
   }
@@ -2410,7 +2795,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         const memberId = postIdForChild(agent.id as string) ?? 'unknown'
         const entry = byPost.get(memberId)
         const roomId = entry?.roomId ?? 'unknown'
-        const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [], args.currentStep)
+        const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [], args.currentStep, { sessionId: agent.id as string })
         return { room: roomId, member: memberId, memoPath }
       }
     })))
@@ -2451,7 +2836,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         // exactly +1 on disk BEFORE the handle is disposed, so the next wake's
         // fresh materialization (cold resume from the journal) reads the
         // incremented ordinal — mirroring host semantics.
-        await bumpPostSleepCounter(memberId, journal)
+        await bumpPostSleepCounter(memberId, journal, { sessionId: agent.id as string, roomId: entry.roomId, boundarySeq: entry.boundarySeq })
         // Mark first (durable), then dispose the live AgentHandle. Dispose
         // tears the agent+session OUT of the in-memory registry (rc.8
         // dsh-agent-loop prepare() dispose, index.js:1132-1152 — it detaches
@@ -2461,6 +2846,12 @@ export function applyInvoke(ctx: Context, config: Config) {
         // asleep via sleepEpoch.
         const sessionId = entry.sessionId
         entry.sleepEpoch = Date.now()
+        // Task T1 — persist the session-event `seq` at this sleep boundary so
+        // the NEXT cycle's session-log capture can slice EXACTLY by seq
+        // (`seq > boundarySeq`), clock-independent. Absent (stub session) →
+        // capture falls back to `time > lastWakeMs`.
+        const boundarySeq = (agent.session as { seq?: number } | undefined)?.seq
+        if (boundarySeq !== undefined) entry.boundarySeq = boundarySeq
         persistPosts()
         await disposeHeadHandle(sessionId)
         return { room: entry.roomId, member: memberId, memoPath: journalPathFor(memberId), sleepEpoch: entry.sleepEpoch }
@@ -3525,7 +3916,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       const entry = byPost.get(memberId)
       const hostEntry = hosts.get(memberId)
       const roomId = entry?.roomId ?? hostEntry?.roomId ?? 'board'
-      const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [], args.currentStep)
+      const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [], args.currentStep, { sessionId: agent.id as string })
       return { room: roomId, member: memberId, memoPath }
     }
   }))
@@ -3577,7 +3968,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         // already shows the incremented counter (wake K → sleep → the woken
         // session is wake K+1). bumpHostSleepCounter persists the bump atomically
         // and returns the NEW full content used to seed the reset below.
-        const seeded = await bumpHostSleepCounter(hostId, journal)
+        const seeded = await bumpHostSleepCounter(hostId, journal, { sessionId, roomId: existing?.roomId ?? 'board', boundarySeq: hosts.get(hostId)?.boundarySeq })
         // Step 2 — register/refresh the durable host identity. ensureHost is
         // idempotent for an existing entry and refuses to change its roomId away
         // from what it has.
@@ -3619,6 +4010,12 @@ export function applyInvoke(ctx: Context, config: Config) {
         // had NOT been injected into the live surface yet (a stale resume while
         // marked slept).
         hostEntry.sleepEpoch = Date.now()
+        // Task T1 — persist the session-event `seq` at this sleep boundary
+        // (immediately after the boundary append) so the NEXT cycle's session-log
+        // capture slices exactly by `seq > boundarySeq`, clock-independent.
+        // Absent (stub session) → capture falls back to `time > lastWakeMs`.
+        const hostBoundarySeq = (agent.session as { seq?: number } | undefined)?.seq
+        if (hostBoundarySeq !== undefined) hostEntry.boundarySeq = hostBoundarySeq
         persistHosts()
         // Step 5 — conclude the sleeping Asistente's turn (the loop stops after
         // this successful tool result) — the host analog of a head ending its turn.

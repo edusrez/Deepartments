@@ -217,6 +217,13 @@ class StubPersistence extends Service {
   }
 }
 
+// NOTE (Task T1): the StubPersistence above deliberately exposes NO `readRaw`,
+// so the one-cycle session-log capture in the hermetic harness always degrades
+// to the STUB form (`transcript: unavailable`) — exactly the service-absence
+// scenario the spec's Risks section mandates must degrade silently (test 4).
+// The bundle resolves `sessionPersistence`/`sessionQuery` OPTIONALLY via
+// `ctx.get` (see src/index.ts note), so the plugin boots without them.
+
 /** A live parent agent as the registry would hold it (exact identity). */
 function fakeParentAgent(id = SessionId(randomUUID())) {
   return {
@@ -2979,3 +2986,196 @@ test('Batch 7 head regression: a head still sleeps through its own-layer dept_sl
   })
 })
 
+
+// --- Task T1: SESSION MEMORY ARCHIVE (append-only history + one-cycle session
+// log + per-member search index). Tests go through the real Loader (Rule 5) in
+// a temp stateDir, anchored to the same journal lifecycle tests above. In the
+// hermetic harness the StubPersistence has no `readRaw`, so the one-cycle
+// transcript capture degrades to the STUB form (transcript: unavailable) — the
+// session log FILE is still written, named by the bumped ordinal. All 5 tests
+// assert the archive artifacts + the degrade-silently + lean-pack invariants.
+
+test('T1 archive: dept_memo_write archives each entry (archive grows per write; index.json reflects it)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const { agents, dispose } = await bootPlugin(stateDir)
+    await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
+    try {
+      const head = agents.store.get(`head-${postId}`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      const signal = new AbortController().signal
+
+      // Two writes within one awake session (ordinal stays 1; archive grows by one each).
+      await memo.execute({ summary: 'Archive entry A.', openItems: ['keep logs'] }, { agent: head, signal })
+      await memo.execute({ summary: 'Archive entry B.' }, { agent: head, signal })
+
+      const archivePath = path.join(stateDir, 'journals', 'archive', `${postId}.md`)
+      const archiveText = await readFile(archivePath, 'utf8')
+      // Count by the END delimiter (each entry has exactly one, at a line start).
+      // NOTE: the checkpoint body itself carries an `archive_seq: === ENTRY … ===`
+      // citation line, so counting `=== ENTRY ` occurrences would over-count by
+      // the inner citation — count `=== END ENTRY ===` (never echoed) instead.
+      const entries = (archiveText.match(/(^|\n)=== END ENTRY ===/g) || []).length
+      assert.equal(entries, 2, 'archive grew by one entry per dept_memo_write')
+      assert.match(archiveText, /=== ENTRY ts=.* wake_counter=1 seq=.* ===/, 'each entry carries the per-write delimiter')
+      assert.match(archiveText, /Archive entry A\./, 'first entry content archived')
+      assert.match(archiveText, /Archive entry B\./, 'second entry content archived')
+
+      // Index reflects both writes.
+      const indexPath = path.join(stateDir, 'journals', 'index.json')
+      const index = JSON.parse(await readFile(indexPath, 'utf8'))
+      assert.equal(index.version, 1, 'index version 1')
+      assert.equal(index.members[postId].entries.length, 2, 'index has one entry per write')
+      assert.equal(index.members[postId].entries[0].wake_counter, 1, 'indexed entry carries the ordinal 1')
+      assert.equal(index.members[postId].entries[0].session_log_path, `journals/sessions/${postId}-1.md`, 'index cites the session log path')
+      assert.match(index.members[postId].entries[0].archive_seq, /^=== ENTRY /, 'index cites the archive marker')
+      assert.deepEqual(index.members[postId].entries[0].open_items, ['keep logs'], 'index copies open_items from the entry')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('T1 sleep boundary: dept_sleep records a per-session log named by the BUMPED ordinal (head own-layer AND host-plane host dept_sleep)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Head own-layer dept_sleep (seedJournal wake 1 → memo → sleep bumps to 2).
+    const headPostId = 'research-head'
+    const headJournalPath = await seedJournal(stateDir, headPostId, 'HEAD-ARCHIVE: archive the sleep boundary.')
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    await waitFor(() => agents.store.has(`head-${headPostId}`), 5000, 'head created at boot')
+    try {
+      const head = agents.store.get(`head-${headPostId}`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      const signal = new AbortController().signal
+
+      await memo.execute({ summary: 'HEAD-ARCHIVE: archive the sleep boundary.' }, { agent: head, signal })
+      await sleep.execute({}, { agent: head, signal })
+      await waitFor(() => agents.store.has(`head-${headPostId}`) === false, 5000, 'handle disposed after sleep')
+
+      // The sleep boundary archives a session log named by the BUMPED ordinal (2).
+      const headSessionLog = path.join(stateDir, 'journals', 'sessions', `${headPostId}-2.md`)
+      const logText = await readFile(headSessionLog, 'utf8')
+      assert.match(logText, /^member: research-head$/m, 'head session log carries the member id')
+      assert.match(logText, /^wake_counter: 2$/m, 'head session log named by the BUMPED ordinal (2)')
+
+      // Host-plane host dept_sleep (seedJournal wake 1 → sleep bumps to 2).
+      const host = agents.put(fakeParentAgent())
+      const hostId = `host-${host.id}`
+      await seedJournal(stateDir, hostId, 'HOST-ARCHIVE: host sleep boundary.')
+      const sleepTool = root.tools.get('dept_sleep')
+      await sleepTool.execute({}, { agent: host, signal })
+      const hostSessionLog = path.join(stateDir, 'journals', 'sessions', `${hostId}-2.md`)
+      const hostLogText = await readFile(hostSessionLog, 'utf8')
+      assert.match(hostLogText, /^member: /m, 'host session log written by the host-plane dept_sleep')
+      assert.match(hostLogText, /^wake_counter: 2$/m, 'host session log named by the BUMPED ordinal (2)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('T1 index: journals/index.json reflects BOTH the archive entry AND the session log for a write (session_log_path + archive_seq populated)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const { agents, dispose } = await bootPlugin(stateDir)
+    await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
+    try {
+      const head = agents.store.get(`head-${postId}`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      const signal = new AbortController().signal
+
+      await memo.execute({ summary: 'Indexed cycle.', openItems: ['index me'] }, { agent: head, signal })
+
+      const indexPath = path.join(stateDir, 'journals', 'index.json')
+      const index = JSON.parse(await readFile(indexPath, 'utf8'))
+      const entry = index.members[postId].entries[0]
+      assert.equal(entry.wake_counter, 1, 'entry wake_counter populated')
+      assert.equal(entry.session_log_path, `journals/sessions/${postId}-1.md`, 'entry session_log_path reflects the session log')
+      assert.match(entry.archive_seq, /^=== ENTRY /, 'entry archive_seq reflects the archive marker')
+      assert.ok(typeof index.members[postId].entries[0].timestamp === 'string' && index.members[postId].entries[0].timestamp.length > 0, 'entry timestamp populated')
+
+      // The corresponding session log file exists (stub form in the hermetic harness).
+      const sessionLogPath = path.join(stateDir, 'journals', 'sessions', `${postId}-1.md`)
+      const logText = await readFile(sessionLogPath, 'utf8')
+      assert.match(logText, /^member: research-head$/m, 'session log file exists for the indexed cycle')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('T1 degrade-silently: an unavailable transcript (no sessionPersistence.readRaw) still lets dept_memo_write AND dept_sleep succeed — stub written, never throws', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
+    try {
+      const head = agents.store.get(`head-${postId}`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      const signal = new AbortController().signal
+
+      // Memo write: capture degrades to the stub form but the write still succeeds.
+      const memoResult = await memo.execute({ summary: 'Even without a transcript, the checkpoint is written.' }, { agent: head, signal })
+      const checkpoint = await readFile(memoResult.memoPath, 'utf8')
+      assert.match(checkpoint, /^wake_counter: 1$/m, 'checkpoint written with ordinal 1 despite no transcript')
+      const stubLog = await readFile(path.join(stateDir, 'journals', 'sessions', `${postId}-1.md`), 'utf8')
+      assert.match(stubLog, /^transcript: unavailable$/m, 'session log is the STUB form when no transcript is capturable')
+
+      // Sleep: still succeeds (bumps the ordinal) despite the stub capture path.
+      const sleepResult = await sleep.execute({}, { agent: head, signal })
+      assert.ok(typeof sleepResult.sleepEpoch === 'number' && sleepResult.sleepEpoch > 0, 'dept_sleep succeeds (no throw) despite the stub capture')
+      const bumpedCheckpoint = await readFile(memoResult.memoPath, 'utf8')
+      assert.match(bumpedCheckpoint, /^wake_counter: 2$/m, 'dept_sleep bumped the ordinal 1 → 2 (checkpoint write + sleep unaffected)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('T1 lean pack: after archive writes, the injected wake pack + readWakeJournalKpi still read ONLY the single checkpoint — no archive/session-log content leaks into the wake surface', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const hostId = `host-${host.id}`
+
+      // A memo write archives + captures a session log for the host.
+      const memo = root.tools.get('dept_memo_write')
+      await memo.execute(
+        { summary: 'PRE-STEP lean check after an archive.', openItems: ['verify lean pack'] },
+        { agent: host, signal }
+      )
+      // Confirm the archive + session artifacts DO exist on disk (they must be
+      // written but STAY OUT of the wake surface).
+      const archiveText = await readFile(path.join(stateDir, 'journals', 'archive', `${hostId}.md`), 'utf8')
+      assert.match(archiveText, /=== ENTRY /, 'host archive was written')
+      const sessionLogText = await readFile(path.join(stateDir, 'journals', 'sessions', `${hostId}-1.md`), 'utf8')
+      assert.match(sessionLogText, /transcript: unavailable/, 'host session log was written')
+
+      // The pre-step wake pack is assembled from readWakeJournalKpi (the single
+      // checkpoint ONLY) — it must NOT leak archive/session-log content.
+      const claimed = preStepClaimed('the lean wake message')
+      const decision = await runPreStep(pluginCtx, host, claimed, signal)
+      assert.equal(decision.kind, 'enter', 'pre-step is enter')
+      const packNode = decision.messages[decision.messages.length - 1]
+      const packText = packNode.content[0].text
+      assert.match(packText, /pack-v1: present/, 'pack present sentinel intact')
+      assert.match(packText, /kpi: wake_counter 1; top open item: verify lean pack/, 'pack KPI reflects the single checkpoint only')
+      // No archive/session-log leakage into the wake surface.
+      assert.ok(!packText.includes('=== ENTRY'), 'no archive delimiter leaks into the wake pack')
+      assert.ok(!packText.includes('transcript: unavailable'), 'no session-log stub leaks into the wake pack')
+      assert.ok(!packText.includes('journals/sessions/'), 'no session-log citation leaks into the wake pack')
+      assert.ok(!packText.includes('archive_seq:'), 'no archive_seq citation leaks into the wake pack')
+    } finally {
+      await dispose()
+    }
+  })
+})
