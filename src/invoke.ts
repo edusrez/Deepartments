@@ -141,14 +141,24 @@ import { roleForSession, buildSubagentOrientation } from './role-orient.js'
 import type { SubagentRole } from './role-orient.js'
 
 /**
- * Task T4 — session header as observed at runtime: the base `SessionHeader`
- * type omits the durable `meta` record that dsh-session attaches on creation
- * (cwd/parentSession/origin/delegationDepth/agentPreset). Transient dispatched
- * subagents carry `meta.origin === 'subagent'` (dsh-subagent childSessionMeta);
- * registered hosts/heads/workers carry `origin: undefined`. We cast through this
- * shape for subagent-origin detection (injector + dept_sleep guard).
+ * Task T4 — session header AS OBSERVED AT RUNTIME: dsh-session FLATTENS the
+ * creation-meta whitelist into TOP-LEVEL header keys (SessionService.prepare:
+ * `header.origin = meta.origin`, `header.parentSession`, … —
+ * dsh-session/lib/index.js:1657-1668); a nested `header.meta` key NEVER exists
+ * at runtime (verified against persisted session records, which carry flat
+ * `{"origin":"subagent","delegationDepth":1,parentSession,…}`). Transient
+ * dispatched subagents carry flat `origin === 'subagent'` (dsh-subagent
+ * childSessionMeta); registered hosts/heads/workers carry `origin: undefined`.
+ * We cast through this shape for subagent-origin detection (injector +
+ * dept_sleep guard). The nested `meta` member is kept ONLY as a defensive
+ * fallback for stale/mocked headers — it is never the discriminator.
  */
-interface SessionHeaderWithMeta {
+interface SessionHeaderWithOrigin {
+  origin?: unknown
+  parentSession?: unknown
+  delegationDepth?: unknown
+  /** Nested creation-meta record — the PRE-flatten shape some mocks/stale
+   *  headers still carry; absent at runtime, read only as a fallback. */
   meta?: {
     origin?: unknown
     parentSession?: unknown
@@ -2458,8 +2468,14 @@ export function applyInvoke(ctx: Context, config: Config) {
     // identity, never journal/git/system/ROADMAP/roster/full-skill. The role
     // comes from the in-process dispatch-time registry (src/role-orient.ts),
     // defaulting to `generic` when unknown or after a cold resume.
-    const subagentMeta = (agent?.session?.header as SessionHeaderWithMeta | undefined)?.meta
-    if (subagentMeta?.origin === 'subagent') {
+    // Read the FLAT top-level origin — the real runtime shape (dsh-session
+    // flattens the creation meta into header.origin; header.meta never exists
+    // at runtime — dsh-session/lib/index.js:1657-1668). The nested
+    // meta.origin fallback covers only stale/mocked headers and can never
+    // shadow the flat value (`??` reads it ONLY when flat origin is absent).
+    const sessionHeader = agent?.session?.header as SessionHeaderWithOrigin | undefined
+    const sessionOrigin = sessionHeader?.origin ?? sessionHeader?.meta?.origin
+    if (sessionOrigin === 'subagent') {
       signal?.throwIfAborted?.()
       const role = roleForSession(sessionId)
       const roomId = config.org.rooms[0]?.id ?? 'board'
@@ -4062,8 +4078,9 @@ export function applyInvoke(ctx: Context, config: Config) {
       // one-shots hanging after sleep). `origin === 'subagent'` is set only on
       // startContinuable children; registered members (host, head, worker) carry
       // origin undefined and are unaffected. Fail loud; no context reset.
-      const deptSleepMeta = (agent.session?.header as SessionHeaderWithMeta | undefined)?.meta
-      if (deptSleepMeta?.origin === 'subagent') {
+      const deptSleepHeader = agent.session?.header as SessionHeaderWithOrigin | undefined
+      const deptSleepOrigin = deptSleepHeader?.origin ?? deptSleepHeader?.meta?.origin
+      if (deptSleepOrigin === 'subagent') {
         ctx.logger.warn(`[deepartments] dept_sleep refused for transient subagent ${agent.id as string}`)
         throw new Error('dept_sleep is refused for a transient delegated subagent — a subagent cannot sleep; its task ends with the settlement notice (role-scoped context reset is not supported).')
       }

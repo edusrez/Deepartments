@@ -2940,14 +2940,18 @@ test('Batch C pre-step: repeated pre-step within ONE awake session does NOT re-i
 // guard).
 
 /** A transient dispatched subagent as dsh-subagent creates it: a bare UUID
- * session whose durable header meta carries origin 'subagent' (+ parentSession). */
+ * session whose durable header carries the FLAT origin 'subagent' as a
+ * TOP-LEVEL key (+ parentSession) — the REAL runtime shape: dsh-session
+ * flattens the creation-meta whitelist into header.origin (dsh-session/lib/
+ * index.js:1657-1668); a nested header.meta NEVER exists at runtime (the old
+ * nested fixture was exactly why the T4 branch stayed dead code). */
 function fakeSubagentAgent(id = SessionId(randomUUID())) {
   return {
     id,
     options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
     status: 'idle',
     session: {
-      header: { id, meta: { origin: 'subagent', parentSession: 'host-some-orchestrator' } },
+      header: { id, origin: 'subagent', parentSession: 'host-some-orchestrator' },
       events: []
     },
     ctx: { get: () => undefined },
@@ -3105,6 +3109,69 @@ test('Task T4 dept_sleep: a transient subagent calling the global dept_sleep is 
       // No context reset occurred: the throw came before the host branch, so the
       // live surface is untouched (nothing collapsed to a journal node).
       assert.equal(sub.session.header.id, sub.id, 'subagent session untouched by the refused sleep')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// ---- Task T4 REGRESSION (2026-08-21): the discriminator reads the FLAT
+// header.origin. dsh-session FLATTENS the creation-meta whitelist into
+// top-level header keys (header.origin = meta.origin — dsh-session/lib/
+// index.js:1657-1668); a nested header.meta NEVER exists at runtime (confirmed
+// on persisted session records). The original T4 code read header.meta.origin,
+// so the slim branch was DEAD CODE: every child — subagent, workflow, fork —
+// got the full 25 313-char host wake pack (explore-deep/2026-08-21-subagent-
+// context-injection.md, the dept_sleep guard too). DRIVEN THROUGH THE REAL
+// LOADER with the REAL flat runtime shape; on the old nested-meta
+// discriminator this test FAILS.
+
+test('Task T4 REGRESSION: a subagent-origin child with the REAL FLAT header (origin top-level, no nested meta) gets the slim role contract AND NOT the wake pack; a host-origin session still gets the full pack; dept_sleep refuses the flat-origin subagent', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const signal = new AbortController().signal
+
+      // ---- subagent: the REAL persisted header shape — flat origin, NO nested
+      // meta (the shape dsh-session produces; the old code read the nested
+      // shape, never matched, and fell through to the full host pack).
+      const sub = agents.put(fakeSubagentAgent())
+      assert.equal(sub.session.header.meta, undefined, 'fixture is the REAL flat shape: no nested meta key on the header')
+      assert.equal(sub.session.header.origin, 'subagent', 'fixture carries the top-level flat origin discriminator')
+      rememberRole(String(sub.id), 'reviewer')
+      const claimed = preStepClaimed('review the change please')
+      const decision = await runPreStep(pluginCtx, sub, claimed, signal)
+      assert.equal(decision.kind, 'enter')
+      assert.equal(decision.messages.length, claimed.length + 1, 'subagent pre-step injects exactly ONE extra node (the slim role block)')
+      const text = decision.messages[decision.messages.length - 1].content[0].text
+      assert.match(text, /^## Deepartments context$/m, 'slim block opens with its OWN header — not the wake-pack header')
+      assert.match(text, /identity: Deepartments subagent \(role: reviewer, room: board\)/, 'slim block: subagent identity with the reviewer role — never a host')
+      // The wake-pack markers the dead-code bug used to inject:
+      assert.ok(!text.includes('## Deepartments wake pack'), 'NO wake-pack header text (dead-code regression: old code injected the full pack)')
+      assert.ok(!text.includes('Pre-resolved journal path'), 'NO journal pointer')
+      assert.ok(!text.includes('## Git bearings'), 'NO git bearings section')
+
+      // ---- host: the real root-agent header (flat, no origin key) still gets
+      // the FULL wake pack — the host-side behavioral guarantee is unchanged.
+      const host = agents.put(fakeParentAgent())
+      const hostClaimed = preStepClaimed('wake up')
+      const hostDecision = await runPreStep(pluginCtx, host, hostClaimed, signal)
+      assert.equal(hostDecision.kind, 'enter')
+      assert.equal(hostDecision.messages.length, hostClaimed.length + 1, 'host pre-step injects exactly ONE extra node (the wake pack)')
+      const hostText = hostDecision.messages[hostDecision.messages.length - 1].content[0].text
+      assert.match(hostText, /^## Deepartments wake pack$/m, 'host-origin session still receives the FULL wake pack')
+      assert.match(hostText, /identity: host-.* \(role: host, room: board\)/, 'host pack carries the host identity branding')
+
+      // ---- dept_sleep guard: invoked with the FLAT origin, the subagent is
+      // refused BEFORE any host sleep branch can run (even with a pre-authored
+      // host journal for its host-<id>).
+      await seedJournal(stateDir, `host-${sub.id}`, 'subagent should never sleep')
+      await assert.rejects(
+        () => root.tools.get('dept_sleep').execute({}, { agent: sub, signal }),
+        /dept_sleep is refused for a transient delegated subagent — a subagent cannot sleep/,
+        'dept_sleep refuses a caller whose header carries the flat origin'
+      )
     } finally {
       await dispose()
     }
