@@ -550,7 +550,7 @@ export function AgentList(props: AgentsOwner) {
   // apply() into agentStore; we consume it reactively. getSnapshot returns a
   // stable reference unless content actually changed, so a no-op poll does not
   // re-render us (Batch 6b, change-guard).
-  const { heads, archived: archivedSet } = useSyncExternalStore(agentStore.subscribe, agentStore.get);
+  const { host, heads, archived: archivedSet } = useSyncExternalStore(agentStore.subscribe, agentStore.get);
   // The native sessions projection store is ALREADY reactive (subscribe + uSES,
   // same as DeepartmentsSettings). Reading it here — instead of a 5s poll —
   // makes the active-row highlight update the moment the selection changes and
@@ -577,10 +577,13 @@ export function AgentList(props: AgentsOwner) {
     void archiveSession(id).catch(() => {});
   }, [archiveSession]);
 
-  // Assistant rows = non-blank, non-archived host-origin sessions in host-list
-  // creation order. Filters:
-  //  - !s.blank   : server `blank` bit — "only show after the first message"
-  //                 (a session disappears until it has content).
+  // Assistant rows = all non-archived host-origin sessions in host-list
+  // creation order, INCLUDING the workspace's single blank session (the server
+  // `blank` bit — "only show after the first message"). That blank session is
+  // the host's own reused workspace session (connectWorkspace), so it IS shown
+  // and labeled with the host RPC name (hostName, "Asistente") below; the
+  // known-accepted flip: after its first message it turns non-blank and takes
+  // the creation-order label. Filters:
   //  - origin     : hide subagent child sessions (origin === 'subagent');
   //                 hosts carry no origin (undefined → kept). This hides the
   //                 builder/subagent children that are not Assistants.
@@ -596,7 +599,6 @@ export function AgentList(props: AgentsOwner) {
   const isAssistant = (s: any) =>
     !!(
       s &&
-      !s.blank &&
       s.origin !== "subagent" &&
       !(s.id || s.sessionId || "").startsWith(HEAD_SESSION_PREFIX) &&
       !archivedSet.has(s.id || s.sessionId)
@@ -617,6 +619,20 @@ export function AgentList(props: AgentsOwner) {
   } else {
     assistantRows = assistantRows.slice().reverse();
   }
+
+  // Row labels: the workspace's blank session is the HOST's own row, so it is
+  // named after the host RPC name fetched by the roster poll (fallback literal
+  // "Asistente" until the first host is pushed). Non-blank rows keep the
+  // creation-order labels EXACTLY as before — the counter counts non-blank rows
+  // only, so the blank row never shifts "Assistant" / "Assistant N" numbering.
+  const hostName = (host && host.name) || "Asistente";
+  let nonBlankSeen = 0;
+  const assistantNames: string[] = assistantRows.map((a: any) => {
+    if (a && a.blank) return hostName;
+    const name = nonBlankSeen === 0 ? "Assistant" : `Assistant ${nonBlankSeen + 1}`;
+    nonBlankSeen += 1;
+    return name;
+  });
 
   const current = snapshot?.current;
 
@@ -643,7 +659,7 @@ export function AgentList(props: AgentsOwner) {
       <h2 className="dp-agents-heading">Agents</h2>
       <div className="dp-agents-list">
         {assistantRows.map((a, i) => {
-          const name = i === 0 ? "Assistant" : `Assistant ${i + 1}`;
+          const name = assistantNames[i];
           const id = a.id ?? a.sessionId;
           return (
             <AssistantRowView
