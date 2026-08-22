@@ -289,13 +289,19 @@ class StubPersistenceWithRoot extends StubPersistence {
  * `stateDir`; `bootPlugin({ workspaceEntities })` overrides for the repair
  * tests) and `attachSession` records the target ids (reality validates the
  * session's persisted header cwd against the entity path and throws on
- * mismatch — dsh-workspace lib:87-105). */
+ * mismatch — dsh-workspace lib:87-105). FIX 1b.1 — model the provider's
+ * mid-init window: while `notReadyRejects` > 0, `list()` rejects like the
+ * real registry whose storage/start has not completed ("workspace registry is
+ * not started yet"; each call decrements). The boot repair hook must RETRY
+ * (non-strict get + bounded loop) until list() resolves — the old strict-get
+ * race silently skipped exactly this state in production. */
 class StubWorkspaceRegistry extends Service {
   constructor(ctx, stateDir, entities) {
     super(ctx, 'workspaceRegistry')
     this.stateDir = stateDir
     this.archived = []
     this.attachCalls = []
+    this.notReadyRejects = 0
     this.entities = entities ?? [{ path: stateDir, attachSession: async (sessionId) => { this.attachCalls.push(sessionId) } }]
   }
 
@@ -303,7 +309,15 @@ class StubWorkspaceRegistry extends Service {
     return this.archived
   }
 
+  setNotReadyRejects(count) {
+    this.notReadyRejects = count
+  }
+
   list() {
+    if (this.notReadyRejects > 0) {
+      this.notReadyRejects--
+      return Promise.reject(new Error('workspace registry is not started yet'))
+    }
     return Promise.resolve(this.entities)
   }
 
@@ -375,6 +389,12 @@ async function bootPlugin(stateDir, opts = {}) {
   // `workspaceEntities` (optional) overrides the entity list the S2.2 attach
   // and the boot repair hook iterate (default: one recording entity).
   const workspaceRegistry = new StubWorkspaceRegistry(root, stateDir, opts.workspaceEntities)
+  // FIX 1b.1 — `registryNotReadyRejects` models a provider whose init is still
+  // in flight at boot (list() rejects mid-init) for the boot-repair retry
+  // regression.
+  if (typeof opts.registryNotReadyRejects === 'number' && opts.registryNotReadyRejects > 0) {
+    workspaceRegistry.setNotReadyRejects(opts.registryNotReadyRejects)
+  }
   await root.plugin(SubagentRuntime)
 
   const spawnStub = stubProvider('spawn')
@@ -3310,6 +3330,31 @@ test('FIX 1b boot repair: the attaching entity THROWS → boot does not crash, a
       await waitFor(() => logged.some((m) => m?.type === 'warn' && String(m.args?.[0] ?? '').includes('host attach repair: no workspace matched session')), 5000, 'repair failure warned (never crashes)')
       disposeExporter()
       assert.equal(workspaceRegistry.attachCalls.length, 0, 'the throwing entity recorded nothing')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('FIX 1b.1 boot repair REGRESSION: the workspace registry is NOT ready at boot (list() rejects mid-init — the strict ctx.get race) — the hook RETRIES until it becomes usable and then attaches', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const sessionId = 'session-repair-target'
+    await seedHostRegistration(stateDir, sessionId)
+    // Production shape: the registry impl exists but its init (storage +
+    // sessionPersistence header-index rebuild) has not completed, so the
+    // first list() calls reject like the real mid-init requireState throw
+    // ("workspace registry is not started yet"). The hook must use the
+    // NON-STRICT get + a bounded retry loop — the strict-get version raced
+    // the init and silently skipped (production: session-6e49895c did not
+    // heal at the 17:24:59 UTC restart; zero `host attach repair` lines).
+    const { root, workspaceRegistry, dispose } = await bootPlugin(stateDir, { registryNotReadyRejects: 2 })
+    try {
+      const logged = []
+      const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
+      await waitFor(() => workspaceRegistry.attachCalls.length === 1, 8000, 'boot repair attached AFTER the registry became ready (retry loop)')
+      assert.equal(workspaceRegistry.attachCalls[0], sessionId, 'retry attach targets the live host session id')
+      await waitFor(() => logged.some((m) => m?.type === 'info' && String(m.args?.[0] ?? '').includes(`host attach repair: attached ${sessionId}`)), 5000, 'attach success logged after retries')
+      disposeExporter()
     } finally {
       await dispose()
     }

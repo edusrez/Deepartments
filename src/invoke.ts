@@ -1757,9 +1757,21 @@ export function applyInvoke(ctx: Context, config: Config) {
   // zero or ambiguous (2+) live hosts (warn on the ambiguous case); on
   // no-match/all-throw log a WARN and never crash. Runs only when the
   // workspaceRegistry service is available (optional seam).
+  // FIX 1b.1 (2026-08-22): the strict `ctx.get('workspaceRegistry')` returns
+  // UNDEFINED until the provider's fiber reaches state 2 (cordis
+  // lib/index.js:762-771 — `_getImpl` bails when `strict && impl.fiber.state
+  // !== 2`). The workspaceRegistry provider's init awaits storage + a
+  // sessionPersistence header-index rebuild, so at the moment this boot hook
+  // runs (hostsLoaded.then — microseconds after plugin boot) the strict get
+  // races the init and silently skipped (production: session-6e49895c did
+  // not heal at the 17:24:59 UTC restart; zero `host attach repair` lines).
+  // Fix: NON-STRICT get + a bounded retry loop around `list()` — retry while
+  // the impl is absent or list() rejects (mid-init, e.g. "workspace registry
+  // is not started yet"), attach on the first resolved list; after the cap
+  // log a WARN and give up (never crash).
+  const HOST_ATTACH_REPAIR_RETRY_MS = 250
+  const HOST_ATTACH_REPAIR_TIMEOUT_MS = 10_000
   const repairHostWorkspaceAttach = async (): Promise<void> => {
-    const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
-    if (registry?.list === void 0) return
     const live: HostEntry[] = []
     for (const entry of hosts.values()) if (entry.retired !== true) live.push(entry)
     if (live.length !== 1) {
@@ -1767,22 +1779,37 @@ export function applyInvoke(ctx: Context, config: Config) {
       return
     }
     const sessionId = live[0].sessionId
-    try {
-      const workspaceList = await registry.list()
-      for (const workspace of workspaceList) {
-        if (typeof workspace?.attachSession !== 'function') continue
+    const deadline = Date.now() + HOST_ATTACH_REPAIR_TIMEOUT_MS
+    let lastFailure: unknown = undefined
+    for (;;) {
+      const registry = ctx.get('workspaceRegistry', false) as WorkspaceRegistryLike | undefined
+      if (registry?.list !== void 0) {
         try {
-          await workspace.attachSession(sessionId)
-          ctx.logger.info(`[deepartments] host attach repair: attached ${sessionId}`)
+          const workspaceList = await registry.list()
+          for (const workspace of workspaceList) {
+            if (typeof workspace?.attachSession !== 'function') continue
+            try {
+              await workspace.attachSession(sessionId)
+              ctx.logger.info(`[deepartments] host attach repair: attached ${sessionId}`)
+              return
+            } catch {
+              // cwd mismatch / unvalidatable header / attach fault — try the next entity.
+            }
+          }
+          // list() RESOLVED but no entity matched: a definitive (non-readiness)
+          // failure — warn once and give up.
+          ctx.logger.warn(`[deepartments] host attach repair: no workspace matched session ${sessionId} (its header cwd has no owning workspace) — the host stays invisible in the sidebar`)
           return
-        } catch {
-          // cwd mismatch / unvalidatable header / attach fault — try the next entity.
+        } catch (error) {
+          // list() rejected → the registry is still initializing — retry.
+          lastFailure = error
         }
       }
-      ctx.logger.warn(`[deepartments] host attach repair: no workspace matched session ${sessionId} (its header cwd has no owning workspace) — the host stays invisible in the sidebar`)
-    } catch (error) {
-      ctx.logger.warn(`[deepartments] host attach repair failed: ${error instanceof Error ? error.message : String(error)}`)
+      if (Date.now() >= deadline) break
+      await new Promise((resolve) => setTimeout(resolve, HOST_ATTACH_REPAIR_RETRY_MS))
     }
+    const detail = lastFailure instanceof Error ? lastFailure.message : String(lastFailure ?? 'registry impl never became available')
+    ctx.logger.warn(`[deepartments] host attach repair failed: ${detail} — the host stays invisible in the sidebar (retried ${HOST_ATTACH_REPAIR_TIMEOUT_MS}ms)`)
   }
   hostsLoaded.then(() => { void repairHostWorkspaceAttach() }, () => { void repairHostWorkspaceAttach() })
 

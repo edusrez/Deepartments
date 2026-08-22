@@ -323,7 +323,12 @@ per-entry; pick one and validate it.
   hosts.json holds EXACTLY ONE non-retired live host entry, the plugin attaches its session to
   the workspace whose path matches the session's persisted header cwd (same iterate-and-try
   as S2.2; zero live hosts skip, 2+ live hosts skip + warn — ambiguous; no-match/failure warn,
-  never crash; idempotent — `attachSession` no-ops when already attached).
+  never crash; idempotent — `attachSession` no-ops when already attached; the hook uses a
+  NON-STRICT `ctx.get('workspaceRegistry', false)` plus a bounded retry (250 ms, ≤10 s) around
+  `list()` — the strict get races the registry provider's init (cordis lib/index.js:762-771:
+  `_getImpl` bails until the provider fiber reaches state 2; FIX 1b.1), so it attaches on the
+  first resolved `list()` and never leaves the host unhealed when the registry is merely slow
+  to start).
 - Crash between S2.5 and S3: old host archived but hosts.json still points at it — **the wake
   resume would target an archived session**. ❓ This is the one real hazard window: the gate
   would inject the pack into a session the client cannot select (archived). Mitigations: (a)
