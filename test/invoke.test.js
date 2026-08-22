@@ -29,7 +29,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadRecords, resolveBoardPath } from '../lib/board-store.js'
 import { emitRoomRecord, roomSessionId } from '../lib/org.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
 import {
@@ -2624,6 +2624,40 @@ test('Batch 7 pure helper: computeHostSleepSurfacePlan computes the full-window 
   })
 })
 
+test('U4 pure helper: pinHostSessionTitle pins "Asistente" only when the session has no user-kind title yet', () => {
+  // Fresh session (no title event): pins with the exact rename() shape.
+  const fresh = Session.create(SessionId('session-title-fresh'))
+  assert.equal(pinHostSessionTitle(fresh), 'pinned')
+  const pinned = fresh.events.find((ev) => ev.type === 'session/title')
+  assert.ok(pinned !== undefined, 'session/title event appended')
+  assert.equal(pinned.data.title, 'Asistente')
+  assert.deepEqual(pinned.data.messageSeqs, [])
+  assert.deepEqual(pinned.data.source, { kind: 'user' })
+  assert.equal(pinned.surfaceOp, undefined, 'title pin is log-only (no surface entry)')
+
+  // Idempotent: a second call never double-pins (the Asistente pin itself is
+  // user-kind — the "already has the Asistente pin" guard).
+  const before = fresh.events.length
+  assert.equal(pinHostSessionTitle(fresh), 'already-titled')
+  assert.equal(fresh.events.length, before, 'no second title event appended')
+
+  // The owner's manual rename (also source.user) always wins — never clobbered.
+  const renamed = Session.create(SessionId('session-title-renamed'))
+  renamed.append('session/title', { title: 'Mi host', messageSeqs: [], source: { kind: 'user' } })
+  const renamedCount = renamed.events.length
+  assert.equal(pinHostSessionTitle(renamed), 'already-titled')
+  assert.equal(renamed.events.length, renamedCount, 'owner rename untouched')
+  assert.equal(renamed.events.find((ev) => ev.type === 'session/title').data.title, 'Mi host')
+
+  // Automatic LLM/fallback titles (source provider/fallback) are NOT user
+  // titles — the Asistente pin overrides them (fold is last-wins).
+  const auto = Session.create(SessionId('session-title-auto'))
+  auto.append('session/title', { title: 'What is the plan for Q3?', messageSeqs: [0], source: { kind: 'provider', provider: 'stub', model: 'stub' } })
+  assert.equal(pinHostSessionTitle(auto), 'pinned')
+  const autoTitle = auto.events.filter((ev) => ev.type === 'session/title').at(-1)
+  assert.equal(autoTitle.data.title, 'Asistente', 'the Asistente user pin wins over the later-folded provider title')
+})
+
 test('Batch 7 pure helper: buildSleepJournalMessage frames the journal as a plugin/notice context (never a user-typed message)', async () => {
   const msg = buildSleepJournalMessage('MY-JOURNAL')
   assert.equal(msg.role, 'user')
@@ -2795,12 +2829,16 @@ test('Batch 7 U2 host dept_sleep ROTATES: no journal rejects loudly; with a jour
       assert.equal(createMeta.version, 0, 'create meta carries header version 0')
       assert.ok(typeof createMeta.createdAt === 'number' && createMeta.createdAt > 0, 'create meta carries createdAt (now)')
       assert.ok(typeof createMeta.cwd === 'string' && createMeta.cwd !== '', 'create meta carries the workspace path (old session header cwd / process cwd)')
-      assert.equal(createMeta.seedLength, 4, 'create meta seedLength = the 4-event rotation seed')
+      assert.equal(createMeta.seedLength, 5, 'create meta seedLength = the 5-event rotation seed')
       const appended = persistence.appendCalls[0]
       assert.equal(appended.id, newSessionId, 'append targets the pre-minted id')
-      assert.deepEqual(appended.events.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message'], 'append carries the rotation seed events')
+      assert.deepEqual(appended.events.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message', 'session/title'], 'append carries the rotation seed events')
       appended.events.forEach((ev, i) => assert.equal(ev.seq, i, `seed seq ${ev.seq} contiguous at index ${i}`))
       assert.ok(!appended.events.some((ev) => ev.type === 'turn/start'), 'the seeded artifact is BLANK (no turn/start — native "New Session" row)')
+      const titlePin = appended.events.find((ev) => ev.type === 'session/title')
+      assert.equal(titlePin.data.title, 'Asistente', 'seeded title pin is "Asistente" (U4)')
+      assert.deepEqual(titlePin.data.messageSeqs, [], 'seeded title pin cites no messages (rename() shape)')
+      assert.deepEqual(titlePin.data.source, { kind: 'user' }, 'seeded title pin is user-source — pinned, LLM/fallback cannot override it')
       const journalNode = appended.events.find((ev) => ev.type === 'user/message')
       assert.equal(journalNode.data.source.kind, 'plugin', 'seeded journal framed as plugin context')
       assert.match(journalNode.data.content[0].text, new RegExp(`^author: ${newHostId}$`, 'm'), 'seeded journal is the RE-KEYED journal (author host-<newId>)')

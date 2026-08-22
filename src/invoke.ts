@@ -125,7 +125,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { emitRoomRecord, roomSessionId, setBoardRecordListener, setRoomCompactionResetter } from './org.js'
 import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './session-cleanup.js'
-import { runHostRotation, validateHostsRotationFile, ROTATION_SCHEMA_VERSION } from './session-rotation.js'
+import { runHostRotation, validateHostsRotationFile, ROTATION_SCHEMA_VERSION, ASISTENTE_SESSION_TITLE } from './session-rotation.js'
 import type { RotationPersistenceLike, WorkspaceRegistryLike } from './session-rotation.js'
 import type { Config, CoordinatorConfig, DepartmentConfig, RoomState } from './org.js'
 import { loadRecords, resolveBoardPath } from './board-store.js'
@@ -1278,6 +1278,49 @@ export function shouldClearCleanupPending(report: Pick<SleepCleanupReport, 'skip
   return report.skipped !== true && report.truncate !== undefined && report.truncateError === undefined
 }
 
+/** Outcome of one host-session title pin (U4 — the "Asistente" sidebar
+ * label). 'pinned' = the `session/title` user event was appended now;
+ * 'already-titled' = the log already holds a user-kind title (the owner's
+ * manual rename OR the Asistente pin itself) — never touched; 'failed' = the
+ * append threw (the caller logs and continues — a title pin must never break
+ * host registration). */
+export type HostTitlePinResult = 'pinned' | 'already-titled' | 'failed'
+
+/**
+ * U4 — pin the durable "Asistente" title on a LIVE host session. The sidebar
+ * row label IS the session title projection, folded last-wins from
+ * `session/title` log events, so appending a user-source title event (the
+ * exact rename() shape — dsh-session-title lib/index.js ~242) makes the host
+ * display "Asistente" and supersedes automatic LLM (`source.provider`) and
+ * deterministic fallback (`source.fallback`) titles. Guards, per the owner's
+ * decision: only pin when the log has NO user-kind `session/title` event yet —
+ * a manual owner rename is also `source.user` and always wins, and a session
+ * that already holds the Asistente pin is never double-pinned.
+ *
+ * `session/title` is a plugin-merged, LOG-ONLY event type (persistence catalog
+ * known-event-types.js — NOT a key of the core SessionEventMap), so the
+ * `session.append` call deliberately widens the type; the live store accepts
+ * the exact shape (session.rename appends it verbatim). Rotated host sessions
+ * already carry the pin in their cold seed (buildRotationSeed) — this covers
+ * the first UI-created host session and every resume via ensureHost.
+ */
+export function pinHostSessionTitle(session: Session): HostTitlePinResult {
+  const titleEvents = session.events as readonly { type: string; data?: { source?: { kind?: string } } }[]
+  if (titleEvents.some((ev) => ev.type === 'session/title' && ev.data?.source?.kind === 'user')) {
+    return 'already-titled'
+  }
+  try {
+    ;(session.append as unknown as (type: string, data: Record<string, unknown>) => void)('session/title', {
+      title: ASISTENTE_SESSION_TITLE,
+      messageSeqs: [],
+      source: { kind: 'user' }
+    })
+    return 'pinned'
+  } catch {
+    return 'failed'
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Service (called from src/index.ts).
 // ---------------------------------------------------------------------------
@@ -1433,6 +1476,24 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (retiredBefore?.retired === true) {
       ctx.logger.warn(`[deepartments] ensureHost: refusing to re-register retired host ${hostId} (rotated to ${retiredBefore.rotatedTo ?? 'unknown'}) — the session stays a plain session`)
       return hostId
+    }
+    // U4 — pin the durable "Asistente" title on the live host session (sidebar
+    // label = the session title projection folded last-wins from session/title
+    // log events). Rotated host sessions already carry the pin in their COLD
+    // seed (buildRotationSeed); this covers the first UI-created host session
+    // and every resume. Guards: only when the session has no user-kind title
+    // YET (the owner's manual rename and the Asistente pin are both
+    // source.user — the owner's rename always wins, the existing pin is never
+    // double-pinned). A missing live session or a failed append is non-fatal;
+    // registration continues regardless.
+    const titleSession = ctx.sessions.get(SessionId(sessionId))
+    if (titleSession !== void 0) {
+      const titlePin = pinHostSessionTitle(titleSession)
+      if (titlePin === 'pinned') {
+        ctx.logger.info(`[deepartments] ensureHost: pinned host session title "${ASISTENTE_SESSION_TITLE}" (${sessionId})`)
+      } else if (titlePin === 'failed') {
+        ctx.logger.warn(`[deepartments] ensureHost: host session title pin failed for ${sessionId} (non-fatal — host registration continues)`)
+      }
     }
     hosts.set(hostId, { hostId, sessionId, roomId })
     hostForSession.set(sessionId, hostId)

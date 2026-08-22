@@ -77,9 +77,21 @@ test('U2 T1: buildRotationSeed produces the contiguous minimal-artifact event li
   const seed = buildRotationSeed(reKeyed, { now: 1787000000000 })
 
   // Exact event types, contiguous seq 0..k (the Session ctor contract).
-  assert.deepEqual(seed.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message'])
+  assert.deepEqual(seed.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message', 'session/title'])
   seed.forEach((ev, i) => assert.equal(ev.seq, i, `seq ${ev.seq} contiguous at index ${i}`))
   assert.ok(seed.every((ev) => ev.time === 1787000000000), 'seed times pinned by the clock seam')
+
+  // The title pin (U4): a user-source `session/title` event in the exact
+  // rename() shape — the rotated host's sidebar label folds to "Asistente"
+  // from its first materialization (automatic LLM/fallback titles cannot
+  // override a user-source pin; blank rows keep the client-side "New Session"
+  // label — no synthetic turn events).
+  const titleEvent = seed[4]
+  assert.equal(titleEvent.type, 'session/title')
+  assert.equal(titleEvent.data.title, 'Asistente')
+  assert.deepEqual(titleEvent.data.messageSeqs, [])
+  assert.deepEqual(titleEvent.data.source, { kind: 'user' })
+  assert.equal(titleEvent.surfaceOp, undefined, 'title pin is a log-only event (no surface entry)')
 
   // The journal node: plugin/notice framing, byte-identical journal text
   // modulo re-key (compare the model-visible content + source shape against
@@ -472,13 +484,14 @@ test('U2 §3.3/S8: the rotation COMMITS (journals + hosts.json) before it resolv
     assert.equal(createdMeta.version, 0, 'header version 0')
     assert.equal(createdMeta.createdAt, 1787000000000, 'createdAt from the clock seam')
     assert.equal(createdMeta.cwd, '/root', 'workspace path attributed')
-    assert.equal(createdMeta.seedLength, 4, 'seedLength = the seed event count')
+    assert.equal(createdMeta.seedLength, 5, 'seedLength = the seed event count')
     assert.equal(createdMeta.delegationDepth, 0, 'fresh host seed has delegation depth 0')
     const [appended] = state.persistenceAppended
     assert.equal(appended.id, newSessionId, 'append targets the pre-minted id')
-    assert.deepEqual(appended.events.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message'])
+    assert.deepEqual(appended.events.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message', 'session/title'])
     appended.events.forEach((ev, i) => assert.equal(ev.seq, i, `seed seq ${ev.seq} contiguous at index ${i}`))
     assert.equal(appended.events[3].data.content[0].text, journalText, 'seed journal node carries the re-keyed journal')
+    assert.deepEqual(appended.events[4].data, { title: 'Asistente', messageSeqs: [], source: { kind: 'user' } }, 'seed title pin is the rename()-shape "Asistente" (U4)')
     // Regression (c) — NO live sessions-store dependency on the rotation path:
     // the artifact is written cold (a later resume restores it via
     // persistence.prepare); nothing may ever store-attach the session here.

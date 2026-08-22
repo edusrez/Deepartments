@@ -54,6 +54,14 @@ export const ROTATION_SCHEMA_VERSION = 2
  * match invoke.ts's HOST_ID_PREFIX ('host-'). */
 const HOST_ID_PREFIX = 'host-'
 
+/** The PINNED display title of HOST sessions. The sidebar row label is the
+ * session TITLE projection, folded last-wins from `session/title` log events
+ * (see .dsh/reports/explore-deep/2026-08-22-dsh-session-naming.md); a
+ * user-source pin is the rename() shape and cannot be overridden by automatic
+ * LLM/fallback titles. Used by the rotation seed (below) AND by invoke.ts's
+ * registration-path pin (ensureHost — same event kept in sync). */
+export const ASISTENTE_SESSION_TITLE = 'Asistente'
+
 /** Notice summary for the seeded journal node of the rotated session (the
  * rotation counterpart of buildSleepJournalMessage's "in-place reset" line). */
 export const ROTATION_JOURNAL_NOTICE_SUMMARY =
@@ -141,7 +149,8 @@ export function buildRotationSeedMessage(reKeyedJournal: string) {
 
 /**
  * §3.2 — the rotation seed: permission/sandbox/approval setup events + the
- * LAST append-origin RE-KEYED journal node, renumbered 0..k (the exact
+ * LAST append-origin RE-KEYED journal node + the pinned HOST title
+ * (`session/title` "Asistente", U4), renumbered 0..k (the exact
  * minimal-artifact event-list shape planMinimalArtifact produces and
  * Session.fromRestore proves cold-bootable). The Session constructor validates
  * contiguous-from-0 seqs, so nothing here may renumber independently. The
@@ -155,7 +164,15 @@ export function buildRotationSeed(reKeyedJournal: string, opts: { preset?: strin
     { type: 'permission/preset', seq: 0, time: now, data: { preset: opts.preset ?? 'danger-full-access' } },
     { type: 'sandbox/mode', seq: 1, time: now, data: { mode: opts.sandbox ?? 'danger-full-access' } },
     { type: 'approval/policy', seq: 2, time: now, data: { policy: opts.policy ?? 'never' } },
-    { type: 'user/message', seq: 3, time: now, data: message as unknown as Record<string, unknown>, surfaceOp: 'append' }
+    { type: 'user/message', seq: 3, time: now, data: message as unknown as Record<string, unknown>, surfaceOp: 'append' },
+    // U4 — the HOST-SESSION TITLE PIN: a user-source `session/title` event in
+    // the exact rename() shape (dsh-session-title lib/index.js ~242). The
+    // title projection folds last-wins over the log and a user-source pin
+    // supersedes automatic LLM/fallback titles, so the rotated session
+    // displays "Asistente" from its first materialization — durable in the
+    // cold seed, no synthetic turn events (blank rows keep the client-side
+    // "New Session" label until the first turn).
+    { type: 'session/title', seq: 4, time: now, data: { title: ASISTENTE_SESSION_TITLE, messageSeqs: [], source: { kind: 'user' } } }
   ]
 }
 
