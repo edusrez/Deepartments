@@ -7,8 +7,8 @@
         stateDir: .deepartments
         # The static organization architecture (owner decisions 11-12): rooms
         # are program architecture defined HERE, never created by agents.
-        # Board-only org: the board room is the sole coordination room, and
-        # its only member is asistente (no departments).
+        # The board room is the coordination room; research-head is a member
+        # of BOTH the board room and the research department room.
         # agentOptions values verified: models served via the opencode-go provider (registered by @deepseek-ai/dsh-llm-pi-ai); deepseek-v4-flash / deepseek-v4-pro available under it.
         org:
           rooms:
@@ -17,6 +17,25 @@
               purpose: Coordination room of department heads
               members:
                 - asistente
+                - research-head
+            - id: research
+              name: Research department
+              purpose: Research department room
+              members:
+                - research-head
+          departments:
+            - id: research
+              name: Research Department
+              roomId: research
+              coordinator:
+                postId: research-head
+                title: Head of Research
+                role: Research department head
+                sessionTitle: Research Head
+                provider: opencode-go
+                agentOptions:
+                  provider: opencode-go
+                  model: deepseek-v4-flash
         # Custom ctx.web fetch provider (webfetch.ts): detects blocking
         # (403/429) and reports WEB_BLOCKED with a message that instructs
         # API/JSON-endpoint investigation instead of guessing host endpoints.

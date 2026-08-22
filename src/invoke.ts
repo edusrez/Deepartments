@@ -1286,32 +1286,40 @@ export function shouldClearCleanupPending(report: Pick<SleepCleanupReport, 'skip
  * host registration). */
 export type HostTitlePinResult = 'pinned' | 'already-titled' | 'failed'
 
+/** Outcome of one session title pin (Piece 1 — the U4 pin generalized beyond
+ * hosts, so configured department heads get a native-sidebar title too). Same
+ * union and semantics as [`HostTitlePinResult`]; kept as an alias so callers
+ * can name the general result without churning the U4 host API. */
+export type TitlePinResult = HostTitlePinResult
+
 /**
- * U4 — pin the durable "Asistente" title on a LIVE host session. The sidebar
+ * Piece 1 — pin a durable sidebar title on a LIVE session (any registered
+ * session that owns a log: the host's, or a department head's). The sidebar
  * row label IS the session title projection, folded last-wins from
  * `session/title` log events, so appending a user-source title event (the
- * exact rename() shape — dsh-session-title lib/index.js ~242) makes the host
- * display "Asistente" and supersedes automatic LLM (`source.provider`) and
+ * exact rename() shape — dsh-session-title lib/index.js ~242) makes the row
+ * display `title` and supersedes automatic LLM (`source.provider`) and
  * deterministic fallback (`source.fallback`) titles. Guards, per the owner's
  * decision: only pin when the log has NO user-kind `session/title` event yet —
  * a manual owner rename is also `source.user` and always wins, and a session
- * that already holds the Asistente pin is never double-pinned.
+ * that already holds the pin is never double-pinned.
  *
  * `session/title` is a plugin-merged, LOG-ONLY event type (persistence catalog
  * known-event-types.js — NOT a key of the core SessionEventMap), so the
  * `session.append` call deliberately widens the type; the live store accepts
  * the exact shape (session.rename appends it verbatim). Rotated host sessions
  * already carry the pin in their cold seed (buildRotationSeed) — this covers
- * the first UI-created host session and every resume via ensureHost.
+ * the first UI-created host session and every resume via ensureHost; heads
+ * receive the pin from ensureHead (coordinator.sessionTitle ?? fallback).
  */
-export function pinHostSessionTitle(session: Session): HostTitlePinResult {
+export function pinSessionTitle(session: Session, title: string): TitlePinResult {
   const titleEvents = session.events as readonly { type: string; data?: { source?: { kind?: string } } }[]
   if (titleEvents.some((ev) => ev.type === 'session/title' && ev.data?.source?.kind === 'user')) {
     return 'already-titled'
   }
   try {
     ;(session.append as unknown as (type: string, data: Record<string, unknown>) => void)('session/title', {
-      title: ASISTENTE_SESSION_TITLE,
+      title,
       messageSeqs: [],
       source: { kind: 'user' }
     })
@@ -1320,6 +1328,23 @@ export function pinHostSessionTitle(session: Session): HostTitlePinResult {
     return 'failed'
   }
 }
+
+/**
+ * U4 — pin the durable "Asistente" title on a LIVE host session. Host
+ * semantics unchanged: this is exactly `pinSessionTitle` with the Asistente
+ * label (the shared helper keeps the owner-rename-wins guard and the
+ * never-double-pin guard). Rotated host sessions already carry the pin in
+ * their cold seed (buildRotationSeed) — this covers the first UI-created host
+ * session and every resume via ensureHost.
+ */
+export function pinHostSessionTitle(session: Session): HostTitlePinResult {
+  return pinSessionTitle(session, ASISTENTE_SESSION_TITLE)
+}
+
+/** Piece 1 — the native-sidebar title pinned on a configured head whose
+ * coordinator config carries no explicit `sessionTitle` (the acceptance
+ * label; the live config sets `coordinator.sessionTitle` explicitly). */
+const HEAD_DEFAULT_SESSION_TITLE = 'Research Head'
 
 // ---------------------------------------------------------------------------
 // Service (called from src/index.ts).
@@ -3305,7 +3330,14 @@ export function applyInvoke(ctx: Context, config: Config) {
       },
       async execute(args): Promise<{ room: string; members: string[]; posts: PostRow[]; hosts: HostRow[] }> {
         const room = config.org.rooms.find((candidate) => candidate.id === args.room)
-        const members = room === void 0 ? [] : [...room.members]
+        // Piece 2 — room validation: an id outside config.org.rooms is NOT a
+        // room (the roster is 100% config-driven; rooms are never discovered
+        // from disk), so the OLD silent `[]` responded to ANY id and faked
+        // knowledge of ghost rooms. Throw loud instead (errors propagate
+        // through defineTool's execute as tool failures — the render only
+        // runs on a successful roster).
+        if (room === void 0) throw new Error(`unknown room "${args.room}" (not in config.org.rooms)`)
+        const members = [...room.members]
         const posts: PostRow[] = []
         for (const entry of byPost.values()) {
           if (entry.roomId !== args.room) continue
@@ -3761,12 +3793,66 @@ export function applyInvoke(ctx: Context, config: Config) {
     return { postId, roomId: entry.roomId, retired: true }
   }
 
+  /** Piece 1 — durably attach a head/worker session to the workspace whose
+   * path matches its persisted header cwd, so the session appears as a row in
+   * the NATIVE sidebar (rows are grouped by workspace from workspace.json
+   * sessionIds — a registered-but-unattached session is INVISIBLE there).
+   * Reuses the canonical attach seam verbatim: `workspaceRegistry.list()` →
+   * iterate the workspace entities → `attachSession` (dsh-workspace validates
+   * cwd vs path and throws on mismatch, so mismatches fall through to the
+   * next entity) — the same iterate-and-try pattern as the host boot-repair
+   * hook above and the S2.2 rotation. Resolution follows the canonical
+   * semantics: a missing/listing-failing registry, an EMPTY workspace list,
+   * or an attach that no entity resolves is a DEFINITIVE (fatal-for-visibility)
+   * failure → the legacy fallback of the boot-repair: log a WARN and give up
+   * (the head stays invisible until the next wake's idempotent re-attach) —
+   * a failed attach must NEVER break head materialization or a wake. Retries
+   * are bounded with the SAME window as the boot-repair, because at boot
+   * (ensureAllHeads) the workspaceRegistry provider may still be initializing
+   * (FIX 1b.1: strict get races the provider's state-2 init). Idempotent:
+   * re-attaching an already-attached session is a no-op for the real registry.
+   */
+  const attachHeadSession = async (sessionId: string, source: string): Promise<void> => {
+    const deadline = Date.now() + HOST_ATTACH_REPAIR_TIMEOUT_MS
+    let lastFailure: unknown = undefined
+    for (;;) {
+      const registry = ctx.get('workspaceRegistry', false) as WorkspaceRegistryLike | undefined
+      if (registry?.list !== void 0) {
+        try {
+          const workspaceList = await registry.list()
+          for (const workspace of workspaceList) {
+            if (typeof workspace?.attachSession !== 'function') continue
+            try {
+              await workspace.attachSession(sessionId)
+              ctx.logger.info(`[deepartments] head attach (${source}): attached ${sessionId}`)
+              return
+            } catch {
+              // cwd mismatch / unvalidatable header / attach fault — try the next entity.
+            }
+          }
+          // list() RESOLVED but no entity matched: a definitive (non-readiness)
+          // failure — warn once and give up (the wakePost re-attach recovers).
+          ctx.logger.warn(`[deepartments] head attach (${source}): no workspace matched session ${sessionId} — the session stays invisible in the sidebar until the next wake re-attach`)
+          return
+        } catch (error) {
+          // list() rejected → the registry is still initializing — retry.
+          lastFailure = error
+        }
+      }
+      if (Date.now() >= deadline) break
+      await new Promise((resolve) => setTimeout(resolve, HOST_ATTACH_REPAIR_RETRY_MS))
+    }
+    const detail = lastFailure instanceof Error ? lastFailure.message : String(lastFailure ?? 'registry impl never became available')
+    ctx.logger.warn(`[deepartments] head attach (${source}) failed: ${detail} — the session stays invisible in the sidebar (retried ${HOST_ATTACH_REPAIR_TIMEOUT_MS}ms)`)
+  }
+
   /** Ensure ONE configured head is materialized as a live root agent.
    * Idempotent: live → reuse (record the handle if create/resume just ran);
    * durable session in the registry → resume; else → create. Mirrors the
    * restartable create/resume fallback, tolerating a resume that fails because
    * no durable session exists yet (then create). Always (re)records the
-   * registry entry keyed by the stable session id. */
+   * registry entry keyed by the stable session id. Piece 1: every branch also
+   * fire-and-forgets the workspace attach + the session title pin (sidebar). */
   const ensureHead = async (department: DepartmentConfig, roomId: string): Promise<void> => {
     const coordinator = department.coordinator
     if (coordinator === void 0) return
@@ -3785,20 +3871,28 @@ export function applyInvoke(ctx: Context, config: Config) {
       if (existing === void 0) {
         registerEntry(makeEntry(department, roomId, String(sessionId)))
       }
-      return
-    }
-    const coordinatorRole = coordinator.role || postId
-    const setup = headSetup(postId, roomId, coordinatorRole, presetId)
-    const agentOptions = coordinator.agentOptions
-    const durableSession = byPost.get(postId) !== void 0
-    if (durableSession) {
-      try {
-        handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions, setup })
-        registerEntry(makeEntry(department, roomId, String(sessionId)))
-      } catch (error: unknown) {
-        // Resume failed (e.g. no durable session in the persistence store after
-        // a stateDir wipe): fall back to creating a fresh session.
-        ctx.logger.warn(`[deepartments] head "${postId}" resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
+    } else {
+      const coordinatorRole = coordinator.role || postId
+      const setup = headSetup(postId, roomId, coordinatorRole, presetId)
+      const agentOptions = coordinator.agentOptions
+      const durableSession = byPost.get(postId) !== void 0
+      if (durableSession) {
+        try {
+          handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions, setup })
+          registerEntry(makeEntry(department, roomId, String(sessionId)))
+        } catch (error: unknown) {
+          // Resume failed (e.g. no durable session in the persistence store after
+          // a stateDir wipe): fall back to creating a fresh session.
+          ctx.logger.warn(`[deepartments] head "${postId}" resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
+          handle = await agents.create({
+            sessionId: String(sessionId),
+            meta: { cwd: repoRoot, origin: undefined, agentPreset: presetId },
+            agentOptions,
+            setup
+          })
+          registerEntry(makeEntry(department, roomId, String(sessionId)))
+        }
+      } else {
         handle = await agents.create({
           sessionId: String(sessionId),
           meta: { cwd: repoRoot, origin: undefined, agentPreset: presetId },
@@ -3807,16 +3901,26 @@ export function applyInvoke(ctx: Context, config: Config) {
         })
         registerEntry(makeEntry(department, roomId, String(sessionId)))
       }
-    } else {
-      handle = await agents.create({
-        sessionId: String(sessionId),
-        meta: { cwd: repoRoot, origin: undefined, agentPreset: presetId },
-        agentOptions,
-        setup
-      })
-      registerEntry(makeEntry(department, roomId, String(sessionId)))
+      if (handle !== void 0) byHeadHandle.set(String(sessionId), handle)
     }
-    if (handle !== void 0) byHeadHandle.set(String(sessionId), handle)
+    // Piece 1 — native sidebar: every branch (fresh create, resume, live-reuse)
+    // fire-and-forgets the workspace attach (idempotent, never fatal) and pins
+    // the head sidebar title on its LIVE session via the U4-generalized helper
+    // (store-first, exactly like the host path — a root agent's session IS
+    // entered in ctx.sessions while it lives). The owner's manual rename
+    // (source.user) always wins; a session already holding the pin is never
+    // double-pinned; a failed pin/attach only logs (head registration stands).
+    void attachHeadSession(String(sessionId), 'ensureHead')
+    const titleSession = ctx.sessions.get(sessionId)
+    if (titleSession !== void 0) {
+      const title = coordinator.sessionTitle || HEAD_DEFAULT_SESSION_TITLE
+      const titlePin = pinSessionTitle(titleSession, title)
+      if (titlePin === 'pinned') {
+        ctx.logger.info(`[deepartments] ensureHead: pinned head session title "${title}" (${sessionId})`)
+      } else if (titlePin === 'failed') {
+        ctx.logger.warn(`[deepartments] ensureHead: head session title pin failed for ${sessionId} (non-fatal — head registration continues)`)
+      }
+    }
   }
 
   /** Build a PostEntry for a configured head (root-agent shape, Batch 1b). The
@@ -3957,6 +4061,12 @@ export function applyInvoke(ctx: Context, config: Config) {
     // Fix A2 — fresh baseline for the (re)materialized incarnation so the relay
     // never misjudges a just-cold-resumed post as stuck before it can speak.
     markHeadProgress(String(sessionId), target)
+    // Piece 1 — idempotent workspace re-attach (heads AND workers — both are
+    // root agents that deserve a native sidebar row). Fire-and-forget, never
+    // fatal to the wake. Covers the boot race where the workspaceRegistry was
+    // still initializing when ensureAllHeads first attached: every cold wake
+    // re-covers visibility until the attach resolves.
+    void attachHeadSession(String(sessionId), 'wakePost')
     const senderSession = byPost.get(record.from)?.sessionId ?? hosts.get(record.from)?.sessionId ?? record.from
     target.followup(createUserMessage({
       content: [{
@@ -4354,7 +4464,14 @@ export function applyInvoke(ctx: Context, config: Config) {
     },
     async execute(args): Promise<{ room: string; members: string[]; posts: PostRow[]; hosts: HostRow[] }> {
       const room = config.org.rooms.find((candidate) => candidate.id === args.room)
-      const members = room === void 0 ? [] : [...room.members]
+      // Piece 2 — room validation: an id outside config.org.rooms is NOT a
+      // room (the roster is 100% config-driven; rooms are never discovered
+      // from disk), so the OLD silent `[]` responded to ANY id and faked
+      // knowledge of ghost rooms. Throw loud instead (errors propagate
+      // through defineTool's execute as tool failures — the render only
+      // runs on a successful roster).
+      if (room === void 0) throw new Error(`unknown room "${args.room}" (not in config.org.rooms)`)
+      const members = [...room.members]
       const posts: PostRow[] = []
       for (const entry of byPost.values()) {
         if (entry.roomId !== args.room) continue

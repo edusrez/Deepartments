@@ -184,6 +184,7 @@ class StubAgents extends Service {
 
   async create(options) {
     this.createCalls.push(options)
+    this.ensureStoreSession(options.sessionId, options.meta)
     return materializeStubAgent(this, options.sessionId, options)
   }
 
@@ -192,10 +193,44 @@ class StubAgents extends Service {
     // Cold resume: restore a dormant resident under its DURABLE id (the seeded
     // childId), with header.parentSession from the adoption map, applying the
     // setup closure (board tools install on cold resume exactly like fresh).
+    this.ensureStoreSession(options.resumeSessionId, {
+      ...options.meta,
+      parentSession: postAdoption.get(options.resumeSessionId)
+    })
     return materializeStubAgent(this, options.resumeSessionId, {
       ...options,
       parentSession: postAdoption.get(options.resumeSessionId)
     })
+  }
+
+  /**
+   * Piece 1 — production parity for the SESSIONS STORE: a real dsh-agent root
+   * session is ENTERED in `ctx.sessions` while its agent lives (root agents
+   * appear in `sessions.list()`), and the plugin's head title pin resolves
+   * the session via `ctx.sessions.get(...)`. The stub therefore registers the
+   * session id in the REAL dsh-session store at create/resume, so ensureHead's
+   * pin finds a live Session and the tests observe the pinned log on the
+   * store entry (which production equates with the agent's own session).
+   * Idempotent: a resume-after-create (or a wake-cold-resume of a session
+   * still entered in the store) REUSES the existing entry instead of tripping
+   * the store's duplicate-id rejection. Never throws: a missing/faulty store
+   * degrades to the plain agent session, mirroring the optional-seam
+   * discipline the plugin itself uses.
+   */
+  ensureStoreSession(sessionId, meta = {}) {
+    const id = SessionId(sessionId)
+    // `this.ctx.get('sessions')` (NOT the `this.ctx.sessions` property — cordis
+    // guards non-injected property access on a service ctx).
+    const store = this.ctx.get('sessions')
+    if (store === undefined || typeof store.get !== 'function') return undefined
+    const existing = store.get(id)
+    if (existing !== undefined) return existing
+    try {
+      return store.create(id, { meta }) ?? store.get(id)
+    } catch {
+      // A concurrent registration won the race — reuse its entry.
+      return store.get(id)
+    }
   }
 }
 
@@ -991,6 +1026,40 @@ test('head setup: the board toolset is registered scoped to the head agent (own 
   })
 })
 
+test('Piece 1: ensureHead attaches the head session to the root workspace AND pins the head session title (native sidebar + U4-generalized pin, real Loader)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, workspaceRegistry, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head root agent created at boot')
+
+      // Workspace attach (fire-and-forget from ensureHead): the head session
+      // lands in the workspace registry's sessionIds — the seam that makes it
+      // appear as a row in the native sidebar.
+      await waitFor(() => workspaceRegistry.attachCalls.includes('head-research-head'), 5000, 'head session attached to the root workspace')
+
+      // Title pin: the head's session (PRODUCTION: the single real session the
+      // root agent lives on, entered in ctx.sessions — the stub registers it
+      // the same way) must carry the user-kind `session/title` rename-shape
+      // event. TEST_ORG sets no coordinator.sessionTitle → the fallback label.
+      const headSession = root.sessions.get(SessionId('head-research-head'))
+      assert.ok(headSession !== undefined, 'the head session is entered in the real sessions store')
+      const title = headSession.events.find((ev) => ev.type === 'session/title')
+      assert.ok(title !== undefined, 'ensureHead pinned a session/title event')
+      assert.equal(title.data.title, 'Research Head', 'the pinned title is the fallback "Research Head" (no coordinator.sessionTitle in TEST_ORG)')
+      assert.deepEqual(title.data.messageSeqs, [], 'title pin cites no messages (rename() shape)')
+      assert.deepEqual(title.data.source, { kind: 'user' }, 'title pin is user-source — the owner manual rename always wins')
+
+      // The pin is single-shot: re-running ensureAllHeads-equivalents never
+      // double-pins. The pure helper already asserts idempotence; here the
+      // event count stays 1 after the boot attach settled.
+      assert.equal(headSession.events.filter((ev) => ev.type === 'session/title').length, 1, 'exactly one title event pinned')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('wake relay (head): a registered department head is woken by raw Agent.followup (no parent needed); self/unknown members are handled', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
@@ -1243,11 +1312,55 @@ test('dept_room_who: lists static members and the registered live heads', async 
       assert.equal(result.posts[0].sessionLive, true, 'head agent is live')
       assert.equal(result.posts[0].agentPreset, 'deepartments-head-research')
 
-      // non-configured room: empty, no throw.
-      const missing = await tool.execute({ room: 'nope' }, { agent: head })
-      assert.deepEqual(missing.members, [])
-      assert.deepEqual(missing.posts, [])
-      assert.deepEqual(missing.hosts, [])
+      // Piece 2 — a room id outside config.org.rooms is NOT a room: the tool
+      // now throws loud instead of returning an empty roster (which faked
+      // knowledge of ghost rooms). Both the message and the Error type are
+      // asserted (defineTool execute errors propagate as tool failures).
+      await assert.rejects(tool.execute({ room: 'nope' }, { agent: head }), (error) => {
+        assert.ok(error instanceof Error)
+        assert.match(error.message, /unknown room "nope" \(not in config\.org\.rooms\)/)
+        return true
+      })
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Piece 2: BOTH dept_room_who definitions (head own-layer AND global host-plane) reject rooms outside config.org.rooms', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
+      const head = agents.store.get('head-research-head')
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+
+      // (1) Head own-layer definition (installed by headSetup).
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const headWho = headCtx.tools.get('dept_room_who', key)
+      await assert.rejects(headWho.execute({ room: 'no-such-room' }, { agent: head }), (error) => {
+        assert.ok(error instanceof Error)
+        assert.match(error.message, /unknown room "no-such-room" \(not in config\.org\.rooms\)/)
+        return true
+      })
+
+      // (2) Global host-plane definition (ctx.tools.register).
+      const globalWho = root.tools.get('dept_room_who')
+      await assert.rejects(globalWho.execute({ room: 'no-such-room' }, { agent: host, signal }), (error) => {
+        assert.ok(error instanceof Error)
+        assert.match(error.message, /unknown room "no-such-room" \(not in config\.org\.rooms\)/)
+        return true
+      })
+
+      // Configured rooms still resolve on BOTH planes ('research'/'board').
+      const headBoard = await headWho.execute({ room: 'board' }, { agent: head })
+      assert.ok(Array.isArray(headBoard.members), 'head-plane roster for a configured room still works')
+      const globalBoard = await globalWho.execute({ room: 'board' }, { agent: host, signal })
+      assert.ok(Array.isArray(globalBoard.members), 'host-plane roster for a configured room still works')
+      const globalResearch = await globalWho.execute({ room: 'research' }, { agent: host, signal })
+      assert.equal(globalResearch.posts[0].postId, 'research-head', 'head rows resolve on a configured room on the host plane')
     } finally {
       await dispose()
     }
@@ -2381,6 +2494,43 @@ test('Batch G a slept head cold-resumes fresh on its next wake: sleepEpoch clear
   })
 })
 
+test('Piece 1: wakePost re-attaches the head session to the workspace (idempotent — the boot-race recovery for the native sidebar)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    await seedJournal(stateDir, postId, 'PIECE-1-WAKE-ATTACH: re-attach on cold wake')
+    const { root, agents, workspaceRegistry, dispose } = await bootPlugin(stateDir)
+    await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
+    try {
+      const head = agents.store.get(`head-${postId}`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const signal = new AbortController().signal
+      // Boot already attached the head once (ensureHead).
+      await waitFor(() => workspaceRegistry.attachCalls.includes(`head-${postId}`), 5000, 'boot attach settled')
+
+      // Sleep (dispose the handle), then wake via the relay's COLD path —
+      // wakePost materializes + re-attaches (idempotent).
+      await headCtx.tools.get('dept_memo_write', key).execute({ summary: 'piece-1' }, { agent: head, signal })
+      await headCtx.tools.get('dept_sleep', key).execute({}, { agent: head, signal })
+      await waitFor(() => agents.store.has(`head-${postId}`) === false, 5000, 'handle disposed after sleep')
+
+      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      const seq = await nextSeq(stateDir, 'board')
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'wake the attached head'), 'board')
+      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'slept head cold-resumed by wakePost')
+
+      // The idempotent re-attach fired: at least the boot attach + the wake
+      // attach (the real registry tolerates re-attaching; the stub records).
+      await waitFor(() => workspaceRegistry.attachCalls.filter((id) => id === `head-${postId}`).length >= 2, 5000, 'wakePost re-attached the head session')
+      const resumed = agents.store.get(`head-${postId}`)
+      await waitFor(() => resumed.inboxMessages.length >= 1, 5000, 'resumed head woken')
+      assert.equal(resumed.inboxMessages.at(-1).source.kind, 'board', 'head wake delivered')
+      assert.ok(workspaceRegistry.attachCalls.filter((id) => id === `head-${postId}`).length >= 2, 'attach count: boot + wake (>= 2)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('Batch G regression: a head that never slept wakes normally via the live followup (no sleepEpoch, no previousChildId)', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
@@ -3055,9 +3205,11 @@ test('Batch 7 U2 host dept_sleep ROTATES: no journal rejects loudly; with a jour
 
       // S2.2 (FIX 1b) — the new session is durably attached to a workspace
       // entity (canonical parity with the apiproxy's creation flow), exactly
-      // once, targeting the pre-minted id.
-      assert.equal(workspaceRegistry.attachCalls.length, 1, 'exactly one workspace attach (S2.2 — FIX 1b)')
-      assert.equal(workspaceRegistry.attachCalls[0], newSessionId, 'attach targets the pre-minted session id')
+      // once, targeting the pre-minted id. (The configured head's own
+      // boot-time attach — Piece 1, 'head-research-head' — lands BEFORE this
+      // in the same registry, so the rotation attach is the LAST entry.)
+      assert.equal(workspaceRegistry.attachCalls.at(-1), newSessionId, 'S2.2 attach targets the pre-minted session id')
+      assert.equal(workspaceRegistry.attachCalls.filter((id) => id === newSessionId).length, 1, 'S2.2 attached the rotated session exactly once (the boot head attach is separate)')
 
       // (a) The OLD on-disk journal is byte-identical apart from the bump
       // (wake_counter 1→2 — G4/D2: kept whole as the archive copy).
@@ -3514,8 +3666,12 @@ test('FIX 1b boot repair: EXACTLY ONE live host entry whose session is not works
     try {
       const logged = []
       const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
-      await waitFor(() => workspaceRegistry.attachCalls.length === 1, 5000, 'boot repair attached the single live host')
-      assert.equal(workspaceRegistry.attachCalls[0], sessionId, 'attach repair targets the live host session id')
+      // The configured head (TEST_ORG department) gets its OWN boot-time
+      // attach (Piece 1) — the REPAIR's contract is the HOST session: it must
+      // be attached exactly once, targeted at the seeded session id.
+      await waitFor(() => workspaceRegistry.attachCalls.includes(sessionId), 5000, 'boot repair attached the single live host')
+      assert.equal(workspaceRegistry.attachCalls.filter((id) => id === sessionId).length, 1, 'attach repair targets the live host session id exactly once')
+      assert.ok(workspaceRegistry.attachCalls.includes('head-research-head'), 'the configured head is attached at boot too (Piece 1)')
       await waitFor(() => logged.some((m) => m?.type === 'info' && String(m.args?.[0] ?? '').includes(`host attach repair: attached ${sessionId}`)), 5000, 'attach repair logged')
       disposeExporter()
     } finally {
@@ -3535,7 +3691,9 @@ test('FIX 1b boot repair: ZERO live host entries → no attach call (skip silent
       const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
       await waitFor(() => logged.some((m) => m?.type === 'info' && String(m.args?.[0] ?? '').includes('loaded 0 host registry entries')), 5000, 'hosts load settled (0 entries)')
       await new Promise((resolve) => setTimeout(resolve, 150))
-      assert.equal(workspaceRegistry.attachCalls.length, 0, 'no attach when there is no live host')
+      // Piece 1 — the CONFIGURED HEAD still gets its own boot attach; the
+      // REPAIR attaches NOTHING when there is no live host.
+      assert.deepEqual(workspaceRegistry.attachCalls, ['head-research-head'], 'no repair attach when there is no live host (only the configured head is attached at boot)')
       disposeExporter()
     } finally {
       await dispose()
@@ -3556,7 +3714,10 @@ test('FIX 1b boot repair: TWO live host entries → NO attach + a WARN (ambiguou
       const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
       await waitFor(() => logged.some((m) => m?.type === 'warn' && String(m.args?.[0] ?? '').includes('host attach repair: skipped (2 live host entries')), 5000, 'ambiguous repair warned')
       disposeExporter()
-      assert.equal(workspaceRegistry.attachCalls.length, 0, 'ambiguous (2+ live hosts): NO attach attempted')
+      // Piece 1 — the CONFIGURED HEAD still gets its own boot attach; the
+      // ambiguous REPAIR attaches NO host (exactly-one-live-host guard).
+      await waitFor(() => workspaceRegistry.attachCalls.includes('head-research-head'), 5000, 'the configured head attach settled')
+      assert.deepEqual(workspaceRegistry.attachCalls, ['head-research-head'], 'ambiguous (2+ live hosts): NO repair attach attempted (only the configured head is attached)')
     } finally {
       await dispose()
     }
@@ -3597,8 +3758,11 @@ test('FIX 1b.1 boot repair REGRESSION: the workspace registry is NOT ready at bo
     try {
       const logged = []
       const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
-      await waitFor(() => workspaceRegistry.attachCalls.length === 1, 8000, 'boot repair attached AFTER the registry became ready (retry loop)')
-      assert.equal(workspaceRegistry.attachCalls[0], sessionId, 'retry attach targets the live host session id')
+      // registryNotReadyRejects: 2 — BOTH the boot-repair hook AND the head
+      // attach retry until the registry becomes usable; the repair's own
+      // contract is the HOST session, attached exactly once after readiness.
+      await waitFor(() => workspaceRegistry.attachCalls.includes(sessionId), 8000, 'boot repair attached AFTER the registry became ready (retry loop)')
+      assert.equal(workspaceRegistry.attachCalls.filter((id) => id === sessionId).length, 1, 'retry attach targets the live host session id exactly once')
       await waitFor(() => logged.some((m) => m?.type === 'info' && String(m.args?.[0] ?? '').includes(`host attach repair: attached ${sessionId}`)), 5000, 'attach success logged after retries')
       disposeExporter()
     } finally {
@@ -4273,8 +4437,10 @@ test('Batch 7 U2 regression: GLOBAL dept_room_who schema declares hosts[].sleepi
       assert.equal(persistence.appendCalls.length, 1, 'S2 appended the seed artifact via the persistence seam')
       assert.equal(persistence.createCalls[0].id, newSessionId, 'persistence.create targets the pre-minted id')
       assert.equal(persistence.appendCalls[0].id, newSessionId, 'persistence.append targets the pre-minted id')
-      assert.equal(workspaceRegistry.attachCalls.length, 1, 'S2.2 attached exactly once to a workspace entity (FIX 1b)')
-      assert.equal(workspaceRegistry.attachCalls[0], newSessionId, 'S2.2 attach targets the pre-minted session id')
+      // S2.2 attached exactly once to a workspace entity (FIX 1b) — the boot head
+      // attach (Piece 1) is a SEPARATE entry.
+      assert.equal(workspaceRegistry.attachCalls.at(-1), newSessionId, 'S2.2 attach targets the pre-minted session id')
+      assert.equal(workspaceRegistry.attachCalls.filter((id) => id === newSessionId).length, 1, 'S2.2 attached the rotated session exactly once (the boot head attach is separate)')
 
       const who = root.tools.get('dept_room_who')
       const result = await who.execute({ room: 'board' }, { agent: host, signal })
