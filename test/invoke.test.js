@@ -262,6 +262,33 @@ class StubPersistenceWithRoot extends StubPersistence {
   }
 }
 
+/** U2 — stub of the canonical session-archive service (dsh-workspace
+ * `workspaceRegistry`, the same service the web RPC `workspace.archiveSession`
+ * drives): a pure registry-global set add + durable mirror file, no session/
+ * agent termination. Rotation calls `archiveSession(oldId)` server-side
+ * (spec 002 §3.3 S2.5) — the tests assert the old id lands in
+ * `archivedSessionIds` + the durable mirror. */
+class StubWorkspaceRegistry extends Service {
+  constructor(ctx, stateDir) {
+    super(ctx, 'workspaceRegistry')
+    this.stateDir = stateDir
+    this.archived = []
+  }
+
+  get archivedSessionIds() {
+    return this.archived
+  }
+
+  async archiveSession(sessionId) {
+    if (this.archived.includes(sessionId)) return
+    this.archived.push(sessionId)
+    // Durable mirror (fire-and-forget, like the real registry's setState →
+    // global.set): T7 asserts the state file holds archivedSessionIds.
+    writeFile(path.join(this.stateDir, 'workspace-registry.json'), JSON.stringify(this.archived, null, 2), 'utf8')
+      .catch(() => {})
+  }
+}
+
 /** A live parent agent as the registry would hold it (exact identity). */
 function fakeParentAgent(id = SessionId(randomUUID())) {
   return {
@@ -314,6 +341,10 @@ async function bootPlugin(stateDir, opts = {}) {
     : opts.persistenceRoot !== undefined
       ? new StubPersistenceWithRoot(root, opts.persistenceRoot)
       : new StubPersistence(root)
+  // U2: the canonical session-archive service (`workspaceRegistry`) — mounted
+  // like the real GUI profile has it, so the rotated dept_sleep's server-side
+  // archive (spec 002 §3.3 S2.5) is exercised through the same seam.
+  const workspaceRegistry = new StubWorkspaceRegistry(root, stateDir)
   await root.plugin(SubagentRuntime)
 
   const spawnStub = stubProvider('spawn')
@@ -335,6 +366,7 @@ async function bootPlugin(stateDir, opts = {}) {
     root,
     agents,
     persistence,
+    workspaceRegistry,
     spawnStub,
     forkStub,
     pluginCtx: () => loader.resolve('deepartments').fiber?.ctx ?? loader.resolve('deepartments').ctx,
@@ -2512,13 +2544,18 @@ test('materialization materializes per-head presets into the harness-home user r
   })
 })
 
-// --- Batch 7: HOST sleep — "vaciar en sitio" (in-place surface reset) --------
+// --- U2: HOST sleep — SESSION ROTATION (replaces the in-place reset) --------
 // The Asistente host gets a HOST branch of dept_memo_write (journals/host-
-// <sessionId>.md) and a HOST branch of dept_sleep: require a journal, persist a
-// durable host sleepEpoch, then IN-PLACE reset the live session's model-visible
-// surface to exactly the journal (surfaceOp replace over the full window) and
-// conclude the turn. Owner decision 2026-08-20: in-place, NOT a new session,
-// NOT an LLM summary.
+// <sessionId>.md) and a HOST branch of dept_sleep. U2 (spec 002): at host
+// dept_sleep the OLD session is RETIRED + ARCHIVED server-side and a NEW
+// session (seeded with the re-keyed journal — author re-keyed to host-<newId>)
+// becomes the registered host; hosts.json rotates (old entry retired/rotatedTo,
+// new entry sleepEpoch/boundarySeq/previousSessionId, top-level schemaVersion 2).
+// The old artifact + old journal stay byte-identical (G4/D2); the wake pack now
+// targets ONLY the new host (retired-skip gate). The LEGACY in-place reset
+// (surfaceOp replace over the full window + deferred fold) is reachable only
+// when the rotation cannot run (missing sessions store / create failure) —
+// those tests force the fallback by breaking `root.sessions.create`.
 
 test('Batch 7 pure helper: computeHostSleepSurfacePlan computes the full-window replace (or a bare append on empty)', async () => {
   // Empty surface → cannot replace; fall back to a plain append so the journal
@@ -2621,17 +2658,18 @@ test('Batch W2 dept_memo_write: identity+cursor block — HOST wake_counter stay
   })
 })
 
-test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes the sleep-time wake_counter bump into the on-disk file, sets sleepEpoch durably, PLAIN-APPENDS the journal node at close (the full-window collapse is DEFERRED to the next pre-step — Fix A) + concludes the turn; the next pre-step collapses the surface to the ONE BUMPED journal node and injects the wake pack', async () => {
+test('Batch 7 U2 host dept_sleep ROTATES: no journal rejects loudly; with a journal the old session is retired + archived, a NEW session (seeded with the re-keyed journal) becomes the registered host, hosts.json rotates (schemaVersion 2), the old artifact/journal stay byte-identical, and the wake pack targets ONLY the new host (retired-skip gate) + concludes the turn', async () => {
   await withTempStateDir(async (stateDir) => {
-    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    const { root, agents, pluginCtx, workspaceRegistry, dispose } = await bootPlugin(stateDir)
     try {
       await waitForRooms(root)
       const host = agents.put(fakeParentAgent())
       const sleepTool = root.tools.get('dept_sleep')
       const signal = new AbortController().signal
-      const hostId = `host-${host.id}`
+      const oldHostId = `host-${host.id}`
+      const oldSessionId = host.id
 
-      // No journal yet → loud rejection (mirror the head's require-a-journal rule).
+      // No journal yet → loud rejection (unchanged — S1).
       await assert.rejects(
         () => sleepTool.execute({}, { agent: host, signal }),
         /requires a saved journal — call dept_memo_write to save your memory first \(no journal for host host-/,
@@ -2639,20 +2677,19 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes t
       )
 
       // Pre-author the host journal (as dept_memo_write would have written it);
-      // seedJournal writes wake_counter 1 for the pre-sleep file.
-      const journalSummary = 'HOST-SLEEP-MEMORY: in-place surface reset carried forward.'
-      const preSleepPath = await seedJournal(stateDir, hostId, journalSummary)
+      // seedJournal writes wake_counter 1 for the pre-sleep file (S1.5 bumps 1→2).
+      const journalSummary = 'HOST-ROTATION-MEMORY: the rotated session carries this forward.'
+      const preSleepPath = await seedJournal(stateDir, oldHostId, journalSummary)
       const preSleepContent = await readFile(preSleepPath, 'utf8')
       assert.match(preSleepContent, /^wake_counter: 1$/m, 'pre-sleep on-disk journal has wake_counter 1')
 
       // Give the host's live session a REAL dsh Session with an existing full
-      // surface (2 prior user messages) so we can assert the close append lands
-      // WITHOUT shadowing (Fix A) and the first pre-step collapses the whole
-      // window to the single journal node.
+      // surface (2 prior user messages) so we can assert the rotation does NOT
+      // touch the old live surface (S5 — the new session IS the journal).
       const realSession = Session.create(SessionId(String(host.id)))
       realSession.append('user/message', { role: 'user', content: [{ type: 'text', text: 'prior turn 1' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
       realSession.append('user/message', { role: 'user', content: [{ type: 'text', text: 'prior turn 2' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
-      assert.ok(realSession.surface.nodes.length === 2, 'surface seeded with 2 nodes before the reset')
+      assert.ok(realSession.surface.nodes.length === 2, 'surface seeded with 2 nodes before the sleep')
       host.session = realSession
 
       let concluded = false
@@ -2662,94 +2699,119 @@ test('Batch 7 host dept_sleep: no journal rejects loudly; with a journal bakes t
         concludeTurn: () => { concluded = true }
       })
 
-      // Return contract: host member, its journal path, a durable sleepEpoch.
-      assert.equal(result.member, hostId)
-      assert.equal(result.memoPath, path.join(stateDir, 'journals', `${hostId}.md`))
+      // Return contract: the NEW host member (the next wake incarnation), its
+      // re-keyed journal path, and the durable sleepEpoch set on the new entry.
+      const newHostId = result.member
+      assert.match(newHostId, /^host-session-/, 'rotation returns the NEW host id (host-<newId>)')
+      assert.notEqual(newHostId, oldHostId, 'the new host id differs from the retired one')
+      assert.equal(result.memoPath, path.join(stateDir, 'journals', `${newHostId}.md`), 'memoPath is the re-keyed journal path')
       assert.ok(typeof result.sleepEpoch === 'number' && result.sleepEpoch > 0)
 
-      // Durable: hosts.json carries the host's sleepEpoch. Deterministic settling
-      // (Task T4 test hardening): tolerate a still-missing key / torn write by
-      // retrying rather than throwing out of the predicate (the ~1/6 flake).
-      await waitFor(async () => (await readHosts(stateDir))?.[hostId]?.sleepEpoch !== undefined, 5000, 'host sleepEpoch persisted to hosts.json')
+      // Durable: hosts.json rotated — schemaVersion 2, old retired/rotatedTo,
+      // new live with previousSessionId. Deterministic settling (Task T4 test
+      // hardening): retry rather than throwing out of the predicate.
+      await waitFor(async () => {
+        const hostsFile = await readHosts(stateDir)
+        return hostsFile[newHostId]?.sessionId !== undefined && hostsFile[oldHostId]?.retired === true
+      }, 5000, 'hosts.json rotated (new live + old retired)')
       const hostsFile = await readHosts(stateDir)
-      assert.ok(typeof hostsFile[hostId].sleepEpoch === 'number', 'host sleepEpoch persisted durably')
+      assert.equal(hostsFile.schemaVersion, 2, 'top-level schemaVersion 2 persisted (D4)')
+      // Old entry: retired evidence, stays queryable.
+      assert.equal(hostsFile[oldHostId].retired, true, 'old entry retired')
+      assert.ok(typeof hostsFile[oldHostId].retiredAt === 'number', 'old entry carries retiredAt')
+      assert.equal(hostsFile[oldHostId].rotatedTo, newHostId, 'old entry rotatedTo the new host')
+      assert.equal(hostsFile[oldHostId].webUiCleanupPending, undefined, 'S4: rotation never sets webUiCleanupPending')
+      assert.equal(hostsFile[oldHostId].deferredJournalSeed, undefined, 'S5: rotation never sets deferredJournalSeed')
+      // New entry: live with the rotation markers.
+      assert.match(hostsFile[newHostId].sessionId, /^session-/, 'new entry sessionId is the NEW session id (assert via the store below)')
+      assert.equal(hostsFile[newHostId].previousSessionId, oldSessionId, 'new entry traces the previous (retired) session')
+      assert.ok(typeof hostsFile[newHostId].sleepEpoch === 'number', 'durable sleepEpoch on the new entry (S7)')
+      assert.equal(hostsFile[newHostId].webUiCleanupPending, undefined, 'S4: no cleanup marker on the new entry either')
+      assert.equal(hostsFile[newHostId].deferredJournalSeed, undefined, 'S5: no deferred seed on the new entry (the session IS the journal)')
 
-      // (a) The on-disk journal now has wake_counter N+1 (1 → 2): the bump is
-      // persisted at the sleep boundary so the NEXT wake's fresh context (which
-      // is seeded from this same file) already shows the incremented ordinal.
-      const postSleepContent = await readFile(result.memoPath, 'utf8')
-      assert.match(postSleepContent, /^wake_counter: 2$/m, 'on-disk journal advanced to wake_counter 2 at dept_sleep')
-      // The bump is a PURE counter change: the rest of the frontmatter + body
-      // are untouched (base fields and summary preserved verbatim).
-      assert.match(postSleepContent, /^author: host-/m, 'author frontmatter untouched by the bump')
-      assert.match(postSleepContent, /^board_cursor: none$/m, 'board_cursor untouched by the bump')
-      assert.ok(postSleepContent.includes(journalSummary), 'summary body untouched by the bump')
+      // The new session id is what the store minted/registered: verify against
+      // the REAL sessions store (S2 created it server-side).
+      const newSessionId = hostsFile[newHostId].sessionId
+      const freshSession = root.sessions.get(SessionId(newSessionId))
+      assert.ok(freshSession !== undefined, 'the rotated session is in the REAL sessions store (S2)')
+      assert.equal(freshSession.id, newSessionId)
+      assert.ok(!freshSession.events.some((ev) => ev.type === 'turn/start'), 'the seeded session is BLANK (no turn/start — native "New Session" row)')
+      assert.equal(freshSession.surface.nodes.length, 1, 'the seeded session surface is the single journal node')
+      const freshDerived = freshSession.deriveMessages()
+      assert.equal(freshDerived.length, 1)
+      assert.equal(freshDerived[0].source.kind, 'plugin', 'seeded journal framed as plugin context')
+      assert.match(freshDerived[0].content[0].text, new RegExp(`^author: ${newHostId}$`, 'm'), 'seeded journal is the RE-KEYED journal (author host-<newId>)')
+      assert.match(freshDerived[0].content[0].text, /^wake_counter: 2$/m, 'seeded journal carries the BUMPED ordinal')
+      assert.ok(freshDerived[0].content[0].text.includes(journalSummary), 'seeded journal carries the summary body')
 
-      // (b) Fix A close semantics: the journal node is PLAIN-APPENDED — the
-      // full-window replace is DEFERRED to the next pre-step, so the close does
-      // NOT shadow the prior surface (replacing here would orphan the pending
-      // dept_sleep tool result the harness appends right after — the wake-7
-      // role:\'tool\' 400 root cause). The live surface keeps ALL 3 nodes, with
-      // the BUMPED journal node at the TAIL (the durable reset content).
-      assert.ok(realSession.surface.nodes.length === 3, 'close PLAIN-APPENDS the journal node (no shadowing — Fix A deferral)')
-      const derivedAtClose = realSession.deriveMessages()
-      assert.equal(derivedAtClose.length, 3, 'deriveMessages() still folds the prior nodes + the appended journal at close')
-      const tail = derivedAtClose[derivedAtClose.length - 1]
-      assert.equal(tail.role, 'user')
-      assert.ok(tail.content[0].text.includes(journalSummary), 'the appended journal node carries the journal summary')
-      assert.match(tail.content[0].text, /^wake_counter: 2$/m, 'the appended journal node shows the BUMPED wake_counter 2')
-      assert.equal(tail.source.kind, 'plugin', 'journal node rendered as plugin context (not a user-typed message)')
-      assert.equal(tail.source.form, 'notice')
-      // The journal node must match buildSleepJournalMessage(seeded) byte-for-byte
-      // in content (createUserMessage assigns a random per-call `id`, so compare
-      // the model-visible content + source rather than the whole object).
-      const rebuiltJournal = buildSleepJournalMessage(postSleepContent)
-      assert.equal(tail.content[0].text, rebuiltJournal.content[0].text, 'journal node content byte-identical to buildSleepJournalMessage(seeded)')
-      assert.deepEqual(tail.source, rebuiltJournal.source, 'journal node source identical to buildSleepJournalMessage(seeded)')
-      // NO pack node in the sleep surface anymore (Batch C — it moved to pre-step).
-      assert.ok(!derivedAtClose.some((m) => m.content?.[0]?.text?.includes('## Deepartments wake pack')), 'no wake-pack node in the dept_sleep surface (pack is injected fresh at the next pre-step)')
+      // (a) The OLD on-disk journal is byte-identical apart from the bump
+      // (wake_counter 1→2 — G4/D2: kept whole as the archive copy).
+      const oldPostSleepContent = await readFile(preSleepPath, 'utf8')
+      assert.match(oldPostSleepContent, /^wake_counter: 2$/m, 'OLD journal bumped to wake_counter 2 at S1.5')
+      assert.match(oldPostSleepContent, new RegExp(`^author: ${oldHostId}$`, 'm'), 'OLD journal author untouched (host-<oldId>)')
+      assert.ok(oldPostSleepContent.includes(journalSummary), 'OLD journal summary untouched')
+      // The NEW re-keyed journal file exists (S1.5b) with the same bumped body.
+      const newJournalText = await readFile(result.memoPath, 'utf8')
+      assert.match(newJournalText, new RegExp(`^author: ${newHostId}$`, 'm'), 'NEW journal author re-keyed to host-<newId>')
+      assert.match(newJournalText, /^wake_counter: 2$/m, 'NEW journal carries the bumped ordinal')
+      assert.ok(newJournalText.includes(journalSummary), 'NEW journal carries the summary body')
+
+      // (b) S5: the rotation does NOT append to the OLD session's live surface
+      // (no in-place journal node) — the old surface keeps its 2 nodes.
+      assert.equal(realSession.surface.nodes.length, 2, 'the old live surface is untouched (the new session IS the journal)')
+
+      // (c) S2.5: the OLD session was archived server-side (canonical registry).
+      assert.ok(workspaceRegistry.archivedSessionIds.includes(oldSessionId), 'old session id archived via workspaceRegistry (D1)')
 
       // The sleeping Asistente's turn concluded after the successful result.
       assert.equal(concluded, true, 'dept_sleep concluded the host turn')
 
-      // The roster surfaces the sleeping host in its (default) board room.
+      // The roster reflects the rotation: the OLD (retired) host is excluded
+      // from "present"; the NEW host shows as the sleeping member.
       const who = await root.tools.get('dept_room_who').execute({ room: 'board' })
-      const sleepingHost = who.hosts.find((h) => h.hostId === hostId)
-      assert.ok(sleepingHost, 'the sleeping host is in the board roster')
-      assert.equal(sleepingHost.sleeping, true, 'dept_room_who surfaces the sleeping host')
+      assert.ok(!who.hosts.some((h) => h.hostId === oldHostId), 'retired host is filtered from the roster (§4/C7)')
+      const newSleepingHost = who.hosts.find((h) => h.hostId === newHostId)
+      assert.ok(newSleepingHost, 'the NEW host is in the board roster')
+      assert.equal(newSleepingHost.sleeping, true, 'dept_room_who surfaces the sleeping NEW host')
 
-      // (c) The FIRST wake pre-step performs the DEFERRED full-window replace:
-      // the surface collapses to EXACTLY ONE node — the journal (durable
-      // memory) — and the wake pack is injected fresh onto decision.messages
-      // (Batch C), its board delta / git / roster read at message time.
+      // (d) The wake pack targets ONLY the new host (§4): the NEW session's
+      // first pre-step injects the full pack (fresh board delta, wake_counter 2
+      // KPI from the re-keyed journal); a pre-step against the OLD (retired)
+      // session injects NOTHING (retired-skip gate); a second pre-step on the
+      // new session stays gated (no re-inject).
+      const newHostAgent = agents.put(fakeParentAgent(newSessionId))
       const claimed = preStepClaimed('wake up — what is the plan?')
-      const decision = await runPreStep(pluginCtx, host, claimed, signal)
-      assert.equal(decision.kind, 'enter', 'pre-step decision is enter')
-      assert.equal(decision.messages.length, claimed.length + 1, 'pre-step injects exactly ONE extra node (the wake pack)')
+      const decision = await runPreStep(pluginCtx, newHostAgent, claimed, signal)
+      assert.equal(decision.kind, 'enter', 'new-host pre-step decision is enter')
+      assert.equal(decision.messages.length, claimed.length + 1, 'new-host pre-step injects exactly ONE extra node (the wake pack)')
       const packNode = decision.messages[decision.messages.length - 1]
-      assert.equal(packNode.source.kind, 'plugin', 'injected pack node is a plugin context')
       assert.match(packNode.content[0].text, /^## Deepartments wake pack$/m, 'injected pack opens with the wake pack header')
       assert.match(packNode.content[0].text, /pack-v1: present/, 'injected pack carries the deterministic P1 presence sentinel')
-      assert.equal(realSession.surface.nodes.length, 1, 'surface collapsed to exactly ONE node at the first pre-step (the deferred full-window replace)')
-      const derived = realSession.deriveMessages()
-      assert.equal(derived.length, 1, 'deriveMessages() returns exactly one node')
-      assert.equal(derived[0].role, 'user')
-      assert.ok(derived[0].content[0].text.includes(journalSummary), 'the wake surface node is the journal (front)')
-      assert.match(derived[0].content[0].text, /^author: /m, 'the journal node carries the journal frontmatter')
-      assert.match(derived[0].content[0].text, /^wake_counter: 2$/m, 'the wake journal node shows the BUMPED wake_counter 2')
-      assert.equal(derived[0].source.kind, 'plugin', 'journal node rendered as plugin context')
-      assert.equal(derived[0].source.form, 'notice')
+      assert.match(packNode.content[0].text, /kpi: wake_counter 2/, 'injected pack KPI reads the RE-KEYED journal (wake_counter 2)')
+      assert.match(packNode.content[0].text, new RegExp(`Pre-resolved journal path.*${newHostId}`), 'injected pack pre-resolves the NEW journal path')
+
+      const retiredOldAgent = agents.put(fakeParentAgent(oldSessionId))
+      const oldDecision = await runPreStep(pluginCtx, retiredOldAgent, claimed, signal)
+      assert.equal(oldDecision.messages.length, claimed.length, 'retired-skip gate: the OLD session pre-step injects NOTHING (plain-session behavior)')
+      assert.ok(!oldDecision.messages.some((m) => m.content?.[0]?.text?.includes('## Deepartments wake pack')), 'no wake pack for the retired host')
+
+      const second = await runPreStep(pluginCtx, newHostAgent, claimed, signal)
+      assert.equal(second.messages.length, claimed.length, 'second pre-step on the new host does NOT re-inject (session-scoped gate holds)')
     } finally {
       await dispose()
     }
   })
 })
 
-test('Fix A regression: a host dept_sleep cycle leaves NO assistant-less role:tool message on the wake surface — the deferred full-window replace at the next pre-step (over ALL nodes INCLUDING the pending tool result) folds the surface back to the journal, which stays at the FRONT of the wake surface', async () => {
+test('Fix A regression (LEGACY FALLBACK path): when the U2 rotation CANNOT run (session create fails), dept_sleep falls back to the in-place reset — a host dept_sleep cycle leaves NO assistant-less role:tool message on the wake surface; the deferred full-window replace at the next pre-step (over ALL nodes INCLUDING the pending tool result) folds the surface back to the journal, which stays at the FRONT of the wake surface', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
       await waitForRooms(root)
+      // U2: force the LEGACY fallback — the rotation cannot run when the
+      // sessions store rejects the create call (spec 002 §3.6). The plugin
+      // resolves the SAME service instance (ctx.get('sessions') === root.sessions).
+      root.sessions.create = () => { throw new Error('injected create failure — rotation falls back to the legacy in-place reset') }
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
       const hostId = `host-${host.id}`
@@ -2899,16 +2961,22 @@ async function authorCleanupWitnessArtifact(sessionsRoot, sessionId, journalText
   await writeFile(path.join(dir, 'session.jsonl.zstd'), Buffer.concat([headerFrame, eventFrame]))
 }
 
-test('Fix wake-12: a dept_sleep → process-restart cycle restores the deferred sleep-replace seed from hosts.json and the FIRST pre-step folds the journal-interleaved close tail back to the journal (the wake-12 first-turn 400 fix)', async () => {
+test('Fix wake-12 (LEGACY FALLBACK path): when the U2 rotation CANNOT run, the fallback still persists the deferred sleep-replace seed — a dept_sleep → process-restart cycle restores it from hosts.json and the FIRST pre-step folds the journal-interleaved close tail back to the journal (the wake-12 first-turn 400 fix)', async () => {
   await withTempStateDir(async (stateDir) => {
     const sessionId = SessionId(randomUUID())
     const hostId = `host-${sessionId}`
     const journalSummary = 'WAKE-12-SEED: carried durably across the restart.'
 
-    // Phase A — boot 1: a real dept_sleep persists the seed durably.
+    // Phase A — boot 1: a real dept_sleep persists the seed durably. The U2
+    // rotation normally REPLACES this legacy machinery (S4/S5 never set
+    // webUiCleanupPending/deferredJournalSeed under rotation), so the test
+    // forces the LEGACY FALLBACK by breaking the sessions store's create —
+    // exactly the "rotation cannot run" case where the legacy path must still
+    // work (spec 002 §3.6/§5).
     const a = await bootPlugin(stateDir)
     try {
       await waitForRooms(a.root)
+      a.root.sessions.create = () => { throw new Error('injected create failure — legacy fallback persists the deferred seed') }
       const hostA = a.agents.put(fakeParentAgent(sessionId))
       await seedJournal(stateDir, hostId, journalSummary)
       // A real dsh Session so the host branch's surface append + deferred
@@ -3028,6 +3096,79 @@ test('Fix wake-12: a boot WITHOUT a persisted deferred seed preserves the pre-ex
       assert.equal(realSession.deriveMessages().length, 1, 'the wake turn survives the first pre-step')
       assert.equal(decision.messages.length, claimed.length + 1, 'pre-step injects exactly ONE extra node (the wake pack)')
       assert.match(decision.messages.at(-1).content[0].text, /pack-v1: present/, 'wake pack still injected fresh')
+    } finally {
+      await b.dispose()
+    }
+  })
+})
+
+test('U2: boot with a ROTATED hosts.json (v2 schema — old retired + new live) restores the registry; the NEW host gets the wake pack, the RETIRED host injects NOTHING (retired-skip gate, T4), and the boot cleanup hook never truncates the retired entry (S5 guard)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const oldSessionId = SessionId(randomUUID())
+    const newSessionId = SessionId(randomUUID())
+    const oldHostId = `host-${oldSessionId}`
+    const newHostId = `host-${newSessionId}`
+    // Both journal files on disk (the S1.5b write happened before the process
+    // died after S3 — the S3→S8 crash window, spec 002 §3.6).
+    await seedJournal(stateDir, oldHostId, 'OLD-ARCHIVE-JOURNAL: preserved whole.')
+    await seedJournal(stateDir, newHostId, 'NEW-LIVE-JOURNAL: re-keyed.')
+    // A ROTATED v2 hosts.json: old retired (evidence, D1) + new live
+    // (previousSessionId traces the retire). The retired entry also carries a
+    // stray legacy cleanup flag + a witness artifact so the ignored-by-guard
+    // path is observable (a non-guarded cleanup would truncate + clear it).
+    const witnessRoot = path.join(stateDir, 'witness-sessions')
+    await authorCleanupWitnessArtifact(witnessRoot, String(oldSessionId), '---\nauthor: ' + oldHostId + '\nwake_counter: 2\n---\n\nretired witness')
+    const artifactPath = path.join(witnessRoot, '--root--', encodeSegment(oldSessionId), 'session.jsonl.zstd')
+    const artifactBefore = await readFile(artifactPath)
+    const hostsPath = path.join(stateDir, 'hosts.json')
+    await writeFile(hostsPath, JSON.stringify({
+      schemaVersion: 2,
+      [oldHostId]: {
+        sessionId: String(oldSessionId), roomId: 'board', sleepEpoch: 1787261780000, boundarySeq: 10,
+        retired: true, retiredAt: 1787261781000, rotatedTo: newHostId, webUiCleanupPending: true
+      },
+      [newHostId]: { sessionId: String(newSessionId), roomId: 'board', sleepEpoch: 1787261781000, boundarySeq: 11, previousSessionId: String(oldSessionId) }
+    }, null, 2))
+    const b = await bootPlugin(stateDir, { persistenceRoot: witnessRoot })
+    try {
+      await waitForRooms(b.root)
+      // The loader validates + restores the v2 file (the new live host is
+      // present; the retired entry stays queryable).
+      await waitFor(async () => {
+        const hostsFile = await readHosts(stateDir)
+        return hostsFile[newHostId]?.sessionId !== undefined
+      }, 5000, 'rotated hosts.json restored')
+      const hostsFile = await readHosts(stateDir)
+      assert.equal(hostsFile[oldHostId].retired, true, 'retired entry restored from the v2 file')
+
+      // (a) The NEW host's first pre-step injects the full wake pack.
+      const newAgent = b.agents.put(fakeParentAgent(newSessionId))
+      const claimed = preStepClaimed('wake up after a restart')
+      const decision = await runPreStep(b.pluginCtx, newAgent, claimed, new AbortController().signal)
+      assert.equal(decision.kind, 'enter', 'new-host pre-step decision is enter')
+      assert.equal(decision.messages.length, claimed.length + 1, 'new host pre-step injects exactly ONE extra node (the wake pack)')
+      assert.match(decision.messages.at(-1).content[0].text, /^## Deepartments wake pack$/m, 'pack opens with the wake pack header')
+      assert.match(decision.messages.at(-1).content[0].text, /pack-v1: present/, 'pack injected on the restored new host')
+      assert.match(decision.messages.at(-1).content[0].text, new RegExp(`Pre-resolved journal path.*${newHostId}`), 'pack pre-resolves the NEW journal path')
+
+      // (b) The RETIRED host's pre-step injects NOTHING (retired-skip gate —
+      // a message typed into the old tab behaves as a plain session, C1).
+      const oldAgent = b.agents.put(fakeParentAgent(oldSessionId))
+      const oldDecision = await runPreStep(b.pluginCtx, oldAgent, claimed, new AbortController().signal)
+      assert.equal(oldDecision.messages.length, claimed.length, 'retired host pre-step adds NO node')
+      assert.ok(!oldDecision.messages.some((m) => m.content?.[0]?.text?.includes('## Deepartments wake pack')), 'no wake pack for the retired host even after a restart')
+
+      // (c) The boot cleanup hook SKIPPED the retired entry (§5 defence-in-
+      // depth): its stray webUiCleanupPending flag SURVIVES the boot and its
+      // witness artifact is byte-identical (never truncated — G4).
+      await waitFor(async () => {
+        const hostsFile = await readHosts(stateDir)
+        return hostsFile[newHostId]?.sessionId !== undefined
+      }, 5000, 'registry settled')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      const afterCleanup = await readHosts(stateDir)
+      assert.equal(afterCleanup[oldHostId].webUiCleanupPending, true, 'cleanup never runs on a retired entry (flag survives — §5 guard)')
+      assert.deepEqual(await readFile(artifactPath), artifactBefore, 'retired artifact byte-identical (never truncated — G4)')
     } finally {
       await b.dispose()
     }
@@ -3667,7 +3808,7 @@ test('Batch W4 dept_wake_snapshot: registers globally (host plane), and ONE call
   })
 })
 
-test('Batch 7 regression: GLOBAL dept_room_who schema declares hosts[].sleeping (A3 — no more copy-paste drift crashing host wake)', async () => {
+test('Batch 7 U2 regression: GLOBAL dept_room_who schema declares hosts[].sleeping (A3 — no more copy-paste drift crashing host wake), reports the NEW rotated host as sleeping, and excludes the RETIRED host from "present"', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
@@ -3675,19 +3816,25 @@ test('Batch 7 regression: GLOBAL dept_room_who schema declares hosts[].sleeping 
       const signal = new AbortController().signal
 
       // (a) A sleeping host must be reported by the GLOBAL (host-plane) roster.
-      // Put a sleeping host into the registry via the host dept_sleep path (the
-      // same mechanism Batch 7 uses), so sleepEpoch is set durably in hosts.json.
+      // Put a sleeping host into the registry via the host dept_sleep ROTATION
+      // path (the same mechanism Batch 7 uses), so the OLD host is retired and
+      // the NEW host carries sleepEpoch durably in hosts.json.
       const host = agents.put(fakeParentAgent())
-      const hostId = `host-${host.id}`
-      await seedJournal(stateDir, hostId, 'HOST-SLEEP-MEMORY: global who sleeping reporting.')
+      const oldHostId = `host-${host.id}`
+      await seedJournal(stateDir, oldHostId, 'HOST-ROTATION-MEMORY: global who sleeping reporting.')
       const sleepResult = await root.tools.get('dept_sleep').execute({}, { agent: host, signal })
       assert.ok(sleepResult.sleepEpoch > 0, 'host slept for the regression test')
+      const newHostId = sleepResult.member
+      assert.notEqual(newHostId, oldHostId, 'rotation produced a NEW host member')
 
       const who = root.tools.get('dept_room_who')
       const result = await who.execute({ room: 'board' }, { agent: host, signal })
-      const sleepingHost = result.hosts.find((h) => h.hostId === hostId)
-      assert.ok(sleepingHost, 'the sleeping host is in the global roster')
-      assert.equal(sleepingHost.sleeping, true, 'global dept_room_who reports the sleeping host')
+      // The NEW host is present and reported as sleeping; the RETIRED old host
+      // is excluded (spec 002 §4/C7).
+      const sleepingHost = result.hosts.find((h) => h.hostId === newHostId)
+      assert.ok(sleepingHost, 'the NEW sleeping host is in the global roster')
+      assert.equal(sleepingHost.sleeping, true, 'global dept_room_who reports the sleeping NEW host')
+      assert.ok(!result.hosts.some((h) => h.hostId === oldHostId), 'the retired old host is excluded from "present"')
 
       // (b) The DECLARED output schema must actually allow `sleeping` on a host —
       // additionalProperties:false on the host item forces this to be declared

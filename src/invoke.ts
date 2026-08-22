@@ -125,6 +125,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { emitRoomRecord, roomSessionId, setBoardRecordListener, setRoomCompactionResetter } from './org.js'
 import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './session-cleanup.js'
+import { runHostRotation, validateHostsRotationFile, ROTATION_SCHEMA_VERSION } from './session-rotation.js'
 import type { Config, CoordinatorConfig, DepartmentConfig, RoomState } from './org.js'
 import { loadRecords, resolveBoardPath } from './board-store.js'
 import type { BoardRecord, MessagePayload } from './board-store.js'
@@ -343,6 +344,20 @@ interface HostEntry {
    * intent (a mid-wake restart must never re-fold the whole wake surface back
    * to the journal). Absent = no deferred replace pending. */
   deferredJournalSeed?: string
+  /** U2 (spec 002 §3.5/D4): set on the RETIRED old entry after a host session
+   * ROTATION at dept_sleep. The entry STAYS in hosts.json (queryable as
+   * evidence, D1) but the wake gate skips it (retire = "no pack + no
+   * registration", §4/C1) and the roster/cleanup treat it as retired. Absent
+   * (or false) = live (pre-rotation behavior). */
+  retired?: boolean
+  /** U2 (D4): when this entry was retired (ms epoch); required on retired. */
+  retiredAt?: number
+  /** U2 (D4): the `host-<newId>` this retired entry rotated to; required on
+   * retired. */
+  rotatedTo?: string
+  /** U2 (D4): on a LIVE entry that was created by a rotation — the sessionId
+   * it rotated FROM (must reference a retired entry in the same file). */
+  previousSessionId?: string
 }
 
 /** Compact per-member read cursors (in-memory — see header comment). */
@@ -522,12 +537,14 @@ function yamlList(items: readonly string[]): string {
 // ---------------------------------------------------------------------------
 // Batch 7 — HOST sleep helpers (PURE, exported, unit-tested).
 //
-// The owner decision "vaciar en sitio" (in-place surface reset, NOT a new
-// session, NOT an LLM summary): when the HOST (the Asistente) calls the
-// host-branch of dept_sleep, the ENTIRE model-visible surface of its live
-// session is eventually collapsed down to ONE node — the agent's own journal —
-// using the SAME surface primitive dsh-compaction drives (explore-deep/2026-08-
-// 20-compaction-reset.md §4): a `user/message` append with
+// U2 (spec 002): the host branch of dept_sleep now ROTATES the host session
+// (old retired + archived, new seeded with the re-keyed journal — see
+// src/session-rotation.ts). These helpers now serve the LEGACY FALLBACK path
+// ONLY (a rotation that cannot run falls back to the old in-place reset): the
+// ENTIRE model-visible surface of the live session is eventually collapsed
+// down to ONE node — the agent's own journal — using the SAME surface
+// primitive dsh-compaction drives (explore-deep/2026-08-20-compaction-reset.md
+// §4): a `user/message` append with
 // `surfaceOp:{op:'replace', start:firstNode, end:lastNode}` +
 // `sourceEventSeqs: allNodes`. `Session.append` (dsh-session index.d.ts:1444)
 // validates + splices the current surface (`foldSurface`/`applySurfacePlan`,
@@ -1226,7 +1243,9 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   // Fire-and-forget persistence of the host registry (callers never await it).
   const persistHosts = (): void => {
-    const data: Record<string, Omit<HostEntry, 'hostId'>> = {}
+    // U2 (D4): every persisted file carries the top-level schemaVersion marker;
+    // loader validation tolerates legacy files without it.
+    const data: Record<string, unknown> = { schemaVersion: ROTATION_SCHEMA_VERSION }
     for (const entry of hosts.values()) {
       data[entry.hostId] = {
         sessionId: entry.sessionId,
@@ -1240,7 +1259,14 @@ export function applyInvoke(ctx: Context, config: Config) {
         ...(entry.webUiCleanupPending === true ? { webUiCleanupPending: true } : {}),
         // Fix wake-12: persist the deferred sleep-replace seed only when set
         // (absent = no fold pending; see HostEntry.deferredJournalSeed).
-        ...(entry.deferredJournalSeed !== void 0 ? { deferredJournalSeed: entry.deferredJournalSeed } : {})
+        ...(entry.deferredJournalSeed !== void 0 ? { deferredJournalSeed: entry.deferredJournalSeed } : {}),
+        // U2 (D4): rotation schema fields — retired/retiredAt/rotatedTo on the
+        // retired old entry, previousSessionId on the new live entry. Persist
+        // only when set (absent = legacy in-place host).
+        ...(entry.retired === true ? { retired: true } : {}),
+        ...(entry.retiredAt !== void 0 ? { retiredAt: entry.retiredAt } : {}),
+        ...(entry.rotatedTo !== void 0 ? { rotatedTo: entry.rotatedTo } : {}),
+        ...(entry.previousSessionId !== void 0 ? { previousSessionId: entry.previousSessionId } : {})
       }
     }
     writeFile(hostsPath, JSON.stringify(data, null, 2), 'utf8').catch(
@@ -1261,6 +1287,15 @@ export function applyInvoke(ctx: Context, config: Config) {
    */
   const ensureHost = (sessionId: string, roomId: string): string => {
     const hostId = `${HOST_ID_PREFIX}${sessionId}`
+    // U2 (rotation, §4/C1): a RETIRED host entry must never be resurrected —
+    // the old session's board-tool calls after a rotation stay PLAIN sessions
+    // ("no pack + no registration"). Refuse the re-registration, log loudly,
+    // keep the entry retired (its rotatedTo stays the live host).
+    const retiredBefore = hosts.get(hostId)
+    if (retiredBefore?.retired === true) {
+      ctx.logger.warn(`[deepartments] ensureHost: refusing to re-register retired host ${hostId} (rotated to ${retiredBefore.rotatedTo ?? 'unknown'}) — the session stays a plain session`)
+      return hostId
+    }
     hosts.set(hostId, { hostId, sessionId, roomId })
     hostForSession.set(sessionId, hostId)
     persistHosts()
@@ -1398,7 +1433,15 @@ export function applyInvoke(ctx: Context, config: Config) {
   const hostsLoaded = readFile(hostsPath, 'utf8')
     .then((text) => {
       const parsed = JSON.parse(text) as Record<string, Omit<HostEntry, 'hostId'>>
+      // U2 (spec 002 §3.5/D4): validate the rotation schema BEFORE restoring —
+      // legacy files (no schemaVersion / no retired fields) keep exact
+      // pre-rotation behavior (validated as a no-op), malformed NEW fields
+      // reject the whole load LOUDLY (descriptive error → the catch below
+      // logs it) instead of being silently dropped.
+      validateHostsRotationFile(parsed)
       for (const [hostId, entry] of Object.entries(parsed)) {
+        // U2 (D4): the top-level schemaVersion marker is not a host entry.
+        if (hostId === 'schemaVersion') continue
         if (typeof entry.sessionId === 'string' && typeof entry.roomId === 'string' && hostId.startsWith(HOST_ID_PREFIX)) {
           const sessionId = hostId.slice(HOST_ID_PREFIX.length)
           if (sessionId === entry.sessionId) {
@@ -1409,6 +1452,12 @@ export function applyInvoke(ctx: Context, config: Config) {
             // Fix wake-12: sanitize the deferred sleep-replace seed (a string;
             // a corrupt value must never survive into the registry).
             const deferredJournalSeed = typeof entry.deferredJournalSeed === 'string' ? entry.deferredJournalSeed : undefined
+            // U2 (D4): sanitize the rotation fields (validator above already
+            // threw on type violations — this pass guards in-memory purity).
+            const retired = entry.retired === true
+            const retiredAt = typeof entry.retiredAt === 'number' ? entry.retiredAt : undefined
+            const rotatedTo = typeof entry.rotatedTo === 'string' ? entry.rotatedTo : undefined
+            const previousSessionId = typeof entry.previousSessionId === 'string' ? entry.previousSessionId : undefined
             hosts.set(hostId, {
               hostId,
               sessionId: entry.sessionId,
@@ -1419,9 +1468,18 @@ export function applyInvoke(ctx: Context, config: Config) {
               // Web-UI sleep cleanup: restore the pending marker (a real
               // dept_sleep set it; the first boot after clears it once the
               // artifact truncation succeeded).
-              ...(entry.webUiCleanupPending === true ? { webUiCleanupPending: true } : {})
+              ...(entry.webUiCleanupPending === true ? { webUiCleanupPending: true } : {}),
+              // U2: restore the rotation schema fields.
+              ...(retired ? { retired: true } : {}),
+              ...(retiredAt !== void 0 ? { retiredAt } : {}),
+              ...(rotatedTo !== void 0 ? { rotatedTo } : {}),
+              ...(previousSessionId !== void 0 ? { previousSessionId } : {})
             })
             hostForSession.set(entry.sessionId, hostId)
+            // U2: a RETIRED entry must never re-arm the deferred fold (rotation
+            // never sets deferredJournalSeed; the retire means "no wake pack,
+            // plain session" — re-arming would fold an archived surface).
+            if (retired) continue
             // Fix wake-12: re-arm the DEFERRED REPLACE intent for the first
             // pre-step of this restarted process. The in-memory
             // `deferredSleepReplace` map died with the previous process; only
@@ -1468,7 +1526,10 @@ export function applyInvoke(ctx: Context, config: Config) {
   const runPendingWebUiCleanups = async (): Promise<void> => {
     const pending: Array<{ hostId: string; sessionId: string }> = []
     for (const hostEntry of hosts.values()) {
-      if (hostEntry.webUiCleanupPending === true) pending.push({ hostId: hostEntry.hostId, sessionId: hostEntry.sessionId })
+      // U2 (§5 defence-in-depth): never truncate a RETIRED entry's artifact —
+      // rotation preserves the old session whole (G4/D2); the boot cleanup is
+      // the LEGACY path for in-place sleeps only.
+      if (hostEntry.webUiCleanupPending === true && hostEntry.retired !== true) pending.push({ hostId: hostEntry.hostId, sessionId: hostEntry.sessionId })
     }
     if (pending.length === 0) return
     ctx.logger.info(`[deepartments] web-ui sleep cleanup pending for ${pending.length} host(s)`)
@@ -2438,6 +2499,9 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
     for (const entry of hosts.values()) {
       if (entry.roomId !== roomId) continue
+      // U2 (§4/C7): a retired entry is filtered from "present" (still
+      // queryable in hosts.json, but no longer a member of the live roster).
+      if (entry.retired === true) continue
       lines.push(`- ${entry.hostId}${entry.sleepEpoch !== void 0 ? ' (sleeping)' : ''}`)
     }
     if (lines.length === 0) lines.push('(no registered members/posts/hosts)')
@@ -2612,7 +2676,12 @@ export function applyInvoke(ctx: Context, config: Config) {
     // branch above (2641) — both keep their behavior untouched.
     const hostId = hostIdForSession(sessionId)
     const hostEntry = hosts.get(hostId)
-    if (hostEntry === undefined) return decision
+    // U2 (spec 002 §4): a RETIRED host entry never gets the wake pack — retire
+    // means "no pack + no registration"; a message typed into the old tab after
+    // a rotation behaves as a PLAIN session (deliberate). The off-path stays
+    // free of `wakePackInjected` (a legacy mid-session registration still
+    // works — see the comment above).
+    if (hostEntry === undefined || hostEntry.retired === true) return decision
     const roomId = hostEntry.roomId ?? config.org.rooms[0]?.id ?? 'board'
     // Fix A — deferred in-place surface reset (see the Batch 7 helper comment +
     // dept_sleep Step 3): the FIRST pre-step after a host dept_sleep performs
@@ -2915,6 +2984,9 @@ export function applyInvoke(ctx: Context, config: Config) {
         const hostsInRoom: HostRow[] = []
         for (const entry of hosts.values()) {
           if (entry.roomId !== args.room) continue
+          // U2 (§4/C7): retired hosts are excluded from the roster (evidence
+          // stays in hosts.json; they are no longer "present" members).
+          if (entry.retired === true) continue
           const sessionLive = agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined
           hostsInRoom.push({ hostId: entry.hostId, sessionId: entry.sessionId, roomId: entry.roomId, sessionLive, sleeping: entry.sleepEpoch !== void 0 })
         }
@@ -3952,6 +4024,9 @@ export function applyInvoke(ctx: Context, config: Config) {
       const hostsInRoom: HostRow[] = []
       for (const entry of hosts.values()) {
         if (entry.roomId !== args.room) continue
+        // U2 (§4/C7): retired hosts are excluded from the roster (evidence
+        // stays in hosts.json; they are no longer "present" members).
+        if (entry.retired === true) continue
         // Batch E liveness: report the host's REAL session liveness — a
         // cold-boot non-live host shows sessionLive:false, never "live".
         const sessionLive = agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined
@@ -4189,7 +4264,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   const globalSleep = ctx.tools.register(defineTool({
     name: 'dept_sleep',
-    description: 'Sleep (dormir): persist your memory to your journal (dept_memo_write MUST be called first — this is enforced) and mark yourself for a context RESET. For a department HEAD this marks the post + disposes its AgentHandle (fresh resume on next wake). For the HOST Asistente it sets a durable host sleepEpoch and IN-PLACE resets its live session\'s model-visible context to exactly its journal (the "vaciar en sitio" owner decision — no new session, no LLM summary), then concludes the turn. Rejects loudly if no journal has been saved.',
+    description: 'Sleep (dormir): persist your memory to your journal (dept_memo_write MUST be called first — this is enforced) and mark yourself for a context RESET. For a department HEAD this marks the post + disposes its AgentHandle (fresh resume on next wake). For the HOST Asistente it ROTATES the host session (spec 002): the old session is retired + archived server-side and a NEW session seeded with the re-keyed journal becomes the registered host (durable host sleepEpoch set on the new entry), then the turn concludes. Falls back to the legacy in-place reset when the rotation cannot run. Rejects loudly if no journal has been saved.',
     parameters: {},
     output: {
       schema: {
@@ -4222,16 +4297,19 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
       const memberId = postIdForChild(agent.id as string)
 
-      // ---- Batch 7: HOST branch (the sleeping Asistente) ---------------------
-      // The caller has no registered post entry → it is a HOST. Owner decision
-      // 2026-08-20 ("vaciar en sitio"): persist its journal, set a durable host
-      // sleepEpoch, then IN-PLACE reset its live session's model-visible surface
-      // to exactly the journal (surfaceOp replace over the full window —
-      // explore-deep/2026-08-20-compaction-reset.md §4) and conclude the turn.
-      // The web api-proxy owns the host's AgentHandle, so we do NOT dispose it
-      // (unlike a head): the session stays live, only its surface is wiped to
-      // the journal. Heads never reach this branch (a head calls its own-layer
-      // dept_sleep, which dispose+resumes — unaffected).
+      // ---- U2: HOST branch (the sleeping Asistente) — SESSION ROTATION ------
+      // The caller has no registered post entry → it is a HOST. Spec 002
+      // (docs/specs/002-host-session-rotation.md): the OLD host session is
+      // RETIRED + ARCHIVED server-side (D1) and a NEW session (seeded with the
+      // re-keyed journal, D3) becomes the registered host, so the GUI's native
+      // sidebar shows the fresh "New Session" row and hides the old one. The
+      // old session's artifact + journal are preserved in FULL (G4/D2 — the
+      // rotation never truncates, never deletes, never appends to the old live
+      // surface). The web api-proxy owns the host's AgentHandle (we do NOT
+      // dispose it — unlike a head): the old session stays live but INERT
+      // (nothing targets host-<oldId> for wake anymore — gate §4). Heads never
+      // reach this branch (a head calls its own-layer dept_sleep, which
+      // dispose+resumes — unaffected).
       if (memberId === undefined) {
         const sessionId = agent.id as string
         const hostId = hostIdForSession(sessionId)
@@ -4240,14 +4318,65 @@ export function applyInvoke(ctx: Context, config: Config) {
         if (journal === void 0 || journal.trim() === '') {
           throw new Error(`[deepartments] dept_sleep requires a saved journal — call dept_memo_write to save your memory first (no journal for host ${hostId})`)
         }
-        // Step 1 — journal REQUIRED (dept_memo_write must have run first): the
+        // S1 — journal REQUIRED (dept_memo_write must have run first): the
         // journal is the ONLY durable surface the next wake resumes from.
-        // Step 1.5 — advance the HOST's wake ordinal at the sleep boundary,
-        // BEFORE the surface is rebuilt/seeded, so the NEXT wake's fresh context
-        // already shows the incremented counter (wake K → sleep → the woken
-        // session is wake K+1). bumpHostSleepCounter persists the bump atomically
-        // and returns the NEW full content used to seed the reset below.
+        // S1.5 (unchanged) — advance the HOST's wake ordinal at the sleep
+        // boundary, BEFORE the rotation, so the NEXT wake's fresh context
+        // (seeded from the re-keyed journal) already shows the incremented
+        // counter (wake K → sleep → the woken session is wake K+1).
+        // bumpHostSleepCounter persists the bump atomically on the OLD file
+        // (kept byte-identical as the archive copy, G4) and returns the
+        // bumped content the rotation re-keys.
         const seeded = await bumpHostSleepCounter(hostId, journal, { sessionId, roomId: existing?.roomId ?? 'board', boundarySeq: hosts.get(hostId)?.boundarySeq })
+        // U2 — perform the ROTATION (S1.5b re-keyed journal → S2 server-side
+        // session creation → S2.5 server-side archive → S2.7 evidence copy →
+        // S3/S7 hosts.json rotation with the durable markers). S6 (the old
+        // session's wake-pack flag) + S8 (concludeTurn) stay HERE; the old
+        // entry keeps its identity but is retired (evidence stays queryable).
+        const boundarySeqAtSleep = (agent.session as { seq?: number } | undefined)?.seq ?? hosts.get(hostId)?.boundarySeq
+        // Resolve the state-home sessions root + evidence archive dir exactly
+        // like the boot cleanup hook (sessionPersistence.root ?? `../sessions`).
+        const deptSleepPersistence = ctx.get('sessionPersistence') as { root?: string } | undefined
+        const deptSleepSessionsRoot = typeof deptSleepPersistence?.root === 'string' && deptSleepPersistence.root !== ''
+          ? deptSleepPersistence.root
+          : path.join(config.stateDir, '..', 'sessions')
+        const rotation = await runHostRotation({
+          oldSessionId: sessionId,
+          oldHostId: hostId,
+          roomId: existing?.roomId ?? 'board',
+          seededJournal: seeded,
+          journalsDir: path.join(config.stateDir, 'journals'),
+          workspacePath: (agent.session?.header as { cwd?: string } | undefined)?.cwd ?? process.cwd(),
+          boundarySeq: boundarySeqAtSleep,
+          sessions: ctx.get('sessions'),
+          workspaceRegistry: ctx.get('workspaceRegistry'),
+          sessionsRoot: deptSleepSessionsRoot,
+          archiveDir: path.join(path.dirname(deptSleepSessionsRoot), 'archive'),
+          hosts,
+          hostForSession,
+          persistHosts,
+          logger: ctx.logger
+        })
+        if (rotation.rotated) {
+          // S6 — retired identity: the OLD session never gets the wake pack
+          // again (retired-skip gate §4); the NEW session's per-process set is
+          // empty by definition, so its first pre-step injects the full pack.
+          wakePackInjected.delete(sessionId)
+          // S8 — conclude the sleeping Asistente's turn (the loop stops after
+          // this successful tool result) — the host analog of a head ending
+          // its turn. Guarded: dsh-tools ToolRunContext exposes concludeTurn();
+          // a bare { agent, signal } test exec does not.
+          if (typeof (exec as { concludeTurn?: unknown }).concludeTurn === 'function') {
+            (exec as { concludeTurn: () => void }).concludeTurn()
+          }
+          return { room: existing?.roomId ?? 'board', member: rotation.newHostId, memoPath: rotation.newJournalPath, sleepEpoch: rotation.sleepEpoch }
+        }
+        // FALLBACK — the legacy IN-PLACE path, reachable ONLY when the rotation
+        // cannot run (missing sessions store / a re-key or create failure —
+        // spec §3.6 crash tolerance). Loud log + the pre-rotation behavior
+        // (journal append + deferred fold + webUiCleanupPending) — the
+        // machinery stays for hosts that slept under the old plugin (§5).
+        ctx.logger.error(`[deepartments] dept_sleep: host session ROTATION could not run (${rotation.reason}); falling back to the legacy in-place reset (journal append + deferred fold + webUiCleanupPending)`)
         // Step 2 — register/refresh the durable host identity. ensureHost is
         // idempotent for an existing entry and refuses to change its roomId away
         // from what it has.

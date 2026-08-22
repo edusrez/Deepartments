@@ -808,11 +808,18 @@ test('Real Loader: the boot web-UI cleanup SKIPS when the host session is held b
   })
 })
 
-test('Real Loader: host dept_sleep still completes (journal capture, wake bump, sleepEpoch) and sets the webUiCleanupPending marker durably — the physical truncation is NOT attempted inside the live process', async () => {
+test('Real Loader: host dept_sleep LEGACY-FALLBACK path still completes (journal capture, wake bump, sleepEpoch) and sets the webUiCleanupPending marker durably — the physical truncation is NOT attempted inside the live process', async () => {
   await withTempStateDir(async (stateDir) => {
     const fixture = await buildFixtureTree(stateDir, { pending: false, childCount: 1 })
     const { root, dispose } = await bootPlugin(stateDir, { persistenceRoot: fixture.sessionsRoot })
     try {
+      // U2 (spec 002): the host dept_sleep ROTATES by default (old retired +
+      // new seeded session — webUiCleanupPending is NEVER set on a rotated
+      // host, S4). This test proves the LEGACY cleanup machinery, so it forces
+      // the legacy fallback: the rotation cannot run when the sessions store
+      // rejects the create call (§3.6), and the fallback still sets the
+      // durable cleanup marker.
+      root.sessions.create = () => { throw new Error('injected — legacy fallback for the cleanup-marker test') }
       const { Session: DshSession, SessionId: Sid } = await import('@deepseek-ai/dsh-session')
       // Seed the host journal (as dept_memo_write would have) so dept_sleep
       // passes its require-a-journal gate.
