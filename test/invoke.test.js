@@ -809,6 +809,65 @@ test('host registration REFRESH MERGES (never replaces): a board-tool refresh of
   })
 })
 
+test('host ROOMID LATCH fix: a board-tool REFRESH operating in a room different from the host\'s stored roomId NEVER rewrites hosts.json roomId (a host registered in "board" stays "board" while it reads in "research")', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const sessionId = SessionId(randomUUID())
+    const hostId = `host-${sessionId}`
+    // The host is ALREADY registered BEFORE boot (seeded hosts.json) in room
+    // 'board'. The pre-fix ensureHost REFRESH re-derived roomId from the
+    // CALLER's room argument, so ANY board-tool call in a different room
+    // flipped the entry (the host-roomid latch bug).
+    assert.equal(await seedHostRegistration(stateDir, sessionId, 'board'), hostId)
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent(sessionId))
+      const signal = new AbortController().signal
+      // The refresh path runs through dept_room_read's memberIdFor with room
+      // 'research' (a live, DIFFERENT room) — the fix must preserve 'board'.
+      const read = await root.tools.get('dept_room_read').execute({ room: 'research' }, { agent: host, signal })
+      assert.equal(read.member, hostId, 'the refresh resolves the registered member id')
+      const hosts = await readHosts(stateDir)
+      assert.equal(hosts[hostId].roomId, 'board', 'ensureHost REFRESH keeps existing.roomId — roomId is never re-derived from the caller\'s room')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('host ROOMID LATCH fix: a host-plane dept_post_retire — the withdrawal is emitted in the RETIRED post\'s room, but the host\'s registry roomId is NOT moved (stays "board")', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const sessionId = SessionId(randomUUID())
+    const hostId = `host-${sessionId}`
+    await seedHostRegistration(stateDir, sessionId, 'board')
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
+      const host = agents.put(fakeParentAgent(sessionId))
+      const signal = new AbortController().signal
+      const researchSession = root.sessions.get(SessionId(roomSessionId('research')))
+      const beforeCount = researchSession.events.length
+
+      // retirePost step (a) emits the withdrawal with memberIdFor(caller,
+      // entry.roomId) — the RETIRED post's room feeds the sender resolution
+      // (which for the HOST runs the ensureHost REFRESH). The withdrawal must
+      // still land in the head's room…
+      const result = await root.tools.get('dept_post_retire').execute({ postId: 'research-head' }, { agent: host, signal })
+      assert.equal(result.retired, true)
+      assert.equal(result.roomId, 'research', 'the retirement targets the retired post\'s room')
+      await waitFor(() => researchSession.events.length > beforeCount, 5000, 'withdrawal note emitted in the head\'s room')
+
+      // …but the host entry keeps its OWN roomId ('board') — the pre-fix latch
+      // flipped it to 'research' through the same refresh merge.
+      const hosts = await readHosts(stateDir)
+      assert.equal(hosts[hostId].roomId, 'board', 'dept_post_retire never moves the live host\'s roomId')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('hosts loader cardinality: TWO live entries → a WARN (never a THROW) listing both ids, and the registry/file stay INTACT (a throw would empty the registry and the next ensureHost persist would erase every file entry)', async () => {
   await withTempStateDir(async (stateDir) => {
     // The wake-12→13 split-brain shape: two BARE live entries (type-valid;

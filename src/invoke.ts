@@ -1464,16 +1464,23 @@ export function applyInvoke(ctx: Context, config: Config) {
    * Lazy host registration: called from a host-plane board tool when the
    * calling agent has no post entry (it may be a HOST Asistente session).
    * Records the deterministic `host-<sessionId>` address and refreshes the
-   * roomId. CONTRACT (postmortem nº5 + relay-fix, 2026-08-22):
+   * durable identity (hostId/sessionId). CONTRACT (postmortem nº5 + relay-fix,
+   * 2026-08-22 + host-roomId latch fix, 2026-08-22):
    *   - NEW registration (hostId absent): allowed ONLY when no other live
    *     (non-retired) host entry exists — the FIRST host registers; any
    *     further session is REFUSED (warn + NO entry; the session stays a
    *     plain session, spec 002 §4/C1) and the EXISTING live host's id is
    *     returned so board-tool member resolution keeps a valid member id.
+   *     roomId is ASSIGNED here, from the caller's room (first-configured-room
+   *     fallback is caller-side: whereami's joinRoom).
    *   - REFRESH (hostId present, non-retired): always allowed, and MERGES —
    *     it preserves every field ensureHost does not own (rotation-successor
    *     metadata: previousSessionId/sleepEpoch/boundarySeq, retire evidence)
-   *     instead of replacing the whole entry.
+   *     instead of replacing the whole entry, and KEEPS `existing.roomId`
+   *     VERBATIM — a refresh never re-derives roomId from the caller's room,
+   *     so no board-tool call operating in any room (incl. dept_post_retire's
+   *     withdrawal emitted in the retired post's room) can move the host's
+   *     registry roomId (host-roomId latch fix).
    *   - RETIRED re-registration: refused (unchanged).
    * Never fabricates a host at boot — only a live tool call registers one.
    */
@@ -1528,12 +1535,19 @@ export function applyInvoke(ctx: Context, config: Config) {
     // sleepEpoch/boundarySeq/deferredJournalSeed and any retire evidence) on
     // the successor's first board-tool call — the live-host pick then degraded
     // to the ambiguity branch. MERGE instead: preserve every field ensureHost
-    // does not own; refresh only the durable identity (hostId/sessionId) and
-    // the roomId (when it differs from the one passed — the caller reports the
-    // room it is operating in).
+    // does not own and refresh only the durable identity (hostId/sessionId).
+    // Host-roomId latch fix (2026-08-22, explore-deep/2026-08-22-host-roomid-
+    // flip.md): the OLD refresh ALSO re-derived roomId from the caller's room
+    // argument, and retirePost emits its withdrawal with the RETIRED post's
+    // room (`memberIdFor(caller, entry.roomId)`) — so a host-plane
+    // dept_post_retire moved the LIVE host's registry roomId into the retired
+    // post's room (observed: roomId "programming" after retiring that room's
+    // head). A refresh now KEEPS `existing.roomId` verbatim: roomId is assigned
+    // ONLY at CREATE; no board-tool call (read/write/retire/whereami) can ever
+    // move the roomId of an already-registered host.
     hosts.set(hostId, existing === undefined
       ? { hostId, sessionId, roomId }
-      : { ...existing, hostId, sessionId, ...(existing.roomId !== roomId ? { roomId } : {}) })
+      : { ...existing, hostId, sessionId })
     hostForSession.set(sessionId, hostId)
     persistHosts()
     return hostId
