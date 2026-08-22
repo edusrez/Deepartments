@@ -3375,7 +3375,7 @@ export function applyInvoke(ctx: Context, config: Config) {
             ? `you are head ${value.postId} in room ${value.roomId} (members: ${value.members.join(', ') || 'none'})`
             : value.hostId
               ? `you are the Asistente host (address ${value.hostId}, room "${value.hostRoomId ?? 'unregistered'}")`
-              : 'you are the Asistente host (not a board head)'
+              : value.message ?? 'you are the Asistente host (not a board head)'
         } as const]
       },
       async execute(_args, exec): Promise<WhereAmI> {
@@ -4426,7 +4426,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           ? `you are head ${value.postId} in room ${value.roomId} (members: ${value.members.join(', ') || 'none'})`
           : value.hostId
             ? `you are the Asistente host (address ${value.hostId}, room "${value.hostRoomId ?? 'unregistered'}")`
-            : 'you are the Asistente host (not a board head)'
+            : value.message ?? 'you are the Asistente host (not a board head)'
       } as const]
     },
     async execute(_args, exec): Promise<WhereAmI> {

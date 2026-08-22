@@ -613,6 +613,13 @@ test('host registration: a non-post agent calling a host-plane board tool resolv
       assert.equal(where.hostId, `host-${host.id}`)
       assert.equal(where.sessionId, host.id)
       assert.equal(where.hostRoomId, 'board')
+
+      // The RENDERED output for a REGISTERED host keeps the address form
+      // (never the refusal message).
+      const whereView = whereamiTool.output.render({}, where)
+      assert.ok(Array.isArray(whereView) && whereView[0]?.type === 'text', 'whereami render returns a text block')
+      assert.match(whereView[0].text, new RegExp(`address host-${host.id}`), 'rendered registered-host text keeps the address form')
+      assert.doesNotMatch(whereView[0].text, /NOT a registered host/, 'a registered host never renders a refusal')
     } finally {
       await dispose()
     }
@@ -689,6 +696,17 @@ test('host registration guard (single live host): the FIRST session registers as
       assert.equal(whereB.hostId, undefined, 'refused session does NOT impersonate the host (no hostId)')
       assert.match(whereB.message, /NOT a registered host/, 'whereami honestly reports the non-registered identity')
       assert.match(whereB.message, new RegExp(`host-${hostA.id}`), 'whereami names the live host entry')
+
+      // (3b) The RENDERED tool output must carry the SAME honest truth — a
+      // refused plain session must never render the generic "Asistente host
+      // (not a board head)" line; the render surfaces its message verbatim
+      // (output.render is the exact harness render path, dsh-tools
+      // createSuccessResult → tool.output.render).
+      const whereBView = root.tools.get('dept_whereami').output.render({}, whereB)
+      assert.ok(Array.isArray(whereBView) && whereBView[0]?.type === 'text', 'whereami render returns a text block')
+      assert.match(whereBView[0].text, /NOT a registered host/, 'rendered text reports the non-registered identity')
+      assert.match(whereBView[0].text, new RegExp(`host-${hostA.id}`), 'rendered text names the live host entry')
+      assert.doesNotMatch(whereBView[0].text, /not a board head/, 'refused session never renders the generic fallback')
 
       // (4) Sender attribution to the LIVE REGISTERED host: a host-posted
       // message records from=host-<sessionId> and the relay resolves the sender
