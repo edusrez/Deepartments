@@ -2649,9 +2649,19 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
     }
     signal?.throwIfAborted?.()
+    // Fix 2026-08-22 — context-injection gate: the host wake pack goes ONLY to
+    // the session REGISTERED as the board host in hosts.json (the boot-loaded
+    // `hosts` Map). A plain root session (never registered) now gets NO
+    // Deepartments context. The gated-off path must NOT add to
+    // `wakePackInjected`: a session that registers LATER mid-session (first
+    // board-tool call → ensureHost) still receives the pack at its next
+    // pre-step ("plain until it becomes the registered host"). Registered
+    // posts are already gated above (2624) and transient subagents in the T4
+    // branch above (2641) — both keep their behavior untouched.
     const hostId = hostIdForSession(sessionId)
     const hostEntry = hosts.get(hostId)
-    const roomId = hostEntry?.roomId ?? config.org.rooms[0]?.id ?? 'board'
+    if (hostEntry === undefined) return decision
+    const roomId = hostEntry.roomId ?? config.org.rooms[0]?.id ?? 'board'
     // Fix A — deferred in-place surface reset (see the Batch 7 helper comment +
     // dept_sleep Step 3): the FIRST pre-step after a host dept_sleep performs
     // the full-window replace the close branch no longer runs. By this point

@@ -458,6 +458,17 @@ async function seedJournal(stateDir, postId, summary) {
   return journalPath
 }
 
+/** Seed a HOST registration into hosts.json BEFORE boot (the context-injection
+ * gate: only the session registered as the board host receives the wake pack).
+ * The boot loader restores it into the in-memory `hosts` Map (invoke.ts:1429).
+ * Returns the deterministic `host-<sessionId>` member id. */
+async function seedHostRegistration(stateDir, sessionId, roomId = 'board') {
+  const hostsPath = path.join(stateDir, 'hosts.json')
+  await mkdir(stateDir, { recursive: true })
+  await writeFile(hostsPath, JSON.stringify({ [`host-${sessionId}`]: { sessionId: String(sessionId), roomId } }, null, 2))
+  return `host-${sessionId}`
+}
+
 async function readPosts(stateDir) {
   const postsPath = path.join(stateDir, 'posts.json')
   await waitFor(async () => {
@@ -3095,10 +3106,14 @@ test('Batch C pre-step: a HOST session\'s first message-time pre-step injects a 
 
 test('Batch C pre-step: a NEVER-SLEPT host (no journal seed) injects a DEGRADED wake pack without throwing', async () => {
   await withTempStateDir(async (stateDir) => {
+    // The wake pack goes ONLY to the session registered as the board host in
+    // hosts.json — seed the registry BEFORE boot (registered-host fixture).
+    const sessionId = SessionId(randomUUID())
+    await seedHostRegistration(stateDir, sessionId)
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
       await waitForRooms(root)
-      const host = agents.put(fakeParentAgent())
+      const host = agents.put(fakeParentAgent(sessionId))
       const signal = new AbortController().signal
       // NO journal seeded — the host has never slept and has no durable memory.
 
@@ -3120,12 +3135,15 @@ test('Batch C pre-step: a NEVER-SLEPT host (no journal seed) injects a DEGRADED 
 
 test('Batch C pre-step: repeated pre-step within ONE awake session does NOT re-inject once the pack is present (session-scoped gate)', async () => {
   await withTempStateDir(async (stateDir) => {
+    // Registered-host fixture (the context-injection gate: only registered
+    // hosts receive the pack) — seed hosts.json BEFORE boot.
+    const sessionId = SessionId(randomUUID())
+    const hostId = await seedHostRegistration(stateDir, sessionId)
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
       await waitForRooms(root)
-      const host = agents.put(fakeParentAgent())
+      const host = agents.put(fakeParentAgent(sessionId))
       const signal = new AbortController().signal
-      const hostId = `host-${host.id}`
       await seedJournal(stateDir, hostId, 'PRE-STEP gate: single injection per awake session.')
 
       const claimed = preStepClaimed()
@@ -3144,6 +3162,118 @@ test('Batch C pre-step: repeated pre-step within ONE awake session does NOT re-i
       // A THIRD pre-step (the follow-up continuation) also stays gated.
       const third = await runPreStep(pluginCtx, host, claimed, signal)
       assert.equal(third.messages.length, claimed.length, 'third pre-step still gated (no re-injection)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- Context-injection gate (2026-08-22): the wake pack goes ONLY to the
+// session REGISTERED as the board host in hosts.json. Plain never-registered
+// root sessions get NO Deepartments context; a mid-session registration
+// delivers the pack at the NEXT pre-step (the gated-off path never marks
+// wakePackInjected).
+
+test('Context-injection gate: a session REGISTERED as the board host in hosts.json gets the wake pack at its first pre-step (pack-v1 sentinel)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const sessionId = SessionId(randomUUID())
+    await seedHostRegistration(stateDir, sessionId)
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent(sessionId))
+      const signal = new AbortController().signal
+
+      const claimed = preStepClaimed('first message of the registered host')
+      const decision = await runPreStep(pluginCtx, host, claimed, signal)
+
+      assert.equal(decision.kind, 'enter', 'pre-step decision is enter')
+      assert.equal(decision.messages.length, claimed.length + 1, 'registered host pre-step injects exactly ONE extra node (the wake pack)')
+      const packNode = decision.messages[decision.messages.length - 1]
+      assert.equal(packNode.source.kind, 'plugin', 'injected pack node is a plugin context')
+      assert.equal(packNode.source.form, 'notice', 'injected pack node is a notice')
+      const packText = packNode.content[0].text
+      assert.match(packText, /^## Deepartments wake pack$/m, 'injected pack opens with the wake pack header')
+      assert.match(packText, /pack-v1: present/, 'injected pack carries the deterministic P1 presence sentinel')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Context-injection gate: a PLAIN root session (never registered in hosts.json) gets NO wake pack and NO Deepartments context at its first pre-step', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      // Deliberately UNREGISTERED: no hosts.json entry, no board-tool call.
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+
+      const claimed = preStepClaimed('a plain conversation')
+      const decision = await runPreStep(pluginCtx, host, claimed, signal)
+
+      assert.equal(decision.kind, 'enter', 'plain pre-step still returns enter')
+      assert.equal(decision.messages.length, claimed.length, 'plain session pre-step adds NO node (decision.messages unchanged)')
+      assert.ok(decision.messages.every((m) => !m.content?.[0]?.text?.includes('deepartments')), 'no Deepartments context anywhere on the plain session surface')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Context-injection gate: a registered board POST (head-*) still gets NO wake pack at its first pre-step (the 2624 post gate is untouched)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'research' })
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      // The stable head session id is registered in posts.json at boot, so
+      // postIdForChild resolves and the early post gate (invoke.ts:2624) holds.
+      const head = agents.put(fakeParentAgent('head-research-head'))
+      const signal = new AbortController().signal
+
+      const claimed = preStepClaimed('head wake surface')
+      const decision = await runPreStep(pluginCtx, head, claimed, signal)
+
+      assert.equal(decision.kind, 'enter', 'post pre-step still returns enter')
+      assert.equal(decision.messages.length, claimed.length, 'a registered post pre-step adds NO pack node (lean board-delta wake only)')
+      assert.ok(!decision.messages.some((m) => m.content?.[0]?.text?.includes('## Deepartments wake pack')), 'a board post never receives the host wake pack')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Context-injection gate: a session that REGISTERS mid-session (first dept_whereami → ensureHost) gets the wake pack at its NEXT pre-step (late registration late-injects)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+
+      // Plain first pre-step: NO pack — not a registered host yet.
+      const claimed = preStepClaimed('first message, still unregistered')
+      const first = await runPreStep(pluginCtx, host, claimed, signal)
+      assert.equal(first.kind, 'enter')
+      assert.equal(first.messages.length, claimed.length, 'unregistered session pre-step adds NO node')
+      assert.ok(!first.messages.some((m) => m.content?.[0]?.text?.includes('## Deepartments wake pack')), 'no wake pack before registration')
+
+      // Mid-session registration: dept_whereami counts as a board tool call →
+      // Batch E ensureHost registers this session in hosts.json SYNCHRONOUSLY.
+      const whereamiTool = pluginCtx().tools.get('dept_whereami')
+      const where = await whereamiTool.execute({}, { agent: host, signal })
+      assert.equal(where.kind, 'host', 'whereami registers the calling session as a host')
+
+      // NEXT pre-step: the pack arrives — the gated-off path never marked
+      // wakePackInjected, so nothing blocks the late injection.
+      const second = await runPreStep(pluginCtx, host, claimed, signal)
+      assert.equal(second.kind, 'enter')
+      assert.equal(second.messages.length, claimed.length + 1, 'post-registration pre-step injects exactly ONE extra node (the wake pack)')
+      const packNode = second.messages[second.messages.length - 1]
+      assert.match(packNode.content[0].text, /^## Deepartments wake pack$/m, 'late-injected pack opens with the wake pack header')
+      assert.match(packNode.content[0].text, /pack-v1: present/, 'late-injected pack carries the presence sentinel')
     } finally {
       await dispose()
     }
@@ -3346,6 +3476,11 @@ test('Task T4 dept_sleep: a transient subagent calling the global dept_sleep is 
 
 test('Task T4 REGRESSION: a subagent-origin child with the REAL FLAT header (origin top-level, no nested meta) gets the slim role contract AND NOT the wake pack; a host-origin session still gets the full pack; dept_sleep refuses the flat-origin subagent', async () => {
   await withTempStateDir(async (stateDir) => {
+    // Registered-host fixture for the host part below (the context-injection
+    // gate: only sessions registered as the board host receive the wake pack) —
+    // seed hosts.json BEFORE boot.
+    const hostSessionId = SessionId(randomUUID())
+    await seedHostRegistration(stateDir, hostSessionId)
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
       await waitForRooms(root)
@@ -3372,7 +3507,7 @@ test('Task T4 REGRESSION: a subagent-origin child with the REAL FLAT header (ori
 
       // ---- host: the real root-agent header (flat, no origin key) still gets
       // the FULL wake pack — the host-side behavioral guarantee is unchanged.
-      const host = agents.put(fakeParentAgent())
+      const host = agents.put(fakeParentAgent(hostSessionId))
       const hostClaimed = preStepClaimed('wake up')
       const hostDecision = await runPreStep(pluginCtx, host, hostClaimed, signal)
       assert.equal(hostDecision.kind, 'enter')
@@ -3750,12 +3885,15 @@ test('T1 degrade-silently: an unavailable transcript (no sessionPersistence.read
 
 test('T1 lean pack: after archive writes, the injected wake pack + readWakeJournalKpi still read ONLY the single checkpoint — no archive/session-log content leaks into the wake surface', async () => {
   await withTempStateDir(async (stateDir) => {
+    // Registered-host fixture (the context-injection gate: only registered
+    // hosts receive the pack) — seed hosts.json BEFORE boot.
+    const sessionId = SessionId(randomUUID())
+    const hostId = await seedHostRegistration(stateDir, sessionId)
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
       await waitForRooms(root)
-      const host = agents.put(fakeParentAgent())
+      const host = agents.put(fakeParentAgent(sessionId))
       const signal = new AbortController().signal
-      const hostId = `host-${host.id}`
 
       // A memo write archives + captures a session log for the host.
       const memo = root.tools.get('dept_memo_write')
