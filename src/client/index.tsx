@@ -20,7 +20,9 @@
  * The first observation only SEEDS the baseline WITHOUT opening (the boot may
  * already be inside the host session — never steal the active tab at boot);
  * subsequent id changes trigger the open. A host id absent from the local
- * store logs loudly and re-polls instead of client-creating (a client-created
+ * store forces one `ctx.sessions.refresh()` (the rotated session is COLD
+ * server-side — no session-added frame ever reveals it); if it is still
+ * absent it logs loudly and re-polls — never client-creates (a client-created
  * id is NOT the registered host — the wake pack would never fire for it).
  *
  * Named exports only (AGENTS.md rule 1); no export default.
@@ -59,6 +61,21 @@ export function shouldOpenHostSession(previous: string | null, current: string |
   return current !== previous;
 }
 
+/** PURE refresh trigger (unit-tested): once a rotation transition is detected
+ * (shouldOpenHostSession), whether the watcher must force `ctx.sessions.refresh()`.
+ * The rotated session is COLD server-side (persistence.create — no agent born),
+ * so the host never emits a `host/session-added` frame for it and the local
+ * store only learns about it through the `api.sessions.list` RPC: without the
+ * forced refresh the open waits for the next connection generation (observed
+ * ~2:51 delay). */
+export function shouldRefreshForHost(
+  previous: string | null,
+  current: string | null,
+  presentInStore: boolean
+): boolean {
+  return shouldOpenHostSession(previous, current) && !presentInStore;
+}
+
 /** Minimal client root-context surface the watcher relies on (client-runner
  * inject; provided by the base bundles). */
 interface ClientCtx {
@@ -68,6 +85,9 @@ interface ClientCtx {
       getSnapshot(): { ids?: string[]; current?: string };
     };
     open(id: string): unknown;
+    /** Force the api.sessions.list baseline pull (real SessionRuntime.refresh,
+     * single-flight); the U3 gate uses it to reveal a COLD rotated host session. */
+    refresh(): unknown;
   };
   connection: {
     rpc: {
@@ -112,6 +132,19 @@ export function apply(ctx: ClientCtx): void {
         // Transition to a DIFFERENT non-null id → open the server-created
         // session. NEVER client-create: a client-created id is not the
         // registered host (the wake pack would never fire for that tab).
+        if (
+          shouldRefreshForHost(
+            lastHostSessionId,
+            current,
+            (ctx.sessions.list.getSnapshot().ids ?? []).includes(current)
+          )
+        ) {
+          // The rotated host session is COLD server-side (persistence.create —
+          // no agent born → no host/session-added frame will ever reveal it):
+          // force the api.sessions.list pull NOW instead of waiting for a
+          // connection generation to refresh the store (observed ~2:51 delay).
+          await ctx.sessions.refresh();
+        }
         if (!(ctx.sessions.list.getSnapshot().ids ?? []).includes(current)) {
           console.warn(
             "[deepartments] host/status: new host session " + current +
