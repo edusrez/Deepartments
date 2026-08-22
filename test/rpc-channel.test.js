@@ -1,4 +1,4 @@
-// dsh-deepartments — `/deepartments` sidebar RPC channel tests (server half).
+// dsh-deepartments — `/deepartments` RPC channel tests (server half).
 //
 // Cover the PURE extraction of the channel (the rc.8 transport fix): the
 // endpoint dispatcher (dispatchDeepartmentsEndpoint), the client-request
@@ -7,6 +7,10 @@
 // are exported from src/invoke.ts with no node:http imports, so they are
 // directly unit-testable — the same pattern as agents-status.test.js testing
 // buildAgentRows.
+//
+// U1 (custom-sidebar removal): the `ui/config` (+`set`) endpoints and their
+// tests were removed with the sidebar; the dispatcher now serves `agents`/`list`
+// only (the kept client roster heartbeat).
 //
 // Tests run against the compiled lib/ (pnpm build first), same as the other
 // suite files.
@@ -54,8 +58,6 @@ const DEPARTMENTS = [RESEARCH, PROGRAMMING]
 // --- in-memory deps (mirrors what applyInvoke wires to the live registries) --
 function makeDeps(overrides = {}) {
   return {
-    uiConfig: { sidebarEnabled: true },
-    persistUiConfig: () => {},
     departments: DEPARTMENTS,
     byPost: new Map(),
     hosts: [],
@@ -103,37 +105,6 @@ test('dispatchDeepartmentsEndpoint: list is an alias of agents', async () => {
     dispatchDeepartmentsEndpoint('list', {}, deps)
   ])
   assert.deepEqual(JSON.parse(JSON.stringify(list)), JSON.parse(JSON.stringify(agents)))
-})
-
-test('dispatchDeepartmentsEndpoint: ui/config reads the persisted toggle', async () => {
-  const deps = makeDeps({ uiConfig: { sidebarEnabled: false } })
-  const result = await dispatchDeepartmentsEndpoint('ui/config', {}, deps)
-  assert.deepEqual(result, { ok: true, value: { sidebarEnabled: false } })
-})
-
-test('dispatchDeepartmentsEndpoint: ui/config/set writes and persists', async () => {
-  let persisted = null
-  const deps = makeDeps({
-    uiConfig: { sidebarEnabled: true },
-    persistUiConfig: () => { persisted = deps.uiConfig.sidebarEnabled }
-  })
-  const result = await dispatchDeepartmentsEndpoint('ui/config/set', { sidebarEnabled: false }, deps)
-  assert.deepEqual(result, { ok: true, value: { sidebarEnabled: false } })
-  assert.equal(deps.uiConfig.sidebarEnabled, false)
-  assert.equal(persisted, false)
-  // A subsequent read reflects the write.
-  assert.deepEqual(await dispatchDeepartmentsEndpoint('ui/config', {}, deps), { ok: true, value: { sidebarEnabled: false } })
-})
-
-test('dispatchDeepartmentsEndpoint: ui/config/set rejects a non-boolean', async () => {
-  const deps = makeDeps()
-  const result = await dispatchDeepartmentsEndpoint('ui/config/set', { sidebarEnabled: 'yes' }, deps)
-  assert.equal(result.ok, false)
-  assert.equal(result.ok || result.error.code, 'bad-request')
-  assert.match(result.ok ? '' : result.error.message, /sidebarEnabled must be a boolean/)
-  // Rejected write does not mutate.
-  const read = await dispatchDeepartmentsEndpoint('ui/config', {}, deps)
-  assert.deepEqual(read, { ok: true, value: { sidebarEnabled: true } })
 })
 
 test('dispatchDeepartmentsEndpoint: unknown endpoint is a bad-request', async () => {

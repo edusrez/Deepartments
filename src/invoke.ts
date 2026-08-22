@@ -803,10 +803,6 @@ export interface HostEntryLike {
  * (the route handler in applyInvoke) wires these to the live registries; tests
  * construct this directly. */
 export interface DeepartmentsEndpointDeps {
-  /** The mutable UI config the client reads/writes (`sidebarEnabled`). */
-  uiConfig: { sidebarEnabled: boolean }
-  /** Fire-and-forget persistence of the UI config. */
-  persistUiConfig(): void
   /** config.org.departments — one row built per (coordinator-bearing) department. */
   departments: DepartmentConfig[]
   /** The durable post registry (postId → entry). */
@@ -835,8 +831,9 @@ export type DeepartmentsDispatchResult =
  * PURE endpoint dispatcher for the `/deepartments` channel — the SAME endpoint
  * logic the legacy `ctx.connection.rpc.handle('/deepartments', ...)` served,
  * extracted into a testable function (no node:http imports). Handles
- * `ui/config` (read), `ui/config/set` (write + persist), and `agents`/`list`
- * (sidebar rows with per-host unread counts). Never throws for a normal call:
+ * `agents`/`list` (department-head roster rows with per-host unread counts —
+ * the client roster heartbeat; kept per U1, it is NOT part of the removed
+ * sidebar). Never throws for a normal call:
  * an unknown endpoint is a bad-request result, and internal failures are left
  * to the caller to fold (the route handler maps them to the `internal` branch).
  */
@@ -845,25 +842,6 @@ export async function dispatchDeepartmentsEndpoint(
   payload: unknown,
   deps: DeepartmentsEndpointDeps
 ): Promise<DeepartmentsDispatchResult> {
-  if (endpoint === 'ui/config') {
-    return { ok: true, value: { sidebarEnabled: deps.uiConfig.sidebarEnabled } }
-  }
-  if (endpoint === 'ui/config/set') {
-    const raw = (typeof payload === 'object' && payload !== null ? payload : {}) as { sidebarEnabled?: unknown }
-    if (typeof raw.sidebarEnabled !== 'boolean') {
-      return {
-        ok: false,
-        error: {
-          code: 'bad-request',
-          message: 'sidebarEnabled must be a boolean',
-          details: { issues: [] }
-        }
-      }
-    }
-    deps.uiConfig.sidebarEnabled = raw.sidebarEnabled
-    deps.persistUiConfig()
-    return { ok: true, value: { sidebarEnabled: deps.uiConfig.sidebarEnabled } }
-  }
   if (endpoint !== 'agents' && endpoint !== 'list') {
     return {
       ok: false,
@@ -1270,19 +1248,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     )
   }
 
-  // --- persistent UI config (sidebars etc.), mirroring the hosts.json pattern.
-  // Served/updated over the `/deepartments` RPC (`ui/config` / `ui/config/set`)
-  // so the client toggle works from ANY origin (Tailscale + loopback). Persisted
-  // to `<stateDir>/ui.json`; missing/corrupt file keeps the default. ---
-  const uiConfig: { sidebarEnabled: boolean } = { sidebarEnabled: true }
-  const uiConfigPath = path.join(config.stateDir, 'ui.json')
-
-  // Fire-and-forget persistence of the UI config (callers never await it).
-  const persistUiConfig = (): void => {
-    writeFile(uiConfigPath, JSON.stringify(uiConfig, null, 2), 'utf8').catch(
-      (error: unknown) => { ctx.logger.warn(`[deepartments] ui.json write failed: ${error instanceof Error ? error.message : String(error)}`) }
-    )
-  }
+  // U1 REMOVED (custom-sidebar removal): the persistent UI config
+  // (`uiConfig`/`persistUiConfig`/`ui.json` — the `sidebarEnabled` toggle) is
+  // gone with the removed sidebar; `/.deepartments/ui.json` is deleted as the
+  // separate migration step. Nothing reads or writes it anymore.
 
   /**
    * Lazy host registration: called from a host-plane board tool when the
@@ -1572,23 +1541,6 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
   hostsLoaded.then(() => { void runPendingWebUiCleanups() }, () => { void runPendingWebUiCleanups() })
-
-  // Best-effort cold load of the persistent UI config. A fresh/missing file
-  // (ENOENT) keeps the default; a corrupt file keeps the default too (we never
-  // throw — the RPC/poll reconciles live on the client side regardless).
-  const uiConfigLoaded = readFile(uiConfigPath, 'utf8')
-    .then((text) => {
-      const parsed = JSON.parse(text) as { sidebarEnabled?: unknown }
-      if (typeof parsed?.sidebarEnabled === 'boolean') {
-        uiConfig.sidebarEnabled = parsed.sidebarEnabled
-      }
-      ctx.logger.info(`[deepartments] loaded ui.json (sidebarEnabled=${uiConfig.sidebarEnabled})`)
-    })
-    .catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        ctx.logger.warn(`[deepartments] ui.json load failed (keeping default UI config): ${error instanceof Error ? error.message : String(error)}`)
-      }
-    })
 
   // Best-effort cold load of the persisted per-member read cursors (Batch D).
   // A fresh/missing file (ENOENT) → empty map: every member starts as a FRESH
@@ -4398,12 +4350,13 @@ export function applyInvoke(ctx: Context, config: Config) {
     globalSleep()
   }, 'deepartments: host-plane board tools')
 
-  // --- main-agents sidebar RPC (server half, HTTP self-mount) ---------------
-  // Serves agent-row status AND the persistent UI config to the client sidebar
-  // over the `/deepartments` channel (trusted-host authority). The pure row + UI
-  // computation lives in dispatchDeepartmentsEndpoint (exported, unit-tested in
+  // --- agents/list RPC (server half, HTTP self-mount) ------------------------
+  // Serves the department-head roster rows to the client over the
+  // `/deepartments` channel (trusted-host authority). The pure row computation
+  // lives in dispatchDeepartmentsEndpoint (exported, unit-tested in
   // test/rpc-channel.test.js); this effect only wires it to the live registries
-  // + the board read model and mounts the HTTP routes.
+  // + the board read model and mounts the HTTP routes. (U1: the persistent UI
+  // config surface the channel once also served is removed with the sidebar.)
   //
   // rc.8 TRANSPORT FIX: `ctx.connection.rpc.handle('/deepartments', ...)` did NOT
   // mount an HTTP route in rc.8 — dsh-client-connection registers ONLY the `/api`
@@ -4472,11 +4425,9 @@ export function applyInvoke(ctx: Context, config: Config) {
       (hostCtx.get('connection') as ConnectionLike | undefined)?.trustedHosts ??
       []
     console.log(
-      `[deepartments] /deepartments channel mounted; trustedHosts=${JSON.stringify(trustedHosts)}; routes: agents/list/ui/config/ui/config/set`
+      `[deepartments] /deepartments channel mounted; trustedHosts=${JSON.stringify(trustedHosts)}; routes: agents/list`
     )
-    const sidebarDeps: DeepartmentsEndpointDeps = {
-      uiConfig,
-      persistUiConfig,
+    const endpointDeps: DeepartmentsEndpointDeps = {
       departments: config.org.departments,
       byPost: byPost as unknown as Map<string, PostEntryLike>,
       hosts: hosts.values() as Iterable<HostEntryLike>,
@@ -4495,18 +4446,16 @@ export function applyInvoke(ctx: Context, config: Config) {
     // (AGENTS.md: every registration is a reversible effect).
     const routes: WebServerRouteLike[] = [
       { path: '/deepartments/agents', endpoint: 'agents' },
-      { path: '/deepartments/list', endpoint: 'list' },
-      { path: '/deepartments/ui/config', endpoint: 'ui/config' },
-      { path: '/deepartments/ui/config/set', endpoint: 'ui/config/set' }
+      { path: '/deepartments/list', endpoint: 'list' }
     ].map(({ path, endpoint }) => ({
       kind: 'exact' as const,
       path,
-      handler: (req: unknown, res: unknown) => handleDeepartmentsRequest(req, res, endpoint, trustedHosts, sidebarDeps)
+      handler: (req: unknown, res: unknown) => handleDeepartmentsRequest(req, res, endpoint, trustedHosts, endpointDeps)
     }))
     hostCtx.effect(() => {
       const disposers = routes.map((route) => webServer.register(route))
       return () => { for (const dispose of disposers) dispose() }
-    }, 'deepartments: main-agents sidebar RPC channel')
+    }, 'deepartments: agents/list RPC channel')
   })
 
 }
