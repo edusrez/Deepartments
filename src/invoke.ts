@@ -1462,8 +1462,19 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   /**
    * Lazy host registration: called from a host-plane board tool when the
-   * calling agent has no post entry (it is a HOST Asistente session). Records
-   * the deterministic `host-<sessionId>` address and refreshes the roomId.
+   * calling agent has no post entry (it may be a HOST Asistente session).
+   * Records the deterministic `host-<sessionId>` address and refreshes the
+   * roomId. CONTRACT (postmortem nº5 + relay-fix, 2026-08-22):
+   *   - NEW registration (hostId absent): allowed ONLY when no other live
+   *     (non-retired) host entry exists — the FIRST host registers; any
+   *     further session is REFUSED (warn + NO entry; the session stays a
+   *     plain session, spec 002 §4/C1) and the EXISTING live host's id is
+   *     returned so board-tool member resolution keeps a valid member id.
+   *   - REFRESH (hostId present, non-retired): always allowed, and MERGES —
+   *     it preserves every field ensureHost does not own (rotation-successor
+   *     metadata: previousSessionId/sleepEpoch/boundarySeq, retire evidence)
+   *     instead of replacing the whole entry.
+   *   - RETIRED re-registration: refused (unchanged).
    * Never fabricates a host at boot — only a live tool call registers one.
    */
   const ensureHost = (sessionId: string, roomId: string): string => {
@@ -1472,10 +1483,27 @@ export function applyInvoke(ctx: Context, config: Config) {
     // the old session's board-tool calls after a rotation stay PLAIN sessions
     // ("no pack + no registration"). Refuse the re-registration, log loudly,
     // keep the entry retired (its rotatedTo stays the live host).
-    const retiredBefore = hosts.get(hostId)
-    if (retiredBefore?.retired === true) {
-      ctx.logger.warn(`[deepartments] ensureHost: refusing to re-register retired host ${hostId} (rotated to ${retiredBefore.rotatedTo ?? 'unknown'}) — the session stays a plain session`)
+    const existing = hosts.get(hostId)
+    if (existing?.retired === true) {
+      ctx.logger.warn(`[deepartments] ensureHost: refusing to re-register retired host ${hostId} (rotated to ${existing.rotatedTo ?? 'unknown'}) — the session stays a plain session`)
       return hostId
+    }
+    // Postmortem nº5 fix — the SINGLE-LIVE-HOST guard: a NEW registration
+    // (this hostId is absent from the registry) while ANOTHER non-retired host
+    // entry exists must NOT mint a second live host (wake-12→13: a stray
+    // dormant tab registered itself as a bare second host 92 s after the
+    // rotation). Mirror the retired-refusal: warn + DO NOT register — the
+    // session stays a plain session ("no pack + no registration", spec 002
+    // §4/C1). Return the EXISTING live host's id so board-tool member
+    // resolution (memberIdFor) keeps returning a valid member id and no tool
+    // of a plain session ever creates an entry.
+    if (existing === undefined) {
+      for (const candidate of hosts.values()) {
+        if (candidate.retired !== true && candidate.sessionId !== sessionId) {
+          ctx.logger.warn(`[deepartments] ensureHost: refusing new host registration ${hostId} — live host already exists: ${candidate.hostId}; the session stays a plain session`)
+          return candidate.hostId
+        }
+      }
     }
     // U4 — pin the durable "Asistente" title on the live host session (sidebar
     // label = the session title projection folded last-wins from session/title
@@ -1495,7 +1523,17 @@ export function applyInvoke(ctx: Context, config: Config) {
         ctx.logger.warn(`[deepartments] ensureHost: host session title pin failed for ${sessionId} (non-fatal — host registration continues)`)
       }
     }
-    hosts.set(hostId, { hostId, sessionId, roomId })
+    // Relay-fix (explore 2026-08-22): the OLD code REPLACED the whole entry on
+    // every refresh, wiping the rotation-successor metadata (previousSessionId/
+    // sleepEpoch/boundarySeq/deferredJournalSeed and any retire evidence) on
+    // the successor's first board-tool call — the live-host pick then degraded
+    // to the ambiguity branch. MERGE instead: preserve every field ensureHost
+    // does not own; refresh only the durable identity (hostId/sessionId) and
+    // the roomId (when it differs from the one passed — the caller reports the
+    // room it is operating in).
+    hosts.set(hostId, existing === undefined
+      ? { hostId, sessionId, roomId }
+      : { ...existing, hostId, sessionId, ...(existing.roomId !== roomId ? { roomId } : {}) })
     hostForSession.set(sessionId, hostId)
     persistHosts()
     return hostId
@@ -1561,7 +1599,11 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   /**
    * Resolve the board member id of a calling agent: a registered post first,
-   * else a (lazily registered) host. A bare agent with no post IS a host.
+   * else a (lazily registered) host. A bare agent with no post may be the HOST
+   * (first registration) or a PLAIN session — under the single-live-host guard
+   * (postmortem nº5) a NEW registration while another live host exists is
+   * REFUSED and the EXISTING live host's id is returned instead, so the board
+   * tools of a plain session never create a host entry.
    */
   const memberIdFor = (agentId: string | undefined, roomId: string): string => {
     if (agentId === undefined) throw new Error('[deepartments] a calling agent is required')
@@ -1693,6 +1735,17 @@ export function applyInvoke(ctx: Context, config: Config) {
         }
       }
       ctx.logger.info(`[deepartments] loaded ${hosts.size} host registry entries from hosts.json`)
+      // Postmortem nº1 fix — the SINGLE-LIVE cardinality invariant, WARN ONLY
+      // (never throw): a THROW here lands in the catch below and boots with an
+      // EMPTY registry, and the next ensureHost→persistHosts re-persists ONLY
+      // the fresh entry — silently erasing every file entry (retired rotation
+      // evidence included). A warn keeps the registry alive so boot-repair and
+      // host/status can still report; pickLiveHostEntry resolves
+      // deterministically among the live candidates.
+      const liveHostEntries = [...hosts.values()].filter((candidate) => candidate.retired !== true)
+      if (liveHostEntries.length > 1) {
+        ctx.logger.warn(`[deepartments] hosts.json: ${liveHostEntries.length} live host entries (exactly one required) — pickLiveHostEntry will choose deterministically among: ${liveHostEntries.map((candidate) => candidate.hostId).join(', ')}`)
+      }
     })
     .catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -3339,8 +3392,17 @@ export function applyInvoke(ctx: Context, config: Config) {
           const joinRoom = config.org.rooms[0]?.id
           if (joinRoom !== void 0) {
             const hostId = ensureHost(agent.id as string, joinRoom)
-            const entry = hosts.get(hostId) as HostEntry
-            return { kind: 'host', postId: null, roomId: null, hostId, sessionId: entry.sessionId, hostRoomId: entry.roomId, message: 'You are the Asistente in your private room with the owner; you are a registered host on the board, not a head.' }
+            // Single-live-host guard (postmortem nº5): when another live host
+            // exists, ensureHost REFUSED this registration and returned the
+            // LIVE host's id without creating an entry. Report HONESTLY —
+            // never impersonate: this session is a plain session and the live
+            // host entry is the one the guard pointed at.
+            const entry = hosts.get(hostIdForSession(agent.id as string))
+            if (entry !== void 0) {
+              return { kind: 'host', postId: null, roomId: null, hostId, sessionId: entry.sessionId, hostRoomId: entry.roomId, message: 'You are the Asistente in your private room with the owner; you are a registered host on the board, not a head.' }
+            }
+            const liveHostEntry = hosts.get(hostId)
+            return { kind: 'host', postId: null, roomId: null, message: `You are the Asistente in your private room with the owner; you are NOT a registered host — the live host is ${liveHostEntry?.hostId ?? hostId}.` }
           }
           return { kind: 'host', postId: null, roomId: null, message: 'You are the Asistente in your private room with the owner; you are NOT a board head.' }
         }
@@ -4386,8 +4448,17 @@ export function applyInvoke(ctx: Context, config: Config) {
         const joinRoom = config.org.rooms[0]?.id
         if (joinRoom !== void 0) {
           const hostId = ensureHost(agent.id as string, joinRoom)
-          const entry = hosts.get(hostId) as HostEntry
-          return { kind: 'host', postId: null, roomId: null, hostId, sessionId: entry.sessionId, hostRoomId: entry.roomId, message: 'You are the Asistente in your private room with the owner; you are a registered host on the board, not a post.' }
+          // Single-live-host guard (postmortem nº5): when another live host
+          // exists, ensureHost REFUSED this registration and returned the LIVE
+          // host's id without creating an entry. Report HONESTLY — never
+          // impersonate: this session is a plain session and the live host
+          // entry is the one the guard pointed at.
+          const entry = hosts.get(hostIdForSession(agent.id as string))
+          if (entry !== void 0) {
+            return { kind: 'host', postId: null, roomId: null, hostId, sessionId: entry.sessionId, hostRoomId: entry.roomId, message: 'You are the Asistente in your private room with the owner; you are a registered host on the board, not a post.' }
+          }
+          const liveHostEntry = hosts.get(hostId)
+          return { kind: 'host', postId: null, roomId: null, message: `You are the Asistente in your private room with the owner; you are NOT a registered host — the live host is ${liveHostEntry?.hostId ?? hostId}.` }
         }
         return { kind: 'host', postId: null, roomId: null, message: 'You are the Asistente in your private room with the owner; you are NOT a board post.' }
       }

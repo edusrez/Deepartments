@@ -29,7 +29,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadRecords, resolveBoardPath } from '../lib/board-store.js'
 import { emitRoomRecord, roomSessionId } from '../lib/org.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
 import {
@@ -655,37 +655,162 @@ test('host wake: a board message addressed to host-<sessionId> raw-wakes the hos
   })
 })
 
-test('sender attribution: a host-posted message records from=host-<sessionId> and the relay resolves the sender session to that host (no anyParentId)', async () => {
+test('host registration guard (single live host): the FIRST session registers as the host; a SECOND session while a live host exists is REFUSED (returns the live host id, no second entry, guard warn, honest dept_whereami); sender attribution still resolves to the LIVE registered host', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
+    const logged = []
+    const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
     try {
       await waitForRooms(root)
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
       const hostA = agents.put(fakeParentAgent())
       const hostB = agents.put(fakeParentAgent())
-      const hostBId = `host-${hostB.id}`
       const signal = new AbortController().signal
+      const writeTool = root.tools.get('dept_room_write')
 
-      // Both hosts register by posting (lazy ensureHost on their own tool call).
-      await root.tools.get('dept_room_write').execute({ room: 'board', to: ['research-head'], text: 'A registers' }, { agent: hostA, signal })
-      await root.tools.get('dept_room_write').execute({ room: 'board', to: ['research-head'], text: 'B registers' }, { agent: hostB, signal })
+      // (1) FIRST session: no live host exists → hostA registers normally.
+      const regA = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'A registers' }, { agent: hostA, signal })
+      assert.equal(regA.from, `host-${hostA.id}`, 'the first session registers as the live host')
+
+      // (2) SECOND session refused: hostB posts while hostA is live → the guard
+      // returns the LIVE host id, creates NO second entry and logs the warn;
+      // the post is recorded under the live host id (a second host is never minted).
+      const regB = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'B registers' }, { agent: hostB, signal })
+      assert.equal(regB.from, `host-${hostA.id}`, 'refused session rides the live host id (never a second host)')
+      const hosts = await readHosts(stateDir)
+      assert.ok(hosts[`host-${hostA.id}`], 'host A entry exists')
+      assert.equal(hosts[`host-${hostB.id}`], undefined, 'refused second session creates NO host entry (single-live invariant)')
+      await waitFor(() => logged.some((m) => m?.type === 'warn' && String(m.args?.[0] ?? '').includes(`refusing new host registration host-${hostB.id}`) && String(m.args?.[0] ?? '').includes(`host-${hostA.id}`)), 5000, 'guard warn logged with the live host id')
+
+      // (3) Honest dept_whereami for the refused session: reports its own
+      // NON-registered identity and points at the live host — never impersonates.
+      const whereB = await root.tools.get('dept_whereami').execute({}, { agent: hostB, signal })
+      assert.equal(whereB.kind, 'host')
+      assert.equal(whereB.hostId, undefined, 'refused session does NOT impersonate the host (no hostId)')
+      assert.match(whereB.message, /NOT a registered host/, 'whereami honestly reports the non-registered identity')
+      assert.match(whereB.message, new RegExp(`host-${hostA.id}`), 'whereami names the live host entry')
+
+      // (4) Sender attribution to the LIVE REGISTERED host: a host-posted
+      // message records from=host-<sessionId> and the relay resolves the sender
+      // session to that host (via hosts.get(from).sessionId — no anyParentId).
       const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
       const seq = await nextSeq(stateDir, 'board')
       // 'asistente' (a static member that is NOT a materialized post) addresses
-      // host B; its sender session falls back to its own id (no anyParentId).
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [hostBId], 'note for B'), 'board')
-      assert.equal(hostB.inboxMessages.length, 1, 'host B was woken once')
-      const wake = hostB.inboxMessages.at(-1)
+      // the live host A; its sender session falls back to its own id.
+      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [regA.from], 'note for the live host'), 'board')
+      assert.equal(hostA.inboxMessages.length, 1, 'the LIVE host was woken once')
+      const wake = hostA.inboxMessages.at(-1)
       assert.equal(wake.source.kind, 'board')
       assert.equal(wake.source.senderSessionId, 'asistente', 'non-post sender resolves to its own id (no anyParentId fabrication)')
 
-      // A host posting records from=<hostId>; the relay attributes the wake's
-      // senderSession to that host's SESSION (via hosts.get(from).sessionId).
-      await root.tools.get('dept_room_write').execute({ room: 'board', to: [hostBId], text: 'A to B' }, { agent: hostA, signal })
-      await waitFor(() => hostB.inboxMessages.length === 2, 5000, 'host B received the host-to-host wake')
-      const hostWake = hostB.inboxMessages.at(-1)
+      // A live host posting records from=<hostId>; the relay attributes the
+      // wake's senderSession to that host's SESSION (via hosts.get(from).sessionId).
+      const headAgent = agents.store.get('head-research-head')
+      const headWakesBefore = headAgent.inboxMessages.length
+      await writeTool.execute({ room: 'board', to: ['research-head'], text: 'A to the head' }, { agent: hostA, signal })
+      await waitFor(() => headAgent.inboxMessages.length === headWakesBefore + 1, 5000, 'the head received the host-to-head wake')
+      const hostWake = headAgent.inboxMessages.at(-1)
       assert.equal(hostWake.source.kind, 'board')
       assert.equal(hostWake.source.from, `host-${hostA.id}`, 'host sender recorded under its hostId')
       assert.equal(hostWake.source.senderSessionId, hostA.id, 'relay resolves the host sender to its session (no anyParentId)')
+    } finally {
+      disposeExporter()
+      await dispose()
+    }
+  })
+})
+
+test('host registration guard: registers when NO live host exists — both on a first-ever boot AND after the prior host entries are all RETIRED (the previous live is gone)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // A hosts.json holding ONLY retired entries (a fully rotated-out chain):
+    // loader validation passes (numeric retiredAt + non-empty rotatedTo), zero
+    // live remain — the guard must let the next session register as the host.
+    const oldSessionId = SessionId(randomUUID())
+    const olderSessionId = SessionId(randomUUID())
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      schemaVersion: 2,
+      [`host-${olderSessionId}`]: { sessionId: String(olderSessionId), roomId: 'board', retired: true, retiredAt: 1787261780000, rotatedTo: `host-${oldSessionId}` },
+      [`host-${oldSessionId}`]: { sessionId: String(oldSessionId), roomId: 'board', retired: true, retiredAt: 1787261781000, rotatedTo: 'host-session-next' }
+    }, null, 2))
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      // No live entry + the caller's hostId is absent → the first live
+      // registration passes (retired entries do not block it).
+      const reg = await root.tools.get('dept_room_write').execute({ room: 'board', to: ['research-head'], text: 'first live after a fully-retired chain' }, { agent: host, signal })
+      assert.equal(reg.from, `host-${host.id}`, 'a session registers as the live host when no live entry exists')
+      const hosts = await readHosts(stateDir)
+      assert.ok(hosts[`host-${host.id}`], 'the fresh host entry was created')
+      assert.equal(hosts[`host-${oldSessionId}`].retired, true, 'the pre-existing retired entries survive untouched')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('host registration REFRESH MERGES (never replaces): a board-tool refresh of a ROTATION-SUCCESSOR entry preserves previousSessionId/sleepEpoch/boundarySeq — the live-host pick stays deterministic after the successor\'s first tool call', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const oldSessionId = SessionId(randomUUID())
+    const newSessionId = SessionId(randomUUID())
+    const oldHostId = `host-${oldSessionId}`
+    const newHostId = `host-${newSessionId}`
+    // A ROTATED v2 hosts.json (the exact shape S3/S7 writes): the old entry
+    // retired with rotatedTo; the new live successor carries the rotation
+    // metadata (sleepEpoch/boundarySeq/previousSessionId).
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      schemaVersion: 2,
+      [oldHostId]: { sessionId: String(oldSessionId), roomId: 'board', sleepEpoch: 1787261780000, boundarySeq: 10, retired: true, retiredAt: 1787261781000, rotatedTo: newHostId },
+      [newHostId]: { sessionId: String(newSessionId), roomId: 'board', sleepEpoch: 1787261781000, boundarySeq: 11, previousSessionId: String(oldSessionId) }
+    }, null, 2))
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      // The successor's FIRST board-tool call refreshes its entry (ensureHost
+      // merge path) — the rotation metadata MUST survive it (the pre-fix code
+      // REPLACED the entry and wiped previousSessionId/sleepEpoch/boundarySeq).
+      const successor = agents.put(fakeParentAgent(newSessionId))
+      const signal = new AbortController().signal
+      const writeResult = await root.tools.get('dept_room_write').execute({ room: 'board', to: ['research-head'], text: 'successor refresh' }, { agent: successor, signal })
+      assert.equal(writeResult.from, newHostId, 'the registered successor refreshes under its own host id')
+      const hosts = await readHosts(stateDir)
+      assert.equal(hosts[newHostId].previousSessionId, String(oldSessionId), 'refresh preserves previousSessionId (successor lineage)')
+      assert.equal(hosts[newHostId].sleepEpoch, 1787261781000, 'refresh preserves sleepEpoch')
+      assert.equal(hosts[newHostId].boundarySeq, 11, 'refresh preserves boundarySeq')
+      assert.equal(hosts[oldHostId].retired, true, 'the retired old entry stays intact')
+      // The in-registry live selection stays UNAMBIGUOUS (successor branch).
+      // Note: parsed hosts.json entries carry NO hostId (persistHosts keys the
+      // object by hostId) — assert the pick's live entry by sessionId.
+      const { live, ambiguous } = pickLiveHostEntry(Object.values(hosts))
+      assert.equal(ambiguous, false, 'pick after refresh is NOT ambiguous')
+      assert.equal(live?.sessionId, String(newSessionId), 'pick after refresh still selects the successor')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('hosts loader cardinality: TWO live entries → a WARN (never a THROW) listing both ids, and the registry/file stay INTACT (a throw would empty the registry and the next ensureHost persist would erase every file entry)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The wake-12→13 split-brain shape: two BARE live entries (type-valid;
+    // legacy files without schemaVersion are tolerated — the validator passes).
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      'host-session-stray': { sessionId: 'session-stray', roomId: 'board' },
+      'host-session-live': { sessionId: 'session-live', roomId: 'board' }
+    }, null, 2))
+    const { root, dispose } = await bootPlugin(stateDir)
+    const logged = []
+    const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
+    try {
+      await waitForRooms(root)
+      await waitFor(() => logged.some((m) => m?.type === 'warn' && String(m.args?.[0] ?? '').includes('2 live host entries (exactly one required)') && String(m.args?.[0] ?? '').includes('host-session-stray') && String(m.args?.[0] ?? '').includes('host-session-live')), 5000, 'loader cardinality warned listing both live ids')
+      // NEVER threw → the loader booted with the full file restored and the
+      // file is untouched (load does not re-persist): both live entries present.
+      const hosts = await readHosts(stateDir)
+      assert.ok(hosts['host-session-stray'], 'first live entry intact (no empty-registry wipe)')
+      assert.ok(hosts['host-session-live'], 'second live entry intact')
+      disposeExporter()
     } finally {
       await dispose()
     }
@@ -1665,11 +1790,14 @@ test('Batch E dept_room_who: a non-live host lists with sessionLive:false, a liv
       assert.equal(dead.sessionId, liveHost.id)
       assert.equal(dead.roomId, 'board')
 
-      // A genuinely live host reports sessionLive:true.
-      const liveAgain = agents.put(fakeParentAgent())
-      await root.tools.get('dept_room_write').execute({ room: 'board', to: [postId], text: 'join again' }, { agent: liveAgain, signal })
+      // A genuinely live host reports sessionLive:true. The single-live-host
+      // guard (postmortem nº5) forbids a SECOND registration while the dead
+      // entry still exists, so re-materialize the SAME registered session id:
+      // the existing host entry then flips to sessionLive:true.
+      agents.put(fakeParentAgent(liveHost.id))
+      await root.tools.get('dept_room_write').execute({ room: 'board', to: [postId], text: 'join again' }, { agent: agents.store.get(liveHost.id), signal })
       const result2 = await who.execute({ room: 'board' }, { agent: post })
-      const alive = result2.hosts.find((h) => h.hostId === `host-${liveAgain.id}`)
+      const alive = result2.hosts.find((h) => h.hostId === `host-${liveHost.id}`)
       assert.ok(alive && alive.sessionLive === true, 'a live host reports sessionLive:true')
     } finally {
       await dispose()
@@ -1744,7 +1872,9 @@ test('Batch E dept_room_write sensitive:true records payload.sensitive + senderV
       assert.equal(deadRec.payload.sensitive, true)
       assert.equal(deadRec.payload.senderVerified, false, 'a non-live host sender is NOT registry-verified (verified:no)')
 
-      // (4) Plain (non-sensitive) write does NOT carry the flags.
+      // (4) Plain (non-sensitive) write does NOT carry the flags. Note: the
+      // single-live-host guard refuses this SECOND session's registration — its
+      // write rides the live host id, and a non-sensitive write carries no flags.
       const plain = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'ordinary note' }, { agent: agents.put(fakeParentAgent()), signal })
       const recs4 = await loadRecords(resolveBoardPath(stateDir, 'board'))
       const plainRec = recs4.find((r) => r.id === plain.messageId)
@@ -1783,11 +1913,12 @@ test('Batch E dept_room_read surfaces the [sensitive — sender verified] flag i
       assert.match(fetched.delta, /\[sensitive — sender verified: yes\]/, 'fetch surfaces the verified flag')
       assert.match(fetched.delta, /top-secret for the head/, 'fetch still returns the full body')
 
-      // A non-live host sender surfaces verified:no in the delta.
-      const dead = agents.put(fakeParentAgent())
-      await writeTool.execute({ room: 'board', to: [postId], text: 'dead join' }, { agent: dead, signal })
-      agents.store.delete(dead.id)
-      const unverified = await writeTool.execute({ room: 'board', to: [postId], text: 'shady secret', sensitive: true }, { agent: dead, signal })
+      // A non-live host sender surfaces verified:no in the delta. The
+      // single-live-host guard (postmortem nº5) forbids a SECOND host entry,
+      // so kill the ONLY registered host's agent: its entry stays (Batch A
+      // reconciliation) and its next sensitive post is verified:no.
+      agents.store.delete(host.id)
+      const unverified = await writeTool.execute({ room: 'board', to: [postId], text: 'shady secret', sensitive: true }, { agent: host, signal })
       const toc2 = await read.execute({ room: 'board' }, { agent: post, signal })
       assert.match(toc2.delta, new RegExp(`${unverified.messageId}`))
       assert.match(toc2.delta, /\[sensitive — sender verified: no\]/, 'a non-live host sender surfaces verified:no')

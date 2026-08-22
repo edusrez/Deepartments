@@ -866,7 +866,16 @@ test('Real Loader: host dept_sleep LEGACY-FALLBACK path still completes (journal
       // DURABLE marker is set in hosts.json (fire-and-forget → waitFor).
       await access(path.join(stateDir, 'journals', 'sessions', `${hostId}-2.md`))
       await waitFor(async () => {
-        const hosts = JSON.parse(await readFile(fixture.hostsPath, 'utf8'))
+        // persistHosts is fire-and-forget: a reader can catch the file
+        // mid-write, so a torn JSON parse means "not yet" — retry (the same
+        // hardening as invoke.test.js readHosts; the merge-on-refresh made the
+        // persisted entry larger and the torn-read window observable).
+        let hosts
+        try {
+          hosts = JSON.parse(await readFile(fixture.hostsPath, 'utf8'))
+        } catch {
+          return false
+        }
         return hosts[hostId]?.webUiCleanupPending === true
       }, 5000, 'webUiCleanupPending marker persisted at sleep')
       assert.equal(typeof (JSON.parse(await readFile(fixture.hostsPath, 'utf8'))[hostId]).sleepEpoch, 'number', 'sleepEpoch persisted')
