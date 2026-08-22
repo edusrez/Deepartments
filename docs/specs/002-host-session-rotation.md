@@ -187,7 +187,22 @@ Let `oldId = sessionId` (the current host), `oldHostId = host-<oldId>`,
    it into the list immediately" described the poison state (attached-but-agentless → the
    resume live-guard) and is revoked by FIX 1 (incident session-6e49895c…, 2026-08-22
    16:19:52 UTC; see §3.2).
-5. **S2.5 (NEW, D1) — SERVER-SIDE ARCHIVE of the old session**:
+5. **S2.2 (NEW, FIX 1b — amended 2026-08-22) — WORKSPACE ATTACH.** Durable workspace
+   membership for the new session: iterate `ctx.get('workspaceRegistry').list()` and call
+   `entity.attachSession(newSessionId)` on each entity, first match wins — `attachSession`
+   validates the session's PERSISTED header cwd against the entity's `path` and throws on any
+   mismatch, so mismatches fall through (dsh-workspace lib/index.js:87-105; the canonical
+   session-creation flow calls exactly this after create — dsh-host-apiproxy lib/index.js:2539,
+   hard-failing the create as `workspace-attach-failed` when it cannot attach). **FATAL when no
+   entity resolves** (empty list, missing `list`, or every attach throws) → rotation returns
+   `rotated:false` and the LEGACY in-place fallback runs: a host that is REGISTERED in
+   hosts.json but INVISIBLE in the sidebar is worse than no rotation (the session-6e49895c…
+   incident — live entry + cold artifact with ZERO rows in `storages/workspace.json` →
+   `global.workspaceIds` entity sessionIds: the native sidebar groups sessions by workspace
+   membership and the U3 watcher's membership check (src/client/index.tsx:115) never passes →
+   host unreachable). The stray COLD artifact remains harmless garbage (§3.6). MUST run AFTER
+   S2 (the attach validates the persisted header) and BEFORE S2.5.
+6. **S2.5 (NEW, D1) — SERVER-SIDE ARCHIVE of the old session**:
    `await ctx.get('workspaceRegistry').archiveSession(oldId)`.
    - This is the **exact canonical API**: `dsh-workspace`'s `WorkspaceRegistry` (service name
      `workspaceRegistry`, `super(ctx, "workspaceRegistry")` lib/index.js:309), method
@@ -210,17 +225,17 @@ Let `oldId = sessionId` (the current host), `oldHostId = host-<oldId>`,
    - The client receives the new archive set automatically via the pushed envelope
      `host/archived-sessions-changed` (dsh-client-runtime:9637 → `installArchived`
      9673-9676), no polling needed for hiding.
-   - **Ordering**: archive AFTER create (the new session is already in the store/registry, so
-     the client never sees a moment with neither session visible) and BEFORE hosts.json
-     rotation (so the retire is durable even if the process dies before S3).
-6. **S2.7 (NEW, D2) — belt-and-suspenders archive copy of the OLD artifact**: copy (NOT
+   - **Ordering**: archive AFTER S2.2 (the new session is already visible via the workspace
+     attach, so the client never sees a moment with neither session visible) and BEFORE
+     hosts.json rotation (so the retire is durable even if the process dies before S3).
+7. **S2.7 (NEW, D2) — belt-and-suspenders archive copy of the OLD artifact**: copy (NOT
    move) `<sessionsRoot>/<oldId>/session.jsonl.zstd` → archive dir
    `/opt/dsh/.dsh-dev/archive/session-<oldId>-pre-rotation-<stamp>.jsonl.zstd` (reuse the
    `formatBackupStamp`/`PRE_CLEANUP_RE` conventions, session-cleanup.ts:344-347, 381), best-
    effort, never throws (like `runSleepCleanup`'s per-piece best-effort). The live artifact
    stays in place; the copy is evidence + insurance. All retired sessions kept in full, no
    cap (D2).
-7. **S3 (NEW, D4) — rotate hosts.json.** In the in-memory `hosts` Map (`HostEntry`,
+8. **S3 (NEW, D4) — rotate hosts.json.** In the in-memory `hosts` Map (`HostEntry`,
    invoke.ts:308-346):
    - **Old entry** becomes `{ ...old, retired: true, retiredAt, rotatedTo: newHostId }` —
      REMAINS in the persisted file (queryable for evidence, D1); the wake gate and roster
@@ -237,21 +252,21 @@ Let `oldId = sessionId` (the current host), `oldHostId = host-<oldId>`,
      unknown/missing version markers on legacy files are tolerated (absent `retired` = legacy
      in-place host — pre-rotation behavior preserved), malformed NEW fields fail loud with a
      descriptive error instead of being silently dropped.
-8. **S4 (CHANGED) — do NOT set `webUiCleanupPending`** on either entry (G4; old preserved in
+9. **S4 (CHANGED) — do NOT set `webUiCleanupPending`** on either entry (G4; old preserved in
    full, new already minimal). §5 details.
-9. **S5 (CHANGED) — do NOT set `deferredJournalSeed`** on the new entry, and do NOT call
+10. **S5 (CHANGED) — do NOT set `deferredJournalSeed`** on the new entry, and do NOT call
    `session.append('user/message', buildSleepJournalMessage(seeded), {surfaceOp:'append'})` on
    the OLD session's live surface. The new session IS the journal (seeded); the in-place
    deferred-replace choreography (Fix A/wake-12) becomes rotation-unreachable. The machinery
    stays in code for **legacy (in-place) sleeps only** (§5).
-10. **S6 (NEW) — wake-pack bookkeeping**: `wakePackInjected.delete(oldId)` (old, retired —
+11. **S6 (NEW) — wake-pack bookkeeping**: `wakePackInjected.delete(oldId)` (old, retired —
     safety); the NEW session has an empty per-process set by definition, so its first pre-step
     injects (§4).
-11. **S7 (changed shape) — durable markers on the NEW entry**: `sleepEpoch = Date.now()`,
+12. **S7 (changed shape) — durable markers on the NEW entry**: `sleepEpoch = Date.now()`,
     boundary seq (invoke.ts:4358-4364 equivalents written to `host-<newId>`) then
     `persistHosts()`. Ordering invariant (kept from the current Step 4 comment, invoke.ts:
     4353-4357): the journal file (S1.5/S1.5b) exists BEFORE `sleepEpoch` is durably persisted.
-12. **S8 (unchanged) — concludeTurn** on the OLD session (invoke.ts:4370-4372). The old handle
+13. **S8 (unchanged) — concludeTurn** on the OLD session (invoke.ts:4370-4372). The old handle
     stays owned by the web api-proxy (hosts never dispose their AgentHandle) but is inert:
     nothing targets `host-<oldId>` for wake anymore (gate §4; archived).
 
@@ -286,16 +301,29 @@ per-entry; pick one and validate it.
 
 ### 3.6 Crash windows (sleep-time ordering guarantees)
 
-- Crash between S1.5b and S2.5: an orphan re-keyed journal file `host-<newId>.md` exists,
+- Crash between S1.5b and S2.2: an orphan re-keyed journal file `host-<newId>.md` exists,
   referenced by nothing — harmless; the next rotation uses a fresh id; optionally swept.
-- Crash between S2 and S2.5: a freshly-seeded **COLD artifact** exists (persistence.create/
-  append landed, nothing live, no hosts.json reference; old host still the live host — correct).
-  Amendment 2026-08-22 (FIX 1): the previous row said a "freshly-seeded session exists in the
-  store — harmless", but that in-store state was exactly the POISON — attached-but-agentless →
-  every later resume hit the live-guard (incident session-6e49895c…, 2026-08-22 16:19:52 UTC;
-  `.dsh/reports/explore-deep/2026-08-22-rotation-resume-live-race.md`). With the cold seed the
-  crash window holds only harmless garbage (an orphan artifact + re-keyed journal); the next
-  rotation uses a fresh id.
+- Crash between S2 and S2.2: a freshly-seeded **COLD artifact** exists (persistence.create/
+  append landed, NOT yet workspace-attached, nothing live, no hosts.json reference; old host
+  still the live host — correct). Amendment 2026-08-22 (FIX 1): the previous row said a
+  "freshly-seeded session exists in the store — harmless", but that in-store state was exactly
+  the POISON — attached-but-agentless → every later resume hit the live-guard (incident
+  session-6e49895c…, 2026-08-22 16:19:52 UTC; `.dsh/reports/explore-deep/2026-08-22-rotation-
+  resume-live-race.md`). With the cold seed the crash window holds only harmless garbage (an
+  orphan artifact + re-keyed journal); the next rotation uses a fresh id.
+- Crash between S2.2 and S2.5: the new session is workspace-attached (visible as a stray blank
+  in the sidebar) but hosts.json still points at the OLD host (still the live registered
+  member — correct; S2.5 archive not yet run). No hosts.json reference to the new member — a
+  later rotation with a fresh id leaves the stray blank as harmless garbage (optionally swept).
+  Amendment 2026-08-22 (FIX 1b): without S2.2 the NEW host would be registered-but-INVISIBLE —
+  the exact session-6e49895c… side effect (a live hosts.json entry with ZERO workspace
+  sessionIds rows → no sidebar row, the client membership check never passes, host
+  unreachable); S2.2 makes the attach a prerequisite of the rotation (fatal when no workspace
+  entity resolves), and the BOOT REPAIR HOOK heals this legacy/crash state: on boot, when
+  hosts.json holds EXACTLY ONE non-retired live host entry, the plugin attaches its session to
+  the workspace whose path matches the session's persisted header cwd (same iterate-and-try
+  as S2.2; zero live hosts skip, 2+ live hosts skip + warn — ambiguous; no-match/failure warn,
+  never crash; idempotent — `attachSession` no-ops when already attached).
 - Crash between S2.5 and S3: old host archived but hosts.json still points at it — **the wake
   resume would target an archived session**. ❓ This is the one real hazard window: the gate
   would inject the pack into a session the client cannot select (archived). Mitigations: (a)

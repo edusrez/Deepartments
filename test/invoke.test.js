@@ -283,16 +283,28 @@ class StubPersistenceWithRoot extends StubPersistence {
  * drives): a pure registry-global set add + durable mirror file, no session/
  * agent termination. Rotation calls `archiveSession(oldId)` server-side
  * (spec 002 §3.3 S2.5) — the tests assert the old id lands in
- * `archivedSessionIds` + the durable mirror. */
+ * `archivedSessionIds` + the durable mirror. FIX 1b — also the workspace
+ * LIST/ATTACH surface (spec 002 §3.3 S2.2 + the boot repair hook): `list()`
+ * returns the workspace entities (default: one recording entity at
+ * `stateDir`; `bootPlugin({ workspaceEntities })` overrides for the repair
+ * tests) and `attachSession` records the target ids (reality validates the
+ * session's persisted header cwd against the entity path and throws on
+ * mismatch — dsh-workspace lib:87-105). */
 class StubWorkspaceRegistry extends Service {
-  constructor(ctx, stateDir) {
+  constructor(ctx, stateDir, entities) {
     super(ctx, 'workspaceRegistry')
     this.stateDir = stateDir
     this.archived = []
+    this.attachCalls = []
+    this.entities = entities ?? [{ path: stateDir, attachSession: async (sessionId) => { this.attachCalls.push(sessionId) } }]
   }
 
   get archivedSessionIds() {
     return this.archived
+  }
+
+  list() {
+    return Promise.resolve(this.entities)
   }
 
   async archiveSession(sessionId) {
@@ -359,8 +371,10 @@ async function bootPlugin(stateDir, opts = {}) {
       : new StubPersistence(root)
   // U2: the canonical session-archive service (`workspaceRegistry`) — mounted
   // like the real GUI profile has it, so the rotated dept_sleep's server-side
-  // archive (spec 002 §3.3 S2.5) is exercised through the same seam.
-  const workspaceRegistry = new StubWorkspaceRegistry(root, stateDir)
+  // archive (spec 002 §3.3 S2.5) is exercised through the same seam. FIX 1b:
+  // `workspaceEntities` (optional) overrides the entity list the S2.2 attach
+  // and the boot repair hook iterate (default: one recording entity).
+  const workspaceRegistry = new StubWorkspaceRegistry(root, stateDir, opts.workspaceEntities)
   await root.plugin(SubagentRuntime)
 
   const spawnStub = stubProvider('spawn')
@@ -2773,6 +2787,12 @@ test('Batch 7 U2 host dept_sleep ROTATES: no journal rejects loudly; with a jour
       assert.match(journalNode.data.content[0].text, /^wake_counter: 2$/m, 'seeded journal carries the BUMPED ordinal')
       assert.ok(journalNode.data.content[0].text.includes(journalSummary), 'seeded journal carries the summary body')
 
+      // S2.2 (FIX 1b) — the new session is durably attached to a workspace
+      // entity (canonical parity with the apiproxy's creation flow), exactly
+      // once, targeting the pre-minted id.
+      assert.equal(workspaceRegistry.attachCalls.length, 1, 'exactly one workspace attach (S2.2 — FIX 1b)')
+      assert.equal(workspaceRegistry.attachCalls[0], newSessionId, 'attach targets the pre-minted session id')
+
       // (a) The OLD on-disk journal is byte-identical apart from the bump
       // (wake_counter 1→2 — G4/D2: kept whole as the archive copy).
       const oldPostSleepContent = await readFile(preSleepPath, 'utf8')
@@ -3203,6 +3223,95 @@ test('U2: boot with a ROTATED hosts.json (v2 schema — old retired + new live) 
       assert.deepEqual(await readFile(artifactPath), artifactBefore, 'retired artifact byte-identical (never truncated — G4)')
     } finally {
       await b.dispose()
+    }
+  })
+})
+
+// --- FIX 1b: boot repair hook — attach the single live host to its workspace
+// The rotation attaches at S2.2; this hook heals legacy/crash states where a
+// host was registered in hosts.json but NEVER workspace-attached (the
+// session-6e49895c… incident: a cold artifact + live entry with ZERO rows in
+// the durable workspace sessionIds → no sidebar row → host unreachable). It
+// runs once per boot after the hosts load, guarded to EXACTLY ONE non-retired
+// live host, best-effort (warn on ambiguity / no-match / failure — never
+// crash). The StubWorkspaceRegistry records attach calls; the plugin resolves
+// the SAME instance (ctx.get('workspaceRegistry') === workspaceRegistry).
+// NOTE: the DEFAULT logger exporter's buffer filters warn (level 2) out, so
+// these tests register their own exporter (levels.default: 4) right after
+// boot to observe the hook's warn/info lines deterministically.
+
+test('FIX 1b boot repair: EXACTLY ONE live host entry whose session is not workspace-attached → attachSession on the workspace entity (heals the invisible-host state)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const sessionId = 'session-repair-target'
+    await seedHostRegistration(stateDir, sessionId)
+    const { root, workspaceRegistry, dispose } = await bootPlugin(stateDir)
+    try {
+      const logged = []
+      const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
+      await waitFor(() => workspaceRegistry.attachCalls.length === 1, 5000, 'boot repair attached the single live host')
+      assert.equal(workspaceRegistry.attachCalls[0], sessionId, 'attach repair targets the live host session id')
+      await waitFor(() => logged.some((m) => m?.type === 'info' && String(m.args?.[0] ?? '').includes(`host attach repair: attached ${sessionId}`)), 5000, 'attach repair logged')
+      disposeExporter()
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('FIX 1b boot repair: ZERO live host entries → no attach call (skip silently)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // A hosts.json carrying only the schema marker — no host entries.
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({ schemaVersion: 2 }, null, 2))
+    const { root, workspaceRegistry, dispose } = await bootPlugin(stateDir)
+    try {
+      const logged = []
+      const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
+      await waitFor(() => logged.some((m) => m?.type === 'info' && String(m.args?.[0] ?? '').includes('loaded 0 host registry entries')), 5000, 'hosts load settled (0 entries)')
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      assert.equal(workspaceRegistry.attachCalls.length, 0, 'no attach when there is no live host')
+      disposeExporter()
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('FIX 1b boot repair: TWO live host entries → NO attach + a WARN (ambiguous — exactly one is required)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      'host-session-one': { sessionId: 'session-one', roomId: 'board' },
+      'host-session-two': { sessionId: 'session-two', roomId: 'board' }
+    }, null, 2))
+    const { root, workspaceRegistry, dispose } = await bootPlugin(stateDir)
+    try {
+      const logged = []
+      const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
+      await waitFor(() => logged.some((m) => m?.type === 'warn' && String(m.args?.[0] ?? '').includes('host attach repair: skipped (2 live host entries')), 5000, 'ambiguous repair warned')
+      disposeExporter()
+      assert.equal(workspaceRegistry.attachCalls.length, 0, 'ambiguous (2+ live hosts): NO attach attempted')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('FIX 1b boot repair: the attaching entity THROWS → boot does not crash, a WARN is logged, nothing attached', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const sessionId = 'session-repair-target'
+    await seedHostRegistration(stateDir, sessionId)
+    const { root, workspaceRegistry, dispose } = await bootPlugin(stateDir, {
+      workspaceEntities: [{ path: stateDir, attachSession: async () => { throw new Error('injected attach fault') } }]
+    })
+    try {
+      const logged = []
+      const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
+      await waitFor(() => logged.some((m) => m?.type === 'warn' && String(m.args?.[0] ?? '').includes('host attach repair: no workspace matched session')), 5000, 'repair failure warned (never crashes)')
+      disposeExporter()
+      assert.equal(workspaceRegistry.attachCalls.length, 0, 'the throwing entity recorded nothing')
+    } finally {
+      await dispose()
     }
   })
 })
@@ -3842,7 +3951,7 @@ test('Batch W4 dept_wake_snapshot: registers globally (host plane), and ONE call
 
 test('Batch 7 U2 regression: GLOBAL dept_room_who schema declares hosts[].sleeping (A3 — no more copy-paste drift crashing host wake), reports the NEW rotated host as sleeping, and excludes the RETIRED host from "present"', async () => {
   await withTempStateDir(async (stateDir) => {
-    const { root, agents, persistence, dispose } = await bootPlugin(stateDir)
+    const { root, agents, persistence, workspaceRegistry, dispose } = await bootPlugin(stateDir)
     try {
       await waitForRooms(root)
       const signal = new AbortController().signal
@@ -3873,6 +3982,8 @@ test('Batch 7 U2 regression: GLOBAL dept_room_who schema declares hosts[].sleepi
       assert.equal(persistence.appendCalls.length, 1, 'S2 appended the seed artifact via the persistence seam')
       assert.equal(persistence.createCalls[0].id, newSessionId, 'persistence.create targets the pre-minted id')
       assert.equal(persistence.appendCalls[0].id, newSessionId, 'persistence.append targets the pre-minted id')
+      assert.equal(workspaceRegistry.attachCalls.length, 1, 'S2.2 attached exactly once to a workspace entity (FIX 1b)')
+      assert.equal(workspaceRegistry.attachCalls[0], newSessionId, 'S2.2 attach targets the pre-minted session id')
 
       const who = root.tools.get('dept_room_who')
       const result = await who.execute({ room: 'board' }, { agent: host, signal })

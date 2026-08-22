@@ -27,10 +27,13 @@
 //     the poison that made every later resume hit the live-guard `cannot
 //     prepare session "<id>" while it is live`).
 //   * `runHostRotation` is DI so the crash windows are unit-testable without
-//     the real Loader: seed-persist failure / missing persistence seam →
+//     the real Loader: seed-persist failure / missing persistence seam /
+//     workspace-attach failure (empty list or no matching entity — FIX 1b) →
 //     `{rotated:false}` (invoke.ts then runs the LEGACY in-place path);
 //     archive + artifact-copy failures are NON-FATAL (the hosts.json retire
-//     still commits).
+//     still commits). The attach is FATAL by design: a host that is
+//     registered in hosts.json but INVISIBLE in the workspace sidebar is
+//     worse than no rotation (a stray cold artifact is harmless garbage).
 //   * Never truncates, never deletes: the old artifact + old journal stay
 //     byte-identical (G4/D2); the archive registry only hides, the archive dir
 //     copy only copies.
@@ -247,10 +250,25 @@ export function validateHostsRotationFile(data: Record<string, unknown>): void {
   }
 }
 
-/** The workspace-registry archive seam (dsh-workspace `archiveSession`),
- * structurally narrowed so the plugin never hard-depends on the package. */
+/** One workspace entity as the rotation/boot repair see it (the structural
+ * projection of dsh-workspace's `WorkspaceEntity`): `path` is the canonical
+ * workspace directory and `attachSession` durably prepends the session after
+ * validating its PERSISTED header cwd against `path` (dsh-workspace
+ * lib/index.js:87-105 — reads the header via `readSessionHeader`, resolves
+ * and stats the cwd, throws on any mismatch). The canonical session-create
+ * flow calls exactly this after create (dsh-host-apiproxy lib/index.js:2539). */
+export interface WorkspaceEntityLike {
+  path: string
+  attachSession(sessionId: string): Promise<void>
+}
+
+/** The workspace-registry seam (dsh-workspace `archiveSession` + `list`),
+ * structurally narrowed so the plugin never hard-depends on the package.
+ * `list()` is the registry's durable-ordered workspace projection
+ * (dsh-workspace lib/index.js:360-366). */
 export interface WorkspaceRegistryLike {
   archiveSession(sessionId: string): Promise<unknown> | unknown
+  list(): Promise<readonly WorkspaceEntityLike[]>
 }
 
 /**
@@ -351,7 +369,9 @@ export interface RotationDeps {
    * (missing create/append) → rotation cannot run (legacy fallback). The
    * new session is persisted COLD and is NEVER store-attached. */
   persistence?: RotationPersistenceLike
-  /** The workspace registry (S2.5). Absent → non-fatal, logged. */
+  /** The workspace registry (S2.2 attach — FATAL; S2.5 archive — non-fatal).
+   * Attach requires `list` + entities; absent list → rotation cannot run
+   * (an invisible registered host is worse than no rotation). */
   workspaceRegistry?: WorkspaceRegistryLike
   /** The state-home sessions root (S2.7 artifact search). */
   sessionsRoot: string
@@ -369,8 +389,9 @@ export interface RotationDeps {
 }
 
 /** Outcome of one rotation attempt. `rotated:false` → invoke.ts runs the
- * LEGACY in-place path (the only fallback trigger: S1.5b write failure or S2
- * seed-persist failure / missing persistence seam — crash windows §3.6).
+ * LEGACY in-place path (the fallback triggers: S1.5b write failure, S2
+ * seed-persist failure / missing persistence seam, or S2.2 workspace-attach
+ * failure — empty list / no matching entity — crash windows §3.6).
  * Archive + copy failures never make the rotation fail (non-fatal). */
 export type HostRotationOutcome =
   | {
@@ -408,13 +429,19 @@ async function writeJournalAtomic(journalPath: string, content: string): Promise
  *   S2    persist the new session seed via the dsh-session-persistence seam
  *         (`create` detached metadata + `append` the seed artifact — the
  *         session stays COLD, never store-attached; FIX 1),
+ *   S2.2  workspace attach — durably prepend the new session to the workspace
+ *         whose path matches its persisted header cwd (canonical parity with
+ *         dsh-host-apiproxy's creation flow; FATAL when no entity resolves —
+ *         FIX 1b),
  *   S2.5  server-side archive of the old session (non-fatal, D1),
  *   S2.7  evidence COPY of the old artifact (best-effort, D2),
  *   S3/S7 rotate hosts.json (old retired + new live, single persistHosts).
  *
  * Ordering guarantees (crash windows §3.6): the re-keyed journal exists before
- * any hosts.json persist names the member; the archive resolves BEFORE the
- * hosts.json rotation (one-await window); after S2 succeeds the rotation never
+ * any hosts.json persist names the member; the cold artifact (S2) precedes
+ * the workspace attach (S2.2 — attachSession validates the PERSISTED header)
+ * which precedes the archive (S2.5); the archive resolves BEFORE the hosts.json
+ * rotation (one-await window); after S2/S2.2 succeed the rotation never
  * silently falls back (a stray COLD artifact — no live attachment — plus the
  * re-keyed journal is harmless garbage; the attached-but-agentless store
  * state is exactly what FIX 1 eliminates).
@@ -473,9 +500,46 @@ export async function runHostRotation(deps: RotationDeps): Promise<HostRotationO
   }
   const actualSessionId = newSessionId
 
+  // S2.2 — WORKSPACE ATTACH (FIX 1b): durably attach the new session to the
+  // workspace whose path matches its persisted header cwd (the canonical
+  // creation flow's `workspace.attachSession` after create —
+  // dsh-host-apiproxy lib:2539; dsh-workspace lib:87-105 validates cwd vs
+  // path and throws on mismatch, so a mismatch just falls through to the
+  // next entity). WITHOUT this the new host is REGISTERED but INVISIBLE in
+  // the GUI sidebar (the session-6e49895c… incident: hosts.json live entry,
+  // cold artifact, ZERO rows in workspace.json's sessionIds — no sidebar row,
+  // the client membership check never passes, host unreachable). THE
+  // fallback trigger: a missing/listing-failing registry, an EMPTY workspace
+  // list, or an attach that no entity resolves → {rotated:false} (legacy
+  // in-place fallback — a registered-but-invisible host is WORSE than no
+  // rotation; the stray COLD artifact is harmless garbage, spec §3.6).
+  let attached = false
+  let attachFailure: unknown = undefined
+  try {
+    const workspaceList = await (deps.workspaceRegistry?.list?.() ?? [])
+    for (const workspace of workspaceList) {
+      if (typeof workspace?.attachSession !== 'function') continue
+      try {
+        await workspace.attachSession(actualSessionId)
+        attached = true
+        break
+      } catch (error) {
+        // cwd mismatch / unvalidatable header / attach fault — try the next entity.
+        attachFailure = error
+      }
+    }
+  } catch (error) {
+    attachFailure = error
+  }
+  if (!attached) {
+    const detail = attachFailure instanceof Error ? attachFailure.message : String(attachFailure ?? 'no workspace matched')
+    return { rotated: false, reason: `workspace attach failed: ${detail}` }
+  }
+
   // S2.5 — SERVER-SIDE ARCHIVE of the old session (D1). NON-FATAL: a registry
   // miss or a failing call logs loudly and the rotation still commits the
-  // hosts.json retire (the durable part).
+  // hosts.json retire (the durable part; S2.2 already failed the rotation —
+  // a host that is registered but invisible is worse than no rotation).
   const archive = await archiveOldSession(deps.workspaceRegistry, deps.oldSessionId, deps.logger)
 
   // S2.7 — belt-and-suspenders evidence COPY (D2). Best-effort, never throws.

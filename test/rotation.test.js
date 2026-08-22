@@ -283,6 +283,8 @@ function rotationHarness(dir, overrides = {}) {
   const state = {
     persistenceCreated: [],
     persistenceAppended: [],
+    attachCalls: [],
+    order: [],
     persisted: 0,
     hosts,
     hostForSession,
@@ -301,9 +303,18 @@ function rotationHarness(dir, overrides = {}) {
     // sessions-store stub — the rotation path must not have one at all.
     persistence: {
       create: async (meta) => { state.persistenceCreated.push(meta) },
-      append: async (id, events) => { state.persistenceAppended.push({ id, events }) }
+      append: async (id, events) => { state.persistenceAppended.push({ id, events }); state.order.push('append') }
     },
-    workspaceRegistry: { archiveSession: async () => undefined },
+    // FIX 1b — the workspace registry: `list` returns the workspace entities
+    // (a MISMATCHING path FIRST — attachSession validates cwd vs path and
+    // throws, so it must fall through — then the '/root' entity that records).
+    workspaceRegistry: {
+      list: async () => [
+        { path: '/workspaces/elsewhere', attachSession: async () => { throw new Error('its cwd resolves to /root') } },
+        { path: '/root', attachSession: async (sessionId) => { state.order.push('attach'); state.attachCalls.push({ path: '/root', sessionId }) } }
+      ],
+      archiveSession: async () => undefined
+    },
     sessionsRoot: path.join(dir, 'sessions'),
     archiveDir: path.join(dir, 'archive'),
     hosts,
@@ -357,7 +368,12 @@ test('U2 D1 §3.6: ARCHIVE failure is NON-FATAL — the rotation still commits (
   await withTempDir(async (dir) => {
     await authorFakeArtifact(path.join(dir, 'sessions'), 'session-old')
     const { deps, state } = rotationHarness(dir, {
-      workspaceRegistry: { archiveSession: async () => { throw new Error('registry down') } }
+      // S2.2 attach must still succeed (registry keeps `list`), only the
+      // S2.5 archive call fails — the non-fatal half.
+      workspaceRegistry: {
+        list: async () => [{ path: '/root', attachSession: async () => { state.attachCalls.push({ path: '/root', sessionId: 'session-attached' }) } }],
+        archiveSession: async () => { throw new Error('registry down') }
+      }
     })
     const outcome = await runHostRotation(deps)
     assert.equal(outcome.rotated, true, 'rotation commits despite the archive failure')
@@ -375,15 +391,47 @@ test('U2 D1 §3.6: ARCHIVE failure is NON-FATAL — the rotation still commits (
   })
 })
 
-test('U2 D1: a MISSING workspace registry is non-fatal (headless degrade) — rotation commits the hosts.json retire', async () => {
+test('U2 §3.6 (FIX 1b): a MISSING workspace registry → {rotated:false} — the rotation cannot attach the new host (an invisible REGISTERED host is worse than no rotation; the legacy fallback runs instead)', async () => {
   await withTempDir(async (dir) => {
     const { deps, state } = rotationHarness(dir, { workspaceRegistry: undefined })
     const outcome = await runHostRotation(deps)
-    assert.equal(outcome.rotated, true)
-    assert.equal(outcome.archive.ok, false)
-    assert.match(outcome.archive.reason, /workspaceRegistry unavailable/)
-    assert.equal(state.hosts.get(deps.oldHostId).retired, true, 'hosts.json retire still commits without the GUI service')
-    assert.equal(state.log.calls.error.length, 1, 'missing registry logged loudly')
+    assert.equal(outcome.rotated, false)
+    assert.match(outcome.reason, /workspace attach failed: /)
+    assert.equal(state.hosts.size, 1, 'hosts map untouched (old entry only)')
+    assert.equal(state.hosts.get(deps.oldHostId).retired, undefined, 'old entry NOT retired')
+    assert.equal(state.persisted, 0, 'persistHosts never called on the attach-failure path')
+  })
+})
+
+test('U2 §3.6 (FIX 1b): workspace attach fails when NO entity resolves (all throw — cwd mismatch / unvalidatable header) → {rotated:false} with a workspace-attach reason', async () => {
+  await withTempDir(async (dir) => {
+    const { deps, state } = rotationHarness(dir, {
+      workspaceRegistry: {
+        list: async () => [
+          { path: '/workspaces/a', attachSession: async () => { throw new Error('cwd mismatch: a') } },
+          { path: '/workspaces/b', attachSession: async () => { throw new Error('no such session in persistence') } }
+        ],
+        archiveSession: async () => undefined
+      }
+    })
+    const outcome = await runHostRotation(deps)
+    assert.equal(outcome.rotated, false)
+    assert.match(outcome.reason, /workspace attach failed: no such session in persistence/, 'the LAST attach failure is the detail')
+    assert.equal(state.hosts.size, 1, 'hosts map untouched')
+    assert.equal(state.persisted, 0, 'persistHosts never called on the attach-failure path')
+  })
+})
+
+test('U2 §3.6 (FIX 1b): workspace attach fails on an EMPTY workspace list → {rotated:false} (legacy fallback)', async () => {
+  await withTempDir(async (dir) => {
+    const { deps, state } = rotationHarness(dir, {
+      workspaceRegistry: { list: async () => [], archiveSession: async () => undefined }
+    })
+    const outcome = await runHostRotation(deps)
+    assert.equal(outcome.rotated, false)
+    assert.match(outcome.reason, /workspace attach failed: no workspace matched/)
+    assert.equal(state.hosts.size, 1, 'hosts map untouched')
+    assert.equal(state.persisted, 0, 'persistHosts never called on the attach-failure path')
   })
 })
 
@@ -435,6 +483,15 @@ test('U2 §3.3/S8: the rotation COMMITS (journals + hosts.json) before it resolv
     // the artifact is written cold (a later resume restores it via
     // persistence.prepare); nothing may ever store-attach the session here.
     assert.equal(deps.sessions, undefined, 'rotation deps carry no sessions-store seam (FIX 1 — the resume live-guard can never fire for the new id)')
+
+    // S2.2 (FIX 1b) — the new session is durably attached to the WORKSPACE
+    // whose path matches its header cwd. The harness's first entity
+    // (mismatching path) throws — a cwd-vs-path validation mismatch falls
+    // through — so the attach landed on the '/root' entity, exactly once,
+    // AFTER the cold seed append (the attach needs the persisted header).
+    assert.equal(state.attachCalls.length, 1, 'exactly one workspace attach (the mismatching path fell through)')
+    assert.deepEqual(state.attachCalls[0], { path: '/root', sessionId: newSessionId }, 'attach targets the pre-minted id on the matching workspace')
+    assert.deepEqual(state.order, ['append', 'attach'], 'S2.2 attach runs AFTER the S2 seed append (it validates the persisted header cwd)')
 
     // S3/S7 — hosts.json records committed BEFORE resolve (persist called).
     assert.ok(state.persisted >= 1, 'commit happens before the outcome resolves (concludeTurn ordering is invoke-side)')

@@ -126,7 +126,7 @@ import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { emitRoomRecord, roomSessionId, setBoardRecordListener, setRoomCompactionResetter } from './org.js'
 import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './session-cleanup.js'
 import { runHostRotation, validateHostsRotationFile, ROTATION_SCHEMA_VERSION } from './session-rotation.js'
-import type { RotationPersistenceLike } from './session-rotation.js'
+import type { RotationPersistenceLike, WorkspaceRegistryLike } from './session-rotation.js'
 import type { Config, CoordinatorConfig, DepartmentConfig, RoomState } from './org.js'
 import { loadRecords, resolveBoardPath } from './board-store.js'
 import type { BoardRecord, MessagePayload } from './board-store.js'
@@ -1740,6 +1740,51 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
   hostsLoaded.then(() => { void runPendingWebUiCleanups() }, () => { void runPendingWebUiCleanups() })
+
+  // --- Boot repair hook: attach the single live host to its workspace (FIX 1b)
+  // A rotated host that was registered in hosts.json but never workspace-
+  // attached (e.g. the session-6e49895c… incident — a cold artifact + live
+  // hosts.json entry with ZERO rows in the durable workspace sessionIds) is
+  // INVISIBLE in the GUI sidebar: the native sidebar groups sessions by
+  // workspace membership and the U3 watcher's membership check
+  // (src/client/index.tsx:115) never passes → the host is unreachable. The
+  // rotation now attaches at S2.2 (src/session-rotation.ts), and this hook
+  // HEALS legacy/crash states at boot: when hosts.json holds EXACTLY ONE
+  // non-retired live host entry, attach its session to the workspace whose
+  // path matches its persisted header cwd (the same iterate-and-try pattern
+  // as S2.2 — dsh-workspace `attachSession` validates cwd vs path and throws
+  // on mismatch, so mismatches fall through). Best-effort: skip silently on
+  // zero or ambiguous (2+) live hosts (warn on the ambiguous case); on
+  // no-match/all-throw log a WARN and never crash. Runs only when the
+  // workspaceRegistry service is available (optional seam).
+  const repairHostWorkspaceAttach = async (): Promise<void> => {
+    const registry = ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
+    if (registry?.list === void 0) return
+    const live: HostEntry[] = []
+    for (const entry of hosts.values()) if (entry.retired !== true) live.push(entry)
+    if (live.length !== 1) {
+      if (live.length > 1) ctx.logger.warn(`[deepartments] host attach repair: skipped (${live.length} live host entries — exactly one required)`)
+      return
+    }
+    const sessionId = live[0].sessionId
+    try {
+      const workspaceList = await registry.list()
+      for (const workspace of workspaceList) {
+        if (typeof workspace?.attachSession !== 'function') continue
+        try {
+          await workspace.attachSession(sessionId)
+          ctx.logger.info(`[deepartments] host attach repair: attached ${sessionId}`)
+          return
+        } catch {
+          // cwd mismatch / unvalidatable header / attach fault — try the next entity.
+        }
+      }
+      ctx.logger.warn(`[deepartments] host attach repair: no workspace matched session ${sessionId} (its header cwd has no owning workspace) — the host stays invisible in the sidebar`)
+    } catch (error) {
+      ctx.logger.warn(`[deepartments] host attach repair failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  hostsLoaded.then(() => { void repairHostWorkspaceAttach() }, () => { void repairHostWorkspaceAttach() })
 
   // Best-effort cold load of the persisted per-member read cursors (Batch D).
   // A fresh/missing file (ENOENT) → empty map: every member starts as a FRESH
