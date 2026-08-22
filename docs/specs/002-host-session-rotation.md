@@ -126,15 +126,25 @@ points at the new member id.
 
 ### 3.2 The server-side session creation — which ctx/API
 
-**`ctx.get('sessions').create(undefined, { seed, meta: { cwd, createdAt, seedLength } })`**
-— the plugin already reaches the sessions store via `ctx.get('sessions')` (invoke.ts:1516,
-2081; the `SessionStore.create(id?, options?: CreateSessionOptions)` shape with `{ seed,
-meta }` per `explore-deep/2026-08-16-plugin-api-map.md`). This is the same store the host
-apiproxy's `sessions.create` RPC drives (dsh-host-apiproxy lib/index.js:2495-2544 →
-`ensureSession`), so the plugin calls the **canonical service directly, in-process**. The new
-session's `meta.cwd = <old session's cwd>` (its workspace path) attributes it to the same
-workspace (the workspace registry indexes live sessions by cwd header, `dsh-workspace`
-lib/index.js:704-708) and `meta.seedLength = seed.length`. `createdAt` set to now.
+**`ctx.get('sessionPersistence')` — `create({ id, version: 0, createdAt, cwd, seedLength,
+delegationDepth: 0 })` + `append(id, seed)` (FIX 1 — amended 2026-08-22).** The seed is
+persisted via the **dsh-session-persistence coordinator** (the `sessionPersistence` service),
+NOT the live sessions store: `create` registers DETACHED lazy metadata (cursor 0, no artifact,
+no store attach — dsh-session-persistence lib/index.js:802-816) and `append` seq-validates and
+materializes the artifact (lib:824-840), so the new session is written **COLD to disk** and is
+NEVER attached to `ctx.sessions`. The earlier choice (`ctx.get('sessions').create(undefined,
+{ seed, meta })`, the `SessionStore.create` shape per `explore-deep/2026-08-16-plugin-api-map.md`)
+was the root cause of the session-6e49895c… incident (2026-08-22 16:19:52 UTC): it attached the
+session IN-MEMORY **without an agent** (attached-but-agentless), and every later resume then
+hit the persistence live-guard `cannot prepare session "<id>" while it is live`
+(dsh-session-persistence lib:849-863/852) — the registered host never woke. Full analysis:
+`.dsh/reports/explore-deep/2026-08-22-rotation-resume-live-race.md` (FIX 1, §4). The resumed
+path (`agents.resume` → `persistence.prepare` → `Session.fromRestore`) is contractually COLD,
+so S2 must hand it a COLD artifact. The new session's meta `cwd = <old session's cwd>` (its
+workspace path) attributes it to the same workspace and `seedLength = seed.length`; `createdAt`
+set to now; `delegationDepth: 0`. The artifact header the jsonl backend writes is identical to
+the pre-incident shape (`{"type":"session","version":0,...,"seedLength":4,"delegationDepth":0}`
+— `toHeaderLine`, dsh-session-persistence-jsonl lib:36-47).
 
 - No client-side creation. The client only OPENS the server-created id (§6) — kills the
   duplicate-blank race and the "client-created session is not the registered host" hazard.
@@ -168,10 +178,15 @@ Let `oldId = sessionId` (the current host), `oldHostId = host-<oldId>`,
    `host-<oldId>` → `host-<newId>` (room unchanged). MUST precede S3's persist so a crash
    can never leave hosts.json pointing at a member whose journal file does not exist (the
    wake pack reads `readWakeJournalKpi(journalPath)` at pack assembly).
-4. **S2 (NEW)** create the new session (§3.2): `const newSession = ctx.get('sessions')
-   .create(undefined, { seed: buildRotationSeed(reKeyedJournal), meta: { cwd: workspacePath,
-   createdAt: Date.now(), seedLength: seed.length } })` → `newSessionId = newSession.id`
-   (session store merges it into the list immediately, runtime 8146-8184).
+4. **S2 (NEW — FIX 1, amended 2026-08-22)** seed the new session COLD via the persistence
+   seam (§3.2): `await ctx.get('sessionPersistence').create({ id: newSessionId, version: 0,
+   createdAt: Date.now(), cwd: workspacePath, seedLength: seed.length, delegationDepth: 0 })`
+   then `await ctx.get('sessionPersistence').append(newSessionId, buildRotationSeed(
+   reKeyedJournal))` → `newSessionId` is the pre-minted id. The session is persisted to disk
+   and is **NOT** entered in the in-memory store — the previous sentence "session store merges
+   it into the list immediately" described the poison state (attached-but-agentless → the
+   resume live-guard) and is revoked by FIX 1 (incident session-6e49895c…, 2026-08-22
+   16:19:52 UTC; see §3.2).
 5. **S2.5 (NEW, D1) — SERVER-SIDE ARCHIVE of the old session**:
    `await ctx.get('workspaceRegistry').archiveSession(oldId)`.
    - This is the **exact canonical API**: `dsh-workspace`'s `WorkspaceRegistry` (service name
@@ -273,9 +288,14 @@ per-entry; pick one and validate it.
 
 - Crash between S1.5b and S2.5: an orphan re-keyed journal file `host-<newId>.md` exists,
   referenced by nothing — harmless; the next rotation uses a fresh id; optionally swept.
-- Crash between S2 and S2.5: an unregistered (freshly-seeded) session exists in the store —
-  harmless; the client may show it as a blank; no hosts.json reference; old host NOT yet
-  archived (still the live host — correct).
+- Crash between S2 and S2.5: a freshly-seeded **COLD artifact** exists (persistence.create/
+  append landed, nothing live, no hosts.json reference; old host still the live host — correct).
+  Amendment 2026-08-22 (FIX 1): the previous row said a "freshly-seeded session exists in the
+  store — harmless", but that in-store state was exactly the POISON — attached-but-agentless →
+  every later resume hit the live-guard (incident session-6e49895c…, 2026-08-22 16:19:52 UTC;
+  `.dsh/reports/explore-deep/2026-08-22-rotation-resume-live-race.md`). With the cold seed the
+  crash window holds only harmless garbage (an orphan artifact + re-keyed journal); the next
+  rotation uses a fresh id.
 - Crash between S2.5 and S3: old host archived but hosts.json still points at it — **the wake
   resume would target an archived session**. ❓ This is the one real hazard window: the gate
   would inject the pack into a session the client cannot select (archived). Mitigations: (a)
@@ -400,7 +420,7 @@ S2.5); no CSS hash patches (`.hHd-Xa_newSession` dropped per G1); no shadow (D1)
 
 | # | Surface | Impact under rotation | Mitigation / disposition |
 |---|---|---|---|
-| C1 | **Wake resume** | Resume targets hosts.json `sessionId` — now the NEW id; nothing resumes the old session. Old tab's first message = plain session (no pack) by gate | Gate unchanged; retired-skip added (§4); tests T2/T4/T6 |
+| C1 | **Wake resume** | Resume targets hosts.json `sessionId` — now the NEW id; nothing resumes the old session. Old tab's first message = plain session (no pack) by gate. Amendment 2026-08-22 (FIX 1): S2 now persists the seed via the **dsh-session-persistence seam (cold artifact; no in-memory store attach)** BECAUSE the live-store attach is the poison state (attached-but-agentless → resume live-guard `cannot prepare session … while it is live` — incident session-6e49895c…, 2026-08-22 16:19:52 UTC; `.dsh/reports/explore-deep/2026-08-22-rotation-resume-live-race.md`). Resume stays the pure cold path: `prepare` → `preparedSession` → `Session.fromRestore` (which re-derives `session/end-seed`) | Gate unchanged; retired-skip added (§4); S2 persistence seam (§3.2); tests T2/T4/T6 + the cold-seed regression (no store attach) |
 | C2 | **Old artifact + journal preservation (G4/D2)** | Server archive touches only the workspace registry state; `archiveSession` does NOT touch the artifact; pre-rotation copy made at S2.7; ALL retired sessions kept in full, no cap | Verified from dsh-workspace code; T3/T7 assert byte-identity |
 | C3 | **Subagent `parentSession` references** | Existing children still reference `oldId`; their send_message/notices target the retired+archived parent → parked/unwaked | ❓ Remaining owner item (R-Q5): orphan-sweep vs park; document behavior |
 | C4 | **Pending-notice / shutdown-notice targeting** (smart-restart) | Notices after rotation target the NEW session (correct); pre-rotation pending notices addressed to the old session are lost/hidden | Acceptable (sleep boundary = notice boundary); flag in ROADMAP |

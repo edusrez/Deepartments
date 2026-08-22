@@ -12,18 +12,25 @@
 // rotatedTo/previousSessionId + `schemaVersion` marker with load validation).
 //
 // Design notes (spec-mapped):
-//   * The NEW session id is PRE-MINTED (`session-<uuid>`) before the store call
-//     so the re-keyed journal (S1.5b) can name `host-<newId>` BEFORE the
-//     session exists — the ordering the spec's crash-window table requires
-//     (the journal file must exist before hosts.json can name the member). The
-//     spec §3.2 wrote `create(undefined, …)` (store-minted id); passing the
-//     pre-minted id to `create(id, …)` keeps every §3.3 step + invariant intact
-//     and makes the invariant STRICTER (journal precedes the session). See the
-//     report's deviation note.
+//   * The NEW session id is PRE-MINTED (`session-<uuid>`) before the
+//     persistence call (S2) so the re-keyed journal (S1.5b) can name
+//     `host-<newId>` BEFORE the session exists — the ordering the spec's
+//     crash-window table requires (the journal file must exist before
+//     hosts.json can name the member). The spec §3.2 wrote
+//     `ctx.get('sessions').create(undefined, …)` (store-minted id); FIX 1
+//     (see .dsh/reports/explore-deep/2026-08-22-rotation-resume-live-race.md —
+//     the session-6e49895c… incident, 2026-08-22 16:19:52 UTC) persists the
+//     seed via the dsh-session-persistence seam with the pre-minted id, which
+//     keeps every §3.3 step + invariant intact and makes the invariant
+//     STRICTER: the artifact is written COLD — the new session is NEVER
+//     attached to `ctx.sessions` (the attached-but-agentless store state is
+//     the poison that made every later resume hit the live-guard `cannot
+//     prepare session "<id>" while it is live`).
 //   * `runHostRotation` is DI so the crash windows are unit-testable without
-//     the real Loader: create failure / missing sessions → `{rotated:false}`
-//     (invoke.ts then runs the LEGACY in-place path); archive + artifact-copy
-//     failures are NON-FATAL (the hosts.json retire still commits).
+//     the real Loader: seed-persist failure / missing persistence seam →
+//     `{rotated:false}` (invoke.ts then runs the LEGACY in-place path);
+//     archive + artifact-copy failures are NON-FATAL (the hosts.json retire
+//     still commits).
 //   * Never truncates, never deletes: the old artifact + old journal stay
 //     byte-identical (G4/D2); the archive registry only hides, the archive dir
 //     copy only copies.
@@ -303,12 +310,19 @@ export async function copyOldArtifactToArchive(opts: { sessionsRoot: string; old
   }
 }
 
-/** The sessions-store seam (dsh-session SessionStore.create), structurally
- * widened so BOTH the live store and the unit-test stub satisfy it; the
- * rotation call passes a pre-minted id + { seed, meta } (checked loosely —
- * the actual seed/header validation happens inside the store). */
-export interface RotationSessionsLike {
-  create(id?: unknown, options?: unknown): { id: string }
+/** The session-persistence seam (dsh-session-persistence coordinator
+ * `create`/`append`), structurally narrowed so the plugin never hard-depends
+ * on the package (mirrors dsh-session-persistence lib/index.js:802-840).
+ * `create` registers DETACHED lazy metadata (`states.set`, cursor 0, NO
+ * artifact, NO live store attach — the session stays COLD); `append`
+ * seq-validates against the cursor and materializes the artifact. This is the
+ * same service the RESUME path reads (`prepare` → live-guard at
+ * dsh-session-persistence lib/index.js:852: a session already in
+ * `ctx.sessions` is rejected as "while it is live"), so S2 must write the
+ * seed here and NEVER via the live sessions store. */
+export interface RotationPersistenceLike {
+  create(meta: { id: string; version?: number; createdAt: number; cwd?: string; seedLength?: number; delegationDepth?: number }): Promise<unknown>
+  append(id: string, events: unknown[]): Promise<unknown>
 }
 
 /** Logger seam for runHostRotation. */
@@ -333,8 +347,10 @@ export interface RotationDeps {
   workspacePath: string
   /** The old session's seq at the boundary (S3 new-entry boundarySeq). */
   boundarySeq?: number
-  /** The sessions store (S2). Absent → rotation cannot run (legacy fallback). */
-  sessions: RotationSessionsLike | undefined
+  /** The session-persistence seam (S2 — FIX 1: cold seed). Absent or partial
+   * (missing create/append) → rotation cannot run (legacy fallback). The
+   * new session is persisted COLD and is NEVER store-attached. */
+  persistence?: RotationPersistenceLike
   /** The workspace registry (S2.5). Absent → non-fatal, logged. */
   workspaceRegistry?: WorkspaceRegistryLike
   /** The state-home sessions root (S2.7 artifact search). */
@@ -354,8 +370,8 @@ export interface RotationDeps {
 
 /** Outcome of one rotation attempt. `rotated:false` → invoke.ts runs the
  * LEGACY in-place path (the only fallback trigger: S1.5b write failure or S2
- * create failure / missing sessions — crash windows §3.6). Archive + copy
- * failures never make the rotation fail (non-fatal). */
+ * seed-persist failure / missing persistence seam — crash windows §3.6).
+ * Archive + copy failures never make the rotation fail (non-fatal). */
 export type HostRotationOutcome =
   | {
     rotated: true
@@ -389,7 +405,9 @@ async function writeJournalAtomic(journalPath: string, content: string): Promise
  * S6/S8 — wakePackInjected bookkeeping + concludeTurn — stay in invoke.ts):
  *
  *   S1.5b write the re-keyed journal `journals/host-<newId>.md` (atomic),
- *   S2    create the new session seeded with `buildRotationSeed(reKeyed)`,
+ *   S2    persist the new session seed via the dsh-session-persistence seam
+ *         (`create` detached metadata + `append` the seed artifact — the
+ *         session stays COLD, never store-attached; FIX 1),
  *   S2.5  server-side archive of the old session (non-fatal, D1),
  *   S2.7  evidence COPY of the old artifact (best-effort, D2),
  *   S3/S7 rotate hosts.json (old retired + new live, single persistHosts).
@@ -397,7 +415,9 @@ async function writeJournalAtomic(journalPath: string, content: string): Promise
  * Ordering guarantees (crash windows §3.6): the re-keyed journal exists before
  * any hosts.json persist names the member; the archive resolves BEFORE the
  * hosts.json rotation (one-await window); after S2 succeeds the rotation never
- * silently falls back (a stray seeded session is harmless garbage).
+ * silently falls back (a stray COLD artifact — no live attachment — plus the
+ * re-keyed journal is harmless garbage; the attached-but-agentless store
+ * state is exactly what FIX 1 eliminates).
  */
 export async function runHostRotation(deps: RotationDeps): Promise<HostRotationOutcome> {
   const now = deps.now ?? Date.now
@@ -422,23 +442,36 @@ export async function runHostRotation(deps: RotationDeps): Promise<HostRotationO
     return { rotated: false, reason: `re-keyed journal write failed: ${error instanceof Error ? error.message : String(error)}` }
   }
 
-  // S2 — server-side session creation (§3.2). THE fallback trigger: a missing
-  // sessions store or a failing create returns {rotated:false} — invoke.ts then
-  // runs the legacy in-place path with a loud log.
-  if (deps.sessions?.create === void 0) {
-    return { rotated: false, reason: "sessions store unavailable (no ctx.get('sessions'))" }
+  // S2 — COLD server-side session seed (spec §3.2, FIX 1). THE fallback
+  // trigger: a missing/partial persistence seam or a failing create/append
+  // returns {rotated:false} — invoke.ts then runs the legacy in-place path
+  // with a loud log. The seed is persisted via the dsh-session-persistence
+  // seam (`create` registers detached lazy metadata at cursor 0 —
+  // dsh-session-persistence lib:802-816; `append` seq-validates and
+  // materializes the artifact — lib:824-840), so the new session is written
+  // to disk COLD and is NEVER attached to ctx.sessions. The later resume
+  // (agents.resume → persistence.prepare) requires exactly that: its
+  // live-guard rejects any id present in ctx.sessions ("cannot prepare
+  // session … while it is live", lib:849-863/852) — the attached-but-
+  // agentless state the old `ctx.get('sessions').create` manufactured.
+  if (deps.persistence?.create === void 0 || deps.persistence?.append === void 0) {
+    return { rotated: false, reason: "persistence seam unavailable (no ctx.get('sessionPersistence'))" }
   }
   const seed = buildRotationSeed(reKeyed)
-  let created: { id: string }
   try {
-    created = deps.sessions.create(newSessionId, {
-      seed,
-      meta: { cwd: deps.workspacePath, createdAt: now(), seedLength: seed.length }
+    await deps.persistence.create({
+      id: newSessionId,
+      version: 0,
+      createdAt: now(),
+      cwd: deps.workspacePath,
+      seedLength: seed.length,
+      delegationDepth: 0
     })
+    await deps.persistence.append(newSessionId, seed)
   } catch (error) {
     return { rotated: false, reason: `session create failed: ${error instanceof Error ? error.message : String(error)}` }
   }
-  const actualSessionId = created?.id ?? newSessionId
+  const actualSessionId = newSessionId
 
   // S2.5 — SERVER-SIDE ARCHIVE of the old session (D1). NON-FATAL: a registry
   // miss or a failing call logs loudly and the rotation still commits the

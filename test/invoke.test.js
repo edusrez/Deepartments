@@ -199,10 +199,26 @@ class StubAgents extends Service {
   }
 }
 
-/** Stub persistence: author enough of a resolved session to cold-resume. */
+/** Stub persistence: author enough of a resolved session to cold-resume, and
+ * (FIX 1 — the rotation cold-seed seam) RECORD the S2 `create`/`append` calls
+ * as spies so the real-Loader rotation can run (no real artifact backend is
+ * needed — the rotation unit tests cover artifact shape; here the point is
+ * that the seed landed via the persistence seam and NOT in the live store). */
 class StubPersistence extends Service {
   constructor(ctx) {
     super(ctx, 'sessionPersistence')
+    this.createCalls = []
+    this.appendCalls = []
+  }
+
+  /** S2 `persistence.create(meta)` — detached lazy metadata (spy). */
+  async create(meta) {
+    this.createCalls.push(meta)
+  }
+
+  /** S2 `persistence.append(id, events)` — the seed artifact (spy). */
+  async append(id, events) {
+    this.appendCalls.push({ id, events })
   }
 
   async inspect(childId) {
@@ -2660,7 +2676,7 @@ test('Batch W2 dept_memo_write: identity+cursor block — HOST wake_counter stay
 
 test('Batch 7 U2 host dept_sleep ROTATES: no journal rejects loudly; with a journal the old session is retired + archived, a NEW session (seeded with the re-keyed journal) becomes the registered host, hosts.json rotates (schemaVersion 2), the old artifact/journal stay byte-identical, and the wake pack targets ONLY the new host (retired-skip gate) + concludes the turn', async () => {
   await withTempStateDir(async (stateDir) => {
-    const { root, agents, pluginCtx, workspaceRegistry, dispose } = await bootPlugin(stateDir)
+    const { root, agents, pluginCtx, persistence, workspaceRegistry, dispose } = await bootPlugin(stateDir)
     try {
       await waitForRooms(root)
       const host = agents.put(fakeParentAgent())
@@ -2723,26 +2739,39 @@ test('Batch 7 U2 host dept_sleep ROTATES: no journal rejects loudly; with a jour
       assert.equal(hostsFile[oldHostId].webUiCleanupPending, undefined, 'S4: rotation never sets webUiCleanupPending')
       assert.equal(hostsFile[oldHostId].deferredJournalSeed, undefined, 'S5: rotation never sets deferredJournalSeed')
       // New entry: live with the rotation markers.
-      assert.match(hostsFile[newHostId].sessionId, /^session-/, 'new entry sessionId is the NEW session id (assert via the store below)')
+      assert.match(hostsFile[newHostId].sessionId, /^session-/, 'new entry sessionId is the NEW session id (asserted cold below)')
       assert.equal(hostsFile[newHostId].previousSessionId, oldSessionId, 'new entry traces the previous (retired) session')
       assert.ok(typeof hostsFile[newHostId].sleepEpoch === 'number', 'durable sleepEpoch on the new entry (S7)')
       assert.equal(hostsFile[newHostId].webUiCleanupPending, undefined, 'S4: no cleanup marker on the new entry either')
       assert.equal(hostsFile[newHostId].deferredJournalSeed, undefined, 'S5: no deferred seed on the new entry (the session IS the journal)')
 
-      // The new session id is what the store minted/registered: verify against
-      // the REAL sessions store (S2 created it server-side).
+      // FIX 1 — the rotated session is persisted COLD: it is NEVER entered in
+      // the live sessions store (the attached-but-agentless state the old
+      // `ctx.get('sessions').create` manufactured made every later resume hit
+      // the persistence live-guard "cannot prepare session … while it is
+      // live" — incident session-6e49895c…, 2026-08-22 16:19:52 UTC), and the
+      // seed landed via the dsh-session-persistence seam (create → detached
+      // metadata; append → the seed artifact).
       const newSessionId = hostsFile[newHostId].sessionId
-      const freshSession = root.sessions.get(SessionId(newSessionId))
-      assert.ok(freshSession !== undefined, 'the rotated session is in the REAL sessions store (S2)')
-      assert.equal(freshSession.id, newSessionId)
-      assert.ok(!freshSession.events.some((ev) => ev.type === 'turn/start'), 'the seeded session is BLANK (no turn/start — native "New Session" row)')
-      assert.equal(freshSession.surface.nodes.length, 1, 'the seeded session surface is the single journal node')
-      const freshDerived = freshSession.deriveMessages()
-      assert.equal(freshDerived.length, 1)
-      assert.equal(freshDerived[0].source.kind, 'plugin', 'seeded journal framed as plugin context')
-      assert.match(freshDerived[0].content[0].text, new RegExp(`^author: ${newHostId}$`, 'm'), 'seeded journal is the RE-KEYED journal (author host-<newId>)')
-      assert.match(freshDerived[0].content[0].text, /^wake_counter: 2$/m, 'seeded journal carries the BUMPED ordinal')
-      assert.ok(freshDerived[0].content[0].text.includes(journalSummary), 'seeded journal carries the summary body')
+      assert.equal(root.sessions.get(SessionId(newSessionId)), undefined, 'FIX 1: the rotated session is COLD — not in the LIVE sessions store')
+      assert.equal(persistence.createCalls.length, 1, 'exactly one persistence.create call (the detached seed metadata)')
+      assert.equal(persistence.appendCalls.length, 1, 'exactly one persistence.append call (the seed artifact)')
+      const createMeta = persistence.createCalls[0]
+      assert.equal(createMeta.id, newSessionId, 'create meta carries the pre-minted session id')
+      assert.equal(createMeta.version, 0, 'create meta carries header version 0')
+      assert.ok(typeof createMeta.createdAt === 'number' && createMeta.createdAt > 0, 'create meta carries createdAt (now)')
+      assert.ok(typeof createMeta.cwd === 'string' && createMeta.cwd !== '', 'create meta carries the workspace path (old session header cwd / process cwd)')
+      assert.equal(createMeta.seedLength, 4, 'create meta seedLength = the 4-event rotation seed')
+      const appended = persistence.appendCalls[0]
+      assert.equal(appended.id, newSessionId, 'append targets the pre-minted id')
+      assert.deepEqual(appended.events.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message'], 'append carries the rotation seed events')
+      appended.events.forEach((ev, i) => assert.equal(ev.seq, i, `seed seq ${ev.seq} contiguous at index ${i}`))
+      assert.ok(!appended.events.some((ev) => ev.type === 'turn/start'), 'the seeded artifact is BLANK (no turn/start — native "New Session" row)')
+      const journalNode = appended.events.find((ev) => ev.type === 'user/message')
+      assert.equal(journalNode.data.source.kind, 'plugin', 'seeded journal framed as plugin context')
+      assert.match(journalNode.data.content[0].text, new RegExp(`^author: ${newHostId}$`, 'm'), 'seeded journal is the RE-KEYED journal (author host-<newId>)')
+      assert.match(journalNode.data.content[0].text, /^wake_counter: 2$/m, 'seeded journal carries the BUMPED ordinal')
+      assert.ok(journalNode.data.content[0].text.includes(journalSummary), 'seeded journal carries the summary body')
 
       // (a) The OLD on-disk journal is byte-identical apart from the bump
       // (wake_counter 1→2 — G4/D2: kept whole as the archive copy).
@@ -2805,13 +2834,15 @@ test('Batch 7 U2 host dept_sleep ROTATES: no journal rejects loudly; with a jour
 
 test('Fix A regression (LEGACY FALLBACK path): when the U2 rotation CANNOT run (session create fails), dept_sleep falls back to the in-place reset — a host dept_sleep cycle leaves NO assistant-less role:tool message on the wake surface; the deferred full-window replace at the next pre-step (over ALL nodes INCLUDING the pending tool result) folds the surface back to the journal, which stays at the FRONT of the wake surface', async () => {
   await withTempStateDir(async (stateDir) => {
-    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    const { root, agents, persistence, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
       await waitForRooms(root)
       // U2: force the LEGACY fallback — the rotation cannot run when the
-      // sessions store rejects the create call (spec 002 §3.6). The plugin
-      // resolves the SAME service instance (ctx.get('sessions') === root.sessions).
-      root.sessions.create = () => { throw new Error('injected create failure — rotation falls back to the legacy in-place reset') }
+      // session-persistence seam rejects the seed create (spec 002 §3.6; FIX 1
+      // — the rotation no longer calls the live sessions store). The plugin
+      // resolves the SAME service instance
+      // (ctx.get('sessionPersistence') === persistence).
+      persistence.create = () => { throw new Error('injected create failure — rotation falls back to the legacy in-place reset') }
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
       const hostId = `host-${host.id}`
@@ -2970,13 +3001,14 @@ test('Fix wake-12 (LEGACY FALLBACK path): when the U2 rotation CANNOT run, the f
     // Phase A — boot 1: a real dept_sleep persists the seed durably. The U2
     // rotation normally REPLACES this legacy machinery (S4/S5 never set
     // webUiCleanupPending/deferredJournalSeed under rotation), so the test
-    // forces the LEGACY FALLBACK by breaking the sessions store's create —
-    // exactly the "rotation cannot run" case where the legacy path must still
-    // work (spec 002 §3.6/§5).
+    // forces the LEGACY FALLBACK by breaking the session-persistence seam's
+    // seed create (FIX 1 — the rotation no longer calls the live sessions
+    // store) — exactly the "rotation cannot run" case where the legacy path
+    // must still work (spec 002 §3.6/§5).
     const a = await bootPlugin(stateDir)
     try {
       await waitForRooms(a.root)
-      a.root.sessions.create = () => { throw new Error('injected create failure — legacy fallback persists the deferred seed') }
+      a.persistence.create = () => { throw new Error('injected create failure — legacy fallback persists the deferred seed') }
       const hostA = a.agents.put(fakeParentAgent(sessionId))
       await seedJournal(stateDir, hostId, journalSummary)
       // A real dsh Session so the host branch's surface append + deferred
@@ -3810,7 +3842,7 @@ test('Batch W4 dept_wake_snapshot: registers globally (host plane), and ONE call
 
 test('Batch 7 U2 regression: GLOBAL dept_room_who schema declares hosts[].sleeping (A3 — no more copy-paste drift crashing host wake), reports the NEW rotated host as sleeping, and excludes the RETIRED host from "present"', async () => {
   await withTempStateDir(async (stateDir) => {
-    const { root, agents, dispose } = await bootPlugin(stateDir)
+    const { root, agents, persistence, dispose } = await bootPlugin(stateDir)
     try {
       await waitForRooms(root)
       const signal = new AbortController().signal
@@ -3826,6 +3858,21 @@ test('Batch 7 U2 regression: GLOBAL dept_room_who schema declares hosts[].sleepi
       assert.ok(sleepResult.sleepEpoch > 0, 'host slept for the regression test')
       const newHostId = sleepResult.member
       assert.notEqual(newHostId, oldHostId, 'rotation produced a NEW host member')
+
+      // FIX 1 — the NEW rotated host is registered with a sessionId and its
+      // session is COLD (seeded via the persistence seam, never store-attached).
+      await waitFor(async () => {
+        const hostsFile = await readHosts(stateDir)
+        return hostsFile[newHostId]?.sessionId !== undefined
+      }, 5000, 'new host entry persisted with a sessionId')
+      const hostsFile = await readHosts(stateDir)
+      const newSessionId = hostsFile[newHostId].sessionId
+      assert.match(newSessionId, /^session-/, 'the NEW rotated host entry carries a session-<uuid> id')
+      assert.equal(root.sessions.get(SessionId(newSessionId)), undefined, 'FIX 1: the rotated session is COLD — not entered in the live sessions store')
+      assert.equal(persistence.createCalls.length, 1, 'S2 registered the detached seed metadata via the persistence seam')
+      assert.equal(persistence.appendCalls.length, 1, 'S2 appended the seed artifact via the persistence seam')
+      assert.equal(persistence.createCalls[0].id, newSessionId, 'persistence.create targets the pre-minted id')
+      assert.equal(persistence.appendCalls[0].id, newSessionId, 'persistence.append targets the pre-minted id')
 
       const who = root.tools.get('dept_room_who')
       const result = await who.execute({ room: 'board' }, { agent: host, signal })

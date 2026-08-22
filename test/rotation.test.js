@@ -3,11 +3,16 @@
 // §3.2/§3.3/§3.5/§3.6. Pure unit tests over lib/session-rotation.js: seed
 // shape + contiguity + cold-boot (T1), re-key (D3/T3), hosts.json rotation
 // entries + schemaVersion validation (D4), the archive wrapper, the S2.7 copy,
-// and the crash windows (§3.6: create fails → {rotated:false} (the legacy
-// fallback trigger); archive fails → non-fatal; rotation commits before it
-// resolves — concludeTurn ordering is invoke-side). The retired-skip WAKE GATE
-// itself is one invoke.ts line; its behavior is covered by the integration
-// pre-step tests in invoke.test.js (where the real Loader lives).
+// and the crash windows (§3.6: seed-persist failure → {rotated:false} (the
+// legacy fallback trigger); archive fails → non-fatal; rotation commits before
+// it resolves — concludeTurn ordering is invoke-side). FIX 1 (the
+// session-6e49895c… incident, 2026-08-22 16:19:52 UTC — see
+// .dsh/reports/explore-deep/2026-08-22-rotation-resume-live-race.md): S2
+// persists the seed via the dsh-session-persistence seam (COLD artifact; NO
+// live sessions-store attach — the attached-but-agentless state made every
+// later resume hit the live-guard). The retired-skip WAKE GATE itself is one
+// invoke.ts line; its behavior is covered by the integration pre-step tests
+// in invoke.test.js (where the real Loader lives).
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -276,7 +281,8 @@ function rotationHarness(dir, overrides = {}) {
   const hostForSession = new Map([[oldSessionId, oldHostId]])
   const log = logger()
   const state = {
-    created: [],
+    persistenceCreated: [],
+    persistenceAppended: [],
     persisted: 0,
     hosts,
     hostForSession,
@@ -290,8 +296,12 @@ function rotationHarness(dir, overrides = {}) {
     journalsDir: path.join(dir, 'journals'),
     workspacePath: '/root',
     boundarySeq: 42,
-    sessions: {
-      create(id, options) { state.created.push({ id, options }); return { id } }
+    // FIX 1 — the dsh-session-persistence seam (cold seed): `create` records
+    // the detached metadata, `append` records the exact seed events. NO live
+    // sessions-store stub — the rotation path must not have one at all.
+    persistence: {
+      create: async (meta) => { state.persistenceCreated.push(meta) },
+      append: async (id, events) => { state.persistenceAppended.push({ id, events }) }
     },
     workspaceRegistry: { archiveSession: async () => undefined },
     sessionsRoot: path.join(dir, 'sessions'),
@@ -312,25 +322,29 @@ async function authorFakeArtifact(sessionsRoot, sessionId) {
   await writeFile(stored, Buffer.from('FAKE-ARTIFACT'))
 }
 
-test('U2 §3.6 crash window: create failure → {rotated:false} + no hosts.json mutation (the LEGACY FALLBACK trigger)', async () => {
+test('U2 §3.6 crash window: seed-persist failure → {rotated:false} + no hosts.json mutation (the LEGACY FALLBACK trigger)', async () => {
   await withTempDir(async (dir) => {
     const { deps, state } = rotationHarness(dir, {
-      sessions: { create() { throw new Error('injected store failure') } }
+      persistence: {
+        create: async () => { throw new Error('injected store failure') },
+        append: async () => undefined
+      }
     })
     const outcome = await runHostRotation(deps)
     assert.equal(outcome.rotated, false)
     assert.match(outcome.reason, /session create failed: injected store failure/)
+    assert.equal(state.persistenceCreated.length, 0, 'create recorded nothing (the call threw)')
     assert.equal(state.hosts.size, 1, 'hosts map untouched (old entry only)')
     assert.equal(state.hosts.get(deps.oldHostId).retired, undefined, 'old entry NOT retired')
     assert.equal(state.persisted, 0, 'persistHosts never called on the failure path')
   })
 })
 
-test('U2 §3.6 crash window: missing sessions store → {rotated:false} (fallback), and a re-key failure is also a clean fallback', async () => {
+test('U2 §3.6 crash window: missing persistence seam → {rotated:false} (fallback), and a re-key failure is also a clean fallback', async () => {
   await withTempDir(async (dir) => {
-    const missing = await runHostRotation(rotationHarness(dir, { sessions: undefined }).deps)
+    const missing = await runHostRotation(rotationHarness(dir, { persistence: undefined }).deps)
     assert.equal(missing.rotated, false)
-    assert.match(missing.reason, /sessions store unavailable/)
+    assert.match(missing.reason, /persistence seam unavailable/)
     const badJournal = rotationHarness(dir, { seededJournal: 'no frontmatter here\n' })
     const bad = await runHostRotation(badJournal.deps)
     assert.equal(bad.rotated, false)
@@ -350,7 +364,7 @@ test('U2 D1 §3.6: ARCHIVE failure is NON-FATAL — the rotation still commits (
     assert.equal(outcome.archive.ok, false)
     assert.match(outcome.archive.reason, /registry down/)
     assert.equal(state.log.calls.error.length, 1, 'archive failure logged loudly')
-    // S2 still created the new session; S3/S7 rotated hosts.
+    // S2 still seeded the new session COLD (persistence seam); S3/S7 rotated hosts.
     const newHostId = outcome.newHostId
     assert.equal(state.hosts.get(newHostId).sessionId, outcome.newSessionId, 'new live entry registered')
     assert.equal(state.hosts.get(newHostId).sleepEpoch, 1787000000000, 'durable sleepEpoch on the new entry (S7)')
@@ -398,14 +412,29 @@ test('U2 §3.3/S8: the rotation COMMITS (journals + hosts.json) before it resolv
     const oldJournal = await readFile(path.join(deps.journalsDir, `${deps.oldHostId}.md`), 'utf8')
     assert.equal(oldJournal, deps.seededJournal, 'OLD journal file byte-identical (bump only, archive copy — G4/D2)')
 
-    // S2 — the new session was created with the contiguous seed + header meta.
-    assert.equal(state.created.length, 1, 'exactly one session created')
-    const [created] = state.created
-    assert.equal(created.id, newSessionId, 'pre-minted id used')
-    assert.equal(created.options.meta.cwd, '/root', 'workspace path attributed')
-    assert.equal(created.options.meta.seedLength, created.options.seed.length)
-    assert.deepEqual(created.options.seed.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message'])
-    assert.equal(created.options.seed[3].data.content[0].text, journalText, 'seed journal node carries the re-keyed journal')
+    // S2 — FIX 1: the new session is seeded COLD via the persistence seam.
+    // `create` registered the DETACHED metadata (cursor 0, no artifact, no
+    // live-store attach); `append` persisted the exact buildRotationSeed
+    // events. Regression (a): create meta carries the pre-minted id + all
+    // header fields; append carries the exact seed of the re-keyed journal.
+    assert.equal(state.persistenceCreated.length, 1, 'exactly one persistence.create call')
+    assert.equal(state.persistenceAppended.length, 1, 'exactly one persistence.append call')
+    const [createdMeta] = state.persistenceCreated
+    assert.equal(createdMeta.id, newSessionId, 'pre-minted id used')
+    assert.equal(createdMeta.version, 0, 'header version 0')
+    assert.equal(createdMeta.createdAt, 1787000000000, 'createdAt from the clock seam')
+    assert.equal(createdMeta.cwd, '/root', 'workspace path attributed')
+    assert.equal(createdMeta.seedLength, 4, 'seedLength = the seed event count')
+    assert.equal(createdMeta.delegationDepth, 0, 'fresh host seed has delegation depth 0')
+    const [appended] = state.persistenceAppended
+    assert.equal(appended.id, newSessionId, 'append targets the pre-minted id')
+    assert.deepEqual(appended.events.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message'])
+    appended.events.forEach((ev, i) => assert.equal(ev.seq, i, `seed seq ${ev.seq} contiguous at index ${i}`))
+    assert.equal(appended.events[3].data.content[0].text, journalText, 'seed journal node carries the re-keyed journal')
+    // Regression (c) — NO live sessions-store dependency on the rotation path:
+    // the artifact is written cold (a later resume restores it via
+    // persistence.prepare); nothing may ever store-attach the session here.
+    assert.equal(deps.sessions, undefined, 'rotation deps carry no sessions-store seam (FIX 1 — the resume live-guard can never fire for the new id)')
 
     // S3/S7 — hosts.json records committed BEFORE resolve (persist called).
     assert.ok(state.persisted >= 1, 'commit happens before the outcome resolves (concludeTurn ordering is invoke-side)')

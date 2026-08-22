@@ -126,6 +126,7 @@ import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { emitRoomRecord, roomSessionId, setBoardRecordListener, setRoomCompactionResetter } from './org.js'
 import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './session-cleanup.js'
 import { runHostRotation, validateHostsRotationFile, ROTATION_SCHEMA_VERSION } from './session-rotation.js'
+import type { RotationPersistenceLike } from './session-rotation.js'
 import type { Config, CoordinatorConfig, DepartmentConfig, RoomState } from './org.js'
 import { loadRecords, resolveBoardPath } from './board-store.js'
 import type { BoardRecord, MessagePayload } from './board-store.js'
@@ -4473,7 +4474,12 @@ export function applyInvoke(ctx: Context, config: Config) {
         const boundarySeqAtSleep = (agent.session as { seq?: number } | undefined)?.seq ?? hosts.get(hostId)?.boundarySeq
         // Resolve the state-home sessions root + evidence archive dir exactly
         // like the boot cleanup hook (sessionPersistence.root ?? `../sessions`).
-        const deptSleepPersistence = ctx.get('sessionPersistence') as { root?: string } | undefined
+        // FIX 1: the SAME persistence service also feeds the rotation's S2
+        // cold-seed seam (create/append — dsh-session-persistence), so the new
+        // host session is written to disk WITHOUT ever being attached to
+        // ctx.sessions (the attached-but-agentless poison state; the resume
+        // live-guard). Optional — the rotation falls back when absent.
+        const deptSleepPersistence = ctx.get('sessionPersistence') as (RotationPersistenceLike & { root?: string }) | undefined
         const deptSleepSessionsRoot = typeof deptSleepPersistence?.root === 'string' && deptSleepPersistence.root !== ''
           ? deptSleepPersistence.root
           : path.join(config.stateDir, '..', 'sessions')
@@ -4485,7 +4491,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           journalsDir: path.join(config.stateDir, 'journals'),
           workspacePath: (agent.session?.header as { cwd?: string } | undefined)?.cwd ?? process.cwd(),
           boundarySeq: boundarySeqAtSleep,
-          sessions: ctx.get('sessions'),
+          persistence: deptSleepPersistence,
           workspaceRegistry: ctx.get('workspaceRegistry'),
           sessionsRoot: deptSleepSessionsRoot,
           archiveDir: path.join(path.dirname(deptSleepSessionsRoot), 'archive'),
@@ -4509,9 +4515,9 @@ export function applyInvoke(ctx: Context, config: Config) {
           return { room: existing?.roomId ?? 'board', member: rotation.newHostId, memoPath: rotation.newJournalPath, sleepEpoch: rotation.sleepEpoch }
         }
         // FALLBACK — the legacy IN-PLACE path, reachable ONLY when the rotation
-        // cannot run (missing sessions store / a re-key or create failure —
-        // spec §3.6 crash tolerance). Loud log + the pre-rotation behavior
-        // (journal append + deferred fold + webUiCleanupPending) — the
+        // cannot run (missing/partial persistence seam or a re-key / seed-
+        // persist failure — spec §3.6 crash tolerance). Loud log + the pre-rotation
+        // behavior (journal append + deferred fold + webUiCleanupPending) — the
         // machinery stays for hosts that slept under the old plugin (§5).
         ctx.logger.error(`[deepartments] dept_sleep: host session ROTATION could not run (${rotation.reason}); falling back to the legacy in-place reset (journal append + deferred fold + webUiCleanupPending)`)
         // Step 2 — register/refresh the durable host identity. ensureHost is
