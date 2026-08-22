@@ -10,7 +10,8 @@
 //
 // U1 (custom-sidebar removal): the `ui/config` (+`set`) endpoints and their
 // tests were removed with the sidebar; the dispatcher now serves `agents`/`list`
-// only (the kept client roster heartbeat).
+// (the kept client roster heartbeat) plus `host/status` (U3 — the client
+// lifecycle watcher's rotation signal, spec 002 §6.1).
 //
 // Tests run against the compiled lib/ (pnpm build first), same as the other
 // suite files.
@@ -159,6 +160,67 @@ test('dispatchDeepartmentsEndpoint: unknown caller session gets zero unread', as
   assert.equal(result.ok, true)
   const row = result.ok ? result.value.agents.find((r) => r.id === 'research-head') : null
   assert.equal(row.unread, 0)
+})
+
+// --- host/status (U3 client lifecycle watcher RPC, spec 002 §6.1) ------------
+
+test('dispatchDeepartmentsEndpoint: host/status reports the live host + retired entries', async () => {
+  const deps = makeDeps({
+    // Post-rotation hosts.json shape (U2, D4): old entry retired (stays in the
+    // file as evidence), new live entry carries previousSessionId.
+    hosts: [
+      { hostId: 'host-sess-old', sessionId: 'sess-old', roomId: 'board', retired: true, retiredAt: 1787337794152, rotatedTo: 'host-sess-new' },
+      { hostId: 'host-sess-new', sessionId: 'sess-new', roomId: 'board', previousSessionId: 'sess-old' }
+    ],
+    loadHostWakeCounter: async () => 7
+  })
+  const result = await dispatchDeepartmentsEndpoint('host/status', {}, deps)
+  assert.equal(result.ok, true)
+  const value = result.ok ? result.value : null
+  assert.equal(value.hostSessionId, 'sess-new')
+  assert.equal(value.previousSessionId, 'sess-old')
+  assert.deepEqual(value.retired, [{ sessionId: 'sess-old', retiredAt: 1787337794152 }])
+  assert.equal(value.wakeCounter, 7)
+})
+
+test('dispatchDeepartmentsEndpoint: host/status with no registered host → null live + empty retired', async () => {
+  const result = await dispatchDeepartmentsEndpoint('host/status', {}, makeDeps())
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.ok ? result.value : null, { hostSessionId: null, previousSessionId: null, retired: [] })
+})
+
+test('dispatchDeepartmentsEndpoint: host/status omits wakeCounter when the dep is absent or fails', async () => {
+  // No loadHostWakeCounter dep → the field is absent (payload minimal/stable).
+  const noDep = await dispatchDeepartmentsEndpoint('host/status', {}, makeDeps({
+    hosts: [{ hostId: 'host-x', sessionId: 'sess-x', roomId: 'board' }]
+  }))
+  assert.equal(noDep.ok, true)
+  assert.equal(noDep.ok ? noDep.value.hostSessionId : null, 'sess-x')
+  assert.equal('wakeCounter' in (noDep.ok ? noDep.value : {}), false)
+  // A failing read → field absent, dispatcher NEVER throws.
+  const failing = await dispatchDeepartmentsEndpoint('host/status', {}, makeDeps({
+    hosts: [{ hostId: 'host-x', sessionId: 'sess-x', roomId: 'board' }],
+    loadHostWakeCounter: async () => { throw new Error('no journal') }
+  }))
+  assert.equal(failing.ok, true)
+  assert.equal('wakeCounter' in (failing.ok ? failing.value : {}), false)
+})
+
+test('dispatchDeepartmentsEndpoint: host/status with only retired entries → null live + retired list', async () => {
+  const result = await dispatchDeepartmentsEndpoint('host/status', {}, makeDeps({
+    hosts: [
+      { hostId: 'host-sess-a', sessionId: 'sess-a', roomId: 'board', retired: true, retiredAt: 1, rotatedTo: 'host-sess-b' },
+      { hostId: 'host-sess-b', sessionId: 'sess-b', roomId: 'board', retired: true, retiredAt: 2, rotatedTo: 'host-sess-c' }
+    ]
+  }))
+  assert.equal(result.ok, true)
+  const value = result.ok ? result.value : null
+  assert.equal(value.hostSessionId, null)
+  assert.equal(value.previousSessionId, null)
+  assert.deepEqual(value.retired, [
+    { sessionId: 'sess-a', retiredAt: 1 },
+    { sessionId: 'sess-b', retiredAt: 2 }
+  ])
 })
 
 // --- parseClientEnvelope -----------------------------------------------------

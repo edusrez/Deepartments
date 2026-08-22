@@ -814,6 +814,16 @@ export interface HostEntryLike {
   hostId: string
   sessionId: string
   roomId?: string
+  /** U2 (spec 002 §3.5/D4): rotation schema — set on RETIRED old entries (the
+   * entry STAYS in hosts.json as evidence; the wake gate skips it). */
+  retired?: boolean
+  /** U2 (D4): when the entry was retired (ms epoch); required on retired. */
+  retiredAt?: number
+  /** U2 (D4): the `host-<newId>` this retired entry rotated to. */
+  rotatedTo?: string
+  /** U2 (D4): on a LIVE entry created by a rotation — the session id it
+   * rotated FROM (references a retired entry in the same file). */
+  previousSessionId?: string
 }
 
 /** Injected data/closure bundle the PURE endpoint dispatcher reads. The caller
@@ -836,6 +846,67 @@ export interface DeepartmentsEndpointDeps {
    * The board FILE is the cold source of truth and carries MessagePayload.ack,
    * which the folded room projection omits. */
   loadBoardRecords(): Promise<BoardRecord[] | undefined>
+  /** Optional (U3): read the live host's journal wake_counter (number) for the
+   * `host/status` payload. Absent dep → the payload omits wakeCounter (the
+   * payload must stay minimal and stable). Contract: never throws (a read
+   * failure is an omission, never an RPC error). */
+  loadHostWakeCounter?: (hostId: string) => Promise<number | undefined>
+}
+
+/** The `/deepartments host/status` RPC payload (U3, spec 002 §6.1): the CURRENT
+ * registered host session — the live (non-retired) hosts.json entry — plus the
+ * RETIRED entries. Client contract (src/client/index.tsx mirrors it): the
+ * watcher opens ONLY transitions to a DIFFERENT non-null `hostSessionId`;
+ * `retired` is informative (the native sidebar already hides archived rows). */
+export interface HostStatusPayload {
+  /** The current registered host session id, or null when no host is
+   * registered (and no live entry — e.g. only retired entries remain). */
+  hostSessionId: string | null
+  /** The live entry's rotation-source session id; null when absent (legacy
+   * in-place host, or no live entry). */
+  previousSessionId: string | null
+  /** Retired host entries (sessionId + when they were retired), in hosts.json
+   * order (oldest rotation first). */
+  retired: Array<{ sessionId: string; retiredAt: number }>
+  /** The live host's journal wake_counter, when readable; OMITTED otherwise
+   * (the payload stays minimal and stable). */
+  wakeCounter?: number
+}
+
+/** PURE builder of the `host/status` payload — derived from the in-memory host
+ * registry only (no side effects). Empty hosts / no live entry →
+ * `{ hostSessionId: null, previousSessionId: null, retired: [] }`. */
+async function buildHostStatusPayload(deps: DeepartmentsEndpointDeps): Promise<HostStatusPayload> {
+  let live: HostEntryLike | undefined
+  const retired: Array<{ sessionId: string; retiredAt: number }> = []
+  for (const entry of deps.hosts) {
+    if (entry.retired === true) {
+      // The loader validator guarantees retiredAt on retired entries (spec 002
+      // §3.5); the defensive skip keeps the payload shape strict.
+      if (typeof entry.retiredAt === 'number') {
+        retired.push({ sessionId: entry.sessionId, retiredAt: entry.retiredAt })
+      }
+      continue
+    }
+    if (live === undefined) live = entry
+  }
+  const hostSessionId = live === undefined ? null : live.sessionId
+  const previousSessionId = live?.previousSessionId ?? null
+  let wakeCounter: number | undefined
+  if (live !== undefined && deps.loadHostWakeCounter !== undefined) {
+    try {
+      const counter = await deps.loadHostWakeCounter(live.hostId)
+      if (typeof counter === 'number' && Number.isFinite(counter)) wakeCounter = counter
+    } catch {
+      // Never throw from the dispatcher; the field is simply omitted.
+    }
+  }
+  return {
+    hostSessionId,
+    previousSessionId,
+    retired,
+    ...(wakeCounter === undefined ? {} : { wakeCounter })
+  }
 }
 
 /** The RpcResult-shaped value the client already understands
@@ -850,7 +921,8 @@ export type DeepartmentsDispatchResult =
  * extracted into a testable function (no node:http imports). Handles
  * `agents`/`list` (department-head roster rows with per-host unread counts —
  * the client roster heartbeat; kept per U1, it is NOT part of the removed
- * sidebar). Never throws for a normal call:
+ * sidebar) and `host/status` (U3 — the client lifecycle watcher's rotation
+ * signal, spec 002 §6.1). Never throws for a normal call:
  * an unknown endpoint is a bad-request result, and internal failures are left
  * to the caller to fold (the route handler maps them to the `internal` branch).
  */
@@ -859,6 +931,9 @@ export async function dispatchDeepartmentsEndpoint(
   payload: unknown,
   deps: DeepartmentsEndpointDeps
 ): Promise<DeepartmentsDispatchResult> {
+  if (endpoint === 'host/status') {
+    return { ok: true, value: await buildHostStatusPayload(deps) }
+  }
   if (endpoint !== 'agents' && endpoint !== 'list') {
     return {
       ok: false,
@@ -4479,13 +4554,15 @@ export function applyInvoke(ctx: Context, config: Config) {
     globalSleep()
   }, 'deepartments: host-plane board tools')
 
-  // --- agents/list RPC (server half, HTTP self-mount) ------------------------
-  // Serves the department-head roster rows to the client over the
-  // `/deepartments` channel (trusted-host authority). The pure row computation
-  // lives in dispatchDeepartmentsEndpoint (exported, unit-tested in
-  // test/rpc-channel.test.js); this effect only wires it to the live registries
-  // + the board read model and mounts the HTTP routes. (U1: the persistent UI
-  // config surface the channel once also served is removed with the sidebar.)
+  // --- agents/list + host/status RPC (server half, HTTP self-mount) --------
+  // Serves the department-head roster rows (`agents`/`list`) and the U3
+  // host-rotation lifecycle signal (`host/status`, spec 002 §6.1) to the client
+  // over the `/deepartments` channel (trusted-host authority). The pure
+  // computation lives in dispatchDeepartmentsEndpoint (exported, unit-tested
+  // in test/rpc-channel.test.js); this effect only wires it to the live
+  // registries + the board read model and mounts the HTTP routes. (U1: the
+  // persistent UI config surface the channel once also served is removed with
+  // the sidebar.)
   //
   // rc.8 TRANSPORT FIX: `ctx.connection.rpc.handle('/deepartments', ...)` did NOT
   // mount an HTTP route in rc.8 — dsh-client-connection registers ONLY the `/api`
@@ -4554,7 +4631,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       (hostCtx.get('connection') as ConnectionLike | undefined)?.trustedHosts ??
       []
     console.log(
-      `[deepartments] /deepartments channel mounted; trustedHosts=${JSON.stringify(trustedHosts)}; routes: agents/list`
+      `[deepartments] /deepartments channel mounted; trustedHosts=${JSON.stringify(trustedHosts)}; routes: agents/list, host/status`
     )
     const endpointDeps: DeepartmentsEndpointDeps = {
       departments: config.org.departments,
@@ -4568,6 +4645,18 @@ export function applyInvoke(ctx: Context, config: Config) {
         // MessagePayload.ack, which the folded room projection omits.
         const boardRoom = config.org.rooms.find((room) => room.id === 'board')
         return boardRoom === void 0 ? undefined : loadRecords(resolveBoardPath(config.stateDir, boardRoom.id))
+      },
+      // U3: the live host's journal wake_counter for the `host/status` payload.
+      // Best-effort and NEVER throwing — an unreadable journal simply omits the
+      // field (the payload contract stays minimal and stable).
+      loadHostWakeCounter: async (hostId) => {
+        try {
+          const text = await readFile(journalPathFor(hostId), 'utf8')
+          const counterMatch = text.match(/^wake_counter:\s*(\d+)/m)
+          return counterMatch !== null ? Number(counterMatch[1]) : undefined
+        } catch {
+          return undefined
+        }
       }
     }
     // Register each client path as a `kind:'exact'` POST route. `webServer.register`
@@ -4575,7 +4664,8 @@ export function applyInvoke(ctx: Context, config: Config) {
     // (AGENTS.md: every registration is a reversible effect).
     const routes: WebServerRouteLike[] = [
       { path: '/deepartments/agents', endpoint: 'agents' },
-      { path: '/deepartments/list', endpoint: 'list' }
+      { path: '/deepartments/list', endpoint: 'list' },
+      { path: '/deepartments/host/status', endpoint: 'host/status' }
     ].map(({ path, endpoint }) => ({
       kind: 'exact' as const,
       path,
@@ -4584,7 +4674,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     hostCtx.effect(() => {
       const disposers = routes.map((route) => webServer.register(route))
       return () => { for (const dispose of disposers) dispose() }
-    }, 'deepartments: agents/list RPC channel')
+    }, 'deepartments: agents/list + host/status RPC channel')
   })
 
 }
