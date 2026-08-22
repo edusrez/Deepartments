@@ -143,15 +143,30 @@ path (`agents.resume` → `persistence.prepare` → `Session.fromRestore`) is co
 so S2 must hand it a COLD artifact. The new session's meta `cwd = <old session's cwd>` (its
 workspace path) attributes it to the same workspace and `seedLength = seed.length`; `createdAt`
 set to now; `delegationDepth: 0`. The artifact header the jsonl backend writes is identical to
-the pre-incident shape (`{"type":"session","version":0,...,"seedLength":4,"delegationDepth":0}`
+the pre-incident shape (`{"type":"session","version":0,...,"seedLength":5,"delegationDepth":0}`
 — `toHeaderLine`, dsh-session-persistence-jsonl lib:36-47).
 
 - No client-side creation. The client only OPENS the server-created id (§6) — kills the
   duplicate-blank race and the "client-created session is not the registered host" hazard.
-- **The seed = `buildRotationSeed(reKeyedJournal)`**: header + permission/sandbox/approval +
-  the LAST append-origin **re-keyed** journal node, renumbered 0..k — the **exact
-  minimal-artifact event list shape** that `planMinimalArtifact` already produces and that
-  `verifyMinimalArtifact`/`Session.fromRestore` prove cold-bootable (session-cleanup.ts:332-341;
+- **The seed = `buildRotationSeed(reKeyedJournal)`** — **FIVE seed events, contiguous seq 0..4**
+  (the four pre-existing events byte-identical to before; the 5th is the U4 host-title pin —
+  updated 2026-08-22; builder report `.dsh/reports/builder/2026-08-22-deepartments-session-title-asistente.md`):
+  1. `{ type: 'permission/preset', seq: 0, time: now, data: { preset: 'danger-full-access' } }`
+  2. `{ type: 'sandbox/mode',      seq: 1, time: now, data: { mode: 'danger-full-access' } }`
+  3. `{ type: 'approval/policy',   seq: 2, time: now, data: { policy: 'never' } }`
+  4. `{ type: 'user/message',      seq: 3, time: now, data: <re-keyed journal as a plugin/notice
+     user message — `createUserMessage` framing, `source.kind: 'plugin'`>, surfaceOp: 'append' }`
+  5. `{ type: 'session/title',     seq: 4, time: now, data: { title: 'Asistente', messageSeqs: [],
+     source: { kind: 'user' } } }` — the **exact `rename()` pin shape** (U4; log-only, no
+     `surfaceOp`): a user-kind pin wins over automatic LLM/provider titles; the registry guard
+     pins only while NO user-kind `session/title` event exists yet (manual owner renames always
+     win; never double-applied). **Title-source invariant: `source.kind === 'user'` ⟺
+     `messageSeqs: []`** — a user-kind title (owner rename or the Asistente pin) is a hard pin
+     with no message ancestry; non-user (provider/auto) titles may carry `messageSeqs` and are
+     overridable.
+  The 5-event list keeps the **exact minimal-artifact event-list core shape** that
+  `planMinimalArtifact` already produces (plus the additive pin) and is proven cold-bootable by
+  `verifyMinimalArtifact`/`Session.fromRestore` (session-cleanup.ts:332-341;
   `2026-08-21-ui-cleanup-build.md`). Seed-contiguity invariants hold: the ctor throws
   `"seed event at index N has seq M (expected N); seed must be contiguous from 0"` on any
   non-contiguous seed (`dsh-session` lib/index.js:1381) and `appendCore` validates appends
@@ -160,7 +175,8 @@ the pre-incident shape (`{"type":"session","version":0,...,"seedLength":4,"deleg
   for the TRUNCATION path, so this is a reuse, not a new risk.
 - **`blank` stays TRUE**: the host's `sessionBlank` projector defines blank as
   `!events.some(e => e.type === "turn/start")` (dsh-host-apiproxy lib/index.js:1187-1189) — a
-  seeded `user/message` journal node never opens a turn, so the new session's wire summary is
+  seeded `user/message` journal node — nor the U4 `session/title` pin (seq 4) — never opens a
+  turn, so the new session's wire summary is
   `blank: true` and the native sidebar renders it as the "New Session" row WHEN current
   (ui-workspace 100-101). This is exactly the clean-chat end-state.
 
@@ -387,10 +403,13 @@ per-entry; pick one and validate it.
   now ALSO guard archived sessions: add `retired` AND `archived` to the skip condition
   (`runSleepCleanup`/`runPendingWebUiCleanups` must never truncate a retired/archived entry's
   artifact — defence-in-depth for G4).
-- **Reuse (cheap win)**: `planMinimalArtifact`'s event list (header + permission/sandbox/
-  approval + last append-origin journal node renumbered 0..k) is the **same shape** as the
-  rotation's seed builder (§3.2) — one shared `buildRotationSeed(reKeyedJournal)`, used by
-  both the new-session seed (rotation) and, only in legacy truncation, the minimal artifact.
+- **Reuse (cheap win — core shape, U4-amended)**: `planMinimalArtifact`'s event list (header +
+  permission/sandbox/approval + last append-origin journal node renumbered 0..k) is the
+  **core** of the rotation's seed builder (§3.2) — `buildRotationSeed(reKeyedJournal)` emits
+  that core PLUS the U4 `session/title` pin (**5 events, seq 0..4**). Rotation uses
+  `buildRotationSeed` directly for the new-session seed; legacy truncation keeps
+  `planMinimalArtifact` (its minimal artifact stays the 4-event core, no pin — legacy hosts get
+  the pin instead from `ensureHost`/`pinHostSessionTitle` on their first board-tool call).
 - **projcache / archive-dir conventions**: rotation itself resets nothing; the D2 copy at
   S2.7 + the existing `archive/` conventions cover evidence. projcache rows for the OLD
   session are left intact (historical), the NEW session generates its own.
@@ -460,7 +479,7 @@ S2.5); no CSS hash patches (`.hHd-Xa_newSession` dropped per G1); no shadow (D1)
 | C5 | **projcache rows** | Old session's row remains (historical); new session generates its own | No reset of the old row (G4); reset logic keyed on live id only |
 | C6 | **RAG journals path** | Two journal files under `journals/` (old archive + new live, re-keyed D3) | Distinct ids; live member feeds the pack/KPI |
 | C7 | **Board roster / `dept_room_who` / snapshot** | Old hostId retired but queryable; new hostId is the member | Roster excludes retired (R-Q3 decides display) |
-| C8 | **Seed contiguity (381/1381)** | New session seed must be contiguous from 0 (ctor throw, dsh-session lib:1381; seedJournal helper shape invoke.test.js:382-403); re-keyed journal file written atomically | Shared `buildRotationSeed` + `Session.fromRestore` cold-boot test (T1/T7) |
+| C8 | **Seed contiguity (381/1381)** | New session seed must be contiguous from 0 — now **5 events, seq 0..4** (the four pre-existing + the U4 `session/title` pin; ctor throw, dsh-session lib:1381; seedJournal helper shape invoke.test.js:382-403); re-keyed journal file written atomically | Shared `buildRotationSeed` + `Session.fromRestore` cold-boot test (T1/T7) |
 | C9 | **Legacy in-place sleeps** | Old `webUiCleanupPending`/`deferredJournalSeed` hosts keep working | Legacy paths stay (§5); loader tolerates absent new fields (§3.5) |
 | C10 | **`dept_post_retire` semantics** | Board-post retirement is a separate lifecycle (post registry); host retirement is hosts.json-only | ❓ R-Q3: keep separate (recommended); no posts.json changes |
 | C11 | **Archive-vs-archive semantics** | The word "archive" now means TWO things: the native visibility archive (D1, hides rows, no termination) and the evidence archive dir (D2, copies artifacts). Never conflate them; never call `workspace.archiveSession` on anything but a retired host | Terminology in ROADMAP/AGENTS.md: "retire+archive at rotation"; "evidence archive" for dirs |
@@ -481,9 +500,12 @@ the sleep close onto a resumed surface (the new session starts life as the journ
 established — `seedJournal` invoke.test.js:382-403, `seedHostRegistration` from
 `2026-08-22-context-injection-gate-fix.md`):**
 
-- T1 — rotation seed builder: `buildRotationSeed(reKeyedJournal)` output is contiguous-from-0,
-  cold-boots via `Session.fromRestore` (the resume ctor), journal node byte-identical to
-  `buildSleepJournalMessage(seeded)` modulo re-key + renumber.
+- T1 — rotation seed builder: `buildRotationSeed(reKeyedJournal)` output is contiguous-from-0
+  — **5 events, seq 0..4** (the four pre-existing events byte-identical; the U4
+  `session/title` pin in the exact `rename()` shape: `title: 'Asistente'`, `messageSeqs: []`,
+  `source.kind: 'user'`, no `surfaceOp`) — and cold-boots via `Session.fromRestore` (the
+  resume ctor); journal node byte-identical to `buildSleepJournalMessage(seeded)` modulo
+  re-key + renumber; event-type deepEqual + pin-shape assertions (rotation.test.js ~79-96).
 - T2 — rotated `dept_sleep`: creates a NEW session (assert session store contents), calls
   `ctx.get('workspaceRegistry').archiveSession(oldId)` (assert oldId in `archivedSessionIds`),
   rotates hosts.json (old entry `retired:true`/`rotatedTo`, new entry with
