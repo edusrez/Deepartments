@@ -54,6 +54,32 @@ a byte-identical copy of the original taken before any rewrite.
 5. Compresses at the zstd default level, verifies the compressed bytes
    round-trip to the verified stream, then atomically replaces the artifact.
 
+## Output format (zstd framing)
+
+The repaired artifact preserves the DSH storage generation encoding
+(`dsh-session-persistence-jsonl`, `compressZstdFrame`):
+
+- **Frame 1 is exactly the session header line** (re-written, terminated in
+  `\n`), compressed as its own independently decodable frame. This is the
+  `assertZstdHeaderFrame` invariant (`lib/index.js:741`): the first frame
+  must decompress to exactly one newline-terminated line — before
+  2026-08-22 the script re-compressed the whole renumbered log as ONE zstd
+  frame, which failed that check on boot (dev crash-loop, ~12 h downtime).
+- **Frames 2..N hold the remaining plaintext in ~512 KiB chunks**, each an
+  independent zstd frame. Body frames may cut JSONL lines — the dsh reader
+  stitches consecutive frames into one stream and tolerates that.
+- Checksums: the `zstandard` module path uses `write_checksum` when the
+  binding supports it (documented fallback otherwise); the CLI path uses
+  `--check` (default-on in zstd 1.5.5; the `--checksum` spelling is not
+  accepted by that binary).
+- **Verification gate** (runs before the atomic replace, on the FINAL
+  artifact): (a) port of `assertZstdHeaderFrame` — frame 1 is one
+  newline-terminated session-header line; (b) the artifact contains ≥ 2
+  frames whenever it has events (the single-frame shape is the incident
+  bug); (c) the scanner's strict expanded-event continuity rule is re-run
+  over the artifact's own decompressed stream. Any failure aborts with
+  exit 1 and the original artifact is left untouched.
+
 ## Recommended verification after a full run
 
 ```bash

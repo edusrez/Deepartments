@@ -21,9 +21,10 @@ and any hypothetical non-chunk record without a seq) pass through
 byte-verbatim. The repair is streaming and memory-conscious: lines are read
 one at a time from the decompressed stream and written to a temporary plain
 JSONL, the temp is re-scanned under the scanner's exact continuity rule, then
-compressed with zstd at the default level to a second temp and atomically
-renamed over the artifact. A byte-identical pre-repair backup is created
-before any rewrite (unless --no-backup).
+compressed with zstd - preserving the DSH storage framing invariant (frame 1
+= exactly the session header line; the body in ~512 KiB independent frames) -
+to a second temp and atomically renamed over the artifact. A byte-identical
+pre-repair backup is created before any rewrite (unless --no-backup).
 
 Exit codes:
   0 success (either "already contiguous" or repaired), or a completed dry-run
@@ -33,8 +34,14 @@ Usage:
   python3 scripts/repair-session-renumber.py <artifact.jsonl.zstd> [--backup-dir DIR] [--dry-run] [--no-backup]
 
 Environment (codec): prefers the portable `zstandard` python module when
-importable, otherwise shells out to the `zstd` CLI. Both produce zstd at the
-default compression level. At least one must be available.
+importable, otherwise shells out to the `zstd` CLI. At least one must be
+available. The re-compressed artifact always matches the DSH writer's
+encoding (dsh-session-persistence-jsonl `compressZstdFrame`): the FIRST zstd
+frame is just the (re-written) session header line and every remaining
+~512 KiB of plaintext is its own independently decodable, checksummed frame.
+The cold-read scanner's `assertZstdHeaderFrame` (lib/index.js) requires the
+first frame to decompress to exactly one newline-terminated line; body
+frames may cut JSONL lines, which the scanner tolerates.
 """
 
 from __future__ import annotations
@@ -53,6 +60,8 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 ZSTD_SUFFIX = ".jsonl.zstd"
 CHUNK_ROW_TAGS = ("text-chunks", "reasoning-chunks", "tool-call-chunks")
 BACKUP_STAMP_FORMAT = "%Y%m%d-%H%M%S"
+ZSTD_MAGIC = 4247762216  # 0xFD2FB528, little-endian magic of a zstd frame
+ZSTD_CHUNK_PLAINTEXT = 512 * 1024  # body frames: ~512 KiB of plaintext each
 
 
 class RepairError(Exception):
@@ -86,6 +95,8 @@ def decompressed_lines(path: str) -> Iterator[bytes]:
             assert proc.stdout is not None
             yield from proc.stdout
         finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
             rc = proc.wait()
             if rc != 0:
                 raise RepairError(
@@ -103,24 +114,256 @@ def decompressed_lines(path: str) -> Iterator[bytes]:
                 reader.close()
 
 
-def compress_file(src: str, dst: str) -> None:
-    """Compress a plain file to zstd (default level, per the format spec)."""
+def _plaintext_frames(src: str, chunk_size: int) -> Iterator[bytes]:
+    """Yield the plaintext of `src` as frame payloads for compression.
+
+    Frame 1 is exactly the first line (the session header record, ensured
+    newline-terminated); frames 2..N are `chunk_size`-sized slices of the
+    remaining bytes (they may cut JSONL lines - the dsh scanner tolerates
+    that). Streaming: only one frame payload is in memory at a time.
+    """
+    with open(src, "rb") as fin:
+        header = fin.readline()
+        if not header.endswith(b"\n"):
+            raise RepairError(
+                "session log has no header line ending in a newline - "
+                "cannot build the frame-1 header frame"
+            )
+        if b"\n" in header[:-1]:
+            raise RepairError(
+                "session log header line contains an embedded newline - "
+                "frame 1 would not be exactly one header line"
+            )
+        yield header
+        while True:
+            chunk = fin.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+
+
+def _compress_frames_cli(frame_iter: Iterator[bytes], dst: str) -> None:
+    """Compress each frame payload with the `zstd` CLI as an own frame.
+
+    `--check` adds the XXH64 content checksum (default-on in zstd 1.5.5,
+    matching the dsh writer's checksummed frames; the `--checksum` spelling
+    is NOT accepted by the 1.5.5 binary, so `--check` is used instead). One
+    subprocess per frame - the CLI has no concatenated-frame flag.
+    """
+    with open(dst, "wb") as fout:
+        for frame in frame_iter:
+            proc = subprocess.run(
+                ["zstd", "-q", "-f", "--check", "-c"],
+                input=frame,
+                capture_output=True,
+            )
+            if proc.returncode != 0:
+                raise RepairError(
+                    f"zstd frame compression failed (rc={proc.returncode}): "
+                    f"{proc.stderr.decode('utf-8', 'replace').strip()}"
+                )
+            fout.write(proc.stdout)
+
+
+def _compress_frames_module(frame_iter: Iterator[bytes], dst: str) -> None:
+    """Compress each frame payload with the `zstandard` module as an own frame."""
     try:
         import zstandard  # type: ignore
     except ImportError:
-        proc = subprocess.run(
-            [_compress_cmd()[0], "-q", "-f", "-o", dst, src],
-            capture_output=True,
-        )
+        raise RepairError("zstandard module is not importable")
+    try:
+        cctx = zstandard.ZstdCompressor(level=3, write_checksum=True)
+    except TypeError:
+        # Older bindings predate the write_checksum kwarg: compress without a
+        # per-frame checksum (documented; the dsh writer emits checksums, but
+        # a missing checksum frame bit is not a scanner failure).
+        cctx = zstandard.ZstdCompressor(level=3)
+    with open(dst, "wb") as fout:
+        for frame in frame_iter:
+            fout.write(cctx.compress(frame))
+
+
+def compress_log_file(src: str, dst: str, chunk_size: int = ZSTD_CHUNK_PLAINTEXT) -> None:
+    """Compress a plain JSONL log preserving the DSH storage framing invariant.
+
+    Frame 1 = exactly the (re-written) session header line, newline-terminated;
+    frames 2..N = the remaining plaintext in `chunk_size` chunks, each an
+    independently decodable, checksummed zstd frame. `assertZstdHeaderFrame`
+    in dsh-session-persistence-jsonl requires frame 1 to decompress to exactly
+    one newline-terminated line; the dsh reader stitches frames together and
+    tolerates body frames that cut lines.
+    """
+    frame_iter = _plaintext_frames(src, chunk_size)
+    try:
+        import zstandard  # type: ignore
+    except ImportError:
+        _compress_frames_cli(frame_iter, dst)
+    else:
+        _compress_frames_module(frame_iter, dst)
+
+
+def _decompress_frame_bytes(data: bytes) -> bytes:
+    """Decompress exactly one complete zstd frame (CLI fallback or module)."""
+    try:
+        import zstandard  # type: ignore
+    except ImportError:
+        proc = subprocess.run(["zstd", "-q", "-d", "-c"], input=data, capture_output=True)
         if proc.returncode != 0:
             raise RepairError(
-                f"zstd compression failed (rc={proc.returncode}) "
-                f"for {src} -> {dst}: {proc.stderr.decode('utf-8', 'replace').strip()}"
+                f"zstd frame decompression failed (rc={proc.returncode}) "
+                f"for a {len(data)}-byte frame"
             )
+        return proc.stdout
     else:
-        cctx = zstandard.ZstdCompressor(level=3)
-        with open(src, "rb") as fin, open(dst, "wb") as fout:
-            cctx.copy_stream(fin, fout)
+        return zstandard.ZstdDecompressor().decompress(data)
+
+
+def scan_zstd_frame_ranges(path: str) -> List[Tuple[int, int]]:
+    """Port of dsh-session-persistence-jsonl `scanZstdFrames`.
+
+    Structurally locate every complete zstd frame in `path` (frame magic,
+    descriptor, blocks, checksum) WITHOUT decompressing payloads - streaming
+    via file seeks, so memory use is O(1) for arbitrarily large logs. Returns
+    (start, end) byte ranges; raises RepairError on corrupt structure.
+    """
+    frames: List[Tuple[int, int]] = []
+    fsize = os.path.getsize(path)
+    offset = 0
+    with open(path, "rb") as fh:
+        while offset < fsize:
+            start = offset
+            if fsize - offset < 4:
+                raise RepairError(
+                    f"corrupt Zstandard session log: truncated frame header at byte {offset}"
+                )
+            fh.seek(offset)
+            if int.from_bytes(fh.read(4), "little") != ZSTD_MAGIC:
+                raise RepairError(
+                    f"corrupt Zstandard session log: invalid frame magic at byte {offset}"
+                )
+            offset += 4
+            descriptor = fh.read(1)[0]
+            offset += 1
+            if (descriptor & 24) != 0:
+                raise RepairError(
+                    f"corrupt Zstandard session log: reserved frame-header bit at byte {offset - 1}"
+                )
+            content_size_flag = descriptor >> 6
+            single_segment = (descriptor & 32) != 0
+            checksum = (descriptor & 4) != 0
+            dictionary_flag = descriptor & 3
+            dictionary_bytes = 4 if dictionary_flag == 3 else dictionary_flag
+            content_size_bytes = (
+                0 if content_size_flag == 0 else 1 << content_size_flag
+            )
+            if content_size_flag == 0 and single_segment:
+                content_size_bytes = 1
+            remaining_header_bytes = (
+                (0 if single_segment else 1) + dictionary_bytes + content_size_bytes
+            )
+            if fsize - offset < remaining_header_bytes:
+                raise RepairError(
+                    f"corrupt Zstandard session log: truncated frame header at byte {offset}"
+                )
+            offset += remaining_header_bytes
+            # Each iteration advances offset by >= 3 bytes, so a valid or
+            # malformed frame always terminates (truncated input -> raise).
+            for _ in range(fsize - offset):
+                if fsize - offset < 3:
+                    raise RepairError(
+                        f"corrupt Zstandard session log: truncated block header at byte {offset}"
+                    )
+                fh.seek(offset)
+                block_header = int.from_bytes(fh.read(3), "little")
+                offset += 3
+                last_block = (block_header & 1) != 0
+                block_type = (block_header >> 1) & 3
+                block_size = block_header >> 3
+                if block_type == 3:
+                    raise RepairError(
+                        f"corrupt Zstandard session log: reserved block type at byte {offset - 3}"
+                    )
+                payload_bytes = 1 if block_type == 1 else block_size
+                if fsize - offset < payload_bytes:
+                    raise RepairError(
+                        f"corrupt Zstandard session log: truncated block payload at byte {offset}"
+                    )
+                offset += payload_bytes
+                if last_block:
+                    break
+            if checksum:
+                if fsize - offset < 4:
+                    raise RepairError(
+                        f"corrupt Zstandard session log: truncated content checksum at byte {offset}"
+                    )
+                offset += 4
+            frames.append((start, offset))
+    return frames
+
+
+def assert_first_frame_is_header(zstd_path: str) -> bytes:
+    """Port of dsh-session-persistence-jsonl `assertZstdHeaderFrame`.
+
+    The first frame must decompress to exactly one newline-terminated line
+    (length > 0 and the first 0x0A is the LAST byte), and that line must parse
+    to a JSON object with type == "session". Returns the raw header line.
+    """
+    frames = scan_zstd_frame_ranges(zstd_path)
+    if not frames:
+        raise RepairError(
+            "corrupt Zstandard session log: no complete frames found"
+        )
+    start, end = frames[0]
+    with open(zstd_path, "rb") as fh:
+        fh.seek(start)
+        plaintext = _decompress_frame_bytes(fh.read(end - start))
+    if len(plaintext) == 0 or plaintext.find(b"\n") != len(plaintext) - 1:
+        raise RepairError(
+            "corrupt Zstandard session log: first frame is not exactly one "
+            "header line (the pre-2026-08-22 single-frame output bug: the "
+            "whole log was re-compressed as ONE zstd frame)"
+        )
+    header_line = plaintext[:-1]
+    try:
+        header = json.loads(header_line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RepairError(
+            f"first frame does not parse as a session header record ({exc})"
+        )
+    if not isinstance(header, dict) or header.get("type") != "session":
+        raise RepairError(
+            "first frame is not a session header record (type='session')"
+        )
+    return header_line
+
+
+def verify_artifact_framing(zstd_path: str, expected_line_count: int) -> None:
+    """Gate over the FINAL compressed artifact, run before the atomic replace.
+
+    (a) port of `assertZstdHeaderFrame`: frame 1 == exactly one session
+        header line (length > 0, first 0x0A is the last byte, type="session");
+        when the log has more than one line, the artifact must contain at
+        least two frames (header frame + body) - the single-frame shape is
+        the incident bug;
+    (b) re-run the strict expanded-event continuity scan over the FINAL
+        artifact's decompressed stream (must equal the verified plaintext);
+    (c) any violation raises RepairError here - the artifact is REPLACED only
+        after this gate passes.
+    """
+    assert_first_frame_is_header(zstd_path)
+    frames = scan_zstd_frame_ranges(zstd_path)
+    if expected_line_count > 1 and len(frames) < 2:
+        raise RepairError(
+            f"corrupt Zstandard session log: artifact has {len(frames)} frame(s) "
+            f"but {expected_line_count} lines - the body is not framed "
+            "(single-frame output would stall the cold-read scanner)"
+        )
+    line_count, _ = verify_strict_lines(decompressed_lines(zstd_path))
+    if line_count != expected_line_count:
+        raise RepairError(
+            f"final artifact re-scan lost records: {line_count} lines, "
+            f"expected {expected_line_count}"
+        )
 
 
 def stream_sha256(path: str) -> str:
@@ -315,8 +558,8 @@ def renumber(artifact: str, seam_line: int, out_path: str) -> Tuple[int, int]:
     return lines_written, idx
 
 
-def verify_strict(path: str) -> Tuple[int, int]:
-    """Verify a plain JSONL under the JS scanner's exact continuity rule.
+def verify_strict_lines(iter_lines: Iterator[bytes]) -> Tuple[int, int]:
+    """Verify an iterable of raw JSONL lines under the scanner's exact rule.
 
     Header first; then every expanded event's seq must equal its zero-based
     index. Any non-carrying record (other than the header) is a hard failure
@@ -325,7 +568,7 @@ def verify_strict(path: str) -> Tuple[int, int]:
     """
     event_count = 0
     line_count = 0
-    for lineno, raw in enumerate(_plain_lines(path), 1):
+    for lineno, raw in enumerate(iter_lines, 1):
         line_count = lineno
         try:
             value = json.loads(raw.decode("utf-8"))
@@ -352,6 +595,11 @@ def verify_strict(path: str) -> Tuple[int, int]:
     if line_count == 0:
         raise RepairError("empty log: no session header record")
     return line_count, event_count
+
+
+def verify_strict(path: str) -> Tuple[int, int]:
+    """Verify a plain JSONL file under the scanner's exact continuity rule."""
+    return verify_strict_lines(_plain_lines(path))
 
 
 def _plain_lines(path: str) -> Iterator[bytes]:
@@ -482,10 +730,16 @@ def run(args: argparse.Namespace) -> int:
                 f"renumbered stream lost records: {line_count}/{res.line_count} "
                 f"lines, {event_count}/{res.event_count} events"
             )
-        # 4) compress (zstd default level) + integrity round-trip.
-        compress_file(tmp_plain, tmp_zstd)
+        # 4) compress (framing: frame 1 = header line alone, body in
+        #    ~512 KiB frames) + integrity round-trip.
+        compress_log_file(tmp_plain, tmp_zstd)
         verify_zstd_roundtrip(tmp_zstd, stream_sha256(tmp_plain))
-        # 5) atomic replacement.
+        # 5) gate over the FINAL artifact: assertZstdHeaderFrame port (frame 1
+        #    == exactly one session header line, multi-frame body) + strict
+        #    continuity re-scan on the artifact's own decompressed stream.
+        #    Any failure aborts HERE - os.replace never publishes unverified.
+        verify_artifact_framing(tmp_zstd, line_count)
+        # 6) atomic replacement.
         os.replace(tmp_zstd, artifact)
         written = tmp_zstd
         print(
@@ -493,7 +747,8 @@ def run(args: argparse.Namespace) -> int:
             f"  renumbered {lines_written - (res.first_seam[0] - 1)} tail lines "
             f"(events {res.first_seam[1]}..{event_count - 1}), "
             f"seed lines 1..{res.first_seam[0] - 1} untouched\n"
-            f"  zstd re-compressed at default level; integrity verified"
+            f"  zstd re-compressed (header frame + ~512 KiB body frames); "
+            f"integrity + framing verified"
         )
         return 0
     finally:
