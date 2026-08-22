@@ -11,8 +11,9 @@
 // `ctx.agents.create`/`resume` from the plugin's ROOT service context (so it
 // lands in agents.roots(), with no origin === 'subagent', and the GUI/sidebar
 // renders it as a main-agent row exactly like "Assistant"):
-//   - stable session id `SessionId(\`head-<postId>\`)`, `meta: { cwd: repoRoot,
-//     origin: undefined, agentPreset: 'deepartments-head' }`, `agentOptions`
+//   - stable session id `SessionId(\`head-<postId>\`)`, `meta: { cwd: <workspace
+//     root path — resolveWorkspaceRootPath>, origin: undefined,
+//     agentPreset: 'deepartments-head' }`, `agentOptions`
 //     from the coordinator config, and a `setup(agentCtx)` that mounts the
 //     dedicated `deepartments-head` preset AND registers the head's `dept_*`
 //     board tools (dept_room_read/write/who, dept_whereami, dept_memo_write,
@@ -1346,6 +1347,18 @@ export function pinHostSessionTitle(session: Session): HostTitlePinResult {
  * label; the live config sets `coordinator.sessionTitle` explicitly). */
 const HEAD_DEFAULT_SESSION_TITLE = 'Research Head'
 
+/** Piece 1 (2026-08-22) — one workspace entity as the workspace-root resolver
+ * reads it: the REAL dsh-workspace entity additionally exposes `sessionIds`
+ * (the membership getter filtered through the session-path index — dsh-workspace
+ * lib:78-80) on top of the rotation seam's `path`/`attachSession` pair. The
+ * rotation's own [`WorkspaceEntityLike`] (src/session-rotation.ts) stays
+ * untouched (it only needs the attach pair); this local narrowing adds the
+ * read-only membership view without widening the seam. */
+interface WorkspaceEntityMembershipLike {
+  path: string
+  sessionIds?: readonly string[]
+}
+
 // ---------------------------------------------------------------------------
 // Service (called from src/index.ts).
 // ---------------------------------------------------------------------------
@@ -2105,15 +2118,17 @@ export function applyInvoke(ctx: Context, config: Config) {
    * but framed as a temporary rank-and-file researcher). Materialized into the
    * harness-home user preset root alongside the head preset. */
   const WORKER_PRESET_ID = 'deepartments-worker'
-  /** Repo root, used as the head agent's stable `meta.cwd` and as the preset
-   * source. `new URL('.', import.meta.url)` already yields the compiled `lib/`
-   * directory (of lib/invoke.js in dev), so one `'..'` up is the repo root. */
+  /** Repo root, used as the preset source AND as the FINAL fallback cwd for
+   * head/worker sessions (the canonical cwd is the workspace root path — see
+   * `resolveWorkspaceRootPath`). `new URL('.', import.meta.url)` already yields
+   * the compiled `lib/` directory (of lib/invoke.js in dev), so one `'..'` up
+   * is the repo root. */
   const repoRoot = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
   // the plugin's ROOT service context — so it is owned by no live parent,
   // lands in agents.roots(), carries no `origin: 'subagent'`, and the
   // GUI/sidebar renders it as a main-agent row exactly like "Assistant".
   //   * stable id `SessionId(\`head-<postId>\`)`
-  //   * `meta: { cwd: repoRoot, origin: undefined, agentPreset: 'deepartments-head' }`
+  //   * `meta: { cwd: <workspace root path>, origin: undefined, agentPreset: 'deepartments-head' }`
   //   * `agentOptions` from the coordinator config
   //   * a `setup(agentCtx)` that mounts the dedicated 'deepartments-head'
   //     preset AND registers the head's dept_* board tools scoped to it.
@@ -3626,7 +3641,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           const setup = workerSetup(args.postId, roomId, args.role)
           const handle = await agents.create({
             sessionId: String(SessionId(sessionId)),
-            meta: { cwd: repoRoot, origin: undefined, agentPreset: WORKER_PRESET_ID },
+            meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
             agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
             setup
           })
@@ -3793,6 +3808,79 @@ export function applyInvoke(ctx: Context, config: Config) {
     return { postId, roomId: entry.roomId, retired: true }
   }
 
+  /** Piece 1 (2026-08-22) — the CANONICAL WORKSPACE ROOT PATH for created
+   * head/worker sessions, replacing the legacy `repoRoot` hardcode. dsh-workspace
+   * attaches a session to a workspace ONLY when its persisted header cwd equals
+   * the entity's canonical path (dsh-workspace lib:98 — strict realpath
+   * equality), and the native sidebar groups rows by workspace membership — so
+   * a session created with `meta.cwd = repoRoot` matches NO workspace when the
+   * GUI-created workspace root is elsewhere (production: workspace path
+   * "/root", head cwd the repo) → the attach always throws → the session stays
+   * INVISIBLE and every wake re-attach repeats the same failure
+   * (explore-deep/2026-08-22-head-attach-cwd.md, fix (a)). Resolution order:
+   *   1. the workspace entity whose `sessionIds` already contains the session
+   *      id of a LIVE hosts.json host entry — the host session was created BY
+   *      the GUI in a workspace, so its owning entity IS the canonical root
+   *      (the entity path is exactly what the GUI uses as the host session's
+   *      own cwd: `workspace.path`);
+   *   2. `list()[0].path` — the registry's durable-first workspace, the same
+   *      ordering attachHeadSession/repairHostWorkspaceAttach iterate;
+   *   3. `repoRoot` — no registry or empty list (headless profiles): the
+   *      legacy value, still a valid cwd.
+   * Bounded wait with the SAME window as the boot-repair FIX 1b.1
+   * (NON-STRICT `ctx.get('workspaceRegistry', false)` + retry 250ms ≤ 10s)
+   * because at boot the provider may still be initializing and the strict get
+   * races its state-2 init — but a composition with NO registry service at all
+   * is a DEFINITIVE absence and falls back immediately. NEVER throws: a path
+   * is ALWAYS returned (the repoRoot floor), so a head/worker create cannot
+   * fail on workspace resolution.
+   */
+  const resolveWorkspaceRootPath = async (): Promise<string> => {
+    const deadline = Date.now() + HOST_ATTACH_REPAIR_TIMEOUT_MS
+    for (;;) {
+      const registry = ctx.get('workspaceRegistry', false) as WorkspaceRegistryLike | undefined
+      if (registry?.list === void 0) {
+        // NO registry service in this composition (headless/minimal profile):
+        // a DEFINITIVE absence — nothing can become available, so fall back to
+        // the repoRoot floor immediately (never a head/worker create block).
+        return repoRoot
+      }
+      try {
+        const workspaceList = await registry.list()
+        // 1. the entity whose membership already covers a live host session.
+        const liveHostSessionIds = new Set<string>()
+        for (const entry of hosts.values()) {
+          if (entry.retired !== true) liveHostSessionIds.add(entry.sessionId)
+        }
+        for (const workspace of workspaceList) {
+          const entity = workspace as WorkspaceEntityMembershipLike
+          if (typeof entity.path !== 'string' || entity.path === '') continue
+          if (entity.sessionIds !== void 0) {
+            for (const sessionId of liveHostSessionIds) {
+              if (entity.sessionIds.includes(sessionId)) return entity.path
+            }
+          }
+        }
+        // 2. the registry's durable-first workspace path.
+        for (const workspace of workspaceList) {
+          const path = (workspace as WorkspaceEntityMembershipLike).path
+          if (typeof path === 'string' && path !== '') return path
+        }
+        // 3. no workspace entities at all — legacy repoRoot floor.
+        return repoRoot
+      } catch {
+        // list() rejected → the registry is still initializing — retry.
+      }
+      if (Date.now() >= deadline) break
+      await new Promise((resolve) => setTimeout(resolve, HOST_ATTACH_REPAIR_RETRY_MS))
+    }
+    // The bounded window elapsed without a resolved list: give up on the
+    // registry and fall back to the repoRoot floor (a head/worker create must
+    // never block on the optional workspace seam — the non-fatal discipline of
+    // the attach hooks).
+    return repoRoot
+  }
+
   /** Piece 1 — durably attach a head/worker session to the workspace whose
    * path matches its persisted header cwd, so the session appears as a row in
    * the NATIVE sidebar (rows are grouped by workspace from workspace.json
@@ -3805,7 +3893,9 @@ export function applyInvoke(ctx: Context, config: Config) {
    * semantics: a missing/listing-failing registry, an EMPTY workspace list,
    * or an attach that no entity resolves is a DEFINITIVE (fatal-for-visibility)
    * failure → the legacy fallback of the boot-repair: log a WARN and give up
-   * (the head stays invisible until the next wake's idempotent re-attach) —
+   * (the session stays invisible — a PERMANENT header-cwd mismatch is not
+   * recovered by the wake re-attach; boot-fresh sessions now carry the
+   * resolved workspace-root cwd, so they resolve by equality) —
    * a failed attach must NEVER break head materialization or a wake. Retries
    * are bounded with the SAME window as the boot-repair, because at boot
    * (ensureAllHeads) the workspaceRegistry provider may still be initializing
@@ -3831,8 +3921,10 @@ export function applyInvoke(ctx: Context, config: Config) {
             }
           }
           // list() RESOLVED but no entity matched: a definitive (non-readiness)
-          // failure — warn once and give up (the wakePost re-attach recovers).
-          ctx.logger.warn(`[deepartments] head attach (${source}): no workspace matched session ${sessionId} — the session stays invisible in the sidebar until the next wake re-attach`)
+          // failure — warn once and give up. A header cwd with no owning
+          // workspace is PERMANENT (the wake re-attach only recovers the
+          // boot-race, never a cwd mismatch).
+          ctx.logger.warn(`[deepartments] head attach (${source}): no workspace matched session ${sessionId} — its header cwd has no owning workspace; the session stays invisible in the sidebar (a cwd mismatch is permanent — only a fresh create under the resolved workspace root fixes it)`)
           return
         } catch (error) {
           // list() rejected → the registry is still initializing — retry.
@@ -3886,7 +3978,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           ctx.logger.warn(`[deepartments] head "${postId}" resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
           handle = await agents.create({
             sessionId: String(sessionId),
-            meta: { cwd: repoRoot, origin: undefined, agentPreset: presetId },
+            meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: presetId },
             agentOptions,
             setup
           })
@@ -3895,7 +3987,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       } else {
         handle = await agents.create({
           sessionId: String(sessionId),
-          meta: { cwd: repoRoot, origin: undefined, agentPreset: presetId },
+          meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: presetId },
           agentOptions,
           setup
         })
@@ -4049,7 +4141,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         ctx.logger.warn(`[deepartments] ${isWorker ? 'worker' : 'head'} "${entry.postId}" wake-resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
         handle = await agents.create({
           sessionId: String(sessionId),
-          meta: { cwd: repoRoot, origin: undefined, agentPreset: preset },
+          meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: preset },
           agentOptions,
           setup
         })

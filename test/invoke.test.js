@@ -163,6 +163,9 @@ class StubAgents extends Service {
     this.childContexts = []
     this.childAgents = []
     this.scopeAnchor = ctx
+    // Piece 1 cwd fix (2026-08-22): forced resume failures (per durable session
+    // id) so the wakePost resume-failed → create-fresh fallback is testable.
+    this.resumeRejects = new Set()
   }
 
   get(id) {
@@ -190,6 +193,7 @@ class StubAgents extends Service {
 
   async resume(options) {
     this.resumeCalls.push(options)
+    if (this.resumeRejects.has(options.resumeSessionId)) throw new Error('stub: forced resume failure (Piece 1 cwd-fix test)')
     // Cold resume: restore a dormant resident under its DURABLE id (the seeded
     // childId), with header.parentSession from the adoption map, applying the
     // setup closure (board tools install on cold resume exactly like fresh).
@@ -337,7 +341,25 @@ class StubWorkspaceRegistry extends Service {
     this.archived = []
     this.attachCalls = []
     this.notReadyRejects = 0
-    this.entities = entities ?? [{ path: stateDir, attachSession: async (sessionId) => { this.attachCalls.push(sessionId) } }]
+    // Piece 1 cwd fix (2026-08-22): the default entity carries the DURABLE
+    // membership view the real entity exposes (`sessionIds` — dsh-workspace
+    // lib:78-80) AND mirrors the real attach into the persisted workspace
+    // record (workspace.json) — the exact projection the native sidebar groups
+    // by. This lets the cwd-fix tests assert both the resolved create cwd and
+    // the post-attach membership file.
+    this.entitySessions = []
+    this.entities = entities ?? [{
+      path: stateDir,
+      sessionIds: this.entitySessions,
+      attachSession: async (sessionId) => {
+        this.attachCalls.push(sessionId)
+        if (!this.entitySessions.includes(sessionId)) {
+          this.entitySessions.push(sessionId)
+          writeFile(path.join(this.stateDir, 'workspace.json'), JSON.stringify({ path: this.stateDir, sessionIds: [...this.entitySessions] }, null, 2), 'utf8')
+            .catch(() => {})
+        }
+      }
+    }]
   }
 
   get archivedSessionIds() {
@@ -408,6 +430,9 @@ async function bootPlugin(stateDir, opts = {}) {
   loader.create({ id: 'tools', name: '@deepseek-ai/dsh-tools' })
 
   const agents = new StubAgents(root)
+  // Piece 1 cwd fix (2026-08-22): a boot opt forces per-session resume failures
+  // (the wakePost resume-failed → create-fresh fallback path).
+  if (opts.resumeRejects !== undefined) agents.resumeRejects = new Set(opts.resumeRejects)
   // Batch S1 live-fix: a boot opt swaps in the real-API-shaped persistence
   // (readRaw present) so the real-capture tests exercise the bound call shape;
   // the default stays readRaw-less so the harness keeps degrading to the stub.
@@ -1060,6 +1085,73 @@ test('Piece 1: ensureHead attaches the head session to the root workspace AND pi
   })
 })
 
+test('Piece 1 cwd fix: ensureHead creates the head under the WORKSPACE ROOT path (not repoRoot) and the session lands in the durable workspace.json', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head root agent created at boot')
+      const create = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
+      assert.ok(create, 'the head was created fresh')
+      assert.equal(create.meta.cwd, stateDir, 'meta.cwd = the canonical workspace root path (the registry entity path) — NOT the repo root')
+      assert.notEqual(create.meta.cwd, path.resolve(path.dirname(new URL(import.meta.url).pathname), '..'), 'the workspace root differs from the legacy repo root')
+      // The attach then matches by cwd equality → the session id is durably
+      // recorded in the workspace membership record (workspace.json) — the
+      // exact projection the native sidebar groups rows by.
+      await waitFor(async () => {
+        try {
+          const ws = JSON.parse(await readFile(path.join(stateDir, 'workspace.json'), 'utf8'))
+          return Array.isArray(ws.sessionIds) && ws.sessionIds.includes('head-research-head')
+        } catch {
+          return false
+        }
+      }, 5000, 'head session recorded in workspace.json sessionIds')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Piece 1 cwd fix: the workspace root is the entity that owns the LIVE HOST session (priority over list()[0].path)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const hostSessionId = 'session-host-live'
+    await seedHostRegistration(stateDir, hostSessionId)
+    // Two distinct workspace paths: the FIRST in the registry order has NO host
+    // session; the SECOND carries the live host session in its membership.
+    const wsFirst = path.join(stateDir, 'ws-first')
+    const wsHost = path.join(stateDir, 'ws-host')
+    const { root, agents, dispose } = await bootPlugin(stateDir, {
+      workspaceEntities: [
+        { path: wsFirst, attachSession: async () => {} },
+        { path: wsHost, sessionIds: [hostSessionId], attachSession: async () => {} }
+      ]
+    })
+    try {
+      await waitForRooms(root)
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head root agent created at boot')
+      const create = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
+      assert.equal(create.meta.cwd, wsHost, 'resolution prefers the entity whose sessionIds hold the live host session (the GUI-created workspace root)')
+      assert.notEqual(create.meta.cwd, wsFirst, 'list()[0].path is NOT chosen while a host-owning entity exists')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Piece 1 cwd fix: NO workspace entities → the head is created with the repoRoot fallback cwd (headless profiles)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir, { workspaceEntities: [] })
+    try {
+      await waitForRooms(root)
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head root agent created at boot')
+      const create = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
+      assert.equal(create.meta.cwd, path.resolve(path.dirname(new URL(import.meta.url).pathname), '..'), 'empty workspace list → the repoRoot fallback cwd (never throws)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('wake relay (head): a registered department head is woken by raw Agent.followup (no parent needed); self/unknown members are handled', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
@@ -1505,7 +1597,11 @@ test('create-when-absent: boot materializes the configured head as a root agent 
 
       const createCall = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
       assert.equal(String(createCall.sessionId), 'head-research-head', 'stable per-post session id')
-      assert.equal(createCall.meta.cwd, path.resolve(path.dirname(new URL(import.meta.url).pathname), '..'), 'meta.cwd is the repo root')
+      // Piece 1 cwd fix (2026-08-22): the head is created under the CANONICAL
+      // WORKSPACE ROOT path (resolveWorkspaceRootPath — the registry entity
+      // path), NOT the legacy repoRoot hardcode (which matched no workspace and
+      // kept the head invisible in the native sidebar).
+      assert.equal(createCall.meta.cwd, stateDir, 'meta.cwd is the canonical workspace root path (the registry entity path), not the repo root')
       // Batch 4a: the head session is created under its PER-HEAD preset so it
       // is a NATIVE, openable session labeled with the head preset.
       assert.equal(createCall.meta.agentPreset, 'deepartments-head-research', 'the PER-HEAD preset is requested (deepartments-head-<departmentId>)')
@@ -2603,6 +2699,10 @@ test('dept_post_create (head): a head creates a DISPOSABLE worker root agent (se
       assert.ok(createCall, 'a ctx.agents.create call for the worker')
       assert.equal(createCall.meta.agentPreset, 'deepartments-worker', 'worker mounts the deepartments-worker preset')
       assert.equal(createCall.meta.origin, undefined, 'worker is a root/main agent (no origin)')
+      // Piece 1 cwd fix (2026-08-22): workers are created under the SAME
+      // workspace-root cwd as heads (resolveWorkspaceRootPath) — not repoRoot —
+      // so the worker's own attach matches by cwd equality too.
+      assert.equal(createCall.meta.cwd, stateDir, 'the worker is created under the workspace-root cwd (resolveWorkspaceRootPath), not the repo root')
 
       // Durable registry: disposable entry.
       const posts = await readPosts(stateDir)
@@ -2704,6 +2804,40 @@ test('worker sleep + respawn: a slept worker is cold-resumed as a fresh incarnat
       const posts = await readPosts(stateDir)
       assert.equal(posts['researcher-alpha'].sleepEpoch, undefined, 'sleepEpoch cleared after the wake')
       assert.equal(posts['researcher-alpha'].provider, 'worker', 'disposable marker survives sleep/respawn')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Piece 1 cwd fix: a wake whose RESUME fails falls back to a FRESH create under the workspace-root cwd (wakePost fallback, workers)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // A durable worker registry entry (no sleepEpoch, not live at boot) — the
+    // relay's cold-wake path, with the RESUME forced to fail so wakePost takes
+    // its create-fresh fallback.
+    await seedPost(stateDir, {
+      postId: 'researcher-alpha',
+      sessionId: 'worker-researcher-alpha',
+      roomId: 'research',
+      agentPreset: 'deepartments-worker',
+      provider: 'worker',
+      role: 'rank-and-file researcher'
+    })
+    const { root, agents, workspaceRegistry, dispose } = await bootPlugin(stateDir, { resumeRejects: ['worker-researcher-alpha'] })
+    try {
+      await waitForRooms(root)
+      // A board message addressed to the worker → the relay cold-wakes it.
+      const researchSession = root.sessions.get(SessionId(roomSessionId('research')))
+      const seq = await nextSeq(stateDir, 'research')
+      await emitRoomRecord(researchSession, resolveBoardPath(stateDir, 'research'), messageRecord(seq, 'research-head', ['researcher-alpha'], 'wake up'), 'research')
+      await waitFor(() => agents.store.has('worker-researcher-alpha'), 5000, 'worker materialized via the resume-failed create-fresh fallback')
+      const createCall = agents.createCalls.find((c) => String(c.sessionId) === 'worker-researcher-alpha')
+      assert.ok(createCall, 'a fresh ctx.agents.create was issued (the forced resume failure triggered the fallback)')
+      assert.equal(createCall.meta.cwd, stateDir, 'the wakePost fallback create uses the workspace-root cwd (resolveWorkspaceRootPath), not the repo root')
+      assert.equal(createCall.meta.agentPreset, 'deepartments-worker', 'the fallback create still mounts the worker preset')
+      // The fallback-created worker is then re-attached (cwd now matches the
+      // workspace path → the attach resolves).
+      await waitFor(() => workspaceRegistry.attachCalls.includes('worker-researcher-alpha'), 5000, 'the fallback-created worker is attached to the workspace')
     } finally {
       await dispose()
     }
