@@ -9,7 +9,7 @@
         # are program architecture defined HERE, never created by agents.
         # The board room is the coordination room; research-head is a member
         # of BOTH the board room and the research department room.
-        # agentOptions values verified: models served via the opencode-go provider (registered by @deepseek-ai/dsh-llm-pi-ai); deepseek-v4-flash / deepseek-v4-pro available under it.
+        # agentOptions values: models served via the deepseek-official provider (official DeepSeek API, DEEPSEEK_API_KEY); deepseek-v4-flash-vision-exp with reasoning max (same as the Asistente).
         org:
           rooms:
             - id: board
@@ -32,10 +32,11 @@
                 title: Head of Research
                 role: Research department head
                 sessionTitle: Research Head
-                provider: opencode-go
+                provider: deepseek-official
                 agentOptions:
-                  provider: opencode-go
-                  model: deepseek-v4-flash
+                  provider: deepseek-official
+                  model: deepseek-v4-flash-vision-exp
+                  reasoningEffort: max
         # Custom ctx.web fetch provider (webfetch.ts): detects blocking
         # (403/429) and reports WEB_BLOCKED with a message that instructs
         # API/JSON-endpoint investigation instead of guessing host endpoints.
