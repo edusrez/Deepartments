@@ -23,7 +23,8 @@ import {
   isTrustedAuthority,
   isTrustedHostFact,
   parseAuthority,
-  parseClientEnvelope
+  parseClientEnvelope,
+  pickLiveHostEntry
 } from '../lib/invoke.js'
 
 // --- department configs (two configured heads, mirroring cordis.patch.yml) ---
@@ -221,6 +222,166 @@ test('dispatchDeepartmentsEndpoint: host/status with only retired entries → nu
     { sessionId: 'sess-a', retiredAt: 1 },
     { sessionId: 'sess-b', retiredAt: 2 }
   ])
+})
+
+// --- deterministic live-host selection (U3 fix, post-mortem finding #2) ------
+//
+// The pre-fix buildHostStatusPayload picked the FIRST non-retired host entry
+// in Map iteration order; after a rotation that returned a STALE live entry
+// (the dead bare `host-1a4af1ea`) instead of the rotation successor
+// (`1122cd45`, the entry carrying `previousSessionId`) — the wake-12→13
+// incident. pickLiveHostEntry makes the selection deterministic: successsor →
+// single-live → (ambiguity fallback) first-in-order + warn.
+
+test('pickLiveHostEntry + host/status: the rotation successor (previousSessionId) wins over a stale bare entry', async () => {
+  // The incident's hosts.json live-entry shape (post-rotation Map order):
+  // retired cf5225e4 first, then the STALE bare 1a4af1ea, then 1122cd45 with
+  // previousSessionId. The OLD pick returned 1a4af1ea; the fix MUST report
+  // 1122cd45.
+  const hosts = [
+    { hostId: 'host-session-cf5225e4', sessionId: 'session-cf5225e4', roomId: 'board', retired: true, retiredAt: 1787410322000, rotatedTo: 'host-1122cd45' },
+    { hostId: 'host-1a4af1ea-5363-4cbd-b0ea-7c2b1812d662', sessionId: '1a4af1ea-5363-4cbd-b0ea-7c2b1812d662', roomId: 'board' },
+    { hostId: 'host-1122cd45', sessionId: 'session-1122cd45', roomId: 'board', previousSessionId: 'session-cf5225e4' }
+  ]
+  const picked = pickLiveHostEntry(hosts)
+  assert.equal(picked.live?.sessionId, 'session-1122cd45')
+  assert.equal(picked.ambiguous, false, 'successor branch is not ambiguous')
+  let warns = 0
+  const deps = makeDeps({
+    hosts,
+    logger: { warn: () => { warns += 1 } },
+    loadHostWakeCounter: async () => 13
+  })
+  const result = await dispatchDeepartmentsEndpoint('host/status', {}, deps)
+  assert.equal(result.ok, true)
+  const value = result.ok ? result.value : null
+  assert.equal(value.hostSessionId, 'session-1122cd45') // NOT 1a4af1ea
+  assert.equal(value.previousSessionId, 'session-cf5225e4')
+  assert.deepEqual(value.retired, [{ sessionId: 'session-cf5225e4', retiredAt: 1787410322000 }])
+  assert.equal(value.wakeCounter, 13)
+  assert.equal(warns, 0, 'successor selection fires NO ambiguity warn')
+})
+
+test('pickLiveHostEntry + host/status: a single live entry is picked WITHOUT an ambiguity warn', async () => {
+  const hosts = [{ hostId: 'host-x', sessionId: 'sess-x', roomId: 'board' }]
+  const picked = pickLiveHostEntry(hosts)
+  assert.equal(picked.live?.sessionId, 'sess-x')
+  assert.equal(picked.ambiguous, false)
+  let warned = false
+  const deps = makeDeps({
+    hosts,
+    logger: { warn: () => { warned = true } }
+  })
+  const result = await dispatchDeepartmentsEndpoint('host/status', {}, deps)
+  assert.equal(result.ok, true)
+  assert.equal(result.ok ? result.value.hostSessionId : null, 'sess-x')
+  // Regression (d): the single-live branch must NOT fire the ambiguity warn.
+  assert.equal(warned, false)
+})
+
+test('pickLiveHostEntry: all entries retired → no live entry (payload covered by the all-retired dispatcher test above)', () => {
+  const picked = pickLiveHostEntry([
+    { hostId: 'host-sess-a', sessionId: 'sess-a', roomId: 'board', retired: true, retiredAt: 1, rotatedTo: 'host-sess-b' },
+    { hostId: 'host-sess-b', sessionId: 'sess-b', roomId: 'board', retired: true, retiredAt: 2, rotatedTo: 'host-sess-c' }
+  ])
+  assert.equal(picked.live, undefined)
+  assert.equal(picked.ambiguous, false)
+})
+
+test('pickLiveHostEntry + host/status: multiple BARE live entries → first in order + ambiguity warn listing the candidates', async () => {
+  // Drift shape (post-mortem #2): two live entries, NEITHER a rotation
+  // successor. Deterministic fallback = first in insertion order; the payload
+  // must ALSO warn with the ambiguous candidates (owner cleans the live state).
+  const hosts = [
+    { hostId: 'host-a', sessionId: 'sess-a', roomId: 'board' },
+    { hostId: 'host-b', sessionId: 'sess-b', roomId: 'board' }
+  ]
+  const picked = pickLiveHostEntry(hosts)
+  assert.equal(picked.live?.sessionId, 'sess-a')
+  assert.equal(picked.ambiguous, true, 'two bare live entries are ambiguous')
+  const messages = []
+  const deps = makeDeps({
+    hosts,
+    logger: { warn: (message) => { messages.push(message) } }
+  })
+  const result = await dispatchDeepartmentsEndpoint('host/status', {}, deps)
+  assert.equal(result.ok, true)
+  const value = result.ok ? result.value : null
+  assert.equal(value.hostSessionId, 'sess-a')
+  assert.equal(value.previousSessionId, null)
+  assert.equal(messages.length, 1)
+  assert.match(messages[0], /host-a \(sessionId=sess-a\)/)
+  assert.match(messages[0], /host-b \(sessionId=sess-b\)/)
+})
+
+// --- production wiring regression: a Map .values() iterator is SINGLE-USE ----
+//
+// Production wires `deps.hosts` as ONE shared `hosts.values()` (applyInvoke,
+// endpointDeps — reviewer FAIL 2026-08-22): a Map iterator is one-shot, so the
+// new buildHostStatusPayload's up-to-3× iteration (pick → candidates spread →
+// retired loop) plus the agents/list host resolution starve it — the FIRST
+// call degraded `retired` to [], and from the SECOND call onward
+// hostSessionId was null (the client watcher's rotation signal died after the
+// first 5s poll). Every test above wires plain ARRAYS (re-iterable), so none
+// can see it. This test wires the REAL production shape — a live Map
+// `.values()` iterator — and asserts the wire (now a fresh-iterator-per-
+// `[Symbol.iterator]` view) stays re-iterable across repeated host/status +
+// agents/list calls.
+
+test('dispatchDeepartmentsEndpoint: a real Map .values() wire stays re-iterable across repeated host/status + agents/list calls', async () => {
+  // Production host registry shape (Map<string, HostEntry>, applyInvoke:1377):
+  // after a rotation the OLD entry stays retired (evidence) and the LIVE entry
+  // carries previousSessionId.
+  const hosts = new Map([
+    ['host-sess-old', { hostId: 'host-sess-old', sessionId: 'sess-old', roomId: 'board', retired: true, retiredAt: 1787337794152, rotatedTo: 'host-sess-new' }],
+    ['host-sess-new', { hostId: 'host-sess-new', sessionId: 'sess-new', roomId: 'board', previousSessionId: 'sess-old' }]
+  ])
+  let warns = 0
+  const deps = makeDeps({
+    // The FIXED production wire (verbatim src/invoke.ts:4701): a wrapper whose
+    // `[Symbol.iterator]` hands out a FRESH MapIterator per call over the SAME
+    // live Map — NOT an array (arrays are trivially re-iterable, which is why
+    // the all-array suite could not catch the bug). Wiring the raw one-shot
+    // `hosts.values()` here would reproduce the reviewer's FAIL (CALL1 retired
+    // degraded to []), not pin the fix.
+    hosts: { [Symbol.iterator]: () => hosts.values() },
+    byPost: new Map([
+      ['research-head', { postId: 'research-head', sessionId: 'head-research-head', roomId: 'research' }]
+    ]),
+    memberCursors: new Map([['host-sess-new', { lastMessageSeq: 0 }]]),
+    loadBoardRecords: async () => [
+      // Addressed to the caller host member, seq > cursor, not ack → the unread
+      // count is OBSERVABLE PROOF the agents/list host resolution still saw the
+      // registry (starved wire → hostMemberId undefined → unread 0).
+      { seq: 1, from: 'research-head', to: ['host-sess-new'], kind: 'message', payload: { kind: 'note', text: 'hi' } }
+    ],
+    logger: { warn: () => { warns += 1 } }
+  })
+  // CALL 1 — host/status must see the FULL registry: retired is NOT degraded
+  // to [] and the live successor is picked (no ambiguity warn).
+  const call1 = await dispatchDeepartmentsEndpoint('host/status', {}, deps)
+  assert.equal(call1.ok, true)
+  assert.equal(call1.ok ? call1.value.hostSessionId : null, 'sess-new')
+  assert.equal(call1.ok ? call1.value.previousSessionId : null, 'sess-old')
+  assert.deepEqual(call1.ok ? call1.value.retired : null, [{ sessionId: 'sess-old', retiredAt: 1787337794152 }])
+  assert.equal(warns, 0, 'successor selection fires NO ambiguity warn')
+  // CALL 2 — hostSessionId must SURVIVE (pre-fix regression: the shared
+  // iterator was exhausted by CALL 1 → null → watcher rotation signal dies).
+  const call2 = await dispatchDeepartmentsEndpoint('host/status', {}, deps)
+  assert.equal(call2.ok, true)
+  assert.equal(call2.ok ? call2.value.hostSessionId : null, 'sess-new')
+  assert.equal(call2.ok ? call2.value.previousSessionId : null, 'sess-old')
+  assert.deepEqual(call2.ok ? call2.value.retired : null, [{ sessionId: 'sess-old', retiredAt: 1787337794152 }])
+  // CALL 3+ — agents/list-like consumers (invoke.ts:1019) still resolve the
+  // caller host member id → candidate cursors apply → unread counted correctly.
+  const call3 = await dispatchDeepartmentsEndpoint('agents', { sessionId: 'sess-new' }, deps)
+  assert.equal(call3.ok, true)
+  const row3 = call3.ok ? call3.value.agents.find((r) => r.id === 'research-head') : null
+  assert.equal(row3.unread, 1)
+  const call4 = await dispatchDeepartmentsEndpoint('list', { sessionId: 'sess-new' }, deps)
+  assert.equal(call4.ok, true)
+  const row4 = call4.ok ? call4.value.agents.find((r) => r.id === 'research-head') : null
+  assert.equal(row4.unread, 1)
 })
 
 // --- parseClientEnvelope -----------------------------------------------------

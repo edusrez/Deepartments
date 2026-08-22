@@ -851,6 +851,11 @@ export interface DeepartmentsEndpointDeps {
    * payload must stay minimal and stable). Contract: never throws (a read
    * failure is an omission, never an RPC error). */
   loadHostWakeCounter?: (hostId: string) => Promise<number | undefined>
+  /** Optional (U3 fix): a minimal warn-capable logger for AMBIGUOUS live-host
+   * selection in `host/status` (the pickLiveHostEntry fallback — multiple live
+   * entries with no rotation successor). Absent dep → the warn is skipped and
+   * the fallback pick is still deterministic (never throws). */
+  logger?: { warn: (message: string) => void }
 }
 
 /** The `/deepartments host/status` RPC payload (U3, spec 002 §6.1): the CURRENT
@@ -873,11 +878,70 @@ export interface HostStatusPayload {
   wakeCounter?: number
 }
 
+/** Result of the deterministic live-host selection (U3 fix, spec 002 §6.1). */
+export interface PickLiveHostResult {
+  /** The selected live entry, or undefined when NO live entry exists. */
+  live: HostEntryLike | undefined
+  /** True when the AMBIGUITY FALLBACK branch fired (multiple live entries,
+   * none carrying `previousSessionId`): the caller should log a warn listing
+   * the candidates. False for the successor / single-live / no-live branches. */
+  ambiguous: boolean
+}
+
+/** PURE deterministic live-host selection for the `host/status` payload (U3
+ * fix, spec 002 §6.1). Among the NON-RETIRED entries, prefer, in order:
+ *   (a) the rotation-created SUCCESSOR — the entry carrying
+ *       `previousSessionId` (the true current host after a rotation);
+ *   (b) the ONLY live entry, when exactly one exists;
+ *   (c) the first live entry in iteration (insertion) order, flagged
+ *       `ambiguous: true` so the caller can warn.
+ * Deterministic for every hosts.json shape: the previous first-non-retired
+ * pick silently returned a STALE entry (e.g. a dead bare `host-1a4af1ea`)
+ * instead of the rotated successor in the wake-12→13 incident (post-mortem
+ * finding #2). No side effects — unit-testable without the invoke context. */
+export function pickLiveHostEntry(entries: Iterable<HostEntryLike>): PickLiveHostResult {
+  let successor: HostEntryLike | undefined
+  const liveEntries: HostEntryLike[] = []
+  for (const entry of entries) {
+    if (entry.retired === true) continue
+    liveEntries.push(entry)
+    if (
+      successor === undefined &&
+      entry.previousSessionId !== undefined &&
+      entry.previousSessionId !== ''
+    ) {
+      successor = entry
+    }
+  }
+  if (successor !== undefined) return { live: successor, ambiguous: false }
+  if (liveEntries.length === 1) return { live: liveEntries[0], ambiguous: false }
+  if (liveEntries.length === 0) return { live: undefined, ambiguous: false }
+  // Multiple live entries, none rotation-created → ambiguity fallback.
+  return { live: liveEntries[0], ambiguous: true }
+}
+
 /** PURE builder of the `host/status` payload — derived from the in-memory host
- * registry only (no side effects). Empty hosts / no live entry →
- * `{ hostSessionId: null, previousSessionId: null, retired: [] }`. */
+ * registry only (no side effects; the only non-pure part is an optional
+ * ambiguity `deps.logger.warn`). Empty hosts / no live entry →
+ * `{ hostSessionId: null, previousSessionId: null, retired: [] }`. Live-host
+ * selection is DETERMINISTIC via pickLiveHostEntry (U3 fix): prefer the
+ * rotation successor (`previousSessionId`), then the single live entry, then
+ * the first live entry with an ambiguity warn (post-mortem finding #2 — the
+ * old first-non-retired pick returned a stale live entry after a rotation). */
 async function buildHostStatusPayload(deps: DeepartmentsEndpointDeps): Promise<HostStatusPayload> {
-  let live: HostEntryLike | undefined
+  const { live, ambiguous } = pickLiveHostEntry(deps.hosts)
+  if (ambiguous && deps.logger !== undefined) {
+    // Multiple live entries with no rotation successor — the pre-fix selection
+    // silently chose the FIRST one (a stale live entry, e.g. a dead bare
+    // `host-1a4af1ea`). Warn with the candidates so the Asistente can clean
+    // the drifted live state; the payload still picks deterministically.
+    const candidates = [...deps.hosts]
+      .filter((entry) => entry.retired !== true)
+      .map((entry) => `${entry.hostId} (sessionId=${entry.sessionId}${entry.previousSessionId === undefined ? '' : `, previousSessionId=${entry.previousSessionId}`})`)
+    deps.logger.warn(
+      `[deepartments] host/status: ${candidates.length} live host entries with no rotation successor — picked ${live?.hostId ?? 'none'} deterministically; candidates: ${candidates.join(', ')}`
+    )
+  }
   const retired: Array<{ sessionId: string; retiredAt: number }> = []
   for (const entry of deps.hosts) {
     if (entry.retired === true) {
@@ -886,9 +950,7 @@ async function buildHostStatusPayload(deps: DeepartmentsEndpointDeps): Promise<H
       if (typeof entry.retiredAt === 'number') {
         retired.push({ sessionId: entry.sessionId, retiredAt: entry.retiredAt })
       }
-      continue
     }
-    if (live === undefined) live = entry
   }
   const hostSessionId = live === undefined ? null : live.sessionId
   const previousSessionId = live?.previousSessionId ?? null
@@ -4636,7 +4698,18 @@ export function applyInvoke(ctx: Context, config: Config) {
     const endpointDeps: DeepartmentsEndpointDeps = {
       departments: config.org.departments,
       byPost: byPost as unknown as Map<string, PostEntryLike>,
-      hosts: hosts.values() as Iterable<HostEntryLike>,
+      // U3 fix (reviewer 2026-08-22): `Map.values()` returns a SINGLE-USE
+      // iterator, and `endpointDeps` is shared for the process lifetime. The
+      // new buildHostStatusPayload iterates `deps.hosts` up to 3× (pick,
+      // candidates spread, retired loop) and agents/list iterates it again, so
+      // a bare `hosts.values()` was exhausted by the FIRST call (retired
+      // degraded to []) and every later call saw zero hosts (hostSessionId →
+      // null — the client watcher's rotation signal died after the first poll).
+      // Re-iterable wire: EVERY `[Symbol.iterator]` call returns a FRESH
+      // iterator over the live Map content. Fixing this inside
+      // buildHostStatusPayload alone could not cure the cross-request
+      // exhaustion of a shared one-shot iterator.
+      hosts: { [Symbol.iterator]: (): Iterator<HostEntryLike> => hosts.values() as Iterator<HostEntryLike> },
       memberCursors: memberCursors as unknown as ReadonlyMap<string, { lastMessageSeq: number }>,
       sessionLive: (sid) => agents !== void 0 && agents.get(SessionId(sid)) !== undefined,
       sessionRunning: (sid) => agents !== void 0 && agents.get(SessionId(sid))?.status === 'running',
@@ -4657,7 +4730,9 @@ export function applyInvoke(ctx: Context, config: Config) {
         } catch {
           return undefined
         }
-      }
+      },
+      // U3 fix: ambiguity warn for live-host selection (post-mortem finding #2).
+      logger: ctx.logger
     }
     // Register each client path as a `kind:'exact'` POST route. `webServer.register`
     // returns a disposer; the effect folds them into one reversible registration
