@@ -53,6 +53,43 @@ if (/^\s*(import|export)\s/m.test(body)) {
   process.exit(1);
 }
 
+// Lazify the DSH react externals (react, react/jsx-runtime) that tsdown hoists
+// to the TOP of the CJS body as `let react = require("react")`. The DSH client
+// test harness loads the bundle with a require stub that THROWS ("the watcher
+// bundle imports nothing") — so the factory body must not execute a require
+// during evaluation, even though the DSH loader DOES resolve react at runtime.
+// Both externals are only ever dereferenced while a React component actually
+// RENDERS, so we hold them as lazy Proxy namespaces that resolve the loader's
+// require on first property access — still inside the factory, where the
+// loader's `require` stays live. Keep these imports name-matched to the tsdown
+// output; if the shape drifts, the count guard below fails loudly instead of
+// emitting a bundle that violates the envelope.
+let lazified = 0;
+body = body.replace(
+  /^let ([A-Za-z_$][\w$]*) = require\("(react|react\/jsx-runtime)"\);$/gm,
+  (_m, ident, spec) => {
+    lazified += 1;
+    return `let ${ident} = new Proxy({}, { get: (t, p) => (t.m ??= require("${spec}"))[p] });`;
+  }
+);
+if (lazified === 0) {
+  console.error(
+    "[normalize-client-banner] no react externals found to lazify; the bundle " +
+    "would emit top-level requires and break the client test harness. Aborting."
+  );
+  process.exit(1);
+}
+// Guard: the DSH react externals are the ONLY top-level requires this plugin
+// bundle is allowed to emit; any other `let X = require(...)` at line scope is
+// an externals drift that the envelope forbids.
+const stray = body.match(/^[ \t]*let [A-Za-z_$][\w$]* = require\(/m);
+if (stray) {
+  console.error(
+    `[normalize-client-banner] unexpected top-level require remains: ${stray[0].trim()}. Aborting.`
+  );
+  process.exit(1);
+}
+
 const envelope =
   `window.__ModuleLoader__.load({\n` +
   `  id: "${ID}",\n` +

@@ -28,8 +28,12 @@
  * Named exports only (AGENTS.md rule 1); no export default.
  */
 
+import { useEffect, useState, type CSSProperties } from "react";
+
 export const name = "deepartments-client";
-export const inject = ["slots", "sessions", "workspaces", "connection"];
+/** `locale` added for the i18n header action + agenda view tab (F4 client UI);
+ * the rest is the pre-existing U1/U3 surface. */
+export const inject = ["slots", "sessions", "workspaces", "connection", "locale"];
 
 type RpcResult<T> = { ok: true; value: T } | { ok: false; error: unknown };
 
@@ -76,6 +80,124 @@ export function shouldRefreshForHost(
   return shouldOpenHostSession(previous, current) && !presentInStore;
 }
 
+// #region F4 client UI (presence toggle + agenda view)
+//
+// The client UI mirrors two additive DSH slots — `conversation.session.header.utilities`
+// (one header button) and `conversation.view` (one session view-ring tab; precedent:
+// dsh-client-ui-trajectory). Both are list slots, and the registrant is self-sufficient:
+// everything a control needs comes from the registrant's own inject face (`connection`
+// RPC + `locale`) plus local React state. The server endpoints (`presence/get`,
+// `presence/set`, `agenda/list`) are added by the server builder in src/invoke.ts
+// (Builder 2) — this file only consumes them.
+//
+// The presence toggle is registered in the RIGHT-ALIGNED `header.utilities` slot (not
+// the title-adjacent `header.actions` slot, where it previously sat at order 15 and the
+// owner observed it beside the title breadcrumb rather than the Session log) so it
+// renders beside the native "Session log" download button — that button registers
+// `id: 'session-log-download'` in the SAME slot with NO explicit order (defaults to 0).
+// The slot orders entries by ascending `order` (default `?? 0`), so our order must be
+// > 0 to land immediately to the RIGHT of Session log; 15 is the only other entry, so
+// it renders directly adjacent.
+
+/** Value returned by `/deepartments presence/get`. */
+export interface PresenceValue {
+  present: boolean;
+}
+
+/** One scheduled job row in the agenda (mirrors dept_job_list frontmatter). */
+export interface AgendaJob {
+  id: string;
+  title: string;
+  schedule?: string;
+  next?: string;
+}
+
+/** One arbitrary calendar entry in the agenda (from `.deepartments/calendar.json`). */
+export interface AgendaCalendarEntry {
+  label: string;
+  time: string;
+}
+
+/** Value returned by `/deepartments agenda/list`. */
+export interface AgendaValue {
+  jobs: AgendaJob[];
+  calendar: AgendaCalendarEntry[];
+}
+
+/** Bindable i18n function (dictionary lookup with optional `{vars}`). */
+export type TFunction = (key: string, vars?: Record<string, unknown>) => string;
+
+/** Namespace for the client dictionary; registered via `ctx.locale.register`. */
+export const locale = "deepartments";
+
+/** Client dictionary. DSH web is en/zh; add `es` later if the owner prefers it. */
+export const dictionary: Record<string, Record<string, string>> = {
+  en: {
+    "header.present": "Present",
+    "header.absent": "Absent",
+    "header.aria.toggle": "Toggle owner presence",
+    "view.agenda": "Agenda",
+    "agenda.loading": "Loading…",
+    "agenda.jobs": "Scheduled",
+    "agenda.calendar": "Calendar",
+    "agenda.empty": "Nothing scheduled yet.",
+    "agenda.error": "Couldn't load the agenda.",
+    "agenda.schedule.none": "—",
+  },
+  zh: {
+    "header.present": "在岗",
+    "header.absent": "离开",
+    "header.aria.toggle": "切换所有者在场状态",
+    "view.agenda": "日程",
+    "agenda.loading": "加载中…",
+    "agenda.jobs": "已排期",
+    "agenda.calendar": "日历",
+    "agenda.empty": "暂无排期内容。",
+    "agenda.error": "无法加载日程。",
+    "agenda.schedule.none": "—",
+  },
+};
+
+/** Stable empty arrays so a view with no agenda keeps a fixed identity. */
+export const NO_JOBS: AgendaJob[] = [];
+export const NO_CALENDAR: AgendaCalendarEntry[] = [];
+
+/** Shared panel chrome for the agenda view tab (inline styles — the client
+ * bundle has no CSS-module pipeline, so the design-system CSS vars are used
+ * directly). */
+const panelStyle: CSSProperties = {
+  padding: "12px 16px",
+  overflowY: "auto",
+  height: "100%",
+  boxSizing: "border-box",
+  display: "flex",
+  flexDirection: "column",
+  gap: 16,
+};
+const sectionStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+};
+const sectionTitleStyle: CSSProperties = {
+  margin: 0,
+  color: "var(--dsw-alias-label-secondary)",
+  fontSize: 12,
+  fontWeight: 500,
+  lineHeight: "18px",
+};
+const cardStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
+  padding: "6px 8px",
+  borderRadius: 8,
+  background: "var(--dsw-alias-fill-l2)",
+  color: "var(--dsw-alias-label-primary)",
+  fontSize: 13,
+  lineHeight: "20px",
+};
+
 /** Minimal client root-context surface the watcher relies on (client-runner
  * inject; provided by the base bundles). */
 interface ClientCtx {
@@ -93,6 +215,19 @@ interface ClientCtx {
     rpc: {
       call(channel: string, endpoint: string, payload: unknown): Promise<RpcResult<unknown>>;
     };
+  };
+  /** `locale` (inject): dictionary registration + namespace binding for `t`. */
+  locale: {
+    register(namespace: string, dict: Record<string, Record<string, string>>): unknown;
+    bind(namespace: string): TFunction;
+  };
+  /** `slots` (inject): additive slot registration. */
+  slots: {
+    inject(
+      name: string,
+      register: () => unknown
+    ): unknown;
+    register(opts: Record<string, unknown>, component: unknown): unknown;
   };
 }
 
@@ -178,4 +313,233 @@ export function apply(ctx: ClientCtx): void {
     },
     "deepartments-client: host/status lifecycle watcher"
   );
+
+  // #region F4 — client UI (presence toggle + agenda view)
+  // Dictionary + bound `t` for the header action and the view tab.
+  ctx.effect(
+    () => {
+      ctx.locale.register(locale, dictionary);
+    },
+    "deepartments-client: dictionaries"
+  );
+  const t = ctx.locale.bind(locale);
+
+  /** One header action: a Present/Absent toggle. Reads `presence/get` on mount,
+   * flips optimistically and fires `presence/set` on click (reverting on a hard
+   * RPC failure so the UI never shows a state the server did not accept).
+   * Self-sufficient — the empty owner share carries everything it needs. */
+  function PresenceToggle() {
+    const [present, setPresent] = useState<boolean>(false);
+    const [busy, setBusy] = useState(false);
+    useEffect(() => {
+      let disposed = false;
+      rpc.call("/deepartments", "presence/get", {})
+        .then((res) => {
+          if (disposed || !res.ok) return;
+          setPresent((res.value as PresenceValue).present);
+        })
+        .catch(() => {
+          // Endpoint may not be mounted yet (Builder 2) — default to absent.
+        });
+      return () => {
+        disposed = true;
+      };
+    }, []);
+
+    const toggle = async () => {
+      if (busy) return;
+      const next = !present;
+      setPresent(next); // optimistic
+      setBusy(true);
+      try {
+        const res = await rpc.call("/deepartments", "presence/set", { present: next });
+        if (!res.ok) {
+          setPresent(!next);
+          console.warn("[deepartments] presence/set:", res.error);
+        }
+      } catch (error) {
+        setPresent(!next);
+        console.warn("[deepartments] presence/set failed:", error);
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    const label = present ? t("header.present") : t("header.absent");
+    const dotColor = present
+      ? "var(--dsw-alias-state-success-primary)"
+      : "var(--dsw-alias-label-tertiary)";
+    return (
+      <button
+        type="button"
+        onClick={() => void toggle()}
+        title={t("header.aria.toggle")}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "3px 6px",
+          border: 0,
+          borderRadius: 6,
+          background: "transparent",
+          color: present
+            ? "var(--dsw-alias-state-success-primary)"
+            : "var(--dsw-alias-label-secondary)",
+          cursor: "pointer",
+          fontSize: 12,
+          lineHeight: "18px",
+        }}
+      >
+        <span
+          aria-hidden
+          style={{
+            flex: "none",
+            width: 8,
+            height: 8,
+            borderRadius: 999,
+            background: dotColor,
+            opacity: busy ? 0.5 : 1,
+          }}
+        />
+        <span>{label}</span>
+      </button>
+    );
+  }
+
+  ctx.slots.inject("conversation.session.header.utilities", () =>
+    ctx.slots.register(
+      {
+        name: "conversation.session.header.utilities",
+        id: "presence-toggle",
+        order: 15,
+        locale,
+      },
+      PresenceToggle
+    )
+  );
+
+  /** One session view-ring tab: an "Agenda" panel listing scheduled jobs and
+   * calendar entries from `/deepartments agenda/list`, with loading / empty /
+   * error states. Self-sufficient (local state, not the session snapshot). */
+  function AgendaView() {
+    const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+    const [data, setData] = useState<AgendaValue>({
+      jobs: NO_JOBS,
+      calendar: NO_CALENDAR,
+    });
+    useEffect(() => {
+      let disposed = false;
+      setStatus("loading");
+      rpc.call("/deepartments", "agenda/list", {})
+        .then((res) => {
+          if (disposed) return;
+          if (res.ok) {
+            const value = res.value as AgendaValue;
+            setData({
+              jobs: value?.jobs ?? NO_JOBS,
+              calendar: value?.calendar ?? NO_CALENDAR,
+            });
+            setStatus("ready");
+          } else {
+            setStatus("error");
+          }
+        })
+        .catch(() => {
+          if (!disposed) setStatus("error");
+        });
+      return () => {
+        disposed = true;
+      };
+    }, []);
+
+    if (status === "loading") {
+      return (
+        <div style={{ ...panelStyle, color: "var(--dsw-alias-label-tertiary)" }}>
+          {t("agenda.loading")}
+        </div>
+      );
+    }
+    if (status === "error") {
+      return (
+        <div style={{ ...panelStyle, color: "var(--dsw-alias-state-error-primary)" }}>
+          {t("agenda.error")}
+        </div>
+      );
+    }
+    if (data.jobs.length === 0 && data.calendar.length === 0) {
+      return (
+        <div style={{ ...panelStyle, color: "var(--dsw-alias-label-tertiary)" }}>
+          {t("agenda.empty")}
+        </div>
+      );
+    }
+    return (
+      <div style={panelStyle}>
+        {data.jobs.length > 0 && (
+          <section style={sectionStyle}>
+            <h3 style={sectionTitleStyle}>{t("agenda.jobs")}</h3>
+            <ul
+              style={{
+                margin: 0,
+                padding: 0,
+                listStyle: "none",
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+              }}
+            >
+              {data.jobs.map((job) => (
+                <li key={job.id} style={cardStyle}>
+                  <span style={{ fontFamily: "var(--ds-font-family-code)", fontWeight: 500 }}>
+                    {job.title}
+                  </span>
+                  <span style={{ color: "var(--dsw-alias-label-secondary)" }}>
+                    {job.schedule ?? t("agenda.schedule.none")}
+                    {job.next ? " · " + job.next : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        {data.calendar.length > 0 && (
+          <section style={sectionStyle}>
+            <h3 style={sectionTitleStyle}>{t("agenda.calendar")}</h3>
+            <ul
+              style={{
+                margin: 0,
+                padding: 0,
+                listStyle: "none",
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+              }}
+            >
+              {data.calendar.map((entry, index) => (
+                <li key={entry.label + index} style={cardStyle}>
+                  <span>{entry.label}</span>
+                  <span style={{ color: "var(--dsw-alias-label-tertiary)" }}>{entry.time}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+      </div>
+    );
+  }
+
+  ctx.slots.inject("conversation.view", () =>
+    ctx.slots.register(
+      {
+        name: "conversation.view",
+        id: "agenda",
+        order: 20,
+        locale,
+        label: () => t("view.agenda"),
+        inject: () => ({}),
+      },
+      AgendaView
+    )
+  );
+  // #endregion
 }

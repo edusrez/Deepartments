@@ -28,7 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath } from '../lib/messages-store.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
 import {
@@ -6793,6 +6793,508 @@ test('F5 RACE FIX: a composition WITHOUT the workspaceRegistry seam (DEFINITIVE 
       disposeExporter()
     } finally {
       await dispose()
+    }
+  })
+})
+
+// ===========================================================================
+// Feature A — owner-presence (Presencia/Ausencia) toggle
+// ===========================================================================
+// The presence flag: `presence/get`/`presence/set` RPC (pure dispatch +
+// persistence to `<stateDir>/presence.json`), the A3 `ask_user_question` guard
+// (deny ONLY the registered host when the owner is absent), and the A4 host
+// pre-step injector (append an "Owner presence" node on a TRANSITION).
+// Pure-dispatch tests exercise the exported dispatch + the SAME exported
+// file persistence helpers the production wiring uses; the real-Loader tests
+// assert the live guard + the pre-step injector.
+
+/** In-memory deps for the pure presence dispatch — the presence closures read/
+ * write the tmp stateDir via the SAME exported helpers production wraps. */
+function presenceDispatchDeps(stateDir, overrides = {}) {
+  const notifyCalls = []
+  return {
+    departments: [],
+    byPost: new Map(),
+    hosts: [],
+    sessionLive: () => false,
+    sessionRunning: () => false,
+    presenceState: async () => readPresenceStateFile(stateDir),
+    savePresenceState: async (state) => writePresenceStateFile(stateDir, state),
+    notifyPresenceChange: (present) => notifyCalls.push(present),
+    ...overrides,
+    _notifyCalls: notifyCalls
+  }
+}
+
+test('presence/set (pure dispatch): a boolean `present` persists `presence.json` (present:false + updatedAt), notifies a CHANGE, and presence/get returns it', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const deps = presenceDispatchDeps(stateDir)
+    // Absent (default present:true → present:false) — a CHANGE, notify fires.
+    const set = await dispatchDeepartmentsEndpoint('presence/set', { present: false }, deps)
+    assert.equal(set.ok, true)
+    assert.equal(set.value?.present, false)
+    assert.equal(typeof set.value?.updatedAt, 'number', 'presence/set stamps updatedAt')
+
+    // persistence on disk via the SAME helper production wires.
+    const onDisk = readPresenceStateFile(stateDir)
+    assert.equal(onDisk.present, false, 'presence.json persisted present:false')
+    assert.equal(typeof onDisk.updatedAt, 'number')
+
+    // notify fired exactly once (default→absent is a change).
+    assert.deepEqual(deps._notifyCalls, [false], 'host notified of the change')
+
+    const get = await dispatchDeepartmentsEndpoint('presence/get', {}, deps)
+    assert.equal(get.ok, true)
+    assert.equal(get.value.present, false, 'presence/get reflects the persisted state')
+    assert.equal(get.value.updatedAt, onDisk.updatedAt)  // same persisted stamp
+  })
+})
+
+test('presence/set (pure dispatch): an idempotent re-set to the SAME value persists but does NOT re-notify', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const deps = presenceDispatchDeps(stateDir)
+    const first = await dispatchDeepartmentsEndpoint('presence/set', { present: false }, deps)
+    assert.equal(first.ok, true)
+    const second = await dispatchDeepartmentsEndpoint('presence/set', { present: false }, deps)
+    assert.equal(second.ok, true)
+    assert.equal(second.value?.present, false)
+    // Notified on the first (change) only — the idempotent re-set is a no-op notify.
+    assert.deepEqual(deps._notifyCalls, [false], 'no duplicate notify on an unchanged re-set')
+  })
+})
+
+test('presence/set (pure dispatch): a non-boolean `present` is a bad-request (never persists)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const deps = presenceDispatchDeps(stateDir)
+    for (const bad of ['yes', 1, null, 'false', {}]) {
+      const result = await dispatchDeepartmentsEndpoint('presence/set', { present: bad }, deps)
+      assert.equal(result.ok, false)
+      assert.equal(result.error?.code, 'bad-request')
+    }
+    assert.deepEqual(deps._notifyCalls, [], 'no notify for a rejected payload')
+  })
+})
+
+test('presence/get (pure dispatch): defaults to present:true when there is no state file / no dep', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // No file; the dep reads an absent file → present:true.
+    const deps = presenceDispatchDeps(stateDir)
+    const get = await dispatchDeepartmentsEndpoint('presence/get', {}, deps)
+    assert.equal(get.ok, true)
+    assert.equal(get.value.present, true)
+    assert.equal(get.value.updatedAt, undefined)
+  })
+})
+
+test('presence.get/presence.set (pure dispatch): graceful degrade when the presence deps are absent (no file, no persist, no notify)', async () => {
+  const deps = presenceDispatchDeps(undefined, {
+    presenceState: undefined,
+    savePresenceState: undefined,
+    notifyPresenceChange: undefined
+  })
+  const get = await dispatchDeepartmentsEndpoint('presence/get', {}, deps)
+  assert.equal(get.ok, true)
+  assert.equal(get.value.present, true, 'absent dep → default present')
+  const set = await dispatchDeepartmentsEndpoint('presence/set', { present: false }, deps)
+  assert.equal(set.ok, true)
+  assert.equal(set.value?.present, false, 'set returns the value even with no persist dep')
+})
+
+// --- A3 guard predicate (PURE) ---------------------------------------------
+
+test('askUserGuardReason: DENIES the REGISTERED HOST ask_user_question when the owner is ABSENT', () => {
+  const reason = askUserGuardReason(
+    { name: 'ask_user_question', agent: { id: 'host-abc' } },
+    { present: () => false, isHostAgent: () => true }
+  )
+  assert.equal(reason, 'owner absent (presence flag)')
+})
+
+test('askUserGuardReason: ALLOWS ask_user_question when the owner is PRESENT', () => {
+  const reason = askUserGuardReason(
+    { name: 'ask_user_question', agent: { id: 'host-abc' } },
+    { present: () => true, isHostAgent: () => true }
+  )
+  assert.equal(reason, undefined)
+})
+
+test('askUserGuardReason: NEVER gates a non-host caller (post/worker/subagent/plain) even when absent', () => {
+  assert.equal(
+    askUserGuardReason({ name: 'ask_user_question', agent: { id: 'head-research' } }, { present: () => false, isHostAgent: () => false }),
+    undefined,
+    'a registered head is not the host → passes'
+  )
+})
+
+test('askUserGuardReason: NEVER gates a non-ask_user tool', () => {
+  assert.equal(
+    askUserGuardReason({ name: 'send_message', agent: { id: 'host-abc' } }, { present: () => false, isHostAgent: () => true }),
+    undefined,
+    'other tools are unaffected by an absent owner'
+  )
+})
+
+test('askUserGuardReason: NEVER gates an exec with no agent (host-identification impossible)', () => {
+  assert.equal(
+    askUserGuardReason({ name: 'ask_user_question', agent: undefined }, { present: () => false, isHostAgent: () => true }),
+    undefined
+  )
+})
+
+// ---------------------------------------------------------------------------
+// A3 + A4 via the REAL Loader (Rule 5): the live global guard + the live
+// `agent/pre-step` injector must observe the toggle.
+// ---------------------------------------------------------------------------
+
+test('A3 guard (real Loader): owner ABSENT DENIES the registered host\'s ask_user_question through the live global guard', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const sessionId = SessionId(randomUUID())
+    await seedHostRegistration(stateDir, sessionId)
+    await writePresenceStateFile(stateDir, { present: false, updatedAt: Date.now() })
+    const { root, agents, dispose } = await bootPlugin(stateDir, { globalTools: ['ask_user_question'] })
+    try {
+      await waitForHeadMaterialized(agents)
+      const host = agents.put(fakeParentAgent(sessionId))
+      const signal = new AbortController().signal
+      const result = await root.tools.execute({ name: 'ask_user_question', agent: host, signal, arguments: { question: 'proceed?' }, callId: 1 })
+      assert.equal(result.isError, true, 'the absent-owner guard denies the host ask_user')
+      assert.match(String(result.error?.message ?? ''), /owner absent \(presence flag\)/, 'denial reason reaches the host')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('A3 guard (real Loader): owner PRESENT (default, no file) ALLOWS the registered host\'s ask_user_question', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const sessionId = SessionId(randomUUID())
+    await seedHostRegistration(stateDir, sessionId)
+    // NO presence.json → default present:true.
+    const { root, agents, dispose } = await bootPlugin(stateDir, { globalTools: ['ask_user_question'] })
+    try {
+      await waitForHeadMaterialized(agents)
+      const host = agents.put(fakeParentAgent(sessionId))
+      const signal = new AbortController().signal
+      const result = await root.tools.execute({ name: 'ask_user_question', agent: host, signal, arguments: { question: 'proceed?' }, callId: 2 })
+      assert.notEqual(result.isError, true, 'a present owner does NOT deny ask_user')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('A4 pre-step (real Loader): a host observes an absent→present TRANSITION — the "Owner presence" node is injected once and NOT repeated on an unchanged step', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const sessionId = SessionId(randomUUID())
+    await seedHostRegistration(stateDir, sessionId)
+    await writePresenceStateFile(stateDir, { present: false, updatedAt: Date.now() })
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForHeadMaterialized(agents)
+      const host = agents.put(fakeParentAgent(sessionId))
+      const signal = new AbortController().signal
+      await seedJournal(stateDir, `host-${sessionId}`, 'PRESENCE TRANSITION: observe the toggle on the next step.')
+
+      const claimed = preStepClaimed('any message')
+
+      // Step 1 — owner ABSENT at boot: the pack injects, the presence node is
+      // SEEDED (no node yet — it fires only on a LATER transition).
+      const first = await runPreStep(pluginCtx, host, claimed, signal)
+      assert.equal(first.messages.length, claimed.length + 1, 'first pre-step injects exactly the wake pack')
+      assert.ok(!first.messages.some((m) => m.content?.[0]?.text?.includes('Owner presence:')), 'no presence node on the seeding step')
+
+      // Step 2 — owner becomes PRESENT (flip the durable file; the injector
+      // refreshes the presence cache from it each step).
+      await writePresenceStateFile(stateDir, { present: true, updatedAt: Date.now() })
+      const second = await runPreStep(pluginCtx, host, claimed, signal)
+      assert.equal(second.messages.length, claimed.length + 1, 'transition step injects ONE node (no re-pack)')
+      const presenceNode = second.messages[second.messages.length - 1]
+      assert.equal(presenceNode.source.kind, 'plugin', 'presence node is a plugin context')
+      assert.equal(presenceNode.source.form, 'notice', 'presence node is a notice (collapsed row)')
+      assert.match(presenceNode.content[0].text, /Owner presence: present/, 'the node names the NEW present state')
+
+      // Step 3 — no further change: the transition node is NOT repeated.
+      const third = await runPreStep(pluginCtx, host, claimed, signal)
+      assert.equal(third.messages.length, claimed.length, 'an unchanged step injects nothing (presence node not repeated)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- W1 (spec 004 §5.7 + ROADMAP W1): runtime calendar + scheduler ----------
+
+test('W1 cron parser: * * * * * matches any minute; specific fields parse; @daily alias; a HUMAN schedule is NOT cron', () => {
+  const all = parseCronSchedule('* * * * *')
+  assert.ok(all, '* * * * * is a valid cron')
+  assert.equal(all.minutes.size, 60, 'every minute')
+  assert.equal(all.hours.size, 24, 'every hour')
+  assert.equal(all.dom.size, 31, 'every day-of-month (1..31)')
+  assert.equal(all.months.size, 12, 'every month (1..12)')
+  assert.equal(all.dow.size, 8, 'every weekday (0..7)')
+  const at = new Date(2026, 7, 23, 9, 15, 0) // local 09:15
+  assert.equal(cronMatches(all, at), true, 'an every-minute cron matches any minute')
+
+  const specific = parseCronSchedule('0 9 * * *')
+  assert.ok(specific, 'a specific 5-field cron parses')
+  assert.deepEqual([...specific.minutes], [0], 'minute 0')
+  assert.deepEqual([...specific.hours], [9], 'hour 9')
+  assert.equal(cronMatches(specific, new Date(2026, 7, 23, 9, 0, 0)), true, 'matches the 09:00 minute')
+  assert.equal(cronMatches(specific, new Date(2026, 7, 23, 9, 15, 0)), false, 'NOT a matching minute')
+  assert.equal(cronMatches(specific, new Date(2026, 7, 23, 10, 0, 0)), false, 'NOT a matching hour')
+
+  const daily = parseCronSchedule('@daily')
+  assert.ok(daily, '@daily alias parses')
+  assert.equal(daily.minutes.has(0), true, '@daily = minute 0')
+  assert.equal(daily.hours.has(0), true, '@daily = hour 0')
+  assert.equal(daily.dom.size, 31, '@daily any day')
+
+  const ranges = parseCronSchedule('*/15 9-17 * * mon-fri')
+  assert.equal(ranges, undefined, 'a non-numeric day range (mon-fri) is NOT supported → not cron (never auto-fires)')
+  assert.equal(parseCronSchedule('daily 09:00 (reserved — calendar not yet implemented; manual run via dept_job_run)'), undefined, 'a HUMAN job schedule is NOT cron')
+  assert.equal(parseCronSchedule(''), undefined, 'empty is not cron')
+})
+
+test('W1 cronIsDue: due within the desync window, no-due outside, idempotent per aligned minute', () => {
+  const cron = parseCronSchedule('* * * * *')
+  const now = new Date(2026, 7, 23, 9, 0, 30) // local 09:00:30
+  assert.equal(cronIsDue(cron, now, undefined), true, 'an every-minute cron is due when never fired')
+  const lastFired = new Date(2026, 7, 23, 9, 0, 10).getTime() // same aligned minute 09:00
+  assert.equal(cronIsDue(cron, now, lastFired), false, 'idempotent: no re-fire inside the same aligned minute')
+  const nextMinute = new Date(2026, 7, 23, 9, 1, 0) // 09:01
+  assert.equal(cronIsDue(cron, nextMinute, lastFired), true, 'the next aligned minute is due once the last minute passed')
+
+  const daily = parseCronSchedule('0 9 * * *')
+  assert.equal(cronIsDue(daily, new Date(2026, 7, 23, 9, 0, 10), undefined), true, 'a 09:00 daily cron is due at 09:00:10 (desync window)')
+  assert.equal(cronIsDue(daily, new Date(2026, 7, 23, 9, 1, 30), undefined), true, 'a 09:00 daily cron is ALSO due at 09:01:30 (a MISSED 09:00 fire within the backward window)')
+  assert.equal(cronIsDue(daily, new Date(2026, 7, 23, 8, 59, 30), undefined), false, 'NOT due 30 s BEFORE 09:00 (the desync window is BACKWARD, for missed fires only)')
+  assert.equal(cronIsDue(daily, new Date(2026, 7, 23, 10, 0, 0), undefined), false, 'NOT due at 10:00 (no match in the window)')
+})
+
+test('W1 nextCronFire: the next fire is strictly after `from` (and the agenda `next` derives from it)', () => {
+  const daily = parseCronSchedule('0 9 * * *')
+  const from = new Date(2026, 7, 23, 0, 0, 0) // local midnight
+  const next = nextCronFire(daily, from)
+  assert.ok(next, 'a daily cron yields a next fire')
+  assert.ok(next.getTime() > from.getTime(), 'the next fire is strictly after `from`')
+  assert.equal(next.getHours(), 9, 'the next fire is the 09:00 local hour')
+  assert.equal(next.getDate(), 23, 'and still the seed date (09:00 same day)')
+})
+
+test('W1 calendar state helpers: read/write round-trip; a malformed file reads empty (never throws)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    await writeCalendarStateFile(stateDir, { entries: [{ id: 'a', label: 'Alpha', at: '2026-08-24T09:00:00.000Z', createdBy: 'research-head', createdAt: now, fired: false }] })
+    const state = readCalendarStateFile(stateDir)
+    assert.equal(state.entries.length, 1, 'round-trips an entry')
+    assert.equal(state.entries[0].id, 'a')
+    assert.equal(state.entries[0].createdBy, 'research-head')
+    assert.equal(state.entries[0].fired, false)
+    await writeFile(path.join(stateDir, 'calendar.json'), '{ not json', 'utf8')
+    assert.equal(readCalendarStateFile(stateDir).entries.length, 0, 'malformed JSON → empty, never throws')
+    // Job-runs state: round-trip + malformed → {}.
+    await writeJobRunsStateFile(stateDir, { 'cron-job': now })
+    assert.equal(readJobRunsStateFile(stateDir)['cron-job'], now, 'job-runs ledger round-trips')
+    await writeFile(path.join(stateDir, 'job-runs-state.json'), 'junk', 'utf8')
+    assert.deepEqual(readJobRunsStateFile(stateDir), {}, 'malformed job-runs → {}, never throws')
+  })
+})
+
+test('W1 pure dispatch agenda/list: jobs (reused job reader) + calendar entries; a cron job carries `next`, a human schedule does not (spec: `{ok:true,value:{jobs,calendar}}`)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const jobDir = await mkdtemp(path.join(tmpdir(), 'deepartments-agenda-'))
+    try {
+      await writeFile(path.join(jobDir, 'cron-job.md'), '---\nid: cron-job\ntitle: Cron job\nrole: researcher\ndescription: a cron-scheduled job\nowner: research-head\nschedule: "0 9 * * *"\n---\n\nRun the cron job body.\n', 'utf8')
+      await writeFile(path.join(jobDir, 'human-job.md'), '---\nid: human-job\ntitle: Human job\nrole: researcher\ndescription: a human-scheduled job\nowner: research-head\nschedule: "daily 09:00 (reserved)"\n---\n\nRun the human job body.\n', 'utf8')
+      await writeCalendarStateFile(stateDir, { entries: [{ id: 'e1', label: 'Standup', at: '2026-08-24T09:00:00.000Z', createdBy: 'research-head', createdAt: Date.now(), fired: false }] })
+      const now = new Date(2026, 7, 23, 0, 0, 0).getTime() // local midnight 08-23
+      const result = await dispatchDeepartmentsEndpoint('agenda/list', {}, {
+        departments: [{ id: 'research', name: 'Research', jobDir }],
+        calendarStateDir: stateDir,
+        now: () => now,
+        byPost: new Map(),
+        hosts: [],
+        sessionLive: () => true
+      })
+      assert.equal(result.ok, true)
+      const value = result.value
+      assert.equal(value.calendar.length, 1, 'calendar entries are returned')
+      assert.equal(value.calendar[0].label, 'Standup')
+      assert.equal(value.calendar[0].time, '2026-08-24T09:00:00.000Z', 'the runtime `at` is bridged to the client `time`')
+      assert.equal(value.jobs.length, 2, 'both hermetic jobs are listed')
+      const cronJob = value.jobs.find((j) => j.id === 'cron-job')
+      assert.ok(cronJob, 'the cron job is listed')
+      assert.equal(cronJob.title, 'Cron job')
+      assert.equal(cronJob.schedule, '0 9 * * *')
+      assert.ok(typeof cronJob.next === 'string' && new Date(cronJob.next).getHours() === 9, 'a cron job carries the next-due ISO (09:00 local)')
+      assert.equal('cron' in cronJob, false, 'the internal CronSchedule object is NOT leaked to the client')
+      const humanJob = value.jobs.find((j) => j.id === 'human-job')
+      assert.ok(humanJob)
+      assert.equal(humanJob.schedule, 'daily 09:00 (reserved)')
+      assert.equal(humanJob.next, undefined, 'a human (non-cron) schedule carries NO `next`')
+    } finally {
+      await rm(jobDir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('W1 calendar tools (real Loader): a head adds/lists/removes entries; validations; ACL = creator OR department head', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      assert.ok(headCtx.tools.get('dept_calendar_add', key), 'dept_calendar_add in the head own layer')
+      assert.ok(headCtx.tools.get('dept_calendar_list', key), 'dept_calendar_list in the head own layer')
+      assert.ok(headCtx.tools.get('dept_calendar_remove', key), 'dept_calendar_remove in the head own layer')
+
+      // Valid add with a KNOWN department jobId.
+      const added = await headCtx.tools.get('dept_calendar_add', key).execute({ label: 'Review W4', at: '2026-08-24T09:00:00.000Z', jobId: 'monitor-dsh-updates' }, { agent: head, signal })
+      assert.equal(added.label, 'Review W4')
+      assert.equal(added.jobId, 'monitor-dsh-updates')
+      assert.equal(added.createdBy, 'research-head')
+      assert.equal(added.fired, false)
+      assert.equal(readCalendarStateFile(stateDir).entries.length, 1, 'the entry is persisted')
+
+      // List + range filter.
+      const listed = await headCtx.tools.get('dept_calendar_list', key).execute({}, { agent: head, signal })
+      assert.equal(listed.count, 1)
+      assert.equal(listed.entries[0].label, 'Review W4')
+      const ranged = await headCtx.tools.get('dept_calendar_list', key).execute({ from: '2026-08-24T00:00:00.000Z', to: '2026-08-24T12:00:00.000Z' }, { agent: head, signal })
+      assert.equal(ranged.count, 1, 'the entry falls inside the window')
+      const outranged = await headCtx.tools.get('dept_calendar_list', key).execute({ from: '2026-08-25T00:00:00.000Z' }, { agent: head, signal })
+      assert.equal(outranged.count, 0, 'outside the window → excluded')
+
+      // Validations: empty label, bad at, unknown jobId.
+      await assert.rejects(() => headCtx.tools.get('dept_calendar_add', key).execute({ label: '', at: '2026-08-24T09:00:00.000Z' }, { agent: head, signal }), /`label` is required/)
+      await assert.rejects(() => headCtx.tools.get('dept_calendar_add', key).execute({ label: 'x', at: 'not-a-date' }, { agent: head, signal }), /`at` must be a parseable ISO datetime/)
+      await assert.rejects(() => headCtx.tools.get('dept_calendar_add', key).execute({ label: 'x', at: '2026-08-24T09:00:00.000Z', jobId: 'does-not-exist' }, { agent: head, signal }), /not a KNOWN job of your department/)
+
+      // Creator removes (head created it).
+      const removed = await headCtx.tools.get('dept_calendar_remove', key).execute({ id: added.id }, { agent: head, signal })
+      assert.equal(removed.id, added.id)
+      assert.equal(readCalendarStateFile(stateDir).entries.length, 0, 'the entry is removed')
+
+      // ACL: a worker (NOT the creator) is DENIED; the head (department head)
+      // may remove a worker's entry; a worker removes its OWN entry.
+      const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'cal-worker', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, created.sessionId)
+      assert.ok(workerCtx.tools.get('dept_calendar_add', workerKey), 'a worker has dept_calendar_add')
+      assert.ok(workerCtx.tools.get('dept_calendar_remove', workerKey), 'a worker has dept_calendar_remove')
+      const worker = agents.store.get(created.sessionId)
+      const headEntry = await headCtx.tools.get('dept_calendar_add', key).execute({ label: 'Head only', at: '2026-08-24T10:00:00.000Z' }, { agent: head, signal })
+      await assert.rejects(
+        () => workerCtx.tools.get('dept_calendar_remove', workerKey).execute({ id: headEntry.id }, { agent: worker, signal }),
+        /only the entry creator .* or the department head may remove it/, 'a worker that is neither creator nor head is DENIED'
+      )
+      // The worker creates its own entry, then the HEAD removes it (head path).
+      const wAdded = await workerCtx.tools.get('dept_calendar_add', workerKey).execute({ label: 'Worker entry', at: '2026-08-24T11:00:00.000Z' }, { agent: worker, signal })
+      assert.equal(wAdded.createdBy, created.postId, 'a worker records itself as createdBy')
+      const hRemove = await headCtx.tools.get('dept_calendar_remove', key).execute({ id: wAdded.id }, { agent: head, signal })
+      assert.equal(hRemove.id, wAdded.id, 'the department HEAD may remove a worker\'s entry (head path)')
+      // The worker removes its OWN entry (creator path).
+      const wAdded2 = await workerCtx.tools.get('dept_calendar_add', workerKey).execute({ label: 'Worker own', at: '2026-08-24T12:00:00.000Z' }, { agent: worker, signal })
+      const wRemove = await workerCtx.tools.get('dept_calendar_remove', workerKey).execute({ id: wAdded2.id }, { agent: worker, signal })
+      assert.equal(wRemove.id, wAdded2.id, 'the CREATE MAY remove its own entry (creator path)')
+      // Unknown id rejects loudly.
+      await assert.rejects(() => headCtx.tools.get('dept_calendar_remove', key).execute({ id: 'nope' }, { agent: head, signal }), /no calendar entry with id "nope"/)
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('W1 runAgendaSchedulerTick (pure, injectable clock): a due cron job fires once + persists the ledger; a calendar jobId entry runs the job; a plain entry notifies the head; idempotent second tick', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const jobDir = await mkdtemp(path.join(tmpdir(), 'deepartments-sched-'))
+    try {
+      await writeFile(path.join(jobDir, 'cron-job.md'), '---\nid: cron-job\ntitle: Cron job\nrole: researcher\ndescription: a cron job\nowner: research-head\nschedule: "* * * * *"\n---\n\nbody\n', 'utf8')
+      await writeFile(path.join(jobDir, 'cal-job.md'), '---\nid: cal-job\ntitle: Calendar job\nrole: researcher\ndescription: a calendar-linked job\nowner: research-head\nschedule: "daily 09:00 (reserved)"\n---\n\nbody\n', 'utf8')
+      const runCalls = []
+      const notifyCalls = []
+      const warns = []
+      let nowMs = new Date(2026, 7, 23, 9, 0, 30).getTime()
+      const deps = {
+        now: () => nowMs,
+        departments: [{ id: 'research', name: 'Research', jobDir }],
+        repoRoot: '/nonexistent',
+        calendarStateDir: stateDir,
+        jobRunsStateDir: stateDir,
+        headForDepartment: () => 'research-head',
+        runJob: async (dept, head, jobId) => { runCalls.push({ dept: dept.id, head, jobId }); return true },
+        notifyHead: async (target, message) => { notifyCalls.push({ target, message }) },
+        departmentForEntry: () => ({ id: 'research', name: 'Research', jobDir }),
+        departmentForJob: () => ({ id: 'research', name: 'Research', jobDir }),
+        logger: { warn: (m) => { warns.push(m) } }
+      }
+      // Seed a due calendar jobId entry (cal-job) + a plain entry.
+      await writeCalendarStateFile(stateDir, { entries: [
+        { id: 'j1', label: 'Run cal job', at: new Date(nowMs - 5 * 60000).toISOString(), jobId: 'cal-job', createdBy: 'research-head', fired: false },
+        { id: 'p1', label: 'Team sync', at: new Date(nowMs - 5 * 60000).toISOString(), createdBy: 'research-head', fired: false }
+      ] })
+      // Tick 1.
+      await runAgendaSchedulerTick(deps)
+      assert.equal(runCalls.filter((c) => c.jobId === 'cron-job').length, 1, 'the due minute fired the cron job once (tick 1)')
+      assert.equal(runCalls.filter((c) => c.jobId === 'cal-job').length, 1, 'the due calendar jobId entry fired the job once')
+      assert.equal(notifyCalls.length, 1, 'the plain due entry notified the head once')
+      assert.equal(notifyCalls[0].target, 'research-head', 'the notification targets the department head')
+      assert.equal(notifyCalls[0].message, 'Team sync', 'the notification carries the entry label')
+      // The idempotency ledger advanced for the cron job.
+      assert.equal(readJobRunsStateFile(stateDir)['cron-job'], nowMs, 'the cron job ledger records the fire time')
+      // The fired entries are marked.
+      const firedCal = readCalendarStateFile(stateDir)
+      assert.equal(firedCal.entries.filter((e) => e.fired === true).length, 2, 'both due entries are marked fired')
+      // Idempotency: the SECOND tick at the same clock does NOT re-fire anything.
+      await runAgendaSchedulerTick(deps)
+      assert.equal(runCalls.filter((c) => c.jobId === 'cron-job').length, 1, 'idempotent: the same minute does not re-fire the cron job')
+      assert.equal(runCalls.filter((c) => c.jobId === 'cal-job').length, 1, 'idempotent: the fired calendar entry is not re-run')
+      assert.equal(notifyCalls.length, 1, 'idempotent: the fired plain entry is not re-notified')
+      assert.equal(warns.length, 0, 'a clean tick logs no warns')
+    } finally {
+      await rm(jobDir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('W1 runAgendaSchedulerTick: a NON-due cron job is not fired; NO-head skips + warns and never throws', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const jobDir = await mkdtemp(path.join(tmpdir(), 'deepartments-sched-'))
+    try {
+      await writeFile(path.join(jobDir, 'later-job.md'), '---\nid: later-job\ntitle: Later job\nrole: researcher\ndescription: a 09:00 daily job\nowner: research-head\nschedule: "0 9 * * *"\n---\n\nbody\n', 'utf8')
+      const runCalls = []
+      const notifyCalls = []
+      const warns = []
+      // 10:00 local — the 09:00 dotaily cron is NOT due (no match in the window).
+      const deps = {
+        now: () => new Date(2026, 7, 23, 10, 0, 0).getTime(),
+        departments: [{ id: 'research', name: 'Research', jobDir }],
+        repoRoot: '/nonexistent',
+        calendarStateDir: stateDir,
+        jobRunsStateDir: stateDir,
+        headForDepartment: () => 'research-head',
+        runJob: async (dept, head, jobId) => { runCalls.push({ dept: dept.id, head, jobId }); return true },
+        notifyHead: async (target, message) => { notifyCalls.push({ target, message }) },
+        departmentForEntry: () => ({ id: 'research', name: 'Research', jobDir }),
+        departmentForJob: () => ({ id: 'research', name: 'Research', jobDir }),
+        logger: { warn: (m) => { warns.push(m) } }
+      }
+      await runAgendaSchedulerTick(deps)
+      assert.equal(runCalls.length, 0, 'a non-due cron job is NOT fired')
+      assert.equal(readJobRunsStateFile(stateDir)['later-job'], undefined, 'no ledger entry for a non-fired job')
+
+      // No-head: a due plain entry with headForDepartment → undefined → skip + warn, never throws.
+      await writeCalendarStateFile(stateDir, { entries: [{ id: 'p1', label: 'Orphan reminder', at: new Date(deps.now() - 5 * 60000).toISOString(), createdBy: 'research-head', fired: false }] })
+      const depsNoHead = {
+        ...deps,
+        headForDepartment: () => undefined,
+        notifyHead: async (target, message) => { notifyCalls.push({ target, message }) }
+      }
+      await runAgendaSchedulerTick(depsNoHead) // must NOT throw
+      assert.equal(notifyCalls.length, 0, 'no head → no notification delivered')
+      assert.ok(warns.some((m) => /no head is available/.test(m)), 'a no-head skip emits a warn')
+      const cal = readCalendarStateFile(stateDir)
+      assert.equal(cal.entries[0].fired, true, 'the orphan entry is still marked fired (single-shot) despite no delivery')
+    } finally {
+      await rm(jobDir, { recursive: true, force: true })
     }
   })
 })

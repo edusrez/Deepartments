@@ -108,9 +108,23 @@ function mockCtx({ firstHost, nextHost, storeIds, onRefresh }) {
   const openCalls = []
   const refreshCalls = []
   let rpcCalls = 0
-  let effectFn = null
+  const effectFns = []
   const ctx = {
-    effect: (fn) => { effectFn = fn },
+    // apply() registers more than one effect (the host/status lifecycle watcher
+    // FIRST, then the W4 i18n dictionary). The flow tests drive ONLY the
+    // lifecycle watcher, so collect every effect and hand back the first one.
+    effect: (fn) => { effectFns.push(fn) },
+    // W4 client UI (presence toggle + agenda view) injects into `locale` and
+    // `slots`. The flow tests run apply() merely to register the watcher and
+    // never render the components, so provide minimal no-op inject faces.
+    locale: {
+      register: () => {},
+      bind: () => (key) => key,
+    },
+    slots: {
+      inject: (_name, register) => register(),
+      register: () => {},
+    },
     sessions: {
       list: { getSnapshot: () => ({ ids: storeIds }) },
       open: (id) => { openCalls.push(id) },
@@ -131,7 +145,7 @@ function mockCtx({ firstHost, nextHost, storeIds, onRefresh }) {
       }
     }
   }
-  return { ctx, openCalls, refreshCalls, getEffectFn: () => effectFn }
+  return { ctx, openCalls, refreshCalls, getEffectFn: () => effectFns[0] }
 }
 
 test('client watcher: rotated host absent → refresh → present → open', async () => {

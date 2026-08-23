@@ -66,7 +66,7 @@ import { mkdir, readFile, writeFile, readdir, copyFile, stat, rename, unlink, ap
 // materialization, before the agent can be awaited; there is no await seam).
 // readFileSync keeps that contract; ENOENT = the department has no
 // architecture (omit the section, never an error).
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -588,6 +588,28 @@ export function buildWakePackMessage(packText: string) {
 }
 
 /**
+ * Build the owner-presence change node (Feature A, A4) — the mirror of
+ * `buildWakePackMessage`: a compact plugin/notice node carrying
+ * `Owner presence: present|absent`. Injected FRESH via `agent/pre-step` at
+ * message-arrival time by the host injector ONLY when the presence flag
+ * transits (absent→present or present→absent) since the last injected value,
+ * so the HOST observes the toggle on its next step WITHOUT re-sending the
+ * ~5 kB wake pack. Reused by the fire-and-forget `presence/set` host notify.
+ */
+export function buildPresenceMessage(present: boolean) {
+  const text = `Owner presence: ${present ? 'present' : 'absent'}`
+  return createUserMessage({
+    content: [{ type: 'text', text }],
+    source: {
+      kind: 'plugin',
+      plugin: 'deepartments',
+      form: 'notice',
+      summary: boundContextSummary(`Deepartments owner presence: ${present ? 'present' : 'absent'}.`)
+    }
+  })
+}
+
+/**
  * Task T4 — the compact ROLE-focused orientation injected into a TRANSIENT
  * dispatched subagent (origin === 'subagent') at its first pre-step, in place
  * of the full ~4.6-4.9k-token host wake pack. One org line + the per-role
@@ -789,6 +811,17 @@ export interface HostEntryLike {
   previousSessionId?: string
 }
 
+/** The owner-presence state (Feature A — the "Presencia/Ausencia" toggle), the
+ * `presence/get` RPC value and the `presence.set` input. Persisted at
+ * `<stateDir>/presence.json` as `{ present: boolean, updatedAt: number }`;
+ * DEFAULT present:true — the owner is considered present until explicitly
+ * toggled absent, so the guard is never over-eager at boot. `updatedAt` is
+ * omitted when the file has none (the owner never toggled). */
+export interface PresenceState {
+  present: boolean
+  updatedAt?: number
+}
+
 /** Injected data/closure bundle the PURE endpoint dispatcher reads. The caller
  * (the route handler in applyInvoke) wires these to the live registries; tests
  * construct this directly. */
@@ -813,6 +846,28 @@ export interface DeepartmentsEndpointDeps {
    * entries with no rotation successor). Absent dep → the warn is skipped and
    * the fallback pick is still deterministic (never throws). */
   logger?: { warn: (message: string) => void }
+  /** A2 — read the current owner-presence state. Absent dep → `presence/get`
+   * defaults to present:true (the owner is here until toggled). Never throws
+   * (an unreadable state file defaults present:true). */
+  presenceState?: () => Promise<PresenceState>
+  /** A2 — persist a new owner-presence state (atomic write to
+   * `presence.json`). Absent dep → `presence/set` returns the value but does
+   * NOT persist (a graceful degrade, never an RPC error). */
+  savePresenceState?: (state: PresenceState) => Promise<void>
+  /** A3/A4 — fire-and-forget host notification fired when `presence/set`
+   * CHANGES the state. Absent dep → the notification is dropped (the reliable
+   * transition signal remains the A4 pre-step injector). */
+  notifyPresenceChange?: (present: boolean) => void
+  /** W1 — `agenda/list`: the repo root used to resolve the DEFAULT department
+   * jobDir (matches the live applyInvoke `repoRoot`). Absent dep → module
+   * `REPO_ROOT` (the bundle-dir parent, the same value). */
+  repoRoot?: string
+  /** W1 — `agenda/list`: the stateDir whose `calendar.json` supplies the
+   * calendar entries. Absent dep → an EMPTY calendar (never an error). */
+  calendarStateDir?: string
+  /** W1 — `agenda/list`: a clock for the next-due job computation (ms epoch).
+   * Absent dep → `Date.now` — the agenda shows the live next-due snapshot. */
+  now?: () => number
 }
 
 /** The `/deepartments host/status` RPC payload (U3, spec 002 §6.1): the CURRENT
@@ -928,6 +983,549 @@ async function buildHostStatusPayload(deps: DeepartmentsEndpointDeps): Promise<H
   }
 }
 
+// ---- Feature A — owner-presence persistence + guard predicate (PURE) -------
+
+/** Read `<stateDir>/presence.json`. Absent, unreadable or malformed → default
+ * present:true (the owner is considered present until toggled). PURE (node:fs
+ * readFileSync), never throws. Exported so the dispatch tests exercise the SAME
+ * persistence helper the production wiring uses — no drift between the tested
+ * path and the live path. */
+export function readPresenceStateFile(stateDir: string): PresenceState {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'presence.json'), 'utf8')) as { present?: unknown; updatedAt?: unknown }
+    return {
+      present: typeof parsed.present === 'boolean' ? parsed.present : true,
+      ...(typeof parsed.updatedAt === 'number' ? { updatedAt: parsed.updatedAt } : {})
+    }
+  } catch {
+    return { present: true }
+  }
+}
+
+/** Write `<stateDir>/presence.json` (mkdir -p the dir, then write the state
+ * JSON). Returns the state written. Exported for the same reason as
+ * [`readPresenceStateFile`]. Throws on an fs failure — the production wrapper
+ * (`savePresence`) folds that into a warn so an RPC never fails on a persist
+ * error, while a test can assert the write directly. */
+export async function writePresenceStateFile(stateDir: string, state: PresenceState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, 'presence.json')), { recursive: true })
+  await writeFile(path.join(stateDir, 'presence.json'), JSON.stringify(state), 'utf8')
+}
+
+// ---------------------------------------------------------------------------
+// W1 (spec 004 §5.7 + ROADMAP W1 — "Runtime + jobs + UI panel"): the runtime
+// calendar + scheduler. The PURE persistence + cron half is exported (like the
+// presence helpers) so the dispatch/scheduler tests exercise the SAME helpers
+// the production wiring uses — no tested/production drift. The runtime calendar
+// is a single-file message board (`<stateDir>/calendar.json`), the job-fire
+// idempotency ledger is `<stateDir>/job-runs-state.json`, and the cron parser is
+// deliberately MINIMAL (`m h dom mon dow` with `*`/numbers/ranges/steps plus a
+// few `@` aliases) — the deployment's job `schedule` fields are HUMAN text
+// (e.g. `"daily 09:00 (reserved…)"`), so a non-cron schedule never auto-fires.
+// No `@recurring`/`RRULE` support: an ad-hoc calendar entry fires ONCE.
+// ---------------------------------------------------------------------------
+
+/** REPO root, resolved from the compiled bundle dir (`lib/` → `..` = the repo).
+ * Shared as the DEFAULT for the agenda/job readers so the dispatch and the
+ * scheduler resolve the default department jobDir exactly like the live
+ * `applyInvoke` `repoRoot` (same expression, same value). */
+export const REPO_ROOT = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
+
+/** One runtime calendar entry (spec §Agenda — `<stateDir>/calendar.json`).
+ * `at` is an ISO datetime; `fired` is the scheduler's ONE-SHOT marker (an
+ * ad-hoc entry fires once — no recurrence; a job's recurrence lives in its own
+ * `schedule`). All optional fields are omitted, never `undefined` (the caller
+ * and the client output stay JSON-lossless). */
+export interface CalendarEntry {
+  id: string
+  label: string
+  at: string
+  jobId?: string
+  createdBy?: string
+  createdAt?: number
+  fired?: boolean
+}
+
+export interface CalendarState {
+  entries: CalendarEntry[]
+}
+
+/** Structural guard for a calendar entry (a malformed/partial record is dropped
+ * rather than leaking an unrenderable shape). */
+function isCalendarEntry(value: unknown): value is CalendarEntry {
+  if (typeof value !== 'object' || value === null) return false
+  const entry = value as Record<string, unknown>
+  return typeof entry.id === 'string' && typeof entry.label === 'string' && typeof entry.at === 'string'
+}
+
+/** Read `<stateDir>/calendar.json`. Absent, unreadable or malformed →
+ * `{ entries: [] }` (never throws — PURE, mirrors readPresenceStateFile).
+ * Exported so the dispatch/scheduler tests exercise the same reader as the
+ * live wiring. */
+export function readCalendarStateFile(stateDir: string): CalendarState {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'calendar.json'), 'utf8')) as { entries?: unknown }
+    if (parsed !== null && typeof parsed === 'object' && Array.isArray(parsed.entries)) {
+      return { entries: parsed.entries.filter(isCalendarEntry) }
+    }
+    return { entries: [] }
+  } catch {
+    return { entries: [] }
+  }
+}
+
+/** Write `<stateDir>/calendar.json` (mkdir -p the dir, then write the state).
+ * Returns nothing; throws on an fs failure — the writing tool folds that into a
+ * warn so an RPC/tick never fails on a persist error, while a test can assert
+ * the write directly. */
+export async function writeCalendarStateFile(stateDir: string, state: CalendarState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, 'calendar.json')), { recursive: true })
+  await writeFile(path.join(stateDir, 'calendar.json'), JSON.stringify(state), 'utf8')
+}
+
+/** Read `<stateDir>/job-runs-state.json` — the idempotency ledger
+ * `{ jobId: lastFiredAtMs }`. Absent/unreadable/malformed → `{}` (never throws).
+ * Value = the ms epoch of the last scheduler fire for that job (minute
+ * resolution; the scheduler relies on the minute floor so a per-minute job
+ * fires exactly once a minute and never re-fires inside the same window). */
+export function readJobRunsStateFile(stateDir: string): Record<string, number> {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'job-runs-state.json'), 'utf8')) as Record<string, unknown>
+    const out: Record<string, number> = {}
+    for (const [jobId, value] of Object.entries(parsed)) {
+      if (typeof value === 'number' && Number.isFinite(value)) out[jobId] = value
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/job-runs-state.json` (mkdir -p the dir, then the ledger). */
+export async function writeJobRunsStateFile(stateDir: string, state: Record<string, number>): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, 'job-runs-state.json')), { recursive: true })
+  await writeFile(path.join(stateDir, 'job-runs-state.json'), JSON.stringify(state), 'utf8')
+}
+
+/** A parsed 5-field cron expression (`m h dom mon dow`), each a Set of the
+ * matching minute/hour/day/month/weekday values. `undefined` from
+ * `parseCronSchedule` means "NOT a cron schedule" (e.g. the deployment's HUMAN
+ * job `schedule` text) — such a schedule is displayed but never auto-fires. */
+export interface CronSchedule {
+  minutes: Set<number>
+  hours: Set<number>
+  dom: Set<number>
+  months: Set<number>
+  dow: Set<number>
+}
+
+/** Build the full value set `[min..max]` for a cron field. */
+function cronAll(min: number, max: number): Set<number> {
+  const out = new Set<number>()
+  for (let v = min; v <= max; v++) out.add(v)
+  return out
+}
+
+/** Parse ONE cron field (min..max) into a value set, or undefined on a
+ * non-cron token. Supported: an asterisk, an asterisk-slash-step, plain
+ * numbers, comma lists and `n-m` ranges. Anything else → undefined (the
+ * expression is NOT cron). */
+function cronFieldParse(expr: string, min: number, max: number): Set<number> | undefined {
+  const out = new Set<number>()
+  for (const partRaw of expr.split(',')) {
+    const part = partRaw.trim()
+    if (part === '*') {
+      for (let v = min; v <= max; v++) out.add(v)
+      continue
+    }
+    const step = /^\*\/(\d+)$/.exec(part)
+    if (step !== null) {
+      const n = Number(step[1])
+      if (!Number.isFinite(n) || n <= 0) return undefined
+      for (let v = min; v <= max; v += n) out.add(v)
+      continue
+    }
+    const range = /^(\d+)(?:-(\d+))?$/.exec(part)
+    if (range !== null) {
+      const start = Number(range[1])
+      const end = range[2] !== undefined ? Number(range[2]) : start
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return undefined
+      for (let v = start; v <= end; v++) out.add(v)
+      continue
+    }
+    return undefined
+  }
+  for (const v of out) {
+    if (v < min || v > max) return undefined
+  }
+  return out
+}
+
+/** Parse a 5-field cron string, or undefined when it is not a valid cron
+ * schedule. Includes the common `@` aliases (`@daily`/`@hourly`/`@weekly`/
+ * `@monthly`/`@yearly`); a NON-5-field (HUMAN) schedule returns undefined. */
+export function parseCronSchedule(schedule: string): CronSchedule | undefined {
+  const s = String(schedule ?? '').trim()
+  if (s === '') return undefined
+  const allMin = cronAll(0, 59)
+  const allHour = cronAll(0, 23)
+  const allDom = cronAll(1, 31)
+  const allMon = cronAll(1, 12)
+  const allDow = cronAll(0, 7)
+  const aliases: Record<string, CronSchedule> = {
+    '@minutely': { minutes: allMin, hours: allHour, dom: allDom, months: allMon, dow: allDow },
+    '@hourly': { minutes: new Set([0]), hours: allHour, dom: allDom, months: allMon, dow: allDow },
+    '@daily': { minutes: new Set([0]), hours: new Set([0]), dom: allDom, months: allMon, dow: allDow },
+    '@weekly': { minutes: new Set([0]), hours: new Set([0]), dom: allDom, months: allMon, dow: new Set([0]) },
+    '@monthly': { minutes: new Set([0]), hours: new Set([0]), dom: new Set([1]), months: allMon, dow: allDow },
+    '@yearly': { minutes: new Set([0]), hours: new Set([0]), dom: new Set([1]), months: new Set([1]), dow: allDow },
+    '@annually': { minutes: new Set([0]), hours: new Set([0]), dom: new Set([1]), months: new Set([1]), dow: allDow }
+  }
+  const alias = aliases[s]
+  if (alias !== undefined) return alias
+  const parts = s.split(/\s+/)
+  if (parts.length !== 5) return undefined
+  const minutes = cronFieldParse(parts[0], 0, 59)
+  const hours = cronFieldParse(parts[1], 0, 23)
+  const dom = cronFieldParse(parts[2], 1, 31)
+  const months = cronFieldParse(parts[3], 1, 12)
+  const dow = cronFieldParse(parts[4], 0, 7)
+  if (minutes === undefined || hours === undefined || dom === undefined || months === undefined || dow === undefined) return undefined
+  return { minutes, hours, dom, months, dow }
+}
+
+/** Whether `at` falls on a minute the cron matches (minute resolution). */
+export function cronMatches(cron: CronSchedule, at: Date): boolean {
+  return (
+    cron.minutes.has(at.getMinutes()) &&
+    cron.hours.has(at.getHours()) &&
+    cron.dom.has(at.getDate()) &&
+    cron.months.has(at.getMonth() + 1) &&
+    cron.dow.has(at.getDay())
+  )
+}
+
+const CRON_HORIZON_MS = 366 * 24 * 60 * 60 * 1000 // 1 year: the next-fire search horizon
+
+/** The NEXT fire of `cron` STRICTLY AFTER `from`, or undefined when none falls
+ * within the 1-year horizon. Minute-resolution forward scan (cheap — a cron
+ * that rarely matches still only scans to its first match). */
+export function nextCronFire(cron: CronSchedule, from: Date): Date | undefined {
+  const candidate = new Date(from.getTime())
+  candidate.setSeconds(0, 0)
+  candidate.setMinutes(candidate.getMinutes() + 1)
+  const horizon = from.getTime() + CRON_HORIZON_MS
+  while (candidate.getTime() <= horizon) {
+    if (cronMatches(cron, candidate)) return new Date(candidate.getTime())
+    candidate.setMinutes(candidate.getMinutes() + 1)
+  }
+  return undefined
+}
+
+/** Cron desync window for the scheduler: a fire whose aligned minute is within
+ * the last N minutes of `now` (a small wake/skew tolerance) is treated as due. */
+export const CRON_DESYNC_WINDOW_MIN = 2
+
+/** Whether the cron job should FIRE at `now`, given the persisted
+ * `lastFiredAt` (ms epoch, optional). Idempotent: a fire ALIGNED minute that is
+ * still within the desync window is due ONLY if it is STRICTLY after the last
+ * fired minute (so a per-minute cron fires once a minute, never re-fires inside
+ * the same window). Never throws. */
+export function cronIsDue(cron: CronSchedule, now: Date, lastFiredAt?: number): boolean {
+  const lastMinute = lastFiredAt === undefined ? -1 : Math.floor(lastFiredAt / 60000)
+  for (let back = 0; back <= CRON_DESYNC_WINDOW_MIN; back++) {
+    const candidate = new Date(now.getTime() - back * 60000)
+    if (!cronMatches(cron, candidate)) continue
+    if (Math.floor(candidate.getTime() / 60000) > lastMinute) return true
+  }
+  return false
+}
+
+// ---- job definition reading (shared by dept_job_list/dept_job_run + agenda) ---
+
+/** Unwrap a QUOTED-YAML scalar (the F4a jobs convention quotes free-text values
+ * like `schedule`: `"daily 09:00 (reserved — …)"`). */
+export function unwrapQuotedScalar(value: string): string {
+  if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
+    return value.slice(1, -1)
+  }
+  return value
+}
+
+export interface JobDefParsed {
+  meta: Record<string, string>
+  body: string
+}
+
+/** Parse a JOB definition frontmatter (spec 004 §5.4-§5.5): the `---`-delimited
+ * `key: value` one-line scalars for id/title/role/description/schedule?/owner/
+ * outbox? PLUS a NON-EMPTY task body. Same lean YAML-lite shape as the role
+ * parser, with the quoted-scalar unwrapping + REQUIRED-key validation
+ * (id/title/role/description/owner). Returns undefined when the file has no
+ * well-formed frontmatter block or omits a required key. PURE + exported so the
+ * agenda/dispatch reader and the scheduler reuse the SAME reader as
+ * dept_job_list/dept_job_run. */
+export function parseJobDefFrontmatter(text: string): JobDefParsed | undefined {
+  const lines = text.split('\n')
+  if (lines[0]?.trim() !== '---') return undefined
+  let end = -1
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === '---') {
+      end = i
+      break
+    }
+  }
+  if (end < 0) return undefined
+  const meta: Record<string, string> = {}
+  for (let i = 1; i < end; i++) {
+    const scalar = /^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/.exec(lines[i])
+    if (scalar !== null) meta[scalar[1]] = unwrapQuotedScalar(scalar[2].trim())
+  }
+  const body = lines.slice(end + 1).join('\n').trim()
+  if (body === '') return undefined
+  for (const key of ['id', 'title', 'role', 'description', 'owner']) {
+    if (typeof meta[key] !== 'string' || meta[key].trim() === '') return undefined
+  }
+  return { meta, body }
+}
+
+/** Resolve the department jobDir (spec 004 §3.1/§3.3): the config
+ * `org.departments[].jobDir` (repo-relative OR absolute), defaulting to
+ * `<repoRoot>/docs/departments/<dept-id>/jobs` when absent/empty. */
+export function jobDirFor(repoRoot: string, department: { id: string; jobDir?: string }): string {
+  const configured = (department.jobDir ?? '').trim()
+  if (configured === '') return path.join(repoRoot, 'docs', 'departments', department.id, 'jobs')
+  return path.isAbsolute(configured) ? configured : path.join(repoRoot, configured)
+}
+
+/** Read + resolve ONE job definition (spec 004 §5.4): locate `<jobId>.md` in the
+ * department jobDir, parse the frontmatter, validate the declared `id` matches
+ * the requested jobId. LOUD errors — a versioned definition with broken
+ * syntax/keys must fail the run, never spawn a task-less worker. Reused by
+ * dept_job_run AND the scheduler (identical messages). */
+export async function readJobDefinitionFile(
+  repoRoot: string,
+  department: { id: string; jobDir?: string },
+  jobId: string
+): Promise<{ meta: Record<string, string>; body: string; path: string }> {
+  const jobDir = jobDirFor(repoRoot, department)
+  const filePath = path.join(jobDir, `${jobId}.md`)
+  let text: string
+  try {
+    text = await readFile(filePath, 'utf8')
+  } catch {
+    throw new Error(`[deepartments] dept_job_run: job not found: ${jobId} (searched ${jobDir})`)
+  }
+  const parsed = parseJobDefFrontmatter(text)
+  if (parsed === void 0) {
+    throw new Error(`[deepartments] dept_job_run: job "${jobId}" (${filePath}) has no valid frontmatter — expected a '---' block (id/title/role/description/owner required; schedule/outbox optional) plus a non-empty task body`)
+  }
+  if (parsed.meta.id !== jobId) {
+    throw new Error(`[deepartments] dept_job_run: job "${jobId}" (${filePath}) declares frontmatter id "${parsed.meta.id}" — the file name must match the job id it is referenced by`)
+  }
+  return { meta: parsed.meta, body: parsed.body, path: filePath }
+}
+
+/** One agenda job item: the dept_job_list frontmatter fields, a human `next`
+ * (the ISO next-cron-fire, when the `schedule` is cron-style), and the internal
+ * `cron` (a parsed CronSchedule, omitted when the schedule is NOT cron — e.g.
+ * the deployment's HUMAN schedule text, which never auto-fires). The client
+ * (AgendaJob) reads id/title/schedule/next; role/description are extras. */
+export interface AgendaJobItem {
+  id: string
+  title: string
+  role?: string
+  description?: string
+  schedule?: string
+  next?: string
+  cron?: CronSchedule
+}
+
+/** Read ALL departments' job definitions into agenda items (pure-ish fs read;
+ * `nowMs` supplies the clock for the `next` computation so the dispatch tests
+ * are deterministic). A missing jobDir is an empty list; an INVALID definition
+ * is SKIPPED (the agenda is a read-only listing — per-entry errors belong to
+ * dept_job_list, which keeps its own per-entry reporting). */
+export async function readAgendaJobs(repoRoot: string, departments: DepartmentConfig[], nowMs: number): Promise<AgendaJobItem[]> {
+  const now = new Date(nowMs)
+  const items: AgendaJobItem[] = []
+  for (const department of departments) {
+    const jobDir = jobDirFor(repoRoot, department)
+    let files: string[]
+    try {
+      files = (await readdir(jobDir)).filter((name) => name.endsWith('.md')).sort()
+    } catch {
+      continue
+    }
+    for (const name of files) {
+      let parsed: JobDefParsed | undefined
+      try {
+        parsed = parseJobDefFrontmatter(await readFile(path.join(jobDir, name), 'utf8'))
+      } catch {
+        parsed = void 0
+      }
+      if (parsed === void 0) continue
+      const schedule = parsed.meta.schedule !== undefined ? parsed.meta.schedule : undefined
+      const cron = schedule !== undefined ? parseCronSchedule(schedule) : undefined
+      const next = cron === undefined ? undefined : (() => {
+        const fire = nextCronFire(cron, now)
+        return fire === undefined ? undefined : fire.toISOString()
+      })()
+      items.push({
+        id: parsed.meta.id,
+        title: parsed.meta.title,
+        ...(parsed.meta.role !== undefined ? { role: parsed.meta.role } : {}),
+        ...(parsed.meta.description !== undefined ? { description: parsed.meta.description } : {}),
+        ...(schedule !== undefined ? { schedule } : {}),
+        ...(next !== undefined ? { next } : {}),
+        ...(cron !== undefined ? { cron } : {})
+      })
+    }
+  }
+  return items
+}
+
+// ---- W1 scheduler tick (PURE — an injectable clock + injected hooks) -------
+
+/** Injected hooks + inputs the scheduler tick reads. The PRODUCTION wiring
+ * (applyInvoke) binds the live registries (departments, post registry, the
+ * job-run engine, the bus delivery seam); tests construct this directly with a
+ * FIXED clock + stub runJob/notifyHead. Abstracted exactly like the endpoint
+ * dispatcher deps so the tick is unit-testable without a booted plugin. */
+export interface AgendaSchedulerDeps {
+  /** The clock (ms epoch) — injectable so a tick test is deterministic. */
+  now(): number
+  /** Every configured department the scheduler fires for. */
+  departments: DepartmentConfig[]
+  /** The repo root for the default department jobDir resolution. */
+  repoRoot: string
+  /** The stateDir whose `calendar.json` the tick reads/marks fired. */
+  calendarStateDir: string
+  /** The stateDir whose `job-runs-state.json` persists the last-fired ledger. */
+  jobRunsStateDir: string
+  /** Resolve the head MEMBER id (postId) a department fires under, or undefined
+   * when the department has no registered head ("sin head" → skip + warn). */
+  headForDepartment(department: DepartmentConfig): string | undefined
+  /** Run ONE department job. Resolves `true` when it FIRED (spawned the worker);
+   * `false` when it was SKIPPED (already running / no head / any non-fatal
+   * error) — the tick never throws from here. */
+  runJob(department: DepartmentConfig, headPostId: string, jobId: string): Promise<boolean>
+  /** Deliver a simple agenda NOTICE to a head (never throws). */
+  notifyHead(headPostId: string, message: string): Promise<void>
+  /** Which department OWNS a calendar entry (its `createdBy` post). */
+  departmentForEntry(entry: CalendarEntry): DepartmentConfig | undefined
+  /** Which department owns a jobId (scans the jobDirs). */
+  departmentForJob(jobId: string): DepartmentConfig | undefined
+  /** Optional warn-capable logger (absent dep → the warn is dropped). */
+  logger?: { warn(message: string): void }
+}
+
+/** ONE scheduler tick (spec §5.7 — W1): (a) fire any cron-scheduled job whose
+ * next run is DUE within the desync window and not already fired (idempotent by
+ * the persisted job-runs-state ledger), attempting the SAME dept_job_run engine
+ * and skipping+warn on "already running" / no-head; (b) fire any CALENDAR entry
+ * whose `at ≤ now` and `fired:false` — a `jobId` entry runs the job, a plain
+ * entry notifies the owning head with the label; (c) NEVER throws (every
+ * internal failure is a warn). The deps keep it pure: a fixed clock + stubbed
+ * hooks make a tick test deterministic. */
+export async function runAgendaSchedulerTick(deps: AgendaSchedulerDeps): Promise<void> {
+  try {
+    const nowMs = deps.now()
+    const now = new Date(nowMs)
+    // (a) cron-scheduled jobs, per department.
+    const runs = readJobRunsStateFile(deps.jobRunsStateDir)
+    let runsChanged = false
+    for (const department of deps.departments) {
+      const headPostId = deps.headForDepartment(department)
+      const jobs = await readAgendaJobs(deps.repoRoot, [department], nowMs)
+      for (const job of jobs) {
+        if (job.cron === undefined) continue
+        if (!cronIsDue(job.cron, now, runs[job.id])) continue
+        if (headPostId === undefined) {
+          deps.logger?.warn(`[deepartments] scheduler: job "${job.id}" (department ${department.id}) is due but the department has NO head — skip`)
+          continue
+        }
+        try {
+          const fired = await deps.runJob(department, headPostId, job.id)
+          if (fired) {
+            runs[job.id] = nowMs
+            runsChanged = true
+          }
+        } catch (error: unknown) {
+          deps.logger?.warn(`[deepartments] scheduler: job "${job.id}" run failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    }
+    if (runsChanged) await writeJobRunsStateFile(deps.jobRunsStateDir, runs)
+    // (b) calendar entries due (at ≤ now, not fired).
+    const cal = readCalendarStateFile(deps.calendarStateDir)
+    let calChanged = false
+    for (const entry of cal.entries) {
+      if (entry.fired === true) continue
+      const at = Date.parse(entry.at)
+      if (Number.isNaN(at) || at > nowMs) continue
+      if (entry.jobId !== undefined && entry.jobId !== '') {
+        const department = deps.departmentForJob(entry.jobId) ?? deps.departmentForEntry(entry)
+        const headPostId = department === void 0 ? undefined : deps.headForDepartment(department)
+        if (headPostId === void 0) {
+          deps.logger?.warn(`[deepartments] scheduler: calendar "${entry.id}" (job ${entry.jobId}) is due but no head is available — skip`)
+        } else {
+          try {
+            await deps.runJob(department as DepartmentConfig, headPostId, entry.jobId)
+          } catch (error: unknown) {
+            deps.logger?.warn(`[deepartments] scheduler: calendar job "${entry.jobId}" run failed: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+      } else {
+        const department = deps.departmentForEntry(entry)
+        const ownHead = department === void 0 ? undefined : deps.headForDepartment(department)
+        const target = ownHead ?? (deps.departments[0] !== void 0 ? deps.headForDepartment(deps.departments[0]) : undefined)
+        if (target === void 0) {
+          deps.logger?.warn(`[deepartments] scheduler: calendar "${entry.id}" is due but no head is available for the notice — skip`)
+        } else {
+          await deps.notifyHead(target, entry.label)
+        }
+      }
+      entry.fired = true
+      calChanged = true
+    }
+    if (calChanged) await writeCalendarStateFile(deps.calendarStateDir, cal)
+  } catch (error: unknown) {
+    deps.logger?.warn(`[deepartments] scheduler tick failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+
+/** The live hooks the A3 guard needs (Feature A). Abstracted so the guard
+ * predicate is PURE and directly unit-testable, and so the production wiring
+ * provides the plugin's live registries (presence cache, host registry). */
+export interface AskUserGuardHooks {
+  /** True when the owner is present (the guard must NOT deny). */
+  present(): boolean
+  /** True when `sessionId` is the REGISTERED host session (the only caller the
+   * guard may gate). Posts/workers/subagents return false. */
+  isHostAgent(sessionId: string): boolean
+}
+
+/** The A3 `ask_user_question` denial reason, or undefined to allow the call.
+ * A GLOBAL plain-context guard (the plugin owns no scoped host ctx), so the
+ * denial is deliberately NARROW — it fires ONLY when (a) the owner is absent,
+ * (b) the tool is exactly `ask_user_question`, AND (c) the caller is the
+ * registered host. Presence absence can never break any other tool, and never
+ * gates a post/worker/subagent (their ask_user, if ever reachable, fails the
+ * host check and passes). Returns the string reason the host model reads. */
+export function askUserGuardReason(
+  exec: { name?: unknown; agent?: { id?: unknown } },
+  hooks: AskUserGuardHooks
+): string | undefined {
+  if (hooks.present()) return undefined
+  if (exec.name !== 'ask_user_question') return undefined
+  const agentId = exec.agent?.id
+  if (typeof agentId !== 'string') return undefined
+  if (!hooks.isHostAgent(agentId)) return undefined
+  return 'owner absent (presence flag)'
+}
+
 /** The RpcResult-shaped value the client already understands
  * (serverResponseSchema.result: `{ok:true, value}` | `{ok:false, error}`). */
 export type DeepartmentsDispatchResult =
@@ -952,6 +1550,85 @@ export async function dispatchDeepartmentsEndpoint(
 ): Promise<DeepartmentsDispatchResult> {
   if (endpoint === 'host/status') {
     return { ok: true, value: await buildHostStatusPayload(deps) }
+  }
+  if (endpoint === 'presence/get') {
+    // A2 — return the current owner-presence state. Absent/unreadable state →
+    // default present:true (never an error); the dep must never throw.
+    const state = deps.presenceState === undefined
+      ? { present: true as const }
+      : await deps.presenceState()
+    return {
+      ok: true,
+      value: {
+        present: state.present === true,
+        ...(typeof state.updatedAt === 'number' ? { updatedAt: state.updatedAt } : {})
+      }
+    }
+  }
+  if (endpoint === 'presence/set') {
+    // A2 — toggle the owner presence. The payload MUST be a boolean `present`
+    // (any other shape is a bad-request, mirroring the strict client contract).
+    const rawPresent = typeof payload === 'object' && payload !== null
+      ? (payload as { present?: unknown }).present
+      : undefined
+    if (typeof rawPresent !== 'boolean') {
+      return {
+        ok: false,
+        error: {
+          code: 'bad-request',
+          message: 'presence.set requires a boolean `present`',
+          details: { issues: [] }
+        }
+      }
+    }
+    const present = rawPresent
+    // Capture the PRIOR value BEFORE the save (the state object the dep writes
+    // may be the same reference the reader returns — never compare after write).
+    const prior = deps.presenceState === undefined
+      ? { present: true as const }
+      : await deps.presenceState()
+    const priorPresent = prior.present === true
+    const changed = priorPresent !== present
+    const updatedAt = Date.now()
+    if (deps.savePresenceState !== undefined) {
+      await deps.savePresenceState({ present, updatedAt })
+    }
+    // A3/A4 — notify the HOST only when the state actually CHANGED (an
+    // idempotent re-set to the same value must not re-wake/re-notify).
+    if (changed && deps.notifyPresenceChange !== undefined) {
+      deps.notifyPresenceChange(present)
+    }
+    return { ok: true, value: { present, updatedAt } }
+  }
+  if (endpoint === 'agenda/list') {
+    // W1 — the client Agenda view (src/client/index.tsx calls `agenda/list`).
+    // `jobs` = every configured department's JOB definitions (dept_job_list's
+    // reader, reused: id/title/role/description/schedule + a human `next` when
+    // the schedule is cron-style), `calendar` = the runtime calendar.json
+    // entries. Never throws: an empty/missing jobDir or calendar state degrades
+    // to an empty list, and the client already defaults to empty arrays.
+    const repoRoot = deps.repoRoot ?? REPO_ROOT
+    const nowMs = deps.now === undefined ? Date.now() : deps.now()
+    const jobs = await readAgendaJobs(repoRoot, deps.departments, nowMs)
+    const rawCalendar = deps.calendarStateDir === undefined ? [] : readCalendarStateFile(deps.calendarStateDir).entries
+    // Client contract (AgendaCalendarEntry reads `label`/`time`): map the
+    // runtime `at` ISO to `time` and keep the full runtime shape as extras. The
+    // client ignores the extras; the raw `at`/`id`/`fired` remain for tooling.
+    const calendar = rawCalendar.map((entry) => ({ ...entry, time: entry.at }))
+    return {
+      ok: true,
+      value: {
+        jobs: jobs.map((job) => ({
+          id: job.id,
+          title: job.title,
+          ...(job.schedule !== undefined ? { schedule: job.schedule } : {}),
+          ...(job.next !== undefined ? { next: job.next } : {}),
+          ...(job.role !== undefined ? { role: job.role } : {}),
+          ...(job.description !== undefined ? { description: job.description } : {})
+        })),
+        calendar
+      }
+    }
   }
   if (endpoint !== 'agents' && endpoint !== 'list') {
     return {
@@ -1360,6 +2037,12 @@ export function applyInvoke(ctx: Context, config: Config) {
   // session-scoped flag is the reliable presence gate. Cleared in the host
   // dept_sleep branch so a post-sleep wake re-injects a FRESH pack.
   const wakePackInjected = new Set<string>()
+  // Feature A — the LAST owner-presence value injected per host session (sessionId
+  // → present|absent). Seeded at wake-pack injection; the host pre-step injector
+  // appends a `buildPresenceMessage` node ONLY when the flag TRANSITS from the
+  // last injected value, so a toggle is observed on the host's next step without
+  // re-sending the ~5kB pack. Post/session-scoped (never a module global).
+  const presenceInjected = new Map<string, boolean>()
   // Fix A — deferred in-place surface reset intent for the host dept_sleep
   // branch (see the Batch 7 helper comment + dept_sleep Step 3): the close
   // branch PLAIN-APPENDS the journal node and records sessionId → the
@@ -1554,6 +2237,69 @@ export function applyInvoke(ctx: Context, config: Config) {
   }
 
   const postIdForChild = (childId: string): string | undefined => byChild.get(childId)
+
+  // --- Feature A — owner-presence state + host notify + ask_user guard ------
+  // `<stateDir>/presence.json` is the durable source; the in-memory `presenceCache`
+  // is the SYNCHRONOUS view the guard + the A4 pre-step injector read (a guard
+  // runs at tool-call time, before any await, so it cannot await a disk read).
+  // Seeded at apply time (readFileSync — a tiny one-off), refreshed at every
+  // host pre-step (so the injector observes toggles), and updated atomically on
+  // every `presence/set`. Per-apply closure only (AGENTS.md rule 4 — no
+  // module-global mutable state). Default present:true (owner is here until
+  // toggled absent — the guard is never over-eager at boot).
+  const presenceCache: PresenceState = readPresenceStateFile(config.stateDir)
+  const refreshPresence = (): void => {
+    const next = readPresenceStateFile(config.stateDir)
+    presenceCache.present = next.present
+    if (next.updatedAt !== undefined) presenceCache.updatedAt = next.updatedAt
+  }
+  const savePresence = async (state: PresenceState): Promise<void> => {
+    // Cache FIRST (the guard + pre-step injector read the cache directly on the
+    // next model step), then persist best-effort — an RPC never fails on a
+    // write error (folded to a warn).
+    presenceCache.present = state.present
+    presenceCache.updatedAt = state.updatedAt
+    try {
+      await writePresenceStateFile(config.stateDir, state)
+    } catch (error) {
+      ctx.logger.warn(`[deepartments] presence.json write failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  // A3 — fire-and-forget HOST notification on a presence CHANGE, reusing the
+  // SAME live-host followup seam the bus delivery uses (busDeliverToHost's live
+  // branch — a resident host picks the change up on its next turn even while
+  // idle). Never awaits, never throws (best-effort — the reliable transition
+  // signal is the A4 pre-step injector). A dormant host is NOT woken here.
+  const notifyHostPresence = (present: boolean): void => {
+    try {
+      const { live } = pickLiveHostEntry(hosts.values())
+      if (live === undefined) return
+      const sessionId = String(SessionId(live.sessionId))
+      const target = agents?.get(sessionId)
+      if (target === undefined) return
+      target.followup(buildPresenceMessage(present))
+    } catch (error) {
+      ctx.logger.warn(`[deepartments] presence change notify to host failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  // A3 — gate the HOST's `ask_user_question`: when the owner is ABSENT the host
+  // must not block on a question only the owner can answer (the model fails
+  // loud and picks another path instead of hanging). Plain-context → GLOBAL
+  // guard (the plugin owns no scoped host ctx — explore report A3); the denial
+  // is NARROW (owner-absent + exactly `ask_user_question` + registered-host
+  // caller) so presence absence can never break any other tool and never gates
+  // a post/worker/subagent. Reversible effect (AGENTS.md rule 4).
+  ctx.effect(() => {
+    const dispose = ctx.tools.guard((exec) => askUserGuardReason(exec, {
+      present: () => presenceCache.present !== false,
+      isHostAgent: (sessionId) => {
+        if (postIdForChild(sessionId) !== undefined) return false
+        const entry = hosts.get(hostIdForSession(sessionId))
+        return entry !== undefined && entry.retired !== true
+      }
+    }))
+    return () => { dispose() }
+  }, 'deepartments: owner-presence ask_user gate')
 
   // Best-effort cold load of the post registry. Batch 1a: entries carry the
   // root-agent `sessionId` (head-<postId>). Legacy entries from the previous
@@ -2827,7 +3573,33 @@ export function applyInvoke(ctx: Context, config: Config) {
     // Host-only: a registered post (head/worker) already has its own lean wake
     // surface; the host wake pack is for HOST Asistente sessions only.
     if (postIdForChild(sessionId) !== undefined) return decision
-    if (wakePackInjected.has(sessionId)) return decision
+    // Feature A (A4) — owner-presence change node, HOST only. Runs BEFORE the
+    // wake-pack gate so a mid-session toggle is still observed on the host's
+    // NEXT step after the pack was injected (the disabled wakePackInjected
+    // early-return would otherwise swallow it). The node is COMPOSED, not
+    // returned, so the wake pack + the presence node land in the SAME step when
+    // both are new. Injected ONLY on a TRANSITION from the last injected value
+    // (seeded at wake-pack injection), so the host observes the toggle without
+    // re-sending the ~5kB pack. `presenceInjected` is keyed per host session;
+    // posts/subagents never reach here (gated above / fail the host check).
+    const hostId = hostIdForSession(sessionId)
+    const hostEntry = hosts.get(hostId)
+    // Refresh the synchronous presence cache from the durable file so this
+    // injector observes a toggle (e.g. a `presence/set` from another surface or
+    // a direct file edit) exactly at the next model step — presence.json is tiny.
+    refreshPresence()
+    const currentPresence = presenceCache.present !== false
+    const presenceChanged = presenceInjected.has(sessionId) && presenceInjected.get(sessionId) !== currentPresence
+    presenceInjected.set(sessionId, currentPresence)
+    const presenceNode = presenceChanged ? [buildPresenceMessage(currentPresence)] : []
+    // Wake-pack gate — an already-injected session returns here WITH any new
+    // presence node (a repeated step re-injects neither the pack nor a stale
+    // presence node; a TRULY changed session returns the presence node only).
+    if (wakePackInjected.has(sessionId)) {
+      return presenceChanged
+        ? { kind: 'enter', messages: [...decision.messages, ...presenceNode] }
+        : decision
+    }
     // ---- Task T4: TRANSIENT dispatched subagent → slim ROLE-focused block, NOT
     // the full ~4.6-4.9k host pack. `origin === 'subagent'` is the robust
     // discriminator DSH sets ONLY on startContinuable children (dsh-subagent
@@ -2861,14 +3633,13 @@ export function applyInvoke(ctx: Context, config: Config) {
     // board-tool call → ensureHost) still receives the pack at its next
     // pre-step ("plain until it becomes the registered host"). Registered
     // posts are already gated above (2624) and transient subagents in the T4
-    // branch above (2641) — both keep their behavior untouched.
-    const hostId = hostIdForSession(sessionId)
-    const hostEntry = hosts.get(hostId)
-    // U2 (spec 002 §4): a RETIRED host entry never gets the wake pack — retire
-    // means "no pack + no registration"; a message typed into the old tab after
-    // a rotation behaves as a PLAIN session (deliberate). The off-path stays
-    // free of `wakePackInjected` (a legacy mid-session registration still
-    // works — see the comment above).
+    // branch above (2641) — both keep their behavior untouched. The `hostEntry`
+    // was resolved in the presence block above (no re-read); U2 (spec 002 §4):
+    // a RETIRED host entry never gets the wake pack — retire means "no pack +
+    // no registration"; a message typed into the old tab after a rotation
+    // behaves as a PLAIN session (deliberate). The off-path stays free of
+    // `wakePackInjected` (a legacy mid-session registration still works — see
+    // the comment above).
     if (hostEntry === undefined || hostEntry.retired === true) return decision
     // Fix A — deferred in-place surface reset (see the Batch 7 helper comment +
     // dept_sleep Step 3): the FIRST pre-step after a host dept_sleep performs
@@ -2913,9 +3684,11 @@ export function applyInvoke(ctx: Context, config: Config) {
     // throws for a missing journal/file, so a brand-new host still gets a pack.
     const pack = await assembleWakePack(hostId, journalPathFor(hostId))
     wakePackInjected.add(sessionId)
+    // `presenceNode` is empty on the first (seeding) step — the wake pack itself
+    // orients; a LATER toggle delivers the presence node on its own step above.
     return {
       kind: 'enter',
-      messages: [...decision.messages, buildWakePackMessage(pack)]
+      messages: [...decision.messages, ...presenceNode, buildWakePackMessage(pack)]
     }
   })
 
@@ -2943,6 +3716,109 @@ export function applyInvoke(ctx: Context, config: Config) {
   /** The repo path of one department's role template file. */
   const roleTemplatePath = (departmentId: string, role: string): string =>
     path.join(repoRoot, 'presets', 'departments', departmentId, `${role}.md`)
+
+  // --- W1 job-run core (shared by dept_job_run AND the scheduler daemon) -----
+  // These two guards + `runJobForDepartment` are hoisted to the APPLY scope so
+  // the scheduler (a plugin daemon with no calling agent) can fire a due job
+  // through the EXACT engine dept_job_run uses — no tool-vs-scheduler drift.
+  // The job reader is module-level (parseJobDefFrontmatter/jobDirFor/
+  // readJobDefinitionFile), shared with the agenda/dispatch.
+
+  /** Validate the job's `role` BEFORE the spawn (spec 005 §5.4): the role MUST
+   * name an existing role template of the department
+   * (`presets/departments/<dept-id>/<role>.md` — the same tree F3's
+   * readRoleTemplate resolves); missing → job-scoped loud error. */
+  const validateJobRole = async (departmentId: string, jobId: string, role: string): Promise<void> => {
+    const filePath = roleTemplatePath(departmentId, role)
+    try {
+      await readFile(filePath, 'utf8')
+    } catch {
+      throw new Error(`[deepartments] dept_job_run: job "${jobId}" declares role "${role}" which has no template at ${filePath} — a role must be a file presets/departments/${departmentId}/<role>.md`)
+    }
+  }
+
+  /** The LIVE (non-retired) worker already running the job in THIS department
+   * (spec §5.4 idempotency): a second run of the same job must NOT spawn a
+   * duplicate — the head finishes by retiring the worker explicitly. */
+  const runningJobWorker = (jobId: string, departmentId: string): string | undefined => {
+    for (const entry of byPost.values()) {
+      if (entry.provider === 'worker' && entry.retired !== true && entry.departmentId === departmentId && entry.jobId === jobId) return entry.postId
+    }
+    return undefined
+  }
+
+  /** Run ONE department job — the dept_worker_spawn contract (dept_job_run's
+   * body, minus the exec.agent derivation): read the definition, validate the
+   * role, enforce the already-running idempotency, materialize the worker root
+   * agent (departmentId/managerId/jobId), pin the HUMAN title, deliver the JOB
+   * BODY as its first durable bus message. Shared by dept_job_run (the head's
+   * manual run) and the W1 scheduler (an automatic run). `opts.callerSessionId`
+   * is the sender for the delivery frame (dept_job_run passes the head's live
+   * session; the scheduler passes the head's durable session id). */
+  const runJobForDepartment = async (
+    department: DepartmentConfig,
+    headEntry: PostEntry,
+    jobId: string,
+    opts: { callerSessionId?: string; signal?: AbortSignal } = {}
+  ): Promise<{ workerId: string; sessionId: string; title: string; jobId: string; role: string; jobPath: string }> => {
+    if (agents === void 0) throw new Error('[deepartments] dept_job_run requires the agents service')
+    // 1. Read + parse the definition FIRST (loud: missing/broken → fail).
+    const definition = await readJobDefinitionFile(repoRoot, department, jobId)
+    // 2. Role validation against the department role template tree.
+    await validateJobRole(department.id, jobId, definition.meta.role)
+    // 3. Idempotency (spec §5.4): never duplicate a running job worker.
+    const running = runningJobWorker(jobId, department.id)
+    if (running !== void 0) {
+      throw new Error(`[deepartments] dept_job_run: job already running: ${running} — retire it explicitly with dept_worker_retire to restart "${jobId}"`)
+    }
+    // 4. dept_worker_spawn contract replicated (shared helpers — the F3 spawn
+    // engine is untouched): resolve the role template, slug-dedup, materialize,
+    // pin the HUMAN title, deliver the JOB BODY as the first bus message.
+    const template = await readRoleTemplate(department.id, definition.meta.role)
+    const postId = dedupedWorkerSlug(jobId)
+    const sessionId = SessionId(mintWorkerSessionId(postId))
+    if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_job_run: a live agent already exists for session "${sessionId}"`)
+    const title = definition.meta.title.trim() !== '' ? definition.meta.title : defaultWorkerTitle(definition.meta.role, definition.body, jobId, postId)
+    const setup = workerSetup(postId, headEntry.roomId, definition.meta.role, { persona: template.persona, taskText: definition.body, tools: template.tools, department })
+    const deptCwd = await resolveDepartmentWorkspaceCwd(department)
+    const handle = await agents.create({
+      sessionId: String(SessionId(sessionId)),
+      meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
+      agentOptions: WORKER_AGENT_OPTIONS,
+      setup
+    })
+    registerEntry({
+      postId,
+      sessionId: String(SessionId(sessionId)),
+      roomId: headEntry.roomId,
+      agentPreset: WORKER_PRESET_ID,
+      provider: 'worker',
+      role: definition.meta.role,
+      managerId: headEntry.postId,
+      departmentId: department.id,
+      jobId
+    })
+    byHeadHandle.set(String(SessionId(sessionId)), handle)
+    const titleSession = ctx.sessions.get(sessionId)
+    if (titleSession !== void 0) {
+      const titlePin = pinSessionTitle(titleSession, title)
+      if (titlePin === 'pinned') {
+        ctx.logger.info(`[deepartments] dept_job_run: pinned worker session title "${title}" (${sessionId})`)
+      } else if (titlePin === 'failed') {
+        ctx.logger.warn(`[deepartments] dept_job_run: worker session title pin failed for ${sessionId} (non-fatal — worker registration continues)`)
+      }
+    }
+    const store = await messagesStoreReady
+    const record = await store.append({
+      from: headEntry.postId,
+      to: [postId],
+      text: definition.body,
+      kind: 'agent'
+    })
+    await deliverBusRecord(record, postId, opts.callerSessionId ?? '', opts.callerSessionId, opts.signal)
+    return { workerId: postId, sessionId: String(SessionId(sessionId)), title, jobId, role: definition.meta.role, jobPath: definition.path }
+  }
+
 
   /** Parse the LEAN frontmatter the role templates use (spec §3.2:
    * `---`-delimited YAML-lite — `key: value` scalars + `- item` lists for
@@ -3059,6 +3935,36 @@ export function applyInvoke(ctx: Context, config: Config) {
   /** Disposer closure per tool the head own-layer registers. */
   type HeadToolDisposers = { dispose: () => void }
 
+  // --- W1 calendar helpers (shared by the calendar tools + the scheduler) ---
+  // `<stateDir>/calendar.json` is the runtime agenda store. The read helper is
+  // the module-level PURE reader; the write helper folds an fs failure to a
+  // warn so an RPC/tick never fails on a persist error (mirrors savePresence).
+
+  /** The runtime calendar state (always `{entries:[...]}`, never throws). */
+  const readCalendar = (): CalendarState => readCalendarStateFile(config.stateDir)
+
+  /** Persist the runtime calendar, folding an fs failure to a warn. */
+  const writeCalendarBestEffort = async (state: CalendarState): Promise<void> => {
+    try {
+      await writeCalendarStateFile(config.stateDir, state)
+    } catch (error) {
+      ctx.logger.warn(`[deepartments] calendar.json write failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** Whether the department owns a job definition `<jobId>.md` (validates the
+   * optional `jobId` on dept_calendar_add: a calendar entry may only reference
+   * a KNOWn job of the caller's department). */
+  const departmentJobExists = async (department: DepartmentConfig, jobId: string): Promise<boolean> => {
+    const jobDir = jobDirFor(repoRoot, department)
+    try {
+      await readFile(path.join(jobDir, `${jobId}.md`), 'utf8')
+      return true
+    } catch {
+      return false
+    }
+  }
+
   /** Install the post's messaging toolset scoped to `agentCtx` (the post's OWN
    * layer — no toolFilter needed for a root agent). The same tool bodies the
    * host plane registers, reused for any resident post: send_message,
@@ -3085,6 +3991,167 @@ export function applyInvoke(ctx: Context, config: Config) {
     // registrations win), and postSetup's lean `restrict({allow:[]})` masks the
     // globals anyway so this own layer is the ONLY visible toolset.
     for (const tool of busTools) disposers.push(agentCtx.tools.register(tool))
+
+    // --- W1 (spec 004 §5.7 + ROADMAP W1): calendar tools — dept_calendar_add /
+    // dept_calendar_list / dept_calendar_remove. Registered on EVERY post's OWN
+    // layer (head AND worker — the runtime agenda is department-scoped, not
+    // head-only), right where the bus tools register. The runtime store is the
+    // shared `<stateDir>/calendar.json` (dept_* tools and the agenda/list
+    // dispatch read the same file). An ad-hoc entry fires ONCE (no recurrence);
+    // `jobId?` links it to a department job so the scheduler runs that job when
+    // the entry's `at` passes (instead of only notifying the head). ------------
+    disposers.push(agentCtx.tools.register(defineTool({
+      name: 'dept_calendar_add',
+      description: 'Add ONE ad-hoc calendar entry to YOUR department\'s runtime agenda (spec 004 §5.7 — stored in <stateDir>/calendar.json). `label` (non-empty) + `at` (a parseable ISO datetime) are REQUIRED; `jobId` (optional) links the entry to a KNOWN job of your department, so the scheduler RUNS that job when `at` passes instead of only notifying your head. Entry: {id, label, at, jobId?, createdBy (your post id), createdAt, fired:false}. Ad-hoc entries fire ONCE — no recurrence (a job\'s recurrence lives in its own `schedule`). Every post (head AND worker) of the department may add; the entry is owned by its creator.',
+      parameters: {
+        label: { type: 'string', required: true, description: 'The entry label (non-empty, e.g. "Review W4 batch").' },
+        at: { type: 'string', required: true, description: 'The schedule time as a parseable ISO datetime (e.g. "2026-08-24T09:00:00.000Z").' },
+        jobId: { type: 'string', description: 'Optional job id of YOUR department — when it passes, the scheduler runs the job.' }
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: { type: 'string', required: true },
+            label: { type: 'string', required: true },
+            at: { type: 'string', required: true },
+            jobId: { type: 'string' },
+            createdBy: { type: 'string', required: true },
+            createdAt: { type: 'number', required: true },
+            fired: { type: 'boolean' }
+          }
+        },
+        render: (_args, value) => [{ type: 'text', text: `calendar added: "${value.label}" @ ${value.at} (id ${value.id})` } as const]
+      },
+      async execute(args, exec): Promise<{ id: string; label: string; at: string; createdBy: string; createdAt: number; jobId?: string; fired?: boolean }> {
+        const agent = exec.agent
+        if (!agent) throw new Error('dept_calendar_add requires a calling agent (exec.agent was undefined)')
+        const postId = postIdForChild(agent.id as string)
+        if (postId === void 0) throw new Error('[deepartments] dept_calendar_add is for a department MEMBER (a registered head or worker), not the host')
+        const label = String(args.label ?? '').trim()
+        if (label === '') throw new Error('[deepartments] dept_calendar_add: `label` is required (non-empty)')
+        const at = String(args.at ?? '').trim()
+        if (at === '' || Number.isNaN(Date.parse(at))) throw new Error('[deepartments] dept_calendar_add: `at` must be a parseable ISO datetime')
+        const jobIdRaw = String(args.jobId ?? '').trim()
+        if (jobIdRaw !== '') {
+          const entry = byPost.get(postId)
+          const department = entry === void 0 ? undefined : departmentForEntry(entry)
+          if (department === void 0 || !(await departmentJobExists(department, jobIdRaw))) {
+            throw new Error(`[deepartments] dept_calendar_add: jobId "${jobIdRaw}" is not a KNOWN job of your department — it must be a file <jobId>.md in the department jobDir`)
+          }
+        }
+        const id = randomUUID()
+        const entry: CalendarEntry = {
+          id,
+          label,
+          at,
+          createdBy: postId,
+          createdAt: Date.now(),
+          fired: false,
+          ...(jobIdRaw !== '' ? { jobId: jobIdRaw } : {})
+        }
+        const state = readCalendar()
+        state.entries.push(entry)
+        await writeCalendarBestEffort(state)
+        return { id, label, at, createdBy: postId, createdAt: entry.createdAt ?? Date.now(), fired: false, ...(jobIdRaw !== '' ? { jobId: jobIdRaw } : {}) }
+      }
+    })))
+
+    disposers.push(agentCtx.tools.register(defineTool({
+      name: 'dept_calendar_list',
+      description: 'List the runtime calendar entries of YOUR department (spec 004 §5.7 — <stateDir>/calendar.json). Optionally filter an inclusive `from`/`to` window (ISO datetimes; entries with `at` in [from, to]). Returns {count, entries}: each entry {id, label, at, jobId?, createdBy?, createdAt?, fired?}. Every post of the department may read the agenda.',
+      parameters: {
+        from: { type: 'string', description: 'Inclusive lower bound (ISO datetime); omit for open start.' },
+        to: { type: 'string', description: 'Inclusive upper bound (ISO datetime); omit for open end.' }
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            count: { type: 'number', required: true },
+            entries: {
+              type: 'array',
+              required: true,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  id: { type: 'string', required: true },
+                  label: { type: 'string', required: true },
+                  at: { type: 'string', required: true },
+                  jobId: { type: 'string' },
+                  createdBy: { type: 'string' },
+                  createdAt: { type: 'number' },
+                  fired: { type: 'boolean' }
+                }
+              }
+            }
+          }
+        },
+        render: (_args, value) => [{ type: 'text', text: `calendar (${value.count}):\n${value.entries.map((e) => `  - ${e.label} @ ${e.at}${e.jobId !== void 0 ? ` (job ${e.jobId})` : ''}${e.fired === true ? ' [fired]' : ''}`).join('\n')}` } as const]
+      },
+      async execute(args): Promise<{ count: number; entries: CalendarEntry[] }> {
+        const state = readCalendar()
+        const fromRaw = String(args.from ?? '').trim()
+        const toRaw = String(args.to ?? '').trim()
+        const from = fromRaw === '' || Number.isNaN(Date.parse(fromRaw)) ? undefined : Date.parse(fromRaw)
+        const to = toRaw === '' || Number.isNaN(Date.parse(toRaw)) ? undefined : Date.parse(toRaw)
+        let entries = state.entries
+        if (from !== undefined) entries = entries.filter((e) => Date.parse(e.at) >= from)
+        if (to !== undefined) entries = entries.filter((e) => Date.parse(e.at) <= to)
+        return { count: entries.length, entries }
+      }
+    })))
+
+    disposers.push(agentCtx.tools.register(defineTool({
+      name: 'dept_calendar_remove',
+      description: 'Remove a runtime calendar entry of YOUR department by id (spec 004 §5.7 — <stateDir>/calendar.json). ACL: the entry CREATOR (its `createdBy`) OR the department HEAD may remove it; ANY other caller is DENIED (an entry is never deleted by a third member). Returns the removed entry; an unknown id is a loud error.',
+      parameters: {
+        id: { type: 'string', required: true, description: 'The entry id (from dept_calendar_add / dept_calendar_list).' }
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: { type: 'string', required: true },
+            label: { type: 'string', required: true },
+            at: { type: 'string', required: true },
+            jobId: { type: 'string' },
+            createdBy: { type: 'string' },
+            createdAt: { type: 'number' },
+            fired: { type: 'boolean' }
+          }
+        },
+        render: (_args, value) => [{ type: 'text', text: `calendar removed: "${value.label}" @ ${value.at} (id ${value.id})` } as const]
+      },
+      async execute(args, exec): Promise<{ id: string; label: string; at: string; createdBy?: string; createdAt?: number; jobId?: string; fired?: boolean }> {
+        const agent = exec.agent
+        if (!agent) throw new Error('dept_calendar_remove requires a calling agent (exec.agent was undefined)')
+        const postId = postIdForChild(agent.id as string)
+        if (postId === void 0) throw new Error('[deepartments] dept_calendar_remove is for a department MEMBER (a registered head or worker), not the host')
+        const id = String(args.id ?? '').trim()
+        if (id === '') throw new Error('[deepartments] dept_calendar_remove: `id` is required')
+        const state = readCalendar()
+        const index = state.entries.findIndex((entry) => entry.id === id)
+        if (index < 0) throw new Error(`[deepartments] dept_calendar_remove: no calendar entry with id "${id}"`)
+        const entry = state.entries[index]
+        // ACL: the creator OR the department head of the entry's department.
+        const creatorEntry = byPost.get(entry.createdBy ?? '')
+        const department = creatorEntry === void 0 ? undefined : departmentForEntry(creatorEntry)
+        const isCreator = entry.createdBy === postId
+        const isHead = department?.coordinator?.postId === postId
+        if (!isCreator && !isHead) {
+          throw new Error(`[deepartments] dept_calendar_remove: only the entry creator (${entry.createdBy ?? '(unknown)'}) or the department head may remove it — you are neither`)
+        }
+        state.entries.splice(index, 1)
+        await writeCalendarBestEffort(state)
+        return { id: entry.id, label: entry.label, at: entry.at, ...(entry.createdBy !== void 0 ? { createdBy: entry.createdBy } : {}), ...(entry.createdAt !== void 0 ? { createdAt: entry.createdAt } : {}), ...(entry.jobId !== void 0 ? { jobId: entry.jobId } : {}), ...(entry.fired !== void 0 ? { fired: entry.fired } : {}) }
+      }
+    })))
+
 
     disposers.push(agentCtx.tools.register(defineTool({
       name: 'dept_memo_write',
@@ -3363,112 +4430,14 @@ export function applyInvoke(ctx: Context, config: Config) {
       // templates come from (`repoRoot`, the plugin's bundle dir floor).
       // There is NO scheduler/calendar this phase (D7): `schedule` is parsed
       // and displayed, never triggered. -------------------------------------
-      /** The department's job directory (spec 004 §3.1): the config
-       * `org.departments[].jobDir` (F1 left it optional) — repo-relative OR
-       * absolute; when absent/empty the DEFAULT is
-       * `<repoRoot>/docs/departments/<dept-id>/jobs` (spec §3.3 layout —
-       * the SAME repo-root mechanism the plugin already uses to resolve the
-       * F3 role template tree, `repoRoot` + `readRoleTemplate`). */
-      const jobDirFor = (department: DepartmentConfig): string => {
-        const configured = (department.jobDir ?? '').trim()
-        if (configured === '') return path.join(repoRoot, 'docs', 'departments', department.id, 'jobs')
-        return path.isAbsolute(configured) ? configured : path.join(repoRoot, configured)
-      }
-
-      /** Unwrap a QUOTED-YAML scalar (the F4a jobs convention quotes free-text
-       * values like `schedule`: `"daily 09:00 (reserved — …)"`). The F3 role
-       * mini-parser needs no quote handling (its values are unquoted); the job
-       * parser normalizes them so list/run display the VALUES, not the quotes. */
-      const unwrapQuotedScalar = (value: string): string => {
-        if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
-          return value.slice(1, -1)
-        }
-        return value
-      }
-
-      /** Parse a job definition frontmatter (spec 004 §5.4-§5.5 — the
-       * `---`-delimited format the F4a jobs use: `key: value` one-line
-       * scalars for id/title/role/description/schedule?/owner/outbox? plus a
-       * NON-EMPTY task body). Same lean YAML-lite shape as the F3 role
-       * parser (no YAML dep), equivalent and consistent — with these job
-       * deltas: quoted scalar unwrapping, and REQUIRED key validation
-       * (id/title/role/description/owner — missing/invalid → undefined so
-       * the list reports per-entry and dept_job_run fails loud). */
-      const parseJobFrontmatter = (text: string): { meta: Record<string, string>; body: string } | undefined => {
-        const lines = text.split('\n')
-        if (lines[0]?.trim() !== '---') return undefined
-        let end = -1
-        for (let i = 1; i < lines.length; i++) {
-          if (lines[i].trim() === '---') {
-            end = i
-            break
-          }
-        }
-        if (end < 0) return undefined
-        const meta: Record<string, string> = {}
-        for (let i = 1; i < end; i++) {
-          const scalar = /^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/.exec(lines[i])
-          // Non-key lines inside the block are ignored (F3-parser consistency).
-          if (scalar !== null) meta[scalar[1]] = unwrapQuotedScalar(scalar[2].trim())
-        }
-        const body = lines.slice(end + 1).join('\n').trim()
-        if (body === '') return undefined
-        for (const key of ['id', 'title', 'role', 'description', 'owner']) {
-          if (typeof meta[key] !== 'string' || meta[key].trim() === '') return undefined
-        }
-        return { meta, body }
-      }
-
-      /** Read + resolve ONE job definition (spec 004 §5.4): locate
-       * `<jobId>.md` in the department's jobDir, parse the frontmatter and
-       * validate the declared `id` matches the requested jobId. LOUD errors
-       * — a versioned definition with broken syntax/keys must fail the run,
-       * never spawn a task-less worker. */
-      const readJobDefinition = async (department: DepartmentConfig, jobId: string): Promise<{ meta: Record<string, string>; body: string; path: string }> => {
-        const jobDir = jobDirFor(department)
-        const filePath = path.join(jobDir, `${jobId}.md`)
-        let text: string
-        try {
-          text = await readFile(filePath, 'utf8')
-        } catch {
-          throw new Error(`[deepartments] dept_job_run: job not found: ${jobId} (searched ${jobDir})`)
-        }
-        const parsed = parseJobFrontmatter(text)
-        if (parsed === void 0) {
-          throw new Error(`[deepartments] dept_job_run: job "${jobId}" (${filePath}) has no valid frontmatter — expected a '---' block (id/title/role/description/owner required; schedule/outbox optional) plus a non-empty task body`)
-        }
-        if (parsed.meta.id !== jobId) {
-          throw new Error(`[deepartments] dept_job_run: job "${jobId}" (${filePath}) declares frontmatter id "${parsed.meta.id}" — the file name must match the job id it is referenced by`)
-        }
-        return { meta: parsed.meta, body: parsed.body, path: filePath }
-      }
-
-      /** Validate the job's `role` BEFORE the spawn (spec 005 §5.4): the role
-       * MUST name an existing role template of the department
-       * (`presets/departments/<dept-id>/<role>.md` — the same tree F3's
-       * readRoleTemplate resolves); missing → job-scoped loud error. The full
-       * resolution (frontmatter id-match + persona body) is then left to F3's
-       * readRoleTemplate, unchanged. */
-      const validateJobRole = async (departmentId: string, jobId: string, role: string): Promise<void> => {
-        const filePath = roleTemplatePath(departmentId, role)
-        try {
-          await readFile(filePath, 'utf8')
-        } catch {
-          throw new Error(`[deepartments] dept_job_run: job "${jobId}" declares role "${role}" which has no template at ${filePath} — a role must be a file presets/departments/${departmentId}/<role>.md`)
-        }
-      }
-
-      /** The LIVE (non-retired) worker already running the job in THIS
-       * department (spec §5.4 idempotency): a second dept_job_run of the same
-       * job must NOT spawn a duplicate — the head finishes by retiring the
-       * worker explicitly (dept_worker_retire), then re-runs. */
-      const runningJobWorker = (jobId: string, departmentId: string): string | undefined => {
-        for (const entry of byPost.values()) {
-          if (entry.provider === 'worker' && entry.retired !== true && entry.departmentId === departmentId && entry.jobId === jobId) return entry.postId
-        }
-        return undefined
-      }
-
+      // The job reader (parseJobDefFrontmatter / jobDirFor / readJobDefinitionFile
+      // — module-level, shared with the agenda/dispatch + scheduler) and the job
+      // idempotency/role guards (validateJobRole / runningJobWorker — apply-scope,
+      // shared with the scheduler's runJobForDepartment) are hoisted: this head
+      // own-layer uses the SAME readers as the REST of the plugin, so list/run
+      // and the agenda never drift. `schedule` is parsed + displayed (and the
+      // scheduler below now also fires cron-style schedules) — it is no longer
+      // purely informational. -----------------------------------------------
       /** One listed job (spec 004 §5.5 + D7): the frontmatter fields, the
        * resolved repo path, `status: "manual-run"` (no calendar this phase)
        * and an `error` carrying the reason when the definition's frontmatter
@@ -3538,7 +4507,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           // resolved from ITS department — spec §5.4 own-department-only).
           const department = departmentForPost(headId)
           if (department === void 0) throw new Error(`[deepartments] dept_job_list: head "${headId}" has no CONFIGURED department — the job directory cannot be resolved`)
-          const jobDir = jobDirFor(department)
+          const jobDir = jobDirFor(repoRoot, department)
           let files: string[]
           try {
             files = (await readdir(jobDir)).filter((name) => name.endsWith('.md')).sort()
@@ -3553,7 +4522,7 @@ export function applyInvoke(ctx: Context, config: Config) {
             const filePath = path.join(jobDir, name)
             let parsed: { meta: Record<string, string>; body: string } | undefined
             try {
-              parsed = parseJobFrontmatter(await readFile(filePath, 'utf8'))
+              parsed = parseJobDefFrontmatter(await readFile(filePath, 'utf8'))
             } catch {
               parsed = void 0
             }
@@ -3611,7 +4580,6 @@ export function applyInvoke(ctx: Context, config: Config) {
         async execute(args, exec): Promise<{ workerId: string; sessionId: string; title: string; jobId: string; role: string; jobPath: string }> {
           const agent = exec.agent
           if (!agent) throw new Error('dept_job_run requires a calling agent (exec.agent was undefined)')
-          if (agents === void 0) throw new Error('[deepartments] dept_job_run requires the agents service')
           const headId = postIdForChild(agent.id as string)
           if (headId === void 0) throw new Error('[deepartments] dept_job_run is for a department HEAD (registered post), not the host')
           const headEntry = byPost.get(headId)
@@ -3620,69 +4588,9 @@ export function applyInvoke(ctx: Context, config: Config) {
           if (department === void 0) throw new Error(`[deepartments] dept_job_run: head "${headId}" has no CONFIGURED department — the job directory cannot be resolved`)
           const jobId = String(args.jobId ?? '').trim()
           if (jobId === '') throw new Error('[deepartments] dept_job_run: `jobId` is required')
-          // 1. Read + parse the definition FIRST (loud: missing/broken → fail).
-          const definition = await readJobDefinition(department, jobId)
-          // 2. Role validation against the department role template tree.
-          await validateJobRole(department.id, jobId, definition.meta.role)
-          // 3. Idempotency (spec §5.4): never duplicate a running job worker.
-          const running = runningJobWorker(jobId, department.id)
-          if (running !== void 0) {
-            throw new Error(`[deepartments] dept_job_run: job already running: ${running} — retire it explicitly with dept_worker_retire to restart "${jobId}"`)
-          }
-          // 4. dept_worker_spawn contract replicated (shared helpers — the F3
-          // spawn engine is untouched): resolve the role template (persona +
-          // title), slug-dedup from the job id, materialize the worker root
-          // agent with departmentId/managerId/jobId, pin the HUMAN job title,
-          // then deliver the JOB BODY as the first durable bus message (the
-          // task = the whole definition body, spec §3.3/§5.4).
-          const template = await readRoleTemplate(department.id, definition.meta.role)
-          const postId = dedupedWorkerSlug(jobId)
-          const sessionId = SessionId(mintWorkerSessionId(postId))
-          if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_job_run: a live agent already exists for session "${sessionId}"`)
-          // Title (owner decision 2026-08-23): the HUMAN frontmatter title is
-          // the passed-in title and always wins; a job without one (defensive —
-          // parseJobFrontmatter validates it non-empty) falls back to the
-          // "Rol: Misión" default.
-          const title = definition.meta.title.trim() !== '' ? definition.meta.title : defaultWorkerTitle(definition.meta.role, definition.body, jobId, postId)
-          const setup = workerSetup(postId, headEntry.roomId, definition.meta.role, { persona: template.persona, taskText: definition.body, tools: template.tools, department })
-          // F5 (spec 004 §6.2 L1): job workers land in the department workspace.
-          const deptCwd = await resolveDepartmentWorkspaceCwd(department)
-          const handle = await agents.create({
-            sessionId: String(SessionId(sessionId)),
-            meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
-            agentOptions: WORKER_AGENT_OPTIONS,
-            setup
-          })
-          registerEntry({
-            postId,
-            sessionId: String(SessionId(sessionId)),
-            roomId: headEntry.roomId,
-            agentPreset: WORKER_PRESET_ID,
-            provider: 'worker',
-            role: definition.meta.role,
-            managerId: headId,
-            departmentId: department.id,
-            jobId
-          })
-          byHeadHandle.set(String(SessionId(sessionId)), handle)
-          const titleSession = ctx.sessions.get(sessionId)
-          if (titleSession !== void 0) {
-            const titlePin = pinSessionTitle(titleSession, title)
-            if (titlePin === 'pinned') {
-              ctx.logger.info(`[deepartments] dept_job_run: pinned worker session title "${title}" (${sessionId})`)
-            } else if (titlePin === 'failed') {
-              ctx.logger.warn(`[deepartments] dept_job_run: worker session title pin failed for ${sessionId} (non-fatal — worker registration continues)`)
-            }
-          }
-          const store = await messagesStoreReady
-          const record = await store.append({
-            from: headId,
-            to: [postId],
-            text: definition.body,
-            kind: 'agent'
-          })
-          await deliverBusRecord(record, postId, agent.id as string, agent.id as string, exec.signal)
-          return { workerId: postId, sessionId: String(SessionId(sessionId)), title, jobId, role: definition.meta.role, jobPath: definition.path }
+          // The SHARED job-run engine — the SAME path the W1 scheduler uses for
+          // an automatic fire (no drift between manual and auto execution).
+          return runJobForDepartment(department, headEntry, jobId, { callerSessionId: agent.id as string, signal: exec.signal })
         }
       })))
 
@@ -5895,6 +6803,74 @@ export function applyInvoke(ctx: Context, config: Config) {
     globalSleep()
   }, 'deepartments: host-plane tools')
 
+  // --- W1 agenda scheduler daemon (spec 004 §5.7) ---------------------------
+  // A plugin daemon (NOT an agent) that ticks every AGENDA_SCHEDULER_INTERVAL_MS:
+  // (a) fires any cron-scheduled JOB whose next run is due within the desync
+  // window and not already fired (job-runs-state.json ledger); (b) fires any
+  // CALENDAR entry with `at ≤ now` and `fired:false` — a `jobId` entry runs the
+  // job, a plain entry notifies the owning head with the label. Reversible
+  // effect (AGENTS.md rule 4): the interval is cleared on dispose. NEVER throws
+  // — the pure tick folds every internal failure to a warn.
+  const AGENDA_SCHEDULER_INTERVAL_MS = 30 * 1000
+  ctx.effect(() => {
+    const tick = (): void => {
+      void runAgendaSchedulerTick({
+        now: () => Date.now(),
+        departments: config.org.departments,
+        repoRoot,
+        calendarStateDir: config.stateDir,
+        jobRunsStateDir: config.stateDir,
+        // Resolve the department's registered head postId (sin head → the tick
+        // skips + warns). A configured head derives it from config.coordinator;
+        // a department with no coordinator/head is unresolved.
+        headForDepartment: (department) => department.coordinator?.postId,
+        // The SHARED dept_job_run engine. Resolves false ("skip") when the job
+        // is already running (idempotency) or any non-fatal error; the tick
+        // only advances the ledger on a true (fired) result.
+        runJob: async (department, headPostId, jobId): Promise<boolean> => {
+          const headEntry = byPost.get(headPostId)
+          if (headEntry === void 0) return false
+          try {
+            await runJobForDepartment(department, headEntry, jobId, { callerSessionId: headEntry.sessionId })
+            return true
+          } catch (error: unknown) {
+            ctx.logger.warn(`[deepartments] scheduler: job "${jobId}" could not run (${error instanceof Error ? error.message : String(error)}) — skip`)
+            return false
+          }
+        },
+        // A plain (non-job) calendar entry notice: deliver a bus message to the
+        // owning head. The scheduler is NOT a catalog member, so the bus ACL
+        // would conservatively deny it — deliver via the post-delivery seam
+        // directly (a plugin-daemon system notice, framed `[From deepartments]`).
+        notifyHead: async (headPostId, message): Promise<void> => {
+          try {
+            const headEntry = byPost.get(headPostId)
+            if (headEntry === void 0) return
+            const store = await messagesStoreReady
+            const record = await store.append({ from: 'deepartments', to: [headPostId], text: `Agenda notice: ${message}`, kind: 'agent' })
+            await busDeliverToPost(headEntry, `[From deepartments → ${headPostId}]: Agenda notice: ${message}`, record, undefined)
+          } catch (error: unknown) {
+            ctx.logger.warn(`[deepartments] scheduler: agenda notice to "${headPostId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        },
+        departmentForEntry: (entry) => {
+          const creator = byPost.get(entry.createdBy ?? '')
+          return creator === void 0 ? undefined : departmentForEntry(creator)
+        },
+        departmentForJob: (jobId) => {
+          for (const department of config.org.departments) {
+            const jobDir = jobDirFor(repoRoot, department)
+            if (existsSync(path.join(jobDir, `${jobId}.md`))) return department
+          }
+          return undefined
+        },
+        logger: ctx.logger
+      })
+    }
+    const interval = setInterval(tick, AGENDA_SCHEDULER_INTERVAL_MS)
+    return () => { clearInterval(interval) }
+  }, 'deepartments: agenda scheduler daemon')
+
   // --- agents/list + host/status RPC (server half, HTTP self-mount) --------
   // Serves the department-head roster rows (`agents`/`list`) and the U3
   // host-rotation lifecycle signal (`host/status`, spec 002 §6.1) to the client
@@ -5972,7 +6948,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       (hostCtx.get('connection') as ConnectionLike | undefined)?.trustedHosts ??
       []
     console.log(
-      `[deepartments] /deepartments channel mounted; trustedHosts=${JSON.stringify(trustedHosts)}; routes: agents/list, host/status`
+      `[deepartments] /deepartments channel mounted; trustedHosts=${JSON.stringify(trustedHosts)}; routes: agents/list, host/status, presence/get, presence/set, agenda/list`
     )
     const endpointDeps: DeepartmentsEndpointDeps = {
       departments: config.org.departments,
@@ -6004,7 +6980,25 @@ export function applyInvoke(ctx: Context, config: Config) {
         }
       },
       // U3 fix: ambiguity warn for live-host selection (post-mortem finding #2).
-      logger: ctx.logger
+      logger: ctx.logger,
+      // Feature A — owner-presence read/write + host-change notify. The read
+      // refreshes the synchronous cache (so a `presence/get` reflects the
+      // current file AND keeps the guard/pre-step cache current); the write
+      // persists atomically via the wrapping savePresence (never throws — an
+      // RPC never fails on a persist error). The notify is the fire-and-forget
+      // HOST followup (A3/A4), fired by the dispatch only on a real CHANGE.
+      presenceState: async () => {
+        refreshPresence()
+        return { present: presenceCache.present, ...(presenceCache.updatedAt === undefined ? {} : { updatedAt: presenceCache.updatedAt }) }
+      },
+      savePresenceState: async (state) => savePresence(state),
+      notifyPresenceChange: (present) => notifyHostPresence(present),
+      // W1 — `agenda/list`: read the jobs from the repo tree (default jobDir
+      // resolution via the apply scope repoRoot) and the runtime calendar from
+      // the shared stateDir. The clock picks the live next-due snapshot.
+      repoRoot,
+      calendarStateDir: config.stateDir,
+      now: () => Date.now()
     }
     // Register each client path as a `kind:'exact'` POST route. `webServer.register`
     // returns a disposer; the effect folds them into one reversible registration
@@ -6012,7 +7006,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     const routes: WebServerRouteLike[] = [
       { path: '/deepartments/agents', endpoint: 'agents' },
       { path: '/deepartments/list', endpoint: 'list' },
-      { path: '/deepartments/host/status', endpoint: 'host/status' }
+      { path: '/deepartments/host/status', endpoint: 'host/status' },
+      { path: '/deepartments/presence/get', endpoint: 'presence/get' },
+      { path: '/deepartments/presence/set', endpoint: 'presence/set' },
+      { path: '/deepartments/agenda/list', endpoint: 'agenda/list' }
     ].map(({ path, endpoint }) => ({
       kind: 'exact' as const,
       path,
@@ -6021,7 +7018,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     hostCtx.effect(() => {
       const disposers = routes.map((route) => webServer.register(route))
       return () => { for (const dispose of disposers) dispose() }
-    }, 'deepartments: agents/list + host/status RPC channel')
+    }, 'deepartments: agents/list + host/status + agenda/list RPC channel')
   })
 
 }
