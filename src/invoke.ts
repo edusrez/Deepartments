@@ -3487,11 +3487,15 @@ export function applyInvoke(ctx: Context, config: Config) {
               title: parsed.meta.title,
               role: parsed.meta.role,
               description: parsed.meta.description,
-              schedule: parsed.meta.schedule,
               status: 'manual-run',
               owner: parsed.meta.owner,
-              outbox: parsed.meta.outbox,
-              path: filePath
+              path: filePath,
+              // JSON-lossless tool result: `schedule`/`outbox` are OPTIONAL
+              // frontmatter keys — a definition that omits them must NOT emit a
+              // property whose value is `undefined` (lossless-json rejects it).
+              // Omit the key entirely when absent (the schema admits it).
+              ...(parsed.meta.schedule !== undefined ? { schedule: parsed.meta.schedule } : {}),
+              ...(parsed.meta.outbox !== undefined ? { outbox: parsed.meta.outbox } : {})
             })
           }
           return { jobDir, jobs }
@@ -4994,16 +4998,29 @@ export function applyInvoke(ctx: Context, config: Config) {
       const memberId = busMemberIdFor(agent.id as string)
       const normalized = Math.min(Math.max(Math.trunc(args.limit ?? 10), 1), 50)
       const page = store.page(memberId, { limit: normalized, before: args.before })
-      // Normalize the wire shape to the declared output schema (threadId null
+      // Normalize the wire shape to the declared output schema and keep it
+      // JSON-lossless (the harness serializes tool results with lossless-json,
+      // which REJECTS a property whose value is `undefined`). `threadId: null`
       // is a store-internal absent marker; the tool surface exposes it as
-      // absent, never null).
+      // ABSENT (the key is omitted entirely) — never `threadId: undefined`.
+      // Same for `sensitive` (only present when a real boolean). No property
+      // is ever emitted with an undefined/NaN/Infinity value.
       return {
         total: page.total,
         remaining: page.remaining,
-        messages: page.messages.map((message) => ({
-          ...message,
-          threadId: message.threadId === null ? undefined : message.threadId
-        }))
+        messages: page.messages.map((message) => {
+          const item: { id: string; ts: number; from: string; to: string[]; text: string; kind: string; threadId?: string; sensitive?: boolean } = {
+            id: message.id,
+            ts: message.ts,
+            from: message.from,
+            to: message.to,
+            text: message.text,
+            kind: message.kind
+          }
+          if (typeof message.threadId === 'string') item.threadId = message.threadId
+          if (typeof message.sensitive === 'boolean') item.sensitive = message.sensitive
+          return item
+        })
       }
     }
   })

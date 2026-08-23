@@ -4925,6 +4925,22 @@ async function readDeliveryRows(stateDir, messageId) {
   return rows.filter((row) => row.messageId === messageId)
 }
 
+/** F9 — assert a tool result is JSON-lossless safe: deep-walk and reject any
+ * property whose value is `undefined`, `NaN` or `Infinity` (the harness
+ * serializes tool results with lossless-json, which rejects exactly those — a
+ * `{ x: undefined }` key must be OMITTED, never emitted). `null` is allowed
+ * (lossless-json accepts it; the schema admits it). */
+function assertLosslessJson(value, label = 'value') {
+  if (value === undefined) throw new Error(`${label} is undefined`)
+  if (typeof value === 'number' && !Number.isFinite(value)) throw new Error(`${label} is not finite (got ${value})`)
+  if (typeof value === 'object' && value !== null) {
+    for (const [key, child] of Object.entries(value)) {
+      if (child === undefined) throw new Error(`${label}.${key} is undefined (a lossless-json tool result cannot carry it)`)
+      assertLosslessJson(child, `${label}.${key}`)
+    }
+  }
+}
+
 test('B2 send_message: catalog head delivered with the spec framing + agent source; record persisted BEFORE delivery; sidecar prepared→delivered', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
@@ -5174,6 +5190,49 @@ test('B2 agent_messages: paging 10-per-page with before cursor + remaining (20 s
   })
 })
 
+test('F9 agent_messages result is JSON-lossless: threadId/sensitive keys omitted when absent, present when real — never undefined', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const hostSessionId = SessionId('f9-host-lossless')
+    const hostMemberId = `host-${hostSessionId}`
+    // m-0: NO threadId, NO sensitive. m-1: threadId + sensitive:true.
+    const records = [
+      { id: 'm-0', seq: 0, ts: 1700000000000, from: 'research-head', to: [hostMemberId], text: 'no thread', kind: 'agent' },
+      { id: 'm-1', seq: 1, ts: 1700000000001, from: 'research-head', to: [hostMemberId], text: 'with thread', kind: 'agent', threadId: 'm-0', sensitive: true }
+    ]
+    await seedMessageRecords(stateDir, records)
+    const { agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      const host = agents.put(fakeParentAgent(SessionId('f9-host-lossless')))
+      const signal = new AbortController().signal
+      const messagesTool = pluginCtx().tools.get('agent_messages')
+
+      const page = await messagesTool.execute({ limit: 10 }, { agent: host, signal })
+      assert.equal(page.total, 2, 'both records are owned')
+
+      // (a) a record WITHOUT threadId/sensitive → those keys are ABSENT
+      // (never `threadId: undefined`), and no message carries an undefined value.
+      const noThread = page.messages.find((message) => message.id === 'm-0')
+      assert.ok(noThread, 'm-0 present')
+      assert.equal(Object.prototype.hasOwnProperty.call(noThread, 'threadId'), false, 'no threadId key when the record has none (NOT threadId: undefined)')
+      assert.equal(Object.prototype.hasOwnProperty.call(noThread, 'sensitive'), false, 'no sensitive key when the record has no sensitive flag')
+
+      // (b) a record WITH threadId/sensitive → the keys ARRIVE with real values.
+      const withThread = page.messages.find((message) => message.id === 'm-1')
+      assert.ok(withThread, 'm-1 present')
+      assert.equal(withThread.threadId, 'm-0', 'threadId arrives as the real string')
+      assert.equal(withThread.sensitive, true, 'sensitive arrives as the real boolean')
+
+      // (c) the WHOLE result is JSON-lossless (no undefined/NaN/Infinity anywhere).
+      assertLosslessJson(page)
+      for (const message of page.messages) {
+        assert.ok(Object.values(message).every((v) => v !== undefined), `message ${message.id} has no property with an undefined value`)
+      }
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('B2 dept_who: whole catalog — host + head rows with kind/title/live/sleeping/sessionId and you:true on the caller', async () => {
   await withTempStateDir(async (stateDir) => {
     const hostSessionId = SessionId('b2-host-who')
@@ -5213,6 +5272,27 @@ test('B2 dept_who: whole catalog — host + head rows with kind/title/live/sleep
       assert.equal(headSelf.you, true, 'head own-layer dept_who marks the head you:true')
       const hostSelf = headResult.members.find((member) => member.agentId === `host-${hostSessionId}`)
       assert.equal(hostSelf.you, false)
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F9 dept_who result is JSON-lossless: worker optional departmentId/role/jobId/retired keys are conditioned-spread, never undefined', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const hostSessionId = SessionId('f9-host-who-lossless')
+    await seedHostRegistration(stateDir, hostSessionId, 'board')
+    const { agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
+      const host = agents.put(fakeParentAgent(SessionId('f9-host-who-lossless')))
+      const signal = new AbortController().signal
+      const who = pluginCtx().tools.get('dept_who')
+      const result = await who.execute({}, { agent: host, signal })
+      assertLosslessJson(result)
+      for (const member of result.members) {
+        assert.ok(Object.values(member).every((v) => v !== undefined), `member ${member.agentId} has no property with an undefined value`)
+      }
     } finally {
       await dispose()
     }
@@ -5589,6 +5669,61 @@ test('F4b dept_job_list: lists the 3 versioned repo jobs (default jobDir) with t
       assert.ok(factCheck, 'fact-check-queue listed')
       assert.equal(factCheck.role, 'reviewer')
       assert.equal(factCheck.title, 'Fact-check the department\'s unverified reports')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F9 dept_job_list result is JSON-lossless: optional schedule/outbox keys omitted when the definition omits them — never undefined', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const jobDir = path.join(stateDir, 'jobs')
+    await mkdir(jobDir, { recursive: true })
+    // full-job.md: declares BOTH optional keys. minimal-job.md: omits them both.
+    await writeFile(path.join(jobDir, 'full-job.md'), [
+      '---',
+      'id: full-job',
+      'title: Full job',
+      'role: researcher',
+      'description: declares schedule and outbox',
+      'schedule: "daily 09:00 (reserved)"',
+      'owner: research-head',
+      'outbox: .dsh/reports/researcher/<YYYY-MM-DD>-full.md',
+      '---',
+      '',
+      'Body of the full job.'
+    ].join('\n'), 'utf8')
+    await writeFile(path.join(jobDir, 'minimal-job.md'), [
+      '---',
+      'id: minimal-job',
+      'title: Minimal job',
+      'role: researcher',
+      'description: omits the optional frontmatter keys',
+      'owner: research-head',
+      '---',
+      '',
+      'Body of the minimal job.'
+    ].join('\n'), 'utf8')
+    const { head, headCtx, key, dispose } = await f4bBootWithJobDir(stateDir, jobDir)
+    try {
+      const result = await headCtx.tools.get('dept_job_list', key).execute({}, { agent: head, signal: new AbortController().signal })
+      assert.equal(result.jobs.length, 2, 'both hermetic jobs listed')
+
+      // The whole list is JSON-lossless (no undefined/NaN/Infinity anywhere).
+      assertLosslessJson(result)
+      for (const job of result.jobs) {
+        assert.ok(Object.values(job).every((v) => v !== undefined), `job ${job.id} has no property with an undefined value`)
+      }
+
+      const full = result.jobs.find((job) => job.id === 'full-job')
+      assert.ok(full)
+      assert.equal(full.schedule, 'daily 09:00 (reserved)', 'schedule preserved when the definition declares it (the quoted YAML scalar is unwrapped)')
+      assert.equal(full.outbox, '.dsh/reports/researcher/<YYYY-MM-DD>-full.md', 'outbox preserved when the definition declares it')
+
+      const minimal = result.jobs.find((job) => job.id === 'minimal-job')
+      assert.ok(minimal)
+      assert.equal(Object.prototype.hasOwnProperty.call(minimal, 'schedule'), false, 'no schedule key when the definition omits it (NOT schedule: undefined)')
+      assert.equal(Object.prototype.hasOwnProperty.call(minimal, 'outbox'), false, 'no outbox key when the definition omits it (NOT outbox: undefined)')
     } finally {
       await dispose()
     }
