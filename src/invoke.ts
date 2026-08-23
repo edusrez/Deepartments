@@ -2549,6 +2549,21 @@ export function applyInvoke(ctx: Context, config: Config) {
     return undefined
   }
 
+  /** The CONFIG DEPARTMENT of a catalog entry (F5, spec 004 §6.2): a worker
+   * carries its link durably (`entry.departmentId` — recorded at create from
+   * the creating head's department); a configured head derives it from config
+   * (`departmentForPost`). A worker whose departmentId no longer exists in
+   * config (a removed department), OR a legacy pre-F1 worker (no departmentId),
+   * yields undefined → the caller falls back to the shared workspace root
+   * (compat — the session keeps its cwd; a fresh create uses the root). */
+  const departmentForEntry = (entry: PostEntry): DepartmentConfig | undefined => {
+    if (entry.departmentId !== void 0) {
+      const byId = config.org.departments.find((d) => d.id === entry.departmentId)
+      if (byId !== void 0) return byId
+    }
+    return departmentForPost(entry.postId)
+  }
+
   // --- Batch W4: NON-pure wake-pack assembly (live reads; buildWakePack is pure).
   // These gather the fresh-ish inputs (git bearings, ROADMAP tail, skill body,
   // board delta, condensed roster, system state) and hand them to the pure
@@ -3157,9 +3172,15 @@ export function applyInvoke(ctx: Context, config: Config) {
           if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_post_create: a live agent already exists for session "${sessionId}"`)
           const firstMessage = args.firstMessage ?? args.prompt
           const setup = workerSetup(args.postId, headEntry.roomId, args.role)
+          // F5 (spec 004 §6.2 L1): the worker of a department WITH a configured
+          // workspacePath is created under that path (its OWN sidebar folder,
+          // ensured first); otherwise the shared workspace root (the
+          // resolveDepartmentWorkspaceCwd '' fallback — pre-F1 behavior).
+          const department = departmentForPost(headId)
+          const deptCwd = await resolveDepartmentWorkspaceCwd(department)
           const handle = await agents.create({
             sessionId: String(SessionId(sessionId)),
-            meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
+            meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
             agentOptions: WORKER_AGENT_OPTIONS,
             setup
           })
@@ -3172,7 +3193,6 @@ export function applyInvoke(ctx: Context, config: Config) {
           // "unchanged"); a HEAD WITHOUT a config department gets no
           // departmentId (legacy-path compatibility — its workers are
           // department-less, host-retireable only).
-          const department = departmentForPost(headId)
           registerEntry({
             postId: args.postId,
             sessionId: String(SessionId(sessionId)),
@@ -3514,9 +3534,11 @@ export function applyInvoke(ctx: Context, config: Config) {
           if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_job_run: a live agent already exists for session "${sessionId}"`)
           const title = definition.meta.title
           const setup = workerSetup(postId, headEntry.roomId, definition.meta.role, { persona: template.persona, taskText: definition.body })
+          // F5 (spec 004 §6.2 L1): job workers land in the department workspace.
+          const deptCwd = await resolveDepartmentWorkspaceCwd(department)
           const handle = await agents.create({
             sessionId: String(SessionId(sessionId)),
-            meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
+            meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
             agentOptions: WORKER_AGENT_OPTIONS,
             setup
           })
@@ -3604,9 +3626,11 @@ export function applyInvoke(ctx: Context, config: Config) {
           if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_worker_spawn: a live agent already exists for session "${sessionId}"`)
           const title = String(args.title ?? '').trim() !== '' ? String(args.title) : defaultWorkerTitle(template.title, args.task, args.jobId, postId)
           const setup = workerSetup(postId, headEntry.roomId, role, { persona: template.persona, taskText: args.task })
+          // F5 (spec 004 §6.2 L1): the worker lands in its department workspace.
+          const deptCwd = await resolveDepartmentWorkspaceCwd(department)
           const handle = await agents.create({
             sessionId: String(SessionId(sessionId)),
-            meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
+            meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
             agentOptions: WORKER_AGENT_OPTIONS,
             setup
           })
@@ -3904,6 +3928,63 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  /** F5 (spec 004 §6.2 L1) — the CONFIGURED WORKSPACE DIRECTORY of a
+   * department, or `''` when the department has NONE (pre-F1 compat: the
+   * department keeps the shared workspace root). `workspacePath` is optional in
+   * config (F1 defaults it to `''`), so absent/blank/undefined all collapse to
+   * `''` — the callers then fall through to `resolveWorkspaceRootPath`. */
+  const departmentWorkspacePath = (department: DepartmentConfig | undefined): string => {
+    const p = department?.workspacePath
+    return typeof p === 'string' && p.trim() !== '' ? p.trim() : ''
+  }
+
+  /** F5 (spec 004 §6.2 L1) — ENSURE a department's REAL sidebar workspace
+   * entity exists and return its canonical path (the cwd its head/worker
+   * sessions attach to). The workspace SERVICE requires an existing directory
+   * (it realpath-validates + stats), so mkdir -p first, then
+   * `registry.create(path, title)` — IDEMPOTENT for an existing canonical path
+   * (returns the existing entity, its title untouched — the title is set ONLY
+   * on first create). NEVER throws: a mkdir/create failure WARNs and the
+   * configured path is returned unchanged (the session is STILL created with
+   * that cwd — it just won't be sidebar-attachable until the directory/entity
+   * exist, the honest non-fatal WARN discipline of the attach hooks). */
+  const ensureDepartmentWorkspace = async (workspacePath: string, title: string): Promise<string> => {
+    try {
+      await mkdir(workspacePath, { recursive: true })
+    } catch (error) {
+      ctx.logger.warn(`[deepartments] department workspace dir "${workspacePath}" could not be created (${error instanceof Error ? error.message : String(error)}) — the department's sessions keep cwd "${workspacePath}" but are NOT sidebar-attachable until the directory exists`)
+      return workspacePath
+    }
+    const registry = ctx.get('workspaceRegistry', false) as WorkspaceRegistryLike | undefined
+    if (registry?.create === void 0) {
+      ctx.logger.warn(`[deepartments] department workspace create skipped (no workspaceRegistry.create seam in this composition) — the department's sessions keep cwd "${workspacePath}" but are not grouped in the sidebar`)
+      return workspacePath
+    }
+    try {
+      const entity = await registry.create(workspacePath, title)
+      // Prefer the canonical path the SERVICE resolved (create realpath-
+      // normalizes); the session cwd must equal it for the attach to match.
+      if (entity !== undefined && typeof entity.path === 'string' && entity.path !== '') return entity.path
+      return workspacePath
+    } catch (error) {
+      ctx.logger.warn(`[deepartments] department workspace create failed for "${workspacePath}" (${error instanceof Error ? error.message : String(error)}) — the department's sessions keep cwd "${workspacePath}" but the sidebar folder may not appear`)
+      return workspacePath
+    }
+  }
+
+  /** F5 (spec 004 §6.2 L1) — the department-aware CWD for a created head/worker
+   * session: a department WITH a configured workspacePath ensures its workspace
+   * (mkdir + `registry.create(title = dept name)`, idempotent) and returns the
+   * canonical workspace path (the department's own sidebar folder). A
+   * department WITHOUT workspacePath returns `''` — the caller then falls back
+   * to `resolveWorkspaceRootPath()` (the shared root, pre-F1 behavior, zero
+   * regression). */
+  const resolveDepartmentWorkspaceCwd = async (department: DepartmentConfig | undefined): Promise<string> => {
+    const workspacePath = departmentWorkspacePath(department)
+    if (workspacePath === '') return ''
+    return ensureDepartmentWorkspace(workspacePath, department!.name || department!.id)
+  }
+
   /** Piece 1 (2026-08-22) — the CANONICAL WORKSPACE ROOT PATH for created
    * head/worker sessions, replacing the legacy `repoRoot` hardcode. dsh-workspace
    * attaches a session to a workspace ONLY when its persisted header cwd equals
@@ -3957,12 +4038,25 @@ export function applyInvoke(ctx: Context, config: Config) {
             }
           }
         }
-        // 2. the registry's durable-first workspace path.
+        // 2. the registry's durable-first workspace path — SKIPPING a
+        // department's own workspace (F5, spec 004 §6.2 L1): the workspace
+        // SERVICE prepends a newly created workspace to the registry order, so
+        // a department workspace would otherwise become list()[0] and hijack
+        // the shared-root resolution for a department WITHOUT workspacePath
+        // (or a legacy head) in a host-less/headless profile. A department
+        // workspace is never the shared root; fall through to the next one
+        // (or the repoRoot floor when every workspace is a department's own).
+        const departmentWorkspacePaths = new Set<string>()
+        for (const department of config.org.departments) {
+          const deptWs = departmentWorkspacePath(department)
+          if (deptWs !== '') departmentWorkspacePaths.add(deptWs)
+        }
         for (const workspace of workspaceList) {
           const path = (workspace as WorkspaceEntityMembershipLike).path
-          if (typeof path === 'string' && path !== '') return path
+          if (typeof path === 'string' && path !== '' && !departmentWorkspacePaths.has(path)) return path
         }
-        // 3. no workspace entities at all — legacy repoRoot floor.
+        // 3. no workspace entities at all (or only department workspaces) —
+        //    legacy repoRoot floor.
         return repoRoot
       } catch {
         // list() rejected → the registry is still initializing — retry.
@@ -4050,6 +4144,14 @@ export function applyInvoke(ctx: Context, config: Config) {
     const presetId = headPresetIdFor(department.id)
     const sessionId = SessionId(headSessionId(postId))
     if (agents === void 0) return
+    // F5 (spec 004 §6.2 L1): a department WITH a configured workspacePath owns a
+    // REAL sidebar folder — ensure the workspace (mkdir + registry.create
+    // title=dept name, idempotent) and carry the canonical path as the cwd for
+    // the fresh-create branches. A department WITHOUT workspacePath returns ''
+    // (the shared workspace root via resolveWorkspaceRootPath — pre-F1). The
+    // ensure runs on EVERY ensureHead (even when the head session is reused/
+    // resumed) so the department folder exists for its workers' spawns.
+    const departmentCwd = await resolveDepartmentWorkspaceCwd(department)
     let handle: AgentHandleLike | undefined
     const live = agents.get(String(sessionId))
     if (live !== void 0) {
@@ -4074,7 +4176,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           ctx.logger.warn(`[deepartments] head "${postId}" resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
           handle = await agents.create({
             sessionId: String(sessionId),
-            meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: presetId },
+            meta: { cwd: departmentCwd !== '' ? departmentCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: presetId },
             agentOptions,
             setup
           })
@@ -4083,7 +4185,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       } else {
         handle = await agents.create({
           sessionId: String(sessionId),
-          meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: presetId },
+          meta: { cwd: departmentCwd !== '' ? departmentCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: presetId },
           agentOptions,
           setup
         })
@@ -4259,13 +4361,19 @@ export function applyInvoke(ctx: Context, config: Config) {
       const agentOptions = coordinator?.agentOptions
       const preset: string = isWorker ? WORKER_PRESET_ID : headPreset
       let handle: AgentHandleLike | undefined
+      // F5 (spec 004 §6.2 L1): the FRESH-create fallback of a bus wake lands the
+      // re-materialized session in ITS department workspace (a worker by its
+      // durable departmentId, a head by config); a department-less/legacy entry
+      // falls back to the shared workspace root (deptCwd ''). The resume path
+      // above keeps the session's stored header cwd (immutable per session).
+      const deptCwd = await resolveDepartmentWorkspaceCwd(departmentForEntry(entry))
       try {
         handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions, setup })
       } catch (error: unknown) {
         ctx.logger.warn(`[deepartments] ${isWorker ? 'worker' : 'head'} "${entry.postId}" bus wake-resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
         handle = await agents.create({
           sessionId: String(sessionId),
-          meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: preset },
+          meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: preset },
           agentOptions,
           setup
         })

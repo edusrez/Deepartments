@@ -286,6 +286,14 @@ export interface WorkspaceEntityLike {
 export interface WorkspaceRegistryLike {
   archiveSession(sessionId: string): Promise<unknown> | unknown
   list(): Promise<readonly WorkspaceEntityLike[]>
+  /** F5 (spec 004 §6.2 L1): the workspace-service `create(path, title)` that
+   * creates OR REUSES the entity for an existing directory (idempotent — an
+   * existing canonical path returns the existing entity, its title untouched)
+   * and returns its canonical `.path`. OPTIONAL in the structural type so an
+   * implementation without it (a composition missing the GUI workspace
+   * service) degrades gracefully (the department sessions still get the
+   * configured cwd, just no sidebar folder this run). */
+  create?(path: string, title?: string): Promise<{ path: string } | undefined>
 }
 
 /**

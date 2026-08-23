@@ -11,6 +11,13 @@
         # research department). Rooms were removed; agents message each other
         # directly via send_message. Departments are defined HERE, never
         # created by agents.
+        # workspacePath (optional, F5): the department's OWN sidebar workspace.
+        # The plugin autogenerates it at runtime — mkdir -p the directory, then
+        # registers it (idempotent workspaceRegistry.create, title = the
+        # department name) — and the department's head/worker sessions are born
+        # with cwd there, so they group under a "Research Department" folder in
+        # the sidebar. A department WITHOUT workspacePath keeps the shared
+        # workspace root (pre-F1 behavior, zero regression).
         # agentOptions values: models served via the opencode-zen provider
         # (OpenCode Go (Zen), https://opencode.ai/zen/go/v1, apiKeyEnv
         # OPENCODE_GO_API_KEY — configured in settings.yaml of the profile);
@@ -19,6 +26,7 @@
           departments:
             - id: research
               name: Research Department
+              workspacePath: /root/.deepartments/departments/research
               coordinator:
                 postId: research-head
                 title: Head of Research

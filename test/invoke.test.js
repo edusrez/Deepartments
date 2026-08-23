@@ -184,7 +184,7 @@ function materializeStubAgent(agents, sessionId, options) {
  * child's own tool layer.
  */
 class StubAgents extends Service {
-  constructor(ctx) {
+  constructor(ctx, sessionCwds) {
     super(ctx, 'agents')
     this.store = new Map()
     this.createCalls = []
@@ -192,6 +192,10 @@ class StubAgents extends Service {
     this.childContexts = []
     this.childAgents = []
     this.scopeAnchor = ctx
+    // F5: the shared sessionId → cwd index (mirrors the harness's canonical-
+    // cwd header index) so the StubWorkspaceRegistry's attach can validate the
+    // cwd vs workspace path like the real dsh-workspace attachSession does.
+    this.sessionCwds = sessionCwds
     // Piece 1 cwd fix (2026-08-22): forced resume failures (per durable session
     // id) so the wakePost resume-failed → create-fresh fallback is testable.
     this.resumeRejects = new Set()
@@ -224,6 +228,7 @@ class StubAgents extends Service {
 
   async create(options) {
     this.createCalls.push(options)
+    this.sessionCwds?.set(String(options.sessionId), options.meta?.cwd)
     this.ensureStoreSession(options.sessionId, options.meta)
     return materializeStubAgent(this, options.sessionId, options)
   }
@@ -231,6 +236,7 @@ class StubAgents extends Service {
   async resume(options) {
     this.resumeCalls.push(options)
     if (this.resumeRejects.has(options.resumeSessionId)) throw new Error('stub: forced resume failure (Piece 1 cwd-fix test)')
+    this.sessionCwds?.set(String(options.resumeSessionId), options.meta?.cwd)
     // Cold resume: restore a dormant resident under its DURABLE id (the seeded
     // childId), with header.parentSession from the adoption map, applying the
     // setup closure (board tools install on cold resume exactly like fresh).
@@ -380,12 +386,20 @@ class StubPersistenceWithRoot extends StubPersistence {
  * (non-strict get + bounded loop) until list() resolves — the old strict-get
  * race silently skipped exactly this state in production. */
 class StubWorkspaceRegistry extends Service {
-  constructor(ctx, stateDir, entities) {
+  constructor(ctx, stateDir, entities, sessionCwds) {
     super(ctx, 'workspaceRegistry')
     this.stateDir = stateDir
     this.archived = []
     this.attachCalls = []
     this.notReadyRejects = 0
+    this.createCalls = []
+    // F5: the shared sessionId → cwd index, so the attach below can validate
+    // the session cwd against the entity path like the real dsh-workspace
+    // attachSession (realpath equality). A session whose cwd is NOT tracked
+    // (a host session minted by the harness/GUI, or a resume without a create)
+    // skips validation — preserving the pre-F5 stub behavior for tests that
+    // never track a cwd for the session.
+    this.sessionCwds = sessionCwds
     // Piece 1 cwd fix (2026-08-22): the default entity carries the DURABLE
     // membership view the real entity exposes (`sessionIds` — dsh-workspace
     // lib:78-80) AND mirrors the real attach into the persisted workspace
@@ -393,18 +407,22 @@ class StubWorkspaceRegistry extends Service {
     // by. This lets the cwd-fix tests assert both the resolved create cwd and
     // the post-attach membership file.
     this.entitySessions = []
-    this.entities = entities ?? [{
+    const defaultEntity = {
       path: stateDir,
+      title: 'root',
       sessionIds: this.entitySessions,
       attachSession: async (sessionId) => {
         this.attachCalls.push(sessionId)
+        const cwd = this.sessionCwds?.get(String(sessionId))
+        if (cwd !== undefined && cwd !== stateDir) throw new Error(`stub: cwd mismatch for ${sessionId} (${cwd} != ${stateDir})`)
         if (!this.entitySessions.includes(sessionId)) {
           this.entitySessions.push(sessionId)
           writeFile(path.join(this.stateDir, 'workspace.json'), JSON.stringify({ path: this.stateDir, sessionIds: [...this.entitySessions] }, null, 2), 'utf8')
             .catch(() => {})
         }
       }
-    }]
+    }
+    this.entities = entities ?? [defaultEntity]
   }
 
   get archivedSessionIds() {
@@ -421,6 +439,32 @@ class StubWorkspaceRegistry extends Service {
       return Promise.reject(new Error('workspace registry is not started yet'))
     }
     return Promise.resolve(this.entities)
+  }
+
+  /** F5 (spec 004 §6.2 L1) — `create(path, title)`: idempotent for an existing
+   * entity at the same canonical path (returns it, title untouched — matching
+   * the real registry's "existing canonical path returns the existing entity
+   * without changing its title"); otherwise creates a NEW validation-aware
+   * entity (cwd == path required to attach). Records the call so the tests can
+   * assert the workspace was created with the department name as its title. */
+  async create(path, title) {
+    this.createCalls.push({ path, title })
+    const existing = this.entities.find((e) => e.path === path)
+    if (existing !== undefined) return existing
+    const sessions = []
+    const entity = {
+      path,
+      title,
+      sessionIds: sessions,
+      attachSession: async (sessionId) => {
+        this.attachCalls.push(sessionId)
+        const cwd = this.sessionCwds?.get(String(sessionId))
+        if (cwd !== undefined && cwd !== path) throw new Error(`stub: cwd mismatch for ${sessionId} (${cwd} != ${path})`)
+        if (!sessions.includes(sessionId)) sessions.push(sessionId)
+      }
+    }
+    this.entities.push(entity)
+    return entity
   }
 
   async archiveSession(sessionId) {
@@ -478,6 +522,12 @@ async function bootPlugin(stateDir, opts = {}) {
   // Piece 1 cwd fix (2026-08-22): a boot opt forces per-session resume failures
   // (the wakePost resume-failed → create-fresh fallback path).
   if (opts.resumeRejects !== undefined) agents.resumeRejects = new Set(opts.resumeRejects)
+  // F5 (spec 004 §6.2): the shared sessionId → cwd index the StubAgents records
+  // on create and the StubWorkspaceRegistry validates on attach (mirrors the
+  // harness canonical-cwd header index, so the department-workspace tests can
+  // assert the session groups into ITS department entity, not the root one).
+  const sessionCwds = new Map()
+  agents.sessionCwds = sessionCwds
   // Batch S1 live-fix: a boot opt swaps in the real-API-shaped persistence
   // (readRaw present) so the real-capture tests exercise the bound call shape;
   // the default stays readRaw-less so the harness keeps degrading to the stub.
@@ -493,7 +543,7 @@ async function bootPlugin(stateDir, opts = {}) {
   // archive (spec 002 §3.3 S2.5) is exercised through the same seam. FIX 1b:
   // `workspaceEntities` (optional) overrides the entity list the S2.2 attach
   // and the boot repair hook iterate (default: one recording entity).
-  const workspaceRegistry = new StubWorkspaceRegistry(root, stateDir, opts.workspaceEntities)
+  const workspaceRegistry = new StubWorkspaceRegistry(root, stateDir, opts.workspaceEntities, sessionCwds)
   // FIX 1b.1 — `registryNotReadyRejects` models a provider whose init is still
   // in flight at boot (list() rejects mid-init) for the boot-repair retry
   // regression.
@@ -5550,6 +5600,120 @@ test('F4b list on a department WITHOUT jobs: missing jobDir is an EMPTY list (no
       assert.equal(result.jobDir.endsWith(path.join('docs', 'departments', 'programming', 'jobs')), true, 'the default jobDir for that department is the resolved path')
     } finally {
       await env.dispose()
+    }
+  })
+})
+
+// ============================================================================
+// F5 — sidebar workspace per department (spec 004 §6.2 L1). A department WITH a
+// configured `workspacePath` owns a REAL harness workspace entity (created via
+// `registry.create(path, dept.name)`, idempotent) and its head/worker sessions
+// are created with that cwd → the native sidebar groups them into a folder
+// labelled with the department name. A department WITHOUT `workspacePath` keeps
+// the shared workspace root (pre-F1 behavior — zero regression).
+// ============================================================================
+
+/** The RESEARCH department WITH a workspacePath (runtime temp dir), built per
+ * test stateDir so the path is real and mkdir-able. Deliberately mirrors
+ * cordis.patch.yml's `name: "Research Department"` + coordinator.sessionTitle. */
+function f5WorkspaceOrg(stateDir, workspacePath) {
+  return {
+    departments: [{
+      id: 'research',
+      name: 'Research Department',
+      workspacePath,
+      coordinator: {
+        postId: 'research-head',
+        role: 'Research department head',
+        provider: 'deepseek-official',
+        sessionTitle: 'Research Head',
+        agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash-vision-exp' }
+      }
+    }]
+  }
+}
+
+test('F5: a department with workspacePath creates its head session under that cwd, registers the workspace with the department title, spawns workers there, and keeps the title pin (idempotent ensure)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const workspacePath = path.join(stateDir, 'departments', 'research')
+    const { root, agents, workspaceRegistry, dispose } = await bootPlugin(stateDir, {
+      org: f5WorkspaceOrg(stateDir, workspacePath)
+    })
+    try {
+      // (a) head session created with cwd = workspacePath (fresh boot → no
+      // durable session → the create path runs with the department cwd).
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'research head materialized at boot')
+      const headCreate = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
+      assert.ok(headCreate, 'the head was freshly created (no durable session at a fresh boot)')
+      assert.equal(headCreate.meta.cwd, workspacePath, 'the head is created under the department workspacePath cwd')
+
+      // The department REAL workspace is registered via registry.create with the
+      // department name as its title (the native sidebar folder label).
+      const wsCreate = workspaceRegistry.createCalls.find((c) => c.path === workspacePath)
+      assert.ok(wsCreate, 'the department workspace was created via workspaceRegistry.create')
+      assert.equal(wsCreate.title, 'Research Department', 'the workspace title = the department.name ("Research Department")')
+
+      // The head session groups into the DEPARTMENT entity (cwd == its path),
+      // not the shared root entity — the folder grouping the sidebar uses.
+      await waitFor(() => {
+        const deptEntity = workspaceRegistry.entities.find((e) => e.path === workspacePath)
+        return deptEntity !== undefined && deptEntity.sessionIds.includes('head-research-head')
+      }, 5000, 'the head session attaches to the DEPARTMENT workspace entity')
+
+      // (e) the head title pin still applies on the new-cwd session row.
+      const headSession = root.sessions.get(SessionId('head-research-head'))
+      assert.ok(headSession !== undefined, 'the head session is entered in the real sessions store')
+      const headTitle = headSession.events.find((ev) => ev.type === 'session/title')
+      assert.ok(headTitle !== undefined, 'the head session title pin still applies in the department cwd')
+      assert.equal(headTitle.data.title, 'Research Head')
+      assert.deepEqual(headTitle.data.source, { kind: 'user' }, 'the pin is user-source (owner manual rename always wins)')
+
+      // (b) dept_worker_spawn lands the worker under the SAME department cwd.
+      const { ctx: headCtx, key } = childContextFor(agents, 'head-research-head')
+      const signal = new AbortController().signal
+      const spawnRes = await headCtx.tools.get('dept_worker_spawn', key).execute(
+        { role: 'researcher', task: 'track dsh updates and report', jobId: 'monitor-dsh-updates' },
+        { agent: agents.store.get('head-research-head'), signal }
+      )
+      await waitFor(() => agents.store.has(`worker-${spawnRes.workerId}`), 5000, 'spawned worker live')
+      const workerCreate = agents.createCalls.find((c) => String(c.sessionId) === `worker-${spawnRes.workerId}`)
+      assert.ok(workerCreate, 'the spawn issued one ctx.agents.create for the worker')
+      assert.equal(workerCreate.meta.cwd, workspacePath, 'the spawned worker is created under the department workspacePath cwd')
+
+      // (d) idempotency: head boot + worker spawn both ensured the SAME
+      // workspace → exactly ONE entity at that path, title NOT overwritten.
+      assert.equal(workspaceRegistry.entities.filter((e) => e.path === workspacePath).length, 1, 'the department workspace entity is NOT duplicated across ensures')
+      assert.equal(workspaceRegistry.entities.find((e) => e.path === workspacePath).title, 'Research Department', 'the workspace title is preserved on re-create (idempotent)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F5 (regression): a department WITHOUT workspacePath keeps the shared workspace root cwd for its head AND a spawned worker, and no department workspace is registered', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // TEST_ORG — the research department has NO workspacePath (pre-F1 shape).
+    const { agents, head, headCtx, key, workspaceRegistry, dispose } = await bootWithHead(stateDir)
+    try {
+      const headCreate = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
+      assert.ok(headCreate, 'the head created at boot')
+      assert.equal(headCreate.meta.cwd, stateDir, 'a department without workspacePath creates its head under the shared workspace root (resolveWorkspaceRootPath) — regression')
+
+      // dept_worker_spawn of a no-workspacePath department → worker cwd root too.
+      const signal = new AbortController().signal
+      const spawnRes = await headCtx.tools.get('dept_worker_spawn', key).execute(
+        { role: 'researcher', task: 'check something', jobId: 'monitor-dsh-updates' },
+        { agent: head, signal }
+      )
+      await waitFor(() => agents.store.has(`worker-${spawnRes.workerId}`), 5000, 'spawned worker live')
+      const workerCreate = agents.createCalls.find((c) => String(c.sessionId) === `worker-${spawnRes.workerId}`)
+      assert.ok(workerCreate, 'the spawn issued one ctx.agents.create for the worker')
+      assert.equal(workerCreate.meta.cwd, stateDir, 'a no-workspacePath worker is created under the shared workspace root — regression')
+
+      // NO department workspace was requested/registered (the ensure is skipped).
+      assert.equal(workspaceRegistry.createCalls.length, 0, 'no department workspace create was issued when no workspacePath is configured')
+    } finally {
+      await dispose()
     }
   })
 })
