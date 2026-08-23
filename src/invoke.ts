@@ -23,14 +23,15 @@
 //     wake the host branch has always used). This REMOVES the rc.6 "parent
 //     must be live" limitation: a head is woken directly by its own agent id.
 //   - Sleep/respawn = `dept_sleep` writes the journal then marks the registry
-//     (`sleepEpoch`) and DISPOSES the head's AgentHandle; the next wake
-//     cold-resumes the SAME durable session via `ctx.agents.resume(...)` and
-//     follows up with the pointer-only board delta. The durable session
-//     survives `dispose()` (dispose tears the LIVE agent+session out of the
-//     in-memory registry, not the sessionPersistence backend — rc.8
-//     dsh-agent-loop prepare() dispose at index.js:1132-1152 detaches
-//     `agents.enter`/`sessions.enter` registrations only), so resume restores
-//     the same incarnation.
+//     (`sleepEpoch`), DISPOSES the head's AgentHandle, and (F8, spec 002 head
+//     rotation) ARCHIVES the head's durable session server-side. The next wake
+//     RECREATES the head FRESH (mints a NEW session id — the archive old one is
+//     never resumed) and follows up with the pointer-only board delta. A
+//     disposable WORKER keeps the legacy cold-resume of the SAME durable
+//     session. The durable session survives `dispose()` (dispose tears the LIVE
+//     agent+session out of the in-memory registry, not the sessionPersistence
+//     backend — rc.8 dsh-agent-loop prepare() dispose at index.js:1132-1152
+//     detaches `agents.enter`/`sessions.enter` registrations only).
 //
 // Mechanics (per .dsh/reports/explore-deep/2026-08-19-host-board-channel.md,
 // ...-lateral-assistant-addressing.md, ...-minimal-context-resident-posts.md):
@@ -63,6 +64,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { execFile as execFileCb } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -3063,7 +3065,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
     disposers.push(agentCtx.tools.register(defineTool({
       name: 'dept_sleep',
-      description: 'Sleep (dormir): persist your memory to your journal (dept_memo_write MUST be called first — this is enforced) and mark yourself for a context RESET. Conclude the turn after calling this; on your NEXT wake you will be cold-resumed as a fresh incarnation with your journal loaded as your long-term memory. Your live AgentHandle is disposed (the durable session survives, so resume restores you). Rejects loudly if no journal has been saved.',
+      description: 'Sleep (dormir): persist your memory to your journal (dept_memo_write MUST be called first — this is enforced) and mark yourself for a context RESET. Conclude the turn after calling this; on your NEXT wake you are recreated as a FRESH incarnation. For a department HEAD (F8): your live AgentHandle is disposed, your durable session is ARCHIVED server-side (the sidebar row disappears, the journal + messages stay), and your next wake creates a NEW session — you keep your identity but get a fresh context. A disposable WORKER keeps the legacy cold-resume of the same session (worker retire is the separate archive path). Rejects loudly if no journal has been saved.',
       parameters: {},
       output: {
         schema: {
@@ -3114,6 +3116,22 @@ export function applyInvoke(ctx: Context, config: Config) {
         const boundarySeq = (agent.session as { seq?: number } | undefined)?.seq
         if (boundarySeq !== undefined) entry.boundarySeq = boundarySeq
         persistPosts()
+        // F8 (spec 002 head rotation) — ARCHIVE the slept head's durable session
+        // server-side so the SIDEBAR ROW disappears (the journal + messages stay
+        // intact — archive never deletes; D5). HEAD-ONLY: a disposable WORKER is
+        // retired via dept_worker_retire (its own archive path) and keeps the
+        // legacy cold-resume behavior — a worker dept_sleep is NOT rotated.
+        // Non-fatal by design (archivePostSessionOnSleep never throws; a missing
+        // registry or a failing call WARNs and the sleep still commits — the
+        // sleep mark is the durable part). FIRE-AND-FORGET (`void`), exactly
+        // like the dispose below: the archive is cosmetic row-hiding and must
+        // never block the sleep (spec D1: archive ≠ delete — the journal +
+        // messages stay intact). Semantics verified S2.5: a pure registry-global
+        // set-add + persist; NOTHING terminates the agent, and the artifact
+        // stays intact.
+        if (entry.provider !== 'worker') {
+          void archivePostSessionOnSleep(sessionId)
+        }
         // Fix sleep-self-deadlock (2026-08-23): NEVER await our own handle's
         // dispose from our own turn — the harness dispose() sends
         // machine.cancel + `await machine.whenIdle()`, i.e. it waits for the
@@ -3928,6 +3946,29 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  /** F8 (spec 002 head rotation) — non-fatal server-side archive of a SLEPT
+   * HEAD's durable session via the workspaceRegistry seam (the S2.5 semantics:
+   * a pure registry-set add + durable persist that HIDES the row; NOTHING
+   * terminates the agent, the artifact and the journal/messages stay intact).
+   * Mirrors archiveWorkerSession but for the dept_sleep HEAD path; never throws
+   * (a missing registry or failing call resolves `false` + a warn) and the
+   * sleep mark (posts.json sleepEpoch) is the durable part — the archive is
+   * cosmetic row-hiding and must never block the sleep. */
+  const archivePostSessionOnSleep = async (sessionId: string): Promise<boolean> => {
+    const registry = ctx.get('workspaceRegistry', false) as WorkspaceRegistryLike | undefined
+    if (registry?.archiveSession === void 0) {
+      ctx.logger.warn(`[deepartments] dept_sleep: archiveSession(${sessionId}) skipped — workspaceRegistry unavailable (the head's sidebar row may remain until the registry service is present)`)
+      return false
+    }
+    try {
+      await registry.archiveSession(sessionId)
+      return true
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] dept_sleep: archiveSession(${sessionId}) failed (non-fatal — the sleep mark still commits): ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+  }
+
   /** F5 (spec 004 §6.2 L1) — the CONFIGURED WORKSPACE DIRECTORY of a
    * department, or `''` when the department has NONE (pre-F1 compat: the
    * department keeps the shared workspace root). `workspacePath` is optional in
@@ -4139,10 +4180,22 @@ export function applyInvoke(ctx: Context, config: Config) {
     const coordinator = department.coordinator
     if (coordinator === void 0) return
     const postId = coordinator.postId
+    // F8 (spec 002 head rotation) — a SLEPT head is DORMANT: its durable session
+    // was ARCHIVED at dept_sleep, so materializing it at boot (resume the same
+    // id) would revive the old artifact instead of the fresh rotation. Leave it
+    // dormant until its next bus wake (materializePost mints a fresh session).
+    // The journal + messages stay intact; the head simply is not live until
+    // addressed. A never-slept head (no sleepEpoch) is unaffected.
+    const durableEntry = byPost.get(postId)
+    if (durableEntry?.sleepEpoch !== void 0) return
     // Batch 4a: the head uses its PER-HEAD preset (deepartments-head-<departmentId>)
     // so the session is NATIVE/openable and labeled with its head preset.
     const presetId = headPresetIdFor(department.id)
-    const sessionId = SessionId(headSessionId(postId))
+    // F8 rotation: track the ENTRY's session id (a head that was rotated to a
+    // fresh session at its last wake carries that id here) — fall back to the
+    // deterministic `head-<postId>` derivation ONLY when there is no durable
+    // entry yet (first boot / fresh department).
+    const sessionId = SessionId(durableEntry?.sessionId ?? headSessionId(postId))
     if (agents === void 0) return
     // F5 (spec 004 §6.2 L1): a department WITH a configured workspacePath owns a
     // REAL sidebar folder — ensure the workspace (mkdir + registry.create
@@ -4165,7 +4218,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       const coordinatorRole = coordinator.role || postId
       const setup = headSetup(postId, roomId, coordinatorRole, presetId)
       const agentOptions = coordinator.agentOptions
-      const durableSession = byPost.get(postId) !== void 0
+      const durableSession = durableEntry !== void 0
       if (durableSession) {
         try {
           handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions, setup })
@@ -4333,24 +4386,65 @@ export function applyInvoke(ctx: Context, config: Config) {
   const materializePost = async (entry: PostEntry): Promise<{ target: AgentLike; resumed: boolean }> => {
     if (agents === void 0) throw new Error('[deepartments] bus delivery requires the agents service')
     const isWorker = entry.provider === 'worker'
-    const sessionId = SessionId(entry.sessionId)
     const coordinator = coordinatorForPost(entry.postId)
     let resumed = false
     if (entry.sleepEpoch !== void 0) {
       // Respawn from sleep: retire the live handle (if any), record the
-      // previous incarnation, clear the flag, then resume below. Joins any
-      // in-flight dept_sleep detach (disposeHeadHandleOnce) so the resume
-      // below is guaranteed to run only AFTER the machine is detached.
+      // previous incarnation, clear the flag. Joins any in-flight dept_sleep
+      // detach (disposeHeadHandleOnce) so the incarnation below is guaranteed to
+      // run only AFTER the machine is detached (no double-dispose race).
       await disposeHeadHandleOnce(entry.sessionId)
       byChild.delete(entry.sessionId)
       const previousSession = entry.sessionId
-      registerEntry({
-        ...entry,
-        previousChildId: previousSession,
-        sleepEpoch: undefined
-      })
+      // F8 (spec 002 head rotation) — a slept HEAD is recreated FRESH: mint a
+      // new session id (the OLD one was ARCHIVED at dept_sleep) and CREATE a
+      // brand-new durable session, never resume the archived old artifact. The
+      // head keeps its identity (postId), journal and messages (archive ≠
+      // delete); only the underlying session (context) is fresh. A disposable
+      // WORKER keeps the legacy cold-resume of the SAME session — worker retire
+      // is the separate archive path.
+      if (!isWorker) {
+        const freshSessionId = String(SessionId(`${HEAD_SESSION_PREFIX}${entry.postId}-${randomUUID()}`))
+        registerEntry({ ...entry, sessionId: freshSessionId, previousChildId: previousSession, sleepEpoch: undefined })
+        const role = coordinator?.role ?? entry.role ?? 'department worker'
+        const headPreset = entry.agentPreset ?? PRESET_ID
+        const setup = headSetup(entry.postId, entry.roomId, role, headPreset)
+        const agentOptions = coordinator?.agentOptions
+        // F5: the fresh incarnation lands in its department workspace (config
+        // workspacePath); a department-less/legacy head falls back to the root.
+        const deptCwd = await resolveDepartmentWorkspaceCwd(departmentForEntry(entry))
+        const handle = await agents.create({
+          sessionId: freshSessionId,
+          meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: headPreset },
+          agentOptions,
+          setup
+        })
+        if (handle !== void 0) byHeadHandle.set(freshSessionId, handle)
+        const freshTarget = agents.get(freshSessionId)
+        if (freshTarget === void 0) throw new Error(`[deepartments] head "${entry.postId}" could not be materialized (fresh rotation) for bus delivery`)
+        markHeadProgress(freshSessionId, freshTarget)
+        void attachHeadSession(freshSessionId, 'bus-deliver')
+        // F8 (acceptance b): pin the head sidebar title on the FRESH session —
+        // the old (archived) session is gone, so the fresh one MUST carry the
+        // pinned department title or the row would fall back to the raw id.
+        const titleSession = ctx.sessions.get(SessionId(freshSessionId))
+        if (titleSession !== void 0) {
+          const title = coordinator?.sessionTitle || HEAD_DEFAULT_SESSION_TITLE
+          const titlePin = pinSessionTitle(titleSession, title)
+          if (titlePin === 'pinned') {
+            ctx.logger.info(`[deepartments] dept_sleep rotation: pinned fresh head title "${title}" (${freshSessionId})`)
+          } else if (titlePin === 'failed') {
+            ctx.logger.warn(`[deepartments] dept_sleep rotation: fresh head title pin failed for ${freshSessionId} (non-fatal — materialization continues)`)
+          }
+        }
+        return { target: freshTarget, resumed: true }
+      }
+      // Worker respawn: record the previous incarnation + clear the sleep flag,
+      // then fall through to the shared cold-resume of the SAME session below.
+      registerEntry({ ...entry, previousChildId: previousSession, sleepEpoch: undefined })
       resumed = true
     }
+    const sessionId = SessionId(entry.sessionId)
     const live = agents.get(String(sessionId))
     if (live === void 0) {
       const role = coordinator?.role ?? entry.role ?? 'department worker'

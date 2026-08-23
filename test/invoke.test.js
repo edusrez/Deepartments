@@ -1671,14 +1671,19 @@ test('Batch G head wake_counter parity: dept_sleep bumps the ordinal (1→2) at 
       const postSleepContent = await readFile(memoResult.memoPath, 'utf8')
       assert.match(postSleepContent, /^wake_counter: 2$/m, 'head wake_counter advanced 1 → 2 at dept_sleep (ordinal bump on disk)')
 
-      // Next wake: the cold-resumed fresh incarnation sees the bumped ordinal (2).
+      // F8 head sleep rotation: the NEXT wake creates a FRESH session (a new
+      // id — the old one was ARCHIVED at sleep), never resumes the archived old
+      // artifact. The bumped ordinal (2) is on disk and read by the next inc.
       const r = await root.tools.get('send_message').execute(
         { to: [postId], text: 'wake up' },
         { agent: { id: 'host-any', session: { header: {} } }, signal }
       )
       assert.equal(r.delivered[postId], 'resumed', 'bus wake of the slept head reports resumed')
-      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'slept head cold-resumed')
-      assert.equal(agents.createCalls.filter((c) => String(c.sessionId) === `head-${postId}`).length, 1, 'head cold-resumed, not re-created')
+      await waitFor(() => agents.createCalls.length > 1, 5000, 'a fresh head session was created on wake (rotation)')
+      const freshCreate = agents.createCalls.at(-1)
+      assert.ok(String(freshCreate.sessionId) !== `head-${postId}`, 'the fresh wake session is a NEW id (not the archived old one)')
+      assert.equal(agents.createCalls.filter((c) => String(c.sessionId) === `head-${postId}`).length, 1, 'the OLD durable id is NOT re-created')
+      assert.equal(agents.store.has(`head-${postId}`), false, 'the archived old session is NOT revived under its old id')
       const resumedContent = await readFile(memoResult.memoPath, 'utf8')
       assert.match(resumedContent, /^wake_counter: 2$/m, 'bumped ordinal (2) persists for the next incarnation')
     } finally {
@@ -1731,12 +1736,12 @@ test('Batch G dept_sleep requires a saved journal (throws otherwise / rejects a 
   })
 })
 
-test('Batch G a slept head cold-resumes fresh on its next wake: sleepEpoch cleared, previous incarnation traced, wake delivered (no fresh create)', async () => {
+test('Batch G head sleep ROTATION (F8): a slept head is ARCHIVED on dept_sleep (sidebar row gone, journal+messages stay) and RECREATED FRESH — NEW session id, never resumed from the archived artifact — on its next wake: sleepEpoch cleared, previous incarnation traced, wake delivered, pinned title on the fresh row', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     const journalText = 'RESPAWN-MEMORY: the research department settled on vanilla; carry this forward. SECRET-PHRASE-respawn-v1'
     await seedJournal(stateDir, postId, journalText)
-    const { root, agents, dispose } = await bootPlugin(stateDir)
+    const { root, agents, workspaceRegistry, dispose } = await bootPlugin(stateDir)
     await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
     try {
       const head = agents.store.get(`head-${postId}`)
@@ -1745,26 +1750,40 @@ test('Batch G a slept head cold-resumes fresh on its next wake: sleepEpoch clear
       const memo = headCtx.tools.get('dept_memo_write', key)
       const signal = new AbortController().signal
 
-      // Sleep: memo + dispose handle + mark.
+      // Sleep: memo + dispose handle + mark. The old durable session is ARCHIVED
+      // server-side (F8) — the row disappears from the native sidebar while the
+      // journal + messages stay fully intact.
       await memo.execute({ summary: journalText }, { agent: head, signal })
+      const oldId = `head-${postId}`
       await sleep.execute({}, { agent: head, signal })
-      await waitFor(() => agents.store.has(`head-${postId}`) === false, 5000, 'handle disposed after sleep')
+      await waitFor(() => agents.store.has(oldId) === false, 5000, 'handle disposed after sleep')
+      await waitFor(() => workspaceRegistry.archivedSessionIds.includes(oldId), 5000, 'the old head session is ARCHIVED on dept_sleep (D1)')
 
-      // Next wake: a bus message addressed to the head cold-resumes it (resume
-      // the SAME durable session — no fresh create under a new id) and delivers
-      // the framed bus message.
+      // Next wake: a bus message addressed to the head recreates it FRESH — a
+      // NEW session id, never a resume of the archived old artifact.
       const r = await root.tools.get('send_message').execute(
         { to: [postId], text: 'wake from sleep' },
         { agent: { id: 'host-any', session: { header: {} } }, signal }
       )
       assert.equal(r.delivered[postId], 'resumed', 'bus delivery reports the dormant-target resume')
+      await waitFor(() => agents.createCalls.length > 1, 5000, 'a fresh head session is created on wake (rotation)')
+      const freshId = String(agents.createCalls.at(-1).sessionId)
+      assert.notEqual(freshId, oldId, 'the fresh wake session is a NEW id, not the archived old one')
+      assert.equal(agents.store.has(oldId), false, 'the archived old session is NOT revived under its old id')
+      assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === oldId).length, 0, 'the archived old session is NEVER resumed')
+      const fresh = agents.store.get(freshId)
+      assert.ok(fresh, 'the fresh head session is materialized')
+      await waitFor(() => fresh.inboxMessages.length >= 1, 5000, 'fresh head woken')
+      assert.equal(fresh.inboxMessages.at(-1).source.kind, 'agent', 'head wake uses the bus agent source')
 
-      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'slept head cold-resumed')
-      const resumed = agents.store.get(`head-${postId}`)
-      await waitFor(() => resumed.inboxMessages.length >= 1, 5000, 'resumed head woken')
-      assert.equal(resumed.inboxMessages.at(-1).source.kind, 'agent', 'head wake uses the bus agent source')
-      // Same durable session id is reused — no fresh-creation under a new id.
-      assert.equal(agents.createCalls.filter((c) => String(c.sessionId) === `head-${postId}`).length, 1, 'created once at boot, resumed on wake (no second create)')
+      // F8 (b): the FRESH row carries the pinned department title (the archived
+      // old row's title is gone — the fresh session MUST re-pin it).
+      const freshSession = root.sessions.get(SessionId(freshId))
+      assert.ok(freshSession !== undefined, 'fresh head session entered in the sessions store')
+      const title = freshSession.events.find((ev) => ev.type === 'session/title')
+      assert.ok(title !== undefined, 'fresh head session pinned a session/title event')
+      assert.equal(title.data.title, 'Research Head', 'the fresh row is pinned to the fallback "Research Head" title')
+      assert.deepEqual(title.data.source, { kind: 'user' }, 'title pin is user-source')
 
       // Durable registry: sleepEpoch cleared, previous incarnation traced.
       await waitFor(async () => {
@@ -1772,8 +1791,8 @@ test('Batch G a slept head cold-resumes fresh on its next wake: sleepEpoch clear
         return posts[postId].sleepEpoch === undefined
       }, 5000, 'sleepEpoch cleared after the wake')
       const posts = await readPosts(stateDir)
-      assert.equal(posts[postId].sessionId, `head-${postId}`, 'same durable session id retained')
-      assert.equal(posts[postId].previousChildId, `head-${postId}`, 'previous incarnation traced (the slept session id)')
+      assert.equal(posts[postId].sessionId, freshId, 'the durable registry now points at the FRESH session id')
+      assert.equal(posts[postId].previousChildId, oldId, 'previous incarnation traced (the ARCHIVED old session id)')
     } finally {
       await dispose()
     }
@@ -1804,15 +1823,17 @@ test('Piece 1: wakePost re-attaches the head session to the workspace (idempoten
         { agent: { id: 'host-any', session: { header: {} } }, signal }
       )
       assert.equal(r.delivered[postId], 'resumed')
-      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'slept head cold-resumed by materializePost')
-
-      // The idempotent re-attach fired: at least the boot attach + the wake
-      // attach (the real registry tolerates re-attaching; the stub records).
-      await waitFor(() => workspaceRegistry.attachCalls.filter((id) => id === `head-${postId}`).length >= 2, 5000, 'bus delivery re-attached the head session')
-      const resumed = agents.store.get(`head-${postId}`)
-      await waitFor(() => resumed.inboxMessages.length >= 1, 5000, 'resumed head woken')
-      assert.equal(resumed.inboxMessages.at(-1).source.kind, 'agent', 'head wake delivered')
-      assert.ok(workspaceRegistry.attachCalls.filter((id) => id === `head-${postId}`).length >= 2, 'attach count: boot + wake (>= 2)')
+      // F8: the wake RECREATES the head FRESH (new id); materializePost
+      // re-attaches that FRESH session (idempotent — the wakePost seam core).
+      await waitFor(() => agents.createCalls.length > 1, 5000, 'fresh head session created on wake')
+      const freshId = String(agents.createCalls.at(-1).sessionId)
+      const fresh = agents.store.get(freshId)
+      assert.ok(fresh, 'fresh head materialized by materializePost')
+      await waitFor(() => workspaceRegistry.attachCalls.includes(freshId), 5000, 'bus delivery re-attached the FRESH head session')
+      await waitFor(() => fresh.inboxMessages.length >= 1, 5000, 'fresh head woken')
+      assert.equal(fresh.inboxMessages.at(-1).source.kind, 'agent', 'head wake delivered')
+      assert.equal(workspaceRegistry.attachCalls.filter((id) => id === `head-${postId}`).length, 1, 'the ARCHIVED old session is attached only once (boot) — never re-attached on wake')
+      assert.ok(workspaceRegistry.attachCalls.filter((id) => id === freshId).length >= 1, 'attach count for the FRESH session (materializePost wake attach)')
     } finally {
       await dispose()
     }
@@ -1954,24 +1975,144 @@ test('Batch G self-deadlock fix: a bus wake DURING the in-flight detach joins th
       release()
       const sent = await withTimeout(sendPromise, 5000, 'bus delivery completes after the detach')
       assert.equal(sent.delivered[postId], 'resumed', 'the respawn-from-sleep delivery reports resumed')
-      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'slept head cold-resumed after the detach')
-      assert.equal(agents.disposeCalls.get(`head-${postId}`), 1, 'still exactly ONE detach (the wake joined it, never doubled it)')
-      assert.equal(agents.createCalls.filter((c) => String(c.sessionId) === `head-${postId}`).length, 1, 'head resumed, not re-created (create only at boot)')
-      const resumed = agents.store.get(`head-${postId}`)
-      await waitFor(() => resumed.inboxMessages.length >= 1, 5000, 'resumed head woken after the detach')
+      // F8 head rotation: the wake RECREATES the head FRESH (a NEW id) after the
+      // detach — never resumes the archived old artifact.
+      await waitFor(() => agents.createCalls.length > 1, 5000, 'slept head recreated fresh after the detach')
+      const freshId = String(agents.createCalls.at(-1).sessionId)
+      assert.notEqual(freshId, `head-${postId}`, 'the fresh wake session is a NEW id (not the archived old one)')
+      assert.equal(agents.disposeCalls.get(`head-${postId}`), 1, 'still exactly ONE detach for the OLD session (the wake joined it, never doubled it)')
+      assert.equal(agents.createCalls.filter((c) => String(c.sessionId) === `head-${postId}`).length, 1, 'the ARCHIVED old id is never re-created')
+      const resumed = agents.store.get(freshId)
+      assert.ok(resumed, 'fresh head materialized by the wake')
+      await waitFor(() => resumed.inboxMessages.length >= 1, 5000, 'fresh head woken after the detach')
       assert.equal(resumed.inboxMessages.at(-1).source.kind, 'agent', 'head wake uses the bus agent source')
       await waitFor(async () => (await readPosts(stateDir))[postId].sleepEpoch === undefined, 5000, 'sleepEpoch cleared after the wake')
 
       // No stale map leak: a SECOND cycle (fresh handle re-materialized by the
       // wake) must dispose AGAIN — a lingering settled `disposingHeads` entry
-      // would dedupe it and the counter would stay at 1.
-      agents.disposeGates.delete(`head-${postId}`)
+      // would dedupe it and the counter would stay at 1. This dispose is keyed
+      // by the FRESH session id (F8 rotation).
+      agents.disposeGates.delete(freshId)
       const { ctx: freshHeadCtx, key: freshKey } = agents.childContexts.at(-1)
       const freshSleep = freshHeadCtx.tools.get('dept_sleep', freshKey)
-      assert.ok(freshSleep, 'dept_sleep re-installed on the resumed head')
+      assert.ok(freshSleep, 'dept_sleep re-installed on the expanded head')
       await withTimeout(freshSleep.execute({}, { agent: resumed, signal }), 1500, 'second-cycle dept_sleep returns')
-      await waitFor(() => agents.store.has(`head-${postId}`) === false, 5000, 'second-cycle detach settled')
-      assert.equal(agents.disposeCalls.get(`head-${postId}`), 2, 'second cycle disposed the RE-materialized handle (no stale in-flight map entry)')
+      await waitFor(() => agents.store.has(freshId) === false, 5000, 'second-cycle detach settled')
+      assert.equal(agents.disposeCalls.get(freshId), 1, 'second cycle disposed the RE-materialized (FRESH) handle once (no stale in-flight map entry)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- F8: HEAD SESSION ROTATION at dept_sleep (spec 002 rotation pattern,
+// heads-only). A head dept_sleep ARCHIVES its durable session server-side
+// (sidebar row gone; journal + messages intact) and its next wake RECREATES a
+// FRESH session (a new id) instead of resuming the archived artifact. Host
+// rotation + worker retire are untouched (their own paths).
+
+test('F8 (a): a head dept_sleep with an ACTIVE session archives it server-side + marks the post dormant, and returns immediately (no self-deadlock wedge)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    await seedJournal(stateDir, postId, 'F8-A: sleep must archive + mark + not wedge.')
+    const { root, agents, workspaceRegistry, dispose } = await bootPlugin(stateDir)
+    await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
+    try {
+      const head = agents.store.get(`head-${postId}`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      const signal = new AbortController().signal
+      await memo.execute({ summary: 'F8-A memory.' }, { agent: head, signal })
+
+      // The tool returns promptly despite the (fire-and-forget) dispose —
+      // the anti-deadlock fix (0dbc66a) is preserved.
+      await withTimeout(sleep.execute({}, { agent: head, signal }), 1500, 'head dept_sleep returns (no self-deadlock wedge)')
+      // The old durable session is ARCHIVED server-side (spec 002 S2.5).
+      await waitFor(() => workspaceRegistry.archivedSessionIds.includes(`head-${postId}`), 5000, 'the active session is archived on dept_sleep')
+      // The post is marked dormant + the live handle disposed.
+      await waitFor(() => agents.store.has(`head-${postId}`) === false, 5000, 'the head handle is disposed after sleep')
+      const posts = await readPosts(stateDir)
+      assert.ok(typeof posts[postId].sleepEpoch === 'number', 'the head is marked dormant (sleepEpoch durable)')
+      // Idempotent archive: a second archive call is a no-op (already archived).
+      assert.equal(workspaceRegistry.archivedSessionIds.filter((id) => id === `head-${postId}`).length, 1, 'archive is idempotent — recorded exactly once')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F8 boot-dormancy: a SLEPT configured head is NOT materialized at boot (ensureHead skips it — its archived session is never revived; it wakes only on its next bus message)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // A configured head (research-head IS in TEST_ORG's org.departments) that
+    // has slept: its durable session was ARCHIVED, so booting must NOT resume
+    // it under the old id (which would revive the archived artifact). It stays
+    // dormant until a bus wake mints the fresh rotation.
+    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'board', agentPreset: 'deepartments-head', sleepEpoch: Date.now() })
+    const { agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await new Promise((r) => setTimeout(r, 300))
+      assert.equal(agents.store.has('head-research-head'), false, 'the slept head is NOT materialized at boot (dormant)')
+      assert.equal(agents.createCalls.some((c) => String(c.sessionId) === 'head-research-head'), false, 'boot does NOT re-create the archived head session')
+      const posts = await readPosts(stateDir)
+      assert.ok(typeof posts['research-head'].sleepEpoch === 'number', 'the slept mark survives boot (still dormant)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F8 (c): a head WITHOUT a session (post-only entry whose durable resume FAILS) still wakes — the resume-failed → create-fresh fallback materializes it under its id', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // A catalog entry with NO live session and a resume that cannot restore it
+    // (e.g. a stateDir wipe / never-materialized durable id). ensureAllHeads
+    // only materializes CONFIGURED coordinators, so this stray stays dormant.
+    await seedPost(stateDir, { postId: 'ghost-head', sessionId: 'head-ghost-head', roomId: 'board', agentPreset: 'deepartments-head' })
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir, { resumeRejects: ['head-ghost-head'] })
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const send = pluginCtx().tools.get('send_message')
+      const result = await send.execute({ to: ['ghost-head'], text: 'wake the session-less head' }, { agent: host, signal })
+      assert.equal(result.delivered['ghost-head'], 'resumed', 'session-less head is materialized (resume-failed → create-fresh)')
+      await waitFor(() => agents.store.has('head-ghost-head'), 5000, 'the session-less head was created/woken')
+      const woke = agents.store.get('head-ghost-head')
+      assert.ok(woke, 'the head regained a live session')
+      assert.ok(agents.createCalls.some((c) => String(c.sessionId) === 'head-ghost-head'), 'materialized via the create-fresh fallback (no resume)')
+      assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === 'head-ghost-head').length, 1, 'the failed resume was attempted once then fell back')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F8 (e): journal and MESSAGES are preserved across a head dept_sleep (the archived session does NOT delete or truncate them)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const journalText = 'F8-E: this memory must SURVIVE the sleep rotation intact. SECRET-ARCHIVE-v1'
+    await seedJournal(stateDir, postId, journalText)
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
+    try {
+      const head = agents.store.get(`head-${postId}`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      const signal = new AbortController().signal
+      // A durable bus message addressed to the head (persisted BEFORE sleep).
+      const send = pluginCtx().tools.get('send_message')
+      await send.execute({ to: [postId], text: 'assignment before sleep' }, { agent: fakeParentAgent(), signal })
+      // Sleep (memo + archive + dispose).
+      await memo.execute({ summary: journalText }, { agent: head, signal })
+      await sleep.execute({}, { agent: head, signal })
+      await waitFor(() => agents.store.has(`head-${postId}`) === false, 5000, 'sleep settles (handle disposed)')
+      // Journal file is intact (content + bumped ordinal) — never deleted/truncated.
+      const journal = await readFile(path.join(stateDir, 'journals', `${postId}.md`), 'utf8')
+      assert.match(journal, /F8-E: this memory must SURVIVE the sleep rotation intact\. SECRET-ARCHIVE-v1/, 'the journal body survives the sleep (not erased)')
+      assert.match(journal, /^wake_counter: \d+$/m, 'the journal still carries its ordinal')
+      // The bus message record addressed to the head survives the sleep.
+      const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+      assert.ok(records.some((r) => r.to.includes(postId)), 'the pre-sleep bus message record is preserved')
     } finally {
       await dispose()
     }
@@ -4840,7 +4981,7 @@ test('B2 send_message: catalog head delivered with the spec framing + agent sour
   })
 })
 
-test('B2 send_message: a dormant (slept) catalog head is RESUMED — sleepEpoch cleared, previous incarnation traced, wake delivered', async () => {
+test('B2 send_message: a dormant (slept) catalog head is RECREATED FRESH on wake (F8 rotation) — sleepEpoch cleared, previous incarnation traced, wake delivered, new session id', async () => {
   await withTempStateDir(async (stateDir) => {
     // Seed a slept head that is NOT configured (ensureAllHeads only
     // materializes CONFIGURED coordinators — a seeded stray stays dormant).
@@ -4850,22 +4991,28 @@ test('B2 send_message: a dormant (slept) catalog head is RESUMED — sleepEpoch 
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
       const send = pluginCtx().tools.get('send_message')
+      const beforeCreate = agents.createCalls.length
       const result = await send.execute({ to: ['sleeper-head'], text: 'wake up' }, { agent: host, signal })
 
-      assert.equal(result.delivered['sleeper-head'], 'resumed', 'dormant head is resumed (materialize + followup)')
-      const woke = agents.store.get('head-sleeper-head')
-      assert.ok(woke, 'dormant head materialized')
+      assert.equal(result.delivered['sleeper-head'], 'resumed', 'dormant head is materialized (fresh rotate) + followup')
+      await waitFor(() => agents.createCalls.length > beforeCreate, 5000, 'a dormant head\'s wake creates a FRESH session (F8 rotation)')
+      const freshId = String(agents.createCalls.at(-1).sessionId)
+      assert.notEqual(freshId, 'head-sleeper-head', 'the fresh wake session is a NEW id (not the archived old one)')
+      const woke = agents.store.get(freshId)
+      assert.ok(woke, 'dormant head materialized (fresh)')
+      assert.equal(agents.store.get('head-sleeper-head'), undefined, 'the ARCHIVED old session id is NOT revived')
       const wake = woke.inboxMessages.at(-1)
       assert.equal(wake.content[0].text, '[From host-' + host.id + ' → sleeper-head]: wake up')
 
       // Durable registry: sleepEpoch cleared, previous incarnation traced (the
-      // wakePost seam verbatim).
+      // wakePost seam verbatim) and the registry now points at the FRESH id.
       await waitFor(async () => {
         const posts = await readPosts(stateDir)
         return posts['sleeper-head'] !== undefined && posts['sleeper-head'].sleepEpoch === undefined
       }, 5000, 'sleepEpoch cleared after the bus wake')
       const posts = await readPosts(stateDir)
       assert.equal(posts['sleeper-head'].previousChildId, 'head-sleeper-head', 'previous incarnation traced')
+      assert.equal(posts['sleeper-head'].sessionId, freshId, 'the durable registry points at the FRESH session id')
     } finally {
       await dispose()
     }
