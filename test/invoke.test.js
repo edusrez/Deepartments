@@ -179,7 +179,12 @@ function materializeStubAgent(agents, sessionId, options) {
   // mechanism the real agent factory uses), anchored under the tools entry's
   // fiber ctx so the upward service walk resolves childCtx.tools as traced.
   const childKey = Symbol('stub-child-scope')
-  const scope = createScope(agents.scopeAnchor, childKey)
+  // F10 live-layout fixture: a test may bind a STANDING ancestor scope (the
+  // base agent preset's `isolate` realm) as the agent scope's PARENT, so the
+  // agent INHERITS the model capability tools as an ancestor contribution while
+  // the host GLOBAL layer stays empty of them — the real dsh composition shape.
+  const parentKey = agents.scopeParentKey ?? options?.scopeParent
+  const scope = createScope(agents.scopeAnchor, childKey, parentKey !== void 0 ? { parent: parentKey } : void 0)
   const childCtx = scope.ctx.extend({ agent })
   agent.ctx = childCtx
   agents.childContexts.push({ ctx: childCtx, key: childKey })
@@ -231,6 +236,13 @@ class StubAgents extends Service {
     // dedupe (one detach for two concurrent disposers, no leaks).
     this.disposeGates = new Map()
     this.disposeCalls = new Map()
+    // F10 live-layout fixture: the standing scope key (a base-agent-preset
+    // `isolate` realm) mounted as the PARENT of every agent scope materialized
+    // AFTER this field is set. A test sets this BEFORE spawning/rotating an
+    // agent so the agent INHERITS the model capability tools as an ancestor
+    // contribution while the host GLOBAL layer stays empty of them. Undefined
+    // by default (the pre-Preset layout: no ancestor layer, globals only).
+    this.scopeParentKey = undefined
   }
 
   get(id) {
@@ -5744,6 +5756,73 @@ test('F10 (spec 004 §7.1): a department HEAD inherits the head base tools (read
         assert.ok(fresh.ctx.tools.get(name, fresh.key), `re-materialized department head inherits the head base tool ${name}`)
       }
       assert.equal(fresh.ctx.tools.get('edit', fresh.key), undefined, 're-materialized department head has NO edit (never granted)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// F10 live-layout regression (2026-08-23): in the REAL dsh agent-preset
+// composition the model-facing capability tools (read/write/glob/grep/
+// web_search/web_fetch) are an ANCESTOR contribution behind the base preset's
+// `isolate` realm — the host GLOBAL layer is EMPTY of them, so the pre-fix
+// probe `ctx.tools.get(name)` (the host GLOBAL view) resolved every declared
+// capability tool to undefined and degraded the post to board-only (the F10
+// runtime symptom). These two tests replicate that layout — an ancestor scope
+// bound as the agent scope's PARENT, with the model tools registered THERE and
+// not on the global root — and prove the allow-list is now sourced from the
+// AGENT scope.
+test('F10 (spec 004 §7.1): in the LIVE agent-preset layout the model tools are an ANCESTOR contribution — the allow-list must be sourced from the AGENT scope, not the host GLOBAL layer (a host-global probe degrades the post to board-only)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // NO globalTools: the host global layer is empty of model capabilities (the
+    // live dsh base preset keeps them behind an `isolate` realm on the agent plane).
+    const { agents, head, headCtx, key, root, dispose } = await bootWithHead(stateDir)
+    try {
+      // Replicate the base agent preset's standing `isolate` realm: a SCOPED
+      // ancestor scope that carries the model capability tools.
+      const ancestorKey = Symbol('base-agent-preset-isolate')
+      const ancestor = createScope(agents.scopeAnchor, ancestorKey)
+      for (const name of ['web_search', 'web_fetch', 'read', 'write', 'glob', 'grep']) ancestor.ctx.tools.register(stubGlobalTool(name))
+      // Every agent materialized from here on inherits that ancestor.
+      agents.scopeParentKey = ancestorKey
+      // Sanity — the live bug: the host GLOBAL layer is empty of model tools,
+      // so the plugin's pre-fix global-view probe would resolve them to undefined.
+      for (const name of ['web_search', 'read', 'write']) {
+        assert.equal(root.tools.get(name), undefined, `host global layer has NO ${name} (model tools are an ancestor contribution, as in the live preset layout)`)
+      }
+      // A researcher declares web_search/web_fetch/read/write/glob/grep + the bus
+      // tools → the allow-list must carry the AGENT-scope (ancestor) capabilities.
+      const researcher = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'investigate X' })
+      for (const name of ['web_search', 'web_fetch', 'read', 'write', 'glob', 'grep']) {
+        assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher inherits the AGENT-scope (ancestor) tool ${name}`)
+      }
+      assert.equal(researcher.ctx.tools.get('edit', researcher.key), undefined, 'researcher has NO edit (the role does not declare it)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F10 (spec 004 §7.1): a role that DECLARES the own-layer bus/lifecycle tools does NOT crash the restrict — the own-layer names are excluded (never named in the allow-list), the inherited model tools are conserved, and the own-layer bus tools stay visible', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const ancestorKey = Symbol('base-agent-preset-isolate')
+      const ancestor = createScope(agents.scopeAnchor, ancestorKey)
+      for (const name of ['web_search', 'web_fetch', 'read', 'write', 'glob', 'grep']) ancestor.ctx.tools.register(stubGlobalTool(name))
+      agents.scopeParentKey = ancestorKey
+      // The researcher template declares the bus tools (send_message/...)
+      // ALONGSIDE the capability tools; the allow-list must exclude the own-layer
+      // names so restrict never throws "scope-local name" and degrades to allow:[].
+      const researcher = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'investigate X' })
+      // restrict did NOT degrade to allow:[] — the inherited model tools are conserved.
+      for (const name of ['web_search', 'web_fetch', 'read', 'write', 'glob', 'grep']) {
+        assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher conserves the inherited tool ${name} (restrict did not fall to allow:[])`)
+      }
+      // The own-layer bus/lifecycle tools are exempt from the mask — still visible.
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
+        assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher still sees the own-layer bus tool ${name}`)
+      }
     } finally {
       await dispose()
     }

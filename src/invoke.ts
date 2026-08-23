@@ -77,6 +77,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './session-cleanup.js'
 import { runHostRotation, validateHostsRotationFile, ROTATION_SCHEMA_VERSION, ASISTENTE_SESSION_TITLE } from './session-rotation.js'
@@ -3965,6 +3966,21 @@ export function applyInvoke(ctx: Context, config: Config) {
    * with a warning — never a hard failure (the deploy must not fail on a bad
    * frontmatter tool name). */
   const DENIED_POST_TOOLS: ReadonlySet<string> = new Set(['subagent', 'subagent_fork', 'workflow', 'ralph', 'run_code'])
+  /** The post's OWN-LAYER board + department-lifecycle tools, registered SCOPED
+   * to the post agent by `installHeadBoardTools` (`src/invoke.ts:3089-3794`,
+   * `:5130,:5230,:5314`): send_message/agent_messages/dept_who/dept_memo_write/
+   * dept_sleep + the department-lifecycle create/retire/spawn/retire/job tools.
+   * The role templates ALSO DECLARE the bus tools (e.g. researcher.md declares
+   * send_message/agent_messages/dept_who/dept_memo_write/dept_sleep), so when the
+   * allow-list is probed against the AGENT scope (see postSetup) these names are
+   * "found" (own-layer is visible) — but naming a scope-local name in
+   * restrict() THROWS. They are explicitly EXCLUDED here (they are exempt from
+   * the restrict mask and never belong in the allow list). */
+  const OWN_LAYER_POST_TOOLS: ReadonlySet<string> = new Set([
+    'send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep',
+    'dept_post_create', 'dept_post_retire', 'dept_worker_spawn', 'dept_worker_retire',
+    'dept_job_list', 'dept_job_run'
+  ])
 
   /** Build the `setup(agentCtx)` for one post (head OR worker): mount the post's
    * dedicated preset and register its board toolset + role, scoped to the post
@@ -3983,28 +3999,44 @@ export function applyInvoke(ctx: Context, config: Config) {
     // agent scope cannot see. The own-layer board tools are exempt from the
     // mask (scoped registrations always stay visible) so they are NOT named.
     const declared: readonly string[] = opts.manager ? HEAD_BASE_TOOLS : (opts.tools ?? [])
-    const allowList: string[] = []
-    for (const name of declared) {
-      if (DENIED_POST_TOOLS.has(name)) {
-        ctx.logger.warn(`[deepartments] ${kind} "${postId}" role tool "${name}" is security-denied (no subagent/wrapper machinery or run_code for department posts) — dropped`)
-        continue
-      }
-      if (ctx.tools.get(name) === void 0) {
-        ctx.logger.warn(`[deepartments] ${kind} "${postId}" role tool "${name}" is not a registered global tool — dropped`)
-        continue
-      }
-      allowList.push(name)
-    }
     return (agentCtx) => {
       // (0) Tool restriction: a root agent has no startContinuable toolFilter,
       // so we mask the GLOBAL host-plane tools to `allowList` (rc.8 dsh-tools
       // restrict — index.d.ts:611 "A restriction filters what a scope
       // inherits... a restricted-away global reads as absent"; it NEVER touches
       // the scope's OWN layer). The post therefore sees its own-layer board
-      // tools + only the inherited GLOBAL capability tools in the allow list. A
+      // tools + only the inherited capability tools in the allow list. A
       // template that still names a non-restrictable name degrades SAFELY to
       // `allow: []` (the pre-F10 behavior — board tools only; never a failed
       // spawn).
+      //
+      // F10 live-fix (2026-08-23): the allow-list MUST be built against the
+      // AGENT's own scope, not the host global layer. In the live dsh
+      // agent-preset layout the model-facing capability tools (read/write/glob/
+      // grep/web_search/web_fetch) are an ANCESTOR contribution behind the base
+      // preset's `isolate` realm — they are NOT on the host GLOBAL layer — so
+      // the pre-fix probe `ctx.tools.get(name)` (the host GLOBAL view) resolved
+      // every declared capability tool to undefined and degraded every post to
+      // board-only (the F10 runtime symptom). `agentCtx.tools.get(name,
+      // agentScope)` reads the agent's OWN view: it resolves the global +
+      // ancestor (inherited) capability tools. Own-layer names (the bus /
+      // lifecycle tools the role templates ALSO declare) are excluded FIRST via
+      // OWN_LAYER_POST_TOOLS — naming a scope-local name in restrict() would
+      // THROW and degrade to allow:[] again.
+      const agentScope = scopeOf(agentCtx)
+      const allowList: string[] = []
+      for (const name of declared) {
+        if (DENIED_POST_TOOLS.has(name)) {
+          ctx.logger.warn(`[deepartments] ${kind} "${postId}" role tool "${name}" is security-denied (no subagent/wrapper machinery or run_code for department posts) — dropped`)
+          continue
+        }
+        if (OWN_LAYER_POST_TOOLS.has(name)) continue
+        if (agentCtx.tools.get(name, agentScope) === void 0) {
+          ctx.logger.warn(`[deepartments] ${kind} "${postId}" role tool "${name}" is not visible to the agent scope (not an inherited global/ancestor tool) — dropped`)
+          continue
+        }
+        allowList.push(name)
+      }
       let restrictOwn: () => void
       try {
         restrictOwn = agentCtx.tools.restrict({ allow: allowList })

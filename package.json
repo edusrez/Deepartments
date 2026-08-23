@@ -38,6 +38,7 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-scope": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.7",
     "@deepseek-ai/dsh-web": "^0.1.0-rc.7"
   },
