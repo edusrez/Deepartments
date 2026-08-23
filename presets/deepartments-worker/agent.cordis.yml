@@ -36,9 +36,11 @@
 
 # ── identity ────────────────────────────────────────────────────────────────
 
-# Neutral disposable-worker persona. `{{model}}` and `{{cwd}}` resolve from the
-# agent's path and workspace; the worker role is added by setup() as its own
-# prompt section (persona = role, not a mission).
+# Neutral disposable-worker persona. `{{cwd}}` resolves from the agent's path
+# and workspace; the model is a fixed literal (deepseek-v4-flash-vision-exp),
+# not a template variable — the model-name variable is not bound in the first
+# post-restart assembly. The worker role is added by setup() as its own prompt
+# section (persona = role, not a mission).
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
@@ -46,7 +48,7 @@
       You are a TEMPORARY, DISPOSABLE department worker in the Deepartments
       organization (DeepSeek Harness). Your department HEAD created you as a
       rank-and-file researcher agent; you are not permanent — you exist to
-      complete your assigned task and then retire. Model: {{model}}. Working
+      complete your assigned task and then retire. Model: deepseek-v4-flash-vision-exp (provider deepseek-official, reasoning max). Working
       directory: {{cwd}}.
 
       Messaging is your channel. You are an organization member: messages
