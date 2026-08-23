@@ -3989,7 +3989,7 @@ export function applyInvoke(ctx: Context, config: Config) {
    * the department-lifecycle tools (a head creates/retires; a worker cannot).
    * F10 adds `tools` (a worker's role-template frontmatter `tools`) and
    * `department` (its config department for the architecture section). */
-  const postSetup = (postId: string, roomId: string, role: string, opts: { preset: string; manager: boolean; persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig }): ((agentCtx: Context) => void | { commit(): void }) => {
+  const postSetup = (postId: string, roomId: string, role: string, opts: { preset: string; manager: boolean; persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig }): ((agentCtx: Context) => unknown) => {
     const presetId = opts.preset
     const kind = opts.manager ? 'head' : 'worker'
     // F10 (spec 004 §7.1): the role template's frontmatter `tools` (a worker)
@@ -3999,7 +3999,26 @@ export function applyInvoke(ctx: Context, config: Config) {
     // agent scope cannot see. The own-layer board tools are exempt from the
     // mask (scoped registrations always stay visible) so they are NOT named.
     const declared: readonly string[] = opts.manager ? HEAD_BASE_TOOLS : (opts.tools ?? [])
-    return (agentCtx) => {
+    return async (agentCtx) => {
+      // (a) AWAIT the dedicated preset mount FIRST, before the capability probe.
+      //     read/write/glob/grep are PRESET-ONLY contributions (the web
+      //     deepartments-dev profile disables the host-plane base
+      //     tool-fs/tool-fs-search — dsh-web-app/cordis.patch.yml:333-337), so a
+      //     probe that runs BEFORE the mount — the pre-fix fire-and-forget
+      //     `void agentPresets.mount(...)` — sees only the host-global web tools,
+      //     drops the fs tools from the allow-list, and restrict() then MASKS
+      //     them (the F10 runtime symptom: web yes, fs no). The harness awaits
+      //     setup (dsh-agent-loop lib/index.js:1260 `await raceAbort(setup?.(...))`),
+      //     so the async mount fully installs its standing bind before publish.
+      //     A failed mount degrades to board-only (pre-F10 behavior), never a
+      //     failed spawn.
+      if (agentPresets !== void 0) {
+        try {
+          await agentPresets.mount(agentCtx, presetId)
+        } catch (error: unknown) {
+          ctx.logger.warn(`[deepartments] ${kind} "${postId}" preset mount failed (board tools still installed): ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
       // (0) Tool restriction: a root agent has no startContinuable toolFilter,
       // so we mask the GLOBAL host-plane tools to `allowList` (rc.8 dsh-tools
       // restrict — index.d.ts:611 "A restriction filters what a scope
@@ -4044,12 +4063,6 @@ export function applyInvoke(ctx: Context, config: Config) {
         ctx.logger.warn(`[deepartments] ${kind} "${postId}" tool restrict(${JSON.stringify(allowList)}) fell back to allow:[] — ${error instanceof Error ? error.message : String(error)}`)
         restrictOwn = agentCtx.tools.restrict({ allow: [] })
       }
-      // (a) Mount the dedicated preset if the service is present.
-      if (agentPresets !== void 0) {
-        void agentPresets.mount(agentCtx, presetId).catch((error: unknown) => {
-          ctx.logger.warn(`[deepartments] ${kind} "${postId}" preset mount failed (board tools still installed): ${error instanceof Error ? error.message : String(error)}`)
-        })
-      }
       // (b) Register the board toolset scoped to this agent (manager gates the
       // department-lifecycle create/retire tools for heads).
       const tools = installHeadBoardTools(agentCtx, opts.manager)
@@ -4065,7 +4078,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   /** The setup for a PERMANENT department head (manager — can create/retire
    * workers). Mounts the 'deepartments-head' preset. F10: `department` feeds the
    * architecture section (spec 004 §9.1) for the head post. */
-  const headSetup = (postId: string, roomId: string, role: string, presetId: string = PRESET_ID, department?: DepartmentConfig): ((agentCtx: Context) => void | { commit(): void }) =>
+  const headSetup = (postId: string, roomId: string, role: string, presetId: string = PRESET_ID, department?: DepartmentConfig): ((agentCtx: Context) => unknown) =>
     postSetup(postId, roomId, role, { preset: presetId, manager: true, department })
 
   /** The setup for a DISPOSABLE department WORKER (no create/retire). Mounts
@@ -4076,7 +4089,7 @@ export function applyInvoke(ctx: Context, config: Config) {
    * section.
    * Absent (legacy dept_post_create) → the framing role section only, NO role
    * tools (pre-F10 behavior: board-only, `allow: []`). */
-  const workerSetup = (postId: string, roomId: string, role: string, extra?: { persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig }): ((agentCtx: Context) => void | { commit(): void }) =>
+  const workerSetup = (postId: string, roomId: string, role: string, extra?: { persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig }): ((agentCtx: Context) => unknown) =>
     postSetup(postId, roomId, role, { preset: WORKER_PRESET_ID, manager: false, persona: extra?.persona, taskText: extra?.taskText, tools: extra?.tools, department: extra?.department })
 
   /** Dispose one head's live AgentHandle (its only teardown capability; the

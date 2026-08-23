@@ -22,7 +22,7 @@ import { randomUUID } from 'node:crypto'
 import { test } from 'node:test'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
-import { createScope } from '@deepseek-ai/dsh-scope'
+import { bindScopeParent, createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
@@ -140,7 +140,7 @@ function stubGlobalTool(name) {
 }
 
 /** Materialize one (fresh or resumed) agent with the requested identity. */
-function materializeStubAgent(agents, sessionId, options) {
+async function materializeStubAgent(agents, sessionId, options) {
   const callerSignal = options.signal
   let callerSignalAborted = false
   callerSignal?.addEventListener('abort', () => {
@@ -189,7 +189,12 @@ function materializeStubAgent(agents, sessionId, options) {
   agent.ctx = childCtx
   agents.childContexts.push({ ctx: childCtx, key: childKey })
   agents.childAgents.push(agent)
-  const provision = options.setup?.(childCtx)
+  // The programmatic setup runs BEFORE publish, and the real harness AWAITS it
+  // (dsh-agent-loop lib/index.js:1260 `(await raceAbort(setup?.(ctx)...))?.commit()`)
+  // — so the stub awaits it too. This keeps the F10 preset-mount ordering test
+  // deterministic (the async postSetup must fully mount the preset + restrict
+  // BEFORE the agent is observable) and is faithful to the production seam.
+  const provision = await options.setup?.(childCtx)
   provision?.commit?.()
   agents.store.set(sessionId, agent)
   return {
@@ -555,6 +560,66 @@ function fakeParentAgent(id = SessionId(randomUUID())) {
 
 // --- boot harness --------------------------------------------------------------
 
+/** F10 preset-mount ordering fixture (2026-08-23): a stub agentPresets service
+ * that replicates the REAL mount() TIMING. The real agentPresets.mount(agentCtx,
+ * id) resolves the preset, ensures its STANDING mount, and BINDS the agent scope
+ * to that standing scope (dsh-agent-presets lib/index.js:954-960,
+ * bindScopeParent) — the fs capability tools are an ANCESTOR contribution of
+ * that standing mount, NOT host-global. This stub registers the capability tools
+ * into a PER-PRESET standing scope and binds the agent scope to it ONLY when
+ * mount() is called (the async bind inside the real mount). So a capability
+ * probe that runs BEFORE the mount (the pre-fix postSetup order, a
+ * fire-and-forget `void agentPresets.mount(...)`) sees NO fs tools — the agent
+ * scope is not yet parented — and drops them from the allow-list, which
+ * restrict() then masks; a probe that runs AFTER the mount (the fix) sees them
+ * as an inherited contribution and keeps them. The default is board-only
+ * (agentPresets absent). */
+class StubAgentPresets extends Service {
+  constructor(root, agents) {
+    super(root, 'agentPresets')
+    this.root = root
+    this.agents = agents
+    this.standingScope = new Map() // presetId -> { key, ctx }
+    this.mountCalls = []
+  }
+
+  _standing(presetId) {
+    let standing = this.standingScope.get(presetId)
+    if (standing === undefined) {
+      const key = Symbol(`standing-${presetId}`)
+      const scope = createScope(this.agents.scopeAnchor ?? this.root, key)
+      standing = { key, ctx: scope.ctx }
+      this.standingScope.set(presetId, standing)
+    }
+    return standing
+  }
+
+  async resolve() {
+    return { id: 'deepartments' }
+  }
+
+  async mount(agentCtx, presetId = 'deepartments') {
+    this.mountCalls.push(presetId)
+    const standing = this._standing(presetId)
+    // Register the preset capability tools into the STANDING (ancestor) scope
+    // ONLY here, idempotent per preset — the preset's own layer, exactly where
+    // the real base-agent-preset carries them.
+    for (const name of ['read', 'write', 'glob', 'grep', 'web_search', 'web_fetch']) {
+      if (standing.ctx.tools.get(name) === undefined) {
+        standing.ctx.tools.register(stubGlobalTool(name))
+      }
+    }
+    // Bind the agent's scope to the standing (ancestor) scope — the async bind
+    // the real mount performs inside mount(). A capability probe that runs
+    // BEFORE this bind sees NO inherited fs tools (the agent scope has no
+    // parent standing mount yet).
+    const agentKey = scopeOf(agentCtx)
+    if (agentKey !== undefined) {
+      bindScopeParent(agentKey, standing.key)
+    }
+  }
+}
+
 /**
  * Boot the REAL Loader with the REAL dsh services, the REAL SubagentRuntime,
  * stub agents/persistence services, two stub subagent providers, and the
@@ -570,6 +635,13 @@ async function bootPlugin(stateDir, opts = {}) {
   loader.create({ id: 'tools', name: '@deepseek-ai/dsh-tools' })
 
   const agents = new StubAgents(root)
+  // F10 preset-mount ordering fix: an OPT-IN stub agentPresets service that
+  // replicates the real mount() timing (registers the preset fs tools into a
+  // PER-PRESET standing scope and binds the agent scope to it only when mount()
+  // is called), so a test can exercise the "the mount must be AWAITED before the
+  // capability probe" ordering. When absent, postSetup skips the mount (the
+  // hermetic default — board-only).
+  const agentPresets = opts.agentPresets === true ? new StubAgentPresets(root, agents) : undefined
   // Piece 1 cwd fix (2026-08-22): a boot opt forces per-session resume failures
   // (the wakePost resume-failed → create-fresh fallback path).
   if (opts.resumeRejects !== undefined) agents.resumeRejects = new Set(opts.resumeRejects)
@@ -656,6 +728,7 @@ async function bootPlugin(stateDir, opts = {}) {
   return {
     root,
     agents,
+    agentPresets,
     persistence,
     workspaceRegistry,
     spawnStub,
@@ -5823,6 +5896,56 @@ test('F10 (spec 004 §7.1): a role that DECLARES the own-layer bus/lifecycle too
       for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
         assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher still sees the own-layer bus tool ${name}`)
       }
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// F10 preset-mount ORDERING regression (2026-08-23): the earlier live-layout
+// tests (the "ANCESTOR contribution" pair above) bound the ancestor scope as the
+// agent scope's PARENT BEFORE spawn — simulating a post-mount ancestor, which
+// HIDES the real timing bug. At runtime the mount() BIND happens INSIDE setup
+// (agentPresets.mount), AFTER postSetup's capability probe. This test replicates
+// the REAL order — the preset standing scope is bound DURING setup, via the
+// agentPresets service — and proves the probe runs AFTER the (awaited) mount, so
+// a post inherits read/write/glob/grep/web_search/web_fetch even though they are
+// PRESET-ONLY (the host global layer is empty of them, as the web profile
+// disables the base tool-fs/tool-fs-search). It FAILS if the probe runs before
+// the mount (the pre-fix order): a pre-mount probe sees no fs tools (the agent
+// scope is not yet parented to the standing scope) and drops them from the
+// allow-list, which restrict() then masks.
+test('F10 (spec 004 §7.1): the preset mount is AWAITED BEFORE the capability probe — a worker inherits the PRESET-ONLY fs/web tools (read/write/glob/grep/web_search/web_fetch) even with an empty host global layer', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // NO globalTools: the host global layer is empty of model capabilities. The
+    // fs tools exist ONLY as the agentPresets standing contribution — the real
+    // order the web profile composes them. The stub registers them into a
+    // PER-PRESET standing scope and binds the agent scope to it ONLY inside
+    // mount() (the async bind inside the real agentPresets.mount).
+    const { agents, root, head, headCtx, key, agentPresets, dispose } = await bootWithHead(stateDir, { agentPresets: true })
+    try {
+      assert.ok(agentPresets, 'the agentPresets stub is mounted in the composition')
+      // Sanity: the capability tools are NOT on the host global layer — they
+      // arrive only via the preset standing bind (the real dsh-agent-presets
+      // layout keeps them behind the preset's own realm, not the host plane).
+      for (const name of ['web_search', 'read', 'write', 'glob', 'grep']) {
+        assert.equal(root.tools.get(name), undefined, `host global layer has NO ${name} (fs/web are a preset standing contribution, as in the live web profile)`)
+      }
+      // The researcher template declares web_search/web_fetch/read/write/glob/
+      // grep + the bus tools. If the setup AWAITS the preset mount FIRST (the
+      // fix), the probe runs against the post-mount agent view and the worker
+      // inherits ALL six; if the probe ran before the mount (the bug), the
+      // worker's allow-list would be empty-of-fs and restrict() would mask them.
+      const researcher = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'investigate X' })
+      for (const name of ['web_search', 'web_fetch', 'read', 'write', 'glob', 'grep']) {
+        assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher inherits the preset-mounted tool ${name} (the mount runs BEFORE the capability probe)`)
+      }
+      assert.equal(researcher.ctx.tools.get('edit', researcher.key), undefined, 'researcher has NO edit (the role does not declare it)')
+      // The worker's own-layer bus tools stay visible (exempt from the mask).
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
+        assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher still sees the bus/ciclo tool ${name}`)
+      }
+      assert.ok(agentPresets.mountCalls.includes('deepartments-worker'), 'the worker preset was mounted during setup')
     } finally {
       await dispose()
     }
