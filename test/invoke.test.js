@@ -28,7 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath } from '../lib/messages-store.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, PARALLEL_FRESH_WINDOW_MS } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
@@ -7535,6 +7535,77 @@ test('W3b runParallelMonitorTick: create/poll/spawn/notify errors NEVER throw (w
       fetchEvents: async () => ({ events: [{ event_id: 'e1', event_date: new Date().toISOString().slice(0, 10), output: { content: 'x' } }], nextCursor: 'c2' })
     })
     assert.ok(warns.some((w) => /spawn for/.test(w)), 'a spawn failure warns')
+  })
+})
+
+test('W3b parallel-monitor daemon: LAZY head resolution survives the boot race (empty byPost → skip without throw; populated → create + poll + spawn + notify)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const byPost = new Map()
+    const departments = TEST_ORG.departments
+    const created = []
+    const polled = []
+    const spawned = []
+    const notified = []
+    const warns = []
+    const infos = []
+    let nowMs = Date.now()
+    let pollCount = 0
+    const daemon = createParallelMonitorDaemon({
+      baseUrl: 'https://api.parallel.ai',
+      maxConsecutiveSpawns: 2,
+      monitors: [{ id: 'm1', query: 'fresh events' }],
+      stateDir,
+      now: () => nowMs,
+      departments,
+      byPost,
+      logger: { warn: (m) => warns.push(m), info: (m) => infos.push(m) },
+      createMonitor: async (monitor) => { created.push(monitor.id); return { monitorId: `monitor_${monitor.id}` } },
+      fetchEvents: async (monitorId, cursor) => {
+        polled.push({ monitorId, cursor })
+        pollCount += 1
+        if (pollCount === 1) return { events: [], nextCursor: 'c1' }
+        // The SECOND poll returns one FRESH event → spawn + notify.
+        return { events: [{ event_id: 'mevt_1', event_date: new Date(nowMs).toISOString().slice(0, 10), output: { content: 'news' } }], nextCursor: 'c2' }
+      },
+      countWorkers: () => 0,
+      spawnWorker: async (dept, head, opts) => { spawned.push({ dept: dept.id, head: head.postId, jobId: opts.jobId }); return { workerId: 'w1' } },
+      notifyHead: async (head, monitor, event, workerId) => { notified.push({ head: head.postId, monitor: monitor.id, workerId }) }
+    })
+    // Tick 1 — byPost is EMPTY (the boot race): the daemon must SKIP (no create /
+    // poll / spawn / notify), NOT throw, and write no monitor state.
+    await daemon.tick()
+    assert.equal(created.length, 0, 'empty byPost → no monitor is created')
+    assert.equal(polled.length, 0, 'empty byPost → nothing is polled')
+    assert.equal(spawned.length, 0, 'empty byPost → nothing is spawned')
+    assert.equal(notified.length, 0, 'empty byPost → nothing is notified')
+    assert.equal(warns.length, 1, 'a no-target skip emits exactly one discreet warn')
+    assert.match(warns[0], /no research department \/ head/, 'the skip warns it is waiting for the department head')
+    assert.ok(!('m1' in readParallelMonitorsState(stateDir).monitors), 'a skipped tick writes no monitor state')
+    // Tick 2 — byPost is now POPULATED with the head: the target resolves LAZILY
+    // and the tick creates the monitor + polls it (the old bug would have left
+    // the daemon permanently disabled).
+    byPost.set('research-head', { postId: 'research-head', sessionId: 'head-1', roomId: 'r', agentPreset: 'deepartments-head' })
+    await daemon.tick()
+    assert.equal(created.length, 1, 'the populated tick creates the monitor once')
+    assert.equal(polled.length, 1, 'the populated tick polls the monitor')
+    assert.equal(infos.length, 1, 'the one-shot enable info is logged once')
+    assert.match(infos[0], /1 monitor\(s\) enabled/, 'the enable info names the count')
+    assert.match(infos[0], /research-head/, 'the enable info names the resolved head postId')
+    assert.equal(spawned.length, 0, 'an empty first poll spawns nothing')
+    const afterCreate = readParallelMonitorsState(stateDir)
+    assert.equal(afterCreate.monitors.m1.monitorId, 'monitor_m1', 'the created monitorId is persisted')
+    assert.equal(afterCreate.monitors.m1.cursor, 'c1', 'the poll cursor advances')
+    // Tick 3 — one fresh event: spawn + notify through the RESOLVED target; the
+    // enable info is NOT re-logged (one-shot).
+    nowMs += 1000
+    await daemon.tick()
+    assert.equal(spawned.length, 1, 'a fresh event spawns one researcher')
+    assert.equal(spawned[0].dept, 'research', 'the researcher lands under the research department')
+    assert.equal(spawned[0].head, 'research-head', 'the researcher is spawned via the resolved head')
+    assert.equal(notified.length, 1, 'the head is notified for the fired event')
+    assert.equal(notified[0].head, 'research-head', 'the notification targets the resolved head')
+    assert.equal(infos.length, 1, 'the enable info is NOT re-logged on later ticks')
+    assert.equal(warns.length, 1, 'no further warns once the target is available')
   })
 })
 

@@ -1773,6 +1773,117 @@ export async function runParallelMonitorTick(deps: ParallelMonitorDeps): Promise
   }
 }
 
+/** The deps ONE parallel-monitor daemon tick needs, PLUS the LAZY
+ * department/head resolution. Mirrors ParallelMonitorDeps (the pure tick) but
+ * moves the department/head target OUT of the tick into a lazy accessor that is
+ * RE-EVALUATED on every tick. The production wiring registers the daemon effect
+ * unconditionally (once an API key + monitors are present) and re-resolves the
+ * target per tick, so the boot race where the posts registry (`byPost`) is still
+ * empty when the effect is registered can NEVER permanently disable the daemon. */
+export interface ParallelMonitorDaemonDeps {
+  /** The Parallel base URL (surfaced in the one-shot "enabled" log). */
+  baseUrl: string
+  /** Max LIVE worker-researchers per monitor (the storm guard). */
+  maxConsecutiveSpawns: number
+  /** Every configured monitor to poll (already resolved — defaults filled). */
+  monitors: ParallelMonitorConfig[]
+  /** The stateDir whose `parallel-monitors-state.json` the tick reads/writes. */
+  stateDir: string
+  /** The clock (ms epoch) — injectable so a tick test is deterministic. */
+  now(): number
+  /** The configured departments (from config.org.departments). */
+  departments: DepartmentConfig[]
+  /** The live post registry. Read LAZILY on each tick (the boot race — the
+   * registry may still be empty when the daemon effect is registered). */
+  byPost: Map<string, PostEntry>
+  /** Per-tick logger: warn for a no-target skip / errors, info one-shot on the
+   * first enabled tick. */
+  logger: { warn(message: string): void; info(message: string): void }
+  /** POST /v1/monitors — create the monitor on Parallel (returns monitor_id). */
+  createMonitor(monitor: ParallelMonitorConfig): Promise<{ monitorId: string }>
+  /** GET /v1/monitors/{id}/events poll (cursor → only-new). */
+  fetchEvents(monitorId: string, cursor: string | undefined): Promise<{ events: ParallelMonitorEvent[]; nextCursor?: string }>
+  /** Live (non-retired) workers of this monitor — the storm-guard count. */
+  countWorkers(monitorId: string): number
+  /** Spawn the researcher via the SAME worker-spawn engine a head uses (sets the
+   * task/title/jobId; the target department/head flow in as the resolved ones). */
+  spawnWorker(department: DepartmentConfig, head: PostEntry, opts: { role: string; task: string; title: string; jobId: string; callerAgentId: string; senderSessionId: string }): Promise<{ workerId: string }>
+  /** Fire-and-forget "a worker is working" notice to the research head. */
+  notifyHead(head: PostEntry, monitor: ParallelMonitorConfig, event: ParallelMonitorEvent, workerId: string): Promise<void>
+}
+
+/** Build the parallel-monitor daemon's per-tick runner with a LAZY
+ * department/head target. Returns the `tick` so a test drives it directly (the
+ * production wiring wraps it in setInterval under a reversible effect). On each
+ * tick the target is RE-RESOLVED: while no research department/head is
+ * registered yet the tick emits ONE discreet warn and SKIPS (the daemon is NOT
+ * disabled — it retries on the next tick); once a target is available it emits
+ * ONE "N monitor(s) enabled…" info and runs the normal create/poll/spawn/notify
+ * flow (the pure runParallelMonitorTick). */
+export function createParallelMonitorDaemon(deps: ParallelMonitorDaemonDeps): { tick(): Promise<void> } {
+  const resolveTarget = (): { department: DepartmentConfig; headEntry: PostEntry } | void => {
+    const department = deps.departments.find((d) => d.id === 'research')
+      ?? deps.departments.find((d) => d.coordinator !== void 0)
+    const headEntry = department?.coordinator !== void 0
+      ? deps.byPost.get(department.coordinator.postId)
+      : void 0
+    if (department === void 0 || headEntry === void 0) return void 0
+    return { department, headEntry }
+  }
+  const monitorQueryShort = (query: string): string => {
+    const trimmed = query.trim()
+    return trimmed.length > 40 ? `${trimmed.slice(0, 37).trimEnd()}...` : trimmed
+  }
+  const buildMonitorBrief = (monitor: ParallelMonitorConfig, event: ParallelMonitorEvent): string =>
+    [
+      `[parallel-monitor] A monitor event was detected (monitor "${monitor.id}", query "${monitor.query}").`,
+      '',
+      event.output?.content !== undefined ? event.output.content : JSON.stringify(event),
+      '',
+      'Verify and investigate this item, then report to your head with a concise memo and write the report to reports/researcher/ so the Research Department record stays durable.'
+    ].join('\n')
+  let warnedNoTarget = false
+  let enabledLogged = false
+  const tick = async (): Promise<void> => {
+    const target = resolveTarget()
+    if (target === void 0) {
+      if (!warnedNoTarget) {
+        warnedNoTarget = true
+        deps.logger.warn('[deepartments] parallel-monitor: no research department / head to spawn monitor workers under — monitoring waiting (retries on the next tick)')
+      }
+      return
+    }
+    if (!enabledLogged) {
+      enabledLogged = true
+      deps.logger.info(`[deepartments] parallel-monitor: ${deps.monitors.length} monitor(s) enabled (department "${target.department.id}", head "${target.headEntry.postId}", baseUrl ${deps.baseUrl})`)
+    }
+    await runParallelMonitorTick({
+      now: deps.now,
+      stateDir: deps.stateDir,
+      monitors: deps.monitors,
+      apiKey: '',
+      baseUrl: deps.baseUrl,
+      maxConsecutiveSpawns: deps.maxConsecutiveSpawns,
+      createMonitor: deps.createMonitor,
+      fetchEvents: deps.fetchEvents,
+      liveWorkerCount: deps.countWorkers,
+      spawnResearcher: async (monitor, event) =>
+        deps.spawnWorker(target.department, target.headEntry, {
+          role: 'researcher',
+          task: buildMonitorBrief(monitor, event),
+          title: `Researcher: Monitor: ${monitorQueryShort(monitor.query)}`,
+          jobId: monitor.id,
+          callerAgentId: target.headEntry.sessionId,
+          senderSessionId: target.headEntry.sessionId
+        }),
+      notifyHead: async (monitor, event, workerId) =>
+        deps.notifyHead(target.headEntry, monitor, event, workerId),
+      logger: deps.logger
+    })
+  }
+  return { tick }
+}
+
 
 /** The live hooks the A3 guard needs (Feature A). Abstracted so the guard
  * predicate is PURE and directly unit-testable, and so the production wiring
@@ -7262,17 +7373,15 @@ export function applyInvoke(ctx: Context, config: Config) {
   const parallelMaxSpawns = parallelConfig?.maxConsecutiveSpawns ?? 2
   // The researcher worker lands under the research department; fall back to the
   // first CONFIGURED department with a coordinator when 'research' is absent.
-  const parallelDepartment = config.org.departments.find((d) => d.id === 'research')
-    ?? config.org.departments.find((d) => d.coordinator !== void 0)
-  const parallelHeadEntry = parallelDepartment?.coordinator !== void 0
-    ? byPost.get(parallelDepartment.coordinator.postId)
-    : void 0
+  // NOTE: the department/head target is resolved LAZILY on EVERY tick (see
+  // createParallelMonitorDaemon) — the boot race where the byPost registry is
+  // still empty when this effect is registered must NOT permanently disable the
+  // daemon (FIX: the old apply-time resolution read byPost before it was loaded,
+  // so a boot-time empty registry left the daemon stuck disabled).
   if (parallelApiKey === '') {
     ctx.logger.warn('[deepartments] parallel-monitor: no PARALLEL_API_KEY / parallel.apiKey — monitoring daemon disabled (set an API key, or parallel.apiKey in the config, to enable)')
   } else if (parallelMonitors.length === 0) {
     ctx.logger.info('[deepartments] parallel-monitor: parallel.monitors is empty — monitoring disabled (explicit no-op)')
-  } else if (parallelDepartment === void 0 || parallelHeadEntry === void 0) {
-    ctx.logger.warn('[deepartments] parallel-monitor: no research department / head to spawn monitor workers under — monitoring daemon disabled')
   } else {
     const parallelHeaders: Record<string, string> = { 'x-api-key': parallelApiKey, 'content-type': 'application/json' }
     // POST /v1/monitors — create the monitor on Parallel (runs immediately on
@@ -7311,64 +7420,42 @@ export function applyInvoke(ctx: Context, config: Config) {
       const nextCursor = typeof json.next_cursor === 'string' ? json.next_cursor : void 0
       return { events, ...(nextCursor !== void 0 ? { nextCursor } : {}) }
     }
-    const monitorQueryShort = (query: string): string => {
-      const trimmed = query.trim()
-      return trimmed.length > 40 ? `${trimmed.slice(0, 37).trimEnd()}...` : trimmed
-    }
-    const buildMonitorBrief = (monitor: ParallelMonitorConfig, event: ParallelMonitorEvent): string =>
-      [
-        `[parallel-monitor] A monitor event was detected (monitor "${monitor.id}", query "${monitor.query}").`,
-        '',
-        event.output?.content !== undefined ? event.output.content : JSON.stringify(event),
-        '',
-        'Verify and investigate this item, then report to your head with a concise memo and write the report to reports/researcher/ so the Research Department record stays durable.'
-      ].join('\n')
-    ctx.logger.info(`[deepartments] parallel-monitor: ${parallelMonitors.length} monitor(s) enabled (department "${parallelDepartment.id}", head "${parallelHeadEntry.postId}", baseUrl ${parallelBaseUrl})`)
-    ctx.effect(() => {
-      const tick = (): void => {
-        void runParallelMonitorTick({
-          now: () => Date.now(),
-          stateDir: config.stateDir,
-          monitors: parallelMonitors,
-          apiKey: parallelApiKey,
-          baseUrl: parallelBaseUrl,
-          maxConsecutiveSpawns: parallelMaxSpawns,
-          createMonitor,
-          fetchEvents,
-          liveWorkerCount: (monitorId) => {
-            let n = 0
-            for (const entry of byPost.values()) {
-              if (entry.provider === 'worker' && entry.retired !== true && entry.jobId === monitorId) n++
-            }
-            return n
-          },
-          spawnResearcher: async (monitor, event) =>
-            spawnWorkerForDepartment(parallelDepartment, parallelHeadEntry, {
-              role: 'researcher',
-              task: buildMonitorBrief(monitor, event),
-              title: `Researcher: Monitor: ${monitorQueryShort(monitor.query)}`,
-              jobId: monitor.id,
-              callerAgentId: parallelHeadEntry.sessionId,
-              senderSessionId: parallelHeadEntry.sessionId
-            }),
-          // The daemon is NOT a catalog member, so the bus ACL would deny it —
-          // deliver a fire-and-forget notice via the post-delivery seam (a
-          // plugin-daemon system notice, framed `[From deepartments]`), exactly
-          // like the agenda scheduler's notifyHead.
-          notifyHead: async (monitor, event, workerId): Promise<void> => {
-            try {
-              const store = await messagesStoreReady
-              const text = `A researcher is working (monitor ${monitor.id}): ${event.output?.content ?? '(no content)'}`
-              const record = await store.append({ from: 'deepartments', to: [parallelHeadEntry.postId], text, kind: 'agent' })
-              await busDeliverToPost(parallelHeadEntry, `[From deepartments → ${parallelHeadEntry.postId}]: ${text}`, record, void 0)
-            } catch (error: unknown) {
-              ctx.logger.warn(`[deepartments] parallel-monitor: notify head failed: ${error instanceof Error ? error.message : String(error)}`)
-            }
-          },
-          logger: ctx.logger
-        })
+    const daemon = createParallelMonitorDaemon({
+      baseUrl: parallelBaseUrl,
+      maxConsecutiveSpawns: parallelMaxSpawns,
+      monitors: parallelMonitors,
+      stateDir: config.stateDir,
+      now: () => Date.now(),
+      departments: config.org.departments,
+      byPost,
+      logger: ctx.logger,
+      createMonitor,
+      fetchEvents,
+      countWorkers: (monitorId) => {
+        let n = 0
+        for (const entry of byPost.values()) {
+          if (entry.provider === 'worker' && entry.retired !== true && entry.jobId === monitorId) n++
+        }
+        return n
+      },
+      spawnWorker: (department, head, opts) => spawnWorkerForDepartment(department, head, opts),
+      // The daemon is NOT a catalog member, so the bus ACL would deny it —
+      // deliver a fire-and-forget notice via the post-delivery seam (a
+      // plugin-daemon system notice, framed `[From deepartments]`), exactly
+      // like the agenda scheduler's notifyHead.
+      notifyHead: async (head, monitor, event, workerId): Promise<void> => {
+        try {
+          const store = await messagesStoreReady
+          const text = `A researcher is working (monitor ${monitor.id}): ${event.output?.content ?? '(no content)'}`
+          const record = await store.append({ from: 'deepartments', to: [head.postId], text, kind: 'agent' })
+          await busDeliverToPost(head, `[From deepartments → ${head.postId}]: ${text}`, record, void 0)
+        } catch (error: unknown) {
+          ctx.logger.warn(`[deepartments] parallel-monitor: notify head failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
       }
-      const interval = setInterval(tick, PARALLEL_MONITOR_INTERVAL_MS)
+    })
+    ctx.effect(() => {
+      const interval = setInterval(() => { void daemon.tick() }, PARALLEL_MONITOR_INTERVAL_MS)
       return () => { clearInterval(interval) }
     }, 'deepartments: parallel-monitor daemon')
   }
