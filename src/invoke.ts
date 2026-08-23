@@ -131,6 +131,16 @@ import type { RotationPersistenceLike, WorkspaceRegistryLike } from './session-r
 import type { Config, CoordinatorConfig, DepartmentConfig, RoomState } from './org.js'
 import { loadRecords, resolveBoardPath } from './board-store.js'
 import type { BoardRecord, MessagePayload } from './board-store.js'
+import {
+  COMPACTION_LINE_THRESHOLD,
+  MessagesStore,
+  compactDeliveryRows,
+  markDelivery,
+  needsRedelivery,
+  parseDeliveryRows,
+  resolveDeliveriesPath
+} from './messages-store.js'
+import type { DeliveryStatus, MessageRecord } from './messages-store.js'
 import { buildAgentRows } from './agents.js'
 import type { PostEntryLike } from './agents.js'
 import {
@@ -190,7 +200,26 @@ interface BoardMessageSource {
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     board: BoardMessageSource
+    /** Agent→agent bus delivery (send_message, spec 003 §4.3). The GUI renders
+     * non-`user` sources as collapsed context rows with label = kind and never
+     * renders `to[]`, so sender + recipients MUST be framed in the text. */
+    agent: AgentMessageSource
   }
+}
+
+/** Message source for a bus deliver (send_message) — the deepartments analogue
+ * of the harness's `coordinator/relay` source, merge-extensible like the board
+ * source above. `form: 'send'` labels the row; `summary` is the human-visible
+ * one-liner chrome. */
+interface AgentMessageSource {
+  kind: 'agent'
+  form: 'send'
+  plugin: 'deepartments'
+  summary: string
+  to?: string[]
+  messageId?: string
+  from?: string
+  senderSessionId?: SessionId
 }
 
 /** Prefix of a runtime host-address registry entry: `host-<sessionId>`. */
@@ -3130,6 +3159,14 @@ export function applyInvoke(ctx: Context, config: Config) {
   const installHeadBoardTools = (agentCtx: Context, manager = false): HeadToolDisposers => {
     const disposers: Array<() => void> = []
 
+    // Batch B2 — the agent-messaging bus tools (send_message / agent_messages /
+    // dept_who) registered on the post's OWN layer: the own-layer registration
+    // SHADOWS the globally-registered harness native `send_message` for this
+    // agent (the harness override seam — same-layer duplicates throw, scoped
+    // registrations win), and postSetup's lean `restrict({allow:[]})` masks the
+    // globals anyway so this own layer is the ONLY visible toolset.
+    for (const tool of busTools) disposers.push(agentCtx.tools.register(tool))
+
     disposers.push(agentCtx.tools.register(defineTool({
       name: 'dept_room_write',
       description: 'Post an addressed message to one board room. The message is recorded from your board member id; addressed recipients are woken to read it. Addressees must be a registered head, a registered host (host-<sessionId>), or a static member — unknown addressees are rejected. Set ack:true when this is a PURE acknowledgement/receipt (no new content) so the wake relay does not loop on a confirmation ping-pong. Mark sensitive:true to flag a sensitive/mission-critical message so recipients can see the sender is registry-verified.',
@@ -4179,10 +4216,623 @@ export function applyInvoke(ctx: Context, config: Config) {
   }
 
   // Boot: materialize the head preset and every configured head once the
-  // registries (posts/hosts/cursors) have cold-loaded. Head materialization no
-  // longer needs a live parent (root agents) — it runs at boot unconditionally.
-  void Promise.all([registryLoaded, hostsLoaded]).then(() => { void ensureAllHeads() })
+  // registries (posts/hosts/cursors) have cold-loaded — and re-drive any
+  // crash-pending bus deliveries (see the re-delivery driver below). Head
+  // materialization no longer needs a live parent (root agents) — it runs at
+  // boot unconditionally.
+  void Promise.all([registryLoaded, hostsLoaded]).then(() => {
+    void ensureAllHeads()
+    void redeliverPendingDeliveries()
+  })
 
+  // ---------------------------------------------------------------------------
+  // Batch B2 — AGENT MESSAGING BUS (spec 003). The delivery side is the
+  // wakePost seam EXACTLY (catalog targets: materialize + always-wake; D4) with
+  // the bus framing/source; the native-route side is `subagents.followup` for
+  // continuable children. `wakePost` above stays byte-identical for the board
+  // (dual-run); the materialization core is shared through this helper so the
+  // bus and the board can never diverge on resume/dispose semantics.
+  // ---------------------------------------------------------------------------
+
+  /** The one record the bus persists per send (spec §3.1): the durable source
+   * of truth, on disk BEFORE any delivery (persist-before-deliver, D4). */
+  const messageStoreDir = config.stateDir
+
+  /** The boot-opened message store (load + compact + per-recipient index).
+   * Rejects loud on mid-file corruption (spec §3.2 — fail loud, never hide);
+   * tools surface the rejection at use. */
+  const messagesStoreReady = MessagesStore.open(messageStoreDir)
+
+  /**
+   * The SHARED post-materialization core of the wakePost seam (spec §4.3 step 2
+   * — "EXACTLY wakePost"): respawn-from-sleep (dispose stale handle, clear
+   * sleepEpoch, keep previousChildId), resume→create fallback with the post's
+   * durable per-head preset + role, mark a fresh progress baseline, and
+   * fire-and-forget the workspace attach. Returns the live target and whether
+   * this call materialized it (the `resumed` delivery status). Throws when the
+   * post cannot be materialized (the caller maps it to a `failed` delivery).
+   */
+  const materializePost = async (entry: PostEntry): Promise<{ target: AgentLike; resumed: boolean }> => {
+    if (agents === void 0) throw new Error('[deepartments] bus delivery requires the agents service')
+    const isWorker = entry.provider === 'worker'
+    const sessionId = SessionId(entry.sessionId)
+    const coordinator = coordinatorForPost(entry.postId)
+    let resumed = false
+    if (entry.sleepEpoch !== void 0) {
+      // Respawn from sleep: retire the live handle (if any), record the
+      // previous incarnation, clear the flag, then resume below.
+      await disposeHeadHandle(entry.sessionId)
+      byChild.delete(entry.sessionId)
+      const previousSession = entry.sessionId
+      registerEntry({
+        ...entry,
+        previousChildId: previousSession,
+        sleepEpoch: undefined
+      })
+      resumed = true
+    }
+    const live = agents.get(String(sessionId))
+    if (live === void 0) {
+      const role = coordinator?.role ?? entry.role ?? 'department worker'
+      const headPreset = entry.agentPreset ?? PRESET_ID
+      const setup = isWorker
+        ? workerSetup(entry.postId, entry.roomId, role)
+        : headSetup(entry.postId, entry.roomId, role, headPreset)
+      const agentOptions = coordinator?.agentOptions
+      const preset: string = isWorker ? WORKER_PRESET_ID : headPreset
+      let handle: AgentHandleLike | undefined
+      try {
+        handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions, setup })
+      } catch (error: unknown) {
+        ctx.logger.warn(`[deepartments] ${isWorker ? 'worker' : 'head'} "${entry.postId}" bus wake-resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
+        handle = await agents.create({
+          sessionId: String(sessionId),
+          meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: preset },
+          agentOptions,
+          setup
+        })
+      }
+      if (handle !== void 0) byHeadHandle.set(String(sessionId), handle)
+      resumed = true
+    }
+    const target = agents.get(String(sessionId))
+    if (target === void 0) throw new Error(`[deepartments] ${isWorker ? 'worker' : 'head'} "${entry.postId}" could not be materialized for bus delivery`)
+    // Fresh baseline for the (re)materialized incarnation so the stuck check
+    // never misjudges a just-cold-resumed post.
+    markHeadProgress(String(sessionId), target)
+    void attachHeadSession(String(sessionId), 'bus-deliver')
+    return { target, resumed }
+  }
+
+  /** The delivered user-message for ONE bus deliver (spec §4.3): the framed
+   * text as content + the `agent/send` source. Built via createUserMessage with
+   * a FRESH inline literal (mirroring wakePost's compile-clean call shape). */
+  const busUserMessage = (record: MessageRecord, framed: string, senderSessionId: string | undefined) =>
+    createUserMessage({
+      content: [{ type: 'text', text: framed } as const],
+      source: {
+        kind: 'agent',
+        form: 'send',
+        plugin: 'deepartments',
+        summary: boundContextSummary(`New message from ${record.from} to ${record.to.length} recipient(s) (${record.kind}).`),
+        to: [...record.to],
+        messageId: record.id,
+        from: record.from,
+        senderSessionId: senderSessionId === undefined ? undefined : SessionId(senderSessionId)
+      }
+    })
+
+  /** The shared post DELIVERY of one bus message: the wakePost seam including
+   * the stuck-head recovery verbatim (relay guards §4.4). Never throws — the
+   * error is logged AND returned as 'failed' (never silent). */
+  const busDeliverToPost = async (entry: PostEntry, framed: string, record: MessageRecord, senderSessionId: string | undefined): Promise<DeliveryStatus> => {
+    const sessionId = String(SessionId(entry.sessionId))
+    try {
+      const live = agents?.get(sessionId)
+      // Fix A2 stuck-head resilience (verbatim): a live-but-running post with
+      // NO session progress for STUCK_HEAD_MS is wedged; dispose + cold-resume
+      // (serialized per head), re-delivering from the DURABLE message record —
+      // never into the frozen loop's in-memory inbox.
+      if (live !== void 0 && entry.sleepEpoch === void 0 && isHeadStuck(sessionId, live)) {
+        ctx.logger.warn(`[deepartments] bus delivery to "${entry.postId}": live but stuck (no session progress for ${STUCK_HEAD_MS / 1000}s) — disposing + cold-resuming from the durable message record`)
+        await serializeHeadRecovery(sessionId, async () => {
+          await disposeHeadHandle(sessionId)
+          headProgress.delete(sessionId)
+          const { target } = await materializePost(entry)
+          target.followup(busUserMessage(record, framed, senderSessionId))
+        })
+        return 'resumed'
+      }
+      const { target, resumed } = await materializePost(entry)
+      target.followup(busUserMessage(record, framed, senderSessionId))
+      return resumed ? 'resumed' : 'delivered'
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] bus delivery to "${entry.postId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+      return 'failed'
+    }
+  }
+
+  /** The shared HOST delivery (D4 — always wake, including a non-live host):
+   * a live host is followed up inline; a non-live host session is resumed
+   * exactly like a dormant head (the owner accepted the materialized host
+   * turn). The host's own composition (the 'deepartments' preset) is re-mounted
+   * best-effort when the agentPresets service is present; a bare resume is the
+   * graceful fallback. Never throws — 'failed' is logged AND returned. */
+  const busDeliverToHost = async (hostEntry: HostEntry, framed: string, record: MessageRecord, senderSessionId: string | undefined): Promise<DeliveryStatus> => {
+    if (agents === void 0) return 'failed'
+    const sessionId = String(SessionId(hostEntry.sessionId))
+    try {
+      const live = agents.get(sessionId)
+      if (live !== void 0) {
+        live.followup(busUserMessage(record, framed, senderSessionId))
+        return 'delivered'
+      }
+      // D4 — a dormant host is ALWAYS woken: resume the durable host session.
+      // The GUI owns the host composition ('deepartments'), so re-mount it
+      // best-effort (mirroring the api-proxy's composeAgent-on-resume); the
+      // session's own global-layer tools remain reachable regardless.
+      const setup = agentPresets === void 0
+        ? undefined
+        : (agentCtx: Context): void => {
+            void agentPresets.mount(agentCtx, 'deepartments').catch((error: unknown) => {
+              ctx.logger.warn(`[deepartments] host resume preset mount failed (bare resume continues): ${error instanceof Error ? error.message : String(error)}`)
+            })
+          }
+      await agents.resume({ resumeSessionId: sessionId, setup })
+      const target = agents.get(sessionId)
+      if (target === void 0) throw new Error(`[deepartments] host "${hostEntry.hostId}" could not be materialized for bus delivery`)
+      target.followup(busUserMessage(record, framed, senderSessionId))
+      return 'resumed'
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+      return 'failed'
+    }
+  }
+
+  /**
+   * Deliver ONE addressed record to ONE recipient and record the sidecar
+   * transition (write-ahead 'prepared' → final status; spec §4.4). THIS is the
+   * idempotent re-delivery unit: send_message calls it after persisting, and
+   * the boot re-delivery driver re-runs it for crash-pending pairs. Route order
+   * per recipient (spec §4.2): child route FIRST (the caller's direct
+   * continuable children — never validated against the catalog), then the
+   * catalog (posts.json ∪ non-retired hosts.json); unknown ids → failed.
+   */
+  const deliverBusRecord = async (
+    record: MessageRecord,
+    recipientId: string,
+    callerAgentId: string,
+    senderSessionId: string | undefined,
+    signal?: AbortSignal
+  ): Promise<DeliveryStatus> => {
+    const framed = `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`
+    await markDelivery(messageStoreDir, record.id, recipientId, 'prepared')
+    try {
+      let status: DeliveryStatus
+      if (recipientId === record.from) {
+        // Ack-loop guard: a self-addressed send is held — persisted, no wake,
+        // never re-enters the caller's own turn.
+        status = 'self'
+      } else if (subagents !== void 0) {
+        // Route (1) — the caller's direct continuable child? Resolve BEFORE any
+        // catalog validation (a transient child id can never be 'unknown').
+        let isChild = false
+        try {
+          const children = await subagents.listChildren(SessionId(callerAgentId), signal ?? undefined)
+          isChild = children.some((child) => child.kind === 'child' && child.mode === 'continuable' && String(child.id) === recipientId)
+        } catch {
+          // listing unavailable (minimal composition): no child route — catalog next
+        }
+        if (isChild) {
+          try {
+            await subagents.followup(
+              await exec_agentFor(callerAgentId) as unknown as Parameters<typeof subagents.followup>[0],
+              SessionId(recipientId),
+              [{ type: 'text', text: framed } as const],
+              {
+                source: {
+                  kind: 'agent',
+                  form: 'send',
+                  plugin: 'deepartments',
+                  summary: boundContextSummary(`New message from ${record.from} to ${record.to.length} recipient(s) (${record.kind}).`),
+                  to: [...record.to],
+                  messageId: record.id,
+                  from: record.from,
+                  senderSessionId: senderSessionId === undefined ? undefined : SessionId(senderSessionId)
+                },
+                // A bare { agent, signal } tool exec is the test surface; the
+                // ABORT_SIGNAL default is never reached in production harness
+                // runs (exec.signal is always present there).
+                signal: signal ?? new AbortController().signal
+              }
+            )
+            status = 'delivered'
+          } catch (error: unknown) {
+            ctx.logger.warn(`[deepartments] bus child-followup to "${recipientId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+            status = 'failed'
+          }
+        } else {
+          status = await busDeliverCatalog(record, recipientId, senderSessionId)
+        }
+      } else {
+        status = await busDeliverCatalog(record, recipientId, senderSessionId)
+      }
+      await markDelivery(messageStoreDir, record.id, recipientId, status)
+      return status
+    } catch (error: unknown) {
+      // The sidecar write failed (fs): the record is durable, the delivery is
+      // NOT recorded — fail loud to the caller (never silently lose a send).
+      ctx.logger.warn(`[deepartments] bus delivery sidecar write failed for ${record.id} → ${recipientId}: ${error instanceof Error ? error.message : String(error)}`)
+      throw error
+    }
+  }
+
+  /** Catalog route of the bus (spec §4.2 route 2 + §4.3 delivery): posts.json
+   * (head/worker) then non-retired hosts.json; unknown → 'failed'. */
+  const busDeliverCatalog = async (record: MessageRecord, recipientId: string, senderSessionId: string | undefined): Promise<DeliveryStatus> => {
+    const entry = byPost.get(recipientId)
+    if (entry !== void 0) {
+      return busDeliverToPost(entry, `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`, record, senderSessionId)
+    }
+    const hostEntry = hosts.get(recipientId)
+    if (hostEntry !== void 0 && hostEntry.retired !== true) {
+      return busDeliverToHost(hostEntry, `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`, record, senderSessionId)
+    }
+    ctx.logger.warn(`[deepartments] bus delivery to unknown member "${recipientId}" (record ${record.id})`)
+    return 'failed'
+  }
+
+  /** The live parent Agent for the native-route followup (the caller is the
+   * direct parent, per the route resolution above). Resolved from the agents
+   * registry — `exec.agent` is not retained past the tool execute frame. */
+  const exec_agentFor = (sessionId: string): AgentLike => {
+    const parent = agents?.get(sessionId)
+    if (parent === void 0) throw new Error(`[deepartments] bus child route requires the live caller agent "${sessionId}"`)
+    return parent
+  }
+
+  /** The caller's BUS member id (spec §3.1: durable member id, never a session
+   * id): the postId for a registered head/worker, else the deterministic
+   * `host-<sessionId>` id for a host/plain session. Deliberately does NOT
+   * lazily register a caller (send_message has no room context); host
+   * registration stays a board-tool concern. */
+  const busMemberIdFor = (agentId: string): string => postIdForChild(agentId) ?? hostIdForSession(agentId)
+
+  /** Shared framing for every bus deliver (spec §4.3): the GUI never renders
+   * `to[]`, so sender + recipients MUST be in the model-facing text. */
+  const busFraming = (record: MessageRecord): string =>
+    `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`
+
+  /** The 1..20 fan-out guard (spec §4.4): the JSON schema subset cannot express
+   * minItems/maxItems, so the cap is enforced here — a hard error above 20. */
+  const assertBusFanOut = (to: readonly string[]): number => {
+    if (!Array.isArray(to) || to.length === 0) throw new Error('[deepartments] send_message: `to` must list at least one recipient')
+    if (to.length > 20) throw new Error(`[deepartments] send_message: fan-out cap is 20 recipients (got ${to.length})`)
+    return to.length
+  }
+
+  // --- messaging bus TOOL DEFINITIONS (ONE body per tool; registered in the
+  // post OWN layer + the host agent's own layer + (when the name is free) the
+  // GLOBAL host plane — see the override note before the registrations).
+  // ---------------------------------------------------------------------------
+
+  /** `send_message` — the unified plugin-owned tool (spec §4). NEVER registers
+   * globally when the harness native owns the name (dsh-tool-subagent-control);
+   * the own-layer registrations SHADOW the native for every deepartments agent
+   * ("Scoped tools shadow globals" — the harness's supported override seam:
+   * a same-layer duplicate throws, there is no replace). */
+  const sendMessageTool = defineTool({
+    name: 'send_message',
+    description: 'Send a message to one or more background agents and/or organization members, delivering it as the recipient\'s next turn and ALWAYS waking the recipient (including a dormant/host target). Recipients are resolved per id: (1) your direct continuable background children are delivered natively (parent→child followup, never catalog-validated); (2) everything else is resolved against the organization catalog (department heads/workers + the Asistente host) and delivered through the durable message store — the record is persisted BEFORE any delivery and delivery state is tracked in a write-ahead sidecar, so a crash re-delivers idempotently. Unknown ids are reported per-recipient as failed (one typo does not kill a multi-recipient send). A self-addressed recipient (your own id) is held ("self" — persisted, never woken). Max 20 recipients (fan-out cap).',
+    parameters: {
+      to: {
+        type: 'array',
+        items: { type: 'string' },
+        required: true,
+        description: 'Recipient agent ids: direct background children first, then catalog member ids (use dept_who for the roster). Max 20.'
+      },
+      text: { type: 'string', required: true, description: 'The message text.' },
+      ack: { type: 'boolean', description: 'Set true when this is a pure acknowledgement/receipt (no new content) — recorded kind "ack".' },
+      sensitive: { type: 'boolean', description: 'Mark this message as sensitive (trust semantics carried over from the board).' },
+      threadId: { type: 'string', description: 'Optional: a message id to reply to (recorded as threadId).' }
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          messageId: { type: 'string', required: true },
+          delivered: { type: 'object', additionalProperties: true, required: true }
+        }
+      },
+      render: (_args, value) => {
+        const lines = Object.entries(value.delivered as Record<string, string>)
+        const text = lines.length === 0
+          ? `sent ${value.messageId}`
+          : lines.length === 1
+            ? `sent ${value.messageId} → ${lines[0][0]}: ${lines[0][1]}`
+            : [`sent ${value.messageId} to ${lines.length} recipient(s):`, ...lines.map(([id, status]) => `  - ${id}: ${status}`)].join('\n')
+        return [{ type: 'text', text } as const]
+      }
+    },
+    async execute(args, exec): Promise<{ messageId: string; delivered: Record<string, DeliveryStatus> }> {
+      const agent = exec.agent
+      if (!agent) throw new Error('send_message requires a calling agent (exec.agent was undefined)')
+      assertBusFanOut(args.to)
+      const store = await messagesStoreReady
+      const from = busMemberIdFor(agent.id as string)
+      const record = await store.append({
+        from,
+        to: [...args.to],
+        text: args.text,
+        kind: args.ack === true ? 'ack' : 'agent',
+        ...(args.threadId !== undefined ? { threadId: args.threadId } : {}),
+        ...(args.sensitive === true ? { sensitive: true } : {})
+      })
+      // Per-message serialization: deliveries run one at a time (never parallel
+      // resume of N dormant agents — quota + race safety, spec §4.4).
+      const delivered: Record<string, DeliveryStatus> = {}
+      for (const recipient of args.to) {
+        delivered[recipient] = await deliverBusRecord(record, recipient, agent.id as string, agent.id as string, exec.signal)
+      }
+      return { messageId: record.id, delivered }
+    }
+  })
+
+  /** `agent_messages` — the caller's OWN received history (spec §5): records
+   * where the caller's member id ∈ to[], newest-first, cursor-paged. NO read/
+   * seen marks in this phase (pure history pager — the §5 note). */
+  const agentMessagesTool = defineTool({
+    name: 'agent_messages',
+    description: 'Page your OWN received message history (the durable agent-messaging log): records addressed to you (your member id is in to[]), newest first. Cursor pagination via `before` (a message id, exclusive); no read/seen marks exist in this phase — this is a pure history pager. After a compaction renumbers seqs an old cursor id may clamp to the newest record (the history is still valid, only the cursor was renumbered).',
+    parameters: {
+      limit: { type: 'number', description: 'Optional: page size (default 10, max 50).' },
+      before: { type: 'string', description: 'Optional: exclusive cursor — a message id (m-<seq>); older-only page.' }
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          total: { type: 'number', required: true },
+          remaining: { type: 'number', required: true },
+          messages: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                ts: { type: 'number', required: true },
+                from: { type: 'string', required: true },
+                to: { type: 'array', items: { type: 'string' }, required: true },
+                text: { type: 'string', required: true },
+                kind: { type: 'string', required: true },
+                threadId: { type: 'string' },
+                sensitive: { type: 'boolean' }
+              }
+            }
+          }
+        }
+      },
+      render: (_args, value) => {
+        const lines = value.messages.map((message) => `- ${message.id} | ${message.from} → ${message.to.join(', ')} | ${message.text.length > 140 ? `${message.text.slice(0, 140)}…` : message.text}`)
+        const head = `${value.total} total message(s) addressed to you; showing ${value.messages.length}`
+        const tail = value.remaining > 0 ? `\n… (${value.remaining} older; page with before=${value.messages[value.messages.length - 1]?.id})` : ''
+        return [{ type: 'text', text: lines.length === 0 ? `${head} — none.` : `${head}:\n${lines.join('\n')}${tail}` } as const]
+      }
+    },
+    async execute(args, exec) {
+      const agent = exec.agent
+      if (!agent) throw new Error('agent_messages requires a calling agent (exec.agent was undefined)')
+      const store = await messagesStoreReady
+      const memberId = busMemberIdFor(agent.id as string)
+      const normalized = Math.min(Math.max(Math.trunc(args.limit ?? 10), 1), 50)
+      const page = store.page(memberId, { limit: normalized, before: args.before })
+      // Normalize the wire shape to the declared output schema (threadId null
+      // is a store-internal absent marker; the tool surface exposes it as
+      // absent, never null).
+      return {
+        total: page.total,
+        remaining: page.remaining,
+        messages: page.messages.map((message) => ({
+          ...message,
+          threadId: message.threadId === null ? undefined : message.threadId
+        }))
+      }
+    }
+  })
+
+  /** `dept_who` — the whole catalog in one call (spec §6), replacing both
+   * dept_room_who AND dept_whereami (subtraction lands in B3; this tool is
+   * ADDITIVE now). `you: true` marks the caller's own entry. */
+  const deptWhoTool = defineTool({
+    name: 'dept_who',
+    description: 'List the whole Deepartments catalog — the Asistente host (kind "host", title "Asistente") and every registered department head/worker (kind "head", title from the department configuration, PostEntry.role fallback) — each with live/sleeping state and session id, and your OWN entry marked you:true. This is the identity + roster tool: learn who exists and who you are in one call. No room parameter — the roster is the organization.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          members: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                agentId: { type: 'string', required: true },
+                kind: { type: 'string', required: true },
+                title: { type: 'string', required: true },
+                live: { type: 'boolean', required: true },
+                sleeping: { type: 'boolean', required: true },
+                sessionId: { type: 'string', required: true },
+                you: { type: 'boolean', required: true }
+              }
+            }
+          }
+        }
+      },
+      render: (_args, value) => {
+        const lines = value.members.map((member) =>
+          `  - ${member.agentId} (${member.kind}, "${member.title}"${member.live ? ', live' : ', offline'}${member.sleeping ? ', sleeping' : ''}${member.you ? ', YOU' : ''})`)
+        return [{ type: 'text', text: `Deepartments catalog (${value.members.length} member(s)):\n${lines.join('\n')}` } as const]
+      }
+    },
+    async execute(_args, exec): Promise<{ members: Array<{ agentId: string; kind: 'host' | 'head'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean }> }> {
+      const agent = exec.agent
+      if (!agent) throw new Error('dept_who requires a calling agent (exec.agent was undefined)')
+      const callerMemberId = busMemberIdFor(agent.id as string)
+      const members: Array<{ agentId: string; kind: 'host' | 'head'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean }> = []
+      for (const entry of hosts.values()) {
+        if (entry.retired === true) continue
+        members.push({
+          agentId: entry.hostId,
+          kind: 'host',
+          title: 'Asistente',
+          live: agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined,
+          sleeping: entry.sleepEpoch !== void 0,
+          sessionId: entry.sessionId,
+          you: entry.hostId === callerMemberId
+        })
+      }
+      for (const entry of byPost.values()) {
+        const coordinator = coordinatorForPost(entry.postId)
+        members.push({
+          agentId: entry.postId,
+          kind: 'head',
+          // Spec §6: coordinator.title for department heads; PostEntry.role
+          // fallback for worker posts. Fallback chain follows head-presets.ts
+          // (`headRoleLine`, the established convention): title → role → postId.
+          title: coordinator?.title || coordinator?.role || entry.role || entry.postId,
+          live: agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined,
+          sleeping: entry.sleepEpoch !== void 0,
+          sessionId: entry.sessionId,
+          you: entry.postId === callerMemberId
+        })
+      }
+      return { members }
+    }
+  })
+
+  /** The three bus tools as ONE tuple — registered in the own layer of every
+   * post (installHeadBoardTools) and of host agents (agent/created hook). */
+  const busTools: readonly ReturnType<typeof defineTool>[] = [sendMessageTool, agentMessagesTool, deptWhoTool]
+
+  // --- OVERRIDE NOTE (the harness native `send_message`) ---------------------
+  // `NamedEntries.insert` THROWS on a same-layer duplicate (no replace), but
+  // SCOPED registrations SHADOW globals — "Scoped tools shadow globals." The
+  // native (dsh-tool-subagent-control) occupies the GLOBAL name only when the
+  // harness composes its row (GUI/headless profiles via dsh-base); the
+  // hermetic Loader tests boot without it. Strategy:
+  //   * own layer (posts via installHeadBoardTools + the host session via the
+  //     agent/created hook) — ALWAYS: the harness's supported override seam;
+  //     every deepartments agent sees the unified tool and the native is
+  //     shadowed away (posts additionally mask globals with the lean
+  //     `restrict({allow:[]})` of postSetup).
+  //   * GLOBAL host plane — `send_message` ONLY when the name is free
+  //     (`ctx.tools.get(...)` undefined = minimal/hermetic compositions, where
+  //     ours is the only send_message; the unified body must be reachable for
+  //     the host tests). `agent_messages` / `dept_who` have no native conflict
+  //     and register globally ALWAYS (host plane).
+  // ---------------------------------------------------------------------------
+  if (ctx.tools.get('send_message') === undefined) {
+    ctx.tools.register(sendMessageTool)
+    ctx.logger.info('[deepartments] send_message: registered unified tool on the global host plane (no native control tool composed here)')
+  } else {
+    ctx.logger.info('[deepartments] send_message: native control tool owns the global name — the unified tool is delivered per-agent own-layer (scoped shadow)')
+  }
+  ctx.tools.register(agentMessagesTool)
+  ctx.tools.register(deptWhoTool)
+
+  // Host own layer (agent/created): register the bus tools on every host (root
+  // non-post) agent so the shadow stands even where the native is global
+  // ("Scoped tools shadow globals" — the harness's override seam). Transient
+  // dispatched children (origin subagent) are deliberately NOT covered — they
+  // stay on the native parent→child adapter the Asistente uses to steer them,
+  // matching the spec's registration scope (host plane + head/worker layers).
+  // Posts are skipped twice over: (1) by the origin-non-root check below and
+  // (2) — defensively, for the announce-time race where byChild is not yet
+  // populated — by the duplicate catch (installHeadBoardTools already
+  // registered the SAME own-layer tools during setup, which runs BEFORE
+  // publish/announce; a second insert of the same name in the same layer
+  // throws, and that throw is exactly the already-installed signal).
+  // Keyed by the AGENT OBJECT, not the session id: every announce is a fresh
+  // AgentLoop incarnation with its OWN scope (incl. cold resumes), so the
+  // registration must be re-established per incarnation — the previous
+  // incarnation's registrations died with its scope.
+  const hostBusToolsInstalled = new WeakSet<object>()
+  ctx.on('agent/created', ({ agent: created }) => {
+    const createdLike = created as unknown as AgentLike
+    if (createdLike === void 0 || typeof createdLike.id !== 'string') return
+    const header = (createdLike.session as { header?: SessionHeaderWithOrigin } | undefined)?.header
+    const origin = header?.origin ?? header?.meta?.origin
+    if (origin !== undefined) return // transient children keep the native adapter
+    if (postIdForChild(createdLike.id) !== undefined) return // posts: own-layer from setup
+    if (hostBusToolsInstalled.has(createdLike)) return
+    const agentTools = (createdLike as { ctx?: { tools?: { register: (definition: ReturnType<typeof defineTool>) => unknown } } }).ctx?.tools
+    if (agentTools === void 0 || typeof agentTools.register !== 'function') return // stub agents (no scoped tools) — nothing to shadow
+    try {
+      for (const tool of busTools) agentTools.register(tool)
+      hostBusToolsInstalled.add(createdLike)
+    } catch (error: unknown) {
+      // Same-layer duplicate ("already registered in this scope") = the post
+      // setup already installed the unified tools pre-announce — the shadow is
+      // in place. Any other failure is a real registration problem: rethrow.
+      if (error instanceof Error && error.message.includes('already registered')) return
+      throw error
+    }
+  })
+
+  // ---------------------------------------------------------------------------
+  // Boot — one-time re-delivery driver for the write-ahead sidecar (spec §4.4):
+  // after registries + store are up, re-run ONLY the pairs whose latest sidecar
+  // status needs re-delivery (crash between persist and delivery / mid-fan-out:
+  // 'prepared'; rejected delivery: 'failed'); 'delivered'/'resumed'/'self' are
+  // never re-run. Also compacts the sidecar at boot (keep only the latest state
+  // per key) once it grows past the board compaction threshold.
+  // ---------------------------------------------------------------------------
+  const redeliverPendingDeliveries = async (): Promise<void> => {
+    try {
+      const filePath = resolveDeliveriesPath(messageStoreDir)
+      let text: string
+      try {
+        text = await readFile(filePath, 'utf8')
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return // nothing ever sent
+        throw error
+      }
+      let rows = parseDeliveryRows(text)
+      if (rows.length > COMPACTION_LINE_THRESHOLD) {
+        rows = compactDeliveryRows(rows)
+        await writeFile(filePath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8')
+        ctx.logger.info(`[deepartments] deliveries sidecar compacted to ${rows.length} latest-state rows (boot)`)
+      }
+      const latestPerKey = new Map<string, (typeof rows)[number]>()
+      for (const row of rows) latestPerKey.set(`${row.messageId}\u0000${row.recipientId}`, row)
+      const store = await messagesStoreReady
+      for (const row of latestPerKey.values()) {
+        if (!needsRedelivery(row.status)) continue
+        const record = store.get(row.messageId)
+        if (record === void 0) {
+          // Record trimmed by the boot compaction: nothing durable remains to
+          // re-deliver — the pair stays a settled no-op.
+          continue
+        }
+        const callerSessionId = byPost.get(record.from)?.sessionId ?? hosts.get(record.from)?.sessionId ?? record.from
+        try {
+          const status = await deliverBusRecord(record, row.recipientId, callerSessionId, callerSessionId)
+          ctx.logger.info(`[deepartments] boot re-delivery: ${record.id} → ${row.recipientId} (was ${row.status}) → ${status}`)
+        } catch (error: unknown) {
+          ctx.logger.warn(`[deepartments] boot re-delivery ${record.id} → ${row.recipientId} failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] boot deliveries re-delivery pass failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
 
   const relay = (record: BoardRecord, roomId: string) => {
     if (record.kind !== 'message' || agents === void 0) return

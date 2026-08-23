@@ -27,6 +27,7 @@ import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadRecords, resolveBoardPath } from '../lib/board-store.js'
+import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath } from '../lib/messages-store.js'
 import { emitRoomRecord, roomSessionId } from '../lib/org.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
 import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry } from '../lib/invoke.js'
@@ -273,6 +274,14 @@ class StubPersistence extends Service {
       }]
     }
   }
+
+  /** B2: `sessionPersistence.list()` — the persistence-header enumeration the
+   * continuation manager's listChildren uses to build its cold corpus. The
+   * stub has no detached sessions, so the live-preferred corpus stays
+   * live-only (a cold child cannot be resumed in this harness either). */
+  async list() {
+    return []
+  }
 }
 
 // NOTE (Task T1): the StubPersistence above deliberately exposes NO `readRaw`,
@@ -461,6 +470,17 @@ async function bootPlugin(stateDir, opts = {}) {
   const forkStub = stubProvider('fork')
   root.subagents.registerProvider(spawnStub)
   root.subagents.registerProvider(forkStub)
+
+  // B2 override fixture: compose the REAL harness control plugin
+  // (dsh-tool-subagent-control — the native global `send_message`) BEFORE the
+  // deepartments row, exactly as dsh-base does in the GUI/headless profiles.
+  // AWAITED so the native owns the global name deterministically BEFORE the
+  // deepartments row applies (the plugin then must NOT register `send_message`
+  // globally — same-layer duplicate would throw — and must shadow the native
+  // per-agent own-layer).
+  if (opts.nativeControlTool === true) {
+    await loader.create({ id: 'native-tool-subagent-control', name: '@deepseek-ai/dsh-tool-subagent-control' })
+  }
 
   loader.create({
     id: 'deepartments',
@@ -4897,6 +4917,376 @@ test('T1 live-fix degrade: service present but NO stored artifact still degrades
       assert.match(stubLog, /^reason: no stored session artifact \(readRaw returned nothing\)$/m, 'stub reason carries the ACTUAL meaningful error — no raw TypeError leaks')
       const checkpoint = await readFile(result.memoPath, 'utf8')
       assert.match(checkpoint, /^wake_counter: 1$/m, 'memo write succeeded despite the stub capture (never throws)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Batch B2 — agent messaging bus (spec 003): send_message / agent_messages /
+// dept_who against the REAL Loader with the REAL SubagentRuntime + stubs.
+// ---------------------------------------------------------------------------
+
+/** Seed `<stateDir>/messages.jsonl` with raw records BEFORE boot (the cold
+ * restart fixture for agent_messages paging — the store opens + indexes it). */
+async function seedMessageRecords(stateDir, records) {
+  const filePath = resolveMessagesPath(stateDir)
+  await mkdir(stateDir, { recursive: true })
+  await writeFile(filePath, `${records.map((record) => JSON.stringify(record)).join('\n')}\n`, 'utf8')
+}
+
+/** Latest delivery status rows for one message id from the sidecar file. */
+async function readDeliveryRows(stateDir, messageId) {
+  const filePath = resolveDeliveriesPath(stateDir)
+  let rows
+  await waitFor(async () => {
+    try {
+      rows = parseDeliveryRows(await readFile(filePath, 'utf8'))
+      return rows.some((row) => row.messageId === messageId)
+    } catch {
+      return false
+    }
+  }, 5000, 'deliveries.jsonl readable')
+  return rows.filter((row) => row.messageId === messageId)
+}
+
+test('B2 send_message: catalog head delivered with the spec framing + agent source; record persisted BEFORE delivery; sidecar prepared→delivered', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      // The head (research-head) is materialized at boot; the host is a fresh
+      // root session. The unified tool is registered globally (no native
+      // control tool composed in this minimal loader — see the override test).
+      const send = pluginCtx().tools.get('send_message')
+      assert.ok(send, 'send_message registered on the host plane')
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const result = await send.execute({ to: ['research-head'], text: 'hello head' }, { agent: host, signal })
+
+      assert.equal(result.messageId, 'm-0', 'first send is m-0 (global seq starts at 0)')
+      assert.equal(result.delivered['research-head'], 'delivered', 'live head delivered inline (no resume)')
+      assert.deepEqual(Object.keys(result.delivered), ['research-head'], 'one recipient, one delivered entry')
+
+      // Framing (spec §4.3) — the GUI never renders to[], so it MUST be in the text.
+      const head = agents.store.get('head-research-head')
+      const wake = head.inboxMessages.at(-1)
+      assert.equal(wake.content[0].text, '[From host-' + host.id + ' → research-head]: hello head', 'framed text = [From sender → to]: text')
+      assert.equal(wake.source.kind, 'agent', 'bus wake source kind is agent')
+      assert.equal(wake.source.form, 'send', 'bus wake source form is send')
+      assert.equal(wake.source.from, `host-${host.id}`, 'source.from is the member id')
+      assert.deepEqual(wake.source.to, ['research-head'], 'source.to carries the recipients (additive, GUI row body)')
+      assert.equal(wake.source.messageId, 'm-0', 'source.messageId links the wake to the durable record')
+      assert.equal(wake.source.senderSessionId, host.id, 'source.senderSessionId is the caller session id')
+      assert.ok(String(wake.source.summary).includes('New message from host-'), 'summary chrome is informative (human row label)')
+
+      // Durable record on disk BEFORE delivery (spec §4.3 step 1): raw text,
+      // member ids only — never session ids.
+      const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+      assert.equal(records.length, 1)
+      assert.equal(records[0].id, 'm-0')
+      assert.equal(records[0].from, `host-${host.id}`)
+      assert.deepEqual(records[0].to, ['research-head'])
+      assert.equal(records[0].text, 'hello head', 'record keeps the RAW text (framing is delivery-only)')
+      assert.equal(records[0].kind, 'agent')
+
+      // Sidecar: write-ahead prepared row THEN the final delivered row.
+      const rows = await readDeliveryRows(stateDir, 'm-0')
+      assert.deepEqual(rows.map((row) => row.status), ['prepared', 'delivered'], 'sidecar transitions prepared → delivered')
+      assert.equal(rows[0].recipientId, 'research-head')
+
+      // agent_messages on the RECIPIENT shows the record (own history).
+      const messagesTool = pluginCtx().tools.get('agent_messages')
+      const page = await messagesTool.execute({ limit: 10 }, { agent: head, signal })
+      assert.equal(page.total, 1)
+      assert.equal(page.messages[0].id, 'm-0')
+      assert.equal(page.messages[0].text, 'hello head')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('B2 send_message: a dormant (slept) catalog head is RESUMED — sleepEpoch cleared, previous incarnation traced, wake delivered', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Seed a slept head that is NOT configured (ensureAllHeads only
+    // materializes CONFIGURED coordinators — a seeded stray stays dormant).
+    await seedPost(stateDir, { postId: 'sleeper-head', sessionId: 'head-sleeper-head', roomId: 'research', agentPreset: 'deepartments-head', sleepEpoch: Date.now() })
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const send = pluginCtx().tools.get('send_message')
+      const result = await send.execute({ to: ['sleeper-head'], text: 'wake up' }, { agent: host, signal })
+
+      assert.equal(result.delivered['sleeper-head'], 'resumed', 'dormant head is resumed (materialize + followup)')
+      const woke = agents.store.get('head-sleeper-head')
+      assert.ok(woke, 'dormant head materialized')
+      const wake = woke.inboxMessages.at(-1)
+      assert.equal(wake.content[0].text, '[From host-' + host.id + ' → sleeper-head]: wake up')
+
+      // Durable registry: sleepEpoch cleared, previous incarnation traced (the
+      // wakePost seam verbatim).
+      await waitFor(async () => {
+        const posts = await readPosts(stateDir)
+        return posts['sleeper-head'] !== undefined && posts['sleeper-head'].sleepEpoch === undefined
+      }, 5000, 'sleepEpoch cleared after the bus wake')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['sleeper-head'].previousChildId, 'head-sleeper-head', 'previous incarnation traced')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('B2 send_message: MULTI-recipient splits per-recipient — live head delivered, unknown id failed (never kills the send)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const send = pluginCtx().tools.get('send_message')
+      const result = await send.execute({ to: ['research-head', 'ghost-unknown'], text: 'one known, one ghost' }, { agent: host, signal })
+
+      assert.equal(result.delivered['research-head'], 'delivered')
+      assert.equal(result.delivered['ghost-unknown'], 'failed', 'unknown catalog id is per-recipient failed, not a hard error')
+      const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+      assert.equal(records.length, 1, 'ONE record for the whole send (to[] = all recipients)')
+      assert.deepEqual(records[0].to, ['research-head', 'ghost-unknown'])
+      const rows = await readDeliveryRows(stateDir, 'm-0')
+      const statuses = Object.fromEntries(rows.map((row) => [row.recipientId, row.status]))
+      assert.equal(statuses['research-head'], 'delivered')
+      assert.equal(statuses['ghost-unknown'], 'failed')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('B2 send_message: SELF-addressed send is held (`self`) — record persisted, NO wake, no followup', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const send = pluginCtx().tools.get('send_message')
+      const hostMemberId = `host-${host.id}`
+      const result = await send.execute({ to: [hostMemberId], text: 'note to self' }, { agent: host, signal })
+
+      assert.equal(result.delivered[hostMemberId], 'self', 'self recipient is held (persisted, no wake)')
+      assert.equal(host.inboxMessages.length, 0, 'no followup into the caller turn (ack-loop guard)')
+      const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+      assert.equal(records.length, 1, 'self send still persists its record')
+      const rows = await readDeliveryRows(stateDir, 'm-0')
+      assert.equal(rows.at(-1).status, 'self', 'sidecar terminal status is self')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('B2 send_message: fan-out cap — 21 recipients is a hard error (cap 20, spec §4.4)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const send = pluginCtx().tools.get('send_message')
+      const recipients = Array.from({ length: 21 }, (_, index) => `member-${index}`)
+      await assert.rejects(
+        () => send.execute({ to: recipients, text: 'too many' }, { agent: host, signal }),
+        /fan-out cap is 20/,
+        '21 recipients rejected loudly'
+      )
+      const records = await loadMessageRecords(resolveMessagesPath(stateDir)).catch(() => [])
+      assert.equal(records.length, 0, 'no record persisted for a rejected send')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('B2 send_message: child route FIRST — a direct continuable child is delivered natively (listChildren, never catalog-validated)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      // Establish a REAL continuable child of the caller through the REAL
+      // SubagentRuntime continuation manager (stub provider prepares continuable
+      // children; StubAgents materializes them with a real scoped ctx).
+      const { childId } = await root.subagents.startContinuable({
+        provider: 'spawn',
+        label: 'b2-child',
+        request: { parent: host, prompt: [{ type: 'text', text: 'initial prompt' }], maxDepth: 1 },
+        signal
+      })
+      const child = agents.store.get(String(childId))
+      assert.ok(child, 'continuable child materialized into the agents store')
+      // The StubAgents.create ignores the factory `seed`, so the real store
+      // session the child is entered under carries NO subagent/descriptor event
+      // — the projection fold listChildren classifies on would serve no
+      // identity. Mirror what the real agent factory writes at creation so the
+      // child lists as mode:'continuable' (the child-route detection seam).
+      const childSession = root.sessions.get(SessionId(childId))
+      assert.ok(childSession, 'child entered in the real session store')
+      childSession.append('subagent/descriptor', { version: 2, mode: 'continuable', provider: 'spawn', label: 'b2-child' })
+
+      // The child id is NOT in the catalog — only the child route can reach it.
+      const send = pluginCtx().tools.get('send_message')
+      const result = await send.execute({ to: [String(childId)], text: 'continue' }, { agent: host, signal })
+      assert.equal(result.delivered[String(childId)], 'delivered', 'child delivered through the native followup route')
+      const childWake = child.inboxMessages.at(-1)
+      assert.equal(childWake.content[0].text, '[From host-' + host.id + ' → ' + childId + ']: continue', 'child wake is framed like every bus delivery')
+      assert.equal(childWake.source.kind, 'agent')
+      assert.equal(childWake.source.senderSessionId, host.id)
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('B2 agent_messages: paging 10-per-page with before cursor + remaining (20 seeded, newest-first, 11-20 via cursor)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const hostSessionId = SessionId('b2-host-page')
+    const hostMemberId = `host-${hostSessionId}`
+    const records = Array.from({ length: 20 }, (_, seq) => ({
+      id: `m-${seq}`,
+      seq,
+      ts: 1700000000000 + seq,
+      from: 'research-head',
+      to: [hostMemberId],
+      text: `message ${seq}`,
+      kind: 'agent'
+    }))
+    await seedMessageRecords(stateDir, records)
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      const host = agents.put(fakeParentAgent(SessionId('b2-host-page')))
+      const signal = new AbortController().signal
+      const messagesTool = pluginCtx().tools.get('agent_messages')
+
+      // Page 1: newest 10 (m-19..m-10), 10 older remaining.
+      const page1 = await messagesTool.execute({ limit: 10 }, { agent: host, signal })
+      assert.equal(page1.total, 20, 'total is the caller-owned record count')
+      assert.equal(page1.messages.length, 10)
+      assert.deepEqual(page1.messages.map((message) => message.id), Array.from({ length: 10 }, (_, index) => `m-${19 - index}`), 'newest-first (m-19 … m-10)')
+      assert.equal(page1.remaining, 10, 'remaining = exact older count (sparse-subset correct)')
+
+      // Page 2 via cursor: records STRICTLY older than m-10 (m-9..m-0).
+      const page2 = await messagesTool.execute({ limit: 10, before: 'm-10' }, { agent: host, signal })
+      assert.deepEqual(page2.messages.map((message) => message.id), Array.from({ length: 10 }, (_, index) => `m-${9 - index}`), 'before cursor is exclusive')
+      assert.equal(page2.remaining, 0, 'no older records below the oldest page')
+
+      // Clamp rule: an unresolvable cursor (renumbered by a compaction) clamps
+      // to the newest boundary — EXCLUSIVE at the newest record (the store's
+      // implemented clamp §3.2, verified in messages-store.test.js:179): the
+      // page restarts from the boundary instead of erroring.
+      const pageClamped = await messagesTool.execute({ limit: 10, before: 'm-4049' }, { agent: host, signal })
+      assert.deepEqual(pageClamped.messages.map((message) => message.id), Array.from({ length: 10 }, (_, index) => `m-${18 - index}`), 'missing cursor clamps to the newest boundary (exclusive); history still valid')
+
+      // limit cap: 999 defensive-caps to 50 (store contract).
+      const pageCapped = await messagesTool.execute({ limit: 999 }, { agent: host, signal })
+      assert.equal(pageCapped.messages.length, 20, 'limit normalizes to the 50 max; 20 owned records served')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('B2 dept_who: whole catalog — host + head rows with kind/title/live/sleeping/sessionId and you:true on the caller', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const hostSessionId = SessionId('b2-host-who')
+    await seedHostRegistration(stateDir, hostSessionId, 'board')
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForRooms(root)
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
+      const host = agents.put(fakeParentAgent(SessionId('b2-host-who')))
+      const signal = new AbortController().signal
+
+      const who = pluginCtx().tools.get('dept_who')
+      const result = await who.execute({}, { agent: host, signal })
+      assert.equal(result.members.length, 2, 'host + configured head')
+
+      const hostRow = result.members.find((member) => member.agentId === `host-${hostSessionId}`)
+      assert.equal(hostRow.kind, 'host', 'host row kind')
+      assert.equal(hostRow.title, 'Asistente', 'host row title is Asistente')
+      assert.equal(hostRow.live, true, 'host is live (agents.get defined)')
+      assert.equal(hostRow.sleeping, false)
+      assert.equal(hostRow.sessionId, String(hostSessionId), 'host sessionId is the registry session id')
+      assert.equal(hostRow.you, true, 'host row marks the CALLER you:true')
+
+      const headRow = result.members.find((member) => member.agentId === 'research-head')
+      assert.equal(headRow.kind, 'head', 'head row kind')
+      assert.equal(headRow.title, 'Research department head', 'title = coordinator.title (TEST_ORG coordinator.title is unset → role fallback… see note)')
+      assert.equal(headRow.live, true, 'configured head is live at boot')
+      assert.equal(headRow.sleeping, false)
+      assert.equal(headRow.sessionId, 'head-research-head')
+      assert.equal(headRow.you, false, 'only the caller is you')
+
+      // The head's own view of the roster: you flips to the head.
+      const head = agents.store.get('head-research-head')
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const headWho = headCtx.tools.get('dept_who', key)
+      const headResult = await headWho.execute({}, { agent: head, signal })
+      const headSelf = headResult.members.find((member) => member.agentId === 'research-head')
+      assert.equal(headSelf.you, true, 'head own-layer dept_who marks the head you:true')
+      const hostSelf = headResult.members.find((member) => member.agentId === `host-${hostSessionId}`)
+      assert.equal(hostSelf.you, false)
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('B2 send_message: the unified implementation is the ONE bound after the override — native control tool owns the global name, deepartments agents still get the unified UNIFIED (to array works, native error absent)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Compose the REAL harness control plugin (dsh-tool-subagent-control: the
+    // native global send_message) BEFORE the deepartments row — exactly the
+    // GUI/headless composition. The plugin must NOT throw at apply (no global
+    // duplicate) and must shadow the native per-agent own-layer.
+    const overrideHostSessionId = SessionId('b2-host-override')
+    await seedHostRegistration(stateDir, overrideHostSessionId, 'board')
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir, { nativeControlTool: true })
+    try {
+      await waitForRooms(root)
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
+
+      // The GLOBAL name is the NATIVE one (dsh-base owns it): its schema is
+      // the adapter shape, not the unified one.
+      const globalSend = pluginCtx().tools.get('send_message')
+      assert.ok(globalSend, 'send_message exists on the host plane')
+      assert.equal(globalSend.parameters.properties.subagent_id !== undefined, true, 'global send_message is the NATIVE adapter (subagent_id schema)')
+      assert.equal(typeof globalSend.parameters.properties.to, 'undefined', 'global layer still holds the native tool, not the unified one')
+
+      // The HEAD own layer carries the UNIFIED tool (scoped shadow — the
+      // harness-supported override: duplicate in one layer throws, so a scoped
+      // registration that SHADOWS the global is the valid seam).
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const headSend = headCtx.tools.get('send_message', key)
+      assert.ok(headSend, 'unified send_message installed in the head own layer')
+      assert.equal(headSend.parameters.properties.to !== undefined, true, 'own-layer send_message is the UNIFIED one (to[] schema)')
+      assert.equal(typeof headSend.parameters.properties.subagent_id, 'undefined', 'own-layer send_message is NOT the native adapter')
+
+      // The unified bound implementation WORKS: to[] array against a catalog
+      // id delivers — the native error (subagent_id required/continuable-only)
+      // never surfaces.
+      const head = agents.store.get('head-research-head')
+      const host = agents.put(fakeParentAgent(SessionId('b2-host-override')))
+      const signal = new AbortController().signal
+      const result = await headSend.execute({ to: [`host-${host.id}`], text: 'reply to host' }, { agent: head, signal })
+      assert.equal(result.delivered[`host-${host.id}`], 'delivered', 'unified tool delivers via the catalog (host live, followup inline)')
+      const wake = host.inboxMessages.at(-1)
+      assert.equal(wake.content[0].text, '[From research-head → host-' + host.id + ']: reply to host', 'unified framing')
+      assert.equal(wake.source.kind, 'agent')
     } finally {
       await dispose()
     }
