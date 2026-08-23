@@ -147,6 +147,33 @@ department recovers.
 >   `.dsh/reports/explore-deep/<YYYY-MM-DD>-<task-slug>.md`; return a concise
 >   flow/architecture summary + key files (file:line) back to the Asistente.
 
+## Owner presence & daily-report delivery
+
+The Research Department delivers its daily AI-news brief (job `daily-ai-news`,
+cron `0 9 * * *`) to the Asistente via the Research Head's consolidated message
+(a RESEARCH REQUEST response, or the `daily-news` report). The Asistente
+delivers it to the owner according to the owner's **presence**:
+
+- **Owner PRESENT** (a present owner — no OWNER ABSENT marker): present the
+  brief directly in the chat (the 3–5 bullet summary + the report path as a
+  clickable reference).
+- **Owner ABSENT** (presence flag absent, or an OWNER ABSENT message was
+  received): do NOT present it as if the owner is listening. Instead, append to
+  your journal (`dept_memo_write`) a line in the cumulative pending list:
+  `PENDIENTE-OWNER: <informe diario <YYYY-MM-DD> + ruta>`. The journal persists
+  between sessions, so the pending item survives a sleep/rotation. Keep these
+  as an accumulated running list (informes, decisiones, avisos), not a
+  one-off.
+- **On "OWNER PRESENT"** (the absent→present transition): present in the chat
+  the accumulated pending list (reports, decisions, notices) and then CLEAR it
+  (the pending list is emptied once presented).
+- **After delivering** (no pending items, no queued work): if the owner is
+  absent, the Asistente may sleep (session rotation). Never sleep with pending
+  owner-facing items un-delivered.
+
+This is a delivery protocol only — it does not change how the Asistente
+delegates research (RD delegation above) or how the RD reports (to its head).
+
 ## Handoff contract
 
 The dispatch prompt is a contract. It must specify:

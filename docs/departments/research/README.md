@@ -50,7 +50,7 @@ keys (order as shown):
 | `title` | yes | human-readable title |
 | `role` | yes | the role template id referenced by name — MUST be one of `presets/departments/research/*.md` (today: `researcher`, `analyst`, `reviewer`, `organizer`) |
 | `description` | yes | one line: what the job does / what it is for |
-| `schedule` | info | intended cadence — **informational only**, see Status below |
+| `schedule` | info | when the job **auto-fires** (W1 — real cron scheduler): a 5-field cron (e.g. `0 9 * * *`). A non-cron (human) schedule is displayed but never auto-fires — the head runs it manually. See Status below |
 | `owner` | yes | who owns/runs the job: `research-head` |
 | `outbox` | info | where the worker leaves its deliverable, relative to the department workspace (e.g. `reports/researcher/<YYYY-MM-DD>-<slug>.md`) |
 
@@ -62,7 +62,7 @@ id: <slug>
 title: <human title>
 role: researcher | analyst | reviewer | organizer
 description: <one line: what it does / what it is for>
-schedule: "<informative text, e.g. daily 09:00 (reserved — calendar not yet implemented; manual run via dept_job_run)>"
+schedule: "<when it auto-fires: a 5-field cron, e.g. `0 9 * * *` (auto-runs via the plugin scheduler daemon); OR plain human text (displayed, never auto-fires — manual run via dept_job_run)>"
 owner: research-head
 outbox: <where the deliverable lands, e.g. reports/researcher/<YYYY-MM-DD>-<slug>.md>
 ---
@@ -87,13 +87,20 @@ outbox: <where the deliverable lands, e.g. reports/researcher/<YYYY-MM-DD>-<slug
 5. Commit the new file — the definition is versioned; a job with broken
    frontmatter fails loudly at `dept_job_run`.
 
-## Status: `schedule` is informational (reserved)
+## Status: `schedule` auto-fires (W1 — cron scheduler + calendar runtime)
 
-Per owner decision **D7**, automatic triggering (calendar/scheduler/cron) is
-**NOT implemented in this phase**: the `schedule` field is parsed and
-displayed (§5.5) but never triggers anything. The Research Head executes jobs
-manually with `dept_job_run` — e.g. on the owner's/Asistente's request, or on
-the cadence the head decides.
+Implemented **2026-08-23 (W1)**: automatic triggering is REAL. A job whose
+`schedule` is a **5-field cron** (e.g. `0 9 * * *`) is fired automatically by
+the plugin's scheduler daemon — through the same `dept_job_run` engine. A
+**non-cron (human)** `schedule` text is displayed but never auto-fires: the
+Research Head runs that job manually with `dept_job_run` (e.g. on the
+owner's/Asistente's request, or on the cadence the head decides).
+
+The department also has a **calendar/agenda runtime**: `dept_calendar_add`,
+`dept_calendar_list` and `dept_calendar_remove` manage ad-hoc one-shot entries
+(stored in `<stateDir>/calendar.json`; an entry with a `jobId` runs that job
+when it passes), and the client `agenda/list` endpoint surfaces the jobs'
+next-cron-fire plus the calendar entries as the department's agenda.
 
 ## Relations
 

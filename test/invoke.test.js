@@ -4610,7 +4610,7 @@ test('Task T4 REGRESSION: a subagent-origin child with the REAL FLAT header (ori
   })
 })
 
-test('Batch W4 pure: buildWakePack composes all 9 sections in order (identity, journal path, delta TOC, roster, git, system, ROADMAP tail, skill body, guidance)', async () => {
+test('Batch W4 pure: buildWakePack composes all 10 sections in order (identity, owner presence, journal path, delta TOC, roster, git, system, ROADMAP tail, skill body, guidance)', async () => {
   const pack = buildWakePack({
     memberId: 'host-session-abc',
     role: 'host',
@@ -4622,6 +4622,7 @@ test('Batch W4 pure: buildWakePack composes all 9 sections in order (identity, j
     roadmapTail: '- **2026-08-20** — W3 committed.',
     skillBody: '# deepartments-workflow\nwake routine body',
     kpi: 'wake_counter 3; top open item: finish W4',
+    ownerPresence: 'present',
     includeGuidance: true
   })
 
@@ -4631,9 +4632,10 @@ test('Batch W4 pure: buildWakePack composes all 9 sections in order (identity, j
   assert.match(pack, /pack-v1: present/, 'pack carries the deterministic `pack-v1: present` sentinel in section 1')
   assert.match(pack, /- kpi: wake_counter 3; top open item: finish W4/, 'pack section 1 carries the wake_counter + top open-item KPI line')
 
-  // Every section header present, in order 1-9.
+  // Every section header present, in order 1-10.
   const headers = [
     '## Deepartments wake pack',
+    '## Owner presence: present',
     '## Journal (long-term memory)',
     '## Message delta (received)',
     '## Condensed roster',
@@ -4661,7 +4663,7 @@ test('Batch W4 pure: buildWakePack composes all 9 sections in order (identity, j
   assert.ok(pack.includes('next step: pick the highest-priority unfinished open item'), 'guidance carries the next-step line')
 })
 
-test('Batch W4 pure: buildWakePack renders an EMPTY board-delta section when there are no new messages, and a lean snapshot (sections 1/3/4 only) when only identity+delta+roster are provided', async () => {
+test('Batch W4 pure: buildWakePack renders an EMPTY board-delta section when there are no new messages, and a lean snapshot (sections 1/4/5 only) when only identity+delta+roster are provided', async () => {
   const pack = buildWakePack({
     memberId: 'host-session-abc',
     role: 'host',
@@ -4670,7 +4672,7 @@ test('Batch W4 pure: buildWakePack renders an EMPTY board-delta section when the
     includeGuidance: false
   })
 
-  // Sections 1, 3, 4 present.
+  // Sections 1, 4, 5 present.
   assert.match(pack, /## Deepartments wake pack/, 'identity header present')
   assert.match(pack, /pack-v1: present/, 'P1 presence sentinel present even in the lean snapshot (shared buildWakePack section 1)')
   assert.match(pack, /## Message delta \(received\)/, 'message delta section present')
@@ -4682,7 +4684,8 @@ test('Batch W4 pure: buildWakePack renders an EMPTY board-delta section when the
   assert.ok(!deltaBody.includes('|'), 'no TOC lines for an empty delta')
   assert.match(deltaBody, /^\s*$/, 'delta section body is empty when no new messages')
 
-  // Lean snapshot shape: sections 2,5,6,7,8,9 absent.
+  // Lean snapshot shape: sections 2,3,6,7,8,9,10 absent.
+  assert.ok(!pack.includes('## Owner presence:'), 'no owner-presence section for a lean snapshot')
   assert.ok(!pack.includes('## Journal (long-term memory)'), 'no journal section for a lean snapshot')
   assert.ok(!pack.includes('## Git bearings'), 'no git section for a lean snapshot')
   assert.ok(!pack.includes('## System state'), 'no system-state section for a lean snapshot')
@@ -4690,11 +4693,12 @@ test('Batch W4 pure: buildWakePack renders an EMPTY board-delta section when the
 })
 
 test('Batch W4 pure: buildWakePack degrades gracefully — undefined optional inputs are skipped (never throws) and (unavailable) markers pass through untouched', async () => {
-  // Undefined git/skill/system/roadmap → those sections are omitted, no crash.
+  // Undefined git/skill/system/roadmap/presence → those sections are omitted, no crash.
   const lean = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '- m-0 | a → h | hi', roster: 'x' })
   assert.ok(!lean.includes('## Git bearings'), 'undefined git omitted gracefully')
   assert.ok(!lean.includes('## deepartments-workflow skill'), 'undefined skill omitted gracefully')
   assert.ok(!lean.includes('## System state'), 'undefined system state omitted gracefully')
+  assert.ok(!lean.includes('## Owner presence:'), 'undefined owner-presence omitted gracefully')
 
   // Markers produced by the NON-pure assembly layer pass through untouched.
   const degraded = buildWakePack({
@@ -4704,6 +4708,21 @@ test('Batch W4 pure: buildWakePack degrades gracefully — undefined optional in
   })
   assert.match(degraded, /\(git unavailable\)/, 'git unavailable marker passes through')
   assert.match(degraded, /\(skill unavailable\)/, 'skill unavailable marker passes through')
+})
+
+test('Batch W4 pure: buildWakePack renders the `## Owner presence: present|absent` line per the supplied state (2 cases) and omits it when no state is supplied', async () => {
+  // Present case.
+  const present = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x', ownerPresence: 'present' })
+  assert.match(present, /## Owner presence: present/, 'the wake pack names the PRESENT owner-presence state')
+  assert.match(present, /## Deepartments wake pack/, 'present case still opens with the identity header')
+  assert.ok(!present.includes('## Owner presence: absent'), 'present case does NOT carry the absent label')
+  // Absent case.
+  const absent = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x', ownerPresence: 'absent' })
+  assert.match(absent, /## Owner presence: absent/, 'the wake pack names the ABSENT owner-presence state')
+  assert.ok(!absent.includes('## Owner presence: present'), 'absent case does NOT carry the present label')
+  // No state supplied (or a failed read) → the line is omitted, never a throw.
+  const none = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x' })
+  assert.ok(!none.includes('## Owner presence:'), 'no presence line when no state is supplied (omitted, never a throw)')
 })
 
 test('Batch W4 pure: buildWakePackMessage frames the wake pack as a plugin/notice context (never a user-typed message)', async () => {
@@ -4730,11 +4749,12 @@ test('Batch W4 dept_wake_snapshot: registers globally (host plane), and ONE call
       assert.match(result.snapshot, /## Condensed roster/, 'snapshot carries the condensed roster section')
       assert.match(result.snapshot, /Liveness \(sessionLive\): not baked in/, 'snapshot roster never embeds live session liveness')
 
-      // Lean on-demand snapshot: no journal/git/skill/guidance sections.
+      // Lean on-demand snapshot: no journal/git/skill/guidance (or presence) sections.
       assert.ok(!result.snapshot.includes('## Journal (long-term memory)'), 'lean snapshot has no journal section')
       assert.ok(!result.snapshot.includes('## Git bearings'), 'lean snapshot has no git section')
       assert.ok(!result.snapshot.includes('## deepartments-workflow skill'), 'lean snapshot has no skill section')
       assert.ok(!result.snapshot.includes('## Guidance (wake routine)'), 'lean snapshot has no guidance section')
+      assert.ok(!result.snapshot.includes('## Owner presence:'), 'lean snapshot has no owner-presence section (reserved for the host wake pack)')
     } finally {
       await dispose()
     }
@@ -6325,7 +6345,7 @@ async function f4bBootWithJobDir(stateDir, jobDir) {
   return { ...env, head, headCtx, key }
 }
 
-test('F4b dept_job_list: lists the 3 versioned repo jobs (default jobDir) with the frontmatter fields + status "manual-run"; host plane has NO job tools', async () => {
+test('F4b dept_job_list: lists the 4 versioned repo jobs (default jobDir) with the frontmatter fields + status "manual-run"; host plane has NO job tools', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, head, headCtx, key, dispose } = await bootWithHead(stateDir)
     try {
@@ -6336,7 +6356,7 @@ test('F4b dept_job_list: lists the 3 versioned repo jobs (default jobDir) with t
 
       const result = await headCtx.tools.get('dept_job_list', key).execute({}, { agent: head, signal: new AbortController().signal })
       assert.equal(result.jobDir.endsWith(path.join('docs', 'departments', 'research', 'jobs')), true, 'jobDir resolved to the DEFAULT repo layout (TEST_ORG has no jobDir configured)')
-      assert.equal(result.jobs.length, 3, 'the 3 F4a repo jobs are listed')
+      assert.equal(result.jobs.length, 4, 'the 4 versioned repo jobs are listed')
 
       const byId = new Map(result.jobs.map((job) => [job.id, job]))
       const monitor = byId.get('monitor-dsh-updates')
@@ -6345,7 +6365,7 @@ test('F4b dept_job_list: lists the 3 versioned repo jobs (default jobDir) with t
       assert.equal(monitor.role, 'researcher', 'role template id from the frontmatter')
       assert.equal(typeof monitor.description, 'string')
       assert.match(monitor.description, /Check DSH core/, 'description from the frontmatter')
-      assert.equal(monitor.schedule, 'daily 09:00 (reserved — calendar not yet implemented; manual run via dept_job_run)', 'the QUOTED YAML schedule is unwrapped to its VALUE')
+      assert.equal(monitor.schedule, '0 9 * * *', 'the QUOTED YAML schedule is unwrapped to its VALUE')
       assert.equal(monitor.status, 'manual-run', 'no scheduler this phase (D7) — every job is manual-run')
       assert.equal(monitor.owner, 'research-head', 'owner from the frontmatter')
       assert.equal(monitor.error, undefined, 'a valid definition carries no per-entry error')
@@ -6359,6 +6379,11 @@ test('F4b dept_job_list: lists the 3 versioned repo jobs (default jobDir) with t
       assert.ok(factCheck, 'fact-check-queue listed')
       assert.equal(factCheck.role, 'reviewer')
       assert.equal(factCheck.title, 'Fact-check the department\'s unverified reports')
+      const daily = byId.get('daily-ai-news')
+      assert.ok(daily, 'daily-ai-news listed')
+      assert.equal(daily.title, 'Daily AI news brief (fresh, de-duplicated)', 'title from the frontmatter')
+      assert.equal(daily.role, 'researcher', 'role template id from the frontmatter')
+      assert.equal(daily.schedule, '0 9 * * *', 'the QUOTED YAML schedule is unwrapped to its VALUE')
     } finally {
       await dispose()
     }
@@ -6803,10 +6828,13 @@ test('F5 RACE FIX: a composition WITHOUT the workspaceRegistry seam (DEFINITIVE 
 // The presence flag: `presence/get`/`presence/set` RPC (pure dispatch +
 // persistence to `<stateDir>/presence.json`), the A3 `ask_user_question` guard
 // (deny ONLY the registered host when the owner is absent), and the A4 host
-// pre-step injector (append an "Owner presence" node on a TRANSITION).
+// pre-step (dedup fix, 2026-08-23): NO presence node is injected on a
+// TRANSITION — the ONLY transition channel is the bus notify
+// (`notifyHostPresence` via `presence/set`), and the CURRENT state is baked
+// into every host wake pack (`buildWakePack` ownerPresence).
 // Pure-dispatch tests exercise the exported dispatch + the SAME exported
 // file persistence helpers the production wiring uses; the real-Loader tests
-// assert the live guard + the pre-step injector.
+// assert the live guard + the pre-step dedup + the wake-pack state line.
 
 /** In-memory deps for the pure presence dispatch — the presence closures read/
  * write the tmp stateDir via the SAME exported helpers production wraps. */
@@ -6983,7 +7011,7 @@ test('A3 guard (real Loader): owner PRESENT (default, no file) ALLOWS the regist
   })
 })
 
-test('A4 pre-step (real Loader): a host observes an absent→present TRANSITION — the "Owner presence" node is injected once and NOT repeated on an unchanged step', async () => {
+test('A4 pre-step (real Loader): NO presence node is injected on a transition — the injected wake pack alone carries the CURRENT owner-presence state (dedup fix)', async () => {
   await withTempStateDir(async (stateDir) => {
     const sessionId = SessionId(randomUUID())
     await seedHostRegistration(stateDir, sessionId)
@@ -6993,29 +7021,29 @@ test('A4 pre-step (real Loader): a host observes an absent→present TRANSITION 
       await waitForHeadMaterialized(agents)
       const host = agents.put(fakeParentAgent(sessionId))
       const signal = new AbortController().signal
-      await seedJournal(stateDir, `host-${sessionId}`, 'PRESENCE TRANSITION: observe the toggle on the next step.')
+      await seedJournal(stateDir, `host-${sessionId}`, 'PRESENCE DEDUP: the host must be told ONCE on a toggle.')
 
       const claimed = preStepClaimed('any message')
 
-      // Step 1 — owner ABSENT at boot: the pack injects, the presence node is
-      // SEEDED (no node yet — it fires only on a LATER transition).
+      // Step 1 — owner ABSENT at boot: exactly the wake pack is injected; it is
+      // the ONLY context node, and it carries the CURRENT (absent) state.
       const first = await runPreStep(pluginCtx, host, claimed, signal)
-      assert.equal(first.messages.length, claimed.length + 1, 'first pre-step injects exactly the wake pack')
-      assert.ok(!first.messages.some((m) => m.content?.[0]?.text?.includes('Owner presence:')), 'no presence node on the seeding step')
+      assert.equal(first.messages.length, claimed.length + 1, 'first pre-step injects exactly one node (the wake pack)')
+      const packNode = first.messages[first.messages.length - 1]
+      assert.equal(packNode.source.kind, 'plugin', 'the injected node is a plugin context')
+      assert.equal(packNode.source.form, 'notice', 'the injected node is a notice (collapsed row)')
+      assert.match(packNode.content[0].text, /## Owner presence: absent/, 'the wake pack carries the CURRENT (absent) owner-presence state')
 
-      // Step 2 — owner becomes PRESENT (flip the durable file; the injector
-      // refreshes the presence cache from it each step).
+      // Step 2 — owner becomes PRESENT: the pre-step injects NOTHING (no presence
+      // node and no re-pack). The transition is delivered by the bus notify
+      // (notifyHostPresence), so the host is NEVER told twice on a toggle.
       await writePresenceStateFile(stateDir, { present: true, updatedAt: Date.now() })
       const second = await runPreStep(pluginCtx, host, claimed, signal)
-      assert.equal(second.messages.length, claimed.length + 1, 'transition step injects ONE node (no re-pack)')
-      const presenceNode = second.messages[second.messages.length - 1]
-      assert.equal(presenceNode.source.kind, 'plugin', 'presence node is a plugin context')
-      assert.equal(presenceNode.source.form, 'notice', 'presence node is a notice (collapsed row)')
-      assert.match(presenceNode.content[0].text, /Owner presence: present/, 'the node names the NEW present state')
+      assert.equal(second.messages.length, claimed.length, 'a transition injects NO presence node and NO re-pack (single channel = bus notify)')
 
-      // Step 3 — no further change: the transition node is NOT repeated.
+      // Step 3 — no further change: still nothing injected.
       const third = await runPreStep(pluginCtx, host, claimed, signal)
-      assert.equal(third.messages.length, claimed.length, 'an unchanged step injects nothing (presence node not repeated)')
+      assert.equal(third.messages.length, claimed.length, 'an unchanged step injects nothing')
     } finally {
       await dispose()
     }

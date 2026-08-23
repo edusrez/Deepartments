@@ -3,7 +3,7 @@ id: monitor-dsh-updates
 title: Monitor DSH + Deepartments ecosystem updates
 role: researcher
 description: Check DSH core and the Deepartments deployment plugin set for new versions on the rc channel, read the changelogs, and report potential improvements or regressions to the Research Head.
-schedule: "daily 09:00 (reserved — calendar not yet implemented; manual run via dept_job_run)"
+schedule: '0 9 * * *'
 owner: research-head
 outbox: reports/researcher/<YYYY-MM-DD>-dsh-updates.md
 ---

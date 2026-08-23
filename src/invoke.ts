@@ -588,13 +588,15 @@ export function buildWakePackMessage(packText: string) {
 }
 
 /**
- * Build the owner-presence change node (Feature A, A4) — the mirror of
- * `buildWakePackMessage`: a compact plugin/notice node carrying
- * `Owner presence: present|absent`. Injected FRESH via `agent/pre-step` at
- * message-arrival time by the host injector ONLY when the presence flag
- * transits (absent→present or present→absent) since the last injected value,
- * so the HOST observes the toggle on its next step WITHOUT re-sending the
- * ~5 kB wake pack. Reused by the fire-and-forget `presence/set` host notify.
+ * Build the owner-presence change node (Feature A, A4) — a compact
+ * plugin/notice node carrying `Owner presence: present|absent`. It is the ONLY
+ * presence channel now (A4 dedup, 2026-08-23): produced by the fire-and-forget
+ * `presence/set` host notify (`notifyHostPresence` → `target.followup`) when
+ * the flag CHANGES, so the host observes the toggle on its next turn. The
+ * `agent/pre-step` TRANSITION node was REMOVED (it duplicated the notify); the
+ * CURRENT presence state is instead baked into every host wake pack via
+ * `buildWakePack`'s `ownerPresence` (read at assembly time) — covering
+ * restarts/future sessions without re-notifying.
  */
 export function buildPresenceMessage(present: boolean) {
   const text = `Owner presence: ${present ? 'present' : 'absent'}`
@@ -662,8 +664,8 @@ export const HOST_WAKE_NEXT_STEP =
 /**
  * The pre-rendered parts `buildWakePack` composes. Every field except
  * memberId/role/messageDelta/roster is OPTIONAL: the wake injection supplies
- * all of them (sections 1-9), while the on-demand `dept_wake_snapshot` supplies
- * only identity+messageDelta+roster (sections 1, 3, 4). A section is rendered
+ * all of them (sections 1-10), while the on-demand `dept_wake_snapshot` supplies
+ * only identity+messageDelta+roster (sections 1, 4, 5). A section is rendered
  * exactly when its content is present — so the SAME pure builder produces both
  * the full wake pack and the lean live snapshot.
  */
@@ -679,26 +681,35 @@ export interface WakePackParts {
    * `assembleWakePack` computes it live from the journal, degrading gracefully
    * when the journal is absent — so a never-slept session still gets a KPI line. */
   kpi?: string
-  /** Pre-resolved durable journal path (wake injection only; section 2). */
+  /** Pre-resolved durable journal path (wake injection only; section 3). */
   journalPath?: string
   /** Message-delta TOC body (latest received, spec 003 §7.2). '' → empty
    * section (no messages yet). */
   messageDelta: string
   /** Condensed roster (registry flags only — NEVER live session liveness). */
   roster: string
-  /** Git bearings (section 5; wake injection only). */
+  /** Git bearings (section 6; wake injection only). */
   git?: string
-  /** System state (section 6; wake injection only). */
+  /** System state (section 7; wake injection only). */
   systemState?: string
-  /** ROADMAP "Current status" tail (section 7; wake injection only). */
+  /** ROADMAP "Current status" tail (section 8; wake injection only). */
   roadmapTail?: string
-  /** Full deepartments-workflow skill body (section 8; wake injection only). */
+  /** Full deepartments-workflow skill body (section 9; wake injection only). */
   skillBody?: string
-  /** Include the closing guidance (section 9)? Defaults true (wake injection). */
+  /** Include the closing guidance (section 10)? Defaults true (wake injection). */
   includeGuidance?: boolean
+  /** Owner-presence snapshot (Feature A/A4 dedup, 2026-08-23; section 2): a single line
+   * `## Owner presence: present|absent` rendering the CURRENT state read at
+   * wake-pack assembly time. Present in EVERY host wake pack (always inject the
+   * current state). Undefined/empty → the line is OMITTED (a presence read
+   * failure degrades to "no line", never a throw) — transitions are carried by
+   * the bus notify (notifyHostPresence), never re-sent as a second node. Only
+   * the host wake injection supplies it; the lean on-demand snapshot
+   * (dept_wake_snapshot) does NOT. */
+  ownerPresence?: string
 }
 
-/** Compose the Deepartments context pack as a string, sections 1-9 in order.
+/** Compose the Deepartments context pack as a string, sections 1-10 in order.
  * PURE: no I/O, no registry/live reads — every section body is provided by the
  * caller. Enforces the deep rule by construction: there is simply no channel to
  * inject live `sessionLive` liveness here. */
@@ -717,7 +728,16 @@ export function buildWakePack(parts: WakePackParts): string {
   }
   sections.push(identityLines.join('\n'))
 
-  // 2 — journal pointer (wake injection only)
+  // 2 — current owner-presence snapshot (Feature A/A4 dedup, 2026-08-23): a
+  // single line `## Owner presence: present|absent` rendering the state read at
+  // assembly time. ALWAYS rendered for the host wake pack; OMITTED (never a
+  // throw) when no state is supplied — the bus notify (notifyHostPresence)
+  // carries transitions instead, so the host is never told twice.
+  if (parts.ownerPresence !== undefined && parts.ownerPresence.trim() !== '') {
+    sections.push(`## Owner presence: ${parts.ownerPresence.trim()}`)
+  }
+
+  // 3 — journal pointer (wake injection only)
   if (parts.journalPath !== undefined && parts.journalPath.trim() !== '') {
     sections.push([
       '## Journal (long-term memory)',
@@ -726,37 +746,37 @@ export function buildWakePack(parts: WakePackParts): string {
     ].join('\n'))
   }
 
-  // 3 — message delta TOC (latest received; always rendered; body may be empty)
+  // 4 — message delta TOC (latest received; always rendered; body may be empty)
   sections.push(
     parts.messageDelta.trim() === ''
       ? '## Message delta (received)'
       : `## Message delta (received)\n${parts.messageDelta}`
   )
 
-  // 4 — condensed roster (always rendered)
+  // 5 — condensed roster (always rendered)
   sections.push(`## Condensed roster\n${parts.roster}`)
 
-  // 5 — git bearings
+  // 6 — git bearings
   if (parts.git !== undefined && parts.git.trim() !== '') {
     sections.push(`## Git bearings\n${parts.git}`)
   }
 
-  // 6 — system state
+  // 7 — system state
   if (parts.systemState !== undefined && parts.systemState.trim() !== '') {
     sections.push(`## System state\n${parts.systemState}`)
   }
 
-  // 7 — ROADMAP "Current status" tail
+  // 8 — ROADMAP "Current status" tail
   if (parts.roadmapTail !== undefined && parts.roadmapTail.trim() !== '') {
     sections.push(`## ROADMAP current status (tail)\n${parts.roadmapTail}`)
   }
 
-  // 8 — full skill body
+  // 9 — full skill body
   if (parts.skillBody !== undefined && parts.skillBody.trim() !== '') {
     sections.push(`## deepartments-workflow skill (full body)\n${parts.skillBody}`)
   }
 
-  // 9 — guidance (canonical routine + next step; wake injection only)
+  // 10 — guidance (canonical routine + next step; wake injection only)
   if (parts.includeGuidance !== false) {
     sections.push([
       '## Guidance (wake routine)',
@@ -2037,12 +2057,6 @@ export function applyInvoke(ctx: Context, config: Config) {
   // session-scoped flag is the reliable presence gate. Cleared in the host
   // dept_sleep branch so a post-sleep wake re-injects a FRESH pack.
   const wakePackInjected = new Set<string>()
-  // Feature A — the LAST owner-presence value injected per host session (sessionId
-  // → present|absent). Seeded at wake-pack injection; the host pre-step injector
-  // appends a `buildPresenceMessage` node ONLY when the flag TRANSITS from the
-  // last injected value, so a toggle is observed on the host's next step without
-  // re-sending the ~5kB pack. Post/session-scoped (never a module global).
-  const presenceInjected = new Map<string, boolean>()
   // Fix A — deferred in-place surface reset intent for the host dept_sleep
   // branch (see the Batch 7 helper comment + dept_sleep Step 3): the close
   // branch PLAIN-APPENDS the journal node and records sessionId → the
@@ -2240,13 +2254,17 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   // --- Feature A — owner-presence state + host notify + ask_user guard ------
   // `<stateDir>/presence.json` is the durable source; the in-memory `presenceCache`
-  // is the SYNCHRONOUS view the guard + the A4 pre-step injector read (a guard
-  // runs at tool-call time, before any await, so it cannot await a disk read).
-  // Seeded at apply time (readFileSync — a tiny one-off), refreshed at every
-  // host pre-step (so the injector observes toggles), and updated atomically on
-  // every `presence/set`. Per-apply closure only (AGENTS.md rule 4 — no
+  // is the SYNCHRONOUS view the guard + the A3 `ask_user_question` guard read (a
+  // guard runs at tool-call time, before any await, so it cannot await a disk
+  // read). Seeded at apply time (readFileSync — a tiny one-off), refreshed at
+  // every host pre-step (so the guard's synchronous view stays current even if
+  // the file is edited outside the RPC), and updated atomically on every
+  // `presence/set`. Per-apply closure only (AGENTS.md rule 4 — no
   // module-global mutable state). Default present:true (owner is here until
-  // toggled absent — the guard is never over-eager at boot).
+  // toggled absent — the guard is never over-eager at boot). A4 dedup
+  // (2026-08-23): the pre-step no longer injects a presence TRANSITION node —
+  // the only transition channel is the bus notify (`notifyHostPresence`); the
+  // current state is baked into every host wake pack via buildWakePack.
   const presenceCache: PresenceState = readPresenceStateFile(config.stateDir)
   const refreshPresence = (): void => {
     const next = readPresenceStateFile(config.stateDir)
@@ -3502,9 +3520,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
-  /** Assemble the FULL wake context pack (sections 1-9) for the host wake
-   * injection: identity + KPI + pre-resolved journal path + live message delta +
-   * roster + git + system state + ROADMAP tail + full skill body + guidance. */
+  /** Assemble the FULL wake context pack (sections 1-10) for the host wake
+   * injection: identity + KPI + current owner-presence state + pre-resolved
+   * journal path + live message delta + roster + git + system state + ROADMAP
+   * tail + full skill body + guidance. */
   const assembleWakePack = async (memberId: string, journalPath: string): Promise<string> => {
     const [messageDelta, git, roadmapTail, skillBody, kpi] = await Promise.all([
       readWakeMessageDelta(memberId),
@@ -3513,6 +3532,19 @@ export function applyInvoke(ctx: Context, config: Config) {
       readWakeSkillBody(),
       readWakeJournalKpi(journalPath)
     ])
+    // Feature A (A4 dedup, 2026-08-23) — read the CURRENT owner-presence state
+    // at assembly time and bake it into the wake pack. `readPresenceStateFile`
+    // never throws (an absent/unreadable file defaults present:true); the
+    // defensive try/catch + the omitted-line degrade in buildWakePack guarantee
+    // this path NEVER throws and NEVER renders a bogus presence line when the
+    // state cannot be read — transitions are delivered by the bus notify.
+    let ownerPresence: string | undefined
+    try {
+      const state = readPresenceStateFile(config.stateDir)
+      ownerPresence = state.present === true ? 'present' : 'absent'
+    } catch {
+      ownerPresence = undefined
+    }
     return buildWakePack({
       memberId,
       role: 'host',
@@ -3524,13 +3556,16 @@ export function applyInvoke(ctx: Context, config: Config) {
       systemState: buildWakeSystemState(),
       roadmapTail,
       skillBody,
+      ownerPresence,
       includeGuidance: true
     })
   }
 
-  /** Assemble the LEAN on-demand wake snapshot (sections 1, 3, 4 only — identity,
+  /** Assemble the LEAN on-demand wake snapshot (sections 1, 4, 5 only — identity,
    * message delta, condensed roster) via the SAME pure `buildWakePack`
-   * builder. Used by `dept_wake_snapshot` for live freshness mid-session. */
+   * builder. Used by `dept_wake_snapshot` for live freshness mid-session. It
+   * intentionally does NOT carry the owner-presence line (that is baked into
+   * the host wake pack injection only; the snapshot is for on-demand reads). */
   const assembleWakeSnapshot = async (memberId: string): Promise<string> => {
     const messageDelta = await readWakeMessageDelta(memberId)
     return buildWakePack({
@@ -3573,32 +3608,22 @@ export function applyInvoke(ctx: Context, config: Config) {
     // Host-only: a registered post (head/worker) already has its own lean wake
     // surface; the host wake pack is for HOST Asistente sessions only.
     if (postIdForChild(sessionId) !== undefined) return decision
-    // Feature A (A4) — owner-presence change node, HOST only. Runs BEFORE the
-    // wake-pack gate so a mid-session toggle is still observed on the host's
-    // NEXT step after the pack was injected (the disabled wakePackInjected
-    // early-return would otherwise swallow it). The node is COMPOSED, not
-    // returned, so the wake pack + the presence node land in the SAME step when
-    // both are new. Injected ONLY on a TRANSITION from the last injected value
-    // (seeded at wake-pack injection), so the host observes the toggle without
-    // re-sending the ~5kB pack. `presenceInjected` is keyed per host session;
-    // posts/subagents never reach here (gated above / fail the host check).
+    // Feature A (A4 dedup, 2026-08-23) — the owner-presence TRANSITION node was
+    // REMOVED from the pre-step: the ONLY transition channel is the bus notify
+    // (`notifyHostPresence`, fired by `presence/set` on a real CHANGE), so the
+    // host is never told twice on a toggle. The CURRENT state is instead baked
+    // into EVERY host wake pack (buildWakePack `ownerPresence`, read at
+    // assembly time) — this covers restarts/future sessions without duplicating
+    // notifications. The host entry is resolved here for the retired gate below.
     const hostId = hostIdForSession(sessionId)
     const hostEntry = hosts.get(hostId)
-    // Refresh the synchronous presence cache from the durable file so this
-    // injector observes a toggle (e.g. a `presence/set` from another surface or
-    // a direct file edit) exactly at the next model step — presence.json is tiny.
+    // Keep the synchronous presence cache current at each host turn (it feeds
+    // the A3 `ask_user_question` guard); presence.json is tiny.
     refreshPresence()
-    const currentPresence = presenceCache.present !== false
-    const presenceChanged = presenceInjected.has(sessionId) && presenceInjected.get(sessionId) !== currentPresence
-    presenceInjected.set(sessionId, currentPresence)
-    const presenceNode = presenceChanged ? [buildPresenceMessage(currentPresence)] : []
-    // Wake-pack gate — an already-injected session returns here WITH any new
-    // presence node (a repeated step re-injects neither the pack nor a stale
-    // presence node; a TRULY changed session returns the presence node only).
+    // Wake-pack gate — an already-injected session returns here UNCHANGED (a
+    // repeated step re-injects neither the pack nor any presence node).
     if (wakePackInjected.has(sessionId)) {
-      return presenceChanged
-        ? { kind: 'enter', messages: [...decision.messages, ...presenceNode] }
-        : decision
+      return decision
     }
     // ---- Task T4: TRANSIENT dispatched subagent → slim ROLE-focused block, NOT
     // the full ~4.6-4.9k host pack. `origin === 'subagent'` is the robust
@@ -3634,7 +3659,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     // pre-step ("plain until it becomes the registered host"). Registered
     // posts are already gated above (2624) and transient subagents in the T4
     // branch above (2641) — both keep their behavior untouched. The `hostEntry`
-    // was resolved in the presence block above (no re-read); U2 (spec 002 §4):
+    // was resolved in the host-entry resolution above (no re-read); U2 (spec 002 §4):
     // a RETIRED host entry never gets the wake pack — retire means "no pack +
     // no registration"; a message typed into the old tab after a rotation
     // behaves as a PLAIN session (deliberate). The off-path stays free of
@@ -3684,11 +3709,12 @@ export function applyInvoke(ctx: Context, config: Config) {
     // throws for a missing journal/file, so a brand-new host still gets a pack.
     const pack = await assembleWakePack(hostId, journalPathFor(hostId))
     wakePackInjected.add(sessionId)
-    // `presenceNode` is empty on the first (seeding) step — the wake pack itself
-    // orients; a LATER toggle delivers the presence node on its own step above.
+    // The wake pack alone orients — it carries the CURRENT owner-presence state
+    // (section 2); a later toggle is delivered by the bus notify, never by a
+    // second pre-step node (A4 dedup, 2026-08-23).
     return {
       kind: 'enter',
-      messages: [...decision.messages, ...presenceNode, buildWakePackMessage(pack)]
+      messages: [...decision.messages, buildWakePackMessage(pack)]
     }
   })
 
@@ -4428,8 +4454,10 @@ export function applyInvoke(ctx: Context, config: Config) {
       // <slug>.md` (see docs/departments/research/README.md — the F4a job
       // files), read from the repo — the SAME repo tree the F3 role
       // templates come from (`repoRoot`, the plugin's bundle dir floor).
-      // There is NO scheduler/calendar this phase (D7): `schedule` is parsed
-      // and displayed, never triggered. -------------------------------------
+      // W1 — the scheduler IS real: `schedule` is a job's cadence (a 5-field
+      // cron auto-fires via the scheduler daemon; a non-cron human schedule is
+      // displayed but never triggers). A manual dept_job_run still works.
+      // ---------------------------------------------------------------------
       // The job reader (parseJobDefFrontmatter / jobDirFor / readJobDefinitionFile
       // — module-level, shared with the agenda/dispatch + scheduler) and the job
       // idempotency/role guards (validateJobRole / runningJobWorker — apply-scope,
@@ -4438,8 +4466,9 @@ export function applyInvoke(ctx: Context, config: Config) {
       // and the agenda never drift. `schedule` is parsed + displayed (and the
       // scheduler below now also fires cron-style schedules) — it is no longer
       // purely informational. -----------------------------------------------
-      /** One listed job (spec 004 §5.5 + D7): the frontmatter fields, the
-       * resolved repo path, `status: "manual-run"` (no calendar this phase)
+      /** One listed job (spec 004 §5.5): the frontmatter fields, the
+       * resolved repo path, `status: "manual-run"` (the field is a holdover —
+       * a cron-scheduled job auto-fires regardless; see the scheduler daemon)
        * and an `error` carrying the reason when the definition's frontmatter
        * is invalid (per-entry — the list never fails as a whole). */
       interface JobListItem {
@@ -4457,7 +4486,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
       disposers.push(agentCtx.tools.register(defineTool({
         name: 'dept_job_list',
-        description: 'List the versioned JOB definitions of YOUR department (spec 004 §5.5): scan the department jobDir (config org.departments[].jobDir — repo-relative or absolute; default <repoRoot>/docs/departments/<your-department-id>/jobs) and parse each *.md definition frontmatter (id/title/role/description/schedule?/owner/outbox?). Returns the resolved jobDir + the list {id, title, role, description, schedule, status:"manual-run", owner, path} per job; a definition with INVALID frontmatter is reported PER-ENTRY with an error (the whole list is never failed). `schedule` is informational only (D7 — no calendar/scheduler this phase): every job runs MANUALLY via dept_job_run. Registered ONLY in the head own-layer.',
+        description: 'List the versioned JOB definitions of YOUR department (spec 004 §5.5): scan the department jobDir (config org.departments[].jobDir — repo-relative or absolute; default <repoRoot>/docs/departments/<your-department-id>/jobs) and parse each *.md definition frontmatter (id/title/role/description/schedule?/owner/outbox?). Returns the resolved jobDir + the list {id, title, role, description, schedule, status:"manual-run", owner, path} per job; a definition with INVALID frontmatter is reported PER-ENTRY with an error (the whole list is never failed). `schedule` is the job cadence (W1): a 5-field cron (e.g. `0 9 * * *`) AUTO-FIRES via the plugin scheduler daemon; a non-cron (human) schedule never auto-fires — that job runs MANUALLY via dept_job_run. Registered ONLY in the head own-layer.',
         parameters: {},
         output: {
           schema: {
@@ -4558,7 +4587,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
       disposers.push(agentCtx.tools.register(defineTool({
         name: 'dept_job_run',
-        description: 'Execute ONE versioned JOB of YOUR department (spec 004 §5.4, D7 — manual execution; no calendar): read the job definition <jobId>.md in the department jobDir (config org.departments[].jobDir; default <repoRoot>/docs/departments/<your-department-id>/jobs), validate its role against presets/departments/<your-department>/<role>.md, and materialize a WORKER exactly like dept_worker_spawn with role = the definition role, task = the JOB BODY (the full concrete assignment), jobId recorded, slug = the job id (deduped -2, -3… including retired), title = the HUMAN frontmatter title. Returns the worker id + session id + title + job id + the definition path. IDEMPOTENCY: a job already running (a LIVE, non-retired job worker of your department with that jobId) is NOT duplicated — it errors `job already running: <workerId>` (retire it explicitly with dept_worker_retire to restart). Missing job / broken frontmatter / unknown role → loud error (a versioned definition with a syntax error must fail the run, never spawn a task-less worker). `schedule` is ignored (reserved, D7). Registered ONLY in the head own-layer.',
+        description: 'Execute ONE versioned JOB of YOUR department (spec 004 §5.4 — manual execution; the W1 scheduler daemon uses the SAME engine for cron auto-fires): read the job definition <jobId>.md in the department jobDir (config org.departments[].jobDir; default <repoRoot>/docs/departments/<your-department-id>/jobs), validate its role against presets/departments/<your-department>/<role>.md, and materialize a WORKER exactly like dept_worker_spawn with role = the definition role, task = the JOB BODY (the full concrete assignment), jobId recorded, slug = the job id (deduped -2, -3… including retired), title = the HUMAN frontmatter title. Returns the worker id + session id + title + job id + the definition path. IDEMPOTENCY: a job already running (a LIVE, non-retired job worker of your department with that jobId) is NOT duplicated — it errors `job already running: <workerId>` (retire it explicitly with dept_worker_retire to restart). Missing job / broken frontmatter / unknown role → loud error (a versioned definition with a syntax error must fail the run, never spawn a task-less worker). `schedule` does NOT gate this run: a manual dept_job_run executes the job regardless of its `schedule`, and a cron-scheduled job auto-fires via the scheduler daemon. Registered ONLY in the head own-layer.',
         parameters: {
           jobId: { type: 'string', required: true, description: 'The job definition id (the file <jobId>.md in the department jobDir — e.g. "monitor-dsh-updates").' }
         },

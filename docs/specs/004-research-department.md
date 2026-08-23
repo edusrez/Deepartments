@@ -2,7 +2,7 @@
 agent: builder
 date: 2026-08-23
 task: research-department-spec
-spec_ref: "Owner decisions (2026-08-23): the Deepartments project becomes ONE REAL COMPANY — durable departments with a head who coordinates and deploys agents, and only the head reports to the Asistente or to other departments. The RESEARCH DEPARTMENT is headed by the Research Head (RH): the RH coordinates/deploys researchers and is the one who reports results; the Asistente never coordinates any research (no on-demand, no scheduled, no reply-triggered) — delegating a research request is send_message to the RH, the only path. TWO operational agent kinds (jobs — versioned, reusable task definitions; ephemerals — one-off, retired after), both materialized as DISCONNECTED root-agent workers with their own sidebar session (never harness subagents). ROLES are person templates referenced by name. Sidebar folder 'Research Department' (L1 recommended: real workspace per department; 'Ungrouped' removed). Messaging ACL: worker → own department only; head → any head + own department; host → everyone. Jobs versioned in the repo (schedule RESERVED — no scheduler this phase; manual dept_job_run). Primary sources: explore-deep/2026-08-23-sidebar-catalog-departments.md (sidebar/catalog file:line facts), explore-deep/2026-08-22-head-machinery.md, docs/specs/003-agent-messaging.md (spec style), presets/ + org.ts + invoke.ts + messages-store.ts verified in-repo."
+spec_ref: "Owner decisions (2026-08-23): the Deepartments project becomes ONE REAL COMPANY — durable departments with a head who coordinates and deploys agents, and only the head reports to the Asistente or to other departments. The RESEARCH DEPARTMENT is headed by the Research Head (RH): the RH coordinates/deploys researchers and is the one who reports results; the Asistente never coordinates any research (no on-demand, no scheduled, no reply-triggered) — delegating a research request is send_message to the RH, the only path. TWO operational agent kinds (jobs — versioned, reusable task definitions; ephemerals — one-off, retired after), both materialized as DISCONNECTED root-agent workers with their own sidebar session (never harness subagents). ROLES are person templates referenced by name. Sidebar folder 'Research Department' (L1 recommended: real workspace per department; 'Ungrouped' removed). Messaging ACL: worker → own department only; head → any head + own department; host → everyone. Jobs versioned in the repo (W1 — implemented 2026-08-23: a 5-field cron `schedule` auto-fires via the plugin scheduler daemon; a human-text schedule = manual `dept_job_run`)). Primary sources: explore-deep/2026-08-23-sidebar-catalog-departments.md (sidebar/catalog file:line facts), explore-deep/2026-08-22-head-machinery.md, docs/specs/003-agent-messaging.md (spec style), presets/ + org.ts + invoke.ts + messages-store.ts verified in-repo."
 outcome: FINAL DRAFT (owner decisions adopted) — DRAFT-ONLY, no commit, no other files touched
 files_touched:
   - docs/specs/004-research-department.md (this draft)
@@ -29,7 +29,7 @@ against the working tree at spec time.
 | D4 | **Roles inside each department** (e.g. researchers, reviewers who check report factuality, organizers who organize reports weekly). Organic: in the future the RH or another department may ask the future internal-programming department to add NEW subroles. Roles are person templates (system prompt + toolset) referenced by name. | §3.2, §7.1 |
 | D5 | **UI/sidebar**: the Research Department agents appear in the sidebar inside a folder named **"Research Department"** (today: "root" and "Ungrouped"). **"Ungrouped" is removed.** The Research Head and its workers appear in that folder. | §6 |
 | D6 | **Messaging**: workers → only agents of THEIR department (incl. their head); heads → any head (RH ↔ Asistente ↔ other heads) + the agents of their department. A worker CANNOT write to heads of other departments nor to agents of other departments (everything goes via its head). The Asistente (host) can talk to everyone. | §5.6 |
-| D7 | **Jobs**: definitions versioned in the repo (what the role does, periodicity, assignment — e.g. `docs/departments/research/jobs/*.md`). **Automatic triggering (calendar/scheduler/cron) is NOT implemented in this phase** — `schedule` field RESERVED; manual execution by the RH (tool `dept_job_run`) meanwhile. | §3.3, §5.4 |
+| D7 | **Jobs** (implemented 2026-08-23, W1): definitions versioned in the repo (what the role does, periodicity, assignment — e.g. `docs/departments/research/jobs/*.md`). **Automatic triggering is REAL**: a 5-field cron `schedule` auto-fires via the plugin scheduler daemon (through `dept_job_run`); a non-cron (human) schedule is manual — the RH runs it with `dept_job_run`. Calendar/agenda runtime: `dept_calendar_add`/`dept_calendar_list`/`dept_calendar_remove` + the client `agenda/list`. | §3.3, §5.4 |
 | D8 | **Session scope**: marathon — design + COMPLETE implementation in this session. | §8 |
 
 ---
@@ -117,13 +117,16 @@ report identified as gaps:
 6. **G6 — Messaging ACL (D6)** in `deliverBusRecord`: worker → own department
    only; head → any head + own department; host → everyone; per-recipient
    `'failed'` on violation (never fails the whole send).
-7. **G7 — Jobs versioned + manually executed (D7).** `dept_job_run`/`dept_job_list`
-   read the repo definitions; `schedule` is reserved (no scheduler).
+7. **G7 — Jobs versioned (D7, W1).** `dept_job_run`/`dept_job_list`
+   read the repo definitions; a 5-field cron `schedule` auto-fires via the
+   scheduler daemon, a non-cron (human) schedule is manual (`dept_job_run`).
 
 ### Non-goals (explicitly out of scope for this spec)
 
-- **No scheduler/calendar/cron** (D7): `schedule` is a reserved, informational
-  field; `dept_job_run` is manual.
+- **Scheduler/calendar/cron — implemented 2026-08-23 (W1)** (a D7 non-goal at
+  spec time, since realized): a 5-field cron `schedule` auto-fires via the
+  plugin scheduler daemon; `dept_job_run` remains the manual path; calendar
+  tools `dept_calendar_add/list/remove` + `agenda/list` are installed.
 - **No job status/queue registry** beyond the worker lifecycle (created → work
   → memo → sleep → retired): no `jobs.json` status projection, no re-assign
   queue, no `dsh-goal` integration this phase.
@@ -201,7 +204,7 @@ id: monitor-dsh-updates
 title: Monitor dsh + plugin updates daily
 role: researcher        # the role template to materialize (D4)
 description: Check the dsh release + this plugin's updates, report to the RH.
-schedule: daily         # RESERVED (D7) — NOT implemented; informational only
+schedule: "0 9 * * *"     # W1 — a 5-field cron AUTO-FIRES via the scheduler daemon
 owner: research-head
 ---
 <the task body: the full prompt the head would otherwise write>
@@ -210,8 +213,9 @@ owner: research-head
 - `dept_job_run <id>` reads the definition and materializes a worker with the
   role's persona + the job's task as its assignment (equivalent to
   `dept_worker_spawn` with `jobId`), §5.4.
-- `schedule` is parsed and displayed but **never triggers anything** in this
-  phase (D7).
+- A 5-field cron `schedule` **auto-fires** via the plugin scheduler daemon
+  (W1 — implemented 2026-08-23); a non-cron (human) schedule is displayed but
+  never triggers — the RH runs it manually.
 - First jobs of the Research Department (§8 F4): `monitor-dsh-updates`
   (daily-ish), `weekly-report-organize` (the organizer's weekly run), plus
   reusable research templates as the RH sees fit.
@@ -384,8 +388,9 @@ dept_job_run({ jobId }) → { postId, sessionId, jobId, role, definitionPath }
   uses for `presets/` materialization; the job files live in the SAME repo as the
   bundle, so the bundle dir is the floor).
 - Spawns a worker exactly like `dept_worker_spawn` with `role` + the job body as
-  task + `jobId` recorded; returns the id + the definition path. `schedule` is
-  ignored (reserved, D7).
+  task + `jobId` recorded; returns the id + the definition path. `schedule` does
+  not gate this manual run (a 5-field cron auto-fires via the scheduler daemon;
+  a non-cron schedule is manual).
 - Missing job / unknown role / bad frontmatter → loud error (the definition file
   is versioned; a syntax error must fail the run, not silently spawn a
   task-less worker).
