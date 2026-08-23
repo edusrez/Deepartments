@@ -2,10 +2,10 @@
 id: weekly-report-organize
 title: Weekly report organization of the department
 role: organizer
-description: Index, normalize and keep tidy the department's report archive (researcher + reviewer reports), maintaining docs/departments/research/INDEX.md; never destroys anything on its own judgment.
+description: Index, normalize and keep tidy the department's report archive (researcher + reviewer reports), maintaining reports/INDEX.md in the department workspace; never destroys anything on its own judgment.
 schedule: "weekly Monday 09:00 (reserved — calendar not yet implemented; manual run via dept_job_run)"
 owner: research-head
-outbox: reply to the Research Head (summary) — index at docs/departments/research/INDEX.md
+outbox: reply to the Research Head (summary) — index at reports/INDEX.md
 ---
 
 # Weekly report organization of the department
@@ -19,15 +19,14 @@ is that persona's, this body is the concrete task).
 
 Keep the department's report archive tidy: everything named per convention,
 duplicates/obsoletes detected, one index up to date. The index is
-`docs/departments/research/INDEX.md` (a repo file, kept SEPARATE from
-`docs/departments/research/README.md`, which is the static layout doc; if the
-Research Head later directs the index into the README, follow that
-instruction instead).
+`reports/INDEX.md` (the department workspace reports index; your cwd is the
+department workspace, so this is relative to it). It is SEPARATE from
+`docs/departments/research/README.md`, the static layout doc.
 
 ## What to do
 
-1. **Locate the archive.** The report directories are `.dsh/reports/researcher/`
-   and `.dsh/reports/reviewer/` (the same relative paths the researcher and
+1. **Locate the archive.** The report directories are `reports/researcher/`
+   and `reports/reviewer/` (the same relative paths the researcher and
    reviewer personas use). Resolve them against your working directory; if
    they are not reachable from your cwd, ask the Research Head for the
    absolute location before doing anything.
@@ -46,24 +45,24 @@ instruction instead).
      findings, conclusions or citations);
    - duplicates/obsoletes: list the candidate (keep/replace/remove) — the
      head decides. **You never delete anything on your own judgment.**
-4. **Maintain the index.** Create/update `docs/departments/research/INDEX.md`
-   (absolute: the repo file; if the repo root is not your cwd, confirm the
-   repo path with the head): a table with columns — date, report path, task /
-   slug, agent, outcome, review status (verified / unverified / FAIL), notes.
-   First run creates the file; later runs update it. Keep the README
+4. **Maintain the index.** Create/update `reports/INDEX.md` (relative to your
+   cwd = the department workspace): a table with columns — date, report path,
+   task / slug, agent, outcome, review status (verified / unverified / FAIL),
+   notes. First run creates the file; later runs update it. Keep the README
    untouched.
 5. **Report.** `send_message` to the Research Head: what was
    renamed/indexed/fixed, the index path, and the candidate list awaiting the
    head's decision (renames, duplicates, obsolete, anything you could not
    do). One line per candidate with file path + recommendation.
-6. **Finish.** `dept_memo_write`, then the worker sleep protocol (request
-   permission, wait, `dept_sleep`) — per the organizer persona.
+6. **Finish (JOB WORKER).** `dept_memo_write` your summary, then REQUEST sleep
+   permission from YOUR HEAD (via `send_message` — never the host), WAIT for
+   the approval, then `dept_sleep` — per the organizer persona's job-worker
+   cycle. You are switched off for good only when the head retires you.
 
 ## Constraints
 
-- Only the report directories and `docs/departments/research/INDEX.md` may be
-  touched by this job (plus your own summary message). Never modify
-  researcher/reviewer report BODIES; never touch `jobs/` definitions, presets
-  or code.
+- Only the report directories and `reports/INDEX.md` may be touched by this
+  job (plus your own summary message). Never modify researcher/reviewer report
+  BODIES; never touch `jobs/` definitions, presets or code.
 - Deleting/removing anything is ALWAYS a head decision — the job only lists
   candidates.

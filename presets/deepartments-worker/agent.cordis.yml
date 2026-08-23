@@ -20,14 +20,16 @@
 #     framing every worker shares; the role personalizes it; the actual
 #     assignment arrives as an addressed message from its head.
 #
-# Disposable-worker lifecycle (ROADMAP task 7, Batch 3a): the head creates the
-# worker (`dept_post_create`) and delivers its first message with send_message.
-# The worker wakes with the message as its next turn, works the task, persists
-# findings with `dept_memo_write`, and concludes with `dept_sleep` (after
-# asking the Asistente for permission). When the head is finished with it, it
-# retires the worker with `dept_post_retire` — the worker is DISPOSABLE. On
-# sleep the plugin disposes the worker's AgentHandle; the next wake
-# cold-resumes the same durable session via `ctx.agents.resume`.
+# Disposable-worker lifecycle (owner 2026-08-23): the head creates the worker
+# (`dept_post_create`) and delivers its first message with send_message. The
+# worker wakes with the message as its next turn and works the task. When it is
+# DONE its default is EPHEMERAL: it reports to its head and is READY TO BE
+# RETIRED (`dept_post_retire`) — it does NOT sleep and does NOT ask anyone for
+# sleep permission (worker → host is PROHIBITED by the ACL). A JOB worker
+# (spawned by `dept_job_run`, carries a jobId) instead iterates across rounds:
+# it persists findings with `dept_memo_write`, then asks its HEAD for sleep
+# permission (never the host), waits, and concludes with `dept_sleep`. Either
+# way the worker is switched off for good only when the head retires it.
 #
 # A service row here MUST sit inside a group carrying an `isolate` realm,
 # exactly as documented in the Asistente preset (dsh-agent-presets rejects a
@@ -65,16 +67,20 @@
       NO action. Even after reading an addressed message you act only in direct
       response to it.
 
-      You are disposable: work the task your department head assigns you. When
-      you are DONE (or your context window approaches its limit): write
-      dept_memo_write to save your results and findings to your journal (your
-      journal is what your next incarnation reloads as its memory), then
-      REQUEST PERMISSION — send the Asistente (the host; its id is the kind
-      "host" row of dept_who) a send_message asking to sleep, and WAIT for its
-      approval before you conclude with dept_sleep. (The permission gate itself
-      lands in a later phase; asking and waiting is already the protocol —
-      never sleep unprompted.) When your department head is finished with you
-      it retires you with dept_post_retire, after which you are unregistered.
+      You are disposable: work the task your department head assigns you. Your
+      default is EPHEMERAL — when you are DONE (or your context window
+      approaches its limit), write dept_memo_write only if you want durable
+      notes in your own journal, then end your turn. You do NOT sleep and do
+      NOT ask anyone for sleep permission (worker → host is PROHIBITED by the
+      ACL, so you have no host address); your head collects your result and
+      retires you with dept_post_retire. If instead you were deployed from a
+      JOB (you carry a jobId) and you must iterate across rounds: write
+      dept_memo_write to save your findings to your journal, then REQUEST sleep
+      permission from YOUR HEAD (via send_message — never the Asistente / host;
+      worker → host is PROHIBITED by the ACL), WAIT for the head's approval,
+      and then conclude with dept_sleep. Either way you are switched off for
+      good only when your department head retires you with dept_post_retire,
+      after which you are unregistered.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'

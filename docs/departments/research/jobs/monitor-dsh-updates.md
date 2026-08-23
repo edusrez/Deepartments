@@ -5,7 +5,7 @@ role: researcher
 description: Check DSH core and the Deepartments deployment plugin set for new versions on the rc channel, read the changelogs, and report potential improvements or regressions to the Research Head.
 schedule: "daily 09:00 (reserved — calendar not yet implemented; manual run via dept_job_run)"
 owner: research-head
-outbox: .dsh/reports/researcher/<YYYY-MM-DD>-dsh-updates.md
+outbox: reports/researcher/<YYYY-MM-DD>-dsh-updates.md
 ---
 
 # Monitor DSH + Deepartments ecosystem updates
@@ -31,7 +31,7 @@ upgrading, fixing or watching (improvements, breaking changes, regressions).
    plugin is built against) and the CLI pin in `AGENTS.md`. Release feed:
    `https://api.github.com/repos/deepseek-ai/deepseek-harness/releases`
    (tags prefixed `dsh-v...`). Identity facts were verified in
-   `.dsh/reports/researcher/2026-08-22-dsh-plugin-listing.md` — reuse them.
+   `reports/researcher/2026-08-22-dsh-plugin-listing.md` — reuse them.
 2. **This plugin** — `dsh-deepartments` (this repo): registry
    `https://registry.npmjs.org/dsh-deepartments` dist-tags vs the repo's own
    `version` in `package.json`; if published upstream, read its changelog /
@@ -39,7 +39,7 @@ upgrading, fixing or watching (improvements, breaking changes, regressions).
 3. **Ecosystem plugins the deployment uses** — the known set:
    `dsh-smart-restart` (npm `dsh-smart-restart`, repo
    `github.com/edusrez/dsh-smart-restart`; see
-   `.dsh/reports/researcher/2026-08-23-smart-restart-awesome-pr.md`),
+   `reports/researcher/2026-08-23-smart-restart-awesome-pr.md`),
    `dsh-smooth-stream`, and the `dshmarket` storefront package. For each:
    dist-tags from `https://registry.npmjs.org/<package-name>`, release notes
    from `https://api.github.com/repos/<owner>/<repo>/releases`; when the repo
@@ -54,7 +54,8 @@ upgrading, fixing or watching (improvements, breaking changes, regressions).
 ## Report
 
 Write the full findings to
-`.dsh/reports/researcher/<YYYY-MM-DD>-dsh-updates.md`, frontmatter in the
+`reports/researcher/<YYYY-MM-DD>-dsh-updates.md` (`reports/` = the department
+workspace reports dir; your cwd is the department workspace), frontmatter in the
 project report convention (`agent: researcher`, `date`, `task: dsh-updates`,
 `spec_ref: docs/departments/research/jobs/monitor-dsh-updates.md`,
 `outcome`, `files_touched`, `error_type`, `key_findings`), then the body:
@@ -82,5 +83,5 @@ questions. You report only to your head (ACL).
 - Prefer API/JSON endpoints; never trust truncated HTML shells of anti-bot
   pages; respect dates.
 - Reference prior report paths you build on (≤ 3 per category):
-  `.dsh/reports/researcher/2026-08-22-dsh-plugin-listing.md`,
-  `.dsh/reports/researcher/2026-08-23-smart-restart-awesome-pr.md`.
+  `reports/researcher/2026-08-22-dsh-plugin-listing.md`,
+  `reports/researcher/2026-08-23-smart-restart-awesome-pr.md`.

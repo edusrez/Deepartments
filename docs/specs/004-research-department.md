@@ -540,17 +540,25 @@ pattern of unknown ids (invoke.ts:3704-3705):
 
 ### 7.1 Role templates of the Research Department
 
-| Role | Persona (template) | Tools | Report protocol |
-|---|---|---|---|
-| `researcher` | Research agent: web investigation (web_search/web_fetch), reads the head's request → investigates → writes a report → reports to the head | web_search, web_fetch (own-layer/allow, ❓ builder-verify the exact `restrict` allow list — today `postSetup` masks globals with `allow: []`, invoke.ts:3045-3051) + bus tools (send_message/agent_messages/dept_who) + dept_memo_write + dept_sleep. **NO subagent tools** — it is a root worker, not a harness subagent | writes `.dsh/reports/researcher/<date>-<slug>.md`; replies to the RH via send_message; communicates ONLY within the department (ACL, D6) |
-| `reviewer` | Factuality checker: verifies claims/citations of research reports, runs checks, issues PASS/FAIL verdicts with evidence | bus tools + report-reading tools ❓ (builder-verify: a read-tool allowance, e.g. the reports dir) + dept_memo_write + dept_sleep | report of verdict (PASS/FAIL + citations) to the head |
-| `organizer` | Weekly organizer: indexes/naming/cleanup of `.dsh/reports/researcher/` | bus tools + file tools allowance ❓ + dept_memo_write + dept_sleep | summary to the head |
+The role `tools` **binding is IMPLEMENTED** — the `tools` frontmatter list IS
+the effective `restrict` allow-list for the role (no longer a "later phase" /
+builder-verify point). `role` = person template referenced by name; the runtime
+worker's cwd is the department workspace, so the deliverable paths below are
+relative to that workspace (`reports/...`), not `.dsh/reports/...`.
 
-- All three: BOOT-QUIET (never act unaddressed — today's worker framing,
+| Role | Persona (template) | Tools (binding implemented) | Report protocol |
+|---|---|---|---|
+| `researcher` | Research agent: web investigation (web_search/web_fetch), reads the head's request → consults `sources/` → investigates → archives sources → writes a report → reports to the head | web_search, web_fetch, read, write, glob, grep + bus tools (send_message/agent_messages/dept_who) + dept_memo_write + dept_sleep. **NO subagent tools** — it is a root worker, not a harness subagent | writes `reports/researcher/<date>-<slug>.md`; replies to the RH via send_message; communicates ONLY within the department (ACL, D6) |
+| `analyst` | Organic synthesis layer: reads one or more researcher reports, prioritizes/trims/consolidates them into a structured synthesis (key findings, evidence, uncertainties, gaps) for the head | read, write, glob, grep, web_search, web_fetch + bus + dept_memo_write + dept_sleep. **NO `edit`** (deliberate — synthesizes, never mutates a researcher report) | writes `reports/analyst/<date>-<slug>-synthesis.md`; replies to the RH |
+| `reviewer` | Factuality checker: verifies claims/citations of research reports, runs checks, issues PASS/FAIL verdicts with evidence | read, write, glob, grep, web_search, web_fetch + bus + dept_memo_write + dept_sleep | writes `reports/reviewer/<date>-<slug>-review.md` (PASS/FAIL + citations); replies to the RH |
+| `organizer` | Weekly organizer: indexes/naming/cleanup of the department report archive | read, write, edit, glob, grep + bus + dept_memo_write + dept_sleep | summary to the head; maintains the reports index `reports/INDEX.md` |
+
+- All four: BOOT-QUIET (never act unaddressed — today's worker framing,
   invoke.ts:3024-3034); messages only inside the department; memory via
-  `dept_memo_write`; sleep at the end (asking permission per the persona
-  protocol of this phase).
-- Role templates live at `presets/departments/research/<role>.md` (§3.2, ❓ Q7).
+  `dept_memo_write`; **ephemeral by default** (see §7.5) — a JOB worker sleeps
+  between rounds asking ITS head, never the host (worker → host PROHIBITED, §5.6).
+- Role templates live at `presets/departments/research/<role>.md` (§3.2, ❓ Q7);
+  the static department design is `presets/departments/research/ARCHITECTURE.md`.
 
 ### 7.2 Research Head persona (updated)
 
@@ -593,6 +601,29 @@ own-layer tool block (`if (manager)`) carry the wording; F6 rewrites both.
   tool allowance = role template's tool list (the `restrict({allow: []})` mask
   at postSetup :3051 becomes role-driven — `allow: <role tools>`); provider/
   model per §7.3.
+
+### 7.5 Owner decisions (2026-08-23) — ephemeral default & organic flow
+
+Two owner decisions SUPERSEDE the earlier "sleep-with-permission" prototype.
+They are ADOPTED requirements for the personas and presets (F6), implemented in
+`presets/departments/research/*.md`, the head/worker presets and the docs:
+
+- **Workers are EPHEMERAL by default.** A one-off task worker (one research, one
+  fact-check, one synthesis) does NOT sleep: it completes the task, reports to
+  its head, and the head retires it (`dept_worker_retire`). No sleep protocol,
+  no permission to ask — there is nobody to ask (worker → host is PROHIBITED by
+  the ACL, §5.6).
+- **Only JOB workers sleep between rounds.** A worker deployed from a job
+  (`dept_job_run`, carries a `jobId`) iterates across sessions: it persists
+  findings with `dept_memo_write`, then requests sleep permission from ITS HEAD
+  (never the host/Asistente — worker → host prohibited by the ACL), waits, and
+  `dept_sleep`s. It is switched off for good only when the head retires it.
+- **Organic flow, not rigid depth/parameters.** The requester expresses an
+  ORGANIC need ("be quick", "verify the primary source", "a careful report");
+  the head plans and ADAPTS — more/fewer subagents and layers
+  (researcher → analyst → reviewer → organizer) per the head's judgment, with
+  heuristics as a guide, never a rule. The head still reports to the requester
+  with a single consolidated report.
 
 ---
 

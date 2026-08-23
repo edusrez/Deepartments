@@ -5,7 +5,7 @@ role: reviewer
 description: Review the department's new reports — every claim and citation, against primary sources — and issue per-point PASS/FAIL verdicts to the Research Head.
 schedule: "on-demand / after new reports (no calendar trigger)"
 owner: research-head
-outbox: .dsh/reports/reviewer/<YYYY-MM-DD>-<slug>-review.md
+outbox: reports/reviewer/<YYYY-MM-DD>-<slug>-review.md
 ---
 
 # Fact-check the department's unverified reports
@@ -27,10 +27,10 @@ The trigger is the Research Head's message (this job has no calendar
 trigger), which either:
 
 - names the report file(s) to verify (e.g.
-  `.dsh/reports/researcher/<YYYY-MM-DD>-<slug>.md`), or
+  `reports/researcher/<YYYY-MM-DD>-<slug>.md`), or
 - asks for "the queue": all researcher reports in
-  `.dsh/reports/researcher/<YYYY-MM-DD>-<slug>.md` that have NO matching
-  verdict file `.dsh/reports/reviewer/<YYYY-MM-DD>-<slug>-review.md`.
+  `reports/researcher/<YYYY-MM-DD>-<slug>.md` that have NO matching
+  verdict file `reports/reviewer/<YYYY-MM-DD>-<slug>-review.md`.
 
 ## What to do (per report in the queue)
 
@@ -42,10 +42,11 @@ trigger), which either:
    CURRENT state instead of the report's claim. Flag anything wrong,
    unverifiable or stale.
 3. **Write the verdict report** to
-   `.dsh/reports/reviewer/<YYYY-MM-DD>-<slug>-review.md` — same date + slug
-   as the reviewed report, with the `-review` suffix; frontmatter in the
+   `reports/reviewer/<YYYY-MM-DD>-<slug>-review.md` (`reports/` = the department
+   workspace reports dir; your cwd is the department workspace) — same date +
+   slug as the reviewed report, with the `-review` suffix; frontmatter in the
    project report convention (`agent: reviewer`, `date`, `task`,
-   `spec_ref: .dsh/reports/researcher/<YYYY-MM-DD>-<slug>.md`,
+   `spec_ref: reports/researcher/<YYYY-MM-DD>-<slug>.md`,
    `outcome: PASS|FAIL`, `verification`, ...). Body: one entry per point —
    claim → checked what → found what → corrected fact (if any) → PASS/FAIL
    per point — plus the overall verdict (PASS only if every point passes or
@@ -55,6 +56,18 @@ trigger), which either:
 5. **Reply to the head.** `send_message` with the verdict(s): PASS/FAIL, the
    per-point reasons (concise), and the review path(s). You report only to
    your head (ACL).
+6. **Finish (JOB WORKER).** `dept_memo_write` your verdict, then REQUEST sleep
+   permission from YOUR HEAD (via `send_message` — never the host), WAIT for
+   the approval, then `dept_sleep` — per the reviewer persona's job-worker
+   cycle. You are switched off for good only when the head retires you.
+
+## Review flow
+
+This job verifies the department's RESEARCH reports (`reports/researcher/`).
+It never edits the reviewed report; it produces a verdict review
+(`reports/reviewer/`) the head uses to decide whether a result is sound enough
+to report out. Reports awaiting review are those with no matching `-review`
+file — the organizer flags them too (see the weekly-report-organize job).
 
 ## Constraints
 

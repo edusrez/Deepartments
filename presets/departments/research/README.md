@@ -1,32 +1,35 @@
-# Research Department role templates (F6 — spec 004)
+# Research Department role templates (spec 004 — F6/F10)
 
 Persona templates ("roles") of the Research Department, per
 `docs/specs/004-research-department.md` §3.2. A role is a **person template
-referenced by name** — this phase: `researcher`, `reviewer`, `organizer`
-(§7.1). Roles are NOT agent presets: no `preset.yml`/`agent.cordis.yml` pair
-here. They are repo-versioned templates the plugin resolves by name at
-spawn time (`dept_worker_spawn`) and job-run time (`dept_job_run`), §7.4.
+referenced by name** — this department's roles: `researcher`, `analyst`,
+`reviewer`, `organizer` (§7.1). Roles are NOT agent presets: no
+`preset.yml`/`agent.cordis.yml` pair here. They are repo-versioned templates the
+plugin resolves by name at spawn time (`dept_worker_spawn`) and job-run time
+(`dept_job_run`).
 
-## Layout (proposal — owner confirm, spec §9 Q7)
+The department's **static design** (what it is, org chart, organic pipeline,
+ACL, worker lifecycle, knowledge system, report convention, tools) lives in
+[ARCHITECTURE.md](ARCHITECTURE.md) — read it first.
+
+## Layout
 
 `presets/departments/<dept-id>/<role>.md` (this directory) — the convention
-proposed by spec 004 §3.2. Alternative considered: per-role subdirectories
-inside the existing `presets/deepartments-head|worker/` base tree — rejected:
-that tree is the *neutral agent preset* materialized into the profile
-`.agent-presets/`, while a role is a leaner persona+tool delta, not a new base
-agent preset.
+proposed by spec 004 §3.2. Each role is a leaner persona+tool delta, not a new
+base agent preset (the neutral head/worker bases live in
+`presets/deepartments-head|worker/`).
 
 ## File format
 
-- **Frontmatter** (`---` delimited): `id` (stable role id referenced by jobs
-  and spawns), `title` (display), `tools` (the model-facing tool ids allowed
-  for this role — the exact binding to the `restrict` allow-list is a
-  builder-verify point, spec §7.1 / §9 last block).
+- **Frontmatter** (`---` delimited): `id` (stable role id referenced by jobs and
+  spawns), `title` (display), `tools` (the model-facing tool ids allowed — the
+  `restrict` allow-list binding to this list is **implemented**, so the declared
+  `tools` ARE the effective allowance for the role).
 - **Body**: the persona text. English (AGENTS.md language policy).
-- **Literals**: the model is a FIXED literal
-  `deepseek-v4-flash-vision-exp` (provider `opencode-zen`,
-  reasoning max) — never the model template variable (fix 3203b69,
-  spec §7.3); `{{cwd}}` is allowed and bound.
+- **Literals**: the model is a FIXED literal `deepseek-v4-flash-vision-exp`
+  (provider `opencode-zen`, reasoning max) — never the model template variable
+  (fix 3203b69, spec §7.3); `{{cwd}}`, `{{deptName}}`, `{{headPostId}}`,
+  `{{workspacePath}}`, `{{reportDir}}` are allowed and templated at runtime.
 
 ## Tool vocabulary (model-facing ids, as used by the harness surface)
 
@@ -36,11 +39,27 @@ agent preset.
   `dept_who`, `dept_memo_write`, `dept_sleep`.
 - NEVER for department workers: `subagent`/`subagent_fork`/`workflow`/`ralph`
   — a worker is a root agent, not a coordinator (D3, §3.4).
+- Role-specific allowance, by design: `edit` is granted to `organizer` (safe
+  frontmatter/rename) but NOT to `researcher`/`reviewer`/`analyst` — the analyst
+  deliberately consolidates without mutating source reports (see analyst.md).
 
-## Report conventions referenced by the personas
+## Worker cycle (ephemeral vs job-worker)
 
-- Researcher reports: `.dsh/reports/researcher/<YYYY-MM-DD>-<slug>.md`.
-- Reviewer verdicts: `.dsh/reports/reviewer/<YYYY-MM-DD>-<slug>.md`
-  (`outcome: PASS|FAIL` + per-point reasons) — the convention already in use
-  in this repo.
-- Organizer: indexes/normalizes both directories.
+- **EPHEMERAL (default)**: a one-off task worker. Completes the task, reports to
+  its head, and the head retires it (`dept_worker_retire`). NO sleep, no
+  permission request (worker → host is PROHIBITED by ACL).
+- **JOB worker** (spawned by `dept_job_run`, carries a `jobId`): iterates across
+  rounds — `dept_memo_write` → request sleep permission from its **head** (never
+  the host) → wait → `dept_sleep`; switched off for good when the head retires
+  it.
+
+## Report + source conventions referenced by the personas
+
+- Researcher reports / reviewer verdicts / analyst syntheses:
+  `{{reportDir}}/<role>/<YYYY-MM-DD>-<slug>.md` (reviewer verdicts
+  `...-<slug>-review.md`) — the DEPARTMENT workspace `reports/` dir, NOT
+  `.dsh/reports/...`.
+- Sources: `{{workspacePath}}/sources/<topic-slug>.md` — see
+  `docs/departments/research/SOURCES.md`.
+- Organizer: indexes/normalizes both report dirs and maintains
+  `{{reportDir}}/INDEX.md`.

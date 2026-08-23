@@ -4,7 +4,8 @@ This directory is the repository-side home of the **Research Department**
 (`docs/specs/004-research-department.md`, §0-D3/D7, §3.1–§3.3, §5.4–§5.5). It
 holds the department's versioned **job definitions**; the department's
 **roles** (person templates) live in `presets/departments/research/` (see
-`presets/departments/research/README.md`).
+`presets/departments/research/README.md`) and its **static design** in
+`presets/departments/research/ARCHITECTURE.md`.
 
 ## Model
 
@@ -12,8 +13,9 @@ holds the department's versioned **job definitions**; the department's
   template + a concrete task body (D3). The definition is saved in the repo so
   any agent of the department can execute it later.
 - A **role** is a person template referenced by name (D4): persona text + tool
-  allowance. Today: `researcher`, `reviewer`, `organizer` — used by jobs and
-  by one-off ephemerals.
+  allowance. This department's roles: `researcher`, `analyst`, `reviewer`,
+  `organizer` — used by jobs and by one-off ephemerals. The role's `tools`
+  frontmatter IS the effective tool allowance (binding implemented).
 - **Execution is the Research Head's business** (§5.4): `dept_job_run <id>`
   reads a definition in `jobs/`, materializes a worker with the role's persona
   + the job body as its task, and returns the worker ids. `dept_job_list`
@@ -25,13 +27,17 @@ holds the department's versioned **job definitions**; the department's
 ```
 docs/departments/research/
 ├── README.md      ← this file (layout + job-definition convention)
-├── INDEX.md       ← report index — maintained by the weekly-report-organize
-│                     job (created on its first run; not edited by hand)
+├── SOURCES.md     ← the sources/ convention (curation, index, no-duplication, TTL)
 └── jobs/          ← versioned job definitions, one file per job
     ├── monitor-dsh-updates.md
     ├── weekly-report-organize.md
     └── fact-check-queue.md
 ```
+
+> The department's **runtime report archive** does NOT live in the repo. It is
+> the department workspace's `reports/` directory (`<workspacePath>/reports/<role>/`,
+> where `<workspacePath>` is `/root/.deepartments/departments/research` per
+> config). The report index `reports/INDEX.md` is maintained by the organizer.
 
 ## Job file format (frontmatter)
 
@@ -42,11 +48,11 @@ keys (order as shown):
 |---|---|---|
 | `id` | yes | stable job id — kebab-case, equals the file name `<slug>.md`; used by `dept_job_run`/`dept_job_list` |
 | `title` | yes | human-readable title |
-| `role` | yes | the role template id referenced by name — MUST be one of `presets/departments/research/*.md` (today: `researcher`, `reviewer`, `organizer`) |
+| `role` | yes | the role template id referenced by name — MUST be one of `presets/departments/research/*.md` (today: `researcher`, `analyst`, `reviewer`, `organizer`) |
 | `description` | yes | one line: what the job does / what it is for |
 | `schedule` | info | intended cadence — **informational only**, see Status below |
 | `owner` | yes | who owns/runs the job: `research-head` |
-| `outbox` | info | where the worker leaves its deliverable (report path) |
+| `outbox` | info | where the worker leaves its deliverable, relative to the department workspace (e.g. `reports/researcher/<YYYY-MM-DD>-<slug>.md`) |
 
 ### Template
 
@@ -54,11 +60,11 @@ keys (order as shown):
 ---
 id: <slug>
 title: <human title>
-role: researcher | reviewer | organizer
+role: researcher | analyst | reviewer | organizer
 description: <one line: what it does / what it is for>
 schedule: "<informative text, e.g. daily 09:00 (reserved — calendar not yet implemented; manual run via dept_job_run)>"
 owner: research-head
-outbox: <where the deliverable lands, e.g. .dsh/reports/researcher/<YYYY-MM-DD>-<slug>.md>
+outbox: <where the deliverable lands, e.g. reports/researcher/<YYYY-MM-DD>-<slug>.md>
 ---
 
 # <Title>
@@ -74,9 +80,9 @@ outbox: <where the deliverable lands, e.g. .dsh/reports/researcher/<YYYY-MM-DD>-
    runs jobs).
 3. Write the body as the self-contained task: what to check/do, exact inputs
    (files, URLs, endpoints), the deliverable (`outbox`), and how to reply to
-   the head. The body is the assignment message the worker receives, so it
-   goes together with the role persona (general protocol: BOOT-QUIET,
-   messaging ACL, memo + sleep are in the persona, not here).
+   the head. The body is the assignment message the worker receives, so it goes
+   together with the role persona (general protocol: BOOT-QUIET, messaging ACL,
+   ephemeral vs job-worker cycle are in the persona, not here).
 4. English only (AGENTS.md language policy); quote the `schedule` value.
 5. Commit the new file — the definition is versioned; a job with broken
    frontmatter fails loudly at `dept_job_run`.
@@ -91,8 +97,9 @@ the cadence the head decides.
 
 ## Relations
 
-- Roles & personas: `presets/departments/research/README.md` and
-  `presets/departments/research/{researcher,reviewer,organizer}.md` (F6).
+- Roles & personas: `presets/departments/research/README.md`, its
+  `ARCHITECTURE.md` and `presets/departments/research/{researcher,analyst,reviewer,organizer}.md`.
+- Source convention: `docs/departments/research/SOURCES.md`.
 - Job execution machinery (code): spec 004 §5.4 (`dept_job_run`), §5.5
   (`dept_job_list`) — F4b.
 - Department definition (config, sidebar workspace): spec 004 §3.1, §6.
