@@ -111,3 +111,17 @@
   name: '@deepseek-ai/dsh-agent-instructions'
   config:
     maxBytes: 65536
+
+# ── filesystem (task surface) ────────────────────────────────────────────────
+
+# The capability tools a head needs to read and search the repo, reports and
+# journals (read/write/glob/grep). Both register into the host `tools` registry
+# and provide nothing, so they need no realm (consistent with the header note
+# above) — the `fs` service and its policy stay in the host.
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
