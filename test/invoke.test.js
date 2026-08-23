@@ -3930,7 +3930,7 @@ test('Context-injection gate: a registered board POST (head-*) still gets NO wak
   })
 })
 
-test('Context-injection gate: a session that REGISTERS mid-session (first dept_whereami → ensureHost) gets the wake pack at its NEXT pre-step (late registration late-injects)', async () => {
+test('Context-injection gate: a session that REGISTERS mid-session (first dept_who self-registers) gets the wake pack at its NEXT pre-step (late registration late-injects)', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {

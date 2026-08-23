@@ -575,12 +575,13 @@ own-layer tool block (`if (manager)`) carry the wording; F6 rewrites both.
 ### 7.3 Literals, never `{{model}}` (fix 3203b69 lesson)
 
 - Persona text uses the **fixed literal**
-  `deepseek-v4-flash-vision-exp` (provider `deepseek-official`, reasoning max)
+  `deepseek-v4-flash-vision-exp` (provider `opencode-zen`, reasoning max)
   — the `{{model}}`-style variable is NOT bound at first post-restart assembly
   and broke the persona (3203b69; the current presets already carry the literal:
   presets/deepartments-head/agent.cordis.yml:44, worker :51). F6 keeps that.
 - **Base profile**: workers inherit the current base —
-  `deepseek-official` / `deepseek-v4-flash-vision-exp` (reasoning max). **No Pro
+  `opencode-zen` / `deepseek-v4-flash-vision-exp` (reasoning max), materialized
+  via `WORKER_AGENT_OPTIONS` (invoke.ts:1878). **No Pro
   subagents anywhere in the department** — the worker is flash, same as today's
   transient subagents (cordis.patch.yml:24-28).
 - `{{cwd}}` stays (it IS bound — the post-restart fix kept it).

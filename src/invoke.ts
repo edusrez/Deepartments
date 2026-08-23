@@ -2998,9 +2998,10 @@ export function applyInvoke(ctx: Context, config: Config) {
    * `dept_post_retire` (legacy) AND the F3 department-scoped worker tools
    * `dept_worker_spawn` / `dept_worker_retire`, so a head can create/retire
    * the WORKERS of its own department. A worker (`manager: false`) gets ONLY
-   * the messaging tools — never the create/retire life-cycle controls (and a
-   * HOST never gets them either: these register ONLY in the head own-layer,
-   * never the global host plane). */
+   * the messaging tools — never the create/retire life-cycle controls. These
+   * create/worker-spawn/worker-retire controls register ONLY in the head
+   * own-layer here; the host plane never exposes them. (The one host-plane
+   * exception is the global `dept_post_retire`, registered separately below.) */
   const installHeadBoardTools = (agentCtx: Context, manager = false): HeadToolDisposers => {
     const disposers: Array<() => void> = []
 
@@ -5062,7 +5063,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   const globalRetire = ctx.tools.register(defineTool({
     name: 'dept_post_retire',
-    description: 'Retire a registered post cleanly: unregister it from the post/child registries and persist. B3 cutover: no withdrawal note — the registry unregistration is the only signal. A hard unregister for permanent posts (the lifecycle journal in Batch G covers the gentler sleep lifecycle path). Unknown postIds are rejected loudly.',
+    description: 'Retire a registered post (spec 004 §4.3 — retirement is MARKED, never erased): for a DISPOSABLE WORKER it marks the entry `retired: true` (the post stays in the registry and its history stays queryable; every live-catalog consumer — busDeliverCatalog addressing, dept_who, the wake-pack roster — filters it) and disposes its live AgentHandle; a permanent CONFIGURED head keeps today\'s semantics (registry entry removed, re-materialized by config at boot). Scope: a HOST caller may retire any post; a HEAD caller only the workers of its own department. Unknown postIds are rejected loudly.',
     parameters: {
       postId: { type: 'string', required: true, description: 'The post id to retire (e.g. "research-head").' }
     },

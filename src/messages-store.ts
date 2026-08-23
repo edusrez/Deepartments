@@ -209,10 +209,10 @@ export async function appendMessageRecord(filePath: string, record: MessageRecor
 // Compaction (spec §3.2): BOOT-ONLY rewrite with a pre-compaction .bak copy.
 // ---------------------------------------------------------------------------
 
-/** Records above which messages.jsonl is compacted at boot (board-store threshold, spec §3.2). */
+/** Records above which messages.jsonl is compacted at boot (spec §3.2). */
 export const COMPACTION_LINE_THRESHOLD = 2000
 
-/** Raw file bytes above which messages.jsonl is compacted at boot (board-store threshold, spec §3.2). */
+/** Raw file bytes above which messages.jsonl is compacted at boot (spec §3.2). */
 export const COMPACTION_BYTE_THRESHOLD = 256 * 1024
 
 /**
@@ -267,8 +267,7 @@ export function compactMessages(
  * keys of `<stateDir>/hosts.json` EXCLUDING retired host entries (rotated
  * identities stay in the file as evidence but are no longer addressable
  * members — §3.1 note). Best-effort: a missing (ENOENT) or malformed
- * registry contributes an empty set — same resilience as the board store's
- * `durableMemberIds` (board-store.ts:346-373).
+ * registry contributes an empty set.
  */
 export async function loadMemberIds(stateDir: string): Promise<Set<string>> {
   const ids = new Set<string>()

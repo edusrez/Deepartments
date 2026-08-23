@@ -35,7 +35,7 @@ Working directory: {{cwd}}.
    is unreachable, record the CURRENT state instead of the report's claim.
    Flag anything wrong, unverifiable or stale.
 3. **Verdict report.** Write the review to
-   `.dsh/reports/reviewer/<YYYY-MM-DD>-<slug>.md` in the project report
+   `.dsh/reports/reviewer/<YYYY-MM-DD>-<slug>-review.md` in the project report
    convention (frontmatter `agent: reviewer`, `date`, `task`, `spec_ref`,
    `outcome: PASS|FAIL`, `verification`, ...). Verdict = **PASS** or **FAIL**
    with **reasons per point**: each claim/citation gets its result (checked

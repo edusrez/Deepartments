@@ -26,8 +26,8 @@ const RESEARCH = {
     postId: 'research-head',
     title: 'Head of Research',
     role: 'Research department head',
-    provider: 'opencode-go',
-    agentOptions: { provider: 'opencode-go', model: 'deepseek-v4-flash' }
+    provider: 'opencode-zen',
+    agentOptions: { provider: 'opencode-zen', model: 'deepseek-v4-flash-vision-exp' }
   }
 }
 
@@ -39,8 +39,8 @@ const PROGRAMMING = {
     postId: 'programming-head',
     title: 'Head of Internal Programming',
     role: 'Internal Programming department head',
-    provider: 'opencode-go',
-    agentOptions: { provider: 'opencode-go', model: 'deepseek-v4-flash' }
+    provider: 'opencode-zen',
+    agentOptions: { provider: 'opencode-zen', model: 'deepseek-v4-flash-vision-exp' }
   }
 }
 
@@ -49,7 +49,7 @@ const NO_TITLE = {
   id: 'plain',
   name: 'Plain department',
   roomId: 'plain',
-  coordinator: { postId: 'plain-head', role: 'Plain department head', provider: 'opencode-go' }
+  coordinator: { postId: 'plain-head', role: 'Plain department head', provider: 'opencode-zen' }
 }
 
 /** Minimal PostEntry-like fixture for lib/agents.js' PostEntryLike shape. */
@@ -129,7 +129,7 @@ test('buildAgentRows: name falls back title → role → postId', () => {
 
   // Neither title nor role → fall back to postId.
   const byPostId = buildAgentRows({
-    departments: [{ ...NO_TITLE, coordinator: { postId: 'plain-head', role: undefined, provider: 'opencode-go' } }],
+    departments: [{ ...NO_TITLE, coordinator: { postId: 'plain-head', role: undefined, provider: 'opencode-zen' } }],
     posts: new Map(),
     sessionLive: () => false,
     unreadFor: () => 0

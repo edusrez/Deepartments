@@ -37,8 +37,8 @@ const RESEARCH = {
     postId: 'research-head',
     title: 'Head of Research',
     role: 'Research department head',
-    provider: 'opencode-go',
-    agentOptions: { provider: 'opencode-go', model: 'deepseek-v4-flash' }
+    provider: 'opencode-zen',
+    agentOptions: { provider: 'opencode-zen', model: 'deepseek-v4-flash-vision-exp' }
   }
 }
 
@@ -50,8 +50,8 @@ const PROGRAMMING = {
     postId: 'programming-head',
     title: 'Head of Internal Programming',
     role: 'Internal Programming department head',
-    provider: 'opencode-go',
-    agentOptions: { provider: 'opencode-go', model: 'deepseek-v4-flash' }
+    provider: 'opencode-zen',
+    agentOptions: { provider: 'opencode-zen', model: 'deepseek-v4-flash-vision-exp' }
   }
 }
 
