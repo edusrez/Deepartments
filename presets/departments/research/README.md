@@ -24,7 +24,7 @@ agent preset.
   builder-verify point, spec §7.1 / §9 last block).
 - **Body**: the persona text. English (AGENTS.md language policy).
 - **Literals**: the model is a FIXED literal
-  `deepseek-v4-flash-vision-exp` (provider `deepseek-official`,
+  `deepseek-v4-flash-vision-exp` (provider `opencode-go`,
   reasoning max) — never the model template variable (fix 3203b69,
   spec §7.3); `{{cwd}}` is allowed and bound.
 
