@@ -2255,7 +2255,7 @@ async function bootWithHead(stateDir, opts = {}) {
   return { ...env, head, headCtx, key }
 }
 
-test('dept_post_create (head): a head creates a DISPOSABLE worker root agent (sessionId worker-<postId>, provider:"worker"), delivers its first message on the board, and the host has NO dept_post_create', async () => {
+test('dept_post_create (head): a head creates a DISPOSABLE worker root agent (sessionId worker-<postId>-<uuid>, provider:"worker"), delivers its first message on the board, and the host has NO dept_post_create', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
     try {
@@ -2271,13 +2271,14 @@ test('dept_post_create (head): a head creates a DISPOSABLE worker root agent (se
         { agent: head, signal }
       )
       assert.equal(result.postId, 'researcher-alpha')
-      assert.equal(result.sessionId, 'worker-researcher-alpha')
+      assert.match(result.sessionId, /^worker-researcher-alpha-[0-9a-f-]+$/, 'the worker mints a UNIQUE session id (worker-<postId>-<uuid>, never the deterministic worker-<postId>)')
+      const sid = result.sessionId
       assert.equal('roomId' in result, false, 'B3: no room id in the create result (the posts live in the catalog)')
 
       // The worker root agent was created via ctx.agents.create (meta
       // agentPreset deepartments-worker, origin undefined) and is LIVE.
-      assert.equal(agents.store.has('worker-researcher-alpha'), true, 'worker agent is live after create')
-      const createCall = agents.createCalls.find((c) => String(c.sessionId) === 'worker-researcher-alpha')
+      assert.equal(agents.store.has(sid), true, 'worker agent is live after create')
+      const createCall = agents.createCalls.find((c) => String(c.sessionId) === sid)
       assert.ok(createCall, 'a ctx.agents.create call for the worker')
       assert.equal(createCall.meta.agentPreset, 'deepartments-worker', 'worker mounts the deepartments-worker preset')
       assert.equal(createCall.meta.origin, undefined, 'worker is a root/main agent (no origin)')
@@ -2291,14 +2292,14 @@ test('dept_post_create (head): a head creates a DISPOSABLE worker root agent (se
 
       // Durable registry: disposable entry (roomId is the INERT legacy field).
       const posts = await readPosts(stateDir)
-      assert.equal(posts['researcher-alpha'].sessionId, 'worker-researcher-alpha')
+      assert.equal(posts['researcher-alpha'].sessionId, sid)
       assert.equal(posts['researcher-alpha'].roomId, 'board', "worker inherits the head entry's inert roomId (legacy registry field)")
       assert.equal(posts['researcher-alpha'].agentPreset, 'deepartments-worker')
       assert.equal(posts['researcher-alpha'].provider, 'worker', 'disposable marker persisted')
 
       // First message delivered as a durable BUS message → the bus delivery
       // wakes the worker (worker inbox receives the framed agent message).
-      const worker = agents.store.get('worker-researcher-alpha')
+      const worker = agents.store.get(sid)
       await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'worker woken by its first bus message')
       assert.equal(worker.inboxMessages.at(-1).source.kind, 'agent', 'worker wake uses the bus source')
     } finally {
@@ -2340,8 +2341,8 @@ test('a worker is lean: board tools present, the department-lifecycle (create/re
     try {
       const signal = new AbortController().signal
       const createTool = headCtx.tools.get('dept_post_create', key)
-      await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
-      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, 'worker-researcher-alpha')
+      const created = await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, created.sessionId)
       // Worker gets the messaging toolset (B3: no board tools anywhere)...
       for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
         assert.ok(workerCtx.tools.get(name, workerKey), `${name} installed in the worker own layer`)
@@ -2364,11 +2365,12 @@ test('worker sleep + respawn: a slept worker is cold-resumed as a fresh incarnat
     try {
       const signal = new AbortController().signal
       const createTool = headCtx.tools.get('dept_post_create', key)
-      await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const created = await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const sid = created.sessionId
 
       // The worker saves its journal and SLEEPS (disposes its handle, marks sleepEpoch).
-      const workerAgent = agents.store.get('worker-researcher-alpha')
-      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, 'worker-researcher-alpha')
+      const workerAgent = agents.store.get(sid)
+      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, sid)
       const memo = workerCtx.tools.get('dept_memo_write', workerKey)
       await memo.execute({ summary: 'found X; retiring to sleep' }, { agent: workerAgent, signal })
       const sleep = workerCtx.tools.get('dept_sleep', workerKey)
@@ -2376,19 +2378,19 @@ test('worker sleep + respawn: a slept worker is cold-resumed as a fresh incarnat
       assert.ok(sleepResult.sleepEpoch > 0, 'worker sleep marked')
       // The worker handle is disposed → not live anymore; the durable entry
       // (provider:'worker') + sleepEpoch persist.
-      assert.equal(agents.store.has('worker-researcher-alpha'), false, 'worker AgentHandle disposed on sleep')
+      assert.equal(agents.store.has(sid), false, 'worker AgentHandle disposed on sleep')
       // A bus message to it cold-resumes + wakes it.
       const r = await root.tools.get('send_message').execute(
         { to: ['researcher-alpha'], text: 'wake up' },
         { agent: head, signal }
       )
       assert.equal(r.delivered['researcher-alpha'], 'resumed')
-      await waitFor(() => agents.store.has('worker-researcher-alpha'), 5000, 'slept worker cold-resumed')
-      const resumed = agents.store.get('worker-researcher-alpha')
+      await waitFor(() => agents.store.has(sid), 5000, 'slept worker cold-resumed')
+      const resumed = agents.store.get(sid)
       await waitFor(() => resumed.inboxMessages.length >= 1, 5000, 'resumed worker woken')
       assert.equal(resumed.inboxMessages.at(-1).source.kind, 'agent', 'worker wake uses the bus source')
       // Same durable session id reused (resume, not a second create).
-      assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === 'worker-researcher-alpha').length >= 1, true, 'worker cold-resumed via ctx.agents.resume')
+      assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === sid).length >= 1, true, 'worker cold-resumed via ctx.agents.resume')
       const posts = await readPosts(stateDir)
       assert.equal(posts['researcher-alpha'].sleepEpoch, undefined, 'sleepEpoch cleared after the wake')
       assert.equal(posts['researcher-alpha'].provider, 'worker', 'disposable marker survives sleep/respawn')
@@ -2441,10 +2443,11 @@ test('worker wake_counter parity: a WRITE does not inflate the ordinal, but dept
     try {
       const signal = new AbortController().signal
       const createTool = headCtx.tools.get('dept_post_create', key)
-      await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const created = await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const sid = created.sessionId
 
-      const workerAgent = agents.store.get('worker-researcher-alpha')
-      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, 'worker-researcher-alpha')
+      const workerAgent = agents.store.get(sid)
+      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, sid)
       const memo = workerCtx.tools.get('dept_memo_write', workerKey)
       const sleep = workerCtx.tools.get('dept_sleep', workerKey)
 
@@ -2459,7 +2462,7 @@ test('worker wake_counter parity: a WRITE does not inflate the ordinal, but dept
 
       // Sleep: bumps the worker ordinal 1 → 2 at the seed boundary on disk.
       await sleep.execute({}, { agent: workerAgent, signal })
-      await waitFor(() => agents.store.has('worker-researcher-alpha') === false, 5000, 'worker handle disposed on sleep')
+      await waitFor(() => agents.store.has(sid) === false, 5000, 'worker handle disposed on sleep')
       const postSleepContent = await readFile(first.memoPath, 'utf8')
       assert.match(postSleepContent, /^wake_counter: 2$/m, 'worker wake_counter advanced 1 → 2 at dept_sleep (ordinal bump on disk)')
     } finally {
@@ -2474,7 +2477,8 @@ test('dept_post_retire (head): a head retires a worker of ITS OWN department (F1
     try {
       const signal = new AbortController().signal
       const createTool = headCtx.tools.get('dept_post_create', key)
-      await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const created = await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const sid = created.sessionId
       const beforeStore = (await loadMessageRecords(resolveMessagesPath(stateDir))).length
 
       const retireTool = headCtx.tools.get('dept_post_retire', key)
@@ -2486,7 +2490,7 @@ test('dept_post_retire (head): a head retires a worker of ITS OWN department (F1
       // Handle disposed + MARKED (F1: the entry STAYS registered with
       // retired:true — retire is a mark, not an erase) + persisted.
       await waitFor(async () => (await readPosts(stateDir))['researcher-alpha'].retired === true, 5000, 'worker marked retired in posts.json (entry kept)')
-      assert.equal(agents.store.has('worker-researcher-alpha'), false, 'worker AgentHandle disposed on retire')
+      assert.equal(agents.store.has(sid), false, 'worker AgentHandle disposed on retire')
       // B3: NO withdrawal note — the store is untouched by a retire.
       assert.equal((await loadMessageRecords(resolveMessagesPath(stateDir))).length, beforeStore, 'no withdrawal note persisted')
 
@@ -2571,7 +2575,7 @@ test('F1 creator recording: dept_post_create stores managerId = the creating hea
     try {
       const signal = new AbortController().signal
       const createTool = headCtx.tools.get('dept_post_create', key)
-      await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const created = await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
 
       const posts = await readPosts(stateDir)
       assert.equal(posts['researcher-alpha'].managerId, 'research-head', 'managerId = the postId of the creating head ("my workers")')
@@ -2583,7 +2587,7 @@ test('F1 creator recording: dept_post_create stores managerId = the creating hea
       assert.equal(posts['researcher-alpha'].provider, 'worker', 'disposable marker unchanged')
 
       // The worker is still a live catalog member with the durable creator link.
-      const worker = agents.store.get('worker-researcher-alpha')
+      const worker = agents.store.get(created.sessionId)
       await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'worker woken by its first bus message')
     } finally {
       await dispose()
@@ -2783,10 +2787,11 @@ async function f2BootWithTwoHeads(stateDir) {
  * the live worker agent + its scoped toolset. */
 async function f2CreateWorker(env, { ctx, key }, workerPostId, role, head) {
   const signal = new AbortController().signal
-  await ctx.tools.get('dept_post_create', key).execute({ postId: workerPostId, role }, { agent: head, signal })
-  await waitFor(() => env.agents.store.has(`worker-${workerPostId}`), 5000, `worker ${workerPostId} live`)
-  const worker = env.agents.store.get(`worker-${workerPostId}`)
-  const wctx = childContextFor(env.agents, `worker-${workerPostId}`)
+  const result = await ctx.tools.get('dept_post_create', key).execute({ postId: workerPostId, role }, { agent: head, signal })
+  const sid = result.sessionId
+  await waitFor(() => env.agents.store.has(sid), 5000, `worker ${workerPostId} live`)
+  const worker = env.agents.store.get(sid)
+  const wctx = childContextFor(env.agents, sid)
   return { worker, ctx: wctx.ctx, key: wctx.key, signal }
 }
 
@@ -2795,9 +2800,10 @@ test('F2 ACL: a worker sends to its own head (manager) — ALLOWED (delivered, f
     const env = await bootWithHead(stateDir)
     try {
       const signal = new AbortController().signal
-      await env.headCtx.tools.get('dept_post_create', env.key).execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: env.head, signal })
-      const worker = env.agents.store.get('worker-researcher-alpha')
-      const { ctx: workerCtx, key: workerKey } = childContextFor(env.agents, 'worker-researcher-alpha')
+      const created = await env.headCtx.tools.get('dept_post_create', env.key).execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: env.head, signal })
+      const sid = created.sessionId
+      const worker = env.agents.store.get(sid)
+      const { ctx: workerCtx, key: workerKey } = childContextFor(env.agents, sid)
       const before = env.head.inboxMessages.length
 
       const r = await workerCtx.tools.get('send_message', workerKey).execute(
@@ -2821,11 +2827,11 @@ test('F2 ACL: a worker sends to a SAME-DEPARTMENT peer worker — ALLOWED (deliv
     const env = await bootWithHead(stateDir)
     try {
       const signal = new AbortController().signal
-      await env.headCtx.tools.get('dept_post_create', env.key).execute({ postId: 'researcher-alpha', role: 'researcher A' }, { agent: env.head, signal })
-      await env.headCtx.tools.get('dept_post_create', env.key).execute({ postId: 'researcher-beta', role: 'researcher B' }, { agent: env.head, signal })
-      const alpha = env.agents.store.get('worker-researcher-alpha')
-      const beta = env.agents.store.get('worker-researcher-beta')
-      const { ctx: alphaCtx, key: alphaKey } = childContextFor(env.agents, 'worker-researcher-alpha')
+      const createdAlpha = await env.headCtx.tools.get('dept_post_create', env.key).execute({ postId: 'researcher-alpha', role: 'researcher A' }, { agent: env.head, signal })
+      const createdBeta = await env.headCtx.tools.get('dept_post_create', env.key).execute({ postId: 'researcher-beta', role: 'researcher B' }, { agent: env.head, signal })
+      const alpha = env.agents.store.get(createdAlpha.sessionId)
+      const beta = env.agents.store.get(createdBeta.sessionId)
+      const { ctx: alphaCtx, key: alphaKey } = childContextFor(env.agents, createdAlpha.sessionId)
       const betaBefore = beta.inboxMessages.length
 
       const r = await alphaCtx.tools.get('send_message', alphaKey).execute(
@@ -2908,8 +2914,8 @@ test('F2 ACL: a head sends to its OWN department worker — ALLOWED; to ANOTHER 
     try {
       const signal = new AbortController().signal
       // A worker of the programming department exists (created by its head).
-      await env.programmingCtx.tools.get('dept_post_create', env.programmingKey).execute({ postId: 'coder-alpha', role: 'programmer' }, { agent: env.programmingHead, signal })
-      const coder = env.agents.store.get('worker-coder-alpha')
+      const coderCreated = await env.programmingCtx.tools.get('dept_post_create', env.programmingKey).execute({ postId: 'coder-alpha', role: 'programmer' }, { agent: env.programmingHead, signal })
+      const coder = env.agents.store.get(coderCreated.sessionId)
       const coderBefore = coder.inboxMessages.length
 
       // (a) research head → its OWN worker: allowed (managerId match).
@@ -2962,10 +2968,10 @@ test('F2 ACL: MIXED message — the allowed recipients are delivered + persisted
     try {
       const { worker, ctx, key, signal } = await f2CreateWorker(env, { ctx: env.researchCtx, key: env.researchKey }, 'researcher-alpha', 'researcher', env.researchHead)
       // A same-department peer (allowed) + a programming worker (denied) + an unknown id (not an ACL subject — fails as unknown).
-      await env.researchCtx.tools.get('dept_post_create', env.researchKey).execute({ postId: 'researcher-beta', role: 'researcher B' }, { agent: env.researchHead, signal })
-      await env.programmingCtx.tools.get('dept_post_create', env.programmingKey).execute({ postId: 'coder-alpha', role: 'programmer' }, { agent: env.programmingHead, signal })
-      const beta = env.agents.store.get('worker-researcher-beta')
-      const coder = env.agents.store.get('worker-coder-alpha')
+      const betaCreated = await env.researchCtx.tools.get('dept_post_create', env.researchKey).execute({ postId: 'researcher-beta', role: 'researcher B' }, { agent: env.researchHead, signal })
+      const coderCreated = await env.programmingCtx.tools.get('dept_post_create', env.programmingKey).execute({ postId: 'coder-alpha', role: 'programmer' }, { agent: env.programmingHead, signal })
+      const beta = env.agents.store.get(betaCreated.sessionId)
+      const coder = env.agents.store.get(coderCreated.sessionId)
       const betaBefore = beta.inboxMessages.length
       const coderBefore = coder.inboxMessages.length
       const recordsBefore = (await loadMessageRecords(resolveMessagesPath(stateDir))).length
@@ -3048,9 +3054,10 @@ test('F2 regression: the CHILD route (subagents.followup) is OUTSIDE the ACL —
     const env = await bootWithHead(stateDir)
     try {
       const signal = new AbortController().signal
-      await env.headCtx.tools.get('dept_post_create', env.key).execute({ postId: 'researcher-alpha', role: 'researcher' }, { agent: env.head, signal })
-      const worker = env.agents.store.get('worker-researcher-alpha')
-      const { ctx: workerCtx, key: workerKey } = childContextFor(env.agents, 'worker-researcher-alpha')
+      const created = await env.headCtx.tools.get('dept_post_create', env.key).execute({ postId: 'researcher-alpha', role: 'researcher' }, { agent: env.head, signal })
+      const sid = created.sessionId
+      const worker = env.agents.store.get(sid)
+      const { ctx: workerCtx, key: workerKey } = childContextFor(env.agents, sid)
       // A REAL continuable child of the WORKER via the Real continuation manager.
       const { childId } = await env.root.subagents.startContinuable({
         provider: 'spawn',
@@ -3077,7 +3084,7 @@ test('F2 regression: the CHILD route (subagents.followup) is OUTSIDE the ACL —
       const childWake = child.inboxMessages.at(-1)
       assert.equal(childWake.content[0].text, `[From researcher-alpha → ${childId}]: continue`, 'child wake is framed like every bus delivery')
       assert.equal(childWake.source.kind, 'agent')
-      assert.equal(childWake.source.senderSessionId, 'worker-researcher-alpha')
+      assert.equal(childWake.source.senderSessionId, sid, 'the child wake sender session id is the worker\'s UNIQUE session id')
     } finally {
       await env.dispose()
     }
@@ -5485,9 +5492,9 @@ async function f3BootWithTwoHeads(stateDir) {
 async function f3Spawn(env, headCtx, key, head, args) {
   const signal = new AbortController().signal
   const result = await headCtx.tools.get('dept_worker_spawn', key).execute(args, { agent: head, signal })
-  await waitFor(() => env.agents.store.has(`worker-${result.workerId}`), 5000, `worker ${result.workerId} live`)
-  const worker = env.agents.store.get(`worker-${result.workerId}`)
-  const wctx = childContextFor(env.agents, `worker-${result.workerId}`)
+  await waitFor(() => env.agents.store.has(result.sessionId), 5000, `worker ${result.workerId} live`)
+  const worker = env.agents.store.get(result.sessionId)
+  const wctx = childContextFor(env.agents, result.sessionId)
   return { result, worker, ctx: wctx.ctx, key: wctx.key, signal }
 }
 
@@ -5506,7 +5513,8 @@ test('F3 dept_worker_spawn: a head spawns a worker of its department (role templ
         jobId: 'monitor-dsh-updates'
       })
       assert.equal(result.workerId, 'monitor-dsh-updates', 'slug = jobId when given (job worker)')
-      assert.equal(result.sessionId, 'worker-monitor-dsh-updates')
+      assert.match(result.sessionId, /^worker-monitor-dsh-updates-[0-9a-f-]+$/, 'the worker mints a UNIQUE session id (worker-<slug>-<uuid>), never the deterministic worker-<slug>')
+      const workerSid = result.sessionId
       // This title ONLY exists if the role template file was READ + its
       // frontmatter parsed (the deterministic proof of the persona-loading
       // mechanism — "Researcher" comes from presets/departments/research/
@@ -5521,13 +5529,14 @@ test('F3 dept_worker_spawn: a head spawns a worker of its department (role templ
       assert.equal(entry.managerId, 'research-head', 'managerId = the creating head ("my workers")')
       assert.equal(entry.departmentId, 'research', 'departmentId = the creating head config department')
       assert.equal(entry.jobId, 'monitor-dsh-updates')
+      assert.equal(entry.sessionId, workerSid, 'the durable registry entry.sessionId = the UNIQUE minted session id')
 
       // The worker agent is live and its FIRST bus message is the task.
       await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'worker woken by its first bus message')
       assert.match(worker.inboxMessages.at(-1).content[0].text, /track DSH updates and report/, 'the task arrives as the first durable bus message')
 
       // Title pin: user-kind session/title on the worker session (sidebar row).
-      const workerSession = root.sessions.get(SessionId('worker-monitor-dsh-updates'))
+      const workerSession = root.sessions.get(SessionId(workerSid))
       assert.ok(workerSession !== undefined, 'the worker session is entered in the real sessions store')
       const title = workerSession.events.find((ev) => ev.type === 'session/title')
       assert.ok(title !== undefined, 'dept_worker_spawn pinned a session/title event')
@@ -5537,7 +5546,7 @@ test('F3 dept_worker_spawn: a head spawns a worker of its department (role templ
       // F7 (provider migration): the spawned worker is created with the
       // coordinator-aligned agentOptions — a discriminating assert on the
       // runtime materialization route (opencode-zen / vision-exp / max).
-      const spawnCall = agents.createCalls.find((c) => String(c.sessionId) === 'worker-monitor-dsh-updates')
+      const spawnCall = agents.createCalls.find((c) => String(c.sessionId) === workerSid)
       assert.ok(spawnCall, 'dept_worker_spawn issued one ctx.agents.create for the worker')
       assert.deepEqual(spawnCall.agentOptions, { provider: 'opencode-zen', model: 'deepseek-v4-flash-vision-exp', reasoningEffort: 'max' }, 'dept_worker_spawn worker agentOptions = opencode-zen / deepseek-v4-flash-vision-exp / reasoningEffort max (coordinator alignment)')
 
@@ -5689,8 +5698,8 @@ test('F10 (spec 004 §7.1): a worker with NO declared role tools (legacy dept_po
     const { agents, root, head, headCtx, key, dispose } = await bootWithHead(stateDir, { globalTools: F10_GLOBAL_TOOLS })
     try {
       const createTool = headCtx.tools.get('dept_post_create', key)
-      await createTool.execute({ postId: 'plain-alpha', role: 'rank-and-file researcher', firstMessage: 'no tools declared' }, { agent: head, signal: new AbortController().signal })
-      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, 'worker-plain-alpha')
+      const created = await createTool.execute({ postId: 'plain-alpha', role: 'rank-and-file researcher', firstMessage: 'no tools declared' }, { agent: head, signal: new AbortController().signal })
+      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, created.sessionId)
       // No role template → no declared tools → allow:[] → GLOBAL tools masked.
       assert.equal(workerCtx.tools.get('web_search', workerKey), undefined, 'a tool-less worker does NOT inherit the global web_search (board-only)')
       assert.equal(workerCtx.tools.get('read', workerKey), undefined, 'a tool-less worker does NOT inherit the global read (board-only)')
@@ -5875,13 +5884,52 @@ test('F3 slug dedup: dept_worker_spawn dedups worker slugs with -2, -3… and NE
   })
 })
 
+test('worker session-id uniqueness (F8 head-rotation pattern applied to workers): a retire archives the worker\'s UNIQUE session id, and a respawn of the SAME role mints a DIFFERENT UNIQUE session id that is NOT archived — the GUI sidebar never hides the replacement worker', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, workspaceRegistry, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      // Spawn the FIRST worker of role "researcher" → a UNIQUE session id.
+      const first = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'first' })
+      const firstSid = first.result.sessionId
+      assert.match(firstSid, /^worker-researcher-[0-9a-f-]+$/, 'the first worker mints a UNIQUE session id (worker-<slug>-<uuid>), never the deterministic worker-researcher')
+      assert.equal(first.result.workerId, 'researcher', 'the first worker keeps the bare role slug (the identity is the postId, not the session)')
+
+      // Retire it → its UNIQUE session is archived (the sidebar row disappears).
+      await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: 'researcher' }, { agent: head, signal })
+      await waitFor(() => workspaceRegistry.archivedSessionIds.includes(firstSid), 5000, 'the FIRST worker\'s unique session is archived (D5)')
+
+      // Respawn the SAME role → the slug dedups to -2 and the session id is a
+      // DIFFERENT unique mint (never the deterministic, never the archived id).
+      const second = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'second' })
+      const secondSid = second.result.sessionId
+      assert.equal(second.result.workerId, 'researcher-2', 'the respawned same-role worker dedups its slug to -2')
+      assert.match(secondSid, /^worker-researcher-2-[0-9a-f-]+$/, 'the second worker mints its OWN unique session id')
+      assert.notEqual(secondSid, firstSid, 'the respawned worker\'s session id DIFFERS from the archived one')
+      assert.equal(workspaceRegistry.archivedSessionIds.includes(secondSid), false, 'the respawned worker\'s session id is NOT archived')
+      assert.equal(workspaceRegistry.archivedSessionIds.includes(firstSid), true, 'only the FIRST worker\'s (archived) session is in the archived set')
+
+      // The replacement worker is LIVE and its row is visible (the GUI sidebar
+      // filter `!archived.has(id)` never hides it) — session attached, NOT archived.
+      assert.equal(agents.store.has(secondSid), true, 'the respawned worker is LIVE')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['researcher'].retired, true, 'the FIRST worker stays marked retired (mark, not erase)')
+      assert.equal(posts['researcher-2'].retired, undefined, 'the respawned worker is LIVE')
+      assert.equal(posts['researcher-2'].sessionId, secondSid, 'the respawned worker\'s durable entry.sessionId = ITS unique session id')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('F3 dept_worker_retire: marks retired (entry kept, live catalog stops addressing), archives the session, cross-department head DENIED, idempotent', async () => {
   await withTempStateDir(async (stateDir) => {
     const env = await f3BootWithTwoHeads(stateDir)
     try {
       const signal = new AbortController().signal
       // research-head spawns a worker of ITS department.
-      await f3Spawn(env, env.researchCtx, env.researchKey, env.researchHead, { role: 'researcher', task: 'investigate X' })
+      const spawned = await f3Spawn(env, env.researchCtx, env.researchKey, env.researchHead, { role: 'researcher', task: 'investigate X' })
+      const sid = spawned.result.sessionId
 
       // programming-head CANNOT retire it (different manager AND department).
       await assert.rejects(
@@ -5894,7 +5942,7 @@ test('F3 dept_worker_retire: marks retired (entry kept, live catalog stops addre
       const result = await env.researchCtx.tools.get('dept_worker_retire', env.researchKey).execute({ workerId: 'researcher' }, { agent: env.researchHead, signal })
       assert.equal(result.retired, true)
       assert.equal(result.archived, true, 'the durable session archive was requested')
-      await waitFor(() => env.workspaceRegistry.archivedSessionIds.includes('worker-researcher'), 5000, 'worker session archived (sidebar row disappears, D5)')
+      await waitFor(() => env.workspaceRegistry.archivedSessionIds.includes(sid), 5000, 'the UNIQUE worker session is archived (sidebar row disappears, D5)')
       const posts = await readPosts(stateDir)
       assert.equal(posts['researcher'].retired, true, 'retire is a MARK, not an erase (posts.json keeps the entry)')
       assert.equal(posts['researcher'].managerId, 'research-head', 'the creator link survives the retire (logs/history kept, D5)')
@@ -5954,7 +6002,7 @@ test('F3 title: the title? parameter overrides the default pin; without task/job
     try {
       const overridden = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'x', title: 'Custom researcher label' })
       assert.equal(overridden.result.title, 'Custom researcher label', 'title? overrides the default')
-      const overriddenSession = root.sessions.get(SessionId('worker-researcher'))
+      const overriddenSession = root.sessions.get(SessionId(overridden.result.sessionId))
       assert.equal(overriddenSession.events.find((ev) => ev.type === 'session/title')?.data.title, 'Custom researcher label', 'the pinned title is the override')
 
       // No task, no jobId → the default title falls back to the derived id.
@@ -6115,35 +6163,37 @@ test('F4b dept_job_run: materializes the job worker (definition role task = the 
       const signal = new AbortController().signal
       const result = await headCtx.tools.get('dept_job_run', key).execute({ jobId: 'monitor-dsh-updates' }, { agent: head, signal })
       assert.equal(result.workerId, 'monitor-dsh-updates', 'worker slug = the job id')
-      assert.equal(result.sessionId, 'worker-monitor-dsh-updates')
+      assert.match(result.sessionId, /^worker-monitor-dsh-updates-[0-9a-f-]+$/, 'the job worker mints a UNIQUE session id (worker-<slug>-<uuid>)')
+      const jobSid = result.sessionId
       assert.equal(result.jobId, 'monitor-dsh-updates')
       assert.equal(result.role, 'researcher', 'role = the definition frontmatter role')
       assert.equal(result.title, 'Monitor DSH + Deepartments ecosystem updates', 'default title = the HUMAN frontmatter title')
       assert.equal(result.jobPath.endsWith(path.join('jobs', 'monitor-dsh-updates.md')), true, 'the definition path is returned')
 
       // The worker is a live registered job worker (spec §4.1 fields).
-      await waitFor(() => agents.store.has('worker-monitor-dsh-updates'), 5000, 'job worker live')
+      await waitFor(() => agents.store.has(jobSid), 5000, 'job worker live')
       const entry = (await readPosts(stateDir))['monitor-dsh-updates']
       assert.equal(entry.provider, 'worker')
       assert.equal(entry.role, 'researcher', 'role recorded = the role TEMPLATE id')
       assert.equal(entry.managerId, 'research-head', 'managerId = the running head')
       assert.equal(entry.departmentId, 'research')
       assert.equal(entry.jobId, 'monitor-dsh-updates', 'jobId recorded on the durable entry')
+      assert.equal(entry.sessionId, jobSid, 'the durable job-worker entry.sessionId = the UNIQUE minted session id')
 
       // Task = the DEFINITION BODY (the whole concrete assignment) delivered
       // as the first durable bus message (which wakes the worker).
-      const worker = agents.store.get('worker-monitor-dsh-updates')
+      const worker = agents.store.get(jobSid)
       await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'worker woken by the job body')
       assert.match(worker.inboxMessages.at(-1).content[0].text, /Determine whether DeepSeek Harness \(DSH\)/, 'the body fragment proves the first bus message IS the job body')
 
       // Title pin (human frontmatter title on the sidebar session).
-      const workerSession = root.sessions.get(SessionId('worker-monitor-dsh-updates'))
+      const workerSession = root.sessions.get(SessionId(jobSid))
       assert.ok(workerSession !== undefined, 'the job worker session is entered in the real sessions store')
       assert.equal(workerSession.events.find((ev) => ev.type === 'session/title')?.data.title, 'Monitor DSH + Deepartments ecosystem updates', 'pinned title = the human frontmatter title')
 
       // F7 (provider migration): the job worker is created with the
       // coordinator-aligned agentOptions (same discriminating assert as F3).
-      const runCreate = agents.createCalls.find((c) => String(c.sessionId) === 'worker-monitor-dsh-updates')
+      const runCreate = agents.createCalls.find((c) => String(c.sessionId) === jobSid)
       assert.ok(runCreate, 'dept_job_run issued one ctx.agents.create for the job worker')
       assert.deepEqual(runCreate.agentOptions, { provider: 'opencode-zen', model: 'deepseek-v4-flash-vision-exp', reasoningEffort: 'max' }, 'dept_job_run worker agentOptions = opencode-zen / deepseek-v4-flash-vision-exp / reasoningEffort max (coordinator alignment)')
     } finally {
@@ -6228,14 +6278,15 @@ test('F4b idempotency: a second dept_job_run of a running job errors "job alread
       const run = headCtx.tools.get('dept_job_run', key)
       const first = await run.execute({ jobId: 'monitor-dsh-updates' }, { agent: head, signal })
       assert.equal(first.workerId, 'monitor-dsh-updates')
-      await waitFor(() => agents.store.has('worker-monitor-dsh-updates'), 5000, 'job worker live')
+      await waitFor(() => agents.store.has(first.sessionId), 5000, 'job worker live')
 
       // SECOND run of the SAME job → NO duplicate: loud "job already running".
       await assert.rejects(
         () => run.execute({ jobId: 'monitor-dsh-updates' }, { agent: head, signal }),
         /job already running: monitor-dsh-updates/, 'a running job is not duplicated (idempotency)'
       )
-      assert.equal(agents.store.has('worker-monitor-dsh-updates-2'), false, 'no duplicate worker agent was created')
+      assert.equal(agents.store.has(first.sessionId), true, 'the original job worker is STILL the only live agent (no duplicate)')
+      assert.equal(agents.createCalls.filter((c) => String(c.sessionId).startsWith('worker-monitor-dsh-updates-')).length, 1, 'exactly ONE job worker session was created (no duplicate create)')
       const posts = await readPosts(stateDir)
       assert.equal(posts['monitor-dsh-updates-2'], undefined, 'no duplicate registry entry')
       assert.equal(posts['monitor-dsh-updates'].retired, undefined, 'the original worker is still LIVE (not retired by the rejected run)')
@@ -6333,8 +6384,8 @@ test('F5: a department with workspacePath creates its head session under that cw
         { role: 'researcher', task: 'track dsh updates and report', jobId: 'monitor-dsh-updates' },
         { agent: agents.store.get('head-research-head'), signal }
       )
-      await waitFor(() => agents.store.has(`worker-${spawnRes.workerId}`), 5000, 'spawned worker live')
-      const workerCreate = agents.createCalls.find((c) => String(c.sessionId) === `worker-${spawnRes.workerId}`)
+      await waitFor(() => agents.store.has(spawnRes.sessionId), 5000, 'spawned worker live')
+      const workerCreate = agents.createCalls.find((c) => String(c.sessionId) === spawnRes.sessionId)
       assert.ok(workerCreate, 'the spawn issued one ctx.agents.create for the worker')
       assert.equal(workerCreate.meta.cwd, workspacePath, 'the spawned worker is created under the department workspacePath cwd')
 
@@ -6363,8 +6414,8 @@ test('F5 (regression): a department WITHOUT workspacePath keeps the shared works
         { role: 'researcher', task: 'check something', jobId: 'monitor-dsh-updates' },
         { agent: head, signal }
       )
-      await waitFor(() => agents.store.has(`worker-${spawnRes.workerId}`), 5000, 'spawned worker live')
-      const workerCreate = agents.createCalls.find((c) => String(c.sessionId) === `worker-${spawnRes.workerId}`)
+      await waitFor(() => agents.store.has(spawnRes.sessionId), 5000, 'spawned worker live')
+      const workerCreate = agents.createCalls.find((c) => String(c.sessionId) === spawnRes.sessionId)
       assert.ok(workerCreate, 'the spawn issued one ctx.agents.create for the worker')
       assert.equal(workerCreate.meta.cwd, stateDir, 'a no-workspacePath worker is created under the shared workspace root — regression')
 

@@ -168,19 +168,42 @@ function headSessionId(postId: string): string {
   return `${HEAD_SESSION_PREFIX}${postId}`
 }
 
-/** Prefix of a DISPOSABLE department WORKER's stable root-agent session id:
- * `worker-<postId>`. Namespaced so it NEVER collides with a configured head's
- * `head-<postId>` id, and — critically — **never re-materialized by
- * ensureAllHeads**, which ONLY ever iterates CONFIGURED coordinators
- * (`config.org.departments[].coordinator`). A worker is created at runtime by
+/** Prefix of a DISPOSABLE department WORKER's root-agent session id:
+ * `worker-<postId>` (the DETERMINISTIC derivation) and, at create time, the
+ * UNIQUE `worker-<postId>-<uuid>` mint (see `mintWorkerSessionId`). Namespaced
+ * so it NEVER collides with a configured head's `head-<postId>` id, and —
+ * critically — **never re-materialized by ensureAllHeads**, which ONLY ever
+ * iterates CONFIGURED coordinators (`config.org.departments[].coordinator`). A
+ * worker is created at runtime by `dept_worker_spawn`/`dept_job_run`/legacy
  * `dept_post_create` (not config), so after `dept_post_retire` removes its
  * registry entry there is NO boot path that re-spawns it: the "retired worker
  * stays retired" guarantee holds trivially. */
 const WORKER_SESSION_PREFIX = 'worker-'
 
-/** The stable root-agent session id of a disposable department worker. */
+/** The DETERMINISTIC worker-session derivation (`worker-<postId>`). NOT the id
+ * minted at create — it is the legacy/guard form used ONLY by
+ * `dedupedWorkerSlug`'s live-agent check (a legacy orphan session with the
+ * deterministic id is still deduped against), and by seed fixtures. A worker
+ * created today mints `worker-<postId>-<uuid>` instead (see below). */
 function workerSessionId(postId: string): string {
   return `${WORKER_SESSION_PREFIX}${postId}`
+}
+
+/** Mint a fresh, UNIQUE root-agent session id for a disposable worker:
+ * `worker-<postId>-<uuid>` — the F8 head-rotation pattern (commit 4d9e889,
+ * `materializePost`) applied to the WORKER create path. The deterministic
+ * `worker-<postId>` base is NEVER reused as a session id: a retired worker's
+ * session was ARCHIVED (registry.archiveSession → archivedSessionIds, D5), and
+ * re-using the id would collide with the archived entry — the GUI sidebar
+ * hides it (`!archived.has(id)`, dsh-client-ui-workspace/lib/client.js) and
+ * the durable session record would bleed into the new incarnation. A fresh
+ * uuid guarantees a worker session NEVER collides with an archived — or live
+ * — session, so a retired-and-respawned same-role worker is always visible.
+ * The worker's IDENTITY is unchanged: the postId/slug, the pinned title,
+ * `dept_who` and postId-keyed messaging all keep resolving to the same post —
+ * only the underlying session id is unique. */
+function mintWorkerSessionId(postId: string): string {
+  return `${WORKER_SESSION_PREFIX}${postId}-${randomUUID()}`
 }
 
 // Batch C — ack-loop budget. A sender→target pair that has exchanged this many
@@ -227,9 +250,11 @@ const stuckNow = (): number => {
  * CONFIGURED permanent head (vs a future disposable worker). */
 interface PostEntry {
   postId: string
-  /** Stable root-agent session id (`head-<postId>` for a configured head,
-   * `worker-<postId>` for a DISPOSABLE worker), shared by the agent registry
-   * and its persisted session; the wake/dispose/resume identity. */
+  /** Root-agent session id (`head-<postId>` for a configured head, the UNIQUE
+   * `worker-<postId>-<uuid>` mint for a DISPOSABLE worker — created fresh and
+   * never reused across a retired-and-respawned same-role worker), shared by
+   * the agent registry and its persisted session; the wake/dispose/resume
+   * identity. */
   sessionId: string
   roomId: string
   /** The root-agent preset id this post mounts. `'deepartments-head'` marks a
@@ -3174,7 +3199,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (manager) {
       disposers.push(agentCtx.tools.register(defineTool({
         name: 'dept_post_create',
-        description: 'Create a DISPOSABLE department worker: spawn a fresh root agent (sessionId worker-<postId>), register it in posts.json as a disposable entry (provider:"worker"; F1: YOU are recorded as its manager — managerId — and your config department as its departmentId), and deliver its first message via the messaging bus. The worker works your assigned task and sleeps when done; you retire it later with dept_post_retire. The first message (firstMessage, or prompt) is persisted as a durable bus message addressed to the worker (the `deepartments/post-created` signal).',
+        description: 'Create a DISPOSABLE department worker: spawn a fresh root agent (sessionId worker-<postId>-<uuid> — a UNIQUE session, never reused across a retired-and-respawned same-role worker), register it in posts.json as a disposable entry (provider:"worker"; F1: YOU are recorded as its manager — managerId — and your config department as its departmentId), and deliver its first message via the messaging bus. The worker works your assigned task and sleeps when done; you retire it later with dept_post_retire. The first message (firstMessage, or prompt) is persisted as a durable bus message addressed to the worker (the `deepartments/post-created` signal).',
         parameters: {
           postId: { type: 'string', required: true, description: 'Short slug for the worker, e.g. "researcher-alpha" (unique; not already registered).' },
           role: { type: 'string', required: true, description: 'The worker role, e.g. "rank-and-file researcher".' },
@@ -3204,7 +3229,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           // configured head (a worker must never shadow a head's identity).
           if (byPost.has(args.postId)) throw new Error(`[deepartments] dept_post_create: postId "${args.postId}" is already registered`)
           if (coordinatorForPost(args.postId) !== void 0) throw new Error(`[deepartments] dept_post_create: postId "${args.postId}" is a configured department head, not a worker`)
-          const sessionId = workerSessionId(args.postId)
+          const sessionId = mintWorkerSessionId(args.postId)
           if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_post_create: a live agent already exists for session "${sessionId}"`)
           const firstMessage = args.firstMessage ?? args.prompt
           // F10 (spec 004 §9.1): the legacy dept_post_create emits a department
@@ -3574,7 +3599,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           // task = the whole definition body, spec §3.3/§5.4).
           const template = await readRoleTemplate(department.id, definition.meta.role)
           const postId = dedupedWorkerSlug(jobId)
-          const sessionId = SessionId(workerSessionId(postId))
+          const sessionId = SessionId(mintWorkerSessionId(postId))
           if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_job_run: a live agent already exists for session "${sessionId}"`)
           const title = definition.meta.title
           const setup = workerSetup(postId, headEntry.roomId, definition.meta.role, { persona: template.persona, taskText: definition.body, tools: template.tools, department })
@@ -3627,7 +3652,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // cross-department spawn surface is absent by construction). -----------
       disposers.push(agentCtx.tools.register(defineTool({
         name: 'dept_worker_spawn',
-        description: 'Spawn a WORKER of YOUR department (spec 004 §5.2): resolve the role template presets/departments/<your-department>/<role>.md (its persona + display title), materialize a fresh root agent worker (sessionId worker-<slug>, its own session row), register it in posts.json with provider:"worker", role, YOUR postId as managerId, your config department as departmentId and the jobId (when given), inject the role persona + your task into its system prompt, pin its sidebar title (title? overrides the default "<RoleTitle>: <task|jobId|slug>"), and deliver the task as its first durable bus message (which wakes it). Worker slugs DEDUP with -2, -3… — a registered (even retired) slug is never reused. Returns the worker post id + session id + the pinned title. Registered ONLY in the head own-layer.',
+        description: 'Spawn a WORKER of YOUR department (spec 004 §5.2): resolve the role template presets/departments/<your-department>/<role>.md (its persona + display title), materialize a fresh root agent worker (sessionId worker-<slug>-<uuid> — a UNIQUE session, its own session row; the worker NEVER collides with an archived session after a retire-and-respawn of the same role), register it in posts.json with provider:"worker", role, YOUR postId as managerId, your config department as departmentId and the jobId (when given), inject the role persona + your task into its system prompt, pin its sidebar title (title? overrides the default "<RoleTitle>: <task|jobId|slug>"), and deliver the task as its first durable bus message (which wakes it). Worker slugs DEDUP with -2, -3… — a registered (even retired) slug is never reused. Returns the worker post id + session id + the pinned title. Registered ONLY in the head own-layer.',
         parameters: {
           role: { type: 'string', required: true, description: 'The role template name, e.g. "researcher" — must be a file presets/departments/<your-department>/<role>.md.' },
           task: { type: 'string', description: 'The one-off assignment: injected into the worker persona AND delivered as its first bus message.' },
@@ -3666,7 +3691,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           // Slug dedup (spec §5.2): base = jobId ?? role; -2/-3… on collision —
           // INCLUDING RETIRED slugs (F1 keeps retired entries in byPost).
           const postId = dedupedWorkerSlug(args.jobId ?? role)
-          const sessionId = SessionId(workerSessionId(postId))
+          const sessionId = SessionId(mintWorkerSessionId(postId))
           if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_worker_spawn: a live agent already exists for session "${sessionId}"`)
           const title = String(args.title ?? '').trim() !== '' ? String(args.title) : defaultWorkerTitle(template.title, args.task, args.jobId, postId)
           const setup = workerSetup(postId, headEntry.roomId, role, { persona: template.persona, taskText: args.task, tools: template.tools, department })

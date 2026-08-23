@@ -99,7 +99,7 @@ report identified as gaps:
    (cordis.patch.yml:15-28 already declares `id: research`, `name: Research
    Department`, coordinator `research-head`).
 2. **G2 — Two operational agent kinds (D3).** Both are workers — same
-   materialization (`worker-<slug>` root agent, own session, own sidebar row);
+   materialization (`worker-<slug>-<uuid>` root agent, own session, own sidebar row);
    the difference is provenance: a **job worker** carries a versioned job id
    (reusable definition) and **an ephemeral** carries a one-off task. Neither is
    a harness subagent (no `subagent/descriptor`, no parent; they are catalog
@@ -147,7 +147,7 @@ Department (org.departments[], config + repo dirs)
  ├── Job    (docs/departments/<dept>/jobs/<slug>.md — versioned task definition)
  ├── Head   (worker 0: the coordinator — a permanent root agent, today's
  │           ensureHead machinery, unchanged: head-<postId>, manager gate)
- └── Worker (root agent worker-<slug>: role template + task; ephemeral or
+ └── Worker (root agent worker-<slug>-<uuid>: role template + task; ephemeral or
              job-backed; its own sidebar session in the department folder)
 ```
 
@@ -218,7 +218,7 @@ owner: research-head
 
 ### 3.4 Worker
 
-- A worker is a **DISCONNECTED root agent** (D3): `worker-<slug>` session id
+- A worker is a **DISCONNECTED root agent** (D3): `worker-<slug>-<uuid>` session id (id único por encarnación, como los heads F8)
   (WORKER_SESSION_PREFIX, invoke.ts:170-175), created via `ctx.agents.create`
   from the plugin root ctx — `origin: undefined`, lands in `agents.roots()` like
   host/heads; **never** a harness subagent (no parent, no `subagent/descriptor`;
@@ -721,7 +721,7 @@ They are ADOPTED requirements for the personas and presets (F6), implemented in
 
 ## PATTERNS / INVARIANTS / SURPRISES (for the builders)
 
-- **Invariants kept**: workers are ROOT agents (`worker-<slug>`, no
+- **Invariants kept**: workers are ROOT agents (`worker-<slug>-<uuid>`, no
   subagent/descriptor) — the native child-followup can never reach them; the
   catalog route + bus is their only delivery path; BOOT-QUIET; the manager gate
   (head own-layer only) stays structural (host CANNOT — D2); retire is

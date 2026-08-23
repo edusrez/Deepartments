@@ -241,7 +241,7 @@ deferred with §5.
   (Consequence: a transient child agentId can never fall into `failed: 'unknown'` — the child
   route is decided first.)
 - **Target resolution**: `sessionId` from the registry entry (post → `head-<postId>` /
-  `worker-<postId>`; host → the live/registered host session id); `sleepEpoch` from the
+  `worker-<postId>-<uuid>` (id único por encarnación, como los heads F8); host → the live/registered host session id); `sleepEpoch` from the
   entry; live status from the AgentRegistry.
 - **Child targets (the route resolved first above)**: its delivery is the **native
   continuable followup** (`ctx.subagents.followup` — running → inbox enqueue, ready → cold
