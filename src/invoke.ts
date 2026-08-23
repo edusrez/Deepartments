@@ -1240,6 +1240,17 @@ export function applyInvoke(ctx: Context, config: Config) {
   // 155-158), so `dept_sleep` can tear a head down. Held by the plugin owner,
   // never by the head agent itself. Cleared when a head sleeps.
   const byHeadHandle = new Map<string, AgentHandleLike>()
+  // Fix sleep-self-deadlock (2026-08-23 — explore-deep/2026-08-23-head-sleep-hang.md
+  // §5a): the in-flight per-session dispose promises. `dept_sleep` fires the
+  // calling agent's OWN handle dispose fire-and-forget (it may not await it
+  // from its own turn — the harness dispose() sends machine.cancel + awaits
+  // machine.whenIdle(), the very driver that is executing the tool), so a
+  // CONCURRENT disposer of the same session (a bus wake respawn, a double
+  // dept_sleep) must JOIN the same detach promise instead of racing a second
+  // dispose over the not-yet-detached machine. Each entry is dropped in
+  // `finally` once settled — a lingering settled entry would otherwise dedupe
+  // the NEXT dispose of a RE-materialized handle.
+  const disposingHeads = new Map<string, Promise<void>>()
   // Fix A2 — per-head wake progress tracker: headSessionId → { at, eventCount }.
   // `at` = when we last observed this head, `eventCount` = the watermark of its
   // session event log (AgentLike.session.events.length) at that time. The relay
@@ -2885,7 +2896,16 @@ export function applyInvoke(ctx: Context, config: Config) {
         const boundarySeq = (agent.session as { seq?: number } | undefined)?.seq
         if (boundarySeq !== undefined) entry.boundarySeq = boundarySeq
         persistPosts()
-        await disposeHeadHandle(sessionId)
+        // Fix sleep-self-deadlock (2026-08-23): NEVER await our own handle's
+        // dispose from our own turn — the harness dispose() sends
+        // machine.cancel + `await machine.whenIdle()`, i.e. it waits for the
+        // very driver that is currently executing this tool (invariant
+        // self-deadlock — explore-deep/2026-08-23-head-sleep-hang.md §5a).
+        // Fire it (the retirePost precedent) so the tool returns immediately,
+        // the turn/end settles and the dispose's whenIdle then resolves; the
+        // per-session `disposingHeads` dedupe lets a concurrent wake JOIN the
+        // same detach instead of racing it.
+        void disposeHeadHandleOnce(sessionId)
         return { room: entry.roomId, member: memberId, memoPath: journalPathFor(memberId), sleepEpoch: entry.sleepEpoch }
       }
     })))
@@ -3070,6 +3090,25 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  /** disposeHeadHandle with the in-flight dedupe of `disposingHeads`: two
+   * concurrent disposers of the SAME session (dept_sleep + a wake respawn, a
+   * double dept_sleep, retirePost during a sleep) share ONE detach and proceed
+   * only once it settles. Never rejects (disposeHeadHandle logs and swallows
+   * handle errors), so a fire-and-forget caller (`void`) cannot produce an
+   * unhandled rejection. Returns the shared promise so the fire-and-forget
+   * caller and an awaiting caller (materializePost) agree on the same
+   * completion; the map entry is dropped once settled (no leak, no stale
+   * dedupe of a later dispose of a re-materialized handle). */
+  const disposeHeadHandleOnce = (sessionId: string): Promise<void> => {
+    const inFlight = disposingHeads.get(sessionId)
+    if (inFlight !== void 0) return inFlight
+    const run = disposeHeadHandle(sessionId).finally(() => {
+      disposingHeads.delete(sessionId)
+    })
+    disposingHeads.set(sessionId, run)
+    return run
+  }
+
   /** Retire a registered post cleanly — the SHARED retirement path used by the
    * global HOST-plane `dept_post_retire` AND the head own-layer `dept_post_retire`.
    *
@@ -3102,8 +3141,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
     byPost.delete(postId)
     byChild.delete(entry.sessionId)
-    // Also dispose any live handle (retiring a post should not leave it live).
-    void disposeHeadHandle(entry.sessionId)
+    // Also dispose any live handle (retiring a post should not leave it live) —
+    // via the in-flight dedupe, so a concurrent dispose (e.g. the post's own
+    // dept_sleep) is JOINED instead of raced into a double dispose.
+    void disposeHeadHandleOnce(entry.sessionId)
     persistPosts()
     return { postId, retired: true }
   }
@@ -3440,8 +3481,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     let resumed = false
     if (entry.sleepEpoch !== void 0) {
       // Respawn from sleep: retire the live handle (if any), record the
-      // previous incarnation, clear the flag, then resume below.
-      await disposeHeadHandle(entry.sessionId)
+      // previous incarnation, clear the flag, then resume below. Joins any
+      // in-flight dept_sleep detach (disposeHeadHandleOnce) so the resume
+      // below is guaranteed to run only AFTER the machine is detached.
+      await disposeHeadHandleOnce(entry.sessionId)
       byChild.delete(entry.sessionId)
       const previousSession = entry.sessionId
       registerEntry({

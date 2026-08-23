@@ -137,6 +137,12 @@ function materializeStubAgent(agents, sessionId, options) {
   return {
     agent,
     dispose: async () => {
+      // Record the invocation BEFORE awaiting the gate (the real harness
+      // dispose() starts the teardown synchronously — machine.cancel — and
+      // only then awaits whenIdle).
+      agents.disposeCalls.set(sessionId, (agents.disposeCalls.get(sessionId) ?? 0) + 1)
+      const gate = agents.disposeGates.get(sessionId)
+      if (gate !== undefined) await gate
       agents.store.delete(sessionId)
     }
   }
@@ -160,6 +166,14 @@ class StubAgents extends Service {
     // Piece 1 cwd fix (2026-08-22): forced resume failures (per durable session
     // id) so the wakePost resume-failed → create-fresh fallback is testable.
     this.resumeRejects = new Set()
+    // Sleep-self-deadlock fix tests (2026-08-23): per-session dispose GATES —
+    // a promise the stub handle's dispose awaits BEFORE detaching, modelling
+    // the real harness dispose() → await machine.whenIdle() contract (which
+    // never settles from the machine's own turn, the deadlock the fix removes)
+    // — and a per-session dispose-call counter to assert the shared-promise
+    // dedupe (one detach for two concurrent disposers, no leaks).
+    this.disposeGates = new Map()
+    this.disposeCalls = new Map()
   }
 
   get(id) {
@@ -504,6 +518,19 @@ async function waitFor(predicate, timeoutMs = 5000, label = 'condition') {
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
   throw new Error(`timed out waiting for ${label}`)
+}
+
+/** Race a promise against a short deadline; rejects with a LABELED error when
+ * the deadline passes (used to assert that a path does NOT block — the pre-fix
+ * dept_sleep self-deadlock would time out here). Clears the timer on settle so
+ * the losing timer can never produce an unhandled rejection; the hung promise
+ * itself stays pending (a pending promise is inert, no unhandled rejection). */
+function withTimeout(promise, ms, label) {
+  let timer
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out: ${label}`)), ms)
+  })
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer))
 }
 
 async function withTempStateDir(fn) {
@@ -1722,6 +1749,140 @@ test('Batch G regression: a head that never slept wakes normally via the live fo
       assert.equal(posts[postId].sessionId, `head-${postId}`, 'session id unchanged (live followup)')
       assert.equal(posts[postId].sleepEpoch, undefined, 'no sleep-mark on a never-slept head')
       assert.equal(posts[postId].previousChildId, undefined, 'no previous incarnation recorded')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- Batch G self-deadlock FIX (2026-08-23): dept_sleep must NOT await its
+// own handle's dispose from its own turn — the real harness
+// dispose() → await machine.whenIdle() waits for the very driver executing the
+// tool (invariant self-deadlock); it is fired fire-and-forget and the per-
+// session `disposingHeads` dedupe makes a CONCURRENT disposer (wake respawn,
+// double dept_sleep) JOIN the same detach instead of racing it. The stub gates
+// below model the real whenIdle never settling while the turn runs.
+
+test('Batch G self-deadlock fix: a head dept_sleep RETURNS immediately even when its own handle dispose machine cannot settle (never-settling whenIdle) — the detach runs in the background', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    await seedJournal(stateDir, postId, 'SELF-DEADLOCK-FIX: sleep must return while the dispose hangs.')
+    const { agents, dispose } = await bootPlugin(stateDir)
+    await waitForHeadMaterialized(agents)
+    try {
+      const head = agents.store.get(`head-${postId}`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      const signal = new AbortController().signal
+      // Model the REAL harness dispose contract the deadlock rode on: the
+      // handle's dispose() awaits the machine's whenIdle, which never settles
+      // while the disposable machine's own turn is executing the tool. A gate
+      // that is never released is exactly that hang.
+      agents.disposeGates.set(`head-${postId}`, new Promise(() => {}))
+      const result = await withTimeout(sleep.execute({}, { agent: head, signal }), 1500, 'dept_sleep must return while the dispose is in flight (pre-fix: awaited the own-handle dispose → self-deadlock)')
+      assert.equal(result.member, postId, 'the tool result is returned (the dispose did not block the call)')
+      assert.ok(typeof result.sleepEpoch === 'number' && result.sleepEpoch > 0, 'the sleep epoch is part of the immediate result')
+      assert.equal(agents.disposeCalls.get(`head-${postId}`), 1, 'exactly one detach was launched (in the background)')
+      assert.equal(agents.store.has(`head-${postId}`), true, 'the not-yet-settled detach has NOT detached yet (still in flight)')
+      // The sleep mark is already durable although the detach is still pending.
+      await waitFor(async () => (await readPosts(stateDir))[postId].sleepEpoch !== undefined, 5000, 'sleepEpoch persisted before the detach settles')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch G self-deadlock fix: a DOUBLE dept_sleep shares ONE in-flight detach (no double-dispose), and the shared promise settles + cleans once the gate opens', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    await seedJournal(stateDir, postId, 'DOUBLE-SLEEP: one detach for two sleeps.')
+    const { agents, dispose } = await bootPlugin(stateDir)
+    await waitForHeadMaterialized(agents)
+    try {
+      const head = agents.store.get(`head-${postId}`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      const signal = new AbortController().signal
+      let release
+      const gate = new Promise((resolve) => { release = () => resolve() })
+      agents.disposeGates.set(`head-${postId}`, gate)
+
+      const first = await withTimeout(sleep.execute({}, { agent: head, signal }), 1500, 'first dept_sleep returns (dispose in flight)')
+      assert.equal(first.member, postId)
+      const second = await withTimeout(sleep.execute({}, { agent: head, signal }), 1500, 'second dept_sleep returns (shares the in-flight dispose)')
+      assert.equal(second.member, postId)
+      assert.equal(agents.disposeCalls.get(`head-${postId}`), 1, 'two dept_sleeps → ONE detach (the shared in-flight promise)')
+      assert.equal(agents.store.has(`head-${postId}`), true, 'still live: the shared detach has not settled')
+
+      // Open the gate: the SHARED detach settles and the durable sleep mark is
+      // in place — still exactly one dispose overall.
+      release()
+      await waitFor(() => agents.store.has(`head-${postId}`) === false, 5000, 'the shared detach settles after the gate opens')
+      assert.equal(agents.disposeCalls.get(`head-${postId}`), 1, 'still exactly ONE detach once settled (no second dispose fired by the second call)')
+      await waitFor(async () => (await readPosts(stateDir))[postId].sleepEpoch !== undefined, 5000, 'sleepEpoch durable')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch G self-deadlock fix: a bus wake DURING the in-flight detach joins the same promise, resumes cleanly after the detach (one dispose, one resume), and a later cycle disposes the RE-materialized handle (no stale map leak)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    await seedJournal(stateDir, postId, 'WAKE-DURING-DISPOSE: resume only after the detach.')
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    await waitForHeadMaterialized(agents)
+    try {
+      const head = agents.store.get(`head-${postId}`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      const signal = new AbortController().signal
+      let release
+      const gate = new Promise((resolve) => { release = () => resolve() })
+      agents.disposeGates.set(`head-${postId}`, gate)
+
+      // Sleep: the tool call RETURNS (fire-and-forget detach, still gated).
+      await withTimeout(sleep.execute({}, { agent: head, signal }), 1500, 'dept_sleep returns while the detach is in flight')
+      assert.equal(agents.disposeCalls.get(`head-${postId}`), 1, 'one detach launched')
+
+      // A wake arrives while the detach is still in flight: the bus delivery
+      // (deliverBusRecord → materializePost respawn branch) must JOIN the
+      // shared promise — never race a second dispose over the not-yet-
+      // detached machine.
+      const host = agents.put(fakeParentAgent())
+      const sendPromise = root.tools.get('send_message').execute(
+        { to: [postId], text: 'wake while the detach is in flight' },
+        { agent: host, signal }
+      )
+      let sendSettled = false
+      sendPromise.then(() => { sendSettled = true }, () => { sendSettled = true })
+      await new Promise((r) => setTimeout(r, 750))
+      assert.equal(sendSettled, false, 'the wake is PARKED on the shared detach (it does not race/resume over the live loop)')
+      assert.equal(agents.disposeCalls.get(`head-${postId}`), 1, 'no second dispose from the wake (shared promise)')
+
+      // Open the gate: the detach settles; the wake then resumes the durable
+      // session and delivers — exactly one dispose overall.
+      release()
+      const sent = await withTimeout(sendPromise, 5000, 'bus delivery completes after the detach')
+      assert.equal(sent.delivered[postId], 'resumed', 'the respawn-from-sleep delivery reports resumed')
+      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'slept head cold-resumed after the detach')
+      assert.equal(agents.disposeCalls.get(`head-${postId}`), 1, 'still exactly ONE detach (the wake joined it, never doubled it)')
+      assert.equal(agents.createCalls.filter((c) => String(c.sessionId) === `head-${postId}`).length, 1, 'head resumed, not re-created (create only at boot)')
+      const resumed = agents.store.get(`head-${postId}`)
+      await waitFor(() => resumed.inboxMessages.length >= 1, 5000, 'resumed head woken after the detach')
+      assert.equal(resumed.inboxMessages.at(-1).source.kind, 'agent', 'head wake uses the bus agent source')
+      await waitFor(async () => (await readPosts(stateDir))[postId].sleepEpoch === undefined, 5000, 'sleepEpoch cleared after the wake')
+
+      // No stale map leak: a SECOND cycle (fresh handle re-materialized by the
+      // wake) must dispose AGAIN — a lingering settled `disposingHeads` entry
+      // would dedupe it and the counter would stay at 1.
+      agents.disposeGates.delete(`head-${postId}`)
+      const { ctx: freshHeadCtx, key: freshKey } = agents.childContexts.at(-1)
+      const freshSleep = freshHeadCtx.tools.get('dept_sleep', freshKey)
+      assert.ok(freshSleep, 'dept_sleep re-installed on the resumed head')
+      await withTimeout(freshSleep.execute({}, { agent: resumed, signal }), 1500, 'second-cycle dept_sleep returns')
+      await waitFor(() => agents.store.has(`head-${postId}`) === false, 5000, 'second-cycle detach settled')
+      assert.equal(agents.disposeCalls.get(`head-${postId}`), 2, 'second cycle disposed the RE-materialized handle (no stale in-flight map entry)')
     } finally {
       await dispose()
     }
