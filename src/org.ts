@@ -69,6 +69,15 @@ export interface Config {
   forkProvider?: string
   org: {
     departments: DepartmentConfig[]
+    /**
+     * Optional extra filesystem roots a department post's `dept_exec` may
+     * operate under, in ADDITION to the fixed/derived defaults (the repo root,
+     * the department workspace, the runtime stateDir and the fixed project
+     * roots). Empty by default — an absent key keeps the default behavior of
+     * every other org field. `dept_exec` accepts only commands/cwd under the
+     * union of these roots + the defaults; anything else is out of scope.
+     */
+    execRoots?: string[]
   }
   /**
    * Custom `ctx.web` fetch provider config (blocking detection).
@@ -114,7 +123,11 @@ export const Config: z<any, any> = z.object({
           maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
         }).default(void 0 as unknown as { provider: string; model: string; maxTokens: number })
       }).default(void 0 as unknown as { postId: string; role: string; title: string; sessionTitle: string; provider: string; agentOptions: { provider: string; model: string; maxTokens: number } })
-    })).default([])
+    })).default([]),
+    // B2 (spec W5): extra scoped roots for dept_exec — optional, empty default.
+    // Mirrors Config.org.execRoots. An absent key (pre-B2 config) defaults to
+    // [] so the existing behavior is byte-compatible.
+    execRoots: z.array(z.string()).default([])
   }).required(),
   webfetch: z.object({
     enabled: z.boolean(),

@@ -59,14 +59,14 @@
 //     self held).
 //
 // NO export default (pitfall 0001 — breaks `inject`).
-import { mkdir, readFile, writeFile, readdir, copyFile, stat, rename, unlink, appendFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, readdir, copyFile, stat, rename, unlink, appendFile, realpath } from 'node:fs/promises'
 // F10 (spec 004 §9.1): the department-architecture prompt section reads the
 // department's ARCHITECTURE.md SYNCHRONOUSLY — the post setup path is
 // synchronous (a root agent's systemPrompt sections are composed at
 // materialization, before the agent can be awaited; there is no await seam).
 // readFileSync keeps that contract; ENOENT = the department has no
 // architecture (omit the section, never an error).
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -1088,6 +1088,13 @@ export interface CalendarEntry {
   createdBy?: string
   createdAt?: number
   fired?: boolean
+  /** B2 (spec W5): the CONFIG department id of the caller that added the entry
+   * (stamped at `dept_calendar_add` from the caller's department). Optional so
+   * a legacy/malformed entry loads untouched; set for every entry added by a
+   * configured department post. Lets `dept_calendar_list` filter by department
+   * while the DEFAULT (no filter) still returns the FULL shared (global)
+   * agenda — the agenda stays unified across departments. */
+  departmentId?: string
 }
 
 export interface CalendarState {
@@ -1149,6 +1156,189 @@ export function readJobRunsStateFile(stateDir: string): Record<string, number> {
 export async function writeJobRunsStateFile(stateDir: string, state: Record<string, number>): Promise<void> {
   await mkdir(path.dirname(path.join(stateDir, 'job-runs-state.json')), { recursive: true })
   await writeFile(path.join(stateDir, 'job-runs-state.json'), JSON.stringify(state), 'utf8')
+}
+
+// ---------------------------------------------------------------------------
+// dept_exec (spec W5-B2): the SCOPED shell tool for department posts. A worker
+// whose role template DECLARES `dept_exec` in its frontmatter `tools` inherits
+// it (registered on the post's OWN layer inside installHeadBoardTools, gated by
+// the role-tools allow-list); a post that does not declare it never sees it,
+// and the host / config heads never get it. The ALLOW ROOTS + the deny guard
+// are PURE module helpers so the scope policy is CENTRAL and unit-testable —
+// the tool runs realpath/execFile around the same `deptExecDenyReason` the
+// tests probe directly.
+// ---------------------------------------------------------------------------
+
+/** The fixed (non-config) allowed roots for dept_exec, in addition to the repo
+ * root, the caller's department workspace and the runtime stateDir. */
+export const DEPT_EXEC_DEFAULT_ROOTS: readonly string[] = [
+  '/home/esuarez/projects',
+  '/usr/lib/node_modules/@deepseek-ai/dsh',
+  // The DEV-profile deployment home (DSH_HOME for deepartments-dev) — the
+  // version-watch job builds/installs plugins there, and dept_exec MUST reach
+  // it. `/opt/dsh/.dsh` (stable) is deliberately OUT of the allowed roots so the
+  // cwd-in-root check + the protected token both deny it (spec §5.1/§5.2 I4).
+  '/opt/dsh/.dsh-dev'
+]
+
+/** Case-insensitive substring denylist for dept_exec commands — a denied token
+ * is an out-of-scope safety net; the caller escalates via the Asistente. */
+export const DEPT_EXEC_DENYLIST: readonly string[] = [
+  'systemctl', 'reboot', 'shutdown', 'poweroff', 'halt', 'init 0',
+  'sudo', 'su -', 'mkfs', 'fdisk', 'parted', 'dd if=', 'rm -rf /',
+  'nsenter', ':(){'
+]
+
+/** The stable-instance state-token — any reference DENIES with the explicit
+ * "stable profile is protected" reason (requires owner approval). */
+export const DEPT_EXEC_PROTECTED_TOKEN = '/opt/dsh/.dsh'
+
+/** Boundary-aware stable-home check (spec §5.1 (c) / §9 ❓2 — the highest-risk
+ * limit). `p` references the stable deployment home `/opt/dsh/.dsh` ONLY as a
+ * whole path component: the literal must (a) be preceded by a start/in-shell
+ * word boundary and (b) NOT be followed by a word/path-continuation char
+ * (`-dev`, `_x`, `foo`). `/opt/dsh/.dsh-dev` (and everything under it) is the
+ * DEV deployment home — NOT stable — so it is NOT denied. Used for BOTH the
+ * command and the resolved cwd so `isStablePath('/opt/dsh/.dsh/…')` is denied
+ * while `isStablePath('/opt/dsh/.dsh-dev/…')` is allowed. */
+export function isStablePath(p: string): boolean {
+  const s = String(p ?? '')
+  const escaped = DEPT_EXEC_PROTECTED_TOKEN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`(^|[^A-Za-z0-9_/.-])${escaped}(?![A-Za-z0-9_-])`)
+  return re.test(s)
+}
+
+/** execFile timeout + maxBuffer for dept_exec (a runaway command is killed). */
+export const DEPT_EXEC_TIMEOUT_MS = 120000
+export const DEPT_EXEC_MAX_BUFFER = 8 * 1024 * 1024
+
+/** Whether `candidate` is `root` or lexically INSIDE it. Both must already be
+ * realpath-resolved by the caller (the comparison is pure string; a trailing
+ * slash is normalized). `candidate === root` or `candidate` starts with
+ * `root/` — never a sibling prefix like `/projects2`. */
+export function isPathInside(candidate: string, root: string): boolean {
+  const c = String(candidate ?? '').replace(/[/\\]+$/, '')
+  const r = String(root ?? '').replace(/[/\\]+$/, '')
+  if (r === '') return false
+  return c === r || c.startsWith(r.endsWith(path.sep) ? r : r + path.sep)
+}
+
+/** The `/`-leading ABSOLUTE-path tokens in a command ("path words"): a token
+ * beginning at `^` or a whitespace/metacharacter boundary, terminated by
+ * whitespace or a shell metacharacter. `--opt=/a` is NOT matched (the `/` is
+ * not at a word boundary) — only a word that STARTS with `/`. `>`/`<` count as
+ * word boundaries so a redirect target with NO hyphen-space (`>/etc/foo`) and
+ * an fd-redirect (`2>/etc/foo`) are BOTH scoped-path tokens — every
+ * `>`/`<`-adjacent absolute path token is checked (the `/dev/null`-style sink
+ * exemption is the explicit whitelist in `deptExecCanonicalToken`, NOT a
+ * lexical digit-guard). The stable-profile token is handled by the dedicated
+ * protected check. */
+function deptExecPathTokens(command: string): string[] {
+  const tokens: string[] = []
+  const cmd = String(command ?? '')
+  const re = /(^|[\s|&;'`"()<>])(\/[^\s|&;'`"()<>]+)/g
+  for (const match of cmd.matchAll(re)) {
+    const boundary = match[1] as string
+    const token = match[2]
+    if (typeof token !== 'string' || token.length <= 1) continue
+    tokens.push(token)
+  }
+  return tokens
+}
+
+/** The `/dev` device-sink tokens that are ALWAYS allowed by the abs-path scope
+ * check — they are not paths under scope control (writing/reading `/dev/null`,
+ * `/dev/stdout`, `/dev/stderr`, `/dev/zero`, `/dev/tty` is harmless and is the
+ * common redirect target). Checked on the NORMALIZED literal, BEFORE any realpath
+ * (realpath would collapse `/dev/stdout` → `/proc/…` and lose the match). */
+const DEPT_EXEC_DEV_WHITELIST: ReadonlySet<string> = new Set([
+  '/dev/null', '/dev/stdout', '/dev/stderr', '/dev/zero', '/dev/tty'
+])
+
+/** Shell metacharacters that make an absolute path token UNRESOLVABLE lexically
+ * (an expansion, variable or glob: `$`, `*`, `?`, `[`, `{`, `~`, backtick,
+ * quotes). Such a token cannot be normalized/realpath'd safely, so it STAYS
+ * HEURISTIC (the raw token is used for the lexical containment check). */
+const DEPT_EXEC_TOKEN_METACHAR = /[$*?\[{~`'"]/
+
+/** The CANONICAL target an absolute path token contributes to the abs-path scope
+ * check (spec §5.1 (d), token normalization): `path.posix.normalize(token)` and,
+ * when the path EXISTS, `realpathSync` — so a `..`-escape or symlink cannot
+ * smuggle an out-of-root or stable path past a lexical check. Returns the string
+ * the scope checks run against:
+ * - a token carrying a metachar/variable/glob → the RAW token (stays heuristic);
+ * - a `/dev` sink in the whitelist → its NORMALIZED literal (always allowed,
+ *   never realpath'd);
+ * - otherwise the normalized path, upgraded to its realpath when it exists
+ *   (tolerant: an unresolvable path falls back to the normalized form). */
+function deptExecCanonicalToken(token: string): string {
+  const t = String(token ?? '')
+  // A token with a shell metachar/var/glob cannot be resolved → stay lexical.
+  if (DEPT_EXEC_TOKEN_METACHAR.test(t)) return t
+  const normalized = path.posix.normalize(t)
+  // A whitelisted /dev sink is allowed verbatim (do NOT realpath it — the match
+  // must be on the literal, not the `/proc/…` target it resolves to).
+  if (DEPT_EXEC_DEV_WHITELIST.has(normalized)) return normalized
+  if (existsSync(normalized)) {
+    try {
+      return realpathSync(normalized)
+    } catch {
+      return normalized
+    }
+  }
+  return normalized
+}
+
+/** The PURE dept_exec scope guard. `cwd` and every entry of `allowedRoots`
+ * must already be REALPATH-resolved (the tool resolves them before calling).
+ * Returns an out-of-scope deny reason string when the command/cwd must NOT run,
+ * or `undefined` when EVERY check passes (the command may execute). Checks, in
+ * order: (1) the resolved cwd is inside an allowed root; (2) denylist
+ * substring (case-insensitive); (3) a boundary-aware `/opt/dsh/.dsh` token in
+ * command OR cwd → the stable profile is protected (its `-dev` sibling is NOT
+ * denied); (4) every `/`-leading absolute path token in the command is under an
+ * allowed root — each token is FIRST canonicalized (`deptExecCanonicalToken`),
+ * and the stable + containment checks run on the canonical target, so a
+ * `..`-escape/symlink to an out-of-root or stable path is denied and a `/dev`
+ * sink in the whitelist is always allowed. */
+export function deptExecDenyReason(command: string, cwd: string, allowedRoots: readonly string[]): string | undefined {
+  const cmd = String(command ?? '').trim()
+  const roots = allowedRoots.filter((r) => typeof r === 'string' && r !== '')
+  // (1) the resolved cwd must be inside an allowed root (realpath equality).
+  if (!roots.some((root) => isPathInside(cwd, root))) {
+    return `OUT_OF_SCOPE / DENIED — cwd "${cwd}" is not inside a scoped dept_exec root (escalate via the Asistente / owner approval)`
+  }
+  // (2) denylist (case-insensitive substring).
+  const lower = cmd.toLowerCase()
+  for (const bad of DEPT_EXEC_DENYLIST) {
+    if (lower.includes(bad)) {
+      return `OUT_OF_SCOPE / DENIED — command contains a denied token "${bad}" (escalate via the Asistente / owner approval)`
+    }
+  }
+  // (3) the stable profile is protected — the boundary-aware token (a whole
+  // path component; `/opt/dsh/.dsh-dev` is NOT stable) → explicit owner approval.
+  if (isStablePath(cmd) || isStablePath(cwd)) {
+    return 'OUT_OF_SCOPE / DENIED — the stable profile is protected — requires explicit owner approval via the Asistente'
+  }
+  // (4) every `/`-leading absolute path token must be under an allowed root.
+  // Each token is FIRST canonicalized (normalize + realpath when it exists) so a
+  // `..`-escape or symlink cannot smuggle an out-of-root/stable path past a
+  // lexical check; a `/dev` sink in the whitelist is always allowed (not a path
+  // under scope control); the stable and containment checks run on the target.
+  for (const token of deptExecPathTokens(cmd)) {
+    const target = deptExecCanonicalToken(token)
+    // `/dev/null` & friends are always allowed — not paths under scope control.
+    if (DEPT_EXEC_DEV_WHITELIST.has(target)) continue
+    // The stable-profile token, applied to the CANONICAL target — a normalized
+    // `..`-escape to `/opt/dsh/.dsh/…` must NOT slip past the boundary check.
+    if (isStablePath(target)) {
+      return 'OUT_OF_SCOPE / DENIED — the stable profile is protected — requires explicit owner approval via the Asistente'
+    }
+    if (!roots.some((root) => isPathInside(target, root))) {
+      return `OUT_OF_SCOPE / DENIED — command references absolute path "${token}" outside a scoped dept_exec root (escalate via the Asistente / owner approval)`
+    }
+  }
+  return undefined
 }
 
 /** A parsed 5-field cron expression (`m h dom mon dow`), each a Set of the
@@ -4461,6 +4651,82 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  // --- dept_exec helpers (spec W5-B2, SCOPED shell for department posts) ----
+  // The pure guard + the allow-roots are the scope policy; these two helpers
+  // build the realpath-resolved root set and run the execFile. The tool is
+  // registered in installHeadBoardTools ONLY when the post's role declare-list
+  // includes `dept_exec` (see postSetup's allowExec computation below).
+
+  /** The realpath-resolved SET of allowed roots for a dept_exec call: the fixed
+   * DEPT_EXEC_DEFAULT_ROOTS, the repo root, the runtime stateDir, the caller's
+   * department workspace, and any configured org.execRoots. Each root is
+   * realpath'd when it resolves (a symlink root collapses to its target, so the
+   * cwd/path comparisons stay strict); an unresolvable root is kept verbatim. */
+  const deptExecAllowedRoots = async (department: DepartmentConfig | undefined): Promise<string[]> => {
+    const raw = new Set<string>(DEPT_EXEC_DEFAULT_ROOTS)
+    raw.add(repoRoot)
+    const stateDir = config.stateDir
+    if (typeof stateDir === 'string' && stateDir.trim() !== '') raw.add(stateDir)
+    const deptCwd = await resolveDepartmentWorkspaceCwd(department)
+    if (deptCwd !== '') raw.add(deptCwd)
+    for (const entry of (config.org.execRoots ?? [])) {
+      if (typeof entry === 'string' && entry.trim() !== '') raw.add(entry.trim())
+    }
+    const resolved: string[] = []
+    for (const root of raw) {
+      try {
+        resolved.push(await realpath(root))
+      } catch {
+        resolved.push(root)
+      }
+    }
+    return resolved
+  }
+
+  /** Run ONE scoped shell command through `bash -lc` with a MINIMAL sanitized
+   * env (PATH/HOME/LANG only — nothing else is leaked to the child). Returns
+   * {ok, exitCode, stdout, stderr}; a non-zero exit or a killed command is a
+   * normal `ok:false` result, never a throw (the caller decides the surface). */
+  const runDeptExec = async (command: string, cwd: string): Promise<{ ok: boolean; exitCode: number | null; stdout: string; stderr: string }> => {
+    const env: NodeJS.ProcessEnv = {
+      PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+      HOME: process.env.HOME ?? '/root',
+      LANG: process.env.LANG ?? 'C'
+    }
+    try {
+      const { stdout, stderr } = await execFileP('bash', ['-lc', command], {
+        cwd,
+        timeout: DEPT_EXEC_TIMEOUT_MS,
+        maxBuffer: DEPT_EXEC_MAX_BUFFER,
+        env
+      })
+      return { ok: true, exitCode: 0, stdout, stderr }
+    } catch (error: unknown) {
+      const e = error as { code?: unknown; stdout?: unknown; stderr?: unknown; killed?: boolean }
+      const exitCode = typeof e.code === 'number' ? e.code : null
+      return {
+        ok: false,
+        exitCode,
+        stdout: typeof e.stdout === 'string' ? e.stdout : '',
+        stderr: typeof e.stderr === 'string' ? e.stderr : (e.killed === true ? 'command killed (timeout)' : String(error ?? ''))
+      }
+    }
+  }
+
+  /** markdown renderer for the dept_exec result: exit code + stdout/stderr in
+   * fenced code blocks, each TRUNCATED to a cap with an explicit marker. */
+  const deptExecRender = (_args: unknown, value: { ok: boolean; exitCode: number | null; stdout: string; stderr: string }): Array<{ type: 'text'; text: string }> => {
+    const MAX = 8000
+    const truncate = (s: string): string => {
+      const trimmed = String(s ?? '')
+      return trimmed.length > MAX ? `${trimmed.slice(0, MAX)}\n… [truncated ${trimmed.length} chars]` : trimmed
+    }
+    const parts: string[] = [`exit code ${value.exitCode}${value.ok ? '' : ' (FAILED)'}`]
+    if (value.stdout !== '') parts.push(`stdout:\n\`\`\`\n${truncate(value.stdout)}\n\`\`\``)
+    if (value.stderr !== '') parts.push(`stderr:\n\`\`\`\n${truncate(value.stderr)}\n\`\`\``)
+    return [{ type: 'text', text: parts.join('\n') } as const]
+  }
+
   /** Install the post's messaging toolset scoped to `agentCtx` (the post's OWN
    * layer — no toolFilter needed for a root agent). The same tool bodies the
    * host plane registers, reused for any resident post: send_message,
@@ -4477,7 +4743,7 @@ export function applyInvoke(ctx: Context, config: Config) {
    * create/worker-spawn/worker-retire controls register ONLY in the head
    * own-layer here; the host plane never exposes them. (The one host-plane
    * exception is the global `dept_post_retire`, registered separately below.) */
-  const installHeadBoardTools = (agentCtx: Context, manager = false): HeadToolDisposers => {
+  const installHeadBoardTools = (agentCtx: Context, manager = false, opts: { allowExec?: boolean } = {}): HeadToolDisposers => {
     const disposers: Array<() => void> = []
 
     // Batch B2 — the agent-messaging bus tools (send_message / agent_messages /
@@ -4498,7 +4764,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     // the entry's `at` passes (instead of only notifying the head). ------------
     disposers.push(agentCtx.tools.register(defineTool({
       name: 'dept_calendar_add',
-      description: 'Add ONE ad-hoc calendar entry to YOUR department\'s runtime agenda (spec 004 §5.7 — stored in <stateDir>/calendar.json). `label` (non-empty) + `at` (a parseable ISO datetime) are REQUIRED; `jobId` (optional) links the entry to a KNOWN job of your department, so the scheduler RUNS that job when `at` passes instead of only notifying your head. Entry: {id, label, at, jobId?, createdBy (your post id), createdAt, fired:false}. Ad-hoc entries fire ONCE — no recurrence (a job\'s recurrence lives in its own `schedule`). Every post (head AND worker) of the department may add; the entry is owned by its creator.',
+      description: 'Add ONE ad-hoc calendar entry to the SHARED department agenda (spec 004 §5.7 — a single <stateDir>/calendar.json across every department, so the agenda is unified/global; the entry is stamped with `departmentId` = your department). `label` (non-empty) + `at` (a parseable ISO datetime) are REQUIRED; `jobId` (optional) links the entry to a KNOWN job of YOUR department, so the scheduler RUNS that job when `at` passes instead of only notifying your head. Entry: {id, label, at, jobId?, createdBy (your post id), createdAt, fired, departmentId}. Ad-hoc entries fire ONCE — no recurrence (a job\'s recurrence lives in its own `schedule`). Every post (head AND worker) of the department may add; the entry is owned by its creator.',
       parameters: {
         label: { type: 'string', required: true, description: 'The entry label (non-empty, e.g. "Review W4 batch").' },
         at: { type: 'string', required: true, description: 'The schedule time as a parseable ISO datetime (e.g. "2026-08-24T09:00:00.000Z").' },
@@ -4515,12 +4781,13 @@ export function applyInvoke(ctx: Context, config: Config) {
             jobId: { type: 'string' },
             createdBy: { type: 'string', required: true },
             createdAt: { type: 'number', required: true },
-            fired: { type: 'boolean' }
+            fired: { type: 'boolean' },
+            departmentId: { type: 'string' }
           }
         },
-        render: (_args, value) => [{ type: 'text', text: `calendar added: "${value.label}" @ ${value.at} (id ${value.id})` } as const]
+        render: (_args, value) => [{ type: 'text', text: `calendar added: "${value.label}" @ ${value.at} (id ${value.id}${value.departmentId !== void 0 ? `, ${value.departmentId}` : ''})` } as const]
       },
-      async execute(args, exec): Promise<{ id: string; label: string; at: string; createdBy: string; createdAt: number; jobId?: string; fired?: boolean }> {
+      async execute(args, exec): Promise<{ id: string; label: string; at: string; createdBy: string; createdAt: number; jobId?: string; fired?: boolean; departmentId?: string }> {
         const agent = exec.agent
         if (!agent) throw new Error('dept_calendar_add requires a calling agent (exec.agent was undefined)')
         const postId = postIdForChild(agent.id as string)
@@ -4529,10 +4796,10 @@ export function applyInvoke(ctx: Context, config: Config) {
         if (label === '') throw new Error('[deepartments] dept_calendar_add: `label` is required (non-empty)')
         const at = String(args.at ?? '').trim()
         if (at === '' || Number.isNaN(Date.parse(at))) throw new Error('[deepartments] dept_calendar_add: `at` must be a parseable ISO datetime')
+        const callerEntry = byPost.get(postId)
+        const department = callerEntry === void 0 ? undefined : departmentForEntry(callerEntry)
         const jobIdRaw = String(args.jobId ?? '').trim()
         if (jobIdRaw !== '') {
-          const entry = byPost.get(postId)
-          const department = entry === void 0 ? undefined : departmentForEntry(entry)
           if (department === void 0 || !(await departmentJobExists(department, jobIdRaw))) {
             throw new Error(`[deepartments] dept_calendar_add: jobId "${jobIdRaw}" is not a KNOWN job of your department — it must be a file <jobId>.md in the department jobDir`)
           }
@@ -4545,21 +4812,23 @@ export function applyInvoke(ctx: Context, config: Config) {
           createdBy: postId,
           createdAt: Date.now(),
           fired: false,
-          ...(jobIdRaw !== '' ? { jobId: jobIdRaw } : {})
+          ...(jobIdRaw !== '' ? { jobId: jobIdRaw } : {}),
+          ...(department !== void 0 ? { departmentId: department.id } : {})
         }
         const state = readCalendar()
         state.entries.push(entry)
         await writeCalendarBestEffort(state)
-        return { id, label, at, createdBy: postId, createdAt: entry.createdAt ?? Date.now(), fired: false, ...(jobIdRaw !== '' ? { jobId: jobIdRaw } : {}) }
+        return { id, label, at, createdBy: postId, createdAt: entry.createdAt ?? Date.now(), fired: false, ...(jobIdRaw !== '' ? { jobId: jobIdRaw } : {}), ...(department !== void 0 ? { departmentId: department.id } : {}) }
       }
     })))
 
     disposers.push(agentCtx.tools.register(defineTool({
       name: 'dept_calendar_list',
-      description: 'List the runtime calendar entries of YOUR department (spec 004 §5.7 — <stateDir>/calendar.json). Optionally filter an inclusive `from`/`to` window (ISO datetimes; entries with `at` in [from, to]). Returns {count, entries}: each entry {id, label, at, jobId?, createdBy?, createdAt?, fired?}. Every post of the department may read the agenda.',
+      description: 'List the runtime calendar entries of the SHARED department agenda (spec 004 §5.7 — a single <stateDir>/calendar.json across every department; the agenda is unified/global). With NO filter it returns the FULL global agenda (every department\'s entries). Optionally filter an inclusive `from`/`to` window (ISO datetimes; entries with `at` in [from, to]) OR by `departmentId` (only entries of that department) — or both. Returns {count, entries}: each entry {id, label, at, jobId?, createdBy?, createdAt?, fired?, departmentId?}. Every post of the department may read the agenda.',
       parameters: {
         from: { type: 'string', description: 'Inclusive lower bound (ISO datetime); omit for open start.' },
-        to: { type: 'string', description: 'Inclusive upper bound (ISO datetime); omit for open end.' }
+        to: { type: 'string', description: 'Inclusive upper bound (ISO datetime); omit for open end.' },
+        departmentId: { type: 'string', description: 'Optional: filter to entries stamped with ONE department id. Omit for the FULL shared (global) agenda. Entries without a departmentId are NOT matched by a filter.' }
       },
       output: {
         schema: {
@@ -4580,30 +4849,37 @@ export function applyInvoke(ctx: Context, config: Config) {
                   jobId: { type: 'string' },
                   createdBy: { type: 'string' },
                   createdAt: { type: 'number' },
-                  fired: { type: 'boolean' }
+                  fired: { type: 'boolean' },
+                  departmentId: { type: 'string' }
                 }
               }
             }
           }
         },
-        render: (_args, value) => [{ type: 'text', text: `calendar (${value.count}):\n${value.entries.map((e) => `  - ${e.label} @ ${e.at}${e.jobId !== void 0 ? ` (job ${e.jobId})` : ''}${e.fired === true ? ' [fired]' : ''}`).join('\n')}` } as const]
+        render: (_args, value) => [{ type: 'text', text: `calendar (${value.count}):\n${value.entries.map((e) => `  - ${e.label} @ ${e.at}${e.departmentId !== void 0 ? ` [${e.departmentId}]` : ''}${e.jobId !== void 0 ? ` (job ${e.jobId})` : ''}${e.fired === true ? ' [fired]' : ''}`).join('\n')}` } as const]
       },
       async execute(args): Promise<{ count: number; entries: CalendarEntry[] }> {
         const state = readCalendar()
         const fromRaw = String(args.from ?? '').trim()
         const toRaw = String(args.to ?? '').trim()
+        const departmentIdRaw = String(args.departmentId ?? '').trim()
+        const departmentId = departmentIdRaw === '' ? undefined : departmentIdRaw
         const from = fromRaw === '' || Number.isNaN(Date.parse(fromRaw)) ? undefined : Date.parse(fromRaw)
         const to = toRaw === '' || Number.isNaN(Date.parse(toRaw)) ? undefined : Date.parse(toRaw)
         let entries = state.entries
         if (from !== undefined) entries = entries.filter((e) => Date.parse(e.at) >= from)
         if (to !== undefined) entries = entries.filter((e) => Date.parse(e.at) <= to)
+        // B2 (spec W5): an optional department filter — only entries stamped with
+        // that departmentId match; entries WITHOUT a departmentId are excluded by
+        // a filter. Default (no filter) = the FULL shared (global) agenda.
+        if (departmentId !== undefined) entries = entries.filter((e) => e.departmentId === departmentId)
         return { count: entries.length, entries }
       }
     })))
 
     disposers.push(agentCtx.tools.register(defineTool({
       name: 'dept_calendar_remove',
-      description: 'Remove a runtime calendar entry of YOUR department by id (spec 004 §5.7 — <stateDir>/calendar.json). ACL: the entry CREATOR (its `createdBy`) OR the department HEAD may remove it; ANY other caller is DENIED (an entry is never deleted by a third member). Returns the removed entry; an unknown id is a loud error.',
+      description: 'Remove a runtime calendar entry of the SHARED department agenda by id (spec 004 §5.7 — the single <stateDir>/calendar.json). ACL: the entry CREATOR (its `createdBy`) OR the department HEAD may remove it; ANY other caller is DENIED (an entry is never deleted by a third member). Returns the removed entry; an unknown id is a loud error.',
       parameters: {
         id: { type: 'string', required: true, description: 'The entry id (from dept_calendar_add / dept_calendar_list).' }
       },
@@ -4618,12 +4894,13 @@ export function applyInvoke(ctx: Context, config: Config) {
             jobId: { type: 'string' },
             createdBy: { type: 'string' },
             createdAt: { type: 'number' },
-            fired: { type: 'boolean' }
+            fired: { type: 'boolean' },
+            departmentId: { type: 'string' }
           }
         },
         render: (_args, value) => [{ type: 'text', text: `calendar removed: "${value.label}" @ ${value.at} (id ${value.id})` } as const]
       },
-      async execute(args, exec): Promise<{ id: string; label: string; at: string; createdBy?: string; createdAt?: number; jobId?: string; fired?: boolean }> {
+      async execute(args, exec): Promise<{ id: string; label: string; at: string; createdBy?: string; createdAt?: number; jobId?: string; fired?: boolean; departmentId?: string }> {
         const agent = exec.agent
         if (!agent) throw new Error('dept_calendar_remove requires a calling agent (exec.agent was undefined)')
         const postId = postIdForChild(agent.id as string)
@@ -4644,9 +4921,62 @@ export function applyInvoke(ctx: Context, config: Config) {
         }
         state.entries.splice(index, 1)
         await writeCalendarBestEffort(state)
-        return { id: entry.id, label: entry.label, at: entry.at, ...(entry.createdBy !== void 0 ? { createdBy: entry.createdBy } : {}), ...(entry.createdAt !== void 0 ? { createdAt: entry.createdAt } : {}), ...(entry.jobId !== void 0 ? { jobId: entry.jobId } : {}), ...(entry.fired !== void 0 ? { fired: entry.fired } : {}) }
+        return { id: entry.id, label: entry.label, at: entry.at, ...(entry.createdBy !== void 0 ? { createdBy: entry.createdBy } : {}), ...(entry.createdAt !== void 0 ? { createdAt: entry.createdAt } : {}), ...(entry.jobId !== void 0 ? { jobId: entry.jobId } : {}), ...(entry.fired !== void 0 ? { fired: entry.fired } : {}), ...(entry.departmentId !== void 0 ? { departmentId: entry.departmentId } : {}) }
       }
     })))
+
+    // --- B2 (spec W5): dept_exec — the SCOPED shell tool for department posts.
+    // Registered on the post's OWN layer (same place as dept_calendar_add), but
+    // ONLY when the post's role allow-list declares `dept_exec` (postSetup
+    // passes allowExec=true for a worker whose role template frontmatter `tools`
+    // contains `dept_exec`). A post that does not declare it never sees the tool;
+    // a config head (HEAD_BASE_TOOLS, no dept_exec) never registers it; the host
+    // never gets it (this own-layer registration is descendants-only). The scope
+    // guard runs BEFORE any execution — a denied command/cwd is a clean error
+    // and the shell is never invoked.
+    if (opts.allowExec === true) {
+      disposers.push(agentCtx.tools.register(defineTool({
+        name: 'dept_exec',
+        description: 'Execute ONE shell command, scoped to your department (spec W5-B2). Runs `bash -lc <command>` with a sanitized env (PATH/HOME/LANG only) inside a scoped root. The command runs in your department workspace cwd by default; an explicit `cwd` must be inside a scoped root. Every command + cwd is guarded BEFORE execution: a denied token (systemctl/reboot/sudo/…), a reference to the protected stable profile (`/opt/dsh/.dsh`) or an absolute path outside a scoped root is DENIED (out of scope — escalate via the Asistente / owner approval). For a department WORKER whose role template declares this tool; it is never exposed to the host or a config head. Output: {ok, exitCode, stdout, stderr} — a non-zero exit is ok:false, never a throw.',
+        parameters: {
+          command: { type: 'string', required: true, description: 'The shell command to run (non-empty). Guarded before execution.' },
+          cwd: { type: 'string', description: 'Working directory; default = your department workspace cwd. Must be inside a scoped root.' }
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              ok: { type: 'boolean', required: true },
+              exitCode: { oneOf: [{ type: 'number' }, { type: 'null' }], required: true },
+              stdout: { type: 'string', required: true },
+              stderr: { type: 'string', required: true }
+            }
+          },
+          render: deptExecRender
+        },
+        async execute(args, exec): Promise<{ ok: boolean; exitCode: number | null; stdout: string; stderr: string }> {
+          const agent = exec.agent
+          if (!agent) throw new Error('dept_exec requires a calling agent (exec.agent was undefined)')
+          const postId = postIdForChild(agent.id as string)
+          if (postId === void 0) throw new Error('[deepartments] dept_exec is for a department MEMBER (a registered head or worker), not the host')
+          const command = String(args.command ?? '').trim()
+          if (command === '') throw new Error('[deepartments] dept_exec: `command` is required (non-empty)')
+          const callerEntry = byPost.get(postId)
+          const department = callerEntry === void 0 ? undefined : departmentForEntry(callerEntry)
+          const cwdRaw = String(args.cwd ?? '').trim()
+          const deptCwd = await resolveDepartmentWorkspaceCwd(department)
+          const defaultCwd = deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath()
+          const cwd = cwdRaw !== '' ? cwdRaw : defaultCwd
+          const allowedRoots = await deptExecAllowedRoots(department)
+          const resolvedCwd = await realpath(cwd).catch(() => cwd)
+          // The scope guard runs BEFORE any execution — a deny is a clean error.
+          const deny = deptExecDenyReason(command, resolvedCwd, allowedRoots)
+          if (deny !== void 0) throw new Error(`[deepartments] dept_exec: ${deny}`)
+          return runDeptExec(command, resolvedCwd)
+        }
+      })))
+    }
 
 
     disposers.push(agentCtx.tools.register(defineTool({
@@ -5396,7 +5726,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   const OWN_LAYER_POST_TOOLS: ReadonlySet<string> = new Set([
     'send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep',
     'dept_post_create', 'dept_post_retire', 'dept_worker_spawn', 'dept_worker_retire',
-    'dept_job_list', 'dept_job_run', 'dept_monitor_list'
+    'dept_job_list', 'dept_job_run', 'dept_monitor_list', 'dept_exec'
   ])
 
   /** Build the `setup(agentCtx)` for one post (head OR worker): mount the post's
@@ -5481,8 +5811,12 @@ export function applyInvoke(ctx: Context, config: Config) {
         restrictOwn = agentCtx.tools.restrict({ allow: [] })
       }
       // (b) Register the board toolset scoped to this agent (manager gates the
-      // department-lifecycle create/retire tools for heads).
-      const tools = installHeadBoardTools(agentCtx, opts.manager)
+      // department-lifecycle create/retire tools for heads). B2 (spec W5):
+      // `dept_exec` is granted ONLY to a post whose allow-list DECLARES it —
+      // for a worker, the role template's frontmatter `tools` (a config head
+      // never declares it; HEAD_BASE_TOOLS does not carry it), so a post that
+      // does not declare the tool never sees it and the host never gets it.
+      const tools = installHeadBoardTools(agentCtx, opts.manager, { allowExec: declared.includes('dept_exec') })
       // (c) Persona = the role (a head's role or a worker's role), NOT a mission.
       // F3: the ROLE PERSONA delta (+ the task) rides the same section seam.
       // F10: `department` feeds the architecture section (spec 004 §9.1).

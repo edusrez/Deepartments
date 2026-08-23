@@ -28,7 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath } from '../lib/messages-store.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
@@ -7657,6 +7657,276 @@ test('W3b dept_monitor_list (head own-layer ONLY): lists the code-default monito
       const spawned = await headCtx.tools.get('dept_worker_spawn', key).execute({ role: 'researcher', task: 'check this' }, { agent: head, signal })
       const { ctx: workerCtx, key: workerKey } = childContextFor(agents, spawned.sessionId)
       assert.equal(workerCtx.tools.get('dept_monitor_list', workerKey), undefined, 'a worker has NO dept_monitor_list')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// ===========================================================================
+// B2 (spec W5-B2): dept_exec — the SCOPED shell tool for department posts, and
+// the calendar `departmentId` attribution. The dept_exec guard + allow-roots are
+// CENTRAL and unit-testable (deptExecDenyReason), and the tool is integration-
+// tested through the real Loader (a role that DECLARES dept_exec owns it; a
+// role that does not never sees it; the host and a config head never get it).
+// ===========================================================================
+
+/** A one-off role template for the dept_exec tests: declares `dept_exec` so the
+ * spawned worker's allow-list carries it (a role that does not declare it never
+ * registers the tool). */
+const EXEC_ROLE = 'execbuilder'
+const EXEC_ROLE_PATH = path.join(F10_REPO_ROOT, 'presets', 'departments', 'research', `${EXEC_ROLE}.md`)
+const EXEC_ROLE_FRONTMATTER = `---\nid: ${EXEC_ROLE}\ntitle: Exec builder\ntools:\n  - dept_exec\n---\n\nYou are an exec builder worker.\n`
+
+/** Snapshot a role template under presets/departments/research/<role>.md (its
+ * content, or absence) so a fixture write/remove restores the exact state. */
+async function snapshotRoleTemplate(role) {
+  const p = path.join(F10_REPO_ROOT, 'presets', 'departments', 'research', `${role}.md`)
+  let content = null
+  try {
+    content = await readFile(p, 'utf8')
+  } catch (err) {
+    if (err?.code !== 'ENOENT') throw err
+  }
+  return async function restoreRoleTemplate() {
+    if (content === null) await rm(p, { force: true })
+    else await writeFile(p, content, 'utf8')
+  }
+}
+
+test('B2 dept_exec (real Loader): a worker whose role DECLARES dept_exec runs a scoped command in-workspace; denied commands/cwd/paths are a clean OUT_OF_SCOPE error; a role without it never sees the tool; the host plane has NO dept_exec', async () => {
+  const restore = await snapshotRoleTemplate(EXEC_ROLE)
+  try {
+    await writeFile(EXEC_ROLE_PATH, EXEC_ROLE_FRONTMATTER, 'utf8')
+    await withTempStateDir(async (stateDir) => {
+      const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+      try {
+        const signal = new AbortController().signal
+        const { worker, ctx: workerCtx, key: workerKey, result } = await f3Spawn({ agents }, headCtx, key, head, { role: EXEC_ROLE, task: 'scoped build' })
+        // The role declares dept_exec → the worker OWNS it (own-layer).
+        const exec = workerCtx.tools.get('dept_exec', workerKey)
+        assert.ok(exec, 'dept_exec is installed for a role whose template declares it')
+        assert.equal(root.tools.get('dept_exec'), undefined, 'the host plane has NO dept_exec (never global)')
+
+        // Positive path: the default cwd is the department workspace/session root
+        // (stateDir, inside a scoped root in this fixture) → `echo ok` runs.
+        const run = await exec.execute({ command: 'echo ok' }, { agent: worker, signal })
+        assert.equal(run.ok, true, 'a scoped command succeeds')
+        assert.equal(run.exitCode, 0, 'a scoped command exits 0')
+        assert.match(run.stdout, /ok/, 'the command stdout is surfaced')
+
+        // Denylist (case-insensitive substring) → DENIED before any execution.
+        await assert.rejects(
+          () => exec.execute({ command: 'systemctl status' }, { agent: worker, signal }),
+          /OUT_OF_SCOPE \/ DENIED — command contains a denied token "systemctl"/, 'a systemctl-style command is denied'
+        )
+
+        // The protected stable-profile token → the specific protected reason.
+        await assert.rejects(
+          () => exec.execute({ command: 'cat /opt/dsh/.dsh/config.yml' }, { agent: worker, signal }),
+          /the stable profile is protected — requires explicit owner approval via the Asistente/, 'a /opt/dsh/.dsh reference is protected-denied'
+        )
+
+        // The DEV deployment home (`/opt/dsh/.dsh-dev`) is NOT stable — a command
+        // referencing it is ALLOWED (the boundary-aware token must not deny `-dev`).
+        const devRun = await exec.execute({ command: 'echo /opt/dsh/.dsh-dev' }, { agent: worker, signal })
+        assert.equal(devRun.ok, true, 'a command referencing the DEV home is allowed (not stable)')
+        assert.match(devRun.stdout, /\/opt\/dsh\/\.dsh-dev/, 'the dev-home command actually ran')
+
+        // A NO-SPACE redirect target (`>/etc/foo`) is now a scoped abs-path token
+        // → OUT_OF_SCOPE (not a silent false-negative allow).
+        await assert.rejects(
+          () => exec.execute({ command: 'echo hi >/etc/foo' }, { agent: worker, signal }),
+          /command references absolute path "\/etc\/foo" outside a scoped dept_exec root/, 'a no-space redirect target outside a root is out of scope'
+        )
+
+        // W5-B2c: the fd-redirect digit-guard is REMOVED — an fd-redirect into a
+        // non-root path (`2>/etc/foo`) is now a scoped abs-path token → OUT_OF_SCOPE.
+        await assert.rejects(
+          () => exec.execute({ command: 'echo hi 2>/etc/foo' }, { agent: worker, signal }),
+          /command references absolute path "\/etc\/foo" outside a scoped dept_exec root/, 'an fd-redirect into a non-root path is out of scope'
+        )
+
+        // An absolute path token outside a scoped root → OUT_OF_SCOPE.
+        await assert.rejects(
+          () => exec.execute({ command: 'ls /etc/passwd' }, { agent: worker, signal }),
+          /command references absolute path "\/etc\/passwd" outside a scoped dept_exec root/, 'an absolute path outside a root is out of scope'
+        )
+
+        // W5-B2c: a `..`-escape THROUGH an allowed root is canonicalized to its
+        // real target → OUT_OF_SCOPE (not a lexical false-allow).
+        await assert.rejects(
+          () => exec.execute({ command: 'cat /home/esuarez/projects/deepartments/../../root/.ssh/id_rsa' }, { agent: worker, signal }),
+          /command references absolute path "\/home\/esuarez\/projects\/deepartments\/\.\.\/\.\.\/root\/\.ssh\/id_rsa" outside a scoped dept_exec root/, 'a `..`-escape through an allowed root is out of scope'
+        )
+
+        // An absolute path UNDER a scoped root is allowed (repo root).
+        const repoRun = await exec.execute({ command: `cat ${path.join(F10_REPO_ROOT, 'README.md')}` }, { agent: worker, signal })
+        assert.equal(repoRun.ok, true, 'an absolute path under a scoped root runs')
+
+        // W5-B2c: the /dev sink whitelist — an fd-redirect into /dev/null is
+        // ALLOWED (not a lexical deny); it actually runs.
+        const devNullRun = await exec.execute({ command: 'ls 2>/dev/null' }, { agent: worker, signal })
+        assert.equal(devNullRun.ok, true, 'an fd-redirect into /dev/null is allowed')
+        assert.equal(devNullRun.exitCode, 0, 'the /dev/null redirect command exits 0')
+
+        // W5-B2c: a redirect TARGET under a scoped root is ALLOWED — it writes
+        // into the temp stateDir (a scoped root), not an out-of-scope path.
+        const redirectRun = await exec.execute({ command: `cat ${path.join(F10_REPO_ROOT, 'README.md')} > ${path.join(stateDir, 'scratch.txt')}` }, { agent: worker, signal })
+        assert.equal(redirectRun.ok, true, 'a redirect target under a scoped root runs')
+
+        // cwd outside the scoped roots → DENIED.
+        await assert.rejects(
+          () => exec.execute({ command: 'echo hi', cwd: '/etc' }, { agent: worker, signal }),
+          /cwd "\/etc" is not inside a scoped dept_exec root/, 'a cwd outside the scoped roots is denied'
+        )
+
+        // A role (researcher) that does NOT declare dept_exec never sees it.
+        const researcher = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'investigate' })
+        assert.equal(researcher.ctx.tools.get('dept_exec', researcher.key), undefined, 'a role without dept_exec does not inherit the tool')
+        assert.equal(researcher.ctx.tools.get('dept_worker_spawn', researcher.key), undefined, 'the researcher peer still lacks the head lifecycle tools (no cross-contamination)')
+      } finally {
+        await dispose()
+      }
+    })
+  } finally {
+    await restore()
+  }
+})
+
+test('B2 dept_exec guard (pure): deptExecDenyReason centralizes the scope policy (cwd root, denylist, boundary-aware stable-profile token, absolute-path tokens)', () => {
+  const roots = ['/home/esuarez/projects', '/usr/lib/node_modules/@deepseek-ai/dsh', '/srv/dept-ws', '/opt/dsh/.dsh-dev']
+  // cwd inside a root → no deny for a harmless command.
+  assert.equal(deptExecDenyReason('echo ok', '/srv/dept-ws', roots), undefined, 'an in-root cwd + harmless command passes')
+  assert.equal(deptExecDenyReason('cat /home/esuarez/projects/README.md', '/srv/dept-ws', roots), undefined, 'an absolute path under a root passes')
+  // cwd outside the roots → out of scope.
+  assert.match(deptExecDenyReason('echo ok', '/etc', roots), /OUT_OF_SCOPE \/ DENIED — cwd "\/etc"/, 'cwd outside the roots is out of scope')
+  // denylist (case-insensitive).
+  assert.match(deptExecDenyReason('SYSTEMCTL list-units', '/srv/dept-ws', roots), /denied token "systemctl"/, 'the denylist is case-insensitive')
+  assert.match(deptExecDenyReason('sudo rm -rf /tmp/x', '/srv/dept-ws', roots), /denied token "sudo"/, 'sudo is denied')
+  // the protected stable-profile token (boundary-aware).
+  assert.match(deptExecDenyReason('cat /opt/dsh/.dsh/agent.cordis.yml', '/srv/dept-ws', roots), /the stable profile is protected/, 'the stable-profile token is protected-denied')
+  // (the /opt/dsh/.dsh-vs-/.dsh-dev boundary discrimination is the DEDICATED test
+  // below — the W5-R2 review coverage gap that missed the (c) bug)
+  // a `su -` denylist match (denylist includes "su -").
+  assert.match(deptExecDenyReason('su - root', '/srv/dept-ws', roots), /denied token "su -"/, 'su - is denied')
+  // an absolute path outside the roots → out of scope.
+  assert.match(deptExecDenyReason('cat /etc/passwd', '/srv/dept-ws', roots), /references absolute path "\/etc\/passwd"/, 'an absolute path outside the roots is out of scope')
+  // (d) a NO-SPACE redirect target is now a scoped abs-path token → OUT_OF_SCOPE.
+  assert.match(deptExecDenyReason('echo hi >/etc/foo', '/srv/dept-ws', roots), /references absolute path "\/etc\/foo" outside a scoped dept_exec root/, 'a no-space redirect target outside a root is out of scope')
+  // the fixed default roots are the documented set (DEV home present, stable out).
+  assert.ok(DEPT_EXEC_DEFAULT_ROOTS.includes('/home/esuarez/projects'), 'the fixed default roots include the projects root')
+  assert.ok(DEPT_EXEC_DEFAULT_ROOTS.includes('/opt/dsh/.dsh-dev'), 'the fixed default roots include the DEV deployment home')
+  assert.ok(!DEPT_EXEC_DEFAULT_ROOTS.includes('/opt/dsh/.dsh'), 'the stable home is NOT a dept_exec root')
+})
+
+test('B2 dept_exec guard (boundary, W5-R2 review gap): the protected stable token is a WHOLE path component — a cwd/command under `/opt/dsh/.dsh` is DENIED while `/opt/dsh/.dsh-dev` (and anything under it) is ALLOWED', () => {
+  const roots = ['/home/esuarez/projects', '/usr/lib/node_modules/@deepseek-ai/dsh', '/srv/dept-ws', '/opt/dsh/.dsh-dev']
+  // (b) the boundary-aware primitive itself (pure, exported) — the literal token
+  // is matched only as a whole path component, so the `-dev` sibling is excluded.
+  assert.equal(isStablePath('/opt/dsh/.dsh'), true, 'the stable home is stable')
+  assert.equal(isStablePath('/opt/dsh/.dsh/'), true, 'the stable home (trailing /) is stable')
+  assert.equal(isStablePath('/opt/dsh/.dsh/.deepartments'), true, 'a path under the stable home is stable')
+  assert.equal(isStablePath('cat /opt/dsh/.dsh/x'), true, 'a command referencing the stable home is stable')
+  assert.equal(isStablePath('/opt/dsh/.dsh-dev'), false, 'the DEV home is NOT stable')
+  assert.equal(isStablePath('/opt/dsh/.dsh-dev/runner'), false, 'a path under the DEV home is NOT stable')
+  assert.equal(isStablePath('cat /opt/dsh/.dsh-dev/x'), false, 'a command referencing the DEV home is NOT stable')
+  // (c) the explicit stable home (exact path or anything under it) in a command
+  // is protected-denied.
+  assert.match(deptExecDenyReason('cat /opt/dsh/.dsh', '/srv/dept-ws', roots), /the stable profile is protected/, 'the exact stable home in a command is protected-denied')
+  assert.match(deptExecDenyReason('cat /opt/dsh/.dsh/./x', '/srv/dept-ws', roots), /the stable profile is protected/, 'anything under the stable home in a command is protected-denied')
+  // (c) a cwd AT/UNDER the stable home is denied too — via the cwd-in-root check,
+  // because the stable home is deliberately NOT a dept_exec root.
+  assert.match(deptExecDenyReason('echo ok', '/opt/dsh/.dsh', roots), /is not inside a scoped dept_exec root/, 'a cwd at the stable home is denied (cwd-in-root)')
+  assert.match(deptExecDenyReason('echo ok', '/opt/dsh/.dsh/.deepartments', roots), /is not inside a scoped dept_exec root/, 'a cwd under the stable home is denied (cwd-in-root)')
+  // (a) a cwd under the DEV home is ALLOWED (not denied by any rule).
+  assert.equal(deptExecDenyReason('echo ok', '/opt/dsh/.dsh-dev/runner', roots), undefined, 'a cwd under the DEV home is allowed (not denied by any rule)')
+  // (b) a command referencing the DEV home is ALLOWED (not stable).
+  assert.equal(deptExecDenyReason('cat /opt/dsh/.dsh-dev/agent.cordis.yml', '/srv/dept-ws', roots), undefined, 'a command referencing the DEV home is allowed (not stable)')
+})
+
+test('B2 dept_exec guard (token normalization, W5-B2c review gap): a `..`-escape THROUGH an allowed root is canonicalized to its real target → OUT_OF_SCOPE; the fd-redirect digit-guard is REMOVED so every `>`/`<`-adjacent absolute path token is checked, EXCEPT the /dev sink whitelist (always allowed)', () => {
+  const roots = ['/home/esuarez/projects', '/usr/lib/node_modules/@deepseek-ai/dsh', '/srv/dept-ws', '/opt/dsh/.dsh-dev']
+  // (a) traversal — `..`-escapes through an allowed root collapse to a REAL path
+  // outside the roots → OUT_OF_SCOPE (not a lexical false-allow).
+  assert.match(
+    deptExecDenyReason('cat /home/esuarez/projects/deepartments/../../root/.ssh/id_rsa', '/srv/dept-ws', roots),
+    /command references absolute path "\/home\/esuarez\/projects\/deepartments\/\.\.\/\.\.\/root\/\.ssh\/id_rsa" outside a scoped dept_exec root/,
+    'a `..`-escape through an allowed root is out of scope'
+  )
+  // (b) an fd-redirect into a non-root path is NO LONGER skipped by a digit-guard.
+  assert.match(
+    deptExecDenyReason('echo hi 2>/etc/foo', '/srv/dept-ws', roots),
+    /command references absolute path "\/etc\/foo" outside a scoped dept_exec root/,
+    'an fd-redirect into a non-root path is out of scope'
+  )
+  // (c) the /dev sink whitelist is ALWAYS allowed (not realpath'd, not under a root).
+  assert.equal(deptExecDenyReason('ls 2>/dev/null', '/srv/dept-ws', roots), undefined, 'an fd-redirect into /dev/null is allowed')
+  assert.equal(deptExecDenyReason('cat x > /dev/stdout', '/srv/dept-ws', roots), undefined, '/dev/stdout is whitelisted')
+  assert.equal(deptExecDenyReason('cat x > /dev/stderr', '/srv/dept-ws', roots), undefined, '/dev/stderr is whitelisted')
+  assert.equal(deptExecDenyReason('cat x > /dev/zero', '/srv/dept-ws', roots), undefined, '/dev/zero is whitelisted')
+  assert.equal(deptExecDenyReason('cat x > /dev/tty', '/srv/dept-ws', roots), undefined, '/dev/tty is whitelisted')
+  // (d) a redirect TARGET under an allowed root is ALLOWED (both tokens are scoped).
+  assert.equal(
+    deptExecDenyReason('cat /home/esuarez/projects/deepartments/README.md > /home/esuarez/projects/scratch.txt', '/srv/dept-ws', roots),
+    undefined,
+    'a redirect target under an allowed root is allowed'
+  )
+  // The whitelist is SURGICAL — a non-whitelisted out-of-scope token is still denied
+  // even when the command ALSO redirects to /dev/null.
+  assert.match(
+    deptExecDenyReason('cat /etc/passwd 2>/dev/null', '/srv/dept-ws', roots),
+    /command references absolute path "\/etc\/passwd" outside a scoped dept_exec root/,
+    'the /dev whitelist does not mask a non-whitelisted out-of-scope path'
+  )
+  // A `..`-escape that normalizes to the STABLE home is protected-denied — the
+  // boundary token now sees the CANONICAL target, not the raw lexical form.
+  assert.match(
+    deptExecDenyReason('cat /home/esuarez/projects/x/../../../../opt/dsh/.dsh/agent.cordis.yml', '/srv/dept-ws', roots),
+    /the stable profile is protected/,
+    'a `..`-escape to the stable home is protected-denied'
+  )
+})
+
+test('B2 calendar attribution (real Loader): dept_calendar_add stamps departmentId; list with NO filter returns the FULL shared agenda; list with departmentId returns only that department; a legacy entry without departmentId is NOT matched by a filter', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { org: TWO_DEPT_ORG })
+    try {
+      const signal = new AbortController().signal
+      const progHead = agents.store.get('head-programming-head')
+      assert.ok(progHead, 'the programming head materialized at boot')
+      const progCtx = childContextFor(agents, 'head-programming-head')
+      assert.ok(progCtx, 'the programming head context resolves')
+
+      // research head adds → departmentId 'research'.
+      const rEntry = await headCtx.tools.get('dept_calendar_add', key).execute({ label: 'Research sync', at: '2026-08-25T09:00:00.000Z' }, { agent: head, signal })
+      assert.equal(rEntry.departmentId, 'research', 'adding via the research head stamps departmentId research')
+      // programming head adds → departmentId 'programming'.
+      const pEntry = await progCtx.ctx.tools.get('dept_calendar_add', progCtx.key).execute({ label: 'Programming sync', at: '2026-08-25T10:00:00.000Z' }, { agent: progHead, signal })
+      assert.equal(pEntry.departmentId, 'programming', 'adding via the programming head stamps departmentId programming')
+
+      // NO filter → the FULL shared (global) agenda, both departments.
+      const all = await headCtx.tools.get('dept_calendar_list', key).execute({}, { agent: head, signal })
+      assert.equal(all.count, 2, 'no filter returns the FULL shared agenda (both departments)')
+      assert.deepEqual(all.entries.map((e) => e.departmentId).sort(), ['programming', 'research'], 'both departments surface in the unfiltered agenda')
+
+      // departmentId filter → only the matching department.
+      const researchOnly = await headCtx.tools.get('dept_calendar_list', key).execute({ departmentId: 'research' }, { agent: head, signal })
+      assert.equal(researchOnly.count, 1, 'the research filter returns only the research entry')
+      assert.equal(researchOnly.entries[0].label, 'Research sync')
+      const programmingOnly = await headCtx.tools.get('dept_calendar_list', key).execute({ departmentId: 'programming' }, { agent: head, signal })
+      assert.equal(programmingOnly.count, 1, 'the programming filter returns only the programming entry')
+      assert.equal(programmingOnly.entries[0].label, 'Programming sync')
+
+      // A legacy entry WITHOUT departmentId is NOT matched by a filter but stays
+      // in the unfiltered (global) agenda.
+      const state = readCalendarStateFile(stateDir)
+      state.entries.push({ id: 'legacy-1', label: 'No dept', at: '2026-08-25T11:00:00.000Z', createdBy: 'some-old-post', fired: false })
+      await writeCalendarStateFile(stateDir, state)
+      const filtered = await headCtx.tools.get('dept_calendar_list', key).execute({ departmentId: 'research' }, { agent: head, signal })
+      assert.equal(filtered.count, 1, 'an entry without departmentId is NOT matched by a departmentId filter')
+      const unfiltered = await headCtx.tools.get('dept_calendar_list', key).execute({}, { agent: head, signal })
+      assert.equal(unfiltered.count, 3, 'the unfiltered agenda still returns the legacy entry')
     } finally {
       await dispose()
     }
