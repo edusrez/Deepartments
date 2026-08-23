@@ -28,8 +28,9 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath } from '../lib/messages-store.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, PARALLEL_FRESH_WINDOW_MS } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
+import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
 import {
   HEAD_PRESET_BASE_ID,
@@ -7323,6 +7324,244 @@ test('W1 runAgendaSchedulerTick: a NON-due cron job is not fired; NO-head skips 
       assert.equal(cal.entries[0].fired, true, 'the orphan entry is still marked fired (single-shot) despite no delivery')
     } finally {
       await rm(jobDir, { recursive: true, force: true })
+    }
+  })
+})
+
+// --- W3b (spec W3 monitor → researcher): Parallel event_stream monitors ------
+// The pure half (config resolution, state helpers, the poller tick) is tested
+// with a fixed clock + stubbed create/poll/spawn/notify; dept_monitor_list is
+// exercised through the real Loader (head own-layer / worker absence).
+
+test('W3b parallel-monitor config: default 2 monitors (code), empty array → none, override passthrough; state round-trips + malformed → empty', async () => {
+  assert.equal(DEFAULT_PARALLEL_MONITORS.length, 2, 'code default = 2 monitors')
+  assert.equal(DEFAULT_PARALLEL_MONITORS[0].id, 'ai-industry-news', 'default #1 id')
+  assert.equal(DEFAULT_PARALLEL_MONITORS[0].processor, 'base', 'default #1 processor = base')
+  assert.equal(DEFAULT_PARALLEL_MONITORS[0].frequency, '1d', 'default #1 frequency = 1d')
+  assert.equal(DEFAULT_PARALLEL_MONITORS[1].id, 'deepseek-dsh-news', 'default #2 id')
+
+  // Absent section → code default; a present section without `monitors` → code default.
+  assert.deepEqual(resolveParallelMonitorConfig(undefined).map((m) => m.id), DEFAULT_PARALLEL_MONITORS.map((m) => m.id), 'absent section → the 2 code defaults')
+  assert.deepEqual(resolveParallelMonitorConfig({}).map((m) => m.id), DEFAULT_PARALLEL_MONITORS.map((m) => m.id), 'present section without monitors key → the 2 code defaults')
+  // Explicit empty array → NONE (disable).
+  assert.deepEqual(resolveParallelMonitorConfig({ monitors: [] }), [], 'explicit empty array → none (monitoring disabled)')
+  // A non-empty array → verbatim.
+  const custom = [{ id: 'custom-monitor', query: 'custom query', processor: 'lite', frequency: '6h' }]
+  assert.deepEqual(resolveParallelMonitorConfig({ monitors: custom }), custom, 'non-empty array → verbatim')
+
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    await writeParallelMonitorsState(stateDir, { monitors: { 'ai-industry-news': { monitorId: 'monitor_1', cursor: 'c1', lastPolledAt: now, lastFiredAt: now, lastEventCount: 3, seenEventIds: ['a', 'b'] } } })
+    const state = readParallelMonitorsState(stateDir)
+    assert.equal(state.monitors['ai-industry-news'].monitorId, 'monitor_1', 'state round-trips monitorId')
+    assert.equal(state.monitors['ai-industry-news'].cursor, 'c1', 'state round-trips cursor')
+    assert.equal(state.monitors['ai-industry-news'].lastEventCount, 3, 'state round-trips lastEventCount')
+    assert.deepEqual(state.monitors['ai-industry-news'].seenEventIds, ['a', 'b'], 'state round-trips seenEventIds')
+    await writeFile(path.join(stateDir, 'parallel-monitors-state.json'), 'junk', 'utf8')
+    assert.deepEqual(readParallelMonitorsState(stateDir).monitors, {}, 'malformed → empty, never throws')
+  })
+})
+
+test('W3b parallel-monitor config SCHEMA: the `parallel` section is declared in Config (W3b first-class), accepts the full field shape, and schemastery normalization preserves the documented default semantics', () => {
+  const base = { stateDir: '.deepartments', org: { departments: [{ id: 'r', name: 'R' }] } }
+  // Absent section → the field is undefined → the code default (2) applies.
+  const absent = configSchema(base)
+  assert.equal(absent.parallel, undefined, 'absent parallel section → undefined field (code default active)')
+  assert.equal(resolveParallelMonitorConfig(absent.parallel).length, 2, 'absent section → the 2 code defaults')
+  // Present section WITHOUT a monitors key → still the code default (not disabled).
+  const empty = configSchema({ ...base, parallel: {} })
+  assert.deepEqual(empty.parallel, {}, 'parallel:{} normalizes to an empty object (monitors stays undefined)')
+  assert.equal(resolveParallelMonitorConfig(empty.parallel).length, 2, 'parallel:{} → the 2 code defaults')
+  // Explicit empty array → disabled.
+  const explicit = configSchema({ ...base, parallel: { monitors: [] } })
+  assert.deepEqual(resolveParallelMonitorConfig(explicit.parallel), [], 'parallel:{monitors:[]} → none (disabled)')
+  // Full field shape is accepted verbatim; absent optional sub-fields are NOT injected.
+  const full = configSchema({ ...base, parallel: { apiKey: 'k', baseUrl: 'b', maxConsecutiveSpawns: 3, monitors: [{ id: 'a', query: 'q', processor: 'lite', frequency: '6h', outputSchema: { foo: 1 }, sourcePolicy: ['x'], includeBackfill: true }] } })
+  assert.equal(full.parallel.apiKey, 'k', 'apiKey preserved')
+  assert.equal(full.parallel.baseUrl, 'b', 'baseUrl preserved')
+  assert.equal(full.parallel.maxConsecutiveSpawns, 3, 'maxConsecutiveSpawns preserved')
+  assert.deepEqual(resolveParallelMonitorConfig(full.parallel), full.parallel.monitors, 'full monitors → verbatim')
+  const minimal = configSchema({ ...base, parallel: { apiKey: 'k', monitors: [{ id: 'a', query: 'q' }] } }).parallel.monitors[0]
+  assert.deepEqual(minimal, { id: 'a', query: 'q' }, 'absent optional monitor sub-fields are not injected ({}/[]/false)')
+})
+
+test('W3b runParallelMonitorTick: creates the monitor once (no monitorId), fires a FRESH first-run event exactly once (spawn + notify), records-not-fires a STALE first-run event, advances the cursor', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const nowMs = new Date(2026, 7, 23, 12, 0, 0).getTime()
+    const freshEvent = { event_id: 'mevt_fresh', event_date: new Date(nowMs - 3600000).toISOString().slice(0, 10), output: { content: 'DeepSeek V4 released' } }
+    const staleEvent = { event_id: 'mevt_stale', event_date: new Date(nowMs - 3 * 24 * 3600000).toISOString().slice(0, 10), output: { content: 'old news' } }
+    const createCalls = []
+    const spawnCalls = []
+    const notifyCalls = []
+    const warns = []
+    const deps = {
+      now: () => nowMs,
+      stateDir,
+      monitors: [{ id: 'ai-industry-news', query: 'AI news', processor: 'base', frequency: '1d' }],
+      apiKey: 'k',
+      baseUrl: 'https://api.parallel.ai',
+      maxConsecutiveSpawns: 2,
+      createMonitor: async () => { createCalls.push(1); return { monitorId: 'monitor_1' } },
+      fetchEvents: async (monitorId, cursor) => {
+        // First poll (cursor undefined) returns the batch; the next poll returns [] (consumed).
+        if (cursor === undefined) return { events: [staleEvent, freshEvent], nextCursor: 'c1' }
+        return { events: [], nextCursor: undefined }
+      },
+      spawnResearcher: async (monitor, ev) => { spawnCalls.push(ev.event_id); return { workerId: `worker-${ev.event_id}` } },
+      notifyHead: async (monitor, ev, wid) => { notifyCalls.push({ ev: ev.event_id, wid }) },
+      liveWorkerCount: () => 0,
+      logger: { warn: (x) => { warns.push(x) } }
+    }
+    // Tick 1: create the monitor + first poll.
+    await runParallelMonitorTick(deps)
+    assert.equal(createCalls.length, 1, 'created the monitor exactly once (no monitorId yet)')
+    assert.deepEqual(spawnCalls, ['mevt_fresh'], 'ONLY the fresh event fires on the first run (the stale event is recorded-not-fired)')
+    assert.equal(notifyCalls.length, 1, 'exactly ONE head notice for the one fired event')
+    assert.equal(notifyCalls[0].ev, 'mevt_fresh', 'the notice is for the fired fresh event')
+    assert.equal(notifyCalls[0].wid, 'worker-mevt_fresh', 'the notice carries the spawned worker id')
+    const state = readParallelMonitorsState(stateDir)
+    assert.equal(state.monitors['ai-industry-news'].monitorId, 'monitor_1', 'monitorId is persisted')
+    assert.equal(state.monitors['ai-industry-news'].cursor, 'c1', 'the cursor advances past the first window')
+    assert.ok(state.monitors['ai-industry-news'].seenEventIds.includes('mevt_stale'), 'the stale event is recorded (seen) so it never re-fires')
+    assert.ok(state.monitors['ai-industry-news'].seenEventIds.includes('mevt_fresh'), 'the fired event is recorded (seen) so it never double-fires')
+    assert.equal(warns.length, 0, 'a clean tick logs no warns')
+  })
+})
+
+test('W3b runParallelMonitorTick: idempotent — no new events spawn nothing; an already-seen event spawns nothing; a storm-guarded live-worker count skips', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const nowMs = new Date(2026, 7, 23, 12, 0, 0).getTime()
+    const spawnCalls = []
+    const notifyCalls = []
+    const warns = []
+    const baseDeps = {
+      now: () => nowMs,
+      stateDir,
+      monitors: [{ id: 'm1', query: 'q', processor: 'base', frequency: '1d' }],
+      apiKey: 'k',
+      baseUrl: 'https://api.parallel.ai',
+      maxConsecutiveSpawns: 2,
+      createMonitor: async () => ({ monitorId: 'monitor_1' }),
+      spawnResearcher: async (monitor, ev) => { spawnCalls.push(ev.event_id); return { workerId: `w-${ev.event_id}` } },
+      notifyHead: async (monitor, ev, wid) => { notifyCalls.push(ev.event_id) },
+      liveWorkerCount: () => 0,
+      logger: { warn: (x) => { warns.push(x) } }
+    }
+    // Seed a monitor already created with a cursor (the poll is now a "later window").
+    await writeParallelMonitorsState(stateDir, { monitors: { m1: { monitorId: 'monitor_1', cursor: 'c9', seenEventIds: ['mevt_seen'] } } })
+    // (a) no new events → nothing.
+    await runParallelMonitorTick({ ...baseDeps, fetchEvents: async () => ({ events: [], nextCursor: undefined }) })
+    assert.equal(spawnCalls.length, 0, 'no events → no spawn')
+    assert.equal(notifyCalls.length, 0, 'no events → no notify')
+    // (b) an already-seen event → nothing (dedup by event_id).
+    await runParallelMonitorTick({ ...baseDeps, fetchEvents: async () => ({ events: [{ event_id: 'mevt_seen', event_date: new Date(nowMs).toISOString().slice(0, 10), output: { content: 'again' } }], nextCursor: 'c10' }) })
+    assert.equal(spawnCalls.length, 0, 'an already-seen event → no spawn')
+    assert.equal(notifyCalls.length, 0, 'an already-seen event → no notify')
+    // (c) storm guard: live workers == maxConsecutiveSpawns → skip (no spawn, warn).
+    await runParallelMonitorTick({
+      ...baseDeps,
+      fetchEvents: async () => ({ events: [{ event_id: 'mevt_new', event_date: new Date(nowMs).toISOString().slice(0, 10), output: { content: 'new' } }], nextCursor: 'c11' }),
+      liveWorkerCount: () => 2
+    })
+    assert.equal(spawnCalls.length, 0, 'live workers ≥ max → the spawn is skipped (storm guard)')
+    assert.match(warns.join(' '), /storm guard/, 'a storm-guard skip emits a warn')
+  })
+})
+
+test('W3b runParallelMonitorTick: storm guard caps LIVE spawns WITHIN one page — 5 fresh events, max 2 → exactly 2 spawns, 3 consumed (skipped, not doubled)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const nowMs = new Date(2026, 7, 23, 12, 0, 0).getTime()
+    const events = Array.from({ length: 5 }, (_, i) => ({ event_id: `mevt_${i}`, event_date: new Date(nowMs).toISOString().slice(0, 10), output: { content: `item ${i}` } }))
+    const spawnCalls = []
+    const notifyCalls = []
+    const warns = []
+    const deps = {
+      now: () => nowMs,
+      stateDir,
+      monitors: [{ id: 'm1', query: 'q', processor: 'base', frequency: '1d' }],
+      apiKey: 'k',
+      baseUrl: 'https://api.parallel.ai',
+      maxConsecutiveSpawns: 2,
+      createMonitor: async () => ({ monitorId: 'monitor_1' }),
+      fetchEvents: async () => ({ events, nextCursor: 'c_next' }),
+      spawnResearcher: async (monitor, ev) => { spawnCalls.push(ev.event_id); return { workerId: `w-${ev.event_id}` } },
+      notifyHead: async (monitor, ev, wid) => { notifyCalls.push(ev.event_id) },
+      liveWorkerCount: () => 0,
+      logger: { warn: (x) => { warns.push(x) } }
+    }
+    // Seed a monitor already created with a cursor (a "later window" — NOT the
+    // first-run freshness gate, so all 5 events are eligible to fire).
+    await writeParallelMonitorsState(stateDir, { monitors: { m1: { monitorId: 'monitor_1', cursor: 'c0', seenEventIds: [] } } })
+    await runParallelMonitorTick(deps)
+    assert.equal(spawnCalls.length, 2, 'exactly 2 spawns (maxConsecutiveSpawns=2), NOT 5 — one page cannot blow past the live cap')
+    assert.deepEqual(spawnCalls, ['mevt_0', 'mevt_1'], 'the first 2 events fire, then the live cap is hit')
+    assert.equal(notifyCalls.length, 2, 'one head notice per fired event')
+    const state = readParallelMonitorsState(stateDir)
+    assert.equal(state.monitors.m1.cursor, 'c_next', 'the cursor advances (the 3 skipped events are consumed, not re-fetched)')
+    assert.ok(state.monitors.m1.seenEventIds.includes('mevt_0'), 'the fired event is recorded seen')
+    assert.ok(state.monitors.m1.seenEventIds.includes('mevt_1'), 'the fired event is recorded seen')
+    assert.ok(!state.monitors.m1.seenEventIds.includes('mevt_2'), 'the first storm-guarded event is NOT recorded seen (skipped, consumed by the cursor advance)')
+    assert.ok(!state.monitors.m1.seenEventIds.includes('mevt_4'), 'the last storm-guarded event is NOT recorded seen (skipped, consumed by the cursor advance)')
+    assert.match(warns.join(' '), /storm guard/, 'a storm-guard skip emits a warn')
+  })
+})
+
+test('W3b runParallelMonitorTick: create/poll/spawn/notify errors NEVER throw (warn + skip)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const warns = []
+    const deps = {
+      now: () => Date.now(),
+      stateDir,
+      monitors: [{ id: 'm1', query: 'q' }],
+      apiKey: 'k',
+      baseUrl: 'x',
+      maxConsecutiveSpawns: 2,
+      createMonitor: async () => { throw new Error('create boom') },
+      fetchEvents: async () => { throw new Error('poll boom') },
+      spawnResearcher: async () => { throw new Error('spawn boom') },
+      notifyHead: async () => { throw new Error('notify boom') },
+      liveWorkerCount: () => 0,
+      logger: { warn: (x) => { warns.push(x) } }
+    }
+    await runParallelMonitorTick(deps) // create fails → warn + skip (must NOT throw)
+    assert.ok(warns.some((w) => /create monitor/.test(w)), 'a create failure warns')
+    // Seed an already-created monitor so the poll path is exercised.
+    await writeParallelMonitorsState(stateDir, { monitors: { m1: { monitorId: 'monitor_1', cursor: 'c1' } } })
+    await runParallelMonitorTick(deps) // poll fails → warn + skip (must NOT throw)
+    assert.ok(warns.some((w) => /poll/.test(w)), 'a poll failure warns')
+    // A poll returning ONE fresh event whose spawn fails → warn + skip (never throw).
+    await runParallelMonitorTick({
+      ...deps,
+      fetchEvents: async () => ({ events: [{ event_id: 'e1', event_date: new Date().toISOString().slice(0, 10), output: { content: 'x' } }], nextCursor: 'c2' })
+    })
+    assert.ok(warns.some((w) => /spawn for/.test(w)), 'a spawn failure warns')
+  })
+})
+
+test('W3b dept_monitor_list (head own-layer ONLY): lists the code-default monitors + the persisted state; a worker has NO dept_monitor_list', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      // Seed a persisted monitor state (which the daemon would have written).
+      await writeParallelMonitorsState(stateDir, { monitors: { 'ai-industry-news': { monitorId: 'monitor_ai', cursor: 'c1', lastPolledAt: 1, lastFiredAt: 2, lastEventCount: 5 } } })
+      assert.ok(headCtx.tools.get('dept_monitor_list', key), 'dept_monitor_list installed in the head own layer')
+      const result = await headCtx.tools.get('dept_monitor_list', key).execute({}, { agent: head, signal })
+      assert.equal(result.monitors.length, 2, 'the 2 code-default monitors are listed')
+      const ai = result.monitors.find((m) => m.id === 'ai-industry-news')
+      assert.ok(ai, 'the ai-industry-news monitor is listed')
+      assert.equal(ai.monitorId, 'monitor_ai', 'the persisted monitorId is surfaced by the tool')
+      assert.equal(ai.lastEventCount, 5, 'the persisted lastEventCount is surfaced')
+      assert.equal(ai.cursor, 'c1', 'the persisted cursor is surfaced')
+      const dsh = result.monitors.find((m) => m.id === 'deepseek-dsh-news')
+      assert.ok(dsh, 'the deepseek-dsh-news monitor is listed')
+      assert.equal(dsh.monitorId, undefined, 'an un-created monitor surfaces no monitor_id')
+      // A WORKER has NO dept_monitor_list (the tool is head own-layer ONLY).
+      const spawned = await headCtx.tools.get('dept_worker_spawn', key).execute({ role: 'researcher', task: 'check this' }, { agent: head, signal })
+      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, spawned.sessionId)
+      assert.equal(workerCtx.tools.get('dept_monitor_list', workerKey), undefined, 'a worker has NO dept_monitor_list')
+    } finally {
+      await dispose()
     }
   })
 })

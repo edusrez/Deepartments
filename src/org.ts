@@ -19,6 +19,7 @@
 // NO export default (pitfall 0001 — breaks `inject`).
 import z from '@deepseek-ai/schemastery'
 import type { WebFetchConfig } from './webfetch.js'
+import type { ParallelConfig } from './invoke.js'
 
 /** The post spec of a department's coordinator (created in Batch 2). */
 export interface CoordinatorConfig {
@@ -74,6 +75,14 @@ export interface Config {
    * Optional; defaults are applied in src/webfetch.ts.
    */
   webfetch?: WebFetchConfig
+  /**
+   * Parallel Web Systems event_stream monitor config (W3b parallel-monitor).
+   * Optional; when `monitors` is ABSENT the CODE default
+   * (DEFAULT_PARALLEL_MONITORS) is used, an explicit `[]` disables monitoring.
+   * Mirrors the runtime shape declared in src/invoke.ts (ParallelConfig), so
+   * the schema and the typed cast in invoke.ts always agree.
+   */
+  parallel?: ParallelConfig
 }
 
 /**
@@ -123,5 +132,37 @@ export const Config: z<any, any> = z.object({
     timeoutMs: number
     maxResponseBytes: number
     maxRedirects: number
+  }),
+  // W3b parallel-monitor (Parallel event_stream). Mirrors the runtime
+  // ParallelConfig/ParallelMonitorConfig in src/invoke.ts: `monitors` defaults
+  // to `void 0` (= undefined) so an ABSENT section or absent `monitors` key both
+  // fall through to the CODE default (DEFAULT_PARALLEL_MONITORS), while an
+  // explicit `[]` still disables monitoring — exactly the resolver's contract.
+  parallel: z.object({
+    apiKey: z.string(),
+    baseUrl: z.string(),
+    maxConsecutiveSpawns: z.number().step(1).min(0),
+    monitors: z.array(z.object({
+      id: z.string().required(),
+      query: z.string().required(),
+      processor: z.union([z.const('lite'), z.const('base')]),
+      frequency: z.string(),
+      outputSchema: z.dict(z.any()).default(void 0 as unknown as any),
+      sourcePolicy: z.array(z.string()).default(void 0 as unknown as any),
+      includeBackfill: z.boolean()
+    })).default(void 0 as unknown as any)
+  }).default(void 0 as unknown as {
+    apiKey: string
+    baseUrl: string
+    maxConsecutiveSpawns: number
+    monitors: {
+      id: string
+      query: string
+      processor: 'lite' | 'base'
+      frequency: string
+      outputSchema: Record<string, unknown>
+      sourcePolicy: string[]
+      includeBackfill: boolean
+    }[]
   })
 })

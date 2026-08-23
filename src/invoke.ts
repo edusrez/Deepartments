@@ -1516,6 +1516,264 @@ export async function runAgendaSchedulerTick(deps: AgendaSchedulerDeps): Promise
 }
 
 
+// ---- W3b parallel-monitor (Parallel Web Systems event_stream monitors) ------
+// An event-AMBIENT monitor (Parallel) is polled by a plugin daemon (no public
+// URL, no webhook — the researcher report 2026-08-23 recommends POLLING): each
+// new net-new event spawns a RESEARCHER directly (through the SAME worker-spawn
+// engine the head uses) and notifies the Research head (owner decision: "cada
+// vez que se active un researcher también se tiene que activar su RH"). The
+// pure half (config resolution + state helpers + the tick) is module-level so
+// the tests exercise it deterministically with a fixed clock + stubbed hooks.
+
+/** One configured event_stream monitor of the deepartments plugin. The `query`
+ * is the NL intent Parallel runs (settings.query); `processor`/`frequency`
+ * mirror POST /v1/monitors (defaults `base`/`1d`). The whole array is read
+ * from `parallel.monitors` in the plugin config; when the section is ABSENT the
+ * CODE DEFAULT (DEFAULT_PARALLEL_MONITORS) is used, so the deployment works
+ * without touching the config (or /opt). */
+export interface ParallelMonitorConfig {
+  /** Stable key for this monitor (its worker slug base + the state key). */
+  id: string
+  /** The natural-language query intent (settings.query). */
+  query: string
+  /** The Parallel processor: 'lite' ($3/1000 exec) or 'base' ($10/1000 exec,
+   * more recall — the default for a broad topic like DeepSeek/AI news). */
+  processor?: 'lite' | 'base'
+  /** The Parallel frequency (e.g. '1d', '6h'; default '1d'). */
+  frequency?: string
+  /** Optional `settings.output_schema` JSON so each event comes back as
+   * structured output (easier to parse for activation). */
+  outputSchema?: Record<string, unknown>
+  /** Optional `settings.advanced_settings.source_policy.include_domains`. */
+  sourcePolicy?: string[]
+  /** Optional `settings.include_backfill` (historical preview on the first run). */
+  includeBackfill?: boolean
+}
+
+/** The `parallel` plugin-config section (read via `config.parallel`). When
+ * `monitors` is ABSENT the code default is used; an EXPLICIT `[]` disables
+ * monitoring (nothing runs). */
+export interface ParallelConfig {
+  apiKey?: string
+  baseUrl?: string
+  /** Max concurrent LIVE worker-researchers per monitor (the storm guard). */
+  maxConsecutiveSpawns?: number
+  monitors?: ParallelMonitorConfig[]
+}
+
+/** The DEV default monitors (owner decision 2026-08-23: 2× `base`, `1d`). */
+export const DEFAULT_PARALLEL_MONITORS: readonly ParallelMonitorConfig[] = [
+  { id: 'ai-industry-news', query: 'AI industry news releases/announcements (new models, benchmarks, services, harness software)', processor: 'base', frequency: '1d' },
+  { id: 'deepseek-dsh-news', query: 'DeepSeek or DSH (DeepSeek Harness) news/releases', processor: 'base', frequency: '1d' }
+]
+
+/** Resolve the effective monitors from the raw `parallel` config section:
+ * an ABSENT section (or a missing `monitors` key) → the CODE DEFAULT (2);
+ * an EXPLICIT empty array → [] (monitoring disabled); a non-empty array → the
+ * configured monitors verbatim. */
+export function resolveParallelMonitorConfig(parallel: ParallelConfig | undefined): ParallelMonitorConfig[] {
+  if (parallel === undefined || parallel.monitors === undefined) return [...DEFAULT_PARALLEL_MONITORS]
+  return parallel.monitors
+}
+
+/** One persisted monitor runtime state (`<stateDir>/parallel-monitors-state.json`). */
+export interface ParallelMonitorState {
+  monitorId?: string
+  /** The last consumed `next_cursor` (newest-first poll cursor). */
+  cursor?: string
+  lastPolledAt?: number
+  lastFiredAt?: number
+  /** Events counted in the last poll (tracability for dept_monitor_list). */
+  lastEventCount?: number
+  /** Bounded seen-event-id list (dedup across a re-returned cursor boundary). */
+  seenEventIds?: string[]
+}
+
+export interface ParallelMonitorsState {
+  monitors: Record<string, ParallelMonitorState>
+}
+
+function parseParallelMonitorState(value: unknown): ParallelMonitorState | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const entry = value as Record<string, unknown>
+  const out: ParallelMonitorState = {}
+  if (typeof entry.monitorId === 'string') out.monitorId = entry.monitorId
+  if (typeof entry.cursor === 'string') out.cursor = entry.cursor
+  if (typeof entry.lastPolledAt === 'number' && Number.isFinite(entry.lastPolledAt)) out.lastPolledAt = entry.lastPolledAt
+  if (typeof entry.lastFiredAt === 'number' && Number.isFinite(entry.lastFiredAt)) out.lastFiredAt = entry.lastFiredAt
+  if (typeof entry.lastEventCount === 'number' && Number.isFinite(entry.lastEventCount)) out.lastEventCount = entry.lastEventCount
+  if (Array.isArray(entry.seenEventIds)) {
+    out.seenEventIds = entry.seenEventIds.filter((id): id is string => typeof id === 'string').slice(-100)
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/** Read `<stateDir>/parallel-monitors-state.json`. Absent, unreadable or
+ * malformed → `{ monitors: {} }` (never throws — mirrors the other readers). */
+export function readParallelMonitorsState(stateDir: string): ParallelMonitorsState {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'parallel-monitors-state.json'), 'utf8')) as { monitors?: unknown }
+    if (parsed !== null && typeof parsed === 'object' && parsed.monitors !== null && typeof parsed.monitors === 'object') {
+      const monitors: Record<string, ParallelMonitorState> = {}
+      for (const [key, value] of Object.entries(parsed.monitors as Record<string, unknown>)) {
+        const state = parseParallelMonitorState(value)
+        if (state !== undefined) monitors[key] = state
+      }
+      return { monitors }
+    }
+    return { monitors: {} }
+  } catch {
+    return { monitors: {} }
+  }
+}
+
+/** Write `<stateDir>/parallel-monitors-state.json` (mkdir -p the dir, then the file). */
+export async function writeParallelMonitorsState(stateDir: string, state: ParallelMonitorsState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, 'parallel-monitors-state.json')), { recursive: true })
+  await writeFile(path.join(stateDir, 'parallel-monitors-state.json'), JSON.stringify(state), 'utf8')
+}
+
+/** A detected monitor event (GET /v1/monitors/{id}/events → events[]). */
+export interface ParallelMonitorEvent {
+  event_id: string
+  event_group_id?: string
+  event_date?: string
+  event_type?: string
+  output?: { type?: string; content?: string; basis?: unknown[] }
+}
+
+/** Freshness gate (the first-cursor design choice, see the builder report): an
+ * event whose `event_date` is newer than this (from now) is "fresh" and IS fired
+ * even on a monitor's FIRST poll (no cursor yet); older backfill is recorded
+ * (the cursor advances) but NOT fired — the first run never spams. */
+export const PARALLEL_FRESH_WINDOW_MS = 48 * 60 * 60 * 1000
+
+function isParallelEventFresh(event: ParallelMonitorEvent, nowMs: number): boolean {
+  const dateRaw = event.event_date
+  if (typeof dateRaw !== 'string' || dateRaw === '') return true // can't judge → surface it
+  const t = Date.parse(dateRaw)
+  if (Number.isNaN(t)) return true
+  return nowMs - t <= PARALLEL_FRESH_WINDOW_MS
+}
+
+/** Injected hooks + inputs one parallel-monitor tick reads. Mirrors
+ * AgendaSchedulerDeps: the PRODUCTION wiring binds the live registries
+ * (resolve department/head, spawn via spawnWorkerForDepartment, notify via the
+ * bus seam); tests construct it with a FIXED clock + stubbed HTTP/spawn/notify. */
+export interface ParallelMonitorDeps {
+  /** The clock (ms epoch) — injectable so a tick test is deterministic. */
+  now(): number
+  /** The stateDir whose `parallel-monitors-state.json` the tick reads/writes. */
+  stateDir: string
+  /** Every configured monitor to poll (already resolved — defaults filled). */
+  monitors: ParallelMonitorConfig[]
+  /** The Parallel API key (`x-api-key`). */
+  apiKey: string
+  /** The Parallel base URL (default https://api.parallel.ai). */
+  baseUrl: string
+  /** Max LIVE worker-researchers per monitor (the storm guard). */
+  maxConsecutiveSpawns: number
+  /** POST /v1/monitors — create the monitor on Parallel (returns monitor_id). */
+  createMonitor(monitor: ParallelMonitorConfig): Promise<{ monitorId: string }>
+  /** GET /v1/monitors/{id}/events poll (cursor → only-new). */
+  fetchEvents(monitorId: string, cursor: string | undefined): Promise<{ events: ParallelMonitorEvent[]; nextCursor?: string }>
+  /** Spawn the worker-researcher for ONE detected event (never throws). */
+  spawnResearcher(monitor: ParallelMonitorConfig, event: ParallelMonitorEvent): Promise<{ workerId: string }>
+  /** Fire-and-forget "a worker is working" notice to the research head. */
+  notifyHead(monitor: ParallelMonitorConfig, event: ParallelMonitorEvent, workerId: string): Promise<void>
+  /** Live (non-retired) workers of this monitor — the storm-guard count. */
+  liveWorkerCount(monitorId: string): number
+  /** Optional warn-capable logger (absent dep → the warn is dropped). */
+  logger?: { warn(message: string): void }
+}
+
+/** ONE parallel-monitor tick: for each configured monitor — (a) create it on
+ * Parallel if it has no monitor_id yet (a POST failure → warn + skip); (b) poll
+ * events (cursor → only-new; a fetch failure → warn + skip); (c) for each NEW
+ * event, spawn a researcher (freshness-gated on the first run, storm-guarded by
+ * the live worker count) and notify the head — each exactly ONCE; (d) advance
+ * the cursor + persist. NEVER throws (every internal failure is a warn). */
+export async function runParallelMonitorTick(deps: ParallelMonitorDeps): Promise<void> {
+  try {
+    const nowMs = deps.now()
+    const state = readParallelMonitorsState(deps.stateDir)
+    let changed = false
+    for (const monitor of deps.monitors) {
+      const key = monitor.id
+      const entry = state.monitors[key] ?? (state.monitors[key] = {})
+      // (a) ensure the monitor exists on Parallel (create once + persist the id).
+      if (entry.monitorId === undefined) {
+        try {
+          const created = await deps.createMonitor(monitor)
+          entry.monitorId = created.monitorId
+          changed = true
+        } catch (error: unknown) {
+          deps.logger?.warn(`[deepartments] parallel-monitor: create monitor "${key}" failed: ${error instanceof Error ? error.message : String(error)} — skip`)
+          continue
+        }
+      }
+      // (b) poll events (cursor → only-new). A fetch error never throws.
+      let events: ParallelMonitorEvent[] = []
+      let nextCursor: string | undefined
+      try {
+        const fetched = await deps.fetchEvents(entry.monitorId, entry.cursor)
+        events = fetched.events ?? []
+        nextCursor = fetched.nextCursor
+      } catch (error: unknown) {
+        deps.logger?.warn(`[deepartments] parallel-monitor: poll "${key}" failed: ${error instanceof Error ? error.message : String(error)} — skip`)
+        continue
+      }
+      const seen = new Set(entry.seenEventIds ?? [])
+      // `live` is the storm-guard count read once, then incremented after EACH
+      // successful spawn so a single page of events can never blow past the cap
+      // within one tick (the reviewer hardening). Only a CONFIRMED spawn (not a
+      // failed one) advances it.
+      let live = deps.liveWorkerCount(key)
+      for (const event of events) {
+        if (event == null || typeof event.event_id !== 'string' || event.event_id === '') continue
+        if (seen.has(event.event_id)) continue // idempotent: an already-seen event → nothing
+        // First-run freshness gate: on the monitor's FIRST poll (no cursor yet)
+        // fire ONLY fresh (≤48h) events; older backfill is recorded, not fired.
+        if (entry.cursor === undefined && !isParallelEventFresh(event, nowMs)) {
+          seen.add(event.event_id)
+          continue
+        }
+        // Storm guard: never exceed maxConsecutiveSpawns LIVE researchers. Once
+        // `live` reaches the cap the remaining page events are SKIPPED (the
+        // break) — but the cursor still advances (below), so they are consumed
+        // rather than re-fetched (the documented storm-guarded-consumption
+        // semantics).
+        if (live >= deps.maxConsecutiveSpawns) {
+          deps.logger?.warn(`[deepartments] parallel-monitor: monitor "${key}" already has ${live} live workers ≥ ${deps.maxConsecutiveSpawns} — skip (storm guard)`)
+          break
+        }
+        try {
+          const spawned = await deps.spawnResearcher(monitor, event)
+          try {
+            await deps.notifyHead(monitor, event, spawned.workerId)
+          } catch (error: unknown) {
+            deps.logger?.warn(`[deepartments] parallel-monitor: notify head for "${key}" event ${event.event_id} failed: ${error instanceof Error ? error.message : String(error)}`)
+          }
+          entry.lastFiredAt = nowMs
+          live += 1 // a successful spawn counts toward the live cap
+        } catch (error: unknown) {
+          deps.logger?.warn(`[deepartments] parallel-monitor: spawn for "${key}" event ${event.event_id} failed: ${error instanceof Error ? error.message : String(error)} — skip`)
+        }
+        seen.add(event.event_id)
+      }
+      if (nextCursor !== undefined) entry.cursor = nextCursor
+      entry.lastPolledAt = nowMs
+      entry.lastEventCount = events.length
+      entry.seenEventIds = [...seen].slice(-100)
+      changed = true
+    }
+    if (changed) await writeParallelMonitorsState(deps.stateDir, state)
+  } catch (error: unknown) {
+    deps.logger?.warn(`[deepartments] parallel-monitor tick failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+
 /** The live hooks the A3 guard needs (Feature A). Abstracted so the guard
  * predicate is PURE and directly unit-testable, and so the production wiring
  * provides the plugin's live registries (presence cache, host registry). */
@@ -3845,6 +4103,82 @@ export function applyInvoke(ctx: Context, config: Config) {
     return { workerId: postId, sessionId: String(SessionId(sessionId)), title, jobId, role: definition.meta.role, jobPath: definition.path }
   }
 
+  /** Spawn a DISPOSABLE department worker — the SHARED dept_worker_spawn engine.
+   * Used by the head own-layer `dept_worker_spawn` tool AND the parallel-monitor
+   * daemon (the monitor spawns a researcher through the SAME path a head would,
+   * so the worker registers identically: root agent, provider:"worker", role,
+   * managerId = the head, departmentId, jobId (when given), persona + task
+   * injection, title pin, first bus message from the head). `opts.title` (when
+   * non-empty) overrides the default "<RoleDisplay>: <mission>"; `opts.jobId`
+   * is the slug base + the recorded jobId (the monitor uses its monitor id).
+   * `opts.callerAgentId`/`opts.senderSessionId` default to the head's session id
+   * (the daemon path); dept_worker_spawn passes the calling head's agent id.
+   * Returns the worker post id + session id + the pinned title. */
+  const spawnWorkerForDepartment = async (
+    department: DepartmentConfig,
+    headEntry: PostEntry,
+    opts: { role: string; task?: string; title?: string; jobId?: string; callerAgentId?: string; senderSessionId?: string; signal?: AbortSignal }
+  ): Promise<{ workerId: string; sessionId: string; title: string }> => {
+    if (agents === void 0) throw new Error('[deepartments] dept_worker_spawn requires the agents service')
+    const role = String(opts.role ?? '').trim()
+    if (role === '') throw new Error('[deepartments] dept_worker_spawn: `role` is required (a role template name, e.g. "researcher")')
+    // Role template is resolved BEFORE any create: a missing/malformed role file
+    // fails the spawn loudly (never a persona-less worker).
+    const template = await readRoleTemplate(department.id, role)
+    // Slug dedup (spec §5.2): base = jobId ?? role; -2/-3… on collision —
+    // INCLUDING RETIRED slugs (F1 keeps retired entries in byPost).
+    const postId = dedupedWorkerSlug(opts.jobId ?? role)
+    const sessionId = SessionId(mintWorkerSessionId(postId))
+    if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_worker_spawn: a live agent already exists for session "${sessionId}"`)
+    const title = (opts.title ?? '').trim() !== '' ? (opts.title as string) : defaultWorkerTitle(role, opts.task, opts.jobId, postId)
+    const setup = workerSetup(postId, headEntry.roomId, role, { persona: template.persona, taskText: opts.task, tools: template.tools, department })
+    // F5 (spec 004 §6.2 L1): the worker lands in its department workspace.
+    const deptCwd = await resolveDepartmentWorkspaceCwd(department)
+    const handle = await agents.create({
+      sessionId: String(SessionId(sessionId)),
+      meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
+      agentOptions: WORKER_AGENT_OPTIONS,
+      setup
+    })
+    registerEntry({
+      postId,
+      sessionId: String(SessionId(sessionId)),
+      roomId: headEntry.roomId,
+      agentPreset: WORKER_PRESET_ID,
+      provider: 'worker',
+      role,
+      managerId: headEntry.postId,
+      departmentId: department.id,
+      ...(opts.jobId !== void 0 ? { jobId: opts.jobId } : {})
+    })
+    byHeadHandle.set(String(SessionId(sessionId)), handle)
+    // F3 pin (spec §5.2): human-readable sidebar row — the owner's manual rename
+    // always wins, a failed pin only logs (registration stands).
+    const titleSession = ctx.sessions.get(sessionId)
+    if (titleSession !== void 0) {
+      const titlePin = pinSessionTitle(titleSession, title)
+      if (titlePin === 'pinned') {
+        ctx.logger.info(`[deepartments] dept_worker_spawn: pinned worker session title "${title}" (${sessionId})`)
+      } else if (titlePin === 'failed') {
+        ctx.logger.warn(`[deepartments] dept_worker_spawn: worker session title pin failed for ${sessionId} (non-fatal — worker registration continues)`)
+      }
+    }
+    // Deliver the assignment (or a creation note) as a DURABLE bus message from
+    // the head — the worker wakes on it. ACL (F2): head → own department worker.
+    const text = (opts.task ?? '').trim() !== ''
+      ? opts.task as string
+      : `[created] worker "${postId}" (${role}) is registered. You are disposable — work your assigned task, then dept_memo_write and dept_sleep; your head retires you with dept_worker_retire when you are done.`
+    const store = await messagesStoreReady
+    const record = await store.append({
+      from: headEntry.postId,
+      to: [postId],
+      text,
+      kind: 'agent'
+    })
+    await deliverBusRecord(record, postId, opts.callerAgentId ?? headEntry.sessionId, opts.senderSessionId ?? headEntry.sessionId, opts.signal)
+    return { workerId: postId, sessionId: String(SessionId(sessionId)), title }
+  }
+
 
   /** Parse the LEAN frontmatter the role templates use (spec §3.2:
    * `---`-delimited YAML-lite — `key: value` scalars + `- item` lists for
@@ -4664,62 +4998,18 @@ export function applyInvoke(ctx: Context, config: Config) {
           if (department === void 0) throw new Error(`[deepartments] dept_worker_spawn: head "${headId}" has no CONFIGURED department — the role template tree (presets/departments/<department-id>/) cannot be resolved`)
           const role = String(args.role ?? '').trim()
           if (role === '') throw new Error('[deepartments] dept_worker_spawn: `role` is required (a role template name, e.g. "researcher")')
-          // Role template is resolved BEFORE any create: a missing/malformed
-          // role file fails the spawn loudly (never a persona-less worker).
-          const template = await readRoleTemplate(department.id, role)
-          // Slug dedup (spec §5.2): base = jobId ?? role; -2/-3… on collision —
-          // INCLUDING RETIRED slugs (F1 keeps retired entries in byPost).
-          const postId = dedupedWorkerSlug(args.jobId ?? role)
-          const sessionId = SessionId(mintWorkerSessionId(postId))
-          if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_worker_spawn: a live agent already exists for session "${sessionId}"`)
-          const title = String(args.title ?? '').trim() !== '' ? String(args.title) : defaultWorkerTitle(role, args.task, args.jobId, postId)
-          const setup = workerSetup(postId, headEntry.roomId, role, { persona: template.persona, taskText: args.task, tools: template.tools, department })
-          // F5 (spec 004 §6.2 L1): the worker lands in its department workspace.
-          const deptCwd = await resolveDepartmentWorkspaceCwd(department)
-          const handle = await agents.create({
-            sessionId: String(SessionId(sessionId)),
-            meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
-            agentOptions: WORKER_AGENT_OPTIONS,
-            setup
-          })
-          registerEntry({
-            postId,
-            sessionId: String(SessionId(sessionId)),
-            roomId: headEntry.roomId,
-            agentPreset: WORKER_PRESET_ID,
-            provider: 'worker',
+          // The SHARED worker-spawn engine — the EXACT path dept_job_run uses and
+          // the parallel-monitor daemon uses for its researcher workers, so there
+          // is no tool-vs-scheduler-vs-daemon drift on registration/pin/delivery.
+          return spawnWorkerForDepartment(department, headEntry, {
             role,
-            managerId: headId,
-            departmentId: department.id,
-            ...(args.jobId !== void 0 ? { jobId: args.jobId } : {})
+            task: args.task,
+            ...(args.jobId !== void 0 ? { jobId: String(args.jobId) } : {}),
+            ...(args.title !== void 0 ? { title: String(args.title) } : {}),
+            callerAgentId: agent.id as string,
+            senderSessionId: agent.id as string,
+            signal: exec.signal
           })
-          byHeadHandle.set(String(SessionId(sessionId)), handle)
-          // F3 pin (spec §5.2): human-readable sidebar row — the owner's manual
-          // rename always wins, a session already holding the pin is never
-          // double-pinned, a failed pin only logs (registration stands).
-          const titleSession = ctx.sessions.get(sessionId)
-          if (titleSession !== void 0) {
-            const titlePin = pinSessionTitle(titleSession, title)
-            if (titlePin === 'pinned') {
-              ctx.logger.info(`[deepartments] dept_worker_spawn: pinned worker session title "${title}" (${sessionId})`)
-            } else if (titlePin === 'failed') {
-              ctx.logger.warn(`[deepartments] dept_worker_spawn: worker session title pin failed for ${sessionId} (non-fatal — worker registration continues)`)
-            }
-          }
-          // Deliver the assignment (or a creation note) as a DURABLE bus message
-          // from the head — the `deepartments/post-created` signal; the bus
-          // delivery wakes the worker (always-wake). ACL (F2): head → own
-          // department worker, allowed.
-          const text = args.task ?? `[created] worker "${postId}" (${role}) is registered. You are disposable — work your assigned task, then dept_memo_write and dept_sleep; your head retires you with dept_worker_retire when you are done.`
-          const store = await messagesStoreReady
-          const record = await store.append({
-            from: headId,
-            to: [postId],
-            text,
-            kind: 'agent'
-          })
-          await deliverBusRecord(record, postId, agent.id as string, agent.id as string, exec.signal)
-          return { workerId: postId, sessionId: String(SessionId(sessionId)), title }
         }
       })))
 
@@ -4764,6 +5054,60 @@ export function applyInvoke(ctx: Context, config: Config) {
           // already-retired no-op: archiveSession is idempotent.
           const archived = await archiveWorkerSession(entry.sessionId)
           return { workerId, retired: true, archived }
+        }
+      })))
+
+      // --- W3b (spec W3 monitor → researcher): dept_monitor_list — the runtime
+      // PARALLEL monitor state (read-only). Registered ONLY in the head own-layer
+      // (the Asistente orchestrates/reads via tooling but never polls monitors
+      // itself). Reads the SAME <stateDir>/parallel-monitors-state.json the
+      // poller daemon writes. ------------------------------------------------
+      disposers.push(agentCtx.tools.register(defineTool({
+        name: 'dept_monitor_list',
+        description: 'List the runtime PARALLEL monitor state (W3b): for each configured monitor (parallel.monitors, or the 2 code defaults), the Parallel monitor_id, the query, the last fire + last poll timestamps, the last cursor and the last event count. Read-only — the daemon, not a head, creates/polls the monitors. Registered ONLY in the head own-layer.',
+        parameters: {},
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              monitors: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: 'string', required: true },
+                    query: { type: 'string', required: true },
+                    monitorId: { type: 'string' },
+                    lastFiredAt: { type: 'number' },
+                    lastPolledAt: { type: 'number' },
+                    cursor: { type: 'string' },
+                    lastEventCount: { type: 'number' }
+                  }
+                }
+              }
+            }
+          },
+          render: (_args, value) => [{ type: 'text', text: `${(value.monitors ?? []).length} parallel monitor(s): ${(value.monitors ?? []).map((m) => `${m.id}${m.monitorId !== undefined ? ` (${m.monitorId})` : ''}`).join(', ')}` } as const]
+        },
+        async execute(): Promise<{ monitors: Array<{ id: string; query: string; monitorId?: string; lastFiredAt?: number; lastPolledAt?: number; cursor?: string; lastEventCount?: number }> }> {
+          const monitors = resolveParallelMonitorConfig((config as unknown as { parallel?: ParallelConfig }).parallel)
+          const state = readParallelMonitorsState(config.stateDir)
+          return {
+            monitors: monitors.map((m) => {
+              const s = state.monitors[m.id]
+              return {
+                id: m.id,
+                query: m.query,
+                ...(s?.monitorId !== undefined ? { monitorId: s.monitorId } : {}),
+                ...(s?.lastFiredAt !== undefined ? { lastFiredAt: s.lastFiredAt } : {}),
+                ...(s?.lastPolledAt !== undefined ? { lastPolledAt: s.lastPolledAt } : {}),
+                ...(s?.cursor !== undefined ? { cursor: s.cursor } : {}),
+                ...(s?.lastEventCount !== undefined ? { lastEventCount: s.lastEventCount } : {})
+              }
+            })
+          }
         }
       })))
     }
@@ -4916,7 +5260,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   const OWN_LAYER_POST_TOOLS: ReadonlySet<string> = new Set([
     'send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep',
     'dept_post_create', 'dept_post_retire', 'dept_worker_spawn', 'dept_worker_retire',
-    'dept_job_list', 'dept_job_run'
+    'dept_job_list', 'dept_job_run', 'dept_monitor_list'
   ])
 
   /** Build the `setup(agentCtx)` for one post (head OR worker): mount the post's
@@ -6899,6 +7243,135 @@ export function applyInvoke(ctx: Context, config: Config) {
     const interval = setInterval(tick, AGENDA_SCHEDULER_INTERVAL_MS)
     return () => { clearInterval(interval) }
   }, 'deepartments: agenda scheduler daemon')
+
+  // --- W3b parallel-monitor daemon (Parallel event_stream monitors) --------
+  // A plugin daemon (NOT an agent) that polls the configured Parallel monitors
+  // and, on each NEW event, spawns a researcher DIRECTLY (through the SAME
+  // worker-spawn engine a head uses — no tool-vs-daemon drift) and notifies the
+  // research head (owner decision 2026-08-23: "cada vez que se active un
+  // researcher también se tiene que activar su RH"). Reversible effect
+  // (AGENTS.md rule 4): the interval is cleared on dispose. The monitors config
+  // defaults live in DEFAULT_PARALLEL_MONITORS (code), so this runs on the dev
+  // profile without touching the config (or /opt); a `parallel` config section
+  // (apiKey/baseUrl/maxConsecutiveSpawns/monitors) overrides it when present.
+  const PARALLEL_MONITOR_INTERVAL_MS = 20 * 1000
+  const parallelConfig = (config as unknown as { parallel?: ParallelConfig }).parallel
+  const parallelMonitors = resolveParallelMonitorConfig(parallelConfig)
+  const parallelApiKey = parallelConfig?.apiKey ?? process.env.PARALLEL_API_KEY ?? ''
+  const parallelBaseUrl = parallelConfig?.baseUrl ?? 'https://api.parallel.ai'
+  const parallelMaxSpawns = parallelConfig?.maxConsecutiveSpawns ?? 2
+  // The researcher worker lands under the research department; fall back to the
+  // first CONFIGURED department with a coordinator when 'research' is absent.
+  const parallelDepartment = config.org.departments.find((d) => d.id === 'research')
+    ?? config.org.departments.find((d) => d.coordinator !== void 0)
+  const parallelHeadEntry = parallelDepartment?.coordinator !== void 0
+    ? byPost.get(parallelDepartment.coordinator.postId)
+    : void 0
+  if (parallelApiKey === '') {
+    ctx.logger.warn('[deepartments] parallel-monitor: no PARALLEL_API_KEY / parallel.apiKey — monitoring daemon disabled (set an API key, or parallel.apiKey in the config, to enable)')
+  } else if (parallelMonitors.length === 0) {
+    ctx.logger.info('[deepartments] parallel-monitor: parallel.monitors is empty — monitoring disabled (explicit no-op)')
+  } else if (parallelDepartment === void 0 || parallelHeadEntry === void 0) {
+    ctx.logger.warn('[deepartments] parallel-monitor: no research department / head to spawn monitor workers under — monitoring daemon disabled')
+  } else {
+    const parallelHeaders: Record<string, string> = { 'x-api-key': parallelApiKey, 'content-type': 'application/json' }
+    // POST /v1/monitors — create the monitor on Parallel (runs immediately on
+    // creation; the poller picks up its net-new events).
+    const createMonitor = async (monitor: ParallelMonitorConfig): Promise<{ monitorId: string }> => {
+      const body = {
+        type: 'event_stream' as const,
+        frequency: monitor.frequency ?? '1d',
+        processor: monitor.processor ?? 'base',
+        settings: {
+          query: monitor.query,
+          ...(monitor.outputSchema !== void 0 ? { output_schema: monitor.outputSchema } : {}),
+          ...(monitor.includeBackfill === true ? { include_backfill: true } : {}),
+          ...(monitor.sourcePolicy !== void 0 && monitor.sourcePolicy.length > 0
+            ? { advanced_settings: { source_policy: { include_domains: monitor.sourcePolicy } } }
+            : {})
+        }
+      }
+      const res = await fetch(`${parallelBaseUrl}/v1/monitors`, { method: 'POST', headers: parallelHeaders, body: JSON.stringify(body) })
+      if (!res.ok) throw new Error(`POST /v1/monitors ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`)
+      const json = (await res.json()) as { monitor_id?: unknown }
+      if (typeof json.monitor_id !== 'string' || json.monitor_id === '') throw new Error('POST /v1/monitors: response missing monitor_id')
+      return { monitorId: json.monitor_id }
+    }
+    // GET /v1/monitors/{id}/events — cursor-paginated (newest first); GETs do
+    // not consume rate limit (the poller). include_completions is LEFT OFF (we
+    // only want the real detected events, not the no-change executions).
+    const fetchEvents = async (monitorId: string, cursor: string | undefined): Promise<{ events: ParallelMonitorEvent[]; nextCursor?: string }> => {
+      const url = new URL(`${parallelBaseUrl}/v1/monitors/${encodeURIComponent(monitorId)}/events`)
+      url.searchParams.set('limit', '50')
+      if (cursor !== void 0) url.searchParams.set('cursor', cursor)
+      const res = await fetch(url.toString(), { headers: { 'x-api-key': parallelApiKey } })
+      if (!res.ok) throw new Error(`GET /v1/monitors/${monitorId}/events ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`)
+      const json = (await res.json()) as { events?: unknown; next_cursor?: unknown }
+      const events = Array.isArray(json.events) ? (json.events as ParallelMonitorEvent[]) : []
+      const nextCursor = typeof json.next_cursor === 'string' ? json.next_cursor : void 0
+      return { events, ...(nextCursor !== void 0 ? { nextCursor } : {}) }
+    }
+    const monitorQueryShort = (query: string): string => {
+      const trimmed = query.trim()
+      return trimmed.length > 40 ? `${trimmed.slice(0, 37).trimEnd()}...` : trimmed
+    }
+    const buildMonitorBrief = (monitor: ParallelMonitorConfig, event: ParallelMonitorEvent): string =>
+      [
+        `[parallel-monitor] A monitor event was detected (monitor "${monitor.id}", query "${monitor.query}").`,
+        '',
+        event.output?.content !== undefined ? event.output.content : JSON.stringify(event),
+        '',
+        'Verify and investigate this item, then report to your head with a concise memo and write the report to reports/researcher/ so the Research Department record stays durable.'
+      ].join('\n')
+    ctx.logger.info(`[deepartments] parallel-monitor: ${parallelMonitors.length} monitor(s) enabled (department "${parallelDepartment.id}", head "${parallelHeadEntry.postId}", baseUrl ${parallelBaseUrl})`)
+    ctx.effect(() => {
+      const tick = (): void => {
+        void runParallelMonitorTick({
+          now: () => Date.now(),
+          stateDir: config.stateDir,
+          monitors: parallelMonitors,
+          apiKey: parallelApiKey,
+          baseUrl: parallelBaseUrl,
+          maxConsecutiveSpawns: parallelMaxSpawns,
+          createMonitor,
+          fetchEvents,
+          liveWorkerCount: (monitorId) => {
+            let n = 0
+            for (const entry of byPost.values()) {
+              if (entry.provider === 'worker' && entry.retired !== true && entry.jobId === monitorId) n++
+            }
+            return n
+          },
+          spawnResearcher: async (monitor, event) =>
+            spawnWorkerForDepartment(parallelDepartment, parallelHeadEntry, {
+              role: 'researcher',
+              task: buildMonitorBrief(monitor, event),
+              title: `Researcher: Monitor: ${monitorQueryShort(monitor.query)}`,
+              jobId: monitor.id,
+              callerAgentId: parallelHeadEntry.sessionId,
+              senderSessionId: parallelHeadEntry.sessionId
+            }),
+          // The daemon is NOT a catalog member, so the bus ACL would deny it —
+          // deliver a fire-and-forget notice via the post-delivery seam (a
+          // plugin-daemon system notice, framed `[From deepartments]`), exactly
+          // like the agenda scheduler's notifyHead.
+          notifyHead: async (monitor, event, workerId): Promise<void> => {
+            try {
+              const store = await messagesStoreReady
+              const text = `A researcher is working (monitor ${monitor.id}): ${event.output?.content ?? '(no content)'}`
+              const record = await store.append({ from: 'deepartments', to: [parallelHeadEntry.postId], text, kind: 'agent' })
+              await busDeliverToPost(parallelHeadEntry, `[From deepartments → ${parallelHeadEntry.postId}]: ${text}`, record, void 0)
+            } catch (error: unknown) {
+              ctx.logger.warn(`[deepartments] parallel-monitor: notify head failed: ${error instanceof Error ? error.message : String(error)}`)
+            }
+          },
+          logger: ctx.logger
+        })
+      }
+      const interval = setInterval(tick, PARALLEL_MONITOR_INTERVAL_MS)
+      return () => { clearInterval(interval) }
+    }, 'deepartments: parallel-monitor daemon')
+  }
 
   // --- agents/list + host/status RPC (server half, HTTP self-mount) --------
   // Serves the department-head roster rows (`agents`/`list`) and the U3
