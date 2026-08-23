@@ -104,24 +104,42 @@ export interface PresenceValue {
   present: boolean;
 }
 
-/** One scheduled job row in the agenda (mirrors dept_job_list frontmatter). */
+/** One scheduled job row in the agenda (mirrors dept_job_list frontmatter).
+ * `role`/`description` are extras the server forwards (src/invoke.ts readAgendaJobs)
+ * and feed the muted row meta line; `next` is the next cron fire as an ISO
+ * datetime, rendered as the mono/muted right value. */
 export interface AgendaJob {
   id: string;
   title: string;
+  role?: string;
+  description?: string;
   schedule?: string;
   next?: string;
 }
 
-/** One arbitrary calendar entry in the agenda (from `.deepartments/calendar.json`). */
+/** One arbitrary calendar entry in the agenda (from `.deepartments/calendar.json`).
+ * `jobId` (optional) links the entry to a scheduled job → renders a compact badge. */
 export interface AgendaCalendarEntry {
   label: string;
   time: string;
+  jobId?: string;
 }
 
 /** Value returned by `/deepartments agenda/list`. */
 export interface AgendaValue {
   jobs: AgendaJob[];
   calendar: AgendaCalendarEntry[];
+}
+
+/** Format a cron next-fire ISO into a compact, locale-neutral `MM-DD HH:mm`
+ * timestamp so the right value reads as a mono run time regardless of the app
+ * locale (the workspace clock uses the dictionary, not the browser locale). */
+function formatNext(iso?: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (v: number) => String(v).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 /** Bindable i18n function (dictionary lookup with optional `{vars}`). */
@@ -179,23 +197,157 @@ const sectionStyle: CSSProperties = {
   flexDirection: "column",
   gap: 6,
 };
+/** Section heading — DSH section/overview-heading language
+ * (`--dsw-font-xs-strong-13`, secondary). */
 const sectionTitleStyle: CSSProperties = {
   margin: 0,
   color: "var(--dsw-alias-label-secondary)",
-  fontSize: 12,
+  fontFamily: "var(--dsw-font-family)",
   fontWeight: 500,
-  lineHeight: "18px",
+  fontSize: 13,
+  lineHeight: "20px",
 };
-const cardStyle: CSSProperties = {
+
+/** Reset list for a section body (no bullets, no default padding). */
+const listStyle: CSSProperties = {
+  margin: 0,
+  padding: 0,
+  listStyle: "none",
+  display: "flex",
+  flexDirection: "column",
+};
+
+/** One agenda row base (workspace projectRow/sessionRow pattern: hoverable
+ * flex row, 8px radius, 0-centered, 0 8px padding — a touch taller to seat the
+ * two-line job cell). */
+const rowBase: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  minWidth: 0,
+  padding: "7px 10px",
+  borderRadius: 8,
+};
+
+/** Bottom separator between rows (border-l1) — applied to every row but the
+ * last so the list reads as DSH table rows (trajectory td border-l1). */
+const rowSeparator: CSSProperties = {
+  borderBottom: "1px solid var(--dsw-alias-border-l1)",
+};
+
+/** Job left cell: strong title (primary) over muted role/schedule meta. */
+const rowMain: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
   display: "flex",
   flexDirection: "column",
   gap: 2,
-  padding: "6px 8px",
-  borderRadius: 8,
-  background: "var(--dsw-alias-fill-l2)",
+};
+const rowTitleStyle: CSSProperties = {
   color: "var(--dsw-alias-label-primary)",
+  fontFamily: "var(--dsw-font-family)",
+  fontWeight: 500,
   fontSize: 13,
   lineHeight: "20px",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+};
+const rowMetaStyle: CSSProperties = {
+  color: "var(--dsw-alias-label-secondary)",
+  fontFamily: "var(--dsw-font-family)",
+  fontWeight: 400,
+  fontSize: 12,
+  lineHeight: "17px",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+};
+
+/** Right value (job next run) — mono, muted, right-aligned, flex:none. */
+const rowValueStyle: CSSProperties = {
+  flex: "none",
+  color: "var(--dsw-alias-label-tertiary)",
+  fontFamily: "var(--ds-font-family-code)",
+  fontSize: 12,
+  lineHeight: "18px",
+  fontVariantNumeric: "tabular-nums",
+  whiteSpace: "nowrap",
+};
+
+/** Calendar right cell: optional jobId badge boxed beside the muted time. */
+const rowRightGroup: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  flex: "none",
+};
+
+/** Compact badge (calendar jobId) — trajectory kindTag pattern (4px radius,
+ * 19px tall, 10px/16px, 650 weight, muted pill fill). */
+const badgeStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  height: 19,
+  padding: "0 5px",
+  borderRadius: 4,
+  border: "1px solid transparent",
+  fontSize: 10,
+  fontWeight: 650,
+  lineHeight: "16px",
+  color: "var(--dsw-alias-label-secondary)",
+  background: "var(--dsw-alias-bg-module-platform)",
+  whiteSpace: "nowrap",
+};
+
+/** Calendar label cell (primary, regular) over muted time. */
+const calLabelStyle: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  color: "var(--dsw-alias-label-primary)",
+  fontFamily: "var(--dsw-font-family)",
+  fontWeight: 400,
+  fontSize: 13,
+  lineHeight: "20px",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+};
+const calTimeStyle: CSSProperties = {
+  flex: "none",
+  color: "var(--dsw-alias-label-tertiary)",
+  fontFamily: "var(--dsw-font-family)",
+  fontSize: 12,
+  lineHeight: "18px",
+  fontVariantNumeric: "tabular-nums",
+  whiteSpace: "nowrap",
+};
+
+/** Centered state surface (loading/empty/error): panel chrome + centered text,
+ * with the GUI's muted/tinted token colors. */
+const statePanelStyle: CSSProperties = {
+  ...panelStyle,
+  alignItems: "center",
+  justifyContent: "center",
+  gap: 8,
+};
+const stateErrorStyle: CSSProperties = {
+  ...statePanelStyle,
+  color: "var(--dsw-alias-state-error-primary)",
+};
+
+/** Loading spinner ring — a self-contained keyframe (unique name, never
+ * collides with a host keyframe) since the bundle has no CSS pipeline. */
+const SPIN_KEYFRAMES =
+  "@keyframes dsw-deepartments-spin{to{transform:rotate(360deg)}}";
+const spinnerStyle: CSSProperties = {
+  flex: "none",
+  width: 12,
+  height: 12,
+  borderRadius: "50%",
+  border: "1.5px solid var(--dsw-alias-border-l2)",
+  borderTopColor: "var(--dsw-alias-state-business-primary)",
+  animation: "dsw-deepartments-spin .7s linear infinite",
 };
 
 /** Minimal client root-context surface the watcher relies on (client-runner
@@ -454,21 +606,25 @@ export function apply(ctx: ClientCtx): void {
 
     if (status === "loading") {
       return (
-        <div style={{ ...panelStyle, color: "var(--dsw-alias-label-tertiary)" }}>
-          {t("agenda.loading")}
+        <div
+          style={{
+            ...statePanelStyle,
+            flexDirection: "row",
+            color: "var(--dsw-alias-label-secondary)",
+          }}
+        >
+          <style>{SPIN_KEYFRAMES}</style>
+          <span aria-hidden style={spinnerStyle} />
+          <span>{t("agenda.loading")}</span>
         </div>
       );
     }
     if (status === "error") {
-      return (
-        <div style={{ ...panelStyle, color: "var(--dsw-alias-state-error-primary)" }}>
-          {t("agenda.error")}
-        </div>
-      );
+      return <div style={stateErrorStyle}>{t("agenda.error")}</div>;
     }
     if (data.jobs.length === 0 && data.calendar.length === 0) {
       return (
-        <div style={{ ...panelStyle, color: "var(--dsw-alias-label-tertiary)" }}>
+        <div style={{ ...statePanelStyle, color: "var(--dsw-alias-label-tertiary)" }}>
           {t("agenda.empty")}
         </div>
       );
@@ -478,25 +634,25 @@ export function apply(ctx: ClientCtx): void {
         {data.jobs.length > 0 && (
           <section style={sectionStyle}>
             <h3 style={sectionTitleStyle}>{t("agenda.jobs")}</h3>
-            <ul
-              style={{
-                margin: 0,
-                padding: 0,
-                listStyle: "none",
-                display: "flex",
-                flexDirection: "column",
-                gap: 6,
-              }}
-            >
-              {data.jobs.map((job) => (
-                <li key={job.id} style={cardStyle}>
-                  <span style={{ fontFamily: "var(--ds-font-family-code)", fontWeight: 500 }}>
-                    {job.title}
-                  </span>
-                  <span style={{ color: "var(--dsw-alias-label-secondary)" }}>
-                    {job.schedule ?? t("agenda.schedule.none")}
-                    {job.next ? " · " + job.next : ""}
-                  </span>
+            <ul style={listStyle}>
+              {data.jobs.map((job, index) => (
+                <li
+                  key={job.id}
+                  style={{
+                    ...rowBase,
+                    ...(index < data.jobs.length - 1 ? rowSeparator : {}),
+                  }}
+                >
+                  <div style={rowMain}>
+                    <span style={rowTitleStyle}>{job.title}</span>
+                    <span style={rowMetaStyle}>
+                      {[job.role, job.schedule].filter(Boolean).join(" · ") ||
+                        t("agenda.schedule.none")}
+                    </span>
+                  </div>
+                  {job.next ? (
+                    <span style={rowValueStyle}>{formatNext(job.next)}</span>
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -505,20 +661,20 @@ export function apply(ctx: ClientCtx): void {
         {data.calendar.length > 0 && (
           <section style={sectionStyle}>
             <h3 style={sectionTitleStyle}>{t("agenda.calendar")}</h3>
-            <ul
-              style={{
-                margin: 0,
-                padding: 0,
-                listStyle: "none",
-                display: "flex",
-                flexDirection: "column",
-                gap: 6,
-              }}
-            >
+            <ul style={listStyle}>
               {data.calendar.map((entry, index) => (
-                <li key={entry.label + index} style={cardStyle}>
-                  <span>{entry.label}</span>
-                  <span style={{ color: "var(--dsw-alias-label-tertiary)" }}>{entry.time}</span>
+                <li
+                  key={entry.label + index}
+                  style={{
+                    ...rowBase,
+                    ...(index < data.calendar.length - 1 ? rowSeparator : {}),
+                  }}
+                >
+                  <span style={calLabelStyle}>{entry.label}</span>
+                  <span style={rowRightGroup}>
+                    {entry.jobId ? <span style={badgeStyle}>{entry.jobId}</span> : null}
+                    <span style={calTimeStyle}>{entry.time}</span>
+                  </span>
                 </li>
               ))}
             </ul>
