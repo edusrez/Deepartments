@@ -2447,6 +2447,331 @@ test('F1 legacy PostEntry compat: a posts.json worker WITHOUT the new F1 fields 
   })
 })
 
+// --- F2 (spec 004 §5.6): department messaging ACL in send_message ----------
+// worker → agents of its own department (incl. its head) + self; head → any
+// head (incl. the host) + its own department's agents; host → everyone.
+// Worker prohibitions (D6): the host, other heads, other departments — and an
+// ORPHAN worker (no departmentId) is reachable ONLY by the head that created
+// it (managerId). Denials are per-recipient `failed:acl:<ground>`: the denied
+// recipient is NOT persisted in the record (to[] = allowed only) and NOT
+// delivered; the child route (subagents.followup) stays OUTSIDE the ACL.
+
+async function f2BootWithTwoHeads(stateDir) {
+  const env = await bootPlugin(stateDir, { org: TWO_DEPT_ORG })
+  await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'research head materialized at boot')
+  await waitFor(() => env.agents.store.has('head-programming-head'), 5000, 'programming head materialized at boot')
+  const researchHead = env.agents.store.get('head-research-head')
+  const programmingHead = env.agents.store.get('head-programming-head')
+  const researchCtx = childContextFor(env.agents, 'head-research-head')
+  const programmingCtx = childContextFor(env.agents, 'head-programming-head')
+  return { ...env, researchHead, programmingHead, researchKey: researchCtx.key, programmingKey: programmingCtx.key, researchCtx: researchCtx.ctx, programmingCtx: programmingCtx.ctx }
+}
+
+/** Create a worker of the given head (own-layer dept_post_create) and return
+ * the live worker agent + its scoped toolset. */
+async function f2CreateWorker(env, { ctx, key }, workerPostId, role, head) {
+  const signal = new AbortController().signal
+  await ctx.tools.get('dept_post_create', key).execute({ postId: workerPostId, role }, { agent: head, signal })
+  await waitFor(() => env.agents.store.has(`worker-${workerPostId}`), 5000, `worker ${workerPostId} live`)
+  const worker = env.agents.store.get(`worker-${workerPostId}`)
+  const wctx = childContextFor(env.agents, `worker-${workerPostId}`)
+  return { worker, ctx: wctx.ctx, key: wctx.key, signal }
+}
+
+test('F2 ACL: a worker sends to its own head (manager) — ALLOWED (delivered, framed, record persisted)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      await env.headCtx.tools.get('dept_post_create', env.key).execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: env.head, signal })
+      const worker = env.agents.store.get('worker-researcher-alpha')
+      const { ctx: workerCtx, key: workerKey } = childContextFor(env.agents, 'worker-researcher-alpha')
+      const before = env.head.inboxMessages.length
+
+      const r = await workerCtx.tools.get('send_message', workerKey).execute(
+        { to: ['research-head'], text: 'done with the task' },
+        { agent: worker, signal }
+      )
+      assert.equal(r.delivered['research-head'], 'delivered', 'worker → its manager head is ALLOWED')
+      assert.equal(r.messageId, 'm-1', 'the allowed send persisted ONE record (m-0 = the create firstMessage)')
+      await waitFor(() => env.head.inboxMessages.length === before + 1, 5000, 'the manager head was woken')
+      assert.match(env.head.inboxMessages.at(-1).content[0].text, /^\[From researcher-alpha → research-head\]: done with the task/, 'bus framing carries the worker sender')
+      const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+      assert.deepEqual(records.at(-1).to, ['research-head'], 'record.to[] = the allowed recipient')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('F2 ACL: a worker sends to a SAME-DEPARTMENT peer worker — ALLOWED (delivered)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      await env.headCtx.tools.get('dept_post_create', env.key).execute({ postId: 'researcher-alpha', role: 'researcher A' }, { agent: env.head, signal })
+      await env.headCtx.tools.get('dept_post_create', env.key).execute({ postId: 'researcher-beta', role: 'researcher B' }, { agent: env.head, signal })
+      const alpha = env.agents.store.get('worker-researcher-alpha')
+      const beta = env.agents.store.get('worker-researcher-beta')
+      const { ctx: alphaCtx, key: alphaKey } = childContextFor(env.agents, 'worker-researcher-alpha')
+      const betaBefore = beta.inboxMessages.length
+
+      const r = await alphaCtx.tools.get('send_message', alphaKey).execute(
+        { to: ['researcher-beta'], text: 'peer ping' },
+        { agent: alpha, signal }
+      )
+      assert.equal(r.delivered['researcher-beta'], 'delivered', 'worker → same-department worker is ALLOWED')
+      await waitFor(() => beta.inboxMessages.length === betaBefore + 1, 5000, 'the peer worker was woken')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('F2 ACL: a worker CANNOT write to a head of ANOTHER department — per-recipient failed:acl, NOT persisted, NOT delivered', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await f2BootWithTwoHeads(stateDir)
+    try {
+      const { worker, ctx, key, signal } = await f2CreateWorker(env, { ctx: env.researchCtx, key: env.researchKey }, 'researcher-alpha', 'researcher', env.researchHead)
+      const programmingBefore = env.programmingHead.inboxMessages.length
+      const recordsBefore = (await loadMessageRecords(resolveMessagesPath(stateDir))).length
+
+      const r = await ctx.tools.get('send_message', key).execute(
+        { to: ['programming-head'], text: 'hello over there' },
+        { agent: worker, signal }
+      )
+      assert.equal(r.delivered['programming-head'], 'failed:acl:other-department', 'worker → other-department head is DENIED with the ACL ground')
+      assert.equal(r.messageId, 'none', 'an all-denied send persists NO record (the message never reached anyone)')
+      assert.equal((await loadMessageRecords(resolveMessagesPath(stateDir))).length, recordsBefore, 'nothing was persisted for the denied recipient')
+      assert.equal(env.programmingHead.inboxMessages.length, programmingBefore, 'the other-department head was NOT woken')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('F2 ACL: a worker CANNOT write to the HOST (D6) — failed:acl:host', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithHead(stateDir)
+    try {
+      const host = env.agents.put(fakeParentAgent())
+      const hostId = `host-${host.id}`
+      await env.root.tools.get('dept_who').execute({}, { agent: host, signal: new AbortController().signal })
+      const { worker, ctx, key, signal } = await f2CreateWorker(env, { ctx: env.headCtx, key: env.key }, 'researcher-alpha', 'researcher', env.head)
+
+      const r = await ctx.tools.get('send_message', key).execute(
+        { to: [hostId], text: 'hey boss' },
+        { agent: worker, signal }
+      )
+      assert.equal(r.delivered[hostId], 'failed:acl:host', 'worker → host is DENIED (D6: everything via its head)')
+      assert.equal(r.messageId, 'none')
+      assert.equal(host.inboxMessages.length, 0, 'the host was NOT woken')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('F2 ACL: a head sends to ANOTHER department\'s head — ALLOWED (heads talk to heads, D6)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await f2BootWithTwoHeads(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const r = await env.researchCtx.tools.get('send_message', env.researchKey).execute(
+        { to: ['programming-head'], text: 'coordination' },
+        { agent: env.researchHead, signal }
+      )
+      assert.equal(r.delivered['programming-head'], 'delivered', 'head → head of another department is ALLOWED (the reporting chain)')
+      assert.equal(r.messageId, 'm-0', 'one record persisted')
+      await waitFor(() => env.programmingHead.inboxMessages.length >= 1, 5000, 'the other head was woken')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('F2 ACL: a head sends to its OWN department worker — ALLOWED; to ANOTHER department\'s worker — DENIED', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await f2BootWithTwoHeads(stateDir)
+    try {
+      const signal = new AbortController().signal
+      // A worker of the programming department exists (created by its head).
+      await env.programmingCtx.tools.get('dept_post_create', env.programmingKey).execute({ postId: 'coder-alpha', role: 'programmer' }, { agent: env.programmingHead, signal })
+      const coder = env.agents.store.get('worker-coder-alpha')
+      const coderBefore = coder.inboxMessages.length
+
+      // (a) research head → its OWN worker: allowed (managerId match).
+      await env.researchCtx.tools.get('dept_post_create', env.researchKey).execute({ postId: 'researcher-alpha', role: 'researcher' }, { agent: env.researchHead, signal })
+      const own = await env.researchCtx.tools.get('send_message', env.researchKey).execute(
+        { to: ['researcher-alpha'], text: 'work item' },
+        { agent: env.researchHead, signal }
+      )
+      assert.equal(own.delivered['researcher-alpha'], 'delivered', 'head → worker of its own department is ALLOWED')
+
+      // (b) research head → programming worker: DENIED (goes via programming-head).
+      const recordsBefore = (await loadMessageRecords(resolveMessagesPath(stateDir))).length
+      const cross = await env.researchCtx.tools.get('send_message', env.researchKey).execute(
+        { to: ['coder-alpha'], text: 'peek' },
+        { agent: env.researchHead, signal }
+      )
+      assert.equal(cross.delivered['coder-alpha'], 'failed:acl:other-department', 'head → worker of ANOTHER department is DENIED')
+      assert.equal(cross.messageId, 'none', 'the all-denied send persisted nothing')
+      assert.equal((await loadMessageRecords(resolveMessagesPath(stateDir))).length, recordsBefore, 'the denied recipient is not in any record')
+      assert.equal(coder.inboxMessages.length, coderBefore, 'the other-department worker was NOT woken')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('F2 ACL: the HOST sends to a worker — ALLOWED (the Asistente talks to everyone, D6)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithHead(stateDir)
+    try {
+      const host = env.agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      await env.root.tools.get('dept_who').execute({}, { agent: host, signal })
+      await env.headCtx.tools.get('dept_post_create', env.key).execute({ postId: 'researcher-alpha', role: 'researcher' }, { agent: env.head, signal })
+
+      const r = await env.root.tools.get('send_message').execute(
+        { to: ['researcher-alpha'], text: 'from the host' },
+        { agent: host, signal }
+      )
+      assert.equal(r.delivered['researcher-alpha'], 'delivered', 'host → worker is ALLOWED')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('F2 ACL: MIXED message — the allowed recipients are delivered + persisted (ONE record, to[] = allowed), the denied surface ONLY in the result', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await f2BootWithTwoHeads(stateDir)
+    try {
+      const { worker, ctx, key, signal } = await f2CreateWorker(env, { ctx: env.researchCtx, key: env.researchKey }, 'researcher-alpha', 'researcher', env.researchHead)
+      // A same-department peer (allowed) + a programming worker (denied) + an unknown id (not an ACL subject — fails as unknown).
+      await env.researchCtx.tools.get('dept_post_create', env.researchKey).execute({ postId: 'researcher-beta', role: 'researcher B' }, { agent: env.researchHead, signal })
+      await env.programmingCtx.tools.get('dept_post_create', env.programmingKey).execute({ postId: 'coder-alpha', role: 'programmer' }, { agent: env.programmingHead, signal })
+      const beta = env.agents.store.get('worker-researcher-beta')
+      const coder = env.agents.store.get('worker-coder-alpha')
+      const betaBefore = beta.inboxMessages.length
+      const coderBefore = coder.inboxMessages.length
+      const recordsBefore = (await loadMessageRecords(resolveMessagesPath(stateDir))).length
+
+      const r = await ctx.tools.get('send_message', key).execute(
+        { to: ['researcher-beta', 'coder-alpha', 'ghost-unknown'], text: 'one allowed, one denied, one ghost' },
+        { agent: worker, signal }
+      )
+      assert.equal(r.delivered['researcher-beta'], 'delivered', 'the allowed peer IS delivered')
+      assert.equal(r.delivered['coder-alpha'], 'failed:acl:other-department', 'the other-department worker is DENIED (ACL ground in the result)')
+      assert.equal(r.delivered['ghost-unknown'], 'failed', 'an unknown id is NOT an ACL subject — it keeps the per-recipient unknown failure')
+      assert.equal(r.messageId, `m-${recordsBefore}`, 'ONE record for the whole send (not one per recipient)')
+
+      const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+      assert.equal(records.length, recordsBefore + 1, 'exactly one record persisted for the mixed send')
+      assert.deepEqual(records.at(-1).to, ['researcher-beta', 'ghost-unknown'], 'record.to[] = ONLY the allowed (+ non-ACL) recipients — the denied never touches the record')
+      await waitFor(() => beta.inboxMessages.length === betaBefore + 1, 5000, 'the allowed peer was woken')
+      assert.equal(coder.inboxMessages.length, coderBefore, 'the denied worker was NOT woken (not delivered)')
+      // The sidecar has rows for the delivered + unknown pair only.
+      const rows = await readDeliveryRows(stateDir, `m-${recordsBefore}`)
+      const statuses = Object.fromEntries(rows.map((row) => [row.recipientId, row.status]))
+      assert.equal(statuses['researcher-beta'], 'delivered', 'sidecar status for the allowed recipient')
+      assert.equal(statuses['coder-alpha'], undefined, 'NO sidecar row for the ACL-denied recipient (it never entered the delivery path)')
+      assert.equal(statuses['ghost-unknown'], 'failed', 'sidecar status for the unknown recipient (unchanged)')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('F2 ACL: an ORPHAN worker (no departmentId) is reachable ONLY by the head that created it (managerId) — the manager allowed, other heads + peers denied', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Two legacy-shaped workers: provider + role + managerId, NO departmentId.
+    await seedPost(stateDir, { postId: 'orphan-a', sessionId: 'worker-orphan-a', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'legacy worker A', managerId: 'research-head' })
+    await seedPost(stateDir, { postId: 'orphan-b', sessionId: 'worker-orphan-b', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'legacy worker B', managerId: 'research-head' })
+    const env = await f2BootWithTwoHeads(stateDir)
+    try {
+      const signal = new AbortController().signal
+      // (a) its manager head (managerId match) is ALLOWED — the cold seeded
+      // orphan is resumed by the delivery (like the F1 legacy-worker test).
+      const byManager = await env.researchCtx.tools.get('send_message', env.researchKey).execute(
+        { to: ['orphan-a'], text: 'wake legacy' },
+        { agent: env.researchHead, signal }
+      )
+      assert.equal(byManager.delivered['orphan-a'], 'resumed', 'head → orphan worker created by it (managerId) is ALLOWED (cold-resumed)')
+      await waitFor(() => env.agents.store.has('worker-orphan-a'), 5000, 'orphan worker materialized by the allowed delivery')
+
+      // (b) ANOTHER head cannot reach it.
+      const byOther = await env.programmingCtx.tools.get('send_message', env.programmingKey).execute(
+        { to: ['orphan-a'], text: 'who are you' },
+        { agent: env.programmingHead, signal }
+      )
+      assert.equal(byOther.delivered['orphan-a'], 'failed:acl:other-department', 'head of ANOTHER department cannot reach the orphan worker')
+      assert.equal(byOther.messageId, 'none')
+
+      // (c) the orphan worker itself: sends to ITS manager head (allowed) and
+      // to its orphan PEER (denied — an orphan is only its manager's reach).
+      const orphanA = env.agents.store.get('worker-orphan-a')
+      const actx = childContextFor(env.agents, 'worker-orphan-a')
+      await waitFor(() => actx !== undefined, 5000, 'orphan context materialized')
+      const toManager = await actx.ctx.tools.get('send_message', actx.key).execute(
+        { to: ['research-head'], text: 'reporting to my manager' },
+        { agent: orphanA, signal }
+      )
+      assert.equal(toManager.delivered['research-head'], 'delivered', 'orphan worker → its manager head is ALLOWED (managerId)')
+      const toPeer = await actx.ctx.tools.get('send_message', actx.key).execute(
+        { to: ['orphan-b'], text: 'peer ?' },
+        { agent: orphanA, signal }
+      )
+      assert.equal(toPeer.delivered['orphan-b'], 'failed:acl:other-department', 'orphan worker → orphan peer is DENIED (only the manager head reaches an orphan)')
+      assert.equal(toPeer.messageId, 'none')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('F2 regression: the CHILD route (subagents.followup) is OUTSIDE the ACL — a worker\'s direct continuable child delivers natively, never catalog-gated', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      await env.headCtx.tools.get('dept_post_create', env.key).execute({ postId: 'researcher-alpha', role: 'researcher' }, { agent: env.head, signal })
+      const worker = env.agents.store.get('worker-researcher-alpha')
+      const { ctx: workerCtx, key: workerKey } = childContextFor(env.agents, 'worker-researcher-alpha')
+      // A REAL continuable child of the WORKER via the Real continuation manager.
+      const { childId } = await env.root.subagents.startContinuable({
+        provider: 'spawn',
+        label: 'f2-child',
+        request: { parent: worker, prompt: [{ type: 'text', text: 'initial prompt' }], maxDepth: 1 },
+        signal
+      })
+      const child = env.agents.store.get(String(childId))
+      assert.ok(child, 'continuable child materialized into the agents store')
+      const childSession = env.root.sessions.get(SessionId(childId))
+      assert.ok(childSession, 'child entered in the real session store')
+      childSession.append('subagent/descriptor', { version: 2, mode: 'continuable', provider: 'spawn', label: 'f2-child' })
+
+      // The child id is NOT a catalog member — the ACL never sees it; only the
+      // child route can reach it, and it delivers (the frontier documented in
+      // invoke.ts: workers are ROOT catalog agents, never children; the
+      // Asistente's transient children are never catalog-validated).
+      const r = await workerCtx.tools.get('send_message', workerKey).execute(
+        { to: [String(childId)], text: 'continue' },
+        { agent: worker, signal }
+      )
+      assert.equal(r.delivered[String(childId)], 'delivered', 'child delivered through the native followup route (outside the ACL)')
+      assert.equal(r.messageId, 'm-1', 'the record persisted (m-0 = the create firstMessage)')
+      const childWake = child.inboxMessages.at(-1)
+      assert.equal(childWake.content[0].text, `[From researcher-alpha → ${childId}]: continue`, 'child wake is framed like every bus delivery')
+      assert.equal(childWake.source.kind, 'agent')
+      assert.equal(childWake.source.senderSessionId, 'worker-researcher-alpha')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
 // --- Batch 4a: PER-HEAD agent presets (openable native head sessions) ---------
 // Each configured head materializes its own preset `deepartments-head-<id>`,
 // derived from the generic `deepartments-head` base + the department role, so

@@ -3714,6 +3714,108 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  // --- F2 (spec 004 §5.6): messaging ACL by department — catalog route ONLY --
+  // THE FRONTIER (documented, per spec §5.6): the ACL gates ONLY the catalog
+  // route. The CHILD route (subagents.followup — the Asistente's transient
+  // builders/reviewers) is OUTSIDE the ACL: children are never catalog
+  // members (the router decides child-first precisely because the two id sets
+  // are disjoint), so they can never reach a check below; department workers
+  // are ROOT catalog agents (never children), so the ACL always applies to
+  // them. 'self' is always allowed (held by the ack-loop guard, never woken).
+  // The SAME pure predicate gates (1) the send_message persist filter — the
+  // record's to[] is ONLY the ACL-allowed recipients (the denied never touch
+  // the record or the delivery sidecar, per spec §5.6 the denied surface only
+  // in the tool result) — and (2) the catalog delivery seam (defensively, so
+  // a boot re-delivery of a PRE-ACL record can never bypass the gate).
+
+  /** The bus member profile the ACL classifies on: kind + the durable
+   * department link (workers carry it on their post entry; a configured head
+   * derives it from config) + the creating-head link (workers only). */
+  interface BusMemberProfile {
+    kind: 'host' | 'head' | 'worker' | 'unclassified'
+    memberId: string
+    departmentId?: string
+    managerId?: string
+  }
+
+  /** Per-recipient send result: a settled DeliveryStatus, or an ACL denial
+   * (`failed:acl:<ground>`) which NEVER touches the record nor the delivery
+   * sidecar — it exists only in the tool result so the sender (e.g. the head)
+   * knows the message must be channeled via the recipient's department head. */
+  type BusSendResult = DeliveryStatus | `failed:acl:${string}`
+
+  const busProfileFor = (memberId: string): BusMemberProfile => {
+    const entry = byPost.get(memberId)
+    if (entry !== void 0) {
+      // A worker's department is its DURABLE link (recorded at create from the
+      // creating head's config department); a configured head derives it from
+      // config (departmentForPost). A legacy pre-F1 worker carries neither →
+      // an "orphan" (only its manager reaches it — see aclDenyGround).
+      return entry.provider === 'worker'
+        ? { kind: 'worker', memberId, departmentId: entry.departmentId, managerId: entry.managerId }
+        : { kind: 'head', memberId, departmentId: departmentForPost(memberId)?.id }
+    }
+    if (hosts.has(memberId)) return { kind: 'host', memberId }
+    return { kind: 'unclassified', memberId }
+  }
+
+  /** One ACL DENIAL ground (undefined = allowed). Spec 004 §5.6 table:
+   * host → everyone; head → any head (incl. the host) + its own department's
+   * agents; worker → its own department's agents (incl. its head) + self;
+   * worker → host PROHIBITED (D6 — it must go via its head). Orphan policy
+   * (builder-verified): a worker without a departmentId is reachable ONLY by
+   * the head that created it (managerId) — its "department" is its manager.
+   * A recipient the catalog does NOT know (a transient child id, an unknown
+   * id) is NOT an ACL subject: the child route and the unknown-per-recipient
+   * 'failed' path keep their own behavior (the front: children are never
+   * catalog-validated; unknown ids already fail as unknown). */
+  const aclDenyGround = (sender: BusMemberProfile, recipient: BusMemberProfile): string | undefined => {
+    // 'self' is always allowed (autocopy/ack-loop guard; held, never woken).
+    if (recipient.memberId === sender.memberId) return undefined
+    // NOT a catalog member → not an ACL subject (child route / unknown path).
+    if (recipient.kind === 'unclassified') return undefined
+    // host: everything (D6 — the Asistente talks to everyone).
+    if (sender.kind === 'host') return undefined
+    if (sender.kind === 'head') {
+      // any head, INCLUDING the host (the host is the top of the reporting
+      // chain: "RH ↔ Asistente ↔ other heads", D6).
+      if (recipient.kind === 'host' || recipient.kind === 'head') return undefined
+      if (recipient.kind === 'worker') {
+        // agents of its own department — by the durable departmentId OR (a
+        // legacy worker the head itself created — "my workers", §4.2).
+        if (recipient.departmentId !== undefined && recipient.departmentId === sender.departmentId) return undefined
+        if (recipient.departmentId === undefined && recipient.managerId === sender.memberId) return undefined
+        return 'other-department'
+      }
+      return 'unclassified-recipient'
+    }
+    if (sender.kind === 'worker') {
+      // D6: a worker NEVER writes to the Asistente — everything via its head.
+      if (recipient.kind === 'host') return 'host'
+      if (recipient.kind === 'head') {
+        // its own head: the manager link, OR (a manager head without the
+        // durable link — legacy) the same config department.
+        if (recipient.memberId === sender.managerId) return undefined
+        if (sender.departmentId !== undefined && recipient.departmentId === sender.departmentId) return undefined
+        return 'other-department'
+      }
+      if (recipient.kind === 'worker') {
+        // a department peer (same durable departmentId). An ORPHAN worker
+        // (no departmentId) is only its manager's (a head's) reach — a worker
+        // sender never is one.
+        if (recipient.departmentId !== undefined && recipient.departmentId === sender.departmentId) return undefined
+        return 'other-department'
+      }
+      return 'unclassified-recipient'
+    }
+    // Unclassified sender (a session the catalog does not know — e.g. a
+    // transient subagent that reached the plugin tool): conservative DENY.
+    // Transient subagents are documented NOT to be ACL subjects (spec 003
+    // D2: they keep the native tool and are not catalog members), so this
+    // branch is a defensive guard for foreign callers only.
+    return 'unclassified-sender'
+  }
+
   /**
    * Deliver ONE addressed record to ONE recipient and record the sidecar
    * transition (write-ahead 'prepared' → final status; spec §4.4). THIS is the
@@ -3796,10 +3898,21 @@ export function applyInvoke(ctx: Context, config: Config) {
    * (head/worker) then non-retired hosts.json; unknown → 'failed'. F1: a
    * RETIRED worker entry STAYS in byPost (marked, not erased) but is filtered
    * from the LIVE catalog — addressing a retired member fails per-recipient
-   * like an unknown one. */
+   * like an unknown one. F2: the messaging ACL (spec §4.2 route 2 + §5.6)
+   * runs HERE, BEFORE any wake/materialization: the send_message persist
+   * filter already keeps denied recipients out of a record's to[], so this
+   * gate is the DEFENSIVE enforcement seam — a boot re-delivery of a PRE-ACL
+   * record (or any other delivery path) can never bypass the rules. A denial
+   * returns 'failed' (sidecar-compatible; the richer `failed:acl:<ground>`
+   * reason lives in the send_message tool result, NOT in the sidecar). */
   const busDeliverCatalog = async (record: MessageRecord, recipientId: string, senderSessionId: string | undefined): Promise<DeliveryStatus> => {
+    const sender = busProfileFor(record.from)
     const entry = byPost.get(recipientId)
     if (entry !== void 0) {
+      if (aclDenyGround(sender, busProfileFor(recipientId)) !== undefined) {
+        ctx.logger.warn(`[deepartments] bus delivery to "${recipientId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — skipped; it goes via the recipient's department head (spec 004 §5.6)`)
+        return 'failed'
+      }
       if (entry.retired === true) {
         ctx.logger.warn(`[deepartments] bus delivery to RETIRED member "${recipientId}" skipped (record ${record.id})`)
         return 'failed'
@@ -3808,6 +3921,11 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
     const hostEntry = hosts.get(recipientId)
     if (hostEntry !== void 0 && hostEntry.retired !== true) {
+      if (aclDenyGround(sender, busProfileFor(recipientId)) !== undefined) {
+        // D6: a worker reaches the host ONLY via its department head.
+        ctx.logger.warn(`[deepartments] bus delivery to the host "${recipientId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — a worker never writes to the Asistente (spec 004 §5.6/D6)`)
+        return 'failed'
+      }
       return busDeliverToHost(hostEntry, `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`, record, senderSessionId)
     }
     ctx.logger.warn(`[deepartments] bus delivery to unknown member "${recipientId}" (record ${record.id})`)
@@ -3875,7 +3993,7 @@ export function applyInvoke(ctx: Context, config: Config) {
    * a same-layer duplicate throws, there is no replace). */
   const sendMessageTool = defineTool({
     name: 'send_message',
-    description: 'Send a message to one or more background agents and/or organization members, delivering it as the recipient\'s next turn and ALWAYS waking the recipient (including a dormant/host target). Recipients are resolved per id: (1) your direct continuable background children are delivered natively (parent→child followup, never catalog-validated); (2) everything else is resolved against the organization catalog (department heads/workers + the Asistente host) and delivered through the durable message store — the record is persisted BEFORE any delivery and delivery state is tracked in a write-ahead sidecar, so a crash re-delivers idempotently. Unknown ids are reported per-recipient as failed (one typo does not kill a multi-recipient send). A self-addressed recipient (your own id) is held ("self" — persisted, never woken). Max 20 recipients (fan-out cap).',
+    description: 'Send a message to one or more background agents and/or organization members, delivering it as the recipient\'s next turn and ALWAYS waking the recipient (including a dormant/host target). Recipients are resolved per id: (1) your direct continuable background children are delivered natively (parent→child followup, never catalog-validated); (2) everything else is resolved against the organization catalog (department heads/workers + the Asistente host) and delivered through the durable message store — the record is persisted BEFORE any delivery and delivery state is tracked in a write-ahead sidecar, so a crash re-delivers idempotently. Unknown ids are reported per-recipient as failed (one typo does not kill a multi-recipient send). A self-addressed recipient (your own id) is held ("self" — persisted, never woken). DEPARTMENT MESSAGING ACL (spec 004 §5.6): the Asistente (host) may send to everyone; a department head may send to any head (incl. the Asistente) and to the agents of its OWN department; a WORKER may send ONLY to the agents of its own department (incl. its head) — a worker CANNOT write to the host, to other heads, or to other departments (everything goes via its own head). A forbidden recipient is reported per-recipient as `failed:acl:<ground>` and is NOT persisted/delivered (the message is not sent to it; route it via the recipient\'s department head). Max 20 recipients (fan-out cap).',
     parameters: {
       to: {
         type: 'array',
@@ -3893,21 +4011,30 @@ export function applyInvoke(ctx: Context, config: Config) {
         type: 'object',
         additionalProperties: false,
         properties: {
+          // F2: 'none' when EVERY recipient is outside the sender's ACL —
+          // then no record is persisted (the store's to[] cannot be empty)
+          // and the delivered map carries only the ACL failures. Real records
+          // are always `m-<seq>`, so the sentinel is unambiguous.
           messageId: { type: 'string', required: true },
           delivered: { type: 'object', additionalProperties: true, required: true }
         }
       },
       render: (_args, value) => {
         const lines = Object.entries(value.delivered as Record<string, string>)
-        const text = lines.length === 0
-          ? `sent ${value.messageId}`
-          : lines.length === 1
-            ? `sent ${value.messageId} → ${lines[0][0]}: ${lines[0][1]}`
-            : [`sent ${value.messageId} to ${lines.length} recipient(s):`, ...lines.map(([id, status]) => `  - ${id}: ${status}`)].join('\n')
+        const head = value.messageId === 'none'
+          ? 'send blocked by the messaging ACL (every recipient outside your scope; nothing sent or persisted)'
+          : lines.length === 0
+            ? `sent ${value.messageId}`
+            : lines.length === 1
+              ? `sent ${value.messageId} → ${lines[0][0]}: ${lines[0][1]}`
+              : `sent ${value.messageId} to ${lines.length} recipient(s):`
+        const text = lines.length === 0 || lines.length === 1
+          ? head
+          : `${head}\n${lines.map(([id, status]) => `  - ${id}: ${status}`).join('\n')}`
         return [{ type: 'text', text } as const]
       }
     },
-    async execute(args, exec): Promise<{ messageId: string; delivered: Record<string, DeliveryStatus> }> {
+    async execute(args, exec): Promise<{ messageId: string; delivered: Record<string, BusSendResult> }> {
       const agent = exec.agent
       if (!agent) throw new Error('send_message requires a calling agent (exec.agent was undefined)')
       assertBusFanOut(args.to)
@@ -3916,9 +4043,37 @@ export function applyInvoke(ctx: Context, config: Config) {
       // complete without board tools. Single-live guard respected.
       const from = busEnsureHostForCaller(agent as { id: string; session?: { header?: SessionHeaderWithOrigin } })
       const store = await messagesStoreReady
+      // F2 (spec 004 §5.6): the ACL PRE-FILTER — ONLY catalog members are
+      // gated (transient children AND unknown ids are not ACL subjects; they
+      // keep their existing behavior: native child delivery / per-recipient
+      // 'failed'). A denied recipient is reported with `failed:acl:<ground>`
+      // and is NEITHER persisted NOR delivered — the record's to[] = ONLY the
+      // allowed recipients (persist-before-deliver D4 kept: what is persisted
+      // is exactly what will be delivered), so the denied surface exists only
+      // in this tool result and the sender (e.g. a head) sees what must be
+      // channeled. The catalog route re-checks the same predicate defensively
+      // (boot re-delivery of pre-ACL records).
+      const sender = busProfileFor(from)
+      const allowed: string[] = []
+      const delivered: Record<string, BusSendResult> = {}
+      for (const recipient of args.to) {
+        const ground = aclDenyGround(sender, busProfileFor(recipient))
+        if (ground === undefined) {
+          allowed.push(recipient)
+        } else {
+          delivered[recipient] = `failed:acl:${ground}`
+          ctx.logger.warn(`[deepartments] send_message ACL denied ${from} → ${recipient} (${ground}) — recipient is outside the sender's messaging scope (spec 004 §5.6); route via its department head`)
+        }
+      }
+      if (allowed.length === 0) {
+        // Everything was denied: NOTHING is persisted (the store requires a
+        // non-empty to[]) and nothing is delivered. The caller receives the
+        // per-recipient ACL reasons under the 'none' sentinel messageId.
+        return { messageId: 'none', delivered }
+      }
       const record = await store.append({
         from,
-        to: [...args.to],
+        to: allowed,
         text: args.text,
         kind: args.ack === true ? 'ack' : 'agent',
         ...(args.threadId !== undefined ? { threadId: args.threadId } : {}),
@@ -3926,8 +4081,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       })
       // Per-message serialization: deliveries run one at a time (never parallel
       // resume of N dormant agents — quota + race safety, spec §4.4).
-      const delivered: Record<string, DeliveryStatus> = {}
-      for (const recipient of args.to) {
+      for (const recipient of allowed) {
         delivered[recipient] = await deliverBusRecord(record, recipient, agent.id as string, agent.id as string, exec.signal)
       }
       return { messageId: record.id, delivered }
