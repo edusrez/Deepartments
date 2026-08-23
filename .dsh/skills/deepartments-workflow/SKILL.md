@@ -198,10 +198,12 @@ channel peerDependencies with CLI pin) live in AGENTS.md and the
 
 - **START** (injected wake, see "Wake routine"): the Deepartments wake pack is
   ALREADY in your initial context — identity, the pre-resolved journal path +
-  body, the board delta TOC, condensed roster, git bearings, system state, and
-  the full deepartments-workflow skill. Do not re-fetch any of it at wake. Call
-  board tools only for LIVE needs the pack cannot cache (liveness, full message
-  text, writes, dept_sleep); do NOT re-read AGENTS.md or the full ROADMAP or
+  body, the message delta TOC (your latest-received messages, newest-first),
+  condensed roster, git bearings, system state, and the full
+  deepartments-workflow skill. Do not re-fetch any of it at wake. Call
+  messaging tools only for LIVE needs the pack cannot cache (liveness via
+  dept_who, full text of older messages via agent_messages, writes via
+  send_message, dept_sleep); do NOT re-read AGENTS.md or the full ROADMAP or
   list state dirs (the journal is the memory) → present the session plan to the
   owner.
 - **WORK**: break into atomic tasks → dispatch builders (parallel if no file
@@ -215,14 +217,15 @@ channel peerDependencies with CLI pin) live in AGENTS.md and the
 ## Wake routine (injected wake)
 
 Start-of-session: the Deepartments wake pack is ALREADY injected as part of
-your initial context — identity, journal path + body, board delta TOC,
-condensed roster, git bearings, system state, and this full skill. Do not
-re-fetch any of it at wake (no dept_whereami / dept_room_read / dept_room_who /
-skill / git calls just to orient — it is all in the pack).
+your initial context — identity, journal path + body, message delta TOC (your
+latest-received messages, newest-first — spec 003 §7.2), condensed roster,
+git bearings, system state, and this full skill. Do not re-fetch any of it at
+wake (no dept_who / agent_messages / skill / git calls just to orient — it is
+all in the pack).
 
-Only call board tools for LIVE needs the pack cannot cache: true session
-liveness (dept_room_who — registry flags in the pack are NOT liveness), full
-text of a message you must answer (dept_room_read messageId), writes, or
+Only call messaging tools for LIVE needs the pack cannot cache: true session
+liveness (dept_who — registry flags in the pack are NOT liveness), full text of
+messages beyond the pack's delta (agent_messages), writes (send_message), or
 dept_sleep. Use dept_wake_snapshot when you need a fresh consolidated snapshot
 mid-session.
 
@@ -240,11 +243,13 @@ The canonical routine text (injected verbatim as wake-pack section 9 guidance
 and mirrored here — the boot-time wording the model follows on every wake):
 
 > Start-of-session: your Deepartments context injection already carries identity,
-> the pre-resolved journal path + journal body, the board delta TOC, the condensed
-> roster, git bearings, system state, and the full deepartments-workflow skill.
-> Read it — do not re-fetch what the pack provides. Only call board tools for LIVE
-> needs the pack cannot cache: true session liveness (dept_room_who), full text of
-> a message you must answer (dept_room_read messageId), writes, or dept_sleep.
+> the pre-resolved journal path + journal body, the message delta TOC (your
+> latest-received messages, newest-first), the condensed roster, git bearings,
+> system state, and the full deepartments-workflow skill.
+> Read it — do not re-fetch what the pack provides. Only call messaging tools for
+> LIVE needs the pack cannot cache: true session liveness (dept_who), full text of
+> messages beyond the pack's delta (agent_messages), writes (send_message), or
+> dept_sleep.
 > REPLY FIRST: your first output of the wake turn is the owner-facing message —
 > greeting + a <=5-line top-item plan + the explicit ask "what do you want this
 > session?" — before ANY tool call (the only exception: the fail-loud health check
@@ -270,16 +275,16 @@ first, tool calls only for live needs, and the owner's answer gates all work):
    speak; exploration follows the owner's answer, never precedes it.
 1. **Read the injected pack** — identity, journal path + body (re-confirm the
    frontmatter: author/room/board_cursor + wake counter/current_step when
-   present), board delta TOC, condensed roster, git bearings, system state, and
+   present), message delta TOC, condensed roster, git bearings, system state, and
    the skill body are all already in your first context. Never act before
    reading the journal (anti-memory-theater); do NOT re-fetch any pack section.
-2. **Live needs only** — call `dept_room_who` when true session liveness
-   matters (the pack's registry flags are NOT liveness); `dept_room_read
-   messageId` for the full text of a message you must answer; write or
+2. **Live needs only** — call `dept_who` when true session liveness matters
+   (the pack's registry flags are NOT liveness); `agent_messages` for the full
+   text of messages beyond the pack's delta; `send_message` to write;
    `dept_sleep` as needed; `dept_wake_snapshot` for a fresh consolidated
    snapshot mid-session.
 3. **Health check (fail-loud, don't guess)** — only if the pack itself is
-   stale/ambiguous (lost cursor, missing room, tool error): STOP and surface it
+   stale/ambiguous (lost cursor, missing message delta, tool error): STOP and surface it
    before any new work; ask the human when a state is stale/ambiguous.
 4. **Then decide — ask first (permission gate)**: from the journal's
    open_items, pick the highest-priority unfinished item and present a concise
@@ -294,16 +299,16 @@ Never pre-load:
   entries; the section is reverse-chronological) or on demand when the journal
   indicates they changed — do not re-read the whole files every wake. The pack
   injects only the facts, not the full docs.
-- State dirs (`<stateDir>/rooms|journals|hosts.json`): the journal IS the memory
-  snapshot; do not re-list them on wake unless the pack points at a missing
-  room/file.
+- State dirs (`<stateDir>/journals|hosts.json|messages.jsonl`): the journal IS
+  the memory snapshot; do not re-list them on wake unless the pack points at a
+  missing file.
 - Grounding cap: to ground the plan, at most 1–2 reads of a report the journal
   references (e.g. the cited reviewer report). No source/checkout/diff
   exploration and no bash forensics before the owner answers; that work starts
   only after go-ahead.
 - If the pack is somehow absent or you distrust a section (brand-new
   never-slept session with no dept_sleep seed yet), fall back to the lean
-  manual orientation (dept_whereami + dept_room_read delta + git batch +
+  manual orientation (dept_who + agent_messages delta + git batch +
   skill load) — but never on a normal seeded wake.
 
 This routine is mirrored as a short reminder header in journals written after

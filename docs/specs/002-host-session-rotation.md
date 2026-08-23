@@ -16,6 +16,13 @@ builder dispatch after the owner's remaining two answers.** All file:line facts 
 primary sources and this session's runtime verification (listed in spec_ref); `❓` marks the
 only remaining owner items and builder-verify points.
 
+> **Superseded note (spec 003, 2026-08-22):** the board (rooms + `dept_room_*` tools) is
+> eliminated by [003-agent-messaging.md](003-agent-messaging.md) (D1) — agents message
+> directly (`send_message` / `agent_messages` / `dept_who`). The rotation mechanics in this
+> spec (RE-KEY, re-keyed-journal seed, archive, sidebar) remain valid as designed (spec 003
+> §7.2/D8 keeps host session rotation); surviving `roomId`/`room` references here are
+> informational-only (default kept, no behavior).
+
 ---
 
 ## 0. Owner decisions adopted (2026-08-22) — requirements, not proposals

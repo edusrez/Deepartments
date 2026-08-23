@@ -6,7 +6,7 @@ Deepartments 是**面向 DeepSeek Harness (DSH) 的智能体（agent）化组织
 部门、可休眠与唤醒的职位（post）、见证者（witness）、激活（activation）与治理
 （governance）——以运行时的 **npm 插件（bundle）** 形式构建。旧工作区的理念在
 这里具象化成了软件：DSH 回答事物*如何运行*（会话、子智能体、调度、技能、任务、
-工具）；Deepartments 回答事物*如何组织*（职位、部门、房间、见证者、激活、治理
+工具）；Deepartments 回答事物*如何组织*（职位、部门、智能体消息、见证者、激活、治理
 策略究竟是什么）。
 
 ## 状态

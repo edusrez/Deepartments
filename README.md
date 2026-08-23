@@ -7,7 +7,7 @@ departments, posts that sleep and wake, witnesses, activations and
 governance — built as an **npm plugin (bundle)** of the runtime. The idea of
 the legacy workspace is materialized here as software: DSH answers *how things
 run* (sessions, subagents, schedule, skills, jobs, tools); Deepartments
-answers *how things are organized* (what a post, a department, a room, a
+answers *how things are organized* (what a post, a department, a message, a
 witness, an activation, a governance policy is).
 
 ## Status

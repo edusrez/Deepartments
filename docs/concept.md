@@ -5,6 +5,11 @@
 > why, and how the idea maps to DeepSeek Harness (DSH) primitives. The
 > reframed idea lives in [IDEA.md](IDEA.md); the plan in
 > [ROADMAP.md](ROADMAP.md).
+>
+> **Superseded (2026-08-22):** the board/rooms parts of this decision register
+> are replaced by direct agent→agent messaging — see
+> [spec 003](specs/003-agent-messaging.md) (D1). This document stays as the
+> historical design record; the current messaging protocol lives in spec 003.
 
 ## 1. Summary and decision register
 

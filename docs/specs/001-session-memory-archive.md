@@ -440,8 +440,9 @@ against the live web profile.
 
 ## Out of scope / future
 
-- Auto-capture of board events (dept_room_read/write deltas) beyond the model-visible
-  transcript, into the session log (currently only the DSH SessionEvent stream).
+- Auto-capture of messaging events (send_message / agent_messages history) beyond the
+  model-visible transcript, into the session log (currently only the DSH SessionEvent
+  stream; the message store itself is the durable history).
 - Semantic dedupe of archive entries / session logs (RAG returns near-duplicate chunks).
 - A cross-instance write lock for the archive (accepted last-write-wins for now).
 - KPI fallback for never-slept agents' wake pack (already an out-of-scope ROADMAP follow-up;

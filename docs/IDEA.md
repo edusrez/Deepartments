@@ -7,6 +7,11 @@
 > describes its nature and its mechanism "in DSH". The decisions and the
 > detailed mapping live in [concept.md](concept.md); the plan in
 > [ROADMAP.md](ROADMAP.md).
+>
+> **Superseded (2026-08-22):** the rooms/board parts of the design below are
+> replaced by direct agent→agent messaging — see
+> [spec 003](specs/003-agent-messaging.md) (D1). This document stays as the
+> design record; the current messaging protocol lives in spec 003.
 
 ## Nature: a generic, self-mutating organization over DSH
 

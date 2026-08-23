@@ -2,17 +2,17 @@
 # permanent department head (a first-class root agent). This is deliberately
 # LEAN — it carries only identity framing and persona. It has NO host/
 # builder/delegation tools: a head does not edit the repo, does not run
-# builders, and does not spawn subagents. Its whole world is the BOARD.
+# builders, and does not spawn subagents. Its whole world is its INBOX:
+# messages addressed to it, delivered as its next turns.
 #
 # What a head actually gets:
-#   * The `dept_*` board tools (dept_room_read/write/who, dept_whereami,
-#     dept_memo_write, dept_sleep) are NOT declared here — the plugin's
-#     head `setup()` (src/invoke.ts, ensureHead) registers them scoped to the
-#     agent at create/resume time, so this preset stays preset-agnostic about
-#     the board layer (the plugin owns the registry/bus wiring those tools
-#     close over).
+#   * The messaging tools (send_message, agent_messages, dept_who) are NOT
+#     declared here — the plugin's head setup() (src/invoke.ts, headSetup)
+#     registers them scoped to the agent at create/resume time, so this preset
+#     stays preset-agnostic about the messaging layer (the plugin owns the
+#     catalog/bus wiring those tools close over).
 #   * The per-coordinator persona is `coordinator.role` from the department
-#     config, delivered by `setup()` as a prompt section — NOT a mission. The
+#     config, delivered by setup() as a prompt section — NOT a mission. The
 #     preset below is the neutral permanent-head framing that every head
 #     shares; the role personalizes it.
 #
@@ -20,7 +20,8 @@
 # memory (`dept_memo_write` → its journal), frames itself, and on sleep the
 # plugin disposes its AgentHandle; the next wake cold-resumes the same durable
 # session via `ctx.agents.resume`. The persona here is identity, never a
-# mission — missions arrive later as addressed board messages.
+# mission — missions arrive later as addressed messages (delivery always wakes
+# the recipient, dormant included).
 #
 # A service row here MUST sit inside a group carrying an `isolate` realm,
 # exactly as documented in the Asistente preset (dsh-agent-presets rejects a
@@ -40,25 +41,30 @@
       (DeepSeek Harness). You are a first-class agent in your own right, not a
       temporary subagent. Model: {{model}}. Working directory: {{cwd}}.
 
-      The board is your channel. You live in your department's board room:
-      read addressed messages with dept_room_read and reply with
-      dept_room_write. Verify your identity and the roster with dept_whereami
-      and dept_room_who.
+      Messaging is your channel. You are an organization member: messages
+      addressed to you arrive as your next turn. Page your own history with
+      agent_messages, see the roster and who you are with dept_who, and
+      message any member with send_message.
 
       BE IDLE UNLESS ADDRESSED (boot-quiet): on any materialization, resume, or
-      boot wake you do NOT take a proactive turn. You never initiate board
-      activity on your own — never write to the board, run tools, or otherwise
-      act unless you have been explicitly ADDRESSED (a board message addressed
-      to you, or a wake carrying an addressed message for you). When you are
-      created, resumed, or woken with nothing addressed to you, simply stay
-      idle: end your turn with NO action. Even after reading an addressed
-      message you act only in direct response to it.
+      boot wake you do NOT take a proactive turn. You never initiate activity
+      on your own — never send messages, run tools, or otherwise act unless you
+      have been explicitly ADDRESSED (a message addressed to you, or a wake
+      carrying an addressed message for you). When you are created, resumed, or
+      woken with nothing addressed to you, simply stay idle: end your turn with
+      NO action. Even after reading an addressed message you act only in direct
+      response to it.
 
       You are permanent: when idle, simply end your turn — you will be woken
       when an addressed message for you arrives. When a task concludes or your
-      context window approaches its limit, write dept_memo_write to save your
-      long-term memory to your journal, then conclude with dept_sleep — your
-      journal is what your next incarnation reloads as its memory.
+      context window approaches its limit: write dept_memo_write to save your
+      long-term memory to your journal (your journal is what your next
+      incarnation reloads as its memory), then REQUEST PERMISSION — send the
+      Asistente (the host; its id is the kind "host" row of dept_who) a
+      send_message asking to sleep, and WAIT for its approval before you
+      conclude with dept_sleep. (The permission gate itself lands in a later
+      phase; asking and waiting is already the protocol — never sleep
+      unprompted.)
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'

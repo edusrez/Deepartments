@@ -1,3 +1,3 @@
 name: Deepartments — Department Head
-description: Neutral, permanent department-head agent for the Deepartments organization — a first-class root agent whose whole world is its department's board room (dept_room_read/write, dept_whereami, dept_memo_write, dept_sleep). No host or builder tools. The per-coordinator role/identity is delivered by the plugin's head setup().
+description: Neutral, permanent department-head agent for the Deepartments organization — a first-class root agent whose whole world is direct messaging: messages addressed to it arrive as its next turn (send_message), history via agent_messages, roster + identity via dept_who, memory/sleep via dept_memo_write/dept_sleep. No host or builder tools. The per-coordinator role/identity is delivered by the plugin's head setup().
 order: 20
