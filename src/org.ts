@@ -57,6 +57,20 @@ export interface DepartmentConfig {
   coordinator?: CoordinatorConfig
 }
 
+/** System-health monitoring config (spec W6, owner request 2026-08-23:
+ * "monitorizar que todo va bien"). Optional; defaults are CODE-level:
+ * `enabled` defaults to true, `intervalMs` defaults to 60000. An ABSENT section
+ * (or absent `enabled`) keeps monitoring ON; an explicit
+ * `health: { enabled: false }` disables the daemon (no heartbeat, no alerts).
+ */
+export interface HealthConfig {
+  /** When explicitly false the system-health daemon is NOT registered (no
+   * heartbeat write, no alerts). Absent → enabled (default true). */
+  enabled?: boolean
+  /** The daemon tick interval in ms (default 60000). */
+  intervalMs?: number
+}
+
 /** Plugin config: workspace state dir + the department (agent) catalog. */
 export interface Config {
   stateDir: string
@@ -92,6 +106,13 @@ export interface Config {
    * the schema and the typed cast in invoke.ts always agree.
    */
   parallel?: ParallelConfig
+  /**
+   * System-health monitoring (spec W6). Optional — defaults are CODE-level
+   * (enabled:true, intervalMs:60000); an explicit `{ enabled: false }`
+   * disables the daemon. Mirrors the runtime shape declared in src/invoke.ts
+   * (HealthConfig), so the schema and the typed config always agree.
+   */
+  health?: HealthConfig
 }
 
 /**
@@ -177,5 +198,14 @@ export const Config: z<any, any> = z.object({
       sourcePolicy: string[]
       includeBackfill: boolean
     }[]
-  })
+  }),
+  // W6 system-health. Mirrors the runtime HealthConfig in src/invoke.ts:
+  // `default(void 0)` so an ABSENT section or absent keys fall through to the
+  // CODE defaults (enabled:true, intervalMs:60000), while an explicit
+  // `health:{ enabled:false }` still disables the daemon — exactly the
+  // parallel section's contract.
+  health: z.object({
+    enabled: z.boolean(),
+    intervalMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+  }).default(void 0 as unknown as { enabled: boolean; intervalMs: number })
 })

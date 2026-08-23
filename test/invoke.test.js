@@ -28,7 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath } from '../lib/messages-store.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
@@ -234,6 +234,10 @@ class StubAgents extends Service {
     // Piece 1 cwd fix (2026-08-22): forced resume failures (per durable session
     // id) so the wakePost resume-failed → create-fresh fallback is testable.
     this.resumeRejects = new Set()
+    // W6 system-health: forced MATERIALIZE failures (per durable session id) so
+    // a content-free bus delivery can be driven to the 'failed' catch block that
+    // records a post-error line (both resume AND create must throw).
+    this.createRejects = new Set()
     // Sleep-self-deadlock fix tests (2026-08-23): per-session dispose GATES —
     // a promise the stub handle's dispose awaits BEFORE detaching, modelling
     // the real harness dispose() → await machine.whenIdle() contract (which
@@ -270,6 +274,7 @@ class StubAgents extends Service {
 
   async create(options) {
     this.createCalls.push(options)
+    if (this.createRejects.has(String(options.sessionId))) throw new Error('stub: forced create failure (W6 post-error script)')
     this.sessionCwds?.set(String(options.sessionId), options.meta?.cwd)
     this.ensureStoreSession(options.sessionId, options.meta)
     return materializeStubAgent(this, options.sessionId, options)
@@ -646,6 +651,10 @@ async function bootPlugin(stateDir, opts = {}) {
   // Piece 1 cwd fix (2026-08-22): a boot opt forces per-session resume failures
   // (the wakePost resume-failed → create-fresh fallback path).
   if (opts.resumeRejects !== undefined) agents.resumeRejects = new Set(opts.resumeRejects)
+  // W6 system-health: a boot opt forces per-session CREATE failures (so both
+  // resume AND create throw → a bus delivery reaches the 'failed' catch block
+  // that records the post-error-line class).
+  if (opts.createRejects !== undefined) agents.createRejects = new Set(opts.createRejects)
   // F5 (spec 004 §6.2): the shared sessionId → cwd index the StubAgents records
   // on create and the StubWorkspaceRegistry validates on attach (mirrors the
   // harness canonical-cwd header index, so the department-workspace tests can
@@ -708,7 +717,11 @@ async function bootPlugin(stateDir, opts = {}) {
       // need a SECOND configured department/head); the default stays TEST_ORG
       // whose departments carry NO workspacePath/jobDir — the optional-field
       // compat surface every test already exercises.
-      org: opts.org ?? TEST_ORG
+      org: opts.org ?? TEST_ORG,
+      // W6 system-health: `opts.health` supplies the `health` config section
+      // (a config-toggle test); absent → the section is omitted (code default
+      // enabled:true, intervalMs:60000).
+      ...(opts.health !== undefined ? { health: opts.health } : {})
     }
   })
   await loader.await()
@@ -7929,6 +7942,213 @@ test('B2 calendar attribution (real Loader): dept_calendar_add stamps department
       assert.equal(unfiltered.count, 3, 'the unfiltered agenda still returns the legacy entry')
     } finally {
       await dispose()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W6 system-health (owner request 2026-08-23: "monitorizar que todo va bien").
+// The plugin's PURE health half (post-errors capture + the injectable health
+// daemon tick) is imported from ../lib/invoke.js (compiled); the config-toggle
+// + failing-materialization tests go through the REAL Loader.
+// ---------------------------------------------------------------------------
+
+test('W6 health config SCHEMA: the `health` section is declared in Config, defaults to code-enabled (enabled true, intervalMs 60000), and an explicit { enabled: false } disables it', () => {
+  const base = { stateDir: '.deepartments', org: { departments: [{ id: 'r', name: 'R' }] } }
+  // Absent section → the field is undefined → the code default (enabled, 60000).
+  const absent = configSchema(base)
+  assert.equal(absent.health, undefined, 'absent health section → undefined field (code default active)')
+  // Present empty section → enabled (absent enabled !== false) + default interval.
+  const empty = configSchema({ ...base, health: {} })
+  assert.deepEqual(empty.health, {}, 'health:{} normalizes to an empty object (enabled/intervalMs stay undefined)')
+  // Explicit enabled:false is preserved (a config-toggle test reads it off config).
+  const disabled = configSchema({ ...base, health: { enabled: false } })
+  assert.deepEqual(disabled.health, { enabled: false }, 'health:{enabled:false} is preserved')
+  // intervalMs override resolves.
+  const fast = configSchema({ ...base, health: { intervalMs: 50 } })
+  assert.equal(fast.health.intervalMs, 50, 'intervalMs override resolves')
+})
+
+test('W6 appendPostError / readPostErrorsFile: appends JSONL, is BOUNDED to the last 500 rows, and a malformed/nonexistent file degrades to empty', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Nonexistent → [] (never throws).
+    assert.deepEqual(readPostErrorsFile(stateDir), [], 'a nonexistent post-errors file reads as empty')
+    // Append 5 entries; the reader returns them in file order (newest last).
+    for (let i = 0; i < 5; i++) await appendPostError(stateDir, { ts: 1000 + i, postId: `p${i}`, messageId: `m-${i}`, error: `err ${i}` })
+    let rows = readPostErrorsFile(stateDir)
+    assert.equal(rows.length, 5, '5 appended rows read back')
+    assert.equal(rows[0].postId, 'p0', 'file order preserved (oldest first)')
+    assert.equal(rows[4].postId, 'p4', 'the last appended row is the newest')
+    assert.equal(rows[0].error, 'err 0', 'the error message round-trips')
+    // Bounding: pre-write 600 rows directly, then read → the newest 500 survive.
+    const many = Array.from({ length: 600 }, (_, i) => ({ ts: 100_000 + i, postId: `bulk-${i}`, error: `e${i}` }))
+    await writeFile(path.join(stateDir, POST_ERRORS_FILE), many.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8')
+    let bounded = readPostErrorsFile(stateDir)
+    assert.equal(bounded.length, POST_ERRORS_MAX_LINES, 'the reader returns at most 500 rows')
+    assert.equal(bounded[0].postId, 'bulk-100', 'the oldest 100 rows are trimmed (newest 500 kept, no off-by-one from the trailing newline)')
+    // Append one more → STILL 500, the appended row is the newest (line 500).
+    await appendPostError(stateDir, { ts: 999_999, postId: 'new-last', error: 'fresh' })
+    bounded = readPostErrorsFile(stateDir)
+    assert.equal(bounded.length, POST_ERRORS_MAX_LINES, 'append keeps the file bounded to 500 rows')
+    assert.equal(bounded.at(-1).postId, 'new-last', 'the appended row is the newest (line 500)')
+    // A malformed file degrades to empty (a partial/garbage line is dropped).
+    await writeFile(path.join(stateDir, POST_ERRORS_FILE), 'not-json\n{"ts":"bad"}\n', 'utf8')
+    assert.deepEqual(readPostErrorsFile(stateDir), [], 'a malformed post-errors file reads as empty (never throws)')
+  })
+})
+
+test('W6 runHealthDaemonTick: heartbeat written; scans post-errors + delivery-failed; alerts once (grouped); dedupes per key ≤1/30min; re-alerts after the window; a fresh error for a NEW postId alerts immediately', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 23, 12, 0, 0).getTime() // fixed epoch
+    const bootId = 'boot-abc'
+    // Seed ONE post-error + ONE delivery-failed row, both 5min old (inside the 2h window).
+    await writeFile(path.join(stateDir, 'post-errors.jsonl'), JSON.stringify({ ts: T0 - 5 * 60000, postId: 'research-head', messageId: 'm-1', error: 'could not be materialized' }) + '\n', 'utf8')
+    await writeFile(path.join(stateDir, 'deliveries.jsonl'), JSON.stringify({ messageId: 'm-2', recipientId: 'research-head', status: 'failed', ts: T0 - 5 * 60000 }) + '\n', 'utf8')
+    const alerts = []
+    const warns = []
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId,
+      hosts,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => warns.push(m) }
+    })
+    // Tick 1 @ T0.
+    await tick(T0)
+    const hb = readHealthHeartbeatFile(stateDir)
+    assert.ok(hb, 'the heartbeat file is written')
+    assert.equal(hb.ts, T0, 'the heartbeat carries the tick ts')
+    assert.equal(hb.bootId, bootId, 'the heartbeat carries the per-process bootId')
+    assert.equal(alerts.length, 1, 'an ALERT fires once (one grouped notify for the two findings)')
+    assert.equal(alerts[0].hostEntry.hostId, 'host-asst', 'the alert targets the resolved live host')
+    assert.match(alerts[0].frame, /^\[From deepartments\] System-health ALERT:/, 'the alert is framed correctly')
+    assert.match(alerts[0].frame, /post-error: research-head/, 'the grouped frame includes the post-error finding')
+    assert.match(alerts[0].frame, /delivery-failed: m-2/, 'the grouped frame includes the delivery-failed finding')
+    // Dedupe state persisted for both keys.
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state['post-error:research-head'], T0, 'the post-error key is deduped at now')
+    assert.equal(state['delivery-failed:m-2'], T0, 'the delivery-failed key is deduped at now')
+    // Audit line written.
+    const auditRows = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l))
+    assert.equal(auditRows.length, 1, 'one audit line per alert')
+    assert.deepEqual(auditRows[0].dedupeKeys.sort(), ['delivery-failed:m-2', 'post-error:research-head'], 'the audit records the dedupe keys')
+    assert.equal(auditRows[0].ts, T0, 'the audit carries the alert ts')
+    // Tick 2 @ T0 (inside the 30min dedupe window) → ≤1 alert per key: NOTHING new.
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'a second tick inside the 30min window does NOT re-alert (≤1 alert per key)')
+    // Tick 3 @ T0 + 31min (the dedupe window elapsed; the anomalies are still inside the 2h scan window) → re-alert.
+    const T1 = T0 + 31 * 60000
+    await tick(T1)
+    assert.equal(alerts.length, 2, 'a tick after the 30min window re-alerts in-window anomalies')
+    const state2 = readHealthAlertsState(stateDir)
+    assert.equal(state2['post-error:research-head'], T1, 'the dedupe ledger advances on the re-alert')
+    assert.equal(state2['delivery-failed:m-2'], T1, 'the delivery-failed ledger advances on the re-alert')
+    // A FRESH post-error for a NEW postId inside the window → alerts immediately (no prior dedupe).
+    await appendPostError(stateDir, { ts: T1, postId: 'worker-x', messageId: 'm-9', error: 'boom' })
+    await tick(T1)
+    assert.equal(alerts.length, 3, 'a fresh post-error for a NEW postId alerts immediately')
+    assert.match(alerts.at(-1).frame, /post-error: worker-x/, 'the new alert names the fresh postId')
+    assert.equal(warns.length, 0, 'a fully-resolvable tick emits no warns')
+  })
+})
+
+test('W6 runHealthDaemonTick: no anomalies → heartbeat only (no alert, no audit, no dedupe ledger)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const alerts = []
+    const warns = []
+    const nowMs = 1_234_567_890
+    await runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-empty',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => warns.push(m) }
+    })
+    const hb = readHealthHeartbeatFile(stateDir)
+    assert.ok(hb, 'the heartbeat is still written with no anomalies')
+    assert.equal(hb.ts, nowMs, 'the heartbeat carries the ts')
+    assert.equal(alerts.length, 0, 'no anomalies → no alert')
+    assert.equal(warns.length, 0, 'no anomalies → no warn')
+    assert.deepEqual(readHealthAlertsState(stateDir), {}, 'no anomalies → no dedupe ledger')
+    let auditExists = true
+    try { await access(path.join(stateDir, 'health-alerts.jsonl')) } catch { auditExists = false }
+    assert.equal(auditExists, false, 'no anomalies → no audit line')
+  })
+})
+
+test('W6 runHealthDaemonTick: an anomaly with NO live host → warn + skip; the dedupe ledger is NOT advanced (the alert retries once a host is live)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_234_567_890_000
+    await writeFile(path.join(stateDir, 'post-errors.jsonl'), JSON.stringify({ ts: T0 - 60000, postId: 'research-head', error: 'boom' }) + '\n', 'utf8')
+    const alerts = []
+    const warns = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'b1',
+      hosts: [], // no live host
+      notifyHost: async (h, f) => { alerts.push(f) },
+      logger: { warn: (m) => warns.push(m) }
+    })
+    assert.equal(alerts.length, 0, 'no live host → no alert delivered')
+    assert.ok(warns.some((w) => /no live host/.test(w)), 'a no-live-host skip warns')
+    assert.deepEqual(readHealthAlertsState(stateDir), {}, 'the dedupe ledger is NOT advanced when no host is reachable')
+  })
+})
+
+test('W6 bus delivery FAILING materialization records a post-error line (real Loader — a dual resume+create failure reaches the catch block)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await seedPost(stateDir, { postId: 'ghost-head', sessionId: 'head-ghost-head', roomId: 'board', agentPreset: 'deepartments-head' })
+    const { agents, pluginCtx, dispose } = await bootPlugin(stateDir, { resumeRejects: ['head-ghost-head'], createRejects: ['head-ghost-head'] })
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const send = pluginCtx().tools.get('send_message')
+      const result = await send.execute({ to: ['ghost-head'], text: 'wake the unwakeable head' }, { agent: host, signal })
+      assert.equal(result.delivered['ghost-head'], 'failed', 'a dual-fail materialization reports failed (never silently success)')
+      const errors = readPostErrorsFile(stateDir)
+      assert.equal(errors.length, 1, 'one post-error line recorded')
+      assert.equal(errors[0].postId, 'ghost-head', 'the post-error carries the failed postId')
+      assert.equal(errors[0].messageId, result.messageId, 'the post-error carries the bus message id')
+      assert.match(errors[0].error, /could not be materialized|forced/, 'the post-error carries the materialization error')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('W6 boot: health.intervalMs override registers a ticking daemon (heartbeat written); health.enabled:false → NO daemon (no heartbeat, no alert)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // (a) enabled by default + intervalMs override → the daemon registers + ticks.
+    const env = await bootPlugin(stateDir, { health: { intervalMs: 50 } })
+    try {
+      await waitFor(() => readHealthHeartbeatFile(stateDir) !== undefined, 5000, 'health heartbeat written by the ticking daemon')
+      const hb = readHealthHeartbeatFile(stateDir)
+      assert.equal(typeof hb.ts, 'number', 'the heartbeat carries a numeric ts')
+      assert.equal(typeof hb.bootId, 'string', 'the heartbeat carries a bootId string')
+      assert.ok(hb.bootId.length > 0, 'the bootId is non-empty')
+    } finally {
+      await env.dispose()
+    }
+  })
+  await withTempStateDir(async (stateDir) => {
+    // (b) health.enabled:false → NO daemon registered (no heartbeat, no alerts).
+    const env = await bootPlugin(stateDir, { health: { enabled: false } })
+    try {
+      // Give any (hypothetical) fire-and-forget a chance — the heartbeat must NEVER appear.
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      let exists = true
+      try { await access(path.join(stateDir, 'health-heartbeat.json')) } catch { exists = false }
+      assert.equal(exists, false, 'health.enabled:false → the heartbeat is NEVER written')
+      assert.deepEqual(readHealthAlertsState(stateDir), {}, 'health.enabled:false → no alert dedupe ledger')
+      let auditExists = true
+      try { await access(path.join(stateDir, 'health-alerts.jsonl')) } catch { auditExists = false }
+      assert.equal(auditExists, false, 'health.enabled:false → no audit line')
+    } finally {
+      await env.dispose()
     }
   })
 })

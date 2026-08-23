@@ -92,7 +92,7 @@ import {
   parseDeliveryRows,
   resolveDeliveriesPath
 } from './messages-store.js'
-import type { DeliveryStatus, MessageRecord } from './messages-store.js'
+import type { DeliveryRow, DeliveryStatus, MessageRecord } from './messages-store.js'
 import { buildAgentRows } from './agents.js'
 import type { PostEntryLike } from './agents.js'
 import {
@@ -1159,6 +1159,176 @@ export async function writeJobRunsStateFile(stateDir: string, state: Record<stri
 }
 
 // ---------------------------------------------------------------------------
+// W6 system-health (owner request 2026-08-23: "monitorizar que todo va bien").
+// Two halves: (1) POST-ERROR CAPTURE — the bus materialization/wake seam
+// records every head/worker session create/resume/wake failure to
+// `<stateDir>/post-errors.jsonl` (bounded to the most-recent 500 lines); (2)
+// the HEALTH DAEMON — a plugin daemon that every `health.intervalMs` (default
+// 60000) writes `<stateDir>/health-heartbeat.json`, scans post-errors.jsonl +
+// deliveries.jsonl (delivery 'failed' rows) for anomalies inside
+// HEALTH_ERROR_WINDOW_MS, dedupes per key inside HEALTH_DEDUPE_WINDOW_MS and,
+// on a net-new anomaly, alerts the HOST (the Asistente) by bus. The tick is
+// PURE (injected clock + injected notify hook) so the tests drive it
+// deterministically with a fixed clock. NEVER throws (every internal failure
+// is a warn).
+// ---------------------------------------------------------------------------
+
+/** A recorded post (head/worker) session create/resume/wake failure. */
+export interface PostErrorEntry {
+  /** The failure ts (ms epoch). */
+  ts: number
+  /** The durable member id (a postId, or the hostId for a host delivery). */
+  postId: string
+  /** The bus message id whose delivery failed (when known). */
+  messageId?: string
+  /** The captured error message. */
+  error: string
+}
+
+export const POST_ERRORS_FILE = 'post-errors.jsonl'
+/** The bounded record cap of post-errors.jsonl (the oldest lines are trimmed). */
+export const POST_ERRORS_MAX_LINES = 500
+
+/** Read `<stateDir>/post-errors.jsonl` → the bounded post-error rows, in file
+ * order. Absent / unreadable / malformed → [] (never throws); a malformed line
+ * (e.g. a partial append) is dropped, mirroring the other JSONL readers. */
+export function readPostErrorsFile(stateDir: string): PostErrorEntry[] {
+  try {
+    const text = readFileSync(path.join(stateDir, POST_ERRORS_FILE), 'utf8')
+    // Filter the (possibly trailing) empty line BEFORE slicing so the bounded
+    // window is exactly the most-recent POST_ERRORS_MAX_LINES content rows (a
+    // trailing '\n' would otherwise shift the slice by one).
+    const lines = text.split('\n').filter((line) => line.trim() !== '').slice(-POST_ERRORS_MAX_LINES)
+    const out: PostErrorEntry[] = []
+    for (const line of lines) {
+      if (line.trim() === '') continue
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(line)
+      } catch {
+        continue
+      }
+      const entry = parsed as Record<string, unknown>
+      if (typeof entry.ts !== 'number' || typeof entry.postId !== 'string') continue
+      out.push({
+        ts: entry.ts,
+        postId: entry.postId,
+        ...(typeof entry.messageId === 'string' ? { messageId: entry.messageId } : {}),
+        error: typeof entry.error === 'string' ? entry.error : ''
+      })
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
+/** Append ONE post-error row to `<stateDir>/post-errors.jsonl` and keep the
+ * file BOUNDED to the most-recent POST_ERRORS_MAX_LINES rows (read + append +
+ * slice-most-recent on write). mkdir -p the dir first; a malformed/nonexistent
+ * file degrades to empty (the append still lands). Never throws — callers fold
+ * a persist failure into a warn. */
+export async function appendPostError(stateDir: string, entry: PostErrorEntry): Promise<void> {
+  const filePath = path.join(stateDir, POST_ERRORS_FILE)
+  await mkdir(path.dirname(filePath), { recursive: true })
+  const lines: string[] = []
+  try {
+    const existing = await readFile(filePath, 'utf8')
+    lines.push(...existing.split('\n').filter((line) => line.trim() !== ''))
+  } catch {
+    /* ENOENT or unreadable → a cold start; lines stays [] */
+  }
+  lines.push(JSON.stringify(entry))
+  const bounded = lines.slice(-POST_ERRORS_MAX_LINES)
+  await writeFile(filePath, bounded.join('\n') + '\n', 'utf8')
+}
+
+/** The heartbeat written every daemon tick. */
+export interface HealthHeartbeat {
+  ts: number
+  bootId: string
+}
+
+/** Read `<stateDir>/health-heartbeat.json` (absent/unreadable/malformed → undefined). */
+export function readHealthHeartbeatFile(stateDir: string): HealthHeartbeat | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'health-heartbeat.json'), 'utf8')) as Record<string, unknown>
+    if (typeof parsed.ts === 'number' && typeof parsed.bootId === 'string') return { ts: parsed.ts, bootId: parsed.bootId }
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Write `<stateDir>/health-heartbeat.json` (mkdir -p the dir, then the file). */
+export async function writeHealthHeartbeatFile(stateDir: string, heartbeat: HealthHeartbeat): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, 'health-heartbeat.json')), { recursive: true })
+  await writeFile(path.join(stateDir, 'health-heartbeat.json'), JSON.stringify(heartbeat), 'utf8')
+}
+
+/** The dedupe ledger of the health daemon: key → lastAlertedAtMs. The key is the
+ * per-anomaly dedupe key (`post-error:<postId>` / `delivery-failed:<messageId>`). */
+export type HealthAlertsState = Record<string, number>
+
+/** Read `<stateDir>/health-alerts-state.json` → `{ [key]: lastAlertedAtMs }`.
+ * Absent / unreadable / malformed → {} (never throws). */
+export function readHealthAlertsState(stateDir: string): HealthAlertsState {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'health-alerts-state.json'), 'utf8')) as Record<string, unknown>
+    const out: HealthAlertsState = {}
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === 'number' && Number.isFinite(value)) out[key] = value
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/health-alerts-state.json` (mkdir -p the dir, then the file). */
+export async function writeHealthAlertsState(stateDir: string, state: HealthAlertsState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, 'health-alerts-state.json')), { recursive: true })
+  await writeFile(path.join(stateDir, 'health-alerts-state.json'), JSON.stringify(state), 'utf8')
+}
+
+/** One detected system-health anomaly (grouped per dedupe key). */
+export interface HealthFinding {
+  /** The anomaly class. */
+  kind: 'post-error' | 'delivery-failed'
+  /** The dedupe key (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS). */
+  key: string
+  /** The postId (post-error) — the durable member that failed to materialize. */
+  postId?: string
+  /** The messageId (delivery-failed) — the bus record that failed delivery. */
+  messageId?: string
+  /** The most-recent row ts of the group (ms epoch). */
+  ts: number
+  /** The captured error message (post-error). */
+  error?: string
+  /** The grouped row count (post-error: rows for the postId inside the window). */
+  count?: number
+}
+
+/** One alert audit line appended to `<stateDir>/health-alerts.jsonl`. */
+export interface HealthAlertAuditEntry {
+  ts: number
+  findings: HealthFinding[]
+  dedupeKeys: string[]
+}
+
+/** Append ONE audit row to `<stateDir>/health-alerts.jsonl` (mkdir + appendFile). */
+export async function appendHealthAlertAudit(stateDir: string, entry: HealthAlertAuditEntry): Promise<void> {
+  const filePath = path.join(stateDir, 'health-alerts.jsonl')
+  await mkdir(path.dirname(filePath), { recursive: true })
+  await appendFile(filePath, JSON.stringify(entry) + '\n', 'utf8')
+}
+
+/** Anomaly freshness window: only anomalies with `now - ts <= 2h` are scanned. */
+export const HEALTH_ERROR_WINDOW_MS = 2 * 60 * 60 * 1000
+/** Alert dedupe window: ≤1 alert per key inside this window. */
+export const HEALTH_DEDUPE_WINDOW_MS = 30 * 60 * 1000
+
+// ---------------------------------------------------------------------------
 // dept_exec (spec W5-B2): the SCOPED shell tool for department posts. A worker
 // whose role template DECLARES `dept_exec` in its frontmatter `tools` inherits
 // it (registered on the post's OWN layer inside installHeadBoardTools, gated by
@@ -2096,6 +2266,153 @@ export function createParallelMonitorDaemon(deps: ParallelMonitorDaemonDeps): { 
     })
   }
   return { tick }
+}
+
+
+// ---- W6 system-health tick (PURE — injectable clock + notify hook) ---------
+// Mirrors the agenda/parallel-monitor ticks: a plugin daemon (NOT an agent)
+// that every `health.intervalMs` writes the heartbeat and scans for anomalies.
+// The tick is PURE — the clock + the host notify hook are injected — so a test
+// drives it deterministically with a fixed clock; the production wiring binds
+// the live hosts registry + the bus delivery seam.
+
+/** Injected hooks + inputs one system-health tick reads. The PRODUCTION wiring
+ * binds the live hosts registry + the bus delivery seam; tests construct this
+ * directly with a FIXED clock + a recording notifyHost. NEVER throws (every
+ * internal failure is a warn). */
+export interface HealthDaemonDeps {
+  /** The clock (ms epoch) — injectable so a tick test is deterministic. */
+  now(): number
+  /** The stateDir whose health-heartbeat.json / post-errors.jsonl /
+   * deliveries.jsonl / health-alerts-state.json / health-alerts.jsonl the tick
+   * reads/writes. */
+  stateDir: string
+  /** The per-process boot id (randomUUID) stamped into the heartbeat. */
+  bootId: string
+  /** The plugin Config (W6: `health.enabled`/`health.intervalMs`). Kept for
+   * contract parity with the scheduler/monitor deps; the pure tick does not
+   * read it (the gating lives at the daemon-registration site). */
+  config?: Config
+  /** The live hosts registry (the Asistente). Resolved per tick via
+   * pickLiveHostEntry (consumed once — a single-use iterator is fine). */
+  hosts: Iterable<HostEntryLike>
+  /** Deliver the framed ALERT bus message to the host (production:
+   * messagesStoreReady.append + busDeliverToHost; tests: a recording stub).
+   * NEVER throws. */
+  notifyHost(hostEntry: HostEntryLike, alertFrame: string): Promise<void>
+  /** Optional warn-capable logger (absent dep → the warn is dropped). */
+  logger?: { warn(message: string): void; info(message: string): void }
+}
+
+/** Group fresh post-errors inside HEALTH_ERROR_WINDOW_MS, deduped per postId
+ * (multiple rows for the same postId within the window → ONE finding). */
+export function scanPostErrorFindings(stateDir: string, nowMs: number): HealthFinding[] {
+  const fresh = readPostErrorsFile(stateDir).filter((row) => nowMs - row.ts <= HEALTH_ERROR_WINDOW_MS)
+  const byPost = new Map<string, PostErrorEntry[]>()
+  for (const row of fresh) {
+    const list = byPost.get(row.postId) ?? []
+    list.push(row)
+    byPost.set(row.postId, list)
+  }
+  const findings: HealthFinding[] = []
+  for (const [postId, rows] of byPost) {
+    findings.push({
+      kind: 'post-error',
+      key: `post-error:${postId}`,
+      postId,
+      ts: rows.reduce((max, row) => Math.max(max, row.ts), 0),
+      error: rows[0].error,
+      count: rows.length
+    })
+  }
+  return findings
+}
+
+/** Group fresh delivery 'failed' rows inside HEALTH_ERROR_WINDOW_MS, deduped per
+ * messageId (multiple rows for the same messageId → ONE finding). */
+export function scanDeliveryFindings(stateDir: string, nowMs: number): HealthFinding[] {
+  let rows: DeliveryRow[] = []
+  try {
+    const text = readFileSync(resolveDeliveriesPath(stateDir), 'utf8')
+    rows = parseDeliveryRows(text)
+  } catch {
+    rows = []
+  }
+  const fresh = rows.filter((row) => row.status === 'failed' && nowMs - row.ts <= HEALTH_ERROR_WINDOW_MS)
+  const byMessage = new Map<string, DeliveryRow>()
+  for (const row of fresh) byMessage.set(row.messageId, row) // last-wins
+  const findings: HealthFinding[] = []
+  for (const [messageId, row] of byMessage) {
+    findings.push({
+      kind: 'delivery-failed',
+      key: `delivery-failed:${messageId}`,
+      messageId,
+      ts: row.ts,
+      count: 1
+    })
+  }
+  return findings
+}
+
+/** Build the framed host ALERT text — `[From deepartments] System-health ALERT:
+ * <grouped findings>`. Each finding is a one-line bullet. */
+export function buildHealthAlertFrame(findings: HealthFinding[]): string {
+  const lines = findings.map((finding) => {
+    if (finding.kind === 'post-error') {
+      const detail = finding.error !== undefined && finding.error !== '' ? `: ${finding.error}` : ''
+      return `- post-error: ${finding.postId} (${finding.count ?? 1} in window)${detail}`
+    }
+    return `- delivery-failed: ${finding.messageId}`
+  })
+  return `[From deepartments] System-health ALERT:\n${lines.join('\n')}`
+}
+
+/** ONE system-health tick: (1) write the heartbeat; (2) scan post-errors + the
+ * delivery sidecar for anomalies inside HEALTH_ERROR_WINDOW_MS; (3) dedupe per
+ * key inside HEALTH_DEDUPE_WINDOW_MS (persisted to health-alerts-state.json so
+ * the ≤1 alert per key per 30min invariant survives restarts); (4) resolve the
+ * live host and alert it by bus for each NET-NEW anomaly; (5) append one audit
+ * row per alert. NEVER throws (every internal failure is a warn). If no host is
+ * registered the anomaly is NOT deduped (it retries — a real deployment without
+ * a reachable host must not silently forget an alert). */
+export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void> {
+  try {
+    const nowMs = deps.now()
+    // 1. heartbeat (always — even with no anomalies).
+    await writeHealthHeartbeatFile(deps.stateDir, { ts: nowMs, bootId: deps.bootId })
+    // 2. scan.
+    const findings = [...scanPostErrorFindings(deps.stateDir, nowMs), ...scanDeliveryFindings(deps.stateDir, nowMs)]
+    if (findings.length === 0) return
+    // 3. dedupe: only alert a key whose lastAlertedAt is absent or older than
+    // the dedupe window (the ≤1 alert per key per 30min invariant).
+    const state = readHealthAlertsState(deps.stateDir)
+    const keysToAlert: string[] = []
+    for (const finding of findings) {
+      const last = state[finding.key]
+      if (last === undefined || nowMs - last > HEALTH_DEDUPE_WINDOW_MS) keysToAlert.push(finding.key)
+    }
+    if (keysToAlert.length === 0) return
+    // 4. resolve the live host (the Asistente); no host → warn + skip (the
+    // dedupe state is NOT advanced — the alert retries once a host is live).
+    const { live } = pickLiveHostEntry(deps.hosts)
+    if (live === undefined) {
+      deps.logger?.warn('[deepartments] system-health: anomalies detected but no live host to alert — skip (retries on the next tick)')
+      return
+    }
+    const alertFindings = findings.filter((finding) => keysToAlert.includes(finding.key))
+    // 5. notify (never throw) + advance the dedupe ledger + audit.
+    try {
+      await deps.notifyHost(live, buildHealthAlertFrame(alertFindings))
+    } catch (error: unknown) {
+      deps.logger?.warn(`[deepartments] system-health: host alert delivery failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    const nextState = { ...state }
+    for (const key of keysToAlert) nextState[key] = nowMs
+    await writeHealthAlertsState(deps.stateDir, nextState)
+    await appendHealthAlertAudit(deps.stateDir, { ts: nowMs, findings: alertFindings, dedupeKeys: [...keysToAlert] })
+  } catch (error: unknown) {
+    deps.logger?.warn(`[deepartments] system-health tick failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 
@@ -6604,6 +6921,19 @@ export function applyInvoke(ctx: Context, config: Config) {
       return resumed ? 'resumed' : 'delivered'
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] bus delivery to "${entry.postId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+      // W6 system-health: record the hard materialization/wake failure for the
+      // health daemon (failures must reach the Asistente; post-errors.jsonl is
+      // the durable anomaly source). A persist failure folds to a warn only.
+      try {
+        await appendPostError(config.stateDir, {
+          ts: Date.now(),
+          postId: entry.postId,
+          messageId: record.id,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      } catch (appendError: unknown) {
+        ctx.logger.warn(`[deepartments] post-error capture for "${entry.postId}" failed: ${appendError instanceof Error ? appendError.message : String(appendError)}`)
+      }
       return 'failed'
     }
   }
@@ -6641,6 +6971,18 @@ export function applyInvoke(ctx: Context, config: Config) {
       return 'resumed'
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+      // W6 system-health: record the host materialization/wake failure (the SAME
+      // durable anomaly source as the post delivery; postId = the host id).
+      try {
+        await appendPostError(config.stateDir, {
+          ts: Date.now(),
+          postId: hostEntry.hostId,
+          messageId: record.id,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      } catch (appendError: unknown) {
+        ctx.logger.warn(`[deepartments] post-error capture for host "${hostEntry.hostId}" failed: ${appendError instanceof Error ? appendError.message : String(appendError)}`)
+      }
       return 'failed'
     }
   }
@@ -7817,6 +8159,55 @@ export function applyInvoke(ctx: Context, config: Config) {
       const interval = setInterval(() => { void daemon.tick() }, PARALLEL_MONITOR_INTERVAL_MS)
       return () => { clearInterval(interval) }
     }, 'deepartments: parallel-monitor daemon')
+  }
+
+  // --- W6 system-health daemon (owner request 2026-08-23: "monitorizar que
+  // todo va bien") -----------------------------------------------------------
+  // A plugin daemon (NOT an agent) that every `health.intervalMs` (default
+  // 60000) writes <stateDir>/health-heartbeat.json and scans post-errors.jsonl +
+  // deliveries.jsonl for anomalies, alerting the HOST (the Asistente) by bus —
+  // failures reach the Asistente. Reversible effect (AGENTS.md rule 4): the
+  // interval is cleared on dispose. `health.enabled === false` → the daemon is
+  // NOT registered (no heartbeat, no alerts) with a one-shot info log; absent
+  // `health` → enabled (code default). The bootId is generated ONCE per plugin
+  // apply (a per-process id stamped into the heartbeat).
+  const healthConfig = config.health
+  const healthEnabled = healthConfig?.enabled !== false
+  const healthIntervalMs = healthConfig?.intervalMs ?? 60_000
+  const healthBootId = randomUUID()
+  if (!healthEnabled) {
+    ctx.logger.info('[deepartments] system-health: health.enabled === false — daemon disabled (no heartbeat, no alerts)')
+  } else {
+    ctx.effect(() => {
+      const tick = (): void => {
+        void runHealthDaemonTick({
+          now: () => Date.now(),
+          stateDir: config.stateDir,
+          bootId: healthBootId,
+          config,
+          // A FRESH single-use iterator per tick (Map.values() is single-use).
+          hosts: hosts.values(),
+          // The daemon is NOT a catalog member, so the bus ACL would deny it —
+          // deliver the alert via the HOST delivery seam directly, framing it
+          // `[From deepartments] System-health ALERT:` (exactly like the other
+          // daemons' notify hooks). The host entry is the LIVE Asistente entry
+          // resolved per tick (setInterval re-evaluates, so the boot race where
+          // the hosts registry is still empty cannot permanently disable it).
+          notifyHost: async (hostEntry, alertFrame): Promise<void> => {
+            try {
+              const store = await messagesStoreReady
+              const record = await store.append({ from: 'deepartments', to: [hostEntry.hostId], text: alertFrame, kind: 'agent' })
+              await busDeliverToHost(hostEntry as HostEntry, alertFrame, record, void 0)
+            } catch (error: unknown) {
+              ctx.logger.warn(`[deepartments] system-health: host alert delivery failed: ${error instanceof Error ? error.message : String(error)}`)
+            }
+          },
+          logger: ctx.logger
+        })
+      }
+      const interval = setInterval(tick, healthIntervalMs)
+      return () => { clearInterval(interval) }
+    }, 'deepartments: system-health daemon')
   }
 
   // --- agents/list + host/status RPC (server half, HTTP self-mount) --------
