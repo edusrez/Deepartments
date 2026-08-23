@@ -294,6 +294,15 @@ export interface WorkspaceRegistryLike {
    * service) degrades gracefully (the department sessions still get the
    * configured cwd, just no sidebar folder this run). */
   create?(path: string, title?: string): Promise<{ path: string } | undefined>
+  /** F5 RACE FIX (incident 2026-08-23): the workspace-service
+   * `resolveByPath(path)` — a NON-MUTATING canonical-path lookup
+   * (dsh-workspace lib:452-455) that returns the entity owning the canonical
+   * path or `undefined` when the directory is unowned. OPTIONAL in the
+   * structural type: a runtime `typeof` guard falls back to
+   * create-after-loaded-list on older harnesses without it (still safe — but
+   * only once the bounded list() retry has proven the durable state is in
+   * memory, so create stays idempotent). */
+  resolveByPath?(path: string): Promise<WorkspaceEntityLike | undefined>
 }
 
 /**

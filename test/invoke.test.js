@@ -15,7 +15,7 @@
 // via StubAgents.resume — the faithful production path for bringing a
 // registered resident back.
 import assert from 'node:assert/strict'
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -393,6 +393,7 @@ class StubWorkspaceRegistry extends Service {
     this.attachCalls = []
     this.notReadyRejects = 0
     this.createCalls = []
+    this.resolveByPathCalls = []
     // F5: the shared sessionId → cwd index, so the attach below can validate
     // the session cwd against the entity path like the real dsh-workspace
     // attachSession (realpath equality). A session whose cwd is NOT tracked
@@ -465,6 +466,20 @@ class StubWorkspaceRegistry extends Service {
     }
     this.entities.push(entity)
     return entity
+  }
+
+  /** F5 RACE FIX (incident 2026-08-23) — `resolveByPath(path)`: the
+   * NON-MUTATING canonical-path lookup of the real registry (dsh-workspace
+   * lib:452-455 — realpath-normalizes, then returns the entity owning the
+   * canonical path, or `undefined` when the directory is unowned). This is the
+   * anti-duplicate guard the ensure uses AFTER list() has proven the durable
+   * state is loaded: an entity an earlier boot / the GUI already created is
+   * returned WITHOUT creating a fresh duplicate record. Records the call so
+   * the tests can assert resolveByPath-first ordering. */
+  async resolveByPath(path) {
+    this.resolveByPathCalls.push(path)
+    const canonical = await realpath(path)
+    return this.entities.find((e) => e.path === canonical)
   }
 
   async archiveSession(sessionId) {
@@ -543,11 +558,18 @@ async function bootPlugin(stateDir, opts = {}) {
   // archive (spec 002 §3.3 S2.5) is exercised through the same seam. FIX 1b:
   // `workspaceEntities` (optional) overrides the entity list the S2.2 attach
   // and the boot repair hook iterate (default: one recording entity).
-  const workspaceRegistry = new StubWorkspaceRegistry(root, stateDir, opts.workspaceEntities, sessionCwds)
+  // F5 RACE FIX (incident 2026-08-23): `withoutWorkspaceRegistry: true`
+  // composes a composition WITHOUT the workspaceRegistry service at all (the
+  // production-headless shape — `ctx.get('workspaceRegistry')` returns
+  // undefined) so the ensure's DEFINITIVE-absence path (no list/create seam)
+  // is exercised directly.
+  const workspaceRegistry = opts.withoutWorkspaceRegistry === true
+    ? undefined
+    : new StubWorkspaceRegistry(root, stateDir, opts.workspaceEntities, sessionCwds)
   // FIX 1b.1 — `registryNotReadyRejects` models a provider whose init is still
   // in flight at boot (list() rejects mid-init) for the boot-repair retry
   // regression.
-  if (typeof opts.registryNotReadyRejects === 'number' && opts.registryNotReadyRejects > 0) {
+  if (workspaceRegistry !== undefined && typeof opts.registryNotReadyRejects === 'number' && opts.registryNotReadyRejects > 0) {
     workspaceRegistry.setNotReadyRejects(opts.registryNotReadyRejects)
   }
   await root.plugin(SubagentRuntime)
@@ -5994,6 +6016,110 @@ test('F5 (regression): a department WITHOUT workspacePath keeps the shared works
 
       // NO department workspace was requested/registered (the ensure is skipped).
       assert.equal(workspaceRegistry.createCalls.length, 0, 'no department workspace create was issued when no workspacePath is configured')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// ============================================================================
+// F5 RACE FIX (incident 2026-08-23) — `ensureDepartmentWorkspace` boot race.
+// The naive `registry.create` was idempotent ONLY once the provider's durable
+// state was in memory (its dedupe iterates the IN-MEMORY entities map, empty
+// mid-init); the deepartments boot hooks raced that init (FIX 1b.1 window) and
+// persisted a FRESH duplicate record per boot (observed 7a9dbcbe / 8be7833e) →
+// the NEXT boot's harness `validateStoredState` rejected "path ... claimed by
+// both workspace ..." → plugin tree load failed → systemd crash loop → GUI
+// down (Tailscale 8445). Fixed ensure discipline: bounded retry (250ms ≤ 10s,
+// the FIX 1b.1 constants) until `list()` RESOLVES (proves the durable state is
+// loaded), then resolveByPath-FIRST (non-mutating — an existing entity from an
+// earlier boot/GUI must never be duplicated), `create` ONLY as the fallback
+// for a genuinely unowned path; a composition with NO registry (definitive
+// absence) returns the configured path immediately, never blocking boot.
+// ============================================================================
+
+test('F5 RACE FIX: the registry is MID-INIT at boot (list() rejects K times) but ALREADY OWNS the department path — ensureDepartmentWorkspace returns the EXISTING entity path and NEVER calls create (no duplicate record per boot)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const workspacePath = path.join(stateDir, 'departments', 'research')
+    // The durable state an EARLIER boot / the GUI already created for this
+    // path BEFORE this boot's ensure runs (the workspace.json record the next
+    // validateStoredState must find UNCHANGED — no second claim of the path).
+    const deptSessions = []
+    const existingDeptEntity = {
+      path: workspacePath,
+      title: 'Research Department',
+      sessionIds: deptSessions,
+      attachSession: async (sessionId) => {
+        if (!deptSessions.includes(sessionId)) deptSessions.push(sessionId)
+      }
+    }
+    // The root entity throws on attach (cwd mismatch for the head) so the
+    // iterate-and-try falls through to the department entity, exactly like
+    // the real registry's cwd-validating attachSession.
+    const rootEntity = {
+      path: stateDir,
+      title: 'root',
+      sessionIds: [],
+      attachSession: async () => { throw new Error('stub: cwd mismatch (root != department workspace)') }
+    }
+    const { agents, workspaceRegistry, dispose } = await bootPlugin(stateDir, {
+      org: f5WorkspaceOrg(stateDir, workspacePath),
+      registryNotReadyRejects: 2,
+      workspaceEntities: [rootEntity, existingDeptEntity]
+    })
+    try {
+      await waitFor(() => agents.store.has('head-research-head'), 8000, 'research head materialized at boot (ensure retried past the mid-init list() rejects)')
+      const headCreate = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
+      assert.ok(headCreate, 'the head was freshly created')
+      assert.equal(headCreate.meta.cwd, workspacePath, 'the head cwd = the PRE-EXISTING department workspace path (resolveByPath returned the existing entity)')
+      assert.equal(workspaceRegistry.createCalls.filter((c) => c.path === workspacePath).length, 0, 'create is NEVER called for the pre-owned path — resolveByPath-first is non-mutating (no duplicate record per boot)')
+      assert.ok(workspaceRegistry.resolveByPathCalls.includes(workspacePath), 'resolveByPath was consulted once the registry became ready')
+      assert.equal(existingDeptEntity.title, 'Research Department', 'the existing entity was returned untouched (title preserved)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F5 RACE FIX: a READY registry with NO entity for the path — ensureDepartmentWorkspace creates it EXACTLY ONCE and returns its path (resolveByPath undefined → create fallback)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const workspacePath = path.join(stateDir, 'departments', 'research')
+    // Default stub entities: only the shared root at stateDir — the department
+    // path is genuinely unowned → the ensure MUST fall back to create.
+    const { agents, workspaceRegistry, dispose } = await bootPlugin(stateDir, {
+      org: f5WorkspaceOrg(stateDir, workspacePath)
+    })
+    try {
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'research head materialized at boot')
+      const headCreate = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
+      assert.ok(headCreate, 'the head was freshly created')
+      assert.equal(headCreate.meta.cwd, workspacePath, 'the head cwd = the created department workspace path')
+      const wsCreates = workspaceRegistry.createCalls.filter((c) => c.path === workspacePath)
+      assert.equal(wsCreates.length, 1, 'create called EXACTLY once for the unowned path (resolveByPath returned undefined → create fallback)')
+      assert.equal(wsCreates[0].title, 'Research Department', 'the created workspace is titled by the department name')
+      assert.ok(workspaceRegistry.resolveByPathCalls.includes(workspacePath), 'resolveByPath was consulted FIRST (returned undefined → create fallback)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F5 RACE FIX: a composition WITHOUT the workspaceRegistry seam (DEFINITIVE absence — no list/create) — ensure returns the configured path IMMEDIATELY with no retry, head still created with that cwd', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const workspacePath = path.join(stateDir, 'departments', 'research')
+    const { root, agents, dispose } = await bootPlugin(stateDir, {
+      org: f5WorkspaceOrg(stateDir, workspacePath),
+      withoutWorkspaceRegistry: true
+    })
+    try {
+      const logged = []
+      const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'research head materialized at boot WITHOUT the registry (definitive absence never blocks boot)')
+      const headCreate = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
+      assert.ok(headCreate, 'the head was freshly created')
+      assert.equal(headCreate.meta.cwd, workspacePath, 'the head cwd = the configured department workspace path (returned unchanged)')
+      assert.ok(logged.some((m) => m?.type === 'warn' && String(m.args?.[0] ?? '').includes('no workspaceRegistry.create seam')), 'a WARN announced the skipped create (definitive absence)')
+      disposeExporter()
     } finally {
       await dispose()
     }

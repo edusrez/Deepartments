@@ -3986,13 +3986,28 @@ export function applyInvoke(ctx: Context, config: Config) {
   /** F5 (spec 004 §6.2 L1) — ENSURE a department's REAL sidebar workspace
    * entity exists and return its canonical path (the cwd its head/worker
    * sessions attach to). The workspace SERVICE requires an existing directory
-   * (it realpath-validates + stats), so mkdir -p first, then
-   * `registry.create(path, title)` — IDEMPOTENT for an existing canonical path
-   * (returns the existing entity, its title untouched — the title is set ONLY
-   * on first create). NEVER throws: a mkdir/create failure WARNs and the
-   * configured path is returned unchanged (the session is STILL created with
-   * that cwd — it just won't be sidebar-attachable until the directory/entity
-   * exist, the honest non-fatal WARN discipline of the attach hooks). */
+   * (it realpath-validates + stats), so mkdir -p first, then the registry
+   * ensure. NEVER throws: every failure path WARNs and the configured path is
+   * returned unchanged (the session is STILL created with that cwd — it just
+   * won't be sidebar-attachable until the directory/entity exist, the honest
+   * non-fatal WARN discipline of the attach hooks).
+   * RACE (incident 2026-08-23): `registry.create(path, title)` is idempotent
+   * ONLY AFTER the provider's durable state is loaded into memory — its
+   * dedupe (dsh-workspace `createCanonical`) iterates the IN-MEMORY `entities`
+   * map, which is EMPTY while the provider init is still in flight. The
+   * deepartments boot hooks (hostsLoaded.then, ensureAllHeads) race that init
+   * (the FIX 1b.1 window), so a naive create persisted a FRESH duplicate
+   * record with a NEW id for the same canonical path on EVERY boot (observed
+   * duplicates 7a9dbcbe / 8be7833e) → the NEXT boot's harness
+   * `validateStoredState` rejected "workspace domain is inconsistent: path ...
+   * is claimed by both workspace ... and ..." → the plugin tree load failed →
+   * systemd crash loop → GUI down (production Tailscale 8445). FIX = the SAME
+   * bounded-retry discipline as FIX 1b.1: retry until `registry.list()`
+   * RESOLVES (list() throws while the state is missing, so resolution proves
+   * the durable state is in memory), then resolveByPath-FIRST — the
+   * NON-MUTATING canonical lookup that returns the entity an earlier boot or
+   * the GUI already created — and `registry.create` ONLY as the fallback for
+   * a genuinely unowned path. */
   const ensureDepartmentWorkspace = async (workspacePath: string, title: string): Promise<string> => {
     try {
       await mkdir(workspacePath, { recursive: true })
@@ -4001,11 +4016,41 @@ export function applyInvoke(ctx: Context, config: Config) {
       return workspacePath
     }
     const registry = ctx.get('workspaceRegistry', false) as WorkspaceRegistryLike | undefined
-    if (registry?.create === void 0) {
+    if (registry === void 0 || typeof registry.list !== 'function' || typeof registry.create !== 'function') {
+      // NO usable registry service in this composition (headless/minimal
+      // profile, or a harness without the workspace seams): a DEFINITIVE
+      // absence — nothing can become available, so return immediately and
+      // never block boot (the same fallback resolveWorkspaceRootPath uses).
       ctx.logger.warn(`[deepartments] department workspace create skipped (no workspaceRegistry.create seam in this composition) — the department's sessions keep cwd "${workspacePath}" but are not grouped in the sidebar`)
       return workspacePath
     }
+    const deadline = Date.now() + HOST_ATTACH_REPAIR_TIMEOUT_MS
+    let lastFailure: unknown = undefined
+    for (;;) {
+      try {
+        await registry.list()
+        // list() RESOLVED → the provider's durable state is now in memory:
+        // create is idempotent again — but prefer the NON-MUTATING
+        // resolveByPath first (an entity that already owns the canonical path
+        // from an earlier boot or the GUI must NEVER be duplicated).
+        break
+      } catch (error) {
+        // list() rejected → the registry is still initializing ("workspace
+        // registry is not started yet") — sleep and retry.
+        lastFailure = error
+      }
+      if (Date.now() >= deadline) {
+        const detail = lastFailure instanceof Error ? lastFailure.message : String(lastFailure ?? 'workspace registry never became ready')
+        ctx.logger.warn(`[deepartments] department workspace ensure timed out waiting for the workspace registry to become ready: ${detail} — the department's sessions keep cwd "${workspacePath}" but may not be grouped in the sidebar (retried ${HOST_ATTACH_REPAIR_TIMEOUT_MS}ms)`)
+        return workspacePath
+      }
+      await new Promise((resolve) => setTimeout(resolve, HOST_ATTACH_REPAIR_RETRY_MS))
+    }
     try {
+      if (typeof registry.resolveByPath === 'function') {
+        const existing = await registry.resolveByPath(workspacePath)
+        if (existing !== undefined && typeof existing.path === 'string' && existing.path !== '') return existing.path
+      }
       const entity = await registry.create(workspacePath, title)
       // Prefer the canonical path the SERVICE resolved (create realpath-
       // normalizes); the session cwd must equal it for the attach to match.
@@ -4019,9 +4064,10 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   /** F5 (spec 004 §6.2 L1) — the department-aware CWD for a created head/worker
    * session: a department WITH a configured workspacePath ensures its workspace
-   * (mkdir + `registry.create(title = dept name)`, idempotent) and returns the
-   * canonical workspace path (the department's own sidebar folder). A
-   * department WITHOUT workspacePath returns `''` — the caller then falls back
+   * (mkdir + registry ensure: resolveByPath-first, create only as the fallback
+   * for an unowned path — title = dept name, set only on first create) and
+   * returns the canonical workspace path (the department's own sidebar folder).
+   * A department WITHOUT workspacePath returns `''` — the caller then falls back
    * to `resolveWorkspaceRootPath()` (the shared root, pre-F1 behavior, zero
    * regression). */
   const resolveDepartmentWorkspaceCwd = async (department: DepartmentConfig | undefined): Promise<string> => {
@@ -4202,10 +4248,11 @@ export function applyInvoke(ctx: Context, config: Config) {
     const sessionId = SessionId(durableEntry?.sessionId ?? headSessionId(postId))
     if (agents === void 0) return
     // F5 (spec 004 §6.2 L1): a department WITH a configured workspacePath owns a
-    // REAL sidebar folder — ensure the workspace (mkdir + registry.create
-    // title=dept name, idempotent) and carry the canonical path as the cwd for
-    // the fresh-create branches. A department WITHOUT workspacePath returns ''
-    // (the shared workspace root via resolveWorkspaceRootPath — pre-F1). The
+    // REAL sidebar folder — ensure the workspace (mkdir + registry ensure — the
+    // race-fixed resolveByPath-first/create-fallback discipline, title=dept
+    // name, set only on first create) and carry the canonical path as the cwd
+    // for the fresh-create branches. A department WITHOUT workspacePath returns
+    // '' (the shared workspace root via resolveWorkspaceRootPath — pre-F1). The
     // ensure runs on EVERY ensureHead (even when the head session is reused/
     // resumed) so the department folder exists for its workers' spawns.
     const departmentCwd = await resolveDepartmentWorkspaceCwd(department)
