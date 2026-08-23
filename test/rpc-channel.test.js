@@ -63,10 +63,8 @@ function makeDeps(overrides = {}) {
     departments: DEPARTMENTS,
     byPost: new Map(),
     hosts: [],
-    memberCursors: new Map(),
     sessionLive: () => false,
     sessionRunning: () => false,
-    loadBoardRecords: async () => undefined,
     ...overrides
   }
 }
@@ -117,50 +115,20 @@ test('dispatchDeepartmentsEndpoint: unknown endpoint is a bad-request', async ()
   assert.match(result.ok ? '' : result.error.message, /unknown endpoint: nope/)
 })
 
-test('dispatchDeepartmentsEndpoint: unreadFor counts addressed unread non-ack messages', async () => {
+test('dispatchDeepartmentsEndpoint (B3): unread derivation is KILLED — rows carry unread 0 (no board cursor; no read/seen marks in the messaging phase, spec 003 §5)', async () => {
   const byPost = new Map([
     ['research-head', { postId: 'research-head', sessionId: 'head-research-head', roomId: 'research' }]
   ])
-  const boardRecords = [
-    // seq 1 from research-head to the caller host, not ack, unread (cursor -1)
-    { seq: 1, from: 'research-head', to: ['host-x'], kind: 'message', payload: { kind: 'note', text: 'hi' } },
-    // seq 2 ack — skipped
-    { seq: 2, from: 'research-head', to: ['host-x'], kind: 'message', payload: { kind: 'note', text: 'ok', ack: true } },
-    // seq 3 addressed to a DIFFERENT member — skipped
-    { seq: 3, from: 'research-head', to: ['host-y'], kind: 'message', payload: { kind: 'note', text: 'no' } },
-    // seq 4 kind not message — skipped
-    { seq: 4, from: 'research-head', to: ['host-x'], kind: 'ready', payload: { title: 'x' } }
-  ]
   const deps = makeDeps({
     byPost,
     hosts: [{ hostId: 'host-x', sessionId: 'sess-x', roomId: 'board' }],
-    loadBoardRecords: async () => boardRecords,
     sessionLive: (sid) => sid === 'head-research-head'
   })
   const result = await dispatchDeepartmentsEndpoint('agents', { sessionId: 'sess-x' }, deps)
   assert.equal(result.ok, true)
   const row = result.ok ? result.value.agents.find((r) => r.id === 'research-head') : null
-  assert.equal(row.unread, 1)
-  assert.equal(row.status, 'completed-notice')
-})
-
-test('dispatchDeepartmentsEndpoint: unknown caller session gets zero unread', async () => {
-  const byPost = new Map([
-    ['research-head', { postId: 'research-head', sessionId: 'head-research-head', roomId: 'research' }]
-  ])
-  const records = [
-    { seq: 1, from: 'research-head', to: ['host-x'], kind: 'message', payload: { kind: 'note', text: 'hi' } }
-  ]
-  // Caller session "nope" is not in hosts → hostMemberId undefined → unread 0.
-  const deps = makeDeps({
-    byPost,
-    hosts: [{ hostId: 'host-x', sessionId: 'sess-x', roomId: 'board' }],
-    loadBoardRecords: async () => records
-  })
-  const result = await dispatchDeepartmentsEndpoint('agents', { sessionId: 'nope' }, deps)
-  assert.equal(result.ok, true)
-  const row = result.ok ? result.value.agents.find((r) => r.id === 'research-head') : null
-  assert.equal(row.unread, 0)
+  assert.equal(row.unread, 0, 'B3: unread is a stable 0 (no board derivation)')
+  assert.notEqual(row.status, 'completed-notice', 'B3: the completed-notice status branch never fires (no unread)')
 })
 
 // --- host/status (U3 client lifecycle watcher RPC, spec 002 §6.1) ------------
@@ -348,13 +316,6 @@ test('dispatchDeepartmentsEndpoint: a real Map .values() wire stays re-iterable 
     byPost: new Map([
       ['research-head', { postId: 'research-head', sessionId: 'head-research-head', roomId: 'research' }]
     ]),
-    memberCursors: new Map([['host-sess-new', { lastMessageSeq: 0 }]]),
-    loadBoardRecords: async () => [
-      // Addressed to the caller host member, seq > cursor, not ack → the unread
-      // count is OBSERVABLE PROOF the agents/list host resolution still saw the
-      // registry (starved wire → hostMemberId undefined → unread 0).
-      { seq: 1, from: 'research-head', to: ['host-sess-new'], kind: 'message', payload: { kind: 'note', text: 'hi' } }
-    ],
     logger: { warn: () => { warns += 1 } }
   })
   // CALL 1 — host/status must see the FULL registry: retired is NOT degraded
@@ -372,16 +333,17 @@ test('dispatchDeepartmentsEndpoint: a real Map .values() wire stays re-iterable 
   assert.equal(call2.ok ? call2.value.hostSessionId : null, 'sess-new')
   assert.equal(call2.ok ? call2.value.previousSessionId : null, 'sess-old')
   assert.deepEqual(call2.ok ? call2.value.retired : null, [{ sessionId: 'sess-old', retiredAt: 1787337794152 }])
-  // CALL 3+ — agents/list-like consumers (invoke.ts:1019) still resolve the
-  // caller host member id → candidate cursors apply → unread counted correctly.
+  // CALL 3+ — agents/list-like consumers still resolve the caller host member
+  // id and the wire stays re-iterable (B3: unread is a stable 0 — the board
+  // derivation is killed; the row still resolves).
   const call3 = await dispatchDeepartmentsEndpoint('agents', { sessionId: 'sess-new' }, deps)
   assert.equal(call3.ok, true)
   const row3 = call3.ok ? call3.value.agents.find((r) => r.id === 'research-head') : null
-  assert.equal(row3.unread, 1)
+  assert.equal(row3.unread, 0, 'B3: unread is a stable 0 (no board derivation)')
   const call4 = await dispatchDeepartmentsEndpoint('list', { sessionId: 'sess-new' }, deps)
   assert.equal(call4.ok, true)
   const row4 = call4.ok ? call4.value.agents.find((r) => r.id === 'research-head') : null
-  assert.equal(row4.unread, 1)
+  assert.equal(row4.unread, 0, 'B3: unread is a stable 0 (no board derivation)')
 })
 
 // --- parseClientEnvelope -----------------------------------------------------

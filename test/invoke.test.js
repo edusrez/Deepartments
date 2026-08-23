@@ -26,9 +26,7 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
-import { loadRecords, resolveBoardPath } from '../lib/board-store.js'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath } from '../lib/messages-store.js'
-import { emitRoomRecord, roomSessionId } from '../lib/org.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
 import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
@@ -46,15 +44,10 @@ import {
 // --- test organization (mirrors cordis.patch.yml, with a stub LLM route) -----
 
 const TEST_ORG = {
-  rooms: [
-    { id: 'board', name: 'Board of directors', purpose: 'Coordination room', members: ['asistente', 'research-head'] },
-    { id: 'research', name: 'Research department', purpose: 'Research department room', members: ['research-head'] }
-  ],
   departments: [
     {
       id: 'research',
       name: 'Research',
-      roomId: 'research',
       coordinator: {
         postId: 'research-head',
         role: 'Research department head',
@@ -522,59 +515,20 @@ async function withTempStateDir(fn) {
   }
 }
 
-async function waitForRooms(root) {
-  await waitFor(() => root.sessions.get(SessionId(roomSessionId('board'))) !== undefined && root.sessions.get(SessionId(roomSessionId('research'))) !== undefined, 5000, 'room sessions live')
-}
-
-async function nextSeq(stateDir, roomId) {
-  const records = await loadRecords(resolveBoardPath(stateDir, roomId))
-  return records.length === 0 ? 0 : records[records.length - 1].seq + 1
-}
-
-function messageRecord(seq, from, to, text, ack = false) {
-  return {
-    id: `t-${seq}-${from}`,
-    seq,
-    ts: 1700000000000 + seq,
-    from,
-    to,
-    cc: [],
-    threadId: null,
-    kind: 'message',
-    payload: ack ? { kind: 'note', text, ack: true } : { kind: 'note', text }
-  }
-}
-
-/** Pre-seed a room's board file with raw records BEFORE boot (a prior
- * session's cold truth) — the restart scenario for the cursor test. */
-async function seedBoardRecords(stateDir, roomId, records) {
-  const filePath = resolveBoardPath(stateDir, roomId)
-  await mkdir(path.dirname(filePath), { recursive: true })
-  await writeFile(filePath, `${records.map((record) => JSON.stringify(record)).join('\n')}\n`, 'utf8')
-}
-
-/** Read the persisted per-member cursor file (created on boot/advance). Retries
- * until the file is present AND parses as JSON (the write is fire-and-forget). */
-async function readCursors(stateDir) {
-  const cursorsPath = path.join(stateDir, 'cursors.json')
-  let parsed
-  await waitFor(async () => {
-    try {
-      parsed = JSON.parse(await readFile(cursorsPath, 'utf8'))
-      return true
-    } catch {
-      return false
-    }
-  }, 5000, 'cursors.json readable')
-  return parsed
-}
-
 /**
  * Seed a durable department head (root agent) into posts.json BEFORE boot,
  * and register its adoption so a cold resume restores it under the same
  * stable session id (`head-<postId>`). Mirrors what a production posts.json
  * holds for a previously-materialized head.
  */
+/** B3b2: settle the boot's fire-and-forget head materialization (ensureAllHeads
+ * runs after the registries load — the room-boot barrier `waitForRooms` used
+ * to provide is gone with the rooms). Tests that act on the booted plugin
+ * before their own head wait must call this right after bootPlugin. */
+async function waitForHeadMaterialized(agents) {
+  await waitFor(() => agents.store.has('head-research-head'), 5000, 'head materialized at boot')
+}
+
 async function seedPost(stateDir, { postId, sessionId = `head-${postId}`, roomId, agentPreset = 'deepartments-head', provider, role, sleepEpoch, previousChildId }) {
   const postsPath = path.join(stateDir, 'posts.json')
   let existing = {}
@@ -664,153 +618,129 @@ async function readHosts(stateDir) {
 
 // --- tests ---------------------------------------------------------------------
 
-test('host registration: a non-post agent calling a host-plane board tool resolves host-<sessionId> and the reverse map; dept_whereami returns kind host', async () => {
+test('B3 gap fix: dept_who from the HOST in a profile with NO hosts.json self-registers the host (one row, you:true) — host auto-registration no longer depends on board tools', async () => {
   await withTempStateDir(async (stateDir) => {
+    // No hosts.json seeded: a FRESH profile. The board tools that used to
+    // trigger ensureHost are gone (B3); dept_who must self-register the caller.
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
 
-      // The HOST plane tools are registered globally on the plugin ctx (the
-      // host channel) — a live host agent can call them.
-      const writeTool = pluginCtx().tools.get('dept_room_write')
-      assert.ok(writeTool, 'dept_room_write registered globally (host plane)')
-      const writeResult = await writeTool.execute(
-        { room: 'board', to: ['research-head'], text: 'hello from host' },
-        { agent: host, signal }
-      )
-      // The host is lazily registered on its first tool call, from=host-<sessionId>.
-      assert.equal(writeResult.from, `host-${host.id}`)
+      const whoTool = root.tools.get('dept_who')
+      assert.ok(whoTool, 'dept_who registered globally (host plane)')
+      const result = await whoTool.execute({}, { agent: host, signal })
+
+      // The host got registered as the ONE live host with you:true.
+      const hostRows = result.members.filter((member) => member.kind === 'host')
+      assert.equal(hostRows.length, 1, 'exactly one host row')
+      assert.equal(hostRows[0].agentId, `host-${host.id}`, 'the host row is the caller (host-<sessionId>)')
+      assert.equal(hostRows[0].you, true, 'the caller marks its own entry you:true')
       const hosts = await readHosts(stateDir)
-      assert.deepEqual(hosts[`host-${host.id}`], { sessionId: host.id, roomId: 'board' })
-
-      // dept_whereami on the registered host returns kind host with its address.
-      const whereamiTool = pluginCtx().tools.get('dept_whereami')
-      assert.ok(whereamiTool, 'dept_whereami registered globally (host plane)')
-      const where = await whereamiTool.execute({}, { agent: host, signal })
-      assert.equal(where.kind, 'host')
-      assert.equal(where.hostId, `host-${host.id}`)
-      assert.equal(where.sessionId, host.id)
-      assert.equal(where.hostRoomId, 'board')
-
-      // The RENDERED output for a REGISTERED host keeps the address form
-      // (never the refusal message).
-      const whereView = whereamiTool.output.render({}, where)
-      assert.ok(Array.isArray(whereView) && whereView[0]?.type === 'text', 'whereami render returns a text block')
-      assert.match(whereView[0].text, new RegExp(`address host-${host.id}`), 'rendered registered-host text keeps the address form')
-      assert.doesNotMatch(whereView[0].text, /NOT a registered host/, 'a registered host never renders a refusal')
+      assert.ok(hosts[`host-${host.id}`], 'the host entry was persisted to hosts.json')
     } finally {
       await dispose()
     }
   })
 })
 
-test('host wake: a board message addressed to host-<sessionId> raw-wakes the host agent with a kind board source', async () => {
+test('B3 gap fix: send_message from the HOST in a profile with NO hosts.json self-registers the host before delivery (catalog resolution)', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
       const host = agents.put(fakeParentAgent())
-      const hostId = `host-${host.id}`
-
-      // Register the host by having it post first.
       const signal = new AbortController().signal
-      await root.tools.get('dept_room_write').execute(
-        { room: 'board', to: ['research-head'], text: 'register me' },
+
+      const sendTool = root.tools.get('send_message')
+      assert.ok(sendTool, 'send_message registered globally (host plane)')
+      const result = await sendTool.execute(
+        { to: ['research-head'], text: 'hello from the host' },
         { agent: host, signal }
       )
-
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      const seq = await nextSeq(stateDir, 'board')
-      const before = host.inboxMessages.length
-      // 'asistente' (a static member that is NOT materialized as a post — the
-      // configured head research-head is a registered post now) addresses the host.
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [hostId], 'please respond'), 'board')
-      assert.equal(host.inboxMessages.length, before + 1, 'the host agent was raw-woken')
-      const wake = host.inboxMessages.at(-1)
-      assert.match(wake.content[0].text, /Board delta in board/)
-      assert.match(wake.content[0].text, new RegExp(`new message \\S+ from asistente`))
-      assert.doesNotMatch(wake.content[0].text, /please respond/, 'pointer-only wake (no body)')
-      assert.equal(wake.source.kind, 'board', 'host wake source kind is board')
-      assert.equal(wake.source.form, 'notice')
-      assert.equal(wake.source.from, 'asistente')
-      assert.equal(wake.source.senderSessionId, 'asistente')
+      assert.equal(result.messageId, 'm-0', 'record persisted (persist-before-deliver)')
+      assert.equal(result.delivered['research-head'], 'delivered')
+      // The catalog resolution needed the host entry: it self-registered.
+      const hosts = await readHosts(stateDir)
+      assert.ok(hosts[`host-${host.id}`], 'send_message self-registered the host in hosts.json')
+      assert.equal(hosts[`host-${host.id}`].sessionId, host.id)
     } finally {
       await dispose()
     }
   })
 })
 
-test('host registration guard (single live host): the FIRST session registers as the host; a SECOND session while a live host exists is REFUSED (returns the live host id, no second entry, guard warn, honest dept_whereami); sender attribution still resolves to the LIVE registered host', async () => {
+test('B3 bus host wake: send_message to a live registered host raw-wakes it with the agent/send source (the old board relay is gone)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
+      const host = agents.put(fakeParentAgent())
+      const hostId = `host-${host.id}`
+      await seedHostRegistration(stateDir, host.id, 'board')
+      // re-boot so the seeded hosts.json is loaded? No: seed was written before
+      // boot in the original usage; here boot already ran. Register lazily via
+      // dept_who instead (the B3 self-registration path).
+      const signal = new AbortController().signal
+      await root.tools.get('dept_who').execute({}, { agent: host, signal })
+
+      const head = agents.store.get('head-research-head')
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const before = host.inboxMessages.length
+      const sendResult = await headCtx.tools.get('send_message', key).execute(
+        { to: [hostId], text: 'please respond' },
+        { agent: head, signal }
+      )
+      assert.equal(sendResult.delivered[hostId], 'delivered', 'bus delivered to the live host')
+      await waitFor(() => host.inboxMessages.length === before + 1, 5000, 'the host agent was raw-woken')
+      const wake = host.inboxMessages.at(-1)
+      assert.match(wake.content[0].text, /^\[From research-head → host-/, 'bus framing carries sender + recipients')
+      assert.equal(wake.source.kind, 'agent', 'host wake source kind is agent')
+      assert.equal(wake.source.form, 'send')
+      assert.equal(wake.source.from, 'research-head')
+      assert.equal(wake.source.senderSessionId, 'head-research-head')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('host registration guard (single live host): the FIRST session registers via dept_who; a SECOND session while a live host exists is REFUSED (no second entry, guard warn); sender attribution still resolves to the caller session', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
     const logged = []
     const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
       const hostA = agents.put(fakeParentAgent())
       const hostB = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
-      const writeTool = root.tools.get('dept_room_write')
+      const whoTool = root.tools.get('dept_who')
 
       // (1) FIRST session: no live host exists → hostA registers normally.
-      const regA = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'A registers' }, { agent: hostA, signal })
-      assert.equal(regA.from, `host-${hostA.id}`, 'the first session registers as the live host')
+      const whoA = await whoTool.execute({}, { agent: hostA, signal })
+      assert.equal(whoA.members.filter((m) => m.kind === 'host').length, 1, 'one host row after the first registration')
 
-      // (2) SECOND session refused: hostB posts while hostA is live → the guard
-      // returns the LIVE host id, creates NO second entry and logs the warn;
-      // the post is recorded under the live host id (a second host is never minted).
-      const regB = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'B registers' }, { agent: hostB, signal })
-      assert.equal(regB.from, `host-${hostA.id}`, 'refused session rides the live host id (never a second host)')
+      // (2) SECOND session refused: hostB dept_who while hostA is live → the guard
+      // creates NO second entry and logs the warn.
+      const whoB = await whoTool.execute({}, { agent: hostB, signal })
+      assert.equal(whoB.members.filter((m) => m.kind === 'host').length, 1, 'still exactly one host row (no second host minted)')
+      assert.equal(whoB.members.filter((m) => m.you === true && m.kind === 'host').length, 0, 'the refused session is NOT marked you:true (it is not a registered host)')
       const hosts = await readHosts(stateDir)
       assert.ok(hosts[`host-${hostA.id}`], 'host A entry exists')
       assert.equal(hosts[`host-${hostB.id}`], undefined, 'refused second session creates NO host entry (single-live invariant)')
       await waitFor(() => logged.some((m) => m?.type === 'warn' && String(m.args?.[0] ?? '').includes(`refusing new host registration host-${hostB.id}`) && String(m.args?.[0] ?? '').includes(`host-${hostA.id}`)), 5000, 'guard warn logged with the live host id')
 
-      // (3) Honest dept_whereami for the refused session: reports its own
-      // NON-registered identity and points at the live host — never impersonates.
-      const whereB = await root.tools.get('dept_whereami').execute({}, { agent: hostB, signal })
-      assert.equal(whereB.kind, 'host')
-      assert.equal(whereB.hostId, undefined, 'refused session does NOT impersonate the host (no hostId)')
-      assert.match(whereB.message, /NOT a registered host/, 'whereami honestly reports the non-registered identity')
-      assert.match(whereB.message, new RegExp(`host-${hostA.id}`), 'whereami names the live host entry')
-
-      // (3b) The RENDERED tool output must carry the SAME honest truth — a
-      // refused plain session must never render the generic "Asistente host
-      // (not a board head)" line; the render surfaces its message verbatim
-      // (output.render is the exact harness render path, dsh-tools
-      // createSuccessResult → tool.output.render).
-      const whereBView = root.tools.get('dept_whereami').output.render({}, whereB)
-      assert.ok(Array.isArray(whereBView) && whereBView[0]?.type === 'text', 'whereami render returns a text block')
-      assert.match(whereBView[0].text, /NOT a registered host/, 'rendered text reports the non-registered identity')
-      assert.match(whereBView[0].text, new RegExp(`host-${hostA.id}`), 'rendered text names the live host entry')
-      assert.doesNotMatch(whereBView[0].text, /not a board head/, 'refused session never renders the generic fallback')
-
-      // (4) Sender attribution to the LIVE REGISTERED host: a host-posted
-      // message records from=host-<sessionId> and the relay resolves the sender
-      // session to that host (via hosts.get(from).sessionId — no anyParentId).
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      const seq = await nextSeq(stateDir, 'board')
-      // 'asistente' (a static member that is NOT a materialized post) addresses
-      // the live host A; its sender session falls back to its own id.
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [regA.from], 'note for the live host'), 'board')
-      assert.equal(hostA.inboxMessages.length, 1, 'the LIVE host was woken once')
-      const wake = hostA.inboxMessages.at(-1)
-      assert.equal(wake.source.kind, 'board')
-      assert.equal(wake.source.senderSessionId, 'asistente', 'non-post sender resolves to its own id (no anyParentId fabrication)')
-
-      // A live host posting records from=<hostId>; the relay attributes the
-      // wake's senderSession to that host's SESSION (via hosts.get(from).sessionId).
+      // (3) Sender attribution: hostA sends via the bus and the record is
+      // attributed to host-<sessionId>; the head receives it framed.
       const headAgent = agents.store.get('head-research-head')
       const headWakesBefore = headAgent.inboxMessages.length
-      await writeTool.execute({ room: 'board', to: ['research-head'], text: 'A to the head' }, { agent: hostA, signal })
-      await waitFor(() => headAgent.inboxMessages.length === headWakesBefore + 1, 5000, 'the head received the host-to-head wake')
+      await root.tools.get('send_message').execute({ to: ['research-head'], text: 'A to the head' }, { agent: hostA, signal })
+      await waitFor(() => headAgent.inboxMessages.length === headWakesBefore + 1, 5000, 'the head received the host-to-head message')
       const hostWake = headAgent.inboxMessages.at(-1)
-      assert.equal(hostWake.source.kind, 'board')
+      assert.equal(hostWake.source.kind, 'agent')
       assert.equal(hostWake.source.from, `host-${hostA.id}`, 'host sender recorded under its hostId')
-      assert.equal(hostWake.source.senderSessionId, hostA.id, 'relay resolves the host sender to its session (no anyParentId)')
+      assert.equal(hostWake.source.senderSessionId, hostA.id, 'sender resolves to the caller session')
     } finally {
       disposeExporter()
       await dispose()
@@ -818,7 +748,7 @@ test('host registration guard (single live host): the FIRST session registers as
   })
 })
 
-test('host registration guard: registers when NO live host exists — both on a first-ever boot AND after the prior host entries are all RETIRED (the previous live is gone)', async () => {
+test('host registration guard (B3): registers when NO live host exists — both on a first-ever boot AND after the prior host entries are all RETIRED (the previous live is gone)', async () => {
   await withTempStateDir(async (stateDir) => {
     // A hosts.json holding ONLY retired entries (a fully rotated-out chain):
     // loader validation passes (numeric retiredAt + non-empty rotatedTo), zero
@@ -832,13 +762,14 @@ test('host registration guard: registers when NO live host exists — both on a 
     }, null, 2))
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
+      await waitForHeadMaterialized(agents)
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
       // No live entry + the caller's hostId is absent → the first live
       // registration passes (retired entries do not block it).
-      const reg = await root.tools.get('dept_room_write').execute({ room: 'board', to: ['research-head'], text: 'first live after a fully-retired chain' }, { agent: host, signal })
-      assert.equal(reg.from, `host-${host.id}`, 'a session registers as the live host when no live entry exists')
+      const who = await root.tools.get('dept_who').execute({}, { agent: host, signal })
+      assert.equal(who.members.filter((m) => m.kind === 'host').length, 1, 'one host row (the fresh registration)')
+      assert.equal(who.members.find((m) => m.kind === 'host').you, true, 'the caller marks itself you:true')
       const hosts = await readHosts(stateDir)
       assert.ok(hosts[`host-${host.id}`], 'the fresh host entry was created')
       assert.equal(hosts[`host-${oldSessionId}`].retired, true, 'the pre-existing retired entries survive untouched')
@@ -848,7 +779,7 @@ test('host registration guard: registers when NO live host exists — both on a 
   })
 })
 
-test('host registration REFRESH MERGES (never replaces): a board-tool refresh of a ROTATION-SUCCESSOR entry preserves previousSessionId/sleepEpoch/boundarySeq — the live-host pick stays deterministic after the successor\'s first tool call', async () => {
+test('host registration REFRESH MERGES (never replaces): a dept_who refresh of a ROTATION-SUCCESSOR entry preserves previousSessionId/sleepEpoch/boundarySeq — the live-host pick stays deterministic after the successor\'s first tool call', async () => {
   await withTempStateDir(async (stateDir) => {
     const oldSessionId = SessionId(randomUUID())
     const newSessionId = SessionId(randomUUID())
@@ -864,14 +795,15 @@ test('host registration REFRESH MERGES (never replaces): a board-tool refresh of
     }, null, 2))
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
-      // The successor's FIRST board-tool call refreshes its entry (ensureHost
+      await waitForHeadMaterialized(agents)
+      // The successor's FIRST bus-tool call refreshes its entry (ensureHost
       // merge path) — the rotation metadata MUST survive it (the pre-fix code
       // REPLACED the entry and wiped previousSessionId/sleepEpoch/boundarySeq).
       const successor = agents.put(fakeParentAgent(newSessionId))
       const signal = new AbortController().signal
-      const writeResult = await root.tools.get('dept_room_write').execute({ room: 'board', to: ['research-head'], text: 'successor refresh' }, { agent: successor, signal })
-      assert.equal(writeResult.from, newHostId, 'the registered successor refreshes under its own host id')
+      const who = await root.tools.get('dept_who').execute({}, { agent: successor, signal })
+      assert.equal(who.members.filter((m) => m.kind === 'host').length, 1, 'one host row after the refresh')
+      assert.equal(who.members.find((m) => m.kind === 'host').you, true, 'the successor refreshes under its own host id (you:true)')
       const hosts = await readHosts(stateDir)
       assert.equal(hosts[newHostId].previousSessionId, String(oldSessionId), 'refresh preserves previousSessionId (successor lineage)')
       assert.equal(hosts[newHostId].sleepEpoch, 1787261781000, 'refresh preserves sleepEpoch')
@@ -889,64 +821,6 @@ test('host registration REFRESH MERGES (never replaces): a board-tool refresh of
   })
 })
 
-test('host ROOMID LATCH fix: a board-tool REFRESH operating in a room different from the host\'s stored roomId NEVER rewrites hosts.json roomId (a host registered in "board" stays "board" while it reads in "research")', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const sessionId = SessionId(randomUUID())
-    const hostId = `host-${sessionId}`
-    // The host is ALREADY registered BEFORE boot (seeded hosts.json) in room
-    // 'board'. The pre-fix ensureHost REFRESH re-derived roomId from the
-    // CALLER's room argument, so ANY board-tool call in a different room
-    // flipped the entry (the host-roomid latch bug).
-    assert.equal(await seedHostRegistration(stateDir, sessionId, 'board'), hostId)
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      const host = agents.put(fakeParentAgent(sessionId))
-      const signal = new AbortController().signal
-      // The refresh path runs through dept_room_read's memberIdFor with room
-      // 'research' (a live, DIFFERENT room) — the fix must preserve 'board'.
-      const read = await root.tools.get('dept_room_read').execute({ room: 'research' }, { agent: host, signal })
-      assert.equal(read.member, hostId, 'the refresh resolves the registered member id')
-      const hosts = await readHosts(stateDir)
-      assert.equal(hosts[hostId].roomId, 'board', 'ensureHost REFRESH keeps existing.roomId — roomId is never re-derived from the caller\'s room')
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-test('host ROOMID LATCH fix: a host-plane dept_post_retire — the withdrawal is emitted in the RETIRED post\'s room, but the host\'s registry roomId is NOT moved (stays "board")', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const sessionId = SessionId(randomUUID())
-    const hostId = `host-${sessionId}`
-    await seedHostRegistration(stateDir, sessionId, 'board')
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
-      const host = agents.put(fakeParentAgent(sessionId))
-      const signal = new AbortController().signal
-      const researchSession = root.sessions.get(SessionId(roomSessionId('research')))
-      const beforeCount = researchSession.events.length
-
-      // retirePost step (a) emits the withdrawal with memberIdFor(caller,
-      // entry.roomId) — the RETIRED post's room feeds the sender resolution
-      // (which for the HOST runs the ensureHost REFRESH). The withdrawal must
-      // still land in the head's room…
-      const result = await root.tools.get('dept_post_retire').execute({ postId: 'research-head' }, { agent: host, signal })
-      assert.equal(result.retired, true)
-      assert.equal(result.roomId, 'research', 'the retirement targets the retired post\'s room')
-      await waitFor(() => researchSession.events.length > beforeCount, 5000, 'withdrawal note emitted in the head\'s room')
-
-      // …but the host entry keeps its OWN roomId ('board') — the pre-fix latch
-      // flipped it to 'research' through the same refresh merge.
-      const hosts = await readHosts(stateDir)
-      assert.equal(hosts[hostId].roomId, 'board', 'dept_post_retire never moves the live host\'s roomId')
-    } finally {
-      await dispose()
-    }
-  })
-})
 
 test('hosts loader cardinality: TWO live entries → a WARN (never a THROW) listing both ids, and the registry/file stay INTACT (a throw would empty the registry and the next ensureHost persist would erase every file entry)', async () => {
   await withTempStateDir(async (stateDir) => {
@@ -960,7 +834,6 @@ test('hosts loader cardinality: TWO live entries → a WARN (never a THROW) list
     const logged = []
     const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
     try {
-      await waitForRooms(root)
       await waitFor(() => logged.some((m) => m?.type === 'warn' && String(m.args?.[0] ?? '').includes('2 live host entries (exactly one required)') && String(m.args?.[0] ?? '').includes('host-session-stray') && String(m.args?.[0] ?? '').includes('host-session-live')), 5000, 'loader cardinality warned listing both live ids')
       // NEVER threw → the loader booted with the full file restored and the
       // file is untouched (load does not re-persist): both live entries present.
@@ -974,97 +847,48 @@ test('hosts loader cardinality: TWO live entries → a WARN (never a THROW) list
   })
 })
 
-test('address validation: dept_room_write to an unknown addressee throws; registered posts and hosts post', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      const host = agents.put(fakeParentAgent())
-      const signal = new AbortController().signal
-      const writeTool = root.tools.get('dept_room_write')
 
-      // Fully-unknown addressee → loud rejection (audit C4 fix).
-      await assert.rejects(
-        () => writeTool.execute({ room: 'board', to: ['nobody'], text: 'nope' }, { agent: host, signal }),
-        /unknown addressee\(s\) nobody/,
-        'unknown addressee rejected loudly'
-      )
-
-      // A registered host addressee posts (the host registers itself lazily).
-      const result = await writeTool.execute({ room: 'board', to: [`host-${host.id}`], text: 'self-note' }, { agent: host, signal })
-      assert.ok(result.messageId.length > 0)
-
-      // A static member (registered in config) posts too.
-      const toStatic = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'to the post member' }, { agent: host, signal })
-      assert.ok(toStatic.messageId.length > 0)
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-test('non-live host: a hostId whose agent is absent is skipped with a warning, not thrown', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      const host = agents.put(fakeParentAgent())
-      const signal = new AbortController().signal
-      // Register a host, then remove its live agent (session closed).
-      await root.tools.get('dept_room_write').execute({ room: 'board', to: ['research-head'], text: 'register' }, { agent: host, signal })
-      agents.store.delete(host.id)
-
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      const seq = await nextSeq(stateDir, 'board')
-      // Emitting a message addressed to the dead host must NOT throw; the relay
-      // skips + warns.
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'research-head', [`host-${host.id}`], 'nobody'), 'board')
-      // No crash; the relay handled it defensively.
-      assert.ok(true)
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-test('head setup: the board toolset is registered scoped to the head agent (own layer) AND globally on the host plane; the head toolset works', async () => {
+test('head setup: the messaging toolset is registered scoped to the head agent (own layer) AND globally on the host plane; the head toolset works (B3: no room tools)', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       // The configured head auto-materializes at boot as a root agent.
       await waitFor(() => agents.store.has(`head-research-head`), 5000, 'head root agent created at boot')
 
-      // The board toolset is registered GLOBALLY (host plane) — assert that.
-      for (const name of ['dept_room_read', 'dept_room_write', 'dept_room_who', 'dept_whereami']) {
+      // The bus/identity toolset is registered GLOBALLY (host plane) — assert that.
+      for (const name of ['send_message', 'agent_messages', 'dept_who']) {
         assert.ok(pluginCtx().tools.get(name), `${name} registered globally (host plane)`)
       }
+      // B3: the board tools are GONE from the global plane.
+      for (const name of ['dept_room_read', 'dept_room_write', 'dept_room_who', 'dept_whereami']) {
+        assert.equal(pluginCtx().tools.get(name), undefined, `${name} removed from the global plane (B3)`)
+      }
 
-      // The head's own layer carries the board tools (installed by head setup).
+      // The head's own layer carries the messaging tools (installed by head setup).
       const { ctx: headCtx, key } = agents.childContexts[0]
-      for (const name of ['dept_room_read', 'dept_room_write', 'dept_witness_write', 'dept_room_who', 'dept_whereami', 'dept_memo_write', 'dept_sleep']) {
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
         assert.ok(headCtx.tools.get(name, key), `${name} installed in the head own layer`)
       }
 
       const head = agents.store.get('head-research-head')
       const signal = new AbortController().signal
 
-      // dept_room_write posts from the head's member id.
-      const writeResult = await headCtx.tools.get('dept_room_write', key).execute(
-        { room: 'board', to: ['asistente'], text: 'hello from the head' },
+      // send_message persists + delivers from the head's member id.
+      const sendResult = await headCtx.tools.get('send_message', key).execute(
+        { to: ['research-head'], text: 'hello from the head' },
         { agent: head, signal }
       )
-      assert.equal(writeResult.from, 'research-head', 'posted under the head member id')
+      assert.equal(sendResult.messageId, 'm-0', 'the bus record was persisted')
+      assert.equal(sendResult.delivered['research-head'], 'self', 'self-addressed send is held (self)')
 
-      // dept_room_who lists static members + the head + any hosts. The head's
-      // department room is 'research' (department.roomId), not the board room.
-      const whoResult = await headCtx.tools.get('dept_room_who', key).execute({ room: 'research' }, { agent: head })
-      assert.deepEqual(whoResult.members, ['research-head'])
-      assert.equal(whoResult.posts.length, 1, 'the head is listed')
-      assert.equal(whoResult.posts[0].postId, 'research-head')
-      assert.equal(whoResult.posts[0].sessionId, 'head-research-head')
-      assert.equal(whoResult.posts[0].sessionLive, true)
-      assert.equal(whoResult.posts[0].agentPreset, 'deepartments-head-research')
+      // dept_who lists the head itself + the configured catalog.
+      const whoResult = await headCtx.tools.get('dept_who', key).execute({}, { agent: head })
+      const self = whoResult.members.find((member) => member.agentId === 'research-head')
+      assert.ok(self, 'the head is listed')
+      assert.equal(self.kind, 'head')
+      assert.equal(self.sessionId, 'head-research-head')
+      assert.equal(self.live, true)
+      assert.equal(self.you, true)
     } finally {
       await dispose()
     }
@@ -1075,7 +899,6 @@ test('Piece 1: ensureHead attaches the head session to the root workspace AND pi
   await withTempStateDir(async (stateDir) => {
     const { root, agents, workspaceRegistry, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'head root agent created at boot')
 
       // Workspace attach (fire-and-forget from ensureHead): the head session
@@ -1109,7 +932,6 @@ test('Piece 1 cwd fix: ensureHead creates the head under the WORKSPACE ROOT path
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'head root agent created at boot')
       const create = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
       assert.ok(create, 'the head was created fresh')
@@ -1147,7 +969,6 @@ test('Piece 1 cwd fix: the workspace root is the entity that owns the LIVE HOST 
       ]
     })
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'head root agent created at boot')
       const create = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
       assert.equal(create.meta.cwd, wsHost, 'resolution prefers the entity whose sessionIds hold the live host session (the GUI-created workspace root)')
@@ -1162,7 +983,6 @@ test('Piece 1 cwd fix: NO workspace entities → the head is created with the re
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir, { workspaceEntities: [] })
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'head root agent created at boot')
       const create = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
       assert.equal(create.meta.cwd, path.resolve(path.dirname(new URL(import.meta.url).pathname), '..'), 'empty workspace list → the repoRoot fallback cwd (never throws)')
@@ -1172,38 +992,49 @@ test('Piece 1 cwd fix: NO workspace entities → the head is created with the re
   })
 })
 
-test('wake relay (head): a registered department head is woken by raw Agent.followup (no parent needed); self/unknown members are handled', async () => {
+test('B3 bus head wake: send_message to a registered department head delivers with the agent/send source (no parent needed); self/unknown members are handled', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       // Head auto-materializes at boot (root agent at its stable session id).
       await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head root agent created at boot')
       const head = agents.store.get(`head-${postId}`)
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      const signal = new AbortController().signal
 
-      // 1. A head-addressed message wakes it via the raw followup.
-      const seq = await nextSeq(stateDir, 'board')
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'question one'), 'board')
+      // 1. A head-addressed message delivers via the bus (agent source framing).
+      const result = await root.tools.get('send_message').execute(
+        { to: [postId], text: 'question one' },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
+      assert.equal(result.delivered[postId], 'delivered')
       await waitFor(() => head.inboxMessages.length >= 1, 5000, 'head woken')
       const wake = head.inboxMessages.at(-1)
-      assert.match(wake.content[0].text, /new message .* from asistente/)
-      assert.doesNotMatch(wake.content[0].text, /question one/, 'pointer-only (no body)')
-      assert.equal(wake.source.kind, 'board', 'head wakes use the raw board followup source')
+      assert.match(wake.content[0].text, /^\[From .*\]: question one/, 'bus framing carries the full body')
+      assert.equal(wake.source.kind, 'agent', 'head wakes use the agent send source')
 
-      // 2. Self-addressed message: sender is not woken (echo-loop guard).
+      // 2. Self-addressed send: held (self) — persisted, no wake.
       const before = head.inboxMessages.length
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq + 1, postId, [postId], 'self note'), 'board')
+      const selfResult = await root.tools.get('send_message').execute(
+        { to: [postId], text: 'self note' },
+        { agent: head, signal }
+      )
+      assert.equal(selfResult.delivered[postId], 'self', 'self-addressed send is held')
       assert.equal(head.inboxMessages.length, before, 'no self-wake')
 
-      // 3. Unknown member: skipped + warned (relay defensive path), never throws.
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq + 2, 'asistente', ['ghost'], 'who?'), 'board')
-      assert.equal(head.inboxMessages.length, before, 'unknown member not woken')
+      // 3. Unknown member: failed per-recipient (never throws the send).
+      const ghostResult = await root.tools.get('send_message').execute(
+        { to: ['ghost'], text: 'who?' },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
+      assert.equal(ghostResult.delivered.ghost, 'failed', 'unknown member fails per-recipient')
 
       // 4. Head wake needs NO live parent: the head stays live with no host and
-      //    a later head-addressed message still wakes it (root-agent model).
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq + 3, 'asistente', [postId], 'still here'), 'board')
+      //    a later message still wakes it (root-agent model).
+      await root.tools.get('send_message').execute(
+        { to: [postId], text: 'still here' },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
       await waitFor(() => head.inboxMessages.length >= before + 1, 5000, 'head woken with no parent present')
     } finally {
       await dispose()
@@ -1211,34 +1042,33 @@ test('wake relay (head): a registered department head is woken by raw Agent.foll
   })
 })
 
-test('Fix A1 boot-quiet: a fresh head materializes at boot with NO proactive turn or board write — it stays idle until an ADDRESSED message wakes it', async () => {
+test('Fix A1 boot-quiet: a fresh head materializes at boot with NO proactive turn or send — it stays idle until an ADDRESSED message wakes it', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
       const head = agents.store.get(`head-${postId}`)
 
       // (a) Materialization itself must NOT enqueue a proactive turn for the head,
-      //     and the head must stay idle (the Fix A1 boot-quiet guarantee). The
-      //     boot path never self-initiates: no followup, no board write, no turn.
+      //     and the head must stay idle (the Fix A1 boot-quiet guarantee).
       assert.equal(head.inboxMessages.length, 0, 'boot materialization enqueues NO proactive followup for the fresh head')
       assert.equal(head.status, 'idle', 'the fresh head stays idle after boot materialization')
       assert.equal(agents.resumeCalls.length, 0, 'boot materialization of the FRESH head does not cold-resume (it creates) — no wake cycle')
 
-      // (b) The head is woken ONLY by an explicitly addressed board message — not
+      // (b) The head is woken ONLY by an explicitly addressed bus message — not
       //     by a proactive turn of its own.
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      const seq = await nextSeq(stateDir, 'board')
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'hello head'), 'board')
+      const signal = new AbortController().signal
+      await root.tools.get('send_message').execute(
+        { to: [postId], text: 'hello head' },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
       await waitFor(() => head.inboxMessages.length >= 1, 5000, 'head woken only once an ADDRESSED message arrives')
-      assert.match(head.inboxMessages.at(-1).content[0].text, /new message .* from asistente/, 'the sole wake is the addressed-board pointer')
+      assert.match(head.inboxMessages.at(-1).content[0].text, /^\[From .*\]: hello head/, 'the sole wake is the addressed bus message')
       assert.equal(head.inboxMessages.length, 1, 'exactly one wake — the addressed message (no extra proactive turns)')
 
-      // (c) The head's own-layer role persona (the BOOT-QUIET directive) is
-      //     installed with the head agent. Its body carries the instruction to
-      //     never self-initiate board activity.
+      // (c) The head’s own-layer role persona (the BOOT-QUIET directive) is
+      //     installed with the head agent.
       const headCtx = head.ctx
       const sp = headCtx?.get('systemPrompt')
       if (sp !== void 0 && typeof sp.assemble === 'function') {
@@ -1250,12 +1080,11 @@ test('Fix A1 boot-quiet: a fresh head materializes at boot with NO proactive tur
         } catch {
           roleText = ''
         }
-        // Best-effort: the role section registers on the agent's scoped layer, so a
-        // scope-less assemble may not surface it. Only assert when it did — the
-        // behavioral (a)/(b) guarantees above are the binding Fix A1 contract.
+        // Best-effort: the role section registers on the agent’s scoped layer, so a
+        // scope-less assemble may not surface it. Only assert when it did.
         if (roleText !== '') {
           assert.match(roleText, /BOOT-QUIET/, 'head role persona directs boot-quiet behavior')
-          assert.match(roleText, /never proactively write to the board/, 'head role persona forbids proactive board writes')
+          assert.match(roleText, /never proactively send/, 'head role persona forbids proactive sends')
         }
       }
     } finally {
@@ -1264,58 +1093,53 @@ test('Fix A1 boot-quiet: a fresh head materializes at boot with NO proactive tur
   })
 })
 
-test('Fix A2 stuck-head recovery: a live-but-stuck head (running, no session progress past STUCK_HEAD_MS) is disposed + cold-resumed then woken — the wake reaches a WORKING model turn, never the frozen loop', async () => {
+test('Fix A2 stuck-head recovery (bus): a live-but-stuck head is disposed + cold-resumed then delivered — the message reaches a WORKING model turn, never the frozen loop', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     const sid = `head-${postId}`
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has(sid), 5000, 'head created at boot')
       const frozenHead = agents.store.get(sid)
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
+      const signal = new AbortController().signal
+      const sendTool = root.tools.get('send_message')
 
-      // Simulate the Batch-1c live-but-STUCK resident loop: status 'running' and a
-      // session event log that NEVER grows (the resident is wedged on a stalled
-      // tool call). Fix A2 drives the stuck window through the injectable clock.
+      // Simulate the live-but-STUCK resident loop: status 'running' and a
+      // session event log that NEVER grows. Drive the window via the clock.
       frozenHead.status = 'running'
       const T0 = 1_700_000_000_000
       const resumeBefore = agents.resumeCalls.length
       process.env.DEEPARTMENTS_TEST_NOW = String(T0)
 
-      // Wake 1: first observation of the running head — the relay records the
-      // progress baseline and (healthy path) enqueues a followup; NOT judged stuck
-      // yet, NOT disposed, NOT resumed.
-      let seq = await nextSeq(stateDir, 'board')
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'first'), 'board')
-      await waitFor(() => frozenHead.inboxMessages.length >= 1, 5000, 'first wake enqueued on the frozen-loop incarnation')
+      // Send 1: first observation of the running head — the bus records the
+      // progress baseline and delivers; NOT judged stuck yet.
+      const r1 = await sendTool.execute({ to: [postId], text: 'first' }, { agent: { id: 'host-any', session: { header: {} } }, signal })
+      assert.equal(r1.delivered[postId], 'delivered', 'first delivery accepted on the frozen-loop incarnation')
+      await waitFor(() => frozenHead.inboxMessages.length >= 1, 5000, 'first delivery enqueued on the frozen-loop incarnation')
       assert.equal(agents.store.get(sid), frozenHead, 'healthy live head is NOT disposed on first observation')
       assert.equal(agents.resumeCalls.length, resumeBefore, 'no cold-resume while the head still looks healthy')
 
-      // The resident makes NO progress for longer than STUCK_HEAD_MS (120s): the
-      // clock advances well past it while status stays 'running' and the event log
-      // never grows.
+      // No progress for longer than STUCK_HEAD_MS (120s).
       process.env.DEEPARTMENTS_TEST_NOW = String(T0 + 130_000)
 
-      // Wake 2: now the head is STUCK → dispose the frozen handle + fall through to
-      // the COLD path (resume then followup) so the wake is re-delivered from the
-      // durable board record, never lost to the frozen in-memory inbox.
-      seq++
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'second'), 'board')
+      // Send 2: now the head is STUCK → dispose the frozen handle + cold-resume
+      // (the materializePost stuck path) so the delivery is re-made from the
+      // DURABLE message record, never lost to the frozen in-memory inbox.
+      const r2 = await sendTool.execute({ to: [postId], text: 'second' }, { agent: { id: 'host-any', session: { header: {} } }, signal })
+      assert.equal(r2.delivered[postId], 'resumed', 'stuck recovery reports resumed')
       await waitFor(() => agents.store.get(sid) !== frozenHead, 5000, 'stuck head was disposed and a fresh incarnation cold-resumed')
 
       const freshHead = agents.store.get(sid)
       assert.ok(freshHead, 'a fresh head incarnation is back in the registry')
       assert.notEqual(freshHead, frozenHead, 'the frozen resident loop is GONE from the registry (disposed), replaced by a working incarnation')
       assert.ok(agents.resumeCalls.length > resumeBefore, 'the stuck head was cold-resumed (agents.resume invoked)')
-      await waitFor(() => freshHead.inboxMessages.length >= 1, 5000, 'the followup reaches the WORKING cold-resumed incarnation')
-      assert.match(freshHead.inboxMessages.at(-1).content[0].text, /new message .* from asistente/, 'the pointer-only wake is delivered to the fresh incarnation')
-      assert.doesNotMatch(freshHead.inboxMessages.at(-1).content[0].text, /second/, 'wake stays pointer-only (no message body)')
+      await waitFor(() => freshHead.inboxMessages.length >= 1, 5000, 'the delivery reaches the WORKING cold-resumed incarnation')
+      assert.match(freshHead.inboxMessages.at(-1).content[0].text, /^\[From .*\]: second/, 'the bus delivery is delivered to the fresh incarnation')
 
-      // The durable board record is the re-delivery source: it must still hold wake
-      // 2's record after dispose+resume (nothing lost to the in-memory inbox).
-      const boardRecords = await loadRecords(resolveBoardPath(stateDir, 'board'))
-      assert.ok(boardRecords.some((r) => r.from === 'asistente' && String(r.to).includes(postId) && r.seq === seq), 'durable board record for the wake-triggering message persists (the re-delivery source)')
+      // The DURABLE message record is the re-delivery source: it still holds
+      // send 2’s record after dispose+resume (nothing lost to the in-memory inbox).
+      const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+      assert.ok(records.some((r) => r.text === 'second'), 'durable message record for the wake-triggering message persists (the re-delivery source)')
     } finally {
       delete process.env.DEEPARTMENTS_TEST_NOW
       await dispose()
@@ -1323,35 +1147,34 @@ test('Fix A2 stuck-head recovery: a live-but-stuck head (running, no session pro
   })
 })
 
-test('Fix A2 normal live-head followup: a HEALTHY live head gets its followup ENQUEUED without being disposed or cold-resumed', async () => {
+test('Fix A2 normal live-head followup (bus): a HEALTHY live head gets its delivery ENQUEUED without being disposed or cold-resumed', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     const sid = `head-${postId}`
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has(sid), 5000, 'head created at boot')
       const head = agents.store.get(sid)
+      const signal = new AbortController().signal
+      const sendTool = root.tools.get('send_message')
+      const send = async (text) => sendTool.execute({ to: [postId], text }, { agent: { id: 'host-any', session: { header: {} } }, signal })
 
-      // Healthy live head: idle status, and its session event log GROWS between
-      // wake observations (a busy-but-working head keeps producing progress).
       const resumeBefore = agents.resumeCalls.length
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      let seq = await nextSeq(stateDir, 'board')
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'wake A'), 'board')
-      await waitFor(() => head.inboxMessages.length >= 1, 5000, 'followup enqueued (healthy path)')
+      const r1 = await send('wake A')
+      assert.equal(r1.delivered[postId], 'delivered')
+      await waitFor(() => head.inboxMessages.length >= 1, 5000, 'delivery enqueued (healthy path)')
 
-      // Even across many subsequent wake pushes, a healthy head keeps the SAME
-      // incarnation: never disposed, never cold-resumed, followups just enqueue.
+      // Even across many subsequent sends, a healthy head keeps the SAME
+      // incarnation: never disposed, never cold-resumed, deliveries just enqueue.
       for (let i = 0; i < 3; i++) {
-        seq++
-        await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], `wake ${i}`), 'board')
+        const r = await send(`wake ${i}`)
+        assert.equal(r.delivered[postId], 'delivered')
       }
-      await waitFor(() => head.inboxMessages.length >= 4, 5000, 'all followups enqueued on the same live incarnation')
+      await waitFor(() => head.inboxMessages.length >= 4, 5000, 'all deliveries enqueued on the same live incarnation')
 
-      assert.equal(agents.store.get(sid), head, 'healthy live head is NEVER disposed across wakes')
+      assert.equal(agents.store.get(sid), head, 'healthy live head is NEVER disposed across sends')
       assert.equal(agents.resumeCalls.length, resumeBefore, 'healthy live head is NEVER cold-resumed (no dispose+resume cycle)')
-      assert.equal(head.inboxMessages.length, 4, 'every wake enqueued a pointer followup on the same live head')
+      assert.equal(head.inboxMessages.length, 4, 'every send delivered a followup on the same live head')
       assert.equal(head.status, 'idle', 'head left in its normal idle state')
     } finally {
       await dispose()
@@ -1359,44 +1182,35 @@ test('Fix A2 normal live-head followup: a HEALTHY live head gets its followup EN
   })
 })
 
-test('Fix A2 no lost wake: the durable board record is the re-delivery source, so a wake-enqueued followup survives a stuck-head dispose+restart', async () => {
+test('Fix A2 no lost wake (bus): the durable message record is the re-delivery source, so a delivered followup survives a stuck-head dispose+restart', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     const sid = `head-${postId}`
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has(sid), 5000, 'head created at boot')
       const frozenHead = agents.store.get(sid)
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-
-      // Pre-seed the durable board file with a wake-triggering record BEFORE the
-      // stuck incident — the production "restart with a pending addressed message"
-      // scenario (the 2026-08-20 live finding: the followup was enqueued into a
-      // frozen loop's in-memory inbox and LOST on restart, showing 0 Board delta).
-      const seq0 = await nextSeq(stateDir, 'board')
-      const pendingRecord = messageRecord(seq0, 'asistente', [postId], 'pending question')
-      await seedBoardRecords(stateDir, 'board', [pendingRecord])
+      const signal = new AbortController().signal
+      const sendTool = root.tools.get('send_message')
 
       // Drive the stuck head through a recovery cycle: first observe it running
       // (baseline), then fast-forward past STUCK_HEAD_MS with no progress.
       const T0 = 1_700_000_000_000
       process.env.DEEPARTMENTS_TEST_NOW = String(T0)
       frozenHead.status = 'running'
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq0 + 1, 'asistente', [postId], 'trigger'), 'board')
+      await sendTool.execute({ to: [postId], text: 'trigger' }, { agent: { id: 'host-any', session: { header: {} } }, signal })
       process.env.DEEPARTMENTS_TEST_NOW = String(T0 + 130_000)
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq0 + 2, 'asistente', [postId], 'trigger again'), 'board')
+      const r = await sendTool.execute({ to: [postId], text: 'trigger again' }, { agent: { id: 'host-any', session: { header: {} } }, signal })
+      assert.equal(r.delivered[postId], 'resumed')
       await waitFor(() => agents.store.get(sid) !== frozenHead, 5000, 'stuck head disposed + cold-resumed')
 
       const freshHead = agents.store.get(sid)
       await waitFor(() => freshHead.inboxMessages.length >= 1, 5000, 'fresh incarnation woken')
 
-      // The durable board record is untouched by dispose/restart and remains the
-      // re-delivery source — NOTHING was lost: the pending record is still there.
-      const boardRecords = await loadRecords(resolveBoardPath(stateDir, 'board'))
-      const pendingOnDisk = boardRecords.find((r) => r.id === pendingRecord.id)
-      assert.ok(pendingOnDisk, 'the pending wake-triggering record persists in the durable board file')
-      assert.deepEqual(pendingOnDisk, pendingRecord, 'the durable record is byte-preserved (the re-delivery source is intact)')
+      // The durable message record is untouched by dispose/restart and remains
+      // the re-delivery source — NOTHING was lost.
+      const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+      assert.ok(records.some((r) => r.text === 'trigger'), 'the trigger message record persists in the durable store')
     } finally {
       delete process.env.DEEPARTMENTS_TEST_NOW
       await dispose()
@@ -1404,200 +1218,81 @@ test('Fix A2 no lost wake: the durable board record is the re-delivery source, s
   })
 })
 
-test('dept_room_who: lists static members and the registered live heads', async () => {
+test('B3 dept_who: the catalog lists registered heads with you:true on the caller (the room-who replacement)', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
       const head = agents.store.get(`head-${postId}`)
       const { ctx: headCtx, key } = agents.childContexts[0]
-      const tool = headCtx.tools.get('dept_room_who', key)
+      const tool = headCtx.tools.get('dept_who', key)
 
-      const result = await tool.execute({ room: 'research' }, { agent: head })
-      assert.equal(result.room, 'research')
-      assert.deepEqual(result.members, ['research-head'], 'static members in config order')
-      assert.equal(result.posts.length, 1)
-      assert.equal(result.posts[0].postId, postId)
-      assert.equal(result.posts[0].sessionId, `head-${postId}`)
-      assert.equal(result.posts[0].sessionLive, true, 'head agent is live')
-      assert.equal(result.posts[0].agentPreset, 'deepartments-head-research')
-
-      // Piece 2 — a room id outside config.org.rooms is NOT a room: the tool
-      // now throws loud instead of returning an empty roster (which faked
-      // knowledge of ghost rooms). Both the message and the Error type are
-      // asserted (defineTool execute errors propagate as tool failures).
-      await assert.rejects(tool.execute({ room: 'nope' }, { agent: head }), (error) => {
-        assert.ok(error instanceof Error)
-        assert.match(error.message, /unknown room "nope" \(not in config\.org\.rooms\)/)
-        return true
-      })
+      const result = await tool.execute({}, { agent: head, signal: new AbortController().signal })
+      const self = result.members.find((member) => member.agentId === postId)
+      assert.ok(self, 'the head is listed in dept_who')
+      assert.equal(self.kind, 'head')
+      assert.equal(self.sessionId, 'head-research-head')
+      assert.equal(self.live, true)
+      assert.equal(self.you, true, 'the caller marks its own entry you:true')
+      // B3: a room parameter no longer exists — dept_who is room-less by design.
+      assert.equal('room' in tool.output.schema.properties, false, 'dept_who output has no room field')
     } finally {
       await dispose()
     }
   })
 })
 
-test('Piece 2: BOTH dept_room_who definitions (head own-layer AND global host-plane) reject rooms outside config.org.rooms', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
-      const head = agents.store.get('head-research-head')
-      const host = agents.put(fakeParentAgent())
-      const signal = new AbortController().signal
-
-      // (1) Head own-layer definition (installed by headSetup).
-      const { ctx: headCtx, key } = agents.childContexts[0]
-      const headWho = headCtx.tools.get('dept_room_who', key)
-      await assert.rejects(headWho.execute({ room: 'no-such-room' }, { agent: head }), (error) => {
-        assert.ok(error instanceof Error)
-        assert.match(error.message, /unknown room "no-such-room" \(not in config\.org\.rooms\)/)
-        return true
-      })
-
-      // (2) Global host-plane definition (ctx.tools.register).
-      const globalWho = root.tools.get('dept_room_who')
-      await assert.rejects(globalWho.execute({ room: 'no-such-room' }, { agent: host, signal }), (error) => {
-        assert.ok(error instanceof Error)
-        assert.match(error.message, /unknown room "no-such-room" \(not in config\.org\.rooms\)/)
-        return true
-      })
-
-      // Configured rooms still resolve on BOTH planes ('research'/'board').
-      const headBoard = await headWho.execute({ room: 'board' }, { agent: head })
-      assert.ok(Array.isArray(headBoard.members), 'head-plane roster for a configured room still works')
-      const globalBoard = await globalWho.execute({ room: 'board' }, { agent: host, signal })
-      assert.ok(Array.isArray(globalBoard.members), 'host-plane roster for a configured room still works')
-      const globalResearch = await globalWho.execute({ room: 'research' }, { agent: host, signal })
-      assert.equal(globalResearch.posts[0].postId, 'research-head', 'head rows resolve on a configured room on the host plane')
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-
-test('dept_whereami: a registered head gets its spatial identity; the host gets the host shape', async () => {
+test('B3 send_message sensitive flag: sensitive:true persists the sensitive marker on the record', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
-    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
+      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
+      const signal = new AbortController().signal
+      const r = await root.tools.get('send_message').execute(
+        { to: [postId], text: 'sensitive note', sensitive: true },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
+      assert.equal(r.delivered[postId], 'delivered')
+      const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+      const record = records.find((entry) => entry.id === r.messageId)
+      assert.ok(record, 'the record persisted')
+      assert.equal(record.sensitive, true, 'the sensitive flag is recorded')
+      assert.equal(record.kind, 'agent')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('B3 agent_messages surfaces the caller’s own received history (the room-read replacement)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
       await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
       const head = agents.store.get(`head-${postId}`)
       const { ctx: headCtx, key } = agents.childContexts[0]
-      const tool = headCtx.tools.get('dept_whereami', key)
       const signal = new AbortController().signal
 
-      // Head path.
-      const where = await tool.execute({}, { agent: head, signal })
-      assert.equal(where.kind, 'post')
-      assert.equal(where.postId, postId)
-      assert.equal(where.roomId, 'research')
-      assert.equal(where.sessionId, `head-${postId}`)
-      assert.equal(where.agentPreset, 'deepartments-head-research')
-      assert.equal(where.sessionLive, true)
-      assert.deepEqual(where.members, ['research-head'])
-      assert.equal(where.posts.length, 1)
-      assert.equal(where.posts[0].sessionLive, true)
-
-      // Host path (a bare host agent): kind host, no address fields.
-      const parent = agents.put(fakeParentAgent())
-      const hostWhere = await pluginCtx().tools.get('dept_whereami').execute({}, { agent: parent, signal })
-      assert.equal(hostWhere.kind, 'host')
-      assert.equal(hostWhere.postId, null)
-      assert.equal(hostWhere.roomId, null)
+      // Seed two addressed messages via the bus.
+      for (const text of ['one', 'two']) {
+        await root.tools.get('send_message').execute(
+          { to: [postId], text },
+          { agent: { id: 'host-any', session: { header: {} } }, signal }
+        )
+      }
+      const page = await headCtx.tools.get('agent_messages', key).execute({ limit: 1 }, { agent: head, signal })
+      assert.equal(page.total, 2, 'both messages addressed to the head are counted')
+      assert.equal(page.remaining, 1, 'one older message remains')
+      assert.equal(page.messages[0].text, 'two', 'newest-first paging')
     } finally {
       await dispose()
     }
   })
 })
 
-test('truncation fix: pointer-only relay, full fetch by id without cursor advance, and explicit TOC preview truncation', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const postId = 'research-head'
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
-      const post = agents.store.get(`head-${postId}`)
-      const { ctx: childCtx, key } = agents.childContexts[0]
-      const signal = new AbortController().signal
-      const read = (args) => childCtx.tools.get('dept_room_read', key).execute({ room: 'board', ...args }, { agent: post, signal })
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      let seq = await nextSeq(stateDir, 'board')
-
-      // (a) wake relay is pointer-only — no body, even for a long message.
-      const longRelay = 'Z'.repeat(300)
-      seq = await nextSeq(stateDir, 'board')
-      const longRec = messageRecord(seq, 'asistente', [postId], longRelay)
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), longRec, 'board')
-      await waitFor(() => post.inboxMessages.length >= 1, 5000, 'head woken')
-      const relayWake = post.inboxMessages.at(-1)
-      assert.match(relayWake.content[0].text, new RegExp(`new message ${longRec.id} from asistente`))
-      assert.ok(!relayWake.content[0].text.includes(longRelay.slice(0, 25)), 'relay carries no body text at all')
-
-      // (b) fetch by messageId returns the FULL text and does not advance cursor.
-      const longBody = 'X'.repeat(500)
-      seq += 1
-      const longMsg = messageRecord(seq, 'asistente', [postId], longBody)
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), longMsg, 'board')
-      const fetched = await read({ messageId: longMsg.id })
-      assert.match(fetched.delta, new RegExp(`Full text of ${longMsg.id}`))
-      assert.equal(fetched.delta.endsWith(longBody), true, 'full text present, untruncated')
-      assert.doesNotMatch(fetched.delta, /…/, 'no truncation marker in fetch mode')
-
-      // (c) a subsequent default read still serves the long message (truncated).
-      seq += 1
-      const shortA = messageRecord(seq, 'asistente', [postId], 'alpha one')
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), shortA, 'board')
-      const toc = await read({})
-      assert.match(toc.delta, new RegExp(`${'X'.repeat(140)}…`), 'long preview truncated with the explicit … marker')
-      assert.doesNotMatch(toc.delta, /X{200,}/, 'no unmarked long body leaked into the TOC')
-      assert.match(toc.delta, /alpha one/)
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-test('dept_room_read: limit + offset page through the delta (per-member cursor)', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const postId = 'research-head'
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
-      const post = agents.store.get(`head-${postId}`)
-      const { ctx: childCtx, key } = agents.childContexts[0]
-      const signal = new AbortController().signal
-      const read = (args) => childCtx.tools.get('dept_room_read', key).execute({ room: 'board', ...args }, { agent: post, signal })
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-
-      let seq = await nextSeq(stateDir, 'board')
-      const m1 = messageRecord(seq, 'asistente', [postId], 'page one')
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), m1, 'board')
-      seq += 1
-      const m2 = messageRecord(seq, 'asistente', [postId], 'page two')
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), m2, 'board')
-
-      // On a fresh cursor, limit:1 + offset:1 reaches the SECOND paged message
-      // (candidates = [M1, M2]; offset skips M1, the limit caps the page at one
-      // entry = M2).
-      const paged = await read({ limit: 1, offset: 1 })
-      assert.match(paged.delta, /page two/, 'offset reached the second message')
-      assert.doesNotMatch(paged.delta, /page one/, 'offset skipped the first message')
-
-      const after = await read({ limit: 1, offset: 0 })
-      assert.equal(after.delta, 'No board messages addressed to you.')
-    } finally {
-      await dispose()
-    }
-  })
-})
 
 // --- Batch 1a: department heads are FIRST-CLASS ROOT AGENTS -----------------
 // A configured coordinator is materialized once as its OWN root agent (NOT a
@@ -1611,7 +1306,6 @@ test('create-when-absent: boot materializes the configured head as a root agent 
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'head root agent created at boot')
       assert.equal(agents.createCalls.filter((c) => String(c.sessionId) === 'head-research-head').length, 1, 'exactly one create for the head')
 
@@ -1632,7 +1326,7 @@ test('create-when-absent: boot materializes the configured head as a root agent 
       // AND the per-head agentPreset marker.
       const posts = await readPosts(stateDir)
       assert.equal(posts['research-head'].sessionId, 'head-research-head')
-      assert.equal(posts['research-head'].roomId, 'research', 'head room comes from the department config')
+      assert.equal(posts['research-head'].roomId, 'board', 'B3: the registry roomId is the inert legacy value (no department room in config anymore)')
       assert.equal(posts['research-head'].agentPreset, 'deepartments-head-research', 'posts.json carries the per-head preset (Batch 4a)')
       assert.equal(posts['research-head'].parentId, undefined, 'no parent for a root head')
       assert.equal(posts['research-head'].provider, undefined, 'no continuation provider for a root head')
@@ -1647,7 +1341,6 @@ test('resume-when-durable: a durable head session (sessionId in posts.json) is r
     await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'research' })
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'head root agent resumed at boot')
       assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === 'head-research-head').length, 1, 'exactly one resume for the head')
       assert.equal(agents.createCalls.filter((c) => String(c.sessionId) === 'head-research-head').length, 0, 'no fresh create when a durable session exists')
@@ -1657,17 +1350,20 @@ test('resume-when-durable: a durable head session (sessionId in posts.json) is r
   })
 })
 
-test('a head is lean: own-layer board tools present, host-plane tools NOT exposed; head gets the department-lifecycle (create/retire) tools', async () => {
+test('a head is lean: own-layer messaging tools present, host-plane tools NOT exposed; head gets the department-lifecycle (create/retire) tools', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
       const head = agents.store.get('head-research-head')
       const { ctx: headCtx, key } = agents.childContexts[0]
-      // Own-layer board tools are installed by head setup.
-      for (const name of ['dept_room_read', 'dept_room_write', 'dept_room_who', 'dept_whereami', 'dept_witness_write', 'dept_memo_write', 'dept_sleep']) {
+      // Own-layer messaging tools are installed by head setup; B3: the board
+      // tools are GONE from every layer.
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
         assert.ok(headCtx.tools.get(name, key), `${name} installed in the head own layer`)
+      }
+      for (const name of ['dept_room_read', 'dept_room_write', 'dept_room_who', 'dept_whereami', 'dept_witness_write']) {
+        assert.equal(headCtx.tools.get(name, key), undefined, `${name} removed from the head own layer (B3)`)
       }
       // Batch 3a: a department HEAD (manager) additionally gets the
       // department-lifecycle tools, scoped to its own layer — the create tool
@@ -1687,7 +1383,6 @@ test('head materialization is idempotent: a second ensure (re-boot/resume) does 
     await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'research' })
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'head resumed at boot')
       // Resumed once, never created; no dupes in either call list.
       assert.equal(agents.createCalls.length, 0, 'no create calls')
@@ -1699,22 +1394,20 @@ test('head materialization is idempotent: a second ensure (re-boot/resume) does 
   })
 })
 
-test('dept_post_retire removes a head from the registry, persists, disposes the handle, and posts a withdrawal note; unknown postId rejects loudly', async () => {
+test('dept_post_retire (B3) removes a head from the registry, persists, and disposes the handle — NO withdrawal note (the board is gone); unknown postId rejects loudly', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
       const host = agents.put(fakeParentAgent())
-      const boardSession = root.sessions.get(SessionId(roomSessionId('research')))
-      const beforeCount = boardSession.events.length
+      const beforeStore = (await loadMessageRecords(resolveMessagesPath(stateDir))).length
 
       const retireTool = root.tools.get('dept_post_retire')
       assert.ok(retireTool, 'dept_post_retire is registered (host plane)')
       const signal = new AbortController().signal
       const result = await retireTool.execute({ postId: 'research-head' }, { agent: host, signal })
       assert.equal(result.retired, true)
-      assert.equal(result.roomId, 'research')
+      assert.equal('roomId' in result, false, 'B3: the retire result no longer carries a room id')
 
       // Registry + persisted posts.json no longer contain the head.
       await waitFor(async () => (await readPosts(stateDir))['research-head'] === undefined, 5000, 'head removed from posts.json')
@@ -1722,8 +1415,9 @@ test('dept_post_retire removes a head from the registry, persists, disposes the 
       // The live handle was disposed (agent gone from the live store).
       assert.equal(agents.store.has('head-research-head'), false, 'head AgentHandle disposed on retire')
 
-      // A withdrawal note was posted in the head's room.
-      await waitFor(() => boardSession.events.length > beforeCount, 5000, 'withdrawal note emitted')
+      // B3: NO withdrawal note — the bus store is untouched by a retire.
+      const afterStore = await loadMessageRecords(resolveMessagesPath(stateDir))
+      assert.equal(afterStore.length, beforeStore, 'no withdrawal message record was persisted (the board note is gone)')
 
       // Unknown postId → loud rejection.
       await assert.rejects(() => retireTool.execute({ postId: 'ghost' }, { agent: host, signal }), /not a registered post/, 'unknown postId rejected loudly')
@@ -1731,289 +1425,6 @@ test('dept_post_retire removes a head from the registry, persists, disposes the 
       await dispose()
     }
   })
-})
-
-
-// --- Batch C: wake-relay guards against acknowledgment ping-pong --------------
-// The log audit found an unbounded ack-echo loop (board seq 86-110) where two
-// residents replying "Confirmado… leído completo" re-woke each other forever.
-// The relay now (a) tags pure acks via dept_room_write `ack:true` →
-// payload.ack, (b) suppresses ack wakes past a per-pair budget (N≥3 within
-// T=120s with no intervening non-ack message), (c) dedups empty-delta wakes
-// when the member's read cursor already consumed the record, and (d) still
-// never wakes on kind 'ready'. Tests below exercise each guard against the
-// REAL relay (setBoardRecordListener → emitRoomRecord).
-
-test('Batch C ack-loop: a content-free confirmation ping-pong saturates and terminates (no wake past the per-pair budget); a non-ack resets the counter and wakes normally', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const sessionA = 'head-research-head'
-    const sessionB = 'head-acceptor-head'
-    const postA = 'research-head'
-    const postB = 'acceptor-head'
-    // research-head auto-creates at boot; acceptor-head is seeded as a second
-    // (non-configured) head so the two-party ack ping-pong has two live targets.
-    await seedPost(stateDir, { postId: postB, sessionId: sessionB, roomId: 'board', agentPreset: 'deepartments-head' })
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      // research-head is configured → live at boot. acceptor-head is a seeded
-      // (non-configured) head: registered in posts.json but materialized lazily
-      // on its first addressed wake (the relay cold-resumes it).
-      await waitFor(() => agents.store.has(sessionA), 5000, 'research-head live at boot')
-      assert.equal(agents.store.has(sessionB), false, 'acceptor-head not yet materialized (lazy)')
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      let seq = await nextSeq(stateDir, 'board')
-
-      const emitAck = (from, to, text) =>
-        emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq++, from, [to], text, true), 'board')
-      const inboxOf = (sessionId) => (agents.store.get(sessionId)?.inboxMessages?.length ?? 0)
-
-      // Warm up 3 acks in each direction — each must still wake (budget N>=3
-      // has not yet accumulated on the pair).
-      await emitAck(postA, postB, 'a1')
-      await emitAck(postB, postA, 'b1')
-      await emitAck(postA, postB, 'a2')
-      await emitAck(postB, postA, 'b2')
-      await emitAck(postA, postB, 'a3')
-      await emitAck(postB, postA, 'b3')
-      await waitFor(() => inboxOf(sessionA) >= 3 && inboxOf(sessionB) >= 3, 5000, 'three wakes each direction')
-      const satA = inboxOf(sessionA)
-      const satB = inboxOf(sessionB)
-      assert.equal(satA, 3, `post A woken by its 3 expected acks (got ${satA})`)
-      assert.equal(satB, 3, `post B woken by its 3 expected acks (got ${satB})`)
-
-      // Once each pair has exchanged N>=3 acks, further acks must NOT wake.
-      await emitAck(postA, postB, 'a4')
-      await emitAck(postB, postA, 'b4')
-      await emitAck(postA, postB, 'a5')
-      await emitAck(postB, postA, 'b5')
-      await new Promise((resolve) => setTimeout(resolve, 200))
-      assert.equal(inboxOf(sessionA), satA, 'post A not re-woken by suppressed acks')
-      assert.equal(inboxOf(sessionB), satB, 'post B not re-woken by suppressed acks')
-
-      // A non-ack message on the SAME pair direction RESETS its counter: the
-      // next ack on that pair wakes normally again.
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq++, postB, [postA], 'new substance'), 'board')
-      await waitFor(() => inboxOf(sessionA) === satA + 1, 5000, 'non-ack message re-wakes post A')
-      await emitAck(postB, postA, 'b6-after-reset')
-      await waitFor(() => inboxOf(sessionA) === satA + 2, 5000, 'post A woken again after counter reset')
-      assert.equal(inboxOf(sessionB), satB, 'suppressed acks on the other direction (A|B) still do not wake post B')
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-test('Batch C ready-guard: a kind:ready boot marker wakes neither a host nor a head', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const postId = 'research-head'
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
-      const parent = agents.put(fakeParentAgent())
-      const hostId = `host-${parent.id}`
-      const head = agents.store.get(`head-${postId}`)
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      let seq = await nextSeq(stateDir, 'board')
-      const hostBefore = parent.inboxMessages.length
-      const headBefore = head.inboxMessages.length
-
-      // Emit a ready marker addressed to both the host and the head.
-      const readyRec = {
-        id: `ready-board-${seq}`,
-        seq: seq++,
-        ts: Date.now(),
-        from: 'system',
-        to: [hostId, postId],
-        cc: [],
-        threadId: null,
-        kind: 'ready',
-        payload: { room: { id: 'board', name: 'Board', purpose: '', members: [] } }
-      }
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), readyRec, 'board')
-      await new Promise((resolve) => setTimeout(resolve, 150))
-      assert.equal(parent.inboxMessages.length, hostBefore, 'no host wake on kind:ready')
-      assert.equal(head.inboxMessages.length, headBefore, 'no head wake on kind:ready')
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-test('Batch C cursor-dedup: a record the member\'s read cursor already consumed does not re-wake the member', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const postId = 'research-head'
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      const seq0 = await nextSeq(stateDir, 'board')
-
-      // Message M1 wakes the head; the head then READS it, advancing the cursor.
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq0, 'asistente', [postId], 'one'), 'board')
-      const post = agents.store.get(`head-${postId}`)
-      await waitFor(() => post.inboxMessages.length >= 1, 5000, 'head woken by M1')
-      const { ctx: childCtx, key } = agents.childContexts[0]
-      const read = childCtx.tools.get('dept_room_read', key)
-      const signal = new AbortController().signal
-      await read.execute({ room: 'board' }, { agent: post, signal })
-      const before = post.inboxMessages.length
-      assert.ok(before >= 1, 'post woken by M1')
-
-      // A record the cursor already consumed (same seq) must NOT re-wake.
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq0, 'asistente', [postId], 'replay'), 'board')
-      await new Promise((resolve) => setTimeout(resolve, 150))
-      assert.equal(post.inboxMessages.length, before, 'no redundant wake for an already-consumed record')
-
-      // A genuinely NEWER record still wakes.
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq0 + 1, 'asistente', [postId], 'two'), 'board')
-      await waitFor(() => post.inboxMessages.length === before + 1, 5000, 'newer record re-wakes')
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-test('Batch C dept_room_write ack:true tags a pure acknowledgement (payload.ack) without changing the output schema; ack omitted stays untagged', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      const host = agents.put(fakeParentAgent())
-      const signal = new AbortController().signal
-      const writeTool = root.tools.get('dept_room_write')
-
-      const ackResult = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'confirm read in full', ack: true }, { agent: host, signal })
-      assert.deepEqual(Object.keys(ackResult).sort(), ['from', 'messageId', 'room', 'to'], 'output schema unchanged when ack:true')
-      assert.equal(ackResult.from, `host-${host.id}`)
-      assert.deepEqual(ackResult.to, ['research-head'])
-
-      const plainResult = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'real content' }, { agent: host, signal })
-
-      const records = await loadRecords(resolveBoardPath(stateDir, 'board'))
-      const messages = records.filter((r) => r.kind === 'message' && r.from === `host-${host.id}`)
-      assert.equal(messages.length, 2)
-      const tagged = messages.find((m) => m.id === ackResult.messageId)
-      const plain = messages.find((m) => m.id === plainResult.messageId)
-      assert.equal(tagged.payload.ack, true, 'ack:true records payload.ack=true')
-      assert.equal(tagged.payload.kind, 'note', 'ack keeps kind note')
-      assert.equal(plain.payload.ack, undefined, 'plain write carries payload.ack undefined')
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-// --- Batch D: persistent read cursors + ready single-once + fork-ghost sweep ---
-// The log audit (2026-08-19) found: (1) per-member read cursors were IN-MEMORY
-// only, so a resident replayed its ENTIRE addressed backlog after a service
-// restart (wasted tokens, dropped missions); (2) the board file accumulated a
-// `kind:'ready'` boot record on EVERY service start (~41%/46-of-111 records of
-// pure noise); (3) retired `asistente-fork-*` ghosts were never garbage
-// collected from posts.json (~77M tokens doing nothing).
-//
-// Batch D fixes: cursors persist to `<stateDir>/cursors.json` and dept_room_read
-// serves ONLY `seq > lastMessageSeq` (a durable high-water mark), so a restarted
-// member reads only-new while a fresh member reads full history; `ready` is
-// emitted ONCE per room across boots; the retired fork provider's leftovers are
-// swept on boot while spawn heads are never touched.
-
-test('Batch D persistent cursor: a persisted high-water `lastMessageSeq` makes a restarted head read ONLY-new, while a fresh head reads full history', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const resumedSession = 'head-research-head'
-    const freshSession = 'head-acceptor-head'
-    const resumedPost = 'research-head'
-    const freshPost = 'acceptor-head'
-    // research-head: a configured head resumed from a durable session (cursor
-    // from cursors.json at seq 1). acceptor-head: a fresh seeded head.
-    await seedPost(stateDir, { postId: resumedPost, sessionId: resumedSession, roomId: 'research' })
-    await seedPost(stateDir, { postId: freshPost, sessionId: freshSession, roomId: 'board' })
-
-    // Historical backlog (a prior session's board file): research-head already
-    // consumed seq 0,1 (its persisted cursor is at lastMessageSeq 1); the fresh
-    // acceptor-head has no cursor entry and must see its full history.
-    await seedBoardRecords(stateDir, 'board', [
-      messageRecord(0, 'asistente', [resumedPost], 'rh-hist-0'),
-      messageRecord(1, 'asistente', [resumedPost], 'rh-hist-1'),
-      messageRecord(2, 'asistente', [freshPost], 'ac-hist-0'),
-      messageRecord(3, 'asistente', [freshPost], 'ac-hist-1')
-    ])
-    // Persisted cursor artifact from the prior session (the "restart" state).
-    await writeFile(path.join(stateDir, 'cursors.json'),
-      JSON.stringify({ 'board:research-head': { lastMessageId: null, lastMessageSeq: 1, lastAgendaSeq: -1 } }, null, 2),
-      'utf8')
-
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      // research-head resumes at boot (durable session present).
-      await waitFor(() => agents.store.has(resumedSession), 5000, 'research-head resumed at boot')
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      const childCtxFor = (sessionId) => agents.childContexts.find((c) => c.ctx.agent?.id === sessionId)
-
-      // (a) FRESH member: first addressed wake cold-resumes acceptor-head and
-      // reads — it must see the full historical backlog addressed to it.
-      let seq = await nextSeq(stateDir, 'board')
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [freshPost], 'fresh-wake'), 'board')
-      await waitFor(() => agents.store.has(freshSession), 5000, 'acceptor-head cold-resumed on wake')
-      const fresh = agents.store.get(freshSession)
-      const freshEntry = childCtxFor(freshSession)
-      assert.ok(freshEntry, 'acceptor-head child context available')
-      const freshRead = freshEntry.ctx.tools.get('dept_room_read', freshEntry.key)
-      const freshDelta = (await freshRead.execute({ room: 'board' }, { agent: fresh, signal: new AbortController().signal })).delta
-      assert.match(freshDelta, /ac-hist-0/, 'fresh member sees full addressed history (ac-hist-0)')
-      assert.match(freshDelta, /ac-hist-1/, 'fresh member sees full addressed history (ac-hist-1)')
-
-      // (b) RESUMED member: research-head (live, cursor at 1) only sees the new
-      // wake message, never rh-hist-0/rh-hist-1.
-      seq = await nextSeq(stateDir, 'board')
-      const resumedWakeText = 'fresh-note-for-resumed'
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [resumedPost], resumedWakeText), 'board')
-      const resumed = agents.store.get(resumedSession)
-      await waitFor(() => resumed.inboxMessages.length >= 1, 5000, 'research-head woken')
-      const resumedEntry = childCtxFor(resumedSession)
-      assert.ok(resumedEntry, 'research-head child context available')
-      const resumedRead = resumedEntry.ctx.tools.get('dept_room_read', resumedEntry.key)
-      const resumedDelta = (await resumedRead.execute({ room: 'board' }, { agent: resumed, signal: new AbortController().signal })).delta
-      assert.match(resumedDelta, new RegExp(resumedWakeText), 'resumed member gets the only-new message')
-      assert.doesNotMatch(resumedDelta, /rh-hist-0/, 'resumed member does NOT replay its historical backlog (rh-hist-0)')
-      assert.doesNotMatch(resumedDelta, /rh-hist-1/, 'resumed member does NOT replay its historical backlog (rh-hist-1)')
-
-      // The high-water mark was mirrored to disk on the read.
-      await waitFor(async () => {
-        const cursors = await readCursors(stateDir)
-        const resumedCursor = cursors['board:research-head']
-        return resumedCursor !== undefined && resumedCursor.lastMessageSeq >= seq
-      }, 5000, 'advanced cursor persisted to cursors.json')
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-test('Batch D ready single-once: a second boot into the same stateDir does NOT re-emit a ready record per room', async () => {
-  const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-ready-'))
-  try {
-    const readyCount = async (roomId) => (await loadRecords(resolveBoardPath(stateDir, roomId))).filter((r) => r.kind === 'ready').length
-
-    const b1 = await bootPlugin(stateDir)
-    await waitForRooms(b1.root)
-    assert.equal(await readyCount('board'), 1, 'one ready record for board after first boot')
-    assert.equal(await readyCount('research'), 1, 'one ready record for research after first boot')
-    await b1.dispose()
-
-    // Restart into the SAME stateDir: the ready record already persisted, so no
-    // second ready record may be appended.
-    const b2 = await bootPlugin(stateDir)
-    await waitForRooms(b2.root)
-    assert.equal(await readyCount('board'), 1, 'still one ready record for board after second boot')
-    assert.equal(await readyCount('research'), 1, 'still one ready record for research after second boot')
-    await b2.dispose()
-  } finally {
-    await rm(stateDir, { recursive: true, force: true })
-  }
 })
 
 test('Batch D fork-ghost sweep: retired fork-provider posts are removed from posts.json on boot while a head remains', async () => {
@@ -2035,7 +1446,6 @@ test('Batch D fork-ghost sweep: retired fork-provider posts are removed from pos
 
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'head resumed at boot')
       // The head survives; the fork ghosts are swept from posts.json on boot (a
       // persistPosts is NOT forced for the legacy entry, but the in-memory
@@ -2044,375 +1454,14 @@ test('Batch D fork-ghost sweep: retired fork-provider posts are removed from pos
       const posts = await readPosts(stateDir)
       assert.equal(posts['research-head'].sessionId, 'head-research-head', 'head kept with its root-agent session id')
 
-      // The live registry agrees (dept_room_who lists no fork ghosts) and the
-      // head is present in its department room.
-      const who = await root.tools.get('dept_room_who').execute({ room: 'board' })
-      assert.ok(!who.posts.some((p) => p.postId.startsWith('asistente-fork-')), 'no fork ghost in the live roster')
+      // The live registry agrees (dept_who lists no fork ghosts).
+      const who = await root.tools.get('dept_who').execute({}, { agent: fakeParentAgent(), signal: new AbortController().signal })
+      assert.ok(!who.members.some((m) => m.agentId.startsWith('asistente-fork-')), 'no fork ghost in the live roster')
     } finally {
       await dispose()
     }
   })
 })
-
-// --- Batch E: roster liveness, whereami ensureHost, sender-trust verification ---
-// Closes Batch A reviewer notes 1-2 and the audit's self-asserted-identity
-// finding: (1) dept_room_who now reports truthful host session liveness
-// (sessionLive) — a cold-boot non-live host is no longer listed as "live";
-// (2) dept_whereami now calls ensureHost on its host branch, so a host that
-// only calls whereami is REGISTERED (addressable) instead of staying
-// addressless; (3) dept_room_write gains a `sensitive` flag that records
-// payload.sensitive + a senderVerified flag (registry-verified sender) as a
-// PRAGMATIC sender-trust SIGNAL — surfaced in the read delta, not an
-// enforcement block or a crypto signature.
-
-test('Batch E dept_room_who: a non-live host lists with sessionLive:false, a live host with sessionLive:true; heads report sessionLive', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const postId = 'research-head'
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
-      const post = agents.store.get(`head-${postId}`)
-      const { ctx: childCtx, key } = agents.childContexts[0]
-      const who = childCtx.tools.get('dept_room_who', key)
-      const signal = new AbortController().signal
-
-      // A live host joins the board room (registering it there).
-      const liveHost = agents.put(fakeParentAgent())
-      await root.tools.get('dept_room_write').execute({ room: 'board', to: [postId], text: 'join' }, { agent: liveHost, signal })
-
-      // The head's OWN room ('research') lists it with sessionLive:true.
-      const ownRoom = await who.execute({ room: 'research' }, { agent: post })
-      assert.equal(ownRoom.posts[0].postId, postId)
-      assert.equal(ownRoom.posts[0].sessionLive, true)
-
-      // Now kill that host's agent — it stays in the registry (Batch A
-      // reconciliation) but is NOT live. It must list with sessionLive:false.
-      agents.store.delete(liveHost.id)
-      const result = await who.execute({ room: 'board' }, { agent: post })
-      const dead = result.hosts.find((h) => h.hostId === `host-${liveHost.id}`)
-      assert.ok(dead, 'the registered-but-dead host is still listed in the roster')
-      assert.equal(dead.sessionLive, false, 'a cold-boot/non-live host reports sessionLive:false, never "live"')
-      assert.equal(dead.sessionId, liveHost.id)
-      assert.equal(dead.roomId, 'board')
-
-      // A genuinely live host reports sessionLive:true. The single-live-host
-      // guard (postmortem nº5) forbids a SECOND registration while the dead
-      // entry still exists, so re-materialize the SAME registered session id:
-      // the existing host entry then flips to sessionLive:true.
-      agents.put(fakeParentAgent(liveHost.id))
-      await root.tools.get('dept_room_write').execute({ room: 'board', to: [postId], text: 'join again' }, { agent: agents.store.get(liveHost.id), signal })
-      const result2 = await who.execute({ room: 'board' }, { agent: post })
-      const alive = result2.hosts.find((h) => h.hostId === `host-${liveHost.id}`)
-      assert.ok(alive && alive.sessionLive === true, 'a live host reports sessionLive:true')
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-test('Batch E dept_whereami host branch: a host-only agent calling whereami is REGISTERED (addressable, hostForSession populated)', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      // A host that NEVER called read/write — whereami is its first board tool call.
-      const host = agents.put(fakeParentAgent())
-      const signal = new AbortController().signal
-      const whereami = root.tools.get('dept_whereami')
-
-      const where = await whereami.execute({}, { agent: host, signal })
-      assert.equal(where.kind, 'host')
-      assert.equal(where.postId, null)
-      assert.equal(where.roomId, null)
-      // ensureHost ran: the host is now registered AND addressable.
-      assert.equal(where.hostId, `host-${host.id}`, 'a whereami-only host is registered and addressable')
-      assert.equal(where.sessionId, host.id)
-      assert.equal(where.hostRoomId, 'board', 'unregistered host joins the first configured room')
-
-      // The reverse map is populated: hosts.json holds the host in room 'board'.
-      const hosts = await readHosts(stateDir)
-      assert.deepEqual(hosts[`host-${host.id}`], { sessionId: host.id, roomId: 'board' }, 'hostForSession/hosts.json populated by a whereami-only call')
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-test('Batch E dept_room_write sensitive:true records payload.sensitive + senderVerified (true for a live registered sender, false for a non-live/unverified host sender)', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const postId = 'research-head'
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
-    try {
-      const signal = new AbortController().signal
-      const writeTool = root.tools.get('dept_room_write')
-
-      // (1) LIVE registered host sender + sensitive → senderVerified true.
-      const host = agents.put(fakeParentAgent())
-      const live = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'mission critical from live host', sensitive: true }, { agent: host, signal })
-      const records = await loadRecords(resolveBoardPath(stateDir, 'board'))
-      const liveRec = records.find((r) => r.id === live.messageId)
-      assert.equal(liveRec.payload.sensitive, true, 'sensitive:true records payload.sensitive=true')
-      assert.equal(liveRec.payload.senderVerified, true, 'a live registered host sender is registry-verified')
-
-      // (2) REGISTERED HEAD sender + sensitive → senderVerified true.
-      const head = agents.store.get(`head-${postId}`)
-      const headEntry = agents.childContexts.find((c) => c.ctx.agent?.id === `head-${postId}`)
-      const headWrite = headEntry.ctx.tools.get('dept_room_write', headEntry.key)
-      const headMsg = await headWrite.execute({ room: 'research', to: ['asistente'], text: 'head secret', sensitive: true }, { agent: head, signal })
-      const recs2 = await loadRecords(resolveBoardPath(stateDir, 'research'))
-      const headRec = recs2.find((r) => r.id === headMsg.messageId)
-      assert.equal(headRec.from, postId)
-      assert.equal(headRec.payload.sensitive, true)
-      assert.equal(headRec.payload.senderVerified, true, 'a registered head sender is registry-verified')
-
-      // (3) NON-LIVE host sender + sensitive → senderVerified FALSE (the audit
-      // concern: a message whose sender session is not live is surfaced as
-      // verified:no).
-      agents.store.delete(host.id)
-      const dead = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'unverified secret', sensitive: true }, { agent: host, signal })
-      const recs3 = await loadRecords(resolveBoardPath(stateDir, 'board'))
-      const deadRec = recs3.find((r) => r.id === dead.messageId)
-      assert.equal(deadRec.from, `host-${host.id}`)
-      assert.equal(deadRec.payload.sensitive, true)
-      assert.equal(deadRec.payload.senderVerified, false, 'a non-live host sender is NOT registry-verified (verified:no)')
-
-      // (4) Plain (non-sensitive) write does NOT carry the flags. Note: the
-      // single-live-host guard refuses this SECOND session's registration — its
-      // write rides the live host id, and a non-sensitive write carries no flags.
-      const plain = await writeTool.execute({ room: 'board', to: ['research-head'], text: 'ordinary note' }, { agent: agents.put(fakeParentAgent()), signal })
-      const recs4 = await loadRecords(resolveBoardPath(stateDir, 'board'))
-      const plainRec = recs4.find((r) => r.id === plain.messageId)
-      assert.equal(plainRec.payload.sensitive, undefined, 'plain write carries payload.sensitive undefined')
-      assert.equal(plainRec.payload.senderVerified, undefined, 'plain write carries payload.senderVerified undefined')
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-test('Batch E dept_room_read surfaces the [sensitive — sender verified] flag in the rendered delta (TOC + fetch)', async () => {
-  await withTempStateDir(async (stateDir) => {
-    const postId = 'research-head'
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
-      const post = agents.store.get(`head-${postId}`)
-      const { ctx: childCtx, key } = agents.childContexts[0]
-      const read = childCtx.tools.get('dept_room_read', key)
-      const signal = new AbortController().signal
-      const writeTool = root.tools.get('dept_room_write')
-
-      // A live host posts a sensitive message addressed to the head.
-      const host = agents.put(fakeParentAgent())
-      const live = await writeTool.execute({ room: 'board', to: [postId], text: 'top-secret for the head', sensitive: true }, { agent: host, signal })
-
-      // TOC mode surfaces the verified flag.
-      const toc = await read.execute({ room: 'board' }, { agent: post, signal })
-      assert.match(toc.delta, new RegExp(`${live.messageId}`), 'sensitive message is in the delta')
-      assert.match(toc.delta, /\[sensitive — sender verified: yes\]/, 'TOC surfaces [sensitive — sender verified: yes] for a live registered host sender')
-
-      // Fetch mode surfaces the flag too.
-      const fetched = await read.execute({ room: 'board', messageId: live.messageId }, { agent: post, signal })
-      assert.match(fetched.delta, /\[sensitive — sender verified: yes\]/, 'fetch surfaces the verified flag')
-      assert.match(fetched.delta, /top-secret for the head/, 'fetch still returns the full body')
-
-      // A non-live host sender surfaces verified:no in the delta. The
-      // single-live-host guard (postmortem nº5) forbids a SECOND host entry,
-      // so kill the ONLY registered host's agent: its entry stays (Batch A
-      // reconciliation) and its next sensitive post is verified:no.
-      agents.store.delete(host.id)
-      const unverified = await writeTool.execute({ room: 'board', to: [postId], text: 'shady secret', sensitive: true }, { agent: host, signal })
-      const toc2 = await read.execute({ room: 'board' }, { agent: post, signal })
-      assert.match(toc2.delta, new RegExp(`${unverified.messageId}`))
-      assert.match(toc2.delta, /\[sensitive — sender verified: no\]/, 'a non-live host sender surfaces verified:no')
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-// --- Board F (Batch F): O(1) emit counter + boot-time compaction ---------------
-
-/** A genuine `m-board-<seq>`-style message (matches the re-id pattern). */
-function boardFMsg(seq, from, to, text) {
-  return {
-    id: `m-board-${seq}`,
-    seq,
-    ts: 1700000000000 + seq,
-    from,
-    to,
-    cc: [],
-    threadId: null,
-    kind: 'message',
-    payload: { kind: 'note', text }
-  }
-}
-
-test('Board F O(1) emit: a 5000-record pre-seeded board seeds the counter once; the next emit gets seq 5000 (not 0)', async () => {
-  await withTempStateDir(async (stateDir) => {
-    // A full prior history: 5000 records — one ready seed followed by 4999
-    // registered→registered messages (both endpoints are static members, so
-    // the keep-rule preserves every one and boot renumber is a 0..4999 no-op).
-    // The ready seed means this boot appends NO second ready, so the file's
-    // last seq stays 4999 and the counter must seed from it (NOT from 0) —
-    // otherwise the next emit seq would collide with a kept record.
-    const seeded = [{ ...boardFMsg(0, 'system', ['asistente', 'research-head'], 'seed-ready'), id: 'ready-board-0', seq: 0, kind: 'ready', payload: { room: { id: 'board', name: 'Board', purpose: 'p', members: ['asistente', 'research-head'] } } }]
-    for (let i = 1; i < 5000; i++) seeded.push(boardFMsg(i, 'asistente', ['research-head'], `pre-${i}`))
-    await seedBoardRecords(stateDir, 'board', seeded)
-
-    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
-    try {
-      await waitForRooms(root)
-      const host = agents.put(fakeParentAgent())
-      const signal = new AbortController().signal
-
-      // One host-plane emit through the real tool (emitBoardMessage → counter).
-      const writeTool = pluginCtx().tools.get('dept_room_write')
-      const writeResult = await writeTool.execute(
-        { room: 'board', to: ['asistente'], text: 'seq-after-5000' },
-        { agent: host, signal }
-      )
-
-      // The counter was seeded from the file (last seq 4999 → next 5000), so
-      // the new record continues at 5000 — not at 0.
-      assert.equal(writeResult.messageId, 'm-board-5000', 'new record id embeds seq 5000 (counter seeded from file)')
-
-      const after = await loadRecords(resolveBoardPath(stateDir, 'board'))
-      assert.equal(after.length, 5001, 'board now has 5001 records (5000 seeded + 1 emitted)')
-      assert.equal(after[after.length - 1].seq, 5000, 'last record seq is 5000')
-      assert.equal(after[after.length - 1].id, 'm-board-5000')
-    } finally {
-      await dispose()
-    }
-  })
-})
-
-test('Board F boot compaction: an oversized board is rewritten keeping only registered messages + a single ready, renumbered below the threshold, with the room\'s cursors reset', async () => {
-  await withTempStateDir(async (stateDir) => {
-    // A HIGH persisted cursor for a board member from a prior (pre-compaction)
-    // session — exactly the "resumed member would SKIP unread kept messages"
-    // hazard the Batch D advisory flags. The research room is untouched.
-    await writeFile(path.join(stateDir, 'cursors.json'), JSON.stringify({
-      'board:research-head': { lastMessageId: 'm-board-1799', lastMessageSeq: 1799, lastAgendaSeq: 12 },
-      'research:research-head': { lastMessageId: 'm-2', lastMessageSeq: 2, lastAgendaSeq: -1 }
-    }, null, 2), 'utf8')
-
-    // Oversized board (2052 records > COMPACTION_LINE_THRESHOLD): 1800 kept
-    // registered→registered messages, 250 ghost-sender messages, one ready
-    // seed and a duplicate ready.
-    const records = []
-    for (let i = 0; i < 1800; i++) records.push(boardFMsg(i, 'asistente', ['research-head'], `kept-${i}`))
-    for (let i = 0; i < 250; i++) records.push({ ...boardFMsg(1800 + i, 'ghost', ['asistente'], `ghost-${i}`) })
-    records.push({
-      id: 'ready-board-a',
-      seq: 2050,
-      ts: 1700000000000 + 2050,
-      from: 'system',
-      to: ['asistente', 'research-head'],
-      cc: [],
-      threadId: null,
-      kind: 'ready',
-      payload: { room: { id: 'board', name: 'Board', purpose: 'p', members: ['asistente', 'research-head'] } }
-    })
-    records.push({
-      id: 'ready-board-b',
-      seq: 2051,
-      ts: 1700000000000 + 2051,
-      from: 'system',
-      to: ['asistente', 'research-head'],
-      cc: [],
-      threadId: null,
-      kind: 'ready',
-      payload: { room: { id: 'board', name: 'Board', purpose: 'p', members: ['asistente', 'research-head'] } }
-    })
-    await seedBoardRecords(stateDir, 'board', records)
-
-    // A durable resident `research-head` head (the same member the stale high
-    // cursor belongs to) so it resumes as a member and its IN-MEMORY read
-    // cursor can be observed after compaction — proving the compaction resetter
-    // cleared it (not just the durable file). It resumes at boot from #the seed.
-    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'research' })
-
-    const { root, agents, dispose } = await bootPlugin(stateDir)
-    try {
-      // Full-boot readiness: org's room-boot effect compacts the board, resets
-      // the durable cursors, fires the compaction resetter (in-memory), and
-      // resolveRoomSession's the live board session — all asynchronously. Wait
-      // for the ENTIRE state before any assertion so we never race mid-boot:
-      //   (1) the compacted board file is below the line threshold,
-      //   (2) the IN-MEMORY board session is live (resolveRoomSession done),
-      //   (3) the durable `board:research-head` cursor is RESET to fresh
-      //       (lastMessageSeq === -1) — reading cursors.json inside the
-      //       predicate with a try/catch tolerates transient mid-reset parse
-      //       errors / ENOENT until compaction's reset write has landed.
-      // The durable reset occurs inside compactBoardFile, and org fires the
-      // in-memory compaction resetter immediately after it returns, so once
-      // (3) holds the resetter has already cleared memberCursors too.
-      await waitFor(async () => {
-        const current = await loadRecords(resolveBoardPath(stateDir, 'board'))
-        if (!(current.length > 0 && current.length < 2000)) return false
-        if (root.sessions.get(SessionId(roomSessionId('board'))) === undefined) return false
-        let parsed
-        try {
-          parsed = JSON.parse(await readFile(path.join(stateDir, 'cursors.json'), 'utf8'))
-        } catch {
-          return false // cursors.json not yet readable (ENOENT / mid-reset parse)
-        }
-        const boardCursor = parsed['board:research-head']
-        return typeof boardCursor?.lastMessageSeq === 'number' && boardCursor.lastMessageSeq === -1
-      }, 5000, 'full boot readiness: board compacted, session live, board cursor reset')
-
-      const compacted = await loadRecords(resolveBoardPath(stateDir, 'board'))
-      // 1800 kept messages + exactly ONE ready seed = 1801 < 2000.
-      assert.equal(compacted.length, 1801, 'board after compaction: 1801 records (< 2000 threshold)')
-      const ghosts = compacted.filter((r) => r.from === 'ghost')
-      assert.equal(ghosts.length, 0, 'ghost-sender messages dropped')
-      const readies = compacted.filter((r) => r.kind === 'ready')
-      assert.equal(readies.length, 1, 'exactly one ready seed kept (duplicate dropped)')
-      // Contiguous renumbered seqs 0..N-1, ids re-derived from the new seq.
-      compacted.forEach((r, index) => {
-        assert.equal(r.seq, index, `seq renumbered contiguous at index ${index}`)
-      })
-      assert.equal(compacted[1800].id, 'ready-board-1800', 'the kept ready re-ids with the new seq')
-      assert.equal(compacted[0].id, 'm-board-0', 'kept message re-ids with the new seq')
-
-      // The room\'s cursors were RESET to fresh so NO member skips the kept set;
-      // the other room\'s cursor is untouched.
-      const cursors = JSON.parse(await readFile(path.join(stateDir, 'cursors.json'), 'utf8'))
-      assert.deepEqual(cursors['board:research-head'], { lastMessageId: null, lastMessageSeq: -1, lastAgendaSeq: -1 })
-      assert.deepEqual(cursors['research:research-head'], { lastMessageId: 'm-2', lastMessageSeq: 2, lastAgendaSeq: -1 })
-
-      // --- Post-compaction IN-MEMORY read (Batch F reviewer fix): the resumed
-      // research-head post's in-memory cursor (cold-loaded BEFORE compaction)
-      // must have been CLEARED by the compaction resetter so it re-reads the
-      // renumbered kept set instead of skipping it. Without the fix, the stale
-      // high cursor (lastMessageSeq 1799) suppresses every kept message. ---
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      assert.ok(boardSession, 'live board session available after the full-boot readiness wait')
-      // The research-head root agent is live at boot; its read seat is the
-      // in-memory memberCursors, which the compaction resetter cleared to fresh.
-      const resumed = agents.store.get('head-research-head')
-      assert.ok(resumed, 'research-head live at boot')
-      const resumedEntry = agents.childContexts.find((c) => c.ctx.agent?.id === 'head-research-head')
-      assert.ok(resumedEntry, 'resumed head child context available')
-      const resumedRead = resumedEntry.ctx.tools.get('dept_room_read', resumedEntry.key)
-      const delta = (await resumedRead.execute({ room: 'board' }, { agent: resumed, signal: new AbortController().signal })).delta
-      // `kept-0` is the definitive proof the stale high cursor did NOT suppress
-      // the renumbered kept set: without the compaction resetter, every kept
-      // message (seq 0..1799, all <= the stale lastMessageSeq 1799) would be
-      // filtered out of the delta. The rendered TOC is page-limited, so we only
-      // assert the first kept message is present, not the truncated tail.
-      assert.match(delta, /kept-0/, 'resumed member re-reads the renumbered kept set (first kept message) after compaction')
-      assert.match(delta, /more messages/, 'the delta exposes the full remaining kept set (still paged/available)')
-    } finally {
-      await dispose()
-    }
-  })
-})
-
 
 // --- Batch G: department-head lifecycle — sleep (dormir) with
 // a long-term memory journal ------------------------------------------------
@@ -2507,9 +1556,11 @@ test('Batch G head wake_counter parity: dept_sleep bumps the ordinal (1→2) at 
       assert.match(postSleepContent, /^wake_counter: 2$/m, 'head wake_counter advanced 1 → 2 at dept_sleep (ordinal bump on disk)')
 
       // Next wake: the cold-resumed fresh incarnation sees the bumped ordinal (2).
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      const seq = await nextSeq(stateDir, 'board')
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'wake up'), 'board')
+      const r = await root.tools.get('send_message').execute(
+        { to: [postId], text: 'wake up' },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
+      assert.equal(r.delivered[postId], 'resumed', 'bus wake of the slept head reports resumed')
       await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'slept head cold-resumed')
       assert.equal(agents.createCalls.filter((c) => String(c.sessionId) === `head-${postId}`).length, 1, 'head cold-resumed, not re-created')
       const resumedContent = await readFile(memoResult.memoPath, 'utf8')
@@ -2554,9 +1605,10 @@ test('Batch G dept_sleep requires a saved journal (throws otherwise / rejects a 
       const posts = await readPosts(stateDir)
       assert.ok(typeof posts[postId].sleepEpoch === 'number', 'sleepEpoch persisted durably')
       assert.equal(agents.store.has(`head-${postId}`), false, 'the head AgentHandle was disposed on sleep (live agent gone)')
-      // dept_room_who surfaces the sleeping head (in its own department room).
-      const who = await root.tools.get('dept_room_who').execute({ room: 'research' })
-      assert.equal(who.posts[0].sleeping, true, 'dept_room_who surfaces the sleeping head')
+      // dept_who surfaces the sleeping head.
+      const who = await root.tools.get('dept_who').execute({}, { agent: fakeParentAgent(), signal })
+      const whoSelf = who.members.find((m) => m.agentId === postId)
+      assert.equal(whoSelf.sleeping, true, 'dept_who surfaces the sleeping head')
     } finally {
       await dispose()
     }
@@ -2582,17 +1634,19 @@ test('Batch G a slept head cold-resumes fresh on its next wake: sleepEpoch clear
       await sleep.execute({}, { agent: head, signal })
       await waitFor(() => agents.store.has(`head-${postId}`) === false, 5000, 'handle disposed after sleep')
 
-      // Next wake: a message addressed to the head cold-resumes it (resume the
-      // SAME durable session — no fresh create under a new id) and delivers the
-      // pointer-only wake.
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      const seq = await nextSeq(stateDir, 'board')
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'wake from sleep'), 'board')
+      // Next wake: a bus message addressed to the head cold-resumes it (resume
+      // the SAME durable session — no fresh create under a new id) and delivers
+      // the framed bus message.
+      const r = await root.tools.get('send_message').execute(
+        { to: [postId], text: 'wake from sleep' },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
+      assert.equal(r.delivered[postId], 'resumed', 'bus delivery reports the dormant-target resume')
 
       await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'slept head cold-resumed')
       const resumed = agents.store.get(`head-${postId}`)
       await waitFor(() => resumed.inboxMessages.length >= 1, 5000, 'resumed head woken')
-      assert.equal(resumed.inboxMessages.at(-1).source.kind, 'board', 'head wake uses the raw board followup source')
+      assert.equal(resumed.inboxMessages.at(-1).source.kind, 'agent', 'head wake uses the bus agent source')
       // Same durable session id is reused — no fresh-creation under a new id.
       assert.equal(agents.createCalls.filter((c) => String(c.sessionId) === `head-${postId}`).length, 1, 'created once at boot, resumed on wake (no second create)')
 
@@ -2623,23 +1677,25 @@ test('Piece 1: wakePost re-attaches the head session to the workspace (idempoten
       // Boot already attached the head once (ensureHead).
       await waitFor(() => workspaceRegistry.attachCalls.includes(`head-${postId}`), 5000, 'boot attach settled')
 
-      // Sleep (dispose the handle), then wake via the relay's COLD path —
-      // wakePost materializes + re-attaches (idempotent).
+      // Sleep (dispose the handle), then wake via the BUS cold path —
+      // materializePost re-attaches (idempotent; the wakePost seam core).
       await headCtx.tools.get('dept_memo_write', key).execute({ summary: 'piece-1' }, { agent: head, signal })
       await headCtx.tools.get('dept_sleep', key).execute({}, { agent: head, signal })
       await waitFor(() => agents.store.has(`head-${postId}`) === false, 5000, 'handle disposed after sleep')
 
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      const seq = await nextSeq(stateDir, 'board')
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'wake the attached head'), 'board')
-      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'slept head cold-resumed by wakePost')
+      const r = await root.tools.get('send_message').execute(
+        { to: [postId], text: 'wake the attached head' },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
+      assert.equal(r.delivered[postId], 'resumed')
+      await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'slept head cold-resumed by materializePost')
 
       // The idempotent re-attach fired: at least the boot attach + the wake
       // attach (the real registry tolerates re-attaching; the stub records).
-      await waitFor(() => workspaceRegistry.attachCalls.filter((id) => id === `head-${postId}`).length >= 2, 5000, 'wakePost re-attached the head session')
+      await waitFor(() => workspaceRegistry.attachCalls.filter((id) => id === `head-${postId}`).length >= 2, 5000, 'bus delivery re-attached the head session')
       const resumed = agents.store.get(`head-${postId}`)
       await waitFor(() => resumed.inboxMessages.length >= 1, 5000, 'resumed head woken')
-      assert.equal(resumed.inboxMessages.at(-1).source.kind, 'board', 'head wake delivered')
+      assert.equal(resumed.inboxMessages.at(-1).source.kind, 'agent', 'head wake delivered')
       assert.ok(workspaceRegistry.attachCalls.filter((id) => id === `head-${postId}`).length >= 2, 'attach count: boot + wake (>= 2)')
     } finally {
       await dispose()
@@ -2654,11 +1710,14 @@ test('Batch G regression: a head that never slept wakes normally via the live fo
     await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
     try {
       const head = agents.store.get(`head-${postId}`)
-      const boardSession = root.sessions.get(SessionId(roomSessionId('board')))
-      const seq = await nextSeq(stateDir, 'board')
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'board'), messageRecord(seq, 'asistente', [postId], 'question'), 'board')
-      await waitFor(() => head.inboxMessages.length >= 1, 5000, 'head woken via normal relay followup')
-      assert.equal(head.inboxMessages.at(-1).source.kind, 'board', 'head wake keeps the board followup source')
+      const signal = new AbortController().signal
+      const r = await root.tools.get('send_message').execute(
+        { to: [postId], text: 'question' },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
+      assert.equal(r.delivered[postId], 'delivered')
+      await waitFor(() => head.inboxMessages.length >= 1, 5000, 'head woken via normal bus delivery')
+      assert.equal(head.inboxMessages.at(-1).source.kind, 'agent', 'head wake keeps the bus source')
       const posts = await readPosts(stateDir)
       assert.equal(posts[postId].sessionId, `head-${postId}`, 'session id unchanged (live followup)')
       assert.equal(posts[postId].sleepEpoch, undefined, 'no sleep-mark on a never-slept head')
@@ -2705,12 +1764,12 @@ test('dept_post_create (head): a head creates a DISPOSABLE worker root agent (se
 
       const signal = new AbortController().signal
       const result = await createTool.execute(
-        { postId: 'researcher-alpha', role: 'rank-and-file researcher', firstMessage: 'investigate X and report on the board' },
+        { postId: 'researcher-alpha', role: 'rank-and-file researcher', firstMessage: 'investigate X and report' },
         { agent: head, signal }
       )
       assert.equal(result.postId, 'researcher-alpha')
       assert.equal(result.sessionId, 'worker-researcher-alpha')
-      assert.equal(result.roomId, 'research', 'worker defaults to the creating head room')
+      assert.equal('roomId' in result, false, 'B3: no room id in the create result (the posts live in the catalog)')
 
       // The worker root agent was created via ctx.agents.create (meta
       // agentPreset deepartments-worker, origin undefined) and is LIVE.
@@ -2724,18 +1783,18 @@ test('dept_post_create (head): a head creates a DISPOSABLE worker root agent (se
       // so the worker's own attach matches by cwd equality too.
       assert.equal(createCall.meta.cwd, stateDir, 'the worker is created under the workspace-root cwd (resolveWorkspaceRootPath), not the repo root')
 
-      // Durable registry: disposable entry.
+      // Durable registry: disposable entry (roomId is the INERT legacy field).
       const posts = await readPosts(stateDir)
       assert.equal(posts['researcher-alpha'].sessionId, 'worker-researcher-alpha')
-      assert.equal(posts['researcher-alpha'].roomId, 'research')
+      assert.equal(posts['researcher-alpha'].roomId, 'board', "worker inherits the head entry's inert roomId (legacy registry field)")
       assert.equal(posts['researcher-alpha'].agentPreset, 'deepartments-worker')
       assert.equal(posts['researcher-alpha'].provider, 'worker', 'disposable marker persisted')
 
-      // First message delivered as a durable board message → the relay wakes
-      // the worker to read it (worker inbox receives the board followup).
+      // First message delivered as a durable BUS message → the bus delivery
+      // wakes the worker (worker inbox receives the framed agent message).
       const worker = agents.store.get('worker-researcher-alpha')
-      await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'worker woken by its first board message')
-      assert.equal(worker.inboxMessages.at(-1).source.kind, 'board', 'worker wake uses the board followup source')
+      await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'worker woken by its first bus message')
+      assert.equal(worker.inboxMessages.at(-1).source.kind, 'agent', 'worker wake uses the bus source')
     } finally {
       await dispose()
     }
@@ -2760,11 +1819,9 @@ test('dept_post_create validation: duplicate postId rejects; a configured-head p
         () => createTool.execute({ postId: 'research-head', role: 'rank-and-file researcher' }, { agent: head, signal }),
         /already registered/, 'a configured head postId is rejected as a worker'
       )
-      // Unknown room → rejects.
-      await assert.rejects(
-        () => createTool.execute({ postId: 'researcher-beta', role: 'rank', room: 'nope' }, { agent: head, signal }),
-        /not a known department room/, 'unknown room rejected loudly'
-      )
+      // B3: a `room` parameter no longer exists — an unknown extra is ignored by
+      // dsh-tools (not part of the declared schema), so the catalog checks (duplicate,
+      // configured-head) are the full validation surface.
     } finally {
       await dispose()
     }
@@ -2779,9 +1836,12 @@ test('a worker is lean: board tools present, the department-lifecycle (create/re
       const createTool = headCtx.tools.get('dept_post_create', key)
       await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
       const { ctx: workerCtx, key: workerKey } = childContextFor(agents, 'worker-researcher-alpha')
-      // Worker gets the board toolset...
-      for (const name of ['dept_room_read', 'dept_room_write', 'dept_room_who', 'dept_whereami', 'dept_witness_write', 'dept_memo_write', 'dept_sleep']) {
+      // Worker gets the messaging toolset (B3: no board tools anywhere)...
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
         assert.ok(workerCtx.tools.get(name, workerKey), `${name} installed in the worker own layer`)
+      }
+      for (const name of ['dept_room_read', 'dept_room_write', 'dept_room_who', 'dept_whereami', 'dept_witness_write']) {
+        assert.equal(workerCtx.tools.get(name, workerKey), undefined, `${name} removed from the worker own layer (B3)`)
       }
       // ...but NOT the department-lifecycle controls (workers never create/retire).
       assert.equal(workerCtx.tools.get('dept_post_create', workerKey), undefined, 'worker has NO dept_post_create')
@@ -2811,14 +1871,16 @@ test('worker sleep + respawn: a slept worker is cold-resumed as a fresh incarnat
       // The worker handle is disposed → not live anymore; the durable entry
       // (provider:'worker') + sleepEpoch persist.
       assert.equal(agents.store.has('worker-researcher-alpha'), false, 'worker AgentHandle disposed on sleep')
-      // A durable board message to it cold-resumes + wakes it.
-      const boardSession = root.sessions.get(SessionId(roomSessionId('research')))
-      const seq = await nextSeq(stateDir, 'research')
-      await emitRoomRecord(boardSession, resolveBoardPath(stateDir, 'research'), messageRecord(seq, 'research-head', ['researcher-alpha'], 'wake up'), 'research')
+      // A bus message to it cold-resumes + wakes it.
+      const r = await root.tools.get('send_message').execute(
+        { to: ['researcher-alpha'], text: 'wake up' },
+        { agent: head, signal }
+      )
+      assert.equal(r.delivered['researcher-alpha'], 'resumed')
       await waitFor(() => agents.store.has('worker-researcher-alpha'), 5000, 'slept worker cold-resumed')
       const resumed = agents.store.get('worker-researcher-alpha')
       await waitFor(() => resumed.inboxMessages.length >= 1, 5000, 'resumed worker woken')
-      assert.equal(resumed.inboxMessages.at(-1).source.kind, 'board', 'worker wake uses the board followup source')
+      assert.equal(resumed.inboxMessages.at(-1).source.kind, 'agent', 'worker wake uses the bus source')
       // Same durable session id reused (resume, not a second create).
       assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === 'worker-researcher-alpha').length >= 1, true, 'worker cold-resumed via ctx.agents.resume')
       const posts = await readPosts(stateDir)
@@ -2845,15 +1907,18 @@ test('Piece 1 cwd fix: a wake whose RESUME fails falls back to a FRESH create un
     })
     const { root, agents, workspaceRegistry, dispose } = await bootPlugin(stateDir, { resumeRejects: ['worker-researcher-alpha'] })
     try {
-      await waitForRooms(root)
-      // A board message addressed to the worker → the relay cold-wakes it.
-      const researchSession = root.sessions.get(SessionId(roomSessionId('research')))
-      const seq = await nextSeq(stateDir, 'research')
-      await emitRoomRecord(researchSession, resolveBoardPath(stateDir, 'research'), messageRecord(seq, 'research-head', ['researcher-alpha'], 'wake up'), 'research')
+      // A bus message addressed to the worker → the bus cold-wakes it.
+      const r = await root.tools.get('send_message').execute(
+        { to: ['researcher-alpha'], text: 'wake up' },
+        { agent: { id: 'host-any', session: { header: {} } }, signal: new AbortController().signal }
+      )
+      // The forced resume failure fell back to create-fresh and STILL delivered
+      // (materializePost's create fallback — never silent).
+      assert.equal(r.delivered['researcher-alpha'], 'resumed', 'the resume-failed wake yields resumed (create-fresh fallback delivered)')
       await waitFor(() => agents.store.has('worker-researcher-alpha'), 5000, 'worker materialized via the resume-failed create-fresh fallback')
       const createCall = agents.createCalls.find((c) => String(c.sessionId) === 'worker-researcher-alpha')
       assert.ok(createCall, 'a fresh ctx.agents.create was issued (the forced resume failure triggered the fallback)')
-      assert.equal(createCall.meta.cwd, stateDir, 'the wakePost fallback create uses the workspace-root cwd (resolveWorkspaceRootPath), not the repo root')
+      assert.equal(createCall.meta.cwd, stateDir, 'the materializePost fallback create uses the workspace-root cwd (resolveWorkspaceRootPath), not the repo root')
       assert.equal(createCall.meta.agentPreset, 'deepartments-worker', 'the fallback create still mounts the worker preset')
       // The fallback-created worker is then re-attached (cwd now matches the
       // workspace path → the attach resolves).
@@ -2904,20 +1969,19 @@ test('dept_post_retire (head): a head retires a worker of ITS OWN room (withdraw
       const signal = new AbortController().signal
       const createTool = headCtx.tools.get('dept_post_create', key)
       await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
-      const boardSession = root.sessions.get(SessionId(roomSessionId('research')))
-      const beforeCount = boardSession.events.length
+      const beforeStore = (await loadMessageRecords(resolveMessagesPath(stateDir))).length
 
       const retireTool = headCtx.tools.get('dept_post_retire', key)
       assert.ok(retireTool, 'head own layer has dept_post_retire')
       const result = await retireTool.execute({ postId: 'researcher-alpha' }, { agent: head, signal })
       assert.equal(result.retired, true)
-      assert.equal(result.roomId, 'research')
+      assert.equal('roomId' in result, false, 'B3: no room id in the retire result')
 
       // Handle disposed + unregistered + persisted removal.
       await waitFor(async () => (await readPosts(stateDir))['researcher-alpha'] === undefined, 5000, 'worker removed from posts.json')
       assert.equal(agents.store.has('worker-researcher-alpha'), false, 'worker AgentHandle disposed on retire')
-      // Withdrawal note posted in the room.
-      await waitFor(() => boardSession.events.length > beforeCount, 5000, 'withdrawal note emitted')
+      // B3: NO withdrawal note — the store is untouched by a retire.
+      assert.equal((await loadMessageRecords(resolveMessagesPath(stateDir))).length, beforeStore, 'no withdrawal note persisted')
 
       // Unknown target → loud rejection.
       await assert.rejects(() => retireTool.execute({ postId: 'ghost' }, { agent: head, signal }), /not a registered post/, 'unknown postId rejected loudly')
@@ -2929,23 +1993,20 @@ test('dept_post_retire (head): a head retires a worker of ITS OWN room (withdraw
   })
 })
 
-test('dept_post_retire scope: a head CANNOT retire a worker of ANOTHER department room', async () => {
+test('dept_post_retire scope (B3): a head CANNOT retire a permanent head via the retire path (the room-scope check is gone with the rooms)', async () => {
   await withTempStateDir(async (stateDir) => {
     const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
     try {
       const signal = new AbortController().signal
-      const createTool = headCtx.tools.get('dept_post_create', key)
-      // Create a worker explicitly in the 'board' room (a known room) — NOT the
-      // head's own 'research' room.
-      await createTool.execute({ postId: 'researcher-elsewhere', role: 'rank', room: 'board' }, { agent: head, signal })
       const retireTool = headCtx.tools.get('dept_post_retire', key)
+      // B3: the room-scope restriction is removed with the board; the remaining
+      // scope rule is worker-only (a permanent head is never retired by a head).
       await assert.rejects(
-        () => retireTool.execute({ postId: 'researcher-elsewhere' }, { agent: head, signal }),
-        /may only retire workers in your own department room/, 'head scoped to its own department room'
+        () => retireTool.execute({ postId: 'research-head' }, { agent: head, signal }),
+        /not a disposable worker/, 'head cannot retire a permanent head'
       )
-      // The worker is still registered (scope rejection left it intact).
       const posts = await readPosts(stateDir)
-      assert.equal(posts['researcher-elsewhere'].provider, 'worker', 'worker not retired by a rejecting call')
+      assert.equal(posts['research-head'].provider, undefined, 'the permanent head was not touched by a rejecting call')
     } finally {
       await dispose()
     }
@@ -3258,7 +2319,6 @@ test('Batch 7 U2 host dept_sleep ROTATES: no journal rejects loudly; with a jour
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, persistence, workspaceRegistry, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       const host = agents.put(fakeParentAgent())
       const sleepTool = root.tools.get('dept_sleep')
       const signal = new AbortController().signal
@@ -3389,11 +2449,12 @@ test('Batch 7 U2 host dept_sleep ROTATES: no journal rejects loudly; with a jour
 
       // The roster reflects the rotation: the OLD (retired) host is excluded
       // from "present"; the NEW host shows as the sleeping member.
-      const who = await root.tools.get('dept_room_who').execute({ room: 'board' })
-      assert.ok(!who.hosts.some((h) => h.hostId === oldHostId), 'retired host is filtered from the roster (§4/C7)')
-      const newSleepingHost = who.hosts.find((h) => h.hostId === newHostId)
-      assert.ok(newSleepingHost, 'the NEW host is in the board roster')
-      assert.equal(newSleepingHost.sleeping, true, 'dept_room_who surfaces the sleeping NEW host')
+      const who = await root.tools.get('dept_who').execute({}, { agent: host, signal })
+      const whoHosts = who.members.filter((m) => m.kind === 'host')
+      assert.ok(!whoHosts.some((h) => h.agentId === oldHostId), 'retired host is filtered from the roster (§4/C7)')
+      const newSleepingHost = whoHosts.find((h) => h.agentId === newHostId)
+      assert.ok(newSleepingHost, 'the NEW host is in the catalog roster')
+      assert.equal(newSleepingHost.sleeping, true, 'dept_who surfaces the sleeping NEW host')
 
       // (d) The wake pack targets ONLY the new host (§4): the NEW session's
       // first pre-step injects the full pack (fresh board delta, wake_counter 2
@@ -3428,7 +2489,6 @@ test('Fix A regression (LEGACY FALLBACK path): when the U2 rotation CANNOT run (
   await withTempStateDir(async (stateDir) => {
     const { root, agents, persistence, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       // U2: force the LEGACY fallback — the rotation cannot run when the
       // session-persistence seam rejects the seed create (spec 002 §3.6; FIX 1
       // — the rotation no longer calls the live sessions store). The plugin
@@ -3599,7 +2659,6 @@ test('Fix wake-12 (LEGACY FALLBACK path): when the U2 rotation CANNOT run, the f
     // must still work (spec 002 §3.6/§5).
     const a = await bootPlugin(stateDir)
     try {
-      await waitForRooms(a.root)
       a.persistence.create = () => { throw new Error('injected create failure — legacy fallback persists the deferred seed') }
       const hostA = a.agents.put(fakeParentAgent(sessionId))
       await seedJournal(stateDir, hostId, journalSummary)
@@ -3634,7 +2693,6 @@ test('Fix wake-12 (LEGACY FALLBACK path): when the U2 rotation CANNOT run, the f
     await authorCleanupWitnessArtifact(witnessRoot, String(sessionId), `---\nauthor: ${hostId}\nwake_counter: 2\n---\n\nwitness`)
     const b = await bootPlugin(stateDir, { persistenceRoot: witnessRoot })
     try {
-      await waitForRooms(b.root)
       await waitFor(async () => {
         const hostsFile = await readHosts(stateDir)
         return hostsFile[hostId]?.webUiCleanupPending !== true
@@ -3708,7 +2766,7 @@ test('Fix wake-12: a boot WITHOUT a persisted deferred seed preserves the pre-ex
     await writeFile(hostsPath, JSON.stringify({ [hostId]: { sessionId: String(sessionId), roomId: 'board', sleepEpoch: 1787261780000, boundarySeq: 10 } }, null, 2))
     const b = await bootPlugin(stateDir)
     try {
-      await waitForRooms(b.root)
+      await waitForHeadMaterialized(b.agents)
       const host = b.agents.put(fakeParentAgent(sessionId))
       const realSession = Session.create(sessionId)
       realSession.append('user/message', { role: 'user', content: [{ type: 'text', text: 'wake turn 1' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
@@ -3755,7 +2813,6 @@ test('U2: boot with a ROTATED hosts.json (v2 schema — old retired + new live) 
     }, null, 2))
     const b = await bootPlugin(stateDir, { persistenceRoot: witnessRoot })
     try {
-      await waitForRooms(b.root)
       // The loader validates + restores the v2 file (the new live host is
       // present; the retired entry stays queryable).
       await waitFor(async () => {
@@ -3947,14 +3004,13 @@ async function runPreStep(pluginCtx, agent, messages, signal) {
   )
 }
 
-test('Batch C pre-step: a HOST session\'s first message-time pre-step injects a FRESH wake pack (pack-v1 sentinel + fresh board delta + wake_counter KPI) onto decision.messages', async () => {
+test('Batch C pre-step: a HOST session\'s first message-time pre-step injects a FRESH wake pack (pack-v1 sentinel + fresh message-delta + wake_counter KPI) onto decision.messages', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
-      const hostId = `host-${host.id}`
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
 
       // Pre-author the host journal WITH open items so the KPI line is real
       // (dept_memo_write is the real tool; wake_counter 1 on first write).
@@ -3964,14 +3020,20 @@ test('Batch C pre-step: a HOST session\'s first message-time pre-step injects a 
         { agent: host, signal }
       )
 
-      // A board message addressed to the host arrives AFTER any "sleep" — the
-      // fresh delta the pack MUST capture (this is the anti-staleness core).
-      const writeTool = root.tools.get('dept_room_write')
-      const written = await writeTool.execute(
-        { room: 'board', to: [hostId], text: 'fresh message for the pre-step pack' },
-        { agent: host, signal }
+      // A bus message addressed to the host arrives AFTER the journal — the
+      // fresh message-delta the pack MUST capture (anti-staleness core, B3:
+      // the delta is the caller\'s latest-received records, not a board cursor).
+      const hostId = `host-${host.id}`
+      // Register the host first (B3 self-registration via dept_who) so the
+      // catalog resolves it as a recipient.
+      await root.tools.get('dept_who').execute({}, { agent: host, signal })
+      const head = agents.store.get('head-research-head')
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const sent = await headCtx.tools.get('send_message', key).execute(
+        { to: [hostId], text: 'fresh message for the pre-step pack' },
+        { agent: head, signal }
       )
-      assert.equal(written.from, hostId, 'board write from the host recorded')
+      assert.equal(sent.delivered[hostId], 'delivered', 'bus message to the host delivered')
 
       const claimed = preStepClaimed()
       const decision = await runPreStep(pluginCtx, host, claimed, signal)
@@ -3985,7 +3047,7 @@ test('Batch C pre-step: a HOST session\'s first message-time pre-step injects a 
       const packText = packNode.content[0].text
       assert.match(packText, /^## Deepartments wake pack$/m, 'injected pack opens with the wake pack header')
       assert.match(packText, /pack-v1: present/, 'injected pack carries the deterministic P1 presence sentinel')
-      assert.match(packText, /fresh message for the pre-step pack/, 'injected pack carries FRESH board-delta content (read at message time, not frozen at the previous dept_sleep)')
+      assert.match(packText, /fresh message for the pre-step pack/, 'injected pack carries FRESH message-delta content (read at message time, not frozen at the previous dept_sleep)')
       assert.match(packText, /- kpi: wake_counter 1; top open item: finish pre-step wiring/, 'injected pack carries the wake_counter + top open-item KPI from the journal')
       assert.match(packText, /Pre-resolved journal path.*host-/, 'injected pack pre-resolves the host journal path')
       assert.match(packText, /## deepartments-workflow skill \(full body\)/, 'injected pack embeds the full skill body')
@@ -4003,7 +3065,7 @@ test('Batch C pre-step: a NEVER-SLEPT host (no journal seed) injects a DEGRADED 
     await seedHostRegistration(stateDir, sessionId)
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
+      await waitForHeadMaterialized(agents)
       const host = agents.put(fakeParentAgent(sessionId))
       const signal = new AbortController().signal
       // NO journal seeded — the host has never slept and has no durable memory.
@@ -4032,7 +3094,6 @@ test('Batch C pre-step: repeated pre-step within ONE awake session does NOT re-i
     const hostId = await seedHostRegistration(stateDir, sessionId)
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       const host = agents.put(fakeParentAgent(sessionId))
       const signal = new AbortController().signal
       await seedJournal(stateDir, hostId, 'PRE-STEP gate: single injection per awake session.')
@@ -4071,7 +3132,7 @@ test('Context-injection gate: a session REGISTERED as the board host in hosts.js
     await seedHostRegistration(stateDir, sessionId)
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
+      await waitForHeadMaterialized(agents)
       const host = agents.put(fakeParentAgent(sessionId))
       const signal = new AbortController().signal
 
@@ -4096,7 +3157,7 @@ test('Context-injection gate: a PLAIN root session (never registered in hosts.js
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
+      await waitForHeadMaterialized(agents)
       // Deliberately UNREGISTERED: no hosts.json entry, no board-tool call.
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
@@ -4118,7 +3179,7 @@ test('Context-injection gate: a registered board POST (head-*) still gets NO wak
     await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'research' })
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
+      await waitForHeadMaterialized(agents)
       // The stable head session id is registered in posts.json at boot, so
       // postIdForChild resolves and the early post gate (invoke.ts:2624) holds.
       const head = agents.put(fakeParentAgent('head-research-head'))
@@ -4140,7 +3201,6 @@ test('Context-injection gate: a session that REGISTERS mid-session (first dept_w
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
 
@@ -4151,11 +3211,11 @@ test('Context-injection gate: a session that REGISTERS mid-session (first dept_w
       assert.equal(first.messages.length, claimed.length, 'unregistered session pre-step adds NO node')
       assert.ok(!first.messages.some((m) => m.content?.[0]?.text?.includes('## Deepartments wake pack')), 'no wake pack before registration')
 
-      // Mid-session registration: dept_whereami counts as a board tool call →
-      // Batch E ensureHost registers this session in hosts.json SYNCHRONOUSLY.
-      const whereamiTool = pluginCtx().tools.get('dept_whereami')
-      const where = await whereamiTool.execute({}, { agent: host, signal })
-      assert.equal(where.kind, 'host', 'whereami registers the calling session as a host')
+      // Mid-session registration: dept_who self-registers the calling host
+      // session (B3 gap fix — the board tools that used to do this are gone).
+      const whoTool = pluginCtx().tools.get('dept_who')
+      const who = await whoTool.execute({}, { agent: host, signal })
+      assert.ok(who.members.some((m) => m.kind === 'host' && m.you === true), 'dept_who registers the calling session as a host')
 
       // NEXT pre-step: the pack arrives — the gated-off path never marked
       // wakePackInjected, so nothing blocks the late injection.
@@ -4209,7 +3269,7 @@ test('Task T4 pre-step: a TRANSIENT subagent (origin=subagent, role=reviewer) is
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
+      await waitForHeadMaterialized(agents)
       const reviewer = agents.put(fakeSubagentAgent())
       // Dispatch-time role recording is what src/subagent.ts execute does; the
       // shared module registry is the same instance the real-loader injector reads.
@@ -4229,7 +3289,7 @@ test('Task T4 pre-step: a TRANSIENT subagent (origin=subagent, role=reviewer) is
       // Slim role-focused block present:
       assert.match(text, /^## Deepartments context$/m, 'subagent orientation opens with its OWN header, not the wake pack header')
       assert.match(text, /pack-v1: present/, 'carries the deterministic presence sentinel')
-      assert.match(text, /identity: Deepartments subagent \(role: reviewer, room: board\)/, 'identity is a Deepartments subagent with the REVIEWER role — never a host')
+      assert.match(text, /identity: Deepartments subagent \(role: reviewer, room: deepartments\)/, 'identity is a Deepartments subagent with the REVIEWER role — never a host')
       assert.match(text, /## Your role contract/, 'role contract section present')
       assert.match(text, /READ-ONLY: you do NOT write or edit code\./, 'reviewer contract injected')
       assert.match(text, /VERDICT: PASS \(1-2 line note\) or FAIL/, 'reviewer contract verdict line injected')
@@ -4238,7 +3298,7 @@ test('Task T4 pre-step: a TRANSIENT subagent (origin=subagent, role=reviewer) is
       assert.ok(!text.includes('## Deepartments wake pack'), 'no host wake pack header')
       assert.ok(!/host-[0-9a-f-]+ \(role: host\)/.test(text), 'no host-… (role: host) branding')
       assert.ok(!text.includes('Pre-resolved journal path'), 'no journal pointer')
-      assert.ok(!text.includes('## Board delta since cursor'), 'no board delta section')
+      assert.ok(!text.includes('## Message delta (received)'), 'no message delta section')
       assert.ok(!text.includes('## Condensed roster'), 'no roster')
       assert.ok(!text.includes('## Git bearings'), 'no git bearings section')
       assert.ok(!text.includes('## System state'), 'no system state section')
@@ -4255,7 +3315,7 @@ test('Task T4 pre-step: role plumbing — known role injects its contract; unkno
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
+      await waitForHeadMaterialized(agents)
       const signal = new AbortController().signal
 
       // normalizeRole is the authoritative normalizer.
@@ -4291,7 +3351,7 @@ test('Task T4 follow-up: the roleRegistry entry is EVICTED at the subagent/end l
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
+      await waitForHeadMaterialized(agents)
 
       // Mount the REAL subagent tool fork (src/subagent.ts apply) the way the
       // agent preset does, so ITS `subagent/end` listener is actually
@@ -4374,7 +3434,7 @@ test('Task T4 REGRESSION: a subagent-origin child with the REAL FLAT header (ori
     await seedHostRegistration(stateDir, hostSessionId)
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
+      await waitForHeadMaterialized(agents)
       const signal = new AbortController().signal
 
       // ---- subagent: the REAL persisted header shape — flat origin, NO nested
@@ -4390,7 +3450,7 @@ test('Task T4 REGRESSION: a subagent-origin child with the REAL FLAT header (ori
       assert.equal(decision.messages.length, claimed.length + 1, 'subagent pre-step injects exactly ONE extra node (the slim role block)')
       const text = decision.messages[decision.messages.length - 1].content[0].text
       assert.match(text, /^## Deepartments context$/m, 'slim block opens with its OWN header — not the wake-pack header')
-      assert.match(text, /identity: Deepartments subagent \(role: reviewer, room: board\)/, 'slim block: subagent identity with the reviewer role — never a host')
+      assert.match(text, /identity: Deepartments subagent \(role: reviewer, room: deepartments\)/, 'slim block: subagent identity with the reviewer role — never a host')
       // The wake-pack markers the dead-code bug used to inject:
       assert.ok(!text.includes('## Deepartments wake pack'), 'NO wake-pack header text (dead-code regression: old code injected the full pack)')
       assert.ok(!text.includes('Pre-resolved journal path'), 'NO journal pointer')
@@ -4405,7 +3465,7 @@ test('Task T4 REGRESSION: a subagent-origin child with the REAL FLAT header (ori
       assert.equal(hostDecision.messages.length, hostClaimed.length + 1, 'host pre-step injects exactly ONE extra node (the wake pack)')
       const hostText = hostDecision.messages[hostDecision.messages.length - 1].content[0].text
       assert.match(hostText, /^## Deepartments wake pack$/m, 'host-origin session still receives the FULL wake pack')
-      assert.match(hostText, /identity: host-.* \(role: host, room: board\)/, 'host pack carries the host identity branding')
+      assert.match(hostText, /identity: host-.* \(role: host\)/, 'host pack carries the host identity branding (B3: no room)')
 
       // ---- dept_sleep guard: invoked with the FLAT origin, the subagent is
       // refused BEFORE any host sleep branch can run (even with a pre-authored
@@ -4426,10 +3486,9 @@ test('Batch W4 pure: buildWakePack composes all 9 sections in order (identity, j
   const pack = buildWakePack({
     memberId: 'host-session-abc',
     role: 'host',
-    room: 'board',
     journalPath: '/state/journals/host-session-abc.md',
-    boardDelta: 'Cursor: seq 3\n- m-4 | sender-1 → host-session-abc | preview text',
-    roster: 'Static members: owner\n- research-head (deepartments-head)',
+    messageDelta: '- m-4 | sender-1 → host-session-abc | preview text',
+    roster: '- research-head (deepartments-head)',
     git: 'status: clean working tree\nlast 2 commits:\n  abc123 feat(x)\n  def456 fix(y)',
     systemState: '- DSH dev home: /opt/dsh/.dsh-dev',
     roadmapTail: '- **2026-08-20** — W3 committed.',
@@ -4448,7 +3507,7 @@ test('Batch W4 pure: buildWakePack composes all 9 sections in order (identity, j
   const headers = [
     '## Deepartments wake pack',
     '## Journal (long-term memory)',
-    '## Board delta since cursor',
+    '## Message delta (received)',
     '## Condensed roster',
     '## Git bearings',
     '## System state',
@@ -4465,7 +3524,7 @@ test('Batch W4 pure: buildWakePack composes all 9 sections in order (identity, j
   }
 
   assert.match(pack, /Pre-resolved journal path: `\/state\/journals\/host-session-abc\.md`/, 'journal path is pre-resolved')
-  assert.match(pack, /- m-4 \| sender-1 → host-session-abc \| preview text/, 'board delta TOC included')
+  assert.match(pack, /- m-4 \| sender-1 → host-session-abc \| preview text/, 'message delta TOC included')
   assert.match(pack, /wake routine body/, 'full skill body embedded')
   // The roster body is caller-provided verbatim (the non-pure buildCondensedRoster
   // adds the "Liveness (sessionLive): not baked in" line — asserted in the
@@ -4478,22 +3537,20 @@ test('Batch W4 pure: buildWakePack renders an EMPTY board-delta section when the
   const pack = buildWakePack({
     memberId: 'host-session-abc',
     role: 'host',
-    room: 'board',
-    boardDelta: '',
-    roster: 'Static members: owner',
+    messageDelta: '',
+    roster: '- research-head (deepartments-head)',
     includeGuidance: false
   })
 
   // Sections 1, 3, 4 present.
   assert.match(pack, /## Deepartments wake pack/, 'identity header present')
   assert.match(pack, /pack-v1: present/, 'P1 presence sentinel present even in the lean snapshot (shared buildWakePack section 1)')
-  assert.match(pack, /## Board delta since cursor/, 'board delta section present')
+  assert.match(pack, /## Message delta \(received\)/, 'message delta section present')
   assert.match(pack, /## Condensed roster/, 'roster section present')
 
-  // Empty delta → the section body after the header is empty (no cursor line,
-  // no TOC lines) before the next section.
-  const deltaBody = pack.split('## Board delta since cursor')[1].split('## Condensed roster')[0]
-  assert.ok(!deltaBody.includes('Cursor:'), 'no cursor line for an empty delta')
+  // Empty delta → the section body after the header is empty (no TOC lines)
+  // before the next section.
+  const deltaBody = pack.split('## Message delta (received)')[1].split('## Condensed roster')[0]
   assert.ok(!deltaBody.includes('|'), 'no TOC lines for an empty delta')
   assert.match(deltaBody, /^\s*$/, 'delta section body is empty when no new messages')
 
@@ -4506,14 +3563,14 @@ test('Batch W4 pure: buildWakePack renders an EMPTY board-delta section when the
 
 test('Batch W4 pure: buildWakePack degrades gracefully — undefined optional inputs are skipped (never throws) and (unavailable) markers pass through untouched', async () => {
   // Undefined git/skill/system/roadmap → those sections are omitted, no crash.
-  const lean = buildWakePack({ memberId: 'h', role: 'host', room: 'board', boardDelta: 'Cursor: seq 0', roster: 'x' })
+  const lean = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '- m-0 | a → h | hi', roster: 'x' })
   assert.ok(!lean.includes('## Git bearings'), 'undefined git omitted gracefully')
   assert.ok(!lean.includes('## deepartments-workflow skill'), 'undefined skill omitted gracefully')
   assert.ok(!lean.includes('## System state'), 'undefined system state omitted gracefully')
 
   // Markers produced by the NON-pure assembly layer pass through untouched.
   const degraded = buildWakePack({
-    memberId: 'h', role: 'host', room: 'board', boardDelta: '', roster: 'x',
+    memberId: 'h', role: 'host', messageDelta: '', roster: 'x',
     git: '(git unavailable)', skillBody: '(skill unavailable)', systemState: '(-)', roadmapTail: '(-)',
     includeGuidance: true
   })
@@ -4532,7 +3589,6 @@ test('Batch W4 dept_wake_snapshot: registers globally (host plane), and ONE call
   await withTempStateDir(async (stateDir) => {
     const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       const tool = root.tools.get('dept_wake_snapshot')
       assert.ok(tool, 'dept_wake_snapshot registered globally (host plane)')
 
@@ -4542,8 +3598,7 @@ test('Batch W4 dept_wake_snapshot: registers globally (host plane), and ONE call
       assert.ok(typeof result.snapshot === 'string' && result.snapshot.length > 0, 'snapshot returns a non-empty text string')
       assert.match(result.snapshot, /^## Deepartments wake pack$/m, 'snapshot opens with the wake pack header')
       assert.match(result.snapshot, new RegExp(`identity: host-${host.id}`), 'snapshot carries identity + host address')
-      assert.match(result.snapshot, /## Board delta since cursor/, 'snapshot carries the board delta section')
-      assert.match(result.snapshot, /Cursor: seq/, 'snapshot carries the board cursor')
+      assert.match(result.snapshot, /## Message delta \(received\)/, 'snapshot carries the message delta section (B3: no board cursor)')
       assert.match(result.snapshot, /## Condensed roster/, 'snapshot carries the condensed roster section')
       assert.match(result.snapshot, /Liveness \(sessionLive\): not baked in/, 'snapshot roster never embeds live session liveness')
 
@@ -4558,11 +3613,10 @@ test('Batch W4 dept_wake_snapshot: registers globally (host plane), and ONE call
   })
 })
 
-test('Batch 7 U2 regression: GLOBAL dept_room_who schema declares hosts[].sleeping (A3 — no more copy-paste drift crashing host wake), reports the NEW rotated host as sleeping, and excludes the RETIRED host from "present"', async () => {
+test('Batch 7 U2 regression (B3): dept_who reports the NEW rotated host as sleeping and excludes the RETIRED host from "present" (the room-who schema drift is moot — the tool is gone)', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, persistence, workspaceRegistry, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       const signal = new AbortController().signal
 
       // (a) A sleeping host must be reported by the GLOBAL (host-plane) roster.
@@ -4596,26 +3650,23 @@ test('Batch 7 U2 regression: GLOBAL dept_room_who schema declares hosts[].sleepi
       assert.equal(workspaceRegistry.attachCalls.at(-1), newSessionId, 'S2.2 attach targets the pre-minted session id')
       assert.equal(workspaceRegistry.attachCalls.filter((id) => id === newSessionId).length, 1, 'S2.2 attached the rotated session exactly once (the boot head attach is separate)')
 
-      const who = root.tools.get('dept_room_who')
-      const result = await who.execute({ room: 'board' }, { agent: host, signal })
+      const who = root.tools.get('dept_who')
+      const result = await who.execute({}, { agent: host, signal })
       // The NEW host is present and reported as sleeping; the RETIRED old host
-      // is excluded (spec 002 §4/C7).
-      const sleepingHost = result.hosts.find((h) => h.hostId === newHostId)
+      // is excluded (spec 002 §4/C7) via dept_who (B3).
+      const sleepingHost = result.members.find((h) => h.kind === 'host' && h.agentId === newHostId)
       assert.ok(sleepingHost, 'the NEW sleeping host is in the global roster')
-      assert.equal(sleepingHost.sleeping, true, 'global dept_room_who reports the sleeping NEW host')
-      assert.ok(!result.hosts.some((h) => h.hostId === oldHostId), 'the retired old host is excluded from "present"')
+      assert.equal(sleepingHost.sleeping, true, 'dept_who reports the sleeping NEW host')
+      assert.ok(!result.members.some((h) => h.kind === 'host' && h.agentId === oldHostId), 'the retired old host is excluded from "present"')
 
-      // (b) The DECLARED output schema must actually allow `sleeping` on a host —
-      // additionalProperties:false on the host item forces this to be declared
-      // explicitly, so a copy-paste drift like A3 can never pass silently again.
-      // (dsh-tools compiles each property's `required: true` annotation into the
-      // object's top-level `required: [...]` array.)
-      const hostsItem = who.output.schema.properties.hosts.items
-      const sleepingSchema = hostsItem.properties.sleeping
-      assert.ok(sleepingSchema, 'hosts.items.properties.sleeping is declared in the output schema')
-      assert.equal(sleepingSchema.type, 'boolean', 'hosts[].sleeping is a boolean')
-      assert.ok(hostsItem.required.includes('sleeping'), 'hosts[].sleeping is required (in the item required[] array)')
-      assert.equal(hostsItem.additionalProperties, false, 'host item keeps additionalProperties:false (field must be declared)')
+      // (b) The DECLARED output schema must actually allow `sleeping` on a
+      // member — additionalProperties:false forces the declaration.
+      const itemSchema = who.output.schema.properties.members.items
+      const sleepingSchema = itemSchema.properties.sleeping
+      assert.ok(sleepingSchema, 'members.items.properties.sleeping is declared in the output schema')
+      assert.equal(sleepingSchema.type, 'boolean', 'members[].sleeping is a boolean')
+      assert.ok(itemSchema.required.includes('sleeping'), 'members[].sleeping is required (in the item required[] array)')
+      assert.equal(itemSchema.additionalProperties, false, 'member item keeps additionalProperties:false (field must be declared)')
     } finally {
       await dispose()
     }
@@ -4807,7 +3858,6 @@ test('T1 lean pack: after archive writes, the injected wake pack + readWakeJourn
     const hostId = await seedHostRegistration(stateDir, sessionId)
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       const host = agents.put(fakeParentAgent(sessionId))
       const signal = new AbortController().signal
 
@@ -4955,7 +4005,6 @@ test('B2 send_message: catalog head delivered with the spec framing + agent sour
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       // The head (research-head) is materialized at boot; the host is a fresh
       // root session. The unified tool is registered globally (no native
       // control tool composed in this minimal loader — see the override test).
@@ -5015,7 +4064,6 @@ test('B2 send_message: a dormant (slept) catalog head is RESUMED — sleepEpoch 
     await seedPost(stateDir, { postId: 'sleeper-head', sessionId: 'head-sleeper-head', roomId: 'research', agentPreset: 'deepartments-head', sleepEpoch: Date.now() })
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
       const send = pluginCtx().tools.get('send_message')
@@ -5045,7 +4093,6 @@ test('B2 send_message: MULTI-recipient splits per-recipient — live head delive
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
       const send = pluginCtx().tools.get('send_message')
@@ -5070,7 +4117,6 @@ test('B2 send_message: SELF-addressed send is held (`self`) — record persisted
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
       const send = pluginCtx().tools.get('send_message')
@@ -5093,7 +4139,6 @@ test('B2 send_message: fan-out cap — 21 recipients is a hard error (cap 20, sp
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
       const send = pluginCtx().tools.get('send_message')
@@ -5115,7 +4160,6 @@ test('B2 send_message: child route FIRST — a direct continuable child is deliv
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
       // Establish a REAL continuable child of the caller through the REAL
@@ -5168,7 +4212,6 @@ test('B2 agent_messages: paging 10-per-page with before cursor + remaining (20 s
     await seedMessageRecords(stateDir, records)
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       const host = agents.put(fakeParentAgent(SessionId('b2-host-page')))
       const signal = new AbortController().signal
       const messagesTool = pluginCtx().tools.get('agent_messages')
@@ -5207,7 +4250,6 @@ test('B2 dept_who: whole catalog — host + head rows with kind/title/live/sleep
     await seedHostRegistration(stateDir, hostSessionId, 'board')
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
       const host = agents.put(fakeParentAgent(SessionId('b2-host-who')))
       const signal = new AbortController().signal
@@ -5257,7 +4299,6 @@ test('B2 send_message: the unified implementation is the ONE bound after the ove
     await seedHostRegistration(stateDir, overrideHostSessionId, 'board')
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir, { nativeControlTool: true })
     try {
-      await waitForRooms(root)
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
 
       // The GLOBAL name is the NATIVE one (dsh-base owns it): its schema is

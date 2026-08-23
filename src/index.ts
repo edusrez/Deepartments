@@ -1,7 +1,6 @@
 // dsh-deepartments — Cordis plugin (bundle scaffold, task 3).
 // NO export default (pitfall 0001 — breaks `inject`).
 import type { Context } from '@deepseek-ai/cordis'
-import { applyOrg } from './org.js'
 import type { Config } from './org.js'
 import { applyInvoke } from './invoke.js'
 import { applyWebFetch } from './webfetch.js'
@@ -11,9 +10,9 @@ export type { WebFetchConfig } from './webfetch.js'
 
 export const name = 'deepartments'
 // agents/subagents are resolved OPTIONALLY inside applyInvoke (ctx.get): the
-// board-room core must keep working in minimal compositions (e.g. the
-// hermetic real-Loader tests of batch 1.5 mount neither), while the host-plane
-// board tools and wake relay fail loud at use when the services are absent.
+// agent-messaging core must keep working in minimal compositions (e.g. the
+// hermetic real-Loader tests of batch 1.5 mount neither), while the bus tools
+// fail loud at use when the services are absent.
 //
 // NOTE (Task T1, deliberate deviation from the owner's literal "inject both
 // 'sessionPersistence' AND 'sessionQuery'" directive — see the builder report):
@@ -29,7 +28,7 @@ export const name = 'deepartments'
 // session-log capture (captureSessionLog) and the board core therefore resolve
 // the session services OPTIONALLY via `ctx.get('sessionPersistence')` /
 // `ctx.get('sessionQuery')` at use, degrading to the stub form when absent.
-export const inject = ['tools', 'sessions', 'sessionProjections']
+export const inject = ['tools', 'sessions']
 
 export function apply(ctx: Context, config: Config) {
   ctx.logger.info('deepartments: online')
@@ -38,16 +37,15 @@ export function apply(ctx: Context, config: Config) {
   // boot line the way dsh-smooth-stream does (console.log with a prefix).
   console.log('[deepartments] online')
 
-  // Task 4: the organization service — config schema, room projection, and
-  // boot instantiation of the configured rooms (all registrations are
-  // reversible effects on this plugin's fiber).
-  applyOrg(ctx, config)
+  // Task 4: the organization config (schema + department/agent catalog) lives
+  // in ./org.ts — a pure configuration module since the board cutover (Batch
+  // B3, spec 003 §7.1); its runtime consumers are the agent-messaging service
+  // (applyInvoke, below) and the RPC/sidebar rows (src/agents.ts).
 
-  // Task 5 (Batch A): the board-as-bus backbone — host identity registry,
-  // host-plane board tools (dept_room_read/write/who/whereami registered
-  // globally so the host and every agent can use the bus) + the wake relay
-  // (wakes addressed posts through the live parent and hosts via the raw
-  // agent path). dept_invoke/fork is retired.
+  // Task 5: the agent messaging service — host identity registry (hosts.json),
+  // the agent→agent BUS tools (send_message/agent_messages/dept_who) + the
+  // department lifecycle (dept_memo_write/dept_sleep/dept_post_create/
+  // dept_post_retire). dept_invoke/fork and the board are retired.
   applyInvoke(ctx, config)
 
   // Web-fetch provider: custom `ctx.web` fetch backend (blocking detection

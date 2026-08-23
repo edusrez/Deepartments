@@ -1,8 +1,9 @@
-// dsh-deepartments — board AS A BUS (host-plane tools + wake relay + permanent
-// department heads). The Asistente host talks DIRECTLY to department heads
-// (resident posts) and to OTHER Asistente sessions through the shared board
-// room — NO fork/clone intermediary. dept_invoke and the fork machinery are
-// retired (Batch A).
+// dsh-deepartments — agent messaging (spec 003): the host Asistente talks to
+// department heads (posts), workers and transient children through the
+// direct agent→agent BUS (send_message/agent_messages/dept_who) — NO board
+// rooms, NO wake relay (Batch B3 cutover: the board is gone; the bus is the
+// only delivery path, spec 003 §7.1). dept_invoke, the fork machinery and all
+// board/room pieces are retired (Batch A / Batch B3).
 //
 // Batch 1a pivots department HEADS from CONTINUABLE SUBAGENTS to FIRST-CLASS
 // ROOT AGENTS (per explore-deep/2026-08-20-main-agent-own-head.md and
@@ -16,7 +17,7 @@
 //     agentPreset: 'deepartments-head' }`, `agentOptions`
 //     from the coordinator config, and a `setup(agentCtx)` that mounts the
 //     dedicated `deepartments-head` preset AND registers the head's `dept_*`
-//     board tools (dept_room_read/write/who, dept_whereami, dept_memo_write,
+//     tools (send_message, agent_messages, dept_who, dept_memo_write,
 //     dept_sleep) scoped to that agent — no host/builder/delegation tools.
 //   - Wake = raw `Agent.followup(createUserMessage(...))` (the SAME simpler
 //     wake the host branch has always used). This REMOVES the rc.6 "parent
@@ -36,81 +37,25 @@
 //   - The host channel IS the global tool layer: `ctx.tools.register` on the
 //     plugin's main-timeline ctx registers into the GLOBAL layer
 //     (dsh-tools ScopedLayers.effect — unscoped ctx → global), visible to the
-//     host Asistente AND every agent. We register the board tools
-//     (dept_room_read/write/who/whereami) GLOBALLY so the host can read and
+//     host Asistente AND every agent. We register the bus tools
+//     (send_message/agent_messages/dept_who) GLOBALLY so the host can read and
 //     write the bus. Heads get their OWN scoped copies instead: `setup()`
 //     registers the same tool bodies on the head's `agentCtx` (a scope's OWN
 //     layer always survives, so no `toolFilter` is needed for a root agent).
 //   - Hosts get a first-class, durable identity in `hosts.json`:
 //     `host-<sessionId>` → { hostId, sessionId, roomId }. Registered LAZILY on
-//     the host's first host-plane board tool call (ensureHost) — we never
-//     fabricate a host session at boot. Heads are registered in `posts.json`,
-//     keyed by postId → { sessionId, roomId, agentPreset, sleepEpoch?,
-//     previousChildId? } (no parentId/provider — see PostEntry below).
-//   - The wake relay wakes each addressed member:
-//       * a registered HEAD    -> RAW `agents.get(SessionId(entry.sessionId))
-//                                 .followup(createUserMessage(...))` — like the
-//                                 host branch; NO parent hop, NO lineage.
-//       * a registered HOST    -> RAW `agents.get(SessionId(host.sessionId))
-//                                 .followup(createUserMessage(...))`.
-//     Self-wakes and echo loops are excluded; unknown members are skipped with
-//     a warning.
-//
-// Batch C — wake-relay guards against confirmation ping-pong (the unbounded
-// ack-echo loop the log audit found in seq 86-110): two residents replying
-// "Confirmado… leído completo" to each other re-woke each other forever,
-// because every ack is addressed back to its sender, each triggering a fresh
-// wake. The relay now applies three guards BEFORE waking each addressed member
-// (head branch AND host branch):
-//   * Ack-loop suppression: a PURE acknowledgement (payload.ack === true) on a
-//     sender→target pair that has already exchanged N≥3 acks within the last
-//     T=120s WITHOUT an intervening non-ack message is a confirmation loop —
-//     the relay logs a debug line and does NOT wake a further turn. Each pair
-//     key is `${from}|${to}`; any non-ack message between the pair resets its
-//     counter. Acks are detected ONLY by the explicit `ack` flag (a first-class
-//     affordance on dept_room_write, Batch C); free-text ack detection is
-//     deliberately NOT attempted (unreliable).
-//   * No self-wake (unchanged): `member === record.from` → continue.
-//   * Boot-noise guard (unchanged): `record.kind !== 'message'` → return
-//     (ready/agenda records wake nobody).
-//   * Empty-delta wake dedup: if the member's read cursor has already advanced
-//     past record R (`memberCursors[member].lastMessageSeq >= record.seq`), a
-//     wake would serve nothing new, so the relay skips it. If the cursor was
-//     lost (in-memory, reset on restart), the member wakes anyway — the
-//     idempotent re-read is then acceptable.
-//   The exact numbers (N≥3, T=120s) are module constants ACK_LOOP_THRESHOLD and
-//   ACK_LOOP_WINDOW_MS below; the header comment and the constants must stay in
-//   sync if either is ever tuned.
-//   - `senderSession` resolves deterministically: a head sender via
-//     byPost.get(from)?.sessionId, a host sender via hosts.get(from)?.sessionId,
-//     else the raw member id. The old `anyParentId()` fabrication is GONE.
-//   - Address validation in dept_room_write rejects fully-unknown addressees
-//     loudly (no silent no-op); the relay still defensively skips+warns for
-//     addressees that race out of the registry.
-//
-// Documented choices:
-//   - Host registry reconciliation (Batch A): on boot we load hosts.json
-//     best-effort, but we do NOT drop entries whose session has no live agent.
-//     A cold-restarted host session is non-resident until reopened, so dropping
-//     it would erase a legitimate host's identity; instead we keep it and the
-//     relay SKIPS+WARNS when the target session is not live. Only a real
-//     join (lazy ensureHost on a live tool call) registers/refreshes a host.
-//   - Per-member read cursors (Batch D): the in-memory map keyed by member id
-//     is the FAST PATH (no 'cursor' board record kind: BoardKind is closed by
-//     board-store.ts), and it is now MIRRORED to `<stateDir>/cursors.json`
-//     (write-through fire-and-forget, last-write) so a restart restores it.
-//     Because the board seq is monotonic and append-only, a persisted
-//     `lastMessageSeq` is a correct durable HIGH-WATER MARK: dept_room_read
-//     serves ONLY records with `seq > cursor.lastMessageSeq` (never "from
-//     index 0"), so a resumed member does NOT replay its historical backlog
-//     after a restart. Semantics: FRESH member (no persisted cursor) = full
-//     history; RESUMED member (cursor present) = only-new.
-//   - Heads are root agents and are NEVER re-materialized by config in a fight
-//     with `dept_post_retire`: materialization is idempotent — it only CREATES
-//     a head whose durable `sessionId` is absent from the registry, and a
-//     retired head is simply absent (no re-spawn on a later host join the way
-//     the old materializeHeads did). "Permanent" = configured coordinator; the
-//     registry's `agentPreset: 'deepartments-head'` field is the marker.
+//     the host's first bus-tool call (ensureHost — dept_who/send_message
+//     self-register via the B3 gap fix; the board tools that used to trigger it
+//     are gone). we never fabricate a host session at boot. Heads are
+//     registered in `posts.json`, keyed by postId → { sessionId, roomId,
+//     agentPreset, sleepEpoch?, previousChildId? } — the durable recipient
+//     catalog. `roomId` survives as an INERT registry field (hosts.json/
+//     posts.json schema stability, session-rotation.ts reads it): no board
+//     tool takes or derives a room anymore.
+//   - Delivery is the BUS (spec 003 §4.3-4.4): send_message persists to
+//     messages.jsonl and delivers per recipient via the wakePost seam
+//     (materializePost — always-wake incl. stuck-head recovery, serialized,
+//     self held).
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 import { mkdir, readFile, writeFile, readdir, copyFile, stat, rename, unlink, appendFile } from 'node:fs/promises'
@@ -124,13 +69,10 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
-import { emitRoomRecord, roomSessionId, setBoardRecordListener, setRoomCompactionResetter } from './org.js'
 import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './session-cleanup.js'
 import { runHostRotation, validateHostsRotationFile, ROTATION_SCHEMA_VERSION, ASISTENTE_SESSION_TITLE } from './session-rotation.js'
 import type { RotationPersistenceLike, WorkspaceRegistryLike } from './session-rotation.js'
-import type { Config, CoordinatorConfig, DepartmentConfig, RoomState } from './org.js'
-import { loadRecords, resolveBoardPath } from './board-store.js'
-import type { BoardRecord, MessagePayload } from './board-store.js'
+import type { Config, CoordinatorConfig, DepartmentConfig } from './org.js'
 import {
   COMPACTION_LINE_THRESHOLD,
   MessagesStore,
@@ -180,26 +122,8 @@ interface SessionHeaderWithOrigin {
   }
 }
 
-/**
- * Message source for a board wake relayed to a HOST Asistente session. The
- * source kind is merge-extensible (dsh-llm MessageSourceMap is open); the
- * plugin augments it below, mirroring how dsh-subagent adds its own kinds.
- */
-interface BoardMessageSource {
-  kind: 'board'
-  form: 'notice'
-  /** One-line account of the board delta, shown without expanding the row. */
-  summary: string
-  roomId?: string
-  messageId?: string
-  from?: string
-  /** Session id of the sender (a host session or a post's child session). */
-  senderSessionId?: SessionId
-}
-
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
-    board: BoardMessageSource
     /** Agent→agent bus delivery (send_message, spec 003 §4.3). The GUI renders
      * non-`user` sources as collapsed context rows with label = kind and never
      * renders `to[]`, so sender + recipients MUST be framed in the text. */
@@ -265,6 +189,11 @@ const ACK_LOOP_WINDOW_MS = 120_000
 // relay disposes the frozen handle and cold-resumes the durable session, so the
 // wake is re-delivered from the DURABLE board record, never lost.
 const STUCK_HEAD_MS = 120_000
+
+/** B3 cutover (spec 003 §7.2): the wake-pack message-delta section carries the
+ * caller's LATEST-RECEIVED messages, capped small — the pack is injected every
+ * wake turn, so the section must stay lean. */
+const WAKE_MESSAGE_DELTA_LIMIT = 5
 
 /** Fix A2 — injectable clock for the stuck-head window. Production reads the
  * REAL wall clock (env unset → `Date.now()`), so a healthy head is judged
@@ -391,44 +320,6 @@ interface HostEntry {
   previousSessionId?: string
 }
 
-/** Compact per-member read cursors (in-memory — see header comment). */
-interface CursorState {
-  /** Last addressed message id the member has seen. */
-  lastMessageId: string | undefined
-  /** Last addressed message seq the member has seen (Batch C empty-delta dedup). */
-  lastMessageSeq: number
-  /** Last agenda touch seq (board FILE seq) the member has seen. */
-  lastAgendaSeq: number
-}
-
-/** One head (root-agent post) row in dept_room_who / dept_whereami outputs. */
-interface PostRow {
-  postId: string
-  /** The head's stable root-agent session id. */
-  sessionId: string
-  roomId: string
-  /** The mounted head preset (marker: configured permanent head). */
-  agentPreset: string
-  /** Whether the head's agent session is LIVE right now (agents.get defined). */
-  sessionLive: boolean
-  /** Batch G: whether the head is currently SLEEPING (sleepEpoch set — its next
-   * wake cold-resumes a fresh incarnation instead of waking the old one). */
-  sleeping: boolean
-}
-
-/** One host row in dept_room_who output. */
-interface HostRow {
-  hostId: string
-  sessionId: string
-  roomId: string
-  /** Batch E: whether the host's agent session is LIVE right now (agents.get
-   * defined). A cold-boot non-live host is listed truthfully with false. */
-  sessionLive: boolean
-  /** Batch 7: whether the host is currently marked SLEPT (HostEntry.sleepEpoch
-   * set — its live surface was reset in place to its journal). */
-  sleeping: boolean
-}
-
 /**
  * Loose structural view of `ctx.connection` — the optional Host Connection
  * service provided by the SEPARATE dsh-client-connection plugin (NOT present
@@ -510,54 +401,15 @@ interface AgentPresetsLike {
   mount(agentCtx: Context, id?: string): Promise<unknown>
 }
 
-/** dept_whereami spatial-identity result. */
-type WhereAmI =
-  | {
-      kind: 'host'
-      postId: null
-      roomId: null
-      hostId?: string
-      sessionId?: string
-      hostRoomId?: string
-      message: string
-    }
-  | {
-      kind: 'post'
-      postId: string
-      roomId: string
-      /** The head's stable root-agent session id. */
-      sessionId: string
-      /** The mounted head preset (marker: configured permanent head). */
-      agentPreset: string
-      /** Whether the head's own agent session is live right now. */
-      sessionLive: boolean
-      members: string[]
-      posts: PostRow[]
-    }
-
 /**
- * Format one addressed message as a compact TOC line for the model-facing
- * delta: message id + sender → recipients + a short preview. The preview is
- * truncated to 140 chars with an explicit '…' when longer — never silently
- * shortened: the message id on the line lets the model fetch the FULL text
- * by id (dept_room_read with messageId).
+ * Format one message-store record as a compact TOC line for the model-facing
+ * message delta (spec 003 §7.2 — the wake pack's message-delta section): the
+ * record id + sender → recipients + a short preview. The preview is truncated
+ * to 140 chars with an explicit '…' when longer — never silently shortened.
  */
-function formatTocMessage(message: Pick<RoomState['messages'][number], 'id' | 'seq' | 'from' | 'to' | 'text' | 'sensitive' | 'senderVerified'>): string {
+function formatMessageDeltaLine(message: Pick<MessageRecord, 'id' | 'from' | 'to' | 'text' | 'kind'>): string {
   const preview = message.text.length > 140 ? `${message.text.slice(0, 140)}…` : message.text
-  // Batch E sender-trust: surface the sensitive flag + registry-verified
-  // sender in the rendered delta so a recipient can decide how to act. This is
-  // a MODEL-FACING trust signal, NOT a hard enforcement block.
-  const flag = message.sensitive
-    ? `[sensitive — sender verified: ${message.senderVerified === true ? 'yes' : 'no'}] `
-    : ''
-  return `- ${message.id} | ${message.from} → ${message.to.join(', ') || '(all)'} | ${flag}${preview}`
-}
-
-/**
- * Format one agenda item for the model-facing delta (compact).
- */
-function formatDeltaAgenda(item: RoomState['agenda'][number]): string {
-  return `- agenda "${item.title}" (${item.status}, owner ${item.owner})`
+  return `- ${message.id} | ${message.from} → ${message.to.join(', ') || '(all)'} | ${preview}`
 }
 
 /** YAML-ish flow list rendering for witness frontmatter arrays. */
@@ -666,9 +518,13 @@ export function buildWakePackMessage(packText: string) {
  * contract block (from src/role-orient.ts) + a reporting pointer. Same
  * plugin/notice surface as the host pack so it lands as a collapsed row.
  */
-export function buildSubagentOrientationMessage(role: SubagentRole, roomId: string) {
+export function buildSubagentOrientationMessage(role: SubagentRole) {
+  // role-orient.ts still takes a `roomId` parameter (out of B3a scope — its
+  // identity line is being cleaned in the persona-wording phase); the B3
+  // cutover passes the org label so the subagent identity never names a board
+  // room.
   return createUserMessage({
-    content: [{ type: 'text', text: buildSubagentOrientation(role, roomId) }],
+    content: [{ type: 'text', text: buildSubagentOrientation(role, 'deepartments') }],
     source: {
       kind: 'plugin',
       plugin: 'deepartments',
@@ -690,7 +546,7 @@ export function buildSubagentOrientationMessage(role: SubagentRole, roomId: stri
 //
 // Deep rule (stale-liveness): the pack NEVER statically embeds true live
 // session liveness (`sessionLive`) — a stale false claim is worse than one
-// on-demand `dept_room_who`. Roster carries only durable registry flags
+// on-demand `dept_who`. Roster carries only durable registry flags
 // (sleeping), listing flags that are live-registry reads never baked in.
 // ---------------------------------------------------------------------------
 
@@ -699,7 +555,7 @@ export function buildSubagentOrientationMessage(role: SubagentRole, roomId: stri
  * journal footer is one-line pointer to the skill, so this text is NOT
  * duplicated in dept_sleep seeds (Batch C P1 dedupe, see ~2051). */
 export const HOST_WAKE_ROUTINE_TEXT =
-  'Start-of-session: your Deepartments context injection already carries identity, the pre-resolved journal path + journal body, the board delta TOC, the condensed roster, git bearings, system state, and the full deepartments-workflow skill. Read it — do not re-fetch what the pack provides. Only call board tools for LIVE needs the pack cannot cache: true session liveness (dept_room_who), full text of a message you must answer (dept_room_read messageId), writes, or dept_sleep. REPLY FIRST: your first output of the wake turn is the owner-facing message — greeting + a <=5-line top-item plan + the explicit ask "what do you want this session?" — before ANY tool call (the only exception: the fail-loud health check when the pack itself is stale/ambiguous, which still surfaces the situation to the owner before working). The plan is PROPOSED, not authorized: do NOT dispatch subagents, explore the codebase, or start the item until the human answers; to ground the plan, at most 1–2 reads of a journal-referenced report and zero src/checkout exploration or bash before go-ahead. Then pick the highest-priority unfinished open item, present a concise plan, and WAIT for the owner\'s answer before working. Full sequence: skill deepartments-workflow ("Wake routine").'
+  'Start-of-session: your Deepartments context injection already carries identity, the pre-resolved journal path + journal body, the message delta (latest received), the condensed roster, git bearings, system state, and the full deepartments-workflow skill. Read it — do not re-fetch what the pack provides. Only call tools for LIVE needs the pack cannot cache: true session liveness (dept_who), full text of a message you must answer (agent_messages before- cursor), writes (send_message), or dept_sleep. REPLY FIRST: your first output of the wake turn is the owner-facing message — greeting + a <=5-line top-item plan + the explicit ask "what do you want this session?" — before ANY tool call (the only exception: the fail-loud health check when the pack itself is stale/ambiguous, which still surfaces the situation to the owner before working). The plan is PROPOSED, not authorized: do NOT dispatch subagents, explore the codebase, or start the item until the human answers; to ground the plan, at most 1–2 reads of a journal-referenced report and zero src/checkout exploration or bash before go-ahead. Then pick the highest-priority unfinished open item, present a concise plan, and WAIT for the owner\'s answer before working. Full sequence: skill deepartments-workflow ("Wake routine").'
 
 /** The closing guidance line that follows the canonical routine in the pack. */
 export const HOST_WAKE_NEXT_STEP =
@@ -707,16 +563,15 @@ export const HOST_WAKE_NEXT_STEP =
 
 /**
  * The pre-rendered parts `buildWakePack` composes. Every field except
- * memberId/role/room/boardDelta/roster is OPTIONAL: the wake injection supplies
+ * memberId/role/messageDelta/roster is OPTIONAL: the wake injection supplies
  * all of them (sections 1-9), while the on-demand `dept_wake_snapshot` supplies
- * only identity+boardDelta+roster (sections 1, 3, 4). A section is rendered
+ * only identity+messageDelta+roster (sections 1, 3, 4). A section is rendered
  * exactly when its content is present — so the SAME pure builder produces both
  * the full wake pack and the lean live snapshot.
  */
 export interface WakePackParts {
   memberId: string
   role: string
-  room: string
   /** Deterministic presence sentinel line injected as the FIRST element of
    * section 1 (see `buildWakePack`) so the wake-pack node's presence is
    * detectable by health checks / the pre-step gate without parsing the JSON
@@ -728,8 +583,9 @@ export interface WakePackParts {
   kpi?: string
   /** Pre-resolved durable journal path (wake injection only; section 2). */
   journalPath?: string
-  /** Cursor + board-delta TOC body. '' → empty section (no new messages). */
-  boardDelta: string
+  /** Message-delta TOC body (latest received, spec 003 §7.2). '' → empty
+   * section (no messages yet). */
+  messageDelta: string
   /** Condensed roster (registry flags only — NEVER live session liveness). */
   roster: string
   /** Git bearings (section 5; wake injection only). */
@@ -756,7 +612,7 @@ export function buildWakePack(parts: WakePackParts): string {
   const identityLines = [
     '## Deepartments wake pack',
     'pack-v1: present',
-    `- identity: ${parts.memberId} (role: ${parts.role}, room: ${parts.room})`
+    `- identity: ${parts.memberId} (role: ${parts.role})`
   ]
   if (parts.kpi !== undefined && parts.kpi.trim() !== '') {
     identityLines.push(`- kpi: ${parts.kpi}`)
@@ -772,11 +628,11 @@ export function buildWakePack(parts: WakePackParts): string {
     ].join('\n'))
   }
 
-  // 3 — board delta TOC since cursor (always rendered; body may be empty)
+  // 3 — message delta TOC (latest received; always rendered; body may be empty)
   sections.push(
-    parts.boardDelta.trim() === ''
-      ? '## Board delta since cursor'
-      : `## Board delta since cursor\n${parts.boardDelta}`
+    parts.messageDelta.trim() === ''
+      ? '## Message delta (received)'
+      : `## Message delta (received)\n${parts.messageDelta}`
   )
 
   // 4 — condensed roster (always rendered)
@@ -867,16 +723,10 @@ export interface DeepartmentsEndpointDeps {
   byPost: Map<string, PostEntryLike>
   /** The host registry, iterated to resolve a caller host member id by sessionId. */
   hosts: Iterable<HostEntryLike>
-  /** Per-host-member read cursors, keyed by hostMemberId (lastMessageSeq watermark). */
-  memberCursors: ReadonlyMap<string, { lastMessageSeq: number }>
   /** Live signal: the head's session is present in the agents registry. */
   sessionLive(sessionId: string): boolean
   /** Optional refinement: the head's session is currently running (status). */
   sessionRunning?: (sessionId: string) => boolean
-  /** Load the durable `board` room records ONCE (undefined when no board room).
-   * The board FILE is the cold source of truth and carries MessagePayload.ack,
-   * which the folded room projection omits. */
-  loadBoardRecords(): Promise<BoardRecord[] | undefined>
   /** Optional (U3): read the live host's journal wake_counter (number) for the
    * `host/status` payload. Absent dep → the payload omits wakeCounter (the
    * payload must stay minimal and stable). Contract: never throws (a read
@@ -1038,39 +888,17 @@ export async function dispatchDeepartmentsEndpoint(
     }
   }
   // Resolve the caller host member id (host-<sessionId>) from its sessionId.
-  // If the caller host is not (yet) registered in `hosts`, unread counts as 0
-  // for all heads (nothing to count against).
+  // If the caller host is not (yet) registered in `hosts`, nothing to count
+  // against. B3 cutover: the board-based unread derivation is KILLED (spec
+  // 003 §7.1 — no read/seen marks in the messaging phase, §5 note: repoint to
+  // messages.jsonl counts or kill); the row's `unread` is a stable 0 and the
+  // `completed-notice` status branch simply never fires.
   let sessionId: string | undefined
   if (typeof payload === 'object' && payload !== null) {
     const rawSession = (payload as { sessionId?: unknown }).sessionId
     if (typeof rawSession === 'string') sessionId = rawSession
   }
-  let hostMemberId: string | undefined
-  if (sessionId !== undefined) {
-    for (const entry of deps.hosts) {
-      if (entry.sessionId === sessionId) { hostMemberId = entry.hostId; break }
-    }
-  }
-  const boardRecords = await deps.loadBoardRecords()
-  // Unread addressed-to-host messages per head: board message with
-  // seq > cursor.lastMessageSeq AND from === postId AND (to is empty OR
-  // includes the caller host member id) AND payload.ack !== true — mirroring
-  // the TOC filter at dept_room_read.
-  const unreadFor = (postId: string): number => {
-    if (hostMemberId === undefined || boardRecords === undefined) return 0
-    const cursor = deps.memberCursors.get(hostMemberId)
-    const lastSeq = cursor === undefined ? -1 : cursor.lastMessageSeq
-    let count = 0
-    for (const record of boardRecords) {
-      if (record.kind !== 'message') continue
-      if (record.seq <= lastSeq) continue
-      if (record.from !== postId) continue
-      if ((record.payload as MessagePayload).ack === true) continue
-      if (record.to.length > 0 && !record.to.includes(hostMemberId)) continue
-      count++
-    }
-    return count
-  }
+  const unreadFor = (_postId: string): number => 0
   const rows = buildAgentRows({
     departments: deps.departments,
     posts: deps.byPost as unknown as Map<string, PostEntryLike>,
@@ -1434,7 +1262,6 @@ export function applyInvoke(ctx: Context, config: Config) {
     headRecoveryQueues.set(sessionId, run.then(() => void 0, () => void 0))
     return run
   }
-  const memberCursors = new Map<string, CursorState>()
   // Batch C — which LIVE agent sessions have already had the (freshly-injected)
   // Deepartments wake pack placed in their context THIS awake session. The pack
   // is now injected at `agent/pre-step` message-arrival time (NOT frozen at
@@ -1464,25 +1291,11 @@ export function applyInvoke(ctx: Context, config: Config) {
   // at boot; a sleep→restart cycle therefore still folds at the first pre-step
   // of the new process (see the loader + the pre-step consume below).
   const deferredSleepReplace = new Map<string, string>()
-  // Batch C: per sender→target pair ack budget. Key `${from}|${to}` → how many
-  // consecutive pure acks (payload.ack) that pair has exchanged and when the
-  // last one landed. Any non-ack message between the pair resets it (delete).
-  const ackCounters = new Map<string, { count: number; lastTs: number }>()
-  const roomQueues = new Map<string, Promise<unknown>>()
-  // Batch F (D6): per-room monotonic next-seq counter, seeded ONCE from the
-  // board file (lazy-once on the first emit). Replaces the O(n) re-read +
-  // reparse of the whole board file on every emit (audit H2 — total write cost
-  // was O(n²)) with an O(1) counter increment. This counter is the per-process
-  // monotonic sequence source; boot compaction (board-store.ts) renumbers the
-  // file at boot BEFORE any emit seeds the counter, so the counter and the
-  // file stay consistent (both originate from the same post-boot file).
-  const nextSeq = new Map<string, number>()
   const postsPath = path.join(config.stateDir, 'posts.json')
-  // Batch D: per-member read cursors persisted to `<stateDir>/cursors.json`,
-  // keyed by `${roomId}:${memberId}` (last-write, fire-and-forget). The
-  // in-memory `memberCursors` map is the fast path and is rebuilt from this
-  // file at boot so a restart does NOT replay the historical backlog.
-  const cursorsPath = path.join(config.stateDir, 'cursors.json')
+  // B3 cutover: room read-cursors are GONE (no board, no read-delta). A legacy
+  // `<stateDir>/cursors.json` may still exist on upgraded stateDirs — it is
+  // deliberately LEFT INERT (no readers, no writers; the file itself is not
+  // deleted here — state migration is the B3 migration step).
 
   // --- host registry (hostId → entry, plus sessionId → hostId reverse) ------
   const hosts = new Map<string, HostEntry>()
@@ -1528,33 +1341,31 @@ export function applyInvoke(ctx: Context, config: Config) {
   // separate migration step. Nothing reads or writes it anymore.
 
   /**
-   * Lazy host registration: called from a host-plane board tool when the
-   * calling agent has no post entry (it may be a HOST Asistente session).
-   * Records the deterministic `host-<sessionId>` address and refreshes the
-   * durable identity (hostId/sessionId). CONTRACT (postmortem nº5 + relay-fix,
-   * 2026-08-22 + host-roomId latch fix, 2026-08-22):
+   * Lazy host registration: called from the host-plane tools when the calling
+   * agent has no post entry (it may be a HOST Asistente session). Records the
+   * deterministic `host-<sessionId>` address and refreshes the durable
+   * identity (hostId/sessionId). CONTRACT (postmortem nº5 + relay-fix,
+   * 2026-08-22 + host-roomId latch fix, 2026-08-22; B3: roomId is now an INERT
+   * registry field — the caller passes the registry default `'board'` since no
+   * board tool carries a room anymore):
    *   - NEW registration (hostId absent): allowed ONLY when no other live
    *     (non-retired) host entry exists — the FIRST host registers; any
    *     further session is REFUSED (warn + NO entry; the session stays a
    *     plain session, spec 002 §4/C1) and the EXISTING live host's id is
-   *     returned so board-tool member resolution keeps a valid member id.
-   *     roomId is ASSIGNED here, from the caller's room (first-configured-room
-   *     fallback is caller-side: whereami's joinRoom).
+   *     returned so bus member resolution keeps a valid member id.
    *   - REFRESH (hostId present, non-retired): always allowed, and MERGES —
    *     it preserves every field ensureHost does not own (rotation-successor
    *     metadata: previousSessionId/sleepEpoch/boundarySeq, retire evidence)
    *     instead of replacing the whole entry, and KEEPS `existing.roomId`
-   *     VERBATIM — a refresh never re-derives roomId from the caller's room,
-   *     so no board-tool call operating in any room (incl. dept_post_retire's
-   *     withdrawal emitted in the retired post's room) can move the host's
-   *     registry roomId (host-roomId latch fix).
+   *     VERBATIM (roomId is never re-derived anywhere anymore).
    *   - RETIRED re-registration: refused (unchanged).
-   * Never fabricates a host at boot — only a live tool call registers one.
+   * Never fabricates a host at boot — only a live tool call registers one
+   * (dept_who / send_message self-register through the B3 gap fix).
    */
   const ensureHost = (sessionId: string, roomId: string): string => {
     const hostId = `${HOST_ID_PREFIX}${sessionId}`
     // U2 (rotation, §4/C1): a RETIRED host entry must never be resurrected —
-    // the old session's board-tool calls after a rotation stay PLAIN sessions
+    // the old session's bus-tool calls after a rotation stay PLAIN sessions
     // ("no pack + no registration"). Refuse the re-registration, log loudly,
     // keep the entry retired (its rotatedTo stays the live host).
     const existing = hosts.get(hostId)
@@ -1568,9 +1379,9 @@ export function applyInvoke(ctx: Context, config: Config) {
     // dormant tab registered itself as a bare second host 92 s after the
     // rotation). Mirror the retired-refusal: warn + DO NOT register — the
     // session stays a plain session ("no pack + no registration", spec 002
-    // §4/C1). Return the EXISTING live host's id so board-tool member
-    // resolution (memberIdFor) keeps returning a valid member id and no tool
-    // of a plain session ever creates an entry.
+    // §4/C1). Return the EXISTING live host's id so member resolution keeps
+    // returning a valid member id and no tool of a plain session ever creates
+    // an entry.
     if (existing === undefined) {
       for (const candidate of hosts.values()) {
         if (candidate.retired !== true && candidate.sessionId !== sessionId) {
@@ -1600,18 +1411,11 @@ export function applyInvoke(ctx: Context, config: Config) {
     // Relay-fix (explore 2026-08-22): the OLD code REPLACED the whole entry on
     // every refresh, wiping the rotation-successor metadata (previousSessionId/
     // sleepEpoch/boundarySeq/deferredJournalSeed and any retire evidence) on
-    // the successor's first board-tool call — the live-host pick then degraded
+    // the successor's first tool call — the live-host pick then degraded
     // to the ambiguity branch. MERGE instead: preserve every field ensureHost
     // does not own and refresh only the durable identity (hostId/sessionId).
-    // Host-roomId latch fix (2026-08-22, explore-deep/2026-08-22-host-roomid-
-    // flip.md): the OLD refresh ALSO re-derived roomId from the caller's room
-    // argument, and retirePost emits its withdrawal with the RETIRED post's
-    // room (`memberIdFor(caller, entry.roomId)`) — so a host-plane
-    // dept_post_retire moved the LIVE host's registry roomId into the retired
-    // post's room (observed: roomId "programming" after retiring that room's
-    // head). A refresh now KEEPS `existing.roomId` verbatim: roomId is assigned
-    // ONLY at CREATE; no board-tool call (read/write/retire/whereami) can ever
-    // move the roomId of an already-registered host.
+    // Host-roomId latch fix: a refresh KEEPS `existing.roomId` verbatim; roomId
+    // is assigned ONLY at CREATE.
     hosts.set(hostId, existing === undefined
       ? { hostId, sessionId, roomId }
       : { ...existing, hostId, sessionId })
@@ -1657,39 +1461,6 @@ export function applyInvoke(ctx: Context, config: Config) {
   }
 
   const postIdForChild = (childId: string): string | undefined => byChild.get(childId)
-
-  // --- per-member read cursors: durable mirror (Batch D) ----------------------
-  // Disk key is `${roomId}:${memberId}`; the in-memory fast path collapses a
-  // multi-room member's entries to the highest high-water seq per member id.
-  const persistedCursors = new Map<string, CursorState>()
-  const cursorKey = (roomId: string, memberId: string): string => `${roomId}:${memberId}`
-
-  // Fire-and-forget write-through of ONE advanced cursor (mirrors the posts/
-  // hosts persist pattern; last-write wins). The stateDir may not exist yet
-  // on a first boot, so mkdir -p first.
-  const persistCursors = (roomId: string, memberId: string, cursor: CursorState): void => {
-    persistedCursors.set(cursorKey(roomId, memberId), cursor)
-    const data: Record<string, CursorState> = {}
-    for (const [key, value] of persistedCursors) data[key] = value
-    mkdir(path.dirname(cursorsPath), { recursive: true }).then(() =>
-      writeFile(cursorsPath, JSON.stringify(data, null, 2), 'utf8')
-    ).catch((error: unknown) => {
-      ctx.logger.warn(`[deepartments] cursors.json write failed: ${error instanceof Error ? error.message : String(error)}`)
-    })
-  }
-
-  /**
-   * Resolve the board member id of a calling agent: a registered post first,
-   * else a (lazily registered) host. A bare agent with no post may be the HOST
-   * (first registration) or a PLAIN session — under the single-live-host guard
-   * (postmortem nº5) a NEW registration while another live host exists is
-   * REFUSED and the EXISTING live host's id is returned instead, so the board
-   * tools of a plain session never create a host entry.
-   */
-  const memberIdFor = (agentId: string | undefined, roomId: string): string => {
-    if (agentId === undefined) throw new Error('[deepartments] a calling agent is required')
-    return postIdForChild(agentId) ?? ensureHost(agentId, roomId)
-  }
 
   // Best-effort cold load of the post registry. Batch 1a: entries carry the
   // root-agent `sessionId` (head-<postId>). Legacy entries from the previous
@@ -2008,129 +1779,10 @@ export function applyInvoke(ctx: Context, config: Config) {
   }
   hostsLoaded.then(() => { void repairHostWorkspaceAttach() }, () => { void repairHostWorkspaceAttach() })
 
-  // Best-effort cold load of the persisted per-member read cursors (Batch D).
-  // A fresh/missing file (ENOENT) → empty map: every member starts as a FRESH
-  // reader (full history). A present file restores the durable high-water
-  // `lastMessageSeq` so a RESUMED member reads only-new after a restart.
-  const cursorsLoaded = readFile(cursorsPath, 'utf8')
-    .then((text) => {
-      const parsed = JSON.parse(text) as Record<string, CursorState>
-      for (const [key, value] of Object.entries(parsed)) {
-        if (typeof value?.lastMessageSeq !== 'number' || typeof value?.lastAgendaSeq !== 'number') continue
-        persistedCursors.set(key, value)
-        // Collapse to the per-member fast path: keep the highest high-water seq
-        // (a multi-room member's entries coexist on disk, last-write wins here).
-        const memberId = key.slice(key.indexOf(':') + 1)
-        const existing = memberCursors.get(memberId)
-        if (existing === void 0 || value.lastMessageSeq > existing.lastMessageSeq) {
-          memberCursors.set(memberId, {
-            lastMessageId: value.lastMessageId ?? undefined,
-            lastMessageSeq: value.lastMessageSeq,
-            lastAgendaSeq: value.lastAgendaSeq
-          })
-        }
-      }
-      ctx.logger.info(`[deepartments] loaded ${memberCursors.size} member read cursors from cursors.json`)
-    })
-    .catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        ctx.logger.warn(`[deepartments] cursors.json load failed (starting with fresh per-member cursors): ${error instanceof Error ? error.message : String(error)}`)
-      }
-    })
-
-  // Serialize every emit per room: seq assignment reads the file's last seq,
-  // so concurrent emitters must not interleave (single-process assumption).
-  const serialize = <T>(roomId: string, task: () => Promise<T>): Promise<T> => {
-    const previous = roomQueues.get(roomId) ?? Promise.resolve()
-    const run = previous.then(task, task)
-    roomQueues.set(roomId, run.then(() => void 0, () => void 0))
-    return run
-  }
-
-  /**
-   * Batch F (D6): seed the per-room next-seq counter ONCE from the board file
-   * (lazy-once on first emit). Reads the file exactly once, sets
-   * `nextSeq[roomId]` to (last seq + 1, or 0 for an empty file), and returns
-   * it. The first read happens AFTER boot, so it reflects any `ready` record
-   * applyOrg appended during boot AND any boot compaction that renumbered the
-   * file — keeping the counter and the file consistent.
-   */
-  const seedNextSeq = async (roomId: string): Promise<number> => {
-    const filePath = resolveBoardPath(config.stateDir, roomId)
-    const records = await loadRecords(filePath)
-    const seq = records.length === 0 ? 0 : records[records.length - 1].seq + 1
-    nextSeq.set(roomId, seq)
-    return seq
-  }
-
-  /**
-   * Emit one addressed board message through org's emit site (session append
-   * + file mirror + listener), assigning the next board file seq. When `ack` is
-   * true the message is a pure acknowledgement/receipt (no new substance) and
-   * is tagged `payload.ack = true` so the relay's ack-loop guard can recognize
-   * it and stop confirmation ping-pong.
-   */
-  const emitBoardMessage = (roomId: string, from: string, to: string[], text: string, threadId: string | null = null, ack = false, sensitive = false): Promise<{ record: BoardRecord; session: Session }> =>
-    serialize(roomId, async () => {
-      const session = ctx.sessions.get(SessionId(roomSessionId(roomId)))
-      if (session === void 0) throw new Error(`[deepartments] room "${roomId}" is not live (no session) — is the room configured?`)
-      const filePath = resolveBoardPath(config.stateDir, roomId)
-      // Batch F (D6): O(1) seq from the per-room counter (lazy-once seed on the
-      // first emit). Never re-reads the board file on subsequent emits.
-      const seq = nextSeq.get(roomId) ?? await seedNextSeq(roomId)
-      nextSeq.set(roomId, seq + 1)
-      // Batch E sender-trust: a sensitive message records the sensitive flag
-      // AND a senderVerified flag computed from the registry (registered post,
-      // or a live registered host). Surface signal, not enforcement.
-      const payload: MessagePayload = { kind: 'note', text }
-      if (ack) payload.ack = true
-      if (sensitive) {
-        payload.sensitive = true
-        payload.senderVerified = computeSenderVerified(from)
-      }
-      const record: BoardRecord = {
-        id: `m-${roomId}-${seq}`,
-        seq,
-        ts: Date.now(),
-        from,
-        to: [...to],
-        cc: [],
-        threadId,
-        kind: 'message',
-        payload
-      }
-      await emitRoomRecord(session, filePath, record, roomId)
-      return { record, session }
-    })
-
-  /**
-   * Address validation for dept_room_write: an addressee is known if it is a
-   * registered post, a registered host, or a static member of any configured
-   * room. Fully-unknown addressees are rejected loudly (the audit C4 no-op).
-   */
-  const isKnownAddressee = (addressee: string): boolean =>
-    byPost.has(addressee) || hosts.has(addressee) || config.org.rooms.some((room) => room.members.includes(addressee))
-
-  /**
-   * Batch E sender-trust: resolve whether a recorded board member id (`from`)
-   * is REGISTRY-VERIFIED — a registered post, or a registered host whose agent
-   * session is currently live. Returned as the `senderVerified` flag on a
-   * sensitive message. HONEST TRUST BOUND: this proves only that the sender
-   * is a registry-admitted board member at emit time — it is NOT a
-   * cryptographic signature and does not authenticate the content's author
-   * beyond that registry admission. It is a pragmatic signal the recipient
-   * sees, not an enforcement block (the audit's own recommendation was to
-   * surface the trust signal, not to hard-block).
-   */
-  const computeSenderVerified = (from: string): boolean => {
-    if (byPost.has(from)) return true // a registered post is registry-verified
-    const host = hosts.get(from)
-    if (host !== void 0) {
-      // A host is verified only when its agent session is actually live.
-      return agents !== void 0 && agents.get(SessionId(host.sessionId)) !== undefined
-    }
-    return false
-  }
+  // B3 cutover: the per-room board-emit machinery (read cursors, seq
+  // counters, room queues, the board message emitter, room-write address
+  // validation, sender-verified trust flags) is DELETED — the BUS
+  // (messages-store.ts + deliverBusRecord) is the only emit/delivery path.
 
   // --- department HEADS: FIRST-CLASS ROOT AGENTS (Batch 1a) ------------------
   // A configured coordinator is materialized as its OWN root agent (NOT a
@@ -2645,7 +2297,6 @@ export function applyInvoke(ctx: Context, config: Config) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
 
-    const cursor = memberCursors.get(memberId)
     const wakeCounter = archive?.wakeCounter ?? Math.max(prevCounter, 1)
     // Task T1 — the journal entry cites BOTH archive artifacts (additive
     // frontmatter lines after `open_items:`/before the closing `---`; the KPI
@@ -2663,7 +2314,9 @@ export function applyInvoke(ctx: Context, config: Config) {
       `wake_counter: ${wakeCounter}`,
       `last_wake: ${prevTimestamp ?? 'none'}`,
       ...(currentStep !== undefined ? [`current_step: ${currentStep}`] : []),
-      `board_cursor: ${cursor?.lastMessageId ?? 'none'}`,
+      // B3 cutover: board read-cursors are gone — the informational frontmatter
+      // line stays for journal-schema stability, pinned to 'none'.
+      'board_cursor: none',
       `decisions: ${yamlList(decisions)}`,
       `constraints: ${yamlList(constraints)}`,
       `open_items: ${yamlList(openItems)}`,
@@ -2891,60 +2544,43 @@ export function applyInvoke(ctx: Context, config: Config) {
     `- Repo root: ${repoRoot}`
   ].join('\n')
 
-  /** Condensed roster of ONE room: static members + registered posts/hosts with
-   * their durable REGISTRY sleeping flags. NEVER embeds live `sessionLive`
-   * liveness (deep rule — a stale liveness claim is worse than one on-demand
-   * `dept_room_who`); a pointer line keeps the on-demand escape hatch explicit. */
-  const buildCondensedRoster = (roomId: string): string => {
+  /** Condensed roster of the WHOLE catalog (B3: no rooms): registered posts +
+   * non-retired hosts with their durable REGISTRY sleeping flags. NEVER embeds
+   * live `sessionLive` liveness (deep rule — a stale liveness claim is worse
+   * than one on-demand `dept_who`); a pointer line keeps the on-demand escape
+   * hatch explicit. */
+  const buildCondensedRoster = (): string => {
     const lines: string[] = []
-    const room = config.org.rooms.find((candidate) => candidate.id === roomId)
-    const members = room === void 0 ? [] : [...room.members]
-    if (members.length > 0) lines.push(`Static members: ${members.join(', ')}`)
     for (const entry of byPost.values()) {
-      if (entry.roomId !== roomId) continue
       lines.push(`- ${entry.postId}${entry.sleepEpoch !== void 0 ? ' (sleeping)' : ''} (${entry.agentPreset})`)
     }
     for (const entry of hosts.values()) {
-      if (entry.roomId !== roomId) continue
       // U2 (§4/C7): a retired entry is filtered from "present" (still
       // queryable in hosts.json, but no longer a member of the live roster).
       if (entry.retired === true) continue
       lines.push(`- ${entry.hostId}${entry.sleepEpoch !== void 0 ? ' (sleeping)' : ''}`)
     }
-    if (lines.length === 0) lines.push('(no registered members/posts/hosts)')
-    lines.push('Liveness (sessionLive): not baked in — call dept_room_who on demand.')
+    if (lines.length === 0) lines.push('(no registered posts/hosts)')
+    lines.push('Liveness (sessionLive): not baked in — call dept_who on demand.')
     return lines.join('\n')
   }
 
-  /** Board delta TOC since the member's cursor (read-only — never advances the
-   * cursor): the cursor high-water line + the message TOC lines (id + sender →
-   * recipients + preview) for messages after the cursor addressed to the member
-   * or sent by it, mirroring dept_room_read's addressed-only semantics. Missing/
-   * unreadable board file → cursor-only line (never throw). */
-  const readWakeBoardDelta = async (memberId: string, roomId: string): Promise<string> => {
-    let records: BoardRecord[]
+  /** Message-delta TOC for the wake pack (spec 003 §7.2): the caller's
+   * LATEST-RECEIVED messages from the messages.jsonl store (capped N,
+   * newest-first; no unread/read state — D5). Missing/unreadable store →
+   * an empty-cursor line (never throw). */
+  const readWakeMessageDelta = async (memberId: string): Promise<string> => {
+    const lines: string[] = []
     try {
-      records = await loadRecords(resolveBoardPath(config.stateDir, roomId))
-    } catch {
-      records = []
+      const store = await messagesStoreReady
+      const page = store.page(memberId, { limit: WAKE_MESSAGE_DELTA_LIMIT })
+      for (const message of page.messages) {
+        lines.push(formatMessageDeltaLine(message))
+      }
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] wake message delta unavailable (${error instanceof Error ? error.message : String(error)})`)
     }
-    const cursor = memberCursors.get(memberId) ?? { lastMessageId: undefined, lastMessageSeq: -1, lastAgendaSeq: -1 }
-    const cursorLine = `Cursor: seq ${cursor.lastMessageSeq}${cursor.lastMessageId !== undefined ? ` / last id ${cursor.lastMessageId}` : ''}`
-    const lines: string[] = [cursorLine]
-    for (const record of records) {
-      if (record.kind !== 'message') continue
-      if (record.seq <= cursor.lastMessageSeq) continue
-      if (!(record.to.includes(memberId) || record.from === memberId)) continue
-      lines.push(formatTocMessage({
-        id: record.id,
-        seq: record.seq,
-        from: record.from,
-        to: record.to,
-        text: record.payload.text,
-        sensitive: record.payload.sensitive,
-        senderVerified: record.payload.senderVerified
-      }))
-    }
+    if (lines.length === 0) lines.push('(no messages received yet)')
     return lines.join('\n')
   }
 
@@ -2973,11 +2609,11 @@ export function applyInvoke(ctx: Context, config: Config) {
   }
 
   /** Assemble the FULL wake context pack (sections 1-9) for the host wake
-   * injection: identity + KPI + pre-resolved journal path + live board delta +
+   * injection: identity + KPI + pre-resolved journal path + live message delta +
    * roster + git + system state + ROADMAP tail + full skill body + guidance. */
-  const assembleWakePack = async (memberId: string, roomId: string, journalPath: string): Promise<string> => {
-    const [boardDelta, git, roadmapTail, skillBody, kpi] = await Promise.all([
-      readWakeBoardDelta(memberId, roomId),
+  const assembleWakePack = async (memberId: string, journalPath: string): Promise<string> => {
+    const [messageDelta, git, roadmapTail, skillBody, kpi] = await Promise.all([
+      readWakeMessageDelta(memberId),
       readWakeGitBearings(),
       readWakeRoadmapTail(),
       readWakeSkillBody(),
@@ -2986,11 +2622,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     return buildWakePack({
       memberId,
       role: 'host',
-      room: roomId,
       kpi,
       journalPath,
-      boardDelta,
-      roster: buildCondensedRoster(roomId),
+      messageDelta,
+      roster: buildCondensedRoster(),
       git,
       systemState: buildWakeSystemState(),
       roadmapTail,
@@ -3000,16 +2635,15 @@ export function applyInvoke(ctx: Context, config: Config) {
   }
 
   /** Assemble the LEAN on-demand wake snapshot (sections 1, 3, 4 only — identity,
-   * board delta/cursor, condensed roster) via the SAME pure `buildWakePack`
+   * message delta, condensed roster) via the SAME pure `buildWakePack`
    * builder. Used by `dept_wake_snapshot` for live freshness mid-session. */
-  const assembleWakeSnapshot = async (memberId: string, roomId: string): Promise<string> => {
-    const boardDelta = await readWakeBoardDelta(memberId, roomId)
+  const assembleWakeSnapshot = async (memberId: string): Promise<string> => {
+    const messageDelta = await readWakeMessageDelta(memberId)
     return buildWakePack({
       memberId,
       role: 'host',
-      room: roomId,
-      boardDelta,
-      roster: buildCondensedRoster(roomId),
+      messageDelta,
+      roster: buildCondensedRoster(),
       includeGuidance: false
     })
   }
@@ -3064,11 +2698,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (sessionOrigin === 'subagent') {
       signal?.throwIfAborted?.()
       const role = roleForSession(sessionId)
-      const roomId = config.org.rooms[0]?.id ?? 'board'
       wakePackInjected.add(sessionId)
       return {
         kind: 'enter',
-        messages: [...decision.messages, buildSubagentOrientationMessage(role, roomId)]
+        messages: [...decision.messages, buildSubagentOrientationMessage(role)]
       }
     }
     signal?.throwIfAborted?.()
@@ -3089,7 +2722,6 @@ export function applyInvoke(ctx: Context, config: Config) {
     // free of `wakePackInjected` (a legacy mid-session registration still
     // works — see the comment above).
     if (hostEntry === undefined || hostEntry.retired === true) return decision
-    const roomId = hostEntry.roomId ?? config.org.rooms[0]?.id ?? 'board'
     // Fix A — deferred in-place surface reset (see the Batch 7 helper comment +
     // dept_sleep Step 3): the FIRST pre-step after a host dept_sleep performs
     // the full-window replace the close branch no longer runs. By this point
@@ -3131,7 +2763,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     // journal yet): assembleWakePack's sections degrade to '(… unavailable)'
     // and readWakeJournalKpi returns a degraded KPI line — the injector never
     // throws for a missing journal/file, so a brand-new host still gets a pack.
-    const pack = await assembleWakePack(hostId, roomId, journalPathFor(hostId))
+    const pack = await assembleWakePack(hostId, journalPathFor(hostId))
     wakePackInjected.add(sessionId)
     return {
       kind: 'enter',
@@ -3142,18 +2774,18 @@ export function applyInvoke(ctx: Context, config: Config) {
   /** Disposer closure per tool the head own-layer registers. */
   type HeadToolDisposers = { dispose: () => void }
 
-  /** Install the post's board toolset scoped to `agentCtx` (the post's OWN
+  /** Install the post's messaging toolset scoped to `agentCtx` (the post's OWN
    * layer — no toolFilter needed for a root agent). The same tool bodies the
-   * host plane registers, reused for any resident post: dept_room_read/write,
-   * dept_witness_write, dept_room_who, dept_whereami, dept_memo_write,
-   * dept_sleep. dept_sleep's head version also disposes the post's AgentHandle
-   * (the plugin's byHeadHandle map) after marking sleepEpoch.
+   * host plane registers, reused for any resident post: send_message,
+   * agent_messages, dept_who, dept_memo_write, dept_sleep. dept_sleep's head
+   * version also disposes the post's AgentHandle (the plugin's byHeadHandle
+   * map) after marking sleepEpoch.
    *
    * Batch 3a — `manager: true` (a department HEAD, not a worker) additionally
    * registers the department-lifecycle tools `dept_post_create` and
    * `dept_post_retire`, so a head can create/retire the WORKERS of its own
-   * department. A worker (`manager: false`) gets ONLY the read/write board
-   * tools — never the create/retire life-cycle controls (and a HOST never gets
+   * department. A worker (`manager: false`) gets ONLY the messaging tools —
+   * never the create/retire life-cycle controls (and a HOST never gets
    * them either: these register ONLY in the head own-layer, never the global
    * host plane). */
   const installHeadBoardTools = (agentCtx: Context, manager = false): HeadToolDisposers => {
@@ -3166,375 +2798,6 @@ export function applyInvoke(ctx: Context, config: Config) {
     // registrations win), and postSetup's lean `restrict({allow:[]})` masks the
     // globals anyway so this own layer is the ONLY visible toolset.
     for (const tool of busTools) disposers.push(agentCtx.tools.register(tool))
-
-    disposers.push(agentCtx.tools.register(defineTool({
-      name: 'dept_room_write',
-      description: 'Post an addressed message to one board room. The message is recorded from your board member id; addressed recipients are woken to read it. Addressees must be a registered head, a registered host (host-<sessionId>), or a static member — unknown addressees are rejected. Set ack:true when this is a PURE acknowledgement/receipt (no new content) so the wake relay does not loop on a confirmation ping-pong. Mark sensitive:true to flag a sensitive/mission-critical message so recipients can see the sender is registry-verified.',
-      parameters: {
-        room: { type: 'string', required: true, description: 'Room id to post to (e.g. "board").' },
-        to: {
-          type: 'array',
-          items: { type: 'string' },
-          required: true,
-          description: 'Board member ids this message is addressed to (e.g. ["research-head"]).'
-        },
-        text: { type: 'string', required: true, description: 'The message text.' },
-        ack: { type: 'boolean', description: 'Set true when this is a pure acknowledgement/receipt (no new content) so the relay does not loop on it.' },
-        sensitive: { type: 'boolean', description: 'Mark this message as sensitive; recipients will see the sender is registry-verified and the message is flagged. A pragmatic trust signal, not a crypto signature.' }
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            room: { type: 'string', required: true },
-            from: { type: 'string', required: true },
-            to: { type: 'array', items: { type: 'string' }, required: true },
-            messageId: { type: 'string', required: true }
-          }
-        },
-        render: (_args, value) => [{ type: 'text', text: `posted ${value.messageId} to ${value.room} (from ${value.from} → ${value.to.join(', ') || '(all)'})` } as const]
-      },
-      async execute(args, exec): Promise<{ room: string; from: string; to: string[]; messageId: string }> {
-        const agent = exec.agent
-        if (!agent) throw new Error('dept_room_write requires a calling agent (exec.agent was undefined)')
-        const memberId = memberIdFor(agent.id as string, args.room)
-        const unknown = args.to.filter((addressee) => !isKnownAddressee(addressee))
-        if (unknown.length > 0) {
-          throw new Error(`[deepartments] dept_room_write: unknown addressee(s) ${unknown.join(', ')} — use dept_room_who for the roster`)
-        }
-        const { record } = await emitBoardMessage(args.room, memberId, [...args.to], args.text, null, args.ack === true, args.sensitive === true)
-        return { room: args.room, from: memberId, to: [...args.to], messageId: record.id }
-      }
-    })))
-
-    disposers.push(agentCtx.tools.register(defineTool({
-      name: 'dept_room_read',
-      description: 'Read this agent\'s new board messages in one room: the delta of messages addressed to you (or sent by you) plus agenda updates since your last read. By default returns a compact table-of-contents of new addressed messages since your last read (message id + sender + short preview, with \'…\' when the preview is truncated). Pass messageId to fetch the FULL text of one message (never truncated); pass limit/offset to page through the delta. Pass the room id (e.g. "board").',
-      parameters: {
-        room: { type: 'string', required: true, description: 'Room id to read (e.g. "board").' },
-        messageId: { type: 'string', description: 'Optional: fetch the FULL text of this one message by id (never truncated). Does not advance the read cursor.' },
-        limit: { type: 'number', description: 'Optional: max TOC entries per read (default 20).' },
-        offset: { type: 'number', description: 'Optional: skip that many candidate messages in TOC mode (default 0).' }
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            room: { type: 'string', required: true },
-            member: { type: 'string', required: true },
-            delta: { type: 'string', required: true }
-          }
-        },
-        render: (_args, value) => [{ type: 'text', text: value.delta } as const]
-      },
-      async execute(args, exec): Promise<{ room: string; member: string; delta: string }> {
-        const agent = exec.agent
-        if (!agent) throw new Error('dept_room_read requires a calling agent (exec.agent was undefined)')
-        const memberId = memberIdFor(agent.id as string, args.room)
-        const session = ctx.sessions.get(SessionId(roomSessionId(args.room)))
-        if (session === void 0) throw new Error(`[deepartments] room "${args.room}" is not live (no session)`)
-        const snapshot = ctx.sessionProjections.snapshot(session)
-        const state = snapshot.values['deepartments/room'] as RoomState | undefined
-        if (state === void 0) {
-          return { room: args.room, member: memberId, delta: 'No board messages addressed to you.' }
-        }
-        if (args.messageId !== undefined) {
-          const message = state.messages.find((candidate) => candidate.id === args.messageId)
-          if (message === void 0) {
-            return { room: args.room, member: memberId, delta: `No board message with id "${args.messageId}" was found in room "${args.room}".` }
-          }
-          const flag = message.sensitive
-            ? `[sensitive — sender verified: ${message.senderVerified === true ? 'yes' : 'no'}] `
-            : ''
-          const delta = `Full text of ${message.id} (from ${message.from} → ${message.to.join(', ') || '(all)'}):\n${flag}${message.text}`
-          return { room: args.room, member: memberId, delta }
-        }
-        const cursor = memberCursors.get(memberId) ?? { lastMessageId: undefined, lastMessageSeq: -1, lastAgendaSeq: -1 }
-        const candidates = state.messages
-          .filter((message) => message.seq > cursor.lastMessageSeq && (message.to.includes(memberId) || message.from === memberId))
-        const limit = Math.max(args.limit ?? 20, 1)
-        const offset = Math.max(args.offset ?? 0, 0)
-        const page = candidates.slice(offset, offset + limit)
-        const remaining = Math.max(candidates.length - (offset + limit), 0)
-        const lines: string[] = []
-        for (const message of page) lines.push(formatTocMessage(message))
-        if (remaining > 0) lines.push(`- … (${remaining} more messages; read again or page with offset)`)
-        const agenda = state.agenda.filter((item) => item.cursorOfLastTouch > cursor.lastAgendaSeq)
-        for (const item of agenda) lines.push(formatDeltaAgenda(item))
-        if (page.length > 0) { cursor.lastMessageId = page[page.length - 1].id; cursor.lastMessageSeq = page[page.length - 1].seq }
-        let maxAgendaSeq = -1
-        for (const item of agenda) if (item.cursorOfLastTouch > maxAgendaSeq) maxAgendaSeq = item.cursorOfLastTouch
-        if (maxAgendaSeq >= 0) cursor.lastAgendaSeq = maxAgendaSeq
-        memberCursors.set(memberId, cursor)
-        persistCursors(args.room, memberId, cursor)
-        const delta = lines.length === 0 ? 'No board messages addressed to you.' : `Board delta (room ${args.room}) for ${memberId}:\n${lines.join('\n')}`
-        return { room: args.room, member: memberId, delta }
-      }
-    })))
-
-    disposers.push(agentCtx.tools.register(defineTool({
-      name: 'dept_witness_write',
-      description: 'Write this agent\'s relevo witness: a schema-constrained YAML-frontmatter markdown file in the room\'s witnesses directory. Use it when handing work over (relevo) or concluding an assignment.',
-      parameters: {
-        summary: { type: 'string', required: true, description: 'The witness body: a short summary of what was done and handed over.' },
-        decisions: { type: 'array', items: { type: 'string' }, description: 'Decisions taken (optional).' },
-        constraints: { type: 'array', items: { type: 'string' }, description: 'Constraints the successor must respect (optional).' },
-        openItems: { type: 'array', items: { type: 'string' }, description: 'Open items for the successor (optional).' }
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            room: { type: 'string', required: true },
-            member: { type: 'string', required: true },
-            witnessPath: { type: 'string', required: true }
-          }
-        },
-        render: (_args, value) => [{ type: 'text', text: `witness written: ${value.witnessPath}` } as const]
-      },
-      async execute(args, exec): Promise<{ room: string; member: string; witnessPath: string }> {
-        const agent = exec.agent
-        if (!agent) throw new Error('dept_witness_write requires a calling agent (exec.agent was undefined)')
-        const memberId = postIdForChild(agent.id as string) ?? 'unknown'
-        const entry = byPost.get(memberId)
-        const roomId = entry?.roomId ?? 'unknown'
-        const cursor = memberCursors.get(memberId)
-        const content = [
-          '---',
-          `author: ${memberId}`,
-          `timestamp: ${new Date().toISOString()}`,
-          `board_cursor: ${cursor?.lastMessageId ?? 'none'}`,
-          `decisions: ${yamlList(args.decisions ?? [])}`,
-          `constraints: ${yamlList(args.constraints ?? [])}`,
-          `open_items: ${yamlList(args.openItems ?? [])}`,
-          '---',
-          '',
-          args.summary,
-          ''
-        ].join('\n')
-        const witnessPath = path.join(config.stateDir, 'rooms', roomId, 'witnesses', `${memberId}.md`)
-        await mkdir(path.dirname(witnessPath), { recursive: true })
-        await writeFile(witnessPath, content, 'utf8')
-        return { room: roomId, member: memberId, witnessPath }
-      }
-    })))
-
-    disposers.push(agentCtx.tools.register(defineTool({
-      name: 'dept_room_who',
-      description: 'Enumerate who is present in a board room from the live registries: the room\'s static members plus every registered head in that room (with whether its agent session is live) and every registered host (host-<sessionId>) that has joined it, each with whether its agent session is currently live (sessionLive). Use this for the authoritative roster instead of inferring presence from stale board history.',
-      parameters: {
-        room: { type: 'string', required: true, description: 'Room id to list who is present in (e.g. "board").' }
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            room: { type: 'string', required: true },
-            members: { type: 'array', items: { type: 'string' }, required: true },
-            posts: {
-              type: 'array',
-              required: true,
-              items: {
-                type: 'object',
-                additionalProperties: false,
-                properties: {
-                  postId: { type: 'string', required: true },
-                  sessionId: { type: 'string', required: true },
-                  roomId: { type: 'string', required: true },
-                  agentPreset: { type: 'string', required: true },
-                  sessionLive: { type: 'boolean', required: true },
-                  sleeping: { type: 'boolean', required: true }
-                }
-              }
-            },
-            hosts: {
-              type: 'array',
-              required: true,
-              items: {
-                type: 'object',
-                additionalProperties: false,
-                properties: {
-                  hostId: { type: 'string', required: true },
-                  sessionId: { type: 'string', required: true },
-                  roomId: { type: 'string', required: true },
-                  sessionLive: { type: 'boolean', required: true },
-                  sleeping: { type: 'boolean', required: true }
-                }
-              }
-            }
-          }
-        },
-        render: (_args, value) => {
-          const memberLine = value.members.length === 0 ? '  (none configured)' : value.members.map((member) => `  - ${member}`).join('\n')
-          const postLines = value.posts.map((post) => `  - ${post.postId}${post.sessionLive ? ' (live)' : ' (offline)'}${post.sleeping ? ' (sleeping)' : ''}`)
-          const postBlock = postLines.length === 0 ? '  (no registered heads)' : postLines.join('\n')
-          const hostLines = value.hosts.map((host) => `  - ${host.hostId} (session ${host.sessionId}, ${host.sessionLive ? 'live' : 'not live'}${host.sleeping ? ', sleeping' : ''})`)
-          const hostBlock = hostLines.length === 0 ? '  (no registered hosts)' : hostLines.join('\n')
-          return [{
-            type: 'text',
-            text: `Room ${value.room} roster:\nStatic members:\n${memberLine}\nRegistered heads:\n${postBlock}\nRegistered hosts:\n${hostBlock}`
-          } as const]
-        }
-      },
-      async execute(args): Promise<{ room: string; members: string[]; posts: PostRow[]; hosts: HostRow[] }> {
-        const room = config.org.rooms.find((candidate) => candidate.id === args.room)
-        // Piece 2 — room validation: an id outside config.org.rooms is NOT a
-        // room (the roster is 100% config-driven; rooms are never discovered
-        // from disk), so the OLD silent `[]` responded to ANY id and faked
-        // knowledge of ghost rooms. Throw loud instead (errors propagate
-        // through defineTool's execute as tool failures — the render only
-        // runs on a successful roster).
-        if (room === void 0) throw new Error(`unknown room "${args.room}" (not in config.org.rooms)`)
-        const members = [...room.members]
-        const posts: PostRow[] = []
-        for (const entry of byPost.values()) {
-          if (entry.roomId !== args.room) continue
-          const sessionLive = agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined
-          posts.push({
-            postId: entry.postId,
-            sessionId: entry.sessionId,
-            roomId: entry.roomId,
-            agentPreset: entry.agentPreset,
-            sessionLive,
-            sleeping: entry.sleepEpoch !== void 0
-          })
-        }
-        const hostsInRoom: HostRow[] = []
-        for (const entry of hosts.values()) {
-          if (entry.roomId !== args.room) continue
-          // U2 (§4/C7): retired hosts are excluded from the roster (evidence
-          // stays in hosts.json; they are no longer "present" members).
-          if (entry.retired === true) continue
-          const sessionLive = agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined
-          hostsInRoom.push({ hostId: entry.hostId, sessionId: entry.sessionId, roomId: entry.roomId, sessionLive, sleeping: entry.sleepEpoch !== void 0 })
-        }
-        return { room: args.room, members, posts, hosts: hostsInRoom }
-      }
-    })))
-
-    disposers.push(agentCtx.tools.register(defineTool({
-      name: 'dept_whereami',
-      description: 'Spatial identity: are you a registered board head or the host? Returns a "post" shape (your post id, room id, the room\'s static members and registered heads with session-liveness) when you are a registered board head; returns a "host" shape (including your host-<sessionId> address when registered) when you are the Asistente host, not a board head.',
-      parameters: {},
-      output: {
-        schema: {
-          oneOf: [
-            {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                kind: { type: 'string', required: true, const: 'host' },
-                postId: { type: 'null', required: true },
-                roomId: { type: 'null', required: true },
-                hostId: { type: 'string' },
-                sessionId: { type: 'string' },
-                hostRoomId: { type: 'string' },
-                message: { type: 'string', required: true }
-              }
-            },
-            {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                kind: { type: 'string', required: true, const: 'post' },
-                postId: { type: 'string', required: true },
-                roomId: { type: 'string', required: true },
-                sessionId: { type: 'string', required: true },
-                agentPreset: { type: 'string', required: true },
-                sessionLive: { type: 'boolean', required: true },
-                members: { type: 'array', items: { type: 'string' }, required: true },
-                posts: {
-                  type: 'array',
-                  required: true,
-                  items: {
-                    type: 'object',
-                    additionalProperties: false,
-                    properties: {
-                      postId: { type: 'string', required: true },
-                      sessionId: { type: 'string', required: true },
-                      roomId: { type: 'string', required: true },
-                      agentPreset: { type: 'string', required: true },
-                      sessionLive: { type: 'boolean', required: true },
-                      sleeping: { type: 'boolean', required: true }
-                    }
-                  }
-                }
-              }
-            }
-          ]
-        },
-        render: (_args, value) => [{
-          type: 'text',
-          text: value.kind === 'post'
-            ? `you are head ${value.postId} in room ${value.roomId} (members: ${value.members.join(', ') || 'none'})`
-            : value.hostId
-              ? `you are the Asistente host (address ${value.hostId}, room "${value.hostRoomId ?? 'unregistered'}")`
-              : value.message ?? 'you are the Asistente host (not a board head)'
-        } as const]
-      },
-      async execute(_args, exec): Promise<WhereAmI> {
-        const agent = exec.agent
-        if (!agent) throw new Error('dept_whereami requires a calling agent (exec.agent was undefined)')
-        const postId = postIdForChild(agent.id as string)
-        if (postId === undefined) {
-          const existingId = hostForSession.get(agent.id as string)
-          const existing = existingId !== void 0 ? hosts.get(existingId) : undefined
-          if (existing !== void 0) {
-            ensureHost(agent.id as string, existing.roomId)
-            return { kind: 'host', postId: null, roomId: null, hostId: existing.hostId, sessionId: existing.sessionId, hostRoomId: existing.roomId, message: 'You are the Asistente in your private room with the owner; you are a registered host on the board, not a head.' }
-          }
-          const joinRoom = config.org.rooms[0]?.id
-          if (joinRoom !== void 0) {
-            const hostId = ensureHost(agent.id as string, joinRoom)
-            // Single-live-host guard (postmortem nº5): when another live host
-            // exists, ensureHost REFUSED this registration and returned the
-            // LIVE host's id without creating an entry. Report HONESTLY —
-            // never impersonate: this session is a plain session and the live
-            // host entry is the one the guard pointed at.
-            const entry = hosts.get(hostIdForSession(agent.id as string))
-            if (entry !== void 0) {
-              return { kind: 'host', postId: null, roomId: null, hostId, sessionId: entry.sessionId, hostRoomId: entry.roomId, message: 'You are the Asistente in your private room with the owner; you are a registered host on the board, not a head.' }
-            }
-            const liveHostEntry = hosts.get(hostId)
-            return { kind: 'host', postId: null, roomId: null, message: `You are the Asistente in your private room with the owner; you are NOT a registered host — the live host is ${liveHostEntry?.hostId ?? hostId}.` }
-          }
-          return { kind: 'host', postId: null, roomId: null, message: 'You are the Asistente in your private room with the owner; you are NOT a board head.' }
-        }
-        const entry = byPost.get(postId)
-        if (entry === void 0) {
-          return { kind: 'host', postId: null, roomId: null, message: 'You are the Asistente in your private room with the owner; you are NOT a board head.' }
-        }
-        const room = config.org.rooms.find((candidate) => candidate.id === entry.roomId)
-        const members = room === void 0 ? [] : [...room.members]
-        const posts: PostRow[] = []
-        for (const candidate of byPost.values()) {
-          if (candidate.roomId !== entry.roomId) continue
-          const sessionLive = agents !== void 0 && agents.get(SessionId(candidate.sessionId)) !== undefined
-          posts.push({
-            postId: candidate.postId,
-            sessionId: candidate.sessionId,
-            roomId: candidate.roomId,
-            agentPreset: candidate.agentPreset,
-            sessionLive,
-            sleeping: candidate.sleepEpoch !== void 0
-          })
-        }
-        return {
-          kind: 'post',
-          postId,
-          roomId: entry.roomId,
-          sessionId: entry.sessionId,
-          agentPreset: entry.agentPreset,
-          sessionLive: agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined,
-          members,
-          posts
-        }
-      }
-    })))
 
     disposers.push(agentCtx.tools.register(defineTool({
       name: 'dept_memo_write',
@@ -3628,20 +2891,21 @@ export function applyInvoke(ctx: Context, config: Config) {
     })))
 
     // --- Batch 3a: department-lifecycle tools — HEAD (manager) only ------
-    // A department HEAD creates and retires DISPOSABLE WORKERS in its own
-    // department room. These register ONLY here, in the head own-layer, so a
-    // worker (manager:false) and a HOST (global plane) never see them — the
-    // "host-CANNOT" invariant is structural (tool simply absent).
+    // A department HEAD creates and retires DISPOSABLE WORKERS. These register
+    // ONLY here, in the head own-layer, so a worker (manager:false) and a HOST
+    // (global plane) never see them — the "host-CANNOT" invariant is
+    // structural (tool simply absent). B3 cutover: no room parameter — the
+    // workers live in the agent CATALOG (posts.json); the first message is
+    // delivered via the BUS (messages.jsonl + deliverBusRecord), not the board.
     if (manager) {
       disposers.push(agentCtx.tools.register(defineTool({
         name: 'dept_post_create',
-        description: 'Create a DISPOSABLE department worker in YOUR department room: spawn a fresh root agent (sessionId worker-<postId>), register it in posts.json as a disposable entry (provider:"worker"), and deliver its first message on the board. The worker lives in the department room and sees the shared board; it works your assigned task and sleeps when done; you retire it later with dept_post_retire. The first message (firstMessage, or prompt) is posted as a durable board message addressed to the worker. Emits a `deepartments/post-created` board message as its signal.',
+        description: 'Create a DISPOSABLE department worker: spawn a fresh root agent (sessionId worker-<postId>), register it in posts.json as a disposable entry (provider:"worker"), and deliver its first message via the messaging bus. The worker works your assigned task and sleeps when done; you retire it later with dept_post_retire. The first message (firstMessage, or prompt) is persisted as a durable bus message addressed to the worker (the `deepartments/post-created` signal).',
         parameters: {
           postId: { type: 'string', required: true, description: 'Short slug for the worker, e.g. "researcher-alpha" (unique; not already registered).' },
           role: { type: 'string', required: true, description: 'The worker role, e.g. "rank-and-file researcher".' },
-          room: { type: 'string', description: 'Department room id for the worker. Defaults to your own department room.' },
           prompt: { type: 'string', description: 'Initial assignment to the worker (alias of firstMessage).' },
-          firstMessage: { type: 'string', description: 'The worker\'s initial assignment, delivered as a durable board message addressed to it.' }
+          firstMessage: { type: 'string', description: 'The worker\'s initial assignment, delivered as a durable bus message addressed to it.' }
         },
         output: {
           schema: {
@@ -3649,13 +2913,12 @@ export function applyInvoke(ctx: Context, config: Config) {
             additionalProperties: false,
             properties: {
               postId: { type: 'string', required: true },
-              sessionId: { type: 'string', required: true },
-              roomId: { type: 'string', required: true }
+              sessionId: { type: 'string', required: true }
             }
           },
-          render: (_args, value) => [{ type: 'text', text: `created worker ${value.postId} (session ${value.sessionId}) in room ${value.roomId}` } as const]
+          render: (_args, value) => [{ type: 'text', text: `created worker ${value.postId} (session ${value.sessionId})` } as const]
         },
-        async execute(args, exec): Promise<{ postId: string; sessionId: string; roomId: string }> {
+        async execute(args, exec): Promise<{ postId: string; sessionId: string }> {
           const agent = exec.agent
           if (!agent) throw new Error('dept_post_create requires a calling agent (exec.agent was undefined)')
           if (agents === void 0) throw new Error('[deepartments] dept_post_create requires the agents service')
@@ -3667,15 +2930,10 @@ export function applyInvoke(ctx: Context, config: Config) {
           // configured head (a worker must never shadow a head's identity).
           if (byPost.has(args.postId)) throw new Error(`[deepartments] dept_post_create: postId "${args.postId}" is already registered`)
           if (coordinatorForPost(args.postId) !== void 0) throw new Error(`[deepartments] dept_post_create: postId "${args.postId}" is a configured department head, not a worker`)
-          // Room: default to the creating head's own department room; must be a
-          // known configured room.
-          const roomId = args.room ?? headEntry.roomId
-          const knownRoom = config.org.rooms.some((room) => room.id === roomId)
-          if (!knownRoom) throw new Error(`[deepartments] dept_post_create: "${roomId}" is not a known department room`)
           const sessionId = workerSessionId(args.postId)
           if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_post_create: a live agent already exists for session "${sessionId}"`)
           const firstMessage = args.firstMessage ?? args.prompt
-          const setup = workerSetup(args.postId, roomId, args.role)
+          const setup = workerSetup(args.postId, headEntry.roomId, args.role)
           const handle = await agents.create({
             sessionId: String(SessionId(sessionId)),
             meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
@@ -3685,25 +2943,33 @@ export function applyInvoke(ctx: Context, config: Config) {
           registerEntry({
             postId: args.postId,
             sessionId: String(SessionId(sessionId)),
-            roomId,
+            roomId: headEntry.roomId,
             agentPreset: WORKER_PRESET_ID,
             provider: 'worker',
             role: args.role
           })
           byHeadHandle.set(String(SessionId(sessionId)), handle)
           // Deliver the initial assignment (or a creation note) as a DURABLE
-          // board message from the head addressed to the worker — this IS the
-          // `deepartments/post-created` event, and the wake relay wakes the
-          // worker to read it. No direct followup needed; the board is durable.
-          const text = firstMessage ?? `[created] worker "${args.postId}" (${args.role || 'department worker'}) is registered in this room. You are disposable — work your assigned task, then dept_memo_write and dept_sleep; your head retires you when done.`
-          await emitBoardMessage(roomId, headId, [args.postId], text)
-          return { postId: args.postId, sessionId: String(SessionId(sessionId)), roomId }
+          // BUS message from the head addressed to the worker — this IS the
+          // `deepartments/post-created` signal; the bus delivery wakes the
+          // worker (always-wake, D4). No direct followup needed; the store is
+          // durable.
+          const text = firstMessage ?? `[created] worker "${args.postId}" (${args.role || 'department worker'}) is registered. You are disposable — work your assigned task, then dept_memo_write and dept_sleep; your head retires you when done.`
+          const store = await messagesStoreReady
+          const record = await store.append({
+            from: headId,
+            to: [args.postId],
+            text,
+            kind: 'agent'
+          })
+          await deliverBusRecord(record, args.postId, agent.id as string, agent.id as string, exec.signal)
+          return { postId: args.postId, sessionId: String(SessionId(sessionId)) }
         }
       })))
 
       disposers.push(agentCtx.tools.register(defineTool({
         name: 'dept_post_retire',
-        description: 'Retire a DISPOSABLE WORKER of YOUR department: post a withdrawal note addressed to the worker, dispose its live AgentHandle, and unregister it from the registry (persisted). Scope: you may only retire workers in YOUR OWN department room, and only disposable workers (provider:"worker") — permanent department heads are NOT retired by this path. Unknown postIds are rejected loudly.',
+        description: 'Retire a DISPOSABLE WORKER of YOUR department: dispose its live AgentHandle and unregister it from the registry (persisted). Scope: you may only retire disposable workers (provider:"worker") — permanent department heads are NOT retired by this path. Unknown postIds are rejected loudly.',
         parameters: {
           postId: { type: 'string', required: true, description: 'The worker post id to retire (e.g. "researcher-alpha").' }
         },
@@ -3713,13 +2979,12 @@ export function applyInvoke(ctx: Context, config: Config) {
             additionalProperties: false,
             properties: {
               postId: { type: 'string', required: true },
-              roomId: { type: 'string', required: true },
               retired: { type: 'boolean', required: true }
             }
           },
-          render: (_args, value) => [{ type: 'text', text: `retired worker ${value.postId} (room ${value.roomId})` } as const]
+          render: (_args, value) => [{ type: 'text', text: `retired worker ${value.postId}` } as const]
         },
-        async execute(args, exec): Promise<{ postId: string; roomId: string; retired: boolean }> {
+        async execute(args, exec): Promise<{ postId: string; retired: boolean }> {
           const agent = exec.agent
           if (!agent) throw new Error('dept_post_retire requires a calling agent (exec.agent was undefined)')
           return retirePost(args.postId, agent.id as string)
@@ -3731,19 +2996,20 @@ export function applyInvoke(ctx: Context, config: Config) {
   }
 
   /** The role of a post as a prompt section (persona = role, NOT a mission —
-   * missions arrive as addressed board messages). Registered on the post's own
-   * systemPrompt layer when that service is composed. `isWorker` switches the
-   * framing between a PERMANENT department head (manager) and a TEMPORARY
-   * DISPOSABLE worker. Both are BOOT-QUIET (never act unaddressed). */
-  const installRoleSection = (agentCtx: Context, role: string, postId: string, roomId: string, isWorker: boolean): void => {
+   * missions arrive as addressed messages on the bus). Registered on the post's
+   * own systemPrompt layer when that service is composed. `isWorker` switches
+   * the framing between a PERMANENT department head (manager) and a TEMPORARY
+   * DISPOSABLE worker. Both are BOOT-QUIET (never act unaddressed). B3
+   * cutover: rooms wording removed — the post lives in the agent catalog. */
+  const installRoleSection = (agentCtx: Context, role: string, postId: string, isWorker: boolean): void => {
     const sp = agentCtx.get('systemPrompt')
     if (sp === void 0 || typeof (sp as { section?: unknown }).section !== 'function') return
     sp.section({
       name: `deepartments:${isWorker ? 'worker' : 'head'}:role:${postId}`,
       order: 1,
       text: isWorker
-        ? `You are "${postId}", a ${role || 'rank-and-file researcher'} DISPOSABLE department worker in the "${roomId}" department room of Deepartments (DeepSeek Harness). Your department HEAD created you as a temporary worker agent; your whole world is the department board and the shared room you live in. You do not edit the repository, run builders, or spawn other agents. Read addressed messages with dept_room_read, reply in the room with dept_room_write, orient with dept_whereami/dept_room_who, and persist your findings/memory with dept_memo_write. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed board message arrives. Work the task your department head assigns you; when you are DONE, write dept_memo_write to save your results, then conclude with dept_sleep. You are DISPOSABLE: your head retires you with dept_post_retire when you are finished.`
-        : `You are "${postId}", the ${role || 'department head'} of the "${roomId}" department room. You are a permanent, first-class agent: you do not edit the repository, run builders, or spawn other agents. Your world is the board — read with dept_room_read, reply with dept_room_write, orient with dept_whereami/dept_room_who, and persist memory with dept_memo_write before dept_sleep. You may create and retire DISPOSABLE WORKERS of your department with dept_post_create and dept_post_retire. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed board message arrives; you never proactively write to the board.`
+        ? `You are "${postId}", a ${role || 'rank-and-file researcher'} DISPOSABLE department worker of Deepartments (DeepSeek Harness). Your department HEAD created you as a temporary worker agent; you do not edit the repository, run builders, or spawn other agents. Read your messages with agent_messages, send with send_message, orient with dept_who, and persist your findings/memory with dept_memo_write. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives. Work the task your department head assigns you; when you are DONE, write dept_memo_write to save your results, then conclude with dept_sleep. You are DISPOSABLE: your head retires you with dept_post_retire when you are finished.`
+        : `You are "${postId}", the ${role || 'department head'}. You are a permanent, first-class agent: you do not edit the repository, run builders, or spawn other agents. Your world is the messaging bus — read with agent_messages, send with send_message, orient with dept_who, and persist memory with dept_memo_write before dept_sleep. You may create and retire DISPOSABLE WORKERS of your department with dept_post_create and dept_post_retire. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives; you never proactively send.`
     })
   }
 
@@ -3773,7 +3039,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // department-lifecycle create/retire tools for heads).
       const tools = installHeadBoardTools(agentCtx, opts.manager)
       // (c) Persona = the role (a head's role or a worker's role), NOT a mission.
-      installRoleSection(agentCtx, role, postId, roomId, opts.manager === false)
+      installRoleSection(agentCtx, role, postId, opts.manager === false)
       // Ensure the agent-scoped registrations unwind with the agent.
       agentCtx.effect(() => () => { tools.dispose(); restrictOwn() }, `deepartments: ${kind} board tools (${postId})`)
     }
@@ -3807,9 +3073,9 @@ export function applyInvoke(ctx: Context, config: Config) {
   /** Retire a registered post cleanly — the SHARED retirement path used by the
    * global HOST-plane `dept_post_retire` AND the head own-layer `dept_post_retire`.
    *
-   * Retirement = (a) post a withdrawal note addressed to the post WHILE it is
-   * still registered (so the relay wakes it), (b) dispose its live AgentHandle
-   * (if any), (c) unregister it from byPost/byChild and persist. The persisted
+   * Retirement = (a) dispose its live AgentHandle (if any), (b) unregister it
+   * from byPost/byChild and persist. B3 cutover: NO withdrawal note (the board
+   * is gone — the registry unregistration is the only signal). The persisted
    * durable session remains (no native delete — researcher M1), but the registry
    * stops addressing it, so it is never woken again; a retired CONFIGURED head is
    * simply re-materialized by ensureAllHeads as before (documented gap), whereas
@@ -3818,9 +3084,10 @@ export function applyInvoke(ctx: Context, config: Config) {
    *
    * Scope: a HOST caller (`postIdForChild(callerId) === undefined`) may retire
    * ANY post (today's semantics). A HEAD caller is restricted to DISPOSABLE
-   * WORKERS of ITS OWN department room — a head can never retire a permanent
-   * head or a worker of another head's room via this path. */
-  const retirePost = async (postId: string, callerAgentId: string): Promise<{ postId: string; roomId: string; retired: true }> => {
+   * WORKERS — a head can never retire a permanent head via this path (the
+   * per-room scope check is gone with the rooms; the catalog holds no room
+   * dimension anymore). */
+  const retirePost = async (postId: string, callerAgentId: string): Promise<{ postId: string; retired: true }> => {
     const entry = byPost.get(postId)
     if (entry === void 0) throw new Error(`[deepartments] dept_post_retire: "${postId}" is not a registered post`)
     // Scope check for HEAD callers (a caller that IS a registered post is a
@@ -3829,20 +3096,16 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (callerId !== void 0) {
       const callerEntry = byPost.get(callerId)
       if (callerEntry === void 0) throw new Error(`[deepartments] dept_post_retire: caller "${callerId}" is not a registered post`)
-      // A head may only retire DISPOSABLE WORKERS...
+      // A head may only retire DISPOSABLE WORKERS (the room-equality check was
+      // board-specific and is removed with the rooms).
       if (entry.provider !== 'worker') throw new Error(`[deepartments] dept_post_retire: "${postId}" is not a disposable worker — a head may only retire workers, never a permanent head`)
-      // ...and only in ITS OWN department room.
-      if (entry.roomId !== callerEntry.roomId) throw new Error(`[deepartments] dept_post_retire: "${postId}" lives in room "${entry.roomId}" but you are head "${callerId}" of room "${callerEntry.roomId}" — you may only retire workers in your own department room`)
     }
-    // Withdrawal note FIRST (while the post is still registered, so the relay
-    // still wakes the targeted post), then unregister + persist.
-    await emitBoardMessage(entry.roomId, memberIdFor(callerAgentId, entry.roomId), [postId], `[withdrawal] post "${postId}" is retired and unregistered from the board.`)
     byPost.delete(postId)
     byChild.delete(entry.sessionId)
     // Also dispose any live handle (retiring a post should not leave it live).
     void disposeHeadHandle(entry.sessionId)
     persistPosts()
-    return { postId, roomId: entry.roomId, retired: true }
+    return { postId, retired: true }
   }
 
   /** Piece 1 (2026-08-22) — the CANONICAL WORKSPACE ROOT PATH for created
@@ -4090,7 +3353,11 @@ export function applyInvoke(ctx: Context, config: Config) {
     for (const department of config.org.departments) {
       const coordinator = department.coordinator
       if (coordinator === void 0) continue
-      await ensureHead(department, department.roomId)
+      // B3: the department config no longer carries a roomId (spec 003 §7 —
+      // the room concept is gone); the registry `roomId` field is INERT for
+      // schema stability, so keep the legacy 'board' value (the same inert
+      // value ensureHost writes for hosts).
+      await ensureHead(department, 'board')
     }
   }
 
@@ -4130,96 +3397,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     return stuckNow() - prior.at > STUCK_HEAD_MS
   }
 
-  /** Cold-resume (or respawn-from-sleep) + wake one post (head OR worker) with
-   * the pointer-only board delta. Called by the relay when the post is not live
-   * (cold boot or slept+disposed). On respawn-from-sleep we first dispose any
-   * stale live handle, clear sleepEpoch, keep the previousChildId trace, then
-   * resume. Batch 3a: a WORKER is woken through the SAME raw root-agent path as
-   * a head — `coordinatorForPost` is undefined for workers, so the role falls
-   * back to the entry's captured `role` ('department worker' default), and the
-   * create/resume materializes the 'deepartments-worker' preset. Sleep/respawn
-   * is post-agnostic (keyed by sessionId) and needs no worker-specific change. */
-  const wakePost = async (entry: PostEntry, record: BoardRecord, roomId: string): Promise<void> => {
-    if (agents === void 0) throw new Error('[deepartments] wakePost requires the agents service')
-    const isWorker = entry.provider === 'worker'
-    const sessionId = SessionId(entry.sessionId)
-    const coordinator = coordinatorForPost(entry.postId)
-    if (entry.sleepEpoch !== void 0) {
-      // Respawn from sleep: retire the live handle (if any), record the
-      // previous incarnation, clear the flag, then resume below.
-      await disposeHeadHandle(entry.sessionId)
-      byChild.delete(entry.sessionId)
-      const previousSession = entry.sessionId
-      registerEntry({
-        ...entry,
-        previousChildId: previousSession,
-        sleepEpoch: undefined
-      })
-    }
-    const live = agents.get(String(sessionId))
-    if (live === void 0) {
-      // Role fallback (Batch 3a): a worker has NO coordinator config, so fall
-      // back to its durable captured role, else a neutral 'department worker'.
-      const role = coordinator?.role ?? entry.role ?? 'department worker'
-      // Batch 4a: a head wakes under its PERSISTED per-head preset
-      // (`entry.agentPreset` = deepartments-head-<departmentId>, set by
-      // makeEntry; generic `deepartments-head` for a legacy/unknown head). A
-      // worker always mounts the disposable-worker preset.
-      const headPreset = entry.agentPreset ?? PRESET_ID
-      const setup = isWorker
-        ? workerSetup(entry.postId, entry.roomId, role)
-        : headSetup(entry.postId, entry.roomId, role, headPreset)
-      const agentOptions = coordinator?.agentOptions
-      const preset: string = isWorker ? WORKER_PRESET_ID : headPreset
-      let handle: AgentHandleLike | undefined
-      try {
-        handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions, setup })
-      } catch (error: unknown) {
-        ctx.logger.warn(`[deepartments] ${isWorker ? 'worker' : 'head'} "${entry.postId}" wake-resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
-        handle = await agents.create({
-          sessionId: String(sessionId),
-          meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: preset },
-          agentOptions,
-          setup
-        })
-      }
-      if (handle !== void 0) byHeadHandle.set(String(sessionId), handle)
-    }
-    const target = agents.get(String(sessionId))
-    if (target === void 0) throw new Error(`[deepartments] ${isWorker ? 'worker' : 'head'} "${entry.postId}" could not be materialized for wake`)
-    // Fix A2 — fresh baseline for the (re)materialized incarnation so the relay
-    // never misjudges a just-cold-resumed post as stuck before it can speak.
-    markHeadProgress(String(sessionId), target)
-    // Piece 1 — idempotent workspace re-attach (heads AND workers — both are
-    // root agents that deserve a native sidebar row). Fire-and-forget, never
-    // fatal to the wake. Covers the boot race where the workspaceRegistry was
-    // still initializing when ensureAllHeads first attached: every cold wake
-    // re-covers visibility until the attach resolves.
-    void attachHeadSession(String(sessionId), 'wakePost')
-    const senderSession = byPost.get(record.from)?.sessionId ?? hosts.get(record.from)?.sessionId ?? record.from
-    target.followup(createUserMessage({
-      content: [{
-        type: 'text',
-        text: `Board delta in ${roomId}: new message ${record.id} from ${record.from} addressed to you. Read it with dept_room_read (room "${roomId}") and reply with dept_room_write to the sender.`
-      } as const],
-      source: {
-        kind: 'board',
-        form: 'notice',
-        plugin: 'deepartments',
-        summary: boundContextSummary(`Board delta in ${roomId} from ${record.from}.`),
-        roomId,
-        messageId: record.id,
-        from: record.from,
-        senderSessionId: SessionId(senderSession)
-      }
-    }))
-  }
-
   // Boot: materialize the head preset and every configured head once the
-  // registries (posts/hosts/cursors) have cold-loaded — and re-drive any
-  // crash-pending bus deliveries (see the re-delivery driver below). Head
-  // materialization no longer needs a live parent (root agents) — it runs at
-  // boot unconditionally.
+  // registries (posts/hosts) have cold-loaded — and re-drive any crash-pending
+  // bus deliveries (see the re-delivery driver below). Head materialization no
+  // longer needs a live parent (root agents) — it runs at boot unconditionally.
   void Promise.all([registryLoaded, hostsLoaded]).then(() => {
     void ensureAllHeads()
     void redeliverPendingDeliveries()
@@ -4227,11 +3408,10 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   // ---------------------------------------------------------------------------
   // Batch B2 — AGENT MESSAGING BUS (spec 003). The delivery side is the
-  // wakePost seam EXACTLY (catalog targets: materialize + always-wake; D4) with
-  // the bus framing/source; the native-route side is `subagents.followup` for
-  // continuable children. `wakePost` above stays byte-identical for the board
-  // (dual-run); the materialization core is shared through this helper so the
-  // bus and the board can never diverge on resume/dispose semantics.
+  // materializePost seam EXACTLY (catalog targets: materialize + always-wake;
+  // D4) with the bus framing/source; the native-route side is
+  // `subagents.followup` for continuable children. The board wakePost above is
+  // gone (B3 cutover — the bus is the only delivery path).
   // ---------------------------------------------------------------------------
 
   /** The one record the bus persists per send (spec §3.1): the durable source
@@ -4493,10 +3673,30 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   /** The caller's BUS member id (spec §3.1: durable member id, never a session
    * id): the postId for a registered head/worker, else the deterministic
-   * `host-<sessionId>` id for a host/plain session. Deliberately does NOT
-   * lazily register a caller (send_message has no room context); host
-   * registration stays a board-tool concern. */
+   * `host-<sessionId>` id for a host/plain session. */
   const busMemberIdFor = (agentId: string): string => postIdForChild(agentId) ?? hostIdForSession(agentId)
+
+  /** B3 gap fix (reviewer B2 note a): with the board gone, the host's
+   * auto-registration must not depend on board tools. For every host-family
+   * caller (no post entry; NOT a transient subagent) dept_who / send_message
+   * run ensureHost(self) — idempotent: a first registration (no host in
+   * hosts.json) registers the caller; a refresh of an existing live entry
+   * MERGES (rotation metadata preserved); and the single-live-host guard
+   * inside ensureHost means a second live host is NEVER minted (a refused
+   * session stays a plain session, with the guard warn). Returns the
+   * caller's member id. */
+  const busEnsureHostForCaller = (callerAgent: { id: string; session?: { header?: SessionHeaderWithOrigin } }): string => {
+    const agentId = callerAgent.id
+    const postId = postIdForChild(agentId)
+    if (postId !== undefined) return postId
+    // A transient subagent is never a host session (origin subagent).
+    const header = callerAgent.session?.header
+    const origin = header?.origin ?? header?.meta?.origin
+    if (origin !== 'subagent') {
+      ensureHost(agentId, 'board')
+    }
+    return hostIdForSession(agentId)
+  }
 
   /** Shared framing for every bus deliver (spec §4.3): the GUI never renders
    * `to[]`, so sender + recipients MUST be in the model-facing text. */
@@ -4559,8 +3759,11 @@ export function applyInvoke(ctx: Context, config: Config) {
       const agent = exec.agent
       if (!agent) throw new Error('send_message requires a calling agent (exec.agent was undefined)')
       assertBusFanOut(args.to)
+      // B3 gap fix: the caller host self-registers when hosts.json has no live
+      // host — the catalog (host row, you:true, reply-ability) must stay
+      // complete without board tools. Single-live guard respected.
+      const from = busEnsureHostForCaller(agent as { id: string; session?: { header?: SessionHeaderWithOrigin } })
       const store = await messagesStoreReady
-      const from = busMemberIdFor(agent.id as string)
       const record = await store.append({
         from,
         to: [...args.to],
@@ -4644,9 +3847,9 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   })
 
-  /** `dept_who` — the whole catalog in one call (spec §6), replacing both
-   * dept_room_who AND dept_whereami (subtraction lands in B3; this tool is
-   * ADDITIVE now). `you: true` marks the caller's own entry. */
+  /** `dept_who` — the whole catalog in one call (spec §6): the B3 subtraction
+   * of the board's room-who and whereami tools is LANDED (this tool is now
+   * the sole roster+identity tool). `you: true` marks the caller's own entry. */
   const deptWhoTool = defineTool({
     name: 'dept_who',
     description: 'List the whole Deepartments catalog — the Asistente host (kind "host", title "Asistente") and every registered department head/worker (kind "head", title from the department configuration, PostEntry.role fallback) — each with live/sleeping state and session id, and your OWN entry marked you:true. This is the identity + roster tool: learn who exists and who you are in one call. No room parameter — the roster is the organization.',
@@ -4684,7 +3887,9 @@ export function applyInvoke(ctx: Context, config: Config) {
     async execute(_args, exec): Promise<{ members: Array<{ agentId: string; kind: 'host' | 'head'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean }> }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_who requires a calling agent (exec.agent was undefined)')
-      const callerMemberId = busMemberIdFor(agent.id as string)
+      // B3 gap fix: caller host self-registers when no live host exists (board
+      // tools are gone; the roster must show the host with you:true).
+      const callerMemberId = busEnsureHostForCaller(agent as { id: string; session?: { header?: SessionHeaderWithOrigin } })
       const members: Array<{ agentId: string; kind: 'host' | 'head'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean }> = []
       for (const entry of hosts.values()) {
         if (entry.retired === true) continue
@@ -4834,550 +4039,26 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
-  const relay = (record: BoardRecord, roomId: string) => {
-    if (record.kind !== 'message' || agents === void 0) return
-    for (const member of record.to) {
-      if (member === record.from) continue
-
-      // Guard (Batch C) — empty-delta wake dedup: if the member's read cursor
-      // has ALREADY advanced past this record, a wake would serve nothing new
-      // (the relay-vs-read cursor divergence, audit C2/H5). Compare by numeric
-      // seq, never lexicographic ids. A lost cursor (in-memory, reset on
-      // restart) misses the map → we wake anyway: the idempotent re-read is
-      // acceptable then.
-      const cursor = memberCursors.get(member)
-      if (cursor !== void 0 && cursor.lastMessageSeq >= record.seq) {
-        ctx.logger.debug(`[deepartments] empty-delta wake dedup: skip "${member}" (${record.id} already consumed by its read cursor at seq ${cursor.lastMessageSeq})`)
-        continue
-      }
-
-      // Guard (Batch C) — ack-loop suppression: a pure ack (payload.ack) on a
-      // pair that has already exchanged N≥3 acks within the last T=120s without
-      // an intervening non-ack message is a confirmation loop; stop waking it.
-      // Any non-ack message between the pair resets the counter. Detected ONLY
-      // by the explicit `ack` flag (never free text).
-      const isAck = (record.payload as { ack?: boolean }).ack === true
-      const pairKey = `${record.from}|${member}`
-      const now = Date.now()
-      const priorPair = ackCounters.get(pairKey)
-      const suppressAckLoop = isAck && priorPair !== void 0 && priorPair.count >= ACK_LOOP_THRESHOLD && (now - priorPair.lastTs) <= ACK_LOOP_WINDOW_MS
-      if (isAck) ackCounters.set(pairKey, { count: (priorPair?.count ?? 0) + 1, lastTs: now })
-      else ackCounters.delete(pairKey)
-      if (suppressAckLoop) {
-        ctx.logger.debug(`[deepartments] ack-loop suppressed: no wake to "${member}" (pair ${pairKey} exchanged ${priorPair!.count} acks within ${ACK_LOOP_WINDOW_MS / 1000}s)`)
-        continue
-      }
-
-      // --- head branch (Batch 1a + Fix 2c-A): wake a registered department head
-      // via the RAW root-agent path. A head is a first-class root agent (NOT a
-      // continuable child), so the relay targets its own agent id directly —
-      // `agents.get(SessionId(entry.sessionId)).followup(...)` — exactly like
-      // the host branch below. This REMOVES the rc.6 "parent must be live"
-      // limitation: no parent hop, no lineage. A head that is LIVE AND
-      // PROGRESSING is woken inline; a cold/slept head (not live — disposed or
-      // after a restart) is cold-resumed (or respawned from sleep) by wakePost
-      // then woken; a live-but-STUCK head (running with no session progress past
-      // STUCK_HEAD_MS — Batch 1c frozen-resident loop) is disposed and
-      // cold-resumed so the wake is re-delivered from the durable board record.
-      const entry = byPost.get(member)
-      if (entry !== void 0) {
-        const sessionId = SessionId(entry.sessionId)
-        const live = agents.get(String(sessionId))
-        if (live === void 0 || entry.sleepEpoch !== void 0) {
-          // Not live (cold) or slept: materialize (resume/respawn) then wake.
-          // Fire-and-forget from the relay's perspective (a detached board-write
-          // side effect); failures are logged, and the durable registry state
-          // (sleepEpoch etc.) is only mutated inside wakePost AFTER the resume
-          // succeeds, so a later wake retries cleanly.
-          void wakePost(entry, record, roomId).catch((error: unknown) => {
-            ctx.logger.warn(`[deepartments] head wake to "${member}" failed: ${error instanceof Error ? error.message : String(error)}`)
-          })
-          continue
-        }
-        // Fix A2 — stuck-head wake resilience. A live-but-running head whose
-        // resident loop has produced NO new session event for STUCK_HEAD_MS is a
-        // wedged frozen agent (Batch 1c). Waking it inline would only enqueue a
-        // followup into the frozen loop's in-memory inbox and LOSE it on restart
-        // (the "Board delta" text never appears in the head session). Instead we
-        // dispose the frozen handle and fall through to the COLD path: the
-        // DURABLE board record is the re-delivery source, so the wake survives
-        // even though the in-memory queue dies with the disposed handle. dispose
-        // never throws (it catches internally), and the recovery is serialized
-        // per head so the relay never double-resumes — it never throws.
-        if (isHeadStuck(String(sessionId), live)) {
-          ctx.logger.warn(`[deepartments] head "${member}" live but stuck (no session progress for ${STUCK_HEAD_MS / 1000}s) — disposing + cold-resuming from the durable board record`)
-          const sid = String(sessionId)
-          void serializeHeadRecovery(sid, async () => {
-            // Dispose the frozen handle first; once gone, agents.get(sid) is
-            // undefined again and wakePost takes the COLD resume path.
-            await disposeHeadHandle(sid)
-            // Reset progress baseline so the fresh incarnation is judged fresh.
-            headProgress.delete(sid)
-            try {
-              await wakePost(entry, record, roomId)
-            } catch (error: unknown) {
-              ctx.logger.warn(`[deepartments] stuck-head wake to "${member}" failed after dispose: ${error instanceof Error ? error.message : String(error)}`)
-            }
-          })
-          continue
-        }
-        // Healthy live head: enqueue after the current turn as today, and record
-        // progress so the next stuck check measures from a fresh baseline.
-        markHeadProgress(String(sessionId), live)
-        const senderSession = byPost.get(record.from)?.sessionId ?? hosts.get(record.from)?.sessionId ?? record.from
-        try {
-          live.followup(createUserMessage({
-            content: [{
-              type: 'text',
-              text: `Board delta in ${roomId}: new message ${record.id} from ${record.from} addressed to you. Read it with dept_room_read (room "${roomId}") and reply with dept_room_write to the sender.`
-            } as const],
-            source: {
-              kind: 'board',
-              form: 'notice',
-              plugin: 'deepartments',
-              summary: boundContextSummary(`Board delta in ${roomId} from ${record.from}.`),
-              roomId,
-              messageId: record.id,
-              from: record.from,
-              senderSessionId: SessionId(senderSession)
-            }
-          }))
-        } catch (error: unknown) {
-          ctx.logger.warn(`[deepartments] head wake to "${member}" failed: ${error instanceof Error ? error.message : String(error)}`)
-        }
-        continue
-      }
-
-      // --- host branch (NEW, Batch A): wake the host via the RAW agent path.
-      // A host is NOT a continuable child, so subagents.followup is impossible
-      // (authorizeLineage rejects host targets). The raw Agent.followup opens a
-      // new waking turn — the correct, simpler wake. ---
-      const host = hosts.get(member)
-      if (host !== void 0) {
-        const target = agents.get(SessionId(host.sessionId))
-        if (target === void 0) {
-          ctx.logger.warn(`[deepartments] host wake skipped for "${member}": session "${host.sessionId}" is not live`)
-          continue
-        }
-        const senderSession = byPost.get(record.from)?.sessionId ?? hosts.get(record.from)?.sessionId ?? record.from
-        try {
-          target.followup(createUserMessage({
-            content: [{
-              type: 'text',
-              text: `Board delta in ${roomId}: new message ${record.id} from ${record.from} addressed to you. Read it with dept_room_read (room "${roomId}") and reply with dept_room_write to the sender.`
-            } as const],
-            source: {
-              kind: 'board',
-              form: 'notice',
-              plugin: 'deepartments',
-              summary: boundContextSummary(`Board delta in ${roomId} from ${record.from}.`),
-              roomId,
-              messageId: record.id,
-              from: record.from,
-              senderSessionId: SessionId(senderSession)
-            }
-          }))
-        } catch (error: unknown) {
-          ctx.logger.warn(`[deepartments] host wake to "${member}" failed: ${error instanceof Error ? error.message : String(error)}`)
-        }
-        continue
-      }
-
-      // --- unknown member: skip + warn (defensive race window; dept_room_write
-      // should have rejected it already, but the registry can change). ---
-      ctx.logger.warn(`[deepartments] wake skipped for unknown member "${member}" in room "${roomId}"`)
-    }
-  }
-  const removeListener = setBoardRecordListener(relay)
-  ctx.effect(() => removeListener, 'deepartments: board record listener')
-
-  // Batch F reviewer fix: clear the affected room's IN-MEMORY read cursors when
-  // a boot compaction rewrites (renumbers) that room's board. The durable
-  // cursors file is already reset by org's compactBoardFile; without this hook,
-  // `memberCursors` cold-loaded the stale pre-reset high cursor and skips most
-  // of the renumbered kept set — exactly the "resumed member skips unread kept
-  // messages" hazard Batch D forbids. `memberCursors` is the collapsed per-member
-  // fast path (highest high-water across rooms), so resetting the member to
-  // FRESH is the correct in-memory mirror; the collapsed single-room design
-  // already accepts member-global high-water. The member reset targets members
-  // that hold a durable `${roomId}:<member>` cursor key — the same population
-  // the durable reset affects.
-  const removeCompactionResetter = setRoomCompactionResetter((roomId) => {
-    for (const memberId of [...memberCursors.keys()]) {
-      if (persistedCursors.has(`${roomId}:${memberId}`)) {
-        memberCursors.set(memberId, { lastMessageId: undefined, lastMessageSeq: -1, lastAgendaSeq: -1 })
-      }
-    }
-  })
-  ctx.effect(() => removeCompactionResetter, 'deepartments: room compaction resetter')
 
   // --- tool definitions (shared by the GLOBAL host plane and the child's OWN
   // layer so a lean toolFilter still exposes them to resident posts) ---------
 
   if (subagents === void 0) {
-    ctx.logger.warn('[deepartments] subagents service absent: the board toolset will not be installed into continuable children (host-plane tools may still fail at use if the services are absent)')
+    ctx.logger.warn('[deepartments] subagents service absent: the messaging toolset will not be installed into continuable children (host-plane tools may still fail at use if the services are absent)')
   }
 
-  // --- global (host-plane) board tools: registered once on the plugin ctx so
-  // the HOST Asistente (and every agent) sees them. Registered as a reversible
+  // --- global (host-plane) tools: registered once on the plugin ctx so the
+  // HOST Asistente (and every agent) sees them. Registered as a reversible
   // effect so HMR unloads them cleanly. ---
-  const globalRead = ctx.tools.register(defineTool({
-    name: 'dept_room_read',
-    description: 'Read this agent\'s new board messages in one room: the delta of messages addressed to you (or sent by you) plus agenda updates since your last read. By default returns a compact table-of-contents of new addressed messages since your last read (message id + sender + short preview, with \'…\' when the preview is truncated). Pass messageId to fetch the FULL text of one message (never truncated); pass limit/offset to page through the delta. Pass the room id (e.g. "board").',
-    parameters: {
-      room: { type: 'string', required: true, description: 'Room id to read (e.g. "board").' },
-      messageId: { type: 'string', description: 'Optional: fetch the FULL text of this one message by id (never truncated). Does not advance the read cursor.' },
-      limit: { type: 'number', description: 'Optional: max TOC entries per read (default 20).' },
-      offset: { type: 'number', description: 'Optional: skip that many candidate messages in TOC mode (default 0).' }
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          room: { type: 'string', required: true },
-          member: { type: 'string', required: true },
-          delta: { type: 'string', required: true }
-        }
-      },
-      render: (_args, value) => [{ type: 'text', text: value.delta } as const]
-    },
-    async execute(args, exec): Promise<{ room: string; member: string; delta: string }> {
-      const agent = exec.agent
-      if (!agent) throw new Error('dept_room_read requires a calling agent (exec.agent was undefined)')
-      const memberId = memberIdFor(agent.id as string, args.room)
-      const session = ctx.sessions.get(SessionId(roomSessionId(args.room)))
-      if (session === void 0) throw new Error(`[deepartments] room "${args.room}" is not live (no session)`)
-      const snapshot = ctx.sessionProjections.snapshot(session)
-      const state = snapshot.values['deepartments/room'] as RoomState | undefined
-      if (state === void 0) {
-        // Projection unit absent (should not happen): serve nothing.
-        return { room: args.room, member: memberId, delta: 'No board messages addressed to you.' }
-      }
-
-      // Fetch mode: return the FULL, untruncated text of one message by id.
-      // Never advances the cursor and never touches memberCursors, so a
-      // subsequent default read still serves the message.
-      if (args.messageId !== undefined) {
-        const message = state.messages.find((candidate) => candidate.id === args.messageId)
-        if (message === void 0) {
-          return { room: args.room, member: memberId, delta: `No board message with id "${args.messageId}" was found in room "${args.room}".` }
-        }
-        const flag = message.sensitive
-          ? `[sensitive — sender verified: ${message.senderVerified === true ? 'yes' : 'no'}] `
-          : ''
-        const delta = `Full text of ${message.id} (from ${message.from} → ${message.to.join(', ') || '(all)'}):\n${flag}${message.text}`
-        return { room: args.room, member: memberId, delta }
-      }
-
-      // TOC mode: compact table of contents of new addressed messages since
-      // the last read, paged by limit/offset, plus agenda updates.
-      const cursor = memberCursors.get(memberId) ?? { lastMessageId: undefined, lastMessageSeq: -1, lastAgendaSeq: -1 }
-      // Seq high-water slicing (Batch D): serve ONLY records with `seq` above
-      // the member's durable `lastMessageSeq`. `state.messages` is seq-ordered;
-      // a persisted cursor therefore skips the historical backlog after a
-      // restart, while a fresh member (cursor at -1) sees full history.
-      const candidates = state.messages
-        .filter((message) => message.seq > cursor.lastMessageSeq && (message.to.includes(memberId) || message.from === memberId))
-      const limit = Math.max(args.limit ?? 20, 1)
-      const offset = Math.max(args.offset ?? 0, 0)
-      const page = candidates.slice(offset, offset + limit)
-      const remaining = Math.max(candidates.length - (offset + limit), 0)
-      const lines: string[] = []
-      for (const message of page) lines.push(formatTocMessage(message))
-      if (remaining > 0) lines.push(`- … (${remaining} more messages; read again or page with offset)`)
-      const agenda = state.agenda.filter((item) => item.cursorOfLastTouch > cursor.lastAgendaSeq)
-      for (const item of agenda) lines.push(formatDeltaAgenda(item))
-      // Advance the cursor to the last TOC entry shown so the next read
-      // serves only newer messages.
-      if (page.length > 0) { cursor.lastMessageId = page[page.length - 1].id; cursor.lastMessageSeq = page[page.length - 1].seq }
-      let maxAgendaSeq = -1
-      for (const item of agenda) if (item.cursorOfLastTouch > maxAgendaSeq) maxAgendaSeq = item.cursorOfLastTouch
-      if (maxAgendaSeq >= 0) cursor.lastAgendaSeq = maxAgendaSeq
-      memberCursors.set(memberId, cursor)
-      // Batch D: mirror the advanced cursor to disk (write-through fire-and-forget)
-      // so a restart restores the high-water mark instead of replaying history.
-      persistCursors(args.room, memberId, cursor)
-      const delta = lines.length === 0 ? 'No board messages addressed to you.' : `Board delta (room ${args.room}) for ${memberId}:\n${lines.join('\n')}`
-      return { room: args.room, member: memberId, delta }
-    }
-  }))
-
-  const globalWrite = ctx.tools.register(defineTool({
-    name: 'dept_room_write',
-    description: 'Post an addressed message to one board room. The message is recorded from your board member id; addressed recipients are woken to read it. Addressees must be a registered post, a registered host (host-<sessionId>), or a static member — unknown addressees are rejected. Set ack:true when this is a PURE acknowledgement/receipt (no new content) so the wake relay does not loop on a confirmation ping-pong. Mark sensitive:true to flag a sensitive/mission-critical message so recipients can see the sender is registry-verified.',
-    parameters: {
-      room: { type: 'string', required: true, description: 'Room id to post to (e.g. "board").' },
-      to: {
-        type: 'array',
-        items: { type: 'string' },
-        required: true,
-        description: 'Board member ids this message is addressed to (e.g. ["research-head"]).'
-      },
-      text: { type: 'string', required: true, description: 'The message text.' },
-      ack: { type: 'boolean', description: 'Set true when this is a pure acknowledgement/receipt (no new content) so the relay does not loop on it.' },
-      sensitive: { type: 'boolean', description: 'Mark this message as sensitive; recipients will see the sender is registry-verified and the message is flagged. A pragmatic trust signal, not a crypto signature.' }
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          room: { type: 'string', required: true },
-          from: { type: 'string', required: true },
-          to: { type: 'array', items: { type: 'string' }, required: true },
-          messageId: { type: 'string', required: true }
-        }
-      },
-      render: (_args, value) => [{ type: 'text', text: `posted ${value.messageId} to ${value.room} (from ${value.from} → ${value.to.join(', ') || '(all)'})` } as const]
-    },
-    async execute(args, exec): Promise<{ room: string; from: string; to: string[]; messageId: string }> {
-      const agent = exec.agent
-      if (!agent) throw new Error('dept_room_write requires a calling agent (exec.agent was undefined)')
-      const memberId = memberIdFor(agent.id as string, args.room)
-      // Loud address validation (audit C4 fix): reject fully-unknown addressees
-      // instead of silently dropping them.
-      const unknown = args.to.filter((addressee) => !isKnownAddressee(addressee))
-      if (unknown.length > 0) {
-        throw new Error(`[deepartments] dept_room_write: unknown addressee(s) ${unknown.join(', ')} — use dept_room_who for the roster`)
-      }
-      const { record } = await emitBoardMessage(args.room, memberId, [...args.to], args.text, null, args.ack === true, args.sensitive === true)
-      return { room: args.room, from: memberId, to: [...args.to], messageId: record.id }
-    }
-  }))
-
-  const globalWho = ctx.tools.register(defineTool({
-    name: 'dept_room_who',
-    description: 'Enumerate who is present in a board room from the live registries: the room\'s static members plus every registered post in that room (with whether its parent is live) and every registered host (host-<sessionId>) that has joined it, each with whether its agent session is currently live (sessionLive). Use this for the authoritative roster instead of inferring presence from stale board history.',
-    parameters: {
-      room: { type: 'string', required: true, description: 'Room id to list who is present in (e.g. "board").' }
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          room: { type: 'string', required: true },
-          members: { type: 'array', items: { type: 'string' }, required: true },
-          posts: {
-            type: 'array',
-            required: true,
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                postId: { type: 'string', required: true },
-                sessionId: { type: 'string', required: true },
-                roomId: { type: 'string', required: true },
-                agentPreset: { type: 'string', required: true },
-                sessionLive: { type: 'boolean', required: true },
-                sleeping: { type: 'boolean', required: true }
-              }
-            }
-          },
-          hosts: {
-            type: 'array',
-            required: true,
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                hostId: { type: 'string', required: true },
-                sessionId: { type: 'string', required: true },
-                roomId: { type: 'string', required: true },
-                sessionLive: { type: 'boolean', required: true },
-                sleeping: { type: 'boolean', required: true }
-              }
-            }
-          }
-        }
-      },
-      render: (_args, value) => {
-        const memberLine = value.members.length === 0 ? '  (none configured)' : value.members.map((member) => `  - ${member}`).join('\n')
-        const postLines = value.posts.map((post) => `  - ${post.postId}${post.sessionLive ? ' (live)' : ' (offline)'}${post.sleeping ? ' (sleeping)' : ''}`)
-        const postBlock = postLines.length === 0 ? '  (no registered heads)' : postLines.join('\n')
-        const hostLines = value.hosts.map((host) => `  - ${host.hostId} (session ${host.sessionId}, ${host.sessionLive ? 'live' : 'not live'})`)
-        const hostBlock = hostLines.length === 0 ? '  (no registered hosts)' : hostLines.join('\n')
-        return [{
-          type: 'text',
-          text: `Room ${value.room} roster:\nStatic members:\n${memberLine}\nRegistered heads:\n${postBlock}\nRegistered hosts:\n${hostBlock}`
-        } as const]
-      }
-    },
-    async execute(args): Promise<{ room: string; members: string[]; posts: PostRow[]; hosts: HostRow[] }> {
-      const room = config.org.rooms.find((candidate) => candidate.id === args.room)
-      // Piece 2 — room validation: an id outside config.org.rooms is NOT a
-      // room (the roster is 100% config-driven; rooms are never discovered
-      // from disk), so the OLD silent `[]` responded to ANY id and faked
-      // knowledge of ghost rooms. Throw loud instead (errors propagate
-      // through defineTool's execute as tool failures — the render only
-      // runs on a successful roster).
-      if (room === void 0) throw new Error(`unknown room "${args.room}" (not in config.org.rooms)`)
-      const members = [...room.members]
-      const posts: PostRow[] = []
-      for (const entry of byPost.values()) {
-        if (entry.roomId !== args.room) continue
-        const sessionLive = agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined
-        posts.push({
-          postId: entry.postId,
-          sessionId: entry.sessionId,
-          roomId: entry.roomId,
-          agentPreset: entry.agentPreset,
-          sessionLive,
-          sleeping: entry.sleepEpoch !== void 0
-        })
-      }
-      const hostsInRoom: HostRow[] = []
-      for (const entry of hosts.values()) {
-        if (entry.roomId !== args.room) continue
-        // U2 (§4/C7): retired hosts are excluded from the roster (evidence
-        // stays in hosts.json; they are no longer "present" members).
-        if (entry.retired === true) continue
-        // Batch E liveness: report the host's REAL session liveness — a
-        // cold-boot non-live host shows sessionLive:false, never "live".
-        const sessionLive = agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined
-        hostsInRoom.push({ hostId: entry.hostId, sessionId: entry.sessionId, roomId: entry.roomId, sessionLive, sleeping: entry.sleepEpoch !== void 0 })
-      }
-      return { room: args.room, members, posts, hosts: hostsInRoom }
-    }
-  }))
-
-  const globalWhereami = ctx.tools.register(defineTool({
-    name: 'dept_whereami',
-    description: 'Spatial identity: are you a registered board post or the host? Returns a "post" shape (your post id, room id, the room\'s static members and registered posts with parent-liveness) when you are a registered board post; returns a "host" shape (including your host-<sessionId> address when registered) when you are the Asistente host, not a board post.',
-    parameters: {},
-    output: {
-      schema: {
-        oneOf: [
-          {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              kind: { type: 'string', required: true, const: 'host' },
-              postId: { type: 'null', required: true },
-              roomId: { type: 'null', required: true },
-              hostId: { type: 'string' },
-              sessionId: { type: 'string' },
-              hostRoomId: { type: 'string' },
-              message: { type: 'string', required: true }
-            }
-          },
-          {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              kind: { type: 'string', required: true, const: 'post' },
-              postId: { type: 'string', required: true },
-              roomId: { type: 'string', required: true },
-              sessionId: { type: 'string', required: true },
-              agentPreset: { type: 'string', required: true },
-              sessionLive: { type: 'boolean', required: true },
-              members: { type: 'array', items: { type: 'string' }, required: true },
-              posts: {
-                type: 'array',
-                required: true,
-                items: {
-                  type: 'object',
-                  additionalProperties: false,
-                  properties: {
-                    postId: { type: 'string', required: true },
-                    sessionId: { type: 'string', required: true },
-                    roomId: { type: 'string', required: true },
-                    agentPreset: { type: 'string', required: true },
-                    sessionLive: { type: 'boolean', required: true },
-                    sleeping: { type: 'boolean', required: true }
-                  }
-                }
-              }
-            }
-          }
-        ]
-      },
-      render: (_args, value) => [{
-        type: 'text',
-        text: value.kind === 'post'
-          ? `you are head ${value.postId} in room ${value.roomId} (members: ${value.members.join(', ') || 'none'})`
-          : value.hostId
-            ? `you are the Asistente host (address ${value.hostId}, room "${value.hostRoomId ?? 'unregistered'}")`
-            : value.message ?? 'you are the Asistente host (not a board head)'
-      } as const]
-    },
-    async execute(_args, exec): Promise<WhereAmI> {
-      const agent = exec.agent
-      if (!agent) throw new Error('dept_whereami requires a calling agent (exec.agent was undefined)')
-      const postId = postIdForChild(agent.id as string)
-      // The Asistente host (and any unregistered agent) has no post entry.
-      if (postId === undefined) {
-        // Batch E ensureHost (reviewer note 2): calling whereami counts as a
-        // board tool call, so a host-only agent is REGISTERED here — it must
-        // not stay addressless. Reuse its existing room when already
-        // registered; an unregistered host joins the first configured room.
-        const existingId = hostForSession.get(agent.id as string)
-        const existing = existingId !== void 0 ? hosts.get(existingId) : undefined
-        if (existing !== void 0) {
-          ensureHost(agent.id as string, existing.roomId)
-          return { kind: 'host', postId: null, roomId: null, hostId: existing.hostId, sessionId: existing.sessionId, hostRoomId: existing.roomId, message: 'You are the Asistente in your private room with the owner; you are a registered host on the board, not a post.' }
-        }
-        const joinRoom = config.org.rooms[0]?.id
-        if (joinRoom !== void 0) {
-          const hostId = ensureHost(agent.id as string, joinRoom)
-          // Single-live-host guard (postmortem nº5): when another live host
-          // exists, ensureHost REFUSED this registration and returned the LIVE
-          // host's id without creating an entry. Report HONESTLY — never
-          // impersonate: this session is a plain session and the live host
-          // entry is the one the guard pointed at.
-          const entry = hosts.get(hostIdForSession(agent.id as string))
-          if (entry !== void 0) {
-            return { kind: 'host', postId: null, roomId: null, hostId, sessionId: entry.sessionId, hostRoomId: entry.roomId, message: 'You are the Asistente in your private room with the owner; you are a registered host on the board, not a post.' }
-          }
-          const liveHostEntry = hosts.get(hostId)
-          return { kind: 'host', postId: null, roomId: null, message: `You are the Asistente in your private room with the owner; you are NOT a registered host — the live host is ${liveHostEntry?.hostId ?? hostId}.` }
-        }
-        return { kind: 'host', postId: null, roomId: null, message: 'You are the Asistente in your private room with the owner; you are NOT a board post.' }
-      }
-      const entry = byPost.get(postId)
-      if (entry === void 0) {
-        // Registry race: postId came from byChild but is missing from byPost.
-        // Treat as host to stay non-throwing and reversible.
-        return { kind: 'host', postId: null, roomId: null, message: 'You are the Asistente in your private room with the owner; you are NOT a board post.' }
-      }
-      const room = config.org.rooms.find((candidate) => candidate.id === entry.roomId)
-      const members = room === void 0 ? [] : [...room.members]
-      const posts: PostRow[] = []
-      for (const candidate of byPost.values()) {
-        if (candidate.roomId !== entry.roomId) continue
-        const sessionLive = agents !== void 0 && agents.get(SessionId(candidate.sessionId)) !== undefined
-        posts.push({
-          postId: candidate.postId,
-          sessionId: candidate.sessionId,
-          roomId: candidate.roomId,
-          agentPreset: candidate.agentPreset,
-          sessionLive,
-          sleeping: candidate.sleepEpoch !== void 0
-        })
-      }
-      return {
-        kind: 'post',
-        postId,
-        roomId: entry.roomId,
-        sessionId: entry.sessionId,
-        agentPreset: entry.agentPreset,
-        sessionLive: agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined,
-        members,
-        posts
-      }
-    }
-  }))
 
   // Batch W4 P1 — ON-DEMAND wake-context snapshot (host plane): the live-
-  // freshness counterpart of the host wake injection. Returns identity/room,
-  // the board cursor + delta TOC, and the condensed roster in ONE call using
-  // the SAME pure `buildWakePack` builder. Deliberately does NOT change
-  // dept_whereami / dept_room_read / dept_room_who behaviour — it is additive,
-  // for when the model needs a refresh the wake pack cannot cache.
+  // freshness counterpart of the host wake injection. Returns identity, the
+  // message delta (latest received) and the condensed roster in ONE call using
+  // the SAME pure `buildWakePack` builder. B3 cutover: no rooms, no board
+  // cursor — the snapshot is the messaging-delta + roster.
   const globalWakeSnapshot = ctx.tools.register(defineTool({
     name: 'dept_wake_snapshot',
-    description: 'On-demand Deepartments wake-context snapshot (host plane): returns, in ONE call and as text, your identity + room, the board read cursor, the board delta TOC since that cursor, and the condensed roster (static members + registered posts/hosts with their durable registry sleeping flags). It NEVER embeds live session liveness — a stale liveness claim is worse than one dept_room_who, so liveness stays on-demand via dept_room_who. This is the live-freshness counterpart of the automatic host wake context pack; for LIVE needs the pack cannot cache (true session liveness, full message text), call dept_room_who / dept_room_read messageId. Does not advance your read cursor.',
+    description: 'On-demand Deepartments wake-context snapshot (host plane): returns, in ONE call and as text, your identity, the message delta (your latest-received messages, capped N) and the condensed roster (registered posts/hosts with their durable registry sleeping flags). It NEVER embeds live session liveness — a stale liveness claim is worse than one dept_who, so liveness stays on-demand via dept_who. This is the live-freshness counterpart of the automatic host wake context pack; for LIVE needs the pack cannot cache (true session liveness, full message text), call dept_who / agent_messages. Does not advance anything.',
     parameters: {},
     output: {
       schema: {
@@ -5394,15 +4075,14 @@ export function applyInvoke(ctx: Context, config: Config) {
       if (!agent) throw new Error('dept_wake_snapshot requires a calling agent (exec.agent was undefined)')
       const sessionId = agent.id as string
       const hostId = hostIdForSession(sessionId)
-      const roomId = hosts.get(hostId)?.roomId ?? config.org.rooms[0]?.id ?? 'board'
-      const snapshot = await assembleWakeSnapshot(hostId, roomId)
+      const snapshot = await assembleWakeSnapshot(hostId)
       return { snapshot }
     }
   }))
 
   const globalRetire = ctx.tools.register(defineTool({
     name: 'dept_post_retire',
-    description: 'Retire a registered board post cleanly: post a withdrawal note in its room (addressed to the post), then unregister it from the post/child registries and persist. A hard unregister for permanent posts (the lifecycle journal in Batch G covers the gentler sleep lifecycle path). Unknown postIds are rejected loudly.',
+    description: 'Retire a registered post cleanly: unregister it from the post/child registries and persist. B3 cutover: no withdrawal note — the registry unregistration is the only signal. A hard unregister for permanent posts (the lifecycle journal in Batch G covers the gentler sleep lifecycle path). Unknown postIds are rejected loudly.',
     parameters: {
       postId: { type: 'string', required: true, description: 'The post id to retire (e.g. "research-head").' }
     },
@@ -5412,13 +4092,12 @@ export function applyInvoke(ctx: Context, config: Config) {
         additionalProperties: false,
         properties: {
           postId: { type: 'string', required: true },
-          roomId: { type: 'string', required: true },
           retired: { type: 'boolean', required: true }
         }
       },
-      render: (_args, value) => [{ type: 'text', text: `retired post ${value.postId} (room ${value.roomId})` } as const]
+      render: (_args, value) => [{ type: 'text', text: `retired post ${value.postId}` } as const]
     },
-    async execute(args, exec): Promise<{ postId: string; roomId: string; retired: boolean }> {
+    async execute(args, exec): Promise<{ postId: string; retired: boolean }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_post_retire requires a calling agent (exec.agent was undefined)')
       // Delegate to the shared retirement path (Batch 3a). From the HOST plane
@@ -5689,15 +4368,11 @@ export function applyInvoke(ctx: Context, config: Config) {
   }))
 
   ctx.effect(() => () => {
-    globalRead()
-    globalWrite()
-    globalWho()
-    globalWhereami()
     globalWakeSnapshot()
     globalRetire()
     globalMemo()
     globalSleep()
-  }, 'deepartments: host-plane board tools')
+  }, 'deepartments: host-plane tools')
 
   // --- agents/list + host/status RPC (server half, HTTP self-mount) --------
   // Serves the department-head roster rows (`agents`/`list`) and the U3
@@ -5793,15 +4468,8 @@ export function applyInvoke(ctx: Context, config: Config) {
       // buildHostStatusPayload alone could not cure the cross-request
       // exhaustion of a shared one-shot iterator.
       hosts: { [Symbol.iterator]: (): Iterator<HostEntryLike> => hosts.values() as Iterator<HostEntryLike> },
-      memberCursors: memberCursors as unknown as ReadonlyMap<string, { lastMessageSeq: number }>,
       sessionLive: (sid) => agents !== void 0 && agents.get(SessionId(sid)) !== undefined,
       sessionRunning: (sid) => agents !== void 0 && agents.get(SessionId(sid))?.status === 'running',
-      loadBoardRecords: async () => {
-        // The board FILE is the cold source of truth and carries
-        // MessagePayload.ack, which the folded room projection omits.
-        const boardRoom = config.org.rooms.find((room) => room.id === 'board')
-        return boardRoom === void 0 ? undefined : loadRecords(resolveBoardPath(config.stateDir, boardRoom.id))
-      },
       // U3: the live host's journal wake_counter for the `host/status` payload.
       // Best-effort and NEVER throwing — an unreadable journal simply omits the
       // field (the payload contract stays minimal and stable).
