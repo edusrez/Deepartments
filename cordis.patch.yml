@@ -5,28 +5,17 @@
       name: dsh-deepartments
       config:
         stateDir: .deepartments
-        # The static organization architecture (owner decisions 11-12): rooms
-        # are program architecture defined HERE, never created by agents.
-        # The board room is the coordination room; research-head is a member
-        # of BOTH the board room and the research department room.
+        # The static organization architecture (owner decisions 11-12; spec 003
+        # B3 cutover): the org is an AGENTS CATALOG — the host plus the
+        # departments, each headed by a coordinator (research-head heads the
+        # research department). Rooms were removed; agents message each other
+        # directly via send_message. Departments are defined HERE, never
+        # created by agents.
         # agentOptions values: models served via the deepseek-official provider (official DeepSeek API, DEEPSEEK_API_KEY); deepseek-v4-flash-vision-exp with reasoning max (same as the Asistente).
         org:
-          rooms:
-            - id: board
-              name: Board of directors
-              purpose: Coordination room of department heads
-              members:
-                - asistente
-                - research-head
-            - id: research
-              name: Research department
-              purpose: Research department room
-              members:
-                - research-head
           departments:
             - id: research
               name: Research Department
-              roomId: research
               coordinator:
                 postId: research-head
                 title: Head of Research
