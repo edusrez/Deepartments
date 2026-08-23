@@ -3011,12 +3011,35 @@ export function applyInvoke(ctx: Context, config: Config) {
     return { id: declaredId, title, tools, persona: parsed.body, path: filePath }
   }
 
-  /** The default sidebar title of a spawned worker (spec §5.2):
-   * `<RoleTitle>: <task|job title|id>` — the role template's title, then the
-   * task (or the job id / the derived post id), e.g. "Researcher: DSH
-   * updates". The `title?` spawn parameter overrides it. */
-  const defaultWorkerTitle = (roleTitle: string, task: string | undefined, jobId: string | undefined, postId: string): string =>
-    `${roleTitle}: ${task ?? jobId ?? postId}`
+  /** The mission headline of a deployed worker's default sidebar title (owner
+   * decision 2026-08-23 "siempre Rol: Misión"): the FIRST line of the task
+   * text, cut to ~`MISSION_MAX` chars (a truncation ellipsis when it exceeds),
+   * falling back to the job id / derived post id when there is no task text. */
+  const MISSION_MAX = 70
+  const workerMission = (task: string | undefined, jobId: string | undefined, postId: string): string => {
+    const trimmed = (task ?? '').trim()
+    const firstLine = trimmed === '' ? '' : trimmed.split('\n')[0].trim()
+    if (firstLine === '') return jobId ?? postId
+    if (firstLine.length > MISSION_MAX) return `${firstLine.slice(0, MISSION_MAX - 3).trimEnd()}...`
+    return firstLine
+  }
+
+  /** The RoleDisplay of a deployed worker's default sidebar title: the role
+   * capitalized (researcher→"Researcher", reviewer→"Reviewer",
+   * analyst→"Analyst", organizer→"Organizer"; any other role → its first
+   * letter capitalized). */
+  const roleDisplay = (role: string): string =>
+    role === '' ? role : role.charAt(0).toUpperCase() + role.slice(1)
+
+  /** The default sidebar title of a deployed worker (owner decision 2026-08-23:
+   * "siempre que se deployee un agente: Rol: Misión como nombre"):
+   * `<RoleDisplay>: <mission>` — the role capitalized + the first line(s) of
+   * the task (cut to ~70 chars with a truncation ellipsis), falling back to
+   * the job id / derived post id when there is no task text. A caller-passed
+   * `title` always wins (respected verbatim); dept_job_run uses its HUMAN
+   * frontmatter title when present. */
+  const defaultWorkerTitle = (role: string, task: string | undefined, jobId: string | undefined, postId: string): string =>
+    `${roleDisplay(role)}: ${workerMission(task, jobId, postId)}`
 
   /** Dedup the worker POST id (spec §5.2): the base slug (jobId ?? role) is
    * suffixed `-2`, `-3`… while the candidate is already registered — INCLUDING
@@ -3269,6 +3292,20 @@ export function applyInvoke(ctx: Context, config: Config) {
             ...(department !== void 0 ? { departmentId: department.id } : {})
           })
           byHeadHandle.set(String(SessionId(sessionId)), handle)
+          // F3 pin (owner decision 2026-08-23): the legacy create path deploys a
+          // worker too, so it pins the SAME "Rol: Misión" default sidebar title
+          // (there is no title/firstMessage override — the role + the first
+          // message are the mission source). Non-fatal: a failed pin only logs.
+          const titleSession = ctx.sessions.get(SessionId(sessionId))
+          if (titleSession !== void 0) {
+            const title = defaultWorkerTitle(args.role, firstMessage, void 0, args.postId)
+            const titlePin = pinSessionTitle(titleSession, title)
+            if (titlePin === 'pinned') {
+              ctx.logger.info(`[deepartments] dept_post_create: pinned worker session title "${title}" (${sessionId})`)
+            } else if (titlePin === 'failed') {
+              ctx.logger.warn(`[deepartments] dept_post_create: worker session title pin failed for ${sessionId} (non-fatal — worker registration continues)`)
+            }
+          }
           // Deliver the initial assignment (or a creation note) as a DURABLE
           // BUS message from the head addressed to the worker — this IS the
           // `deepartments/post-created` signal; the bus delivery wakes the
@@ -3601,7 +3638,11 @@ export function applyInvoke(ctx: Context, config: Config) {
           const postId = dedupedWorkerSlug(jobId)
           const sessionId = SessionId(mintWorkerSessionId(postId))
           if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_job_run: a live agent already exists for session "${sessionId}"`)
-          const title = definition.meta.title
+          // Title (owner decision 2026-08-23): the HUMAN frontmatter title is
+          // the passed-in title and always wins; a job without one (defensive —
+          // parseJobFrontmatter validates it non-empty) falls back to the
+          // "Rol: Misión" default.
+          const title = definition.meta.title.trim() !== '' ? definition.meta.title : defaultWorkerTitle(definition.meta.role, definition.body, jobId, postId)
           const setup = workerSetup(postId, headEntry.roomId, definition.meta.role, { persona: template.persona, taskText: definition.body, tools: template.tools, department })
           // F5 (spec 004 §6.2 L1): job workers land in the department workspace.
           const deptCwd = await resolveDepartmentWorkspaceCwd(department)
@@ -3652,12 +3693,12 @@ export function applyInvoke(ctx: Context, config: Config) {
       // cross-department spawn surface is absent by construction). -----------
       disposers.push(agentCtx.tools.register(defineTool({
         name: 'dept_worker_spawn',
-        description: 'Spawn a WORKER of YOUR department (spec 004 §5.2): resolve the role template presets/departments/<your-department>/<role>.md (its persona + display title), materialize a fresh root agent worker (sessionId worker-<slug>-<uuid> — a UNIQUE session, its own session row; the worker NEVER collides with an archived session after a retire-and-respawn of the same role), register it in posts.json with provider:"worker", role, YOUR postId as managerId, your config department as departmentId and the jobId (when given), inject the role persona + your task into its system prompt, pin its sidebar title (title? overrides the default "<RoleTitle>: <task|jobId|slug>"), and deliver the task as its first durable bus message (which wakes it). Worker slugs DEDUP with -2, -3… — a registered (even retired) slug is never reused. Returns the worker post id + session id + the pinned title. Registered ONLY in the head own-layer.',
+        description: 'Spawn a WORKER of YOUR department (spec 004 §5.2): resolve the role template presets/departments/<your-department>/<role>.md (its persona + display title), materialize a fresh root agent worker (sessionId worker-<slug>-<uuid> — a UNIQUE session, its own session row; the worker NEVER collides with an archived session after a retire-and-respawn of the same role), register it in posts.json with provider:"worker", role, YOUR postId as managerId, your config department as departmentId and the jobId (when given), inject the role persona + your task into its system prompt, pin its sidebar title (title? overrides the default "<RoleDisplay>: <mission>"), and deliver the task as its first durable bus message (which wakes it). Worker slugs DEDUP with -2, -3… — a registered (even retired) slug is never reused. Returns the worker post id + session id + the pinned title. Registered ONLY in the head own-layer.',
         parameters: {
           role: { type: 'string', required: true, description: 'The role template name, e.g. "researcher" — must be a file presets/departments/<your-department>/<role>.md.' },
           task: { type: 'string', description: 'The one-off assignment: injected into the worker persona AND delivered as its first bus message.' },
           jobId: { type: 'string', description: 'Set when the worker runs a versioned job (F4); becomes the slug base and is recorded on the entry.' },
-          title: { type: 'string', description: 'Sidebar row title (overrides the default "<RoleTitle>: <task|jobId|slug>").' }
+          title: { type: 'string', description: 'Sidebar row title (overrides the default "<RoleDisplay>: <mission>" — the role capitalized + the first line of the task, cut to ~70 chars).' }
         },
         output: {
           schema: {
@@ -3693,7 +3734,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           const postId = dedupedWorkerSlug(args.jobId ?? role)
           const sessionId = SessionId(mintWorkerSessionId(postId))
           if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_worker_spawn: a live agent already exists for session "${sessionId}"`)
-          const title = String(args.title ?? '').trim() !== '' ? String(args.title) : defaultWorkerTitle(template.title, args.task, args.jobId, postId)
+          const title = String(args.title ?? '').trim() !== '' ? String(args.title) : defaultWorkerTitle(role, args.task, args.jobId, postId)
           const setup = workerSetup(postId, headEntry.roomId, role, { persona: template.persona, taskText: args.task, tools: template.tools, department })
           // F5 (spec 004 §6.2 L1): the worker lands in its department workspace.
           const deptCwd = await resolveDepartmentWorkspaceCwd(department)
@@ -3802,13 +3843,36 @@ export function applyInvoke(ctx: Context, config: Config) {
    * over this the section is the START plus a reference to the full file. */
   const ARCHITECTURE_SECTION_MAX = 3500
 
+  /** F10/role-persona template substitution (spec 004 §9.1 + the owner's
+   * role-persona templating): replace the DEPARTMENT template variables —
+   * `{{deptName}}`, `{{headPostId}}`, `{{workspacePath}}`,
+   * `{{reportDir}}` (= <workspacePath>/reports) — in a prompt-section body
+   * with the department's real values. Shared by the architecture section
+   * (buildArchitectureSection) and the role persona (installRoleSection) so a
+   * role template body can use the same variables and NEVER leaks a raw
+   * uppercase `{{...}}` into the harness prompt expander (which only accepts
+   * lowercase `[a-z][a-z0-9_]*` variable names). A missing workspacePath
+   * empties `{{workspacePath}}`/`{{reportDir}}`; `{{cwd}}` (a legitimate
+   * lowercase harness preset variable) is NEVER touched — this map only knows
+   * the 4 department variables, so any other `{{...}}` passes through
+   * untouched. */
+  const renderDepartmentTemplate = (text: string, department: DepartmentConfig): string => {
+    const workspacePath = department.workspacePath ?? ''
+    const reportDir = workspacePath !== '' ? path.join(workspacePath, 'reports') : ''
+    const headPostId = department.coordinator?.postId ?? ''
+    return text
+      .replace(/\{\{deptName\}\}/g, department.name)
+      .replace(/\{\{headPostId\}\}/g, headPostId)
+      .replace(/\{\{workspacePath\}\}/g, workspacePath)
+      .replace(/\{\{reportDir\}\}/g, reportDir)
+  }
+
   /** Read + template the department's ARCHITECTURE.md into a prompt section
    * body (undefined = omit the section cleanly). A department without an
-   * ARCHITECTURE.md injects nothing and NEVER errors. Minimal templating
-   * replaces {{deptName}}, {{headPostId}}, {{workspacePath}},
-   * {{reportDir}} (= <workspacePath>/reports) with the department's real
-   * values; a missing workspacePath leaves those placeholders EMPTY. Content
-   * >~3500 chars is truncated to its START plus a pointer to the full file.
+   * ARCHITECTURE.md injects nothing and NEVER errors. Templating replaces
+   * {{deptName}}, {{headPostId}}, {{workspacePath}}, {{reportDir}} with the
+   * department's real values via renderDepartmentTemplate. Content >~3500
+   * chars is truncated to its START plus a pointer to the full file.
    * SYNC (readFileSync): installRoleSection/postSetup must stay synchronous
    * (a root agent's systemPrompt sections are composed at materialization,
    * before the agent can be awaited — there is no await seam). */
@@ -3822,15 +3886,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       ctx.logger.warn(`[deepartments] architecture section for "${department.id}" could not be read (${error instanceof Error ? error.message : String(error)}) — section omitted`)
       return void 0
     }
-    const workspacePath = department.workspacePath ?? ''
-    const reportDir = workspacePath !== '' ? path.join(workspacePath, 'reports') : ''
-    const headPostId = department.coordinator?.postId ?? ''
-    const rendered = raw
-      .replace(/\{\{deptName\}\}/g, department.name)
-      .replace(/\{\{headPostId\}\}/g, headPostId)
-      .replace(/\{\{workspacePath\}\}/g, workspacePath)
-      .replace(/\{\{reportDir\}\}/g, reportDir)
-      .trim()
+    const rendered = renderDepartmentTemplate(raw, department).trim()
     if (rendered === '') return void 0
     if (rendered.length > ARCHITECTURE_SECTION_MAX) {
       return `## Department architecture\n\n${rendered.slice(0, ARCHITECTURE_SECTION_MAX)}\n\n… (truncated — full text at ${archPath})`
@@ -3855,7 +3911,15 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (extra !== void 0 && (extra.persona !== undefined || extra.taskText !== undefined)) {
       const personaText = extra.persona ?? ''
       const taskText = extra.taskText === undefined ? '' : `\n\n## Your current assignment\n\n${extra.taskText}`
-      const combined = `${personaText}${taskText}`.trim()
+      // F10 persona templating: a role persona body (e.g. presets/
+      // departments/<dept>/<role>.md) may carry the same department template
+      // variables as the architecture — substitute the real values BEFORE the
+      // section is assembled so a raw uppercase {{headPostId}} never reaches
+      // the harness prompt expander (which only accepts lowercase variable
+      // names). A post without a config department (legacy/department-less)
+      // leaves the persona untouched. {{cwd}} is never touched.
+      const raw = `${personaText}${taskText}`
+      const combined = (department !== void 0 ? renderDepartmentTemplate(raw, department) : raw).trim()
       if (combined !== '') {
         sp.section({
           name: `deepartments:${isWorker ? 'worker' : 'head'}:role-persona:${postId}`,

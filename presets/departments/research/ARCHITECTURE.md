@@ -26,6 +26,10 @@ to fact-check (PASS/FAIL); an `organizer` to consolidate/inventory. The head
 gathers results over messaging, reviews what it can, consolidates, and reports
 to the requester with a single report + summary.
 
+**Title convention** (owner): the head deploys each worker with the title
+`'<Role>: <short mission>'` — the Role is the worker's role, the Mission the
+brief objective of the task, not the whole task.
+
 ## Worker lifecycle
 
 **EPHEMERAL by default**: assignment → work → report (→ reply to head) → the

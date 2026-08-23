@@ -5862,6 +5862,70 @@ test('F10 (spec 004 §9.1): a missing ARCHITECTURE.md omits the architecture sec
   })
 })
 
+test('F10 (spec 004 §9.1): the ROLE PERSONA body is templated like the architecture — a raw uppercase {{headPostId}}/{{reportDir}} NEVER reaches the assembled systemPrompt (the harness prompt expander rejects them), while the lowercase harness variable {{cwd}} is LEFT for the preset', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const org = {
+      departments: [
+        {
+          id: 'research',
+          name: 'Research',
+          workspacePath: path.join(stateDir, 'dept-research'),
+          coordinator: { postId: 'research-head', role: 'Research department head', provider: 'deepseek-official', agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' } }
+        }
+      ]
+    }
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { org })
+    try {
+      const worker = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'templated persona' })
+      const persona = await findPromptSection(worker.ctx, worker.key, `deepartments:worker:role-persona:${worker.result.workerId}`, true)
+      assert.ok(persona !== undefined, 'the role-persona section is assembled')
+      // The REAL researcher.md persona carries {{headPostId}}/{{workspacePath}}/
+      // {{reportDir}}: the assembled section must NEVER leak a raw `{...}` into
+      // the prompt (the harness expander only accepts lowercase [a-z][a-z0-9_]*).
+      assert.doesNotMatch(persona.text, /\{\{\s*(headPostId|reportDir|workspacePath|deptName)\s*\}\}/, 'no raw department {{...}} placeholder remains in the persona')
+      assert.match(persona.text, /research-head/, '{{headPostId}} templated -> "research-head"')
+      assert.match(persona.text, new RegExp(path.join(stateDir, 'dept-research', 'reports').replace(/[/\\]/g, '\\$&')), '{{reportDir}} templated -> <workspacePath>/reports')
+      // {{cwd}} is a legitimate lowercase HARNESS preset variable — NEVER touched.
+      assert.match(persona.text, /\{\{cwd\}\}/, '{{cwd}} stays raw (harness preset variable)')
+      // The task is still injected with the templated persona.
+      assert.match(persona.text, /## Your current assignment/, 'the task section is still appended')
+      assert.match(persona.text, /templated persona/, 'the spawned task is present')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F3 title default (owner decision 2026-08-23): spawn without a title uses "Rol: Misión" (role capitalized + first line of the task), truncating a long task to ~70 chars; a passed title is respected verbatim', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      // No title + a short task → "<RoleDisplay>: <first line of the task>".
+      const short = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'track DSH updates' })
+      assert.equal(short.result.title, 'Researcher: track DSH updates', 'default title = "<RoleDisplay>: <mission>" (role capitalized, not the template title)')
+      assert.equal(root.sessions.get(SessionId(short.result.sessionId)).events.find((ev) => ev.type === 'session/title')?.data.title, 'Researcher: track DSH updates', 'the pinned session title is the "Rol: Misión" default')
+
+      // No title + a LONG task → the mission is cut to ~70 chars + ellipsis
+      // (the ~70 cap applies to the MISSION, not the whole "Role: mission" row).
+      const longTask = 'a very long assignment line that surely exceeds seventy characters when used verbatim as the sidebar mission text here'
+      const long = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: longTask })
+      const longPrefix = 'Researcher: '
+      assert.ok(long.result.title.startsWith(longPrefix), 'the default title keeps the "<RoleDisplay>: " prefix')
+      const longMission = long.result.title.slice(longPrefix.length)
+      assert.ok(longMission.length <= 70, `the mission is capped at ~70 chars (got "${longMission}" — length ${longMission.length})`)
+      assert.ok(longMission.endsWith('...'), 'the truncated mission carries a truncation ellipsis')
+      assert.equal(longMission, `${longTask.slice(0, 67).trimEnd()}...`, 'the mission is the task start cut to ~70 chars')
+
+      // A PASSED title is respected verbatim (never substituted).
+      const custom = await f3Spawn({ agents }, headCtx, key, head, { role: 'reviewer', task: 'check the report', title: 'Custom reviewer label' })
+      assert.equal(custom.result.title, 'Custom reviewer label', 'a passed title overwrites the "Rol: Misión" default')
+      assert.equal(root.sessions.get(SessionId(custom.result.sessionId)).events.find((ev) => ev.type === 'session/title')?.data.title, 'Custom reviewer label', 'the pinned title is the passed override')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('F3 slug dedup: dept_worker_spawn dedups worker slugs with -2, -3… and NEVER reuses a RETIRED slug', async () => {
   await withTempStateDir(async (stateDir) => {
     const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
