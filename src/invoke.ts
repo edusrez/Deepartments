@@ -608,16 +608,16 @@ export function presenceGuidance(present: boolean): string {
  * was REMOVED (it duplicated the notify); the CURRENT presence state is instead
  * baked into every host wake pack via `buildWakePack`'s `ownerPresence` (read
  * at assembly time) — covering restarts/future sessions without re-notifying.
- * The first content text block stays byte-identical (`Owner presence:
- * present|absent`); the guidance is a SECOND content block, so the dedup
- * summary (`Deepartments owner presence: present|absent.`) is untouched.
+ * The single content text block keeps the first line byte-identical
+ * (`Owner presence: present|absent`), then appends a literal newline and the
+ * matching presence guidance line — so the dedup summary
+ * (`Deepartments owner presence: present|absent.`) is untouched.
  */
 export function buildPresenceMessage(present: boolean) {
-  const text = `Owner presence: ${present ? 'present' : 'absent'}`
+  const text = `Owner presence: ${present ? 'present' : 'absent'}\n${presenceGuidance(present)}`
   return createUserMessage({
     content: [
-      { type: 'text', text },
-      { type: 'text', text: presenceGuidance(present) }
+      { type: 'text', text }
     ],
     source: {
       kind: 'plugin',

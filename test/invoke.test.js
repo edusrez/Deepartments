@@ -4738,17 +4738,17 @@ test('Batch W4 pure: buildWakePack renders the `## Owner presence: present|absen
   assert.ok(!none.includes('## Owner presence:'), 'no presence line when no state is supplied (omitted, never a throw)')
 })
 
-test('Batch W4 pure: buildPresenceMessage keeps the exact first content line + dedup summary and appends the presence guidance as a SECOND content block', () => {
+test('Batch W4 pure: buildPresenceMessage keeps the exact first content line + dedup summary and fuses the presence guidance into a SINGLE content block after a literal newline', () => {
   const present = buildPresenceMessage(true)
-  assert.equal(present.content[0].text, 'Owner presence: present', 'the first content block is the exact `Owner presence: present` line')
-  assert.equal(present.content[1].text, presenceGuidance(true), 'the SECOND content block is the present guidance line')
-  assert.equal(present.content.length, 2, 'the presence node carries exactly two text blocks (state + guidance)')
+  assert.ok(present.content[0].text.startsWith('Owner presence: present\n'), 'the single content block starts with the exact `Owner presence: present` line + literal newline')
+  assert.equal(present.content[0].text, `Owner presence: present\n${presenceGuidance(true)}`, 'the single content block is state + literal newline + present guidance')
+  assert.equal(present.content.length, 1, 'the presence node carries exactly ONE text block (state + guidance fused)')
   assert.match(present.source.summary, /Deepartments owner presence: present\./, 'the dedup summary is INTACT for present')
 
   const absent = buildPresenceMessage(false)
-  assert.equal(absent.content[0].text, 'Owner presence: absent', 'the first content block is the exact `Owner presence: absent` line')
-  assert.equal(absent.content[1].text, presenceGuidance(false), 'the SECOND content block is the absent guidance line')
-  assert.equal(absent.content.length, 2, 'the presence node carries exactly two text blocks (state + guidance)')
+  assert.ok(absent.content[0].text.startsWith('Owner presence: absent\n'), 'the single content block starts with the exact `Owner presence: absent` line + literal newline')
+  assert.equal(absent.content[0].text, `Owner presence: absent\n${presenceGuidance(false)}`, 'the single content block is state + literal newline + absent guidance')
+  assert.equal(absent.content.length, 1, 'the presence node carries exactly ONE text block (state + guidance fused)')
   assert.match(absent.source.summary, /Deepartments owner presence: absent\./, 'the dedup summary is INTACT for absent')
 })
 
