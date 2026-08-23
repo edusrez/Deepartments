@@ -37,6 +37,19 @@
                   provider: opencode-zen
                   model: deepseek-v4-flash-vision-exp
                   reasoningEffort: max
+            - id: internal-programming
+              name: Internal Programming
+              workspacePath: /root/.deepartments/departments/internal-programming
+              coordinator:
+                postId: internal-programming-head
+                title: Internal Programming Head
+                role: Internal Programming department head
+                sessionTitle: Internal Programming Head
+                provider: opencode-zen
+                agentOptions:
+                  provider: opencode-zen
+                  model: deepseek-v4-flash-vision-exp
+                  reasoningEffort: max
         # Custom ctx.web fetch provider (webfetch.ts): detects blocking
         # (403/429) and reports WEB_BLOCKED with a message that instructs
         # API/JSON-endpoint investigation instead of guessing host endpoints.
