@@ -39,6 +39,20 @@ export interface CoordinatorConfig {
 export interface DepartmentConfig {
   id: string
   name: string
+  /**
+   * Optional real workspace directory of the department (spec 004 §3.1/§6.2):
+   * the department's own sidebar folder. F5 creates the workspace entity at
+   * this path and every head/worker of the department is created with
+   * `meta.cwd` = this path. OPTIONAL this phase (F1): absent/empty = the
+   * department keeps the shared workspace root (pre-F1 behavior).
+   */
+  workspacePath?: string
+  /**
+   * Optional repo-relative directory holding the department's versioned job
+   * definitions (spec 004 §3.3 — `dept_job_run` reads them, F4). OPTIONAL this
+   * phase (F1): absent/empty = no jobs declared yet.
+   */
+  jobDir?: string
   coordinator?: CoordinatorConfig
 }
 
@@ -75,6 +89,10 @@ export const Config: z<any, any> = z.object({
     departments: z.array(z.object({
       id: z.string().required(),
       name: z.string().default(''),
+      // F1 (spec 004 §3.1): OPTIONAL department fields, empty by default —
+      // a config without them (the pre-F1 shape) keeps composing untouched.
+      workspacePath: z.string().default(''),
+      jobDir: z.string().default(''),
       coordinator: z.object({
         postId: z.string().required(),
         role: z.string().default(''),

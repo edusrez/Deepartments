@@ -238,6 +238,27 @@ interface PostEntry {
    * `coordinatorForPost` is undefined for workers (they have no config), so the
    * durable entry carries the role the creating head supplied. */
   role?: string
+  /** F1 (spec 004 §4.1): the durable department link of a WORKER — the config
+   * department id of the creating head's department, recorded at create
+   * (the pre-F1 code only copied the inert roomId). A configured department
+   * head is derived from config instead (`departmentForPost`). Absent on
+   * legacy workers (pre-F1 entries) and on heads (config-derived). */
+  departmentId?: string
+  /** F1 (spec 004 §4.1/§4.2): the postId of the HEAD that created this worker
+   * ("my workers" — the per-owner retire scope). Absent on legacy workers.
+   * Never set on heads (they come from config, not from a creator). */
+  managerId?: string
+  /** F1 (spec 004 §3.4/§5.4): set when the worker was spawned by a JOB run
+   * (F4) — the versioned job definition id. Absent on plain ephemeral workers
+   * (dept_post_create) and on heads. */
+  jobId?: string
+  /** F1 (spec 004 §4.3): RETIREMENT IS MARKED, NEVER ERASED. `dept_post_retire`
+   * on a worker sets this flag and KEEPS the registry entry (byPost +
+   * posts.json), so the history stays queryable; the LIVE catalog
+   * (busDeliverCatalog addressing, dept_who, the wake-pack roster) filters
+   * retired entries. Absent/false = live. Never set on configured heads
+   * (a head retire stays cosmetic — the config re-materializes it). */
+  retired?: boolean
   /** Batch G: set when the head SLEPT (memoized + marked). On the next wake the
    * relay cold-resumes the SAME durable session (context reset + journal reload)
    * instead of waking a live incarnation; cleared once the respawn lands.
@@ -261,6 +282,11 @@ interface PostEntryPersisted {
   agentPreset: string
   provider?: 'worker'
   role?: string
+  /** F1 — persisted only when set (absent = legacy/pre-F1 entry). */
+  departmentId?: string
+  managerId?: string
+  jobId?: string
+  retired?: boolean
   sleepEpoch?: number
   boundarySeq?: number
   previousChildId?: string
@@ -1453,6 +1479,12 @@ export function applyInvoke(ctx: Context, config: Config) {
         // for workers (absent for configured permanent heads).
         ...(entry.provider !== void 0 ? { provider: entry.provider } : {}),
         ...(entry.role !== void 0 ? { role: entry.role } : {}),
+        // F1: persist the creator link + department + job link + retired marker
+        // only when set — legacy entries (all absent) rewrite byte-compatible.
+        ...(entry.departmentId !== void 0 ? { departmentId: entry.departmentId } : {}),
+        ...(entry.managerId !== void 0 ? { managerId: entry.managerId } : {}),
+        ...(entry.jobId !== void 0 ? { jobId: entry.jobId } : {}),
+        ...(entry.retired === true ? { retired: true } : {}),
         // Batch G: persist the optional sleep lifecycle fields only when set
         // (absent = never slept / no previous incarnation).
         ...(entry.sleepEpoch !== void 0 ? { sleepEpoch: entry.sleepEpoch } : {}),
@@ -1503,6 +1535,14 @@ export function applyInvoke(ctx: Context, config: Config) {
           // whose entry was removed stays gone across restarts.
           const provider = entry.provider === 'worker' ? 'worker' as const : undefined
           const role = typeof entry.role === 'string' ? entry.role : undefined
+          // F1: read the new optional fields with type guards — a legacy
+          // pre-F1 entry (all absent) loads EXACTLY as before (undefined, no
+          // error); a retired worker entry is registered AS retired (kept
+          // queryable, filtered by every live-catalog consumer).
+          const departmentId = typeof entry.departmentId === 'string' ? entry.departmentId : undefined
+          const managerId = typeof entry.managerId === 'string' ? entry.managerId : undefined
+          const jobId = typeof entry.jobId === 'string' ? entry.jobId : undefined
+          const retired = entry.retired === true
           registerEntry({
             postId,
             sessionId,
@@ -1510,6 +1550,10 @@ export function applyInvoke(ctx: Context, config: Config) {
             agentPreset: entry.agentPreset,
             ...(provider !== void 0 ? { provider } : {}),
             ...(role !== void 0 ? { role } : {}),
+            ...(departmentId !== void 0 ? { departmentId } : {}),
+            ...(managerId !== void 0 ? { managerId } : {}),
+            ...(jobId !== void 0 ? { jobId } : {}),
+            ...(retired ? { retired: true } : {}),
             ...(sleepEpoch !== void 0 ? { sleepEpoch } : {}),
             ...(boundarySeq !== void 0 ? { boundarySeq } : {}),
             ...(previousChildId !== void 0 ? { previousChildId } : {})
@@ -2467,6 +2511,18 @@ export function applyInvoke(ctx: Context, config: Config) {
     return undefined
   }
 
+  /** The CONFIG DEPARTMENT of a registered post, if its coordinator matches
+   * (F1). A configured HEAD derives its department here; a WORKER carries the
+   * link durably in its own entry (recorded at create from the creating head's
+   * department — `departmentForPost(creatorId)`) and has no config row.
+   * Undefined = not a configured head (a worker, or a legacy/non-config post). */
+  const departmentForPost = (postId: string): DepartmentConfig | undefined => {
+    for (const department of config.org.departments) {
+      if (department.coordinator?.postId === postId) return department
+    }
+    return undefined
+  }
+
   // --- Batch W4: NON-pure wake-pack assembly (live reads; buildWakePack is pure).
   // These gather the fresh-ish inputs (git bearings, ROADMAP tail, skill body,
   // board delta, condensed roster, system state) and hand them to the pure
@@ -2563,6 +2619,11 @@ export function applyInvoke(ctx: Context, config: Config) {
   const buildCondensedRoster = (): string => {
     const lines: string[] = []
     for (const entry of byPost.values()) {
+      // F1 (§4.3): a RETIRED worker is filtered from "present" (it stays in
+      // posts.json — marked, not erased — but is no longer a live member).
+      // Configuration heads are never retired-marked (cosmetic head retire
+      // deletes the entry as before).
+      if (entry.retired === true) continue
       lines.push(`- ${entry.postId}${entry.sleepEpoch !== void 0 ? ' (sleeping)' : ''} (${entry.agentPreset})`)
     }
     for (const entry of hosts.values()) {
@@ -2920,7 +2981,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (manager) {
       disposers.push(agentCtx.tools.register(defineTool({
         name: 'dept_post_create',
-        description: 'Create a DISPOSABLE department worker: spawn a fresh root agent (sessionId worker-<postId>), register it in posts.json as a disposable entry (provider:"worker"), and deliver its first message via the messaging bus. The worker works your assigned task and sleeps when done; you retire it later with dept_post_retire. The first message (firstMessage, or prompt) is persisted as a durable bus message addressed to the worker (the `deepartments/post-created` signal).',
+        description: 'Create a DISPOSABLE department worker: spawn a fresh root agent (sessionId worker-<postId>), register it in posts.json as a disposable entry (provider:"worker"; F1: YOU are recorded as its manager — managerId — and your config department as its departmentId), and deliver its first message via the messaging bus. The worker works your assigned task and sleeps when done; you retire it later with dept_post_retire. The first message (firstMessage, or prompt) is persisted as a durable bus message addressed to the worker (the `deepartments/post-created` signal).',
         parameters: {
           postId: { type: 'string', required: true, description: 'Short slug for the worker, e.g. "researcher-alpha" (unique; not already registered).' },
           role: { type: 'string', required: true, description: 'The worker role, e.g. "rank-and-file researcher".' },
@@ -2960,13 +3021,25 @@ export function applyInvoke(ctx: Context, config: Config) {
             agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
             setup
           })
+          // F1 (spec 004 §4.1/§4.2): RECORD THE CREATOR. The pre-F1 code copied
+          // only the head's INERT roomId; the department link now lives in
+          // `departmentId` (the config department of the creating head — the
+          // worker is, structurally, a worker of THAT department) and the
+          // creating head itself in `managerId` ("my workers" scope). roomId
+          // stays as the inert legacy field (schema stability, spec §4.1
+          // "unchanged"); a HEAD WITHOUT a config department gets no
+          // departmentId (legacy-path compatibility — its workers are
+          // department-less, host-retireable only).
+          const department = departmentForPost(headId)
           registerEntry({
             postId: args.postId,
             sessionId: String(SessionId(sessionId)),
             roomId: headEntry.roomId,
             agentPreset: WORKER_PRESET_ID,
             provider: 'worker',
-            role: args.role
+            role: args.role,
+            managerId: headId,
+            ...(department !== void 0 ? { departmentId: department.id } : {})
           })
           byHeadHandle.set(String(SessionId(sessionId)), handle)
           // Deliver the initial assignment (or a creation note) as a DURABLE
@@ -2989,7 +3062,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
       disposers.push(agentCtx.tools.register(defineTool({
         name: 'dept_post_retire',
-        description: 'Retire a DISPOSABLE WORKER of YOUR department: dispose its live AgentHandle and unregister it from the registry (persisted). Scope: you may only retire disposable workers (provider:"worker") — permanent department heads are NOT retired by this path. Unknown postIds are rejected loudly.',
+        description: 'Retire a DISPOSABLE WORKER of YOUR department: mark it retired (the registry entry STAYS in posts.json with retired:true — the live catalog stops addressing it), dispose its live AgentHandle and persist. Scope (F1): you may only retire the workers YOU created (managerId match) or the workers of your OWN config department — a worker of another head/department is rejected loudly, and permanent department heads are NOT retired by this path. Unknown postIds are rejected loudly.',
         parameters: {
           postId: { type: 'string', required: true, description: 'The worker post id to retire (e.g. "researcher-alpha").' }
         },
@@ -3121,11 +3194,20 @@ export function applyInvoke(ctx: Context, config: Config) {
    * a retired DISPOSABLE WORKER is never re-materialized (workers are runtime-only,
    * not config — see ensureAllHeads).
    *
-   * Scope: a HOST caller (`postIdForChild(callerId) === undefined`) may retire
-   * ANY post (today's semantics). A HEAD caller is restricted to DISPOSABLE
-   * WORKERS — a head can never retire a permanent head via this path (the
-   * per-room scope check is gone with the rooms; the catalog holds no room
-   * dimension anymore). */
+   * F1 (spec 004 §4.3): a WORKER retire is MARKED, NOT ERASED — the entry stays
+   * in posts.json (and in byPost) with `retired: true` (history queryable), and
+   * every live-catalog consumer (busDeliverCatalog addressing, dept_who, the
+   * wake-pack roster) filters it. A configured HEAD retire keeps today's
+   * semantics (entry deleted, re-materialized by config at boot — cosmetic).
+   *
+   * Scope (F1, spec 004 §4.2 — restored to "ONLY MY workers"): a HOST caller
+   * (`postIdForChild(callerId) === undefined`) may retire ANY post (today's
+   * semantics). A HEAD caller is restricted to DISPOSABLE WORKERS **of its own
+   * department**: the target must be a worker whose `managerId` is the caller's
+   * postId OR whose `departmentId` equals the caller's config department —
+   * replacing the pre-F1 generic "any worker" check. A legacy worker without
+   * the F1 fields matches neither (backfill policy: an estate-owned orphan is
+   * host-retireable only). A permanent head is never retired by a head. */
   const retirePost = async (postId: string, callerAgentId: string): Promise<{ postId: string; retired: true }> => {
     const entry = byPost.get(postId)
     if (entry === void 0) throw new Error(`[deepartments] dept_post_retire: "${postId}" is not a registered post`)
@@ -3138,14 +3220,34 @@ export function applyInvoke(ctx: Context, config: Config) {
       // A head may only retire DISPOSABLE WORKERS (the room-equality check was
       // board-specific and is removed with the rooms).
       if (entry.provider !== 'worker') throw new Error(`[deepartments] dept_post_retire: "${postId}" is not a disposable worker — a head may only retire workers, never a permanent head`)
+      // F1: ONLY MY WORKERS — the caller must be the entry's manager (the head
+      // that created it) or a head of the SAME config department (a manager
+      // replacement/department-cluster head stays in scope).
+      const callerDepartment = departmentForPost(callerId)
+      const sameManager = entry.managerId !== void 0 && entry.managerId === callerId
+      const sameDepartment = entry.departmentId !== void 0 && callerDepartment !== void 0 && entry.departmentId === callerDepartment.id
+      if (!sameManager && !sameDepartment) {
+        throw new Error(`[deepartments] dept_post_retire: "${postId}" is not a worker of YOUR department (manager ${entry.managerId ?? 'unset'}, department ${entry.departmentId ?? 'unset'}) — a head may only retire the workers it created or the workers of its own department`)
+      }
     }
-    byPost.delete(postId)
-    byChild.delete(entry.sessionId)
+    // Idempotent (spec patterns): a second retire of an already-marked worker
+    // succeeds as a no-op (the dispose is deduped via disposeHeadHandleOnce).
+    if (entry.retired === true) return { postId, retired: true }
+    if (entry.provider === 'worker') {
+      // MARK, NOT ERASE (F1): the registry entry stays; the live catalog filters.
+      entry.retired = true
+      persistPosts()
+    } else {
+      // Configured head / non-worker: today's semantics (unregister; the config
+      // re-materializes it at boot — cosmetic retire).
+      byPost.delete(postId)
+      byChild.delete(entry.sessionId)
+      persistPosts()
+    }
     // Also dispose any live handle (retiring a post should not leave it live) —
     // via the in-flight dedupe, so a concurrent dispose (e.g. the post's own
     // dept_sleep) is JOINED instead of raced into a double dispose.
     void disposeHeadHandleOnce(entry.sessionId)
-    persistPosts()
     return { postId, retired: true }
   }
 
@@ -3691,10 +3793,17 @@ export function applyInvoke(ctx: Context, config: Config) {
   }
 
   /** Catalog route of the bus (spec §4.2 route 2 + §4.3 delivery): posts.json
-   * (head/worker) then non-retired hosts.json; unknown → 'failed'. */
+   * (head/worker) then non-retired hosts.json; unknown → 'failed'. F1: a
+   * RETIRED worker entry STAYS in byPost (marked, not erased) but is filtered
+   * from the LIVE catalog — addressing a retired member fails per-recipient
+   * like an unknown one. */
   const busDeliverCatalog = async (record: MessageRecord, recipientId: string, senderSessionId: string | undefined): Promise<DeliveryStatus> => {
     const entry = byPost.get(recipientId)
     if (entry !== void 0) {
+      if (entry.retired === true) {
+        ctx.logger.warn(`[deepartments] bus delivery to RETIRED member "${recipientId}" skipped (record ${record.id})`)
+        return 'failed'
+      }
       return busDeliverToPost(entry, `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`, record, senderSessionId)
     }
     const hostEntry = hosts.get(recipientId)
@@ -3892,10 +4001,15 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   /** `dept_who` — the whole catalog in one call (spec §6): the B3 subtraction
    * of the board's room-who and whereami tools is LANDED (this tool is now
-   * the sole roster+identity tool). `you: true` marks the caller's own entry. */
+   * the sole roster+identity tool). `you: true` marks the caller's own entry.
+   * F1 (§4.1/§5.1): the row `kind` is DERIVED — `'worker'` for a disposable
+   * worker (provider:'worker'), `'head'` for a configured coordinator — and a
+   * RETIRED worker is filtered from the roster (it stays in posts.json as
+   * `retired: true`; the full extension of the row — departmentId/role/jobId —
+   * is the F3 phase). */
   const deptWhoTool = defineTool({
     name: 'dept_who',
-    description: 'List the whole Deepartments catalog — the Asistente host (kind "host", title "Asistente") and every registered department head/worker (kind "head", title from the department configuration, PostEntry.role fallback) — each with live/sleeping state and session id, and your OWN entry marked you:true. This is the identity + roster tool: learn who exists and who you are in one call. No room parameter — the roster is the organization.',
+    description: 'List the whole Deepartments catalog — the Asistente host (kind "host", title "Asistente") and every registered department head/worker with its DERIVED kind (a configured department head is kind "head", a disposable worker is kind "worker"; title from the department configuration, PostEntry.role fallback) — each with live/sleeping state and session id, and your OWN entry marked you:true. This is the identity + roster tool: learn who exists and who you are in one call. No room parameter — the roster is the organization.',
     parameters: {},
     output: {
       schema: {
@@ -3927,13 +4041,13 @@ export function applyInvoke(ctx: Context, config: Config) {
         return [{ type: 'text', text: `Deepartments catalog (${value.members.length} member(s)):\n${lines.join('\n')}` } as const]
       }
     },
-    async execute(_args, exec): Promise<{ members: Array<{ agentId: string; kind: 'host' | 'head'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean }> }> {
+    async execute(_args, exec): Promise<{ members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean }> }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_who requires a calling agent (exec.agent was undefined)')
       // B3 gap fix: caller host self-registers when no live host exists (board
       // tools are gone; the roster must show the host with you:true).
       const callerMemberId = busEnsureHostForCaller(agent as { id: string; session?: { header?: SessionHeaderWithOrigin } })
-      const members: Array<{ agentId: string; kind: 'host' | 'head'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean }> = []
+      const members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean }> = []
       for (const entry of hosts.values()) {
         if (entry.retired === true) continue
         members.push({
@@ -3947,10 +4061,15 @@ export function applyInvoke(ctx: Context, config: Config) {
         })
       }
       for (const entry of byPost.values()) {
+        // F1 (§4.3): retired workers are filtered from the LIVE roster (their
+        // entry stays durable with retired:true; history is not erased).
+        if (entry.retired === true) continue
         const coordinator = coordinatorForPost(entry.postId)
         members.push({
           agentId: entry.postId,
-          kind: 'head',
+          // F1: kind derived — a disposable worker is 'worker'; every other
+          // post (configured head) is 'head' (pre-F1 hardcode).
+          kind: entry.provider === 'worker' ? 'worker' : 'head',
           // Spec §6: coordinator.title for department heads; PostEntry.role
           // fallback for worker posts. Fallback chain follows head-presets.ts
           // (`headRoleLine`, the established convention): title → role → postId.

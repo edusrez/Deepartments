@@ -58,6 +58,35 @@ const TEST_ORG = {
   ]
 }
 
+/** F1: a SECOND config department — the retire-scope tests need another head
+ * whose department/manager differ from research-head's. Deliberately keeps the
+ * pre-F1 minimal shape (no workspacePath/jobDir/title) — the optional-field
+ * config surface stays exercised everywhere. */
+const TWO_DEPT_ORG = {
+  departments: [
+    {
+      id: 'research',
+      name: 'Research',
+      coordinator: {
+        postId: 'research-head',
+        role: 'Research department head',
+        provider: 'deepseek-official',
+        agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' }
+      }
+    },
+    {
+      id: 'programming',
+      name: 'Programming',
+      coordinator: {
+        postId: 'programming-head',
+        role: 'Programming department head',
+        provider: 'deepseek-official',
+        agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' }
+      }
+    }
+  ]
+}
+
 /**
  * Shared adoption map: durable child session id → its direct parent session id,
  * and whether the parent is live. Used by the stub persistence (to author the
@@ -494,7 +523,11 @@ async function bootPlugin(stateDir, opts = {}) {
     name: '../lib/index.js',
     config: {
       stateDir,
-      org: TEST_ORG
+      // F1: `opts.org` overrides TEST_ORG (the multi-department scope tests
+      // need a SECOND configured department/head); the default stays TEST_ORG
+      // whose departments carry NO workspacePath/jobDir — the optional-field
+      // compat surface every test already exercises.
+      org: opts.org ?? TEST_ORG
     }
   })
   await loader.await()
@@ -556,7 +589,7 @@ async function waitForHeadMaterialized(agents) {
   await waitFor(() => agents.store.has('head-research-head'), 5000, 'head materialized at boot')
 }
 
-async function seedPost(stateDir, { postId, sessionId = `head-${postId}`, roomId, agentPreset = 'deepartments-head', provider, role, sleepEpoch, previousChildId }) {
+async function seedPost(stateDir, { postId, sessionId = `head-${postId}`, roomId, agentPreset = 'deepartments-head', provider, role, departmentId, managerId, jobId, retired, sleepEpoch, previousChildId }) {
   const postsPath = path.join(stateDir, 'posts.json')
   let existing = {}
   try {
@@ -568,6 +601,12 @@ async function seedPost(stateDir, { postId, sessionId = `head-${postId}`, roomId
   // Batch 3a: a disposable worker carries its provider:'worker' marker + role.
   if (provider !== undefined) entry.provider = provider
   if (role !== undefined) entry.role = role
+  // F1: the creator link + department + job link + retired marker (post-PostEntry
+  // extension) — seeded so the loader exercises the NEW optional fields.
+  if (departmentId !== undefined) entry.departmentId = departmentId
+  if (managerId !== undefined) entry.managerId = managerId
+  if (jobId !== undefined) entry.jobId = jobId
+  if (retired === true) entry.retired = true
   // Batch G: a slept head carries the durable sleep-mark (and its previous
   // incarnation's sessionId) in posts.json — seeded so the relay can respawn it.
   if (sleepEpoch !== undefined) entry.sleepEpoch = sleepEpoch
@@ -2123,7 +2162,7 @@ test('worker wake_counter parity: a WRITE does not inflate the ordinal, but dept
   })
 })
 
-test('dept_post_retire (head): a head retires a worker of ITS OWN room (withdrawal note + disposed handle + unregistered); unknown postId rejects; a permanent head is not retired', async () => {
+test('dept_post_retire (head): a head retires a worker of ITS OWN department (F1: marked retired:true — the entry stays; handle disposed); unknown postId rejects; a permanent head is not retired', async () => {
   await withTempStateDir(async (stateDir) => {
     const { agents, head, headCtx, key, root, dispose } = await bootWithHead(stateDir)
     try {
@@ -2138,8 +2177,9 @@ test('dept_post_retire (head): a head retires a worker of ITS OWN room (withdraw
       assert.equal(result.retired, true)
       assert.equal('roomId' in result, false, 'B3: no room id in the retire result')
 
-      // Handle disposed + unregistered + persisted removal.
-      await waitFor(async () => (await readPosts(stateDir))['researcher-alpha'] === undefined, 5000, 'worker removed from posts.json')
+      // Handle disposed + MARKED (F1: the entry STAYS registered with
+      // retired:true — retire is a mark, not an erase) + persisted.
+      await waitFor(async () => (await readPosts(stateDir))['researcher-alpha'].retired === true, 5000, 'worker marked retired in posts.json (entry kept)')
       assert.equal(agents.store.has('worker-researcher-alpha'), false, 'worker AgentHandle disposed on retire')
       // B3: NO withdrawal note — the store is untouched by a retire.
       assert.equal((await loadMessageRecords(resolveMessagesPath(stateDir))).length, beforeStore, 'no withdrawal note persisted')
@@ -2174,37 +2214,235 @@ test('dept_post_retire scope (B3): a head CANNOT retire a permanent head via the
   })
 })
 
-test('retired worker is NOT re-materialized by ensureAllHeads (workers are runtime-only, never booted from config)', async () => {
+test('retired worker is NOT re-materialized by ensureAllHeads (workers are runtime-only, never booted from config) — the F1 retire mark survives re-boot', async () => {
   await withTempStateDir(async (stateDir) => {
-    // Seed a durable WORKER entry (provider:'worker') directly into posts.json
-    // BEFORE boot — exactly like a durable worker left in a previous boot. On
-    // boot, ensureAllHeads iterates ONLY configured coordinators, so the worker
-    // is NOT materialized automatically.
-    await seedPost(stateDir, { postId: 'researcher-alpha', sessionId: 'worker-researcher-alpha', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker' })
+    // Seed a durable WORKER entry (provider:'worker' + the F1 creator link)
+    // directly into posts.json BEFORE boot — exactly like a durable worker left
+    // in a previous boot. On boot, ensureAllHeads iterates ONLY configured
+    // coordinators, so the worker is NOT materialized automatically.
+    await seedPost(stateDir, { postId: 'researcher-alpha', sessionId: 'worker-researcher-alpha', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', managerId: 'research-head', departmentId: 'research' })
     const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
     try {
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'configured head still materialized at boot')
       // The seeded worker is NOT created by ensureAllHeads.
       assert.equal(agents.store.has('worker-researcher-alpha'), false, 'ensureAllHeads never materializes a disposable worker (config-only)')
-      // Retire it; it must not re-materialize.
+      // Retire it — the research head IS its manager, so the F1 scope passes.
       const retireTool = headCtx.tools.get('dept_post_retire', key)
       const signal = new AbortController().signal
-      await retireTool.execute({ postId: 'researcher-alpha' }, { agent: head, signal })
-      await waitFor(async () => (await readPosts(stateDir))['researcher-alpha'] === undefined, 5000, 'worker retired+removed')
+      const retireResult = await retireTool.execute({ postId: 'researcher-alpha' }, { agent: head, signal })
+      assert.equal(retireResult.retired, true)
+      // F1: the entry is MARKED, not erased — and still not materialized.
+      await waitFor(async () => (await readPosts(stateDir))['researcher-alpha']?.retired === true, 5000, 'worker marked retired (entry kept in posts.json)')
       assert.equal(agents.store.has('worker-researcher-alpha'), false, 'worker disposed on retire')
-      // dispose + re-boot the SAME stateDir: ensureAllHeads does NOT revive it.
+      // dispose + re-boot the SAME stateDir: ensureAllHeads does NOT revive it,
+      // and the retire MARK is durable across restarts.
       await dispose()
       const env2 = await bootPlugin(stateDir)
       try {
         await waitFor(() => env2.agents.store.has('head-research-head'), 5000, 'configured head back at re-boot')
         assert.equal(env2.agents.store.has('worker-researcher-alpha'), false, 'retired worker NOT re-materialized after re-boot')
         const posts = await readPosts(stateDir)
-        assert.equal(posts['researcher-alpha'], undefined, 'retired worker stays out of posts.json after re-boot')
+        assert.equal(posts['researcher-alpha'].retired, true, 'retired worker stays in posts.json with retired:true (marked, not erased)')
+        assert.equal(posts['researcher-alpha'].managerId, 'research-head', 'the creator link survives the retire + re-boot')
       } finally {
         await env2.dispose()
       }
     } finally {
       void 0
+    }
+  })
+})
+
+// --- F1 (spec 004 §4.1-§4.3, §8): department catalog core --------------------
+// PostEntry + persist extension (departmentId/managerId/jobId/retired + the
+// derived 'worker' kind), creator recording at dept_post_create, the retire
+// scope restored to "ONLY MY workers", retire = MARKED not erased, and the
+// optional-field config + legacy-entry compatibility surfaces.
+
+test('F1 creator recording: dept_post_create stores managerId = the creating head postId and departmentId = its config department (durable in posts.json)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const createTool = headCtx.tools.get('dept_post_create', key)
+      await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['researcher-alpha'].managerId, 'research-head', 'managerId = the postId of the creating head ("my workers")')
+      assert.equal(posts['researcher-alpha'].departmentId, 'research', 'departmentId = the config department of the creating head')
+      // The inert roomId copy survives (schema stability, spec §4.1
+      // "unchanged") — the department link moved from the roomId copy to the
+      // explicit departmentId/managerId.
+      assert.equal(posts['researcher-alpha'].roomId, 'board', 'roomId stays the inert legacy field')
+      assert.equal(posts['researcher-alpha'].provider, 'worker', 'disposable marker unchanged')
+
+      // The worker is still a live catalog member with the durable creator link.
+      const worker = agents.store.get('worker-researcher-alpha')
+      await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'worker woken by its first bus message')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F1 retire scope: a head retires ONLY its own workers — a worker of ANOTHER head/department is rejected loudly; own-department works', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootPlugin(stateDir, { org: TWO_DEPT_ORG })
+    try {
+      await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'research head materialized at boot')
+      await waitFor(() => env.agents.store.has('head-programming-head'), 5000, 'programming head materialized at boot')
+      const researchHead = env.agents.store.get('head-research-head')
+      const programmingHead = env.agents.store.get('head-programming-head')
+      const { ctx: researchCtx, key: researchKey } = childContextFor(env.agents, 'head-research-head')
+      const { ctx: programmingCtx, key: programmingKey } = childContextFor(env.agents, 'head-programming-head')
+      const signal = new AbortController().signal
+
+      // research-head creates a worker of ITS department (manager + dept recorded).
+      await researchCtx.tools.get('dept_post_create', researchKey).execute(
+        { postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: researchHead, signal }
+      )
+      // programming-head CANNOT retire it (different manager AND department).
+      await assert.rejects(
+        () => programmingCtx.tools.get('dept_post_retire', programmingKey).execute({ postId: 'researcher-alpha' }, { agent: programmingHead, signal }),
+        /not a worker of YOUR department/, 'a head cannot retire a worker of ANOTHER department'
+      )
+      // The worker is untouched (still live, not marked).
+      assert.equal((await readPosts(stateDir))['researcher-alpha']?.retired, undefined, 'the rejected retire left the entry live')
+      // research-head CAN retire it (managerId match).
+      const okRetire = await researchCtx.tools.get('dept_post_retire', researchKey).execute({ postId: 'researcher-alpha' }, { agent: researchHead, signal })
+      assert.equal(okRetire.retired, true)
+      await waitFor(async () => (await readPosts(stateDir))['researcher-alpha']?.retired === true, 5000, 'research head retired its own worker (marked)')
+
+      // Mirror: programming-head creates ITS worker; research-head cannot retire it.
+      await programmingCtx.tools.get('dept_post_create', programmingKey).execute(
+        { postId: 'coder-alpha', role: 'programmer' }, { agent: programmingHead, signal }
+      )
+      const coderPosts = await readPosts(stateDir)
+      assert.equal(coderPosts['coder-alpha'].managerId, 'programming-head', 'the second worker records ITS creator')
+      assert.equal(coderPosts['coder-alpha'].departmentId, 'programming', 'the second worker records ITS department')
+      await assert.rejects(
+        () => researchCtx.tools.get('dept_post_retire', researchKey).execute({ postId: 'coder-alpha' }, { agent: researchHead, signal }),
+        /not a worker of YOUR department/, 'the mirror: research-head cannot retire a worker of the programming department'
+      )
+      // programming-head retires its own (marked, entry kept).
+      await programmingCtx.tools.get('dept_post_retire', programmingKey).execute({ postId: 'coder-alpha' }, { agent: programmingHead, signal })
+      await waitFor(async () => (await readPosts(stateDir))['coder-alpha']?.retired === true, 5000, 'programming head retired its own worker (marked)')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('F1 host retire scope: the HOST retires any worker (marked, entry kept) — and a retired worker disappears from the LIVE catalog and from dept_who', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const createTool = headCtx.tools.get('dept_post_create', key)
+      await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const host = agents.put(fakeParentAgent())
+
+      // HOST may retire ANY worker (the scope restriction applies to heads only).
+      const retireTool = root.tools.get('dept_post_retire')
+      const result = await retireTool.execute({ postId: 'researcher-alpha' }, { agent: host, signal })
+      assert.equal(result.retired, true)
+      await waitFor(async () => (await readPosts(stateDir))['researcher-alpha']?.retired === true, 5000, 'worker marked retired (entry kept)')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['researcher-alpha'].retired, true, 'retire is a MARK, not an erase (posts.json keeps the entry)')
+      assert.equal(posts['researcher-alpha'].managerId, 'research-head', 'the creator link survives the retire')
+      assert.equal(posts['researcher-alpha'].departmentId, 'research', 'the department link survives the retire')
+
+      // NOT in the LIVE catalog anymore: a bus send to it fails per-recipient.
+      const send = await root.tools.get('send_message').execute(
+        { to: ['researcher-alpha'], text: 'are you there?' }, { agent: host, signal }
+      )
+      assert.equal(send.delivered['researcher-alpha'], 'failed', 'a retired worker is not addressed by the live catalog')
+
+      // NOT in dept_who either (the live roster); the head stays with kind head.
+      const who = await root.tools.get('dept_who').execute({}, { agent: host, signal })
+      assert.ok(!who.members.some((m) => m.agentId === 'researcher-alpha'), 'the retired worker is filtered from dept_who')
+      const headRow = who.members.find((m) => m.agentId === 'research-head')
+      assert.ok(headRow, 'the head is still listed')
+      assert.equal(headRow.kind, 'head', 'the configured head row keeps kind "head"')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F1 kind derivation in dept_who: a LIVE worker row is kind "worker" (not the pre-F1 hardcoded "head")', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      await headCtx.tools.get('dept_post_create', key).execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const who = await root.tools.get('dept_who').execute({}, { agent: agents.put(fakeParentAgent()), signal })
+      const workerRow = who.members.find((m) => m.agentId === 'researcher-alpha')
+      assert.ok(workerRow, 'the worker is listed')
+      assert.equal(workerRow.kind, 'worker', 'a disposable worker derives kind "worker"')
+      assert.equal(workerRow.title, 'rank-and-file researcher', 'worker title = the durable role fallback')
+      const headRow = who.members.find((m) => m.agentId === 'research-head')
+      assert.equal(headRow.kind, 'head', 'a configured head stays kind "head"')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F1 config compat: an org.departments[] WITHOUT workspacePath/jobDir (pre-F1 shape, coordinator without title/sessionTitle) parses through the real Loader and boots', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The pre-F1 config shape — the NEW department fields are OPTIONAL and must
+    // not break the composition of the existing config.
+    const env = await bootPlugin(stateDir, { org: { departments: [{ id: 'research', name: 'Research', coordinator: { postId: 'research-head', role: 'Research department head' } }] } })
+    try {
+      await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'head materialized from the legacy-shaped config')
+      const who = await env.root.tools.get('dept_who').execute({}, { agent: env.agents.put(fakeParentAgent()), signal: new AbortController().signal })
+      const headRow = who.members.find((m) => m.agentId === 'research-head')
+      assert.ok(headRow, 'the head is listed')
+      assert.equal(headRow.kind, 'head')
+      assert.equal(headRow.title, 'Research department head', 'title falls back to the coordinator role (no title/sessionTitle set)')
+      // dept_post_create still works under the legacy-shaped config and records
+      // the creator (departmentId from the config dep, managerId = the head).
+      const { ctx: headCtx, key } = childContextFor(env.agents, 'head-research-head')
+      await headCtx.tools.get('dept_post_create', key).execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: env.agents.store.get('head-research-head'), signal: new AbortController().signal })
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['researcher-alpha'].managerId, 'research-head')
+      assert.equal(posts['researcher-alpha'].departmentId, 'research')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('F1 legacy PostEntry compat: a posts.json worker WITHOUT the new F1 fields loads without error, derives kind "worker", stays a LIVE catalog member, and is host-retireable only (orphan backfill policy)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Pre-F1 durable worker shape: provider / role only — NO departmentId,
+    // NO managerId, NO jobId, NO retired.
+    await seedPost(stateDir, { postId: 'researcher-alpha', sessionId: 'worker-researcher-alpha', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'rank-and-file researcher' })
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const host = agents.put(fakeParentAgent())
+      // Loaded without error and listed with the DERIVED worker kind.
+      const who = await root.tools.get('dept_who').execute({}, { agent: host, signal })
+      const workerRow = who.members.find((m) => m.agentId === 'researcher-alpha')
+      assert.ok(workerRow, 'the legacy worker is listed (loaded without error)')
+      assert.equal(workerRow.kind, 'worker', 'the legacy worker derives kind "worker" (no hardcoded "head")')
+      assert.equal(workerRow.title, 'rank-and-file researcher', 'worker title falls back to the durable role')
+      // Still a LIVE catalog member (legacy is actively resumed + delivered).
+      const send = await root.tools.get('send_message').execute({ to: ['researcher-alpha'], text: 'wake' }, { agent: host, signal })
+      assert.equal(send.delivered['researcher-alpha'], 'resumed', 'a legacy worker is still addressed by the live catalog')
+      // Backfill policy (spec §4.1): a legacy worker WITHOUT managerId/
+      // departmentId matches NO head scope — only the HOST may retire it.
+      await assert.rejects(
+        () => headCtx.tools.get('dept_post_retire', key).execute({ postId: 'researcher-alpha' }, { agent: head, signal }),
+        /not a worker of YOUR department/, 'a head cannot retire a legacy manager-less worker'
+      )
+      const hostRetire = await root.tools.get('dept_post_retire').execute({ postId: 'researcher-alpha' }, { agent: host, signal })
+      assert.equal(hostRetire.retired, true, 'the HOST retires the legacy worker')
+      await waitFor(async () => (await readPosts(stateDir))['researcher-alpha']?.retired === true, 5000, 'legacy worker marked retired')
+    } finally {
+      await dispose()
     }
   })
 })
