@@ -1869,14 +1869,14 @@ export function applyInvoke(ctx: Context, config: Config) {
    * but framed as a temporary rank-and-file researcher). Materialized into the
    * harness-home user preset root alongside the head preset. */
   const WORKER_PRESET_ID = 'deepartments-worker'
-  /** F7 (owner decision 2026-08-23 — provider migration to opencode-go): the
+  /** F7 (owner decision 2026-08-23 — provider migration to opencode-zen): the
    * runtime-materialized department workers run the SAME provider/model route
-   * as the coordinator (cordis.patch.yml — opencode-go /
+   * as the coordinator (cordis.patch.yml — opencode-zen /
    * deepseek-v4-flash-vision-exp, reasoningEffort max). ONE source shared by
    * the three spawn paths (dept_post_create, dept_job_run, dept_worker_spawn)
    * so the worker route cannot drift from the config again. */
   const WORKER_AGENT_OPTIONS: AgentOptionsLike = {
-    provider: 'opencode-go',
+    provider: 'opencode-zen',
     model: 'deepseek-v4-flash-vision-exp',
     reasoningEffort: 'max'
   }

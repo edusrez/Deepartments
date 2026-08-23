@@ -11,8 +11,8 @@
         # research department). Rooms were removed; agents message each other
         # directly via send_message. Departments are defined HERE, never
         # created by agents.
-        # agentOptions values: models served via the opencode-go provider
-        # (OpenCode Go, https://opencode.ai/zen/go/v1, apiKeyEnv
+        # agentOptions values: models served via the opencode-zen provider
+        # (OpenCode Go (Zen), https://opencode.ai/zen/go/v1, apiKeyEnv
         # OPENCODE_GO_API_KEY — configured in settings.yaml of the profile);
         # deepseek-v4-flash-vision-exp with reasoning max (same as the Asistente).
         org:
@@ -24,9 +24,9 @@
                 title: Head of Research
                 role: Research department head
                 sessionTitle: Research Head
-                provider: opencode-go
+                provider: opencode-zen
                 agentOptions:
-                  provider: opencode-go
+                  provider: opencode-zen
                   model: deepseek-v4-flash-vision-exp
                   reasoningEffort: max
         # Custom ctx.web fetch provider (webfetch.ts): detects blocking
