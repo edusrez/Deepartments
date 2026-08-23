@@ -60,6 +60,13 @@
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 import { mkdir, readFile, writeFile, readdir, copyFile, stat, rename, unlink, appendFile } from 'node:fs/promises'
+// F10 (spec 004 §9.1): the department-architecture prompt section reads the
+// department's ARCHITECTURE.md SYNCHRONOUSLY — the post setup path is
+// synchronous (a root agent's systemPrompt sections are composed at
+// materialization, before the agent can be awaited; there is no await seam).
+// readFileSync keeps that contract; ENOENT = the department has no
+// architecture (omit the section, never an error).
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -3107,7 +3114,18 @@ export function applyInvoke(ctx: Context, config: Config) {
         // sessionPersistence backend), so the durable session survives and the
         // next wake resumes it. The registry keeps the head wakeable-while-
         // asleep via sleepEpoch.
-        const sessionId = entry.sessionId
+        // F8 ghost-row fix (owner 2026-08-23): archive the session the head is
+        // ACTUALLY running in (agent.id), NOT the registry's entry.sessionId.
+        // A stale reload (a mid-cycle post/process restart re-reading an older
+        // posts.json) can leave entry.sessionId pointing at the PREVIOUS
+        // (already-archived) incarnation while the head really runs in a FRESH
+        // one — archiving the stale id hides nothing and leaves the CURRENT row
+        // as a sidebar ghost. Converge the registry to the real session id
+        // BEFORE the durable persist so the CURRENT session is archived and the
+        // next wake traces the correct previous incarnation. Never-resume-
+        // archived + the retire flow are untouched.
+        const sessionId = String(agent.id)
+        entry.sessionId = sessionId
         entry.sleepEpoch = Date.now()
         // Task T1 — persist the session-event `seq` at this sleep boundary so
         // the NEXT cycle's session-log capture can slice EXACTLY by seq
@@ -3189,12 +3207,16 @@ export function applyInvoke(ctx: Context, config: Config) {
           const sessionId = workerSessionId(args.postId)
           if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_post_create: a live agent already exists for session "${sessionId}"`)
           const firstMessage = args.firstMessage ?? args.prompt
-          const setup = workerSetup(args.postId, headEntry.roomId, args.role)
+          // F10 (spec 004 §9.1): the legacy dept_post_create emits a department
+          // worker with NO role template (no persona/tools) — it still gets the
+          // department-aware setup (architecture section), and NO role tools
+          // (pre-F10 behavior: board-only, `allow: []`).
+          const department = departmentForPost(headId)
+          const setup = workerSetup(args.postId, headEntry.roomId, args.role, { department })
           // F5 (spec 004 §6.2 L1): the worker of a department WITH a configured
           // workspacePath is created under that path (its OWN sidebar folder,
           // ensured first); otherwise the shared workspace root (the
           // resolveDepartmentWorkspaceCwd '' fallback — pre-F1 behavior).
-          const department = departmentForPost(headId)
           const deptCwd = await resolveDepartmentWorkspaceCwd(department)
           const handle = await agents.create({
             sessionId: String(SessionId(sessionId)),
@@ -3555,7 +3577,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           const sessionId = SessionId(workerSessionId(postId))
           if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_job_run: a live agent already exists for session "${sessionId}"`)
           const title = definition.meta.title
-          const setup = workerSetup(postId, headEntry.roomId, definition.meta.role, { persona: template.persona, taskText: definition.body })
+          const setup = workerSetup(postId, headEntry.roomId, definition.meta.role, { persona: template.persona, taskText: definition.body, tools: template.tools, department })
           // F5 (spec 004 §6.2 L1): job workers land in the department workspace.
           const deptCwd = await resolveDepartmentWorkspaceCwd(department)
           const handle = await agents.create({
@@ -3647,7 +3669,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           const sessionId = SessionId(workerSessionId(postId))
           if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_worker_spawn: a live agent already exists for session "${sessionId}"`)
           const title = String(args.title ?? '').trim() !== '' ? String(args.title) : defaultWorkerTitle(template.title, args.task, args.jobId, postId)
-          const setup = workerSetup(postId, headEntry.roomId, role, { persona: template.persona, taskText: args.task })
+          const setup = workerSetup(postId, headEntry.roomId, role, { persona: template.persona, taskText: args.task, tools: template.tools, department })
           // F5 (spec 004 §6.2 L1): the worker lands in its department workspace.
           const deptCwd = await resolveDepartmentWorkspaceCwd(department)
           const handle = await agents.create({
@@ -3751,7 +3773,47 @@ export function applyInvoke(ctx: Context, config: Config) {
    * the framing between a PERMANENT department head (manager) and a TEMPORARY
    * DISPOSABLE worker. Both are BOOT-QUIET (never act unaddressed). B3
    * cutover: rooms wording removed — the post lives in the agent catalog. */
-  const installRoleSection = (agentCtx: Context, role: string, postId: string, isWorker: boolean, extra?: { persona?: string; taskText?: string }): void => {
+  /** Length cap for a department-architecture prompt section (spec 004 §9.1):
+   * over this the section is the START plus a reference to the full file. */
+  const ARCHITECTURE_SECTION_MAX = 3500
+
+  /** Read + template the department's ARCHITECTURE.md into a prompt section
+   * body (undefined = omit the section cleanly). A department without an
+   * ARCHITECTURE.md injects nothing and NEVER errors. Minimal templating
+   * replaces {{deptName}}, {{headPostId}}, {{workspacePath}},
+   * {{reportDir}} (= <workspacePath>/reports) with the department's real
+   * values; a missing workspacePath leaves those placeholders EMPTY. Content
+   * >~3500 chars is truncated to its START plus a pointer to the full file.
+   * SYNC (readFileSync): installRoleSection/postSetup must stay synchronous
+   * (a root agent's systemPrompt sections are composed at materialization,
+   * before the agent can be awaited — there is no await seam). */
+  const buildArchitectureSection = (department: DepartmentConfig): string | undefined => {
+    const archPath = path.join(repoRoot, 'presets', 'departments', department.id, 'ARCHITECTURE.md')
+    let raw: string
+    try {
+      raw = readFileSync(archPath, 'utf8')
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return void 0
+      ctx.logger.warn(`[deepartments] architecture section for "${department.id}" could not be read (${error instanceof Error ? error.message : String(error)}) — section omitted`)
+      return void 0
+    }
+    const workspacePath = department.workspacePath ?? ''
+    const reportDir = workspacePath !== '' ? path.join(workspacePath, 'reports') : ''
+    const headPostId = department.coordinator?.postId ?? ''
+    const rendered = raw
+      .replace(/\{\{deptName\}\}/g, department.name)
+      .replace(/\{\{headPostId\}\}/g, headPostId)
+      .replace(/\{\{workspacePath\}\}/g, workspacePath)
+      .replace(/\{\{reportDir\}\}/g, reportDir)
+      .trim()
+    if (rendered === '') return void 0
+    if (rendered.length > ARCHITECTURE_SECTION_MAX) {
+      return `## Department architecture\n\n${rendered.slice(0, ARCHITECTURE_SECTION_MAX)}\n\n… (truncated — full text at ${archPath})`
+    }
+    return `## Department architecture\n\n${rendered}`
+  }
+
+  const installRoleSection = (agentCtx: Context, role: string, postId: string, isWorker: boolean, extra?: { persona?: string; taskText?: string }, department?: DepartmentConfig): void => {
     const sp = agentCtx.get('systemPrompt')
     if (sp === void 0 || typeof (sp as { section?: unknown }).section !== 'function') return
     sp.section({
@@ -3777,24 +3839,90 @@ export function applyInvoke(ctx: Context, config: Config) {
         })
       }
     }
+    // F10 (spec 004 §9.1): the DEPARTMENT ARCHITECTURE — a 3rd systemPrompt
+    // section for EVERY post of the department (worker AND head), when the
+    // department has an ARCHITECTURE.md. Omitted cleanly otherwise (a
+    // department-less/legacy post or a department with no architecture file).
+    if (department !== void 0) {
+      const architecture = buildArchitectureSection(department)
+      if (architecture !== void 0) {
+        sp.section({
+          name: `deepartments:${isWorker ? 'worker' : 'head'}:architecture:${postId}`,
+          order: 3,
+          text: architecture
+        })
+      }
+    }
   }
+
+  /** The GLOBAL tools every department HEAD inherits from the host surface
+   * (spec 004 §7.1 / F10): read, write, glob, grep + the research web tools.
+   * The head's own-layer board + department-lifecycle tools
+   * (send_message/agent_messages/dept_who/dept_memo_write/dept_sleep +
+   * dept_worker_spawn/retire, dept_post_create/retire) are SCOPED-registered
+   * and ALWAYS visible (exempt from the restrict mask — naming a scope-local
+   * name in restrict() would THROW), so only these GLOBAL capability tools need
+   * naming in the allow list. */
+  const HEAD_BASE_TOOLS: readonly string[] = ['read', 'write', 'glob', 'grep', 'web_search', 'web_fetch']
+  /** Security posture (spec 004 §7.1; OWNER DECISION 2026-08-23): `edit` is NOT
+   * a hard deny — it flows through the role's allow-list like any other tool,
+   * so only a role whose template DECLARES it inherits it (the organizer
+   * template declares `edit` → it inherits it; researcher/reviewer templates do
+   * not declare it → they never see it). What stays HARD-DENIED for every
+   * department post is the Asistente's subagent coordination machinery
+   * (`subagent`/`subagent_fork`/`workflow`/`ralph`) and the reserved `run_code`
+   * transport — a post is a ROOT worker/coordinator and never spawns or
+   * coordinates anyone else. A template that DECLARES a denied name is DROPPED
+   * with a warning — never a hard failure (the deploy must not fail on a bad
+   * frontmatter tool name). */
+  const DENIED_POST_TOOLS: ReadonlySet<string> = new Set(['subagent', 'subagent_fork', 'workflow', 'ralph', 'run_code'])
 
   /** Build the `setup(agentCtx)` for one post (head OR worker): mount the post's
    * dedicated preset and register its board toolset + role, scoped to the post
    * agent. Runs pre-publication on the fresh agent's scoped context
    * (rc.8 CreateAgentOptions.setup, index.d.ts:117). The `manager` flag gates
-   * the department-lifecycle tools (a head creates/retires; a worker cannot). */
-  const postSetup = (postId: string, roomId: string, role: string, opts: { preset: string; manager: boolean; persona?: string; taskText?: string }): ((agentCtx: Context) => void | { commit(): void }) => {
+   * the department-lifecycle tools (a head creates/retires; a worker cannot).
+   * F10 adds `tools` (a worker's role-template frontmatter `tools`) and
+   * `department` (its config department for the architecture section). */
+  const postSetup = (postId: string, roomId: string, role: string, opts: { preset: string; manager: boolean; persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig }): ((agentCtx: Context) => void | { commit(): void }) => {
     const presetId = opts.preset
     const kind = opts.manager ? 'head' : 'worker'
+    // F10 (spec 004 §7.1): the role template's frontmatter `tools` (a worker)
+    // OR the head's fixed base set (a head) become the REAL inherited-tool
+    // allowance. Denied / unknown / scope-local names are DROPPED (with a
+    // warning) so restrict() never throws on a template that names a tool the
+    // agent scope cannot see. The own-layer board tools are exempt from the
+    // mask (scoped registrations always stay visible) so they are NOT named.
+    const declared: readonly string[] = opts.manager ? HEAD_BASE_TOOLS : (opts.tools ?? [])
+    const allowList: string[] = []
+    for (const name of declared) {
+      if (DENIED_POST_TOOLS.has(name)) {
+        ctx.logger.warn(`[deepartments] ${kind} "${postId}" role tool "${name}" is security-denied (no subagent/wrapper machinery or run_code for department posts) — dropped`)
+        continue
+      }
+      if (ctx.tools.get(name) === void 0) {
+        ctx.logger.warn(`[deepartments] ${kind} "${postId}" role tool "${name}" is not a registered global tool — dropped`)
+        continue
+      }
+      allowList.push(name)
+    }
     return (agentCtx) => {
-      // (0) LEAN tool restriction: a root agent has no startContinuable
-      // toolFilter, so we hide the GLOBAL host-plane tools from the post with an
-      // `allow: []` mask on the inherited surface (rc.8 dsh-tools restrict —
-      // index.d.ts:611 "A restriction filters what a scope inherits... a
-      // restricted-away global reads as absent"; it never touches the scope's
-      // OWN layer). The post therefore sees ONLY its own-layer board tools.
-      const restrictOwn = agentCtx.tools.restrict({ allow: [] })
+      // (0) Tool restriction: a root agent has no startContinuable toolFilter,
+      // so we mask the GLOBAL host-plane tools to `allowList` (rc.8 dsh-tools
+      // restrict — index.d.ts:611 "A restriction filters what a scope
+      // inherits... a restricted-away global reads as absent"; it NEVER touches
+      // the scope's OWN layer). The post therefore sees its own-layer board
+      // tools + only the inherited GLOBAL capability tools in the allow list. A
+      // template that still names a non-restrictable name degrades SAFELY to
+      // `allow: []` (the pre-F10 behavior — board tools only; never a failed
+      // spawn).
+      let restrictOwn: () => void
+      try {
+        restrictOwn = agentCtx.tools.restrict({ allow: allowList })
+      } catch (error: unknown) {
+        ctx.logger.warn(`[deepartments] ${kind} "${postId}" tool restrict(${JSON.stringify(allowList)}) fell back to allow:[] — ${error instanceof Error ? error.message : String(error)}`)
+        restrictOwn = agentCtx.tools.restrict({ allow: [] })
+      }
       // (a) Mount the dedicated preset if the service is present.
       if (agentPresets !== void 0) {
         void agentPresets.mount(agentCtx, presetId).catch((error: unknown) => {
@@ -3806,23 +3934,29 @@ export function applyInvoke(ctx: Context, config: Config) {
       const tools = installHeadBoardTools(agentCtx, opts.manager)
       // (c) Persona = the role (a head's role or a worker's role), NOT a mission.
       // F3: the ROLE PERSONA delta (+ the task) rides the same section seam.
-      installRoleSection(agentCtx, role, postId, opts.manager === false, { persona: opts.persona, taskText: opts.taskText })
+      // F10: `department` feeds the architecture section (spec 004 §9.1).
+      installRoleSection(agentCtx, role, postId, opts.manager === false, { persona: opts.persona, taskText: opts.taskText }, opts.department)
       // Ensure the agent-scoped registrations unwind with the agent.
       agentCtx.effect(() => () => { tools.dispose(); restrictOwn() }, `deepartments: ${kind} board tools (${postId})`)
     }
   }
 
   /** The setup for a PERMANENT department head (manager — can create/retire
-   * workers). Mounts the 'deepartments-head' preset. */
-  const headSetup = (postId: string, roomId: string, role: string, presetId: string = PRESET_ID): ((agentCtx: Context) => void | { commit(): void }) =>
-    postSetup(postId, roomId, role, { preset: presetId, manager: true })
+   * workers). Mounts the 'deepartments-head' preset. F10: `department` feeds the
+   * architecture section (spec 004 §9.1) for the head post. */
+  const headSetup = (postId: string, roomId: string, role: string, presetId: string = PRESET_ID, department?: DepartmentConfig): ((agentCtx: Context) => void | { commit(): void }) =>
+    postSetup(postId, roomId, role, { preset: presetId, manager: true, department })
 
   /** The setup for a DISPOSABLE department WORKER (no create/retire). Mounts
    * the 'deepartments-worker' preset. F3: `extra` carries the role template
    * persona + the spawned task (spec §7.4 — persona delta + assignment).
-   * Absent (legacy dept_post_create) → the framing role section only. */
-  const workerSetup = (postId: string, roomId: string, role: string, extra?: { persona?: string; taskText?: string }): ((agentCtx: Context) => void | { commit(): void }) =>
-    postSetup(postId, roomId, role, { preset: WORKER_PRESET_ID, manager: false, persona: extra?.persona, taskText: extra?.taskText })
+   * F10: `extra.tools` carries the role template's frontmatter `tools` (the
+   * real inherited allow-list); `extra.department` feeds the architecture
+   * section.
+   * Absent (legacy dept_post_create) → the framing role section only, NO role
+   * tools (pre-F10 behavior: board-only, `allow: []`). */
+  const workerSetup = (postId: string, roomId: string, role: string, extra?: { persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig }): ((agentCtx: Context) => void | { commit(): void }) =>
+    postSetup(postId, roomId, role, { preset: WORKER_PRESET_ID, manager: false, persona: extra?.persona, taskText: extra?.taskText, tools: extra?.tools, department: extra?.department })
 
   /** Dispose one head's live AgentHandle (its only teardown capability; the
    * bare `agents.get(id)` returns no dispose — rc.8 index.d.ts:349 vs 155-158).
@@ -4267,7 +4401,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
     } else {
       const coordinatorRole = coordinator.role || postId
-      const setup = headSetup(postId, roomId, coordinatorRole, presetId)
+      const setup = headSetup(postId, roomId, coordinatorRole, presetId, department)
       const agentOptions = coordinator.agentOptions
       const durableSession = durableEntry !== void 0
       if (durableSession) {
@@ -4459,7 +4593,9 @@ export function applyInvoke(ctx: Context, config: Config) {
         registerEntry({ ...entry, sessionId: freshSessionId, previousChildId: previousSession, sleepEpoch: undefined })
         const role = coordinator?.role ?? entry.role ?? 'department worker'
         const headPreset = entry.agentPreset ?? PRESET_ID
-        const setup = headSetup(entry.postId, entry.roomId, role, headPreset)
+        // F10 (spec 004 §9.1): the materialized head carries its department's
+        // architecture section (if any).
+        const setup = headSetup(entry.postId, entry.roomId, role, headPreset, departmentForEntry(entry))
         const agentOptions = coordinator?.agentOptions
         // F5: the fresh incarnation lands in its department workspace (config
         // workspacePath); a department-less/legacy head falls back to the root.
@@ -4500,9 +4636,13 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (live === void 0) {
       const role = coordinator?.role ?? entry.role ?? 'department worker'
       const headPreset = entry.agentPreset ?? PRESET_ID
+      // F10 (spec 004 §9.1): the re-materialized post carries its department's
+      // architecture section (a worker by its durable departmentId, a head by
+      // config; a department-less/legacy entry → omitted cleanly).
+      const dept = departmentForEntry(entry)
       const setup = isWorker
-        ? workerSetup(entry.postId, entry.roomId, role)
-        : headSetup(entry.postId, entry.roomId, role, headPreset)
+        ? workerSetup(entry.postId, entry.roomId, role, { department: dept })
+        : headSetup(entry.postId, entry.roomId, role, headPreset, dept)
       const agentOptions = coordinator?.agentOptions
       const preset: string = isWorker ? WORKER_PRESET_ID : headPreset
       let handle: AgentHandleLike | undefined

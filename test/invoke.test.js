@@ -115,6 +115,30 @@ function stubProvider(name) {
   return provider
 }
 
+/** F10 (spec 004 §7.1) — a minimal GLOBAL stub for a harness capability tool
+ * (web_search/read/write/glob/grep/web_fetch/edit). The dsh-tools registry has
+ * no native tools in this hermetic composition, so a test that must prove a
+ * worker/head INHERITS a global tool registers these on the global plane
+ * BEFORE the plugin boots (the head/worker restrict allow-list reads
+ * `ctx.tools.get(name)` at setup). The stub's schema matches the dsh-tools
+ * contract (output {schema, render}); `name` is preserved so the restrict
+ * allow-list identifies it by name exactly as the real harness would. */
+function stubGlobalTool(name) {
+  return defineTool({
+    name,
+    description: `F10 stub for global tool "${name}"`,
+    parameters: { input: { type: 'string', description: 'stub input' } },
+    output: {
+      // dsh-tools output uses the VALUE schema DSL (no `required` keyword).
+      schema: { type: 'object', additionalProperties: false, properties: {} },
+      render: (_args, value) => [{ type: 'text', text: `${name}: ok` }]
+    },
+    async execute() {
+      return {}
+    }
+  })
+}
+
 /** Materialize one (fresh or resumed) agent with the requested identity. */
 function materializeStubAgent(agents, sessionId, options) {
   const callerSignal = options.signal
@@ -604,6 +628,19 @@ async function bootPlugin(stateDir, opts = {}) {
   })
   await loader.await()
   agents.scopeAnchor = loader.resolve('tools').fiber?.ctx ?? root
+  // F10 (spec 004 §7.1): register the GLOBAL harness capability tools as stubs
+  // AFTER boot (once the tools service is composed — an inline register before
+  // `loader.await()` would touch the pre-composition tools and corrupt it). The
+  // BOOTED head's setup ran before this (its inherited surface is board-only),
+  // but any LATER materialization — a dept_worker_spawn, or a slept head's
+  // wake — sees the globals in its restrict allow-list (in the real harness
+  // these are the native globals the host profile composes). An
+  // already-registered name is skipped (no duplicate throw).
+  if (opts.globalTools !== undefined) {
+    for (const name of opts.globalTools) {
+      if (root.tools.get(name) === undefined) root.tools.register(stubGlobalTool(name))
+    }
+  }
   return {
     root,
     agents,
@@ -1821,6 +1858,59 @@ test('Batch G head sleep ROTATION (F8): a slept head is ARCHIVED on dept_sleep (
   })
 })
 
+test('Batch G F8 ghost-row fix (owner 2026-08-23): dept_sleep archives the LIVE agent session (agent.id) and converges the durable registry entry.sessionId to it at EVERY sleep — a head slept, woken fresh, slept AGAIN archives the CURRENT (fresh) incarnation, never an older/stale id', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    await seedJournal(stateDir, postId, 'GHOST-ROW-FIX: two full rotation cycles. SECRET-PHRASE-ghost-v1')
+    const { root, agents, workspaceRegistry, dispose } = await bootPlugin(stateDir)
+    await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
+    try {
+      const signal = new AbortController().signal
+      const firstHead = agents.store.get(`head-${postId}`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      const memo = headCtx.tools.get('dept_memo_write', key)
+
+      // Cycle 1 — sleep the ORIGINAL head. The archived + durable session id must
+      // equal the agent's LIVE id (agent.id), which is the first incarnation.
+      await memo.execute({ summary: 'cycle-1 memory' }, { agent: firstHead, signal })
+      const firstId = String(firstHead.id)
+      await sleep.execute({}, { agent: firstHead, signal })
+      await waitFor(() => agents.store.has(`head-${postId}`) === false, 5000, 'first head disposed after sleep')
+      await waitFor(() => workspaceRegistry.archivedSessionIds.includes(firstId), 5000, 'the LIVE first session is archived at sleep (agent.id, not a stale registry id)')
+      let posts = await readPosts(stateDir)
+      assert.equal(posts[postId].sessionId, firstId, 'durable registry sessionId converges to the LIVE agent id at sleep')
+
+      // Wake → materializePost mints a FRESH rotation id.
+      await root.tools.get('send_message').execute({ to: [postId], text: 'wake' }, { agent: { id: 'host-any', session: { header: {} } }, signal })
+      await waitFor(() => agents.createCalls.length > 1, 5000, 'fresh head session created on wake')
+      const freshId = String(agents.createCalls.at(-1).sessionId)
+      assert.notEqual(freshId, firstId, 'the fresh wake session is a NEW id (rotation)')
+      const freshHead = agents.store.get(freshId)
+      assert.ok(freshHead, 'fresh head materialized')
+      await waitFor(() => freshHead.inboxMessages.length >= 1, 5000, 'fresh head woken')
+      posts = await readPosts(stateDir)
+      assert.equal(posts[postId].sessionId, freshId, 'durable registry points at the FRESH session id after wake')
+
+      // Cycle 2 — sleep the FRESH head. The archived + durable session id must
+      // equal the LIVE (fresh) agent id — NOT the previous (already-archived)
+      // incarnation. This guards against archiving a stale entry.sessionId.
+      const { ctx: freshCtx, key: freshKey } = agents.childContexts.at(-1)
+      await freshCtx.tools.get('dept_memo_write', freshKey).execute({ summary: 'cycle-2 memory' }, { agent: freshHead, signal })
+      await freshCtx.tools.get('dept_sleep', freshKey).execute({}, { agent: freshHead, signal })
+      await waitFor(() => agents.store.has(freshId) === false, 5000, 'fresh head disposed after second sleep')
+      await waitFor(() => workspaceRegistry.archivedSessionIds.includes(freshId), 5000, 'the LIVE (fresh) session is archived at the SECOND sleep (agent.id, not an archived old id)')
+      // The previous incarnation is already archived — the second sleep must not
+      // re-add or corrupt it (archive is idempotent, recorded exactly once).
+      assert.equal(workspaceRegistry.archivedSessionIds.filter((id) => id === firstId).length, 1, 'the first incarnation stays archived exactly once (no re-add at the second sleep)')
+      posts = await readPosts(stateDir)
+      assert.equal(posts[postId].sessionId, freshId, 'durable registry still converges to the FRESH (live) agent id after the second sleep')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('Piece 1: wakePost re-attaches the head session to the workspace (idempotent — the boot-race recovery for the native sidebar)', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
@@ -2157,8 +2247,8 @@ function childContextFor(agents, sessionId) {
 
 /** Get the head agent + its own-layer scoped toolset (the configured head
  * `head-research-head` is the first materialized agent at boot). */
-async function bootWithHead(stateDir) {
-  const env = await bootPlugin(stateDir)
+async function bootWithHead(stateDir, opts = {}) {
+  const env = await bootPlugin(stateDir, opts)
   await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'head created at boot')
   const head = env.agents.store.get('head-research-head')
   const { ctx: headCtx, key } = childContextFor(env.agents, 'head-research-head')
@@ -5495,6 +5585,270 @@ test('F3 gates: a worker agent has NO dept_worker_spawn/dept_worker_retire, and 
       assert.equal(agents.store.has('worker-nonexistent-role'), false, 'no agent is created for the failed spawn')
     } finally {
       await dispose()
+    }
+  })
+})
+
+// ===========================================================================
+// F10 (spec 004 §7.1 real role→tools binding, §9.1 department-architecture
+// injection) — discriminating tests.
+// ===========================================================================
+
+/** The repo-root path (the plugin resolves presets/departments/<id>/ against
+ * it; lib/ and test/ are both one level below the root, so the same
+ * derivation yields the root). */
+const F10_REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
+/** The department ARCHITECTURE.md the research department's posts read (spec
+ * 004 §9.1). The "exists" tests write + clean it up as a fixture (the read
+ * path is fixed at repo presets/departments/research/); the "absent" test
+ * relies on it NOT existing. */
+const F10_ARCHITECTURE_PATH = path.join(F10_REPO_ROOT, 'presets', 'departments', 'research', 'ARCHITECTURE.md')
+/** The GLOBAL harness capability tools a department post can inherit (the
+ * minimal composition registers no native tools, so the tests stub them on the
+ * global plane BEFORE boot, exactly as the host profile composes them). */
+const F10_GLOBAL_TOOLS = ['web_search', 'web_fetch', 'read', 'write', 'glob', 'grep', 'edit']
+
+/** Snapshot the department ARCHITECTURE.md (its content, or absence) BEFORE an
+ * injection fixture writes/removes the REAL preset file, so running the tests
+ * never destroys a pre-existing ARCHITECTURE.md. Returns a restore() that
+ * rewrites the original content if it existed, or removes the file if it was
+ * absent — the exact pre-test state is restored in every case. */
+async function snapshotArchitectureFile() {
+  let content = null
+  try {
+    content = await readFile(F10_ARCHITECTURE_PATH, 'utf8')
+  } catch (err) {
+    if ((err)?.code !== 'ENOENT') throw err
+  }
+  return async function restoreArchitectureFile() {
+    if (content === null) {
+      await rm(F10_ARCHITECTURE_PATH, { force: true })
+    } else {
+      await writeFile(F10_ARCHITECTURE_PATH, content, 'utf8')
+    }
+  }
+}
+
+/** Read ONE systemPrompt section by name for a post's scoped context. */
+async function findPromptSection(ctx, key, sectionName, useScope) {
+  const sp = ctx?.get('systemPrompt')
+  if (sp === void 0 || typeof sp.assemble !== 'function') return undefined
+  try {
+    const assembly = await sp.assemble(useScope ? { scope: key } : {})
+    return (assembly.sections ?? []).find((s) => s.name === sectionName)
+  } catch {
+    return undefined
+  }
+}
+
+test('F10 (spec 004 §7.1): a worker inherits its role template REAL GLOBAL tools via the restrict allow-list (web_search/read/write/glob/grep), keeps the bus/ciclo tools visible, GATES `edit` by role presence (only a DECLARING role gets it), and denies the subagent lifecycle controls', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, root, head, headCtx, key, dispose } = await bootWithHead(stateDir, { globalTools: F10_GLOBAL_TOOLS })
+    try {
+      // Sanity: the global stubs exist on the host plane (the inherited surface).
+      for (const name of ['web_search', 'web_fetch', 'read', 'write', 'glob', 'grep', 'edit']) assert.ok(root.tools.get(name), `host plane exposes the global stub ${name}`)
+
+      // The researcher role template declares web_search/web_fetch/read/write/
+      // glob/grep + the bus tools → the worker's allow-list is the declared
+      // tools that exist as GLOBALS (visible), bus/ciclo are own-layer exempt.
+      // researcher does NOT declare `edit` → it never sees it (role-gated, not
+      // a hard deny-set anymore).
+      const researcher = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'investigate X' })
+      const r = researcher.result
+      for (const name of ['web_search', 'web_fetch', 'read', 'write', 'glob', 'grep']) {
+        assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher worker "${r.workerId}" inherits the global role tool ${name}`)
+      }
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
+        assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher worker "${r.workerId}" still sees the bus/ciclo tool ${name}`)
+      }
+      assert.equal(researcher.ctx.tools.get('edit', researcher.key), undefined, 'researcher has NO edit (role does not declare it)')
+      assert.equal(researcher.ctx.tools.get('dept_worker_spawn', researcher.key), undefined, 'researcher has NO dept_worker_spawn')
+
+      // The organizer role template DECLARES `edit` — OWNER DECISION (2026-08-23):
+      // `edit` is NOT a hard deny; it flows through the role allow-list like any
+      // other tool, so a role that DECLARES it INHERITS it. organizer DECLARES
+      // it → it HAS it.
+      const organizer = await f3Spawn({ agents }, headCtx, key, head, { role: 'organizer', task: 'organize reports' })
+      for (const name of ['read', 'write', 'edit', 'glob', 'grep']) {
+        assert.ok(organizer.ctx.tools.get(name, organizer.key), `organizer worker "${organizer.result.workerId}" inherits the file tool ${name}`)
+      }
+      assert.equal(organizer.ctx.tools.get('web_search', organizer.key), undefined, 'organizer does NOT inherit web_search (not declared)')
+
+      // A reviewer (role template WITHOUT `edit`) → NO edit, mirroring researcher.
+      const reviewer = await f3Spawn({ agents }, headCtx, key, head, { role: 'reviewer', task: 'review a report' })
+      assert.equal(reviewer.ctx.tools.get('edit', reviewer.key), undefined, 'reviewer has NO edit (role does not declare it)')
+      assert.equal(reviewer.ctx.tools.get('subagent', reviewer.key), undefined, 'reviewer has NO subagent (hard-denied)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F10 (spec 004 §7.1): a worker with NO declared role tools (legacy dept_post_create) keeps the pre-F10 board-only allow:[] behavior (global tools masked)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, root, head, headCtx, key, dispose } = await bootWithHead(stateDir, { globalTools: F10_GLOBAL_TOOLS })
+    try {
+      const createTool = headCtx.tools.get('dept_post_create', key)
+      await createTool.execute({ postId: 'plain-alpha', role: 'rank-and-file researcher', firstMessage: 'no tools declared' }, { agent: head, signal: new AbortController().signal })
+      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, 'worker-plain-alpha')
+      // No role template → no declared tools → allow:[] → GLOBAL tools masked.
+      assert.equal(workerCtx.tools.get('web_search', workerKey), undefined, 'a tool-less worker does NOT inherit the global web_search (board-only)')
+      assert.equal(workerCtx.tools.get('read', workerKey), undefined, 'a tool-less worker does NOT inherit the global read (board-only)')
+      // The own-layer bus/ciclo tools are exempt from the mask — still visible.
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
+        assert.ok(workerCtx.tools.get(name, workerKey), `tool-less worker still sees the bus/ciclo tool ${name}`)
+      }
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F10 (spec 004 §7.1): a department HEAD inherits the head base tools (read/write/glob/grep/web_search/web_fetch) + its own-layer board/lifecycle tools, and never edit', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, root, head, headCtx, key, dispose } = await bootWithHead(stateDir, { globalTools: F10_GLOBAL_TOOLS })
+    const signal = new AbortController().signal
+    try {
+      // The booted head's OWN-LAYER board + department-lifecycle tools are
+      // always visible (exempt from the mask) — asserted on the booted context.
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep', 'dept_worker_spawn', 'dept_worker_retire', 'dept_post_create', 'dept_post_retire', 'dept_job_run', 'dept_job_list']) {
+        assert.ok(headCtx.tools.get(name, key), `department head sees its own-layer tool ${name}`)
+      }
+      assert.equal(headCtx.tools.get('edit', key), undefined, 'department head has NO edit (never granted)')
+      // The INHERITED surface (read/web_search) only lands where the head setup
+      // ran AFTER the globals were registered — the booted head materialized at
+      // boot (before the post-boot global registration), so sleep + bus wake
+      // rotates it to a FRESH session whose setup IS post-globals (the F8
+      // re-materialization runs materializePost → headSetup).
+      await headCtx.tools.get('dept_memo_write', key).execute({ summary: 'rotate to expose inherited head tools' }, { agent: head, signal })
+      await headCtx.tools.get('dept_sleep', key).execute({}, { agent: head, signal })
+      await waitFor(() => agents.store.has('head-research-head') === false, 5000, 'head handle disposed after sleep')
+      const r = await root.tools.get('send_message').execute(
+        { to: ['research-head'], text: 'wake' },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
+      assert.equal(r.delivered['research-head'], 'resumed', 'bus wake of the slept head reports resumed')
+      await waitFor(() => agents.createCalls.length > 1, 5000, 'a fresh head session was created on wake (rotation)')
+      const fresh = childContextFor(agents, String(agents.createCalls.at(-1).sessionId))
+      assert.ok(fresh !== undefined, 'the re-materialized (fresh) head context resolves')
+      for (const name of ['read', 'write', 'glob', 'grep', 'web_search', 'web_fetch']) {
+        assert.ok(fresh.ctx.tools.get(name, fresh.key), `re-materialized department head inherits the head base tool ${name}`)
+      }
+      assert.equal(fresh.ctx.tools.get('edit', fresh.key), undefined, 're-materialized department head has NO edit (never granted)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F10 (spec 004 §9.1): an existing ARCHITECTURE.md injects a templated "## Department architecture" systemPrompt section for BOTH the department worker AND the head', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Fixture: write the research department's ARCHITECTURE.md (the read path
+    // is fixed at repo presets/departments/research/). The test uses its own
+    // stub body, so it does NOT depend on the real file; on exit the REAL file
+    // (or its absence) is restored — the fixture never destroys it. The org
+    // configures a workspacePath so {{workspacePath}}/{{reportDir}} bind.
+    const restoreArchitectureFile = await snapshotArchitectureFile()
+    try {
+      await writeFile(F10_ARCHITECTURE_PATH, [
+        '# Research Department Architecture',
+        '',
+        'Department: {{deptName}}',
+        'Head: {{headPostId}}',
+        'Workspace: {{workspacePath}}',
+        'Reports: {{reportDir}}',
+        '',
+        'The department coordinates through the bus; workers are disposable.'
+      ].join('\n') + '\n', 'utf8')
+      const org = {
+        departments: [
+          {
+            id: 'research',
+            name: 'Research',
+            workspacePath: path.join(stateDir, 'dept-research'),
+            coordinator: { postId: 'research-head', role: 'Research department head', provider: 'deepseek-official', agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' } }
+          }
+        ]
+      }
+      const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { org })
+      try {
+        // The HEAD (materialized at boot) carries the architecture section.
+        const headSection = await findPromptSection(head.ctx, key, 'deepartments:head:architecture:research-head', true)
+        assert.ok(headSection !== undefined, 'the head has the department architecture section')
+        const headText = headSection.text
+        assert.match(headText, /^## Department architecture/m, 'the head architecture section opens with the "## Department architecture" heading')
+        assert.match(headText, /Department: Research/, '{{deptName}} templated -> "Research"')
+        assert.match(headText, /Head: research-head/, '{{headPostId}} templated -> "research-head"')
+        assert.match(headText, new RegExp(`Workspace: ${path.join(stateDir, 'dept-research').replace(/[/\\]/g, '\\$&')}`), '{{workspacePath}} templated -> the configured workspace path')
+        assert.match(headText, new RegExp(`Reports: ${path.join(stateDir, 'dept-research', 'reports').replace(/[/\\]/g, '\\$&')}`), '{{reportDir}} templated -> <workspacePath>/reports')
+
+        // The WORKER (spawned via dept_worker_spawn) carries the same section.
+        const worker = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'templated architecture' })
+        const wSection = await findPromptSection(worker.ctx, worker.key, `deepartments:worker:architecture:${worker.result.workerId}`, true)
+        assert.ok(wSection !== undefined, 'the spawned worker has the department architecture section')
+        assert.match(wSection.text, /^## Department architecture/m, 'the worker architecture section opens with the "## Department architecture" heading')
+        assert.match(wSection.text, /Department: Research/, 'worker {{deptName}} templated')
+        assert.match(wSection.text, /Head: research-head/, 'worker {{headPostId}} templated')
+      } finally {
+        await dispose()
+      }
+    } finally {
+      await restoreArchitectureFile()
+    }
+  })
+})
+
+test('F10 (spec 004 §9.1): an ARCHITECTURE.md longer than the cap is TRUNCATED to its start plus a reference to the full file', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Fixture: write a long body to the REAL preset path, then restore the real
+    // ARCHITECTURE.md (or its absence) on exit — never destroy a pre-existing one.
+    const restoreArchitectureFile = await snapshotArchitectureFile()
+    try {
+      const longBody = `## Research Department Architecture\n\nDepartment: {{deptName}}\nHead: {{headPostId}}\n\n` + ('line of the department architecture document. '.repeat(220))
+      await writeFile(F10_ARCHITECTURE_PATH, longBody, 'utf8')
+      const org = { departments: [{ id: 'research', name: 'Research', workspacePath: path.join(stateDir, 'dept-research'), coordinator: { postId: 'research-head', role: 'Research department head', provider: 'deepseek-official', agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' } } }] }
+      const { agents, headCtx, key, head, dispose } = await bootWithHead(stateDir, { org })
+      try {
+        const worker = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'truncation' })
+        const section = await findPromptSection(worker.ctx, worker.key, `deepartments:worker:architecture:${worker.result.workerId}`, true)
+        assert.ok(section !== undefined, 'the worker has the architecture section')
+        assert.ok(section.text.length <= 3500 + 300, `the section is capped (got ${section.text.length})`)
+        assert.match(section.text, /Department: Research/, 'the truncated head still carries the templated start')
+        assert.match(section.text, /… \(truncated — full text at .*ARCHITECTURE\.md\)/, 'the truncated section references the full ARCHITECTURE.md')
+      } finally {
+        await dispose()
+      }
+    } finally {
+      await restoreArchitectureFile()
+    }
+  })
+})
+
+test('F10 (spec 004 §9.1): a missing ARCHITECTURE.md omits the architecture section for BOTH the worker AND the head, with NO error', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Force absence for the assertion, then restore the real ARCHITECTURE.md
+    // (or its absence) on exit — never leave the repo file deleted.
+    const restoreArchitectureFile = await snapshotArchitectureFile()
+    try {
+      await rm(F10_ARCHITECTURE_PATH, { force: true })
+      const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+      try {
+        // Head: no architecture section authored.
+        const headSection = await findPromptSection(head.ctx, key, 'deepartments:head:architecture:research-head', true)
+        assert.ok(headSection === undefined, 'no architecture section for the head when ARCHITECTURE.md is absent')
+        // Worker: no architecture section, spawn does not fail.
+        const worker = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'no architecture' })
+        const wSection = await findPromptSection(worker.ctx, worker.key, `deepartments:worker:architecture:${worker.result.workerId}`, true)
+        assert.ok(wSection === undefined, 'no architecture section for the worker when ARCHITECTURE.md is absent')
+        // The worker's role persona is still injected (the architecture omission
+        // never silently eats the other sections).
+        const roleSection = await findPromptSection(worker.ctx, worker.key, `deepartments:worker:role:${worker.result.workerId}`, true)
+        assert.ok(roleSection !== undefined, 'the role framing section is still injected without an ARCHITECTURE.md')
+      } finally {
+        await dispose()
+      }
+    } finally {
+      await restoreArchitectureFile()
     }
   })
 })
