@@ -2655,8 +2655,9 @@ export function applyInvoke(ctx: Context, config: Config) {
   // A3 — fire-and-forget HOST notification on a presence CHANGE, reusing the
   // SAME live-host followup seam the bus delivery uses (busDeliverToHost's live
   // branch — a resident host picks the change up on its next turn even while
-  // idle). Never awaits, never throws (best-effort — the reliable transition
-  // signal is the A4 pre-step injector). A dormant host is NOT woken here.
+  // idle). With A4 dedup (2026-08-23) this is now the ONLY transition channel:
+  // a dormant host is never woken here — the current state is baked into every
+  // host wake pack via buildWakePack. Never awaits, never throws.
   const notifyHostPresence = (present: boolean): void => {
     try {
       const { live } = pickLiveHostEntry(hosts.values())
