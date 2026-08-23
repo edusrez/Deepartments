@@ -588,20 +588,37 @@ export function buildWakePackMessage(packText: string) {
 }
 
 /**
+ * The owner-presence directive line, injected alongside the state in BOTH the
+ * presence-change node (`buildPresenceMessage`, A4) and wake-pack section 2
+ * (`buildWakePack`) so the host is told how to act on the CURRENT state.
+ */
+export function presenceGuidance(present: boolean): string {
+  return present
+    ? 'Owner guidance: make the most of the presence — share any question you have (none is fine — no need to force it) or report what was done while the owner was away.'
+    : 'Owner guidance: work autonomously as far as you can; you will be notified when the owner returns.'
+}
+
+/**
  * Build the owner-presence change node (Feature A, A4) — a compact
- * plugin/notice node carrying `Owner presence: present|absent`. It is the ONLY
- * presence channel now (A4 dedup, 2026-08-23): produced by the fire-and-forget
- * `presence/set` host notify (`notifyHostPresence` → `target.followup`) when
- * the flag CHANGES, so the host observes the toggle on its next turn. The
- * `agent/pre-step` TRANSITION node was REMOVED (it duplicated the notify); the
- * CURRENT presence state is instead baked into every host wake pack via
- * `buildWakePack`'s `ownerPresence` (read at assembly time) — covering
- * restarts/future sessions without re-notifying.
+ * plugin/notice node carrying `Owner presence: present|absent` + the matching
+ * presence guidance line. It is the ONLY presence channel now (A4 dedup,
+ * 2026-08-23): produced by the fire-and-forget `presence/set` host notify
+ * (`notifyHostPresence` → `target.followup`) when the flag CHANGES, so the host
+ * observes the toggle on its next turn. The `agent/pre-step` TRANSITION node
+ * was REMOVED (it duplicated the notify); the CURRENT presence state is instead
+ * baked into every host wake pack via `buildWakePack`'s `ownerPresence` (read
+ * at assembly time) — covering restarts/future sessions without re-notifying.
+ * The first content text block stays byte-identical (`Owner presence:
+ * present|absent`); the guidance is a SECOND content block, so the dedup
+ * summary (`Deepartments owner presence: present|absent.`) is untouched.
  */
 export function buildPresenceMessage(present: boolean) {
   const text = `Owner presence: ${present ? 'present' : 'absent'}`
   return createUserMessage({
-    content: [{ type: 'text', text }],
+    content: [
+      { type: 'text', text },
+      { type: 'text', text: presenceGuidance(present) }
+    ],
     source: {
       kind: 'plugin',
       plugin: 'deepartments',
@@ -698,14 +715,15 @@ export interface WakePackParts {
   skillBody?: string
   /** Include the closing guidance (section 10)? Defaults true (wake injection). */
   includeGuidance?: boolean
-  /** Owner-presence snapshot (Feature A/A4 dedup, 2026-08-23; section 2): a single line
-   * `## Owner presence: present|absent` rendering the CURRENT state read at
-   * wake-pack assembly time. Present in EVERY host wake pack (always inject the
-   * current state). Undefined/empty → the line is OMITTED (a presence read
-   * failure degrades to "no line", never a throw) — transitions are carried by
-   * the bus notify (notifyHostPresence), never re-sent as a second node. Only
-   * the host wake injection supplies it; the lean on-demand snapshot
-   * (dept_wake_snapshot) does NOT. */
+  /** Owner-presence snapshot (Feature A/A4 dedup, 2026-08-23; section 2): a
+   * line `## Owner presence: present|absent` rendering the CURRENT state read
+   * at wake-pack assembly time, followed by the matching presence guidance line
+   * (`presenceGuidance`) when the state is present/absent. Present in EVERY
+   * host wake pack (always inject the current state). Undefined/empty → the
+   * line is OMITTED (a presence read failure degrades to "no line", never a
+   * throw) — transitions are carried by the bus notify (notifyHostPresence),
+   * never re-sent as a second node. Only the host wake injection supplies it;
+   * the lean on-demand snapshot (dept_wake_snapshot) does NOT. */
   ownerPresence?: string
 }
 
@@ -728,12 +746,18 @@ export function buildWakePack(parts: WakePackParts): string {
   }
   sections.push(identityLines.join('\n'))
 
-  // 2 — current owner-presence snapshot (Feature A/A4 dedup, 2026-08-23): a
-  // single line `## Owner presence: present|absent` rendering the state read at
-  // assembly time. ALWAYS rendered for the host wake pack; OMITTED (never a
-  // throw) when no state is supplied — the bus notify (notifyHostPresence)
-  // carries transitions instead, so the host is never told twice.
-  if (parts.ownerPresence !== undefined && parts.ownerPresence.trim() !== '') {
+  // 2 — current owner-presence snapshot (Feature A/A4 dedup, 2026-08-23): the
+  // line `## Owner presence: present|absent` rendering the state read at
+  // assembly time, followed by the matching presence guidance line when the
+  // state is present/absent. ALWAYS rendered for the host wake pack; for a
+  // supplied state that is neither present nor absent, ONLY the header line is
+  // rendered (unchanged behavior); OMITTED (never a throw) when no state is
+  // supplied — the bus notify (notifyHostPresence) carries transitions instead,
+  // so the host is never told twice.
+  const presenceState = parts.ownerPresence?.trim().toLowerCase()
+  if (presenceState === 'present' || presenceState === 'absent') {
+    sections.push(`## Owner presence: ${presenceState}\n${presenceGuidance(presenceState === 'present')}`)
+  } else if (parts.ownerPresence !== undefined && parts.ownerPresence.trim() !== '') {
     sections.push(`## Owner presence: ${parts.ownerPresence.trim()}`)
   }
 

@@ -28,7 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath } from '../lib/messages-store.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
@@ -4711,19 +4711,45 @@ test('Batch W4 pure: buildWakePack degrades gracefully — undefined optional in
   assert.match(degraded, /\(skill unavailable\)/, 'skill unavailable marker passes through')
 })
 
-test('Batch W4 pure: buildWakePack renders the `## Owner presence: present|absent` line per the supplied state (2 cases) and omits it when no state is supplied', async () => {
-  // Present case.
+test('Batch W4 pure: buildWakePack renders the `## Owner presence: present|absent` line + matching guidance per the supplied state, and omits it when no state is supplied', async () => {
+  // Present case: header + present guidance.
   const present = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x', ownerPresence: 'present' })
   assert.match(present, /## Owner presence: present/, 'the wake pack names the PRESENT owner-presence state')
+  assert.match(present, /Owner guidance: make the most of the presence/, 'the PRESENT state appends the present guidance line')
   assert.match(present, /## Deepartments wake pack/, 'present case still opens with the identity header')
   assert.ok(!present.includes('## Owner presence: absent'), 'present case does NOT carry the absent label')
-  // Absent case.
+  assert.ok(!present.includes('Owner guidance: work autonomously'), 'present case does NOT carry the absent guidance')
+  // Absent case: header + absent guidance.
   const absent = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x', ownerPresence: 'absent' })
   assert.match(absent, /## Owner presence: absent/, 'the wake pack names the ABSENT owner-presence state')
+  assert.match(absent, /Owner guidance: work autonomously as far as you can/, 'the ABSENT state appends the absent guidance line')
   assert.ok(!absent.includes('## Owner presence: present'), 'absent case does NOT carry the present label')
+  assert.ok(!absent.includes('Owner guidance: make the most of the presence'), 'absent case does NOT carry the present guidance')
+  // A mixed-case trimmed value is normalized to lowercase before the comparison.
+  const mixed = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x', ownerPresence: '  Present  ' })
+  assert.match(mixed, /## Owner presence: present/, 'a mixed-case presence value is normalized to lowercase')
+  assert.match(mixed, /Owner guidance: make the most of the presence/, 'a mixed-case PRESENT value appends the present guidance')
+  // A supplied value that is neither present nor absent → ONLY the header line (unchanged behavior).
+  const unknown = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x', ownerPresence: 'maybe' })
+  assert.match(unknown, /## Owner presence: maybe/, 'an unknown presence value renders ONLY the header line')
+  assert.ok(!unknown.includes('Owner guidance:'), 'an unknown presence value appends NO guidance')
   // No state supplied (or a failed read) → the line is omitted, never a throw.
   const none = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x' })
   assert.ok(!none.includes('## Owner presence:'), 'no presence line when no state is supplied (omitted, never a throw)')
+})
+
+test('Batch W4 pure: buildPresenceMessage keeps the exact first content line + dedup summary and appends the presence guidance as a SECOND content block', () => {
+  const present = buildPresenceMessage(true)
+  assert.equal(present.content[0].text, 'Owner presence: present', 'the first content block is the exact `Owner presence: present` line')
+  assert.equal(present.content[1].text, presenceGuidance(true), 'the SECOND content block is the present guidance line')
+  assert.equal(present.content.length, 2, 'the presence node carries exactly two text blocks (state + guidance)')
+  assert.match(present.source.summary, /Deepartments owner presence: present\./, 'the dedup summary is INTACT for present')
+
+  const absent = buildPresenceMessage(false)
+  assert.equal(absent.content[0].text, 'Owner presence: absent', 'the first content block is the exact `Owner presence: absent` line')
+  assert.equal(absent.content[1].text, presenceGuidance(false), 'the SECOND content block is the absent guidance line')
+  assert.equal(absent.content.length, 2, 'the presence node carries exactly two text blocks (state + guidance)')
+  assert.match(absent.source.summary, /Deepartments owner presence: absent\./, 'the dedup summary is INTACT for absent')
 })
 
 test('Batch W4 pure: buildWakePackMessage frames the wake pack as a plugin/notice context (never a user-typed message)', async () => {
