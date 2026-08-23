@@ -1982,6 +1982,9 @@ test('dept_post_create (head): a head creates a DISPOSABLE worker root agent (se
       // workspace-root cwd as heads (resolveWorkspaceRootPath) — not repoRoot —
       // so the worker's own attach matches by cwd equality too.
       assert.equal(createCall.meta.cwd, stateDir, 'the worker is created under the workspace-root cwd (resolveWorkspaceRootPath), not the repo root')
+      // F7 (provider migration): the runtime-minted worker is created with the
+      // coordinator-aligned agentOptions (opencode-go / vision-exp / max).
+      assert.deepEqual(createCall.agentOptions, { provider: 'opencode-go', model: 'deepseek-v4-flash-vision-exp', reasoningEffort: 'max' }, 'worker agentOptions = opencode-go / deepseek-v4-flash-vision-exp / reasoningEffort max (coordinator alignment)')
 
       // Durable registry: disposable entry (roomId is the INERT legacy field).
       const posts = await readPosts(stateDir)
@@ -5142,6 +5145,13 @@ test('F3 dept_worker_spawn: a head spawns a worker of its department (role templ
       assert.equal(title.data.title, 'Researcher: track DSH updates and report')
       assert.deepEqual(title.data.source, { kind: 'user' }, 'the pin is user-source (the owner manual rename always wins)')
 
+      // F7 (provider migration): the spawned worker is created with the
+      // coordinator-aligned agentOptions — a discriminating assert on the
+      // runtime materialization route (opencode-go / vision-exp / max).
+      const spawnCall = agents.createCalls.find((c) => String(c.sessionId) === 'worker-monitor-dsh-updates')
+      assert.ok(spawnCall, 'dept_worker_spawn issued one ctx.agents.create for the worker')
+      assert.deepEqual(spawnCall.agentOptions, { provider: 'opencode-go', model: 'deepseek-v4-flash-vision-exp', reasoningEffort: 'max' }, 'dept_worker_spawn worker agentOptions = opencode-go / deepseek-v4-flash-vision-exp / reasoningEffort max (coordinator alignment)')
+
       // F3 persona mechanism (spec §7.4): the ROLE TEMPLATE body + the task are
       // injected as a systemPrompt section (the persona delta; the worker still
       // mounts the base deepartments-worker preset). The section surfacing via
@@ -5422,6 +5432,12 @@ test('F4b dept_job_run: materializes the job worker (definition role task = the 
       const workerSession = root.sessions.get(SessionId('worker-monitor-dsh-updates'))
       assert.ok(workerSession !== undefined, 'the job worker session is entered in the real sessions store')
       assert.equal(workerSession.events.find((ev) => ev.type === 'session/title')?.data.title, 'Monitor DSH + Deepartments ecosystem updates', 'pinned title = the human frontmatter title')
+
+      // F7 (provider migration): the job worker is created with the
+      // coordinator-aligned agentOptions (same discriminating assert as F3).
+      const runCreate = agents.createCalls.find((c) => String(c.sessionId) === 'worker-monitor-dsh-updates')
+      assert.ok(runCreate, 'dept_job_run issued one ctx.agents.create for the job worker')
+      assert.deepEqual(runCreate.agentOptions, { provider: 'opencode-go', model: 'deepseek-v4-flash-vision-exp', reasoningEffort: 'max' }, 'dept_job_run worker agentOptions = opencode-go / deepseek-v4-flash-vision-exp / reasoningEffort max (coordinator alignment)')
     } finally {
       await dispose()
     }

@@ -325,7 +325,7 @@ interface HostEntry {
    * still performs the full-window fold. Without the restore the in-memory map
    * (which dies with the process) is empty, the fold is skipped, and the
    * journal-interleaved close tail [assistant(tool_calls)·journal·tool] ships
-   * in the first request — the strict deepseek-official API 400s ("insufficient
+   * in the first request — the strict opencode-go API 400s ("insufficient
    * tool messages following tool_calls"). Cleared when the fold consumes the
    * intent (a mid-wake restart must never re-fold the whole wake surface back
    * to the journal). Absent = no deferred replace pending. */
@@ -397,6 +397,21 @@ interface AgentHandleLike {
   dispose(): Promise<void>
 }
 
+/** Agent-scoped creation options the department machinery passes at
+ * create/resume. Shape = the dsh core `AgentOptions`
+ * (`{ provider?, model?, maxTokens? }` — dsh-agent runtime-types.d.ts:21)
+ * PLUS the repo's coordinator convention `reasoningEffort` (the coordinator
+ * block in cordis.patch.yml carries `reasoningEffort: max`). The core runtime
+ * tolerates the extra key (assertAgentOptions validates only maxTokens —
+ * dsh-agent-loop index.js), so declaring it keeps the F7 worker surface
+ * type-honest with the config pattern. */
+interface AgentOptionsLike {
+  provider?: string
+  model?: string
+  maxTokens?: number
+  reasoningEffort?: string
+}
+
 /** Structural view of the `agents` service surface the head lifecycle touches
  * (rc.8 dsh-agent types/index.d.ts:288-370). */
 interface AgentsLike {
@@ -406,13 +421,13 @@ interface AgentsLike {
   create(options: {
     sessionId: string
     meta?: Record<string, unknown>
-    agentOptions?: { provider?: string; model?: string; maxTokens?: number }
+    agentOptions?: AgentOptionsLike
     setup?: (agentCtx: Context) => unknown
     signal?: AbortSignal
   }): Promise<AgentHandleLike>
   resume(options: {
     resumeSessionId: string
-    agentOptions?: { provider?: string; model?: string; maxTokens?: number }
+    agentOptions?: AgentOptionsLike
     setup?: (agentCtx: Context) => unknown
     signal?: AbortSignal
   }): Promise<AgentHandleLike>
@@ -468,7 +483,7 @@ function yamlList(items: readonly string[]): string {
 // performs the full-window replace over ALL current nodes INCLUDING the still
 // pending dept_sleep tool result — so the assistant tool-call message and its
 // result stay a legal sequence and an orphaned role:'tool' node never reaches
-// the strict deepseek-official API.
+// the strict opencode-go API.
 // ---------------------------------------------------------------------------
 
 /** The surface-op arguments (a full-window replace, or a bare append when the
@@ -1317,7 +1332,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   // below) performs the full-window replace over ALL current nodes INCLUDING
   // the still-pending dept_sleep tool result, so the assistant tool-call
   // message and its result remain a legal sequence and no orphaned role:'tool'
-  // node ever reaches the strict deepseek-official API (wake-7 400
+  // node ever reaches the strict opencode-go API (wake-7 400
   // INVALID_REQUEST root cause — explore-deep/2026-08-21-failedmessages-tool-
   // role-error.md). The seeded text is carried (NOT re-read) so the wake
   // replace re-lands a byte-identical journal node and still works if the file
@@ -1854,6 +1869,17 @@ export function applyInvoke(ctx: Context, config: Config) {
    * but framed as a temporary rank-and-file researcher). Materialized into the
    * harness-home user preset root alongside the head preset. */
   const WORKER_PRESET_ID = 'deepartments-worker'
+  /** F7 (owner decision 2026-08-23 — provider migration to opencode-go): the
+   * runtime-materialized department workers run the SAME provider/model route
+   * as the coordinator (cordis.patch.yml — opencode-go /
+   * deepseek-v4-flash-vision-exp, reasoningEffort max). ONE source shared by
+   * the three spawn paths (dept_post_create, dept_job_run, dept_worker_spawn)
+   * so the worker route cannot drift from the config again. */
+  const WORKER_AGENT_OPTIONS: AgentOptionsLike = {
+    provider: 'opencode-go',
+    model: 'deepseek-v4-flash-vision-exp',
+    reasoningEffort: 'max'
+  }
   /** Repo root, used as the preset source AND as the FINAL fallback cwd for
    * head/worker sessions (the canonical cwd is the workspace root path — see
    * `resolveWorkspaceRootPath`). `new URL('.', import.meta.url)` already yields
@@ -2805,7 +2831,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     // surface so provenance covers every node exactly) — folds the surface back
     // to the journal BEFORE any request is built (the agent-loop requests
     // session.deriveMessages() AFTER the pre-step waterfall), so the strict
-    // deepseek-official API never sees the orphaned tool message. Degrades
+    // opencode-go API never sees the orphaned tool message. Degrades
     // silently when the session is a stub (no append) — same guard as close.
     const deferredJournal = deferredSleepReplace.get(sessionId)
     if (deferredJournal !== undefined) {
@@ -3133,7 +3159,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           const handle = await agents.create({
             sessionId: String(SessionId(sessionId)),
             meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
-            agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+            agentOptions: WORKER_AGENT_OPTIONS,
             setup
           })
           // F1 (spec 004 §4.1/§4.2): RECORD THE CREATOR. The pre-F1 code copied
@@ -3490,7 +3516,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           const handle = await agents.create({
             sessionId: String(SessionId(sessionId)),
             meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
-            agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+            agentOptions: WORKER_AGENT_OPTIONS,
             setup
           })
           registerEntry({
@@ -3580,7 +3606,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           const handle = await agents.create({
             sessionId: String(SessionId(sessionId)),
             meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
-            agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+            agentOptions: WORKER_AGENT_OPTIONS,
             setup
           })
           registerEntry({
@@ -5244,7 +5270,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         // at close would shadow the assistant message carrying the dept_sleep
         // tool-call while the harness still appends the tool's own result AFTER
         // the replace — orphaning a role:'tool' node on the wake surface that
-        // the strict deepseek-official API rejects (400 INVALID_REQUEST). The
+        // the strict opencode-go API rejects (400 INVALID_REQUEST). The
         // full-window replace is therefore DEFERRED: the intent (sessionId →
         // seeded journal text) is recorded in `deferredSleepReplace` and the
         // NEXT `agent/pre-step` (the Batch C injector below) performs it over
