@@ -4000,9 +4000,6 @@ export function applyInvoke(ctx: Context, config: Config) {
     // mask (scoped registrations always stay visible) so they are NOT named.
     const declared: readonly string[] = opts.manager ? HEAD_BASE_TOOLS : (opts.tools ?? [])
     return async (agentCtx) => {
-      // DEBUG-SC-2026-08-23 START — TEMPORARY diagnostic instrumentation for journalctl capture.
-      // Cleanup: delete every line containing "DEBUG-SC-2026-08-23" (between START and END).
-      console.log('[deepartments][debug] postSetup', { postId, kind, presetId })
       // (a) AWAIT the dedicated preset mount FIRST, before the capability probe.
       //     read/write/glob/grep are PRESET-ONLY contributions (the web
       //     deepartments-dev profile disables the host-plane base
@@ -4018,11 +4015,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       if (agentPresets !== void 0) {
         try {
           await agentPresets.mount(agentCtx, presetId)
-          // DEBUG-SC-2026-08-23
-          console.log('[deepartments][debug] mount done', { presetId, ok: true })
         } catch (error: unknown) {
-          // DEBUG-SC-2026-08-23
-          console.log('[deepartments][debug] mount done', { presetId, ok: false, error: error instanceof Error ? error.message : String(error) })
           ctx.logger.warn(`[deepartments] ${kind} "${postId}" preset mount failed (board tools still installed): ${error instanceof Error ? error.message : String(error)}`)
         }
       }
@@ -4053,35 +4046,20 @@ export function applyInvoke(ctx: Context, config: Config) {
       const allowList: string[] = []
       for (const name of declared) {
         if (DENIED_POST_TOOLS.has(name)) {
-          // DEBUG-SC-2026-08-23
-          console.log('[deepartments][debug] probe', name, '->', 'DENIED')
           ctx.logger.warn(`[deepartments] ${kind} "${postId}" role tool "${name}" is security-denied (no subagent/wrapper machinery or run_code for department posts) — dropped`)
           continue
         }
-        if (OWN_LAYER_POST_TOOLS.has(name)) {
-          // DEBUG-SC-2026-08-23
-          console.log('[deepartments][debug] probe', name, '->', 'OWN_LAYER')
-          continue
-        }
-        // DEBUG-SC-2026-08-23
-        const found = agentCtx.tools.get(name, agentScope) !== void 0
-        console.log('[deepartments][debug] probe', name, '->', found ? 'FOUND' : 'missing')
-        if (!found) {
+        if (OWN_LAYER_POST_TOOLS.has(name)) continue
+        if (agentCtx.tools.get(name, agentScope) === void 0) {
           ctx.logger.warn(`[deepartments] ${kind} "${postId}" role tool "${name}" is not visible to the agent scope (not an inherited global/ancestor tool) — dropped`)
           continue
         }
         allowList.push(name)
       }
-      // DEBUG-SC-2026-08-23
-      console.log('[deepartments][debug] allow', { allow: allowList })
       let restrictOwn: () => void
       try {
         restrictOwn = agentCtx.tools.restrict({ allow: allowList })
-        // DEBUG-SC-2026-08-23
-        console.log('[deepartments][debug] restrict done', { result: 'ok' })
       } catch (error: unknown) {
-        // DEBUG-SC-2026-08-23
-        console.log('[deepartments][debug] restrict done', { result: `caught:${error instanceof Error ? error.message : String(error)}` })
         ctx.logger.warn(`[deepartments] ${kind} "${postId}" tool restrict(${JSON.stringify(allowList)}) fell back to allow:[] — ${error instanceof Error ? error.message : String(error)}`)
         restrictOwn = agentCtx.tools.restrict({ allow: [] })
       }
@@ -4092,29 +4070,6 @@ export function applyInvoke(ctx: Context, config: Config) {
       // F3: the ROLE PERSONA delta (+ the task) rides the same section seam.
       // F10: `department` feeds the architecture section (spec 004 §9.1).
       installRoleSection(agentCtx, role, postId, opts.manager === false, { persona: opts.persona, taskText: opts.taskText }, opts.department)
-      // DEBUG-SC-2026-08-23 — list the tools the agent scope sees post-mount + restrict.
-      // Probe which visibility API dsh-tools exposes; only get/schemas are public, so fall
-      // back to schemas() ids when no list()/keys() exists. Never throws (debug must not
-      // break setup).
-      const toolsProbe = agentCtx.tools as unknown as { list?: () => unknown; keys?: () => unknown }
-      let visibleApi = 'none'
-      let visibleIds: unknown
-      try {
-        if (typeof toolsProbe.list === 'function') {
-          visibleApi = 'list'
-          visibleIds = (toolsProbe.list as () => unknown)()
-        } else if (typeof toolsProbe.keys === 'function') {
-          visibleApi = 'keys'
-          visibleIds = (toolsProbe.keys as () => unknown)()
-        } else if (typeof agentCtx.tools.schemas === 'function') {
-          visibleApi = 'schemas'
-          visibleIds = agentCtx.tools.schemas(agentScope).map((s) => (s as unknown as { name?: string }).name)
-        }
-      } catch (err: unknown) {
-        visibleApi = `${visibleApi}:error:${err instanceof Error ? err.message : String(err)}`
-      }
-      console.log('[deepartments][debug] visible tools', { api: visibleApi, ids: visibleIds })
-      // DEBUG-SC-2026-08-23 END — delete every line with "DEBUG-SC-2026-08-23" to clean up.
       // Ensure the agent-scoped registrations unwind with the agent.
       agentCtx.effect(() => () => { tools.dispose(); restrictOwn() }, `deepartments: ${kind} board tools (${postId})`)
     }
