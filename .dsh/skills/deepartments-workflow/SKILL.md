@@ -52,6 +52,13 @@ The Asistente is the only Pro agent.
   independent builders in parallel in one message; continue dependent work
   only when the notice arrives; never wait inline or busy-poll. Use
   `send_message` for follow-up turns in the same child conversation.
+- **Restart only with `smart_restart`.** Never restart the DSH service with a
+  raw `systemctl restart`/`reboot`: `smart_restart` runs a canary (aborts if the
+  boot is unhealthy), records reason+session, restarts detached, and anchors the
+  post-restart notice to this session. A raw `systemctl restart` with active
+  subagents kills their in-flight turn (session "Stopped", result "outcome
+  unknown") and gives no durable result. Always use `smart_restart`
+  (canary:true).
 
 ## Dispatch templates
 
