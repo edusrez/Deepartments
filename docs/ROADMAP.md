@@ -450,3 +450,52 @@ of the research — so no builder needs to re-research.)
 - **2026-08-23** — **ÉPICA COMPLETA — W1-W4 (Research Department como empresa real)**: (a) **W4 owner presence** (576952b) — toggle header `conversation.session.header.utilities` (order 15, junto a Session log parte derecha; localizada la util nativa session-log-download order 0), estado global runtime `<stateDir>/presence.json` (default present:true), RPC presence/get|set (rutas exactas slash), `ctx.tools.guard` niega `ask_user_question` solo host+absent (reversible), notificación por bus única por transición + estado `## Owner presence:` en el wake pack (dedup: eliminado el nodo pre-step de transición — fix 37c924b; probado en vivo 2x por el owner). (b) **W1 calendar & scheduler** (576952b) — `calendar.json` runtime + `dept_calendar_add/list/remove` (ACL creador/head) + panel Agenda (cliente `conversation.view`) + daemon 30s (cron 5-campos def., ledger minute-floored job-runs-state, motor compartido `runJobForDepartment`) + `agenda/list`. (c) **W2 daily AI news** (37c924b) — job `daily-ai-news` cron `0 9 * * *` (09:00 GMT), frescura ≤48h, ledger `daily-news/ledger.json` anti-repetición, reporte+archive sources/, protocolo entrega-presencia en SKILL.md; monitor-dsh-updates cronizado; D7 texts alineados. (d) **W3 suite Parallel SIN Responses API** — search section (`dsh-tool-web-enhanced` c369a67, mode fast, live 200) + **extract provider** (4afdc21 — `full_content:true`, 20-URL cap, opt-in, live 19KB) + **monitor module** (8f54f38, 09d5742 — event_stream polling GET events sin cuota, primer-cursor solo FRESH 48h, storm guard `maxConsecutiveSpawns=2` endurecido por página, spawn directo researcher `Researcher: Monitor: <query>` + aviso RH (bus, `[From deepartments]`), factory lazy resolve (boot race — byPost vacío en apply), 2 defaults base/1d ≈$0.02/día). Schema `parallel` first-class (org.ts). (e) **Verificación**: 275/275, reviewer PASS por batch, canary PASS todos los restarts, monitors creados+polling confirmados en vivo (state file + GET /v1/monitors), presence toggle y wake-pack estado probados en vivo por el owner. (f) **OPEN ITEMS**: key3 opencode-go re-test (reset 2026-08-24T00:00), PR #2726 merge, monitor huérfano `monitor_8b6b74b8...` limpieza P3 (DELETE requiere credencial admin), wake-12 flaky (passes isolated), P2 settings-unavailable, P3 nits (comentario stale invoke.ts:2290), backups storages limpieza opcional.
 
 - **2026-08-23** — **Cierre de sesión + PRÓXIMA SESIÓN POTENTE — Departamento de Programación interna (W5)**: (a) **Entregado hoy**: fix de prompt/context-injection (regla *restart solo `smart_restart`*; directiva RESTART-INTERRUPTION en la fuente de presets), feature de dsh-smart-restart "sesiones interrumpidas" (verificada en vivo), directiva de presencia (wake pack + transición, en inglés), dshmarket 1.21.0, monitor huérfano cancelado, PR #2726 merged, bump web-fetch-http. (b) **PLAN PRÓXIMA SESIÓN**: crear el **Departamento de Programación interna** — equivalente al RD (head `programming-head` + workers builder/reviewer/explore-deep + personas + ARCHITECTURE), misión: programación interna de DSH/deepartments/plugins; plantilla: preset/departments de research (`presets/departments/research/*` + config `org.ts departments[]` + workspace `departments/programming`). **REVERSIÓN PARCIAL** del cleanup de `0859823` (revisar ese commit antes de re-crear; limpiar restos huérfanos de runtime `.agent-presets/deepartments-head-programming`). Microdecisiones pendientes con el owner (naming, workers efímeros vs standing, flujo Asistente→head→workers, alcance de permisos del depto).
+
+- **2026-08-23** — **ÉPICA W5+W6 — Departamento de Programación interna (IPD) + monitorización de salud**:
+  (a) **Departamento IPD creado y live** (decisiones owner 7 micro + naming "Internal
+  Programming" para evitar colisión con el futuro "external programming"):
+  `internal-programming` / `internal-programming-head` / "Internal Programming Head", preset
+  `deepartments-head-internal-programming`, workspace
+  `/root/.deepartments/departments/internal-programming`, personas
+  builder/reviewer/explore-deep/organizer + ARCHITECTURE/README (spec
+  `docs/specs/005`), **agenda común** (CalendarEntry.departmentId atribución + filtro
+  opcional; ya era global).
+  (b) **Tool `dept_exec`** (shell con ámbito): roots permitidos `{/home/esuarez/projects,
+  /usr/lib/node_modules/@deepseek-ai/dsh, /opt/dsh/.dsh-dev, repo, workspace, stateDir}`,
+  **stable `/opt/dsh/.dsh` protegido** (solo permiso explícito del owner), denylist de
+  comandos, normalización/realpath de tokens + whitelist /dev + `org.execRoots` opcional;
+  gated por allow-list de rol. 3 rondas de review (boundary stable-dev, tokens, redirects)
+  — **281/281**.
+  (c) **Jobs IPD**: `weekly-repo-health` (`0 8 * * 1`) y `version-watch` (`0 6 * * *` —
+  evalúa seguridad/novedades/viabilidad, instala en dev, notifica Asistente para
+  smart_restart; core-DSH solo propone).
+  (d) **Rol del Asistente** (skill + preset host): interfaz/coordinador; programación
+  interna SIEMPRE vía IPH (D2, PROGRAMMING REQUEST), fallback de emergencia anotado;
+  presets base head/worker generalizados (orquestación agnóstica, ids `dept_worker_*`).
+  (e) **E2E real del IPD**: m-79 → head ejecuta `weekly-repo-health` (job end-to-end vía
+  `dept_job_run`, worker builder con `dept_exec` en-scope, reportes, 0 commits,
+  0 out-of-scope); README actualizados en 3 repos (en/zh parity) — commits `24f701e`,
+  `c12ef17`, `71733f6`.
+  (f) **W6 system-health** (petición owner "monitorizar que todo va bien"):
+  post-errors.jsonl (captura de fallos de materialización/wake) + daemon 60s (heartbeat,
+  scan errores ≤2h dedupe 30min + fallos de entrega dedupe por messageId, ALERT por bus al
+  Asistente con `[From deepartments]`, estado anti-repetición persistente) + job digest
+  `system-health-report` (`0 7 * * *`) + spec 006; **tests 281→288**, 2 gates reviewer
+  PASS; commit `5b1537a`.
+  (g) **Deploy+drill**: ladder verde; probe E2E en vivo — heartbeat + **2 ALERT reales
+  recibidos por el host** (drill + post-error REAL `agent/inbox/spliced non-JSON` en sesión
+  host) → monitorización operativa.
+  (h) **INCIDENTE (2026-08-23) — colisión de sesión IPH**: el smoke CLI del twin (comparte
+  DSH home/sessions con el GUI) materializó al head nuevo y dejó log stale
+  (`head-internal-programming-head`); el GUI al retomar la MISMA sesión determinística →
+  guard `dsh-session-persistence` "id collision" → turno fallido. FIX: limpiar log stale +
+  restart limpio; **patched twin** (`tool-subagent-control` disabled — colisión
+  `send_message` pre-existente, carrera de registro; GUI/stable intactos). LECCIÓN: no
+  correr smoke CLI del twin con heads configurados con artifacts durables en el mismo DSH
+  home.
+  (i) **PENDIENTES**: decisión OWNER — release-state de dsh-tool-web-enhanced (Parallel docs
+  vs [Unreleased] npm 0.3.0-rc.1: ¿bump a 0.4.0-rc.1 o marcar unreleased en README?);
+  W7 backlog IPD — (1) ruido de delivery-failures a recipientes muertos (re-intentos en cada
+  boot), (2) error `agent/inbox/spliced non-JSON-serializable` en wake del host; key3
+  re-test 00:00Z; informe diario 09:00 GMT 2026-08-24 (verificación); test script opcional
+  dsh-tool-web-enhanced.
