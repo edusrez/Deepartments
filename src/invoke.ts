@@ -2843,6 +2843,120 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   })
 
+  // --- F3 (spec 004 §3.2/§5.2/§7.4): ROLE TEMPLATES --------------------------
+  // A role is a PERSONA TEMPLATE referenced by name, versioned in the repo at
+  // `presets/departments/<dept-id>/<role>.md` (frontmatter `id`/`title`/`tools`
+  // + persona body). Roles are NOT agent presets (no preset.yml /
+  // agent.cordis.yml pair — see presets/departments/research/README.md): the
+  // worker still mounts the neutral base `deepartments-worker` preset and the
+  // ROLE DELTA is the persona, injected as a systemPrompt section at spawn
+  // time (installRoleSection `extra`). The `tools` frontmatter is DOCUMENTED
+  // ONLY in this phase: postSetup still masks every global with the lean
+  // `restrict({allow: []})` and there is NO role-driven allow list binding
+  // yet (spec §7.1/§9 — a later phase).
+
+  /** One resolved role template (the persona delta + display title). */
+  interface RoleTemplate {
+    id: string
+    title: string
+    tools?: string[]
+    persona: string
+    path: string
+  }
+
+  /** The repo path of one department's role template file. */
+  const roleTemplatePath = (departmentId: string, role: string): string =>
+    path.join(repoRoot, 'presets', 'departments', departmentId, `${role}.md`)
+
+  /** Parse the LEAN frontmatter the role templates use (spec §3.2:
+   * `---`-delimited YAML-lite — `key: value` scalars + `- item` lists for
+   * `tools`). Returns the meta map + the persona body, or undefined when the
+   * file has no well-formed frontmatter block. Deliberately NOT a YAML
+   * dependency (the bundle adds none): the role format is a constrained
+   * subset, and a malformed template must fail loud at spawn (spec §5.4
+   * analogy), never silently spawn a persona-less worker. */
+  const parseRoleTemplateFrontmatter = (text: string): { meta: Record<string, string | string[]>; body: string } | undefined => {
+    const lines = text.split('\n')
+    if (lines[0]?.trim() !== '---') return undefined
+    let end = -1
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i].trim() === '---') {
+        end = i
+        break
+      }
+    }
+    if (end < 0) return undefined
+    const meta: Record<string, string | string[]> = {}
+    let lastKey: string | undefined
+    for (let i = 1; i < end; i++) {
+      const line = lines[i]
+      const scalar = /^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/.exec(line)
+      if (scalar !== null) {
+        lastKey = scalar[1]
+        const value = scalar[2].trim()
+        // `tools:` with no inline value opens a list (the `- item` lines below).
+        meta[lastKey] = value === '' ? [] : value
+        continue
+      }
+      const item = /^\s*-\s+(.*)$/.exec(line)
+      if (item !== null && lastKey !== undefined) {
+        const current = meta[lastKey]
+        if (Array.isArray(current)) current.push(item[1].trim())
+        else meta[lastKey] = [item[1].trim()]
+      }
+    }
+    const body = lines.slice(end + 1).join('\n').trim()
+    if (body === '') return undefined
+    return { meta, body }
+  }
+
+  /** Resolve + validate ONE role template (loud errors — a missing or
+   * malformed role file must fail the spawn). The frontmatter `id` must match
+   * the name it is referenced by (the file name IS the role id, §3.2); the
+   * `title` is the display title fallback for the sidebar pin. */
+  const readRoleTemplate = async (departmentId: string, role: string): Promise<RoleTemplate> => {
+    const filePath = roleTemplatePath(departmentId, role)
+    let text: string
+    try {
+      text = await readFile(filePath, 'utf8')
+    } catch (error: unknown) {
+      throw new Error(`[deepartments] dept_worker_spawn: role "${role}" has no template at ${filePath} — a role must be a file presets/departments/${departmentId}/<role>.md (frontmatter id/title/tools + persona body)`)
+    }
+    const parsed = parseRoleTemplateFrontmatter(text)
+    if (parsed === void 0) {
+      throw new Error(`[deepartments] dept_worker_spawn: role template "${role}" (${filePath}) has no valid frontmatter — expected a '---' block (id/title/tools) plus a persona body`)
+    }
+    const declaredId = typeof parsed.meta.id === 'string' ? parsed.meta.id : void 0
+    if (declaredId !== role) {
+      throw new Error(`[deepartments] dept_worker_spawn: role template "${role}" (${filePath}) declares frontmatter id "${declaredId ?? '(none)'}" — the file name must match the role id it is referenced by`)
+    }
+    const title = typeof parsed.meta.title === 'string' && parsed.meta.title.trim() !== '' ? parsed.meta.title : role
+    const toolsValue = parsed.meta.tools
+    const tools = Array.isArray(toolsValue) ? toolsValue.filter((item): item is string => typeof item === 'string') : void 0
+    return { id: declaredId, title, tools, persona: parsed.body, path: filePath }
+  }
+
+  /** The default sidebar title of a spawned worker (spec §5.2):
+   * `<RoleTitle>: <task|job title|id>` — the role template's title, then the
+   * task (or the job id / the derived post id), e.g. "Researcher: DSH
+   * updates". The `title?` spawn parameter overrides it. */
+  const defaultWorkerTitle = (roleTitle: string, task: string | undefined, jobId: string | undefined, postId: string): string =>
+    `${roleTitle}: ${task ?? jobId ?? postId}`
+
+  /** Dedup the worker POST id (spec §5.2): the base slug (jobId ?? role) is
+   * suffixed `-2`, `-3`… while the candidate is already registered — INCLUDING
+   * RETIRED (a retired worker's id is never reused; F1 keeps retired entries
+   * in byPost, so the dedup sees them) — or shadows a configured head. The
+   * live-session guard mirrors dept_post_create's (a legacy orphan session). */
+  const dedupedWorkerSlug = (base: string): string => {
+    const sanitized = String(base ?? '').trim().replace(/[^\w.-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '') || 'worker'
+    let slug = sanitized
+    for (let n = 2; byPost.has(slug) || coordinatorForPost(slug) !== void 0 || (agents !== void 0 && agents.get(String(SessionId(workerSessionId(slug)))) !== void 0); n++) {
+      slug = `${sanitized}-${n}`
+    }
+    return slug
+  }
+
   /** Disposer closure per tool the head own-layer registers. */
   type HeadToolDisposers = { dispose: () => void }
 
@@ -2854,12 +2968,13 @@ export function applyInvoke(ctx: Context, config: Config) {
    * map) after marking sleepEpoch.
    *
    * Batch 3a — `manager: true` (a department HEAD, not a worker) additionally
-   * registers the department-lifecycle tools `dept_post_create` and
-   * `dept_post_retire`, so a head can create/retire the WORKERS of its own
-   * department. A worker (`manager: false`) gets ONLY the messaging tools —
-   * never the create/retire life-cycle controls (and a HOST never gets
-   * them either: these register ONLY in the head own-layer, never the global
-   * host plane). */
+   * registers the department-lifecycle tools `dept_post_create`,
+   * `dept_post_retire` (legacy) AND the F3 department-scoped worker tools
+   * `dept_worker_spawn` / `dept_worker_retire`, so a head can create/retire
+   * the WORKERS of its own department. A worker (`manager: false`) gets ONLY
+   * the messaging tools — never the create/retire life-cycle controls (and a
+   * HOST never gets them either: these register ONLY in the head own-layer,
+   * never the global host plane). */
   const installHeadBoardTools = (agentCtx: Context, manager = false): HeadToolDisposers => {
     const disposers: Array<() => void> = []
 
@@ -3083,6 +3198,475 @@ export function applyInvoke(ctx: Context, config: Config) {
           return retirePost(args.postId, agent.id as string)
         }
       })))
+
+      // --- F4 (spec 004 §5.4-§5.5, D7): JOB tools — dept_job_list /
+      // dept_job_run (registered ONLY here, in the head own-layer: the RH
+      // executes its department's VERSIONED jobs manually; the host plane
+      // never sees them — D2 structural, dept_worker_spawn parity; a worker
+      // (manager:false) never sees them either). The department is DERIVED
+      // from the caller (a head can only list/run the jobs of ITS OWN
+      // department — the jobDir is resolved from the caller's config
+      // department, spec §5.4 "own department only" by construction). Job
+      // definitions are plain repo files: `docs/departments/<dept-id>/jobs/
+      // <slug>.md` (see docs/departments/research/README.md — the F4a job
+      // files), read from the repo — the SAME repo tree the F3 role
+      // templates come from (`repoRoot`, the plugin's bundle dir floor).
+      // There is NO scheduler/calendar this phase (D7): `schedule` is parsed
+      // and displayed, never triggered. -------------------------------------
+      /** The department's job directory (spec 004 §3.1): the config
+       * `org.departments[].jobDir` (F1 left it optional) — repo-relative OR
+       * absolute; when absent/empty the DEFAULT is
+       * `<repoRoot>/docs/departments/<dept-id>/jobs` (spec §3.3 layout —
+       * the SAME repo-root mechanism the plugin already uses to resolve the
+       * F3 role template tree, `repoRoot` + `readRoleTemplate`). */
+      const jobDirFor = (department: DepartmentConfig): string => {
+        const configured = (department.jobDir ?? '').trim()
+        if (configured === '') return path.join(repoRoot, 'docs', 'departments', department.id, 'jobs')
+        return path.isAbsolute(configured) ? configured : path.join(repoRoot, configured)
+      }
+
+      /** Unwrap a QUOTED-YAML scalar (the F4a jobs convention quotes free-text
+       * values like `schedule`: `"daily 09:00 (reserved — …)"`). The F3 role
+       * mini-parser needs no quote handling (its values are unquoted); the job
+       * parser normalizes them so list/run display the VALUES, not the quotes. */
+      const unwrapQuotedScalar = (value: string): string => {
+        if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
+          return value.slice(1, -1)
+        }
+        return value
+      }
+
+      /** Parse a job definition frontmatter (spec 004 §5.4-§5.5 — the
+       * `---`-delimited format the F4a jobs use: `key: value` one-line
+       * scalars for id/title/role/description/schedule?/owner/outbox? plus a
+       * NON-EMPTY task body). Same lean YAML-lite shape as the F3 role
+       * parser (no YAML dep), equivalent and consistent — with these job
+       * deltas: quoted scalar unwrapping, and REQUIRED key validation
+       * (id/title/role/description/owner — missing/invalid → undefined so
+       * the list reports per-entry and dept_job_run fails loud). */
+      const parseJobFrontmatter = (text: string): { meta: Record<string, string>; body: string } | undefined => {
+        const lines = text.split('\n')
+        if (lines[0]?.trim() !== '---') return undefined
+        let end = -1
+        for (let i = 1; i < lines.length; i++) {
+          if (lines[i].trim() === '---') {
+            end = i
+            break
+          }
+        }
+        if (end < 0) return undefined
+        const meta: Record<string, string> = {}
+        for (let i = 1; i < end; i++) {
+          const scalar = /^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/.exec(lines[i])
+          // Non-key lines inside the block are ignored (F3-parser consistency).
+          if (scalar !== null) meta[scalar[1]] = unwrapQuotedScalar(scalar[2].trim())
+        }
+        const body = lines.slice(end + 1).join('\n').trim()
+        if (body === '') return undefined
+        for (const key of ['id', 'title', 'role', 'description', 'owner']) {
+          if (typeof meta[key] !== 'string' || meta[key].trim() === '') return undefined
+        }
+        return { meta, body }
+      }
+
+      /** Read + resolve ONE job definition (spec 004 §5.4): locate
+       * `<jobId>.md` in the department's jobDir, parse the frontmatter and
+       * validate the declared `id` matches the requested jobId. LOUD errors
+       * — a versioned definition with broken syntax/keys must fail the run,
+       * never spawn a task-less worker. */
+      const readJobDefinition = async (department: DepartmentConfig, jobId: string): Promise<{ meta: Record<string, string>; body: string; path: string }> => {
+        const jobDir = jobDirFor(department)
+        const filePath = path.join(jobDir, `${jobId}.md`)
+        let text: string
+        try {
+          text = await readFile(filePath, 'utf8')
+        } catch {
+          throw new Error(`[deepartments] dept_job_run: job not found: ${jobId} (searched ${jobDir})`)
+        }
+        const parsed = parseJobFrontmatter(text)
+        if (parsed === void 0) {
+          throw new Error(`[deepartments] dept_job_run: job "${jobId}" (${filePath}) has no valid frontmatter — expected a '---' block (id/title/role/description/owner required; schedule/outbox optional) plus a non-empty task body`)
+        }
+        if (parsed.meta.id !== jobId) {
+          throw new Error(`[deepartments] dept_job_run: job "${jobId}" (${filePath}) declares frontmatter id "${parsed.meta.id}" — the file name must match the job id it is referenced by`)
+        }
+        return { meta: parsed.meta, body: parsed.body, path: filePath }
+      }
+
+      /** Validate the job's `role` BEFORE the spawn (spec 005 §5.4): the role
+       * MUST name an existing role template of the department
+       * (`presets/departments/<dept-id>/<role>.md` — the same tree F3's
+       * readRoleTemplate resolves); missing → job-scoped loud error. The full
+       * resolution (frontmatter id-match + persona body) is then left to F3's
+       * readRoleTemplate, unchanged. */
+      const validateJobRole = async (departmentId: string, jobId: string, role: string): Promise<void> => {
+        const filePath = roleTemplatePath(departmentId, role)
+        try {
+          await readFile(filePath, 'utf8')
+        } catch {
+          throw new Error(`[deepartments] dept_job_run: job "${jobId}" declares role "${role}" which has no template at ${filePath} — a role must be a file presets/departments/${departmentId}/<role>.md`)
+        }
+      }
+
+      /** The LIVE (non-retired) worker already running the job in THIS
+       * department (spec §5.4 idempotency): a second dept_job_run of the same
+       * job must NOT spawn a duplicate — the head finishes by retiring the
+       * worker explicitly (dept_worker_retire), then re-runs. */
+      const runningJobWorker = (jobId: string, departmentId: string): string | undefined => {
+        for (const entry of byPost.values()) {
+          if (entry.provider === 'worker' && entry.retired !== true && entry.departmentId === departmentId && entry.jobId === jobId) return entry.postId
+        }
+        return undefined
+      }
+
+      /** One listed job (spec 004 §5.5 + D7): the frontmatter fields, the
+       * resolved repo path, `status: "manual-run"` (no calendar this phase)
+       * and an `error` carrying the reason when the definition's frontmatter
+       * is invalid (per-entry — the list never fails as a whole). */
+      interface JobListItem {
+        id: string
+        path: string
+        status?: 'manual-run'
+        title?: string
+        role?: string
+        description?: string
+        schedule?: string
+        owner?: string
+        outbox?: string
+        error?: string
+      }
+
+      disposers.push(agentCtx.tools.register(defineTool({
+        name: 'dept_job_list',
+        description: 'List the versioned JOB definitions of YOUR department (spec 004 §5.5): scan the department jobDir (config org.departments[].jobDir — repo-relative or absolute; default <repoRoot>/docs/departments/<your-department-id>/jobs) and parse each *.md definition frontmatter (id/title/role/description/schedule?/owner/outbox?). Returns the resolved jobDir + the list {id, title, role, description, schedule, status:"manual-run", owner, path} per job; a definition with INVALID frontmatter is reported PER-ENTRY with an error (the whole list is never failed). `schedule` is informational only (D7 — no calendar/scheduler this phase): every job runs MANUALLY via dept_job_run. Registered ONLY in the head own-layer.',
+        parameters: {},
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              jobDir: { type: 'string', required: true },
+              jobs: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: 'string', required: true },
+                    path: { type: 'string', required: true },
+                    status: { type: 'string' },
+                    title: { type: 'string' },
+                    role: { type: 'string' },
+                    description: { type: 'string' },
+                    schedule: { type: 'string' },
+                    owner: { type: 'string' },
+                    outbox: { type: 'string' },
+                    error: { type: 'string' }
+                  }
+                }
+              }
+            }
+          },
+          render: (_args, value) => {
+            const lines = value.jobs.map((job) => {
+              if (job.error !== void 0) return `  - ${job.id} (${job.path}) — ERROR: ${job.error}`
+              const meta = [job.status, job.role].filter(Boolean).join(', ')
+              return `  - ${job.id} — "${job.title}" (${meta}) [${job.path}]`
+            })
+            return [{ type: 'text', text: `jobs (${value.jobs.length}) in ${value.jobDir}:\n${lines.join('\n')}` } as const]
+          }
+        },
+        async execute(_args, exec): Promise<{ jobDir: string; jobs: JobListItem[] }> {
+          const agent = exec.agent
+          if (!agent) throw new Error('dept_job_list requires a calling agent (exec.agent was undefined)')
+          const headId = postIdForChild(agent.id as string)
+          if (headId === void 0) throw new Error('[deepartments] dept_job_list is for a department HEAD (registered post), not the host')
+          const headEntry = byPost.get(headId)
+          if (headEntry === void 0) throw new Error(`[deepartments] dept_job_list: head "${headId}" is not registered`)
+          // A head WITHOUT a config department cannot list jobs (the jobDir is
+          // resolved from ITS department — spec §5.4 own-department-only).
+          const department = departmentForPost(headId)
+          if (department === void 0) throw new Error(`[deepartments] dept_job_list: head "${headId}" has no CONFIGURED department — the job directory cannot be resolved`)
+          const jobDir = jobDirFor(department)
+          let files: string[]
+          try {
+            files = (await readdir(jobDir)).filter((name) => name.endsWith('.md')).sort()
+          } catch (error: unknown) {
+            // No jobs declared yet (missing default dir) → an EMPTY list, not
+            // an error; any other failure (permissions, misconfig) is loud.
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { jobDir, jobs: [] }
+            throw error
+          }
+          const jobs: JobListItem[] = []
+          for (const name of files) {
+            const filePath = path.join(jobDir, name)
+            let parsed: { meta: Record<string, string>; body: string } | undefined
+            try {
+              parsed = parseJobFrontmatter(await readFile(filePath, 'utf8'))
+            } catch {
+              parsed = void 0
+            }
+            if (parsed === void 0) {
+              // Per-entry error: an invalid definition is REPORTED, the list
+              // as a whole still returns (spec §5.5 list robustness).
+              jobs.push({
+                id: name.replace(/\.md$/, ''),
+                path: filePath,
+                error: 'invalid frontmatter (expected a `---` block with id/title/role/description/owner plus a non-empty body)'
+              })
+              continue
+            }
+            jobs.push({
+              id: parsed.meta.id,
+              title: parsed.meta.title,
+              role: parsed.meta.role,
+              description: parsed.meta.description,
+              schedule: parsed.meta.schedule,
+              status: 'manual-run',
+              owner: parsed.meta.owner,
+              outbox: parsed.meta.outbox,
+              path: filePath
+            })
+          }
+          return { jobDir, jobs }
+        }
+      })))
+
+      disposers.push(agentCtx.tools.register(defineTool({
+        name: 'dept_job_run',
+        description: 'Execute ONE versioned JOB of YOUR department (spec 004 §5.4, D7 — manual execution; no calendar): read the job definition <jobId>.md in the department jobDir (config org.departments[].jobDir; default <repoRoot>/docs/departments/<your-department-id>/jobs), validate its role against presets/departments/<your-department>/<role>.md, and materialize a WORKER exactly like dept_worker_spawn with role = the definition role, task = the JOB BODY (the full concrete assignment), jobId recorded, slug = the job id (deduped -2, -3… including retired), title = the HUMAN frontmatter title. Returns the worker id + session id + title + job id + the definition path. IDEMPOTENCY: a job already running (a LIVE, non-retired job worker of your department with that jobId) is NOT duplicated — it errors `job already running: <workerId>` (retire it explicitly with dept_worker_retire to restart). Missing job / broken frontmatter / unknown role → loud error (a versioned definition with a syntax error must fail the run, never spawn a task-less worker). `schedule` is ignored (reserved, D7). Registered ONLY in the head own-layer.',
+        parameters: {
+          jobId: { type: 'string', required: true, description: 'The job definition id (the file <jobId>.md in the department jobDir — e.g. "monitor-dsh-updates").' }
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              workerId: { type: 'string', required: true },
+              sessionId: { type: 'string', required: true },
+              title: { type: 'string', required: true },
+              jobId: { type: 'string', required: true },
+              role: { type: 'string', required: true },
+              jobPath: { type: 'string', required: true }
+            }
+          },
+          render: (_args, value) => [{ type: 'text', text: `ran job ${value.jobId}: worker ${value.workerId} (session ${value.sessionId}, role ${value.role}, title "${value.title}") — definition ${value.jobPath}` } as const]
+        },
+        async execute(args, exec): Promise<{ workerId: string; sessionId: string; title: string; jobId: string; role: string; jobPath: string }> {
+          const agent = exec.agent
+          if (!agent) throw new Error('dept_job_run requires a calling agent (exec.agent was undefined)')
+          if (agents === void 0) throw new Error('[deepartments] dept_job_run requires the agents service')
+          const headId = postIdForChild(agent.id as string)
+          if (headId === void 0) throw new Error('[deepartments] dept_job_run is for a department HEAD (registered post), not the host')
+          const headEntry = byPost.get(headId)
+          if (headEntry === void 0) throw new Error(`[deepartments] dept_job_run: head "${headId}" is not registered`)
+          const department = departmentForPost(headId)
+          if (department === void 0) throw new Error(`[deepartments] dept_job_run: head "${headId}" has no CONFIGURED department — the job directory cannot be resolved`)
+          const jobId = String(args.jobId ?? '').trim()
+          if (jobId === '') throw new Error('[deepartments] dept_job_run: `jobId` is required')
+          // 1. Read + parse the definition FIRST (loud: missing/broken → fail).
+          const definition = await readJobDefinition(department, jobId)
+          // 2. Role validation against the department role template tree.
+          await validateJobRole(department.id, jobId, definition.meta.role)
+          // 3. Idempotency (spec §5.4): never duplicate a running job worker.
+          const running = runningJobWorker(jobId, department.id)
+          if (running !== void 0) {
+            throw new Error(`[deepartments] dept_job_run: job already running: ${running} — retire it explicitly with dept_worker_retire to restart "${jobId}"`)
+          }
+          // 4. dept_worker_spawn contract replicated (shared helpers — the F3
+          // spawn engine is untouched): resolve the role template (persona +
+          // title), slug-dedup from the job id, materialize the worker root
+          // agent with departmentId/managerId/jobId, pin the HUMAN job title,
+          // then deliver the JOB BODY as the first durable bus message (the
+          // task = the whole definition body, spec §3.3/§5.4).
+          const template = await readRoleTemplate(department.id, definition.meta.role)
+          const postId = dedupedWorkerSlug(jobId)
+          const sessionId = SessionId(workerSessionId(postId))
+          if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_job_run: a live agent already exists for session "${sessionId}"`)
+          const title = definition.meta.title
+          const setup = workerSetup(postId, headEntry.roomId, definition.meta.role, { persona: template.persona, taskText: definition.body })
+          const handle = await agents.create({
+            sessionId: String(SessionId(sessionId)),
+            meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
+            agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+            setup
+          })
+          registerEntry({
+            postId,
+            sessionId: String(SessionId(sessionId)),
+            roomId: headEntry.roomId,
+            agentPreset: WORKER_PRESET_ID,
+            provider: 'worker',
+            role: definition.meta.role,
+            managerId: headId,
+            departmentId: department.id,
+            jobId
+          })
+          byHeadHandle.set(String(SessionId(sessionId)), handle)
+          const titleSession = ctx.sessions.get(sessionId)
+          if (titleSession !== void 0) {
+            const titlePin = pinSessionTitle(titleSession, title)
+            if (titlePin === 'pinned') {
+              ctx.logger.info(`[deepartments] dept_job_run: pinned worker session title "${title}" (${sessionId})`)
+            } else if (titlePin === 'failed') {
+              ctx.logger.warn(`[deepartments] dept_job_run: worker session title pin failed for ${sessionId} (non-fatal — worker registration continues)`)
+            }
+          }
+          const store = await messagesStoreReady
+          const record = await store.append({
+            from: headId,
+            to: [postId],
+            text: definition.body,
+            kind: 'agent'
+          })
+          await deliverBusRecord(record, postId, agent.id as string, agent.id as string, exec.signal)
+          return { workerId: postId, sessionId: String(SessionId(sessionId)), title, jobId, role: definition.meta.role, jobPath: definition.path }
+        }
+      })))
+
+      // --- F3 (spec 004 §5.2): dept_worker_spawn — the department-scoped
+      // worker deployment tool (registered ONLY here, in the head own-layer:
+      // D2 — the Asistente NEVER mints research workers; structural like
+      // dept_post_create). The department is DERIVED from the caller (a head
+      // can only deploy into its OWN department — spec §5.2 validation, the
+      // cross-department spawn surface is absent by construction). -----------
+      disposers.push(agentCtx.tools.register(defineTool({
+        name: 'dept_worker_spawn',
+        description: 'Spawn a WORKER of YOUR department (spec 004 §5.2): resolve the role template presets/departments/<your-department>/<role>.md (its persona + display title), materialize a fresh root agent worker (sessionId worker-<slug>, its own session row), register it in posts.json with provider:"worker", role, YOUR postId as managerId, your config department as departmentId and the jobId (when given), inject the role persona + your task into its system prompt, pin its sidebar title (title? overrides the default "<RoleTitle>: <task|jobId|slug>"), and deliver the task as its first durable bus message (which wakes it). Worker slugs DEDUP with -2, -3… — a registered (even retired) slug is never reused. Returns the worker post id + session id + the pinned title. Registered ONLY in the head own-layer.',
+        parameters: {
+          role: { type: 'string', required: true, description: 'The role template name, e.g. "researcher" — must be a file presets/departments/<your-department>/<role>.md.' },
+          task: { type: 'string', description: 'The one-off assignment: injected into the worker persona AND delivered as its first bus message.' },
+          jobId: { type: 'string', description: 'Set when the worker runs a versioned job (F4); becomes the slug base and is recorded on the entry.' },
+          title: { type: 'string', description: 'Sidebar row title (overrides the default "<RoleTitle>: <task|jobId|slug>").' }
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              workerId: { type: 'string', required: true },
+              sessionId: { type: 'string', required: true },
+              title: { type: 'string', required: true }
+            }
+          },
+          render: (_args, value) => [{ type: 'text', text: `spawned worker ${value.workerId} (session ${value.sessionId}, title "${value.title}")` } as const]
+        },
+        async execute(args, exec): Promise<{ workerId: string; sessionId: string; title: string }> {
+          const agent = exec.agent
+          if (!agent) throw new Error('dept_worker_spawn requires a calling agent (exec.agent was undefined)')
+          if (agents === void 0) throw new Error('[deepartments] dept_worker_spawn requires the agents service')
+          const headId = postIdForChild(agent.id as string)
+          if (headId === void 0) throw new Error('[deepartments] dept_worker_spawn is for a department HEAD (registered post), not the host')
+          const headEntry = byPost.get(headId)
+          if (headEntry === void 0) throw new Error(`[deepartments] dept_worker_spawn: head "${headId}" is not registered`)
+          // A head WITHOUT a config department cannot spawn: the role template
+          // tree (presets/departments/<dept-id>/) is keyed by the department.
+          const department = departmentForPost(headId)
+          if (department === void 0) throw new Error(`[deepartments] dept_worker_spawn: head "${headId}" has no CONFIGURED department — the role template tree (presets/departments/<department-id>/) cannot be resolved`)
+          const role = String(args.role ?? '').trim()
+          if (role === '') throw new Error('[deepartments] dept_worker_spawn: `role` is required (a role template name, e.g. "researcher")')
+          // Role template is resolved BEFORE any create: a missing/malformed
+          // role file fails the spawn loudly (never a persona-less worker).
+          const template = await readRoleTemplate(department.id, role)
+          // Slug dedup (spec §5.2): base = jobId ?? role; -2/-3… on collision —
+          // INCLUDING RETIRED slugs (F1 keeps retired entries in byPost).
+          const postId = dedupedWorkerSlug(args.jobId ?? role)
+          const sessionId = SessionId(workerSessionId(postId))
+          if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_worker_spawn: a live agent already exists for session "${sessionId}"`)
+          const title = String(args.title ?? '').trim() !== '' ? String(args.title) : defaultWorkerTitle(template.title, args.task, args.jobId, postId)
+          const setup = workerSetup(postId, headEntry.roomId, role, { persona: template.persona, taskText: args.task })
+          const handle = await agents.create({
+            sessionId: String(SessionId(sessionId)),
+            meta: { cwd: await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
+            agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+            setup
+          })
+          registerEntry({
+            postId,
+            sessionId: String(SessionId(sessionId)),
+            roomId: headEntry.roomId,
+            agentPreset: WORKER_PRESET_ID,
+            provider: 'worker',
+            role,
+            managerId: headId,
+            departmentId: department.id,
+            ...(args.jobId !== void 0 ? { jobId: args.jobId } : {})
+          })
+          byHeadHandle.set(String(SessionId(sessionId)), handle)
+          // F3 pin (spec §5.2): human-readable sidebar row — the owner's manual
+          // rename always wins, a session already holding the pin is never
+          // double-pinned, a failed pin only logs (registration stands).
+          const titleSession = ctx.sessions.get(sessionId)
+          if (titleSession !== void 0) {
+            const titlePin = pinSessionTitle(titleSession, title)
+            if (titlePin === 'pinned') {
+              ctx.logger.info(`[deepartments] dept_worker_spawn: pinned worker session title "${title}" (${sessionId})`)
+            } else if (titlePin === 'failed') {
+              ctx.logger.warn(`[deepartments] dept_worker_spawn: worker session title pin failed for ${sessionId} (non-fatal — worker registration continues)`)
+            }
+          }
+          // Deliver the assignment (or a creation note) as a DURABLE bus message
+          // from the head — the `deepartments/post-created` signal; the bus
+          // delivery wakes the worker (always-wake). ACL (F2): head → own
+          // department worker, allowed.
+          const text = args.task ?? `[created] worker "${postId}" (${role}) is registered. You are disposable — work your assigned task, then dept_memo_write and dept_sleep; your head retires you with dept_worker_retire when you are done.`
+          const store = await messagesStoreReady
+          const record = await store.append({
+            from: headId,
+            to: [postId],
+            text,
+            kind: 'agent'
+          })
+          await deliverBusRecord(record, postId, agent.id as string, agent.id as string, exec.signal)
+          return { workerId: postId, sessionId: String(SessionId(sessionId)), title }
+        }
+      })))
+
+      // --- F3 (spec 004 §5.3): dept_worker_retire — the department-scoped
+      // retire tool: ONLY MY workers (managerId match or own config department
+      // — the F1 retirePost scope) + mark (entry kept, retired:true) + archive
+      // the durable session (the sidebar row disappears, D5). Idempotent; the
+      // registry entry and message history are NEVER erased (D5). -----------
+      disposers.push(agentCtx.tools.register(defineTool({
+        name: 'dept_worker_retire',
+        description: 'Retire ONE of YOUR department\'s workers (spec 004 §5.3): marks it retired (the posts.json entry STAYS with retired:true — the live catalog stops addressing it, dept_who still lists it with retired:true), disposes its live handle, AND archives its durable session (non-fatal — the sidebar row disappears, D5). Scope: only the workers YOU created (managerId) or a worker of YOUR config department — another head\'s/department\'s worker is rejected loudly; a permanent department head is never retired here; unknown workerIds reject. Idempotent: a second retire of the same worker succeeds as a no-op. The registry entry and the message history are NEVER erased (D5: keep the logs).',
+        parameters: {
+          workerId: { type: 'string', required: true, description: 'The worker post id to retire (e.g. "researcher-alpha" — the id dept_who lists).' }
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              workerId: { type: 'string', required: true },
+              retired: { type: 'boolean', required: true },
+              archived: { type: 'boolean', required: true }
+            }
+          },
+          render: (_args, value) => [{ type: 'text', text: `retired worker ${value.workerId} (${value.archived ? 'session archived' : 'session archive skipped (non-fatal)'})` } as const]
+        },
+        async execute(args, exec): Promise<{ workerId: string; retired: boolean; archived: boolean }> {
+          const agent = exec.agent
+          if (!agent) throw new Error('dept_worker_retire requires a calling agent (exec.agent was undefined)')
+          const workerId = String(args.workerId ?? '').trim()
+          if (workerId === '') throw new Error('[deepartments] dept_worker_retire: `workerId` is required')
+          const entry = byPost.get(workerId)
+          if (entry === void 0) throw new Error(`[deepartments] dept_worker_retire: "${workerId}" is not a registered post`)
+          if (entry.provider !== 'worker') throw new Error(`[deepartments] dept_worker_retire: "${workerId}" is not a disposable worker — a head may only retire workers, never a permanent head`)
+          // Scope (manager/department match — "only MY workers") + mark + dispose
+          // are the F1 shared path (retirePost); idempotent on an already-retired
+          // worker (no-op success).
+          await retirePost(workerId, agent.id as string)
+          // F3 (spec §5.3): archive the DURABLE session so the sidebar row
+          // disappears — non-fatal (a failed archive only warns; the retire
+          // mark is the durable part). Runs on every retire INCLUDING the
+          // already-retired no-op: archiveSession is idempotent.
+          const archived = await archiveWorkerSession(entry.sessionId)
+          return { workerId, retired: true, archived }
+        }
+      })))
     }
 
     return { dispose: () => { for (const d of disposers) d() } }
@@ -3094,16 +3678,32 @@ export function applyInvoke(ctx: Context, config: Config) {
    * the framing between a PERMANENT department head (manager) and a TEMPORARY
    * DISPOSABLE worker. Both are BOOT-QUIET (never act unaddressed). B3
    * cutover: rooms wording removed — the post lives in the agent catalog. */
-  const installRoleSection = (agentCtx: Context, role: string, postId: string, isWorker: boolean): void => {
+  const installRoleSection = (agentCtx: Context, role: string, postId: string, isWorker: boolean, extra?: { persona?: string; taskText?: string }): void => {
     const sp = agentCtx.get('systemPrompt')
     if (sp === void 0 || typeof (sp as { section?: unknown }).section !== 'function') return
     sp.section({
       name: `deepartments:${isWorker ? 'worker' : 'head'}:role:${postId}`,
       order: 1,
       text: isWorker
-        ? `You are "${postId}", a ${role || 'rank-and-file researcher'} DISPOSABLE department worker of Deepartments (DeepSeek Harness). Your department HEAD created you as a temporary worker agent; you do not edit the repository, run builders, or spawn other agents. Read your messages with agent_messages, send with send_message, orient with dept_who, and persist your findings/memory with dept_memo_write. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives. Work the task your department head assigns you; when you are DONE, write dept_memo_write to save your results, then conclude with dept_sleep. You are DISPOSABLE: your head retires you with dept_post_retire when you are finished.`
-        : `You are "${postId}", the ${role || 'department head'}. You are a permanent, first-class agent: you do not edit the repository, run builders, or spawn other agents. Your world is the messaging bus — read with agent_messages, send with send_message, orient with dept_who, and persist memory with dept_memo_write before dept_sleep. You may create and retire DISPOSABLE WORKERS of your department with dept_post_create and dept_post_retire. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives; you never proactively send.`
+        ? `You are "${postId}", a ${role || 'rank-and-file researcher'} DISPOSABLE department worker of Deepartments (DeepSeek Harness). Your department HEAD created you as a temporary worker agent; you do not edit the repository, run builders, or spawn other agents. Read your messages with agent_messages, send with send_message, orient with dept_who, and persist your findings/memory with dept_memo_write. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives. Work the task your department head assigns you; when you are DONE, write dept_memo_write to save your results, then conclude with dept_sleep. You are DISPOSABLE: your head retires you with dept_worker_retire when you are finished.`
+        : `You are "${postId}", the ${role || 'department head'}. You are a permanent, first-class agent: you do not edit the repository, run builders, or spawn other agents. Your world is the messaging bus — read with agent_messages, send with send_message, orient with dept_who, and persist memory with dept_memo_write before dept_sleep. You may create and retire DISPOSABLE WORKERS of your department with dept_worker_spawn and dept_worker_retire (the department-scoped worker tools — the legacy dept_post_create/dept_post_retire still exist as the raw machinery). BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives; you never proactively send.`
     })
+    // F3 (spec §7.4): the ROLE PERSONA — the role template's body (+ the task)
+    // as a second section when dept_worker_spawn resolved one. The worker
+    // still mounts the base `deepartments-worker` preset; the role is the
+    // persona DELTA (the person supports it: role = persona + tool allowance).
+    if (extra !== void 0 && (extra.persona !== undefined || extra.taskText !== undefined)) {
+      const personaText = extra.persona ?? ''
+      const taskText = extra.taskText === undefined ? '' : `\n\n## Your current assignment\n\n${extra.taskText}`
+      const combined = `${personaText}${taskText}`.trim()
+      if (combined !== '') {
+        sp.section({
+          name: `deepartments:${isWorker ? 'worker' : 'head'}:role-persona:${postId}`,
+          order: 2,
+          text: combined
+        })
+      }
+    }
   }
 
   /** Build the `setup(agentCtx)` for one post (head OR worker): mount the post's
@@ -3111,7 +3711,7 @@ export function applyInvoke(ctx: Context, config: Config) {
    * agent. Runs pre-publication on the fresh agent's scoped context
    * (rc.8 CreateAgentOptions.setup, index.d.ts:117). The `manager` flag gates
    * the department-lifecycle tools (a head creates/retires; a worker cannot). */
-  const postSetup = (postId: string, roomId: string, role: string, opts: { preset: string; manager: boolean }): ((agentCtx: Context) => void | { commit(): void }) => {
+  const postSetup = (postId: string, roomId: string, role: string, opts: { preset: string; manager: boolean; persona?: string; taskText?: string }): ((agentCtx: Context) => void | { commit(): void }) => {
     const presetId = opts.preset
     const kind = opts.manager ? 'head' : 'worker'
     return (agentCtx) => {
@@ -3132,7 +3732,8 @@ export function applyInvoke(ctx: Context, config: Config) {
       // department-lifecycle create/retire tools for heads).
       const tools = installHeadBoardTools(agentCtx, opts.manager)
       // (c) Persona = the role (a head's role or a worker's role), NOT a mission.
-      installRoleSection(agentCtx, role, postId, opts.manager === false)
+      // F3: the ROLE PERSONA delta (+ the task) rides the same section seam.
+      installRoleSection(agentCtx, role, postId, opts.manager === false, { persona: opts.persona, taskText: opts.taskText })
       // Ensure the agent-scoped registrations unwind with the agent.
       agentCtx.effect(() => () => { tools.dispose(); restrictOwn() }, `deepartments: ${kind} board tools (${postId})`)
     }
@@ -3144,9 +3745,11 @@ export function applyInvoke(ctx: Context, config: Config) {
     postSetup(postId, roomId, role, { preset: presetId, manager: true })
 
   /** The setup for a DISPOSABLE department WORKER (no create/retire). Mounts
-   * the 'deepartments-worker' preset. */
-  const workerSetup = (postId: string, roomId: string, role: string): ((agentCtx: Context) => void | { commit(): void }) =>
-    postSetup(postId, roomId, role, { preset: WORKER_PRESET_ID, manager: false })
+   * the 'deepartments-worker' preset. F3: `extra` carries the role template
+   * persona + the spawned task (spec §7.4 — persona delta + assignment).
+   * Absent (legacy dept_post_create) → the framing role section only. */
+  const workerSetup = (postId: string, roomId: string, role: string, extra?: { persona?: string; taskText?: string }): ((agentCtx: Context) => void | { commit(): void }) =>
+    postSetup(postId, roomId, role, { preset: WORKER_PRESET_ID, manager: false, persona: extra?.persona, taskText: extra?.taskText })
 
   /** Dispose one head's live AgentHandle (its only teardown capability; the
    * bare `agents.get(id)` returns no dispose — rc.8 index.d.ts:349 vs 155-158).
@@ -3249,6 +3852,29 @@ export function applyInvoke(ctx: Context, config: Config) {
     // dept_sleep) is JOINED instead of raced into a double dispose.
     void disposeHeadHandleOnce(entry.sessionId)
     return { postId, retired: true }
+  }
+
+  /** F3 — archive a retired WORKER's durable session via the workspaceRegistry
+   * seam (WorkspaceRegistryLike.archiveSession, the host-rotation precedent,
+   * session-rotation.ts:283-291) so the SIDEBAR ROW disappears (spec §5.3/D5).
+   * Non-fatal by design, exactly like the rotation archive: a missing registry
+   * (headless/minimal profile) or a failing call resolves `false` + a warn —
+   * the retire MARK (posts.json retired:true) is the durable part and always
+   * commits. Called by dept_worker_retire (ONLY the new department-scoped
+   * tool; the legacy dept_post_retire keeps today's no-archive behavior). */
+  const archiveWorkerSession = async (sessionId: string): Promise<boolean> => {
+    const registry = ctx.get('workspaceRegistry', false) as WorkspaceRegistryLike | undefined
+    if (registry?.archiveSession === void 0) {
+      ctx.logger.warn(`[deepartments] dept_worker_retire: archiveSession(${sessionId}) skipped — workspaceRegistry unavailable (the worker's sidebar row may remain until the registry service is present)`)
+      return false
+    }
+    try {
+      await registry.archiveSession(sessionId)
+      return true
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] dept_worker_retire: archiveSession(${sessionId}) failed (non-fatal — the retire mark still commits): ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
   }
 
   /** Piece 1 (2026-08-22) — the CANONICAL WORKSPACE ROOT PATH for created
@@ -4157,13 +4783,14 @@ export function applyInvoke(ctx: Context, config: Config) {
    * of the board's room-who and whereami tools is LANDED (this tool is now
    * the sole roster+identity tool). `you: true` marks the caller's own entry.
    * F1 (§4.1/§5.1): the row `kind` is DERIVED — `'worker'` for a disposable
-   * worker (provider:'worker'), `'head'` for a configured coordinator — and a
-   * RETIRED worker is filtered from the roster (it stays in posts.json as
-   * `retired: true`; the full extension of the row — departmentId/role/jobId —
-   * is the F3 phase). */
+   * worker (provider:'worker'), `'head'` for a configured coordinator. F3
+   * (§5.1): WORKER rows additionally carry `departmentId?`/`role?`/`jobId?`
+   * (the head manages its workers by filtering departmentId), and RETIRED
+   * workers stay LISTED with `retired: true` — the head's management view
+   * (the LIVE catalog — busDeliverCatalog addressing — still filters them). */
   const deptWhoTool = defineTool({
     name: 'dept_who',
-    description: 'List the whole Deepartments catalog — the Asistente host (kind "host", title "Asistente") and every registered department head/worker with its DERIVED kind (a configured department head is kind "head", a disposable worker is kind "worker"; title from the department configuration, PostEntry.role fallback) — each with live/sleeping state and session id, and your OWN entry marked you:true. This is the identity + roster tool: learn who exists and who you are in one call. No room parameter — the roster is the organization.',
+    description: 'List the whole Deepartments catalog — the Asistente host (kind "host", title "Asistente") and every registered department head/worker with its DERIVED kind (a configured department head is kind "head", a disposable worker is kind "worker"; title from the department configuration, PostEntry.role fallback) — each with live/sleeping state and session id, and your OWN entry marked you:true. Worker rows additionally carry departmentId/role/jobId (its department template and job link) and RETIRED workers are shown with retired:true (the head\'s management view; a retired worker is NOT addressed by the live catalog — sending to it fails per-recipient). This is the identity + roster tool: learn who exists and who you are in one call. No room parameter — the roster is the organization.',
     parameters: {},
     output: {
       schema: {
@@ -4183,7 +4810,11 @@ export function applyInvoke(ctx: Context, config: Config) {
                 live: { type: 'boolean', required: true },
                 sleeping: { type: 'boolean', required: true },
                 sessionId: { type: 'string', required: true },
-                you: { type: 'boolean', required: true }
+                you: { type: 'boolean', required: true },
+                departmentId: { type: 'string' },
+                role: { type: 'string' },
+                jobId: { type: 'string' },
+                retired: { type: 'boolean' }
               }
             }
           }
@@ -4191,17 +4822,17 @@ export function applyInvoke(ctx: Context, config: Config) {
       },
       render: (_args, value) => {
         const lines = value.members.map((member) =>
-          `  - ${member.agentId} (${member.kind}, "${member.title}"${member.live ? ', live' : ', offline'}${member.sleeping ? ', sleeping' : ''}${member.you ? ', YOU' : ''})`)
+          `  - ${member.agentId} (${member.kind}, "${member.title}"${member.live ? ', live' : ', offline'}${member.sleeping ? ', sleeping' : ''}${member.retired === true ? ', retired' : ''}${member.you ? ', YOU' : ''})`)
         return [{ type: 'text', text: `Deepartments catalog (${value.members.length} member(s)):\n${lines.join('\n')}` } as const]
       }
     },
-    async execute(_args, exec): Promise<{ members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean }> }> {
+    async execute(_args, exec): Promise<{ members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }> }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_who requires a calling agent (exec.agent was undefined)')
       // B3 gap fix: caller host self-registers when no live host exists (board
       // tools are gone; the roster must show the host with you:true).
       const callerMemberId = busEnsureHostForCaller(agent as { id: string; session?: { header?: SessionHeaderWithOrigin } })
-      const members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean }> = []
+      const members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }> = []
       for (const entry of hosts.values()) {
         if (entry.retired === true) continue
         members.push({
@@ -4215,15 +4846,16 @@ export function applyInvoke(ctx: Context, config: Config) {
         })
       }
       for (const entry of byPost.values()) {
-        // F1 (§4.3): retired workers are filtered from the LIVE roster (their
-        // entry stays durable with retired:true; history is not erased).
-        if (entry.retired === true) continue
+        // F3 (§5.1): retired workers stay LISTED (the head-management view)
+        // with `retired: true` — the LIVE catalog (busDeliverCatalog
+        // addressing) keeps filtering them; the entry stays durable.
         const coordinator = coordinatorForPost(entry.postId)
+        const isWorker = entry.provider === 'worker'
         members.push({
           agentId: entry.postId,
           // F1: kind derived — a disposable worker is 'worker'; every other
           // post (configured head) is 'head' (pre-F1 hardcode).
-          kind: entry.provider === 'worker' ? 'worker' : 'head',
+          kind: isWorker ? 'worker' : 'head',
           // Spec §6: coordinator.title for department heads; PostEntry.role
           // fallback for worker posts. Fallback chain follows head-presets.ts
           // (`headRoleLine`, the established convention): title → role → postId.
@@ -4231,7 +4863,13 @@ export function applyInvoke(ctx: Context, config: Config) {
           live: agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined,
           sleeping: entry.sleepEpoch !== void 0,
           sessionId: entry.sessionId,
-          you: entry.postId === callerMemberId
+          you: entry.postId === callerMemberId,
+          // F3 (§5.1): worker rows carry the department template/department
+          // link + job link (the head filters its workers by departmentId).
+          ...(isWorker && entry.departmentId !== void 0 ? { departmentId: entry.departmentId } : {}),
+          ...(isWorker && entry.role !== void 0 ? { role: entry.role } : {}),
+          ...(isWorker && entry.jobId !== void 0 ? { jobId: entry.jobId } : {}),
+          ...(isWorker && entry.retired === true ? { retired: true } : {})
         })
       }
       return { members }

@@ -2333,7 +2333,7 @@ test('F1 retire scope: a head retires ONLY its own workers — a worker of ANOTH
   })
 })
 
-test('F1 host retire scope: the HOST retires any worker (marked, entry kept) — and a retired worker disappears from the LIVE catalog and from dept_who', async () => {
+test('F1 host retire scope: the HOST retires any worker (marked, entry kept) — the retired worker disappears from the LIVE catalog (and is shown with retired:true in dept_who, F3-amended)', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
     try {
@@ -2358,9 +2358,15 @@ test('F1 host retire scope: the HOST retires any worker (marked, entry kept) —
       )
       assert.equal(send.delivered['researcher-alpha'], 'failed', 'a retired worker is not addressed by the live catalog')
 
-      // NOT in dept_who either (the live roster); the head stays with kind head.
+      // F3-amended 6(d) — the DISCRIMINATING assertion: a retired worker IS
+      // LISTED in dept_who (the head's management view) with retired:true,
+      // while the LIVE delivery catalog (the send above) fails it. The two
+      // surfaces are distinct: visible-with-flag, never addressed.
       const who = await root.tools.get('dept_who').execute({}, { agent: host, signal })
-      assert.ok(!who.members.some((m) => m.agentId === 'researcher-alpha'), 'the retired worker is filtered from dept_who')
+      const retiredRow = who.members.find((m) => m.agentId === 'researcher-alpha')
+      assert.ok(retiredRow, 'F3: the retired worker IS listed in dept_who (management view shows retired rows)')
+      assert.equal(retiredRow.retired, true, 'F3: the retired row carries retired:true')
+      assert.equal(retiredRow.kind, 'worker', 'the retired row keeps the derived kind "worker"')
       const headRow = who.members.find((m) => m.agentId === 'research-head')
       assert.ok(headRow, 'the head is still listed')
       assert.equal(headRow.kind, 'head', 'the configured head row keeps kind "head"')
@@ -5054,6 +5060,480 @@ test('B2 send_message: the unified implementation is the ONE bound after the ove
       assert.equal(wake.source.kind, 'agent')
     } finally {
       await dispose()
+    }
+  })
+})
+
+// --- F3 (spec 004 §5.1-§5.3, §7.4): worker-management tools -----------------
+// dept_worker_spawn (head own-layer ONLY: role template → worker root agent
+// with departmentId/managerId/role/jobId, persona + task injection, title pin,
+// slug dedup incl. retired) and dept_worker_retire (scope + retired mark +
+// archiveSession so the sidebar row disappears), plus the dept_who row
+// extension (departmentId/role/jobId; RETIRED workers stay listed with
+// retired:true while the LIVE catalog keeps filtering them).
+
+/** Boot the research department + a second department (programming) — the F3
+ * cross-department scope tests need another head. Mirrors f2BootWithTwoHeads
+ * (deliberately re-declared here so the F3 tests never depend on the F2 test
+ * zone). */
+async function f3BootWithTwoHeads(stateDir) {
+  const env = await bootPlugin(stateDir, { org: TWO_DEPT_ORG })
+  await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'research head materialized at boot')
+  await waitFor(() => env.agents.store.has('head-programming-head'), 5000, 'programming head materialized at boot')
+  const researchHead = env.agents.store.get('head-research-head')
+  const programmingHead = env.agents.store.get('head-programming-head')
+  const researchCtx = childContextFor(env.agents, 'head-research-head')
+  const programmingCtx = childContextFor(env.agents, 'head-programming-head')
+  return { ...env, researchHead, programmingHead, researchKey: researchCtx.key, programmingKey: programmingCtx.key, researchCtx: researchCtx.ctx, programmingCtx: programmingCtx.ctx }
+}
+
+/** Spawn via the head own-layer dept_worker_spawn and wait for the worker
+ * agent to be live. Returns the tool result + the live worker + its scoped
+ * toolset. */
+async function f3Spawn(env, headCtx, key, head, args) {
+  const signal = new AbortController().signal
+  const result = await headCtx.tools.get('dept_worker_spawn', key).execute(args, { agent: head, signal })
+  await waitFor(() => env.agents.store.has(`worker-${result.workerId}`), 5000, `worker ${result.workerId} live`)
+  const worker = env.agents.store.get(`worker-${result.workerId}`)
+  const wctx = childContextFor(env.agents, `worker-${result.workerId}`)
+  return { result, worker, ctx: wctx.ctx, key: wctx.key, signal }
+}
+
+test('F3 dept_worker_spawn: a head spawns a worker of its department (role template → persona + task, departmentId/managerId/role/jobId, title pin, first bus message) — and the host plane has NO dept_worker_spawn', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      assert.ok(headCtx.tools.get('dept_worker_spawn', key), 'dept_worker_spawn installed in the head own layer')
+      // D2: structural — the host plane never sees the spawn tool (the
+      // Asistente never mints research workers).
+      assert.equal(root.tools.get('dept_worker_spawn'), undefined, 'host plane has NO dept_worker_spawn')
+
+      const { result, worker, key: workerKey } = await f3Spawn({ agents, root }, headCtx, key, head, {
+        role: 'researcher',
+        task: 'track DSH updates and report',
+        jobId: 'monitor-dsh-updates'
+      })
+      assert.equal(result.workerId, 'monitor-dsh-updates', 'slug = jobId when given (job worker)')
+      assert.equal(result.sessionId, 'worker-monitor-dsh-updates')
+      // This title ONLY exists if the role template file was READ + its
+      // frontmatter parsed (the deterministic proof of the persona-loading
+      // mechanism — "Researcher" comes from presets/departments/research/
+      // researcher.md frontmatter, not from code).
+      assert.equal(result.title, 'Researcher: track DSH updates and report', 'default title = "<RoleTitle>: <task>" (role template title)')
+
+      // Durable entry: provider/role/manager/department/jobId (spec §4.1/§5.2).
+      const posts = await readPosts(stateDir)
+      const entry = posts['monitor-dsh-updates']
+      assert.equal(entry.provider, 'worker')
+      assert.equal(entry.role, 'researcher', 'role = the role TEMPLATE id')
+      assert.equal(entry.managerId, 'research-head', 'managerId = the creating head ("my workers")')
+      assert.equal(entry.departmentId, 'research', 'departmentId = the creating head config department')
+      assert.equal(entry.jobId, 'monitor-dsh-updates')
+
+      // The worker agent is live and its FIRST bus message is the task.
+      await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'worker woken by its first bus message')
+      assert.match(worker.inboxMessages.at(-1).content[0].text, /track DSH updates and report/, 'the task arrives as the first durable bus message')
+
+      // Title pin: user-kind session/title on the worker session (sidebar row).
+      const workerSession = root.sessions.get(SessionId('worker-monitor-dsh-updates'))
+      assert.ok(workerSession !== undefined, 'the worker session is entered in the real sessions store')
+      const title = workerSession.events.find((ev) => ev.type === 'session/title')
+      assert.ok(title !== undefined, 'dept_worker_spawn pinned a session/title event')
+      assert.equal(title.data.title, 'Researcher: track DSH updates and report')
+      assert.deepEqual(title.data.source, { kind: 'user' }, 'the pin is user-source (the owner manual rename always wins)')
+
+      // F3 persona mechanism (spec §7.4): the ROLE TEMPLATE body + the task are
+      // injected as a systemPrompt section (the persona delta; the worker still
+      // mounts the base deepartments-worker preset). The section surfacing via
+      // assemble is BEST-EFFORT in this stub harness (the Fix A1 head test
+      // guards the same seam — "a scope-less assemble may not surface it"), so
+      // the content is asserted only when the section did surface; the static
+      // proof is the title above (frontmatter-parsed) + the entry.role.
+      const sp = worker.ctx?.get('systemPrompt')
+      if (sp !== void 0 && typeof sp.assemble === 'function') {
+        const assembly = await sp.assemble({ scope: workerKey })
+        const persona = (assembly.sections ?? []).find((s) => s.name === 'deepartments:worker:role-persona:monitor-dsh-updates')
+        if (persona !== undefined) {
+          assert.match(persona.text, /You are a \*\*researcher\*\* of the \*\*Research Department\*\*/, 'the role persona body came from presets/departments/research/researcher.md')
+          assert.match(persona.text, /track DSH updates and report/, 'the task is injected with the persona')
+        }
+        const roleSection = (assembly.sections ?? []).find((s) => s.name === 'deepartments:worker:role:monitor-dsh-updates')
+        if (roleSection !== undefined) {
+          assert.match(roleSection.text, /dept_worker_retire/, 'the worker framing names the NEW retire tool')
+        }
+      }
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F3 gates: a worker agent has NO dept_worker_spawn/dept_worker_retire, and an unknown role template rejects loudly', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const { worker, ctx: workerCtx, key: workerKey } = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'check something' })
+
+      // A worker never sees the department-lifecycle tools (manager:false).
+      assert.equal(workerCtx.tools.get('dept_worker_spawn', workerKey), undefined, 'worker has NO dept_worker_spawn')
+      assert.equal(workerCtx.tools.get('dept_worker_retire', workerKey), undefined, 'worker has NO dept_worker_retire')
+
+      // A role without a template file fails LOUD (never a persona-less worker).
+      await assert.rejects(
+        () => headCtx.tools.get('dept_worker_spawn', key).execute({ role: 'nonexistent-role', task: 'x' }, { agent: head, signal: new AbortController().signal }),
+        /no template at .*presets\/departments\/research\/nonexistent-role\.md/, 'a role that is not a file in the department template tree rejects'
+      )
+      assert.equal(agents.store.has('worker-nonexistent-role'), false, 'no agent is created for the failed spawn')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F3 slug dedup: dept_worker_spawn dedups worker slugs with -2, -3… and NEVER reuses a RETIRED slug', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const first = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'first' })
+      assert.equal(first.result.workerId, 'researcher', 'first spawn takes the bare role slug')
+
+      const second = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'second' })
+      assert.equal(second.result.workerId, 'researcher-2', 'a live slug dedups to -2')
+
+      // Retire the FIRST worker (its slug stays REGISTERED in posts.json with
+      // retired:true — the F1 mark-not-erase invariant) and spawn again: the
+      // retired slug is still NOT reused → -3.
+      await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: 'researcher' }, { agent: head, signal: new AbortController().signal })
+      const third = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'third' })
+      assert.equal(third.result.workerId, 'researcher-3', 'a RETIRED slug is not reused (dedup sees retired entries)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F3 dept_worker_retire: marks retired (entry kept, live catalog stops addressing), archives the session, cross-department head DENIED, idempotent', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await f3BootWithTwoHeads(stateDir)
+    try {
+      const signal = new AbortController().signal
+      // research-head spawns a worker of ITS department.
+      await f3Spawn(env, env.researchCtx, env.researchKey, env.researchHead, { role: 'researcher', task: 'investigate X' })
+
+      // programming-head CANNOT retire it (different manager AND department).
+      await assert.rejects(
+        () => env.programmingCtx.tools.get('dept_worker_retire', env.programmingKey).execute({ workerId: 'researcher' }, { agent: env.programmingHead, signal }),
+        /not a worker of YOUR department/, 'a head cannot retire a worker of ANOTHER department'
+      )
+      assert.equal((await readPosts(stateDir))['researcher']?.retired, undefined, 'the rejected retire left the entry live')
+
+      // research-head retires its own worker: mark + archive.
+      const result = await env.researchCtx.tools.get('dept_worker_retire', env.researchKey).execute({ workerId: 'researcher' }, { agent: env.researchHead, signal })
+      assert.equal(result.retired, true)
+      assert.equal(result.archived, true, 'the durable session archive was requested')
+      await waitFor(() => env.workspaceRegistry.archivedSessionIds.includes('worker-researcher'), 5000, 'worker session archived (sidebar row disappears, D5)')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['researcher'].retired, true, 'retire is a MARK, not an erase (posts.json keeps the entry)')
+      assert.equal(posts['researcher'].managerId, 'research-head', 'the creator link survives the retire (logs/history kept, D5)')
+
+      // LIVE catalog stops addressing it (per-recipient failed, like unknown).
+      const host = env.agents.put(fakeParentAgent())
+      const send = await env.root.tools.get('send_message').execute({ to: ['researcher'], text: 'are you there?' }, { agent: host, signal })
+      assert.equal(send.delivered['researcher'], 'failed', 'a retired worker is not addressed by the live catalog')
+
+      // dept_who (the MANAGEMENT view) still lists it WITH retired:true.
+      const who = await env.root.tools.get('dept_who').execute({}, { agent: host, signal })
+      const row = who.members.find((m) => m.agentId === 'researcher')
+      assert.ok(row, 'the retired worker IS listed in dept_who')
+      assert.equal(row.retired, true, 'the row carries retired:true')
+      assert.equal(row.kind, 'worker', 'the row keeps the derived worker kind')
+
+      // Idempotent: a second retire succeeds as a no-op (still archived).
+      const again = await env.researchCtx.tools.get('dept_worker_retire', env.researchKey).execute({ workerId: 'researcher' }, { agent: env.researchHead, signal })
+      assert.equal(again.retired, true)
+      assert.equal(again.archived, true)
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('F3 dept_who rows: a LIVE worker row carries departmentId/role/jobId (and no retired flag), with the derived kind "worker"', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'check X' })
+      await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'check Y', jobId: 'monitor-dsh-updates' })
+
+      const who = await root.tools.get('dept_who').execute({}, { agent: agents.put(fakeParentAgent()), signal: new AbortController().signal })
+      const row = who.members.find((m) => m.agentId === 'researcher')
+      assert.ok(row, 'the ephemeral worker is listed')
+      assert.equal(row.kind, 'worker', 'derived kind "worker"')
+      assert.equal(row.departmentId, 'research', 'F3: worker row carries its departmentId')
+      assert.equal(row.role, 'researcher', 'F3: worker row carries the role template id')
+      assert.equal(row.jobId, undefined, 'an ephemeral worker has no jobId')
+      assert.equal(row.retired, undefined, 'a LIVE worker row carries no retired flag')
+
+      const jobRow = who.members.find((m) => m.agentId === 'monitor-dsh-updates')
+      assert.ok(jobRow, 'the job worker is listed')
+      assert.equal(jobRow.jobId, 'monitor-dsh-updates', 'F3: a job worker row carries its jobId')
+      assert.equal(jobRow.departmentId, 'research')
+      assert.equal(jobRow.kind, 'worker')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F3 title: the title? parameter overrides the default pin; without task/jobId the default falls back to the derived id', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const overridden = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'x', title: 'Custom researcher label' })
+      assert.equal(overridden.result.title, 'Custom researcher label', 'title? overrides the default')
+      const overriddenSession = root.sessions.get(SessionId('worker-researcher'))
+      assert.equal(overriddenSession.events.find((ev) => ev.type === 'session/title')?.data.title, 'Custom researcher label', 'the pinned title is the override')
+
+      // No task, no jobId → the default title falls back to the derived id.
+      const fallback = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher' })
+      assert.equal(fallback.result.workerId, 'researcher-2', 'dedup applied for the second spawn')
+      assert.equal(fallback.result.title, 'Researcher: researcher-2', 'default title = "<RoleTitle>: <id>" without task/jobId')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- F4b (spec 004 §5.4-§5.5, D7): JOB execution tools --------------------
+// dept_job_list (head own-layer ONLY: scan the department jobDir — config
+// org.departments[].jobDir (repo-relative OR absolute; the DEFAULT is
+// <repoRoot>/docs/departments/<dept-id>/jobs) — parse each *.md definition
+// frontmatter and return {id,title,role,description,schedule,status:
+// "manual-run",owner,path} + the resolved jobDir; an INVALID definition is a
+// PER-ENTRY error, never a failed list; a missing jobDir is an empty list).
+// dept_job_run (head own-layer ONLY, manual execution — no scheduler, D7):
+// locate <jobId>.md, validate the role template, replicate the
+// dept_worker_spawn contract with task = the job BODY + jobId recorded;
+// IDEMPOTENT (a live non-retired job worker of the SAME jobId errors "job
+// already running", never duplicates); loud errors for missing job / broken
+// frontmatter / unknown role; the host plane sees NEITHER (D2 structural —
+// dept_worker_spawn parity).
+
+/** Boot the research department with an ABSOLUTE custom jobDir (the F4b
+ * resolver accepts repo-relative OR absolute config jobDir; absolute keeps
+ * these hermetic at a temp dir seeded by the test, while the default-repo
+ * layout is asserted against the REAL docs/departments/research/jobs tree —
+ * the same pattern the F3 role-template tests use). */
+async function f4bBootWithJobDir(stateDir, jobDir) {
+  const env = await bootPlugin(stateDir, {
+    org: {
+      departments: [
+        {
+          id: 'research',
+          name: 'Research',
+          jobDir,
+          coordinator: {
+            postId: 'research-head',
+            role: 'Research department head',
+            provider: 'deepseek-official',
+            agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' }
+          }
+        }
+      ]
+    }
+  })
+  await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'head materialized at boot')
+  const head = env.agents.store.get('head-research-head')
+  const { ctx: headCtx, key } = childContextFor(env.agents, 'head-research-head')
+  return { ...env, head, headCtx, key }
+}
+
+test('F4b dept_job_list: lists the 3 versioned repo jobs (default jobDir) with the frontmatter fields + status "manual-run"; host plane has NO job tools', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      // Head own-layer ONLY (D7 manual; D2 structural like dept_worker_spawn).
+      assert.ok(headCtx.tools.get('dept_job_list', key), 'dept_job_list installed in the head own layer')
+      assert.equal(root.tools.get('dept_job_list'), undefined, 'host plane has NO dept_job_list')
+      assert.equal(root.tools.get('dept_job_run'), undefined, 'host plane has NO dept_job_run')
+
+      const result = await headCtx.tools.get('dept_job_list', key).execute({}, { agent: head, signal: new AbortController().signal })
+      assert.equal(result.jobDir.endsWith(path.join('docs', 'departments', 'research', 'jobs')), true, 'jobDir resolved to the DEFAULT repo layout (TEST_ORG has no jobDir configured)')
+      assert.equal(result.jobs.length, 3, 'the 3 F4a repo jobs are listed')
+
+      const byId = new Map(result.jobs.map((job) => [job.id, job]))
+      const monitor = byId.get('monitor-dsh-updates')
+      assert.ok(monitor, 'monitor-dsh-updates listed')
+      assert.equal(monitor.title, 'Monitor DSH + Deepartments ecosystem updates', 'title from the frontmatter')
+      assert.equal(monitor.role, 'researcher', 'role template id from the frontmatter')
+      assert.equal(typeof monitor.description, 'string')
+      assert.match(monitor.description, /Check DSH core/, 'description from the frontmatter')
+      assert.equal(monitor.schedule, 'daily 09:00 (reserved — calendar not yet implemented; manual run via dept_job_run)', 'the QUOTED YAML schedule is unwrapped to its VALUE')
+      assert.equal(monitor.status, 'manual-run', 'no scheduler this phase (D7) — every job is manual-run')
+      assert.equal(monitor.owner, 'research-head', 'owner from the frontmatter')
+      assert.equal(monitor.error, undefined, 'a valid definition carries no per-entry error')
+      assert.equal(monitor.path.endsWith(path.join('jobs', 'monitor-dsh-updates.md')), true, 'the resolved repo path of the definition')
+
+      const weekly = byId.get('weekly-report-organize')
+      assert.ok(weekly, 'weekly-report-organize listed')
+      assert.equal(weekly.role, 'organizer')
+      assert.equal(weekly.title, 'Weekly report organization of the department')
+      const factCheck = byId.get('fact-check-queue')
+      assert.ok(factCheck, 'fact-check-queue listed')
+      assert.equal(factCheck.role, 'reviewer')
+      assert.equal(factCheck.title, 'Fact-check the department\'s unverified reports')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F4b dept_job_run: materializes the job worker (definition role task = the job BODY, jobId slug + entry, HUMAN frontmatter title, first bus message = the body)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      assert.ok(headCtx.tools.get('dept_job_run', key), 'dept_job_run installed in the head own layer')
+
+      const signal = new AbortController().signal
+      const result = await headCtx.tools.get('dept_job_run', key).execute({ jobId: 'monitor-dsh-updates' }, { agent: head, signal })
+      assert.equal(result.workerId, 'monitor-dsh-updates', 'worker slug = the job id')
+      assert.equal(result.sessionId, 'worker-monitor-dsh-updates')
+      assert.equal(result.jobId, 'monitor-dsh-updates')
+      assert.equal(result.role, 'researcher', 'role = the definition frontmatter role')
+      assert.equal(result.title, 'Monitor DSH + Deepartments ecosystem updates', 'default title = the HUMAN frontmatter title')
+      assert.equal(result.jobPath.endsWith(path.join('jobs', 'monitor-dsh-updates.md')), true, 'the definition path is returned')
+
+      // The worker is a live registered job worker (spec §4.1 fields).
+      await waitFor(() => agents.store.has('worker-monitor-dsh-updates'), 5000, 'job worker live')
+      const entry = (await readPosts(stateDir))['monitor-dsh-updates']
+      assert.equal(entry.provider, 'worker')
+      assert.equal(entry.role, 'researcher', 'role recorded = the role TEMPLATE id')
+      assert.equal(entry.managerId, 'research-head', 'managerId = the running head')
+      assert.equal(entry.departmentId, 'research')
+      assert.equal(entry.jobId, 'monitor-dsh-updates', 'jobId recorded on the durable entry')
+
+      // Task = the DEFINITION BODY (the whole concrete assignment) delivered
+      // as the first durable bus message (which wakes the worker).
+      const worker = agents.store.get('worker-monitor-dsh-updates')
+      await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'worker woken by the job body')
+      assert.match(worker.inboxMessages.at(-1).content[0].text, /Determine whether DeepSeek Harness \(DSH\)/, 'the body fragment proves the first bus message IS the job body')
+
+      // Title pin (human frontmatter title on the sidebar session).
+      const workerSession = root.sessions.get(SessionId('worker-monitor-dsh-updates'))
+      assert.ok(workerSession !== undefined, 'the job worker session is entered in the real sessions store')
+      assert.equal(workerSession.events.find((ev) => ev.type === 'session/title')?.data.title, 'Monitor DSH + Deepartments ecosystem updates', 'pinned title = the human frontmatter title')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F4b dept_job_run gates: unknown jobId rejects (job not found + searched dir); an unknown role rejects; a mismatching declared id rejects', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      // A jobId without a definition file (the DEFAULT repo jobDir is searched).
+      await assert.rejects(
+        () => headCtx.tools.get('dept_job_run', key).execute({ jobId: 'does-not-exist' }, { agent: head, signal }),
+        /job not found: does-not-exist \(searched .*docs[\\/]departments[\\/]research[\\/]jobs\)/, 'missing definition: loud "job not found: <id> (searched <dir>)"'
+      )
+      assert.equal(agents.store.has('worker-does-not-exist'), false, 'no agent is created for the failed run')
+    } finally {
+      await dispose()
+    }
+  })
+
+  await withTempStateDir(async (stateDir) => {
+    // Hermetic custom jobDir: one job with an UNKNOWN role, one file whose
+    // declared `id` does not match its file name, one file with BROKEN
+    // frontmatter (the per-entry list error surface).
+    const jobDir = await mkdtemp(path.join(tmpdir(), 'deepartments-jobs-'))
+    try {
+      await writeFile(path.join(jobDir, 'bad-role-job.md'), '---\nid: bad-role-job\ntitle: Bad role job\nrole: no-such-role\ndescription: an invalid role\nowner: research-head\n---\n\ntask body\n', 'utf8')
+      await writeFile(path.join(jobDir, 'mismatch.md'), '---\nid: declared-elsewhere\ntitle: Mismatched id\nrole: researcher\ndescription: id differs from the file name\nowner: research-head\n---\n\ntask body\n', 'utf8')
+      await writeFile(path.join(jobDir, 'broken.md'), 'no frontmatter at all here\n', 'utf8')
+      const { agents, head, headCtx, key, dispose } = await f4bBootWithJobDir(stateDir, jobDir)
+      try {
+        const signal = new AbortController().signal
+        // Unknown role → loud error BEFORE any spawn (role templates are the
+        // department tree presets/departments/research/<role>.md).
+        await assert.rejects(
+          () => headCtx.tools.get('dept_job_run', key).execute({ jobId: 'bad-role-job' }, { agent: head, signal }),
+          /declares role "no-such-role" which has no template at .*presets[\\/]departments[\\/]research[\\/]no-such-role\.md/, 'unknown job role rejects loudly'
+        )
+        assert.equal(agents.store.has('worker-bad-role-job'), false, 'no agent is created for the invalid role')
+
+        // Declared id ≠ requested id → loud (the file name IS the job id).
+        await assert.rejects(
+          () => headCtx.tools.get('dept_job_run', key).execute({ jobId: 'mismatch' }, { agent: head, signal }),
+          /declares frontmatter id "declared-elsewhere"/, 'a definition whose declared id mismatches its file name rejects'
+        )
+
+        // List: the INVALID definition is reported PER-ENTRY with an error,
+        // the whole list still returns (spec §5.5 list robustness).
+        const list = await headCtx.tools.get('dept_job_list', key).execute({}, { agent: head, signal })
+        assert.equal(list.jobDir, jobDir, 'the CUSTOM config jobDir is resolved (absolute accepted)')
+        assert.equal(list.jobs.length, 3, 'all definitions are listed (broken included, not fatal)')
+        const broken = list.jobs.find((job) => job.id === 'broken')
+        assert.ok(broken, 'the broken definition is listed')
+        assert.equal(typeof broken.error, 'string', 'the broken entry carries the per-entry error')
+        assert.equal(broken.status, undefined, 'an invalid entry is NOT a runnable manual-run job')
+        const badRole = list.jobs.find((job) => job.id === 'bad-role-job')
+        assert.equal(badRole.role, 'no-such-role', 'list only PARSES frontmatter (role validation is a run concern)')
+      } finally {
+        await dispose()
+      }
+    } finally {
+      await rm(jobDir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('F4b idempotency: a second dept_job_run of a running job errors "job already running" (no duplicate worker); a worker has NO job tools', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      // A worker (manager:false) never sees the department job tools.
+      const { ctx: workerCtx, key: workerKey } = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'check X' })
+      assert.equal(workerCtx.tools.get('dept_job_run', workerKey), undefined, 'worker has NO dept_job_run')
+      assert.equal(workerCtx.tools.get('dept_job_list', workerKey), undefined, 'worker has NO dept_job_list')
+
+      // First run materializes the job worker (slug = the job id).
+      const run = headCtx.tools.get('dept_job_run', key)
+      const first = await run.execute({ jobId: 'monitor-dsh-updates' }, { agent: head, signal })
+      assert.equal(first.workerId, 'monitor-dsh-updates')
+      await waitFor(() => agents.store.has('worker-monitor-dsh-updates'), 5000, 'job worker live')
+
+      // SECOND run of the SAME job → NO duplicate: loud "job already running".
+      await assert.rejects(
+        () => run.execute({ jobId: 'monitor-dsh-updates' }, { agent: head, signal }),
+        /job already running: monitor-dsh-updates/, 'a running job is not duplicated (idempotency)'
+      )
+      assert.equal(agents.store.has('worker-monitor-dsh-updates-2'), false, 'no duplicate worker agent was created')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['monitor-dsh-updates-2'], undefined, 'no duplicate registry entry')
+      assert.equal(posts['monitor-dsh-updates'].retired, undefined, 'the original worker is still LIVE (not retired by the rejected run)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('F4b list on a department WITHOUT jobs: missing jobDir is an EMPTY list (not an error), with the default jobDir resolved', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await f3BootWithTwoHeads(stateDir)
+    try {
+      const signal = new AbortController().signal
+      // programming has no jobDir configured AND no docs/departments/
+      // programming/jobs → ENOENT → empty (a department without jobs is not
+      // an error), the resolved default path is still returned.
+      const result = await env.programmingCtx.tools.get('dept_job_list', env.programmingKey).execute({}, { agent: env.programmingHead, signal })
+      assert.equal(result.jobs.length, 0, 'a department without a jobs dir lists ZERO jobs')
+      assert.equal(result.jobDir.endsWith(path.join('docs', 'departments', 'programming', 'jobs')), true, 'the default jobDir for that department is the resolved path')
+    } finally {
+      await env.dispose()
     }
   })
 })
