@@ -1,6 +1,6 @@
 ---
 name: deepartments-workflow
-description: Multi-agent workflow for the Deepartments project — Asistente (the main agent) + builders + reviewer + scribe + explore, with research delegated to the Research Department (RD). Use it when planning or executing multi-agent code changes, when dispatching subagents, or when resuming a session of this project. Port of the multi-agent-workflow pattern to DeepSeek Harness.
+description: Multi-agent workflow for the Deepartments project — Asistente (the main agent) + builders + reviewer + scribe + explore, with research delegated to the Research Department (RD) and internal programming delegated to the Internal Programming Department (IPD). Use it when planning or executing multi-agent code changes, when dispatching subagents, or when resuming a session of this project. Port of the multi-agent-workflow pattern to DeepSeek Harness.
 ---
 
 # Deepartments — Multi-Agent Workflow (DSH)
@@ -15,25 +15,38 @@ Department (RD) — see "Research requests → Research Department (RD)".
 
 | Role | Dispatch tool | Model | Notes |
 |-----|----------------|-------|-------|
-| **Asistente** (the main agent, Pro) | (this agent) | Pro | All tools, but NEVER edits; conversation, planning, microdecisions, dispatch |
-| **builder** | `subagent` | deepseek-v4-flash-vision-exp | Atomic edits with a clear spec; ALL builders run Flash, no Pro tier |
+| **Asistente** (the main agent, Pro) | (this agent) | Pro | All tools, but NEVER edits; interface/coordinator — translates the owner's vision, asks microdecisions, and runs verification/commits/deploys; does NOT plan internal programming (the IPD head does) |
+| **Internal Programming Head** (`internal-programming-head`) | `send_message` | (department tier) | DELEGATING head of the Internal Programming Department; ephemeral workers builder/reviewer/explore-deep/organizer. Owns all internal programming work — see "Programming requests → Internal Programming Department (IPD)" |
+| **builder** | `subagent` | deepseek-v4-flash-vision-exp | EMERGENCY fallback + non-code atomic edits (e.g. docs/spec drafts); NOT the normal path for internal code changes — those go via the IPD. All such builders run Flash, no Pro tier |
 | **reviewer** | `subagent` | deepseek-v4-flash-vision-exp | Read-only verifier after each builder/batch; PASS/FAIL |
-| **scribe** | `subagent` | deepseek-v4-flash-vision-exp | Doc drafts to `.dsh/reports/scribe/` (never auto-commits) |
+| **scribe** | `subagent` | deepseek-v4-flash-vision-exp | Non-code doc drafts to `.dsh/reports/scribe/` (never auto-commits); normal document work is department-owned |
 | **explore** | `subagent` | deepseek-v4-flash-vision-exp | Read-only; code search, flow analysis |
 
-There is no rigid roster: every subagent is dispatched via `subagent` or
+The Asistente's transient subagents (`subagent`/`subagent_fork`) are the
+**emergency fallback** and **non-code** path (e.g. scribe doc drafts). Normal
+**internal code changes do NOT go through them** — they are delegated to the
+Internal Programming Department, which owns its own ephemeral workers (builder
+/ reviewer / explore-deep / organizer) under a delegating head. For the
+department dispatch flow see "Programming requests → Internal Programming
+Department (IPD)".
+
+That transient roster is not rigid: every dispatch is via `subagent` or
 `subagent_fork` (all Flash-tier, defaulting to `deepseek-v4-flash-vision-exp`
 via the direct DeepSeek API — provider `deepseek-official`, reasoning_effort
 `max`, endpoint/API key wired in the dev profile; stable profile untouched).
-The `_fork` variants
-inherit the conversation: use them for context-inheriting follow-ups. The
-per-role contract is NOT re-written into the prompt — it is INJECTED at the
-child's first pre-step from the bundled ROLE_CONTRACTS map (Task T4): pass the
-`role` param and the dispatch prompt stays objective+files+spec+verification.
-The Asistente is the only Pro agent.
+The `_fork` variants inherit the conversation: use them for context-inheriting
+follow-ups. The per-role contract is NOT re-written into the prompt — it is
+INJECTED at the child's first pre-step from the bundled ROLE_CONTRACTS map
+(Task T4): pass the `role` param and the dispatch prompt stays
+objective+files+spec+verification. The Asistente is the only Pro agent.
 
 ## Key principles
 
+- **Asistente = interface/coordinator.** It translates the owner's vision into
+  microdecisions and dispatch; it runs the verification ladder, git commits and
+  deploys. It does NOT plan internal programming — the Internal Programming
+  Department head does. Internal code changes are delegated (see the IPD
+  section); the Asistente keeps verification/commits/docs/restart duties.
 - **Microdecisions**: the Asistente asks with `ask_user_question` before
   assuming defaults. No silent conventions.
 - **One file, one owner**: parallel builders never touch the same file.
@@ -138,6 +151,41 @@ research itself via its transient `researcher` subagent (`subagent`,
 owner as an exception, with the reason. Return to RD delegation as soon as the
 department recovers.
 
+### Programming requests → Internal Programming Department (IPD)
+
+Internal code changes are NEVER planned or dispatched by the Asistente — a host
+`builder` subagent is NOT the normal path (D2, mirror of research). Every
+internal programming request is delegated to the **Internal Programming
+Department**. Dispatch is a single `send_message` to `internal-programming-head` (the
+IPD's head) in this format:
+
+```
+PROGRAMMING REQUEST
+- Topic/objective: <the atomic work to deliver>
+- Acceptance: <what "done" means — spec/acceptance criteria>
+- Files in scope: <only these — do not touch others>
+- Priority: <how urgent/important>
+```
+
+The IPD deploys organically (ephemeral workers builder/reviewer/explore-deep/
+organizer at the head's discretion), reviews and consolidates, then responds.
+The Asistente:
+
+- NEVER addresses the IPD's workers directly (D2 — no per-worker messaging, no
+  dept worker spawn/retire); only addresses `internal-programming-head`.
+- Treats the head's consolidated report as the **source of truth**.
+- Keeps (does NOT delegate away) the **verification ladder** (build → plugin
+  add → dump-config → headless smoke), **git commits**, **ROADMAP/AGENTS-level
+  docs**, and the **smart_restart responsibility**. Version-watch installs end
+  with a request to the Asistente, which restarts with canary and reports.
+
+**Emergency fallback** (exception, not the norm): ONLY if the IPD is unavailable
+(`internal-programming-head` asleep with no reply, department down) may the Asistente run
+internal code changes itself via its transient `builder` subagent (`subagent`,
+`role: builder`). Such use MUST be annotated in the session summary to the owner
+as an exception, with the reason. Return to IPD delegation as soon as the
+department recovers.
+
 ### Scribe (documentation)
 
 > Your role contract (scribe) is injected by Deepartments — follow it.
@@ -153,6 +201,14 @@ department recovers.
 > - **Report**: write to
 >   `.dsh/reports/explore-deep/<YYYY-MM-DD>-<task-slug>.md`; return a concise
 >   flow/architecture summary + key files (file:line) back to the Asistente.
+
+## Agenda & department jobs
+
+The agenda is COMMON/GLOBAL: all departments share the same runtime calendar and
+the Agenda panel shows everything unified. Department jobs are versioned under
+`docs/departments/<dept>/jobs/` — e.g. the IPD's `weekly-repo-health` and
+`version-watch`. Jobs run on the shared calendar; results flow back through the
+department head's consolidated report.
 
 ## Owner presence & daily-report delivery
 
@@ -259,8 +315,10 @@ channel peerDependencies with CLI pin) live in AGENTS.md and the
   send_message, dept_sleep); do NOT re-read AGENTS.md or the full ROADMAP or
   list state dirs (the journal is the memory) → present the session plan to the
   owner.
-- **WORK**: break into atomic tasks → dispatch builders (parallel if no file
-  overlap) → reviewer gate after each batch → commit after each green batch.
+- **WORK**: break into atomic tasks → internal code work via the PROGRAMMING
+  REQUEST route (not `subagent` builders); "dispatch builders" applies only to
+  the emergency-fallback/non-code path (parallel if no file overlap) →
+  reviewer gate after each batch → commit after each green batch.
 - **END**: verification, commit, update `docs/ROADMAP.md` (transient status
   only; git is the permanent record; never auto-generated), concise summary.
 - **Microdecisions**: any ambiguous detail (library, pattern, naming,
