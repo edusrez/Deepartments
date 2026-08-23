@@ -38,6 +38,16 @@ and services to the runtime. Development uses the isolated profile
 - **`docs/ROADMAP.md`** — phases 0-4 with exit criteria and the phase 2
   kickoff tasks.
 
+## Development
+
+```sh
+pnpm build         # `tsc` — compile src/ to lib/
+pnpm build:client  # `tsdown && node scripts/normalize-client-banner.mjs` — bundle the client plugin + normalize the banner
+pnpm test          # `node --test` — run the unit tests
+```
+
+Verification is TIERED — see [AGENTS.md](AGENTS.md) for the level instructions.
+
 ## Working agreement
 
 To build the plugin: read [AGENTS.md](AGENTS.md) and load the skill

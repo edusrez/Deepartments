@@ -36,6 +36,16 @@ verification）。
   MVP 与风险。
 - **`docs/ROADMAP.md`** —— 第 0-4 阶段及退出标准，以及第 2 阶段的启动任务。
 
+## 开发
+
+```sh
+pnpm build         # `tsc` —— 将 src/ 编译到 lib/
+pnpm build:client  # `tsdown && node scripts/normalize-client-banner.mjs` —— 打包客户端插件 + 规范化 banner
+pnpm test          # `node --test` —— 运行单元测试
+```
+
+验证是分层的（TIERED）—— 参见 [AGENTS.md](AGENTS.md) 了解各层级说明。
+
 ## 工作约定
 
 要构建该插件：阅读 [AGENTS.md](AGENTS.md) 并加载技能
