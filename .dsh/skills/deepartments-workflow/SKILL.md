@@ -1,14 +1,15 @@
 ---
 name: deepartments-workflow
-description: Multi-agent workflow for the Deepartments project — Asistente (the main agent) + builders + reviewer + researcher + scribe + explore. Use it when planning or executing multi-agent code changes, when dispatching subagents, or when resuming a session of this project. Port of the multi-agent-workflow pattern to DeepSeek Harness.
+description: Multi-agent workflow for the Deepartments project — Asistente (the main agent) + builders + reviewer + scribe + explore, with research delegated to the Research Department (RD). Use it when planning or executing multi-agent code changes, when dispatching subagents, or when resuming a session of this project. Port of the multi-agent-workflow pattern to DeepSeek Harness.
 ---
 
 # Deepartments — Multi-Agent Workflow (DSH)
 
 This project uses a conversational Asistente + parallel subagents pattern.
 The human talks to the main agent (the Asistente); the Asistente asks
-microdecisions and organizes research, planning and parallel execution via
-subagents.
+microdecisions and organizes planning and parallel execution via subagents.
+Research is NOT run by the Asistente: it is delegated to the Research
+Department (RD) — see "Research requests → Research Department (RD)".
 
 ## Roster
 
@@ -17,7 +18,6 @@ subagents.
 | **Asistente** (the main agent, Pro) | (this agent) | Pro | All tools, but NEVER edits; conversation, planning, microdecisions, dispatch |
 | **builder** | `subagent` | deepseek-v4-flash-vision-exp | Atomic edits with a clear spec; ALL builders run Flash, no Pro tier |
 | **reviewer** | `subagent` | deepseek-v4-flash-vision-exp | Read-only verifier after each builder/batch; PASS/FAIL |
-| **researcher** | `subagent` | deepseek-v4-flash-vision-exp | Web research; reports to `.dsh/reports/researcher/` |
 | **scribe** | `subagent` | deepseek-v4-flash-vision-exp | Doc drafts to `.dsh/reports/scribe/` (never auto-commits) |
 | **explore** | `subagent` | deepseek-v4-flash-vision-exp | Read-only; code search, flow analysis |
 
@@ -66,8 +66,8 @@ the single line telling the child its role contract is injected.
 All dispatch tools run in the background automatically — there is no
 `run_in_background` parameter; results arrive via the settlement notice. Pass the
 role with the `role` param on `subagent`/`subagent_fork`
-(builder|reviewer|researcher|scribe|explore; default generic). Unknown roles fall
-back to generic.
+(builder|reviewer|scribe|explore; `researcher` = emergency RD-fallback only;
+default generic). Unknown roles fall back to generic.
 
 ### Builder (default tier)
 
@@ -101,16 +101,35 @@ Dispatched via `subagent` (Flash model, `role: reviewer`), after a builder.
 > - **Report**: `.dsh/reports/reviewer/<YYYY-MM-DD>-<task-slug>.md` (frontmatter
 >   convention below) + the verdict back to the Asistente.
 
-### Researcher (web)
+### Research requests → Research Department (RD)
 
-Dispatched via `subagent` (Flash model, `role: researcher`).
+The Asistente NEVER runs research itself — a host `researcher` subagent is NOT
+the normal path (D2). Every research request is delegated to the **Research
+Department**. Dispatch is a single `send_message` to `research-head` (the RD's
+head) in this format:
 
-> Your role contract (researcher) is injected by Deepartments — follow it.
-> - **Topic**: <what to research>; dates <training cutoff 2025 — web_search
->   anything current>.
-> - **Report**: full findings to
->   `.dsh/reports/researcher/<YYYY-MM-DD>-<topic>.md`; return ONLY a concise
->   summary (3-5 bullets) + the report path.
+```
+RESEARCH REQUEST
+- Topic: <what to research>
+- Why/context: <why now; what decision it feeds>
+- Needs: <organic — e.g. "quick", "make sure of the primary source", "careful report"; date awareness if current>
+- Return: report to reports/researcher/<YYYY-MM-DD>-<topic>.md (department workspace) + a 3-5 bullet summary back via messaging
+```
+
+The RD deploys organically (1-3 `researcher` workers; analyst/reviewer depending
+on nuance), reviews and consolidates, then responds. The Asistente:
+
+- NEVER hands the researchers the task directly (D2 — only the head reports).
+- NEVER supervises the RD's workers (no dept_worker_spawn/retire, no
+  per-worker messaging); only addresses `research-head`.
+- Treats the head's consolidated report as the **source of truth**.
+
+**Emergency fallback** (exception, not the norm): ONLY if the RD is unavailable
+(`research-head` asleep with no reply, department down) may the Asistente run
+research itself via its transient `researcher` subagent (`subagent`,
+`role: researcher`). Such use MUST be annotated in the session summary to the
+owner as an exception, with the reason. Return to RD delegation as soon as the
+department recovers.
 
 ### Scribe (documentation)
 
