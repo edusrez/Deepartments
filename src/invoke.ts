@@ -1610,6 +1610,103 @@ export async function appendPostErrorDeduped(stateDir: string, entry: PostErrorE
   return true
 }
 
+// --- QD (spec 007 Quality Department) RUNTIME — the probability gate + config --
+// The Quality Department inspects the org's OWN runtime: every department HEAD
+// archive (dept_sleep) and every HOST session rotation is inspected at 100%
+// (D-Q3, the mandate), while a disposable WORKER retire is SAMPLED at 0.10 by
+// default (D-Q2). The gate below is PURE (kind + deps in, boolean out, no side
+// effects beyond reading the deterministic env/seed seam) so a test drives it
+// offline through the real Loader. It is an INTERNAL helper — there is NO
+// public `dept_quality_*` tool; the hooks are the bus-directive emitters in
+// applyInvoke (maybeEmitQualityInspectDirective).
+/** The code default for the worker-retire dice (D-Q2). */
+export const QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY = 0.10
+
+/** The deterministic env override for the worker probability path (a numeric
+ * [0,1] string). Overrides ONLY the worker dice; the head/host mandate is never
+ * a dice and is never overridden. Invalid/absent → undefined (code default). */
+export const QUALITY_INSPECT_ENV_VAR = 'DEEPARTMENTS_QUALITY_INSPECT'
+
+export type QualityInspectKind = 'worker' | 'head' | 'host'
+
+/** The probability-gate inputs (PURE — injectable rng + injectable probability). */
+export interface QualityInspectDecisionDeps {
+  /** An injected [0,1) random source (default Math.random). */
+  rng?: () => number
+  /** The worker dice probability (default 0.10), clamped to [0,1]. */
+  workerInspectProbability?: number
+}
+
+/** Parse `DEEPARTMENTS_QUALITY_INSPECT` (a numeric [0,1] string); invalid/absent
+ * → undefined. Overrides ONLY the worker path. */
+function parseQualityInspectEnvOverride(): number | undefined {
+  const raw = process.env[QUALITY_INSPECT_ENV_VAR]
+  if (raw === undefined || raw === '') return undefined
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 0 || n > 1) return undefined
+  return n
+}
+
+const clamp01 = (n: number): number => Math.min(1, Math.max(0, n))
+
+/**
+ * The QD probability gate (spec 007 §5.2, D-Q2/D-Q3) — PURE, injectable rng.
+ *
+ *   kind 'head' → ALWAYS true (the head archive is never gated — D-Q3 mandate)
+ *   kind 'host' → ALWAYS true (the host counts as "H", head-equivalent — D-Q3)
+ *   kind 'worker' → `(rng ?? Math.random)() < clamp(workerInspectProbability ??
+ *                                 0.10, 0, 1)`  (D-Q2 dice)
+ *
+ * The head/host branch is STRUCTURAL — no knob / env override can make it false.
+ * The `DEEPARTMENTS_QUALITY_INSPECT` env override (a numeric [0,1] string)
+ * overrides ONLY the worker probability path; it never touches the mandate.
+ */
+export function qualityInspectDecision(kind: QualityInspectKind, deps: QualityInspectDecisionDeps = {}): boolean {
+  if (kind === 'head' || kind === 'host') return true
+  const rng = deps.rng ?? Math.random
+  const envOverride = parseQualityInspectEnvOverride()
+  const prob = clamp01(envOverride ?? deps.workerInspectProbability ?? QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY)
+  return rng() < prob
+}
+
+/**
+ * The QD config-resolution helper (spec 007 §4.1, D-Q2): read the `quality`
+ * config block and return the effective worker dice probability.
+ * `(config as unknown as { quality?: { workerInspectProbability?: number } })`
+ * → `quality?.workerInspectProbability`, validated to [0,1]; invalid/absent →
+ * the code default 0.10. Mirrors the `health.staleLiveMinutes` fallback
+ * (org.ts:86-90). The head/host 100% mandate is NOT resolved here — it is
+ * structural in `qualityInspectDecision`. PURE (config in, number out).
+ */
+export function resolveQualityWorkerInspectProbability(config: unknown): number {
+  const quality = (config as { quality?: { workerInspectProbability?: unknown } } | undefined)?.quality
+  const raw = quality?.workerInspectProbability
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 && raw <= 1) return raw
+  return QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY
+}
+
+/** The QUALITY INSPECT directive surface (the archive event details a hook
+ * carries to `quality-head`). One variant per archive/post-error event. */
+export type QualityInspectDirectiveSurface =
+  | { kind: 'worker-retired'; workerPostId: string; sessionId: string; archived: boolean }
+  | { kind: 'head-slept'; headPostId: string; sessionId: string; sleepEpoch: number }
+  | { kind: 'host-rotated'; oldSessionId: string; newSessionId: string; oldHostId: string; newHostId: string; sleepEpoch: number; archiveOk?: boolean }
+  | { kind: 'post-error'; postId: string; messageId: string; error: string }
+
+/** The human-readable directive frame for a surface (pure — testable). */
+export function qualityInspectDirectiveText(surface: QualityInspectDirectiveSurface): string {
+  switch (surface.kind) {
+    case 'worker-retired':
+      return `Quality inspect: worker retired (post ${surface.workerPostId}, session ${surface.sessionId}, archived ${surface.archived})`
+    case 'head-slept':
+      return `Quality inspect: head slept (post ${surface.headPostId}, session ${surface.sessionId}, sleepEpoch ${surface.sleepEpoch})`
+    case 'host-rotated':
+      return `Quality inspect: host rotated (old session ${surface.oldSessionId} → new session ${surface.newSessionId}, host ${surface.oldHostId} → ${surface.newHostId}, sleepEpoch ${surface.sleepEpoch}, archiveOk ${surface.archiveOk ?? false})`
+    case 'post-error':
+      return `Quality inspect: post-error (post ${surface.postId}, message ${surface.messageId}, error ${surface.error})`
+  }
+}
+
 // ---------------------------------------------------------------------------
 // W8-c SAFEGUARDS PACKAGE (owner "tenemos que crear salvaguardas para
 // protegerse de estos errores", 2026-08-24) — four default-on, individually
@@ -4210,6 +4307,10 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   // --- mutable state (all owned by this invocation's closure; reversible) ---
   const byPost = new Map<string, PostEntry>()
+  // QD (spec 007 §4.1): the resolved worker-archive dice probability from the
+  // `quality` config block (absent/invalid → code default 0.10). Consumed by
+  // the worker-retire hook; the head+host 100% mandate is NOT resolved here.
+  const qualityWorkerInspectProbability = resolveQualityWorkerInspectProbability(config)
   const byChild = new Map<string, string>()
   // Batch 1a: the live AgentHandle of each materialized head keyed by its
   // session id. create/resume return the handle (the ONLY disposer — a bare
@@ -6778,6 +6879,12 @@ export function applyInvoke(ctx: Context, config: Config) {
         // stays intact.
         if (entry.provider !== 'worker') {
           void archivePostSessionOnSleep(sessionId)
+          // QD (spec 007 §6.2, D-Q3): the HEAD-sleep MANDATE — a department head
+          // archive is inspected at 100% (never gated by the dice). Emits an
+          // ADDRESSED QUALITY INSPECT directive to quality-head right after the
+          // archive seals. Non-fatal (the helper wraps its own try/catch); a
+          // failing directive degrades to a warn and the sleep still commits.
+          await maybeEmitQualityInspectDirective({ kind: 'head-slept', headPostId: memberId, sessionId, sleepEpoch: entry.sleepEpoch })
         }
         // Fix sleep-self-deadlock (2026-08-23): NEVER await our own handle's
         // dispose from our own turn — the harness dispose() sends
@@ -7200,12 +7307,25 @@ export function applyInvoke(ctx: Context, config: Config) {
           // Scope (manager/department match — "only MY workers") + mark + dispose
           // are the F1 shared path (retirePost); idempotent on an already-retired
           // worker (no-op success).
+          // QD (spec 007 §6.1, D-Q2): capture the PRE-retire state so the
+          // worker-retire dice fires ONCE per REAL archive, never on the
+          // idempotent no-op of an already-retired worker (R1).
+          const wasRetired = entry.retired === true
           await retirePost(workerId, agent.id as string)
           // F3 (spec §5.3): archive the DURABLE session so the sidebar row
           // disappears — non-fatal (a failed archive only warns; the retire
           // mark is the durable part). Runs on every retire INCLUDING the
           // already-retired no-op: archiveSession is idempotent.
           const archived = await archiveWorkerSession(entry.sessionId)
+          // QD (spec 007 §6.1): the WORKER-retire dice. A FRESH retire rolls the
+          // gate (sample 0.10 by default, D-Q2); an already-retired worker is
+          // NOT re-inspected (`!wasRetired`). The directive is non-fatal (the
+          // helper wraps its own try/catch) and is emitted AFTER the retire mark
+          // commits + the archive runs. The dice lives HERE, NOT in retirePost
+          // (shared with dept_post_retire which does NOT archive).
+          if (!wasRetired && qualityInspectDecision('worker', { rng: Math.random, workerInspectProbability: qualityWorkerInspectProbability })) {
+            await maybeEmitQualityInspectDirective({ kind: 'worker-retired', workerPostId: workerId, sessionId: entry.sessionId, archived })
+          }
           return { workerId, retired: true, archived }
         }
       })))
@@ -8463,6 +8583,25 @@ export function applyInvoke(ctx: Context, config: Config) {
       } catch (appendError: unknown) {
         ctx.logger.warn(`[deepartments] post-error capture for "${entry.postId}" failed: ${appendError instanceof Error ? appendError.message : String(appendError)}`)
       }
+      // QD (spec 007 §6.4, D-Q4a): a NEW post-error record (the spec-006 capture)
+      // triggers an ADDRESSED QUALITY INSPECT directive to quality-head (with the
+      // error record) — the event-driven, bus-ready analysis seam (additive to the
+      // spec-006 host ALERT). Non-fatal (the helper wraps its own try/catch).
+      // ECHO GUARD (reviewer gate): a failed QUALITY INSPECT directive delivery to
+      // `quality-head` lands in THIS SAME catch — if we re-emitted a post-error
+      // directive for it, the directive → busDeliverToPost(quality-head) → fail →
+      // re-append → re-emit loop is unbounded. Gate the emit so the QD target's
+      // OWN delivery failure is recorded (post-errors.jsonl) but is NEVER bubbled
+      // back into another directive. (The host-delivery site gates on `appended`
+      // instead; both bound the echo.)
+      if (entry.postId !== 'quality-head') {
+        await maybeEmitQualityInspectDirective({
+          kind: 'post-error',
+          postId: entry.postId,
+          messageId: record.id,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
       return 'failed'
     }
   }
@@ -8558,15 +8697,49 @@ export function applyInvoke(ctx: Context, config: Config) {
         error: recordedError instanceof Error ? recordedError.message : String(recordedError)
       }
       const cls = postErrorClass(entry.error)
-      if (cls === POST_ERROR_CLASS_SESSION_NOT_FOUND) {
-        await appendPostErrorDeduped(config.stateDir, entry, `${POST_ERROR_RECORD_KEY_PREFIX}${hostEntry.hostId}:${cls}`, entry.ts)
-      } else {
-        await appendPostError(config.stateDir, entry)
+      const appended = cls === POST_ERROR_CLASS_SESSION_NOT_FOUND
+        ? await appendPostErrorDeduped(config.stateDir, entry, `${POST_ERROR_RECORD_KEY_PREFIX}${hostEntry.hostId}:${cls}`, entry.ts)
+        : (await appendPostError(config.stateDir, entry), true)
+      // QD (spec 007 §6.4, D-Q4a): after a NEW post-error record is actually
+      // appended, trigger the ADDRESSED QUALITY INSPECT directive to quality-head
+      // (a dedupe-skip means no new record — do not re-signal). Non-fatal (the
+      // helper wraps its own try/catch).
+      if (appended) {
+        await maybeEmitQualityInspectDirective({ kind: 'post-error', postId: entry.postId, messageId: entry.messageId ?? '', error: entry.error })
       }
     } catch (appendError: unknown) {
       ctx.logger.warn(`[deepartments] post-error capture for host "${hostEntry.hostId}" failed: ${appendError instanceof Error ? appendError.message : String(appendError)}`)
     }
     return 'failed'
+  }
+
+  // --- QD (spec 007 Quality Department) RUNTIME hooks — the directive emitter --
+  // The QUALITY INSPECT directive: an ADDRESSED bus message to the configured
+  // `quality-head`. The hook fires INSIDE plugin-internal functions (retirePost /
+  // the head dept_sleep branch / runHostRotation / the bus-delivery catches),
+  // NOT a hosted agent's send_message — so the catalog-route ACL would deny it.
+  // It therefore delivers via the SAME daemon-not-a-catalog-member notify
+  // pattern as the agenda scheduler `notifyHead`
+  // (messagesStoreReady.append → busDeliverToPost, invoke.ts:~9781). NEVERTHROW
+  // and NEVER-spawn: the whole emit is wrapped in its own try/catch → a failed
+  // delivery degrades to ctx.logger.warn and the retire/sleep/rotation it hooks
+  // still commits. The directive is the ONLY output — quality-head orchestrates
+  // its own workers; the hook NEVER spawns a QD worker.
+  /** Resolve the configured `quality-head` post (a registered head — the QD
+   * coordinator materialized by `ensureAllHeads` at boot). */
+  const resolveQualityHeadEntry = (): PostEntry | undefined => byPost.get('quality-head')
+
+  const maybeEmitQualityInspectDirective = async (surface: QualityInspectDirectiveSurface): Promise<void> => {
+    try {
+      const qualityHead = resolveQualityHeadEntry()
+      if (qualityHead === undefined) return
+      const store = await messagesStoreReady
+      const text = qualityInspectDirectiveText(surface)
+      const record = await store.append({ from: 'deepartments', to: ['quality-head'], text, kind: 'agent' })
+      await busDeliverToPost(qualityHead, `[From deepartments → quality-head]: ${text}`, record, void 0)
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] quality-inspect directive to "quality-head" failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   // --- F2 (spec 004 §5.6): messaging ACL by department — catalog route ONLY --
@@ -9505,6 +9678,23 @@ export function applyInvoke(ctx: Context, config: Config) {
           if (typeof (exec as { concludeTurn?: unknown }).concludeTurn === 'function') {
             (exec as { concludeTurn: () => void }).concludeTurn()
           }
+          // QD (spec 007 §6.3, D-Q3): the HOST-rotation MANDATE — a host session
+          // rotation is inspected at 100% (the host counts as "H", never a die).
+          // Emits an ADDRESSED QUALITY INSPECT directive to quality-head on
+          // `rotation.rotated === true` REGARDLESS of the S2.5 archive ok (an
+          // `archive.ok === false` is still a COMMITTED rotation). Non-fatal
+          // (the helper wraps its own try/catch); a failing directive degrades
+          // to a warn and the rotation still commits. Do NOT move this into
+          // session-rotation.ts (bus-less).
+          await maybeEmitQualityInspectDirective({
+            kind: 'host-rotated',
+            oldSessionId: sessionId,
+            newSessionId: rotation.newSessionId,
+            oldHostId: hostId,
+            newHostId: rotation.newHostId,
+            sleepEpoch: rotation.sleepEpoch,
+            archiveOk: rotation.archive?.ok === true
+          })
           return { room: existing?.roomId ?? 'board', member: rotation.newHostId, memoPath: rotation.newJournalPath, sleepEpoch: rotation.sleepEpoch }
         }
         // FALLBACK — the legacy IN-PLACE path, reachable ONLY when the rotation

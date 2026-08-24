@@ -1,6 +1,6 @@
 ---
 name: deepartments-workflow
-description: Multi-agent workflow for the Deepartments project — Asistente (the main agent) + builders + reviewer + scribe + explore, with research delegated to the Research Department (RD) and internal programming delegated to the Internal Programming Department (IPD). Use it when planning or executing multi-agent code changes, when dispatching subagents, or when resuming a session of this project. Port of the multi-agent-workflow pattern to DeepSeek Harness.
+description: Multi-agent workflow for the Deepartments project — Asistente (the main agent) + builders + reviewer + scribe + explore, with research delegated to the Research Department (RD), internal programming delegated to the Internal Programming Department (IPD), and org-runtime quality inspection delegated to the Quality Department (QD). Use it when planning or executing multi-agent code changes, when dispatching subagents, or when resuming a session of this project. Port of the multi-agent-workflow pattern to DeepSeek Harness.
 ---
 
 # Deepartments — Multi-Agent Workflow (DSH)
@@ -10,6 +10,9 @@ The human talks to the main agent (the Asistente); the Asistente asks
 microdecisions and organizes planning and parallel execution via subagents.
 Research is NOT run by the Asistente: it is delegated to the Research
 Department (RD) — see "Research requests → Research Department (RD)".
+Quality of the org's own runtime is NOT inspected by the Asistente either: it is
+delegated to the Quality Department (QD) — see "Quality requests → Quality
+Department (QD)".
 
 ## Roster
 
@@ -17,6 +20,7 @@ Department (RD) — see "Research requests → Research Department (RD)".
 |-----|----------------|-------|-------|
 | **Asistente** (the main agent, Pro) | (this agent) | Pro | All tools, but NEVER edits; interface/coordinator — translates the owner's vision, asks microdecisions, and runs verification/commits/deploys; does NOT plan internal programming (the IPD head does) |
 | **Internal Programming Head** (`internal-programming-head`) | `send_message` | (department tier) | DELEGATING head of the Internal Programming Department; ephemeral workers builder/reviewer/explore-deep/organizer. Owns all internal programming work — see "Programming requests → Internal Programming Department (IPD)" |
+| **Quality Head** (`quality-head`) | `send_message` | (department tier) | DELEGATING head of the Quality Department; ephemeral-per-round worker quality-inspector. Inspects the org's own runtime (archive events sampled/100%, post-errors, daily digest) — see "Quality requests → Quality Department (QD)" |
 | **builder** | `subagent` | deepseek-v4-flash-vision-exp | EMERGENCY fallback + non-code atomic edits (e.g. docs/spec drafts); NOT the normal path for internal code changes — those go via the IPD. All such builders run Flash, no Pro tier |
 | **reviewer** | `subagent` | deepseek-v4-flash-vision-exp | Read-only verifier after each builder/batch; PASS/FAIL |
 | **scribe** | `subagent` | deepseek-v4-flash-vision-exp | Non-code doc drafts to `.dsh/reports/scribe/` (never auto-commits); normal document work is department-owned |
@@ -45,8 +49,9 @@ objective+files+spec+verification. The Asistente is the only Pro agent.
 - **Asistente = interface/coordinator.** It translates the owner's vision into
   microdecisions and dispatch; it runs the verification ladder, git commits and
   deploys. It does NOT plan internal programming — the Internal Programming
-  Department head does. Internal code changes are delegated (see the IPD
-  section); the Asistente keeps verification/commits/docs/restart duties.
+  Department head does. It also does NOT inspect the org's own runtime quality —
+  the Quality Department head does. Internal code changes are delegated (see the
+  IPD section); the Asistente keeps verification/commits/docs/restart duties.
 - **Microdecisions**: the Asistente asks with `ask_user_question` before
   assuming defaults. No silent conventions.
 - **One file, one owner**: parallel builders never touch the same file.
@@ -186,6 +191,47 @@ internal code changes itself via its transient `builder` subagent (`subagent`,
 as an exception, with the reason. Return to IPD delegation as soon as the
 department recovers.
 
+### Quality requests → Quality Department (QD)
+
+The **Quality Department** inspects the Deepartments organization's own runtime
+(how the org itself behaves) — it never plans/fixes it. It is **event-driven +
+digest** (D-Q2/D-Q3/D-Q4): the lifecycle archive events (a disposable worker
+retire sampled at probability 0.10, a department head `dept_sleep` at 100%, a
+host session rotation at 100%) and a new post-error record each emit a Quality
+Inspect directive to `quality-head`; a **daily digest job** (`quality-daily`,
+role `quality-inspector`, cron `0 8 * * *`, owner `quality-head`) consolidates
+the week's post-errors / stalled posts / delivery failures / prior inspection
+results. The QD is **report-only**: it has no `edit`, no mutating `dept_exec`, no
+commit — findings go to the Asistente AND are auto-requested as a PROGRAMMING
+REQUEST to `internal-programming-head` for the genuinely fixable ones (it never
+fixes; the IPD fixes).
+
+Dispatch is a single `send_message` to `quality-head` (the QD's head) in this
+format:
+
+```
+QUALITY REQUEST
+- Surface: <what to inspect — an archive event (retired worker / head sleep / host rotation) or a signal (post-error / stalled post / delivery failure / digest)>
+- Why/context: <why now; what decision it feeds>
+- Return: report to .dsh/reports/quality/<YYYY-MM-DD>-<slug>.md (stateDir/repo, D-Q6) + a 3-5 bullet summary back via messaging
+```
+
+The QD deploys organically (1 `quality-inspector` worker, rooted and ephemeral-
+per-round W8-g), reviews and consolidates, then responds. The Asistente:
+
+- NEVER addresses the QD's workers directly (D2 — no per-worker messaging, no
+  dept worker spawn/retire); only addresses `quality-head`.
+- Treats the head's consolidated report as the **source of truth**.
+- The QH reports consolidated findings to the Asistente (3–5 bullets + report
+  paths) AND auto-files a **PROGRAMMING REQUEST** to `internal-programming-head`
+  for each genuinely fixable issue (D-Q5).
+
+**Emergency fallback** (exception, not the norm): ONLY if the QD is unavailable
+(`quality-head` asleep with no reply, department down) may the Asistente inspect
+the org's own runtime itself — annotated in the session summary to the owner as
+an exception, with the reason. Return to QD delegation as soon as the department
+recovers.
+
 ## Cross-department synergies (heads talk to heads)
 
 Departments can request each other's services. The messaging ACL already allows
@@ -203,6 +249,9 @@ REQUEST** to `internal-programming-head`.
 - **RD → IPD (tooling needs):** a research/tooling need that requires internal
   code (scripts, automation, repo tooling) — the Research Head sends a
   PROGRAMMING REQUEST to the Internal Programming Head.
+- **QD → IPD (fix needs):** a quality finding that is genuinely fixable — the
+  Quality Head auto-files a PROGRAMMING REQUEST to the Internal Programming Head
+  (the QD never fixes; the IPD fixes). The QD inspects, the IPD repairs.
 - **Workers never cross departments.** A worker NEVER messages another
   department's head or workers (D2); it asks its own head, which relays.
 - **The Asistente stays out of the loop.** It is NOT part of the department ↔

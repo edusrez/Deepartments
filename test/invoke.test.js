@@ -30,6 +30,7 @@ import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMe
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
 import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
+import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
 import {
@@ -9559,6 +9560,332 @@ test('W9-b (d): the System-health ALERT path delivers to a busy host with interr
       assert.match(host.inboxMessages.at(-1).content[0].text, /System-health ALERT/, 'the ALERT frame reaches the host')
     } finally {
       await env.dispose()
+    }
+  })
+})
+
+// --- QD (spec 007 Quality Department) RUNTIME tests --------------------------
+// The QD runtime hooks (spec 007 §5-§6): the probability gate (D-Q2/D-Q3), the
+// config-resolution helper (§4.1), the three archive-event hooks (worker retire
+// dice, head dept_sleep 100%, host rotation 100%) and the event-driven
+// post-error directive (D-Q4a). All are additive — the existing suite stays
+// untouched (no renumbering/rewrites). Modeled on the real-Loader harness
+// (bootPlugin + seedPost/seedJournal + runHealthDaemonTick).
+
+/** An org with BOTH a research department (to spawn/retire a worker) AND the
+ * configured `quality` department whose coordinator `quality-head` is
+ * materialized at boot (the QD directive target; D-Q1). */
+const QD_ORG = {
+  departments: [
+    {
+      id: 'research',
+      name: 'Research',
+      coordinator: {
+        postId: 'research-head',
+        role: 'Research department head',
+        provider: 'deepseek-official',
+        agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' }
+      }
+    },
+    {
+      id: 'quality',
+      name: 'Quality',
+      coordinator: {
+        postId: 'quality-head',
+        role: 'Quality department head',
+        provider: 'deepseek-official',
+        agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' }
+      }
+    }
+  ]
+}
+
+/** Boot with QD_ORG and wait for BOTH the research head and the quality head. */
+async function bootWithQD(stateDir, opts = {}) {
+  const env = await bootPlugin(stateDir, { ...opts, org: QD_ORG })
+  await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'research head materialized at boot')
+  await waitFor(() => env.agents.store.has('head-quality-head'), 5000, 'quality head materialized at boot')
+  return env
+}
+
+/** The research-head agent + its own-layer scoped toolset (for dept_worker_spawn
+ * / dept_worker_retire / dept_sleep). */
+function qdResearchHead(env) {
+  const head = env.agents.store.get('head-research-head')
+  const { ctx: headCtx, key } = childContextFor(env.agents, 'head-research-head')
+  return { head, headCtx, key }
+}
+
+/** The ADDRESSED QUALITY INSPECT directives that reached `quality-head`. */
+async function qualityDirectives(stateDir) {
+  const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+  return records.filter((r) => r.from === 'deepartments' && (r.to ?? []).includes('quality-head'))
+}
+
+test('QD probability gate: worker default 0.10 + clamp; worker uses injected rng + env override; head+host ALWAYS true even prob<1', () => {
+  // worker default (prob 0.10): rng below the threshold → true; above → false.
+  assert.equal(qualityInspectDecision('worker', { rng: () => 0.05 }), true, 'rng 0.05 < default 0.10 → true')
+  assert.equal(qualityInspectDecision('worker', { rng: () => 0.95 }), false, 'rng 0.95 ≥ default 0.10 → false')
+  assert.equal(qualityInspectDecision('worker', { rng: () => 0.0999 }), true, 'rng 0.0999 < 0.10 → true')
+  assert.equal(qualityInspectDecision('worker', { rng: () => 0.1 }), false, 'rng 0.1 is NOT < 0.10 (strict) → false')
+  // clamp: prob > 1 → clamped to 1; prob < 0 → clamped to 0.
+  assert.equal(qualityInspectDecision('worker', { rng: () => 0.5, workerInspectProbability: 2 }), true, 'prob 2 clamps to 1 → true')
+  assert.equal(qualityInspectDecision('worker', { rng: () => 0.5, workerInspectProbability: -1 }), false, 'prob -1 clamps to 0 → false')
+  // injected worker probability overrides the default.
+  assert.equal(qualityInspectDecision('worker', { rng: () => 0.5, workerInspectProbability: 0.5 }), false, '0.5 < 0.5 is false (strict)')
+  assert.equal(qualityInspectDecision('worker', { rng: () => 0.49, workerInspectProbability: 0.5 }), true, '0.49 < 0.5 → true')
+  // head + host: ALWAYS true — the 100% mandate (D-Q3) is STRUCTURAL (never a die).
+  assert.equal(qualityInspectDecision('head', { rng: () => 0, workerInspectProbability: 0 }), true, 'head mandate 100% (never a die)')
+  assert.equal(qualityInspectDecision('host', { rng: () => 0, workerInspectProbability: 0 }), true, 'host mandate 100% (host = "H")')
+  // env override (worker path ONLY): 1 forces true, 0 forces false, invalid → default.
+  process.env[QUALITY_INSPECT_ENV_VAR] = '1'
+  try {
+    assert.equal(qualityInspectDecision('worker', { rng: () => 0.999 }), true, 'env=1 forces the worker dice true')
+    assert.equal(qualityInspectDecision('head', { rng: () => 0, workerInspectProbability: 0 }), true, 'env never turns the head mandate off')
+  } finally {
+    delete process.env[QUALITY_INSPECT_ENV_VAR]
+  }
+  process.env[QUALITY_INSPECT_ENV_VAR] = '0'
+  try {
+    assert.equal(qualityInspectDecision('worker', { rng: () => 0.5 }), false, 'env=0 forces the worker dice false')
+  } finally {
+    delete process.env[QUALITY_INSPECT_ENV_VAR]
+  }
+  process.env[QUALITY_INSPECT_ENV_VAR] = 'not-a-number'
+  try {
+    // pre-set a working probability so the invalid env falls back to the config value.
+    assert.equal(qualityInspectDecision('worker', { rng: () => 0.05, workerInspectProbability: 0.10 }), true, 'invalid env falls back to the injected probability')
+  } finally {
+    delete process.env[QUALITY_INSPECT_ENV_VAR]
+  }
+  // directive text is pure and human-readable.
+  assert.match(qualityInspectDirectiveText({ kind: 'worker-retired', workerPostId: 'researcher', sessionId: 's-1', archived: true }), /worker retired.*post researcher/)
+  assert.match(qualityInspectDirectiveText({ kind: 'head-slept', headPostId: 'research-head', sessionId: 'head-research-head', sleepEpoch: 123 }), /head slept.*sleepEpoch 123/)
+  assert.match(qualityInspectDirectiveText({ kind: 'post-error', postId: 'ghost-head', messageId: 'm-1', error: 'boom' }), /post-error.*post ghost-head.*error boom/)
+})
+
+test('QD config resolution: absent quality → code default 0.10; present valid → that; invalid → default', () => {
+  assert.equal(resolveQualityWorkerInspectProbability({}), QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, 'no org field → code default 0.10')
+  assert.equal(resolveQualityWorkerInspectProbability({ quality: {} }), QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, 'absent knob → code default 0.10')
+  assert.equal(resolveQualityWorkerInspectProbability({ quality: { workerInspectProbability: 0.3 } }), 0.3, 'present valid in [0,1] → that')
+  assert.equal(resolveQualityWorkerInspectProbability({ quality: { workerInspectProbability: 1 } }), 1, 'upper bound 1 accepted')
+  assert.equal(resolveQualityWorkerInspectProbability({ quality: { workerInspectProbability: 0 } }), 0, 'lower bound 0 accepted')
+  assert.equal(resolveQualityWorkerInspectProbability({ quality: { workerInspectProbability: 2 } }), QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, '>1 falls back to default')
+  assert.equal(resolveQualityWorkerInspectProbability({ quality: { workerInspectProbability: -1 } }), QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, '<0 falls back to default')
+  assert.equal(resolveQualityWorkerInspectProbability({ quality: { workerInspectProbability: '0.3' } }), QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, 'non-number falls back to default')
+  assert.equal(resolveQualityWorkerInspectProbability(undefined), QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, 'undefined config → default')
+})
+
+test('QD worker retire (env forced true): a fresh retire emits ONE quality-inspect directive; the idempotent no-op retire emits NONE (wasRetired guard)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    process.env[QUALITY_INSPECT_ENV_VAR] = '1' // force the worker dice true
+    try {
+      const env = await bootWithQD(stateDir)
+      try {
+        const signal = new AbortController().signal
+        const { head, headCtx, key } = qdResearchHead(env)
+        const spawned = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'qd sample' })
+        const sid = spawned.result.sessionId
+        const result = await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: spawned.result.workerId }, { agent: head, signal })
+        assert.equal(result.retired, true, 'the renew retire commits')
+        assert.equal(result.archived, true, 'the worker session is archived')
+        await waitFor(() => env.workspaceRegistry.archivedSessionIds.includes(sid), 5000, 'the worker session is archived (D5)')
+        let dirs = await qualityDirectives(stateDir)
+        const retiredDirs = dirs.filter((d) => /worker retired/.test(d.text))
+        assert.equal(retiredDirs.length, 1, 'a fresh retire (dice true) emits exactly ONE worker-retired directive')
+        assert.match(retiredDirs[0].text, new RegExp(`worker retired.*post ${spawned.result.workerId}`), 'the directive names the retired worker')
+        // Idempotent no-op retire: wasRetired=true → the QD hook never re-fires (R1).
+        const again = await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: spawned.result.workerId }, { agent: head, signal })
+        assert.equal(again.retired, true, 'the second retire succeeds as a no-op')
+        await new Promise((r) => setTimeout(r, 100))
+        dirs = await qualityDirectives(stateDir)
+        assert.equal(dirs.filter((d) => /worker retired/.test(d.text)).length, 1, 'the idempotent no-op retire emits NO additional directive')
+      } finally {
+        await env.dispose()
+      }
+    } finally {
+      delete process.env[QUALITY_INSPECT_ENV_VAR]
+    }
+  })
+})
+
+test('QD worker retire rng-false: emits no quality-inspect directive (worker sample misses)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    process.env[QUALITY_INSPECT_ENV_VAR] = '0' // force the worker dice false
+    try {
+      const env = await bootWithQD(stateDir)
+      try {
+        const signal = new AbortController().signal
+        const { head, headCtx, key } = qdResearchHead(env)
+        const spawned = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'qd sample-miss' })
+        const result = await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: spawned.result.workerId }, { agent: head, signal })
+        assert.equal(result.retired, true, 'the retire still commits outside the dice')
+        await new Promise((r) => setTimeout(r, 100))
+        const dirs = await qualityDirectives(stateDir)
+        assert.equal(dirs.filter((d) => /worker retired/.test(d.text)).length, 0, 'a worker retire that misses the dice emits NO directive')
+      } finally {
+        await env.dispose()
+      }
+    } finally {
+      delete process.env[QUALITY_INSPECT_ENV_VAR]
+    }
+  })
+})
+
+test('QD head dept_sleep ALWAYS emits a quality-inspect directive (D-Q3 mandate, no dice)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const { head, headCtx, key } = qdResearchHead(env)
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      await memo.execute({ summary: 'QD head-sleep mandate memory.' }, { agent: head, signal })
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      await withTimeout(sleep.execute({}, { agent: head, signal }), 1500, 'head dept_sleep returns (no self-deadlock wedge)')
+      const dirs = await qualityDirectives(stateDir)
+      const headDirs = dirs.filter((d) => /head slept/.test(d.text))
+      assert.equal(headDirs.length, 1, 'a head dept_sleep ALWAYS emits exactly ONE head-slept directive (100% mandate, no dice)')
+      assert.match(headDirs[0].text, /post research-head/, 'the head-slept directive names the archived head')
+      assert.match(headDirs[0].text, /sleepEpoch \d+/, 'the head-slept directive carries the sleepEpoch surface')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('QD host rotation ALWAYS emits one quality-inspect directive (host = "H", no dice), regardless of the archive ok', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir)
+    try {
+      const host = env.agents.put(fakeParentAgent())
+      const sleepTool = env.root.tools.get('dept_sleep')
+      const signal = new AbortController().signal
+      const oldHostId = `host-${host.id}`
+      await seedJournal(stateDir, oldHostId, 'QD-HOST-ROTATION-MEMORY')
+      const realSession = Session.create(SessionId(String(host.id)))
+      realSession.append('user/message', { role: 'user', content: [{ type: 'text', text: 'prior turn' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
+      host.session = realSession
+      let concluded = false
+      const result = await sleepTool.execute({}, { agent: host, signal, concludeTurn: () => { concluded = true } })
+      assert.ok(concluded, 'the host turn concluded')
+      assert.match(result.member, /^host-session-/, 'the rotation returned the NEW host id')
+      const dirs = await qualityDirectives(stateDir)
+      const hostDirs = dirs.filter((d) => /host rotated/.test(d.text))
+      assert.equal(hostDirs.length, 1, 'a host rotation ALWAYS emits exactly ONE host-rotated directive (100% mandate, no dice)')
+      assert.match(hostDirs[0].text, new RegExp(`old session ${host.id}`), 'the host-rotated directive names the OLD (archived) session')
+      assert.match(hostDirs[0].text, /new session session-[0-9a-f-]+/, 'the host-rotated directive names the NEW session')
+      assert.match(hostDirs[0].text, /archiveOk (true|false)/, 'the host-rotated directive carries the archive-ok surface')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('QD event-driven post-error: a bus-delivery failure appends a post-error record AND emits a post-error directive to quality-head', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await seedPost(stateDir, { postId: 'ghost-head', sessionId: 'head-ghost-head', roomId: 'board', agentPreset: 'deepartments-head' })
+    const env = await bootWithQD(stateDir, { resumeRejects: ['head-ghost-head'], createRejects: ['head-ghost-head'] })
+    try {
+      const host = env.agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const send = env.pluginCtx().tools.get('send_message')
+      const result = await send.execute({ to: ['ghost-head'], text: 'wake the unwakeable' }, { agent: host, signal })
+      assert.equal(result.delivered['ghost-head'], 'failed', 'a dual-fail materialization reports failed')
+      const errors = readPostErrorsFile(stateDir)
+      assert.equal(errors.length, 1, 'one post-error line recorded')
+      assert.equal(errors[0].postId, 'ghost-head', 'the post-error carries the failed postId')
+      assert.equal(errors[0].messageId, result.messageId, 'the post-error carries the bus message id')
+      const dirs = await qualityDirectives(stateDir)
+      const errorDirs = dirs.filter((d) => /post-error/.test(d.text))
+      assert.equal(errorDirs.length, 1, 'a new post-error emits exactly ONE post-error directive (D-Q4a)')
+      assert.match(errorDirs[0].text, /post ghost-head/, 'the post-error directive names the failed postId')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('QD echo guard (cross-check 5): a failing bus delivery to the QD target (postId === "quality-head") emits NO post-error directive, while a non-QD target still emits exactly one', async () => {
+  // The reviewer gate (cross-check 5): a post-error directive whose OWN delivery
+  // to `quality-head` fails lands in THIS SAME catch. If we re-emitted a
+  // post-error for it, the directive → busDeliverToPost(quality-head) → fail →
+  // re-append → re-emit loop would be unbounded. The guard gates the emit on
+  // `entry.postId !== 'quality-head'` so the QD target's OWN delivery failure is
+  // recorded (post-errors.jsonl) but NEVER bubbled back into another directive.
+  // Scenario (a): the QD target itself fails → NO post-error directive is emitted.
+  await withTempStateDir(async (stateDir) => {
+    // An org WITHOUT a quality coordinator: `quality-head` is ONLY the seeded,
+    // non-materialized post, so its bus delivery fails cleanly into the catch
+    // block AND `byPost.get('quality-head')` is still a valid directive target
+    // (un-guarded the emit would fire and echo).
+    await seedPost(stateDir, { postId: 'quality-head', sessionId: 'head-quality-head', roomId: 'board', agentPreset: 'deepartments-head' })
+    const env = await bootPlugin(stateDir, { resumeRejects: ['head-quality-head'], createRejects: ['head-quality-head'] })
+    try {
+      const host = env.agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const send = env.pluginCtx().tools.get('send_message')
+      const result = await send.execute({ to: ['quality-head'], text: 'wake the unwakeable QD target' }, { agent: host, signal })
+      assert.equal(result.delivered['quality-head'], 'failed', 'a dual-fail materialization of the QD target reports failed')
+      // The failure IS a real post-error record (the echo is not silently dropped).
+      const errors = readPostErrorsFile(stateDir)
+      assert.equal(errors.length, 1, 'the QD target failure is RECORDED in post-errors.jsonl')
+      assert.equal(errors[0].postId, 'quality-head', 'the post-error carries the failed QD target postId')
+      // But the QD target's OWN failure must NOT re-signal a directive (bounded).
+      const dirs = await qualityDirectives(stateDir)
+      assert.equal(dirs.filter((d) => /post-error/.test(d.text)).length, 0, 'the QD target failure emits NO post-error directive (echo guard)')
+    } finally {
+      await env.dispose()
+    }
+  })
+  // Scenario (b): a non-QD target's failure still emits exactly ONE post-error
+  // directive to quality-head (the guard is scoped to the QD target only).
+  await withTempStateDir(async (stateDir) => {
+    await seedPost(stateDir, { postId: 'ghost-head', sessionId: 'head-ghost-head', roomId: 'board', agentPreset: 'deepartments-head' })
+    const env = await bootWithQD(stateDir, { resumeRejects: ['head-ghost-head'], createRejects: ['head-ghost-head'] })
+    try {
+      const host = env.agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const send = env.pluginCtx().tools.get('send_message')
+      const result = await send.execute({ to: ['ghost-head'], text: 'wake the unwakeable' }, { agent: host, signal })
+      assert.equal(result.delivered['ghost-head'], 'failed', 'a dual-fail materialization reports failed')
+      const dirs = await qualityDirectives(stateDir)
+      const errorDirs = dirs.filter((d) => /post-error/.test(d.text))
+      assert.equal(errorDirs.length, 1, 'a non-QD failure still emits exactly ONE post-error directive')
+      assert.match(errorDirs[0].text, /post ghost-head/, 'the directive names the failed postId')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('QD non-fatal: a failing directive emit (store.append rejects) still commits the retire', async () => {
+  await withTempStateDir(async (stateDir) => {
+    process.env[QUALITY_INSPECT_ENV_VAR] = '1' // force the worker dice true so the emit runs
+    try {
+      const env = await bootWithQD(stateDir)
+      try {
+        const signal = new AbortController().signal
+        const { head, headCtx, key } = qdResearchHead(env)
+        const spawned = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'qd non-fatal' })
+        const sid = spawned.result.sessionId
+        // Force the directive emit to FAIL: make the messages file path a DIRECTORY
+        // so `store.append` (the durable flush) rejects inside the emit; the emit's
+        // own try/catch must swallow it and the retire must still commit.
+        await rm(path.join(stateDir, 'messages.jsonl'), { force: true })
+        await mkdir(path.join(stateDir, 'messages.jsonl'))
+        const result = await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: spawned.result.workerId }, { agent: head, signal })
+        assert.equal(result.retired, true, 'the retire mark still commits (the failing emit never breaks the seam)')
+        assert.equal(result.archived, true, 'the archive still runs (the failing emit is non-fatal)')
+        await waitFor(() => env.workspaceRegistry.archivedSessionIds.includes(sid), 5000, 'the worker session archived despite the failing emit')
+        // Restore a readable messages path so the directive read is ENOENT→[].
+        await rm(path.join(stateDir, 'messages.jsonl'), { recursive: true, force: true })
+        const dirs = await qualityDirectives(stateDir)
+        assert.equal(dirs.filter((d) => /worker retired/.test(d.text)).length, 0, 'no directive was recorded (store.append rejected → caught → warn)')
+      } finally {
+        await env.dispose()
+      }
+    } finally {
+      delete process.env[QUALITY_INSPECT_ENV_VAR]
     }
   })
 })

@@ -23,6 +23,14 @@
         # OPENCODE_GO_API_KEY — configured in settings.yaml of the profile);
         # deepseek-v4-flash-vision-exp with reasoning max (same as the Asistente).
         org:
+          # D-Q6 fs-scope (spec 007 §3.2/§5.3; seam-report risk 3): the
+          # quality-inspector's archived-session reads — the stateDir
+          # journals/* (under config.stateDir, itself a dept_exec allowed root)
+          # AND the session-persistence root + host-rotation evidence archive
+          # (sessions/*.jsonl.zstd + archive/, both under /opt/dsh/.dsh-dev —
+          # sessionPersistence.root, itself a dept_exec DEFAULT root). Both are
+          # ALREADY reachable by dept_exec, so org.execRoots needs NO extension
+          # for the D-Q6 inspect read access.
           departments:
             - id: research
               name: Research Department
@@ -50,6 +58,25 @@
                   provider: opencode-zen
                   model: deepseek-v4-flash-vision-exp
                   reasoningEffort: max
+            - id: quality
+              name: Quality Department
+              workspacePath: /root/.deepartments/departments/quality
+              coordinator:
+                postId: quality-head
+                title: Head of Quality
+                role: Quality department head
+                sessionTitle: Head of Quality
+                provider: opencode-zen
+                agentOptions:
+                  provider: opencode-zen
+                  model: deepseek-v4-flash-vision-exp
+                  reasoningEffort: max
+        # Quality Department runtime block (D-Q2, spec 007 §4.1): the worker-
+        # archive inspection dice probability. CODE-DEFAULT-CAPABLE — ABSENT →
+        # the code default 0.10; present → that value (the D-Q3 head/host 100%
+        # inspect mandate is structural and NOT a knob).
+        quality:
+          workerInspectProbability: 0.10
         # Custom ctx.web fetch provider (webfetch.ts): detects blocking
         # (403/429) and reports WEB_BLOCKED with a message that instructs
         # API/JSON-endpoint investigation instead of guessing host endpoints.
