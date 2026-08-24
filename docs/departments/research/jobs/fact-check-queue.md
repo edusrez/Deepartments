@@ -56,10 +56,14 @@ trigger), which either:
 5. **Reply to the head.** `send_message` with the verdict(s): PASS/FAIL, the
    per-point reasons (concise), and the review path(s). You report only to
    your head (ACL).
-6. **Finish (JOB WORKER).** `dept_memo_write` your verdict, then REQUEST sleep
-   permission from YOUR HEAD (via `send_message` — never the host), WAIT for
-   the approval, then `dept_sleep` — per the reviewer persona's job-worker
-   cycle. You are switched off for good only when the head retires you.
+6. **Finish (JOB WORKER).** You carry a `jobId` (deployed by schedule/reactive
+   trigger via the Research Head's `dept_job_run`), but you are EPHEMERAL PER
+   ROUND: complete the job for this round (work, write the report, reply to the
+   head via `send_message`) and you are DONE. Do NOT `dept_sleep`; do NOT request
+   sleep permission from anyone (worker → host is PROHIBITED). The head collects
+   your result and RETIRES you (`dept_worker_retire`); the NEXT job round spawns
+   a FRESH worker (a new `worker-<slug>-<uuid>`) with the same `jobId`. No
+   round-to-round state carries over.
 
 ## Review flow
 

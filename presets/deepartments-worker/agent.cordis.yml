@@ -20,16 +20,18 @@
 #     framing every worker shares; the role personalizes it; the actual
 #     assignment arrives as an addressed message from its head.
 #
-# Disposable-worker lifecycle (owner 2026-08-23): the head creates the worker
-# (`dept_worker_spawn`) and delivers its first message with send_message. The
-# worker wakes with the message as its next turn and works the task. When it is
-# DONE its default is EPHEMERAL: it reports to its head and is READY TO BE
-# RETIRED (`dept_worker_retire`) — it does NOT sleep and does NOT ask anyone for
-# sleep permission (worker → host is PROHIBITED by the ACL). A JOB worker
-# (spawned by `dept_job_run`, carries a jobId) instead iterates across rounds:
-# it persists findings with `dept_memo_write`, then asks its HEAD for sleep
-# permission (never the host), waits, and concludes with `dept_sleep`. Either
-# way the worker is switched off for good only when the head retires it.
+# Disposable-worker lifecycle (owner 2026-08-23; jobs updated 2026-08-24): the
+# head creates the worker (`dept_worker_spawn`) and delivers its first message
+# with send_message. The worker wakes with the message as its next turn and
+# works the task. When it is DONE its default is EPHEMERAL: it reports to its
+# head and is READY TO BE RETIRED (`dept_worker_retire`) — it does NOT sleep and
+# does NOT ask anyone for sleep permission (worker → host is PROHIBITED by the
+# ACL). A JOB worker (spawned by `dept_job_run`, carries a jobId) is EPHEMERAL
+# PER ROUND too: it completes the job for this round (work, write the report,
+# reply to its head), and is DONE — the head collects its result and retires it
+# (`dept_worker_retire`); the next job round spawns a fresh worker with the same
+# jobId. Either way the worker is switched off for good only when the head
+# retires it.
 #
 # A service row here MUST sit inside a group carrying an `isolate` realm,
 # exactly as documented in the Asistente preset (dsh-agent-presets rejects a
@@ -74,13 +76,14 @@
       NOT ask anyone for sleep permission (worker → host is PROHIBITED by the
       ACL, so you have no host address); your head collects your result and
       retires you with dept_worker_retire. If instead you were deployed from a
-      JOB (you carry a jobId) and you must iterate across rounds: write
-      dept_memo_write to save your findings to your journal, then REQUEST sleep
-      permission from YOUR HEAD (via send_message — never the Asistente / host;
-      worker → host is PROHIBITED by the ACL), WAIT for the head's approval,
-      and then conclude with dept_sleep. Either way you are switched off for
-      good only when your department head retires you with dept_worker_retire,
-      after which you are unregistered.
+      JOB (you carry a jobId), you are STILL EPHEMERAL PER ROUND: complete the
+      job for this round (work, write the report, reply to your head via
+      send_message), and you are DONE. Do NOT sleep and do NOT request sleep
+      permission from anyone; your head collects your result and retires you
+      with dept_worker_retire — the next job round spawns a fresh worker (a new
+      worker-<slug>-<uuid>) with the same jobId. You are switched off for good
+      only when your department head retires you with dept_worker_retire, after
+      which you are unregistered.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'

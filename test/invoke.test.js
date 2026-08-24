@@ -28,7 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
@@ -169,7 +169,10 @@ async function materializeStubAgent(agents, sessionId, options) {
     steer() {},
     inject() {},
     send() {},
-    cancel() {},
+    cancelCalls: [],
+    cancel(cause, options) {
+      this.cancelCalls.push({ cause, options })
+    },
     // Never settles: the Activation stays resident for the whole test (the
     // settlement watcher just waits on whenIdle forever, which is fine).
     whenIdle() {
@@ -238,6 +241,17 @@ class StubAgents extends Service {
     // a content-free bus delivery can be driven to the 'failed' catch block that
     // records a post-error line (both resume AND create must throw).
     this.createRejects = new Set()
+    // W8-i: per-session 'session "<id>" not found' ONCE (the transient first-
+    // attempt failure the host delivery retries through the host-attach repair
+    // seam) — the FIRST resume throws the harness not-found class, the retry
+    // resume SUCCEEDS, so the W8-i retry-before-record + no-trace tests can
+    // drive a transient not-found deterministically.
+    this.resumeNotFoundOnce = new Set()
+    // W8-i: per-session PERSISTENT 'session "<id>" not found' (the retry ALSO
+    // fails) — every resume throws the not-found class so the W8-i
+    // record-only-on-retry-failure + the stable per-(post+class) dedupe tests
+    // drive a persistent not-found deterministically.
+    this.resumeNotFound = new Set()
     // Sleep-self-deadlock fix tests (2026-08-23): per-session dispose GATES —
     // a promise the stub handle's dispose awaits BEFORE detaching, modelling
     // the real harness dispose() → await machine.whenIdle() contract (which
@@ -282,6 +296,15 @@ class StubAgents extends Service {
 
   async resume(options) {
     this.resumeCalls.push(options)
+    // W8-i: a PERSISTENT 'session "<id>" not found' (every resume throws — the
+    // retry ALSO fails) → the W8-i record-on-retry-failure + stable-dedupe path.
+    if (this.resumeNotFound.has(options.resumeSessionId)) throw new Error(`session "${options.resumeSessionId}" not found`)
+    // W8-i: a transient 'session "<id>" not found' (once per session) thrown by
+    // the NORMAL resume path — the W8-i retry must re-resume SUCCESSFULLY.
+    if (this.resumeNotFoundOnce.has(options.resumeSessionId)) {
+      this.resumeNotFoundOnce.delete(options.resumeSessionId)
+      throw new Error(`session "${options.resumeSessionId}" not found`)
+    }
     if (this.resumeRejects.has(options.resumeSessionId)) throw new Error('stub: forced resume failure (Piece 1 cwd-fix test)')
     this.sessionCwds?.set(String(options.resumeSessionId), options.meta?.cwd)
     // Cold resume: restore a dormant resident under its DURABLE id (the seeded
@@ -557,7 +580,10 @@ function fakeParentAgent(id = SessionId(randomUUID())) {
       this.injectedMessages.push(message)
     },
     send() {},
-    cancel() {},
+    cancelCalls: [],
+    cancel(cause, options) {
+      this.cancelCalls.push({ cause, options })
+    },
     whenIdle() {
       return new Promise(() => {})
     }
@@ -655,6 +681,14 @@ async function bootPlugin(stateDir, opts = {}) {
   // resume AND create throw → a bus delivery reaches the 'failed' catch block
   // that records the post-error-line class).
   if (opts.createRejects !== undefined) agents.createRejects = new Set(opts.createRejects)
+  // W8-i: a boot opt forces a per-session transient 'session "<id>" not found'
+  // ONCE (so the host delivery retry is exercised: first resume throws, the
+  // retry resume succeeds → NO post-error row).
+  if (opts.resumeNotFoundOnce !== undefined) agents.resumeNotFoundOnce = new Set(opts.resumeNotFoundOnce)
+  // W8-i: a boot opt forces a per-session PERSISTENT 'session "<id>" not found'
+  // (every resume throws → the retry ALSO fails → the record-on-retry-failure +
+  // stable per-(post+class) dedupe path).
+  if (opts.resumeNotFound !== undefined) agents.resumeNotFound = new Set(opts.resumeNotFound)
   // F5 (spec 004 §6.2): the shared sessionId → cwd index the StubAgents records
   // on create and the StubWorkspaceRegistry validates on attach (mirrors the
   // harness canonical-cwd header index, so the department-workspace tests can
@@ -8793,6 +8827,153 @@ test('W8-d PART C config: waitThresholdMs resolves (absent/invalid → the 30min
   })
 })
 
+test('W8-h PART 1 interrupted-post boot reconciliation: a post whose session ends in an INTERRUPTED (open) turn records ONE post-error row (error class "interrupted-post") and the W6 daemon ALERTS the host; a healthy/balanced post produces NO row (no false positives); an interruption BEFORE the restart window is NOT flagged', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    const alerts = []
+    const warns = []
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    // An interrupted post: an OPEN turn (turn/start at T0-5min, NO turn/end after
+    // it — the crash tail the persistence backend would close as interrupted).
+    const interruptedEvents = [
+      { type: 'user/message', time: T0 - 6 * 60000, data: {} },
+      { type: 'turn/start', time: T0 - 5 * 60000, data: { turn: 3 } },
+      { type: 'assistant/message', time: T0 - 4 * 60000, data: { message: { content: '…' } } }
+    ]
+    // A healthy/balanced post: every turn closed by a completed turn/end.
+    const healthyEvents = [
+      { type: 'user/message', time: T0 - 6 * 60000, data: {} },
+      { type: 'turn/start', time: T0 - 5 * 60000, data: { turn: 1 } },
+      { type: 'turn/end', time: T0 - 4 * 60000, data: { turn: 1, reason: { kind: 'completed' } } }
+    ]
+    // A post interrupted LONG before the restart window (crash-tail BEFORE
+    // restartAfterTs) → NOT flagged (the 'Stopped' class is THIS restart).
+    const oldInterruptedEvents = [
+      { type: 'turn/start', time: T0 - 12 * 60000, data: { turn: 1 } },
+      { type: 'assistant/message', time: T0 - 11 * 60000, data: {} }
+    ]
+    const first = await reconcileInterruptedPosts({
+      now: () => T0,
+      stateDir,
+      postEvents: [
+        { postId: 'worker-interrupted', sessionId: 's-worker', events: interruptedEvents },
+        { postId: 'worker-healthy', sessionId: 's-healthy', events: healthyEvents },
+        { postId: 'worker-old', sessionId: 's-old', events: oldInterruptedEvents }
+      ],
+      restartAfterTs: T0 - 10 * 60000,
+      logger: { warn: (m) => warns.push(m) }
+    })
+    assert.deepEqual(first.interrupted.sort(), ['worker-interrupted', 'worker-old'], 'BOTH interrupted tails are DETECTED (the old one is a session still in an interrupted state)')
+    assert.equal(first.appended, 1, 'ONLY the fresh (restart-window) interrupted post appends a row — the pre-restart one is NOT re-flagged')
+    const errors = readPostErrorsFile(stateDir)
+    assert.equal(errors.length, 1, 'ONE post-error row in post-errors.jsonl (no false positive for the healthy + pre-restart posts)')
+    assert.equal(errors[0].postId, 'worker-interrupted', 'the row carries the interrupted postId')
+    assert.match(errors[0].error, /^interrupted-post:/, 'the row carries the "interrupted-post" error class')
+    assert.equal(errors[0].ts, T0 - 4 * 60000, 'the row ts = the crash-tail (last real event) time')
+    // The W6 daemon ALERTS the host (the row is fresh inside the 2h window).
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-w8h-1',
+      config: { stateDir, org: { departments: [] } },
+      hosts,
+      posts: [],
+      notifyHost: async (hostEntry, frame) => { alerts.push(frame) },
+      logger: { warn: (m) => warns.push(m) }
+    })
+    assert.equal(alerts.length, 1, 'the daemon ALERTS the host')
+    assert.match(alerts[0], /post-error: worker-interrupted/, 'the alert names the interrupted post')
+    assert.match(alerts[0], /interrupted-post:/, 'the alert carries the "interrupted-post" error class')
+    assert.equal(warns.length, 0, 'a fully-resolvable reconciliation+alert emits no warns')
+  })
+})
+
+test('W8-h PART 2 dedupe: a repeated interrupted-post reconciliation does NOT re-append/alert the same post within 30min; re-alerts once AFTER the window', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    const alerts = []
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const interruptedEvents = [
+      { type: 'user/message', time: T0 - 5 * 60000, data: {} },
+      { type: 'turn/start', time: T0 - 4 * 60000, data: { turn: 7 } }
+    ]
+    const postEvents = [{ postId: 'worker-a', sessionId: 's-w', events: interruptedEvents }]
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-w8h-2',
+      config: { stateDir, org: { departments: [] } },
+      hosts,
+      posts: [],
+      notifyHost: async (hostEntry, frame) => { alerts.push(frame) },
+      logger: { warn: () => {} }
+    })
+    // 1st reconciliation @ T0 → ONE row; a tick alerts ONCE.
+    const first = await reconcileInterruptedPosts({ now: () => T0, stateDir, postEvents, restartAfterTs: T0 - 10 * 60000 })
+    assert.equal(first.appended, 1, 'the first reconciliation appends ONE row')
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'the first tick ALERTS the interrupted post')
+    // 2nd reconciliation @ T0+5min (inside the 30min window) → NO new row; tick → NO re-alert.
+    const second = await reconcileInterruptedPosts({ now: () => T0 + 5 * 60000, stateDir, postEvents, restartAfterTs: T0 - 10 * 60000 })
+    assert.equal(second.appended, 0, 'a repeated reconciliation inside the 30min window does NOT re-append')
+    assert.equal(readPostErrorsFile(stateDir).length, 1, 'still ONE post-error row')
+    await tick(T0 + 5 * 60000)
+    assert.equal(alerts.length, 1, 'a tick inside the 30min window does NOT re-alert')
+    // 3rd reconciliation @ T0+31min (after the window) → re-appends the row; tick → re-alerts ONCE.
+    const third = await reconcileInterruptedPosts({ now: () => T0 + 31 * 60000, stateDir, postEvents, restartAfterTs: T0 - 10 * 60000 })
+    assert.equal(third.appended, 1, 'a reconciliation after the 30min window re-appends ONE row')
+    assert.equal(readPostErrorsFile(stateDir).length, 2, 'TWO post-error rows total')
+    await tick(T0 + 31 * 60000)
+    assert.equal(alerts.length, 2, 'a tick after the 30min window re-alerts the same interrupted post')
+  })
+})
+
+test('W8-h PART 3 heartbeat interrupted line: buildHeartbeatSection renders `- interrupted: <postIds>` when an interruption is present and `- interrupted: none` when clean', () => {
+  const T0 = 1_000_000_000_000
+  const clean = buildHeartbeatSection({ hostLastActivityTs: T0 - 60_000, rows: [] }, T0)
+  assert.match(clean, /^- interrupted: none$/m, 'a clean heartbeat renders `- interrupted: none`')
+  const present = buildHeartbeatSection({ hostLastActivityTs: T0 - 60_000, rows: [], interruptedPostIds: ['worker-a', 'research-head'] }, T0)
+  assert.match(present, /^- interrupted: worker-a research-head$/m, 'the interrupted line lists the stopped postIds')
+  const single = buildHeartbeatSection({ hostLastActivityTs: T0 - 60_000, rows: [], interruptedPostIds: ['worker-a'] }, T0)
+  assert.match(single, /^- interrupted: worker-a$/m, 'one interrupted post renders a single id')
+  // An empty interruptedPostIds array → 'none'.
+  assert.match(buildHeartbeatSection({ hostLastActivityTs: T0 - 60_000, rows: [], interruptedPostIds: [] }, T0), /^- interrupted: none$/m, 'an empty interruptedPostIds still renders `none`')
+})
+
+test('W8-h PART 4 scanInterruptedTurn: detects an OPEN turn (un-repaired crash) and a persisted `interrupted` marker (repaired crash); returns undefined for a balanced/healthy log, an empty log, and a RECOVERED session', () => {
+  const T0 = 1_000_000_000_000
+  // Case A — an open turn with no turn/end (the crash tail is not yet repaired).
+  const open = scanInterruptedTurn([
+    { type: 'turn/start', time: T0 - 60_000, data: { turn: 3 } },
+    { type: 'assistant/message', time: T0 - 30_000, data: {} }
+  ], 's-1', 'worker-a')
+  assert.ok(open !== undefined, 'an open turn is detected as interrupted')
+  assert.equal(open.turn, 3, 'the capture carries the open turn number')
+  assert.equal(open.ts, T0 - 30_000, 'the crash-tail ts = the last event time')
+  // Case B — a persisted `turn/end { reason: interrupted }` marker (the reload
+  // repair closed the open turn).
+  const repaired = scanInterruptedTurn([
+    { type: 'turn/start', time: T0 - 60_000, data: { turn: 2 } },
+    { type: 'turn/end', time: T0 - 30_000, data: { turn: 2, reason: { kind: 'interrupted' } } }
+  ], 's-2', 'worker-b')
+  assert.ok(repaired !== undefined, 'a persisted interrupted marker is detected')
+  assert.match(repaired.evidence, /interrupted/, 'the evidence names the interrupted turn')
+  // Balanced/healthy (every turn closed by a completed turn/end) → undefined.
+  assert.equal(scanInterruptedTurn([
+    { type: 'turn/start', time: T0 - 60_000, data: { turn: 1 } },
+    { type: 'turn/end', time: T0 - 30_000, data: { turn: 1, reason: { kind: 'completed' } } }
+  ], 's-3', 'worker-c'), undefined, 'a balanced/healthy log is NOT flagged')
+  // Recovered — an interrupted marker followed by a NEW completed turn → undefined.
+  assert.equal(scanInterruptedTurn([
+    { type: 'turn/start', time: T0 - 60_000, data: { turn: 1 } },
+    { type: 'turn/end', time: T0 - 30_000, data: { turn: 1, reason: { kind: 'interrupted' } } },
+    { type: 'turn/start', time: T0 - 20_000, data: { turn: 2 } },
+    { type: 'turn/end', time: T0 - 10_000, data: { turn: 2, reason: { kind: 'completed' } } }
+  ], 's-4', 'worker-d'), undefined, 'a RECOVERED session (a new completed turn after the marker) is NOT flagged')
+  // Empty log → undefined (never throws).
+  assert.equal(scanInterruptedTurn([], 's-5', 'worker-e'), undefined, 'an empty log → undefined (never throws)')
+})
+
 
 
 /** Seed the write-ahead delivery sidecar with the given wire rows
@@ -9095,6 +9276,289 @@ test('W8-b assignment seam: a worker spawned with a task containing an unbound d
       assert.ok(persona.text.includes('{ {lateral}}'), 'the assignment section shows the broken token')
     } finally {
       await dispose()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W8-i (urgent — live production noise): the 'session "<id>" not found' host-
+// alert delivery loop. A bus host delivery to a dormant host whose durable
+// session is not yet workspace-attached throws `session "<id>" not found`; the
+// seam was recording the transient first-attempt failure as a post-error so the
+// W6 health daemon re-alerted the HOST every dedupe window (16 rows live). The
+// fix in THREE parts (retry before recording; stable per-(post+class) dedupe;
+// a later-successful retry leaves NO trace), tested here.
+// ---------------------------------------------------------------------------
+
+test('W8-i postErrorClass / isSessionNotFoundError: the "session <id> not found" class is classified; a generic failure is not', () => {
+  assert.equal(postErrorClass('session "abc" not found'), POST_ERROR_CLASS_SESSION_NOT_FOUND, 'the exact message is the not-found class')
+  assert.equal(postErrorClass('session "abc" not found (not attached)'), POST_ERROR_CLASS_SESSION_NOT_FOUND, 'the (not attached) suffix is still the not-found class')
+  assert.equal(postErrorClass(new Error('session "x" not found')), POST_ERROR_CLASS_SESSION_NOT_FOUND, 'an Error instance carries the class')
+  assert.equal(postErrorClass('could not be materialized'), undefined, 'a generic failure is NOT the not-found class')
+  assert.equal(postErrorClass('preset "foo" not found'), undefined, 'a preset-not-found is NOT the session-not-found class (it lacks session ")')
+  assert.equal(isSessionNotFoundError('session "abc" not found'), true, 'isSessionNotFoundError true for the class')
+  assert.equal(isSessionNotFoundError('boom'), false, 'isSessionNotFoundError false for a generic failure')
+})
+
+test('W8-i appendPostErrorDeduped: appends once per key per HEALTH_DEDUPE_WINDOW_MS (no re-record inside the window), re-appends after the window', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const key = 'record:post-error:p1:session-not-found'
+    const T0 = 1_700_000_000_000
+    const entry = { ts: T0, postId: 'p1', messageId: 'm-1', error: 'session "s" not found' }
+    const appended = await appendPostErrorDeduped(stateDir, entry, key, T0)
+    assert.equal(appended, true, 'the first append lands')
+    assert.equal(readPostErrorsFile(stateDir).length, 1, 'one row after the first append')
+    // A second append INSIDE the dedupe window is skipped (no re-record).
+    const second = await appendPostErrorDeduped(stateDir, { ...entry, messageId: 'm-2' }, key, T0 + 1000)
+    assert.equal(second, false, 'an append inside the dedupe window is skipped (no re-record)')
+    assert.equal(readPostErrorsFile(stateDir).length, 1, 'still one row inside the window')
+    // After the window elapses → a fresh append lands again.
+    const after = await appendPostErrorDeduped(stateDir, { ...entry, messageId: 'm-3' }, key, T0 + HEALTH_DEDUPE_WINDOW_MS + 1000)
+    assert.equal(after, true, 'after the window a fresh append lands again')
+    assert.equal(readPostErrorsFile(stateDir).length, 2, 'two rows after the window')
+  })
+})
+
+test('W8-i scanPostErrorFindings: the "session not found" class groups per (post+class) key; a generic class keeps the legacy per-post key', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_700_000_000_000
+    await writeFile(path.join(stateDir, 'post-errors.jsonl'), [
+      JSON.stringify({ ts: T0, postId: 'host-a', messageId: 'm-1', error: 'session "s" not found' }),
+      JSON.stringify({ ts: T0 + 1000, postId: 'host-a', messageId: 'm-2', error: 'session "s" not found' }),
+      JSON.stringify({ ts: T0 + 2000, postId: 'host-a', error: 'could not be materialized' }),
+      JSON.stringify({ ts: T0, postId: 'head-b', error: 'boom' })
+    ].join('\n') + '\n', 'utf8')
+    const findings = scanPostErrorFindings(stateDir, T0 + 10_000)
+    const notFound = findings.find((f) => f.key === 'post-error:host-a:session-not-found')
+    assert.ok(notFound, 'the not-found rows group into a per-(post+class) finding')
+    assert.equal(notFound.count, 2, 'both not-found rows count together')
+    assert.equal(notFound.postId, 'host-a', 'the not-found finding carries the host postId')
+    const generic = findings.find((f) => f.key === 'post-error:host-a')
+    assert.ok(generic, 'the generic class keeps the legacy per-post key')
+    assert.equal(generic.count, 1, 'the generic row is its own group')
+    const headB = findings.find((f) => f.key === 'post-error:head-b')
+    assert.ok(headB, 'a distinct post with a generic error keeps the legacy key')
+  })
+})
+
+test('W8-i (a): a TRANSIENT "session not found" host delivery retries through the host-attach repair seam and delivers WITHOUT recording a post-error (no trace)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const hostSessionId = 'host-w8i-transient'
+    const hostId = await seedHostRegistration(stateDir, hostSessionId)
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { resumeNotFoundOnce: [hostSessionId] })
+    try {
+      const signal = new AbortController().signal
+      const send = await headCtx.tools.get('send_message', key).execute(
+        { to: [hostId], text: 'transient wake' },
+        { agent: head, signal }
+      )
+      assert.equal(send.delivered[hostId], 'resumed', 'the transient not-found is retried and the host delivery SUCCEEDS')
+      assert.equal(readPostErrorsFile(stateDir).length, 0, 'a transient not-found later retried successfully leaves NO post-error row (no trace)')
+      // The host was resumed twice (the original + the W8-i retry), then delivered.
+      assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === hostSessionId).length, 2, 'the host resume was attempted twice (original + retry)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('W8-i (b): a PERSISTENT "session not found" host delivery records exactly ONE post-error row per (post+class) per 30min; a second attempt within the window does NOT re-record, and the daemon does NOT re-alert', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const hostSessionId = 'host-w8i-persist'
+    const hostId = await seedHostRegistration(stateDir, hostSessionId)
+    const { head, headCtx, key, dispose } = await bootWithHead(stateDir, { resumeNotFound: [hostSessionId] })
+    try {
+      const signal = new AbortController().signal
+      const send = async () => headCtx.tools.get('send_message', key).execute(
+        { to: [hostId], text: 'persistent wake' },
+        { agent: head, signal }
+      )
+      // First attempt: the retry ALSO fails → recorded ONCE (per post+class).
+      const r1 = await send()
+      assert.equal(r1.delivered[hostId], 'failed', 'a persistent not-found reports failed')
+      assert.equal(readPostErrorsFile(stateDir).length, 1, 'ONE post-error row recorded after the retry also failed')
+      // A SECOND attempt within the same 30min window does NOT re-record.
+      const r2 = await send()
+      assert.equal(r2.delivered[hostId], 'failed', 'the second attempt also reports failed')
+      assert.equal(readPostErrorsFile(stateDir).length, 1, 'a second attempt within the window does NOT re-record (per post+class dedupe)')
+
+      // The health daemon ALERTS the host for the recorded not-found ONCE per
+      // (post+class) and does NOT re-alert within HEALTH_DEDUPE_WINDOW_MS.
+      const T0 = Date.now()
+      const alerts = []
+      const hosts = [{ hostId, sessionId: hostSessionId, roomId: 'board' }]
+      const tick = (nowMs) => runHealthDaemonTick({
+        now: () => nowMs,
+        stateDir,
+        bootId: 'boot-w8i-b',
+        hosts,
+        posts: [],
+        hostWaits: [],
+        notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+        logger: { warn: () => {} }
+      })
+      await tick(T0)
+      assert.equal(alerts.length, 1, 'the daemon ALERTS once for the persistent not-found')
+      assert.ok(alerts[0].frame.includes('post-error: ' + hostId), 'the alert names the host postId')
+      const state = readHealthAlertsState(stateDir)
+      assert.ok(state[`post-error:${hostId}:session-not-found`] !== undefined, 'the dedupe key is per (post+class) with the class suffix')
+      await tick(T0 + 5 * 60000)
+      assert.equal(alerts.length, 1, 'a second tick within the window does NOT re-alert')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('W8-i (c): a host delivery that succeeds normally (live host) stays unchanged — delivered, NO post-error recorded', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const host = agents.put(fakeParentAgent())
+      const hostId = `host-${host.id}`
+      await seedHostRegistration(stateDir, host.id, 'board')
+      const signal = new AbortController().signal
+      await root.tools.get('dept_who').execute({}, { agent: host, signal })
+      const before = host.inboxMessages.length
+      const sendResult = await headCtx.tools.get('send_message', key).execute(
+        { to: [hostId], text: 'normal alert' },
+        { agent: head, signal }
+      )
+      assert.equal(sendResult.delivered[hostId], 'delivered', 'a normal live-host delivery is delivered (unchanged)')
+      await waitFor(() => host.inboxMessages.length === before + 1, 5000, 'the host agent was raw-woken')
+      assert.equal(readPostErrorsFile(stateDir).length, 0, 'a normally-successful host delivery records NO post-error')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W9-b — delivery interrupt/queue semantics (owner decision 2026-08-24): an
+// opt-in `interrupt` option on bus delivery. Default FALSE = the current QUEUE
+// semantics (zero regression); `interrupt: true` PREEMPTS a busy recipient:
+//   - DORMANT recipient → wake + process immediately (unchanged).
+//   - LIVE mid-turn recipient → the current turn is ABORTED (reason
+//     'interrupted', keepInbox preserved) and the message is the first item of
+//     the next turn. The harness abort/stop API is `Agent.cancel(cause,
+//     options)` (dsh-agent-loop lib/index.js:405) — the stub records the call.
+// The System-health ALERT path + the system-wait wake are wired `interrupt:
+// true`. The literal double-brace template token is NOT used in any of these
+// prompt-facing frames (they are plain alert/message text).
+// ---------------------------------------------------------------------------
+
+test('W9-b (a): a DORMANT recipient with interrupt:true wakes + processes immediately (no abort needed, delivery is the first turn item)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const wsid = 'worker-1-seed-sess'
+    await seedPost(stateDir, { postId: 'worker-1', sessionId: wsid, roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'research-head' })
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head materialized')
+      assert.equal(agents.store.has(wsid), false, 'the worker is DORMANT at boot (not auto-materialized — a worker is created on demand)')
+      const signal = new AbortController().signal
+      const sendTool = root.tools.get('send_message')
+      const r = await sendTool.execute(
+        { to: ['worker-1'], text: 'wake the dormant worker', interrupt: true },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
+      assert.equal(r.delivered['worker-1'], 'resumed', 'the dormant worker was materialized + woken immediately')
+      const worker = agents.store.get(wsid)
+      await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'the message is the first item of the woken turn')
+      assert.match(worker.inboxMessages.at(-1).content[0].text, /^\[From .* → worker-1\]: wake the dormant worker/, 'the interrupt message is delivered')
+      assert.equal(worker.cancelCalls.length, 0, 'a DORMANT recipient needs no abort (no live turn to preempt) — the followup alone wakes it')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('W9-b (b): a LIVE mid-turn recipient with interrupt:true aborts the CURRENT turn (reason "interrupted", keepInbox), delivers the message as the first item of the next turn, and preserves the session context', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head materialized')
+      const head = agents.store.get('head-research-head')
+      const signal = new AbortController().signal
+      const sendTool = root.tools.get('send_message')
+      // Drive the recipient into a LIVE MID-TURN state (the harness `status` is
+      // 'running' while a turn/step driver is active). The stub records the
+      // abort call sent through the harness abort/stop API (Agent.cancel).
+      head.status = 'running'
+      const cancelBefore = head.cancelCalls.length
+      const resumeBefore = agents.resumeCalls.length
+      const inboxBefore = head.inboxMessages.length
+
+      const r = await sendTool.execute(
+        { to: ['research-head'], text: 'PREEMPT this busy turn', interrupt: true },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
+      assert.equal(r.delivered['research-head'], 'delivered', 'the interrupt message is delivered')
+      await waitFor(() => head.inboxMessages.length === inboxBefore + 1, 5000, 'the message is the first item of the next turn')
+      // The abort was invoked through Agent.cancel with the `interrupted` reason.
+      assert.equal(head.cancelCalls.length, cancelBefore + 1, 'the LIVE running recipient was aborted')
+      const abort = head.cancelCalls.at(-1)
+      assert.deepEqual(abort.cause, { kind: 'hook', reason: 'interrupted' }, 'abort cause carries reason "interrupted" (the harness AgentCancelCause has no literal kind)')
+      assert.deepEqual(abort.options, { keepInbox: true }, 'keepInbox preserves any already-pending work (no data loss — only the active turn is aborted)')
+      // Session context preserved: the SAME live incarnation survives, no
+      // dispose/cold-resume, so the aborted turn's partial state stays recoverable.
+      assert.equal(agents.store.get('head-research-head'), head, 'same live incarnation (session context preserved — no dispose)')
+      assert.equal(agents.resumeCalls.length, resumeBefore, 'no cold-resume (the next turn continues from the preserved state)')
+      assert.match(head.inboxMessages.at(-1).content[0].text, /^\[From .* → research-head\]: PREEMPT this busy turn/, 'the interrupt message is the delivered one')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('W9-b (c): a LIVE mid-turn recipient with interrupt:FALSE (default) is QUEUED — the current turn is NOT aborted (zero regression)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head materialized')
+      const head = agents.store.get('head-research-head')
+      const signal = new AbortController().signal
+      const sendTool = root.tools.get('send_message')
+      head.status = 'running'
+      const cancelBefore = head.cancelCalls.length
+      const inboxBefore = head.inboxMessages.length
+
+      const r = await sendTool.execute(
+        { to: ['research-head'], text: 'QUEUED behind the current work' },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
+      assert.equal(r.delivered['research-head'], 'delivered', 'the default (queue) message is delivered')
+      await waitFor(() => head.inboxMessages.length === inboxBefore + 1, 5000, 'the message is enqueued')
+      assert.equal(head.cancelCalls.length, cancelBefore, 'interrupt:FALSE (default) → NO abort (the current turn is NOT preempted — queue semantics)')
+      assert.match(head.inboxMessages.at(-1).content[0].text, /^\[From .* → research-head\]: QUEUED behind the current work/, 'the queued message is delivered')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('W9-b (d): the System-health ALERT path delivers to a busy host with interrupt:true (the host current turn is aborted with reason "interrupted")', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootPlugin(stateDir, { health: { intervalMs: 50 } })
+    try {
+      const host = env.agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      // Self-register the live host (B3 gap fix — dept_who ensures a host entry).
+      await env.root.tools.get('dept_who').execute({}, { agent: host, signal })
+      // A fresh anomaly → the daemon must ALERT the host.
+      await appendPostError(stateDir, { ts: Date.now(), postId: 'research-head', messageId: 'm-alert', error: 'could not be materialized' })
+      // Drive the host into a BUSY (mid-turn) state so the interrupt fires.
+      host.status = 'running'
+      const cancelBefore = host.cancelCalls.length
+      // Wait for the daemon tick to deliver the alert through the production
+      // notifyHost hook (wired `busDeliverToHost(..., { interrupt: true })`).
+      await waitFor(() => host.cancelCalls.length > cancelBefore, 5000, 'the health daemon alert interrupted the busy host')
+      const abort = host.cancelCalls.at(-1)
+      assert.deepEqual(abort.cause, { kind: 'hook', reason: 'interrupted' }, 'the System-health ALERT aborts the busy host with reason "interrupted"')
+      assert.deepEqual(abort.options, { keepInbox: true }, 'the ALERT keeps pending work (keepInbox) — no data loss')
+      assert.equal(host.inboxMessages.length >= 1, true, 'the System-health ALERT bus message is delivered')
+      assert.match(host.inboxMessages.at(-1).content[0].text, /System-health ALERT/, 'the ALERT frame reaches the host')
+    } finally {
+      await env.dispose()
     }
   })
 })

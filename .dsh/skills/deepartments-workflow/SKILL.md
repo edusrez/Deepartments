@@ -214,6 +214,22 @@ REQUEST** to `internal-programming-head`.
   Department, and the consolidated answer is folded back into the version-watch
   report the IPH forwards to the Asistente.
 
+### Delivery semantics (interrupt vs queue)
+
+`send_message` (and the internal bus deliveries: the system-health daemon's host
+ALERT, the system-wait wake, and the agenda/parallel scheduler's head notice)
+deliver a message as the recipient's **next turn**. By default that message is
+**QUEUED** behind whatever the recipient is currently doing (normal queue
+semantics). The opt-in `interrupt: true` **preempts** a busy recipient: a
+recipient that is LIVE mid-turn has its CURRENT turn ABORTED (reason
+'interrupted' — the harness `Agent.cancel` with `keepInbox`, so pending work is
+preserved and nothing is lost) and the message becomes the FIRST item of its
+next turn; a DORMANT recipient always wakes + processes immediately either way.
+The system-health ALERT path (and the system-wait wake) is wired `interrupt:
+true`, so a health alert preempts a busy host/head turn rather than queueing
+behind it. Keep `interrupt` OFF (the default) for normal flows — a preemptive
+abort is only for a time-sensitive, must-surface-now notice.
+
 ### Scribe (documentation)
 
 > Your role contract (scribe) is injected by Deepartments — follow it.

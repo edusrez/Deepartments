@@ -127,9 +127,9 @@ report identified as gaps:
   spec time, since realized): a 5-field cron `schedule` auto-fires via the
   plugin scheduler daemon; `dept_job_run` remains the manual path; calendar
   tools `dept_calendar_add/list/remove` + `agenda/list` are installed.
-- **No job status/queue registry** beyond the worker lifecycle (created → work
-  → memo → sleep → retired): no `jobs.json` status projection, no re-assign
-  queue, no `dsh-goal` integration this phase.
+- **No job status/queue registry** beyond the worker lifecycle (created → work →
+  report → retired): no `jobs.json` status projection, no re-assign queue, no
+  `dsh-goal` integration this phase.
 - **No host-plane worker tools** (D2): the Asistente does NOT create workers;
   `dept_post_create` stays head-only.
 - **No virtual-folder harness change unless the owner picks L2** ($9 Q1).
@@ -228,9 +228,11 @@ owner: research-head
   host/heads; **never** a harness subagent (no parent, no `subagent/descriptor`;
   the native `send_message` child adapter can never reach it — it always goes
   through the catalog route, §5.6).
-- Lifecycle: spawn (role persona + task) → work the task → `dept_memo_write` →
-  `dept_sleep` → head retires (`dept_worker_retire`: unregister + archive
-  session, §5.3). BOOT-QUIET persona (never acts unaddressed) — today's
+- Lifecycle: spawn (role persona + task) → work the task → write the report &
+  reply to the head → head retires (`dept_worker_retire`: unregister + archive
+  session, §5.3). EPHEMERAL PER ROUND — a worker does NOT sleep and does NOT
+  request permission (worker → host is PROHIBITED, §5.6); a job worker is retried
+  fresh each round (§7.5). BOOT-QUIET persona (never acts unaddressed) — today's
   `installRoleSection` worker framing (invoke.ts:3024-3034) carries it.
 - Two provenances (D3): **job worker** (`jobId` set, slug = job id, deduped) and
   **ephemeral** (`jobId` absent, slug = head-chosen slug, deduped `-2`, `-3`…).
@@ -560,8 +562,10 @@ relative to that workspace (`reports/...`), not `.dsh/reports/...`.
 
 - All four: BOOT-QUIET (never act unaddressed — today's worker framing,
   invoke.ts:3024-3034); messages only inside the department; memory via
-  `dept_memo_write`; **ephemeral by default** (see §7.5) — a JOB worker sleeps
-  between rounds asking ITS head, never the host (worker → host PROHIBITED, §5.6).
+  `dept_memo_write`; **ephemeral by default** (see §7.5) — a JOB worker is
+  EPHEMERAL PER ROUND too: it works the round, writes the report, replies to ITS
+  head, and is retired; it never sleeps and never asks the host (worker → host
+  PROHIBITED, §5.6).
 - Role templates live at `presets/departments/research/<role>.md` (§3.2, ❓ Q7);
   the static department design is `presets/departments/research/ARCHITECTURE.md`.
 
@@ -618,11 +622,15 @@ They are ADOPTED requirements for the personas and presets (F6), implemented in
   its head, and the head retires it (`dept_worker_retire`). No sleep protocol,
   no permission to ask — there is nobody to ask (worker → host is PROHIBITED by
   the ACL, §5.6).
-- **Only JOB workers sleep between rounds.** A worker deployed from a job
-  (`dept_job_run`, carries a `jobId`) iterates across sessions: it persists
-  findings with `dept_memo_write`, then requests sleep permission from ITS HEAD
-  (never the host/Asistente — worker → host prohibited by the ACL), waits, and
-  `dept_sleep`s. It is switched off for good only when the head retires it.
+- **JOB workers are EPHEMERAL PER ROUND (owner 2026-08-24).** A worker deployed
+  from a job (`dept_job_run`, carries a `jobId`) is still a job worker (deployed
+  AUTOMATICALLY by schedule/reactive trigger via the head's `dept_job_run` or the
+  scheduler), but it completes the job for this round — work, write the report,
+  reply to its head — and is DONE. It does NOT sleep and does NOT request sleep
+  permission from ITS HEAD (never the host/Asistente — worker → host prohibited
+  by the ACL). The head collects the result and retires it (`dept_worker_retire`);
+  the NEXT round spawns a FRESH worker (a new `worker-<slug>-<uuid>`) with the
+  same `jobId`. No round-to-round state carries over.
 - **Organic flow, not rigid depth/parameters.** The requester expresses an
   ORGANIC need ("be quick", "verify the primary source", "a careful report");
   the head plans and ADAPTS — more/fewer subagents and layers

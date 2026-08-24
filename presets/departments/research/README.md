@@ -48,10 +48,11 @@ base agent preset (the neutral head/worker bases live in
 - **EPHEMERAL (default)**: a one-off task worker. Completes the task, reports to
   its head, and the head retires it (`dept_worker_retire`). NO sleep, no
   permission request (worker → host is PROHIBITED by ACL).
-- **JOB worker** (spawned by `dept_job_run`, carries a `jobId`): iterates across
-  rounds — `dept_memo_write` → request sleep permission from its **head** (never
-  the host) → wait → `dept_sleep`; switched off for good when the head retires
-  it.
+- **JOB worker** (spawned by `dept_job_run`, carries a `jobId`): EPHEMERAL PER
+  ROUND — completes the job for this round (work, report, reply to its head) and
+  is DONE; the head retires it and the NEXT round spawns a fresh worker with the
+  same `jobId`. NO sleep, no permission request (worker → host is PROHIBITED by
+  ACL).
 
 ## Report + source conventions referenced by the personas
 

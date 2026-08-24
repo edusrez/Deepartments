@@ -199,11 +199,13 @@ schedule never auto-fires (agenda §1.6).
 Identical to the RD (§3.4 spec 004): a **DISCONNECTED root agent**
 (`worker-<slug>-<uuid>`, `provider:'worker'`, own sidebar session in the IPD
 folder), never a harness subagent. Lifecycle: spawn (role persona + task) → work
-→ `dept_memo_write` → (`dept_sleep` only for JOB workers, requesting permission
-from ITS head — never the host) → head retires (`dept_worker_retire`). **Boot-quiet**
-(never acts unaddressed). The IPD `builder` worker is typically **ephemeral** for a
-one-off task (does NOT sleep) and **job-backed** for the scheduled jobs (iterates
-across rounds via sleep; §7.5 pattern of spec 004).
+the task → write the report & reply to the head (`dept_memo_write` only if durable
+notes are wanted) → head retires (`dept_worker_retire`). EPHEMERAL PER ROUND — a
+worker does NOT sleep and does NOT request permission from ITS head (never the
+host); a job worker is retried fresh each round. **Boot-quiet** (never acts
+unaddressed). The IPD `builder` worker is typically **ephemeral** for a one-off
+task and **job-backed** for the scheduled jobs — both are EPHEMERAL PER ROUND
+(§7.5 pattern of spec 004).
 
 ### 3.5 Who coordinates what (I2)
 
@@ -411,9 +413,10 @@ workspace, so deliverable paths are relative to that workspace (`reports/...`).
 | `organizer` | Planning/consolidation: indexes/normalizes the dept's report archive, consolidates findings for the head | read, write, glob, grep, send_message, agent_messages, dept_who, dept_memo_write, dept_sleep | **no `edit`, NO `dept_exec`** — purely planning/consolidation via messaging + reads (it must never mutate code or run a command). |
 
 - All four: **BOOT-QUIET** (never act unaddressed); message only inside the IPD
-  (ACL); memory via `dept_memo_write`; **ephemeral by default**, JOB workers sleep
-  between rounds asking **their** IPD head (never the host). §7.5 spec-004 pattern
-  carries.
+  (ACL); memory via `dept_memo_write`; **ephemeral by default**, and JOB workers
+  are EPHEMERAL PER ROUND too — they work the round, report, reply to **their**
+  IPD head, and are retired; they never sleep and never ask the host. §7.5
+  spec-004 pattern carries.
 - Role templates live at `presets/departments/internal-programming/<role>.md`;
   the static department design is
   `presets/departments/internal-programming/{ARCHITECTURE.md,README.md}`.

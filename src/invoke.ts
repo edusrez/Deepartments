@@ -376,6 +376,52 @@ const stuckNow = (): number => {
   return Number.isFinite(override) ? override : Date.now()
 }
 
+// ---------------------------------------------------------------------------
+// W9-b — delivery interrupt/queue semantics (owner decision 2026-08-24).
+//
+// Opt-in `interrupt: true` on a bus send / delivery PREEMPTS a busy recipient:
+//
+//   - recipient DORMANT  → wake + process IMMEDIATELY (unchanged behavior).
+//   - recipient LIVE mid-turn → the delivery seam ABORTS the recipient's
+//     CURRENT turn (reason 'interrupted') and the message is the first item of
+//     the recipient's NEXT turn.
+//
+// DEFAULT (no `interrupt`, or `interrupt: false`) = the CURRENT QUEUE
+// semantics: the message is enqueued behind whatever the recipient is doing —
+// ZERO regression for normal flows.
+//
+// HARNESS ABORT/STOP API (the GUI stop): `Agent.cancel(cause, options?)`
+// (dsh-agent rAgent.cancel — dsh-agent-loop lib/index.js:405). It clears the
+// inbox UNLESS `options.keepInbox` is set, then aborts the active turn/task via
+// `this.phase.abort.abort(cause)`. The `AgentCancelCause` union is
+// { user | parent | hook(reason) | disposed } — there is NO literal
+// 'interrupted' kind, so the semantic reason is carried as a `hook` cause whose
+// `reason` string is 'interrupted' (type-valid, and the durable `turn/end`
+// reason records `{ kind: 'hook', reason: 'interrupted' }`). `keepInbox: true`
+// preserves any already-pending/steering inbox items, so an interrupt NEVER
+// loses an earlier queued message (only the ACTIVE turn is aborted). The abort
+// is graceful MID-TOOL: dsh-agent-loop records the partial assistant content
+// via `assembler.interruptedBlocks()` as an `assistant/message` (interrupted:
+// true) before rethrowing, and the session records the turn as ended-aborted —
+// the partial state is preserved, no data loss. The session context (the
+// durable session log) is untouched, so the NEXT turn continues from the
+// preserved state.
+// ---------------------------------------------------------------------------
+
+/** W9-b — one bus-delivery option. `interrupt: true` preempts a busy
+ * recipient; `false`/absent (the default) keeps the QUEUE semantics. */
+interface DeliveryInterruptOptions {
+  interrupt?: boolean
+}
+
+/** The semantic interrupt cancel-cause: a `hook` cause whose `reason` carries
+ * 'interrupted' (the harness `AgentCancelCause` union has no literal kind). */
+const INTERRUPT_CANCEL_CAUSE = { kind: 'hook', reason: 'interrupted' } as const
+
+/** The abort options: `keepInbox: true` preserves any already-pending inbox
+ * work so the interrupt never loses an earlier queued item. */
+const INTERRUPT_CANCEL_OPTIONS = { keepInbox: true } as const
+
 /** One durable post registry entry — a FIRST-CLASS ROOT-AGENT department head
  * (Batch 1a). Keyed by postId; the durable root-agent session id is `sessionId`
  * (= `head-<postId>`). Drops the old continuable-subagent `parentId`/`provider`
@@ -553,6 +599,10 @@ interface AgentLike {
    * → treated as no signal (never misclassified as progression). */
   session?: { events: unknown[] }
   followup(message: { content: readonly { type: string; text: string }[]; source: Record<string, unknown> }): void
+  /** The harness ABORT/STOP API (the GUI stop — dsh-agent Agent.cancel). W9-b
+   * delivery-interrupt uses it with a `hook`/reason 'interrupted' cause and
+   * `{ keepInbox: true }` (preserve pending work) to preempt a busy recipient.
+   * Never throws. */
   cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void
   whenIdle(): Promise<void>
 }
@@ -1505,6 +1555,62 @@ export const HEALTH_ERROR_WINDOW_MS = 2 * 60 * 60 * 1000
 export const HEALTH_DEDUPE_WINDOW_MS = 30 * 60 * 1000
 
 // ---------------------------------------------------------------------------
+// W8-i (live production noise): the 'session "<id>" not found' host-delivery
+// loop. A bus host delivery to a dormant host whose durable session is not yet
+// workspace-attached throws `session "<id>" not found` from the
+// session-persistence / session-query / api-remotes seam. The delivery seam was
+// recording that transient first-attempt failure as a post-error, so the W6
+// health daemon re-alerted the HOST every dedupe window — alert spam (16 rows
+// live). THREE fixes: (1) RETRY a 'not found' through the host-attach repair
+// seam BEFORE recording; (2) the post-error dedupe for this class is keyed per
+// (post + class + window), NOT per messageId/attempt; (3) a later-retried
+// SUCCESSFUL delivery leaves NO post-error row.
+// ---------------------------------------------------------------------------
+
+/** The W8-i 'session not found' error class token (the dedupe/alert class
+ * suffix; the harness message shape is `session "<id>" not found`, incl. the
+ * `(not attached)` suffix). */
+export const POST_ERROR_CLASS_SESSION_NOT_FOUND = 'session-not-found'
+
+/** The W8-i RECORDING-dedupe key prefix (distinct from the daemon's ALERT key
+ * `post-error:<postId>:<class>` so the FIRST recorded 'not found' row still
+ * ALERTS; a repeat inside the window re-records nothing). */
+export const POST_ERROR_RECORD_KEY_PREFIX = 'record:post-error:'
+
+/**
+ * W8-i: the stable error CLASS of a post-error message (absent = the generic
+ * class). The 'session not found' class is thrown by the session-persistence /
+ * session-query / api-remotes seams when a bus resume cannot find the durable
+ * session — the transient first-attempt failure that must be retried through
+ * the host-attach repair seam BEFORE it is recorded. PURE. */
+export function postErrorClass(error: string | unknown): string | undefined {
+  const message = error instanceof Error ? error.message : String(error)
+  return /session "[^"]*" not found/.test(message) ? POST_ERROR_CLASS_SESSION_NOT_FOUND : undefined
+}
+
+/** W8-i: whether an error is the 'session "<id>" not found' class. PURE. */
+export function isSessionNotFoundError(error: unknown): boolean {
+  return postErrorClass(error) === POST_ERROR_CLASS_SESSION_NOT_FOUND
+}
+
+/**
+ * W8-i recording dedupe (the shared health-alerts-state.json ledger, the
+ * W8-c/W8-d `key → lastAlertedAt` pattern): append ONE post-error row ONLY when
+ * `key` is OUTSIDE HEALTH_DEDUPE_WINDOW_MS, then advance `key` to `nowMs`.
+ * Returns whether a row was appended. The `key` is a RECORDING key (distinct
+ * from the daemon's ALERT key) so the FIRST recorded row still ALERTS and a
+ * repeat inside the window re-records nothing. If a persist write fails it
+ * silently degrades to a best-effort append (never throws — the caller wraps a
+ * warn). */
+export async function appendPostErrorDeduped(stateDir: string, entry: PostErrorEntry, key: string, nowMs: number): Promise<boolean> {
+  const state = readHealthAlertsState(stateDir)
+  if (state[key] !== undefined && nowMs - state[key] <= HEALTH_DEDUPE_WINDOW_MS) return false
+  await appendPostError(stateDir, entry)
+  await writeHealthAlertsState(stateDir, { ...state, [key]: nowMs })
+  return true
+}
+
+// ---------------------------------------------------------------------------
 // W8-c SAFEGUARDS PACKAGE (owner "tenemos que crear salvaguardas para
 // protegerse de estos errores", 2026-08-24) — four default-on, individually
 // disable-able safeguards built on the W6 system-health machinery
@@ -1985,6 +2091,9 @@ export interface HeartbeatSnapshot {
    * (a host-sent message to a post with no reply + no session activity within
    * `waitThresholdMs`), or undefined (no wait → no WAIT line). */
   waitReason?: string
+  /** W8-h — the postIds whose session shows an INTERRUPTED (stopped) turn (the
+   * 'Stopped' badge). Absent/empty → the section renders `- interrupted: none`. */
+  interruptedPostIds?: string[]
 }
 
 /** Human age label for a millisecond delta (`5m`, `1h`, `45s`) — the ONLY place
@@ -2031,6 +2140,11 @@ export function buildHeartbeatSection(snapshot: HeartbeatSnapshot, nowMs: number
   if (snapshot.waitReason !== undefined && snapshot.waitReason.trim() !== '') {
     lines.push(`- WAIT: ${snapshot.waitReason}`)
   }
+  // W8-h INTERRUPTED line (always): the postIds in an interrupted/stopped state,
+  // or 'none' when clean. The postIds carry no double-brace template token (they
+  // are member ids, never a template reference).
+  const interrupted = (snapshot.interruptedPostIds ?? []).filter((id) => id.trim() !== '')
+  lines.push(interrupted.length > 0 ? `- interrupted: ${interrupted.join(' ')}` : '- interrupted: none')
   return lines.join('\n')
 }
 
@@ -2081,6 +2195,204 @@ export function readInboxByPost(
     list.push({ messageId: row.messageId, ts })
   }
   return { inboxTsByPost, hostRowsByPost }
+}
+
+// ---------------------------------------------------------------------------
+// W8-h INTERRUPTED-POST REPORTING (owner: "when the DSH service restarts and
+// stops department posts mid-turn, the restart notice only lists the MAIN
+// session — department posts are NOT reported; they must surface automatically").
+// BOOT RECONCILIATION reuses the W6/W8 alert path: a post whose session log ends
+// in an INTERRUPTED (open/stopped) turn is recorded into post-errors.jsonl
+// (error class 'interrupted-post') so the W6 health daemon ALERTS the host.
+// MECHANISM — NOT a cordis event hook: the harness exposes no global turn/end
+// event (the W8-c PART 1 hook decision, see scanTurnErrorCaptures). Instead we
+// REUSE the harness's OWN crash-recovery marker: the dsh-session persistence
+// backend closes every crash-orphaned OPEN turn with a synthetic `turn/end {
+// reason: { kind: 'interrupted' } }` on reload (its `interruptedTurnClosers`).
+// A post is INTERRUPTED (stopped) when its session log ends in that state — an
+// OPEN turn that no `turn/end` closed (the repair is NOT yet persisted for a
+// NOT-resumed post, e.g. a worker), OR a persisted `turn/end` whose
+// `reason.kind === 'interrupted'` with no subsequent completed work (the repair
+// WAS persisted for a resumed post). A BALANCED log (every turn closed by a
+// non-interrupted `turn/end`) is HEALTHY → never flagged (no false positives).
+// ---------------------------------------------------------------------------
+
+/** The W8-h dedupe key prefix (`interrupted-post:<postId>`), advanced in
+ * health-alerts-state.json so a repeated boot reconciliation does NOT re-alert
+ * the same post within HEALTH_DEDUPE_WINDOW_MS. */
+export const INTERRUPTED_POST_KEY_PREFIX = 'interrupted-post:'
+
+/** W8-h — ONE post whose session was INTERRUPTED (stopped) by a restart. */
+export interface InterruptedPostCapture {
+  postId: string
+  /** The interrupted (open) turn number, when known (the repair may already have
+   * closed it as an explicit `turn/end { interrupted }` marker). */
+  turn?: number
+  /** The crash-tail ts (ms epoch) — the LAST real session event's time (the
+   * persistence backend stamps the synthetic interrupted turn/end with the SAME
+   * time, so this is the crash moment bound, not the reload moment). */
+  ts: number
+  /** The session id the interrupted turn belongs to. */
+  sessionId: string
+  /** A short human-readable evidence line (the session state/evidence). */
+  evidence: string
+  /** The bus message id whose processing was interrupted, when the session log
+   * carries it (the last surface message before the interrupted turn). */
+  messageId?: string
+}
+
+/**
+ * W8-h DETECTION (PURE, exported) — is a post's session log in an
+ * INTERRUPTED/STOPPED state? Reproduces the harness's OWN crash-recovery
+ * semantics (`interruptedTurnClosers`): a post is interrupted when its session
+ * log ends with an OPEN turn that no `turn/end` closed (Case A — the repair is
+ * not yet persisted, a NOT-resumed post), OR when the MOST-RECENT `turn/end` is
+ * the persistence backend's synthetic `interrupted` marker with no subsequent
+ * completed work (Case B — the repair WAS persisted for a resumed post whose
+ * turn was cut by the restart). A BALANCED log (every `turn/start` closed by a
+ * non-interrupted `turn/end`) is HEALTHY → undefined (never flagged). An empty /
+ * malformed log → undefined (never throws). NO event hook is used (see
+ * scanTurnErrorCaptures — the harness exposes no global turn/end event).
+ */
+export function scanInterruptedTurn(
+  events: readonly HealthSessionEvent[],
+  sessionId: string,
+  postId: string
+): InterruptedPostCapture | undefined {
+  let openTurn: number | undefined
+  let lastTurnEndKind: string | undefined
+  let lastTurnEndTs: number | undefined
+  let lastEventTs: number | undefined
+  let lastSurfaceMessageId: string | undefined
+  for (const event of events) {
+    if (typeof event.time === 'number' && Number.isFinite(event.time)) {
+      if (lastEventTs === undefined || event.time > lastEventTs) lastEventTs = event.time
+    }
+    if (event.type === 'turn/start') {
+      const data = (typeof event.data === 'object' && event.data !== null ? event.data : {}) as Record<string, unknown>
+      openTurn = typeof data.turn === 'number' ? data.turn : openTurn
+    } else if (event.type === 'turn/end') {
+      const data = (typeof event.data === 'object' && event.data !== null ? event.data : {}) as Record<string, unknown>
+      const reason = (typeof data.reason === 'object' && data.reason !== null ? data.reason : {}) as Record<string, unknown>
+      lastTurnEndKind = typeof reason.kind === 'string' ? reason.kind : undefined
+      lastTurnEndTs = typeof event.time === 'number' && Number.isFinite(event.time) ? event.time : undefined
+      openTurn = undefined
+      lastSurfaceMessageId = undefined
+    } else if (event.type === 'user/message' || event.type === 'assistant/message') {
+      // A surface message BEFORE an open turn is the message the post was
+      // processing when the turn was interrupted — a best-effort messageId.
+      const data = (typeof event.data === 'object' && event.data !== null ? event.data : {}) as Record<string, unknown>
+      const message = (typeof data.message === 'object' && data.message !== null ? data.message : {}) as Record<string, unknown>
+      const candidate = typeof message.id === 'string'
+        ? message.id
+        : (typeof data.id === 'string' ? data.id : (typeof data.messageId === 'string' ? data.messageId : undefined))
+      if (candidate !== undefined) lastSurfaceMessageId = candidate
+    }
+  }
+  // Case A — an OPEN turn with no turn/end after it (the repair is not persisted).
+  if (openTurn !== undefined) {
+    const ts = lastEventTs ?? lastTurnEndTs ?? 0
+    return {
+      postId,
+      sessionId,
+      turn: openTurn,
+      ts,
+      ...(lastSurfaceMessageId !== undefined ? { messageId: lastSurfaceMessageId } : {}),
+      evidence: `interrupted turn ${openTurn} (no turn/end — stopped by a restart)`
+    }
+  }
+  // Case B — the most-recent turn/end is the persistence backend's synthetic
+  // `interrupted` marker with no subsequent completed work.
+  if (lastTurnEndKind === 'interrupted') {
+    const ts = lastTurnEndTs ?? lastEventTs ?? 0
+    return {
+      postId,
+      sessionId,
+      ...(lastTurnEndTs === undefined && lastSurfaceMessageId !== undefined ? { messageId: lastSurfaceMessageId } : {}),
+      ts,
+      evidence: 'interrupted turn (closed by the reload repair — stopped by a restart)'
+    }
+  }
+  return undefined
+}
+
+/** W8-h — one registered post's reconciliation input (the session event log is
+ * injected so the pure reconciliation is fixture-testable). */
+export interface InterruptedPostInput {
+  postId: string
+  sessionId: string
+  retired?: boolean
+  events?: readonly HealthSessionEvent[]
+}
+
+/** W8-h — the result of ONE interrupted-post boot reconciliation. */
+export interface InterruptedPostReconciliation {
+  /** Every post whose session shows an interrupted (stopped) turn. */
+  interrupted: string[]
+  /** How many NET-NEW post-error rows were appended (after the dedupe window). */
+  appended: number
+}
+
+/**
+ * W8-h BOOT RECONCILIATION (exported; the I/O is parameterized so a test drives
+ * it with injected fixtures + a fixed clock). For each registered post, read its
+ * session event log (the production wiring reads the DURABLE session so a
+ * NOT-resumed worker is judged against its on-disk crash tail; a test injects
+ * fixtures). A post whose session ends in an INTERRUPTED turn, FRESH inside the
+ * restart window (the crash-tail ts is AFTER the previous boot's last heartbeat
+ * `restartAfterTs` AND within HEALTH_ERROR_WINDOW_MS), gets ONE post-error row
+ * (error class 'interrupted-post') appended to post-errors.jsonl → the W6 daemon
+ * ALERTS the host. NET-NEW per post per HEALTH_DEDUPE_WINDOW_MS (the shared
+ * health-alerts-state.json ledger, key 'interrupted-post:<postId>'); a repeated
+ * reconciliation inside the window does NOT re-append/alert, and re-alerts once
+ * AFTER the window. A retired post is never flagged; a balanced (healthy) log is
+ * never flagged. NEVER throws (every internal failure is a warn/skip).
+ */
+export async function reconcileInterruptedPosts(deps: {
+  now: () => number
+  stateDir: string
+  postEvents: Iterable<InterruptedPostInput>
+  /** The restart-window lower bound (the PREVIOUS boot's last heartbeat ts): only
+   * an interruption whose crash-tail ts is AFTER this is flagged (the 'Stopped'
+   * class is THIS restart, not an old crash). Absent → the 2h freshness window
+   * alone bounds it. */
+  restartAfterTs?: number
+  logger?: { warn(message: string): void; info(message: string): void }
+}): Promise<InterruptedPostReconciliation> {
+  const nowMs = deps.now()
+  const out: InterruptedPostReconciliation = { interrupted: [], appended: 0 }
+  try {
+    const state = readHealthAlertsState(deps.stateDir)
+    const nextState = { ...state }
+    let stateChanged = false
+    for (const post of deps.postEvents) {
+      if (post.retired === true) continue
+      const capture = scanInterruptedTurn(post.events ?? [], post.sessionId, post.postId)
+      if (capture === undefined) continue
+      out.interrupted.push(post.postId)
+      // Restart-window bound: crash-tail AFTER the previous heartbeat AND fresh
+      // inside the W6 alert freshness window (the daemon scans the SAME window).
+      const afterRestart = deps.restartAfterTs === undefined || capture.ts > deps.restartAfterTs
+      const fresh = nowMs - capture.ts <= HEALTH_ERROR_WINDOW_MS
+      if (!afterRestart || !fresh) continue
+      // Dedupe: ≤1 post-error row per post per HEALTH_DEDUPE_WINDOW_MS.
+      const key = `${INTERRUPTED_POST_KEY_PREFIX}${post.postId}`
+      if (nextState[key] !== undefined && nowMs - nextState[key] <= HEALTH_DEDUPE_WINDOW_MS) continue
+      await appendPostError(deps.stateDir, {
+        ts: capture.ts,
+        postId: post.postId,
+        ...(capture.messageId !== undefined ? { messageId: capture.messageId } : {}),
+        error: `interrupted-post: ${capture.evidence}`
+      })
+      nextState[key] = nowMs
+      stateChanged = true
+      out.appended++
+    }
+    if (stateChanged) await writeHealthAlertsState(deps.stateDir, nextState)
+  } catch (error: unknown) {
+    deps.logger?.warn(`[deepartments] interrupted-post reconciliation failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------
@@ -3173,20 +3485,29 @@ export interface HealthDaemonDeps {
 }
 
 /** Group fresh post-errors inside HEALTH_ERROR_WINDOW_MS, deduped per postId
- * (multiple rows for the same postId within the window → ONE finding). */
+ * (multiple rows for the same postId within the window → ONE finding). W8-i: a
+ * DISTINCT error class (e.g. 'session not found') gets its OWN per-(post+class)
+ * dedupe key `post-error:<postId>:<class>` so a repeated not-found attempt
+ * never re-alerts per attempt; the generic class keeps the legacy
+ * `post-error:<postId>` key (existing behavior unchanged). */
 export function scanPostErrorFindings(stateDir: string, nowMs: number): HealthFinding[] {
   const fresh = readPostErrorsFile(stateDir).filter((row) => nowMs - row.ts <= HEALTH_ERROR_WINDOW_MS)
-  const byPost = new Map<string, PostErrorEntry[]>()
+  const byGroup = new Map<string, PostErrorEntry[]>()
   for (const row of fresh) {
-    const list = byPost.get(row.postId) ?? []
+    const cls = postErrorClass(row.error)
+    const groupKey = cls === undefined ? row.postId : `${row.postId}\u0000${cls}`
+    const list = byGroup.get(groupKey) ?? []
     list.push(row)
-    byPost.set(row.postId, list)
+    byGroup.set(groupKey, list)
   }
   const findings: HealthFinding[] = []
-  for (const [postId, rows] of byPost) {
+  for (const [groupKey, rows] of byGroup) {
+    const split = groupKey.indexOf('\u0000')
+    const postId = split === -1 ? groupKey : groupKey.slice(0, split)
+    const cls = split === -1 ? undefined : groupKey.slice(split + 1)
     findings.push({
       kind: 'post-error',
-      key: `post-error:${postId}`,
+      key: cls === undefined ? `post-error:${postId}` : `post-error:${postId}:${cls}`,
       postId,
       ts: rows.reduce((max, row) => Math.max(max, row.ts), 0),
       error: rows[0].error,
@@ -5424,9 +5745,11 @@ export function applyInvoke(ctx: Context, config: Config) {
       const hostLive = hostEntry !== undefined ? agents?.get(SessionId(hostEntry.sessionId)) : undefined
       const hostEvents = (hostLive?.session?.events ?? []) as HealthSessionEvent[]
       const hostSnap = buildPostSnapshot({ postId: hostId, events: hostEvents, inboxTs: [] })
-      // Per ACTIVE (and dormant) catalog post rows + the WAIT scan inputs.
+      // Per ACTIVE (and dormant) catalog post rows + the WAIT scan inputs +
+      // the W8-h INTERRUPTED (stopped) postIds.
       const rows: HeartbeatRow[] = []
       const hostWaitPosts: HostWaitPostInput[] = []
+      const interruptedPostIds: string[] = []
       for (const [postId, entry] of byPost) {
         if (entry.retired === true) continue
         const live = agents?.get(SessionId(entry.sessionId))
@@ -5440,13 +5763,26 @@ export function applyInvoke(ctx: Context, config: Config) {
           ...(snap.oldestPendingTs !== undefined ? { oldestPendingTs: snap.oldestPendingTs } : {})
         })
         hostWaitPosts.push({ postId, retired: false, events, hostMessages: hostRowsByPost.get(postId) ?? [] })
+        // W8-h — a post is INTERRUPTED (stopped) when its session ends in an
+        // interrupted turn AND it is NOT a LIVE-RUNNING agent (a live running
+        // turn is healthy progress, never a stop). Reuses the SAME pure detector
+        // the boot reconciliation uses.
+        const capture = scanInterruptedTurn(events, entry.sessionId, postId)
+        if (capture !== undefined && !(live !== undefined && live.status === 'running')) {
+          interruptedPostIds.push(postId)
+        }
       }
       const waits = scanHostWaits(hostWaitPosts, nowMs, waitThresholdMs)
       const waitReason = waits.length > 0
         ? `host waiting on ${waits.map((wait) => wait.postId).join(', ')}: ${waits[0].error ?? 'no reply or session activity'}`
         : undefined
       return buildHeartbeatSection(
-        { hostLastActivityTs: hostSnap.lastActivityTs, rows, ...(waitReason !== undefined ? { waitReason } : {}) },
+        {
+          hostLastActivityTs: hostSnap.lastActivityTs,
+          rows,
+          ...(waitReason !== undefined ? { waitReason } : {}),
+          ...(interruptedPostIds.length > 0 ? { interruptedPostIds } : {})
+        },
         nowMs
       )
     } catch {
@@ -7829,6 +8165,75 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  /** W8-h boot INTERRUPTED-POST RECONCILIATION (owner-required 2026-08-24: the
+   * DSH restart notice only lists the MAIN session; department posts interrupted
+   * mid-turn are NOT reported to the Asistente — they must surface automatically,
+   * never silently). After the post registry loads, reconcile EACH registered
+   * post against its session's INTERRUPTED (open/stopped) turn and record it
+   * into post-errors.jsonl (error class 'interrupted-post') so the W6 health
+   * daemon ALERTS the host. Reads the DURABLE session for each post (a resumed
+   * head's durable log carries the reload-repair marker; a NOT-resumed worker is
+   * judged against its on-disk crash tail). Bounded by the previous boot's last
+   * heartbeat ts (the restart timestamp window) when the heartbeat file exists;
+   * deduped per post per 30min (health-alerts-state.json, key
+   * 'interrupted-post:<postId>'). Gated by `health.enabled` (the whole health
+   * daemon OFF → no reconcile; the W6 alert path would never fire). Non-fatal. */
+  const runInterruptedPostReconciliation = async (): Promise<void> => {
+    if (config.health?.enabled === false) return
+    try {
+      const persistence = ctx.get('sessionPersistence') as { readRaw?: (id: SessionId, signal?: AbortSignal) => Promise<{ content: string } | undefined> } | undefined
+      // The previous boot's last heartbeat ts — the restart-window lower bound.
+      // The CURRENT daemon has not ticked yet at reconciliation time, so
+      // health-heartbeat.json still holds the PREVIOUS process's last tick.
+      const prevHeartbeat = readHealthHeartbeatFile(config.stateDir)
+      const postEvents: InterruptedPostInput[] = []
+      for (const [postId, entry] of byPost) {
+        if (entry.retired === true) continue
+        let events: HealthSessionEvent[] = []
+        // W8-h: a LIVE-RUNNING post (a phase is actually underway) is healthy
+        // progress, never a stop — do NOT flag it (mirrors the heartbeat's
+        // live-running exclusion, so a post that recovered and is actively
+        // working after a restart is never a false positive). A genuinely
+        // stopped post's agent is NOT 'running', so no real interruption is
+        // masked.
+        const live = agents?.get(SessionId(entry.sessionId))
+        if (live !== undefined && live.status === 'running') continue
+        // Prefer the LIVE agent's in-memory log (reflects the repaired/reloaded
+        // session after a resume), else the DURABLE persistence readRaw (the true
+        // on-disk crash tail for a NOT-resumed post).
+        if (live?.session?.events?.length) {
+          events = live.session.events as HealthSessionEvent[]
+        } else if (persistence !== undefined && typeof persistence.readRaw === 'function') {
+          try {
+            const raw = await persistence.readRaw(SessionId(entry.sessionId))
+            events = (raw?.content ?? '').split('\n').flatMap((line) => {
+              if (line.trim() === '') return []
+              try {
+                const ev = JSON.parse(line) as { type?: unknown; time?: unknown; data?: unknown }
+                if (ev !== null && typeof ev === 'object' && typeof ev.type === 'string' && typeof ev.time === 'number') {
+                  return [{ type: ev.type, time: ev.time, data: ev.data }]
+                }
+              } catch { /* skip a malformed line */ }
+              return []
+            })
+          } catch { /* durable read failed → events stays [] (degrades, never fatal) */ }
+        }
+        postEvents.push({ postId, sessionId: entry.sessionId, retired: false, events })
+      }
+      const result = await reconcileInterruptedPosts({
+        now: () => Date.now(),
+        stateDir: config.stateDir,
+        postEvents,
+        restartAfterTs: prevHeartbeat?.ts
+      })
+      if (result.interrupted.length > 0 || result.appended > 0) {
+        ctx.logger.info(`[deepartments] interrupted-post reconciliation: ${result.interrupted.length} interrupted post(s), ${result.appended} appended to post-errors.jsonl`)
+      }
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] interrupted-post reconciliation failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   // Boot: materialize the head preset and every configured head once the
   // registries (posts/hosts) have cold-loaded — and re-drive any crash-pending
   // bus deliveries (see the re-delivery driver below). Head materialization no
@@ -7837,6 +8242,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     void ensureAllHeads()
     void redeliverPendingDeliveries()
     void runPresetAudit()
+    void runInterruptedPostReconciliation()
   })
 
   // ---------------------------------------------------------------------------
@@ -8001,9 +8407,14 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   /** The shared post DELIVERY of one bus message: the wakePost seam including
    * the stuck-head recovery verbatim (relay guards §4.4). Never throws — the
-   * error is logged AND returned as 'failed' (never silent). */
-  const busDeliverToPost = async (entry: PostEntry, framed: string, record: MessageRecord, senderSessionId: string | undefined): Promise<DeliveryStatus> => {
+   * error is logged AND returned as 'failed' (never silent). W9-b: when
+   * `opts.interrupt` is true and the recipient is LIVE mid-turn, the CURRENT
+   * turn is aborted (reason 'interrupted', keepInbox preserved) so the message
+   * is the FIRST item of the recipient's next turn instead of queueing behind
+   * it. Default (false) = QUEUE semantics, unchanged. */
+  const busDeliverToPost = async (entry: PostEntry, framed: string, record: MessageRecord, senderSessionId: string | undefined, opts?: DeliveryInterruptOptions): Promise<DeliveryStatus> => {
     const sessionId = String(SessionId(entry.sessionId))
+    const interrupt = opts?.interrupt === true
     try {
       const live = agents?.get(sessionId)
       // Fix A2 stuck-head resilience (verbatim): a live-but-running post with
@@ -8019,6 +8430,20 @@ export function applyInvoke(ctx: Context, config: Config) {
           target.followup(busUserMessage(record, framed, senderSessionId))
         })
         return 'resumed'
+      }
+      // W9-b interrupt: a LIVE, currently-running recipient with `interrupt:
+      // true` is preempted — abort its CURRENT turn (reason 'interrupted') and
+      // preserve any already-pending inbox work (keepInbox), so the message
+      // delivered below is the FIRST item of the recipient's next turn. A
+      // DORMANT recipient (live === undefined) needs no abort — the followup
+      // below wakes it immediately (unchanged).
+      if (interrupt && live !== void 0 && live.status === 'running') {
+        try {
+          live.cancel(INTERRUPT_CANCEL_CAUSE, INTERRUPT_CANCEL_OPTIONS)
+          ctx.logger.warn(`[deepartments] bus delivery to "${entry.postId}": interrupt=true — aborted the current turn (reason 'interrupted'); delivery is the first item of the next turn`)
+        } catch (cancelError: unknown) {
+          ctx.logger.warn(`[deepartments] bus delivery to "${entry.postId}": interrupt cancel failed (delivery continues as a queue): ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`)
+        }
       }
       const { target, resumed } = await materializePost(entry)
       target.followup(busUserMessage(record, framed, senderSessionId))
@@ -8047,48 +8472,101 @@ export function applyInvoke(ctx: Context, config: Config) {
    * exactly like a dormant head (the owner accepted the materialized host
    * turn). The host's own composition (the 'deepartments' preset) is re-mounted
    * best-effort when the agentPresets service is present; a bare resume is the
-   * graceful fallback. Never throws — 'failed' is logged AND returned. */
-  const busDeliverToHost = async (hostEntry: HostEntry, framed: string, record: MessageRecord, senderSessionId: string | undefined): Promise<DeliveryStatus> => {
+   * graceful fallback. Never throws — 'failed' is logged AND returned. W9-b:
+   * when `opts.interrupt` is true and the host is LIVE mid-turn, the CURRENT
+   * turn is aborted (reason 'interrupted', keepInbox preserved) so the message
+   * is the FIRST item of the host's next turn. Default (false) = QUEUE. */
+  const busDeliverToHost = async (hostEntry: HostEntry, framed: string, record: MessageRecord, senderSessionId: string | undefined, opts?: DeliveryInterruptOptions): Promise<DeliveryStatus> => {
     if (agents === void 0) return 'failed'
     const sessionId = String(SessionId(hostEntry.sessionId))
-    try {
-      const live = agents.get(sessionId)
-      if (live !== void 0) {
-        live.followup(busUserMessage(record, framed, senderSessionId))
-        return 'delivered'
-      }
-      // D4 — a dormant host is ALWAYS woken: resume the durable host session.
-      // The GUI owns the host composition ('deepartments'), so re-mount it
-      // best-effort (mirroring the api-proxy's composeAgent-on-resume); the
-      // session's own global-layer tools remain reachable regardless.
-      const setup = agentPresets === void 0
-        ? undefined
-        : (agentCtx: Context): void => {
-            void agentPresets.mount(agentCtx, 'deepartments').catch((error: unknown) => {
-              ctx.logger.warn(`[deepartments] host resume preset mount failed (bare resume continues): ${error instanceof Error ? error.message : String(error)}`)
-            })
-          }
-      await agents.resume({ resumeSessionId: sessionId, setup })
-      const target = agents.get(sessionId)
-      if (target === void 0) throw new Error(`[deepartments] host "${hostEntry.hostId}" could not be materialized for bus delivery`)
-      target.followup(busUserMessage(record, framed, senderSessionId))
-      return 'resumed'
-    } catch (error: unknown) {
-      ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}" failed: ${error instanceof Error ? error.message : String(error)}`)
-      // W6 system-health: record the host materialization/wake failure (the SAME
-      // durable anomaly source as the post delivery; postId = the host id).
+    const interrupt = opts?.interrupt === true
+    /** One host delivery attempt: an inline followup for a LIVE host, else the
+     * D4 resume (with the best-effort 'deepartments' preset mount). Returns the
+     * status plus the thrown error, so the W8-i retry below can classify a
+     * transient 'session "<id>" not found' WITHOUT losing the message. */
+    const attemptHostDelivery = async (): Promise<{ status: DeliveryStatus; error?: unknown }> => {
       try {
-        await appendPostError(config.stateDir, {
-          ts: Date.now(),
-          postId: hostEntry.hostId,
-          messageId: record.id,
-          error: error instanceof Error ? error.message : String(error)
-        })
-      } catch (appendError: unknown) {
-        ctx.logger.warn(`[deepartments] post-error capture for host "${hostEntry.hostId}" failed: ${appendError instanceof Error ? appendError.message : String(appendError)}`)
+        const live = agents.get(sessionId)
+        if (live !== void 0) {
+          // W9-b interrupt: a LIVE, currently-running host with `interrupt:
+          // true` is preempted — abort its CURRENT turn (reason 'interrupted')
+          // and preserve any already-pending inbox work (keepInbox).
+          if (interrupt && live.status === 'running') {
+            try {
+              live.cancel(INTERRUPT_CANCEL_CAUSE, INTERRUPT_CANCEL_OPTIONS)
+              ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}": interrupt=true — aborted the current turn (reason 'interrupted'); delivery is the first item of the next turn`)
+            } catch (cancelError: unknown) {
+              ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}": interrupt cancel failed (delivery continues as a queue): ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`)
+            }
+          }
+          live.followup(busUserMessage(record, framed, senderSessionId))
+          return { status: 'delivered' }
+        }
+        // D4 — a dormant host is ALWAYS woken: resume the durable host session.
+        // The GUI owns the host composition ('deepartments'), so re-mount it
+        // best-effort (mirroring the api-proxy's composeAgent-on-resume); the
+        // session's own global-layer tools remain reachable regardless.
+        const setup = agentPresets === void 0
+          ? undefined
+          : (agentCtx: Context): void => {
+              void agentPresets.mount(agentCtx, 'deepartments').catch((error: unknown) => {
+                ctx.logger.warn(`[deepartments] host resume preset mount failed (bare resume continues): ${error instanceof Error ? error.message : String(error)}`)
+              })
+            }
+        await agents.resume({ resumeSessionId: sessionId, setup })
+        const target = agents.get(sessionId)
+        if (target === void 0) throw new Error(`[deepartments] host "${hostEntry.hostId}" could not be materialized for bus delivery`)
+        target.followup(busUserMessage(record, framed, senderSessionId))
+        return { status: 'resumed' }
+      } catch (error: unknown) {
+        return { status: 'failed', error }
       }
-      return 'failed'
     }
+    const first = await attemptHostDelivery()
+    if (first.status !== 'failed') return first.status
+    // W8-i: a SINGLE transient 'session "<id>" not found' first-attempt failure
+    // (a host session registered in hosts.json whose durable session is not yet
+    // workspace-attached — the harness session-persistence/query seam) must NOT
+    // be recorded as a post-error: re-deliver THROUGH the existing host-attach
+    // repair seam (await it) BEFORE recording, and record ONLY if the retry
+    // ALSO fails — so a later-retried SUCCESSFUL delivery leaves NO trace. A
+    // non-'not found' failure records today's row unchanged.
+    let recordedError: unknown = first.error
+    if (isSessionNotFoundError(first.error)) {
+      try {
+        await repairHostWorkspaceAttach()
+      } catch (repairError: unknown) {
+        ctx.logger.warn(`[deepartments] host attach repair (bus-deliver retry) failed for host "${hostEntry.hostId}": ${repairError instanceof Error ? repairError.message : String(repairError)}`)
+      }
+      const second = await attemptHostDelivery()
+      if (second.status !== 'failed') return second.status
+      recordedError = second.error ?? first.error
+    }
+    ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}" failed: ${recordedError instanceof Error ? recordedError.message : String(recordedError)}`)
+    // W6 system-health: record the host materialization/wake failure (the SAME
+    // durable anomaly source as the post delivery; postId = the host id). W8-i:
+    // for the 'session not found' class a PER-(post+class) recording dedupe in
+    // the shared health-alerts-state.json ledger ensures a PERSISTENT not-found
+    // is NEVER re-recorded/re-alerted inside HEALTH_DEDUPE_WINDOW_MS (one per
+    // post+class per 30min, NOT per attempt); a generic class keeps the plain
+    // append (the daemon's own per-postId alert dedupe already gates it).
+    try {
+      const entry: PostErrorEntry = {
+        ts: Date.now(),
+        postId: hostEntry.hostId,
+        messageId: record.id,
+        error: recordedError instanceof Error ? recordedError.message : String(recordedError)
+      }
+      const cls = postErrorClass(entry.error)
+      if (cls === POST_ERROR_CLASS_SESSION_NOT_FOUND) {
+        await appendPostErrorDeduped(config.stateDir, entry, `${POST_ERROR_RECORD_KEY_PREFIX}${hostEntry.hostId}:${cls}`, entry.ts)
+      } else {
+        await appendPostError(config.stateDir, entry)
+      }
+    } catch (appendError: unknown) {
+      ctx.logger.warn(`[deepartments] post-error capture for host "${hostEntry.hostId}" failed: ${appendError instanceof Error ? appendError.message : String(appendError)}`)
+    }
+    return 'failed'
   }
 
   // --- F2 (spec 004 §5.6): messaging ACL by department — catalog route ONLY --
@@ -8207,7 +8685,8 @@ export function applyInvoke(ctx: Context, config: Config) {
     recipientId: string,
     callerAgentId: string,
     senderSessionId: string | undefined,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    opts?: DeliveryInterruptOptions
   ): Promise<DeliveryStatus> => {
     const framed = `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`
     await markDelivery(messageStoreDir, record.id, recipientId, 'prepared')
@@ -8264,10 +8743,14 @@ export function applyInvoke(ctx: Context, config: Config) {
             status = 'failed'
           }
         } else {
-          status = await busDeliverCatalog(record, recipientId, senderSessionId)
+          // W9-b: the `interrupt` option (preempt a busy recipient) applies to
+          // the CATALOG route (registered heads/workers + the host) — a
+          // continuable CHILD has no abort seam here, so the option is not
+          // threaded into the child route (children are always queue-delivered).
+          status = await busDeliverCatalog(record, recipientId, senderSessionId, opts)
         }
       } else {
-        status = await busDeliverCatalog(record, recipientId, senderSessionId)
+        status = await busDeliverCatalog(record, recipientId, senderSessionId, opts)
       }
       await markDelivery(messageStoreDir, record.id, recipientId, status)
       return status
@@ -8290,7 +8773,7 @@ export function applyInvoke(ctx: Context, config: Config) {
    * record (or any other delivery path) can never bypass the rules. A denial
    * returns 'failed' (sidecar-compatible; the richer `failed:acl:<ground>`
    * reason lives in the send_message tool result, NOT in the sidecar). */
-  const busDeliverCatalog = async (record: MessageRecord, recipientId: string, senderSessionId: string | undefined): Promise<DeliveryStatus> => {
+  const busDeliverCatalog = async (record: MessageRecord, recipientId: string, senderSessionId: string | undefined, opts?: DeliveryInterruptOptions): Promise<DeliveryStatus> => {
     const sender = busProfileFor(record.from)
     const entry = byPost.get(recipientId)
     if (entry !== void 0) {
@@ -8302,7 +8785,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         ctx.logger.warn(`[deepartments] bus delivery to RETIRED member "${recipientId}" skipped (record ${record.id})`)
         return 'failed'
       }
-      return busDeliverToPost(entry, `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`, record, senderSessionId)
+      return busDeliverToPost(entry, `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`, record, senderSessionId, opts)
     }
     const hostEntry = hosts.get(recipientId)
     if (hostEntry !== void 0 && hostEntry.retired !== true) {
@@ -8311,7 +8794,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         ctx.logger.warn(`[deepartments] bus delivery to the host "${recipientId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — a worker never writes to the Asistente (spec 004 §5.6/D6)`)
         return 'failed'
       }
-      return busDeliverToHost(hostEntry, `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`, record, senderSessionId)
+      return busDeliverToHost(hostEntry, `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`, record, senderSessionId, opts)
     }
     ctx.logger.warn(`[deepartments] bus delivery to unknown member "${recipientId}" (record ${record.id})`)
     return 'failed'
@@ -8378,7 +8861,7 @@ export function applyInvoke(ctx: Context, config: Config) {
    * a same-layer duplicate throws, there is no replace). */
   const sendMessageTool = defineTool({
     name: 'send_message',
-    description: 'Send a message to one or more background agents and/or organization members, delivering it as the recipient\'s next turn and ALWAYS waking the recipient (including a dormant/host target). Recipients are resolved per id: (1) your direct continuable background children are delivered natively (parent→child followup, never catalog-validated); (2) everything else is resolved against the organization catalog (department heads/workers + the Asistente host) and delivered through the durable message store — the record is persisted BEFORE any delivery and delivery state is tracked in a write-ahead sidecar, so a crash re-delivers idempotently. Unknown ids are reported per-recipient as failed (one typo does not kill a multi-recipient send). A self-addressed recipient (your own id) is held ("self" — persisted, never woken). DEPARTMENT MESSAGING ACL (spec 004 §5.6): the Asistente (host) may send to everyone; a department head may send to any head (incl. the Asistente) and to the agents of its OWN department; a WORKER may send ONLY to the agents of its own department (incl. its head) — a worker CANNOT write to the host, to other heads, or to other departments (everything goes via its own head). A forbidden recipient is reported per-recipient as `failed:acl:<ground>` and is NOT persisted/delivered (the message is not sent to it; route it via the recipient\'s department head). Max 20 recipients (fan-out cap).',
+    description: 'Send a message to one or more background agents and/or organization members, delivering it as the recipient\'s next turn and ALWAYS waking the recipient (including a dormant/host target). Recipients are resolved per id: (1) your direct continuable background children are delivered natively (parent→child followup, never catalog-validated); (2) everything else is resolved against the organization catalog (department heads/workers + the Asistente host) and delivered through the durable message store — the record is persisted BEFORE any delivery and delivery state is tracked in a write-ahead sidecar, so a crash re-delivers idempotently. Unknown ids are reported per-recipient as failed (one typo does not kill a multi-recipient send). A self-addressed recipient (your own id) is held ("self" — persisted, never woken). W9-b `interrupt: true` (optional, default false): a recipient LIVE mid-turn has its CURRENT turn ABORTED (reason "interrupted", pending work preserved) and the message is the FIRST item of its next turn — the harness abort/stop API (Agent.cancel with keepInbox) is the seam; default false keeps QUEUE semantics (zero regression). DEPARTMENT MESSAGING ACL (spec 004 §5.6): the Asistente (host) may send to everyone; a department head may send to any head (incl. the Asistente) and to the agents of its OWN department; a WORKER may send ONLY to the agents of its own department (incl. its head) — a worker CANNOT write to the host, to other heads, or to other departments (everything goes via its own head). A forbidden recipient is reported per-recipient as `failed:acl:<ground>` and is NOT persisted/delivered (the message is not sent to it; route it via the recipient\'s department head). Max 20 recipients (fan-out cap).',
     parameters: {
       to: {
         type: 'array',
@@ -8389,7 +8872,8 @@ export function applyInvoke(ctx: Context, config: Config) {
       text: { type: 'string', required: true, description: 'The message text.' },
       ack: { type: 'boolean', description: 'Set true when this is a pure acknowledgement/receipt (no new content) — recorded kind "ack".' },
       sensitive: { type: 'boolean', description: 'Mark this message as sensitive (trust semantics carried over from the board).' },
-      threadId: { type: 'string', description: 'Optional: a message id to reply to (recorded as threadId).' }
+      threadId: { type: 'string', description: 'Optional: a message id to reply to (recorded as threadId).' },
+      interrupt: { type: 'boolean', description: 'Optional, default false. When true, delivery PREEMPTS a busy recipient: a recipient LIVE mid-turn has its CURRENT turn aborted (reason "interrupted") and the message is the FIRST item of its next turn; a DORMANT recipient still wakes + processes immediately. Default false keeps the QUEUE semantics (enqueued behind the current work) — zero regression for normal flows.' }
     },
     output: {
       schema: {
@@ -8467,7 +8951,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // Per-message serialization: deliveries run one at a time (never parallel
       // resume of N dormant agents — quota + race safety, spec §4.4).
       for (const recipient of allowed) {
-        delivered[recipient] = await deliverBusRecord(record, recipient, agent.id as string, agent.id as string, exec.signal)
+        delivered[recipient] = await deliverBusRecord(record, recipient, agent.id as string, agent.id as string, exec.signal, args.interrupt === true ? { interrupt: true } : undefined)
       }
       return { messageId: record.id, delivered }
     }
@@ -9410,7 +9894,10 @@ export function applyInvoke(ctx: Context, config: Config) {
             try {
               const store = await messagesStoreReady
               const record = await store.append({ from: 'deepartments', to: [hostEntry.hostId], text: alertFrame, kind: 'agent' })
-              await busDeliverToHost(hostEntry as HostEntry, alertFrame, record, void 0)
+              // W9-b: a System-health ALERT (and the system-wait wake) must
+              // PREEMPT a busy host turn, not queue behind it — deliver with
+              // `interrupt: true` (abort the current turn, reason 'interrupted').
+              await busDeliverToHost(hostEntry as HostEntry, alertFrame, record, void 0, { interrupt: true })
             } catch (error: unknown) {
               ctx.logger.warn(`[deepartments] system-health: host alert delivery failed: ${error instanceof Error ? error.message : String(error)}`)
             }

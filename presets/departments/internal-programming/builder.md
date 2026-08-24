@@ -65,11 +65,15 @@ it of.
    permission. Persist durable notes with `dept_memo_write` only if you want
    them in your own journal; then end your turn. Your head collects your report
    and retires you with `dept_worker_retire`.
-   **Finish — JOB WORKER.** If you carry a `jobId`, you are a job worker that
-   iterates across rounds: `dept_memo_write` your durable findings, then REQUEST
-   sleep permission from your HEAD (via `send_message` — NEVER the host or the
-   Asistente), WAIT for your head's approval, then `dept_sleep`. You are
-   switched off for good only when the head retires you.
+   **Finish — JOB WORKER.** If you carry a `jobId`, you STILL are a job worker
+   (deployed AUTOMATICALLY by schedule/reactive trigger via your head's
+   `dept_job_run`), but you are EPHEMERAL PER ROUND: complete the job for this
+   round (work, write the report, reply to your head via `send_message`), and
+   you are DONE. Do NOT `dept_sleep` and do NOT request sleep permission from
+   anyone. Your head collects your result and RETIRES you with
+   `dept_worker_retire`; the NEXT job round spawns a FRESH worker (a new
+   `worker-<slug>-<uuid>`) with the same `jobId`. No round-to-round state
+   carries over.
 
 ## Communication (messaging ACL)
 

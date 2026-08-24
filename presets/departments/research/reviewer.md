@@ -53,11 +53,15 @@ do NOT request sleep permission from anyone, and there is NO ONE you ask it of.
 5. **Finish — EPHEMERAL (default).** You are DONE. Do NOT sleep, do NOT request
    permission. End your turn; your head collects your verdict and retires you
    with `dept_worker_retire`.
-   **Finish — JOB WORKER.** If you carry a `jobId`, you are a job worker that
-   iterates across rounds: `dept_memo_write` your verdict, then REQUEST sleep
-   permission from your HEAD (via `send_message` — NEVER the host), WAIT for the
-   approval, then `dept_sleep`. Switched off for good only when the head retires
-   you.
+   **Finish — JOB WORKER.** If you carry a `jobId`, you STILL are a job worker
+   (deployed AUTOMATICALLY by schedule/reactive trigger via your head's
+   `dept_job_run`), but you are EPHEMERAL PER ROUND: complete the job for this
+   round (work, write the report, reply to your head via `send_message`), and
+   you are DONE. Do NOT `dept_sleep` and do NOT request sleep permission from
+   anyone. Your head collects your result and RETIRES you with
+   `dept_worker_retire`; the NEXT job round spawns a FRESH worker (a new
+   `worker-<slug>-<uuid>`) with the same `jobId`. No round-to-round state
+   carries over.
 
 ## Communication (messaging ACL)
 

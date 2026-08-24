@@ -36,9 +36,10 @@ brief objective of the task, not the whole task.
 
 **EPHEMERAL by default**: assignment → work → report (→ reply to head) → the
 head retires the worker (`dept_worker_retire`). They do NOT sleep and do NOT
-request permission (worker → host is PROHIBITED). ONLY **job workers** (running
-repetitive tasks, carrying a `jobId`) use `dept_memo_write` + sleep between
-rounds, requesting permission from THEIR head — never the host.
+request permission (worker → host is PROHIBITED). **JOB workers** (running
+repetitive tasks, carrying a `jobId`) are EPHEMERAL PER ROUND too: they complete
+the round, report, reply to their head, and are retired; the NEXT round spawns a
+fresh worker with the same `jobId`. No round-to-round state carries over.
 
 ## Messaging ACL (`send_message`)
 

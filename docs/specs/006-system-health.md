@@ -556,6 +556,14 @@ alert class).
 | 3 | **Preset audit** | A preset/persona text (COMMENTS INCLUDED) holding an UNBOUND template reference (a double-brace reference to a variable that is NOT one of the known-bound persona vars cwd/headPostId/workspacePath/reportDir/deptName) — a config-health finding; the audit NEVER mutates a preset file. | `presetAuditEnabled` (true) | `config-presets.jsonl` | `config-preset` / `config-preset` |
 | 4 | **Config knobs** | Individual disable for each of 1-3 (absent → all on; `false` → that class never alerts). | `health.turnErrorCaptureEnabled` / `health.staleLiveWatchdogEnabled` / `health.presetAuditEnabled` (+ `health.staleLiveMinutes`) | n/a | n/a |
 | 5 | **System heartbeat (W8-d)** | (a) A LEAN `## System heartbeat:` section injected into EVERY HOST wake pack (host last-activity, per active agent last-activity / NO SESSION / SLEEPING, pending count + oldest age, and a `WAIT` line when the host holds a quiet expectation). (b) The CONDITIONAL wake: the daemon wakes the host ONLY when the WAIT condition holds (a HOST-sent message to a post with NO reply AND NO session activity for >= `waitThresholdMs`), via a single `[From deepartments] system-wait: <reason>` bus message — deduped per recipient+message per 30min. **NO standalone hourly message** (the daemon still ticks/writes the heartbeat file; zero noise otherwise). | `heartbeatEnabled` (true) + `waitThresholdMs` (30 min) | `health-alerts-state.json` (the shared ledger, key `wait:<recipientId>:<messageId>`) | `system-wait` / `wait:<postId>:<messageId>` |
+| 6 | **Interrupted-post boot reconciliation (W8-h)** | A REGISTERED post (head/worker, not retired) whose session log is in an INTERRUPTED/STOPPED state — the GUI 'Stopped' badge — when the DSH service restarts and kills a department post mid-turn. The restart notice only lists the MAIN session; this reconciles EACH registered post against its session's interrupted turn and records it into post-errors.jsonl (error class `interrupted-post`) → the W6 daemon ALERTS the host, so NO restart-interrupted agent is ever silent. | `health.enabled` (the daemon gate; no separate knob) | `post-errors.jsonl` + `health-alerts-state.json` (key `interrupted-post:<postId>`) | `post-error:<postId>` / `interrupted-post:<postId>` |
+
+**Scheduler auto-run visibility (W8-c).** The agenda-scheduler auto-run path
+records a post-error finding (postId `scheduler`, the message carries the jobId +
+reason) on (a) `runJob` throws (reason = the thrown error text), (b) an
+unresolved head (reason `no head`), or (c) an idempotency skip (fire returns
+FALSE, reason `idempotency-skip`) → the W6 daemon ALERTS the host, deduped by
+`scheduler:<jobId>:<reason>` for 30min.
 
 **Shared snapshot primitives (W8-c/W8-d reuse).** `buildPostSnapshot(post)` (PURE,
 exported) computes `{ lastActivityTs, pendingCount, oldestPendingTs }` from a
@@ -581,3 +589,82 @@ and only a `reason.kind === 'error'` `turn/end` fresher than
 `turn-errors-state.json` so a turn is never double-counted; the row lands in
 `post-errors.jsonl` and flows through the existing post-error scan → ALERT. The
 interval stays tiny (the daemon already ticks at `health.intervalMs`, 60s).
+
+**W8-h interrupted-post mechanism (documented).** The harness exposes NO global
+turn/end cordis event (same hook decision as Part 1), so the interrupted-post
+reconciliation REUSES the harness's OWN crash-recovery marker instead of an event
+hook: the dsh-session persistence backend closes every crash-orphaned OPEN turn
+with a synthetic `turn/end { reason: { kind: 'interrupted' } }` on reload
+(`interruptedTurnClosers`). A post is INTERRUPTED/STOPPED when its session log
+ends in that state — an OPEN turn no `turn/end` closed (the repair is NOT yet
+persisted for a NOT-resumed post, e.g. a worker), OR a persisted `turn/end` whose
+`reason.kind === 'interrupted'` with no subsequent completed work (the repair WAS
+persisted for a resumed post). `scanInterruptedTurn` (PURE) detects that; a
+BALANCED log (every turn closed by a non-interrupted `turn/end`) is HEALTHY →
+never flagged (no false positives), and a RECOVERED session (a new completed
+turn after the marker) is likewise not flagged. The boot reconciliation
+(`reconcileInterruptedPosts`) bounds the flag to the RESTART window (the crash-tail
+ts AFTER the previous boot's last heartbeat AND within `HEALTH_ERROR_WINDOW_MS`),
+dedupes per post per 30min (key `interrupted-post:<postId>`), and appends ONE
+post-error row (error class `interrupted-post`) → the W6 daemon ALERTS the host.
+The `## System heartbeat:` wake-pack section renders a line
+`- interrupted: <postIds>` (or `- interrupted: none` when clean) via
+`buildHeartbeatSection`, listing the stopped posts (a LIVE-RUNNING agent is never
+listed — a live running turn is healthy progress, not a stop).
+
+---
+
+## 15. W8-i ADDENDUM — the host 'session not found' delivery loop
+
+**Problem (live production noise, 2026-08-24).** The bus host-delivery path
+(`busDeliverToHost` — the W6 ALERT/report deliveries + the system-wait wake)
+resumes a DORMANT host session; when that durable session is not yet
+workspace-attached the harness session-persistence/query seam throws
+`session "<id>" not found`. The seam was recording that transient FIRST-attempt
+failure as a post-error, and since the post-error dedupe was NOT stable per
+post+class, the daemon re-alerted the HOST every dedupe window (16 rows live) —
+alert spam for a failure that the delivery ultimately recovered from.
+
+**Fix (three parts, in `src/invoke.ts` + `isSessionNotFoundError` /
+`postErrorClass` / `appendPostErrorDeduped`):**
+
+1. **Retry before recording.** `busDeliverToHost` classifies the caught error via
+   `isSessionNotFoundError`; on a `'session "<id>" not found'` it FIRST retries
+   through the existing host-attach repair seam (`repairHostWorkspaceAttach`,
+   awaited) and re-attempts the resume, BEFORE recording anything. The post-error
+   is recorded ONLY if the retry ALSO fails.
+2. **Stable per-(post+class) dedupe.** `scanPostErrorFindings` now keys the
+   `'session not found'` class on `post-error:<postId>:session-not-found` (per
+   post + class, within `HEALTH_DEDUPE_WINDOW_MS`) instead of only per postId, so
+   a repeated not-found NEVER re-alerts per attempt. The recording path uses a
+   separate `record:post-error:<postId>:session-not-found` ledger key so the
+   FIRST recorded row still alerts; a repeat inside the window re-records
+   nothing. A generic class keeps the legacy `post-error:<postId>` key.
+3. **No trace on a later-successful retry.** Because the retry runs BEFORE any
+   recording, a transient not-found that the retry delivers leaves NO post-error
+   row (no trace) — only a genuinely-persistent not-found is recorded (once per
+   post+class per 30min).
+
+---
+
+## 16. W9-b ADDENDUM — delivery interrupt/queue semantics
+
+The system-health ALERT path AND the system-wait wake (both delivered by the
+daemon's production `notifyHost` hook → `busDeliverToHost`) are now wired
+`interrupt: true` (owner decision 2026-08-24) — a health alert must PREEMPT a
+busy host turn, not queue behind it.
+
+`send_message` (and the internal bus delivery seams `busDeliverToPost` /
+`busDeliverToHost`) accept the opt-in `interrupt?: boolean` option (default
+FALSE = the current QUEUE semantics, zero regression). When TRUE and the
+recipient is LIVE mid-turn, the seam ABORTS the recipient's CURRENT turn with
+reason 'interrupted' via the harness abort/stop API — `Agent.cancel(cause,
+options)` with `{ keepInbox: true }`, so any already-pending inbox work is
+preserved (no data loss) and only the active turn is preempted — and the message
+becomes the FIRST item of the recipient's NEXT turn. A DORMANT recipient wakes +
+processes immediately either way (no abort needed).
+
+The default `interrupt: false` keeps the QUEUE behavior for ALL normal flows —
+including the agenda/parallel scheduler head notices (`notifyHead`) — so the
+only preempting deliveries are the health ALERT + system-wait wake, exactly as
+the owner decided.
