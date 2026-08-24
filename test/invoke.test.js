@@ -8645,6 +8645,104 @@ test('P2 Bug A cross-boot regression (real Loader): a boot with a LIVE + RETIRED
   })
 })
 
+test('Bug A SOURCE GATE (no over-suppression, write seam): a NON-retired host with a PERSISTENT "session not found" delivery STILL appends its post-error ROW at the busDeliverToHost write — the source gate re-validates the durable hosts registry and never suppresses a legitimate post-error for a live host', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const liveSessionId = 'host-buga-sourcegate-live'
+    const liveHostId = await seedHostRegistration(stateDir, liveSessionId)
+    const { head, headCtx, key, dispose } = await bootWithHead(stateDir, { resumeNotFound: [liveSessionId] })
+    try {
+      const signal = new AbortController().signal
+      const send = await headCtx.tools.get('send_message', key).execute(
+        { to: [liveHostId], text: 'persistent wake' },
+        { agent: head, signal }
+      )
+      assert.equal(send.delivered[liveHostId], 'failed', 'a persistent session-not-found host delivery reports failed')
+      // The busDeliverToHost catch re-validates against the durable registry:
+      // the host is NOT retired, so `(hosts.get()?.retired ?? hostEntry.retired)
+      // === true` is FALSE → the source gate does NOT suppress the write.
+      const rows = readPostErrorsFile(stateDir).filter((r) => r.postId === liveHostId)
+      assert.equal(rows.length, 1, 'the NON-retired host STILL gets its legitimate post-error ROW (the source gate does NOT over-suppress a live host)')
+      assert.match(rows[0].error, /session "host-buga-sourcegate-live" not found/, 'the recorded error is the not-found class')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Bug A SOURCE GATE (retired-host ZERO new ROWS + ZERO QD directives, write seam): a host that is RETIRED in the DURABLE hosts registry NEVER gets a new post-error ROW for a bus delivery and NEVER emits a quality-inspect directive — the source gate suppresses the ROW at the write (the scan gate only suppresses the FINDING; this suppresses the ROW)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    process.env[QUALITY_INSPECT_ENV_VAR] = '1' // force the QD dice so the emit WOULD fire if a row were written
+    try {
+      // Seed the durable hosts registry BEFORE boot: a RETIRED host (terminal,
+      // the 17:08 noise source) + a LIVE host (the rotation successor the daemon
+      // actually alerts). The loader restores both into the in-memory `hosts`
+      // Map that busDeliverToHost's source gate re-validates against.
+      const retiredSessionId = 'host-buga-retired'
+      const liveSessionId = 'host-buga-live'
+      const retiredHostId = `host-${retiredSessionId}`
+      const liveHostId = `host-${liveSessionId}`
+      await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+        schemaVersion: 2,
+        [liveHostId]: { sessionId: liveSessionId, roomId: 'board' },
+        [retiredHostId]: { sessionId: retiredSessionId, roomId: 'board', retired: true, retiredAt: Date.now() - 1000, rotatedTo: liveHostId }
+      }, null, 2))
+
+      const env = await bootWithQD(stateDir, { health: { intervalMs: 50 }, resumeNotFound: [liveSessionId] })
+      try {
+        // A legacy post-error ROW for the retired host (the 17:08 deploy noise)
+        // + a FRESH post-error ROW for a worker post so the daemon tick has a
+        // net-new finding to alert the LIVE host about.
+        await appendPostError(stateDir, { ts: Date.now() - 60_000, postId: retiredHostId, messageId: 'm-legacy-retired', error: `session "${retiredSessionId}" not found` })
+        await appendPostError(stateDir, { ts: Date.now(), postId: 'worker-research', messageId: 'm-fresh', error: 'could not be materialized' })
+
+        const { head, headCtx, key } = qdResearchHead(env)
+
+        // (a) The production system-health daemon (real notifyHost →
+        // busDeliverToHost, health.intervalMs) delivers a net-new finding ALERT
+        // to the LIVE host; the LIVE host's resume throws (resumeNotFound) so
+        // the busDeliverToHost catch WRITES a post-error ROW for the LIVE host.
+        // This proves the write seam is live and the source gate does NOT
+        // over-suppress it.
+        await waitFor(async () => {
+          return readPostErrorsFile(stateDir).some((r) => r.postId === liveHostId)
+        }, 5000, 'the daemon recorded the LIVE host post-error (real notifyHost → busDeliverToHost catch → dedupe append)')
+        assert.equal(readPostErrorsFile(stateDir).filter((r) => r.postId === liveHostId).length, 1, 'the LIVE host gets exactly one post-error ROW (no over-suppression at the write seam)')
+
+        // The RETIRED host must NEVER be the daemon's alert target (retiredHostIds
+        // scan skip + pickLiveHostEntry retired skip) and must have ZERO NEW
+        // post-error ROWS: the ONLY retired-host row is the untouched legacy seed.
+        const retiredRows = readPostErrorsFile(stateDir).filter((r) => r.postId === retiredHostId)
+        assert.equal(retiredRows.length, 1, 'the ONLY retired-host row is the seeded legacy row (ZERO NEW rows written)')
+        assert.equal(retiredRows[0].messageId, 'm-legacy-retired', 'the legacy retired-host row is the untouched seed (no NEW write)')
+
+        // (b) A direct bus delivery to the RETIRED host via the REAL send_message
+        // seam → the catalog/entry gate refuses it (a retired host is terminal),
+        // so it reports failed AND appends ZERO new ROWS + ZERO QD directives.
+        const before = readPostErrorsFile(stateDir).filter((r) => r.postId === retiredHostId).length
+        const signal = new AbortController().signal
+        const sendRetired = await headCtx.tools.get('send_message', key).execute(
+          { to: [retiredHostId], text: 'wake the retired host' },
+          { agent: head, signal }
+        )
+        assert.equal(sendRetired.delivered[retiredHostId], 'failed', 'a delivery to a durable-RETIRED host reports failed')
+        const after = readPostErrorsFile(stateDir).filter((r) => r.postId === retiredHostId).length
+        assert.equal(after, before, 'the RETIRED host got ZERO NEW post-error ROWs (the source gate suppresses the write)')
+        await waitFor(async () => {
+          return readPostErrorsFile(stateDir).filter((r) => r.postId === retiredHostId).length === before
+        }, 5000, 'retired-host row count is stable after the delivery attempt')
+        // No QD quality-inspect directive addressed to quality-head for the
+        // retired host (a suppressed write never reaches the maybeEmitQualityInspectDirective emit).
+        const dirs = await qualityDirectives(stateDir)
+        assert.equal(dirs.filter((d) => /post-error.*post host-buga-retired/.test(d.text)).length, 0, 'NO quality-inspect directive is emitted for the RETIRED host')
+      } finally {
+        await env.dispose()
+      }
+    } finally {
+      delete process.env[QUALITY_INSPECT_ENV_VAR]
+    }
+  })
+})
+
 test('P2 Bug C: an ALREADY-delivered post-error identity is NEVER re-alerted (no per-window re-fire); a NEW postId (a new error identity) alerts', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()

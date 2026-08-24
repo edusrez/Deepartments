@@ -8823,6 +8823,17 @@ export function applyInvoke(ctx: Context, config: Config) {
     // post+class per 30min, NOT per attempt); a generic class keeps the plain
     // append (the daemon's own per-postId alert dedupe already gates it).
     try {
+      // Bug A SOURCE GATE (the write, not the scan): a RETIRED host's session is
+      // terminal (W7). Re-validate against the durable hosts registry — not the
+      // possibly-stale in-memory hostEntry — so a rotation-commit window / a second
+      // daemon twin / a stale deliver can NEVER append a new post-error ROW for a
+      // retired host (the scan gate only suppresses the FINDING; this suppresses the
+      // ROW at the source, per the Asistente's "ZERO new rows" acceptance).
+      const durableRetired = (hosts.get(hostEntry.hostId)?.retired ?? hostEntry.retired) === true
+      if (durableRetired) {
+        ctx.logger.warn(`[deepartments] bus delivery to RETIRED host "${hostEntry.hostId}" — post-error ROW write skipped (terminal; source gate)`)
+        return 'failed'
+      }
       const entry: PostErrorEntry = {
         ts: Date.now(),
         postId: hostEntry.hostId,
