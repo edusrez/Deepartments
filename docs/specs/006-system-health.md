@@ -227,7 +227,11 @@ tick. Group the fresh, deduped rows into a compact finding per postId.
 **(c) Scan delivery failures.** Read `<stateDir>/deliveries.jsonl` rows with
 `status:'failed'` (via the existing `parseDeliveryRows`, messages-store.ts:506)
 and `ts ≥ now - 2h`. Dedup: **per `messageId`** within a `30min` window. Group
-the rows into a compact finding per messageId.
+the rows into a compact finding per messageId. **W7-A note: a
+`status:'terminal'` row is by definition NOT a failure and is NEVER re-attempted
+(a dead/unknown recipient settled once by the boot re-delivery driver), so the
+scan's `status === 'failed'` filter naturally leaves it out — a terminal row can
+never become a `delivery-failed` alert (see the W7-A addendum below).**
 
 **(d) Alert.** If any grouping non-empty, build a grouped finding text
 (`<grouped findings>` — e.g. "N post-error(s): post A (2×), post B (1×); M
@@ -436,6 +440,45 @@ habit. Acceptance criteria (the simulation chain):
 - **STABLE is a hard boundary.** The daemon writes only under `<stateDir>`; the
   digest job reads only DEV/`$DSH_HOME` and NEVER the stable profile
   `/opt/dsh/.dsh`. No `systemctl`.
+
+---
+
+## 12. W7-A ADDENDUM — terminal status of dead-recipient deliveries
+
+**Problem.** The bus re-attempts delivery at EVERY boot for messages to
+dead/unknown recipients (removed/closed/retired sessions — e.g. formerly-open
+subagents whose session is gone): the boot re-delivery driver
+(`redeliverPendingDeliveries`, invoke.ts) re-runs every pair whose latest sidecar
+status `needsRedelivery(...)` (messages-store `status` null / `'prepared'` /
+`'failed'`), and `deliverBusRecord` re-attempts even when the recipient is no
+longer a live catalog member. Each boot re-attempt appends a NEW `'failed'`
+sidecar row → the W6 health daemon (§5.2c) re-alerts every boot — persistent
+noise with no recovery path.
+
+**Fix (behavior for VALID recipients unchanged).** A delivery pair's status
+gains a **`'terminal'`** value (`DeliveryStatus` union, messages-store.ts): the
+runaway state for a pair whose recipient is no longer a live catalog member.
+`needsRedelivery('terminal')` returns `false` (settled — never re-delivered).
+The boot re-delivery driver resolves each re-attempt-eligible recipient against
+the durable catalog (non-retired `posts.json` ∪ non-retired `hosts.json`) BEFORE
+re-attempting: a **DEAD/UNKNOWN** recipient (neither exists, or its post/host is
+retired / session closed-archived) is settled once by appending a SINGLE
+`'terminal'` row via `markDelivery(stateDir, messageId, recipientId, 'terminal')`
+and the bus re-wake is **SKIPPED** (no `deliverBusRecord` call → no fresh
+`'prepared'`/`'failed'` rows). A **VALID** recipient keeps today's behavior —
+still delivered/resumed/failed, still re-attempted when `'prepared'`/`'failed'`.
+
+Because the sidecar is append-only and `deliveryStatus` reads the LAST row per
+(`messageId`, `recipientId`), one settled `'terminal'` row makes the pair's
+latest status `'terminal'`, so `needsRedelivery` is `false` on every subsequent
+boot — the noise stops after one boot. An already-`'terminal'` row stays
+terminal across restarts.
+
+**Consequences for the health daemon.** `scanDeliveryFindings` (§5.2c) filters on
+`status === 'failed'`, so a `'terminal'` row is never an anomaly. The daemon
+therefore stops re-alerting a settled dead-recipient pair; the OLD pre-settle
+`'failed'` rows age out of the 2h window on their own (no fresh `'failed'` row is
+produced, so no new alert).
 
 ---
 

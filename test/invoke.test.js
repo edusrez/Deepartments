@@ -23,12 +23,12 @@ import { test } from 'node:test'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { bindScopeParent, createScope, scopeOf } from '@deepseek-ai/dsh-scope'
-import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { Session, SessionId, snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
-import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath } from '../lib/messages-store.js'
+import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, toJsonSafe, jsonSafeMessageSource } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
@@ -8149,6 +8149,220 @@ test('W6 boot: health.intervalMs override registers a ticking daemon (heartbeat 
       assert.equal(auditExists, false, 'health.enabled:false → no audit line')
     } finally {
       await env.dispose()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W7-A — DELIVERY-FAILURE NOISE (boot re-delivery settles DEAD/UNKNOWN
+// recipients as a single 'terminal' row and does NOT re-attempt them, so the
+// W6 health daemon stops re-alerting every boot).
+// ---------------------------------------------------------------------------
+
+/** Seed the write-ahead delivery sidecar with the given wire rows
+ * (append-only JSONL: one { messageId, recipientId, status, ts } per line). */
+async function seedDeliveryRows(stateDir, rows) {
+  const filePath = resolveDeliveriesPath(stateDir)
+  await mkdir(stateDir, { recursive: true })
+  await writeFile(filePath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8')
+  return filePath
+}
+
+test('W7-A boot re-delivery: a DEAD recipient (not in posts/hosts) is settled as one terminal row — NO new prepared/failed rows, NO deliverBusRecord wake', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    // A live head makes the sender resolvable; the RECIPIENT is an unknown /
+    // removed session (a formerly-open subagent whose session is gone).
+    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'board' })
+    await seedMessageRecords(stateDir, [
+      { id: 'm-0', seq: 0, ts: now, from: 'research-head', to: ['dead-worker'], text: 'hello dead recipient', kind: 'agent' }
+    ])
+    const deliveriesPath = await seedDeliveryRows(stateDir, [{ messageId: 'm-0', recipientId: 'dead-worker', status: 'failed', ts: now }])
+    const { dispose } = await bootPlugin(stateDir)
+    try {
+      // The boot driver settles the pair as terminal.
+      await waitFor(async () => (await deliveryStatus(stateDir, 'm-0', 'dead-worker')) === 'terminal', 5000, 'dead recipient settled as terminal at boot')
+      const rows = parseDeliveryRows(await readFile(deliveriesPath, 'utf8'))
+      const m0 = rows.filter((row) => row.messageId === 'm-0')
+      assert.deepEqual(m0.map((row) => row.status), ['failed', 'terminal'], 'the dead-recipient pair gains ONLY a terminal row (the seeded failed row + the settled terminal)')
+      assert.equal(m0.length, 2, 'exactly two rows for the pair — NO deliverBusRecord call, so no new prepared/failed transition')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('W7-A boot re-delivery: a TERMINAL pair is NOT re-attempted on the NEXT boot (needsRedelivery(terminal) === false → no new rows)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'board' })
+    await seedMessageRecords(stateDir, [
+      { id: 'm-0', seq: 0, ts: now, from: 'research-head', to: ['dead-worker'], text: 'hello dead recipient', kind: 'agent' }
+    ])
+    const deliveriesPath = await seedDeliveryRows(stateDir, [{ messageId: 'm-0', recipientId: 'dead-worker', status: 'failed', ts: now }])
+    // FIRST boot: settle to terminal.
+    const first = await bootPlugin(stateDir)
+    await waitFor(async () => (await deliveryStatus(stateDir, 'm-0', 'dead-worker')) === 'terminal', 5000, 'first boot settles the dead recipient as terminal')
+    await first.dispose()
+    // SECOND boot over the SAME stateDir: the terminal pair must NOT be re-attempted.
+    const second = await bootPlugin(stateDir)
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200)) // give the fire-and-forget driver a chance
+      const rows = parseDeliveryRows(await readFile(deliveriesPath, 'utf8'))
+      const m0 = rows.filter((row) => row.messageId === 'm-0')
+      assert.deepEqual(m0.map((row) => row.status), ['failed', 'terminal'], 'the terminal pair is NOT re-attempted — no new prepared/failed/terminal row on the second boot')
+      assert.equal((await deliveryStatus(stateDir, 'm-0', 'dead-worker')), 'terminal', 'the terminal status persists across the second boot')
+    } finally {
+      await second.dispose()
+    }
+  })
+})
+
+test('W7-A boot re-delivery: a VALID (live) recipient with a re-attempt-eligible pair is STILL delivered/resumed (unchanged — dead-recipient settle never touches it)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    const hostId = await seedHostRegistration(stateDir, 'host-live-1') // a live host sender → ACL passes to the head
+    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'board', agentPreset: 'deepartments-head' })
+    await seedMessageRecords(stateDir, [
+      { id: 'm-0', seq: 0, ts: now, from: hostId, to: ['research-head'], text: 'hello live head', kind: 'agent' }
+    ])
+    const deliveriesPath = await seedDeliveryRows(stateDir, [{ messageId: 'm-0', recipientId: 'research-head', status: 'prepared', ts: now }])
+    const { agents, dispose } = await bootPlugin(stateDir)
+    try {
+      // The live head is delivered/resumed on boot — never terminal.
+      await waitFor(async () => {
+        const s = await deliveryStatus(stateDir, 'm-0', 'research-head')
+        return s === 'delivered' || s === 'resumed'
+      }, 5000, 'valid recipient delivered/resumed at boot')
+      const s = await deliveryStatus(stateDir, 'm-0', 'research-head')
+      assert.ok(s === 'delivered' || s === 'resumed', `valid recipient settled as ${s} (NOT terminal)`)
+      const rows = parseDeliveryRows(await readFile(deliveriesPath, 'utf8'))
+      const m0 = rows.filter((row) => row.messageId === 'm-0')
+      assert.ok(m0.some((row) => row.status === 'delivered' || row.status === 'resumed'), 'the pair carries a delivered/resumed final status')
+      assert.ok(m0.every((row) => row.status !== 'terminal'), 'a valid recipient is NEVER settled as terminal')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('W7-A scanDeliveryFindings: a terminal row is NOT an anomaly (only a fresh failed row alerts; stale + terminal rows are ignored)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    // A fresh failed row (alerts), a fresh terminal row (anomaly-free — W7-A),
+    // and a STALE failed row (outside the 2h window — ignored).
+    await seedDeliveryRows(stateDir, [
+      { messageId: 'm-0', recipientId: 'dead-worker', status: 'terminal', ts: now },
+      { messageId: 'm-1', recipientId: 'live-worker', status: 'failed', ts: now },
+      { messageId: 'm-2', recipientId: 'other-worker', status: 'failed', ts: now - 10 * 60 * 60 * 1000 }
+    ])
+    const findings = scanDeliveryFindings(stateDir, now)
+    assert.deepEqual(findings.map((finding) => finding.messageId), ['m-1'], 'only the fresh failed row alerts — the terminal row and the stale failed row produce no finding')
+    assert.equal(findings.length, 1, 'one delivery-failed finding')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W7-B — HOST-SPLICE ERROR (non-JSON-serializable agent/inbox/spliced data):
+// the bus UserMessage source is projected to a PLAIN JSON-safe value before it
+// is inserted, so a branded / class instance / function / undefined /
+// circular-ref value can never break the durable-session append.
+// ---------------------------------------------------------------------------
+
+test('W7-B toJsonSafe: a source carrying NON-serializable fields is projected to a lossless-JSON-safe plain value that keeps every semantic field', () => {
+  // Branded id object / class instance / function / circular ref / present-undefined.
+  const circular = { self: null }
+  circular.self = circular
+  const badSource = {
+    kind: 'agent',
+    form: 'send',
+    plugin: 'deepartments',
+    summary: 'New message from host-abc to 1 recipient(s) (agent).',
+    to: ['research-head'],
+    messageId: 'm-0',
+    from: 'host-abc',
+    senderSessionId: undefined, // the W7-B root cause: a present-undefined key
+    fn: () => 42,
+    branded: new (class Branded { constructor() { this.x = 1 } })(),
+    circular
+  }
+  const sanitized = toJsonSafe(badSource)
+  assert.ok(sanitized, 'toJsonSafe returns a value')
+  assert.notEqual(snapshotJsonValue(sanitized), undefined, 'the sanitized source is accepted by the dsh-session lossless-JSON boundary (snapshotJsonValue returns a snapshot, NOT undefined)')
+  assert.ok(JSON.stringify(sanitized), 'JSON.stringify on the sanitized source succeeds (no throw)')
+  // Semantic fields preserved as plain strings/arrays.
+  assert.equal(sanitized.kind, 'agent')
+  assert.equal(sanitized.form, 'send')
+  assert.equal(sanitized.plugin, 'deepartments')
+  assert.equal(typeof sanitized.summary, 'string')
+  assert.deepEqual(sanitized.to, ['research-head'])
+  assert.equal(sanitized.messageId, 'm-0')
+  assert.equal(sanitized.from, 'host-abc')
+  // The present-undefined key is OMITTED (never emitted as `senderSessionId: undefined`),
+  // the function is dropped, the class instance degrades to a plain object, and the
+  // circular ref is cut to null.
+  assert.ok(!Object.hasOwn(sanitized, 'senderSessionId'), 'the present-undefined senderSessionId is omitted (a lossless-JSON boundary rejects it)')
+  assert.ok(!Object.hasOwn(sanitized, 'fn'), 'the function field is omitted')
+  assert.equal(sanitized.branded.x, 1, 'the class instance degrades to a plain object')
+  assert.deepEqual(sanitized.circular, { self: null }, 'the circular reference (a self-referential object property) is cut to a null inner ref')
+})
+
+test('W7-B jsonSafeMessageSource: a real bus `agent/send` source with senderSessionId: undefined is lossless-JSON safe (splice-boundary proof)', () => {
+  const source = jsonSafeMessageSource({
+    kind: 'agent',
+    form: 'send',
+    plugin: 'deepartments',
+    summary: 'New message from research-head to 1 recipient(s) (agent).',
+    to: ['asistente'],
+    messageId: 'm-42',
+    from: 'research-head',
+    senderSessionId: undefined
+  })
+  assert.notEqual(snapshotJsonValue(source), undefined, 'the sanitized agent source is lossless-JSON safe (the `agent/inbox/spliced` append boundary accepts it)')
+  assert.ok(JSON.stringify(source), 'JSON.stringify succeeds on the sanitized source')
+  assert.ok(!Object.hasOwn(source, 'senderSessionId'), 'senderSessionId: undefined is omitted, not emitted as a present-undefined key')
+  assert.equal(source.kind, 'agent')
+  assert.equal(source.messageId, 'm-42')
+  assert.equal(source.from, 'research-head')
+  assert.deepEqual(source.to, ['asistente'])
+})
+
+test('W7-B needsRedelivery: a terminal status is SETTLED (never re-delivered)', () => {
+  assert.equal(needsRedelivery('terminal'), false, 'terminal is settled (not re-delivered)')
+  assert.equal(needsRedelivery('delivered'), false)
+  assert.equal(needsRedelivery('resumed'), false)
+  assert.equal(needsRedelivery('self'), false)
+  assert.equal(needsRedelivery('prepared'), true, 'prepared still re-delivers (crash window)')
+  assert.equal(needsRedelivery('failed'), true, 'failed still re-delivers')
+  assert.equal(needsRedelivery(null), true, 'no row yet → re-deliver')
+})
+
+test('W7-B like-for-like boot delivery to a LIVE head still succeeds and the delivered wake source is lossless-JSON safe (never throws, never terminal)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const hostId = await seedHostRegistration(stateDir, 'host-live-2')
+    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'board', agentPreset: 'deepartments-head' })
+    const now = Date.now()
+    await seedMessageRecords(stateDir, [
+      { id: 'm-0', seq: 0, ts: now, from: hostId, to: ['research-head'], text: 'like-for-like delivery', kind: 'agent' }
+    ])
+    const deliveriesPath = await seedDeliveryRows(stateDir, [{ messageId: 'm-0', recipientId: 'research-head', status: 'failed', ts: now }])
+    const { agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitFor(async () => {
+        const s = await deliveryStatus(stateDir, 'm-0', 'research-head')
+        return s === 'delivered' || s === 'resumed'
+      }, 5000, 'like-for-like delivery succeeds')
+      await waitForHeadMaterialized(agents)
+      const wake = agents.store.get('head-research-head').inboxMessages.at(-1)
+      assert.ok(wake, 'the head received the bus message')
+      assert.ok(wake.source, 'the delivered message carries a source')
+      // The delivered wake source is lossless-JSON safe — the splice append would NOT throw.
+      assert.notEqual(snapshotJsonValue(wake.source), undefined, 'the delivered wake source is lossless-JSON safe (snapshotJsonValue != undefined)')
+      assert.ok(JSON.stringify(wake.source), 'JSON.stringify succeeds on the delivered wake source')
+      const s = await deliveryStatus(stateDir, 'm-0', 'research-head')
+      assert.notEqual(s, 'terminal', 'a live recipient is never settled as terminal')
+    } finally {
+      await dispose()
     }
   })
 })

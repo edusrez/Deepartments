@@ -78,7 +78,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
-import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, boundContextSummary, type MessageSource } from '@deepseek-ai/dsh-llm'
 import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './session-cleanup.js'
 import { runHostRotation, validateHostsRotationFile, ROTATION_SCHEMA_VERSION, ASISTENTE_SESSION_TITLE } from './session-rotation.js'
 import type { RotationPersistenceLike, WorkspaceRegistryLike } from './session-rotation.js'
@@ -154,6 +154,76 @@ interface AgentMessageSource {
   messageId?: string
   from?: string
   senderSessionId?: SessionId
+}
+
+/**
+ * Project ANY value to a PLAIN JSON-safe value accepted by dsh-session's
+ * `snapshotJsonValue` (the `agent/inbox/spliced` append boundary — W7-B): JSON
+ * scalars, plain arrays, and plain/null-prototype objects ONLY. No branded /
+ * class instances, functions, `undefined`, symbols, bigint, non-finite
+ * numbers, sparse arrays, negative zero or circular references. A
+ * non-plain/branded object degrades to its primitive string form (e.g. a
+ * `SessionId`/`MessageId` brand → the bare string, `Date` → ISO, `RegExp` →
+ * `/…/`); functions/`undefined`/symbols/bigint are OMITTED from objects (never
+ * a present `undefined` key — `snapshotJsonValue` REJECTS a plain object whose
+ * property value is `undefined`) and become `null` inside arrays; circular
+ * references are cut to `null`. The bus UserMessage `source` (and the wake-pack
+ * message) is run through this BEFORE it is inserted, so the spliced event is
+ * ALWAYS serializable — a malformed/wrong value must NOT fail a delivery turn
+ * (the seam keeps its never-throw contract). A top-level `undefined`/function
+ * result is the "omit this key" signal for the caller. Never throws.
+ */
+export function toJsonSafe<T>(value: T): T {
+  const seen = new WeakSet<object>()
+  const visit = (v: unknown): unknown => {
+    if (v === null) return null
+    const t = typeof v
+    if (t === 'string' || t === 'boolean') return v
+    if (t === 'number') return Number.isFinite(v) && !Object.is(v, -0) ? v : null
+    // undefined / function / symbol / bigint are NOT JSON scalars → omit (object)
+    // or null (array). A present `undefined` KEY is what broke the splice.
+    if (t !== 'object') return undefined
+    const obj = v as object
+    if (seen.has(obj)) return null // circular ref → cut
+    if (Array.isArray(obj)) {
+      seen.add(obj)
+      const out: unknown[] = []
+      for (let i = 0; i < obj.length; i++) {
+        // sparse holes and undefined/function elements → null (snapshotJsonValue
+        // rejects both a missing own index and a non-scalar element).
+        out.push(Object.prototype.hasOwnProperty.call(obj, i) ? (visit((obj as unknown[])[i]) ?? null) : null)
+      }
+      return out
+    }
+    seen.add(obj)
+    const proto = Object.getPrototypeOf(obj)
+    // Exotic / branded / class instance (not a plain object): if it has a
+    // non-default string projection, use it (Date → ISO, RegExp → /…/, a brand
+    // that runs `String(x)`); otherwise fall through to its own enumerable keys.
+    if (proto !== Object.prototype && proto !== null) {
+      const maybe = String(obj)
+      if (typeof maybe === 'string' && maybe !== '[object Object]') return maybe
+    }
+    const out: Record<string, unknown> = {}
+    for (const key of Object.keys(obj)) {
+      const item = visit((obj as Record<string, unknown>)[key])
+      if (item !== undefined) out[key] = item
+    }
+    return out
+  }
+  // Generic: the projected value is shape-preserving (a plain JSON-safe clone),
+  // so the compile-time type T stays valid for the caller's object-literal
+  // inference (a fresh literal type is assignable to followup's
+  // `Record<string, unknown>`, whereas a `MessageSource` interface is not).
+  return visit(value) as T
+}
+
+/** Project any message `source` (a bus `AgentMessageSource` OR a wake-pack
+ * plugin-notice source — both are `MessageSource` values) to a plain JSON-safe
+ * value, keeping every semantically-important field as plain strings/arrays and
+ * omitting any that are `undefined`. This is the emit-site sanitizer (W7-B). */
+export function jsonSafeMessageSource<T extends MessageSource>(source: T): T {
+  return toJsonSafe(source)
 }
 
 /** Prefix of a runtime host-address registry entry: `host-<sessionId>`. */
@@ -578,12 +648,14 @@ export function buildSleepJournalMessage(journalText: string) {
 export function buildWakePackMessage(packText: string) {
   return createUserMessage({
     content: [{ type: 'text', text: packText }],
-    source: {
+    // W7-B: JSON-safe source projection (the wake-pack message is inserted into
+    // a durable session; a branded/non-plain value would break the splice).
+    source: jsonSafeMessageSource({
       kind: 'plugin',
       plugin: 'deepartments',
       form: 'notice',
       summary: boundContextSummary('Deepartments wake context pack — injected orientation (identity, journal path, board delta, roster, git, system state, full deepartments-workflow skill).')
-    }
+    })
   })
 }
 
@@ -2338,6 +2410,12 @@ export function scanDeliveryFindings(stateDir: string, nowMs: number): HealthFin
   } catch {
     rows = []
   }
+  // W7-A: only `status === 'failed'` rows are anomalies. A `terminal` row (a
+  // dead/unknown recipient settled once by the boot re-delivery driver) is by
+  // definition NOT a failure and is NEVER re-attempted, so it is naturally
+  // excluded here — a terminal row can never become a `delivery-failed` alert.
+  // Guard: an unknown/garbage status is likewise never an anomaly (the filter
+  // is the whitelist — only 'failed' is scanned).
   const fresh = rows.filter((row) => row.status === 'failed' && nowMs - row.ts <= HEALTH_ERROR_WINDOW_MS)
   const byMessage = new Map<string, DeliveryRow>()
   for (const row of fresh) byMessage.set(row.messageId, row) // last-wins
@@ -6883,7 +6961,12 @@ export function applyInvoke(ctx: Context, config: Config) {
   const busUserMessage = (record: MessageRecord, framed: string, senderSessionId: string | undefined) =>
     createUserMessage({
       content: [{ type: 'text', text: framed } as const],
-      source: {
+      // W7-B: the source is projected to a PLAIN JSON-safe value BEFORE it is
+      // inserted (the `agent/inbox/spliced` append boundary rejects
+      // branded/class instances, a present `undefined` key, functions, etc.).
+      // `senderSessionId: undefined` (no caller session) is OMITTED, never
+      // emitted as a present-undefined key. A malformed value never throws.
+      source: jsonSafeMessageSource({
         kind: 'agent',
         form: 'send',
         plugin: 'deepartments',
@@ -6892,7 +6975,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         messageId: record.id,
         from: record.from,
         senderSessionId: senderSessionId === undefined ? undefined : SessionId(senderSessionId)
-      }
+      })
     })
 
   /** The shared post DELIVERY of one bus message: the wakePost seam including
@@ -7130,7 +7213,11 @@ export function applyInvoke(ctx: Context, config: Config) {
               SessionId(recipientId),
               [{ type: 'text', text: framed } as const],
               {
-                source: {
+                // W7-B: the SAME JSON-safe projection as `busUserMessage` — the
+                // child-followup source is inserted into a durable session too,
+                // so a present-undefined `senderSessionId` / branded value must
+                // never reach the `agent/inbox/spliced` append boundary.
+                source: jsonSafeMessageSource({
                   kind: 'agent',
                   form: 'send',
                   plugin: 'deepartments',
@@ -7139,7 +7226,7 @@ export function applyInvoke(ctx: Context, config: Config) {
                   messageId: record.id,
                   from: record.from,
                   senderSessionId: senderSessionId === undefined ? undefined : SessionId(senderSessionId)
-                },
+                }),
                 // A bare { agent, signal } tool exec is the test surface; the
                 // ABORT_SIGNAL default is never reached in production harness
                 // runs (exec.signal is always present there).
@@ -7609,10 +7696,28 @@ export function applyInvoke(ctx: Context, config: Config) {
   // Boot — one-time re-delivery driver for the write-ahead sidecar (spec §4.4):
   // after registries + store are up, re-run ONLY the pairs whose latest sidecar
   // status needs re-delivery (crash between persist and delivery / mid-fan-out:
-  // 'prepared'; rejected delivery: 'failed'); 'delivered'/'resumed'/'self' are
-  // never re-run. Also compacts the sidecar at boot (keep only the latest state
-  // per key) once it grows past the board compaction threshold.
+  // 'prepared'; rejected delivery: 'failed'); 'delivered'/'resumed'/'self'/
+  // 'terminal' are never re-run. Also compacts the sidecar at boot (keep only
+  // the latest state per key) once it grows past the board compaction
+  // threshold. W7-A: BEFORE re-attempting a pair, resolve the recipient against
+  // the durable catalog — a DEAD/UNKNOWN recipient (removed/closed/retired
+  // session) is settled as a single 'terminal' row and SKIPPED (no
+  // deliverBusRecord call → no fresh 'failed'/'prepared' rows → the W6 health
+  // daemon stops re-alerting every boot).
   // ---------------------------------------------------------------------------
+  /** Resolve a bus recipient against the durable catalog: ALIVE if it exists as
+   * a NON-RETIRED post (byPost / posts.json) OR a NON-RETIRED host
+   * (hosts / hosts.json); DEAD/UNKNOWN if neither exists, or the recipient's
+   * post/host is retired (a removed/closed session — e.g. a formerly-open
+   * subagent whose session is gone). The boot re-delivery driver uses this to
+   * settle dead recipients ONCE (W7-A). */
+  const recipientCatalogAlive = (recipientId: string): boolean => {
+    const post = byPost.get(recipientId)
+    if (post !== void 0) return post.retired !== true
+    const host = hosts.get(recipientId)
+    if (host !== void 0) return host.retired !== true
+    return false
+  }
   const redeliverPendingDeliveries = async (): Promise<void> => {
     try {
       const filePath = resolveDeliveriesPath(messageStoreDir)
@@ -7638,6 +7743,15 @@ export function applyInvoke(ctx: Context, config: Config) {
         if (record === void 0) {
           // Record trimmed by the boot compaction: nothing durable remains to
           // re-deliver — the pair stays a settled no-op.
+          continue
+        }
+        // W7-A: a dead/unknown recipient must NOT be re-attempted at every boot.
+        // Settle it as a single 'terminal' row and skip the bus re-wake — no
+        // deliverBusRecord call, so NO new 'prepared'/'failed' rows (the noise
+        // the W6 health daemon re-alerted on every boot).
+        if (!recipientCatalogAlive(row.recipientId)) {
+          await markDelivery(messageStoreDir, row.messageId, row.recipientId, 'terminal')
+          ctx.logger.info(`[deepartments] boot re-delivery: ${record.id} → ${row.recipientId} (was ${row.status}) → 'terminal' — recipient is dead/unknown (no longer a live catalog member), settled once and never re-attempted`)
           continue
         }
         const callerSessionId = byPost.get(record.from)?.sessionId ?? hosts.get(record.from)?.sessionId ?? record.from

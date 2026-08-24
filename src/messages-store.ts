@@ -58,12 +58,17 @@
 // The delivery sidecar (§4.4) is a separate append-only JSONL file of rows
 // {messageId, recipientId, status, ts}: send_message appends 'prepared'
 // BEFORE delivering (write-ahead) and the final status ('delivered' |
-// 'resumed' | 'failed' | 'self') after; boot re-delivery consults the LATEST
-// row per (messageId, recipientId) — 'delivered'/'resumed' are skipped,
-// 'prepared' (crash between persist and delivery / mid-fan-out) and 'failed'
-// are re-run. One row per transition (rows are never edited in place — the
-// store is append-only); `compactDeliveryRows` keeps only the latest row per
-// key for the sidecar's own boot compaction (spec §4.4 builder-verify point).
+// 'resumed' | 'failed' | 'self' | 'terminal') after; boot re-delivery consults
+// the LATEST row per (messageId, recipientId) — 'delivered'/'resumed'/
+// 'terminal' are skipped, 'prepared' (crash between persist and delivery /
+// mid-fan-out) and 'failed' are re-run. 'terminal' is the SETTLED death-mark of
+// a delivery pair whose recipient is no longer a live catalog member (a
+// removed/closed/retired session — W7-A): it is never re-delivered and the
+// W6 health scan ignores it, so a dead recipient is not re-attempted at every
+// boot (which spawned fresh 'failed' rows and a re-alert every boot). One row
+// per transition (rows are never edited in place — the store is append-only);
+// `compactDeliveryRows` keeps only the latest row per key for the sidecar's own
+// boot compaction (spec §4.4 builder-verify point).
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
@@ -99,8 +104,11 @@ export interface MessageInput {
   sensitive?: boolean
 }
 
-/** Delivery lifecycle of one (messageId, recipientId) pair (§4.1/§4.4). */
-export type DeliveryStatus = 'prepared' | 'delivered' | 'resumed' | 'failed' | 'self'
+/** Delivery lifecycle of one (messageId, recipientId) pair (§4.1/§4.4).
+ * `terminal` is the SETTLED death-mark appended by the boot re-delivery driver
+ * when the recipient is no longer a live catalog member (W7-A): it is never
+ * re-delivered and the W6 health scan ignores it (see `needsRedelivery`). */
+export type DeliveryStatus = 'prepared' | 'delivered' | 'resumed' | 'failed' | 'self' | 'terminal'
 
 /** One sidecar row: one delivery transition (append-only, §4.4). */
 export interface DeliveryRow {
@@ -579,7 +587,9 @@ export async function deliveryStatus(stateDir: string, messageId: string, recipi
  * (re-)delivered — no row yet, or the last transition was 'prepared' (crash
  * between persist and delivery / mid-fan-out) or 'failed' (never delivered);
  * false when the pair is settled — 'delivered'/'resumed' → skip, 'self' →
- * held by design (no wake, ack-loop guard).
+ * held by design (no wake, ack-loop guard), 'terminal' → the recipient is a
+ * dead/unknown catalog member that was settled once and is NEVER re-delivered
+ * (W7-A).
  */
 export function needsRedelivery(status: DeliveryStatus | null): boolean {
   return status === null || status === 'prepared' || status === 'failed'
