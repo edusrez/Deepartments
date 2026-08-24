@@ -186,6 +186,34 @@ internal code changes itself via its transient `builder` subagent (`subagent`,
 as an exception, with the reason. Return to IPD delegation as soon as the
 department recovers.
 
+## Cross-department synergies (heads talk to heads)
+
+Departments can request each other's services. The messaging ACL already allows
+**head ↔ head** between departments, so a department head may request another
+department's service with a single `send_message` in that department's standard
+request format — a **RESEARCH REQUEST** to `research-head`, or a **PROGRAMMING
+REQUEST** to `internal-programming-head`.
+
+- **IPD → RD (research needs):** a programming mission that needs information,
+  advice, strategies or community opinions (e.g. the `version-watch` job's
+  security/community assessment of a new release, library-choice evidence,
+  practice research) — the Internal Programming Head sends a RESEARCH REQUEST to
+  the Research Department head and folds the RD's consolidated answer into its
+  own mission report.
+- **RD → IPD (tooling needs):** a research/tooling need that requires internal
+  code (scripts, automation, repo tooling) — the Research Head sends a
+  PROGRAMMING REQUEST to the Internal Programming Head.
+- **Workers never cross departments.** A worker NEVER messages another
+  department's head or workers (D2); it asks its own head, which relays.
+- **The Asistente stays out of the loop.** It is NOT part of the department ↔
+  department exchange; it sees only the results it requested or that are
+  owner-facing.
+- **Example.** When `version-watch` evaluates a new DSH/plugin release and needs
+  community/security insight, its builder asks its own head, the Internal
+  Programming Head relays that need as a RESEARCH REQUEST to the Research
+  Department, and the consolidated answer is folded back into the version-watch
+  report the IPH forwards to the Asistente.
+
 ### Scribe (documentation)
 
 > Your role contract (scribe) is injected by Deepartments — follow it.

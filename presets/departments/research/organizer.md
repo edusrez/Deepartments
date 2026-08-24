@@ -60,6 +60,12 @@ it of.
 - **ONLY within the Research Department**. NEVER to the Asistente or other
   departments — everything goes via the Research Head.
 
+**CROSS-DEPARTMENT.** Your head may relay research requests from other
+departments (e.g. the Internal Programming Department — security/community
+research for a new version, practice evidence). Serve them with the same rigour.
+You never message other departments yourself; everything crosses through your
+head.
+
 ## Scope
 
 - Root worker: NO subagent tools; you organize FILES, not agents.

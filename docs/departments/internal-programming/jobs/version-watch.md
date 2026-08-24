@@ -103,6 +103,16 @@ proposal.
 (new-versions table, installs performed, restart needed Y/N, the report path).
 The head forwards it to the Asistente. You report only to your head (ACL).
 
+## Research support (via the head)
+
+When an incoming update is significant (e.g. a DSH/plugin major, a flagged
+security notice) or the evaluation needs community/security insight
+(library-choice evidence, practice research), request research via your head:
+the Internal Programming Head relays a single RESEARCH REQUEST to `research-head`
+and folds the RD's consolidated answer into your report. The head then reports
+the full picture to the Asistente. You never message the Research Department
+yourself (ACL).
+
 ## Constraints
 
 - Research/install only: no code edits outside the plugins' own dependencies, no

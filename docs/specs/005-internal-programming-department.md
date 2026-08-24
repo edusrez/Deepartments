@@ -461,6 +461,18 @@ reason it exists. The denylist + stable-token + absolute-path guards (§5.1) are
 what let `builder` run `pnpm build`/`git log`/`dsh plugin add` without opening a
 free shell.
 
+### 7.6 Cross-department requests
+
+The Internal Programming Department may request Research Department services
+through its head. When a programming mission needs information, advice,
+strategies or community opinions (e.g. the `version-watch` security/community
+assessment of a new release, library-choice evidence, practice research), the
+**Internal Programming Head** sends a single RESEARCH REQUEST to `research-head`
+(in the RD's request format) and folds the RD's consolidated answer into its own
+mission report. Workers never contact the other department directly — everything
+crosses departments through the IPD head (D2). See the skill section
+"Cross-department synergies (heads talk to heads)".
+
 ---
 
 ## 8. Implementation phases (I1–I6) — parallel builders, no file overlap

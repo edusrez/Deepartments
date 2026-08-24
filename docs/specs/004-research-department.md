@@ -630,6 +630,15 @@ They are ADOPTED requirements for the personas and presets (F6), implemented in
   heuristics as a guide, never a rule. The head still reports to the requester
   with a single consolidated report.
 
+### 7.6 Cross-department research requests
+
+The Research Department may serve research requests from other department heads
+(e.g. the Internal Programming Head — security/community research for a new
+version, practice evidence) with its normal rigour, and may in turn request
+internal programming from the IPD via its head when a need requires code
+(scripts, automation, repo tooling → a PROGRAMMING REQUEST). Workers never
+message across departments (D2); everything crosses through the head.
+
 ---
 
 ## 8. Implementation phases (F1–F6) — parallel builders, no file overlap

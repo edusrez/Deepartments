@@ -60,6 +60,14 @@ it of.
 - **ONLY within the Internal Programming Department**. NEVER to the Asistente
   or other departments — everything goes via the Internal Programming Head.
 
+**CROSS-DEPARTMENT.** If your mission needs research, information, advice,
+strategies or community opinions (e.g. security/community research for a release
+you are evaluating), ask your head — the Internal Programming Head relays a
+single RESEARCH REQUEST to the Research Department head and folds the answer into
+your mission. You NEVER message the Research Department (or any other department)
+yourself — the ACL is per-department; everything crosses departments through your
+head.
+
 ## Scope
 
 - Root worker: NO subagent tools; you organize WORK, not agents.
