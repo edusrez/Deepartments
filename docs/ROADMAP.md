@@ -499,3 +499,32 @@ of the research — so no builder needs to re-research.)
   boot), (2) error `agent/inbox/spliced non-JSON-serializable` en wake del host; key3
   re-test 00:00Z; informe diario 09:00 GMT 2026-08-24 (verificación); test script opcional
   dsh-tool-web-enhanced.
+
+- **2026-08-24** — **W7 + PRIMERA OPERACIÓN REAL DE DEPARTAMENTOS (IPD)**:
+  (a) **W7 backend IPD** (owner "adelante con todo"): A) terminaciones de entrega — estado
+  `terminal` para entregas a recipientes muertos/retirados (se asientan una vez, sin reintentos
+  en boot; el daemon solo alerta sobre `failed`) → adiós al ruido de alertas; B) fix
+  `agent/inbox/spliced` — `toJsonSafe`/`jsonSafeMessageSource` en los 3 seams (busUserMessage,
+  deliverBusRecord, buildWakePackMessage): la raíz era `senderSessionId: undefined` presente en
+  el splice; C) **release dsh-tool-web-enhanced 0.4.0-rc.1** — CHANGELOG con Parallel +
+  Parallel Extract (que faltaban), **publicado en npm (tag rc)**; `latest` sigue en 0.3.0-rc.1
+  (decisión: el deploy usa el repo local symlink; rc es la línea del proyecto). Tests
+  **288→296**, 2 gates reviewer PASS; commits `5224e15` + `fc6affe`.
+  (b) **Sinergias inter-departamento** (petición owner): skill `Cross-department synergies` +
+  specs 004/005 §7.6 + 8 personas con CROSS-DEPARTMENT + version-watch→RD: heads↔heads
+  (RESEARCH REQUEST / PROGRAMMING REQUEST), workers siempre vía su head (D2), Asistente fuera
+  del loop depto↔depto — commit `c92dfbc`.
+  (c) **Primera operación en vivo**: `version-watch` (06:04Z) → **dshmarket 1.21.2 instalado**
+  en dev (core y resto HOLD; 0 GHSA) y `system-health-report` (07:00Z) → primer digest:
+  **SIN anomalías live**, 0 fail deliveries en 2h, spliced quieto >6h desde el boot W7 (= el
+  fix B funciona); Asistente ejecutó el smart_restart para cargar 1.21.2 (verificado: servicio
+  200 + heartbeat fresco).
+  (d) **Lecciones/notas W8**: (1) AGENTS.md CLI pin `@deepseek-ai/dsh@0.1.0-rc.8` desfasado vs
+  desplegado 0.1.1-rc.2 → actualizar; (2) peer ranges de dsh-deepartments y
+  dsh-tool-web-enhanced (`^0.1.0-rc.7`) no matchean la línea 0.1.1-rc.2 (tolerado en boot;
+  ensanchar en la próxima edición); (3) matiz m-115: entradas de sessión host ANTIGUA en
+  hosts.json cuentan como "vivas" (1 failed tras boot; tratar hosts viejos como muertos en el
+  fix A siguiente); (4) flaky test de timing de la suite (1 vez en 3 corridas; endurecer
+  próximo pase); (5) key3 opencode-go re-test post-reset 2026-08-24 00:00Z (pendiente — el
+  sistema opera con opencode-zen; verificar fallback); (6) informe diario 09:00 GMT 2026-08-24:
+  primera entrega esperada por el protocolo de presencia (verificar).
