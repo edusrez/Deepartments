@@ -28,7 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { Config as configSchema } from '../lib/org.js'
@@ -8227,12 +8227,16 @@ test('W6 appendPostError / readPostErrorsFile: appends JSONL, is BOUNDED to the 
   })
 })
 
-test('W6 runHealthDaemonTick: heartbeat written; scans post-errors + delivery-failed; alerts once (grouped); dedupes per key ≤1/30min; re-alerts after the window; a fresh error for a NEW postId alerts immediately', async () => {
+test('W6 runHealthDaemonTick: heartbeat written; scans post-errors + delivery-failed; alerts once (grouped); dedupes per IDENTITY (a delivered post-error identity is NEVER re-alerted — Bug C; delivery-failed re-alerts after the window); a fresh error for a NEW postId alerts immediately', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 23, 12, 0, 0).getTime() // fixed epoch
     const bootId = 'boot-abc'
     // Seed ONE post-error + ONE delivery-failed row, both 5min old (inside the 2h window).
-    await writeFile(path.join(stateDir, 'post-errors.jsonl'), JSON.stringify({ ts: T0 - 5 * 60000, postId: 'research-head', messageId: 'm-1', error: 'could not be materialized' }) + '\n', 'utf8')
+    const researchError = 'could not be materialized'
+    // Bug C: the ERROR-IDENTITY ledger key (postId:error-hash) — the same error
+    // stream is delivered ONCE and never re-alerts (a NEW error identity alerts).
+    const researchIdentity = `post-error:research-head:${errorIdentityHash(researchError)}`
+    await writeFile(path.join(stateDir, 'post-errors.jsonl'), JSON.stringify({ ts: T0 - 5 * 60000, postId: 'research-head', messageId: 'm-1', error: researchError }) + '\n', 'utf8')
     await writeFile(path.join(stateDir, 'deliveries.jsonl'), JSON.stringify({ messageId: 'm-2', recipientId: 'research-head', status: 'failed', ts: T0 - 5 * 60000 }) + '\n', 'utf8')
     const alerts = []
     const warns = []
@@ -8256,29 +8260,34 @@ test('W6 runHealthDaemonTick: heartbeat written; scans post-errors + delivery-fa
     assert.match(alerts[0].frame, /^\[From deepartments\] System-health ALERT:/, 'the alert is framed correctly')
     assert.match(alerts[0].frame, /post-error: research-head/, 'the grouped frame includes the post-error finding')
     assert.match(alerts[0].frame, /delivery-failed: m-2/, 'the grouped frame includes the delivery-failed finding')
-    // Dedupe state persisted for both keys.
+    // Dedupe state persisted for both identities.
     const state = readHealthAlertsState(stateDir)
-    assert.equal(state['post-error:research-head'], T0, 'the post-error key is deduped at now')
+    assert.equal(state[researchIdentity], T0, 'the post-error IDENTITY key is deduped at now (Bug C: error-identity)')
     assert.equal(state['delivery-failed:m-2'], T0, 'the delivery-failed key is deduped at now')
     // Audit line written.
     const auditRows = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l))
     assert.equal(auditRows.length, 1, 'one audit line per alert')
     assert.deepEqual(auditRows[0].dedupeKeys.sort(), ['delivery-failed:m-2', 'post-error:research-head'], 'the audit records the dedupe keys')
     assert.equal(auditRows[0].ts, T0, 'the audit carries the alert ts')
-    // Tick 2 @ T0 (inside the 30min dedupe window) → ≤1 alert per key: NOTHING new.
+    // Tick 2 @ T0 (inside the 30min dedupe window) → ≤1 alert per identity: NOTHING new.
     await tick(T0)
-    assert.equal(alerts.length, 1, 'a second tick inside the 30min window does NOT re-alert (≤1 alert per key)')
-    // Tick 3 @ T0 + 31min (the dedupe window elapsed; the anomalies are still inside the 2h scan window) → re-alert.
+    assert.equal(alerts.length, 1, 'a second tick inside the 30min window does NOT re-alert (≤1 alert per identity)')
+    // Tick 3 @ T0 + 31min → Bug C identity semantics: the SAME post-error (same
+    // postId + error) is a DELIVERED identity and is NEVER re-alerted (no
+    // per-window re-fire); the delivery-failed finding keeps the legacy per-key
+    // window and DOES re-alert (already identity-typed, not regressed).
     const T1 = T0 + 31 * 60000
     await tick(T1)
-    assert.equal(alerts.length, 2, 'a tick after the 30min window re-alerts in-window anomalies')
+    assert.equal(alerts.length, 2, 'a tick after the 30min window re-alerts only the delivery-failed (identity-typed) finding')
+    assert.ok(!alerts.at(-1).frame.includes('post-error: research-head'), 'the SAME post-error identity is NOT re-alerted after the window (Bug C)')
+    assert.match(alerts.at(-1).frame, /delivery-failed: m-2/, 'the delivery-failed finding re-alerts (legacy per-key window preserved)')
     const state2 = readHealthAlertsState(stateDir)
-    assert.equal(state2['post-error:research-head'], T1, 'the dedupe ledger advances on the re-alert')
+    assert.equal(state2[researchIdentity], T0, 'the delivered post-error identity is NOT advanced (it never re-alerts)')
     assert.equal(state2['delivery-failed:m-2'], T1, 'the delivery-failed ledger advances on the re-alert')
-    // A FRESH post-error for a NEW postId inside the window → alerts immediately (no prior dedupe).
+    // A FRESH post-error for a NEW postId (a NEW error identity) → alerts immediately (no prior dedupe).
     await appendPostError(stateDir, { ts: T1, postId: 'worker-x', messageId: 'm-9', error: 'boom' })
     await tick(T1)
-    assert.equal(alerts.length, 3, 'a fresh post-error for a NEW postId alerts immediately')
+    assert.equal(alerts.length, 3, 'a fresh post-error for a NEW postId (a new error identity) alerts immediately')
     assert.match(alerts.at(-1).frame, /post-error: worker-x/, 'the new alert names the fresh postId')
     assert.equal(warns.length, 0, 'a fully-resolvable tick emits no warns')
   })
@@ -8489,6 +8498,134 @@ test('W8-c PART 2 stale-live watchdog: a catalog-live post with pending addresse
     const before3 = alerts.length
     await tick(T0 + 33 * 60000, [retired])
     assert.equal(alerts.length, before3, 'a retired post is NEVER stalled')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P2 (2026-08-24) system-health daemon fixes — Bug A (retired-host re-probe),
+// Bug B (stalled-post false positives) + B-EXT (retired-post), Bug C (post-error
+// re-alert loop, ERROR IDENTITY), and the latent single-use-iterator fix.
+// ---------------------------------------------------------------------------
+
+test('P2 Bug B: scanStalledPosts NEVER flags a RUNNING post (an in-flight turn is healthy progress, not stale) — the running flag is the disambiguator', () => {
+  const T0 = 1_000_000_000_000
+  // A post with a pending message + an OLD last session write (>= stale, so
+  // WITHOUT the flag it WOULD be stale) BUT the LIVE agent is currently running
+  // → NOT stalled (Bug B short-circuit).
+  const running = { postId: 'worker-run', retired: false, running: true, events: [{ type: 'turn/start', time: T0 - 40 * 60000, data: { turn: 1 } }], inboxTs: [T0 - 20 * 60000] }
+  assert.equal(scanStalledPosts([running], T0, 10).length, 0, 'a running post is NEVER stalled even with pending + old activity')
+  // Control: the SAME shape without `running:true` IS stale → the running flag
+  // is exactly what saves a long in-flight turn.
+  const notRunning = { ...running, running: false }
+  assert.equal(scanStalledPosts([notRunning], T0, 10).length, 1, 'the SAME post without the running flag is stale (control: running is the disambiguator)')
+})
+
+test('P2 Bug B: scanStalledPosts does NOT flag a post with RECENT queue/inbox traffic (fresh delivery = alive) even when its last session write is old', () => {
+  const T0 = 1_000_000_000_000
+  // Last session write is OLD (>= stale) but a FRESH inbox delivery (1 min ago)
+  // is happening → NOT stalled (Bug B: fresh queue/delivery activity = alive).
+  const receiving = { postId: 'worker-receive', retired: false, events: [{ type: 'user/message', time: T0 - 40 * 60000, data: {} }], inboxTs: [T0 - 60_000] }
+  assert.equal(scanStalledPosts([receiving], T0, 10).length, 0, 'a post with a RECENT inbox delivery (fresh queue traffic) is NOT stalled')
+  // Control: the same post with only OLD inbox ts IS stale (within the window).
+  const quiet = { ...receiving, inboxTs: [T0 - 20 * 60000] }
+  assert.equal(scanStalledPosts([quiet], T0, 10).length, 1, 'a post with no RECENT activity IS stale (control)')
+})
+
+test('P2 Bug B-EXT: scanStalledPosts NEVER flags a RETIRED post (a retired member is not a stale-live signal)', () => {
+  const T0 = 1_000_000_000_000
+  const retired = { postId: 'worker-gone', retired: true, running: false, events: [{ type: 'user/message', time: T0 - 60 * 60000, data: {} }], inboxTs: [T0 - 20 * 60000] }
+  assert.equal(scanStalledPosts([retired], T0, 10).length, 0, 'a retired post is NEVER a stalled finding')
+})
+
+test('P2 Bug A (defense-in-depth): scanPostErrorFindings skips a row whose postId is a RETIRED host id (a legacy disk row never re-alerts the live host)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_700_000_000_000
+    await writeFile(path.join(stateDir, 'post-errors.jsonl'), [
+      JSON.stringify({ ts: T0, postId: 'host-retired', messageId: 'm-1', error: 'session "s" not found' }),
+      JSON.stringify({ ts: T0 + 1000, postId: 'host-live', error: 'boom' })
+    ].join('\n') + '\n', 'utf8')
+    const all = scanPostErrorFindings(stateDir, T0 + 10_000)
+    assert.ok(all.some((f) => f.postId === 'host-retired'), 'without the retired set the retired-host row is a finding (legacy)')
+    const filtered = scanPostErrorFindings(stateDir, T0 + 10_000, new Set(['host-retired']))
+    assert.ok(!filtered.some((f) => f.postId === 'host-retired'), 'with the retired-host set a retired-host row is NEVER a finding (Bug A)')
+    assert.ok(filtered.some((f) => f.postId === 'host-live'), 'a live-host row is still a finding')
+  })
+})
+
+test('P2 Bug A: the daemon does NOT alert a legacy post-error row for a RETIRED host (retired-host set threaded through the tick — a terminal host is never a new alert)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    await writeFile(path.join(stateDir, 'post-errors.jsonl'), JSON.stringify({ ts: T0 - 60_000, postId: 'host-retired', messageId: 'm-1', error: 'session "s" not found' }) + '\n', 'utf8')
+    const alerts = []
+    const hosts = [
+      { hostId: 'host-live', sessionId: 's-live', roomId: 'board' },
+      { hostId: 'host-retired', sessionId: 's-old', roomId: 'board', retired: true, retiredAt: T0 - 1000, rotatedTo: 'host-live' }
+    ]
+    await runHealthDaemonTick({
+      now: () => T0, stateDir, bootId: 'boot-bugA-deep',
+      hosts,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: () => {} }
+    })
+    assert.equal(alerts.length, 0, 'the daemon does NOT alert a retired-host post-error row (Bug A: terminal host, no re-alert of the live host)')
+  })
+})
+
+test('P2 Bug C: an ALREADY-delivered post-error identity is NEVER re-alerted (no per-window re-fire); a NEW postId (a new error identity) alerts', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const alerts = []
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs, stateDir, bootId: 'boot-bugC',
+      hosts,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: () => {} }
+    })
+    // A post-error row for worker-a (error 'boom').
+    await appendPostError(stateDir, { ts: T0, postId: 'worker-a', messageId: 'm-1', error: 'boom' })
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'the FIRST error identity alerts')
+    assert.match(alerts[0].frame, /post-error: worker-a/, 'the alert names the post')
+    // A RE-CURRENCE of the SAME error identity (new row, fresh ts) inside the
+    // 2h window → NOT a new alert (Bug C: a delivered identity never re-alerts).
+    await appendPostError(stateDir, { ts: T0 + 10 * 60000, postId: 'worker-a', messageId: 'm-1b', error: 'boom' })
+    await tick(T0 + 10 * 60000)
+    assert.equal(alerts.length, 1, 'a re-current SAME error identity is NOT re-alerted')
+    // After the 30min window elapses the identity is STILL delivered → NOT re-alerted.
+    await tick(T0 + 31 * 60000)
+    assert.equal(alerts.length, 1, 'the SAME error identity is NEVER re-alerted even after the dedupe window (Bug C)')
+    // A NEW postId (a genuinely NEW error identity) → alerts immediately.
+    await appendPostError(stateDir, { ts: T0 + 32 * 60000, postId: 'worker-b', messageId: 'm-2', error: 'a new error' })
+    await tick(T0 + 32 * 60000)
+    assert.equal(alerts.length, 2, 'a NEW postId (a new error identity) alerts immediately')
+    assert.match(alerts.at(-1).frame, /post-error: worker-b/, 'the new-alert names the new postId')
+  })
+})
+
+test('P2 LATENT FIX: the daemon tick does NOT drop the conditional system-wait when the ALERT path ALSO fires in the SAME tick (deps.hosts is materialized ONCE — no exhausted single-use iterator)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    await appendPostError(stateDir, { ts: T0, postId: 'worker-a', messageId: 'm-1', error: 'boom' })
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const frames = []
+    // A quiet host expectation (a host-sent message without a reply/resources).
+    const waitPost = { postId: 'worker-b', retired: false, events: [], hostMessages: [{ messageId: 'm-2', ts: T0 - 40 * 60000 }] }
+    await runHealthDaemonTick({
+      now: () => T0, stateDir, bootId: 'boot-latent',
+      config: { stateDir, org: { departments: [] } },
+      hosts,
+      hostWaits: [waitPost],
+      posts: [],
+      notifyHost: async (hostEntry, frame) => { frames.push(frame) },
+      logger: { warn: () => {} }
+    })
+    // BOTH the ALERT (post-error) AND the WAIT (system-wait) deliver in ONE tick —
+    // before the fix the WAIT path read an EXHAUSTED deps.hosts iterator (the ALERT
+    // path consumed it) → live was undefined → the wake was silently dropped.
+    assert.equal(frames.filter((f) => f.includes('System-health ALERT')).length, 1, 'the ALERT path is delivered')
+    assert.equal(frames.filter((f) => f.includes('system-wait: worker-b')).length, 1, 'the CONDITIONAL WAIT wake is delivered in the SAME tick (not dropped by an exhausted host iterator)')
+    assert.equal(frames.length, 2, 'both the ALERT + the WAIT wake are delivered')
   })
 })
 
@@ -8920,12 +9057,15 @@ test('W8-h PART 2 dedupe: a repeated interrupted-post reconciliation does NOT re
     assert.equal(readPostErrorsFile(stateDir).length, 1, 'still ONE post-error row')
     await tick(T0 + 5 * 60000)
     assert.equal(alerts.length, 1, 'a tick inside the 30min window does NOT re-alert')
-    // 3rd reconciliation @ T0+31min (after the window) → re-appends the row; tick → re-alerts ONCE.
+    // 3rd reconciliation @ T0+31min (after the window) → re-appends the row; the
+    // daemon does NOT re-alert the SAME interrupted-post ERROR IDENTITY (Bug C: a
+    // delivered post-error identity is never re-alerted — only a NEW occurrence,
+    // i.e. a new interruption with a new evidence, would alert).
     const third = await reconcileInterruptedPosts({ now: () => T0 + 31 * 60000, stateDir, postEvents, restartAfterTs: T0 - 10 * 60000 })
     assert.equal(third.appended, 1, 'a reconciliation after the 30min window re-appends ONE row')
     assert.equal(readPostErrorsFile(stateDir).length, 2, 'TWO post-error rows total')
     await tick(T0 + 31 * 60000)
-    assert.equal(alerts.length, 2, 'a tick after the 30min window re-alerts the same interrupted post')
+    assert.equal(alerts.length, 1, 'a tick after the 30min window does NOT re-alert the SAME interrupted-post error identity (Bug C)')
   })
 })
 
@@ -9402,7 +9542,11 @@ test('W8-i (b): a PERSISTENT "session not found" host delivery records exactly O
       assert.equal(alerts.length, 1, 'the daemon ALERTS once for the persistent not-found')
       assert.ok(alerts[0].frame.includes('post-error: ' + hostId), 'the alert names the host postId')
       const state = readHealthAlertsState(stateDir)
-      assert.ok(state[`post-error:${hostId}:session-not-found`] !== undefined, 'the dedupe key is per (post+class) with the class suffix')
+      // Bug C: the alert ledger advances the ERROR-IDENTITY key (postId:error-hash),
+      // not the raw per-(post+class) key — but the class suffix still shapes the
+      // finding (scanPostErrorFindings) and the recording dedupe key.
+      const recorded = readPostErrorsFile(stateDir)[0]
+      assert.ok(state[`post-error:${hostId}:${errorIdentityHash(recorded.error)}`] !== undefined, 'the dedupe key is the ERROR-IDENTITY key (postId:error-hash)')
       await tick(T0 + 5 * 60000)
       assert.equal(alerts.length, 1, 'a second tick within the window does NOT re-alert')
     } finally {

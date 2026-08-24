@@ -1554,6 +1554,22 @@ export const HEALTH_ERROR_WINDOW_MS = 2 * 60 * 60 * 1000
 /** Alert dedupe window: ≤1 alert per key inside this window. */
 export const HEALTH_DEDUPE_WINDOW_MS = 30 * 60 * 1000
 
+/** Bug C — the stable ERROR-IDENTITY token of a post-error finding. A stable
+ * FNV-1a hash (hex) of the error message maps the SAME error string to the SAME
+ * token, so the alert ledger can distinguish a delivered error stream from a
+ * NEW occurrence: `post-error:<postId>:<errorIdentityHash(error)>`. The same
+ * (postId, error) identity is delivered ONCE and NEVER re-alerts inside the
+ * window; only a genuinely-NEW error identity alerts. PURE (deterministic, no
+ * collision-sensitive crypto — the token is only a ledger key). */
+export function errorIdentityHash(text: string): string {
+  let h = 0x811c9dc5
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return (h >>> 0).toString(16)
+}
+
 // ---------------------------------------------------------------------------
 // W8-i (live production noise): the 'session "<id>" not found' host-delivery
 // loop. A bus host delivery to a dormant host whose durable session is not yet
@@ -1747,6 +1763,12 @@ export interface PostActivityInput {
   /** True when the post is a retired/removed member — a retired post is never a
    * stale-live or turn-error signal. Absent/false = a live catalog member. */
   retired?: boolean
+  /** True when the post's LIVE agent is CURRENTLY in an executing turn
+   * (`agents.get(sessionId)?.status === 'running'`). A genuinely-running turn is
+   * NOT stalled (Bug B) — a long in-flight model call is healthy progress, NOT a
+   * stale/stuck post, so `scanStalledPosts` short-circuits it as alive. Absent/
+   * false = not running (the post is idle/dormant and may be candidly stale). */
+  running?: boolean
   /** The post's session event log (the live agent's in-memory events, or a
    * durable slice). Absent/empty → no activity signal (never misclassified). */
   events?: readonly HealthSessionEvent[]
@@ -1818,12 +1840,31 @@ export function buildPostSnapshot(post: PostActivityInput): PostActivitySnapshot
 /** The stale-live staleness threshold (W8-c PART 2, default 10 min). */
 export const STALE_LIVE_DEFAULT_MINUTES = 10
 
+/** W8-c PART 2 (Bug B) — the tight "recent activity" window that counts as ALIVE.
+ * A post with a session write OR an inbox/queue delivery within this window is
+ * NOT stalled even when its LAST session write is older than `staleMinutes`
+ * (fresh queue/delivery traffic is healthy progress, not a stale post). Chosen
+ * as a sub-stale window (2 min) so it only catches genuinely-fresh activity and
+ * never masks a truly-stalled post. */
+export const POST_RECENT_ACTIVITY_WINDOW_MS = 2 * 60 * 1000
+
 /** W8-c PART 2 — flag a catalog-live post that is STALLED: it holds at least
  * one PENDING unprocessed addressed message AND its session log has NO writes
  * for >= `staleMinutes` (or no writes at all for that long — the oldest pending
  * message is itself >= `staleMinutes` old). Emits ONE 'stalled-post' finding per
  * stale post (key `stalled:<postId>`, deduped by the daemon's alert ledger).
- * Retired posts never produce a finding. Pure, never throws. */
+ * Retired posts never produce a finding. Pure, never throws.
+ *
+ * W8-c PART 2 (Bug B — false-positive de-dupe): a post is NEVER flagged when it
+ * is ALIVE, independent of the last-write age:
+ *   - `post.running === true` — the LIVE agent is currently executing a turn
+ *     (a genuinely-running turn / long in-flight model call is healthy progress,
+ *     NOT a stalled post);
+ *   - RECENT activity — a session write OR an inbox/queue delivery within
+ *     `POST_RECENT_ACTIVITY_WINDOW_MS` (an actively-receiving post is alive even
+ *     when its last session write is old).
+ * Both short-circuit BEFORE the stale test so a live/running/recently-active
+ * post is never emitted. */
 export function scanStalledPosts(
   posts: Iterable<PostActivityInput>,
   nowMs: number,
@@ -1835,6 +1876,17 @@ export function scanStalledPosts(
     if (post.retired === true) continue
     const snap = buildPostSnapshot(post)
     if (snap.pendingCount === 0) continue
+    // Bug B liveness short-circuits (last-write-age independent).
+    if (post.running === true) continue
+    // A RECENT session write OR a RECENT inbox/queue delivery = alive (fresh
+    // queue/delivery traffic is not a stalling post, even with an old last write).
+    let recentActivityTs: number | undefined = snap.lastActivityTs
+    if (post.inboxTs !== undefined) {
+      for (const ts of post.inboxTs) {
+        if (typeof ts === 'number' && Number.isFinite(ts) && (recentActivityTs === undefined || ts > recentActivityTs)) recentActivityTs = ts
+      }
+    }
+    if (recentActivityTs !== undefined && nowMs - recentActivityTs < POST_RECENT_ACTIVITY_WINDOW_MS) continue
     const stale =
       (snap.lastActivityTs !== undefined && nowMs - snap.lastActivityTs >= windowMs) ||
       (snap.lastActivityTs === undefined && snap.oldestPendingTs !== undefined && nowMs - snap.oldestPendingTs >= windowMs)
@@ -3586,9 +3638,15 @@ export interface HealthDaemonDeps {
  * DISTINCT error class (e.g. 'session not found') gets its OWN per-(post+class)
  * dedupe key `post-error:<postId>:<class>` so a repeated not-found attempt
  * never re-alerts per attempt; the generic class keeps the legacy
- * `post-error:<postId>` key (existing behavior unchanged). */
-export function scanPostErrorFindings(stateDir: string, nowMs: number): HealthFinding[] {
-  const fresh = readPostErrorsFile(stateDir).filter((row) => nowMs - row.ts <= HEALTH_ERROR_WINDOW_MS)
+ * `post-error:<postId>` key (existing behavior unchanged).
+ * Bug A (defense-in-depth): a `retiredHostIds` set of RETIRED host ids is
+ * threaded in so a LEGACY post-error row for a retired host on disk (e.g. a
+ * pre-rotation row) is never a finding/alert — a retired host is terminal (W7
+ * philosophy) and its rows must not re-alert the live host. Optional (logical
+ * OR default) so existing callers/tests that do not have the set keep working. */
+export function scanPostErrorFindings(stateDir: string, nowMs: number, retiredHostIds?: ReadonlySet<string>): HealthFinding[] {
+  const inWindow = readPostErrorsFile(stateDir).filter((row) => nowMs - row.ts <= HEALTH_ERROR_WINDOW_MS)
+  const fresh = retiredHostIds === undefined ? inWindow : inWindow.filter((row) => !retiredHostIds.has(row.postId))
   const byGroup = new Map<string, PostErrorEntry[]>()
   for (const row of fresh) {
     const cls = postErrorClass(row.error)
@@ -3683,6 +3741,17 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
 export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void> {
   try {
     const nowMs = deps.now()
+    // LATENT BUG (Bug A/the single-use-iterator seam): `deps.hosts` is a
+    // SINGLE-USE iterable (HostMap.values() in production) consumed by
+    // pickLiveHostEntry in the ALERT path AND the CONDITIONAL-WAKE path. On a
+    // tick where BOTH run, the WAIT path read an exhausted iterator → live =
+    // undefined → the system-wait wake was silently dropped. Materialize it ONCE
+    // and reuse the SAME array for BOTH picks AND the Bug A retired-host set.
+    const hostList = [...(deps.hosts ?? [])]
+    // Bug A (defense-in-depth): the set of RETIRED host ids, threaded into the
+    // post-error scan so a legacy post-error row for a retired host on disk is
+    // never a finding/alert (a retired host is terminal — W7 philosophy).
+    const retiredHostIds = new Set<string>(hostList.filter((entry) => entry.retired === true).map((entry) => entry.hostId))
     // W8-d PART B — a COARSER per-minute gate for the conditional system-wait:
     // read the PREVIOUS tick's minute marker BEFORE overwriting the heartbeat,
     // so the WAIT condition is evaluated at most ONCE per minute even when
@@ -3732,7 +3801,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     }
     // 3. scan.
     const findings = [
-      ...scanPostErrorFindings(deps.stateDir, nowMs),
+      ...scanPostErrorFindings(deps.stateDir, nowMs, retiredHostIds),
       ...scanDeliveryFindings(deps.stateDir, nowMs),
       ...(presetAuditEnabled ? scanConfigPresetFindings(deps.stateDir, nowMs) : []),
       ...(staleLiveWatchdogEnabled ? scanStalledPosts(posts, nowMs, staleLiveMinutes) : [])
@@ -3752,29 +3821,44 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     let stateChanged = false
     // 4. ALERT path (W6/W8-c): group the net-new findings and alert the LIVE host
     // by a single `System-health ALERT:` bus frame; advance the ledger + audit.
+    // Bug C — ERROR-IDENTITY alert-eligibility: a post-error finding alerts ONLY
+    // when its error identity was NEVER delivered (the SAME (postId,error)
+    // stream is delivered ONCE and NEVER re-alerts inside the window — no
+    // per-window re-fire, the Bug C re-alert loop). The identity is
+    // `post-error:<postId>:<errorIdentityHash>` stored in the SAME shared
+    // health-alerts-state.json ledger (key → lastAlertedAtMs). For
+    // delivery-failed / stalled / config-preset findings the identity IS the
+    // existing finding key and the legacy per-key 30min window is preserved
+    // (already identity-typed; do not regress).
     if (findings.length > 0) {
-      const keysToAlert = findings
-        .filter((finding) => nextState[finding.key] === undefined || nowMs - nextState[finding.key] > HEALTH_DEDUPE_WINDOW_MS)
-        .map((finding) => finding.key)
-      if (keysToAlert.length > 0) {
+      const identityOf = (finding: HealthFinding): string =>
+        finding.kind === 'post-error'
+          ? `post-error:${finding.postId}:${errorIdentityHash(finding.error ?? '')}`
+          : finding.key
+      const findingsToAlert = findings.filter((finding) => {
+        const identity = identityOf(finding)
+        if (finding.kind === 'post-error') return nextState[identity] === undefined
+        return nextState[identity] === undefined || nowMs - nextState[identity] > HEALTH_DEDUPE_WINDOW_MS
+      })
+      if (findingsToAlert.length > 0) {
         // 5. resolve the live host (the Asistente); no host → warn + skip (the
         // dedupe state is NOT advanced — the alert retries once a host is live).
-        const { live } = pickLiveHostEntry(deps.hosts)
+        const { live } = pickLiveHostEntry(hostList)
         if (live === undefined) {
           deps.logger?.warn('[deepartments] system-health: anomalies detected but no live host to alert — skip (retries on the next tick)')
         } else {
-          const alertFindings = findings.filter((finding) => keysToAlert.includes(finding.key))
+          const alertFindings = findingsToAlert
           // 6. notify (never throw) + advance the dedupe ledger + audit.
           try {
             await deps.notifyHost(live, buildHealthAlertFrame(alertFindings))
           } catch (error: unknown) {
             deps.logger?.warn(`[deepartments] system-health: host alert delivery failed: ${error instanceof Error ? error.message : String(error)}`)
           }
-          for (const key of keysToAlert) {
-            nextState[key] = nowMs
+          for (const finding of findingsToAlert) {
+            nextState[identityOf(finding)] = nowMs
             stateChanged = true
           }
-          await appendHealthAlertAudit(deps.stateDir, { ts: nowMs, findings: alertFindings, dedupeKeys: [...keysToAlert] })
+          await appendHealthAlertAudit(deps.stateDir, { ts: nowMs, findings: alertFindings, dedupeKeys: [...new Set(findingsToAlert.map((f) => f.key))] })
         }
       }
     }
@@ -3790,7 +3874,9 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       const waits = scanHostWaits(hostWaits, nowMs, waitThresholdMs)
       const waitsToWake = waits.filter((wait) => nextState[wait.key] === undefined || nowMs - nextState[wait.key] > HEALTH_DEDUPE_WINDOW_MS)
       if (waitsToWake.length > 0) {
-        const { live } = pickLiveHostEntry(deps.hosts)
+        // LATENT BUG fix: use the materialized hostList (NOT the single-use
+        // deps.hosts iterator) — the ALERT path above already consumed it.
+        const { live } = pickLiveHostEntry(hostList)
         if (live === undefined) {
           deps.logger?.warn('[deepartments] system-health: system-wait condition but no live host to wake — skip (retries on the next tick)')
         } else {
@@ -3809,6 +3895,14 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // Persist the merged ledger once if the ALERT or CONDITIONAL-WAKE path
     // advanced any key.
     if (stateChanged) {
+      // Defensive 2h prune (Bug C): drop delivered-identity entries that aged out
+      // of the anomaly window so the shared ledger never grows unbounded. Every
+      // key's dedupe/re-arm window is <= HEALTH_DEDUPE_WINDOW_MS, so a >=2h-old
+      // entry is already immune to the alert window (re-derivable at zero cost) —
+      // pruning it is safe for the alert AND the W8-i recording keys it shares.
+      for (const [k, v] of Object.entries(nextState)) {
+        if (nowMs - v > HEALTH_ERROR_WINDOW_MS) delete nextState[k]
+      }
       await writeHealthAlertsState(deps.stateDir, nextState)
     }
   } catch (error: unknown) {
@@ -8617,6 +8711,17 @@ export function applyInvoke(ctx: Context, config: Config) {
    * is the FIRST item of the host's next turn. Default (false) = QUEUE. */
   const busDeliverToHost = async (hostEntry: HostEntry, framed: string, record: MessageRecord, senderSessionId: string | undefined, opts?: DeliveryInterruptOptions): Promise<DeliveryStatus> => {
     if (agents === void 0) return 'failed'
+    // W7 terminal philosophy (Bug A, PRIMARY): a RETIRED host is terminal — it is
+    // NEVER attempted and NEVER recorded (no resume, no materialization, no
+    // post-error row). The only registered live host is the rotation successor.
+    // Without this gate a stale in-memory Map (the rotation-commit window / a
+    // second daemon twin) could still resolve the retired host as live and the
+    // delivery catch would record its rows, re-alerting the CURRENT host about a
+    // terminal entry forever.
+    if (hostEntry.retired === true) {
+      ctx.logger.warn(`[deepartments] bus delivery to RETIRED host "${hostEntry.hostId}" skipped (terminal — a retired host is never attempted or recorded)`)
+      return 'failed'
+    }
     const sessionId = String(SessionId(hostEntry.sessionId))
     const interrupt = opts?.interrupt === true
     /** One host delivery attempt: an inline followup for a LIVE host, else the
@@ -10031,6 +10136,11 @@ export function applyInvoke(ctx: Context, config: Config) {
         out.push({
           postId,
           retired: entry.retired === true,
+          // Bug B: the LIVE agent's status — a genuinely-running turn is NOT
+          // stalled (a long in-flight model call is healthy progress). The
+          // harness agent.status === 'running' is the disambiguator (events alone
+          // cannot distinguish a healthy running turn from an interrupted one).
+          running: live !== undefined && live.status === 'running',
           events: (live?.session?.events ?? []) as HealthSessionEvent[],
           inboxTs: inboxTsByPost.get(postId) ?? []
         })
