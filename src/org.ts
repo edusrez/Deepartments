@@ -62,6 +62,12 @@ export interface DepartmentConfig {
  * `enabled` defaults to true, `intervalMs` defaults to 60000. An ABSENT section
  * (or absent `enabled`) keeps monitoring ON; an explicit
  * `health: { enabled: false }` disables the daemon (no heartbeat, no alerts).
+ *
+ * W8-c SAFEGUARDS PACKAGE (owner "tenemos que crear salvaguardas", 2026-08-24):
+ * each individual safeguard is default-on and individually disable-able:
+ * `turnErrorCaptureEnabled`, `staleLiveWatchdogEnabled` (+ `staleLiveMinutes`)
+ * and `presetAuditEnabled`. Absent → all on (code defaults); an explicit
+ * `false` disables THAT safeguard (and its alert class is never emitted).
  */
 export interface HealthConfig {
   /** When explicitly false the system-health daemon is NOT registered (no
@@ -69,6 +75,39 @@ export interface HealthConfig {
   enabled?: boolean
   /** The daemon tick interval in ms (default 60000). */
   intervalMs?: number
+  /** W8-c PART 1 — when explicitly false, a live post session whose turn ends in
+   * an error is NOT recorded into post-errors.jsonl (no turn-error alert class).
+   * Absent → enabled (default true). */
+  turnErrorCaptureEnabled?: boolean
+  /** W8-c PART 2 — when explicitly false, the stale-live watchdog is NOT run (a
+   * catalog-live post with pending addressed messages and no session writes for
+   * `staleLiveMinutes` is NOT flagged/alerts). Absent → enabled (default true). */
+  staleLiveWatchdogEnabled?: boolean
+  /** W8-c PART 2 — the staleness threshold in minutes (default 10): a post is
+   * "stalled" when its session log has NO writes for at least this long while it
+   * holds pending addressed messages. Must be a positive number; invalid/absent
+   * → the code default (10). */
+  staleLiveMinutes?: number
+  /** W8-c PART 3 — when explicitly false, the boot preset audit is NOT run (no
+   * config-preset finding/alert for a preset text holding an unbound template
+   * reference). Absent → enabled (default true). */
+  presetAuditEnabled?: boolean
+  /** W8-d PART C — the system heartbeat to the Asistente (CONTEXT INJECTION +
+   * CONDITIONAL WAKE, no standalone hourly message; owner idea 2026-08-24
+   * "que el asistente reciba un latido cada hora con la última entrada de
+   * actividad propia y de los agentes activos"). When explicitly false, the
+   * host wake-pack `## System heartbeat:` section is OMITTED and the daemon does
+   * NOT evaluate the conditional system-wait wake (both are off together).
+   * Absent → enabled (default true — the section + the conditional wake are on,
+   * but the daemon still only wakes on the WAIT condition: zero noise
+   * otherwise). */
+  heartbeatEnabled?: boolean
+  /** W8-d PART C — the quiet-expectation threshold in ms (default
+   * 30*60*1000 = 30 min): the WAIT condition holds when the host sent a message
+   * to a post that produced NO reply AND NO session activity for at least this
+   * long, waking the host once per window via a `system-wait:` bus message.
+   * Must be a positive number; invalid/absent → the code default (30 min). */
+  waitThresholdMs?: number
 }
 
 /** Plugin config: workspace state dir + the department (agent) catalog. */
@@ -203,9 +242,28 @@ export const Config: z<any, any> = z.object({
   // `default(void 0)` so an ABSENT section or absent keys fall through to the
   // CODE defaults (enabled:true, intervalMs:60000), while an explicit
   // `health:{ enabled:false }` still disables the daemon — exactly the
-  // parallel section's contract.
+  // parallel section's contract. W8-c adds the four per-safeguard knobs
+  // (turnErrorCaptureEnabled / staleLiveWatchdogEnabled + staleLiveMinutes /
+  // presetAuditEnabled), all `default(void 0)` so absent → code default-on.
+  // W8-d adds the system-heartbeat knobs (heartbeatEnabled / waitThresholdMs),
+  // likewise `default(void 0)` so absent → code defaults (on, 30 min).
   health: z.object({
     enabled: z.boolean(),
-    intervalMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
-  }).default(void 0 as unknown as { enabled: boolean; intervalMs: number })
+    intervalMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    turnErrorCaptureEnabled: z.boolean(),
+    staleLiveWatchdogEnabled: z.boolean(),
+    staleLiveMinutes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    presetAuditEnabled: z.boolean(),
+    heartbeatEnabled: z.boolean(),
+    waitThresholdMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+  }).default(void 0 as unknown as {
+    enabled: boolean
+    intervalMs: number
+    turnErrorCaptureEnabled: boolean
+    staleLiveWatchdogEnabled: boolean
+    staleLiveMinutes: number
+    presetAuditEnabled: boolean
+    heartbeatEnabled: boolean
+    waitThresholdMs: number
+  })
 })

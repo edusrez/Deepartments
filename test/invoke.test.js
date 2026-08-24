@@ -28,7 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, toJsonSafe, jsonSafeMessageSource } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
@@ -7367,6 +7367,201 @@ test('W1 runAgendaSchedulerTick: a NON-due cron job is not fired; NO-head skips 
   })
 })
 
+// --- W8-c DISCRETE FOLLOW-UP (scheduler auto-run visibility) -----------------
+// The agenda-scheduler auto-run no-fire cases must be VISIBLE: a real no-fire is
+// recorded ONCE into post-errors.jsonl (postId 'scheduler', the message = the
+// jobId + the cause) so the W6 health daemon ALERTS the host. Three cases: (a)
+// runJob THROWS (reason = the thrown error), (b) the head post is unresolved
+// (reason 'no head'), (c) the fire returns FALSE / idempotency skip (reason
+// 'idempotency-skip'). Deduped per `scheduler:<jobId>:<reason>` (30min window)
+// so the same no-fire is never double-recorded on consecutive ticks.
+
+// Drive the scheduler tick through the SAME pure tick, wiring `onAutoRunSkip` to
+// the pure capture helper (the production closure does exactly this for the
+// tick-level no-head). Returns the writes (post-error rows + dedupe ledger).
+function schedTicker({ stateDir, runJob, headForDepartment, nowMs, jobId }) {
+  const captured = []
+  const deps = {
+    now: () => nowMs,
+    departments: [{ id: 'research', name: 'Research', jobDir: '/nonexistent' }],
+    repoRoot: '/nonexistent',
+    calendarStateDir: stateDir,
+    jobRunsStateDir: stateDir,
+    headForDepartment: headForDepartment ?? (() => 'research-head'),
+    runJob: runJob ?? (async () => true),
+    notifyHead: async () => {},
+    departmentForEntry: () => ({ id: 'research', name: 'Research', jobDir: '/nonexistent' }),
+    departmentForJob: () => ({ id: 'research', name: 'Research', jobDir: '/nonexistent' }),
+    logger: { warn: () => {} },
+    onAutoRunSkip: async (finding) => {
+      await captureSchedulerAutoRunFailure({ stateDir, now: () => nowMs, jobId: finding.jobId, reason: finding.reason, error: finding.error })
+      captured.push(finding)
+    }
+  }
+  return { deps, captured }
+}
+
+test('W8-c scheduler auto-run visibility (case a): a due cron job whose runJob THROWS records a post-error row (postId "scheduler", reason = the thrown error) and the health daemon ALERTS the host', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const jobDir = await mkdtemp(path.join(tmpdir(), 'deepartments-sched-'))
+    try {
+      await writeFile(path.join(jobDir, 'sched-a.md'), '---\nid: sched-a\ntitle: Sched A\nrole: researcher\ndescription: a due job\nowner: research-head\nschedule: "* * * * *"\n---\n\nbody\n', 'utf8')
+      const nowMs = new Date(2026, 7, 23, 9, 0, 30).getTime()
+      const { deps } = schedTicker({ stateDir, nowMs, runJob: async () => { throw new Error('kaboom') } })
+      // Point the jobDir at the real seeded dir.
+      deps.departments[0].jobDir = jobDir
+      deps.departmentForEntry = () => ({ id: 'research', name: 'Research', jobDir })
+      deps.departmentForJob = () => ({ id: 'research', name: 'Research', jobDir })
+      await runAgendaSchedulerTick(deps)
+      const rows = readPostErrorsFile(stateDir)
+      const schedRows = rows.filter((r) => r.postId === 'scheduler')
+      assert.equal(schedRows.length, 1, 'case (a): a thrown auto-run records ONE post-error row')
+      assert.equal(schedRows[0].jobId, 'sched-a', 'case (a): the row carries the jobId')
+      assert.equal(schedRows[0].reason, 'kaboom', 'case (a): the reason is the thrown error')
+      assert.match(schedRows[0].error, /sched-a/, 'case (a): the message text includes the jobId')
+      assert.match(schedRows[0].error, /kaboom/, 'case (a): the message text includes the cause')
+      // The W6 health daemon ALERTS the host when it scans the fresh post-error.
+      const alerts = []
+      await runHealthDaemonTick({
+        now: () => nowMs, stateDir, bootId: 'boot-a',
+        hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+        notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+        logger: { warn: () => {} }
+      })
+      assert.equal(alerts.length, 1, 'case (a): the daemon ALERTS the host')
+      assert.match(alerts[0].frame, /post-error: scheduler/, 'case (a): the alert names the scheduler postId')
+      assert.match(alerts[0].frame, /sched-a/, 'case (a): the alert names the jobId')
+    } finally {
+      await rm(jobDir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('W8-c scheduler auto-run visibility (case b): a due cron job SKIPPED because the head post is unresolved records a post-error row (postId "scheduler", reason "no head") and the health daemon ALERTS the host', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const jobDir = await mkdtemp(path.join(tmpdir(), 'deepartments-sched-'))
+    try {
+      await writeFile(path.join(jobDir, 'sched-b.md'), '---\nid: sched-b\ntitle: Sched B\nrole: researcher\ndescription: a due job\nowner: no-head\nschedule: "* * * * *"\n---\n\nbody\n', 'utf8')
+      const nowMs = new Date(2026, 7, 23, 9, 0, 30).getTime()
+      const { deps } = schedTicker({ stateDir, nowMs, headForDepartment: () => undefined })
+      deps.departments[0].jobDir = jobDir
+      deps.departmentForEntry = () => ({ id: 'research', name: 'Research', jobDir })
+      deps.departmentForJob = () => ({ id: 'research', name: 'Research', jobDir })
+      await runAgendaSchedulerTick(deps)
+      const rows = readPostErrorsFile(stateDir)
+      const schedRows = rows.filter((r) => r.postId === 'scheduler')
+      assert.equal(schedRows.length, 1, 'case (b): an unresolved-head auto-run records ONE post-error row')
+      assert.equal(schedRows[0].jobId, 'sched-b', 'case (b): the row carries the jobId')
+      assert.equal(schedRows[0].reason, 'no head', 'case (b): the reason is "no head"')
+      assert.match(schedRows[0].error, /no head/, 'case (b): the message text carries the cause')
+      const alerts = []
+      await runHealthDaemonTick({
+        now: () => nowMs, stateDir, bootId: 'boot-b',
+        hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+        notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+        logger: { warn: () => {} }
+      })
+      assert.equal(alerts.length, 1, 'case (b): the daemon ALERTS the host')
+      assert.match(alerts[0].frame, /post-error: scheduler/, 'case (b): the alert names the scheduler postId')
+      assert.match(alerts[0].frame, /sched-b/, 'case (b): the alert names the jobId')
+    } finally {
+      await rm(jobDir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('W8-c scheduler auto-run visibility (case c): a due cron job whose fire returns FALSE (idempotency skip) records a post-error row (postId "scheduler", reason "idempotency-skip") and the health daemon ALERTS the host', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const jobDir = await mkdtemp(path.join(tmpdir(), 'deepartments-sched-'))
+    try {
+      await writeFile(path.join(jobDir, 'sched-c.md'), '---\nid: sched-c\ntitle: Sched C\nrole: researcher\ndescription: a due job\nowner: research-head\nschedule: "* * * * *"\n---\n\nbody\n', 'utf8')
+      const nowMs = new Date(2026, 7, 23, 9, 0, 30).getTime()
+      const { deps } = schedTicker({ stateDir, nowMs, runJob: async () => false })
+      deps.departments[0].jobDir = jobDir
+      deps.departmentForEntry = () => ({ id: 'research', name: 'Research', jobDir })
+      deps.departmentForJob = () => ({ id: 'research', name: 'Research', jobDir })
+      await runAgendaSchedulerTick(deps)
+      const rows = readPostErrorsFile(stateDir)
+      const schedRows = rows.filter((r) => r.postId === 'scheduler')
+      assert.equal(schedRows.length, 1, 'case (c): a returns-false auto-run records ONE post-error row')
+      assert.equal(schedRows[0].jobId, 'sched-c', 'case (c): the row carries the jobId')
+      assert.equal(schedRows[0].reason, 'idempotency-skip', 'case (c): the reason is "idempotency-skip"')
+      assert.match(schedRows[0].error, /idempotency-skip/, 'case (c): the message text carries the cause')
+      const alerts = []
+      await runHealthDaemonTick({
+        now: () => nowMs, stateDir, bootId: 'boot-c',
+        hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+        notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+        logger: { warn: () => {} }
+      })
+      assert.equal(alerts.length, 1, 'case (c): the daemon ALERTS the host')
+      assert.match(alerts[0].frame, /post-error: scheduler/, 'case (c): the alert names the scheduler postId')
+      assert.match(alerts[0].frame, /sched-c/, 'case (c): the alert names the jobId')
+    } finally {
+      await rm(jobDir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('W8-c scheduler auto-run visibility (dedupe): the SAME no-fire on consecutive ticks is recorded ONCE (health-alerts-state.json dedupe, key scheduler:<jobId>:<reason>, 30min window) — never double-recorded', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const jobDir = await mkdtemp(path.join(tmpdir(), 'deepartments-sched-'))
+    try {
+      await writeFile(path.join(jobDir, 'sched-d.md'), '---\nid: sched-d\ntitle: Sched D\nrole: researcher\ndescription: a due job\nowner: research-head\nschedule: "* * * * *"\n---\n\nbody\n', 'utf8')
+      // A case (a) throw does NOT advance the job-runs ledger, so the SAME cron
+      // is still due on the next tick (it re-attempts the fire) — the capture
+      // dedupe is what prevents a second post-error row.
+      const nowMs = new Date(2026, 7, 23, 9, 0, 30).getTime()
+      const { deps } = schedTicker({ stateDir, nowMs, runJob: async () => { throw new Error('kaboom') } })
+      deps.departments[0].jobDir = jobDir
+      deps.departmentForEntry = () => ({ id: 'research', name: 'Research', jobDir })
+      deps.departmentForJob = () => ({ id: 'research', name: 'Research', jobDir })
+      await runAgendaSchedulerTick(deps)
+      await runAgendaSchedulerTick(deps)
+      const rows = readPostErrorsFile(stateDir).filter((r) => r.postId === 'scheduler')
+      assert.equal(rows.length, 1, 'dedupe: the same no-fire is recorded ONCE inside the 30min window (not double-recorded on a consecutive tick)')
+      const state = readHealthAlertsState(stateDir)
+      assert.equal(state[schedulerAutoRunKey('sched-d', 'kaboom')], nowMs, 'dedupe: the scheduler dedupe ledger is persisted at now')
+    } finally {
+      await rm(jobDir, { recursive: true, force: true })
+    }
+  })
+})
+
+test('W8-c scheduler auto-run visibility (logging): the closure LOGS THE REASON (jobId + cause) into the finding/message text that surfaces in the host ALERT', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const jobDir = await mkdtemp(path.join(tmpdir(), 'deepartments-sched-'))
+    try {
+      await writeFile(path.join(jobDir, 'sched-l.md'), '---\nid: sched-l\ntitle: Sched L\nrole: researcher\ndescription: a due job\nowner: research-head\nschedule: "0 9 * * *"\n---\n\nbody\n', 'utf8')
+      const nowMs = new Date(2026, 7, 23, 9, 0, 30).getTime()
+      const { deps, captured } = schedTicker({ stateDir, nowMs, runJob: async () => false })
+      deps.departments[0].jobDir = jobDir
+      deps.departmentForEntry = () => ({ id: 'research', name: 'Research', jobDir })
+      deps.departmentForJob = () => ({ id: 'research', name: 'Research', jobDir })
+      await runAgendaSchedulerTick(deps)
+      // The captured finding carries the jobId + the exact skip cause.
+      assert.equal(captured.length, 1, 'logging: the tick emitted exactly one scheduler finding')
+      assert.equal(captured[0].jobId, 'sched-l', 'logging: the finding carries the jobId')
+      assert.equal(captured[0].reason, 'idempotency-skip', 'logging: the finding carries the skip cause')
+      // The recorded message text (which the alert surfaces) includes both.
+      const row = readPostErrorsFile(stateDir).find((r) => r.postId === 'scheduler')
+      assert.match(row.error, /sched-l/, 'logging: the finding/message text includes the jobId')
+      assert.match(row.error, /idempotency-skip/, 'logging: the finding/message text includes the cause')
+      // And the framer shows it verbatim in the host ALERT.
+      const alerts = []
+      await runHealthDaemonTick({
+        now: () => nowMs, stateDir, bootId: 'boot-l',
+        hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+        notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+        logger: { warn: () => {} }
+      })
+      assert.match(alerts[0].frame, /idempotency-skip/, 'logging: the host ALERT surfaces the skip cause')
+    } finally {
+      await rm(jobDir, { recursive: true, force: true })
+    }
+  })
+})
+
 // --- W3b (spec W3 monitor → researcher): Parallel event_stream monitors ------
 // The pure half (config resolution, state helpers, the poller tick) is tested
 // with a fixed clock + stubbed create/poll/spawn/notify; dept_monitor_list is
@@ -8154,10 +8349,451 @@ test('W6 boot: health.intervalMs override registers a ticking daemon (heartbeat 
 })
 
 // ---------------------------------------------------------------------------
-// W7-A — DELIVERY-FAILURE NOISE (boot re-delivery settles DEAD/UNKNOWN
-// recipients as a single 'terminal' row and does NOT re-attempt them, so the
-// W6 health daemon stops re-alerting every boot).
+// W8-c SAFEGUARDS PACKAGE (owner "tenemos que crear salvaguardas para
+// protegerse de estos errores", 2026-08-24): four default-on, individually
+// disable-able safeguards built on the W6 system-health machinery (turn-failure
+// capture, the stale-live watchdog, the preset audit, and the config knobs +
+// the SHARED pure activity/pending-age snapshot primitives). Pure helpers are
+// imported from ../lib/invoke.js (compiled); the real-Loader preset-audit test
+// boots the plugin. The literal double-brace template token is used ONLY inside
+// these source string literals (the scanner matches it in code) — it is never
+// rendered into a prompt-facing artifact.
 // ---------------------------------------------------------------------------
+
+test('W8-c PART 1 turn-failure capture: a live post session whose turn/end ends in an ERROR reason is recorded into post-errors.jsonl and the daemon ALERTS the host (no double-count)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    const alerts = []
+    const warns = []
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    // A simulated post turn that ends in an ERROR (the malformed-reference class).
+    const events = [
+      { type: 'user/message', time: T0 - 60_000, data: {} },
+      { type: 'turn/start', time: T0 - 50_000, data: { turn: 1 } },
+      { type: 'assistant/message', time: T0 - 40_000, data: { message: { content: '…' } } },
+      { type: 'turn/end', time: T0 - 30_000, data: { turn: 1, reason: { kind: 'error', message: 'malformed template reference' } } }
+    ]
+    const posts = [{ postId: 'worker-a', retired: false, events, inboxTs: [] }]
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-w8c-1',
+      hosts,
+      posts,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => warns.push(m) }
+    })
+    // Tick 1 → the turn error is captured → a post-error row + an ALERT.
+    await tick(T0)
+    const errors = readPostErrorsFile(stateDir)
+    assert.equal(errors.length, 1, 'one post-error row recorded for the turn error')
+    assert.equal(errors[0].postId, 'worker-a', 'the row carries the postId')
+    assert.match(errors[0].error, /malformed template reference/, 'the row carries the turn/end error message')
+    assert.equal(alerts.length, 1, 'the daemon ALERTED the host')
+    assert.match(alerts[0].frame, /post-error: worker-a/, 'the alert names the failed post')
+    assert.equal(warns.length, 0, 'a fully-resolvable capture+alert emits no warns')
+    // Tick 2 (the SAME turn, inside the fresh-window) → NO double row, NO re-alert.
+    await tick(T0 + 5000)
+    assert.equal(readPostErrorsFile(stateDir).length, 1, 'the same turn is NOT double-captured')
+    assert.equal(alerts.length, 1, 'a second tick does NOT re-alert (capture+alert dedupe)')
+  })
+})
+
+test('W8-c PART 1 scanTurnErrorCaptures: tails a live session log for the MOST-RECENT turn/end ERROR (an ok reason → undefined)', () => {
+  const T0 = 1_000_000_000_000
+  const good = [
+    { type: 'turn/end', time: T0 - 2000, data: { turn: 1, reason: { kind: 'ok' } } },
+    { type: 'turn/end', time: T0 - 1000, data: { turn: 2, reason: { kind: 'error', message: 'no provider' } } }
+  ]
+  const capture = scanTurnErrorCaptures(good, 'p1')
+  assert.equal(capture.postId, 'p1', 'the capture carries the postId')
+  assert.match(capture.error, /no provider/, 'the most-recent ERROR turn is returned (not the ok one)')
+  assert.equal(scanTurnErrorCaptures([{ type: 'turn/end', time: T0, data: { turn: 1, reason: { kind: 'ok' } } }], 'p2'), undefined, 'a non-error turn/end is NOT captured')
+  assert.equal(scanTurnErrorCaptures([], 'p3'), undefined, 'an empty log → no capture (never throws)')
+})
+
+test('W8-c PART 2 stale-live watchdog: a catalog-live post with pending addressed messages AND no session writes for >= N min is a STALLED post (alerts once/30min, re-alerts after the window); does NOT alert with no pending messages or when NOT silent', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const alerts = []
+    const tick = (nowMs, posts) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-w8c-2',
+      hosts,
+      posts,
+      notifyHost: async (hostEntry, frame) => { alerts.push(frame) },
+      logger: { warn: () => {} }
+    })
+    // (a) stalled: the last session write is >= 10min old (T0-25min) and a
+    // pending addressed message (T0-20min) has NO completed turn after it.
+    const stalled = { postId: 'worker-slow', retired: false, events: [{ type: 'user/message', time: T0 - 25 * 60000, data: {} }], inboxTs: [T0 - 20 * 60000] }
+    await tick(T0, [stalled])
+    assert.equal(alerts.length, 1, 'a stalled post ALERTS the host')
+    assert.match(alerts[0], /stalled-post: worker-slow/, 'the alert names the stalled post')
+    assert.match(alerts[0], /pending message/, 'the alert describes the pending-message condition')
+    // (b) dedupe per post/30min: inside the window → no re-alert.
+    await tick(T0 + 60_000, [stalled])
+    assert.equal(alerts.length, 1, 'a second tick inside the 30min window does NOT re-alert')
+    // (c) re-alert after the window.
+    await tick(T0 + 31 * 60000, [stalled])
+    assert.equal(alerts.length, 2, 'a tick after the 30min window re-alerts the same stalled post')
+    // (d) NO pending addressed messages → NOT stalled (regardless of age).
+    const noPending = { postId: 'worker-quiet', retired: false, events: [{ type: 'user/message', time: T0 - 60 * 60000, data: {} }], inboxTs: [] }
+    const before = alerts.length
+    await tick(T0 + 32 * 60000, [noPending])
+    assert.equal(alerts.length, before, 'a post with NO pending messages is NOT stalled')
+    // (e) NOT silent (recent session write) → NOT stalled, even with pending.
+    const notSilent = { postId: 'worker-busy', retired: false, events: [{ type: 'turn/end', time: T0 - 60_000, data: { turn: 1, reason: { kind: 'ok' } } }], inboxTs: [T0 - 5000] }
+    const before2 = alerts.length
+    await tick(T0, [notSilent])
+    assert.equal(alerts.length, before2, 'a post with a RECENT session write is NOT stalled')
+    // (f) a RETIRED post is never flagged.
+    const retired = { postId: 'worker-gone', retired: true, events: [{ type: 'user/message', time: T0 - 60 * 60000, data: {} }], inboxTs: [T0 - 20 * 60000] }
+    const before3 = alerts.length
+    await tick(T0 + 33 * 60000, [retired])
+    assert.equal(alerts.length, before3, 'a retired post is NEVER stalled')
+  })
+})
+
+test('W8-c PART 3 preset audit: auditPresetText flags an UNBOUND template reference (incl. in a comment) and ALLOWS the known-bound persona vars; the marker → scanConfigPresetFindings → daemon ALERT', async () => {
+  // Pure scanner.
+  assert.deepEqual(auditPresetText('a comment with {{evil}} in it'), ['evil'], 'an unbound reference in a comment is flagged')
+  assert.deepEqual(auditPresetText('no template here'), [], 'text without a double-brace token returns []')
+  assert.deepEqual(auditPresetText('{{cwd}} and {{headPostId}} and {{deptName}} and {{workspacePath}} and {{reportDir}}'), [], 'the known-bound persona vars are ALLOWED')
+  assert.deepEqual(auditPresetText('{{unknownVar}} and {{cwd}}'), ['unknownVar'], 'only the unbound name is returned (cwd allowed)')
+  assert.deepEqual(auditPresetText('a bare {{ marker'), ['<bare-marker>'], 'a bare two-opening-braces marker is an unhandled token')
+  // Marker → finding → ALERT.
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    await appendConfigPresetMarker(stateDir, { ts: T0, preset: 'departments/research/ARCHITECTURE.md', unbound: ['evil'] })
+    assert.equal(readConfigPresetMarkers(stateDir).length, 1, 'one marker read back')
+    assert.deepEqual(readConfigPresetMarkers(stateDir)[0].unbound, ['evil'], 'the unbound names round-trip')
+    const findings = scanConfigPresetFindings(stateDir, T0)
+    assert.equal(findings.length, 1, 'one config-preset finding')
+    assert.equal(findings[0].key, 'config-preset', 'the dedupe key is config-preset')
+    assert.equal(findings[0].postId, 'config', 'postId is config')
+    const alerts = []
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-w8c-3',
+      config: { stateDir, org: { departments: [] } },
+      hosts,
+      posts: [],
+      notifyHost: async (hostEntry, frame) => { alerts.push(frame) },
+      logger: { warn: () => {} }
+    })
+    assert.equal(alerts.length, 1, 'a config-preset finding ALERTS the host')
+    assert.match(alerts[0], /config-preset: unbound template reference\(s\) in preset text: evil/, 'the alert describes the unbound reference verbally (no literal double-brace token)')
+  })
+})
+
+test('W8-c PART 3 preset audit (real Loader): a boot with an unbound template reference in the department ARCHITECTURE.md records a config-preset marker; no preset file is mutated; bound vars do NOT trip it', async () => {
+  const restore = await snapshotArchitectureFile()
+  try {
+    await writeFile(F10_ARCHITECTURE_PATH, '# a comment with {{evil}} in it\n## Department architecture\n- deptName: {{deptName}}\n', 'utf8')
+    await withTempStateDir(async (stateDir) => {
+      const env = await bootPlugin(stateDir)
+      try {
+        await waitFor(() => readConfigPresetMarkers(stateDir).length > 0, 5000, 'config-preset marker written by the boot preset audit')
+        const markers = readConfigPresetMarkers(stateDir)
+        assert.equal(markers.length, 1, 'ONE config-preset marker recorded at boot (bound vars do NOT add markers)')
+        assert.match(markers[0].preset, /ARCHITECTURE\.md/, 'the marker names the audited source')
+        assert.ok(markers[0].unbound.includes('evil'), 'the unbound name is recorded')
+        // The preset file is NOT mutated (it still holds the raw unbound token).
+        const raw = await readFile(F10_ARCHITECTURE_PATH, 'utf8')
+        assert.ok(raw.includes('{{evil}}'), 'the preset file is NOT mutated (still holds the raw token)')
+      } finally {
+        await env.dispose()
+      }
+    })
+  } finally {
+    await restore()
+  }
+})
+
+test('W8-c PART 4 config knobs: an individual safeguard enabled:false → that safeguard does NOT alert (stale-live off → no stalled alert; turn-error off → no post-error row)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const alerts = []
+    const tick = (cfg, posts) => runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-w8c-4',
+      config: cfg,
+      hosts,
+      posts,
+      notifyHost: async (hostEntry, frame) => { alerts.push(frame) },
+      logger: { warn: () => {} }
+    })
+    // stale-live OFF → a stalled post does NOT alert.
+    const stalled = { postId: 'worker-slow', retired: false, events: [{ type: 'user/message', time: T0 - 25 * 60000, data: {} }], inboxTs: [T0 - 20 * 60000] }
+    await tick({ stateDir, org: { departments: [] }, health: { staleLiveWatchdogEnabled: false } }, [stalled])
+    assert.equal(alerts.length, 0, 'stale-live off → NO stalled alert')
+    // turn-error OFF → a simulated turn error records NO post-error row / alert.
+    const turnErr = [{ postId: 'worker-x', retired: false, events: [{ type: 'turn/end', time: T0 - 30_000, data: { turn: 1, reason: { kind: 'error', message: 'boom' } } }], inboxTs: [] }]
+    await tick({ stateDir, org: { departments: [] }, health: { turnErrorCaptureEnabled: false } }, turnErr)
+    assert.equal(alerts.length, 0, 'turn-error off → NO alert')
+    assert.deepEqual(readPostErrorsFile(stateDir), [], 'turn-error off → NO post-error row recorded')
+  })
+})
+
+test('W8-c PART 5 shared snapshot primitives (pure, exported): buildPostSnapshot computes lastActivityTs + pendingCount + oldestPendingTs from a session log + an inbox; computeInboxTsByPost maps the delivery sidecar to per-post inbox ts', async () => {
+  const T0 = 1_000_000_000_000
+  // Answered: a message followed by a completed turn/end → NOT pending.
+  const answered = buildPostSnapshot({
+    postId: 'p1',
+    events: [{ type: 'user/message', time: T0 - 60_000, data: {} }, { type: 'turn/end', time: T0 - 30_000, data: { turn: 1, reason: { kind: 'ok' } } }],
+    inboxTs: [T0 - 60_000]
+  })
+  assert.equal(answered.lastActivityTs, T0 - 30_000, 'lastActivityTs = the newest event ts')
+  assert.equal(answered.pendingCount, 0, 'a message followed by a completed turn is answered (not pending)')
+  assert.equal(answered.oldestPendingTs, undefined, 'no pending → oldestPendingTs undefined')
+  // Unanswered: a message with NO completed turn after it → pending.
+  const unanswered = buildPostSnapshot({
+    postId: 'p2',
+    events: [{ type: 'user/message', time: T0 - 60_000, data: {} }],
+    inboxTs: [T0 - 60_000]
+  })
+  assert.equal(unanswered.pendingCount, 1, 'a message with no completed turn after it is pending')
+  assert.equal(unanswered.oldestPendingTs, T0 - 60_000, 'oldestPendingTs = the pending message ts')
+  // No activity → lastActivityTs undefined; empty inbox → 0 pending.
+  const empty = buildPostSnapshot({ postId: 'p3', events: [], inboxTs: [] })
+  assert.equal(empty.lastActivityTs, undefined, 'no activity → lastActivityTs undefined')
+  assert.equal(empty.pendingCount, 0, 'empty inbox → 0 pending')
+  // computeInboxTsByPost.
+  const msgTs = new Map([['m-1', 111], ['m-2', 222]])
+  const rows = [
+    { messageId: 'm-1', recipientId: 'r', status: 'delivered', ts: T0 - 60_000 },
+    { messageId: 'm-2', recipientId: 'r', status: 'prepared', ts: T0 - 1000 },
+    { messageId: 'm-1', recipientId: 'other', status: 'delivered', ts: T0 - 60_000 },
+    { messageId: 'm-9', recipientId: 'r', status: 'failed', ts: T0 - 10_000 }
+  ]
+  const inbox = computeInboxTsByPost(msgTs, rows, T0, HEALTH_ERROR_WINDOW_MS)
+  assert.deepEqual([...(inbox.get('r') ?? [])].sort((a, b) => a - b), [111, 222], 'the per-post inbox resolves message ids to their ts (delivered + prepared; a failed row is excluded)')
+  assert.deepEqual([...(inbox.get('other') ?? [])], [111], 'other recipients are grouped separately')
+})
+
+// ---------------------------------------------------------------------------
+// W8-d SYSTEM HEARTBEAT to the Asistente (owner idea 2026-08-24 "que el
+// asistente reciba un latido cada hora con la última entrada de actividad propia
+// y de los agentes activos"; amended design m-159 + m-163): NO standalone hourly
+// message — (1) a LEAN `## System heartbeat:` section is injected into every
+// HOST wake pack; (2) the daemon wakes the host ONLY on the WAIT condition via a
+// `[From deepartments] system-wait: <reason>` bus message (zero noise otherwise).
+// Both REUSE the W8-c shared snapshot primitives (buildPostSnapshot /
+// computeInboxTsByPost / scanStalledPosts). Pure helpers are imported from
+// ../lib/invoke.js (compiled); the wake-pack section + the conditional-wake are
+// exercised at the pure + daemon-tick seams.
+// ---------------------------------------------------------------------------
+
+test('W8-d PART A heartbeat section (shared primitives, injectable clock): buildHeartbeatSection renders host + per-agent last-activity (NO SESSION / SLEEPING / age), pending count + oldest age, and a WAIT line; buildWakePack injects the `## System heartbeat:` block', () => {
+  const T0 = 1_000_000_000_000
+  // Reuse the SAME snapshot primitive the W8-c watchdog uses (buildPostSnapshot)
+  // with a fixture session log + inbox — the ages are NOT reimplemented.
+  const active = buildPostSnapshot({ postId: 'worker-a', events: [{ type: 'user/message', time: T0 - 90 * 60000, data: {} }], inboxTs: [T0 - 80 * 60000] })
+  const idle = buildPostSnapshot({ postId: 'worker-c', events: [], inboxTs: [] })
+  const section = buildHeartbeatSection({
+    hostLastActivityTs: T0 - 5 * 60000,
+    rows: [
+      { postId: 'worker-a', sleeping: false, lastActivityTs: active.lastActivityTs, pendingCount: active.pendingCount, oldestPendingTs: active.oldestPendingTs },
+      { postId: 'worker-b', sleeping: false },
+      { postId: 'research-head', sleeping: true },
+      { postId: 'worker-c', sleeping: false, pendingCount: idle.pendingCount }
+    ],
+    waitReason: 'host waiting on worker-a: no reply or session activity in 30 min'
+  }, T0)
+  assert.match(section, /^- host: last activity 5m ago/m, 'the HOST last-activity line renders the real age')
+  assert.match(section, /^- worker-a: last activity 1h 30m ago/m, 'an active agent renders its last-activity age')
+  assert.match(section, /^- worker-b: NO SESSION/m, 'a catalog-live post with no session activity is NO SESSION')
+  assert.match(section, /^- research-head: SLEEPING/m, 'a dormant post is SLEEPING')
+  assert.match(section, /^- worker-c: NO SESSION/m, 'a post with no session activity is NO SESSION (empty log)')
+  assert.match(section, /pending 1; oldest 1h 20m ago \(unanswered\)/, 'the pending count + oldest message age render (reused primitive)')
+  assert.match(section, /^- WAIT: host waiting on worker-a/m, 'the WAIT line renders when the host holds a quiet expectation')
+  // The pure wake-pack builder injects the section as a `## System heartbeat:` block.
+  const pack = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x', heartbeat: section })
+  assert.match(pack, /## System heartbeat:/, 'the wake pack carries the `## System heartbeat:` header')
+  assert.match(pack, /worker-a: last activity 1h 30m ago/, 'the wake pack embeds the heartbeat per-agent body')
+  assert.match(pack, /WAIT: host waiting on worker-a/, 'the wake pack embeds the heartbeat WAIT line')
+  assert.ok(!pack.includes('## Owner presence:'), 'no owner-presence section when none supplied')
+  // A caller that supplies NO heartbeat body (e.g. heartbeatEnabled false) → the
+  // section is OMITTED (never a throw).
+  const lean = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x' })
+  assert.ok(!lean.includes('## System heartbeat:'), 'a wake pack without a heartbeat body omits the section (never a throw)')
+})
+
+test('W8-d PART A shared primitives (spot-check + heartbeat-specific fixture): scanHostWaits reuses buildPostSnapshot to flag a HOST-sent message that is pending AND quiet over waitThresholdMs; an answered/recent/empty/retired post is skipped; buildSystemWaitFrame shapes the bus message', () => {
+  const T0 = 1_000_000_000_000
+  // WAIT: a host-sent message at T0-40min, NO reply (no turn/end after it), NO
+  // session activity at all → a system-wait finding (the heartbeat WAIT condition).
+  const waits = scanHostWaits([{ postId: 'worker-a', retired: false, events: [], hostMessages: [{ messageId: 'm-1', ts: T0 - 40 * 60000 }] }], T0, SYSTEM_WAIT_DEFAULT_MS)
+  assert.equal(waits.length, 1, 'one system-wait finding for the quiet host expectation')
+  assert.equal(waits[0].kind, 'system-wait', 'the finding kind is system-wait')
+  assert.equal(waits[0].key, 'wait:worker-a:m-1', 'the dedupe key is wait:<recipientId>:<messageId>')
+  assert.equal(waits[0].postId, 'worker-a', 'the finding names the quiet post')
+  assert.equal(waits[0].messageId, 'm-1', 'the finding carries the specific host-sent message id')
+  assert.match(waits[0].error, /no reply or session activity in 30 min/, 'the reason names the quiet window')
+  assert.equal(buildSystemWaitFrame(waits[0]), '[From deepartments] system-wait: worker-a (no reply or session activity in 30 min)', 'the system-wait frame names the post + the quiet window')
+  // A host-sent message the post ANSWERED (a turn/end AFTER it) → NOT a wait.
+  const answered = scanHostWaits([{ postId: 'worker-b', events: [{ type: 'turn/end', time: T0 - 30 * 60000, data: { turn: 1, reason: { kind: 'ok' } } }], hostMessages: [{ messageId: 'm-2', ts: T0 - 40 * 60000 }] }], T0, SYSTEM_WAIT_DEFAULT_MS)
+  assert.equal(answered.length, 0, 'an answered host-sent message is NOT a wait')
+  // A post with RECENT session activity (a fresh session write) → NOT a wait.
+  const busy = scanHostWaits([{ postId: 'worker-c', events: [{ type: 'assistant/message', time: T0 - 60_000, data: {} }], hostMessages: [{ messageId: 'm-3', ts: T0 - 40 * 60000 }] }], T0, SYSTEM_WAIT_DEFAULT_MS)
+  assert.equal(busy.length, 0, 'a post with RECENT session activity is NOT a wait')
+  // No host-sent message → NOT a wait.
+  assert.equal(scanHostWaits([{ postId: 'worker-d', events: [], hostMessages: [] }], T0, SYSTEM_WAIT_DEFAULT_MS).length, 0, 'no host-sent message → not a wait')
+  // A RETIRED post is never flagged.
+  assert.equal(scanHostWaits([{ postId: 'worker-gone', retired: true, events: [], hostMessages: [{ messageId: 'm-4', ts: T0 - 40 * 60000 }] }], T0, SYSTEM_WAIT_DEFAULT_MS).length, 0, 'a retired post is NEVER a wait')
+})
+
+test('W8-d PART A readInboxByPost (fixture): resolves the per-post inbox ts via the delivery sidecar AND the host-ADDRESSED rows (from === hostId), excluding a non-host sender and a failed/delivered-by-other row', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_000_000_000_000
+    await seedMessageRecords(stateDir, [
+      { id: 'm-1', seq: 0, ts: T0 - 40 * 60000, from: 'host-asst', to: ['worker-a'], text: 'hi', kind: 'agent' },
+      { id: 'm-2', seq: 1, ts: T0 - 30 * 60000, from: 'worker-b', to: ['worker-a'], text: 'from another post', kind: 'agent' },
+      { id: 'm-3', seq: 2, ts: T0 - 20 * 60000, from: 'host-asst', to: ['worker-c'], text: 'a failed delivery', kind: 'agent' }
+    ])
+    await seedDeliveryRows(stateDir, [
+      { messageId: 'm-1', recipientId: 'worker-a', status: 'delivered', ts: T0 - 40 * 60000 },
+      { messageId: 'm-2', recipientId: 'worker-a', status: 'delivered', ts: T0 - 30 * 60000 },
+      { messageId: 'm-3', recipientId: 'worker-c', status: 'failed', ts: T0 - 20 * 60000 }
+    ])
+    const { inboxTsByPost, hostRowsByPost } = readInboxByPost(stateDir, 'host-asst', T0, HEALTH_ERROR_WINDOW_MS)
+    // General inbox (any sender): both delivered rows.
+    assert.deepEqual([...(inboxTsByPost.get('worker-a') ?? [])].sort((a, b) => a - b), [T0 - 40 * 60000, T0 - 30 * 60000], 'the general inbox carries every delivered message ts (filters a failed row)')
+    // Host-ADDRESSED rows: only the host-sent delivered message (a non-host
+    // sender + a failed row are excluded).
+    assert.deepEqual(hostRowsByPost.get('worker-a'), [{ messageId: 'm-1', ts: T0 - 40 * 60000 }], 'hostRowsByPost carries only the host-sent delivered row for the post')
+    assert.equal(hostRowsByPost.get('worker-c'), undefined, 'a host-sent FAILED delivery is not a host-address row')
+  })
+})
+
+test('W8-d PART B conditional system-wait wake: a host-sent message to a post with no session activity + no reply over waitThresholdMs wakes the host ONCE (deduped per recipient+message/30min); an answered/recent post does NOT wake (quiet test); no live host skips', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const alerts = []
+    const warns = []
+    // A host-sent message (m-1) at T0-40min addressed to worker-a, with NO
+    // turn/end after it (no reply) and NO session activity at all.
+    const waitPost = { postId: 'worker-a', retired: false, events: [], hostMessages: [{ messageId: 'm-1', ts: T0 - 40 * 60000 }] }
+    const tick = (nowMs, hostWaits, cfg = { stateDir, org: { departments: [] } }) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-w8d-1',
+      config: cfg,
+      hosts,
+      hostWaits,
+      posts: [],
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => warns.push(m) }
+    })
+    // Tick 1 @ T0: the WAIT condition holds → ONE system-wait wake.
+    await tick(T0, [waitPost])
+    assert.equal(alerts.length, 1, 'a quiet host expectation wakes the host exactly once')
+    assert.equal(alerts[0].hostEntry.hostId, 'host-asst', 'the wake targets the live host')
+    assert.match(alerts[0].frame, /^\[From deepartments\] system-wait: worker-a/, 'the wake uses the system-wait bus frame (NOT a System-health ALERT)')
+    assert.match(alerts[0].frame, /no reply or session activity in 30 min/, 'the reason names the quiet window')
+    assert.equal(warns.length, 0, 'a fully-resolvable conditional wake emits no warns')
+    // Tick 2 @ T0+1min (inside the 30min dedupe window) → NO re-wake.
+    await tick(T0 + 60_000, [waitPost])
+    assert.equal(alerts.length, 1, 'a second tick inside the 30min window does NOT re-wake (dedupe per recipient+message)')
+    // Tick 3 @ T0+31min (the dedupe window elapsed) → re-wake ONCE.
+    await tick(T0 + 31 * 60000, [waitPost])
+    assert.equal(alerts.length, 2, 'a tick after the 30min window re-wakes the same quiet expectation')
+    // Quiet test: a post that REPLIED (a completed turn after the message) is NOT a wait.
+    const replied = { postId: 'worker-b', retired: false, events: [{ type: 'turn/end', time: T0 - 30 * 60000, data: { turn: 1, reason: { kind: 'ok' } } }], hostMessages: [{ messageId: 'm-2', ts: T0 - 40 * 60000 }] }
+    const before = alerts.length
+    await tick(T0, [replied])
+    assert.equal(alerts.length, before, 'a post that replied is NOT a wait (the message is answered)')
+    // Quiet test: a post with RECENT session activity is NOT a wait.
+    const busy = { postId: 'worker-c', retired: false, events: [{ type: 'assistant/message', time: T0 - 60_000, data: {} }], hostMessages: [{ messageId: 'm-3', ts: T0 - 40 * 60000 }] }
+    const before2 = alerts.length
+    await tick(T0, [busy])
+    assert.equal(alerts.length, before2, 'a post with RECENT session activity is NOT a wait')
+    // No live host → the WAIT condition is detected but skipped (no wake); the
+    // dedupe ledger is NOT advanced (the wake retries once a host is live). Use a
+    // FRESH wait key AND a distinct minute (the per-minute WAIT gate) so neither
+    // the earlier ledger nor the minute marker suppresses the check.
+    const alerts2 = []
+    const freshWait = { postId: 'worker-x', retired: false, events: [], hostMessages: [{ messageId: 'm-9', ts: T0 - 40 * 60000 }] }
+    await runHealthDaemonTick({
+      now: () => T0 + 2 * 60000,
+      stateDir,
+      bootId: 'boot-w8d-2',
+      config: { stateDir, org: { departments: [] } },
+      hosts: [],
+      hostWaits: [freshWait],
+      posts: [],
+      notifyHost: async (hostEntry, frame) => { alerts2.push(frame) },
+      logger: { warn: (m) => warns.push(m) }
+    })
+    assert.equal(alerts2.length, 0, 'no live host → no wake delivered')
+    assert.ok(warns.some((w) => /no live host to wake/.test(w)), 'a no-live-host skip warns')
+    assert.equal(warns.filter((w) => /no live host to wake/.test(w)).length, 1, 'the no-live-host skip warns once (retries on the next tick)')
+  })
+})
+
+test('W8-d PART B NO standalone hourly heartbeat: the daemon ticks/writes the heartbeat file, but the ONLY host delivery for the heartbeat is the conditional system-wait frame (never a full/periodic heartbeat message, never a System-health ALERT)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const frames = []
+    const waitPost = { postId: 'worker-a', retired: false, events: [], hostMessages: [{ messageId: 'm-1', ts: T0 - 40 * 60000 }] }
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-w8d-4',
+      config: { stateDir, org: { departments: [] } },
+      hosts,
+      hostWaits: [waitPost],
+      posts: [],
+      notifyHost: async (hostEntry, frame) => { frames.push(frame) },
+      logger: { warn: () => {} }
+    })
+    assert.ok(readHealthHeartbeatFile(stateDir) !== undefined, 'the daemon still writes the heartbeat file (it ticks)')
+    assert.equal(frames.length, 1, 'the ONLY host delivery is the conditional system-wait')
+    assert.match(frames[0], /^\[From deepartments\] system-wait:/, 'the delivered frame is the system-wait bus message')
+    assert.ok(!frames[0].includes('System-health ALERT'), 'a wait is NEVER folded into a System-health ALERT frame')
+    assert.ok(!/heartbeat/i.test(frames[0]), 'a full heartbeat is NEVER bus-delivered (no standalone hourly message)')
+  })
+})
+
+test('W8-d PART C config: waitThresholdMs resolves (absent/invalid → the 30min default; a valid override wins) and heartbeatEnabled false → NO conditional wake (the daemon still writes the heartbeat)', async () => {
+  // (a) resolveSystemWaitMs — pure.
+  assert.equal(resolveSystemWaitMs(undefined), SYSTEM_WAIT_DEFAULT_MS, 'absent waitThresholdMs → the 30min code default')
+  assert.equal(resolveSystemWaitMs({ waitThresholdMs: 60_000 }), 60_000, 'a valid override wins')
+  assert.equal(resolveSystemWaitMs({ waitThresholdMs: 0 }), SYSTEM_WAIT_DEFAULT_MS, '0 is invalid → the default')
+  assert.equal(resolveSystemWaitMs({ waitThresholdMs: -5 }), SYSTEM_WAIT_DEFAULT_MS, 'a negative value is invalid → the default')
+  assert.equal(resolveSystemWaitMs({ waitThresholdMs: Number.NaN }), SYSTEM_WAIT_DEFAULT_MS, 'NaN is invalid → the default')
+  // (b) heartbeatEnabled false → NO conditional system-wait, but the daemon still ticks.
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const alerts = []
+    const waitPost = { postId: 'worker-a', retired: false, events: [], hostMessages: [{ messageId: 'm-1', ts: T0 - 40 * 60000 }] }
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-w8d-5',
+      config: { stateDir, org: { departments: [] }, health: { heartbeatEnabled: false } },
+      hosts,
+      hostWaits: [waitPost],
+      posts: [],
+      notifyHost: async (hostEntry, frame) => { alerts.push(frame) },
+      logger: { warn: () => {} }
+    })
+    assert.equal(alerts.length, 0, 'heartbeatEnabled false → NO conditional system-wait')
+    assert.ok(readHealthHeartbeatFile(stateDir) !== undefined, 'the daemon still writes the heartbeat file (only the conditional wake is off)')
+  })
+})
+
+
 
 /** Seed the write-ahead delivery sidecar with the given wire rows
  * (append-only JSONL: one { messageId, recipientId, status, ts } per line). */
@@ -8361,6 +8997,102 @@ test('W7-B like-for-like boot delivery to a LIVE head still succeeds and the del
       assert.ok(JSON.stringify(wake.source), 'JSON.stringify succeeds on the delivered wake source')
       const s = await deliveryStatus(stateDir, 'm-0', 'research-head')
       assert.notEqual(s, 'terminal', 'a live recipient is never settled as terminal')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// ===========================================================================
+// W8-b prompt literal safety (delivery-seam brace sanitizer) — the CLASS FIX for
+// the repeated 'malformed prompt variable reference' / 'prompt variable has no
+// value' failures that KILL a recipient session: a literal double-brace template
+// reference (two opening braces + a name + two closing braces) in delivered
+// message/job/wake-pack text is an UNBOUND variable reference that FAILS the
+// prompt assembly. `sanitizePromptLiterals` is applied at the delivery/injection
+// seams so message/job/wake-pack text can never break a recipient session while
+// the known-bound persona/preset vars (cwd/headPostId/workspacePath/reportDir/
+// deptName) keep resolving.
+// ===========================================================================
+
+test('W8-b pure: sanitizePromptLiterals breaks unbound double-brace refs, preserves bound vars, byte-identical for no-brace text', () => {
+  // (c) No double-brace token → byte-identical (no spurious change).
+  assert.equal(sanitizePromptLiterals('plain text'), 'plain text')
+  assert.equal(sanitizePromptLiterals(''), '')
+  assert.equal(sanitizePromptLiterals('a [b] c'), 'a [b] c')
+
+  // (b) Bound persona/preset vars (cwd/headPostId/workspacePath/reportDir/
+  //     deptName) are preserved byte-identical — they must survive so the
+  //     persona/preset assembler can bind them.
+  assert.equal(
+    sanitizePromptLiterals('{{cwd}} {{headPostId}} {{workspacePath}} {{reportDir}} {{deptName}}'),
+    '{{cwd}} {{headPostId}} {{workspacePath}} {{reportDir}} {{deptName}}'
+  )
+  assert.equal(sanitizePromptLiterals('use {{cwd}} here'), 'use {{cwd}} here')
+
+  // (a) An unbound double-brace reference is BROKEN so no complete unbound
+  //     brace-brace pair remains (the two-opening-braces sequence is rendered
+  //     separated by a space — never a contiguous opening brace-pair).
+  assert.equal(sanitizePromptLiterals('a {{lateral}} b'), 'a { {lateral}} b')
+  assert.equal(sanitizePromptLiterals('a {{lateral}} b').includes('{{'), false, 'no contiguous opening brace-pair remains after an unbound ref is broken')
+
+  // A bare two-opening-braces marker (no valid name) is broken too.
+  assert.equal(sanitizePromptLiterals('stray {{ opener'), 'stray { { opener')
+  assert.equal(sanitizePromptLiterals('stray {{ opener').includes('{{'), false)
+
+  // Mixed: an unbound ref broken + a bound ref preserved.
+  assert.equal(sanitizePromptLiterals('{{cwd}} and {{oops}}'), '{{cwd}} and { {oops}}')
+})
+
+test('W8-b wake-pack seam: buildWakePackMessage sanitizes the wake-pack text so an unbound double-brace token in the message delta cannot break the wake', () => {
+  const msg = buildWakePackMessage('## Deepartments wake pack\n- msg-1 | a → b | hello {{lateral}} world')
+  assert.ok(!msg.content[0].text.includes('{{lateral}}'), 'the wake-pack text carries no complete unbound brace-brace pair')
+  assert.ok(msg.content[0].text.includes('{ {lateral}}'), 'the wake-pack text renders the broken token form')
+})
+
+test('W8-b delivery seam: a bus message containing an unbound double-brace token is sanitized at the delivery seam (recipient session assembles; bound vars survive)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const { result, worker } = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'initial task' })
+      await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'worker woken by its first bus message')
+
+      const signal = new AbortController().signal
+      const send = await headCtx.tools.get('send_message', key).execute(
+        { to: [result.workerId], text: 'report on {{lateral}} and use {{cwd}} here' },
+        { agent: head, signal }
+      )
+      assert.equal(send.delivered[result.workerId], 'delivered', 'the message with the unbound token is delivered to the worker (the session is NOT killed)')
+      await waitFor(() => worker.inboxMessages.length >= 2, 5000, 'delivered message reaches the worker inbox')
+      const delivered = worker.inboxMessages.at(-1).content[0].text
+      assert.ok(!delivered.includes('{{lateral}}'), 'the unbound token is broken at the delivery seam (no complete unbound brace-brace pair)')
+      assert.ok(delivered.includes('{ {lateral}}'), 'the recipient sees the broken (non-brace-pair) form')
+      assert.ok(delivered.includes('{{cwd}}'), 'the bound persona var (cwd) is preserved for the assembler')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('W8-b assignment seam: a worker spawned with a task containing an unbound double-brace token has it sanitized in the assignment section AND the delivered bus message (worker session assembles)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const { result, ctx: workerCtx, key: workerKey, worker } = await f3Spawn({ agents }, headCtx, key, head, {
+        role: 'researcher',
+        task: 'scan {{lateral}} now'
+      })
+      // The assignment is delivered as the first durable bus message (sanitized).
+      await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'worker woken by its assignment message')
+      const inbox = worker.inboxMessages.at(-1).content[0].text
+      assert.ok(!inbox.includes('{{lateral}}'), 'the delivered assignment message has no complete unbound brace-brace pair')
+      assert.ok(inbox.includes('{ {lateral}}'), 'the delivered assignment message shows the broken token')
+
+      // The assignment injection (role-persona section carrying the task) is sanitized.
+      const persona = await findPromptSection(workerCtx, workerKey, `deepartments:worker:role-persona:${result.workerId}`, true)
+      assert.ok(persona !== undefined, 'the worker role-persona/assignment section surfaced')
+      assert.ok(!persona.text.includes('{{lateral}}'), 'the assignment section has no complete unbound brace-brace pair')
+      assert.ok(persona.text.includes('{ {lateral}}'), 'the assignment section shows the broken token')
     } finally {
       await dispose()
     }

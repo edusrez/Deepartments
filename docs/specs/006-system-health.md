@@ -482,6 +482,27 @@ produced, so no new alert).
 
 ---
 
+## 13. Prompt literal safety (W8-b addendum)
+
+**Problem.** A literal double-brace template reference (two opening braces + a
+name + two closing braces) inside delivered message/job/wake-pack text is an
+unbound variable reference that FAILS the recipient session assembly (the
+"malformed prompt variable reference / prompt variable has no value" class).
+
+**Fix.** `sanitizePromptLiterals` (src/invoke.ts) breaks every double-brace
+reference that is NOT one of the known-bound persona/preset vars, and is applied
+at the delivery/injection seams: `buildWakePackMessage` (wake-pack text),
+`busUserMessage` (bus deliveries), the `deliverBusRecord` child-followup, and the
+job-body/worker-assignment injection (`runJobForDepartment` /
+`spawnWorkerForDepartment`). The known-bound vars — `cwd`, `headPostId`,
+`workspacePath`, `reportDir`, `deptName` — are LEFT UNCHANGED so the
+persona/preset assembler still binds them; anything else is broken (the
+two-opening-braces sequence is rendered separated) so no complete unbound
+brace-pair reaches the assembler. Text without any double-brace token is
+byte-identical. Bound persona/preset vars are preserved.
+
+---
+
 ## PATTERNS / INVARIANTS / SURPRISES (for the builders)
 
 - **Invariants kept**: the bus seams still NEVER throw and still return
@@ -515,3 +536,48 @@ produced, so no new alert).
   6853-6860, runAgendaSchedulerTick 1665, createParallelMonitorDaemon 2037,
   daemon wiring 7649-7820), src/org.ts (Config schema, `parallel` mirror
   94/149-180), src/messages-store.ts (§4.4 sidecar, parseDeliveryRows 506).
+
+---
+
+## 14. Safeguards matrix + system heartbeat (W8-c addendum, W8-d extension)
+
+Owner requests (2026-08-24): *"tenemos que crear salvaguardas para protegerse de
+estos errores"* — four default-on, individually disable-able safeguards built on
+the W6 machinery, plus (W8-d) the **system heartbeat** to the Asistente. Each
+safeguard writes into a durable side record that the health daemon tick turns into
+a bus ALERT to the host; each is gated by an individual `health.*` knob (absent →
+code default ON; explicit `false` → that safeguard is OFF and never emits its
+alert class).
+
+| # | Safeguard | What it catches | Knob (default) | Durable side record | Finding kind / dedupe key |
+|---|-----------|-----------------|-----------------|---------------------|---------------------------|
+| 1 | **Turn-failure capture** | A post session whose turn ends in an ERROR reason (the malformed-reference / no-provider / no-model class) — recorded into post-errors.jsonl so the daemon ALERTS the host. | `turnErrorCaptureEnabled` (true) | `post-errors.jsonl` (bounded 500) | `post-error:<postId>` / `post-error:<postId>` |
+| 2 | **Stale-live watchdog** | A catalog-live post (not retired) that holds PENDING addressed messages AND has NO session writes for >= `staleLiveMinutes` — the "el sistema parece colgado" class (a turn died silently). | `staleLiveWatchdogEnabled` (true) + `staleLiveMinutes` (10) | none (computed live from the session log + the delivery sidecar) | `stalled-post` / `stalled:<postId>` |
+| 3 | **Preset audit** | A preset/persona text (COMMENTS INCLUDED) holding an UNBOUND template reference (a double-brace reference to a variable that is NOT one of the known-bound persona vars cwd/headPostId/workspacePath/reportDir/deptName) — a config-health finding; the audit NEVER mutates a preset file. | `presetAuditEnabled` (true) | `config-presets.jsonl` | `config-preset` / `config-preset` |
+| 4 | **Config knobs** | Individual disable for each of 1-3 (absent → all on; `false` → that class never alerts). | `health.turnErrorCaptureEnabled` / `health.staleLiveWatchdogEnabled` / `health.presetAuditEnabled` (+ `health.staleLiveMinutes`) | n/a | n/a |
+| 5 | **System heartbeat (W8-d)** | (a) A LEAN `## System heartbeat:` section injected into EVERY HOST wake pack (host last-activity, per active agent last-activity / NO SESSION / SLEEPING, pending count + oldest age, and a `WAIT` line when the host holds a quiet expectation). (b) The CONDITIONAL wake: the daemon wakes the host ONLY when the WAIT condition holds (a HOST-sent message to a post with NO reply AND NO session activity for >= `waitThresholdMs`), via a single `[From deepartments] system-wait: <reason>` bus message — deduped per recipient+message per 30min. **NO standalone hourly message** (the daemon still ticks/writes the heartbeat file; zero noise otherwise). | `heartbeatEnabled` (true) + `waitThresholdMs` (30 min) | `health-alerts-state.json` (the shared ledger, key `wait:<recipientId>:<messageId>`) | `system-wait` / `wait:<postId>:<messageId>` |
+
+**Shared snapshot primitives (W8-c/W8-d reuse).** `buildPostSnapshot(post)` (PURE,
+exported) computes `{ lastActivityTs, pendingCount, oldestPendingTs }` from a
+post's session event log + its addressed-message ts list — a message is *pending*
+(unanswered) when the log holds NO completed `turn/end` AFTER it. `scanStalledPosts`
+is the stale-live predicate; `computeInboxTsByPost` maps the delivery sidecar to a
+per-post addressed-message ts list (delivered/prepared/resumed rows). The W8-d
+heartbeat **reuses these same primitives** — the heartbeat section and the WAIT
+condition are computed by `scanHostWaits` (which calls `buildPostSnapshot` with the
+HOST-sent ts as the inbox, so a host-sent message that was answered or saw recent
+session activity is never a wait) and rendered by `buildHeartbeatSection`, so the
+ages are NEVER reimplemented. `readInboxByPost` is the shared store read that
+resolves the per-post inbox + the host-ADDRESSED rows for both the W8-c watchdog
+and the W8-d WAIT scan.
+
+**Part 1 hook decision (documented).** The harness exposes NO global `turn/end`
+cordis event (`turn/end` is a per-session append, dsh-agent-loop lib/index.js:592),
+so turn-failure capture uses a **BOUNDED TAIL-SCAN** of the live posts' session
+event logs (the agent's in-memory `session.events` the plugin already reads) in
+the health-daemon tick, bounded to the last `TURN_ERROR_CAPTURE_MAX_TAIL` events
+and only a `reason.kind === 'error'` `turn/end` fresher than
+`TURN_ERROR_FRESH_WINDOW_MS` (10 min). Captured turns are deduped via
+`turn-errors-state.json` so a turn is never double-counted; the row lands in
+`post-errors.jsonl` and flows through the existing post-error scan → ALERT. The
+interval stays tiny (the daemon already ticks at `health.intervalMs`, 60s).

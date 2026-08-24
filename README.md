@@ -10,6 +10,25 @@ run* (sessions, subagents, schedule, skills, jobs, tools); Deepartments
 answers *how things are organized* (what a post, a department, a message, a
 witness, an activation, a governance policy is).
 
+## Features
+
+- **Departments & roles** — a configurable organization of department heads
+  and role workers (builder / reviewer / explore-deep…), surfaced by
+  `dept_who` and managed with worker spawn / retire.
+- **Jobs & shared agenda** — versioned department jobs (`dept_job_run` /
+  `dept_job_list`) and a single runtime `calendar.json` agenda
+  (`dept_calendar_add` / `list` / `remove`), driven by a scheduler daemon.
+- **Monitors** — a monitor module that polls external signals and on a
+  trigger spawns a fresh worker and notifies the department head.
+- **System-health** — a health daemon that writes a heartbeat, raises silent
+  incidents as bus alerts to the host, plus a daily system-health digest job.
+- **The bus (messaging)** — agent-to-agent messaging with a per-department ACL
+  (`send_message` / `agent_messages`) backed by a durable message store.
+- **Sleep / wake session lifecycle** — posts that nap and resume without loss,
+  with a durable per-agent journal (`dept_memo_write`) and session rotation.
+- **Client plugin UI** — the sidebar department catalog, the shared Agenda
+  panel, and the owner presence toggle.
+
 ## Status
 
 - **Phase 2 (MVP) in development** — see [docs/ROADMAP.md](docs/ROADMAP.md).

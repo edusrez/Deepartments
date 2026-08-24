@@ -90,7 +90,9 @@ import {
   markDelivery,
   needsRedelivery,
   parseDeliveryRows,
-  resolveDeliveriesPath
+  parseMessageRecords,
+  resolveDeliveriesPath,
+  resolveMessagesPath
 } from './messages-store.js'
 import type { DeliveryRow, DeliveryStatus, MessageRecord } from './messages-store.js'
 import { buildAgentRows } from './agents.js'
@@ -224,6 +226,67 @@ export function toJsonSafe<T>(value: T): T {
  * omitting any that are `undefined`. This is the emit-site sanitizer (W7-B). */
 export function jsonSafeMessageSource<T extends MessageSource>(source: T): T {
   return toJsonSafe(source)
+}
+
+/** W8-b prompt-literal safety (delivery-seam brace sanitizer). The KNOWN-BOUND
+ * template variable names used by persona/preset templating (spec 004 §9.1 /
+ * F10 — see `renderDepartmentTemplate`): a reference to one of these MUST
+ * survive so the persona/preset assembler can bind it. `cwd` is the legitimate
+ * lowercase harness preset variable that renderDepartmentTemplate NEVER touches;
+ * the other four are the department template variables it substitutes. */
+const BOUND_TEMPLATE_VARS: ReadonlySet<string> = new Set([
+  'cwd',
+  'headPostId',
+  'workspacePath',
+  'reportDir',
+  'deptName'
+])
+
+/** The break renderer for an UNBOUND double-brace template reference: the
+ * two-opening-braces sequence is emitted as the two characters separated by a
+ * space, so no complete opening brace-pair remains and the prompt assembler
+ * sees no reference. A real prose space (not a zero-width span) is used because
+ * it is never stripped by the prompt expander — the assembler only ever matches
+ * a contiguous `{{`, and `{ {` is not one. */
+const PROMPT_LITERAL_UNBOUND_BREAK = '{ {'
+
+/**
+ * W8-b prompt-literal safety (delivery-seam brace sanitizer). Returns a copy of
+ * `text` in which every DOUBLE-BRACE TEMPLATE REFERENCE that is NOT one of the
+ * known-bound template vars (cwd / headPostId / workspacePath / reportDir /
+ * deptName) is BROKEN so the prompt assembler sees no reference — an unbound
+ * double-brace token (two opening braces + a name + two closing braces, or a
+ * bare two-opening-braces marker) is a FATAL malformed prompt-variable
+ * reference that fails the recipient session assembly. A bound var reference is
+ * LEFT UNCHANGED (it must survive for the persona/preset assembler to bind it).
+ * Text WITHOUT any double-brace token is returned BYTE-IDENTICAL (no spurious
+ * change). Pure, deterministic, never throws.
+ */
+export function sanitizePromptLiterals(text: string): string {
+  // Fast path: no double-opening-brace marker anywhere → byte-identical.
+  if (!text.includes('{{')) return text
+  let out = ''
+  let i = 0
+  while (i < text.length) {
+    if (text[i] === '{' && text[i + 1] === '{') {
+      const ref = /^([a-zA-Z][a-zA-Z0-9_]*)}}/.exec(text.slice(i + 2))
+      if (ref !== null && BOUND_TEMPLATE_VARS.has(ref[1])) {
+        // Bound reference → leave the opening double-brace untouched; the name
+        // and closing braces fall through the scan unchanged.
+        out += '{{'
+        i += 2
+        continue
+      }
+      // Unbound name (or a bare two-opening-braces marker): break the opening
+      // brace-pair so the assembler sees no reference (brace-safe).
+      out += PROMPT_LITERAL_UNBOUND_BREAK
+      i += 2
+      continue
+    }
+    out += text[i]
+    i += 1
+  }
+  return out
 }
 
 /** Prefix of a runtime host-address registry entry: `host-<sessionId>`. */
@@ -647,7 +710,12 @@ export function buildSleepJournalMessage(journalText: string) {
  */
 export function buildWakePackMessage(packText: string) {
   return createUserMessage({
-    content: [{ type: 'text', text: packText }],
+    // W8-b prompt-literal safety: the wake-pack text (message-delta section,
+    // roster, git, skill body) is run through the brace sanitizer so an unbound
+    // double-brace token in a delivered message (or any assembled pack content)
+    // can never break the recipient session assembly. Bound persona/preset vars
+    // (cwd/headPostId/workspacePath/reportDir/deptName) are preserved.
+    content: [{ type: 'text', text: sanitizePromptLiterals(packText) }],
     // W7-B: JSON-safe source projection (the wake-pack message is inserted into
     // a durable session; a branded/non-plain value would break the splice).
     source: jsonSafeMessageSource({
@@ -797,6 +865,16 @@ export interface WakePackParts {
    * never re-sent as a second node. Only the host wake injection supplies it;
    * the lean on-demand snapshot (dept_wake_snapshot) does NOT. */
   ownerPresence?: string
+  /** W8-d PART A — the `## System heartbeat:` section BODY (already-built,
+   * brace-safe), injected into every HOST wake pack by `assembleWakePack` when
+   * `health.heartbeatEnabled` (default on). Computed by the SAME pure snapshot
+   * helpers the W8-c watchdog reuses (buildPostSnapshot / scanHostWaits):
+   * host last-activity, per-active agent last-activity (NO SESSION / SLEEPING),
+   * pending message counts + oldest ages, and a WAIT line when the host holds a
+   * quiet expectation. Undefined/empty → the section is OMITTED (never a
+   * throw) — and `health.heartbeatEnabled === false` explicitly omits it. The
+   * section passes through `sanitizePromptLiterals` at the wake-pack seam. */
+  heartbeat?: string
 }
 
 /** Compose the Deepartments context pack as a string, sections 1-10 in order.
@@ -831,6 +909,17 @@ export function buildWakePack(parts: WakePackParts): string {
     sections.push(`## Owner presence: ${presenceState}\n${presenceGuidance(presenceState === 'present')}`)
   } else if (parts.ownerPresence !== undefined && parts.ownerPresence.trim() !== '') {
     sections.push(`## Owner presence: ${parts.ownerPresence.trim()}`)
+  }
+
+  // 2b — W8-d PART A: the current `## System heartbeat:` snapshot (host + per
+  // active agent last-activity, pending ages, WAIT line), built at assembly
+  // time by the same pure snapshot helpers the W8-c watchdog reuses
+  // (buildPostSnapshot / scanHostWaits — see `buildHeartbeatSection`). A
+  // caller that supplies no body (or `health.heartbeatEnabled === false`) gets
+  // no section — OMITTED, never a throw. Only the host wake injection supplies
+  // it; the lean on-demand snapshot does NOT.
+  if (parts.heartbeat !== undefined && parts.heartbeat.trim() !== '') {
+    sections.push(`## System heartbeat:\n${parts.heartbeat}`)
   }
 
   // 3 — journal pointer (wake injection only)
@@ -1249,12 +1338,19 @@ export async function writeJobRunsStateFile(stateDir: string, state: Record<stri
 export interface PostErrorEntry {
   /** The failure ts (ms epoch). */
   ts: number
-  /** The durable member id (a postId, or the hostId for a host delivery). */
+  /** The durable member id (a postId, or the hostId for a host delivery). A
+   * W8-c scheduler no-fire records postId 'scheduler'. */
   postId: string
   /** The bus message id whose delivery failed (when known). */
   messageId?: string
   /** The captured error message. */
   error: string
+  /** W8-c scheduler-visibility: the jobId whose agenda auto-run did not fire
+   * (when the row is a scheduler no-fire). */
+  jobId?: string
+  /** W8-c scheduler-visibility: the no-fire reason ('no head' |
+   * 'idempotency-skip' | the thrown error text). */
+  reason?: string
 }
 
 export const POST_ERRORS_FILE = 'post-errors.jsonl'
@@ -1286,7 +1382,9 @@ export function readPostErrorsFile(stateDir: string): PostErrorEntry[] {
         ts: entry.ts,
         postId: entry.postId,
         ...(typeof entry.messageId === 'string' ? { messageId: entry.messageId } : {}),
-        error: typeof entry.error === 'string' ? entry.error : ''
+        error: typeof entry.error === 'string' ? entry.error : '',
+        ...(typeof entry.jobId === 'string' ? { jobId: entry.jobId } : {}),
+        ...(typeof entry.reason === 'string' ? { reason: entry.reason } : {})
       })
     }
     return out
@@ -1365,19 +1463,25 @@ export async function writeHealthAlertsState(stateDir: string, state: HealthAler
 
 /** One detected system-health anomaly (grouped per dedupe key). */
 export interface HealthFinding {
-  /** The anomaly class. */
-  kind: 'post-error' | 'delivery-failed'
+  /** The anomaly class. W8-c adds `config-preset` (a preset text holding an
+   * unbound template reference) and `stalled-post` (a catalog-live post with no
+   * session activity while it holds pending messages). W8-d adds `system-wait`
+   * (a host-sent message to a post with no reply + no session activity within
+   * `waitThresholdMs` — the conditional wake; NOT part of the System-health
+   * ALERT frame, it rides `buildSystemWaitFrame`). */
+  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait'
   /** The dedupe key (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS). */
   key: string
-  /** The postId (post-error) — the durable member that failed to materialize. */
+  /** The postId (post-error / stalled-post). */
   postId?: string
   /** The messageId (delivery-failed) — the bus record that failed delivery. */
   messageId?: string
   /** The most-recent row ts of the group (ms epoch). */
   ts: number
-  /** The captured error message (post-error). */
+  /** The captured error message (post-error / config-preset — the unbound
+   * template variable names; the literal double-brace token is never written). */
   error?: string
-  /** The grouped row count (post-error: rows for the postId inside the window). */
+  /** The grouped row count (post-error / stalled-post / config-preset). */
   count?: number
 }
 
@@ -1399,6 +1503,585 @@ export async function appendHealthAlertAudit(stateDir: string, entry: HealthAler
 export const HEALTH_ERROR_WINDOW_MS = 2 * 60 * 60 * 1000
 /** Alert dedupe window: ≤1 alert per key inside this window. */
 export const HEALTH_DEDUPE_WINDOW_MS = 30 * 60 * 1000
+
+// ---------------------------------------------------------------------------
+// W8-c SAFEGUARDS PACKAGE (owner "tenemos que crear salvaguardas para
+// protegerse de estos errores", 2026-08-24) — four default-on, individually
+// disable-able safeguards built on the W6 system-health machinery
+// (post-errors.jsonl, the health daemon tick, health-alerts-state.json dedupe,
+// the bus ALERT to the host):
+//   1. TURN-FAILURE CAPTURE — a post session whose turn/end ends in an ERROR
+//      reason is recorded into post-errors.jsonl so the daemon ALERTS (a
+//      BOUNDED TAIL-SCAN of the live posts' session event logs — the harness
+//      exposes no global turn/end cordis event, so the tick observes the live
+//      agent session logs it already reads, see the doc below).
+//   2. STALE-LIVE WATCHDOG — a catalog-live post with pending addressed
+//      messages AND no session writes for >= N minutes is a 'stalled post'.
+//   3. PRESET AUDIT — preset/persona text (COMMENTS INCLUDED) holding an
+//      UNBOUND template reference (not one of the KNOWN-BOUND persona vars)
+//      records a config-preset finding.
+//   4. CONFIG KNOBS — `health.turnErrorCaptureEnabled` /
+//      `staleLiveWatchdogEnabled` (+ `staleLiveMinutes`) / `presetAuditEnabled`.
+// A SHARED pure activity/pending-age snapshot service (`buildPostSnapshot` +
+// the exported scan helpers) is reused by the stale-live watchdog AND the
+// eventual W8-d heartbeat.
+// ---------------------------------------------------------------------------
+
+/** One session event of a post's session log (the live agent's in-memory event
+ * list, or a durable slice). STRUCTURAL — only the fields the health safeguards
+ * read are declared, so the plugin never hard-depends on the harness session
+ * event type. */
+export interface HealthSessionEvent {
+  type?: string
+  /** The event ts (ms epoch) — the session log's write timestamp. */
+  time?: number
+  data?: unknown
+}
+
+/** One catalog post's snapshot inputs for the health safeguards. */
+export interface PostActivityInput {
+  postId: string
+  /** True when the post is a retired/removed member — a retired post is never a
+   * stale-live or turn-error signal. Absent/false = a live catalog member. */
+  retired?: boolean
+  /** The post's session event log (the live agent's in-memory events, or a
+   * durable slice). Absent/empty → no activity signal (never misclassified). */
+  events?: readonly HealthSessionEvent[]
+  /** The ts (ms epoch) of messages ADDRESSED to the post in the recent window
+   * (its inbox). */
+  inboxTs?: readonly number[]
+}
+
+/** The SHARED activity/pending snapshot of one post — the reusable pure helper
+ * the W8-c-2 stale-live watchdog AND the eventual W8-d heartbeat read. */
+export interface PostActivitySnapshot {
+  postId: string
+  /** The last session-log write ts (ms epoch), or undefined for an empty/absent
+   * log. */
+  lastActivityTs?: number
+  /** Count of PENDING (addressed but not yet answered) messages in the post's
+   * inbox: the address ts entries with NO completed `turn/end` AFTER them (a
+   * message whose turn is still open, or was never started, is unprocessed). A
+   * message followed by a completed turn (a `turn/end` after it) is answered. */
+  pendingCount: number
+  /** The OLDEST pending message ts (ms epoch), or undefined. */
+  oldestPendingTs?: number
+}
+
+/**
+ * W8-c SHARED snapshot primitive (PURE, exported — W8-d reuses it). From a
+ * post's session event log + its addressed-message ts list, compute the
+ * activity snapshot: the last session-log write ts, and the COUNT + oldest age
+ * of PENDING (addressed-but-unanswered) messages. A message is answered iff the
+ * log holds a completed turn (`turn/end`) AFTER its ts; otherwise a delivered
+ * message that never produced a completed turn is still unprocessed. An empty
+ * inbox or no events degrade cleanly (never throws).
+ */
+export function buildPostSnapshot(post: PostActivityInput): PostActivitySnapshot {
+  const events = post.events ?? []
+  let lastActivityTs: number | undefined
+  for (const event of events) {
+    if (typeof event.time === 'number' && Number.isFinite(event.time)) {
+      if (lastActivityTs === undefined || event.time > lastActivityTs) lastActivityTs = event.time
+    }
+  }
+  const pending = (post.inboxTs ?? []).filter((ts) => {
+    if (typeof ts !== 'number' || !Number.isFinite(ts)) return false
+    if (lastActivityTs === undefined) return true // no activity → every addressed message is unprocessed
+    if (ts <= lastActivityTs) {
+      // A turn may have completed after this message; if the log holds a
+      // `turn/end` AFTER it, the message was answered.
+      for (const event of events) {
+        if (event.type === 'turn/end' && typeof event.time === 'number' && Number.isFinite(event.time) && event.time > ts) {
+          return false // completed turn after the message → answered
+        }
+      }
+      return true
+    }
+    return true
+  })
+  let oldestPendingTs: number | undefined
+  for (const ts of pending) {
+    if (oldestPendingTs === undefined || ts < oldestPendingTs) oldestPendingTs = ts
+  }
+  return {
+    postId: post.postId,
+    ...(lastActivityTs !== undefined ? { lastActivityTs } : {}),
+    pendingCount: pending.length,
+    ...(oldestPendingTs !== undefined ? { oldestPendingTs } : {})
+  }
+}
+
+/** The stale-live staleness threshold (W8-c PART 2, default 10 min). */
+export const STALE_LIVE_DEFAULT_MINUTES = 10
+
+/** W8-c PART 2 — flag a catalog-live post that is STALLED: it holds at least
+ * one PENDING unprocessed addressed message AND its session log has NO writes
+ * for >= `staleMinutes` (or no writes at all for that long — the oldest pending
+ * message is itself >= `staleMinutes` old). Emits ONE 'stalled-post' finding per
+ * stale post (key `stalled:<postId>`, deduped by the daemon's alert ledger).
+ * Retired posts never produce a finding. Pure, never throws. */
+export function scanStalledPosts(
+  posts: Iterable<PostActivityInput>,
+  nowMs: number,
+  staleMinutes: number
+): HealthFinding[] {
+  const windowMs = staleMinutes * 60_000
+  const findings: HealthFinding[] = []
+  for (const post of posts) {
+    if (post.retired === true) continue
+    const snap = buildPostSnapshot(post)
+    if (snap.pendingCount === 0) continue
+    const stale =
+      (snap.lastActivityTs !== undefined && nowMs - snap.lastActivityTs >= windowMs) ||
+      (snap.lastActivityTs === undefined && snap.oldestPendingTs !== undefined && nowMs - snap.oldestPendingTs >= windowMs)
+    if (!stale) continue
+    findings.push({
+      kind: 'stalled-post',
+      key: `stalled:${post.postId}`,
+      postId: post.postId,
+      ts: snap.oldestPendingTs ?? snap.lastActivityTs ?? nowMs,
+      count: snap.pendingCount,
+      error: `no session writes for >= ${staleMinutes} min`
+    })
+  }
+  return findings
+}
+
+/** W8-c PART 1 — how fresh a turn-error must be to be captured (<= 10 min). */
+export const TURN_ERROR_FRESH_WINDOW_MS = 10 * 60 * 1000
+/** W8-c PART 1 — the bounded tail of the session log scanned per post per tick. */
+export const TURN_ERROR_CAPTURE_MAX_TAIL = 30
+
+/** A turn-error capture candidate: the post + a fresh turn/end error reason. */
+export interface TurnErrorCapture {
+  postId: string
+  /** The captured error message (the turn/end reason message/code). */
+  error: string
+  /** The turn/end event ts (ms epoch). */
+  ts: number
+  /** A stable dedupe key for the captured (postId, turn) pair — a turn that
+   * already produced a post-error row is never double-captured. */
+  key: string
+}
+
+/** W8-c PART 1 — BOUNDED TAIL-SCAN of one post's session event log for a
+ * turn/end that ended in an ERROR reason (`reason.kind === 'error'` — the
+ * malformed-reference / no-provider/no-model class). Returns the MOST-RECENT
+ * error turn in the tail, or undefined. Pure, never throws (a malformed event
+ * shape degrades to "no capture"). NO HARNESS EVENT HOOK IS USED: the harness
+ * exposes NO global turn/end cordis event (turn/end is a per-session append,
+ * dsh-agent-loop index.js:592 — there is no `ctx.on('turn/end')`), and the
+ * plugin already reads the live agents' `session.events` (the real session log
+ * the harness maintains) in the daemon tick, so the cleanest available
+ * observation point is a bounded per-tick tail-scan there. */
+export function scanTurnErrorCaptures(events: readonly HealthSessionEvent[], postId: string): TurnErrorCapture | undefined {
+  const tail = events.slice(-TURN_ERROR_CAPTURE_MAX_TAIL)
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const event = tail[i]
+    if (event.type !== 'turn/end') continue
+    const data = (typeof event.data === 'object' && event.data !== null ? event.data : {}) as Record<string, unknown>
+    const reason = (typeof data.reason === 'object' && data.reason !== null ? data.reason : {}) as Record<string, unknown>
+    const kind = reason.kind
+    const isError = kind === 'error' || (typeof kind === 'string' && /error/i.test(kind))
+    if (!isError) continue
+    const turn = data.turn
+    const ts = typeof event.time === 'number' && Number.isFinite(event.time) ? event.time : Date.now()
+    const message =
+      (typeof reason.message === 'string' && reason.message !== '')
+        ? reason.message
+        : (typeof reason.code === 'string' && reason.code !== '')
+          ? reason.code
+          : `${String(kind ?? 'error')} (turn ${String(turn ?? '?')})`
+    return {
+      postId,
+      error: message,
+      ts,
+      key: `${postId}:turn-error:${typeof turn === 'number' ? String(turn) : '?'}:${ts}`
+    }
+  }
+  return undefined
+}
+
+/** The dedupe ledger of turn-error capture: `postId:turn-error:<turn>:<ts>` →
+ * lastCapturedAtMs. Prevents re-recording the same turn on a later tick. */
+export type TurnErrorsState = Record<string, number>
+
+export const TURN_ERRORS_STATE_FILE = 'turn-errors-state.json'
+
+/** Read `<stateDir>/turn-errors-state.json` → `{ [key]: lastCapturedAtMs }`.
+ * Absent / unreadable / malformed → {} (never throws). */
+export function readTurnErrorsState(stateDir: string): TurnErrorsState {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, TURN_ERRORS_STATE_FILE), 'utf8')) as Record<string, unknown>
+    const out: TurnErrorsState = {}
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === 'number' && Number.isFinite(value)) out[key] = value
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/turn-errors-state.json` (mkdir -p the dir, then the file). */
+export async function writeTurnErrorsState(stateDir: string, state: TurnErrorsState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, TURN_ERRORS_STATE_FILE)), { recursive: true })
+  await writeFile(path.join(stateDir, TURN_ERRORS_STATE_FILE), JSON.stringify(state), 'utf8')
+}
+
+/** W8-c PART 3 — the config-preset finding markers file. */
+export const CONFIG_PRESETS_FILE = 'config-presets.jsonl'
+
+/** One preset-audit marker: a preset/persona text holding unbound template vars. */
+export interface ConfigPresetMarker {
+  ts: number
+  /** The preset/source name audited (e.g. `deepartments-head/agent.cordis.yml`). */
+  preset: string
+  /** The UNBOUND template variable NAMES found (no braces — the literal
+   * double-brace token is never written into a prompt-facing artifact). */
+  unbound: string[]
+}
+
+/** Read `<stateDir>/config-presets.jsonl` → the markers, in file order. Absent /
+ * unreadable / malformed → [] (never throws). */
+export function readConfigPresetMarkers(stateDir: string): ConfigPresetMarker[] {
+  try {
+    const text = readFileSync(path.join(stateDir, CONFIG_PRESETS_FILE), 'utf8')
+    const lines = text.split('\n').filter((line) => line.trim() !== '')
+    const out: ConfigPresetMarker[] = []
+    for (const line of lines) {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(line)
+      } catch {
+        continue
+      }
+      const marker = parsed as Record<string, unknown>
+      if (typeof marker.ts !== 'number' || typeof marker.preset !== 'string' || !Array.isArray(marker.unbound)) continue
+      out.push({ ts: marker.ts, preset: marker.preset, unbound: marker.unbound.filter((v): v is string => typeof v === 'string') })
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
+/** Append ONE config-preset marker to `<stateDir>/config-presets.jsonl`
+ * (mkdir -p the dir, then appendFile). Never throws — callers fold a persist
+ * failure into a warn. */
+export async function appendConfigPresetMarker(stateDir: string, marker: ConfigPresetMarker): Promise<void> {
+  try {
+    const filePath = path.join(stateDir, CONFIG_PRESETS_FILE)
+    await mkdir(path.dirname(filePath), { recursive: true })
+    await appendFile(filePath, JSON.stringify(marker) + '\n', 'utf8')
+  } catch {
+    /* non-fatal: a preset-audit marker that cannot persist must not fail boot */
+  }
+}
+
+/**
+ * W8-c PART 3 — PRESET AUDIT scanner (PURE, exported — COMMENTS INCLUDED).
+ * Returns the NAMES of the unbound template-variable references in `text`: a
+ * double-brace template token is UNBOUND unless its name is one of the
+ * KNOWN-BOUND persona vars (cwd / headPostId / workspacePath / reportDir /
+ * deptName — the W8-b BOUND_TEMPLATE_VARS set). A bound var reference is
+ * allowed; any other reference (including a bare two-opening-braces marker)
+ * is an UNBOUND token. Text without any double-brace token → []. The literal
+ * double-brace token is described verbatim; only NAMES (no braces) are returned,
+ * so the caller never emits the fatal token into a prompt-facing artifact.
+ */
+export function auditPresetText(text: string): string[] {
+  if (!text.includes('{{')) return []
+  const unbound = new Set<string>()
+  let i = 0
+  while (i < text.length) {
+    if (text[i] === '{' && text[i + 1] === '{') {
+      const ref = /^([a-zA-Z][a-zA-Z0-9_]*)}}/.exec(text.slice(i + 2))
+      if (ref !== null) {
+        if (!BOUND_TEMPLATE_VARS.has(ref[1])) unbound.add(ref[1])
+      } else {
+        // A bare two-opening-braces marker (no closing/name) — an unhandled token.
+        unbound.add('<bare-marker>')
+      }
+      i += 2
+      continue
+    }
+    i += 1
+  }
+  return [...unbound]
+}
+
+/** W8-c PART 3 — group fresh config-preset markers inside HEALTH_ERROR_WINDOW_MS
+ * into ONE 'config-preset' finding (key 'config-preset'; deduped per 30min by
+ * the daemon ledger, so a boot audit re-alerts at most once per window). */
+export function scanConfigPresetFindings(stateDir: string, nowMs: number): HealthFinding[] {
+  const fresh = readConfigPresetMarkers(stateDir).filter((marker) => nowMs - marker.ts <= HEALTH_ERROR_WINDOW_MS)
+  if (fresh.length === 0) return []
+  const ts = fresh.reduce((max, marker) => Math.max(max, marker.ts), 0)
+  const names = [...new Set(fresh.flatMap((marker) => marker.unbound))]
+  return [
+    {
+      kind: 'config-preset',
+      key: 'config-preset',
+      postId: 'config',
+      ts,
+      error: names.join(', '),
+      count: fresh.length
+    }
+  ]
+}
+
+/** W8-c PART 2 — the production inbox reader: map recipientId → the ts of its
+ * ADDRESSED messages (delivery rows with status 'prepared'/'delivered'/'resumed'
+ * inside the window, resolved to the message record ts). PURE — the parsed rows
+ * are injected so a test drives it with fixtures. */
+export function computeInboxTsByPost(
+  messageTsById: ReadonlyMap<string, number>,
+  deliveryRows: readonly DeliveryRow[],
+  nowMs: number,
+  windowMs: number
+): Map<string, number[]> {
+  const out = new Map<string, number[]>()
+  for (const row of deliveryRows) {
+    if (nowMs - row.ts > windowMs) continue
+    if (row.status !== 'prepared' && row.status !== 'delivered' && row.status !== 'resumed') continue
+    const ts = messageTsById.get(row.messageId)
+    if (ts === undefined) continue
+    let list = out.get(row.recipientId)
+    if (list === undefined) {
+      list = []
+      out.set(row.recipientId, list)
+    }
+    list.push(ts)
+  }
+  return out
+}
+
+// ---------------------------------------------------------------------------
+// W8-d SYSTEM HEARTBEAT to the Asistente (owner idea 2026-08-24 "que el
+// asistente reciba un latido cada hora con la última entrada de actividad propia
+// y de los agentes activos"). Amended final design (m-159 + m-163): NO
+// standalone hourly message — (1) a LEAN `## System heartbeat:` section is
+// injected into every HOST wake pack; (2) the health daemon wakes the host ONLY
+// when the WAIT condition holds, via a `[From deepartments] system-wait: <reason>`
+// bus message (zero noise otherwise). Both REUSE the shared pure snapshot
+// primitives above (buildPostSnapshot / computeInboxTsByPost) — the ages are
+// NEVER reimplemented. `health.heartbeatEnabled` (default on) gates both; an
+// explicit false omits the wake-pack section + the conditional wake.
+// ---------------------------------------------------------------------------
+
+/** W8-d PART C — the quiet-expectation threshold default (30 min). */
+export const SYSTEM_WAIT_DEFAULT_MS = 30 * 60 * 1000
+
+/** W8-d PART C — resolve the effective wait threshold from `health` config:
+ * a positive finite `waitThresholdMs` wins; absent/invalid → the 30min default.
+ * Pure (never throws). */
+export function resolveSystemWaitMs(health: { waitThresholdMs?: number } | undefined): number {
+  const raw = health?.waitThresholdMs
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return raw
+  return SYSTEM_WAIT_DEFAULT_MS
+}
+
+/** W8-d PART B — one post's input to the WAIT scan (a quiet-expectation check):
+ * the post's session event log + the ts of messages ADDRESSED to it that the
+ * HOST sent, each with its messageId (a delivered-but-never-answered class,
+ * e.g. m-78). STRUCTURAL — only the fields the WAIT scan reads are declared. */
+export interface HostWaitPostInput {
+  postId: string
+  /** True when the post is a retired member — a retired post is never a wait
+   * signal (its messages are terminal-settled, W7-A). */
+  retired?: boolean
+  /** The post's session event log. Absent/empty → no activity signal. */
+  events?: readonly HealthSessionEvent[]
+  /** Host-ADDRESSED message rows (messageId + ts) in the recent window — the
+   * candidate WAIT set (the host sent these; they may still be unanswered). */
+  hostMessages?: readonly { messageId: string; ts: number }[]
+}
+
+/**
+ * W8-d PART B — scan for the WAIT condition (PURE, exported): a HOST-SENT
+ * message to a post that produced NO reply AND NO session activity within
+ * `waitThresholdMs`. Reuses `buildPostSnapshot` (the pending-age primitive) with
+ * the host-sent ts as the INBOX — so a host-sent message followed by a completed
+ * turn (`turn/end` AFTER it) is answered and NOT a wait, and the pending count /
+ * oldest age are the SAME computation the W8-c watchdog uses. A retired post is
+ * never flagged. Emits ONE 'system-wait' finding per quiet host expectation, key
+ * `wait:<postId>:<messageId>` (deduped by the daemon's health-alerts-state.json
+ * ledger, so a quiet expectation alerts ONCE per HEALTH_DEDUPE_WINDOW_MS).
+ * Pure, never throws.
+ */
+export function scanHostWaits(
+  posts: Iterable<HostWaitPostInput>,
+  nowMs: number,
+  waitThresholdMs: number
+): HealthFinding[] {
+  const windowMs = waitThresholdMs
+  const findings: HealthFinding[] = []
+  for (const post of posts) {
+    if (post.retired === true) continue
+    const hostTs = (post.hostMessages ?? []).map((m) => m.ts)
+    if (hostTs.length === 0) continue
+    // Reuse the SHARED pending-age primitive with the HOST-sent ts as the inbox:
+    // pendingCount + oldestPendingTs are computed exactly like the watchdog does.
+    const snap = buildPostSnapshot({ postId: post.postId, events: post.events, inboxTs: hostTs })
+    if (snap.pendingCount === 0) continue
+    // Quiet: no session activity for >= the wait window (or NO session at all
+    // while the oldest host-sent message is already that old). Mirrors the
+    // stalled-post predicate (scanStalledPosts) so a stale claim is never < the
+    // threshold.
+    const quiet =
+      (snap.lastActivityTs !== undefined && nowMs - snap.lastActivityTs >= windowMs) ||
+      (snap.lastActivityTs === undefined && snap.oldestPendingTs !== undefined && nowMs - snap.oldestPendingTs >= windowMs)
+    if (!quiet) continue
+    const oldestRow = (post.hostMessages ?? []).find((m) => m.ts === snap.oldestPendingTs)
+    const messageId = oldestRow?.messageId ?? `${post.postId}:${String(snap.oldestPendingTs)}`
+    findings.push({
+      kind: 'system-wait',
+      key: `wait:${post.postId}:${messageId}`,
+      postId: post.postId,
+      messageId,
+      ts: snap.oldestPendingTs ?? nowMs,
+      count: snap.pendingCount,
+      error: `no reply or session activity in ${Math.round(windowMs / 60_000)} min`
+    })
+  }
+  return findings
+}
+
+/** Build the framed conditional-wake bus message — `[From deepartments]
+ * system-wait: <reason>` where the reason names the quiet post + the window.
+ * The only host delivery of the heartbeat is this conditional system-wait (no
+ * standalone hourly heartbeat message). */
+export function buildSystemWaitFrame(wait: HealthFinding): string {
+  const quiet = wait.error !== undefined && wait.error !== '' ? ` (${wait.error})` : ''
+  return `[From deepartments] system-wait: ${wait.postId}${quiet}`
+}
+
+/** One catalog post's heartbeat row (the per-agent activity/pending line). */
+export interface HeartbeatRow {
+  postId: string
+  /** True when the post is dormant (sleepEpoch set). */
+  sleeping: boolean
+  /** The post's last session-log write ts (ms epoch), or undefined for an empty
+   * log — rendered 'NO SESSION' (catalog-live without session activity). */
+  lastActivityTs?: number
+  /** Count of PENDING (addressed-but-unanswered) messages in the post's inbox. */
+  pendingCount: number
+  /** The OLDEST pending message ts (ms epoch), or undefined. */
+  oldestPendingTs?: number
+}
+
+/** The heartbeat snapshot `buildHeartbeatSection` renders — PURE (no I/O), built
+ * at wake-pack assembly time by `assembleWakePack` from the same snapshots the
+ * W8-c watchdog reads. */
+export interface HeartbeatSnapshot {
+  /** The host (Asistente) session's last logged event ts, or undefined ('NO
+   * SESSION' — the harness session record carries no events). */
+  hostLastActivityTs?: number
+  /** Per ACTIVE (and dormant) catalog post rows. */
+  rows: HeartbeatRow[]
+  /** The WAIT line reason when the host holds an unanswered/quiet expectation
+   * (a host-sent message to a post with no reply + no session activity within
+   * `waitThresholdMs`), or undefined (no wait → no WAIT line). */
+  waitReason?: string
+}
+
+/** Human age label for a millisecond delta (`5m`, `1h`, `45s`) — the ONLY place
+ * a raw age is formatted (the SNAPSHOT computation stays in buildPostSnapshot). */
+function formatHeartbeatAge(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return 'now'
+  const minutes = Math.floor(ms / 60_000)
+  if (minutes >= 60) return `${Math.floor(minutes / 60)}h${minutes % 60 > 0 ? ` ${minutes % 60}m` : ''}`
+  if (minutes >= 1) return `${minutes}m`
+  return `${Math.max(1, Math.floor(ms / 1000))}s`
+}
+
+/**
+ * W8-d PART A — render the LEAN `## System heartbeat:` section BODY (PURE,
+ * exported; the `## System heartbeat:` header is added by `buildWakePack`). A
+ * few compact lines: host last-activity, per-agent activity/state (NO SESSION /
+ * SLEEPING / last activity), pending message count + oldest age, and a WAIT
+ * line when the host holds a quiet expectation. Brace-safe (never emits the
+ * literal double-brace template token — the section rides through
+ * `sanitizePromptLiterals` at the wake-pack seam). Never throws.
+ */
+export function buildHeartbeatSection(snapshot: HeartbeatSnapshot, nowMs: number): string {
+  const lines: string[] = []
+  // HOST last-activity (the Asistente session's last logged event).
+  lines.push(
+    snapshot.hostLastActivityTs !== undefined
+      ? `- host: last activity ${formatHeartbeatAge(nowMs - snapshot.hostLastActivityTs)} ago`
+      : '- host: NO SESSION'
+  )
+  // Per ACTIVE agent/head/worker (a dormant post is 'SLEEPING'; catalog-live
+  // with no session activity is 'NO SESSION').
+  for (const row of snapshot.rows) {
+    const activity = row.sleeping
+      ? 'SLEEPING'
+      : row.lastActivityTs === undefined
+        ? 'NO SESSION'
+        : `last activity ${formatHeartbeatAge(nowMs - row.lastActivityTs)} ago`
+    lines.push(`- ${row.postId}: ${activity}`)
+    if (row.pendingCount > 0 && row.oldestPendingTs !== undefined) {
+      lines.push(`  pending ${row.pendingCount}; oldest ${formatHeartbeatAge(nowMs - row.oldestPendingTs)} ago (unanswered)`)
+    }
+  }
+  // WAIT line (only when the host has an unanswered/quiet expectation).
+  if (snapshot.waitReason !== undefined && snapshot.waitReason.trim() !== '') {
+    lines.push(`- WAIT: ${snapshot.waitReason}`)
+  }
+  return lines.join('\n')
+}
+
+/** W8-d SHARED store read (SYNC, non-pure but never throws): resolve the
+ * per-post inbox ts (from the delivery sidecar + the message-record ts map) AND
+ * the host-ADDRESSED message rows per post (`messageId` + ts, from messages
+ * whose `from === hostId`). The delivery sidecar + messages.jsonl are read fresh
+ * (never frozen at boot), so a post that wakes/stalls mid-process is judged
+ * against its CURRENT activity; a missing/malformed store degrades to empty
+ * (never throws). Reuses `computeInboxTsByPost` for the general inbox (the W8-c
+ * watchdog path) and produces the host-sender-aware rows for the W8-d WAIT scan.
+ */
+export function readInboxByPost(
+  stateDir: string,
+  hostId: string,
+  nowMs: number,
+  windowMs: number
+): { inboxTsByPost: Map<string, number[]>; hostRowsByPost: Map<string, { messageId: string; ts: number }[]> } {
+  let deliveryRows: DeliveryRow[] = []
+  try {
+    deliveryRows = parseDeliveryRows(readFileSync(resolveDeliveriesPath(stateDir), 'utf8'))
+  } catch {
+    deliveryRows = []
+  }
+  const messageTs = new Map<string, number>()
+  const messageFrom = new Map<string, string>()
+  try {
+    for (const record of parseMessageRecords(readFileSync(resolveMessagesPath(stateDir), 'utf8'))) {
+      messageTs.set(record.id, record.ts)
+      messageFrom.set(record.id, record.from)
+    }
+  } catch {
+    /* messages.jsonl absent/malformed → the inbox is empty (never fatal) */
+  }
+  const inboxTsByPost = computeInboxTsByPost(messageTs, deliveryRows, nowMs, windowMs)
+  const hostRowsByPost = new Map<string, { messageId: string; ts: number }[]>()
+  for (const row of deliveryRows) {
+    if (nowMs - row.ts > windowMs) continue
+    if (row.status !== 'prepared' && row.status !== 'delivered' && row.status !== 'resumed') continue
+    if (messageFrom.get(row.messageId) !== hostId) continue
+    const ts = messageTs.get(row.messageId)
+    if (ts === undefined) continue
+    let list = hostRowsByPost.get(row.recipientId)
+    if (list === undefined) {
+      list = []
+      hostRowsByPost.set(row.recipientId, list)
+    }
+    list.push({ messageId: row.messageId, ts })
+  }
+  return { inboxTsByPost, hostRowsByPost }
+}
 
 // ---------------------------------------------------------------------------
 // dept_exec (spec W5-B2): the SCOPED shell tool for department posts. A worker
@@ -1861,6 +2544,90 @@ export async function readAgendaJobs(repoRoot: string, departments: DepartmentCo
   return items
 }
 
+// ---------------------------------------------------------------------------
+// W8-c DISCRETE FOLLOW-UP (scheduler auto-run visibility) — the agenda-scheduler
+// auto-run path's failures are INVISIBLE today (the pure tick folds a no-fire
+// into a warn that is not visible in service logs). This SINK records a
+// scheduler auto-run no-fire into post-errors.jsonl (postId 'scheduler',
+// message = the jobId + the reason) so the W6 health daemon ALERTS the host,
+// DEDUPED by health-alerts-state.json (key `scheduler:<jobId>:<reason>`) so a
+// real no-fire is recorded ONCE per HEALTH_DEDUPE_WINDOW_MS (do NOT double-record
+// the same no-fire on consecutive ticks — the point is that a real no-fire
+// surfaces as an alert, not that it wins a race). Pure: `now()` is injectable so
+// a tick test is deterministic.
+// ---------------------------------------------------------------------------
+
+/** A scheduler auto-run no-fire finding surfaced by the pure tick (W8-c
+ * scheduler-visibility): the fire resolved a head but runJob THREW, OR it
+ * SKIPPED because the head post was unresolved, OR it returned FALSE (an
+ * idempotency skip). */
+export interface SchedulerAutoRunFinding {
+  /** The job id that did not fire. */
+  jobId: string
+  /** The no-fire reason: 'no head' | 'idempotency-skip' | the thrown error text. */
+  reason: string
+  /** The thrown error text (when reason is a thrown error). */
+  error?: string
+}
+
+/** Normalize a scheduler no-fire reason into the dedupe-key reason: a
+ * 'job already running' idempotency trip maps to 'idempotency-skip'; every
+ * other reason is used verbatim. */
+export function normalizeSchedulerAutoRunReason(reason: string): string {
+  return /job already running/.test(reason) ? 'idempotency-skip' : reason
+}
+
+/** The scheduler dedupe key (W8-c scheduler-visibility): one key per
+ * (jobId, reason) so a given no-fire is recorded ≤1 per HEALTH_DEDUPE_WINDOW_MS. */
+export function schedulerAutoRunKey(jobId: string, reason: string): string {
+  return `scheduler:${jobId}:${normalizeSchedulerAutoRunReason(reason)}`
+}
+
+/** Record ONE scheduler auto-run no-fire into post-errors.jsonl (postId
+ * 'scheduler', the message = the jobId + the reason/cause) so the W6 health
+ * daemon ALERTS the host. DEDUPED by health-alerts-state.json (key
+ * `scheduler:<jobId>:<reason>`) so a real no-fire is recorded ONCE per
+ * HEALTH_DEDUPE_WINDOW_MS and never spams consecutive ticks. Never throws (a
+ * persist failure is a warn). Resolves TRUE when a new row was appended, FALSE
+ * when it was deduped inside the window. */
+export async function captureSchedulerAutoRunFailure(opts: {
+  /** The stateDir holding post-errors.jsonl + health-alerts-state.json. */
+  stateDir: string
+  /** The clock (ms epoch) — injectable so a tick test is deterministic. */
+  now(): number
+  /** The job id that did not fire. */
+  jobId: string
+  /** The no-fire reason: 'no head' | 'idempotency-skip' | the thrown error text. */
+  reason: string
+  /** Optional extra detail (the thrown error text) folded into the recorded
+   * message when it differs from `reason`. */
+  error?: string
+  /** Optional warn-capable logger. */
+  logger?: { warn(message: string): void }
+}): Promise<boolean> {
+  const normalizedReason = normalizeSchedulerAutoRunReason(opts.reason)
+  const key = schedulerAutoRunKey(opts.jobId, normalizedReason)
+  try {
+    const state = readHealthAlertsState(opts.stateDir)
+    const last = state[key]
+    if (last !== undefined && opts.now() - last < HEALTH_DEDUPE_WINDOW_MS) return false
+    const errorText = `job "${opts.jobId}" scheduler auto-run no-fire: ${normalizedReason}${opts.error !== undefined && opts.error !== normalizedReason ? ` (${opts.error})` : ''}`
+    await appendPostError(opts.stateDir, {
+      ts: opts.now(),
+      postId: 'scheduler',
+      error: errorText,
+      jobId: opts.jobId,
+      reason: normalizedReason
+    })
+    state[key] = opts.now()
+    await writeHealthAlertsState(opts.stateDir, state)
+    return true
+  } catch (error: unknown) {
+    opts.logger?.warn(`[deepartments] scheduler: auto-run capture for job "${opts.jobId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+    return false
+  }
+}
+
 // ---- W1 scheduler tick (PURE — an injectable clock + injected hooks) -------
 
 /** Injected hooks + inputs the scheduler tick reads. The PRODUCTION wiring
@@ -1894,6 +2661,13 @@ export interface AgendaSchedulerDeps {
   departmentForJob(jobId: string): DepartmentConfig | undefined
   /** Optional warn-capable logger (absent dep → the warn is dropped). */
   logger?: { warn(message: string): void }
+  /** W8-c scheduler-visibility: optional AUTO-RUN no-fire sink. The tick calls
+   * it for every job auto-run that did NOT fire — (a) the fire resolved a head
+   * but runJob THREW, (b) the fire SKIPPED because the head post was unresolved
+   * (no head), (c) the fire returned FALSE (idempotency skip). Absent dep → the
+   * finding is dropped (the existing tests keep the tick hermetic). May be
+   * async (the tick awaits it, so a capture is never lost to a fire-and-forget). */
+  onAutoRunSkip?: (finding: SchedulerAutoRunFinding) => void | Promise<void>
 }
 
 /** ONE scheduler tick (spec §5.7 — W1): (a) fire any cron-scheduled job whose
@@ -1919,6 +2693,7 @@ export async function runAgendaSchedulerTick(deps: AgendaSchedulerDeps): Promise
         if (!cronIsDue(job.cron, now, runs[job.id])) continue
         if (headPostId === undefined) {
           deps.logger?.warn(`[deepartments] scheduler: job "${job.id}" (department ${department.id}) is due but the department has NO head — skip`)
+          await deps.onAutoRunSkip?.({ jobId: job.id, reason: 'no head' })
           continue
         }
         try {
@@ -1926,9 +2701,13 @@ export async function runAgendaSchedulerTick(deps: AgendaSchedulerDeps): Promise
           if (fired) {
             runs[job.id] = nowMs
             runsChanged = true
+          } else {
+            await deps.onAutoRunSkip?.({ jobId: job.id, reason: 'idempotency-skip' })
           }
         } catch (error: unknown) {
-          deps.logger?.warn(`[deepartments] scheduler: job "${job.id}" run failed: ${error instanceof Error ? error.message : String(error)}`)
+          const errorText = error instanceof Error ? error.message : String(error)
+          deps.logger?.warn(`[deepartments] scheduler: job "${job.id}" run failed: ${errorText}`)
+          await deps.onAutoRunSkip?.({ jobId: job.id, reason: errorText, error: errorText })
         }
       }
     }
@@ -1945,11 +2724,15 @@ export async function runAgendaSchedulerTick(deps: AgendaSchedulerDeps): Promise
         const headPostId = department === void 0 ? undefined : deps.headForDepartment(department)
         if (headPostId === void 0) {
           deps.logger?.warn(`[deepartments] scheduler: calendar "${entry.id}" (job ${entry.jobId}) is due but no head is available — skip`)
+          await deps.onAutoRunSkip?.({ jobId: entry.jobId, reason: 'no head' })
         } else {
           try {
-            await deps.runJob(department as DepartmentConfig, headPostId, entry.jobId)
+            const fired = await deps.runJob(department as DepartmentConfig, headPostId, entry.jobId)
+            if (!fired) await deps.onAutoRunSkip?.({ jobId: entry.jobId, reason: 'idempotency-skip' })
           } catch (error: unknown) {
-            deps.logger?.warn(`[deepartments] scheduler: calendar job "${entry.jobId}" run failed: ${error instanceof Error ? error.message : String(error)}`)
+            const errorText = error instanceof Error ? error.message : String(error)
+            deps.logger?.warn(`[deepartments] scheduler: calendar job "${entry.jobId}" run failed: ${errorText}`)
+            await deps.onAutoRunSkip?.({ jobId: entry.jobId, reason: errorText, error: errorText })
           }
         }
       } else {
@@ -2361,13 +3144,26 @@ export interface HealthDaemonDeps {
   stateDir: string
   /** The per-process boot id (randomUUID) stamped into the heartbeat. */
   bootId: string
-  /** The plugin Config (W6: `health.enabled`/`health.intervalMs`). Kept for
-   * contract parity with the scheduler/monitor deps; the pure tick does not
-   * read it (the gating lives at the daemon-registration site). */
+  /** The plugin Config (W6: `health.enabled`/`health.intervalMs`). The pure tick
+   * reads the W8-c per-safeguard knobs (`turnErrorCaptureEnabled` /
+   * `staleLiveWatchdogEnabled` + `staleLiveMinutes` / `presetAuditEnabled`) from
+   * `config.health`, with code-defaults (all enabled, 10 min) when absent. */
   config?: Config
   /** The live hosts registry (the Asistente). Resolved per tick via
    * pickLiveHostEntry (consumed once — a single-use iterator is fine). */
   hosts: Iterable<HostEntryLike>
+  /** W8-c PART 1/2 — the catalog posts (activity + inbox inputs) the turn-error
+   * capture and the stale-live watchdog scan. Absent → [] (the safeguards are
+   * no-ops; a hermetic test omits it). CONSUMED ONE — the tick materializes it
+   * into an array so both safeguards share the same snapshot. */
+  posts?: Iterable<PostActivityInput>
+  /** W8-d PART B — the host-sender-aware inputs the CONDITIONAL system-wait scan
+   * reads (postId + events + host-sent message rows). Absent → [] (the
+   * conditional wake is a no-op; a hermetic test omits it). CONSUMED ONE — the
+   * tick materializes it into an array so the WAIT scan shares the same
+   * `buildPostSnapshot` computation. The production wiring resolves it from the
+   * LIVE host's sent messages (see buildHostWaits). */
+  hostWaits?: Iterable<HostWaitPostInput>
   /** Deliver the framed ALERT bus message to the host (production:
    * messagesStoreReady.append + busDeliverToHost; tests: a recording stub).
    * NEVER throws. */
@@ -2433,61 +3229,170 @@ export function scanDeliveryFindings(stateDir: string, nowMs: number): HealthFin
 }
 
 /** Build the framed host ALERT text — `[From deepartments] System-health ALERT:
- * <grouped findings>`. Each finding is a one-line bullet. */
+ * <grouped findings>`. Each finding is a one-line bullet. The config-preset and
+ * stalled-post bullets describe their anomaly verbally (never the literal
+ * double-brace template token — the ALERT is a prompt-facing bus message). */
 export function buildHealthAlertFrame(findings: HealthFinding[]): string {
   const lines = findings.map((finding) => {
     if (finding.kind === 'post-error') {
       const detail = finding.error !== undefined && finding.error !== '' ? `: ${finding.error}` : ''
       return `- post-error: ${finding.postId} (${finding.count ?? 1} in window)${detail}`
     }
-    return `- delivery-failed: ${finding.messageId}`
+    if (finding.kind === 'delivery-failed') {
+      return `- delivery-failed: ${finding.messageId}`
+    }
+    if (finding.kind === 'config-preset') {
+      return `- config-preset: unbound template reference(s) in preset text${finding.error !== undefined && finding.error !== '' ? `: ${finding.error}` : ''}`
+    }
+    return `- stalled-post: ${finding.postId} (${finding.count ?? 1} pending message(s), ${finding.error ?? 'no session activity'})`
   })
   return `[From deepartments] System-health ALERT:\n${lines.join('\n')}`
 }
 
-/** ONE system-health tick: (1) write the heartbeat; (2) scan post-errors + the
- * delivery sidecar for anomalies inside HEALTH_ERROR_WINDOW_MS; (3) dedupe per
- * key inside HEALTH_DEDUPE_WINDOW_MS (persisted to health-alerts-state.json so
- * the ≤1 alert per key per 30min invariant survives restarts); (4) resolve the
- * live host and alert it by bus for each NET-NEW anomaly; (5) append one audit
- * row per alert. NEVER throws (every internal failure is a warn). If no host is
- * registered the anomaly is NOT deduped (it retries — a real deployment without
- * a reachable host must not silently forget an alert). */
+/** ONE system-health tick: (1) write the heartbeat; (2) W8-c turn-failure
+ * capture (record fresh turn errors into post-errors.jsonl); (3) scan
+ * post-errors + delivery-failed + config-preset + stalled-post for anomalies
+ * inside HEALTH_ERROR_WINDOW_MS; (4) dedupe per key inside
+ * HEALTH_DEDUPE_WINDOW_MS (persisted to health-alerts-state.json so the ≤1
+ * alert per key per 30min invariant survives restarts); (5) resolve the live
+ * host and alert it by bus for each NET-NEW anomaly; (6) append one audit row
+ * per alert. The W8-c per-safeguard knobs are read from `config.health`
+ * (default-on): `turnErrorCaptureEnabled`, `staleLiveWatchdogEnabled` +
+ * `staleLiveMinutes`, `presetAuditEnabled`. NEVER throws (every internal
+ * failure is a warn). If no host is registered the anomaly is NOT deduped (it
+ * retries — a real deployment without a reachable host must not silently
+ * forget an alert). */
 export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void> {
   try {
     const nowMs = deps.now()
+    // W8-d PART B — a COARSER per-minute gate for the conditional system-wait:
+    // read the PREVIOUS tick's minute marker BEFORE overwriting the heartbeat,
+    // so the WAIT condition is evaluated at most ONCE per minute even when
+    // `health.intervalMs` is faster (e.g. 10s) — a sub-minute re-fire skips the
+    // scan (the 30-min dedupe ledger, shared with the W6 alert path, already
+    // prevents a re-wake; this just avoids a redundant scan).
+    const prevTick = readHealthHeartbeatFile(deps.stateDir)
+    const currentMinute = Math.floor(nowMs / 60_000)
+    const prevMinute = prevTick !== undefined ? Math.floor(prevTick.ts / 60_000) : undefined
     // 1. heartbeat (always — even with no anomalies).
     await writeHealthHeartbeatFile(deps.stateDir, { ts: nowMs, bootId: deps.bootId })
-    // 2. scan.
-    const findings = [...scanPostErrorFindings(deps.stateDir, nowMs), ...scanDeliveryFindings(deps.stateDir, nowMs)]
-    if (findings.length === 0) return
-    // 3. dedupe: only alert a key whose lastAlertedAt is absent or older than
-    // the dedupe window (the ≤1 alert per key per 30min invariant).
+    // W8-c per-safeguard knobs (default-on).
+    const health = deps.config?.health
+    const turnErrorCaptureEnabled = health?.turnErrorCaptureEnabled !== false
+    const staleLiveWatchdogEnabled = health?.staleLiveWatchdogEnabled !== false
+    const presetAuditEnabled = health?.presetAuditEnabled !== false
+    const staleLiveMinutes =
+      typeof health?.staleLiveMinutes === 'number' && Number.isFinite(health.staleLiveMinutes) && health.staleLiveMinutes > 0
+        ? health.staleLiveMinutes
+        : STALE_LIVE_DEFAULT_MINUTES
+    const posts = [...(deps.posts ?? [])]
+    // 2. W8-c PART 1 — turn-failure capture: a fresh turn/end ERROR reason in a
+    // live post's session event log is recorded into post-errors.jsonl (deduped
+    // via turn-errors-state.json so a turn is never double-counted) so the
+    // post-error scan below ALERTS the host. Never throws.
+    if (turnErrorCaptureEnabled) {
+      try {
+        const captureState = readTurnErrorsState(deps.stateDir)
+        let changed = false
+        for (const post of posts) {
+          if (post.retired === true) continue
+          const capture = scanTurnErrorCaptures(post.events ?? [], post.postId)
+          if (capture === undefined) continue
+          // A turn already captured (and still fresh) is not re-recorded.
+          const lastCaptured = captureState[capture.key]
+          if (lastCaptured !== undefined && nowMs - lastCaptured < TURN_ERROR_FRESH_WINDOW_MS) continue
+          // Only a FRESH error (<= the turn-error window) is recorded now.
+          if (nowMs - capture.ts > TURN_ERROR_FRESH_WINDOW_MS) continue
+          await appendPostError(deps.stateDir, { ts: capture.ts, postId: capture.postId, error: capture.error })
+          captureState[capture.key] = nowMs
+          changed = true
+        }
+        if (changed) await writeTurnErrorsState(deps.stateDir, captureState)
+      } catch (error: unknown) {
+        deps.logger?.warn(`[deepartments] system-health: turn-error capture failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    // 3. scan.
+    const findings = [
+      ...scanPostErrorFindings(deps.stateDir, nowMs),
+      ...scanDeliveryFindings(deps.stateDir, nowMs),
+      ...(presetAuditEnabled ? scanConfigPresetFindings(deps.stateDir, nowMs) : []),
+      ...(staleLiveWatchdogEnabled ? scanStalledPosts(posts, nowMs, staleLiveMinutes) : [])
+    ]
+    // W8-d PART B/C — the system-heartbeat knobs: `heartbeatEnabled` (default
+    // on) gates the CONDITIONAL-WAKE path; `waitThresholdMs` is resolved with
+    // the 30min code default when absent/invalid (see `resolveSystemWaitMs`).
+    const heartbeatEnabled = health?.heartbeatEnabled !== false
+    const waitThresholdMs = resolveSystemWaitMs(health)
+    // Per-minute gate: only evaluate the WAIT condition ONCE per minute (a tick
+    // that re-fires within the same minute — `intervalMs < 60s` — is skipped).
+    const hostWaits = heartbeatEnabled && currentMinute !== prevMinute ? [...(deps.hostWaits ?? [])] : []
+    // Read the dedupe ledger ONCE; the ALERT path + the CONDITIONAL-WAKE path
+    // SHARE it (a key advanced by either is never re-emitted inside the window).
     const state = readHealthAlertsState(deps.stateDir)
-    const keysToAlert: string[] = []
-    for (const finding of findings) {
-      const last = state[finding.key]
-      if (last === undefined || nowMs - last > HEALTH_DEDUPE_WINDOW_MS) keysToAlert.push(finding.key)
-    }
-    if (keysToAlert.length === 0) return
-    // 4. resolve the live host (the Asistente); no host → warn + skip (the
-    // dedupe state is NOT advanced — the alert retries once a host is live).
-    const { live } = pickLiveHostEntry(deps.hosts)
-    if (live === undefined) {
-      deps.logger?.warn('[deepartments] system-health: anomalies detected but no live host to alert — skip (retries on the next tick)')
-      return
-    }
-    const alertFindings = findings.filter((finding) => keysToAlert.includes(finding.key))
-    // 5. notify (never throw) + advance the dedupe ledger + audit.
-    try {
-      await deps.notifyHost(live, buildHealthAlertFrame(alertFindings))
-    } catch (error: unknown) {
-      deps.logger?.warn(`[deepartments] system-health: host alert delivery failed: ${error instanceof Error ? error.message : String(error)}`)
-    }
     const nextState = { ...state }
-    for (const key of keysToAlert) nextState[key] = nowMs
-    await writeHealthAlertsState(deps.stateDir, nextState)
-    await appendHealthAlertAudit(deps.stateDir, { ts: nowMs, findings: alertFindings, dedupeKeys: [...keysToAlert] })
+    let stateChanged = false
+    // 4. ALERT path (W6/W8-c): group the net-new findings and alert the LIVE host
+    // by a single `System-health ALERT:` bus frame; advance the ledger + audit.
+    if (findings.length > 0) {
+      const keysToAlert = findings
+        .filter((finding) => nextState[finding.key] === undefined || nowMs - nextState[finding.key] > HEALTH_DEDUPE_WINDOW_MS)
+        .map((finding) => finding.key)
+      if (keysToAlert.length > 0) {
+        // 5. resolve the live host (the Asistente); no host → warn + skip (the
+        // dedupe state is NOT advanced — the alert retries once a host is live).
+        const { live } = pickLiveHostEntry(deps.hosts)
+        if (live === undefined) {
+          deps.logger?.warn('[deepartments] system-health: anomalies detected but no live host to alert — skip (retries on the next tick)')
+        } else {
+          const alertFindings = findings.filter((finding) => keysToAlert.includes(finding.key))
+          // 6. notify (never throw) + advance the dedupe ledger + audit.
+          try {
+            await deps.notifyHost(live, buildHealthAlertFrame(alertFindings))
+          } catch (error: unknown) {
+            deps.logger?.warn(`[deepartments] system-health: host alert delivery failed: ${error instanceof Error ? error.message : String(error)}`)
+          }
+          for (const key of keysToAlert) {
+            nextState[key] = nowMs
+            stateChanged = true
+          }
+          await appendHealthAlertAudit(deps.stateDir, { ts: nowMs, findings: alertFindings, dedupeKeys: [...keysToAlert] })
+        }
+      }
+    }
+    // 5. CONDITIONAL WAKE path (W8-d PART B): NO scheduled hourly heartbeat
+    // message. When `heartbeatEnabled`, evaluate the WAIT condition (a HOST-SENT
+    // message to a post with NO reply AND NO session activity within
+    // `waitThresholdMs`) and wake the HOST by a `[From deepartments]
+    // system-wait: <reason>` bus message — ONCE per recipient+message per
+    // HEALTH_DEDUPE_WINDOW_MS (the same health-alerts-state.json ledger, key
+    // `wait:<postId>:<messageId>`). If nothing is waiting → NO wake, ZERO noise.
+    // No live host → the ledger is NOT advanced (the wake retries once live).
+    if (hostWaits.length > 0) {
+      const waits = scanHostWaits(hostWaits, nowMs, waitThresholdMs)
+      const waitsToWake = waits.filter((wait) => nextState[wait.key] === undefined || nowMs - nextState[wait.key] > HEALTH_DEDUPE_WINDOW_MS)
+      if (waitsToWake.length > 0) {
+        const { live } = pickLiveHostEntry(deps.hosts)
+        if (live === undefined) {
+          deps.logger?.warn('[deepartments] system-health: system-wait condition but no live host to wake — skip (retries on the next tick)')
+        } else {
+          for (const wait of waitsToWake) {
+            try {
+              await deps.notifyHost(live, buildSystemWaitFrame(wait))
+              nextState[wait.key] = nowMs
+              stateChanged = true
+            } catch (error: unknown) {
+              deps.logger?.warn(`[deepartments] system-health: system-wait delivery failed: ${error instanceof Error ? error.message : String(error)}`)
+            }
+          }
+        }
+      }
+    }
+    // Persist the merged ledger once if the ALERT or CONDITIONAL-WAKE path
+    // advanced any key.
+    if (stateChanged) {
+      await writeHealthAlertsState(deps.stateDir, nextState)
+    }
   } catch (error: unknown) {
     deps.logger?.warn(`[deepartments] system-health tick failed: ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -4499,6 +5404,56 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  /** W8-d PART A — compute the `## System heartbeat:` snapshot at assembly time
+   * (live reads; buildHeartbeatSection is the pure renderer). Reads the SAME
+   * session event logs + inbox the W8-c watchdog uses (buildPostSnapshot /
+   * readInboxByPost / scanHostWaits), so the ages are NEVER reimplemented.
+   * Gated by `health.heartbeatEnabled` (default on): an explicit false → the
+   * snapshot is undefined (the section is OMITTED, never a throw). ANY read
+   * failure degrades to undefined (omitted section). */
+  const assembleHeartbeat = (hostId: string): string | undefined => {
+    const health = config.health
+    if (health?.heartbeatEnabled === false) return undefined
+    try {
+      const nowMs = Date.now()
+      const waitThresholdMs = resolveSystemWaitMs(health)
+      const { inboxTsByPost, hostRowsByPost } = readInboxByPost(config.stateDir, hostId, nowMs, HEALTH_ERROR_WINDOW_MS)
+      // HOST last-activity (the Asistente session's last logged event) — reuse
+      // the same snapshot primitive with an empty inbox (only activity matters).
+      const hostEntry = [...hosts.values()].find((entry) => entry.hostId === hostId)
+      const hostLive = hostEntry !== undefined ? agents?.get(SessionId(hostEntry.sessionId)) : undefined
+      const hostEvents = (hostLive?.session?.events ?? []) as HealthSessionEvent[]
+      const hostSnap = buildPostSnapshot({ postId: hostId, events: hostEvents, inboxTs: [] })
+      // Per ACTIVE (and dormant) catalog post rows + the WAIT scan inputs.
+      const rows: HeartbeatRow[] = []
+      const hostWaitPosts: HostWaitPostInput[] = []
+      for (const [postId, entry] of byPost) {
+        if (entry.retired === true) continue
+        const live = agents?.get(SessionId(entry.sessionId))
+        const events = (live?.session?.events ?? []) as HealthSessionEvent[]
+        const snap = buildPostSnapshot({ postId, events, inboxTs: inboxTsByPost.get(postId) ?? [] })
+        rows.push({
+          postId,
+          sleeping: entry.sleepEpoch !== void 0,
+          ...(snap.lastActivityTs !== undefined ? { lastActivityTs: snap.lastActivityTs } : {}),
+          pendingCount: snap.pendingCount,
+          ...(snap.oldestPendingTs !== undefined ? { oldestPendingTs: snap.oldestPendingTs } : {})
+        })
+        hostWaitPosts.push({ postId, retired: false, events, hostMessages: hostRowsByPost.get(postId) ?? [] })
+      }
+      const waits = scanHostWaits(hostWaitPosts, nowMs, waitThresholdMs)
+      const waitReason = waits.length > 0
+        ? `host waiting on ${waits.map((wait) => wait.postId).join(', ')}: ${waits[0].error ?? 'no reply or session activity'}`
+        : undefined
+      return buildHeartbeatSection(
+        { hostLastActivityTs: hostSnap.lastActivityTs, rows, ...(waitReason !== undefined ? { waitReason } : {}) },
+        nowMs
+      )
+    } catch {
+      return undefined
+    }
+  }
+
   /** Assemble the FULL wake context pack (sections 1-10) for the host wake
    * injection: identity + KPI + current owner-presence state + pre-resolved
    * journal path + live message delta + roster + git + system state + ROADMAP
@@ -4536,6 +5491,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       roadmapTail,
       skillBody,
       ownerPresence,
+      heartbeat: assembleHeartbeat(memberId),
       includeGuidance: true
     })
   }
@@ -4784,7 +5740,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     const sessionId = SessionId(mintWorkerSessionId(postId))
     if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_job_run: a live agent already exists for session "${sessionId}"`)
     const title = definition.meta.title.trim() !== '' ? definition.meta.title : defaultWorkerTitle(definition.meta.role, definition.body, jobId, postId)
-    const setup = workerSetup(postId, headEntry.roomId, definition.meta.role, { persona: template.persona, taskText: definition.body, tools: template.tools, department })
+    const setup = workerSetup(postId, headEntry.roomId, definition.meta.role, { persona: template.persona, taskText: sanitizePromptLiterals(definition.body), tools: template.tools, department })
     const deptCwd = await resolveDepartmentWorkspaceCwd(department)
     const handle = await agents.create({
       sessionId: String(SessionId(sessionId)),
@@ -4852,7 +5808,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     const sessionId = SessionId(mintWorkerSessionId(postId))
     if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_worker_spawn: a live agent already exists for session "${sessionId}"`)
     const title = (opts.title ?? '').trim() !== '' ? (opts.title as string) : defaultWorkerTitle(role, opts.task, opts.jobId, postId)
-    const setup = workerSetup(postId, headEntry.roomId, role, { persona: template.persona, taskText: opts.task, tools: template.tools, department })
+    const setup = workerSetup(postId, headEntry.roomId, role, { persona: template.persona, taskText: opts.task === undefined ? undefined : sanitizePromptLiterals(opts.task), tools: template.tools, department })
     // F5 (spec 004 §6.2 L1): the worker lands in its department workspace.
     const deptCwd = await resolveDepartmentWorkspaceCwd(department)
     const handle = await agents.create({
@@ -6813,6 +7769,66 @@ export function applyInvoke(ctx: Context, config: Config) {
     return stuckNow() - prior.at > STUCK_HEAD_MS
   }
 
+  /** W8-c PART 3 — boot PRESET AUDIT. After the configured heads are materialized
+   * (and on every boot), scan the preset/persona text the plugin reads (COMMENTS
+   * INCLUDED) for any UNBOUND double-brace template reference (a reference to a
+   * variable that is NOT one of the KNOWN-BOUND persona vars cwd/headPostId/
+   * workspacePath/reportDir/deptName). On an unbound reference, record a
+   * CONFIG-HEALTH post-error-marker (`config-presets.jsonl`) that the health
+   * daemon turns into a 'config-preset' ALERT to the host (deduped per
+   * 'config-preset' per 30min). NEVER mutates a preset file — the audit is
+   * read-only and writes only its own stateDir marker. Gated by
+   * `health.presetAuditEnabled` (default on). Non-fatal (a read failure skips
+   * that source). */
+  const runPresetAudit = async (): Promise<void> => {
+    if (config.health?.presetAuditEnabled === false) return
+    const sources: { name: string; text: string }[] = []
+    // The head + disposable-worker base presets (the preset text the plugin
+    // materializes into the harness home's .agent-presets/).
+    for (const presetId of [PRESET_ID, WORKER_PRESET_ID]) {
+      try {
+        sources.push({ name: `${presetId}/agent.cordis.yml`, text: await readFile(path.join(repoRoot, 'presets', presetId, 'agent.cordis.yml'), 'utf8') })
+      } catch {
+        /* source absent → skip (never a boot failure) */
+      }
+    }
+    // Each department's ARCHITECTURE.md (the raw text, comments included, BEFORE
+    // templating — so an unbound reference in any comment/style is caught).
+    for (const department of config.org.departments) {
+      const archPath = path.join(repoRoot, 'presets', 'departments', department.id, 'ARCHITECTURE.md')
+      try {
+        sources.push({ name: `departments/${department.id}/ARCHITECTURE.md`, text: await readFile(archPath, 'utf8') })
+      } catch {
+        /* no architecture file → skip */
+      }
+    }
+    // The host preset ('deepartments') is OWNED by the GUI profile, not this repo;
+    // scan its harness-home .agent-presets copy when present (it is not — this
+    // repo defines no host preset — so the source is skipped cleanly).
+    try {
+      const hostPresetDir = path.join(dshHome(), '.agent-presets', 'deepartments')
+      for (const file of ['agent.cordis.yml', 'preset.yml']) {
+        sources.push({ name: `deepartments/${file}`, text: await readFile(path.join(hostPresetDir, file), 'utf8') })
+      }
+    } catch {
+      /* host preset absent → skip */
+    }
+    const bad: { preset: string; unbound: string[] }[] = []
+    for (const source of sources) {
+      const unbound = auditPresetText(source.text)
+      if (unbound.length > 0) bad.push({ preset: source.name, unbound })
+    }
+    if (bad.length === 0) return
+    for (const finding of bad) {
+      await appendConfigPresetMarker(config.stateDir, { ts: Date.now(), preset: finding.preset, unbound: finding.unbound })
+    }
+    try {
+      ctx.logger.warn(`[deepartments] preset-audit: unbound template reference(s) in preset text: ${bad.map((b) => `${b.preset} (${b.unbound.join(', ')})`).join('; ')}`)
+    } catch {
+      /* a post-dispose logger warn must not surface as an unhandled rejection */
+    }
+  }
+
   // Boot: materialize the head preset and every configured head once the
   // registries (posts/hosts) have cold-loaded — and re-drive any crash-pending
   // bus deliveries (see the re-delivery driver below). Head materialization no
@@ -6820,6 +7836,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   void Promise.all([registryLoaded, hostsLoaded]).then(() => {
     void ensureAllHeads()
     void redeliverPendingDeliveries()
+    void runPresetAudit()
   })
 
   // ---------------------------------------------------------------------------
@@ -6960,7 +7977,11 @@ export function applyInvoke(ctx: Context, config: Config) {
    * a FRESH inline literal (mirroring wakePost's compile-clean call shape). */
   const busUserMessage = (record: MessageRecord, framed: string, senderSessionId: string | undefined) =>
     createUserMessage({
-      content: [{ type: 'text', text: framed } as const],
+      // W8-b prompt-literal safety: the delivered bus message text (already
+      // framed) is run through the brace sanitizer so an unbound double-brace
+      // token in a message can never break the recipient session assembly.
+      // Bound persona/preset vars are preserved.
+      content: [{ type: 'text', text: sanitizePromptLiterals(framed) } as const],
       // W7-B: the source is projected to a PLAIN JSON-safe value BEFORE it is
       // inserted (the `agent/inbox/spliced` append boundary rejects
       // branded/class instances, a present `undefined` key, functions, etc.).
@@ -7211,7 +8232,11 @@ export function applyInvoke(ctx: Context, config: Config) {
             await subagents.followup(
               await exec_agentFor(callerAgentId) as unknown as Parameters<typeof subagents.followup>[0],
               SessionId(recipientId),
-              [{ type: 'text', text: framed } as const],
+              // W8-b prompt-literal safety: the child-followup text (bus
+              // message content injected into a continuable child) is run
+              // through the brace sanitizer so an unbound double-brace token
+              // can never break the child session assembly.
+              [{ type: 'text', text: sanitizePromptLiterals(framed) } as const],
               {
                 // W7-B: the SAME JSON-safe projection as `busUserMessage` — the
                 // child-followup source is inserted into a durable session too,
@@ -8125,17 +9150,39 @@ export function applyInvoke(ctx: Context, config: Config) {
         headForDepartment: (department) => department.coordinator?.postId,
         // The SHARED dept_job_run engine. Resolves false ("skip") when the job
         // is already running (idempotency) or any non-fatal error; the tick
-        // only advances the ledger on a true (fired) result.
+        // only advances the ledger on a true (fired) result. W8-c scheduler
+        // visibility: each no-fire is ALSO recorded into post-errors.jsonl
+        // (postId 'scheduler', message = the jobId + the cause) so the health
+        // daemon ALERTS the host — (a) a thrown run is captured with the thrown
+        // error, (b) an unresolved head post is 'no head', (c) an idempotency
+        // skip is 'idempotency-skip'. The tick folds them into a false return
+        // (so it cannot distinguish them), hence they are recorded HERE.
         runJob: async (department, headPostId, jobId): Promise<boolean> => {
           const headEntry = byPost.get(headPostId)
-          if (headEntry === void 0) return false
+          if (headEntry === void 0) {
+            await captureSchedulerAutoRunFailure({ stateDir: config.stateDir, now: () => Date.now(), jobId, reason: 'no head', error: 'no head' })
+            return false
+          }
           try {
             await runJobForDepartment(department, headEntry, jobId, { callerSessionId: headEntry.sessionId })
             return true
           } catch (error: unknown) {
-            ctx.logger.warn(`[deepartments] scheduler: job "${jobId}" could not run (${error instanceof Error ? error.message : String(error)}) — skip`)
+            const errorText = error instanceof Error ? error.message : String(error)
+            const reason = /job already running/.test(errorText) ? 'idempotency-skip' : errorText
+            await captureSchedulerAutoRunFailure({ stateDir: config.stateDir, now: () => Date.now(), jobId, reason, error: errorText })
+            ctx.logger.warn(`[deepartments] scheduler: job "${jobId}" could not run (${errorText}) — skip`)
             return false
           }
+        },
+        // W8-c scheduler visibility: the pure tick surfaces the cron
+        // no-head skip (a department with NO registered head) through this
+        // hook. The (a) runJob-throw and (c) returns-false cases are recorded
+        // by runJob directly (the closure folds them into a false return, so
+        // the tick cannot distinguish them) — only the tick-level 'no head'
+        // flows through here, so the same no-fire is never double-recorded.
+        onAutoRunSkip: async (finding) => {
+          if (finding.reason !== 'no head') return
+          await captureSchedulerAutoRunFailure({ stateDir: config.stateDir, now: () => Date.now(), jobId: finding.jobId, reason: 'no head', error: 'no head' })
         },
         // A plain (non-job) calendar entry notice: deliver a bus message to the
         // owning head. The scheduler is NOT a catalog member, so the bus ACL
@@ -8292,6 +9339,52 @@ export function applyInvoke(ctx: Context, config: Config) {
   if (!healthEnabled) {
     ctx.logger.info('[deepartments] system-health: health.enabled === false — daemon disabled (no heartbeat, no alerts)')
   } else {
+    // W8-c PART 1/2 — the catalog-post inputs the turn-error + stale-live
+    // safeguards scan: the live agent's session event log (the real session log
+    // the harness maintains) + the post's addressed-message ts list (from the
+    // delivery sidecar resolved to the message-records ts). Resolved FRESH per
+    // tick (never frozen at boot), so a post that wakes/stalls mid-process is
+    // judged against its CURRENT activity. Never throws (a missing/malformed
+    // registry or store degrades to empty inputs — the scan is a no-op).
+    const buildHealthPosts = (): PostActivityInput[] => {
+      // `readInboxByPost` (W8-d) reads the delivery sidecar + messages.jsonl ONCE
+      // and resolves the per-post inbox ts for both the W8-c safeguards and the
+      // W8-d host-wait scan (hostId '' → no host rows, only the general inbox).
+      const { inboxTsByPost } = readInboxByPost(config.stateDir, '', Date.now(), HEALTH_ERROR_WINDOW_MS)
+      const out: PostActivityInput[] = []
+      for (const [postId, entry] of byPost) {
+        const live = agents?.get(entry.sessionId)
+        out.push({
+          postId,
+          retired: entry.retired === true,
+          events: (live?.session?.events ?? []) as HealthSessionEvent[],
+          inboxTs: inboxTsByPost.get(postId) ?? []
+        })
+      }
+      return out
+    }
+    // W8-d PART B — the host-sender-aware inputs the CONDITIONAL system-wait scan
+    // reads: the post's session event log + the ts of messages ADDRESSED to it
+    // that the LIVE host sent (from the delivery sidecar + message records).
+    // Resolved FRESH per tick against the LIVE host (pickLiveHostEntry), so the
+    // WAIT condition judges the CURRENT active Asistente. Never throws.
+    const buildHostWaits = (): HostWaitPostInput[] => {
+      const { live } = pickLiveHostEntry(hosts.values())
+      if (live === undefined) return []
+      const nowMs = Date.now()
+      const { hostRowsByPost } = readInboxByPost(config.stateDir, live.hostId, nowMs, HEALTH_ERROR_WINDOW_MS)
+      const out: HostWaitPostInput[] = []
+      for (const [postId, entry] of byPost) {
+        const liveAgent = agents?.get(entry.sessionId)
+        out.push({
+          postId,
+          retired: entry.retired === true,
+          events: (liveAgent?.session?.events ?? []) as HealthSessionEvent[],
+          hostMessages: hostRowsByPost.get(postId) ?? []
+        })
+      }
+      return out
+    }
     ctx.effect(() => {
       const tick = (): void => {
         void runHealthDaemonTick({
@@ -8301,6 +9394,12 @@ export function applyInvoke(ctx: Context, config: Config) {
           config,
           // A FRESH single-use iterator per tick (Map.values() is single-use).
           hosts: hosts.values(),
+          // W8-c: the catalog-post inputs (activity + inbox) for the turn-error
+          // + stale-live safeguards — resolved lazily per tick.
+          posts: buildHealthPosts(),
+          // W8-d: the host-sender-aware inputs for the conditional system-wait
+          // scan — resolved lazily per tick.
+          hostWaits: buildHostWaits(),
           // The daemon is NOT a catalog member, so the bus ACL would deny it —
           // deliver the alert via the HOST delivery seam directly, framing it
           // `[From deepartments] System-health ALERT:` (exactly like the other
