@@ -5079,6 +5079,27 @@ export function applyInvoke(ctx: Context, config: Config) {
     model: 'deepseek-v4-flash-vision-exp',
     reasoningEffort: 'max'
   }
+  /** VARIANT-2 (2026-08-24) — post-restart host AgentOptions intermittently
+   * empty: the plugin's OWN D4 dormant-host bus delivery (busDeliverToHost)
+   * resumes the host with `agents.resume({ resumeSessionId, setup })` and NO
+   * agentOptions → `agent.options = {}` → the dsh-agent-loop request waterfall
+   * throws `agent "session-<uuid>" has no provider/model` at the first
+   * post-boot materialization. The D4 setup only mounts the 'deepartments'
+   * preset and does NOT installSelection, so `agent.options` MUST be the
+   * carrier — mirror heads/workers (WORKER_AGENT_OPTIONS /
+   * coordinator.agentOptions) to make the HOST symmetric: pass the FULL
+   * constant (provider/model/reasoningEffort) at the D4 resume (invoke.ts:8760)
+   * so `this.options` is non-empty at EVERY host materialization → the
+   * request waterfall returns it → no `no provider/model`. NOTE:
+   * defaultModelSelection().agentOptions() (dsh-host-apiproxy) DROPS
+   * reasoningEffort — pass the FULL constant, not a provider/model-only
+   * partial. ONE source shared by the D4 host resume so the host route cannot
+   * drift from the config again (mirrors the F7 WORKER_AGENT_OPTIONS). */
+  const HOST_AGENT_OPTIONS: AgentOptionsLike = {
+    provider: 'opencode-zen',
+    model: 'deepseek-v4-flash-vision-exp',
+    reasoningEffort: 'max'
+  }
   /** Repo root, used as the preset source AND as the FINAL fallback cwd for
    * head/worker sessions (the canonical cwd is the workspace root path — see
    * `resolveWorkspaceRootPath`). `new URL('.', import.meta.url)` already yields
@@ -8757,7 +8778,14 @@ export function applyInvoke(ctx: Context, config: Config) {
                 ctx.logger.warn(`[deepartments] host resume preset mount failed (bare resume continues): ${error instanceof Error ? error.message : String(error)}`)
               })
             }
-        await agents.resume({ resumeSessionId: sessionId, setup })
+        // VARIANT-2 (2026-08-24): WITHOUT a host agentOptions the D4 resume
+        // constructs a FRESH ReactLoopAgent with `agent.options = {}` → the
+        // request waterfall throws `agent "session-<uuid>" has no provider/model`
+        // at the first post-boot host materialization (the host AgentOptions were
+        // intermittently empty — see HOST_AGENT_OPTIONS). The D4 setup does NOT
+        // installSelection, so a non-empty `this.options` is the ONLY carrier.
+        // Mirror WORKER_AGENT_OPTIONS (heads/workers) so the host is symmetric.
+        await agents.resume({ resumeSessionId: sessionId, setup, agentOptions: HOST_AGENT_OPTIONS })
         const target = agents.get(sessionId)
         if (target === void 0) throw new Error(`[deepartments] host "${hostEntry.hostId}" could not be materialized for bus delivery`)
         target.followup(busUserMessage(record, framed, senderSessionId))

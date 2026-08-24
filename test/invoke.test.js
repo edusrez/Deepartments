@@ -8571,6 +8571,80 @@ test('P2 Bug A: the daemon does NOT alert a legacy post-error row for a RETIRED 
   })
 })
 
+test('P2 Bug A cross-boot regression (real Loader): a boot with a LIVE + RETIRED host in hosts.json NEVER alerts a legacy retired-host post-error row (scanPostErrorFindings retiredHostIds skip + busDeliverToHost retired short-circuit) across >=2 consecutive boots', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const liveSessionId = SessionId(randomUUID())
+    const retiredSessionId = SessionId(randomUUID())
+    const liveHostId = `host-${liveSessionId}`
+    const retiredHostId = `host-${retiredSessionId}`
+    const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    // (i) Seed a hosts.json with a LIVE host + a RETIRED host (v2 rotation shape).
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      schemaVersion: 2,
+      [liveHostId]: { sessionId: String(liveSessionId), roomId: 'board' },
+      [retiredHostId]: { sessionId: String(retiredSessionId), roomId: 'board', retired: true, retiredAt: T0 - 1000, rotatedTo: liveHostId }
+    }, null, 2))
+    // The retired-host `session not found` post-error row (the 17:08 deploy
+    // noise the P2 silence invariant must never re-alert the live host with).
+    await writeFile(path.join(stateDir, 'post-errors.jsonl'), JSON.stringify({ ts: T0 - 60_000, postId: retiredHostId, messageId: 'm-retired', error: `session "${retiredSessionId}" not found` }) + '\n', 'utf8')
+
+    const hostList = () => [
+      { hostId: liveHostId, sessionId: String(liveSessionId), roomId: 'board' },
+      { hostId: retiredHostId, sessionId: String(retiredSessionId), roomId: 'board', retired: true, retiredAt: T0 - 1000, rotatedTo: liveHostId }
+    ]
+    const driveTick = async (alerts) => {
+      await runHealthDaemonTick({
+        now: () => T0 + 2000,
+        stateDir,
+        bootId: 'boot-bugA-cross',
+        hosts: hostList(),
+        posts: [],
+        notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+        logger: { warn: () => {} }
+      })
+    }
+    const assertNoRetiredAlert = (alerts, bootLabel) => {
+      const retiredFrames = alerts.filter((a) => a.frame.includes(`post-error: ${retiredHostId}`))
+      assert.equal(retiredFrames.length, 0, `${bootLabel}: the daemon NEVER sends a retired-host post-error finding to the host (Bug A)`)
+      assert.ok(alerts.every((a) => a.hostEntry.hostId === liveHostId || a.hostEntry.retired !== true), `${bootLabel}: every alert targets the LIVE host, never a terminal retired host`)
+    }
+
+    // Boot 1 — the plugin BOOTS with the retired host present (the loader restores it).
+    let env = await bootPlugin(stateDir)
+    try {
+      await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'head materialized at boot 1')
+      // The loader restored BOTH entries from hosts.json (live + retired intact).
+      const hostsFile = await readHosts(stateDir)
+      assert.ok(hostsFile[liveHostId]?.sessionId !== undefined, 'boot 1: the LIVE host is loaded from hosts.json')
+      assert.equal(hostsFile[retiredHostId].retired, true, 'boot 1: the RETIRED host marker survived the boot (terminal evidence kept)')
+      // scanPostErrorFindings with the retired-host set threaded in skips the row.
+      const retiredSet = new Set(hostList().filter((h) => h.retired === true).map((h) => h.hostId))
+      assert.ok(!scanPostErrorFindings(stateDir, T0 + 10_000, retiredSet).some((f) => f.postId === retiredHostId), 'boot 1: scanPostErrorFindings (retired set) skips the retired-host row')
+      // A full tick → NO alert for the retired host (Bug A defense-in-depth).
+      const alerts1 = []
+      await driveTick(alerts1)
+      assertNoRetiredAlert(alerts1, 'boot 1')
+    } finally {
+      await env.dispose()
+    }
+
+    // Boot 2 — RE-boot + re-scan: the retired-host post-error row PERSISTS on
+    // disk and STILL never alerts over a second, fresh process.
+    env = await bootPlugin(stateDir)
+    try {
+      await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'head materialized at boot 2')
+      const hostsFile = await readHosts(stateDir)
+      assert.equal(hostsFile[retiredHostId].retired, true, 'boot 2: the RETIRED host marker survives a re-boot')
+      assert.equal(readPostErrorsFile(stateDir).some((r) => r.postId === retiredHostId), true, 'boot 2: the retired-host post-error row is STILL on disk (persisted across the boot)')
+      const alerts2 = []
+      await driveTick(alerts2)
+      assertNoRetiredAlert(alerts2, 'boot 2')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
 test('P2 Bug C: an ALREADY-delivered post-error identity is NEVER re-alerted (no per-window re-fire); a NEW postId (a new error identity) alerts', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
@@ -9572,6 +9646,49 @@ test('W8-i (c): a host delivery that succeeds normally (live host) stays unchang
       assert.equal(sendResult.delivered[hostId], 'delivered', 'a normal live-host delivery is delivered (unchanged)')
       await waitFor(() => host.inboxMessages.length === before + 1, 5000, 'the host agent was raw-woken')
       assert.equal(readPostErrorsFile(stateDir).length, 0, 'a normally-successful host delivery records NO post-error')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('VARIANT-2 host materialization (PRIMARY gap): the D4 DORMANT-host bus resume carries a HOST_AGENT_OPTIONS constant (non-empty provider/model/reasoningEffort) at EVERY host materialization — a post-boot host resume never throws "agent has no provider/model"', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Seed THREE distinct DORMANT host registrations BEFORE boot (the loader
+    // restores them into the in-memory `hosts` Map; a host is DORMANT while no
+    // agent is materialized for its session, so busDeliverToHost is forced onto
+    // the D4 resume path — src/invoke.ts:8760 — the exact first-post-boot seam).
+    const sids = [SessionId(randomUUID()), SessionId(randomUUID()), SessionId(randomUUID())]
+    const hostsPath = path.join(stateDir, 'hosts.json')
+    await writeFile(hostsPath, JSON.stringify(Object.fromEntries(sids.map((sid) => [`host-${sid}`, { sessionId: String(sid), roomId: 'board' }])), null, 2))
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      for (let i = 0; i < 3; i++) {
+        const sid = sids[i]
+        const hostId = `host-${sid}`
+        // Deliver a bus message to the DORMANT host → the plugin resumes it (D4).
+        const sendResult = await headCtx.tools.get('send_message', key).execute(
+          { to: [hostId], text: `wake ${i}` },
+          { agent: head, signal }
+        )
+        assert.equal(sendResult.delivered[hostId], 'resumed', `host ${i} was resumed by the plugin (D4 dormant-host resume)`)
+        // Assert the agentOptions carried on the RESUME call is NON-EMPTY
+        // (provider + model — the dsh-agent-loop:714 `no provider/model` guard).
+        await waitFor(() => agents.resumeCalls.some((c) => String(c.resumeSessionId) === String(sid)), 5000, `host ${i} resumed by the plugin`)
+        const call = agents.resumeCalls.find((c) => String(c.resumeSessionId) === String(sid))
+        assert.ok(call.agentOptions, `host ${i} resume carries agentOptions (the pre-variant-2 D4 resume passed NONE)`)
+        assert.ok(typeof call.agentOptions.provider === 'string' && call.agentOptions.provider.length > 0, `host ${i} resume provider is non-empty`)
+        assert.ok(typeof call.agentOptions.model === 'string' && call.agentOptions.model.length > 0, `host ${i} resume model is non-empty`)
+        assert.equal(call.agentOptions.reasoningEffort, 'max', `host ${i} resume reasoningEffort is max (the FULL constant, not the api-proxy provider/model-only partial)`)
+        // The materialized target's `options` is ALSO non-empty — `agent.options`
+        // is the carrier the dsh-agent-loop request waterfall reads (`this.options`).
+        const target = agents.get(sid)
+        assert.ok(target !== undefined, `host ${i} agent materialized`)
+        assert.ok(typeof target.options.provider === 'string' && target.options.provider.length > 0, `host ${i} materialized agent.options.provider is non-empty`)
+        assert.ok(typeof target.options.model === 'string' && target.options.model.length > 0, `host ${i} materialized agent.options.model is non-empty`)
+        assert.equal(target.options.reasoningEffort, 'max', `host ${i} materialized agent.options.reasoningEffort is max`)
+      }
     } finally {
       await dispose()
     }
