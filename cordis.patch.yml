@@ -91,3 +91,19 @@
           timeoutMs: 30000
           maxResponseBytes: 5000000
           maxRedirects: 5
+
+# HOST-SIDE FIRST-WAKE FIX (owner-owned bundle patch — "bundles → profile →
+# $DSH_HOME → --patch, last wins per row"). These top-level rows OVERRIDE the
+# CORE deployment defaults by id so the default deployment persona NEVER
+# references the model variable (unbound at the first post-restart wake, when
+# the async model-selection/settings source is not yet loaded) and the host's
+# agent.options.model/provider are never empty early. See
+# reports/explore-deep/2026-08-24-firstwake-assembly-roots.md.
+- id: system-prompt
+  config:
+    persona: >-
+      You are a coding agent powered by the deepseek-v4-flash-vision-exp model. Your working directory is {{cwd}}.
+- id: agent-default-model
+  config:
+    provider: opencode-zen
+    model: deepseek-v4-flash-vision-exp

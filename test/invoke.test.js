@@ -10033,3 +10033,97 @@ test('QD non-fatal: a failing directive emit (store.append rejects) still commit
     }
   })
 })
+
+// --- HOST-side first-wake fix (2026-08-24) config guard ----------------------
+//
+// The host (Asistente) session is NOT created by the plugin, so a plugin-only
+// real-Loader test cannot reproduce the CORE first-wake assembly failure (the
+// plugin's heads/workers hard-code WORKER_AGENT_OPTIONS / coordinator.agentOptions
+// and are already immune). The primary host-side regression guard is a CONFIG
+// test: it reads the repo's OWN bundled patch (operator-owned — "bundles →
+// profile → $DSH_HOME → --patch, last wins per row") and asserts the two
+// override rows that neutralize the CORE default deployment persona's unbound
+// model variable (dsh-web-app/cordis.patch.yml system-prompt persona references
+// the model variable, unbound at the first post-restart wake because the async
+// model-selection/settings source is not yet loaded). If these rows regress the
+// config back to the unbound model variable, the test fails.
+
+/** Read the repo's bundled cordis.patch.yml (the operator-owned bundle patch). */
+function readBundlePatchText() {
+  return readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+}
+
+/** Split a cordis patch text into its TOP-LEVEL entries. A top-level list item
+ * starts with `- ` at column 0; nested entries under `insert:` are indented, so
+ * the per-entry id is matched only at the entry root. Returns the entries that
+ * declare an `id:` at their root, as {id, block}. */
+function topLevelPatchEntries(text) {
+  const entries = []
+  let cur = null
+  for (const line of text.split('\n')) {
+    if (/^- /.test(line)) {
+      cur = [line]
+      entries.push(cur)
+    } else if (cur) {
+      cur.push(line)
+    }
+  }
+  const out = []
+  for (const blockLines of entries) {
+    const block = blockLines.join('\n')
+    const idMatch = block.match(/^- id:\s*(\S+)/m)
+    if (idMatch) out.push({ id: idMatch[1], block })
+  }
+  return out
+}
+
+test('HOST-SIDE FIRST-WAKE FIX config guard: the bundled patch overrides the CORE default deployment persona to a literal model (no unbound model variable) and pins an explicit default model — guard against regressing the config back to the unbound {{model}} token', async () => {
+  const text = await readBundlePatchText()
+  const entries = topLevelPatchEntries(text)
+  const sp = entries.find((e) => e.id === 'system-prompt')
+  const adm = entries.find((e) => e.id === 'agent-default-model')
+
+  assert.ok(sp, 'a top-level `- id: system-prompt` override row exists in the bundled patch')
+  assert.ok(adm, 'a top-level `- id: agent-default-model` override row exists in the bundled patch')
+
+  // (a) The default deployment persona MUST be a literal model — never the
+  // unbound model variable (nor the broken-brace rendering). This is the
+  // assembly-failure surface: at the first post-restart wake the model selection
+  // is empty, so the CORE persona's model variable throws "has no value".
+  assert.ok(sp.block.includes('persona:'), 'the system-prompt row carries a persona')
+  assert.ok(!sp.block.includes('{{model}}'), 'the system-prompt persona does NOT reference the unbound {{model}} variable')
+  assert.ok(!sp.block.includes('{ {model}}'), 'the system-prompt persona does NOT reference the broken-brace { {model}} rendering')
+  assert.ok(sp.block.includes('deepseek-v4-flash-vision-exp'), 'the system-prompt persona names the literal model')
+  assert.ok(sp.block.includes('{{cwd}}'), 'the system-prompt persona references the bound working-directory var {{cwd}}')
+
+  // (b) The default model MUST be pinned explicitly (provider + model both set),
+  // so the host's agent.options.model/provider are NEVER empty before the
+  // settings document loads (a base default behind a loaded-but-empty settings
+  // section would otherwise be emptied).
+  assert.ok(adm.block.includes('provider: opencode-zen'), 'the agent-default-model row pins provider opencode-zen')
+  assert.ok(adm.block.includes('model: deepseek-v4-flash-vision-exp'), 'the agent-default-model row pins model deepseek-v4-flash-vision-exp')
+})
+
+test('HOST-SIDE FIRST-WAKE FIX real-Loader regression: the plugin materializes its own heads/workers with a MODEL-BOUND session (provider + model never empty) — the plugin side must never regress to an unbound model', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      // The booted head is materialized with an explicit provider + model.
+      const headCall = agents.createCalls.find((c) => String(c.sessionId) === 'head-research-head')
+      assert.ok(headCall, 'the head is materialized via ctx.agents.create at boot')
+      assert.ok(headCall.agentOptions, 'the head create carries agentOptions')
+      assert.ok(typeof headCall.agentOptions.provider === 'string' && headCall.agentOptions.provider.length > 0, 'the head provider is non-empty')
+      assert.ok(typeof headCall.agentOptions.model === 'string' && headCall.agentOptions.model.length > 0, 'the head model is non-empty')
+
+      // A spawned worker is materialized with an explicit provider + model too.
+      const { result } = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'model-bound regression' })
+      const workerCall = agents.createCalls.find((c) => String(c.sessionId) === result.sessionId)
+      assert.ok(workerCall, 'the spawned worker is materialized via ctx.agents.create')
+      assert.ok(workerCall.agentOptions, 'the worker create carries agentOptions')
+      assert.ok(typeof workerCall.agentOptions.provider === 'string' && workerCall.agentOptions.provider.length > 0, 'the worker provider is non-empty')
+      assert.ok(typeof workerCall.agentOptions.model === 'string' && workerCall.agentOptions.model.length > 0, 'the worker model is non-empty')
+    } finally {
+      await dispose()
+    }
+  })
+})
