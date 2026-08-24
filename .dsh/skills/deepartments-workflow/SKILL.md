@@ -44,6 +44,19 @@ INJECTED at the child's first pre-step from the bundled ROLE_CONTRACTS map
 (Task T4): pass the `role` param and the dispatch prompt stays
 objective+files+spec+verification. The Asistente is the only Pro agent.
 
+## Head lifecycle
+
+Department heads are PERMANENT (unlike ephemeral workers), but they do sleep
+and re-wake. The Asistente (host) directs head sleeping via an ADDRESSED SLEEP
+DIRECTIVE: a `send_message` to the head carrying "Sleep — conclude now". On that
+directive the head writes its memo (`dept_memo_write`) then concludes with
+`dept_sleep`. A head NEVER sleeps unprompted — sleep happens only on the
+Asistente's directive. The Asistente may issue a SLEEP DIRECTIVE at a natural
+boundary: the head is idle, all its work is reported, or to force a context
+reset. This mirrors the worker ephemeral rule (a worker is retired by its head)
+but for the durable head — the head's next wake cold-resumes the same durable
+session.
+
 ## Key principles
 
 - **Asistente = interface/coordinator.** It translates the owner's vision into
@@ -413,7 +426,9 @@ channel peerDependencies with CLI pin) live in AGENTS.md and the
   the emergency-fallback/non-code path (parallel if no file overlap) →
   reviewer gate after each batch → commit after each green batch.
 - **END**: verification, commit, update `docs/ROADMAP.md` (transient status
-  only; git is the permanent record; never auto-generated), concise summary.
+  only; git is the permanent record; never auto-generated), concise summary. At
+  session end (or when directed) the Asistente may issue a SLEEP DIRECTIVE to
+  each head before its own sleep/rotation.
 - **Microdecisions**: any ambiguous detail (library, pattern, naming,
   structure, tier) → `ask_user_question` BEFORE dispatching. Present options;
   the owner decides. No silent defaults.
