@@ -1066,6 +1066,56 @@ export interface HostEntryLike {
   previousSessionId?: string
 }
 
+/** Read the DURABLE hosts registry (`<stateDir>/hosts.json`) as a plain
+ * `{ [hostId]: { retired } }` object (the `retired` flag normalized to boolean;
+ * the top-level `schemaVersion` marker is skipped). Returns `undefined` (never
+ * throws) when the file is absent/unreadable/malformed, so the caller can fall
+ * back to the in-memory registry. This is the Bug A AUTHORITATIVE on-disk
+ * source: a long-lived process (e.g. a second daemon twin that booted BEFORE a
+ * rotation) may hold a STALE in-memory `hosts` Map, but the file is the
+ * truthful rotation record. */
+export function readDurableHostsRegistry(stateDir: string): Record<string, { retired: boolean }> | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'hosts.json'), 'utf8')) as Record<string, unknown>
+    const out: Record<string, { retired: boolean }> = {}
+    for (const [hostId, entry] of Object.entries(parsed)) {
+      if (hostId === 'schemaVersion') continue
+      if (entry !== null && typeof entry === 'object') {
+        const e = entry as { retired?: unknown }
+        out[hostId] = { retired: e.retired === true }
+      }
+    }
+    return out
+  } catch {
+    return undefined
+  }
+}
+
+/** Bug A authoritative source gate: `true` iff the DURABLE hosts.json marks the
+ * given host `retired: true` ON DISK. `undefined` (file unreadable/malformed)
+ * lets the caller fall back to the in-memory registry — NEVER throws. Because
+ * the on-disk file is the truthful rotation record, a STALE in-memory `hosts`
+ * Map (a process that booted before a rotation) cannot bypass this check. */
+export function isHostRetiredOnDisk(stateDir: string, hostId: string): boolean | undefined {
+  const registry = readDurableHostsRegistry(stateDir)
+  if (registry === undefined) return undefined
+  return registry[hostId]?.retired === true
+}
+
+/** The set of RETIRED host ids computed from the DURABLE hosts.json (re-read
+ * fresh on every call). `undefined` when the file is unreadable/malformed. Used
+ * by the system-health daemon so the retired-host scan gate is robust to a
+ * STALE in-memory registry (a process that booted before a rotation). */
+export function readDurableRetiredHostIds(stateDir: string): Set<string> | undefined {
+  const registry = readDurableHostsRegistry(stateDir)
+  if (registry === undefined) return undefined
+  const ids = new Set<string>()
+  for (const [hostId, entry] of Object.entries(registry)) {
+    if (entry.retired === true) ids.add(hostId)
+  }
+  return ids
+}
+
 /** The owner-presence state (Feature A — the "Presencia/Ausencia" toggle), the
  * `presence/get` RPC value and the `presence.set` input. Persisted at
  * `<stateDir>/presence.json` as `{ present: boolean, updatedAt: number }`;
@@ -3750,8 +3800,18 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     const hostList = [...(deps.hosts ?? [])]
     // Bug A (defense-in-depth): the set of RETIRED host ids, threaded into the
     // post-error scan so a legacy post-error row for a retired host on disk is
-    // never a finding/alert (a retired host is terminal — W7 philosophy).
+    // never a finding/alert (a retired host is terminal — W7 philosophy). The
+    // in-memory `hostList` is a boot-time registry and may be STALE in a long-lived
+    // process that booted BEFORE a rotation (a second daemon twin sharing the
+    // stateDir) — so ALSO re-read the DURABLE hosts.json fresh each tick and merge
+    // its retired ids. The durable file is authoritative; a stale in-memory
+    // registry must not let a terminal host's rows re-alert. Never throws (a
+    // read/parse failure degrades to the in-memory set only).
     const retiredHostIds = new Set<string>(hostList.filter((entry) => entry.retired === true).map((entry) => entry.hostId))
+    const durableRetiredHostIds = readDurableRetiredHostIds(deps.stateDir)
+    if (durableRetiredHostIds !== undefined) {
+      for (const hostId of durableRetiredHostIds) retiredHostIds.add(hostId)
+    }
     // W8-d PART B — a COARSER per-minute gate for the conditional system-wait:
     // read the PREVIOUS tick's minute marker BEFORE overwriting the heartbeat,
     // so the WAIT condition is evaluated at most ONCE per minute even when
@@ -8824,14 +8884,24 @@ export function applyInvoke(ctx: Context, config: Config) {
     // append (the daemon's own per-postId alert dedupe already gates it).
     try {
       // Bug A SOURCE GATE (the write, not the scan): a RETIRED host's session is
-      // terminal (W7). Re-validate against the durable hosts registry — not the
-      // possibly-stale in-memory hostEntry — so a rotation-commit window / a second
-      // daemon twin / a stale deliver can NEVER append a new post-error ROW for a
-      // retired host (the scan gate only suppresses the FINDING; this suppresses the
-      // ROW at the source, per the Asistente's "ZERO new rows" acceptance).
-      const durableRetired = (hosts.get(hostEntry.hostId)?.retired ?? hostEntry.retired) === true
+      // terminal (W7). Re-validate against the DURABLE hosts.json ON DISK — the
+      // authoritative rotation record — NOT the possibly-stale in-memory `hosts`
+      // Map / hostEntry. A long-lived process (a second daemon twin that booted
+      // BEFORE a rotation, sharing the stateDir) keeps a STALE in-memory registry
+      // that never marks the retired host retired; that stale registry would let
+      // this catch append a new post-error ROW forever. Re-reading the on-disk
+      // file here closes the stale-twin bypass: the scan gate only suppresses the
+      // FINDING; this suppresses the ROW at the source, per the Asistente's
+      // "ZERO new rows" acceptance.
+      const durableRetiredOnDisk = isHostRetiredOnDisk(config.stateDir, hostEntry.hostId)
+      // Belt-and-suspenders: the in-memory Map check is a FALLBACK for the window
+      // where hosts.json is unreadable/malformed (durableRetiredOnDisk === undefined),
+      // and never over-suppresses a DURABLY-LIVE host (durableRetiredOnDisk === false
+      // is authoritative → the write proceeds).
+      const inMemoryRetired = (hosts.get(hostEntry.hostId)?.retired ?? hostEntry.retired) === true
+      const durableRetired = durableRetiredOnDisk === true || (durableRetiredOnDisk === undefined && inMemoryRetired)
       if (durableRetired) {
-        ctx.logger.warn(`[deepartments] bus delivery to RETIRED host "${hostEntry.hostId}" — post-error ROW write skipped (terminal; source gate)`)
+        ctx.logger.warn(`[deepartments] bus delivery to RETIRED host "${hostEntry.hostId}" — post-error ROW write skipped (terminal; durable source gate)`)
         return 'failed'
       }
       const entry: PostErrorEntry = {

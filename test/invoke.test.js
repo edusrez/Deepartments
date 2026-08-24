@@ -8743,6 +8743,69 @@ test('Bug A SOURCE GATE (retired-host ZERO new ROWS + ZERO QD directives, write 
   })
 })
 
+test('Bug A DURABLE GATE (STALE in-memory registry, real Loader): a host that is RETIRED in the DURABLE hosts.json but STALE-LIVE in the boot-time IN-MEMORY registry (a second daemon twin that booted BEFORE the rotation, sharing the stateDir) appends ZERO new post-error ROWs and ZERO QD directives for a bus delivery whose materialize CALL throws "session not found" — the on-disk hosts.json re-validation closes the stale-twin bypass that the in-memory source gate + scan gate both miss', async () => {
+  await withTempStateDir(async (stateDir) => {
+    process.env[QUALITY_INSPECT_ENV_VAR] = '1' // force the QD dice so the emit WOULD fire if a row were written
+    try {
+      const hostSessionId = 'host-buga-durable-stale'
+      const hostId = `host-${hostSessionId}`
+      // (i) Seed hosts.json BEFORE boot with the host as LIVE — this is the "twin"
+      // that boots pre-rotation and caches the host as live in its in-memory Map.
+      await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+        schemaVersion: 2,
+        [hostId]: { sessionId: hostSessionId, roomId: 'board' }
+      }, null, 2))
+
+      const env = await bootWithQD(stateDir, { health: { enabled: false }, resumeNotFound: [hostSessionId] })
+      try {
+        // Boot restored the host into the in-memory registry as LIVE. NOW the
+        // rotation commits: overwrite hosts.json ON DISK to mark it RETIRED —
+        // WITHOUT rebooting, so the in-memory registry stays STALE-LIVE (the
+        // process never re-reads hosts.json, exactly the real stale-twin).
+        await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+          schemaVersion: 2,
+          [hostId]: { sessionId: hostSessionId, roomId: 'board', retired: true, retiredAt: Date.now() - 1000, rotatedTo: 'host-session-rotated' }
+        }, null, 2))
+        const hostsFile = await readHosts(stateDir)
+        assert.equal(hostsFile[hostId].retired, true, 'the DURABLE hosts.json now marks the host retired (the authoritative rotation record)')
+
+        const { head, headCtx, key } = qdResearchHead(env)
+        const before = readPostErrorsFile(stateDir).filter((r) => r.postId === hostId).length
+        const signal = new AbortController().signal
+
+        // (ii) Drive the busDeliverToHost CATCH: a delivery to the host. The
+        // addressing/catalog gate reads the STALE in-memory registry (host is
+        // LIVE there) so it is NOT refused — the delivery reaches busDeliverToHost,
+        // agents.resume throws "session not found", and the catch runs.
+        const send = await headCtx.tools.get('send_message', key).execute(
+          { to: [hostId], text: 'wake the stale-live twin' },
+          { agent: head, signal }
+        )
+        assert.equal(send.delivered[hostId], 'failed', 'the delivery reports failed')
+        // The in-memory registry was stale-live, so busDeliverToHost DID attempt the
+        // host resume (proving the catch was reached) — the durable gate alone is what
+        // stops the ROW.
+        assert.equal(env.agents.resumeCalls.some((c) => String(c.resumeSessionId) === hostSessionId), true, 'busDeliverToHost attempted the host resume (the in-memory registry is stale-live, so the addressing gate passed and the catch ran)')
+
+        // (iii) ZERO new post-error ROWs for the retired host — the DURABLE
+        // hosts.json gate sees it retired even though the in-memory registry says live.
+        await waitFor(async () => {
+          return readPostErrorsFile(stateDir).filter((r) => r.postId === hostId).length === before
+        }, 5000, 'retired-host (stale in-memory) row count is stable')
+        const staleRows = readPostErrorsFile(stateDir).filter((r) => r.postId === hostId)
+        assert.equal(staleRows.length, before, `the STALE-in-memory but DURABLY-retired host appends ZERO NEW post-error ROWs (${before} before → ${staleRows.length} after)`)
+        // No QD quality-inspect directive addressed to quality-head for it.
+        const dirs = await qualityDirectives(stateDir)
+        assert.equal(dirs.filter((d) => /post-error.*post host-buga-durable-stale/.test(d.text)).length, 0, 'NO quality-inspect directive is emitted for the DURABLY-retired host')
+      } finally {
+        await env.dispose()
+      }
+    } finally {
+      delete process.env[QUALITY_INSPECT_ENV_VAR]
+    }
+  })
+})
+
 test('P2 Bug C: an ALREADY-delivered post-error identity is NEVER re-alerted (no per-window re-fire); a NEW postId (a new error identity) alerts', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
