@@ -28,7 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { Config as configSchema } from '../lib/org.js'
@@ -352,6 +352,22 @@ class StubAgents extends Service {
   }
 }
 
+/** FIX-2 (QD NO_ADAPTER alerting) — a trivial optional `llm` service stub:
+ * satisfies the plugin's BOOT provider-adapter check (`ctx.get('llm').
+ * listProviders()`). A boot WITHOUT this option leaves `llm` absent (the
+ * hermetic default) so the boot check skips with a warn (headless/minimal
+ * profile), exactly as production. */
+class StubLLM extends Service {
+  constructor(ctx, providers) {
+    super(ctx, 'llm')
+    this.providers = providers ?? []
+  }
+
+  listProviders() {
+    return this.providers
+  }
+}
+
 /** Stub persistence: author enough of a resolved session to cold-resume, and
  * (FIX 1 — the rotation cold-seed seam) RECORD the S2 `create`/`append` calls
  * as spies so the real-Loader rotation can run (no real artifact backend is
@@ -668,6 +684,11 @@ async function bootPlugin(stateDir, opts = {}) {
   loader.create({ id: 'tools', name: '@deepseek-ai/dsh-tools' })
 
   const agents = new StubAgents(root)
+  // FIX-2 (QD NO_ADAPTER alerting): an OPT-IN `llm` service stub so the BOOT
+  // provider-adapter check is drivable (ctx.get('llm').listProviders()). A boot
+  // without this option leaves `llm` ABSENT (the hermetic default) → the boot
+  // check skips with a warn (headless/minimal profile), exactly as production.
+  const llm = opts.llmListProviders !== undefined ? new StubLLM(root, opts.llmListProviders) : undefined
   // F10 preset-mount ordering fix: an OPT-IN stub agentPresets service that
   // replicates the real mount() timing (registers the preset fs tools into a
   // PER-PRESET standing scope and binds the agent scope to it only when mount()
@@ -777,6 +798,7 @@ async function bootPlugin(stateDir, opts = {}) {
   return {
     root,
     agents,
+    llm,
     agentPresets,
     persistence,
     workspaceRegistry,
@@ -8946,6 +8968,132 @@ test('W8-c PART 4 config knobs: an individual safeguard enabled:false → that s
     await tick({ stateDir, org: { departments: [] }, health: { turnErrorCaptureEnabled: false } }, turnErr)
     assert.equal(alerts.length, 0, 'turn-error off → NO alert')
     assert.deepEqual(readPostErrorsFile(stateDir), [], 'turn-error off → NO post-error row recorded')
+  })
+})
+
+test('FIX-1 (QD NO_ADAPTER alerting): a cleanly-retired WORKER whose live session events hold a FRESH turn/end ERROR (NO_ADAPTER) is captured at retire — ONE post-error row, the retire still succeeds, and the row is a daemon-alertable post-error finding', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithHead(stateDir)
+    try {
+      // A head spawns a worker; the FIRST model call dies with NO_ADAPTER (which
+      // surfaces as a turn/end reason=error on the agent's live session log).
+      const spawned = await f3Spawn(env, env.headCtx, env.key, env.head, { role: 'researcher', task: 'investigate X' })
+      const postId = spawned.result.workerId
+      const now = Date.now()
+      spawned.worker.session.events.push({
+        type: 'turn/end', time: now,
+        data: { turn: 1, reason: { kind: 'error', message: 'no adapter registered for provider "opencode-zen"', code: 'NO_ADAPTER' } }
+      })
+      // Retire it: the retire must SUCCEED (the capture is non-fatal) AND the
+      // retire-seam must have recovered the error turn the daemon would have missed.
+      const retired = await env.headCtx.tools.get('dept_worker_retire', env.key).execute({ workerId: postId }, { agent: env.head, signal: new AbortController().signal })
+      assert.equal(retired.retired, true, 'the retire still succeeds (the retire-seam capture is non-fatal)')
+      const rows = readPostErrorsFile(stateDir).filter((r) => r.postId === postId)
+      assert.equal(rows.length, 1, 'exactly ONE post-error row is appended for the NO_ADAPTER worker at retire (no double-count)')
+      assert.match(rows[0].error, /no adapter registered|NO_ADAPTER/, 'the row carries the NO_ADAPTER error text')
+      // The row is a daemon-observable post-error finding → the host is ALERTED.
+      const findings = scanPostErrorFindings(stateDir, now)
+      assert.ok(findings.some((f) => f.postId === postId), 'the NO_ADAPTER retire row is a post-error finding the health daemon alerts on')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('FIX-1 (QD NO_ADAPTER alerting): a retired WORKER WITHOUT a fresh error turn appends NO post-error row (a clean completion is not a false positive)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithHead(stateDir)
+    try {
+      const spawned = await f3Spawn(env, env.headCtx, env.key, env.head, { role: 'researcher', task: 'clean task' })
+      const postId = spawned.result.workerId
+      // A CLEAN completion (turn/end reason ok) — NOT an error turn.
+      spawned.worker.session.events.push({ type: 'turn/end', time: Date.now(), data: { turn: 1, reason: { kind: 'ok' } } })
+      const retired = await env.headCtx.tools.get('dept_worker_retire', env.key).execute({ workerId: postId }, { agent: env.head, signal: new AbortController().signal })
+      assert.equal(retired.retired, true, 'the retire succeeds')
+      assert.equal(readPostErrorsFile(stateDir).filter((r) => r.postId === postId).length, 0, 'a clean worker appends NO post-error row at retire')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('FIX-2 (QD NO_ADAPTER alerting): PURE provider-adapter boot check — a missing registered adapter is a finding; a registered + clean endpoint is NOT; an endpoint drift (local/proxy baseURL or maxRetries:0) is a finding; the settings.yaml parser resolves the pi-ai surface', async () => {
+  // (a) Missing adapter (the NO_ADAPTER class): configured but the adapter was
+  // never registered → ONE finding, independent of any spawned agent.
+  assert.deepEqual(resolveProviderAdapterBootFindings({ configuredProviders: ['opencode-zen'], registeredProviders: [] }), [
+    { postId: PROVIDER_ADAPTER_CHECK_POST_ID, error: 'provider adapter not registered for "opencode-zen"' }
+  ])
+  // (b) Registered + a clean remote endpoint → NO finding (no false positive).
+  assert.deepEqual(resolveProviderAdapterBootFindings({
+    configuredProviders: ['opencode-zen'],
+    registeredProviders: [{ id: 'opencode-zen', name: 'OpenCode Zen' }],
+    providerSettings: { 'opencode-zen': { baseURL: 'https://opencode.ai/zen/go/v1', maxRetries: 2 } }
+  }), [])
+  // (c) Endpoint drift: a local/proxy baseURL (the QD stale settings value).
+  assert.deepEqual(resolveProviderAdapterBootFindings({
+    configuredProviders: ['opencode-zen'],
+    registeredProviders: [{ id: 'opencode-zen', name: 'OpenCode Zen' }],
+    providerSettings: { 'opencode-zen': { baseURL: 'http://127.0.0.1:4097/v1', maxRetries: 2 } }
+  }), [
+    { postId: PROVIDER_ADAPTER_CHECK_POST_ID, error: 'provider endpoint drift for "opencode-zen": baseURL "http://127.0.0.1:4097/v1" is a local/proxy endpoint, not the remote provider surface' }
+  ])
+  // (d) Endpoint drift: a maxRetries: 0 profile (the QD stale-profile signal).
+  assert.deepEqual(resolveProviderAdapterBootFindings({
+    configuredProviders: ['opencode-zen'],
+    registeredProviders: [{ id: 'opencode-zen', name: 'OpenCode Zen' }],
+    providerSettings: { 'opencode-zen': { baseURL: 'https://opencode.ai/zen/go/v1', maxRetries: 0 } }
+  }), [
+    { postId: PROVIDER_ADAPTER_CHECK_POST_ID, error: 'provider endpoint drift for "opencode-zen": maxRetries is 0 (the QD outage\'s stale-profile signal)' }
+  ])
+  // The drift helper is conservative: a healthy remote endpoint yields NO drift.
+  assert.equal(providerAdapterEndpointDrift('opencode-zen', { baseURL: 'https://opencode.ai/zen/go/v1', maxRetries: 2 }), undefined)
+  assert.match(providerAdapterEndpointDrift('opencode-zen', { baseURL: 'http://127.0.0.1:4097/v1' }) ?? '', /local\/proxy/, 'a proxy baseURL is a drift')
+  // The dependency-free settings.yaml parser resolves the pi-ai provider surface.
+  const parsed = parseLlmPiAiProviderSettings([
+    'llm-pi-ai:',
+    '  providers:',
+    '    opencode-zen:',
+    '      api: openai-completions',
+    '      baseURL: http://127.0.0.1:4097/v1',
+    '      apiKeyEnv: OPENCODE_GO_API_KEY',
+    '      maxRetries: 0'
+  ].join('\n'))
+  assert.deepEqual(parsed, { 'opencode-zen': { baseURL: 'http://127.0.0.1:4097/v1', maxRetries: 0 } }, 'the parser resolves baseURL + maxRetries per provider')
+  // A settings.yaml without the pi-ai namespace is a no-op (never a finding source).
+  assert.deepEqual(parseLlmPiAiProviderSettings('other: {}\n'), {}, 'a non-pi-ai settings.yaml resolves to {}')
+})
+
+test('FIX-2 (QD NO_ADAPTER alerting): a boot where the configured provider is NOT registered (llm.listProviders() lacks it) appends a provider-adapter post-error row FROM THE BREAK, even with no agent spawned', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The llm service is present but the configured provider route ('opencode-zen')
+    // is NOT in the adapter registry (the exact condition of the outage); the test
+    // coordinator route 'stub-coord' IS registered, so it is NOT a false finding.
+    const env = await bootPlugin(stateDir, { llmListProviders: [{ id: 'stub-coord', name: 'Stub Coord' }] })
+    try {
+      await waitFor(() => readPostErrorsFile(stateDir).some((r) => r.postId === PROVIDER_ADAPTER_CHECK_POST_ID), 5000, 'provider-adapter boot row written')
+      const rows = readPostErrorsFile(stateDir).filter((r) => r.postId === PROVIDER_ADAPTER_CHECK_POST_ID)
+      assert.equal(rows.length, 1, 'exactly ONE provider-adapter finding (opencode-zen only — the registered test coordinator is not a false positive)')
+      assert.match(rows[0].error, /provider adapter not registered for "opencode-zen"/, 'the finding names the configured provider route')
+      const findings = scanPostErrorFindings(stateDir, Date.now())
+      assert.ok(findings.some((f) => f.postId === PROVIDER_ADAPTER_CHECK_POST_ID), 'the missing-adapter row is a post-error finding the daemon alerts on')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('FIX-2 (QD NO_ADAPTER alerting): a boot where the configured provider IS registered + the endpoint matches → NO provider-adapter row (no false positive from the break)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Both the worker/head route ('opencode-zen') AND the test coordinator route
+    // ('stub-coord') are registered, and no drift-inducing settings.yaml exists.
+    const env = await bootPlugin(stateDir, { llmListProviders: [{ id: 'opencode-zen', name: 'OpenCode Zen' }, { id: 'stub-coord', name: 'Stub Coord' }] })
+    try {
+      // Let the boot provider-adapter check settle (it runs in the boot .then block).
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      assert.equal(readPostErrorsFile(stateDir).filter((r) => r.postId === PROVIDER_ADAPTER_CHECK_POST_ID).length, 0, 'a boot with the configured provider registered + a clean endpoint is NOT flagged')
+    } finally {
+      await env.dispose()
+    }
   })
 })
 

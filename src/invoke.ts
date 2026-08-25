@@ -2137,6 +2137,163 @@ export function scanConfigPresetFindings(stateDir: string, nowMs: number): Healt
   ]
 }
 
+/** FIX-2 (QD NO_ADAPTER alerting) — the synthetic postId under which a BOOT
+ * provider-adapter-registration/endpoint finding is written. It is a NON-post
+ * id (a postId the registry never mints), so it can never collide with a real
+ * post, and the W6 daemon's `scanPostErrorFindings` surfaces it as a
+ * `post-error` finding → the host is ALERTED from the break even with NO agent
+ * spawned in the window (the QH acceptance "boot check that fires a finding
+ * independent of any spawned agent"). */
+export const PROVIDER_ADAPTER_CHECK_POST_ID = 'provider-adapter-check'
+
+/** ONE provider-adapter boot finding: a configured provider route that is either
+ * (a) NOT registered as a live adapter (the NO_ADAPTER class — configured but the
+ * pi-ai adapter was never registered, the exact condition that produces a silent
+ * first-call NO_ADAPTER), or (b) registered but with a drifted/stale endpoint
+ * surface (a baseURL to a local/proxy endpoint or a `maxRetries: 0` profile — the
+ * QD config-hygiene signal). */
+export interface ProviderAdapterBootFinding {
+  postId: string
+  error: string
+}
+
+/** FIX-2 — the PURE provider-adapter boot-check inputs. */
+export interface ProviderAdapterBootInput {
+  /** The configured provider routes (worker route, host route, coordinators). */
+  configuredProviders: readonly string[]
+  /** The provider routes CURRENTLY registered as adapters (llm.listProviders():
+   * [{id, name}], NO endpoint stored — the trace crux for the drift half). */
+  registeredProviders: readonly { id: string; name: string }[]
+  /** Optional per-provider endpoint surface (llm-pi-ai.providers.<p>.baseURL /
+   * .maxRetries). Absent → the drift half is a no-op (the missing-adapter half
+   * still fires), exactly the graceful degradation production needs. */
+  providerSettings?: Readonly<Record<string, { baseURL?: string; maxRetries?: number }>>
+}
+
+/** A baseURL that points at a LOCAL/PROXY surface rather than the remote provider
+ * endpoint — the value the outage's stale settings carried (the QD re-wire
+ * http://127.0.0.1:4097/v1 → https://opencode.ai/zen/go/v1). */
+const LOCAL_ENDPOINT_RE = /(?:127\.0\.0\.1|localhost|0\.0\.0\.0)(?::|\/|$)/i
+
+/** Detect a provider ENDPOINT DRIFT (the QD config-hygiene signal): a baseURL
+ * pointing at a local/proxy surface (127.0.0.1 / localhost / 0.0.0.0) or a
+ * `maxRetries: 0` profile. Returns a human-readable drift error, or undefined
+ * when the endpoint surface is healthy. Pure, never throws. */
+export function providerAdapterEndpointDrift(provider: string, settings: { baseURL?: string; maxRetries?: number }): string | undefined {
+  const baseURL = (settings.baseURL ?? '').trim()
+  if (baseURL !== '' && LOCAL_ENDPOINT_RE.test(baseURL)) {
+    return `provider endpoint drift for "${provider}": baseURL "${baseURL}" is a local/proxy endpoint, not the remote provider surface`
+  }
+  if (settings.maxRetries === 0) {
+    return `provider endpoint drift for "${provider}": maxRetries is 0 (the QD outage's stale-profile signal)`
+  }
+  return undefined
+}
+
+/** FIX-2 — PURE provider-adapter boot check. Returns ONE finding per configured
+ * provider that is either (a) NOT registered as a live adapter (the NO_ADAPTER
+ * class — the provider is configured but its adapter was never registered, the
+ * condition that produced the silent ~49-min outage), or (b) registered but with a
+ * drifted/stale endpoint surface. Never throws. */
+export function resolveProviderAdapterBootFindings(input: ProviderAdapterBootInput): ProviderAdapterBootFinding[] {
+  const registered = new Set<string>((input.registeredProviders ?? []).map((p) => p.id))
+  const findings: ProviderAdapterBootFinding[] = []
+  for (const provider of input.configuredProviders ?? []) {
+    if (provider === undefined || provider === '') continue
+    if (!registered.has(provider)) {
+      findings.push({ postId: PROVIDER_ADAPTER_CHECK_POST_ID, error: `provider adapter not registered for "${provider}"` })
+      continue
+    }
+    const settings = input.providerSettings?.[provider]
+    if (settings !== undefined) {
+      const drift = providerAdapterEndpointDrift(provider, settings)
+      if (drift !== undefined) findings.push({ postId: PROVIDER_ADAPTER_CHECK_POST_ID, error: drift })
+    }
+  }
+  return findings
+}
+
+/** Strip surrounding single/double quotes from a YAML scalar (best-effort). */
+function unquoteYamlScalar(value: string): string {
+  const v = value.trim()
+  if (v.length >= 2 && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))) return v.slice(1, -1)
+  return v
+}
+
+/** FIX-2 — parse a minimal `settings.yaml` surface for the pi-ai provider
+ * profiles: `llm-pi-ai.providers.<provider>.baseURL` / `.maxRetries`. This is a
+ * bounded, DEPENDENCY-FREE line scan (the plugin loads in hermetic/minimal
+ * profiles with no yaml package), so a parse failure or a non-matching structure
+ * degrades to an empty map → the drift half of fix-2 is a NO-OP (the
+ * missing-adapter half still fires). Never throws. */
+export function parseLlmPiAiProviderSettings(text: string): Record<string, { baseURL?: string; maxRetries?: number }> {
+  const out: Record<string, { baseURL?: string; maxRetries?: number }> = {}
+  const indentOf = (value: string): number => {
+    const m = /^\s*/.exec(value)
+    return m ? m[0].length : 0
+  }
+  let mode: 'none' | 'llm-pi-ai' | 'providers' = 'none'
+  let providersIndent = -1
+  let providerIndent = -1
+  let current: { baseURL?: string; maxRetries?: number } | undefined
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/\r$/, '')
+    const trimmed = line.trim()
+    if (trimmed === '' || trimmed.startsWith('#') || trimmed === '---') continue
+    const indent = indentOf(line)
+    if (mode === 'none') {
+      if (indent === 0 && /^llm-pi-ai\s*:/.test(trimmed)) mode = 'llm-pi-ai'
+      continue
+    }
+    if (mode === 'llm-pi-ai') {
+      if (indent === 0) break /* the llm-pi-ai block ended */
+      if (/^providers\s*:/.test(trimmed)) {
+        mode = 'providers'
+        providersIndent = indent
+      }
+      continue
+    }
+    /* mode === 'providers' */
+    if (indent <= providersIndent) {
+      mode = 'none'
+      current = undefined
+      continue
+    }
+    const isProviderKey = /^[A-Za-z0-9_.-]+\s*:\s*$/.test(trimmed)
+    if (isProviderKey && (current === undefined || indent === providerIndent)) {
+      const name = trimmed.replace(/:\s*$/, '').trim()
+      current = { baseURL: undefined, maxRetries: undefined }
+      out[name] = current
+      providerIndent = indent
+      continue
+    }
+    if (current === undefined) continue
+    const baseMatch = /^baseURL\s*:\s*(.+)$/i.exec(trimmed)
+    if (baseMatch) {
+      current.baseURL = unquoteYamlScalar(baseMatch[1])
+      continue
+    }
+    const retryMatch = /^maxRetries\s*:\s*(.+)$/i.exec(trimmed)
+    if (retryMatch) {
+      const parsed = Number(unquoteYamlScalar(retryMatch[1]))
+      current.maxRetries = Number.isFinite(parsed) ? parsed : undefined
+    }
+  }
+  return out
+}
+
+/** FIX-2 — read the pi-ai provider endpoint surface from `<stateDir>/settings.yaml`
+ * (best-effort: absent/unreadable/malformed → {}, never throws). The plugin's own
+ * config.stateDir is the DSH runtime state dir that carries settings.yaml. */
+export function readLlmPiAiProviderSettings(stateDir: string): Record<string, { baseURL?: string; maxRetries?: number }> {
+  try {
+    const text = readFileSync(path.join(stateDir, 'settings.yaml'), 'utf8')
+    return parseLlmPiAiProviderSettings(text)
+  } catch {
+    return {}
+  }
+}
+
 /** W8-c PART 2 — the production inbox reader: map recipientId → the ts of its
  * ADDRESSED messages (delivery rows with status 'prepared'/'delivered'/'resumed'
  * inside the window, resolved to the message record ts). PURE — the parsed rows
@@ -7885,6 +8042,43 @@ export function applyInvoke(ctx: Context, config: Config) {
    * replacing the pre-F1 generic "any worker" check. A legacy worker without
    * the F1 fields matches neither (backfill policy: an estate-owned orphan is
    * host-retireable only). A permanent head is never retired by a head. */
+  /** FIX-1 (QD NO_ADAPTER alerting) — capture a FRESH turn/end ERROR (the
+   * NO_ADAPTER / no-provider class) at the moment a WORKER is cleanly retired and
+   * append ONE post-error row so the health daemon ALERTS the host even though the
+   * post is about to be retired. The daemon's per-tick turn-error capture
+   * (runHealthDaemonTick → scanTurnErrorCaptures) SKIPS retired posts
+   * (`if (post.retired === true) continue`) AND the retire path disposes the handle
+   * (disposeHeadHandleOnce below), so the live session events are GONE before the
+   * ≤60s tick scans them — a no-op-die worker (NO_ADAPTER at its first model call)
+   * would otherwise be indistinguishable from success. Reading the STILL-LIVE
+   * handle's events HERE (before dispose) recovers the error turn.
+   * Never throws (a capture/persist failure is a warn — non-fatal to the retire);
+   * deduped via turn-errors-state so a turn the daemon ALREADY recorded (and is
+   * still fresh) is NOT double-counted. */
+  const captureRetiredPostTurnError = async (stateDir: string, sessionId: string, postId: string): Promise<void> => {
+    try {
+      const liveAgent = agents?.get(sessionId)
+      const events = (liveAgent?.session?.events ?? []) as HealthSessionEvent[]
+      if (events.length === 0) return
+      const capture = scanTurnErrorCaptures(events, postId)
+      if (capture === undefined) return
+      const nowMs = Date.now()
+      // Only a FRESH error (<= the turn-error window) is worth recording at retire —
+      // a stale turn either was already captured by a prior daemon tick or is too
+      // old to alert on.
+      if (nowMs - capture.ts > TURN_ERROR_FRESH_WINDOW_MS) return
+      // Dedupe: a turn the daemon ALREADY recorded (and is still fresh) is not
+      // recorded twice (the retire-seam is a second chance, not a double-count).
+      const captureState = readTurnErrorsState(stateDir)
+      const lastCaptured = captureState[capture.key]
+      if (lastCaptured !== undefined && nowMs - lastCaptured < TURN_ERROR_FRESH_WINDOW_MS) return
+      await appendPostError(stateDir, { ts: capture.ts, postId: capture.postId, error: capture.error })
+      await writeTurnErrorsState(stateDir, { ...captureState, [capture.key]: nowMs })
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] dept_worker_retire: turn-error capture failed (non-fatal to the retire): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   const retirePost = async (postId: string, callerAgentId: string): Promise<{ postId: string; retired: true }> => {
     const entry = byPost.get(postId)
     if (entry === void 0) throw new Error(`[deepartments] dept_post_retire: "${postId}" is not a registered post`)
@@ -7911,6 +8105,12 @@ export function applyInvoke(ctx: Context, config: Config) {
     // succeeds as a no-op (the dispose is deduped via disposeHeadHandleOnce).
     if (entry.retired === true) return { postId, retired: true }
     if (entry.provider === 'worker') {
+      // FIX-1 (QD NO_ADAPTER alerting): BEFORE the mark + dispose, capture a FRESH
+      // turn/end error (e.g. NO_ADAPTER) on the STILL-LIVE handle's session events
+      // so the health daemon ALERTS the host even though this post is about to be
+      // retired (the daemon skips retired posts AND the dispose empties the events
+      // — see captureRetiredPostTurnError). Never throws / non-fatal to the retire.
+      await captureRetiredPostTurnError(config.stateDir, entry.sessionId, postId)
       // MARK, NOT ERASE (F1): the registry entry stays; the live catalog filters.
       entry.retired = true
       persistPosts()
@@ -8529,6 +8729,53 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  /** FIX-2 (QD NO_ADAPTER alerting) — a BOOT provider-adapter-registration check
+   * that fires a finding INDEPENDENT of any spawned agent (the QH acceptance "a
+   * boot check that fires a finding independent of any spawned agent" / the
+   * "from the break" trigger). It queries the LLM adapter registry
+   * (`ctx.get('llm').listProviders()`), compares the configured provider route(s)
+   * (the worker/head route pinned 'opencode-zen' in WORKER_AGENT_OPTIONS /
+   * HOST_AGENT_OPTIONS + each coordinator) to the registry, AND (best-effort)
+   * reads the pi-ai provider endpoint surface (llm-pi-ai.providers.<provider>
+   * .baseURL / .maxRetries) to flag a drift (a local/proxy baseURL or a
+   * `maxRetries: 0` profile — the QD config-hygiene signal). On a missing or
+   * drifted provider it appends a post-error row so the health daemon ALERTS the
+   * host EVEN WITH NO AGENT SPAWNED. Read-only + never-throws; a headless/minimal
+   * profile with no `llm` service is skipped with a warn. Gated on
+   * `health.enabled` (the WHOLE health daemon OFF → no alert path → skip). */
+  const runProviderAdapterBootCheck = async (): Promise<void> => {
+    if (config.health?.enabled === false) return
+    try {
+      const llm = ctx.get('llm', false) as { listProviders?: () => Array<{ id: string; name: string }> } | undefined
+      if (llm === undefined || typeof llm.listProviders !== 'function') {
+        ctx.logger.warn('[deepartments] provider-adapter boot check skipped — the "llm" service is absent (headless/minimal profile)')
+        return
+      }
+      const registeredProviders = (llm.listProviders() ?? [])
+      const configuredProviders = new Set<string>()
+      if (WORKER_AGENT_OPTIONS.provider) configuredProviders.add(WORKER_AGENT_OPTIONS.provider)
+      if (HOST_AGENT_OPTIONS.provider) configuredProviders.add(HOST_AGENT_OPTIONS.provider)
+      for (const department of config.org.departments ?? []) {
+        const c = department.coordinator
+        if (c?.agentOptions?.provider) configuredProviders.add(c.agentOptions.provider)
+        else if (c?.provider) configuredProviders.add(c.provider)
+      }
+      const providerSettings = readLlmPiAiProviderSettings(config.stateDir)
+      const findings = resolveProviderAdapterBootFindings({
+        configuredProviders: [...configuredProviders],
+        registeredProviders,
+        providerSettings
+      })
+      if (findings.length === 0) return
+      for (const finding of findings) {
+        await appendPostError(config.stateDir, { ts: Date.now(), postId: finding.postId, error: finding.error })
+      }
+      ctx.logger.warn(`[deepartments] provider-adapter boot check: ${findings.length} finding(s) → ${findings.map((f) => f.error).join('; ')}`)
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] provider-adapter boot check failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   // Boot: materialize the head preset and every configured head once the
   // registries (posts/hosts) have cold-loaded — and re-drive any crash-pending
   // bus deliveries (see the re-delivery driver below). Head materialization no
@@ -8538,6 +8785,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     void redeliverPendingDeliveries()
     void runPresetAudit()
     void runInterruptedPostReconciliation()
+    void runProviderAdapterBootCheck()
   })
 
   // ---------------------------------------------------------------------------
