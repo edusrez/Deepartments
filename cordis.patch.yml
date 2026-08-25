@@ -63,9 +63,9 @@
               workspacePath: /root/.deepartments/departments/quality
               coordinator:
                 postId: quality-head
-                title: Head of Quality
+                title: Quality Head
                 role: Quality department head
-                sessionTitle: Head of Quality
+                sessionTitle: Quality Head
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen

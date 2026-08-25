@@ -42,7 +42,7 @@ line refs are treated as design-level.
 
 | # | Decision | Baked in as |
 |---|---|---|
-| D-Q1 | **Naming.** Department id `quality`; name "Quality Department"; coordinator postId `quality-head`, title "Head of Quality", role "Quality department head", sessionTitle "Head of Quality"; head preset `deepartments-head-quality`; workspacePath `/root/.deepartments/departments/quality`; jobDir `docs/departments/quality/jobs`; spec `docs/specs/007-quality-department.md`. | §3.1, §7.4 |
+| D-Q1 | **Naming.** Department id `quality`; name "Quality Department"; coordinator postId `quality-head`, title "Quality Head", role "Quality department head", sessionTitle "Quality Head"; head preset `deepartments-head-quality`; workspacePath `/root/.deepartments/departments/quality`; jobDir `docs/departments/quality/jobs`; spec `docs/specs/007-quality-department.md`. | §3.1, §7.4 |
 | D-Q2 | **Random control (worker archive).** When a NON-head agent session is archived (a disposable WORKER retired via `dept_worker_retire`/`dept_post_retire`), wake a QD inspection with probability `0.10` — a configurable constant (default 0.10) in the org config (`quality: { workerInspectProbability?: number }`), testable deterministically via an injected seed / env override (`DEEPARTMENTS_QUALITY_INSPECT`-style env OR an injected rng so tests are deterministic). | §4, §5.2, §6.1 |
 | D-Q3 | **Mandatory 100% (head + host) — with a single anti-loop exception.** EVERY head archive (a department head's `dept_sleep`, which archives the head session) AND EVERY host session rotation (the Asistente's `dept_sleep` host branch, which archives the OLD host session) is inspected at **100% — never gated by the dice** — EXCEPT the **Quality Head's own sleep**, which is SAMPLED at the 0.10 worker dice (D-Q7). The host counts as a "H" (head-equivalent). | §6.2, §6.3, §7.2 |
 | D-Q4 | **Analysis of architecture errors — two paths.** (a) EVENT-DRIVEN: a new post-error record (the spec 006 system-health post-error capture, `post-errors.jsonl`) triggers a QD analysis directive to quality-head (with the error record); (b) A DAILY DIGEST JOB `quality-daily` (role `quality-inspector`, cron `0 8 * * *`, owner `quality-head`, calendar entry `departmentId=quality`) that consolidates patterns (post-errors, stalled posts, delivery failures, inspection results). | §6.4, §6.5 |
@@ -184,9 +184,9 @@ Quality Department (org.departments[], id: quality)
   "jobDir": "docs/departments/quality/jobs",                    // default from jobDirFor (org.ts)
   "coordinator": {
     "postId": "quality-head",
-    "title": "Head of Quality",
+    "title": "Quality Head",
     "role": "Quality department head",
-    "sessionTitle": "Head of Quality",
+    "sessionTitle": "Quality Head",
     "provider": "opencode-zen",
     "agentOptions": { "provider": "opencode-zen", "model": "deepseek-v4-flash-vision-exp", "reasoningEffort": "max" }
   }
@@ -540,7 +540,7 @@ worker reports to the QH (never the host — worker → host is PROHIBITED).
 
 The `deepartments-head-quality` persona becomes, in effect:
 
-> You are the **Head of Quality** of the **Quality Department** (Deepartments,
+> You are the **Quality Head** of the **Quality Department** (Deepartments,
 > DeepSeek Harness). You OWN the QUALITY of the Deepartments organization's own
 > runtime — you do NOT fix it. You receive **Quality Inspect directives** (bus
 > messages from the archive-event hooks: a retired worker sampled at 10%, a
