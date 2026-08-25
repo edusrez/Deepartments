@@ -356,7 +356,13 @@ class StubAgents extends Service {
  * satisfies the plugin's BOOT provider-adapter check (`ctx.get('llm').
  * listProviders()`). A boot WITHOUT this option leaves `llm` absent (the
  * hermetic default) so the boot check skips with a warn (headless/minimal
- * profile), exactly as production. */
+ * profile), exactly as production.
+ *
+ * FIX-2 race-tolerance: `listProviders` may be EITHER a static array (the
+ * pre-race test shape) OR a FUNCTION the boot check PROBES on EACH poll — so a
+ * test models a provider adapter that REGISTERS ASYNCHRONOUSLY after the boot
+ * check first reads the registry (the fix-2 false positive: the check fires
+ * before `ctx.llm.registerAdapter` settles). */
 class StubLLM extends Service {
   constructor(ctx, providers) {
     super(ctx, 'llm')
@@ -364,7 +370,7 @@ class StubLLM extends Service {
   }
 
   listProviders() {
-    return this.providers
+    return typeof this.providers === 'function' ? this.providers() : this.providers
   }
 }
 
@@ -9063,19 +9069,49 @@ test('FIX-2 (QD NO_ADAPTER alerting): PURE provider-adapter boot check — a mis
   assert.deepEqual(parseLlmPiAiProviderSettings('other: {}\n'), {}, 'a non-pi-ai settings.yaml resolves to {}')
 })
 
-test('FIX-2 (QD NO_ADAPTER alerting): a boot where the configured provider is NOT registered (llm.listProviders() lacks it) appends a provider-adapter post-error row FROM THE BREAK, even with no agent spawned', async () => {
+test('FIX-2 (QD NO_ADAPTER alerting): a boot where the configured provider NEVER registers within the retry window (a GENUINE outage) appends EXACTLY ONE provider-adapter post-error row FROM THE BREAK, even with no agent spawned', async () => {
   await withTempStateDir(async (stateDir) => {
     // The llm service is present but the configured provider route ('opencode-zen')
-    // is NOT in the adapter registry (the exact condition of the outage); the test
-    // coordinator route 'stub-coord' IS registered, so it is NOT a false finding.
-    const env = await bootPlugin(stateDir, { llmListProviders: [{ id: 'stub-coord', name: 'Stub Coord' }] })
+    // is NEVER registered across the whole bounded retry window (the exact condition
+    // of the ~49-min outage); the test coordinator route 'stub-coord' IS registered,
+    // so it is NOT a false finding. A SHORT retry window (via the health config)
+    // keeps the HARD alert path fast + deterministic.
+    const env = await bootPlugin(stateDir, { llmListProviders: [{ id: 'stub-coord', name: 'Stub Coord' }], health: { providerAdapterRetryWindowMs: 300, providerAdapterRetryMs: 20 } })
     try {
       await waitFor(() => readPostErrorsFile(stateDir).some((r) => r.postId === PROVIDER_ADAPTER_CHECK_POST_ID), 5000, 'provider-adapter boot row written')
       const rows = readPostErrorsFile(stateDir).filter((r) => r.postId === PROVIDER_ADAPTER_CHECK_POST_ID)
-      assert.equal(rows.length, 1, 'exactly ONE provider-adapter finding (opencode-zen only — the registered test coordinator is not a false positive)')
+      assert.equal(rows.length, 1, 'EXACTLY ONE provider-adapter finding (opencode-zen only — the registered test coordinator is not a false positive)')
       assert.match(rows[0].error, /provider adapter not registered for "opencode-zen"/, 'the finding names the configured provider route')
       const findings = scanPostErrorFindings(stateDir, Date.now())
       assert.ok(findings.some((f) => f.postId === PROVIDER_ADAPTER_CHECK_POST_ID), 'the missing-adapter row is a post-error finding the daemon alerts on')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('FIX-2 (QD NO_ADAPTER alerting): RACE-TOLERANT boot — a configured provider adapter that REGISTERS SHORTLY AFTER boot (the async ctx.llm.registerAdapter settling, the fix-2 FALSE-POSITIVE condition) is suppressed: NO provider-adapter post-error row', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The adapter registry is EMPTY of 'opencode-zen' on the FIRST few polls (the
+    // async registration has not settled when the boot check first reads it), then
+    // the provider REGISTERS shortly after — a healthy-but-slow boot. Deliberately
+    // drive `listProviders` as a FUNCTION the boot check re-probes on each poll.
+    let polls = 0
+    const llmListProviders = () => {
+      polls += 1
+      // First two polls: the adapter is still registering (opencode-zen absent).
+      if (polls <= 2) return [{ id: 'stub-coord', name: 'Stub Coord' }]
+      // Registered shortly after: both configured routes are now live.
+      return [{ id: 'opencode-zen', name: 'OpenCode Zen' }, { id: 'stub-coord', name: 'Stub Coord' }]
+    }
+    const env = await bootPlugin(stateDir, { llmListProviders, health: { providerAdapterRetryWindowMs: 500, providerAdapterRetryMs: 20 } })
+    try {
+      // Let the boot check run its bounded retry: with a 500ms window it polls
+      // every 20ms, so the adapter (appearing on poll 3, ~40ms in) proves a
+      // DELAYED registration is NOT an alert.
+      await new Promise((resolve) => setTimeout(resolve, 700))
+      assert.equal(readPostErrorsFile(stateDir).filter((r) => r.postId === PROVIDER_ADAPTER_CHECK_POST_ID).length, 0, 'a provider that registers within the retry window is a NO-OP (a healthy-but-slow boot is NOT an alert)')
+      assert.ok(polls >= 3, `the boot check re-polled the registry (${polls} polls) before the adapter registered`)
     } finally {
       await env.dispose()
     }

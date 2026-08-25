@@ -2146,6 +2146,22 @@ export function scanConfigPresetFindings(stateDir: string, nowMs: number): Healt
  * independent of any spawned agent"). */
 export const PROVIDER_ADAPTER_CHECK_POST_ID = 'provider-adapter-check'
 
+/** FIX-2 race-tolerance — the boot provider-adapter check is RACE-TOLERANT: it
+ * waits (within a bounded window) for an ASYNC provider-adapter registration
+ * (`ctx.llm.registerAdapter` in the dsh-llm-pi-ai apply) to settle before it
+ * decides. The check is fired in the boot `.then` block (microseconds after
+ * plugin boot) but the adapter registration is ASYNC — so the naive first read
+ * of `llm.listProviders()` can FALSE-POSITIVE on a healthy-but-still-registering
+ * boot ("provider adapter not registered for ..." even though the adapter IS
+ * registered for live calls). A DELAYED registration is NOT an alert; only a
+ * provider STILL MISSING after the window elapses is a GENUINE outage (the HARD
+ * NO_ADAPTER alert). Mirrors the `HOST_ATTACH_REPAIR_*` bounded-retry discipline
+ * (invoke.ts:5224). Both knobs are injectable/testable via
+ * `health.providerAdapterRetryWindowMs` / `health.providerAdapterRetryMs` (the
+ * health daemon config), defaulting to these code-level constants. */
+export const PROVIDER_ADAPTER_RETRY_WINDOW_MS = 5_000
+export const PROVIDER_ADAPTER_RETRY_MS = 250
+
 /** ONE provider-adapter boot finding: a configured provider route that is either
  * (a) NOT registered as a live adapter (the NO_ADAPTER class — configured but the
  * pi-ai adapter was never registered, the exact condition that produces a silent
@@ -8742,7 +8758,21 @@ export function applyInvoke(ctx: Context, config: Config) {
    * drifted provider it appends a post-error row so the health daemon ALERTS the
    * host EVEN WITH NO AGENT SPAWNED. Read-only + never-throws; a headless/minimal
    * profile with no `llm` service is skipped with a warn. Gated on
-   * `health.enabled` (the WHOLE health daemon OFF → no alert path → skip). */
+   * `health.enabled` (the WHOLE health daemon OFF → no alert path → skip).
+   *
+   * RACE-TOLERANT (the fix-2 false positive): the check is fired in the boot
+   * `.then` block (microseconds after plugin boot) but `ctx.llm.registerAdapter`
+   * (the dsh-llm-pi-ai apply) is ASYNC — so the naive FIRST read of
+   * `listProviders()` can run BEFORE the adapter registers and FALSE-POSITIVE on
+   * a healthy-but-still-registering boot. Instead of alerting immediately on a
+   * missing/drifted provider, it polls within a BOUNDED window
+   * (`health.providerAdapterRetryWindowMs` / `health.providerAdapterRetryMs`, default
+   * `PROVIDER_ADAPTER_RETRY_WINDOW_MS`, mirroring the `HOST_ATTACH_REPAIR_*`
+   * bounded-retry discipline): each poll re-reads `listProviders()` and re-reads
+   * the settings surface. A provider that REGISTERS (or a drift that resolves)
+   * WITHIN the window is a DELAYED-but-healthy boot → suppressed (NO alert). Only
+   * a finding STILL PRESENT AFTER the window elapses is a GENUINE outage → the
+   * HARD NO_ADAPTER/endpoint alert is appended. Never throws. */
   const runProviderAdapterBootCheck = async (): Promise<void> => {
     if (config.health?.enabled === false) return
     try {
@@ -8751,7 +8781,6 @@ export function applyInvoke(ctx: Context, config: Config) {
         ctx.logger.warn('[deepartments] provider-adapter boot check skipped — the "llm" service is absent (headless/minimal profile)')
         return
       }
-      const registeredProviders = (llm.listProviders() ?? [])
       const configuredProviders = new Set<string>()
       if (WORKER_AGENT_OPTIONS.provider) configuredProviders.add(WORKER_AGENT_OPTIONS.provider)
       if (HOST_AGENT_OPTIONS.provider) configuredProviders.add(HOST_AGENT_OPTIONS.provider)
@@ -8760,17 +8789,49 @@ export function applyInvoke(ctx: Context, config: Config) {
         if (c?.agentOptions?.provider) configuredProviders.add(c.agentOptions.provider)
         else if (c?.provider) configuredProviders.add(c.provider)
       }
-      const providerSettings = readLlmPiAiProviderSettings(config.stateDir)
-      const findings = resolveProviderAdapterBootFindings({
-        configuredProviders: [...configuredProviders],
-        registeredProviders,
-        providerSettings
-      })
-      if (findings.length === 0) return
-      for (const finding of findings) {
-        await appendPostError(config.stateDir, { ts: Date.now(), postId: finding.postId, error: finding.error })
+      const configuredProviderList = [...configuredProviders]
+      if (configuredProviderList.length === 0) return
+
+      // Bounded retry window (mirrors the HOST_ATTACH_REPAIR_* discipline): the
+      // configured provider(s) may legitimately still be REGISTERING (the async
+      // ctx.llm.registerAdapter) at the moment this boot check first runs — the
+      // exact race that fired the false positive. Poll until the window elapses;
+      // suppress a DELAYED registration, alert on a NEVER-registered provider.
+      const retryHealthCfg = (config.health ?? {}) as unknown as {
+        providerAdapterRetryWindowMs?: number
+        providerAdapterRetryMs?: number
       }
-      ctx.logger.warn(`[deepartments] provider-adapter boot check: ${findings.length} finding(s) → ${findings.map((f) => f.error).join('; ')}`)
+      const retryWindowMs = typeof retryHealthCfg.providerAdapterRetryWindowMs === 'number' && retryHealthCfg.providerAdapterRetryWindowMs > 0
+        ? retryHealthCfg.providerAdapterRetryWindowMs
+        : PROVIDER_ADAPTER_RETRY_WINDOW_MS
+      const retryMs = typeof retryHealthCfg.providerAdapterRetryMs === 'number' && retryHealthCfg.providerAdapterRetryMs > 0
+        ? retryHealthCfg.providerAdapterRetryMs
+        : PROVIDER_ADAPTER_RETRY_MS
+      const deadline = Date.now() + retryWindowMs
+      for (;;) {
+        // Re-read BOTH the registry and the settings surface on every poll so a
+        // transient registration/settings-loading race cannot false-alert.
+        const registeredProviders = (llm.listProviders() ?? [])
+        const providerSettings = readLlmPiAiProviderSettings(config.stateDir)
+        const findings = resolveProviderAdapterBootFindings({
+          configuredProviders: configuredProviderList,
+          registeredProviders,
+          providerSettings
+        })
+        // Provider registered (or the drift resolved) WITHIN the window → this is a
+        // healthy-but-slow boot → NO finding, no alert.
+        if (findings.length === 0) return
+        if (Date.now() >= deadline) {
+          // STILL missing/drifted AFTER the window elapses → a GENUINE outage →
+          // the HARD NO_ADAPTER/endpoint alert (the ~49-min outage case).
+          for (const finding of findings) {
+            await appendPostError(config.stateDir, { ts: Date.now(), postId: finding.postId, error: finding.error })
+          }
+          ctx.logger.warn(`[deepartments] provider-adapter boot check: ${findings.length} finding(s) → ${findings.map((f) => f.error).join('; ')}`)
+          return
+        }
+        await new Promise((resolve) => setTimeout(resolve, retryMs))
+      }
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] provider-adapter boot check failed: ${error instanceof Error ? error.message : String(error)}`)
     }
