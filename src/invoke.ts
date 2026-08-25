@@ -84,17 +84,50 @@ import { runHostRotation, ASISTENTE_SESSION_TITLE, isArchivedSession } from './s
 import type { RotationPersistenceLike, WorkspaceRegistryLike } from './session-rotation.js'
 import type { Config, CoordinatorConfig, DepartmentConfig, ParallelConfig, ParallelMonitorConfig } from './org.js'
 import {
-  COMPACTION_LINE_THRESHOLD,
   MessagesStore,
-  compactDeliveryRows,
   markDelivery,
-  needsRedelivery,
   parseDeliveryRows,
   parseMessageRecords,
   resolveDeliveriesPath,
-  resolveMessagesPath
-} from './messages-store.js'
-import type { DeliveryRow, DeliveryStatus, MessageRecord } from './messages-store.js'
+  resolveMessagesPath,
+  DeliveryRedeliverer
+} from './core/messages.js'
+import type { DeliveryRow, DeliveryStatus, MessageRecord } from './core/messages.js'
+// Re-export the message-store + redelivery-guard public surface (value + type)
+// so the compiled lib/invoke.js stays a drop-in superset of the pre-extraction
+// module (same pattern as step (a) — the registry).
+export {
+  MESSAGE_FILE,
+  DELIVERIES_FILE,
+  resolveMessagesPath,
+  resolveDeliveriesPath,
+  parseMessageRecords,
+  loadMessageRecords,
+  appendMessageRecord,
+  COMPACTION_LINE_THRESHOLD,
+  COMPACTION_BYTE_THRESHOLD,
+  shouldCompact,
+  compactMessages,
+  loadMemberIds,
+  compactMessagesFile,
+  MessagesStore,
+  parseDeliveryRows,
+  markDelivery,
+  deliveryStatus,
+  needsRedelivery,
+  compactDeliveryRows,
+  DeliveryRedeliverer
+} from './core/messages.js'
+export type {
+  MessageKind,
+  MessageRecord,
+  MessageInput,
+  DeliveryRow,
+  DeliveryStatus,
+  PageOptions,
+  PageResult,
+  DeliveryRedelivererDeps
+} from './core/messages.js'
 import { buildAgentRows } from './agents.js'
 import type { PostEntryLike } from './agents.js'
 import {
@@ -8916,7 +8949,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   // longer needs a live parent (root agents) — it runs at boot unconditionally.
   void Promise.all([registryLoaded, hostsLoaded]).then(() => {
     void ensureAllHeads()
-    void redeliverPendingDeliveries()
+    void redeliverPendingDeliveries.run()
     void runPresetAudit()
     void runInterruptedPostReconciliation()
     void runProviderAdapterBootCheck()
@@ -10157,59 +10190,17 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (host !== void 0) return host.retired !== true
     return false
   }
-  const redeliverPendingDeliveries = async (): Promise<void> => {
-    try {
-      const filePath = resolveDeliveriesPath(messageStoreDir)
-      let text: string
-      try {
-        text = await readFile(filePath, 'utf8')
-      } catch (error: unknown) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return // nothing ever sent
-        throw error
-      }
-      let rows = parseDeliveryRows(text)
-      if (rows.length > COMPACTION_LINE_THRESHOLD) {
-        rows = compactDeliveryRows(rows)
-        await writeFile(filePath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`, 'utf8')
-        ctx.logger.info(`[deepartments] deliveries sidecar compacted to ${rows.length} latest-state rows (boot)`)
-      }
-      const latestPerKey = new Map<string, (typeof rows)[number]>()
-      for (const row of rows) latestPerKey.set(`${row.messageId}\u0000${row.recipientId}`, row)
-      const store = await messagesStoreReady
-      for (const row of latestPerKey.values()) {
-        if (!needsRedelivery(row.status)) continue
-        const record = store.get(row.messageId)
-        if (record === void 0 || !record.to.includes(row.recipientId)) {
-          // Record trimmed by the boot compaction (nothing durable remains), OR
-          // the id was REBOUND (the message store renumbered/reused this id for
-          // a DIFFERENT message that never addressed this recipient): nothing
-          // durable/RELEVANT remains to re-deliver, so the pair stays a settled
-          // no-op. A record that DOES still include the recipient is the
-          // legitimate rebound case and re-delivers below (idempotent).
-          // (Issue-3, owner acceptance.)
-          continue
-        }
-        // W7-A: a dead/unknown recipient must NOT be re-attempted at every boot.
-        // Settle it as a single 'terminal' row and skip the bus re-wake — no
-        // deliverBusRecord call, so NO new 'prepared'/'failed' rows (the noise
-        // the W6 health daemon re-alerted on every boot).
-        if (!recipientCatalogAlive(row.recipientId)) {
-          await markDelivery(messageStoreDir, row.messageId, row.recipientId, 'terminal')
-          ctx.logger.info(`[deepartments] boot re-delivery: ${record.id} → ${row.recipientId} (was ${row.status}) → 'terminal' — recipient is dead/unknown (no longer a live catalog member), settled once and never re-attempted`)
-          continue
-        }
-        const callerSessionId = byPost.get(record.from)?.sessionId ?? hosts.get(record.from)?.sessionId ?? record.from
-        try {
-          const status = await deliverBusRecord(record, row.recipientId, callerSessionId, callerSessionId)
-          ctx.logger.info(`[deepartments] boot re-delivery: ${record.id} → ${row.recipientId} (was ${row.status}) → ${status}`)
-        } catch (error: unknown) {
-          ctx.logger.warn(`[deepartments] boot re-delivery ${record.id} → ${row.recipientId} failed: ${error instanceof Error ? error.message : String(error)}`)
-        }
-      }
-    } catch (error: unknown) {
-      ctx.logger.warn(`[deepartments] boot deliveries re-delivery pass failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
+  const redeliverPendingDeliveries = new DeliveryRedeliverer({
+    stateDir: messageStoreDir,
+    logger: ctx.logger,
+    recipientAlive: recipientCatalogAlive,
+    getRecord: async (messageId: string): Promise<MessageRecord | undefined> =>
+      (await messagesStoreReady).get(messageId),
+    resolveCallerSessionId: (from: string): string =>
+      byPost.get(from)?.sessionId ?? hosts.get(from)?.sessionId ?? from,
+    deliver: (record: MessageRecord, recipientId: string, callerSessionId: string): Promise<DeliveryStatus> =>
+      deliverBusRecord(record, recipientId, callerSessionId, callerSessionId)
+  })
 
 
   // --- tool definitions (shared by the GLOBAL host plane and the child's OWN

@@ -10071,6 +10071,69 @@ test('W7-A boot re-delivery: a VALID (live) recipient with a re-attempt-eligible
   })
 })
 
+test('C8′ boot re-delivery: a delivery to a NON-CATALOG finished subagent-child id (a session UUID never in posts.json/hosts.json — m-406/m-407) is settled as ONE terminal row and NOT re-scanned on the next boot', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    // A finished subagent-child session id (the m-406/m-407 shape): present in
+    // the message's to[] but NEVER a durable post id or host id.
+    const finishedChildId = '75a826f6-4c8b-4a1e-9b0d-1e2f3a4b5c6d'
+    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'board' })
+    await seedMessageRecords(stateDir, [
+      { id: 'm-0', seq: 0, ts: now, from: 'research-head', to: [finishedChildId], text: 'hello finished child', kind: 'agent' }
+    ])
+    const deliveriesPath = await seedDeliveryRows(stateDir, [{ messageId: 'm-0', recipientId: finishedChildId, status: 'failed', ts: now }])
+    // FIRST boot: the non-catalog finished child is settled as terminal ONCE.
+    const first = await bootPlugin(stateDir)
+    await waitFor(async () => (await deliveryStatus(stateDir, 'm-0', finishedChildId)) === 'terminal', 5000, 'non-catalog finished child settled as terminal at boot')
+    await first.dispose()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    const rowsAfterFirst = parseDeliveryRows(await readFile(deliveriesPath, 'utf8'))
+    const m0First = rowsAfterFirst.filter((row) => row.messageId === 'm-0')
+    assert.deepEqual(m0First.map((row) => row.status), ['failed', 'terminal'], 'the non-catalog finished-child pair gains ONLY a terminal row (no deliverBusRecord call)')
+    // SECOND boot over the same stateDir: NOT re-scanned/re-alerted (terminal → needsRedelivery false).
+    const second = await bootPlugin(stateDir)
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200)) // let the fire-and-forget boot driver run
+      const rowsAfterSecond = parseDeliveryRows(await readFile(deliveriesPath, 'utf8'))
+      const m0Second = rowsAfterSecond.filter((row) => row.messageId === 'm-0')
+      assert.deepEqual(m0Second.map((row) => row.status), ['failed', 'terminal'], 'the terminal pair is NOT re-scanned on the second boot — no new prepared/failed/terminal row')
+      assert.equal(await deliveryStatus(stateDir, 'm-0', finishedChildId), 'terminal', 'the terminal status persists across the second boot')
+    } finally {
+      await second.dispose()
+    }
+  })
+})
+
+test('C8′ boot re-delivery: a catalog-LIVE recipient with a `failed` sidecar row is STILL re-delivered at boot (delivered/resumed), NEVER settled terminal', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    const hostId = await seedHostRegistration(stateDir, 'host-live-1') // a live host sender → ACL passes to the head
+    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'board', agentPreset: 'deepartments-head' })
+    await seedMessageRecords(stateDir, [
+      { id: 'm-0', seq: 0, ts: now, from: hostId, to: ['research-head'], text: 'retry me', kind: 'agent' }
+    ])
+    const deliveriesPath = await seedDeliveryRows(stateDir, [{ messageId: 'm-0', recipientId: 'research-head', status: 'failed', ts: now }])
+    const { dispose } = await bootPlugin(stateDir)
+    try {
+      // A catalog-LIVE recipient with a failed row is RE-DELIVERED (returns a
+      // delivered/resumed final status) — never terminal (C8′ only settles
+      // NON-catalog recipients).
+      await waitFor(async () => {
+        const s = await deliveryStatus(stateDir, 'm-0', 'research-head')
+        return s === 'delivered' || s === 'resumed'
+      }, 5000, 'a catalog-live recipient with a failed row is RE-DELIVERED at boot (delivered/resumed)')
+      const s = await deliveryStatus(stateDir, 'm-0', 'research-head')
+      assert.ok(s === 'delivered' || s === 'resumed', `catalog-live recipient settled as ${s} (NOT terminal)`)
+      const rows = parseDeliveryRows(await readFile(deliveriesPath, 'utf8'))
+      const m0 = rows.filter((row) => row.messageId === 'm-0')
+      assert.ok(m0.some((row) => row.status === 'delivered' || row.status === 'resumed'), 'the pair carries a delivered/resumed final status')
+      assert.ok(m0.every((row) => row.status !== 'terminal'), 'a catalog-live recipient is NEVER settled as terminal (C8′ only settles NON-catalog)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('Issue-3 redelivery guard (a): a pending sidecar (messageIdX, other-head) whose store record X does NOT include other-head is NOT re-delivered (stale id reuse — the pair stays settled, no new row)', async () => {
   await withTempStateDir(async (stateDir) => {
     const now = Date.now()
