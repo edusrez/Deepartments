@@ -80,7 +80,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { createUserMessage, boundContextSummary, type MessageSource } from '@deepseek-ai/dsh-llm'
 import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './session-cleanup.js'
-import { runHostRotation, validateHostsRotationFile, ROTATION_SCHEMA_VERSION, ASISTENTE_SESSION_TITLE, isArchivedSession } from './session-rotation.js'
+import { runHostRotation, ASISTENTE_SESSION_TITLE, isArchivedSession } from './session-rotation.js'
 import type { RotationPersistenceLike, WorkspaceRegistryLike } from './session-rotation.js'
 import type { Config, CoordinatorConfig, DepartmentConfig, ParallelConfig, ParallelMonitorConfig } from './org.js'
 import {
@@ -107,6 +107,73 @@ import {
 } from './head-presets.js'
 import { roleForSession, buildSubagentOrientation } from './role-orient.js'
 import type { SubagentRole } from './role-orient.js'
+// FASE 2 step (a): the durable registry store (hosts/posts catalog) is carved
+// out of this monolith into ./core/registry.js — the SINGLE source of the
+// catalog. Everything registry-related below (mintWorkerSessionId, the durable
+// read/reconcile helpers, ensureHost/registerEntry/persist + the pure live-host
+// pick) is imported from there and re-exported so the lib/invoke.js public
+// surface stays drop-in for existing consumers (and the bus tests).
+import {
+  RegistryStore,
+  HOST_ID_PREFIX,
+  HEAD_SESSION_PREFIX,
+  WORKER_SESSION_PREFIX,
+  headSessionId,
+  workerSessionId,
+  mintWorkerSessionId,
+  readDurableHostsRegistry,
+  isHostRetiredOnDisk,
+  readDurableRetiredHostIds,
+  readDurableHostEntries,
+  findRotationTerminal,
+  hasRotatedToCycle,
+  analyzeDurableHostRegistry,
+  reconcileDurableHostRegistry,
+  analyzeDurablePostsRegistry,
+  reconcileDurablePostsRegistry,
+  pickLiveHostEntry
+} from './core/registry.js'
+import type {
+  PostEntry,
+  HostEntry,
+  HostEntryLike
+} from './core/registry.js'
+// Re-export the registry's public surface (value + type) so the compiled
+// lib/invoke.js stays a drop-in superset of the pre-extraction module.
+export {
+  RegistryStore,
+  HOST_ID_PREFIX,
+  HEAD_SESSION_PREFIX,
+  WORKER_SESSION_PREFIX,
+  headSessionId,
+  workerSessionId,
+  mintWorkerSessionId,
+  readDurableHostsRegistry,
+  isHostRetiredOnDisk,
+  readDurableRetiredHostIds,
+  readDurableHostEntries,
+  findRotationTerminal,
+  hasRotatedToCycle,
+  analyzeDurableHostRegistry,
+  reconcileDurableHostRegistry,
+  analyzeDurablePostsRegistry,
+  reconcileDurablePostsRegistry,
+  pickLiveHostEntry
+} from './core/registry.js'
+export type {
+  PostEntry,
+  PostEntryPersisted,
+  HostEntry,
+  HostEntryLike,
+  PickLiveHostResult,
+  DurableHostReconcileIssue,
+  DurableHostRepair,
+  DurableHostReconcileResult,
+  DurablePostReconcileLike,
+  DurablePostsReconcileResult,
+  ReconcileDurableHostOpts,
+  ReconcileDurablePostsOpts
+} from './core/registry.js'
 
 /**
  * Task T4 — session header AS OBSERVED AT RUNTIME: dsh-session FLATTENS the
@@ -289,56 +356,6 @@ export function sanitizePromptLiterals(text: string): string {
   return out
 }
 
-/** Prefix of a runtime host-address registry entry: `host-<sessionId>`. */
-const HOST_ID_PREFIX = 'host-'
-
-/** Prefix of a department head's STABLE root-agent session id: `head-<postId>`.
- * Deterministic and namespaced (never collides with host/room/parent sessions),
- * so a head's durable session is resolvable across boots and cold restarts. */
-const HEAD_SESSION_PREFIX = 'head-'
-
-/** The stable root-agent session id of a configured department head. */
-function headSessionId(postId: string): string {
-  return `${HEAD_SESSION_PREFIX}${postId}`
-}
-
-/** Prefix of a DISPOSABLE department WORKER's root-agent session id:
- * `worker-<postId>` (the DETERMINISTIC derivation) and, at create time, the
- * UNIQUE `worker-<postId>-<uuid>` mint (see `mintWorkerSessionId`). Namespaced
- * so it NEVER collides with a configured head's `head-<postId>` id, and —
- * critically — **never re-materialized by ensureAllHeads**, which ONLY ever
- * iterates CONFIGURED coordinators (`config.org.departments[].coordinator`). A
- * worker is created at runtime by `dept_worker_spawn`/`dept_job_run`/legacy
- * `dept_post_create` (not config), so after `dept_post_retire` removes its
- * registry entry there is NO boot path that re-spawns it: the "retired worker
- * stays retired" guarantee holds trivially. */
-const WORKER_SESSION_PREFIX = 'worker-'
-
-/** The DETERMINISTIC worker-session derivation (`worker-<postId>`). NOT the id
- * minted at create — it is the legacy/guard form used ONLY by
- * `dedupedWorkerSlug`'s live-agent check (a legacy orphan session with the
- * deterministic id is still deduped against), and by seed fixtures. A worker
- * created today mints `worker-<postId>-<uuid>` instead (see below). */
-function workerSessionId(postId: string): string {
-  return `${WORKER_SESSION_PREFIX}${postId}`
-}
-
-/** Mint a fresh, UNIQUE root-agent session id for a disposable worker:
- * `worker-<postId>-<uuid>` — the F8 head-rotation pattern (commit 4d9e889,
- * `materializePost`) applied to the WORKER create path. The deterministic
- * `worker-<postId>` base is NEVER reused as a session id: a retired worker's
- * session was ARCHIVED (registry.archiveSession → archivedSessionIds, D5), and
- * re-using the id would collide with the archived entry — the GUI sidebar
- * hides it (`!archived.has(id)`, dsh-client-ui-workspace/lib/client.js) and
- * the durable session record would bleed into the new incarnation. A fresh
- * uuid guarantees a worker session NEVER collides with an archived — or live
- * — session, so a retired-and-respawned same-role worker is always visible.
- * The worker's IDENTITY is unchanged: the postId/slug, the pinned title,
- * `dept_who` and postId-keyed messaging all keep resolving to the same post —
- * only the underlying session id is unique. */
-function mintWorkerSessionId(postId: string): string {
-  return `${WORKER_SESSION_PREFIX}${postId}-${randomUUID()}`
-}
 
 // Batch C — ack-loop budget. A sender→target pair that has exchanged this many
 // pure acks (payload.ack) within this window, with no intervening non-ack
@@ -422,152 +439,6 @@ const INTERRUPT_CANCEL_CAUSE = { kind: 'hook', reason: 'interrupted' } as const
  * work so the interrupt never loses an earlier queued item. */
 const INTERRUPT_CANCEL_OPTIONS = { keepInbox: true } as const
 
-/** One durable post registry entry — a FIRST-CLASS ROOT-AGENT department head
- * (Batch 1a). Keyed by postId; the durable root-agent session id is `sessionId`
- * (= `head-<postId>`). Drops the old continuable-subagent `parentId`/`provider`
- * continuation fields from the persisted JSON — a root head has no parent. The
- * `agentPreset: 'deepartments-head'` field is the marker that this is a
- * CONFIGURED permanent head (vs a future disposable worker). */
-interface PostEntry {
-  postId: string
-  /** Root-agent session id (`head-<postId>` for a configured head, the UNIQUE
-   * `worker-<postId>-<uuid>` mint for a DISPOSABLE worker — created fresh and
-   * never reused across a retired-and-respawned same-role worker), shared by
-   * the agent registry and its persisted session; the wake/dispose/resume
-   * identity. */
-  sessionId: string
-  roomId: string
-  /** The root-agent preset id this post mounts. `'deepartments-head'` marks a
-   * CONFIGURED permanent head; `'deepartments-worker'` marks a DISPOSABLE
-   * worker created at runtime by dept_post_create. */
-  agentPreset: string
-  /** Batch 3a: disposable-worker marker. Only set (`'worker'`) for workers
-   * created by `dept_post_create`. Absent/undefined = a configured permanent
-   * head. This registry-level flag is what lets `dept_post_retire` (head path)
-   * retire workers without ever touching permanent heads, and it is NOT read by
-   * `ensureAllHeads` (which only iterates config coordinators). */
-  provider?: 'worker'
-  /** Batch 3a: the ROLE captured at create time (e.g. 'rank-and-file
-   * researcher'). Used as the persona/role fallback when waking a worker —
-   * `coordinatorForPost` is undefined for workers (they have no config), so the
-   * durable entry carries the role the creating head supplied. */
-  role?: string
-  /** F1 (spec 004 §4.1): the durable department link of a WORKER — the config
-   * department id of the creating head's department, recorded at create
-   * (the pre-F1 code only copied the inert roomId). A configured department
-   * head is derived from config instead (`departmentForPost`). Absent on
-   * legacy workers (pre-F1 entries) and on heads (config-derived). */
-  departmentId?: string
-  /** F1 (spec 004 §4.1/§4.2): the postId of the HEAD that created this worker
-   * ("my workers" — the per-owner retire scope). Absent on legacy workers.
-   * Never set on heads (they come from config, not from a creator). */
-  managerId?: string
-  /** F1 (spec 004 §3.4/§5.4): set when the worker was spawned by a JOB run
-   * (F4) — the versioned job definition id. Absent on plain ephemeral workers
-   * (dept_post_create) and on heads. */
-  jobId?: string
-  /** F1 (spec 004 §4.3): RETIREMENT IS MARKED, NEVER ERASED. `dept_post_retire`
-   * on a worker sets this flag and KEEPS the registry entry (byPost +
-   * posts.json), so the history stays queryable; the LIVE catalog
-   * (busDeliverCatalog addressing, dept_who, the wake-pack roster) filters
-   * retired entries. Absent/false = live. Never set on configured heads
-   * (a head retire stays cosmetic — the config re-materializes it). */
-  retired?: boolean
-  /** Batch G: set when the head SLEPT (memoized + marked). On the next wake the
-   * relay cold-resumes the SAME durable session (context reset + journal reload)
-   * instead of waking a live incarnation; cleared once the respawn lands.
-   * Absent/undefined = never slept. */
-  sleepEpoch?: number
-  /** Task T1 (Session Memory Archive): the session event `seq` recorded at the
-   * previous dept_sleep boundary (agent.session.seq immediately after the
-   * boundary append). Stored so the next cycle's session-log capture can slice
-   * events with `seq > boundarySeq` EXACTLY (clock-independent). Absent = first
-   * ever cycle (falls back to the `time > lastWakeMs` timestamp slice). */
-  boundarySeq?: number
-  /** Batch G: the sessionId of the PREVIOUS incarnation (recording where a slept
-   * head's old live session went), kept so trace stays honest. Absent = first. */
-  previousChildId?: string
-  /** Fix (head-sleep worker drain): the durable list of the head's IN-FLIGHT
-   * workers (provider==='worker' && managerId===this.postId && retired!==true)
-   * recorded at dept_sleep, so the sleep is handed off through the SAME
-   * persistPosts write with a durable "n workers in flight" ledger. The boot
-   * reconcile (runHalfSleptHeadReconcile) reads it to reap/flag any worker whose
-   * manager is still dormant. Only set on a slept HEAD; cleared on respawn.
-   * Absent = never slept with in-flight workers. */
-  inflightWorkers?: string[]
-}
-
-/** The DURABLE shape persisted to posts.json. */
-interface PostEntryPersisted {
-  sessionId: string
-  roomId: string
-  agentPreset: string
-  provider?: 'worker'
-  role?: string
-  /** F1 — persisted only when set (absent = legacy/pre-F1 entry). */
-  departmentId?: string
-  managerId?: string
-  jobId?: string
-  retired?: boolean
-  sleepEpoch?: number
-  boundarySeq?: number
-  previousChildId?: string
-  inflightWorkers?: string[]
-}
-
-/** One durable host registry entry (hostId → host session in a room). */
-interface HostEntry {
-  hostId: string
-  sessionId: string
-  roomId: string
-  /** Batch 7: set when the host SLEPT (dept_sleep, host branch — journal
-   * persisted + surface reset to the journal). Durable marker: "the Asistente
-   * slept at T". A host does NOT dispose its live AgentHandle (the web
-   * api-proxy owns it — see explore-deep/2026-08-20-host-sleep.md), so unlike
-   * a head it stays live after sleep; the marker records that a context reset
-   * happened and the journal IS the current surface. Absent = never slept. */
-  sleepEpoch?: number
-  /** Task T1 (Session Memory Archive): the session-event `seq` recorded at the
-   * previous dept_sleep boundary, for exact one-cycle session-log slicing. See
-   * PostEntry.boundarySeq. Absent = first-ever cycle. */
-  boundarySeq?: number
-  /** Web-UI sleep cleanup (Option A): set at dept_sleep (host branch), cleared
-   * by the FIRST boot that successfully truncates the host session artifact.
-   * The truncation CANNOT run inside dept_sleep (the harness appends the tool
-   * result + step/end + turn/end AFTER execute() returns at LIVE in-memory
-   * seqs, and the Session constructor requires events contiguous from seq 0 —
-   * see src/session-cleanup.ts header), so this durable marker makes the next
-   * process's boot perform the cleanup exactly once per sleep cycle; mid-wake
-   * restarts (flag cleared) are exact no-ops. Absent = no cleanup pending. */
-  webUiCleanupPending?: boolean
-  /** Fix wake-12 (explore-deep/2026-08-21-first-turn-api-orphan.md): the
-   * DURABLE seed for Fix A's deferred sleep surface replace. dept_sleep (host
-   * branch) records it alongside the in-memory `deferredSleepReplace` intent
-   * (the seeded journal text the wake fold re-inserts); the boot hosts loader
-   * restores it into that map so the FIRST pre-step of a RESTARTED process
-   * still performs the full-window fold. Without the restore the in-memory map
-   * (which dies with the process) is empty, the fold is skipped, and the
-   * journal-interleaved close tail [assistant(tool_calls)·journal·tool] ships
-   * in the first request — the strict opencode-go API 400s ("insufficient
-   * tool messages following tool_calls"). Cleared when the fold consumes the
-   * intent (a mid-wake restart must never re-fold the whole wake surface back
-   * to the journal). Absent = no deferred replace pending. */
-  deferredJournalSeed?: string
-  /** U2 (spec 002 §3.5/D4): set on the RETIRED old entry after a host session
-   * ROTATION at dept_sleep. The entry STAYS in hosts.json (queryable as
-   * evidence, D1) but the wake gate skips it (retire = "no pack + no
-   * registration", §4/C1) and the roster/cleanup treat it as retired. Absent
-   * (or false) = live (pre-rotation behavior). */
-  retired?: boolean
-  /** U2 (D4): when this entry was retired (ms epoch); required on retired. */
-  retiredAt?: number
-  /** U2 (D4): the `host-<newId>` this retired entry rotated to; required on
-   * retired. */
-  rotatedTo?: string
-  /** U2 (D4): on a LIVE entry that was created by a rotation — the sessionId
-   * it rotated FROM (must reference a retired entry in the same file). */
-  previousSessionId?: string
-}
 
 /**
  * Loose structural view of `ctx.connection` — the optional Host Connection
@@ -1058,521 +929,6 @@ export interface WebServerLike {
   register(route: WebServerRouteLike): () => void
 }
 
-/** Loose structural view of one host-registry entry (hosts.json value). */
-export interface HostEntryLike {
-  hostId: string
-  sessionId: string
-  roomId?: string
-  /** U2 (spec 002 §3.5/D4): rotation schema — set on RETIRED old entries (the
-   * entry STAYS in hosts.json as evidence; the wake gate skips it). */
-  retired?: boolean
-  /** U2 (D4): when the entry was retired (ms epoch); required on retired. */
-  retiredAt?: number
-  /** U2 (D4): the `host-<newId>` this retired entry rotated to. */
-  rotatedTo?: string
-  /** U2 (D4): on a LIVE entry created by a rotation — the session id it
-   * rotated FROM (references a retired entry in the same file). */
-  previousSessionId?: string
-}
-
-/** Read the DURABLE hosts registry (`<stateDir>/hosts.json`) as a plain
- * `{ [hostId]: { retired } }` object (the `retired` flag normalized to boolean;
- * the top-level `schemaVersion` marker is skipped). Returns `undefined` (never
- * throws) when the file is absent/unreadable/malformed, so the caller can fall
- * back to the in-memory registry. This is the Bug A AUTHORITATIVE on-disk
- * source: a long-lived process (e.g. a second daemon twin that booted BEFORE a
- * rotation) may hold a STALE in-memory `hosts` Map, but the file is the
- * truthful rotation record. */
-export function readDurableHostsRegistry(stateDir: string): Record<string, { retired: boolean }> | undefined {
-  try {
-    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'hosts.json'), 'utf8')) as Record<string, unknown>
-    const out: Record<string, { retired: boolean }> = {}
-    for (const [hostId, entry] of Object.entries(parsed)) {
-      if (hostId === 'schemaVersion') continue
-      if (entry !== null && typeof entry === 'object') {
-        const e = entry as { retired?: unknown }
-        out[hostId] = { retired: e.retired === true }
-      }
-    }
-    return out
-  } catch {
-    return undefined
-  }
-}
-
-/** Bug A authoritative source gate: `true` iff the DURABLE hosts.json marks the
- * given host `retired: true` ON DISK. `undefined` (file unreadable/malformed)
- * lets the caller fall back to the in-memory registry — NEVER throws. Because
- * the on-disk file is the truthful rotation record, a STALE in-memory `hosts`
- * Map (a process that booted before a rotation) cannot bypass this check. */
-export function isHostRetiredOnDisk(stateDir: string, hostId: string): boolean | undefined {
-  const registry = readDurableHostsRegistry(stateDir)
-  if (registry === undefined) return undefined
-  return registry[hostId]?.retired === true
-}
-
-/** The set of RETIRED host ids computed from the DURABLE hosts.json (re-read
- * fresh on every call). `undefined` when the file is unreadable/malformed. Used
- * by the system-health daemon so the retired-host scan gate is robust to a
- * STALE in-memory registry (a process that booted before a rotation). */
-export function readDurableRetiredHostIds(stateDir: string): Set<string> | undefined {
-  const registry = readDurableHostsRegistry(stateDir)
-  if (registry === undefined) return undefined
-  const ids = new Set<string>()
-  for (const [hostId, entry] of Object.entries(registry)) {
-    if (entry.retired === true) ids.add(hostId)
-  }
-  return ids
-}
-
-/** Read the DURABLE hosts registry (`<stateDir>/hosts.json`) FRESH and return
- * ALL host entries as `HostEntryLike[]` (hostId, sessionId, roomId?, retired?,
- * retiredAt?, rotatedTo?, previousSessionId?), PRESERVING the rotation-chain
- * metadata so a subsequent `pickLiveHostEntry` succeeds exactly as it does for
- * the in-memory registry (the successor detection reads `previousSessionId`).
- * The top-level `schemaVersion` marker is skipped. Returns `undefined` (never
- * throws) when the file is absent/unreadable/malformed, so the caller falls
- * back to the in-memory registry; an EMPTY array (a readable file with no
- * entries) is a valid read. This is the DURABLE source the system-health daemon
- * ALERT recipient must resolve from — the on-disk file is the truthful rotation
- * record, while the boot-loaded IN-MEMORY registry is STALE in a long-lived /
- * twin daemon that booted BEFORE a rotation (it still lists the retired host as
- * live and never learned the successor). Unlike `readDurableHostsRegistry`
- * (Bug A: `{hostId:{retired}}` only), this keeps the full entry shape. */
-export function readDurableHostEntries(stateDir: string): HostEntryLike[] | undefined {
-  try {
-    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'hosts.json'), 'utf8')) as Record<string, unknown>
-    const entries: HostEntryLike[] = []
-    for (const [hostId, raw] of Object.entries(parsed)) {
-      if (hostId === 'schemaVersion') continue
-      if (raw === null || typeof raw !== 'object') continue
-      const e = raw as Record<string, unknown>
-      const entry: HostEntryLike = {
-        hostId,
-        sessionId: typeof e.sessionId === 'string' ? e.sessionId : ''
-      }
-      if (typeof e.roomId === 'string') entry.roomId = e.roomId
-      if (e.retired === true) entry.retired = true
-      if (typeof e.retiredAt === 'number') entry.retiredAt = e.retiredAt
-      if (typeof e.rotatedTo === 'string') entry.rotatedTo = e.rotatedTo
-      if (typeof e.previousSessionId === 'string') entry.previousSessionId = e.previousSessionId
-      entries.push(entry)
-    }
-    return entries
-  } catch {
-    return undefined
-  }
-}
-
-// ---------------------------------------------------------------------------
-// m-119 — DURABLE hosts.json/posts.json RECONCILIATION + rotation convergence.
-//
-// The durable org stateDir (the filesystem ROOT `/.deepartments/hosts.json` +
-// `posts.json`) is the SOURCE OF TRUTH for the rotation chain and the post
-// registry. In the split-brain era a STALE daemon twin (a second process that
-// booted BEFORE a rotation, sharing the stateDir) wrote/read the durable
-// registry with a stale in-memory view, so hosts.json accumulated retired
-// entries + a long rotation chain. The runtime already re-reads the durable
-// file fresh each tick (the Bug A durable-gate + the alert-recipient fix), but
-// nothing VALIDATES the durable registry's invariant and nothing REPAIRS a
-// degenerate state. These helpers:
-//   - verify the INVARIANT "exactly ONE non-retired live host (the rotation
-//     successor)" against the durable hosts.json entries (pure + unit-testable,
-//     `analyzeDurableHostRegistry`),
-//   - detect + define an IDEMPOTENT repair for the degenerate cases: (a) ZERO
-//     live, (b) MULTIPLE live, (c) chain-integrity (a retired host's
-//     `rotatedTo` lost/dangling/cycling/terminating in a retired host),
-//   - write the repair ONLY under an explicit `write: true`, ALWAYS backing up
-//     the pre-repair file first (the safest idempotent repair),
-//   - analogously FLAG (and optionally retire-if-safe) a durable WORKER post
-//     whose session is definitively gone (the W8-g retire-leak class) — never
-//     auto-retiring a configured head.
-// The repair is idempotent: after it runs the state is non-degenerate, so a
-// re-run is a no-op (clean). A missing/unreadable durable file is never a
-// throw and never a fabricated host session (the loader already falls back to
-// the in-memory registry + the next ensureHost prunes on first register).
-// ---------------------------------------------------------------------------
-
-/** ONE issue the durable host-registry validation detected (warn-class). */
-export interface DurableHostReconcileIssue {
-  code: 'zero-live' | 'multi-live' | 'chain-integrity'
-  hostId?: string
-  message: string
-}
-
-/** The idempotent repair plan for a degenerate durable hosts.json. `clean` is
- * true when NO host-entry change is needed (a no-op — the invariant already
- * holds and the repair is a no-write). `writable` is true only when there is a
- * CONCRETE, safe change to commit (a hostId to keep live + hosts to
- * retire/unretire); a zero-live state with NO chain terminal is warn-only
- * (`writable: false` — we never fabricate a host session). */
-export interface DurableHostRepair {
-  /** The single non-retired live host to keep (the deterministic pick). */
-  liveHostId: string | undefined
-  /** Non-picked live hostIds to mark RETIRED (multi-live repair). */
-  retireHostIds: string[]
-  /** The chain-terminal hostId to UN-RETIRE (zero-live repair). undefined = none. */
-  unretireHostId: string | undefined
-  /** True when NO write is needed (the invariant already holds). */
-  clean: boolean
-  /** True when there is a concrete, safe write to commit. */
-  writable: boolean
-}
-
-/** Result of the durable host-registry reconciliation (pure analysis). */
-export interface DurableHostReconcileResult {
-  /** The deterministic live entry (pickLiveHostEntry), or undefined when no live. */
-  liveEntry: HostEntryLike | undefined
-  /** Number of non-retired live entries. */
-  liveCount: number
-  /** True when the ambiguity fallback fired (multiple live, none rotation-created). */
-  ambiguous: boolean
-  /** Invariant breach: ZERO non-retired live hosts. */
-  zeroLive: boolean
-  /** Invariant breach: MORE THAN ONE non-retired live host. */
-  multiLive: boolean
-  /** Rotation-chain integrity: ok | dangling | cycle | retired-terminal. */
-  chainIntegrity: 'ok' | 'dangling' | 'cycle' | 'retired-terminal'
-  /** All detected issues (warn-class), in detection order. */
-  issues: DurableHostReconcileIssue[]
-  /** The idempotent repair plan (no-op when clean). */
-  repair: DurableHostRepair
-}
-
-/** The host that is the rotation-chain TERMINAL: the target of some host's
- * `rotatedTo` AND carrying NO `rotatedTo` of its own (the chain end). Returns
- * `undefined` when no single terminal exists (a dangling chain, a cycle, or a
- * bare retired host with no chain — none of which are safe repair candidates). */
-export function findRotationTerminal(entries: HostEntryLike[], byId: Map<string, HostEntryLike>): string | undefined {
-  const targets = new Set<string>()
-  for (const entry of entries) {
-    if (typeof entry.rotatedTo === 'string' && entry.rotatedTo !== '') targets.add(entry.rotatedTo)
-  }
-  const terminals = entries.filter((entry) => targets.has(entry.hostId) && (entry.rotatedTo === undefined || entry.rotatedTo === ''))
-  return terminals.length === 1 ? terminals[0].hostId : undefined
-}
-
-/** Whether the `rotatedTo` graph contains a cycle among the entries present in
- * the file (a chain-integrity violation — the chain never reaches a terminal). */
-export function hasRotatedToCycle(entries: HostEntryLike[], byId: Map<string, HostEntryLike>): boolean {
-  const visiting = new Set<string>()
-  const visited = new Set<string>()
-  const dfs = (hostId: string): boolean => {
-    if (visited.has(hostId)) return false
-    if (visiting.has(hostId)) return true
-    const entry = byId.get(hostId)
-    if (entry === undefined) return false
-    visiting.add(hostId)
-    const next = typeof entry.rotatedTo === 'string' ? entry.rotatedTo : ''
-    if (next !== '' && byId.has(next) && dfs(next)) return true
-    visiting.delete(hostId)
-    visited.add(hostId)
-    return false
-  }
-  for (const entry of entries) if (dfs(entry.hostId)) return true
-  return false
-}
-
-/** PURE durable host-registry invariant validator (m-119). Non-throwing,
- * deterministic, and side-effect free — unit-testable without the invoke
- * context. Given the durable hosts.json entries it verifies the invariant
- * "exactly ONE non-retired live host (the rotation successor)" and reports the
- * degenerate cases with an idempotent repair plan:
- *   (a) ZERO non-retired live hosts → the rotation chain lost its successor;
- *       the repair UN-RETIRES the chain terminal (the LAST rotation target) so
- *       the chain reaches a live host again — or warns (no write) when no
- *       terminal can be safely identified (never fabricate a host session).
- *   (b) MULTIPLE non-retired live hosts → the loader's pickLiveHostEntry
- *       ambiguity; the repair KEEPS the deterministic pick (successor-first)
- *       and RETIRES the other live entries (deterministic, warn).
- *   (c) chain-integrity → a retired host whose `rotatedTo` is dangling (target
- *       absent from the file), forms a cycle, or terminates in a RETIRED host;
- *       flagged + warned; repaired ONLY when it coincides with (a)/(b).
- * The LIVE-side correctness is NOT changed: a host retired in the durable file
- * stays terminal (never live-resolvable / row-producing) and a live host stays
- * resolvable — this helper is purely about the durable registry's own shape. */
-export function analyzeDurableHostRegistry(entries: Iterable<HostEntryLike>): DurableHostReconcileResult {
-  const all = [...entries]
-  const byId = new Map(all.map((entry) => [entry.hostId, entry]))
-  const liveEntries = all.filter((entry) => entry.retired !== true)
-  const { live: selectedLive, ambiguous } = pickLiveHostEntry(all)
-  const liveCount = liveEntries.length
-  const zeroLive = liveCount === 0
-  const multiLive = liveCount > 1
-
-  const issues: DurableHostReconcileIssue[] = []
-  let chainIntegrity: DurableHostReconcileResult['chainIntegrity'] = 'ok'
-  const danglingTargets = all.filter((entry) => entry.retired === true && typeof entry.rotatedTo === 'string' && entry.rotatedTo !== '' && !byId.has(entry.rotatedTo))
-  const cycle = hasRotatedToCycle(all, byId)
-  const terminalId = findRotationTerminal(all, byId)
-  if (cycle) {
-    chainIntegrity = 'cycle'
-  } else if (danglingTargets.length > 0) {
-    chainIntegrity = 'dangling'
-  } else if (terminalId !== undefined && byId.get(terminalId)?.retired === true) {
-    chainIntegrity = 'retired-terminal'
-  }
-
-  if (zeroLive) {
-    issues.push({ code: 'zero-live', message: `durable hosts.json has ZERO non-retired live hosts (${all.length} entries, all retired) — the rotation chain lost its live successor` })
-  }
-  if (multiLive) {
-    issues.push({ code: 'multi-live', message: `durable hosts.json has ${liveCount} non-retired live hosts (exactly one required) — selected ${selectedLive?.hostId ?? 'none'} deterministically; the others are retire candidates` })
-  }
-  if (chainIntegrity !== 'ok') {
-    const detail = chainIntegrity === 'dangling'
-      ? `retired host(s) ${danglingTargets.map((d) => `${d.hostId}→${d.rotatedTo}`).join(', ')} point at a host NOT in hosts.json (lost successor)`
-      : chainIntegrity === 'cycle'
-        ? 'the rotatedTo chain contains a cycle'
-        : `the chain terminal ${terminalId} is RETIRED (the chain does not reach a live host)`
-    issues.push({ code: 'chain-integrity', message: `durable hosts.json chain-integrity: ${detail}` })
-  }
-
-  let repair: DurableHostRepair
-  if (multiLive && selectedLive !== undefined) {
-    const retireHostIds = liveEntries.filter((entry) => entry.hostId !== selectedLive.hostId).map((entry) => entry.hostId)
-    repair = { liveHostId: selectedLive.hostId, retireHostIds, unretireHostId: undefined, clean: retireHostIds.length === 0, writable: retireHostIds.length > 0 }
-  } else if (zeroLive && terminalId !== undefined && byId.get(terminalId)?.retired === true) {
-    repair = { liveHostId: terminalId, retireHostIds: [], unretireHostId: terminalId, clean: false, writable: true }
-  } else {
-    repair = { liveHostId: selectedLive?.hostId, retireHostIds: [], unretireHostId: undefined, clean: true, writable: false }
-  }
-
-  return { liveEntry: selectedLive, liveCount, ambiguous, zeroLive, multiLive, chainIntegrity, issues, repair }
-}
-
-/** Read + parse a DURABLE JSON registry file with a bounded RETRY for the
- * boot-time torn-write race (a concurrent persistHosts/persistPosts may be
- * wrote the file while this reads it — a transient `Unexpected end of JSON
- * input`). An ABSENT file (ENOENT) is a clean no-op (returned immediately, no
- * retry — it is a definitive absence, not a torn write). Returns the parsed
- * object, or `undefined` after exhausting the retries (malformed). Never
- * throws. */
-async function readDurableJsonFile(stateDir: string, filename: string): Promise<Record<string, unknown> | undefined> {
-  const filePath = path.join(stateDir, filename)
-  if (!existsSync(filePath)) return undefined
-  for (let attempt = 0; attempt < 5; attempt++) {
-    try {
-      const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, unknown>
-      if (parsed !== null && typeof parsed === 'object') return parsed
-    } catch {
-      // torn/malformed → retry after a short backoff (a concurrent write may
-      // still be in-flight); exhausted retries fall through to undefined.
-    }
-    if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 30))
-  }
-  return undefined
-}
-
-/** Apply the repair plan to the RAW parsed hosts.json (preserving every field
- * the durable file carries that HostEntryLike does not model). Returns a new
- * object; the input is never mutated. */
-function applyHostRepairToRaw(raw: Record<string, unknown>, repair: DurableHostRepair, nowMs: number): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...raw }
-  for (const hostId of repair.retireHostIds) {
-    const e = out[hostId]
-    if (e !== null && typeof e === 'object') {
-      out[hostId] = { ...(e as Record<string, unknown>), retired: true, retiredAt: nowMs }
-    }
-  }
-  if (repair.unretireHostId !== undefined) {
-    const e = out[repair.unretireHostId]
-    if (e !== null && typeof e === 'object') {
-      const { retired: _retired, retiredAt: _retiredAt, rotatedTo: _rotatedTo, ...rest } = e as Record<string, unknown>
-      out[repair.unretireHostId] = rest
-      if (repair.liveHostId !== undefined) out[repair.liveHostId] = out[repair.unretireHostId]
-    }
-  }
-  return out
-}
-
-/** Options for `reconcileDurableHostRegistry`. */
-export interface ReconcileDurableHostOpts {
-  logger?: { warn(message: string): void }
-  /** When true, WRITE the repaired durable hosts.json when degenerate (backing
-   * up the pre-repair file first). When false/absent the helper is read-only
-   * (validate + warn). */
-  write?: boolean
-  /** Clock (ms epoch) for retiredAt + the backup timestamp. Absent → Date.now. */
-  now?: () => number
-}
-
-/** Read-only validate, or WRITE a repaired durable hosts.json, per m-119.
- * Never throws (an unreadable/malformed file → a warn + a clean no-op). When
- * `write: true` and the state is degenerate + a safe repair exists, the
- * pre-repair hosts.json is copied to `<stateDir>/hosts.json.bak-<ts>-reconcile`
- * FIRST, then the repaired file is written atomically (tmp + rename). The
- * repair is IDEMPOTENT: after it runs the state is non-degenerate, so a
- * re-run is clean. Returns the analysis result (issues + repair plan). */
-export async function reconcileDurableHostRegistry(
-  stateDir: string,
-  opts: ReconcileDurableHostOpts = {}
-): Promise<DurableHostReconcileResult> {
-  const logger = opts.logger
-  const raw = await readDurableJsonFile(stateDir, 'hosts.json')
-  if (raw === undefined) {
-    // Absent (ENOENT) → nothing to reconcile (the loader is empty; the next
-    // ensureHost registers the first host on first register). Malformed (after
-    // the retry window) → warn.
-    if (!existsSync(path.join(stateDir, 'hosts.json'))) {
-      return { liveEntry: undefined, liveCount: 0, ambiguous: false, zeroLive: false, multiLive: false, chainIntegrity: 'ok', issues: [], repair: { liveHostId: undefined, retireHostIds: [], unretireHostId: undefined, clean: true, writable: false } }
-    }
-    logger?.warn('[deepartments] reconcile-host: hosts.json unreadable/malformed — cannot validate the durable rotation invariant (no repair)')
-    return { liveEntry: undefined, liveCount: 0, ambiguous: false, zeroLive: false, multiLive: false, chainIntegrity: 'ok', issues: [], repair: { liveHostId: undefined, retireHostIds: [], unretireHostId: undefined, clean: true, writable: false } }
-  }
-  // Build the HostEntryLike[] for the pure analysis from the raw (same shape as
-  // readDurableHostEntries).
-  const entries: HostEntryLike[] = []
-  for (const [hostId, rawEntry] of Object.entries(raw)) {
-    if (hostId === 'schemaVersion') continue
-    if (rawEntry === null || typeof rawEntry !== 'object') continue
-    const e = rawEntry as Record<string, unknown>
-    const entry: HostEntryLike = { hostId, sessionId: typeof e.sessionId === 'string' ? e.sessionId : '' }
-    if (typeof e.roomId === 'string') entry.roomId = e.roomId
-    if (e.retired === true) entry.retired = true
-    if (typeof e.retiredAt === 'number') entry.retiredAt = e.retiredAt
-    if (typeof e.rotatedTo === 'string') entry.rotatedTo = e.rotatedTo
-    if (typeof e.previousSessionId === 'string') entry.previousSessionId = e.previousSessionId
-    entries.push(entry)
-  }
-  const result = analyzeDurableHostRegistry(entries)
-  for (const issue of result.issues) logger?.warn(`[deepartments] reconcile-host: ${issue.message}`)
-  if (opts.write === true && !result.repair.clean && result.repair.writable) {
-    try {
-      const nowMs = (opts.now ?? (() => Date.now()))()
-      const backupPath = path.join(stateDir, `hosts.json.bak-${nowMs}-reconcile`)
-      await copyFile(path.join(stateDir, 'hosts.json'), backupPath)
-      const repairedRaw = applyHostRepairToRaw(raw, result.repair, nowMs)
-      const tmpPath = path.join(stateDir, `hosts.json.tmp-${nowMs}`)
-      await writeFile(tmpPath, JSON.stringify(repairedRaw, null, 2), 'utf8')
-      await rename(tmpPath, path.join(stateDir, 'hosts.json'))
-      logger?.warn(`[deepartments] reconcile-host: REPAIRED durable hosts.json (backup ${path.basename(backupPath)})`)
-    } catch (error: unknown) {
-      logger?.warn(`[deepartments] reconcile-host: repair write failed (the durable file is left untouched): ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
-  return result
-}
-
-/** Loose durable post-registry entry the posts reconcile reads (provider marks a
- * disposable worker; a configured head has NO provider). */
-export interface DurablePostReconcileLike {
-  postId: string
-  sessionId: string
-  provider?: string
-  role?: string
-  retired?: boolean
-}
-
-/** Result of the durable posts-registry reconcile (m-119). */
-export interface DurablePostsReconcileResult {
-  /** Non-retired WORKER posts whose session is definitively gone (retire-leak
-   * candidates — flagged/warned, never auto-retired unless opted in). */
-  workerRetireCandidates: Array<{ postId: string; sessionId: string }>
-  /** Candidates that were actually marked retired (when `retireGoneWorkers`). */
-  workersRetired: Array<{ postId: string; sessionId: string }>
-  /** True when the durable posts.json was written (a retire happened). */
-  changed: boolean
-}
-
-/** PURE durable posts-registry leak detector (m-119, W8-g). Given the durable
- * posts.json entries + a session-gone predicate, it FLAGS every non-retired
- * WORKER (the disposable-worker marker `provider: 'worker'`) whose session is
- * DEFINITIVELY gone — the retire-leak class. A CONFIGURED HEAD (no `provider`)
- * is NEVER flagged and NEVER auto-retired. The retire decision itself is the
- * caller's (`opts.retireGoneWorkers`): this function only classifies. */
-export function analyzeDurablePostsRegistry(
-  entries: Iterable<DurablePostReconcileLike>,
-  isSessionGone: (entry: DurablePostReconcileLike) => boolean
-): DurablePostsReconcileResult {
-  const candidates: Array<{ postId: string; sessionId: string }> = []
-  for (const entry of entries) {
-    if (entry.retired === true) continue
-    if (entry.provider !== 'worker') continue
-    if (isSessionGone(entry)) candidates.push({ postId: entry.postId, sessionId: entry.sessionId })
-  }
-  return { workerRetireCandidates: candidates, workersRetired: [], changed: false }
-}
-
-/** Options for `reconcileDurablePostsRegistry`. */
-export interface ReconcileDurablePostsOpts {
-  logger?: { warn(message: string): void }
-  /** Resolve whether a session is DEFINITIVELY gone (no durable session). A
-   * conservative resolver (unable to determine) MUST return false. */
-  isSessionGone: (sessionId: string) => boolean | Promise<boolean>
-  /** When true, WRITE the retire mark for the flagged candidates (backup the
-   * pre-repair posts.json first). Default false → flag + warn only. */
-  retireGoneWorkers?: boolean
-  /** Clock (ms epoch) for the backup timestamp. Absent → Date.now. */
-  now?: () => number
-}
-
-/** Read-only flag (or retire-if-safe) the durable posts.json for gone WORKER
- * sessions, per m-119. Never throws. A configured head is never touched. When
- * `retireGoneWorkers`, the pre-repair posts.json is copied to
- * `<stateDir>/posts.json.bak-<ts>-reconcile` FIRST, then the retires are
- * written atomically (tmp + rename). Idempotent (a re-run sees the workers
- * already retired → no candidates → no write). */
-export async function reconcileDurablePostsRegistry(
-  stateDir: string,
-  opts: ReconcileDurablePostsOpts
-): Promise<DurablePostsReconcileResult> {
-  const logger = opts.logger
-  const raw = await readDurableJsonFile(stateDir, 'posts.json')
-  if (raw === undefined) {
-    if (!existsSync(path.join(stateDir, 'posts.json'))) {
-      return { workerRetireCandidates: [], workersRetired: [], changed: false }
-    }
-    logger?.warn('[deepartments] reconcile-posts: posts.json unreadable/malformed — cannot reconcile gone workers (no change)')
-    return { workerRetireCandidates: [], workersRetired: [], changed: false }
-  }
-  const entries: DurablePostReconcileLike[] = []
-  for (const [postId, rawEntry] of Object.entries(raw)) {
-    if (rawEntry === null || typeof rawEntry !== 'object') continue
-    const e = rawEntry as Record<string, unknown>
-    const entry: DurablePostReconcileLike = { postId, sessionId: typeof e.sessionId === 'string' ? e.sessionId : '' }
-    if (typeof e.provider === 'string') entry.provider = e.provider
-    if (typeof e.role === 'string') entry.role = e.role
-    if (e.retired === true) entry.retired = true
-    entries.push(entry)
-  }
-  // Resolve the session-gone predicate (async-tolerant) to a sync predicate.
-  const goneByPostId = new Map<string, boolean>()
-  for (const entry of entries) {
-    if (entry.retired === true || entry.provider !== 'worker') continue
-    let gone = false
-    try {
-      gone = Boolean(await opts.isSessionGone(entry.sessionId))
-    } catch {
-      gone = false
-    }
-    goneByPostId.set(entry.postId, gone)
-  }
-  const result = analyzeDurablePostsRegistry(entries, (entry) => goneByPostId.get(entry.postId) === true)
-  for (const candidate of result.workerRetireCandidates) {
-    logger?.warn(`[deepartments] reconcile-posts: worker "${candidate.postId}" (session ${candidate.sessionId}) is a retire-leak candidate — its durable session is gone${opts.retireGoneWorkers === true ? '; auto-retiring (retire-if-safe)' : '; NOT auto-retired (flag only)'}`)
-  }
-  if (opts.retireGoneWorkers === true && result.workerRetireCandidates.length > 0) {
-    try {
-      const nowMs = (opts.now ?? (() => Date.now()))()
-      const backupPath = path.join(stateDir, `posts.json.bak-${nowMs}-reconcile`)
-      await copyFile(path.join(stateDir, 'posts.json'), backupPath)
-      const repairedRaw = { ...raw }
-      for (const candidate of result.workerRetireCandidates) {
-        const e = repairedRaw[candidate.postId]
-        if (e !== null && typeof e === 'object') repairedRaw[candidate.postId] = { ...(e as Record<string, unknown>), retired: true }
-      }
-      const tmpPath = path.join(stateDir, `posts.json.tmp-${nowMs}`)
-      await writeFile(tmpPath, JSON.stringify(repairedRaw, null, 2), 'utf8')
-      await rename(tmpPath, path.join(stateDir, 'posts.json'))
-      logger?.warn(`[deepartments] reconcile-posts: RETIRED ${result.workerRetireCandidates.length} gone worker(s) in durable posts.json (backup ${path.basename(backupPath)})`)
-      return { workerRetireCandidates: result.workerRetireCandidates, workersRetired: result.workerRetireCandidates, changed: true }
-    } catch (error: unknown) {
-      logger?.warn(`[deepartments] reconcile-posts: retire write failed (the durable file is left untouched): ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
-  return result
-}
 
 /** The owner-presence state (Feature A — the "Presencia/Ausencia" toggle), the
  * `presence/get` RPC value and the `presence.set` input. Persisted at
@@ -1653,47 +1009,6 @@ export interface HostStatusPayload {
   wakeCounter?: number
 }
 
-/** Result of the deterministic live-host selection (U3 fix, spec 002 §6.1). */
-export interface PickLiveHostResult {
-  /** The selected live entry, or undefined when NO live entry exists. */
-  live: HostEntryLike | undefined
-  /** True when the AMBIGUITY FALLBACK branch fired (multiple live entries,
-   * none carrying `previousSessionId`): the caller should log a warn listing
-   * the candidates. False for the successor / single-live / no-live branches. */
-  ambiguous: boolean
-}
-
-/** PURE deterministic live-host selection for the `host/status` payload (U3
- * fix, spec 002 §6.1). Among the NON-RETIRED entries, prefer, in order:
- *   (a) the rotation-created SUCCESSOR — the entry carrying
- *       `previousSessionId` (the true current host after a rotation);
- *   (b) the ONLY live entry, when exactly one exists;
- *   (c) the first live entry in iteration (insertion) order, flagged
- *       `ambiguous: true` so the caller can warn.
- * Deterministic for every hosts.json shape: the previous first-non-retired
- * pick silently returned a STALE entry (e.g. a dead bare `host-1a4af1ea`)
- * instead of the rotated successor in the wake-12→13 incident (post-mortem
- * finding #2). No side effects — unit-testable without the invoke context. */
-export function pickLiveHostEntry(entries: Iterable<HostEntryLike>): PickLiveHostResult {
-  let successor: HostEntryLike | undefined
-  const liveEntries: HostEntryLike[] = []
-  for (const entry of entries) {
-    if (entry.retired === true) continue
-    liveEntries.push(entry)
-    if (
-      successor === undefined &&
-      entry.previousSessionId !== undefined &&
-      entry.previousSessionId !== ''
-    ) {
-      successor = entry
-    }
-  }
-  if (successor !== undefined) return { live: successor, ambiguous: false }
-  if (liveEntries.length === 1) return { live: liveEntries[0], ambiguous: false }
-  if (liveEntries.length === 0) return { live: undefined, ambiguous: false }
-  // Multiple live entries, none rotation-created → ambiguity fallback.
-  return { live: liveEntries[0], ambiguous: true }
-}
 
 /** PURE builder of the `host/status` payload — derived from the in-memory host
  * registry only (no side effects; the only non-pure part is an optional
@@ -5419,12 +4734,19 @@ export function applyInvoke(ctx: Context, config: Config) {
   const agentPresets = ctx.get('agentPresets') as AgentPresetsLike | undefined
 
   // --- mutable state (all owned by this invocation's closure; reversible) ---
-  const byPost = new Map<string, PostEntry>()
+  // FASE 2 step (a): the DURABLE REGISTRY (the single source of the hosts/posts
+  // catalog) is constructed here on the plugin fiber — AGENTS.md rule 4 (no
+  // module-global mutable state). It owns the in-memory catalog maps + the
+  // durable read/persist + registerEntry/ensureHost/markRetired. The consts
+  // below are references to its maps so EVERY existing consumer reads/writes
+  // the SAME live catalog (behavior-neutral, R6 byte-compatible on disk).
+  const registry = new RegistryStore({ stateDir: config.stateDir, logger: ctx.logger })
+  const byPost = registry.byPost
   // QD (spec 007 §4.1): the resolved worker-archive dice probability from the
   // `quality` config block (absent/invalid → code default 0.10). Consumed by
   // the worker-retire hook; the head+host 100% mandate is NOT resolved here.
   const qualityWorkerInspectProbability = resolveQualityWorkerInspectProbability(config)
-  const byChild = new Map<string, string>()
+  const byChild = registry.byChild
   // Batch 1a: the live AgentHandle of each materialized head keyed by its
   // session id. create/resume return the handle (the ONLY disposer — a bare
   // `agents.get(id)` returns no dispose; rc.8 dsh-agent index.d.ts:349 vs
@@ -5493,49 +4815,21 @@ export function applyInvoke(ctx: Context, config: Config) {
   // at boot; a sleep→restart cycle therefore still folds at the first pre-step
   // of the new process (see the loader + the pre-step consume below).
   const deferredSleepReplace = new Map<string, string>()
-  const postsPath = path.join(config.stateDir, 'posts.json')
   // B3 cutover: room read-cursors are GONE (no board, no read-delta). A legacy
   // `<stateDir>/cursors.json` may still exist on upgraded stateDirs — it is
   // deliberately LEFT INERT (no readers, no writers; the file itself is not
   // deleted here — state migration is the B3 migration step).
 
   // --- host registry (hostId → entry, plus sessionId → hostId reverse) ------
-  const hosts = new Map<string, HostEntry>()
-  const hostForSession = new Map<string, string>()
-  const hostsPath = path.join(config.stateDir, 'hosts.json')
+  // (owned by the RegistryStore above; referenced here so every consumer — the
+  // bus delivery, the roster, the health daemon — reads the SAME live host
+  // catalog the store persists.)
+  const hosts = registry.hosts
+  const hostForSession = registry.hostForSession
 
   // Fire-and-forget persistence of the host registry (callers never await it).
-  const persistHosts = (): void => {
-    // U2 (D4): every persisted file carries the top-level schemaVersion marker;
-    // loader validation tolerates legacy files without it.
-    const data: Record<string, unknown> = { schemaVersion: ROTATION_SCHEMA_VERSION }
-    for (const entry of hosts.values()) {
-      data[entry.hostId] = {
-        sessionId: entry.sessionId,
-        roomId: entry.roomId,
-        // Batch 7: persist the optional host sleep marker only when set (absent
-        // = never slept).
-        ...(entry.sleepEpoch !== void 0 ? { sleepEpoch: entry.sleepEpoch } : {}),
-        // Task T1: persist the optional cycle-boundary seq only when set.
-        ...(entry.boundarySeq !== void 0 ? { boundarySeq: entry.boundarySeq } : {}),
-        // Web-UI sleep cleanup: persist the pending flag only when set.
-        ...(entry.webUiCleanupPending === true ? { webUiCleanupPending: true } : {}),
-        // Fix wake-12: persist the deferred sleep-replace seed only when set
-        // (absent = no fold pending; see HostEntry.deferredJournalSeed).
-        ...(entry.deferredJournalSeed !== void 0 ? { deferredJournalSeed: entry.deferredJournalSeed } : {}),
-        // U2 (D4): rotation schema fields — retired/retiredAt/rotatedTo on the
-        // retired old entry, previousSessionId on the new live entry. Persist
-        // only when set (absent = legacy in-place host).
-        ...(entry.retired === true ? { retired: true } : {}),
-        ...(entry.retiredAt !== void 0 ? { retiredAt: entry.retiredAt } : {}),
-        ...(entry.rotatedTo !== void 0 ? { rotatedTo: entry.rotatedTo } : {}),
-        ...(entry.previousSessionId !== void 0 ? { previousSessionId: entry.previousSessionId } : {})
-      }
-    }
-    writeFile(hostsPath, JSON.stringify(data, null, 2), 'utf8').catch(
-      (error: unknown) => { ctx.logger.warn(`[deepartments] hosts.json write failed: ${error instanceof Error ? error.message : String(error)}`) }
-    )
-  }
+  // (The durable write + `.bak` backup live in the RegistryStore.)
+  const persistHosts = (): void => { registry.persistHosts() }
 
   // U1 REMOVED (custom-sidebar removal): the persistent UI config
   // (`uiConfig`/`persistUiConfig`/`ui.json` — the `sidebarEnabled` toggle) is
@@ -5564,71 +4858,27 @@ export function applyInvoke(ctx: Context, config: Config) {
    * Never fabricates a host at boot — only a live tool call registers one
    * (dept_who / send_message self-register through the B3 gap fix).
    */
-  const ensureHost = (sessionId: string, roomId: string): string => {
-    const hostId = `${HOST_ID_PREFIX}${sessionId}`
-    // U2 (rotation, §4/C1): a RETIRED host entry must never be resurrected —
-    // the old session's bus-tool calls after a rotation stay PLAIN sessions
-    // ("no pack + no registration"). Refuse the re-registration, log loudly,
-    // keep the entry retired (its rotatedTo stays the live host).
-    const existing = hosts.get(hostId)
-    if (existing?.retired === true) {
-      ctx.logger.warn(`[deepartments] ensureHost: refusing to re-register retired host ${hostId} (rotated to ${existing.rotatedTo ?? 'unknown'}) — the session stays a plain session`)
-      return hostId
-    }
-    // Postmortem nº5 fix — the SINGLE-LIVE-HOST guard: a NEW registration
-    // (this hostId is absent from the registry) while ANOTHER non-retired host
-    // entry exists must NOT mint a second live host (wake-12→13: a stray
-    // dormant tab registered itself as a bare second host 92 s after the
-    // rotation). Mirror the retired-refusal: warn + DO NOT register — the
-    // session stays a plain session ("no pack + no registration", spec 002
-    // §4/C1). Return the EXISTING live host's id so member resolution keeps
-    // returning a valid member id and no tool of a plain session ever creates
-    // an entry.
-    if (existing === undefined) {
-      for (const candidate of hosts.values()) {
-        if (candidate.retired !== true && candidate.sessionId !== sessionId) {
-          ctx.logger.warn(`[deepartments] ensureHost: refusing new host registration ${hostId} — live host already exists: ${candidate.hostId}; the session stays a plain session`)
-          return candidate.hostId
+  const ensureHost = (sessionId: string, roomId: string): string =>
+    registry.ensureHost(sessionId, roomId, {
+      // U4 — pin the durable "Asistente" title (the ctx-dependent side effect
+      // the store injects via this hook at the exact post-guard point the
+      // pre-extraction ensureHost pinned it).
+      pinHostTitle: (sid) => {
+        const titleSession = ctx.sessions.get(SessionId(sid))
+        if (titleSession !== void 0) {
+          const titlePin = pinHostSessionTitle(titleSession)
+          if (titlePin === 'pinned') {
+            ctx.logger.info(`[deepartments] ensureHost: pinned host session title "${ASISTENTE_SESSION_TITLE}" (${sid})`)
+          } else if (titlePin === 'failed') {
+            ctx.logger.warn(`[deepartments] ensureHost: host session title pin failed for ${sid} (non-fatal — host registration continues)`)
+          }
         }
       }
-    }
-    // U4 — pin the durable "Asistente" title on the live host session (sidebar
-    // label = the session title projection folded last-wins from session/title
-    // log events). Rotated host sessions already carry the pin in their COLD
-    // seed (buildRotationSeed); this covers the first UI-created host session
-    // and every resume. Guards: only when the session has no user-kind title
-    // YET (the owner's manual rename and the Asistente pin are both
-    // source.user — the owner's rename always wins, the existing pin is never
-    // double-pinned). A missing live session or a failed append is non-fatal;
-    // registration continues regardless.
-    const titleSession = ctx.sessions.get(SessionId(sessionId))
-    if (titleSession !== void 0) {
-      const titlePin = pinHostSessionTitle(titleSession)
-      if (titlePin === 'pinned') {
-        ctx.logger.info(`[deepartments] ensureHost: pinned host session title "${ASISTENTE_SESSION_TITLE}" (${sessionId})`)
-      } else if (titlePin === 'failed') {
-        ctx.logger.warn(`[deepartments] ensureHost: host session title pin failed for ${sessionId} (non-fatal — host registration continues)`)
-      }
-    }
-    // Relay-fix (explore 2026-08-22): the OLD code REPLACED the whole entry on
-    // every refresh, wiping the rotation-successor metadata (previousSessionId/
-    // sleepEpoch/boundarySeq/deferredJournalSeed and any retire evidence) on
-    // the successor's first tool call — the live-host pick then degraded
-    // to the ambiguity branch. MERGE instead: preserve every field ensureHost
-    // does not own and refresh only the durable identity (hostId/sessionId).
-    // Host-roomId latch fix: a refresh KEEPS `existing.roomId` verbatim; roomId
-    // is assigned ONLY at CREATE.
-    hosts.set(hostId, existing === undefined
-      ? { hostId, sessionId, roomId }
-      : { ...existing, hostId, sessionId })
-    hostForSession.set(sessionId, hostId)
-    persistHosts()
-    return hostId
-  }
+    })
 
   /** Deterministic durable member id for a HOST session (Batch 7): the same
    * `host-<sessionId>` address used for the journal path and hosts.json. */
-  const hostIdForSession = (sessionId: string): string => `${HOST_ID_PREFIX}${sessionId}`
+  const hostIdForSession = (sessionId: string): string => registry.hostIdForSession(sessionId)
 
   // Persistence of the post registry. Callers MAY await it (returns the write
   // promise) so a durability-critical step (the dept_sleep sleepEpoch mark) can
@@ -5636,48 +4886,11 @@ export function applyInvoke(ctx: Context, config: Config) {
   // shape (`persistPosts()` as a statement ignores the returned promise). The
   // promise ALWAYS settles — a failed write resolves (the error is logged), never
   // rejects — so an awaiting caller can never be thrown on a disk hiccup.
-  const persistPosts = (): Promise<void> => {
-    const data: Record<string, PostEntryPersisted> = {}
-    for (const entry of byPost.values()) {
-      data[entry.postId] = {
-        // Batch 1a: persist the root-agent identity — no parentId/provider
-        // (a root head has no parent). agentPreset is the permanent-head marker.
-        sessionId: entry.sessionId,
-        roomId: entry.roomId,
-        agentPreset: entry.agentPreset,
-        // Batch 3a: persist the disposable-worker marker + captured role only
-        // for workers (absent for configured permanent heads).
-        ...(entry.provider !== void 0 ? { provider: entry.provider } : {}),
-        ...(entry.role !== void 0 ? { role: entry.role } : {}),
-        // F1: persist the creator link + department + job link + retired marker
-        // only when set — legacy entries (all absent) rewrite byte-compatible.
-        ...(entry.departmentId !== void 0 ? { departmentId: entry.departmentId } : {}),
-        ...(entry.managerId !== void 0 ? { managerId: entry.managerId } : {}),
-        ...(entry.jobId !== void 0 ? { jobId: entry.jobId } : {}),
-        ...(entry.retired === true ? { retired: true } : {}),
-        // Batch G: persist the optional sleep lifecycle fields only when set
-        // (absent = never slept / no previous incarnation).
-        ...(entry.sleepEpoch !== void 0 ? { sleepEpoch: entry.sleepEpoch } : {}),
-        ...(entry.boundarySeq !== void 0 ? { boundarySeq: entry.boundarySeq } : {}),
-        ...(entry.previousChildId !== void 0 ? { previousChildId: entry.previousChildId } : {}),
-        // Fix (head-sleep worker drain): persist the in-flight worker ledger only
-        // when non-empty (absent = no in-flight workers, byte-compatible for
-        // legacy/never-slept entries).
-        ...(Array.isArray(entry.inflightWorkers) && entry.inflightWorkers.length > 0 ? { inflightWorkers: entry.inflightWorkers } : {})
-      }
-    }
-    return writeFile(postsPath, JSON.stringify(data, null, 2), 'utf8').catch(
-      (error: unknown) => { ctx.logger.warn(`[deepartments] posts.json write failed: ${error instanceof Error ? error.message : String(error)}`) }
-    )
-  }
+  const persistPosts = (): Promise<void> => registry.persistPosts()
 
-  const registerEntry = (entry: PostEntry) => {
-    byPost.set(entry.postId, entry)
-    byChild.set(entry.sessionId, entry.postId)
-    persistPosts()
-  }
+  const registerEntry = (entry: PostEntry) => registry.registerEntry(entry)
 
-  const postIdForChild = (childId: string): string | undefined => byChild.get(childId)
+  const postIdForChild = (childId: string): string | undefined => registry.postIdForChild(childId)
 
   // --- Feature A — owner-presence state + host notify + ask_user guard ------
   // `<stateDir>/presence.json` is the durable source; the in-memory `presenceCache`
@@ -5755,70 +4968,11 @@ export function applyInvoke(ctx: Context, config: Config) {
   // untouched until a later persistPosts overwrites it — reversible). The
   // configured coordinator is then re-created fresh as a root agent by
   // ensureHeads on boot; the old durable subagent session is never woken.
-  const registryLoaded = readFile(postsPath, 'utf8')
-    .then((text) => {
-      const parsed = JSON.parse(text) as Record<string, Record<string, unknown>>
-      let sweptLegacy = 0
-      for (const [postId, entry] of Object.entries(parsed)) {
-        if (entry?.provider === 'fork') {
-          // Orphaned fork ghost (retired pre-Batch-A): never register it and
-          // count it for the boot summary.
-          sweptLegacy++
-          continue
-        }
-        const sessionId = typeof entry?.sessionId === 'string' ? entry.sessionId : undefined
-        if (sessionId !== undefined && typeof entry?.roomId === 'string' && typeof entry?.agentPreset === 'string') {
-          const sleepEpoch = typeof entry.sleepEpoch === 'number' ? entry.sleepEpoch : undefined
-          const boundarySeq = typeof entry.boundarySeq === 'number' ? entry.boundarySeq : undefined
-          const previousChildId = typeof entry.previousChildId === 'string' ? entry.previousChildId : undefined
-          // Batch 3a: a disposable worker is cold-loaded like any post, carrying
-          // its durable `provider: 'worker'` marker + captured role. It is NOT
-          // re-materialized by ensureAllHeads (config-only), so a retired worker
-          // whose entry was removed stays gone across restarts.
-          const provider = entry.provider === 'worker' ? 'worker' as const : undefined
-          const role = typeof entry.role === 'string' ? entry.role : undefined
-          // F1: read the new optional fields with type guards — a legacy
-          // pre-F1 entry (all absent) loads EXACTLY as before (undefined, no
-          // error); a retired worker entry is registered AS retired (kept
-          // queryable, filtered by every live-catalog consumer).
-          const departmentId = typeof entry.departmentId === 'string' ? entry.departmentId : undefined
-          const managerId = typeof entry.managerId === 'string' ? entry.managerId : undefined
-          const jobId = typeof entry.jobId === 'string' ? entry.jobId : undefined
-          const retired = entry.retired === true
-          // Fix (head-sleep worker drain): restore the durable in-flight worker
-          // ledger so the boot reconcile can read it for a loaded slept head.
-          const inflightWorkers = Array.isArray(entry.inflightWorkers)
-            ? entry.inflightWorkers.filter((w): w is string => typeof w === 'string')
-            : undefined
-          registerEntry({
-            postId,
-            sessionId,
-            roomId: entry.roomId,
-            agentPreset: entry.agentPreset,
-            ...(provider !== void 0 ? { provider } : {}),
-            ...(role !== void 0 ? { role } : {}),
-            ...(departmentId !== void 0 ? { departmentId } : {}),
-            ...(managerId !== void 0 ? { managerId } : {}),
-            ...(jobId !== void 0 ? { jobId } : {}),
-            ...(retired ? { retired: true } : {}),
-            ...(sleepEpoch !== void 0 ? { sleepEpoch } : {}),
-            ...(boundarySeq !== void 0 ? { boundarySeq } : {}),
-            ...(previousChildId !== void 0 ? { previousChildId } : {}),
-            ...(inflightWorkers !== void 0 && inflightWorkers.length > 0 ? { inflightWorkers } : {})
-          })
-        } else {
-          // Legacy continuable-subagent entry (or a malformed one): leave out of
-          // the in-memory registry; the head is re-created fresh (if configured).
-          sweptLegacy++
-        }
-      }
-      ctx.logger.info(`[deepartments] loaded ${byPost.size} head registry entries from posts.json${sweptLegacy > 0 ? `; skipped ${sweptLegacy} legacy/non-head entry/entries (head model)` : ''}`)
-    })
-    .catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        ctx.logger.warn(`[deepartments] posts.json load failed (starting with an empty registry): ${error instanceof Error ? error.message : String(error)}`)
-      }
-    })
+  const registryLoaded = registry.loadPosts().catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      ctx.logger.warn(`[deepartments] posts.json load failed (starting with an empty registry): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
 
   // Best-effort cold load of the host registry. Reconciliation choice (Batch
   // A): we do NOT drop entries whose session has no live agent — a
@@ -5826,87 +4980,11 @@ export function applyInvoke(ctx: Context, config: Config) {
   // it would erase a legitimate host's identity. We keep it; the relay
   // SKIPS+WARNS when the target session is not live. Only a real join (lazy
   // ensureHost on a live tool call) registers/refreshes a host.
-  const hostsLoaded = readFile(hostsPath, 'utf8')
-    .then((text) => {
-      const parsed = JSON.parse(text) as Record<string, Omit<HostEntry, 'hostId'>>
-      // U2 (spec 002 §3.5/D4): validate the rotation schema BEFORE restoring —
-      // legacy files (no schemaVersion / no retired fields) keep exact
-      // pre-rotation behavior (validated as a no-op), malformed NEW fields
-      // reject the whole load LOUDLY (descriptive error → the catch below
-      // logs it) instead of being silently dropped.
-      validateHostsRotationFile(parsed)
-      for (const [hostId, entry] of Object.entries(parsed)) {
-        // U2 (D4): the top-level schemaVersion marker is not a host entry.
-        if (hostId === 'schemaVersion') continue
-        if (typeof entry.sessionId === 'string' && typeof entry.roomId === 'string' && hostId.startsWith(HOST_ID_PREFIX)) {
-          const sessionId = hostId.slice(HOST_ID_PREFIX.length)
-          if (sessionId === entry.sessionId) {
-            // Batch 7: sanitize the optional sleep marker so a corrupt value
-            // never survives into the in-memory registry.
-            const sleepEpoch = typeof entry.sleepEpoch === 'number' ? entry.sleepEpoch : undefined
-            const boundarySeq = typeof entry.boundarySeq === 'number' ? entry.boundarySeq : undefined
-            // Fix wake-12: sanitize the deferred sleep-replace seed (a string;
-            // a corrupt value must never survive into the registry).
-            const deferredJournalSeed = typeof entry.deferredJournalSeed === 'string' ? entry.deferredJournalSeed : undefined
-            // U2 (D4): sanitize the rotation fields (validator above already
-            // threw on type violations — this pass guards in-memory purity).
-            const retired = entry.retired === true
-            const retiredAt = typeof entry.retiredAt === 'number' ? entry.retiredAt : undefined
-            const rotatedTo = typeof entry.rotatedTo === 'string' ? entry.rotatedTo : undefined
-            const previousSessionId = typeof entry.previousSessionId === 'string' ? entry.previousSessionId : undefined
-            hosts.set(hostId, {
-              hostId,
-              sessionId: entry.sessionId,
-              roomId: entry.roomId,
-              ...(sleepEpoch !== void 0 ? { sleepEpoch } : {}),
-              ...(boundarySeq !== void 0 ? { boundarySeq } : {}),
-              ...(deferredJournalSeed !== void 0 ? { deferredJournalSeed } : {}),
-              // Web-UI sleep cleanup: restore the pending marker (a real
-              // dept_sleep set it; the first boot after clears it once the
-              // artifact truncation succeeded).
-              ...(entry.webUiCleanupPending === true ? { webUiCleanupPending: true } : {}),
-              // U2: restore the rotation schema fields.
-              ...(retired ? { retired: true } : {}),
-              ...(retiredAt !== void 0 ? { retiredAt } : {}),
-              ...(rotatedTo !== void 0 ? { rotatedTo } : {}),
-              ...(previousSessionId !== void 0 ? { previousSessionId } : {})
-            })
-            hostForSession.set(entry.sessionId, hostId)
-            // U2: a RETIRED entry must never re-arm the deferred fold (rotation
-            // never sets deferredJournalSeed; the retire means "no wake pack,
-            // plain session" — re-arming would fold an archived surface).
-            if (retired) continue
-            // Fix wake-12: re-arm the DEFERRED REPLACE intent for the first
-            // pre-step of this restarted process. The in-memory
-            // `deferredSleepReplace` map died with the previous process; only
-            // hosts.json carried the folded-journal seed. Without this restore
-            // the first pre-step skips the fold (invoke.ts:2620) and the
-            // journal-interleaved close tail ships to the strict API → the
-            // wake-12 first-turn 400. The fold consumes (deletes) the map
-            // entry AND clears the durable field, so a later mid-wake restart
-            // is a true no-op (never re-folds the wake surface).
-            if (deferredJournalSeed !== void 0) deferredSleepReplace.set(entry.sessionId, deferredJournalSeed)
-          }
-        }
-      }
-      ctx.logger.info(`[deepartments] loaded ${hosts.size} host registry entries from hosts.json`)
-      // Postmortem nº1 fix — the SINGLE-LIVE cardinality invariant, WARN ONLY
-      // (never throw): a THROW here lands in the catch below and boots with an
-      // EMPTY registry, and the next ensureHost→persistHosts re-persists ONLY
-      // the fresh entry — silently erasing every file entry (retired rotation
-      // evidence included). A warn keeps the registry alive so boot-repair and
-      // host/status can still report; pickLiveHostEntry resolves
-      // deterministically among the live candidates.
-      const liveHostEntries = [...hosts.values()].filter((candidate) => candidate.retired !== true)
-      if (liveHostEntries.length > 1) {
-        ctx.logger.warn(`[deepartments] hosts.json: ${liveHostEntries.length} live host entries (exactly one required) — pickLiveHostEntry will choose deterministically among: ${liveHostEntries.map((candidate) => candidate.hostId).join(', ')}`)
-      }
-    })
-    .catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        ctx.logger.warn(`[deepartments] hosts.json load failed (starting with an empty registry): ${error instanceof Error ? error.message : String(error)}`)
-      }
-    })
+  const hostsLoaded = registry.loadHosts({ deferredSleepReplace }).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      ctx.logger.warn(`[deepartments] hosts.json load failed (starting with an empty registry): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
 
   // --- Web-UI sleep cleanup at boot (Option A; src/session-cleanup.ts) -------
   // After a REAL host dept_sleep set `webUiCleanupPending`, the FIRST boot
@@ -8976,24 +8054,14 @@ export function applyInvoke(ctx: Context, config: Config) {
       // — see captureRetiredPostTurnError). Never throws / non-fatal to the retire.
       await captureRetiredPostTurnError(config.stateDir, entry.sessionId, postId)
       // MARK, NOT ERASE (F1): the registry entry stays; the live catalog filters.
-      entry.retired = true
-      // Fix (head-sleep worker drain): prune this worker from its manager head's
-      // durable in-flight ledger (if the head recorded it at dept_sleep), so the
-      // ledger stays accurate as workers are cut clean by any retire path.
-      if (entry.managerId !== void 0) {
-        const manager = byPost.get(entry.managerId)
-        if (manager !== void 0 && Array.isArray(manager.inflightWorkers)) {
-          const idx = manager.inflightWorkers.indexOf(postId)
-          if (idx >= 0) manager.inflightWorkers = manager.inflightWorkers.filter((w) => w !== postId)
-        }
-      }
-      persistPosts()
+      // The store owns the durable MARK (retired:true + manager-ledger prune +
+      // persist) — it never erases a post from the catalog.
+      registry.markPostRetired(postId)
     } else {
       // Configured head / non-worker: today's semantics (unregister; the config
-      // re-materializes it at boot — cosmetic retire).
-      byPost.delete(postId)
-      byChild.delete(entry.sessionId)
-      persistPosts()
+      // re-materializes it at boot — cosmetic retire). The store owns the
+      // unregister + persist.
+      registry.unregisterPost(postId)
     }
     // Also dispose any live handle (retiring a post should not leave it live) —
     // via the in-flight dedupe, so a concurrent dispose (e.g. the post's own
