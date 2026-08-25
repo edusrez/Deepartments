@@ -162,6 +162,19 @@ export interface Config {
      * never an env default. The Asistente-direct path remains the alternative.
      */
     missionExecRoots?: string[]
+    /**
+     * P1 rewire-pooler: the pooler (dsh-key-pooler) baseURL — the LEGITIMATE
+     * local/proxy LLM route (e.g. http://127.0.0.1:4097/v1) the opencode-zen
+     * provider points at. An EXACT-MATCH exemption for the endpoint-drift rule:
+     * `providerAdapterEndpointDrift` treats a baseURL EQUAL to this value as a
+     * healthy route (NOT drift), so the boot provider-adapter check does not
+     * false-alert on the pooler — while ANY OTHER local/proxy baseURL
+     * (127.0.0.1 / localhost / 0.0.0.0 not equal to the pooler) STAYS a drift.
+     * Absent (undefined) → NO exemption (every local/proxy baseURL is still
+     * drift — no blind localhost hardcode). The `maxRetries: 0` stale-profile
+     * signal is NEVER exempted by this field.
+     */
+    poolerBaseURL?: string
   }
   /**
    * Custom `ctx.web` fetch provider config (blocking detection).
@@ -230,7 +243,13 @@ export const Config: z<any, any> = z.object({
     // Config.org.missionExecRoots). An ABSENT key (no mission grant) defaults
     // to [] so the protected stable profile stays DENIED without an explicit
     // grant — never a silent/env-default widening. Config-recorded + revocable.
-    missionExecRoots: z.array(z.string()).default([])
+    missionExecRoots: z.array(z.string()).default([]),
+    // P1 rewire-pooler: the pooler baseURL is a LEGITIMATE local/proxy LLM route
+    // (mirrors Config.org.poolerBaseURL). An ABSENT key → NO exemption (the
+    // endpoint-drift rule stays valid for every other local/proxy baseURL); an
+    // EXACT-MATCH of the configured value is never flagged as drift. The
+    // maxRetries:0 stale-profile signal is NEVER relaxed by this field.
+    poolerBaseURL: z.string()
   }).required(),
   webfetch: z.object({
     enabled: z.boolean(),

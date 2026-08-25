@@ -71,12 +71,24 @@
                   provider: opencode-zen
                   model: deepseek-v4-flash-vision-exp
                   reasoningEffort: max
+          # P1 rewire-pooler: the pooler (dsh-key-pooler) baseURL — a LEGITIMATE
+          # local/proxy LLM route. The endpoint-drift exemption
+          # (providerAdapterEndpointDrift in src/invoke.ts) treats a baseURL
+          # EXACTLY equal to this as a HEALTHY route (NOT drift), so the boot
+          # provider-adapter check does NOT false-alert on the pooler. MUST match
+          # the opencode-zen baseURL set in settings.yaml
+          # (llm-pi-ai.providers.opencode-zen.baseURL). Absent/undefined → NO
+          # exemption (every local/proxy baseURL stays a drift).
+          poolerBaseURL: http://127.0.0.1:4097/v1
         # Quality Department runtime block (D-Q2, spec 007 §4.1): the worker-
         # archive inspection dice probability. CODE-DEFAULT-CAPABLE — ABSENT →
         # the code default 0.10; present → that value (the D-Q3 head/host 100%
         # inspect mandate is structural and NOT a knob).
+        # P3 (owner decision 2026-08-25 "sube la posibilidad al 25%"): the PERMANENT
+        # repo value is 0.25 (25% of worker retirements audited). Code default stays
+        # 0.10 (a config with NO quality block still composes at the code default).
         quality:
-          workerInspectProbability: 0.10
+          workerInspectProbability: 0.25
         # Custom ctx.web fetch provider (webfetch.ts): detects blocking
         # (403/429) and reports WEB_BLOCKED with a message that instructs
         # API/JSON-endpoint investigation instead of guessing host endpoints.

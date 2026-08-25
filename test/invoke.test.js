@@ -9323,13 +9323,15 @@ test('FIX-2 (QD NO_ADAPTER alerting): PURE provider-adapter boot check — a mis
     registeredProviders: [{ id: 'opencode-zen', name: 'OpenCode Zen' }],
     providerSettings: { 'opencode-zen': { baseURL: 'https://opencode.ai/zen/go/v1', maxRetries: 2 } }
   }), [])
-  // (c) Endpoint drift: a local/proxy baseURL (the QD stale settings value).
+  // (c) Endpoint drift: a local/proxy baseURL that is NOT the configured pooler
+  // (no poolerBaseURL configured → no exemption) is STILL a drift. P1 rewire-pooler
+  // uses the stock port 4097 for the pooler, so 9999 is a clearly-OTHER localhost.
   assert.deepEqual(resolveProviderAdapterBootFindings({
     configuredProviders: ['opencode-zen'],
     registeredProviders: [{ id: 'opencode-zen', name: 'OpenCode Zen' }],
-    providerSettings: { 'opencode-zen': { baseURL: 'http://127.0.0.1:4097/v1', maxRetries: 2 } }
+    providerSettings: { 'opencode-zen': { baseURL: 'http://127.0.0.1:9999/v1', maxRetries: 2 } }
   }), [
-    { postId: PROVIDER_ADAPTER_CHECK_POST_ID, error: 'provider endpoint drift for "opencode-zen": baseURL "http://127.0.0.1:4097/v1" is a local/proxy endpoint, not the remote provider surface' }
+    { postId: PROVIDER_ADAPTER_CHECK_POST_ID, error: 'provider endpoint drift for "opencode-zen": baseURL "http://127.0.0.1:9999/v1" is a local/proxy endpoint, not the remote provider surface' }
   ])
   // (d) Endpoint drift: a maxRetries: 0 profile (the QD stale-profile signal).
   assert.deepEqual(resolveProviderAdapterBootFindings({
@@ -9341,7 +9343,32 @@ test('FIX-2 (QD NO_ADAPTER alerting): PURE provider-adapter boot check — a mis
   ])
   // The drift helper is conservative: a healthy remote endpoint yields NO drift.
   assert.equal(providerAdapterEndpointDrift('opencode-zen', { baseURL: 'https://opencode.ai/zen/go/v1', maxRetries: 2 }), undefined)
-  assert.match(providerAdapterEndpointDrift('opencode-zen', { baseURL: 'http://127.0.0.1:4097/v1' }) ?? '', /local\/proxy/, 'a proxy baseURL is a drift')
+  // An un-exempted local/proxy baseURL is a drift (no poolerBaseURL provided).
+  assert.match(providerAdapterEndpointDrift('opencode-zen', { baseURL: 'http://127.0.0.1:9999/v1' }) ?? '', /local\/proxy/, 'a non-pooler proxy baseURL is a drift')
+
+  // --- P1 rewire-pooler: the pooler baseURL is a LEGITIMATE route (EXACT-match exemption) ---
+  const POOLER = 'http://127.0.0.1:4097/v1'
+  // (e) baseURL === the configured poolerBaseURL → NOT drift (exact-match exemption).
+  assert.equal(providerAdapterEndpointDrift('opencode-zen', { baseURL: POOLER }, { poolerBaseURL: POOLER }), undefined,
+    'the configured pooler baseURL is a legitimate route, not drift')
+  // (f) A DIFFERENT local/proxy baseURL (NOT the pooler) is STILL drift even with the pooler exempted.
+  assert.match(providerAdapterEndpointDrift('opencode-zen', { baseURL: 'http://127.0.0.1:9999/v1' }, { poolerBaseURL: POOLER }) ?? '', /local\/proxy/,
+    'a non-pooler localhost baseURL is STILL drift when a pooler is configured')
+  // (g) The pooler baseURL + maxRetries:0 → STILL drift (the maxRetries stale-profile signal is NEVER relaxed by the exemption).
+  assert.match(providerAdapterEndpointDrift('opencode-zen', { baseURL: POOLER, maxRetries: 0 }, { poolerBaseURL: POOLER }) ?? '', /maxRetries is 0/,
+    'the pooler exemption does NOT relax the maxRetries stale-profile signal')
+  // (h) WITHOUT a configured poolerBaseURL, the pooler baseURL is STILL drift (no blind localhost exemption).
+  assert.match(providerAdapterEndpointDrift('opencode-zen', { baseURL: POOLER }) ?? '', /local\/proxy/,
+    'no poolerBaseURL configured → no exemption → the pooler localhost is still a drift')
+  // (i) The org.poolerBaseURL config flows through the boot input → the pooler route is NOT a finding.
+  assert.deepEqual(resolveProviderAdapterBootFindings({
+    configuredProviders: ['opencode-zen'],
+    registeredProviders: [{ id: 'opencode-zen', name: 'OpenCode Zen' }],
+    providerSettings: { 'opencode-zen': { baseURL: POOLER, maxRetries: 2 } },
+    poolerBaseURL: POOLER
+  }), [], 'wiring org.poolerBaseURL through the boot input exempts the pooler route')
+  // (j) A remote baseURL with the pooler configured → NO drift (unchanged).
+  assert.equal(providerAdapterEndpointDrift('opencode-zen', { baseURL: 'https://opencode.ai/zen/go/v1', maxRetries: 2 }, { poolerBaseURL: POOLER }), undefined)
   // The dependency-free settings.yaml parser resolves the pi-ai provider surface.
   const parsed = parseLlmPiAiProviderSettings([
     'llm-pi-ai:',
@@ -9355,6 +9382,65 @@ test('FIX-2 (QD NO_ADAPTER alerting): PURE provider-adapter boot check — a mis
   assert.deepEqual(parsed, { 'opencode-zen': { baseURL: 'http://127.0.0.1:4097/v1', maxRetries: 0 } }, 'the parser resolves baseURL + maxRetries per provider')
   // A settings.yaml without the pi-ai namespace is a no-op (never a finding source).
   assert.deepEqual(parseLlmPiAiProviderSettings('other: {}\n'), {}, 'a non-pi-ai settings.yaml resolves to {}')
+})
+
+test('P1 rewire-pooler (GAP 1): the deepartments plugin org config SETS org.poolerBaseURL to the pooler route, so the endpoint-drift exemption is ACTIVE and the boot check does NOT flag the pooler as drift', async () => {
+  // GAP 1 regression guard: builder-56 wired the exemption (src/org.ts +
+  // src/invoke.ts) but did NOT set the VALUE in the plugin org config, so the
+  // boot provider-adapter check would STILL flag opencode-zen (baseURL
+  // http://127.0.0.1:4097/v1 — the pooler) as endpoint drift and post-error at
+  // boot. This reads the REAL cordis.patch.yml (the bundled config) and asserts
+  // the deepartments org block carries org.poolerBaseURL = the pooler route.
+  // Read-only + dependency-free line scan (mirrors parseLlmPiAiProviderSettings).
+  const INDENT = (line0) => (line0.match(/^\s*/)?.[0].length ?? 0)
+  const text = await readFile(path.join(REPO_ROOT, 'cordis.patch.yml'), 'utf8')
+  const lines = text.split('\n')
+  const rowIdx = lines.findIndex((l) => /^\s*- id: deepartments\s*$/.test(l))
+  assert.ok(rowIdx >= 0, 'cordis.patch.yml contains the deepartments patch row')
+  const rowIndent = INDENT(lines[rowIdx])
+  let inConfig = false
+  let configIndent = -1
+  let inOrg = false
+  let orgIndent = -1
+  let poolerBaseURL
+  for (let i = rowIdx; i < lines.length; i += 1) {
+    const line = lines[i]
+    const indent = INDENT(line)
+    const trimmed = line.trim()
+    if (trimmed === '' || trimmed.startsWith('#')) continue
+    // Stop at the next top-level patch row (the array of patch entries).
+    if (i > rowIdx && indent <= rowIndent && /^-\s/.test(trimmed)) break
+    if (inConfig && indent <= configIndent) {
+      inConfig = false
+      inOrg = false
+    }
+    if (!inConfig && /^config\s*:/.test(trimmed) && indent > rowIndent) {
+      inConfig = true
+      configIndent = indent
+      continue
+    }
+    if (inConfig && !inOrg && /^org\s*:/.test(trimmed) && indent > configIndent) {
+      inOrg = true
+      orgIndent = indent
+      continue
+    }
+    if (inOrg) {
+      if (indent <= orgIndent) {
+        inOrg = false
+        continue
+      }
+      const keyMatch = /^poolerBaseURL\s*:\s*(.+)$/.exec(trimmed)
+      if (keyMatch) {
+        poolerBaseURL = keyMatch[1].trim()
+        break
+      }
+    }
+  }
+  assert.equal(
+    poolerBaseURL,
+    'http://127.0.0.1:4097/v1',
+    'GAP 1: org.poolerBaseURL must be set to the pooler route (http://127.0.0.1:4097/v1) so the drift exemption is ACTIVE',
+  )
 })
 
 test('FIX-2 (QD NO_ADAPTER alerting): a boot where the configured provider NEVER registers within the retry window (a GENUINE outage) appends EXACTLY ONE provider-adapter post-error row FROM THE BREAK, even with no agent spawned', async () => {

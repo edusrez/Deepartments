@@ -2877,6 +2877,21 @@ export interface ProviderAdapterBootInput {
    * .maxRetries). Absent → the drift half is a no-op (the missing-adapter half
    * still fires), exactly the graceful degradation production needs. */
   providerSettings?: Readonly<Record<string, { baseURL?: string; maxRetries?: number }>>
+  /** P1 rewire-pooler: the config `org.poolerBaseURL` — the pooler (dsh-key-pooler)
+   * baseURL, a LEGITIMATE local/proxy LLM route. When a configured provider's
+   * baseURL EXACTLY equals this value, the endpoint-drift rule treats it as a
+   * healthy route (NOT drift) — so the boot check does not false-alert on the
+   * pooler. Absent (undefined) → NO exemption (every local/proxy baseURL is still
+   * drift). The `maxRetries: 0` stale-profile signal is NEVER exempted. */
+  poolerBaseURL?: string
+}
+
+/** P1 rewire-pooler — optional endpoint-drift exemption deps. `poolerBaseURL` is
+ * the pooler (dsh-key-pooler) LLM route: a LEGITIMATE local/proxy endpoint that
+ * must NOT be flagged as drift. An EXACT match only — never a blind localhost
+ * hardcode — so a random 127.0.0.1 that is not the configured pooler STAYS drift. */
+export interface ProviderAdapterEndpointDriftDeps {
+  poolerBaseURL?: string
 }
 
 /** A baseURL that points at a LOCAL/PROXY surface rather than the remote provider
@@ -2887,11 +2902,19 @@ const LOCAL_ENDPOINT_RE = /(?:127\.0\.0\.1|localhost|0\.0\.0\.0)(?::|\/|$)/i
 /** Detect a provider ENDPOINT DRIFT (the QD config-hygiene signal): a baseURL
  * pointing at a local/proxy surface (127.0.0.1 / localhost / 0.0.0.0) or a
  * `maxRetries: 0` profile. Returns a human-readable drift error, or undefined
- * when the endpoint surface is healthy. Pure, never throws. */
-export function providerAdapterEndpointDrift(provider: string, settings: { baseURL?: string; maxRetries?: number }): string | undefined {
+ * when the endpoint surface is healthy. Pure, never throws. `deps.poolerBaseURL`
+ * (the P1 rewire-pooler config `org.poolerBaseURL`) is an EXACT-MATCH exemption:
+ * a baseURL EQUAL to it is a LEGITIMATE local/proxy LLM route (not drift), while
+ * ANY OTHER local/proxy baseURL STAYS a drift. The `maxRetries: 0` stale-profile
+ * signal is NEVER exempted. */
+export function providerAdapterEndpointDrift(provider: string, settings: { baseURL?: string; maxRetries?: number }, deps?: ProviderAdapterEndpointDriftDeps): string | undefined {
   const baseURL = (settings.baseURL ?? '').trim()
-  if (baseURL !== '' && LOCAL_ENDPOINT_RE.test(baseURL)) {
-    return `provider endpoint drift for "${provider}": baseURL "${baseURL}" is a local/proxy endpoint, not the remote provider surface`
+  if (baseURL !== '') {
+    const poolerBaseURL = (deps?.poolerBaseURL ?? '').trim()
+    const isExemptPooler = poolerBaseURL !== '' && baseURL === poolerBaseURL
+    if (!isExemptPooler && LOCAL_ENDPOINT_RE.test(baseURL)) {
+      return `provider endpoint drift for "${provider}": baseURL "${baseURL}" is a local/proxy endpoint, not the remote provider surface`
+    }
   }
   if (settings.maxRetries === 0) {
     return `provider endpoint drift for "${provider}": maxRetries is 0 (the QD outage's stale-profile signal)`
@@ -2915,7 +2938,7 @@ export function resolveProviderAdapterBootFindings(input: ProviderAdapterBootInp
     }
     const settings = input.providerSettings?.[provider]
     if (settings !== undefined) {
-      const drift = providerAdapterEndpointDrift(provider, settings)
+      const drift = providerAdapterEndpointDrift(provider, settings, { poolerBaseURL: input.poolerBaseURL })
       if (drift !== undefined) findings.push({ postId: PROVIDER_ADAPTER_CHECK_POST_ID, error: drift })
     }
   }
@@ -9684,7 +9707,8 @@ export function applyInvoke(ctx: Context, config: Config) {
         const findings = resolveProviderAdapterBootFindings({
           configuredProviders: configuredProviderList,
           registeredProviders,
-          providerSettings
+          providerSettings,
+          poolerBaseURL: config.org.poolerBaseURL
         })
         // Provider registered (or the drift resolved) WITHIN the window → this is a
         // healthy-but-slow boot → NO finding, no alert.
