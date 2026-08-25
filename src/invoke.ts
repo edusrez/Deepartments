@@ -2125,6 +2125,169 @@ export async function appendPostErrorDeduped(stateDir: string, entry: PostErrorE
   return true
 }
 
+// ---------------------------------------------------------------------------
+// M3 (dshd-error-handler): the per-recipient interrupt back-off + the
+// materialization-cascade quarantine. Two CORE guards over the
+// dispatch/materialization/post-error path (spec §2.4, §3.3):
+//   (1) safeInterrupt — the interrupt-LOOP bound + re-entrancy guard;
+//   (2) the per-host materialization-failure cooldown (the SAFEST subset of
+//       R2/R3 — gates REPEATED post-error recording, keeps the durable repair).
+// ---------------------------------------------------------------------------
+
+/** M3 — the per-recipient interrupt cooldown. At most ONE bus interrupt (a live
+ * turn aborted with reason 'interrupted') per recipient per this window is
+ * ALLOWED, regardless of how many net-new alert identities/classes/rows appear
+ * — a host turn can be canceled at most once per cooldown (identity-independent),
+ * which is BOTH the primary interrupt-loop bound AND the re-entrancy guard (a
+ * turn the daemon just interrupted is within the cooldown → never interrupted
+ * again → the self-referential interrupted-post loop closes). A code constant
+ * (a `health.interruptCooldownMs` runtime knob is a future org.ts schema change
+ * — deliberately NOT done here; see the M3 report). */
+export const INTERRUPT_COOLDOWN_MS = 5 * 60 * 1000
+
+/** M3 — the interrupt-cooldown ledger key prefix (`interrupt:<recipientId>`). */
+export const INTERRUPT_COOLDOWN_KEY_PREFIX = 'interrupt:'
+
+/** M3 — the interrupt-cooldown ledger file (a key→lastInterruptAtMs JSON ledger,
+ * mirroring the health-alerts-state.json pattern). A SEPARATE file so the
+ * system-health tick's own health-alerts-state.json write can never clobber the
+ * interrupt gate (the tick reads the ledger at the top and rewrites it at the
+ * end; the interrupt gate is written DURING the bus delivery). */
+export const INTERRUPT_COOLDOWN_FILE = 'interrupt-state.json'
+
+/** Read `<stateDir>/interrupt-state.json` → `{ [key]: lastInterruptAtMs }`.
+ * Absent / unreadable / malformed → {} (never throws). */
+export function readInterruptState(stateDir: string): HealthAlertsState {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, INTERRUPT_COOLDOWN_FILE), 'utf8')) as Record<string, unknown>
+    const out: HealthAlertsState = {}
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === 'number' && Number.isFinite(value)) out[key] = value
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/interrupt-state.json` (mkdir -p the dir, then the file). */
+export async function writeInterruptState(stateDir: string, state: HealthAlertsState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, INTERRUPT_COOLDOWN_FILE)), { recursive: true })
+  await writeFile(path.join(stateDir, INTERRUPT_COOLDOWN_FILE), JSON.stringify(state), 'utf8')
+}
+
+/** M3 — the per-recipient interrupt back-off. A shared helper that gates EVERY
+ * bus interrupt at the choke point (busDeliverToHost + busDeliverToPost): at most
+ * ONE interrupt per recipient per INTERRUPT_COOLDOWN_MS, regardless of identity
+ * count. Returns FALSE (no interrupt — the delivery falls through to QUEUE
+ * semantics) when a prior interrupt is inside the cooldown; TRUE when the turn
+ * was actually aborted. NEVER throws (a ledger failure degrades to an
+ * in-memory-only gate — the cooldown is best-effort but bounded; a cancel
+ * failure returns false WITHOUT advancing the gate, so a failed abort never
+ * caps a future genuine interrupt). */
+export async function safeInterrupt(
+  agent: { cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void },
+  recipientId: string,
+  nowMs: number,
+  stateDir: string
+): Promise<boolean> {
+  const key = `${INTERRUPT_COOLDOWN_KEY_PREFIX}${recipientId}`
+  let state: HealthAlertsState = {}
+  try { state = readInterruptState(stateDir) } catch { state = {} }
+  const last = state[key]
+  if (last !== undefined && nowMs - last < INTERRUPT_COOLDOWN_MS) return false
+  try {
+    agent.cancel(INTERRUPT_CANCEL_CAUSE, INTERRUPT_CANCEL_OPTIONS)
+  } catch {
+    return false
+  }
+  const next = { ...state, [key]: nowMs }
+  // Bounded: prune entries that aged out of the cooldown so the ledger never
+  // grows unbounded over time (an entry older than the cooldown is immaterial).
+  for (const [k, v] of Object.entries(next)) {
+    if (nowMs - v > INTERRUPT_COOLDOWN_MS) delete next[k]
+  }
+  try { await writeInterruptState(stateDir, next) } catch { /* best-effort */ }
+  return true
+}
+
+/** M3 — the N consecutive materialization failures after which a NON-retired
+ * host is quarantined (post-error recording + QD directive suppressed), keeping
+ * the durable-retry repair (the W8-i host-attach retry STILL runs — the
+ * delivery ATTEMPT is never skipped, only the RECORDING is gated). */
+export const MATERIALIZE_QUARANTINE_N = 3
+/** M3 — the per-host materialization quarantine window (ms). */
+export const MATERIALIZE_QUARANTINE_MS = 5 * 60 * 1000
+/** M3 — the materialization-issue ledger file (a per-host consecutive-failure
+ * counter + quarantineUntil, persisted so the back-off survives ticks). */
+export const MATERIALIZE_STATE_FILE = 'materialize-state.json'
+
+/** One host's materialization issue state. */
+export interface HostMaterializeIssue {
+  /** Consecutive materialization failures (saturated at MATERIALIZE_QUARANTINE_N). */
+  consecutiveFailures: number
+  /** When the host is quarantined (recording suppressed) until this epoch-ms. */
+  quarantineUntil: number
+}
+/** The materialization-issue ledger: hostId → issue state. */
+export type MaterializeIssueLedger = Record<string, HostMaterializeIssue>
+
+/** Read `<stateDir>/materialize-state.json` → `{ [hostId]: issue }`.
+ * Absent / unreadable / malformed → {} (never throws). */
+export function readMaterializeState(stateDir: string): MaterializeIssueLedger {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, MATERIALIZE_STATE_FILE), 'utf8')) as Record<string, unknown>
+    const out: MaterializeIssueLedger = {}
+    for (const [hostId, value] of Object.entries(parsed)) {
+      if (typeof value === 'object' && value !== null) {
+        const row = value as Record<string, unknown>
+        if (typeof row.consecutiveFailures === 'number' && typeof row.quarantineUntil === 'number') {
+          out[hostId] = { consecutiveFailures: row.consecutiveFailures, quarantineUntil: row.quarantineUntil }
+        }
+      }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/materialize-state.json` (mkdir -p the dir, then the file). */
+export async function writeMaterializeState(stateDir: string, state: MaterializeIssueLedger): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, MATERIALIZE_STATE_FILE)), { recursive: true })
+  await writeFile(path.join(stateDir, MATERIALIZE_STATE_FILE), JSON.stringify(state), 'utf8')
+}
+
+/** M3 — increment a host's consecutive-failure counter and, once it reaches
+ * MATERIALIZE_QUARANTINE_N, quarantine it for MATERIALIZE_QUARANTINE_MS (a FIXED
+ * window from the Nth failure; an already-quarantined host is NOT extended — a
+ * continuously-failing host re-quarantines each time the window lapses). PURE.
+ * Returns the next ledger + whether the host is quarantined. */
+export function markHostMaterializeFailure(state: MaterializeIssueLedger, hostId: string, nowMs: number): { next: MaterializeIssueLedger; quarantined: boolean } {
+  const prevFailures = state[hostId]?.consecutiveFailures ?? 0
+  const consecutiveFailures = Math.min(prevFailures + 1, MATERIALIZE_QUARANTINE_N)
+  const prevQuarantineUntil = state[hostId]?.quarantineUntil ?? 0
+  const alreadyQuarantined = nowMs < prevQuarantineUntil
+  const quarantineUntil = alreadyQuarantined
+    ? prevQuarantineUntil
+    : (consecutiveFailures >= MATERIALIZE_QUARANTINE_N ? nowMs + MATERIALIZE_QUARANTINE_MS : 0)
+  const quarantined = quarantineUntil !== 0 && nowMs < quarantineUntil
+  return { next: { ...state, [hostId]: { consecutiveFailures, quarantineUntil } }, quarantined }
+}
+
+/** M3 — clear a host's materialization issue (DURABLE): read the ledger, drop
+ * the host's entry if present, and persist ONLY when there was one (a healthy
+ * host's successful delivery performs no write). Promoted to a helper so the
+ * bus-deliver success path can reset the counter without touching the ledger on
+ * the common no-op case. */
+export async function resetHostMaterializeFailures(stateDir: string, hostId: string): Promise<void> {
+  const state = readMaterializeState(stateDir)
+  if (state[hostId] === undefined) return
+  const next = { ...state }
+  delete next[hostId]
+  await writeMaterializeState(stateDir, next)
+}
+
 // --- QD (spec 007 Quality Department) RUNTIME — the probability gate + config --
 // The Quality Department inspects the org's OWN runtime: every department HEAD
 // archive (dept_sleep) and every HOST session rotation is inspected at 100%
@@ -4664,17 +4827,28 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // Bug C — ERROR-IDENTITY alert-eligibility: a post-error finding alerts ONLY
     // when its error identity was NEVER delivered (the SAME (postId,error)
     // stream is delivered ONCE and NEVER re-alerts inside the window — no
-    // per-window re-fire, the Bug C re-alert loop). The identity is
-    // `post-error:<postId>:<errorIdentityHash>` stored in the SAME shared
-    // health-alerts-state.json ledger (key → lastAlertedAtMs). For
+    // per-window re-fire, the Bug C re-alert loop). The identity is stored in
+    // the SAME shared health-alerts-state.json ledger (key → lastAlertedAtMs).
+    // M3 (stable-class identity, spec §2.4): for a post-error finding the
+    // identity is `post-error:<postId>:<class>` when the error has a STABLE
+    // class (postErrorClass non-undefined — e.g. `session-not-found`), and ONLY
+    // falls back to the raw-text hash `post-error:<postId>:<errorIdentityHash>`
+    // when the error has NO stable class. This aligns the alert identity with the
+    // ALREADY-classed scan grouping (scanPostErrorFindings) so a recurring
+    // identical-class error whose text embeds a per-attempt variable (a rotating
+    // session id, a 429 token-count) is a ONE-SHOT alert regardless of text
+    // instability — the ROOT of the 1h host-stuck interrupt loop. For
     // delivery-failed / stalled / config-preset findings the identity IS the
     // existing finding key and the legacy per-key 30min window is preserved
     // (already identity-typed; do not regress).
     if (findings.length > 0) {
-      const identityOf = (finding: HealthFinding): string =>
-        finding.kind === 'post-error'
+      const identityOf = (finding: HealthFinding): string => {
+        if (finding.kind !== 'post-error') return finding.key
+        const cls = postErrorClass(finding.error)
+        return cls === undefined
           ? `post-error:${finding.postId}:${errorIdentityHash(finding.error ?? '')}`
-          : finding.key
+          : `post-error:${finding.postId}:${cls}`
+      }
       const findingsToAlert = findings.filter((finding) => {
         const identity = identityOf(finding)
         if (finding.kind === 'post-error') return nextState[identity] === undefined
@@ -9842,12 +10016,18 @@ export function applyInvoke(ctx: Context, config: Config) {
       // delivered below is the FIRST item of the recipient's next turn. A
       // DORMANT recipient (live === undefined) needs no abort — the followup
       // below wakes it immediately (unchanged).
+      // M3 (spec §2.4): the abort is gated by the shared per-recipient interrupt
+      // back-off (safeInterrupt) — at most ONE interrupt per recipient per
+      // INTERRUPT_COOLDOWN_MS, regardless of identity/class count. A turn just
+      // interrupted by the daemon is within the cooldown → it is NEVER
+      // interrupted again (the re-entrancy guard); a delivery that falls inside
+      // the cooldown races through to QUEUE semantics (no abort).
       if (interrupt && live !== void 0 && live.status === 'running') {
-        try {
-          live.cancel(INTERRUPT_CANCEL_CAUSE, INTERRUPT_CANCEL_OPTIONS)
+        const aborted = await safeInterrupt(live, entry.postId, Date.now(), config.stateDir)
+        if (aborted) {
           ctx.logger.warn(`[deepartments] bus delivery to "${entry.postId}": interrupt=true — aborted the current turn (reason 'interrupted'); delivery is the first item of the next turn`)
-        } catch (cancelError: unknown) {
-          ctx.logger.warn(`[deepartments] bus delivery to "${entry.postId}": interrupt cancel failed (delivery continues as a queue): ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`)
+        } else {
+          ctx.logger.warn(`[deepartments] bus delivery to "${entry.postId}": interrupt=true but within the per-recipient cooldown — delivery queued (no abort)`)
         }
       }
       const { target, resumed } = await materializePost(entry)
@@ -9926,12 +10106,18 @@ export function applyInvoke(ctx: Context, config: Config) {
           // W9-b interrupt: a LIVE, currently-running host with `interrupt:
           // true` is preempted — abort its CURRENT turn (reason 'interrupted')
           // and preserve any already-pending inbox work (keepInbox).
+          // M3 (spec §2.4): the abort is gated by the shared per-recipient
+          // interrupt back-off (safeInterrupt) — at most ONE interrupt per
+          // recipient per INTERRUPT_COOLDOWN_MS, regardless of identity/class
+          // count. A turn just interrupted by the daemon is within the cooldown
+          // → it is NEVER interrupted again (the re-entrancy guard); a delivery
+          // inside the cooldown races through to QUEUE semantics (no abort).
           if (interrupt && live.status === 'running') {
-            try {
-              live.cancel(INTERRUPT_CANCEL_CAUSE, INTERRUPT_CANCEL_OPTIONS)
+            const aborted = await safeInterrupt(live, hostEntry.hostId, Date.now(), config.stateDir)
+            if (aborted) {
               ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}": interrupt=true — aborted the current turn (reason 'interrupted'); delivery is the first item of the next turn`)
-            } catch (cancelError: unknown) {
-              ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}": interrupt cancel failed (delivery continues as a queue): ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`)
+            } else {
+              ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}": interrupt=true but within the per-recipient cooldown — delivery queued (no abort)`)
             }
           }
           live.followup(busUserMessage(record, framed, senderSessionId))
@@ -9965,7 +10151,13 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
     }
     const first = await attemptHostDelivery()
-    if (first.status !== 'failed') return first.status
+    if (first.status !== 'failed') {
+      // M3 cascade guard: a SUCCESSFUL materialization clears the host's
+      // consecutive-failure counter (a recovered host must not be treated as a
+      // threshold already met → an immediate re-quarantine).
+      await resetHostMaterializeFailures(config.stateDir, hostEntry.hostId)
+      return first.status
+    }
     // W8-i: a SINGLE transient 'session "<id>" not found' first-attempt failure
     // (a host session registered in hosts.json whose durable session is not yet
     // workspace-attached — the harness session-persistence/query seam) must NOT
@@ -9981,17 +10173,24 @@ export function applyInvoke(ctx: Context, config: Config) {
         ctx.logger.warn(`[deepartments] host attach repair (bus-deliver retry) failed for host "${hostEntry.hostId}": ${repairError instanceof Error ? repairError.message : String(repairError)}`)
       }
       const second = await attemptHostDelivery()
-      if (second.status !== 'failed') return second.status
+      if (second.status !== 'failed') {
+        await resetHostMaterializeFailures(config.stateDir, hostEntry.hostId)
+        return second.status
+      }
       recordedError = second.error ?? first.error
     }
     ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}" failed: ${recordedError instanceof Error ? recordedError.message : String(recordedError)}`)
     // W6 system-health: record the host materialization/wake failure (the SAME
-    // durable anomaly source as the post delivery; postId = the host id). W8-i:
-    // for the 'session not found' class a PER-(post+class) recording dedupe in
-    // the shared health-alerts-state.json ledger ensures a PERSISTENT not-found
-    // is NEVER re-recorded/re-alerted inside HEALTH_DEDUPE_WINDOW_MS (one per
-    // post+class per 30min, NOT per attempt); a generic class keeps the plain
-    // append (the daemon's own per-postId alert dedupe already gates it).
+    // durable anomaly source as the post delivery; postId = the host id). M3
+    // (spec §3.3): for EVERY host class the recording is now a PER-(host+class)
+    // dedupe in the shared health-alerts-state.json ledger (reusing
+    // appendPostErrorDeduped, the W8-i recording ledger) — a PERSISTENT failure
+    // of a NON-retired-but-broken host is NEVER re-recorded/re-alerted inside
+    // HEALTH_DEDUPE_WINDOW_MS (one per host+class per 30min, NOT per attempt).
+    // This is the R1 generic-class write dedupe: a generic (non-session-not-found)
+    // failure previously used the PLAIN append → a row EVERY attempt; now ≤1 per
+    // (host,class) per window, and the QD directive emit below is gated on an
+    // actually-NEW append (not "every attempt").
     try {
       // Bug A SOURCE GATE (the write, not the scan): a RETIRED host's session is
       // terminal (W7). Re-validate against the DURABLE hosts.json ON DISK — the
@@ -10014,20 +10213,37 @@ export function applyInvoke(ctx: Context, config: Config) {
         ctx.logger.warn(`[deepartments] bus delivery to RETIRED host "${hostEntry.hostId}" — post-error ROW write skipped (terminal; durable source gate)`)
         return 'failed'
       }
+      // M3 materialization-cascade guard (spec §3.3, R5 — the SAFEST subset of
+      // R2/R3): a NON-retired-but-BROKEN host keeps failing materialization →
+      // the daemon treats EACH attempt as a fresh anomaly. The per-host
+      // consecutive-failure cooldown below NEVER skips the delivery attempt (the
+      // durable-retry repair is kept) — it gates only the REPEATED post-error
+      // RECORDING (and thus the QD directive) once a host has hit N consecutive
+      // failures. The FULL delivery-side quarantine (skipping the attempt to
+      // stop the tight-retry loop itself) is DEFERRED (too invasive for a clean
+      // additive change; see the M3 report).
       const entry: PostErrorEntry = {
         ts: Date.now(),
         postId: hostEntry.hostId,
         messageId: record.id,
         error: recordedError instanceof Error ? recordedError.message : String(recordedError)
       }
+      const matState = readMaterializeState(config.stateDir)
+      const { next: nextMat, quarantined } = markHostMaterializeFailure(matState, hostEntry.hostId, entry.ts)
+      await writeMaterializeState(config.stateDir, nextMat)
+      if (quarantined) {
+        ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}": ${MATERIALIZE_QUARANTINE_N} consecutive materialization failures — quarantined until ${new Date(entry.ts + MATERIALIZE_QUARANTINE_MS).toISOString()} (post-error recording + QD directive suppressed; the delivery attempt + durable repair are unchanged)`)
+        return 'failed'
+      }
       const cls = postErrorClass(entry.error)
-      const appended = cls === POST_ERROR_CLASS_SESSION_NOT_FOUND
-        ? await appendPostErrorDeduped(config.stateDir, entry, `${POST_ERROR_RECORD_KEY_PREFIX}${hostEntry.hostId}:${cls}`, entry.ts)
-        : (await appendPostError(config.stateDir, entry), true)
+      const recordKey = `${POST_ERROR_RECORD_KEY_PREFIX}${hostEntry.hostId}:${cls ?? 'generic'}`
+      const appended = await appendPostErrorDeduped(config.stateDir, entry, recordKey, entry.ts)
       // QD (spec 007 §6.4, D-Q4a): after a NEW post-error record is actually
       // appended, trigger the ADDRESSED QUALITY INSPECT directive to quality-head
-      // (a dedupe-skip means no new record — do not re-signal). Non-fatal (the
-      // helper wraps its own try/catch).
+      // (a dedupe-skip means no new record — do not re-signal). M3: `appended`
+      // is now a REAL recording-dedupe result for EVERY class (generic included),
+      // so a REPEAT failure inside the window emits NO directive (the old generic
+      // branch always returned true → a directive per retry). Non-fatal.
       if (appended) {
         await maybeEmitQualityInspectDirective({ kind: 'post-error', postId: entry.postId, messageId: entry.messageId ?? '', error: entry.error })
       }

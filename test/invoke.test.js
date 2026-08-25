@@ -28,7 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { Config as configSchema } from '../lib/org.js'
@@ -10249,13 +10249,225 @@ test('W8-i (b): a PERSISTENT "session not found" host delivery records exactly O
       assert.equal(alerts.length, 1, 'the daemon ALERTS once for the persistent not-found')
       assert.ok(alerts[0].frame.includes('post-error: ' + hostId), 'the alert names the host postId')
       const state = readHealthAlertsState(stateDir)
-      // Bug C: the alert ledger advances the ERROR-IDENTITY key (postId:error-hash),
-      // not the raw per-(post+class) key — but the class suffix still shapes the
+      // M3 (stable-class alert identity): for a CODED (session-not-found) error the
+      // alert ledger advances the STABLE-CLASS key post-error:<postId>:<class> —
+      // NOT the raw error-hash — so a recurring identical-class error is a ONE-SHOT
+      // alert regardless of text instability. The class suffix also shapes the
       // finding (scanPostErrorFindings) and the recording dedupe key.
-      const recorded = readPostErrorsFile(stateDir)[0]
-      assert.ok(state[`post-error:${hostId}:${errorIdentityHash(recorded.error)}`] !== undefined, 'the dedupe key is the ERROR-IDENTITY key (postId:error-hash)')
+      assert.ok(state[`post-error:${hostId}:${POST_ERROR_CLASS_SESSION_NOT_FOUND}`] !== undefined, 'the dedupe key is the STABLE-CLASS key (postId:session-not-found)')
       await tick(T0 + 5 * 60000)
       assert.equal(alerts.length, 1, 'a second tick within the window does NOT re-alert')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- M3 (dshd-error-handler) tests — the interrupt-loop guard + the
+// materialization-cascade guard (spec §2.4, §3.3) -----------------------------
+// These pin the NEW M3 behavior over the dispatch/materialization/post-error
+// path. They are additive; the existing W6/W8-i/P2 tests stay untouched except
+// the W8-i (b) stable-class identity assertion updated to the new semantics.
+
+test('M3 INTERRUPT-LOOP GUARD (spec acc 1): safeInterrupt allows at most ONE interrupt per recipient per INTERRUPT_COOLDOWN_MS, regardless of identity/class count (identity-independent) — a burst of interrupt:true deliveries cancels the live turn only once; the cooldown is persisted (survives a fresh read) and a call after the cooldown interrupts again', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_000_000_000_000
+    const agent = fakeParentAgent() // records cancelCalls; status defaults to idle
+    agent.status = 'running'
+    // First interrupt inside the cooldown: allowed.
+    const first = await safeInterrupt(agent, 'host-asst', T0, stateDir)
+    assert.equal(first, true, 'the first interrupt is allowed')
+    assert.equal(agent.cancelCalls.length, 1, 'the first interrupt cancels the turn')
+    assert.deepEqual(agent.cancelCalls[0].cause, { kind: 'hook', reason: 'interrupted' }, 'the interrupt carries the semantic cause')
+    assert.deepEqual(agent.cancelCalls[0].options, { keepInbox: true }, 'the interrupt preserves pending work')
+    // Persisted: the ledger records interrupt:<recipientId> = nowMs (survives a
+    // fresh read, NOT just in-memory).
+    const ledger = readInterruptState(stateDir)
+    assert.equal(ledger[`${INTERRUPT_COOLDOWN_KEY_PREFIX}host-asst`], T0, 'the interrupt cooldown is persisted (survives a fresh read)')
+    // A second interrupt INSIDE the cooldown (e.g. the next 60s tick): BLOCKED.
+    const second = await safeInterrupt(agent, 'host-asst', T0 + 60_000, stateDir)
+    assert.equal(second, false, 'an interrupt inside the cooldown is blocked (≤1 per recipient per cooldown)')
+    assert.equal(agent.cancelCalls.length, 1, 'the blocked interrupt does NOT cancel the turn')
+    // A THIRD interrupt AFTER the cooldown lapses: allowed again (bounded, not permanent).
+    const third = await safeInterrupt(agent, 'host-asst', T0 + INTERRUPT_COOLDOWN_MS + 1, stateDir)
+    assert.equal(third, true, 'an interrupt after the cooldown lapses is allowed')
+    assert.equal(agent.cancelCalls.length, 2, 'the post-cooldown interrupt cancels again (bounded, not permanent)')
+    // A DIFFERENT recipient is on its OWN cooldown (per-recipient, identity-independent).
+    const other = await safeInterrupt(agent, 'head-research', T0 + 60_000, stateDir)
+    assert.equal(other, true, 'a DIFFERENT recipient is not blocked by the first recipient\u2019s cooldown')
+    assert.equal(agent.cancelCalls.length, 3, 'the other recipient interrupts immediately')
+  })
+})
+
+test('M3 INTERRUPT-LOOP GUARD (spec acc 1, 1h-window bound): with a single persisted anomaly whose alert text varies per attempt, a burst of net-new alert identities cancels the host turn at most once per INTERRUPT_COOLDOWN_MS — the total host cancellation count in a 1h window is bounded by the cooldown-derived cap', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_000_000_000_000
+    const agent = fakeParentAgent()
+    agent.status = 'running'
+    // A burst of DISTINCT alert identities (a rotating session id / token-count)
+    // arriving every 60s — each would be a NET-NEW alert identity (the Bug C
+    // identity dedupe alone does NOT stop them). The per-recipient cooldown caps
+    // the cancels.
+    let cancels = 0
+    const oneHourMs = 60 * 60 * 1000
+    for (let now = T0; now < T0 + oneHourMs; now += 60_000) {
+      const allowed = await safeInterrupt(agent, 'host-asst', now, stateDir)
+      if (allowed) cancels++
+    }
+    // Cap = ceil(1h / INTERRUPT_COOLDOWN_MS) + 1 (a boundary interrupt at exactly
+    // the cooldown edge is allowed, so +1 for the strict "<" comparison).
+    const cap = Math.ceil(oneHourMs / INTERRUPT_COOLDOWN_MS) + 1
+    assert.ok(cancels <= cap, `the 1h host-cancellation count (${cancels}) is bounded by the cooldown-derived cap (${cap})`)
+    assert.ok(cancels >= 1 && cancels < 60, 'the burst does NOT cancel every tick (the guard engages)')
+    assert.equal(agent.cancelCalls.length, cancels, 'cancelCalls matches the allowed interrupt count (no silent double-cancel)')
+  })
+})
+
+test('M3 STABLE-CLASS ALERT IDENTITY (spec acc 2): a recurring identical-CLASS error (session-not-found) whose text embeds a per-attempt variable (a rotating session id) produces ONE alert per (postId, class) — the alert identity is post-error:<postId>:<class>, NOT the raw-text hash', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 23, 12, 0, 0).getTime()
+    const bootId = 'boot-m3-class'
+    await writeFile(path.join(stateDir, 'post-errors.jsonl'), JSON.stringify({ ts: T0 - 60_000, postId: 'research-head', messageId: 'm-1', error: 'session "s-1" not found' }) + '\n', 'utf8')
+    const alerts = []
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId,
+      hosts,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: () => {} }
+    })
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'the classed post-error alerts once')
+    assert.equal(alerts[0].frame.includes('post-error: research-head'), true, 'the alert names the postId')
+    const state = readHealthAlertsState(stateDir)
+    assert.ok(state['post-error:research-head:session-not-found'] !== undefined, 'the alert identity is the STABLE-CLASS key (postId:session-not-found)')
+    // A second tick with a NET-NEW session id (SAME class, DIFFERENT per-attempt
+    // text): the scan re-groups to the SAME class → the alert is a ONE-SHOT
+    // (no re-alert, no per-window re-arm).
+    await appendPostError(stateDir, { ts: T0 - 10_000, postId: 'research-head', messageId: 'm-2', error: 'session "s-2" not found' })
+    await tick(T0 + 5_000)
+    assert.equal(alerts.length, 1, 'the SAME class with rotating per-attempt text is NOT re-alerted (one-shot per (postId,class))')
+  })
+})
+
+test('M3 STABLE-CLASS ALERT IDENTITY (spec acc 2, no over-suppression): a genuinely NET-NEW error identity (a different class/text) still alerts after a classed one-shot — the identity collapse never suppresses a genuinely-new occurrence', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 23, 12, 0, 0).getTime()
+    const bootId = 'boot-m3-new'
+    await writeFile(path.join(stateDir, 'post-errors.jsonl'), JSON.stringify({ ts: T0 - 60_000, postId: 'research-head', messageId: 'm-1', error: 'session "s-1" not found' }) + '\n', 'utf8')
+    const alerts = []
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId,
+      hosts,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: () => {} }
+    })
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'the classed error alerts once')
+    // A genuinely NEW error identity — a DIFFERENT (generic, no stable class)
+    // error whose text differs from the delivered classed text → a NET-NEW
+    // identity (raw-text hash fallback) → alerts.
+    await appendPostError(stateDir, { ts: T0 - 10_000, postId: 'research-head', messageId: 'm-2', error: 'provider adapter not registered for "deepseek-official"' })
+    await tick(T0 + 5_000)
+    assert.equal(alerts.length, 2, 'a NET-NEW error identity still alerts (no over-suppression)')
+  })
+})
+
+test('M3 R1 GENERIC-CLASS WRITE DEDUPE (spec acc 6): a persistently-broken NON-retired HOST delivery uses the recording ledger (≤1 post-error row per (host,class) per window), NOT a row every attempt', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const hostSessionId = 'host-m3-r1'
+    const hostId = await seedHostRegistration(stateDir, hostSessionId)
+    const { head, headCtx, key, dispose } = await bootWithHead(stateDir, { resumeRejects: [hostSessionId] })
+    try {
+      const signal = new AbortController().signal
+      const send = async () => headCtx.tools.get('send_message', key).execute(
+        { to: [hostId], text: 'persistent wake' },
+        { agent: head, signal }
+      )
+      const r1 = await send()
+      assert.equal(r1.delivered[hostId], 'failed', 'a generic-broken host reports failed')
+      assert.equal(readPostErrorsFile(stateDir).length, 1, 'ONE generic-class post-error row recorded on the first attempt')
+      const r2 = await send()
+      assert.equal(r2.delivered[hostId], 'failed', 'the second attempt also reports failed')
+      // R1: the SECOND attempt within the window does NOT append a row (the host
+      // branch now uses the recording ledger for EVERY host class — no unbounded
+      // row growth).
+      assert.equal(readPostErrorsFile(stateDir).length, 1, 'a second attempt within the window does NOT append a row (generic host class uses the recording ledger — R1)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('M3 MATERIALIZATION-CASCADE GUARD (spec acc 7, safe subset): a NON-retired-broken host is quarantined after N consecutive materialization failures (per-host back-off via the durable materialize-state ledger), and a quarantined host emits NO further post-error rows (bounded row stream)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const hostSessionId = 'host-m3-q'
+    const hostId = await seedHostRegistration(stateDir, hostSessionId)
+    const { head, headCtx, key, dispose } = await bootWithHead(stateDir, { resumeRejects: [hostSessionId], createRejects: [hostSessionId] })
+    try {
+      const signal = new AbortController().signal
+      const send = async () => headCtx.tools.get('send_message', key).execute(
+        { to: [hostId], text: 'persistent wake' },
+        { agent: head, signal }
+      )
+      // Drive N (=MATERIALIZE_QUARANTINE_N) consecutive materialization failures.
+      for (let i = 0; i < MATERIALIZE_QUARANTINE_N; i++) {
+        const r = await send()
+        assert.equal(r.delivered[hostId], 'failed', `attempt ${i + 1} reports failed`)
+      }
+      const issue = readMaterializeState(stateDir)[hostId]
+      assert.ok(issue !== undefined, 'the materialize-state ledger records the host issue')
+      assert.ok(issue.consecutiveFailures >= MATERIALIZE_QUARANTINE_N, 'the consecutive-failure counter reaches N')
+      assert.ok(issue.quarantineUntil > 0, 'the host is quarantined (quarantineUntil set)')
+      // A quarantined host emits NO further post-error rows — the cascade is
+      // bounded (R1 caps at ≤1 per (host,class); the quarantine additionally
+      // suppresses the recording).
+      const r = await send()
+      assert.equal(r.delivered[hostId], 'failed', 'a quarantined host still reports failed (the attempt is never skipped)')
+      assert.equal(readPostErrorsFile(stateDir).length, 1, 'a quarantined host does NOT emit an unbounded post-error stream (≤1 row)')
+      // A SUCCESSFUL delivery clears the host\u2019s consecutive-failure counter (a
+      // recovered host is not treated as a threshold already met) — verified via
+      // resetHostMaterializeFailures on a "recovered" host.
+      await resetHostMaterializeFailures(stateDir, hostId)
+      assert.equal(readMaterializeState(stateDir)[hostId], undefined, 'a successful delivery resets the host\u2019s materialization issue counter')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('M3 RETIRED-HOST SOURCE GATE (spec acc 5, regression pin): a RETIRED host produces ZERO post-error rows, ZERO QD directives and ZERO alerts even via a STALE in-memory registry (the durable hosts.json re-read at the WRITE source wins)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const retiredSessionId = SessionId(randomUUID())
+    const retiredHostId = `host-${retiredSessionId}`
+    const liveSessionId = SessionId(randomUUID())
+    const liveHostId = `host-${liveSessionId}`
+    const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      schemaVersion: 2,
+      [liveHostId]: { sessionId: String(liveSessionId), roomId: 'board' },
+      [retiredHostId]: { sessionId: String(retiredSessionId), roomId: 'board', retired: true, retiredAt: T0 - 1000, rotatedTo: liveHostId }
+    }, null, 2))
+    const { head, headCtx, key, agents, dispose } = await bootWithHead(stateDir)
+    try {
+      // STALE in-memory registry: the retired host's session is STILL a live
+      // agent in the in-memory `agents` Map (a twin daemon that booted BEFORE the
+      // rotation). The durable hosts.json (re-read fresh at the WRITE source) must
+      // win — the retired host is NEVER recorded and NEVER delivered.
+      agents.put(fakeParentAgent(retiredSessionId))
+      const signal = new AbortController().signal
+      const send = async () => headCtx.tools.get('send_message', key).execute(
+        { to: [retiredHostId], text: 'wake the retired host' },
+        { agent: head, signal }
+      )
+      const result = await send()
+      assert.equal(result.delivered[retiredHostId], 'failed', 'a retired host delivery reports failed (terminal, never attempted)')
+      assert.equal(readPostErrorsFile(stateDir).length, 0, 'ZERO post-error rows for a retired host even via a stale in-memory registry (durable source gate)')
     } finally {
       await dispose()
     }
