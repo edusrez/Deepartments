@@ -2150,6 +2150,14 @@ export interface QualityInspectDecisionDeps {
   rng?: () => number
   /** The worker dice probability (default 0.10), clamped to [0,1]. */
   workerInspectProbability?: number
+  /** The caller head's postId (a 'head' kind). The 100% head-inspect mandate
+   * (D-Q3) EXCLUDES the QD's OWN head — 'quality-head' (owner m-178/m-182): the
+   * QH's OWN sleep is sampled by the SAME worker dice (D-Q2, default 0.10) so
+   * the "QH sleeps each round → q-i → QH wakes → QH sleeps again" feedback
+   * cannot recur. Any OTHER head (research-head, internal-programming-head, …)
+   * stays structural-true (100%). Absent → structural-true (a plain/legacy
+   * head call). */
+  headPostId?: string
 }
 
 /** Parse `DEEPARTMENTS_QUALITY_INSPECT` (a numeric [0,1] string); invalid/absent
@@ -2167,17 +2175,42 @@ const clamp01 = (n: number): number => Math.min(1, Math.max(0, n))
 /**
  * The QD probability gate (spec 007 §5.2, D-Q2/D-Q3) — PURE, injectable rng.
  *
- *   kind 'head' → ALWAYS true (the head archive is never gated — D-Q3 mandate)
- *   kind 'host' → ALWAYS true (the host counts as "H", head-equivalent — D-Q3)
+ *   kind 'head' → structural-true for ANY head EXCEPT the QD's own
+ *                  'quality-head' (owner m-178/m-182 — the anti-loop exclusion):
+ *                  the QH's OWN sleep is sampled by the SAME worker dice so the
+ *                  "QH sleeps each round → q-i → QH wakes → QH sleeps again"
+ *                  feedback cannot recur; every OTHER configured head
+ *                  (research-head, internal-programming-head, …) stays 100% (D-Q3)
+ *   kind 'host'  → ALWAYS true (the host counts as "H", head-equivalent — D-Q3;
+ *                  the host is NOT the QH, so it is never gated)
  *   kind 'worker' → `(rng ?? Math.random)() < clamp(workerInspectProbability ??
  *                                 0.10, 0, 1)`  (D-Q2 dice)
  *
- * The head/host branch is STRUCTURAL — no knob / env override can make it false.
- * The `DEEPARTMENTS_QUALITY_INSPECT` env override (a numeric [0,1] string)
- * overrides ONLY the worker probability path; it never touches the mandate.
+ * The non-QH head/host branch is STRUCTURAL — no knob / env override can make it
+ * false. The QH-head dice and the worker dice are the SAME probability path
+ * (reusing `workerInspectProbability` — no dedicated knob). The
+ * `DEEPARTMENTS_QUALITY_INSPECT` env override (a numeric [0,1] string)
+ * overrides ONLY that probability path (the QH dice + the worker dice); it
+ * never touches the structural non-QH head/host mandate.
  */
 export function qualityInspectDecision(kind: QualityInspectKind, deps: QualityInspectDecisionDeps = {}): boolean {
-  if (kind === 'head' || kind === 'host') return true
+  if (kind === 'host') return true
+  if (kind === 'head') {
+    // The 100% head-inspect mandate EXCLUDES the QD's OWN head ('quality-head')
+    // — the anti-loop exclusion (owner m-178/m-182): the QH's own sleep is
+    // sampled by the SAME worker dice (D-Q2), so the QH-sleep → q-i → QH-wake →
+    // QH-sleep-again feedback cannot recur. Any OTHER head (and a plain/legacy
+    // head call with no headPostId) stays structural-true (100%). The ENV
+    // override affects only the probability path (the QH dice + worker dice),
+    // never a non-QH head mandate.
+    if (deps.headPostId === 'quality-head') {
+      const rng = deps.rng ?? Math.random
+      const envOverride = parseQualityInspectEnvOverride()
+      const prob = clamp01(envOverride ?? deps.workerInspectProbability ?? QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY)
+      return rng() < prob
+    }
+    return true
+  }
   const rng = deps.rng ?? Math.random
   const envOverride = parseQualityInspectEnvOverride()
   const prob = clamp01(envOverride ?? deps.workerInspectProbability ?? QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY)
@@ -2274,6 +2307,23 @@ export interface PostActivityInput {
   /** The ts (ms epoch) of messages ADDRESSED to the post in the recent window
    * (its inbox). */
   inboxTs?: readonly number[]
+  /** True when the post is DORMANT (sleepEpoch set — deliberately asleep by a
+   * sleep directive). A dormant post's pending queue drains at its next WAKE,
+   * so it is NEVER a stale/stalled post (owner m-169/m-174). Absent/false = a
+   * live (awake) post, candidly stale. */
+  sleeping?: boolean
+  /** The post's provider marker: 'worker' for a disposable worker; ABSENT for a
+   * configured head (and any non-worker post). `scanStalledPosts` uses it to
+   * recognize the ORPHANED-WORKER class (m-228) — a non-retired WORKER whose
+   * retire step was cut by a restart. A configured head is never an orphan. */
+  provider?: string
+  /** Whether the post's LIVE AgentHandle still exists in the `agents` registry
+   * (`agents.get(sessionId) !== undefined`). A non-retired worker with
+   * `hasLiveHandle: false` and NO session activity is an ORPHAN (its durable
+   * session is gone + no live handle) — it must never feed the stalled detector.
+   * Absent (undefined) = unknown/live-permissive → never treated as orphaned
+   * (a post that never reports its handle is never falsely orphan-swept). */
+  hasLiveHandle?: boolean
 }
 
 /** The SHARED activity/pending snapshot of one post — the reusable pure helper
@@ -2373,6 +2423,24 @@ export function scanStalledPosts(
   const findings: HealthFinding[] = []
   for (const post of posts) {
     if (post.retired === true) continue
+    // Dormant-exclusion (owner m-169/m-174): a post with sleepEpoch set is
+    // DELIBERATELY asleep by a sleep directive; its pre-sleep pending messages
+    // drain at its next WAKE, so it is NEVER a stalled post (the stale pendings
+    // are the EXPECTED dormant state, not a stuck session).
+    if (post.sleeping === true) continue
+    // m-228 — ORPHANED-WORKER exclusion: a non-retired WORKER with NO live
+    // AgentHandle (`hasLiveHandle === false`) AND NO session activity (no events)
+    // is an ORPHAN — its retire step was cut by a deploy restart, so the normal
+    // retire path never re-retires it and it would FEED this detector forever (a
+    // zombie post). It is NOT stalled (nothing is running and nothing is
+    // progressing); treat it as orphaned → skip the finding. A LIVE worker has a
+    // handle (`hasLiveHandle !== false`) and is never excluded; a configured head
+    // has `provider !== 'worker'` and is never excluded; a post that never reports
+    // its handle (hasLiveHandle undefined) is never treated as orphaned (the
+    // conservative unknown → live-permissive default). The durable auto-retire is
+    // deliberately NOT done here (the m-119 boot reconcile stays read-only) — this
+    // only stops the orphan from generating alerts.
+    if (post.provider === 'worker' && post.hasLiveHandle === false && (post.events?.length ?? 0) === 0) continue
     const snap = buildPostSnapshot(post)
     if (snap.pendingCount === 0) continue
     // Bug B liveness short-circuits (last-write-age independent).
@@ -2832,6 +2900,11 @@ export interface HostWaitPostInput {
   /** True when the post is a retired member — a retired post is never a wait
    * signal (its messages are terminal-settled, W7-A). */
   retired?: boolean
+  /** True when the post is DORMANT (sleepEpoch set — deliberately asleep by a
+   * sleep directive). A dormant post's pending queue drains at its next WAKE,
+   * so it is NEVER a system-wait (owner m-169/m-174). Absent/false = a live
+   * (awake) post, candidly quiet. */
+  sleeping?: boolean
   /** The post's session event log. Absent/empty → no activity signal. */
   events?: readonly HealthSessionEvent[]
   /** Host-ADDRESSED message rows (messageId + ts) in the recent window — the
@@ -2860,6 +2933,12 @@ export function scanHostWaits(
   const findings: HealthFinding[] = []
   for (const post of posts) {
     if (post.retired === true) continue
+    // Dormant-exclusion (owner m-169/m-174/m-192/m-193): a post with sleepEpoch
+    // set is DELIBERATELY asleep by a sleep directive; its pre-sleep pending
+    // host messages drain at its next WAKE, so it is NEVER a system-wait (the
+    // quiet period is the EXPECTED dormant state, not an unanswered host
+    // expectation). Same criterion as scanStalledPosts.
+    if (post.sleeping === true) continue
     const hostTs = (post.hostMessages ?? []).map((m) => m.ts)
     if (hostTs.length === 0) continue
     // Reuse the SHARED pending-age primitive with the HOST-sent ts as the inbox:
@@ -6749,7 +6828,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           pendingCount: snap.pendingCount,
           ...(snap.oldestPendingTs !== undefined ? { oldestPendingTs: snap.oldestPendingTs } : {})
         })
-        hostWaitPosts.push({ postId, retired: false, events, hostMessages: hostRowsByPost.get(postId) ?? [] })
+        hostWaitPosts.push({ postId, retired: false, events, hostMessages: hostRowsByPost.get(postId) ?? [], sleeping: entry.sleepEpoch !== void 0 })
         // W8-h — a post is INTERRUPTED (stopped) when its session ends in an
         // interrupted turn AND it is NOT a LIVE-RUNNING agent (a live running
         // turn is healthy progress, never a stop). Reuses the SAME pure detector
@@ -7804,9 +7883,13 @@ export function applyInvoke(ctx: Context, config: Config) {
         // are already committed.
         void disposeHeadHandleOnce(sessionId)
         // QD (spec 007 §6.2, D-Q3): the HEAD-sleep MANDATE — a department head
-        // archive is inspected at 100% (never gated by the dice). Emits an
-        // ADDRESSED QUALITY INSPECT directive to quality-head. Non-fatal (the
-        // helper wraps its own try/catch); a failing directive degrades to a
+        // archive is inspected at 100% (never gated by the dice) for ANY head
+        // EXCEPT the QD's own coordinator ('quality-head'), whose OWN sleep is
+        // sampled by the worker dice to break the QH sleep → q-i → wake → sleep
+        // anti-loop (owner m-178/m-182 — the gate lives in
+        // maybeEmitQualityInspectDirective, which reads the surface headPostId).
+        // Emits an ADDRESSED QUALITY INSPECT directive to quality-head. Non-fatal
+        // (the helper wraps its own try/catch); a failing directive degrades to a
         // warn and the sleep still commits. Runs AFTER the dispose dispatch so
         // the async bus deliver is NOT on the detach path — a rotation/restart
         // landing on this await can no longer leave the head LIVE.
@@ -9972,6 +10055,19 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   const maybeEmitQualityInspectDirective = async (surface: QualityInspectDirectiveSurface): Promise<void> => {
     try {
+      // QD anti-loop (owner m-178/m-182): the QH's OWN sleep is NOT part of the
+      // 100% head-inspect mandate — a 'head-slept' surface whose headPostId is
+      // 'quality-head' is gated by the SAME worker dice (D-Q2, default 0.10), so
+      // the "QH sleeps each round → q-i → QH wakes → QH sleeps again" feedback
+      // cannot recur. ANY OTHER head (and the host rotation, which is not the
+      // QH) stays at 100% structural-true. The ENV override affects only the
+      // probability path (the QH dice + worker dice), never a non-QH head
+      // mandate. The directive gate lives HERE (the surface already carries
+      // headPostId); a missed dice simply drops the directive — the dept_sleep
+      // still commits.
+      if (surface.kind === 'head-slept' && !qualityInspectDecision('head', { headPostId: surface.headPostId, rng: Math.random, workerInspectProbability: qualityWorkerInspectProbability })) {
+        return
+      }
       const qualityHead = resolveQualityHeadEntry()
       if (qualityHead === undefined) return
       const store = await messagesStoreReady
@@ -10530,7 +10626,14 @@ export function applyInvoke(ctx: Context, config: Config) {
           // fallback for worker posts. Fallback chain follows head-presets.ts
           // (`headRoleLine`, the established convention): title → role → postId.
           title: coordinator?.title || coordinator?.role || entry.role || entry.postId,
-          live: agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined,
+          // m-228 (QD flag, dept_who 'live,retired'): a RETIRED worker must NEVER
+          // render live — even when its AgentHandle lingers in the `agents`
+          // registry (the deploy-restart case), the data field is live:false so
+          // any consumer (and the render, which appends ', retired' separately)
+          // reads a consistent 'offline, retired', never the contradictory
+          // 'live, retired'. The HOST loop above already continues on retired
+          // hosts; this is the worker-post analogue.
+          live: entry.retired !== true && agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined,
           sleeping: entry.sleepEpoch !== void 0,
           sessionId: entry.sessionId,
           you: entry.postId === callerMemberId,
@@ -11278,7 +11381,18 @@ export function applyInvoke(ctx: Context, config: Config) {
           // cannot distinguish a healthy running turn from an interrupted one).
           running: live !== undefined && live.status === 'running',
           events: (live?.session?.events ?? []) as HealthSessionEvent[],
-          inboxTs: inboxTsByPost.get(postId) ?? []
+          inboxTs: inboxTsByPost.get(postId) ?? [],
+          // Dormant-exclusion (owner m-169/m-174): a sleepEpoch-set post is
+          // deliberately asleep — never a stalled finding (see scanStalledPosts).
+          sleeping: entry.sleepEpoch !== void 0,
+          // m-228 — the orphaned-worker signal: the worker marker + whether a
+          // LIVE AgentHandle exists (scanStalledPosts uses both to exclude an
+          // orphaned worker whose retire step was cut by a restart). When the
+          // `agents` registry is ABSENT (a headless/minimal profile) liveness is
+          // UNKNOWABLE, so the field is OMITTED (undefined) — the orphan
+          // exclusion is conservative and never fires on an unknown liveness.
+          provider: entry.provider,
+          ...(agents !== void 0 ? { hasLiveHandle: live !== undefined } : {})
         })
       }
       return out
@@ -11300,7 +11414,10 @@ export function applyInvoke(ctx: Context, config: Config) {
           postId,
           retired: entry.retired === true,
           events: (liveAgent?.session?.events ?? []) as HealthSessionEvent[],
-          hostMessages: hostRowsByPost.get(postId) ?? []
+          hostMessages: hostRowsByPost.get(postId) ?? [],
+          // Dormant-exclusion (owner m-169/m-174): a sleepEpoch-set post is
+          // deliberately asleep — never a system-wait finding (see scanHostWaits).
+          sleeping: entry.sleepEpoch !== void 0
         })
       }
       return out

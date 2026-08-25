@@ -2883,6 +2883,46 @@ test('F1 kind derivation in dept_who: a LIVE worker row is kind "worker" (not th
   })
 })
 
+test('m-228 dept_who: a RETIRED worker with a LINGERING live AgentHandle renders "offline, retired" (never "live, retired") — the live data field is short-circuited for retired posts', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'researcher-orphan', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const sid = created.sessionId
+      // Retire it (a head/host may always retire its own/department workers) —
+      // mark retired (entry kept) + dispose.
+      const retireResult = await root.tools.get('dept_post_retire').execute({ postId: 'researcher-orphan' }, { agent: agents.put(fakeParentAgent()), signal })
+      assert.equal(retireResult.retired, true)
+      // REPRODUCE the m-228 bug: a retired worker whose AgentHandle LINGERS in the
+      // `agents` registry (the deploy-restart case where the dispose never ran) →
+      // `agents.get(SessionId(entry.sessionId))` is DEFINED for a RETIRED post, so
+      // WITHOUT the fix `live` computes true → the render appends ', live' AND
+      // ', retired' (the contradictory "live, retired").
+      agents.put(fakeParentAgent(SessionId(sid)))
+      const who = await root.tools.get('dept_who').execute({}, { agent: agents.put(fakeParentAgent()), signal })
+      const row = who.members.find((m) => m.agentId === 'researcher-orphan')
+      assert.ok(row, 'the retired worker is listed in dept_who (the head management view)')
+      assert.equal(row.retired, true, 'the row carries retired:true')
+      // DATA-FIELD fix: a retired worker is NEVER live, even with a lingering handle.
+      assert.equal(row.live, false, 'the data-field fix: a retired worker computes live:false (any consumer reads a consistent state)')
+      // RENDER is a separate consumer of the SAME live field — it must produce
+      // "offline, retired", never the contradictory "live, retired".
+      const whoTool = root.tools.get('dept_who')
+      const rendered = whoTool.output.render({}, { members: who.members })
+      assert.ok(Array.isArray(rendered) && rendered.length > 0, 'dept_who renders a text page')
+      const text = rendered[0].text
+      const line = text.split('\n').find((l) => l.includes('researcher-orphan'))
+      assert.ok(line, 'the worker line is present in the rendered catalog')
+      assert.match(line, /, offline/, 'the worker line renders offline (live:false)')
+      assert.match(line, /, retired/, 'the worker line renders retired')
+      assert.doesNotMatch(line, /, live/, 'the worker line NEVER renders "live, retired" (the m-228 contradiction)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('F1 config compat: an org.departments[] WITHOUT workspacePath/jobDir (pre-F1 shape, coordinator without title/sessionTitle) parses through the real Loader and boots', async () => {
   await withTempStateDir(async (stateDir) => {
     // The pre-F1 config shape — the NEW department fields are OPTIONAL and must
@@ -8673,6 +8713,58 @@ test('P2 Bug B-EXT: scanStalledPosts NEVER flags a RETIRED post (a retired membe
   assert.equal(scanStalledPosts([retired], T0, 10).length, 0, 'a retired post is NEVER a stalled finding')
 })
 
+test('P2 Bug B-EXT (dormant-exclusion, owner m-169/m-174/m-192/m-193): a DORMANT post (sleepEpoch set — deliberately asleep) with STALE pre-sleep pendings produces NEITHER a stalled-post finding NOR a system-wait finding; a LIVE post with the SAME stale pendings still produces BOTH (so the exclusion does NOT over-suppress)', () => {
+  const T0 = 1_000_000_000_000
+  const oldTs = T0 - 40 * 60000 // 40 min old — older than the 10min stale window and the 30min wait window
+  // DORMANT head: sleepEpoch set (sleeping: true) — its pre-sleep pending queue is
+  // the EXPECTED dormant state, not a stuck session.
+  const dormantStall = { postId: 'research-head', retired: false, sleeping: true, running: false, events: [], inboxTs: [oldTs] }
+  // LIVE (awake) head: the SAME stale pendings — candidly stale, MUST be flagged.
+  const liveStall = { postId: 'research-head', retired: false, running: false, events: [], inboxTs: [oldTs] }
+  const stalledDormant = scanStalledPosts([dormantStall], T0, 10)
+  const stalledLive = scanStalledPosts([liveStall], T0, 10)
+  assert.equal(stalledDormant.length, 0, 'a DORMANT post is NEVER a stalled-post finding (its queue drains at wake)')
+  assert.equal(stalledLive.length, 1, 'a LIVE post with the SAME stale pendings is STILL a stalled-post finding (no over-suppression)')
+  assert.equal(stalledLive[0].postId, 'research-head', 'the stalled finding names the LIVE post')
+  const dormantWait = { postId: 'research-head', retired: false, sleeping: true, events: [], hostMessages: [{ messageId: 'm-1', ts: oldTs }] }
+  const liveWait = { postId: 'research-head', retired: false, events: [], hostMessages: [{ messageId: 'm-2', ts: oldTs }] }
+  const waitsDormant = scanHostWaits([dormantWait], T0, SYSTEM_WAIT_DEFAULT_MS)
+  const waitsLive = scanHostWaits([liveWait], T0, SYSTEM_WAIT_DEFAULT_MS)
+  assert.equal(waitsDormant.length, 0, 'a DORMANT post is NEVER a system-wait finding (its queue drains at wake)')
+  assert.equal(waitsLive.length, 1, 'a LIVE post with a STALE host expectation is STILL a system-wait finding (no over-suppression)')
+  assert.equal(waitsLive[0].postId, 'research-head', 'the wait finding names the LIVE post')
+})
+
+test('m-228 orphaned-worker exclusion: scanStalledPosts NEVER flags a non-retired WORKER with NO live handle + NO session activity (an orphan whose retire step was cut by a restart); a LIVE worker and a configured HEAD with the SAME stale pendings are STILL flagged (no over-suppression)', () => {
+  const T0 = 1_000_000_000_000
+  const oldTs = T0 - 40 * 60000 // 40 min old — older than the 10min stale window
+  // ORPHANED worker: non-retired + provider:"worker" + hasLiveHandle:false + NO
+  // session events + a stale pending message → NOT a stalled-post finding. WITHOUT
+  // the m-228 exclusion this shape IS stale (pending + no activity → the control
+  // below proves it), so the exclusion is exactly what suppresses the zombie.
+  const orphan = { postId: 'builder-orphan', retired: false, provider: 'worker', hasLiveHandle: false, running: false, events: [], inboxTs: [oldTs] }
+  assert.equal(scanStalledPosts([orphan], T0, 10).length, 0, 'an orphaned worker (no live handle + no session activity) is NEVER a stalled-post finding')
+  // CONTROL 1 — LIVE worker: provider:"worker" but hasLiveHandle:true (a live
+  // AgentHandle), SAME stale pendings, not running → STILL flagged (a live-but-
+  // idle worker is candidly stale, NOT an orphan — no over-suppression).
+  const liveWorker = { postId: 'builder-live', retired: false, provider: 'worker', hasLiveHandle: true, running: false, events: [], inboxTs: [oldTs] }
+  const liveFindings = scanStalledPosts([liveWorker], T0, 10)
+  assert.equal(liveFindings.length, 1, 'a LIVE worker with stale pendings is STILL a stalled-post finding (no over-suppression)')
+  assert.equal(liveFindings[0].postId, 'builder-live', 'the stalled finding names the LIVE worker')
+  // CONTROL 2 — configured HEAD: provider !== "worker" (absent), no live handle,
+  // SAME stale pendings → STILL flagged (a head is NEVER orphan-swept — the
+  // orphan signal is strictly the disposable-worker marker).
+  const head = { postId: 'research-head', retired: false, provider: undefined, hasLiveHandle: false, running: false, events: [], inboxTs: [oldTs] }
+  const headFindings = scanStalledPosts([head], T0, 10)
+  assert.equal(headFindings.length, 1, 'a configured HEAD with no live handle is STILL a stalled-post finding (never orphan-swept)')
+  assert.equal(headFindings[0].postId, 'research-head', 'the stalled finding names the HEAD')
+  // CONTROL 3 — orphaned worker WITH session activity (events present) is NOT the
+  // orphan class → STILL flagged (a worker that wrote events but lost its handle
+  // is not confirmed-dead; the conservative no-activity gate holds).
+  const workerWithEvents = { postId: 'builder-eventful', retired: false, provider: 'worker', hasLiveHandle: false, running: false, events: [{ type: 'user/message', time: T0 - 50 * 60000, data: {} }], inboxTs: [oldTs] }
+  assert.equal(scanStalledPosts([workerWithEvents], T0, 10).length, 1, 'a worker with (old) session activity is still flagged — the orphan class requires NO activity')
+})
+
 test('P2 Bug A (defense-in-depth): scanPostErrorFindings skips a row whose postId is a RETIRED host id (a legacy disk row never re-alerts the live host)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = 1_700_000_000_000
@@ -10418,6 +10510,13 @@ function qdResearchHead(env) {
   return { head, headCtx, key }
 }
 
+/** The quality-head (the QD coordinator) agent + its own-layer scoped toolset. */
+function qdHead(env) {
+  const head = env.agents.store.get('head-quality-head')
+  const { ctx: headCtx, key } = childContextFor(env.agents, 'head-quality-head')
+  return { head, headCtx, key }
+}
+
 /** The ADDRESSED QUALITY INSPECT directives that reached `quality-head`. */
 async function qualityDirectives(stateDir) {
   const records = await loadMessageRecords(resolveMessagesPath(stateDir))
@@ -10464,6 +10563,41 @@ test('QD probability gate: worker default 0.10 + clamp; worker uses injected rng
   assert.match(qualityInspectDirectiveText({ kind: 'worker-retired', workerPostId: 'researcher', sessionId: 's-1', archived: true }), /worker retired.*post researcher/)
   assert.match(qualityInspectDirectiveText({ kind: 'head-slept', headPostId: 'research-head', sessionId: 'head-research-head', sleepEpoch: 123 }), /head slept.*sleepEpoch 123/)
   assert.match(qualityInspectDirectiveText({ kind: 'post-error', postId: 'ghost-head', messageId: 'm-1', error: 'boom' }), /post-error.*post ghost-head.*error boom/)
+})
+
+test('QD anti-loop QH exclusion (owner m-178/m-182): the QD head (quality-head) OWN head decision is gated by the worker dice; every OTHER head + host stays structural-true', () => {
+  // (a) The QH's OWN 'head' decision IS the dice (D-Q2, default 0.10): rng below
+  // the threshold → true, above → false. The anti-loop exclusion makes the
+  // QH's own sleep SAMPLED (10%) so "QH sleeps → q-i → QH wakes → QH sleeps
+  // again" cannot recur.
+  assert.equal(qualityInspectDecision('head', { headPostId: 'quality-head', rng: () => 0.0 }), true, 'QH dice rng 0.0 < default 0.10 → true')
+  assert.equal(qualityInspectDecision('head', { headPostId: 'quality-head', rng: () => 0.99 }), false, 'QH dice rng 0.99 ≥ 0.10 → false')
+  // The QH dice reuses the worker probability (no dedicated knob): it respects an
+  // injected workerInspectProbability with the same strict < semantics.
+  assert.equal(qualityInspectDecision('head', { headPostId: 'quality-head', rng: () => 0.05, workerInspectProbability: 0.05 }), false, 'QH dice 0.05 < 0.05 (strict) → false')
+  assert.equal(qualityInspectDecision('head', { headPostId: 'quality-head', rng: () => 0.05, workerInspectProbability: 0.10 }), true, 'QH dice 0.05 < 0.10 → true')
+  // (b) ANY OTHER head stays structural-true (100%, ignores rng + a 0 probability).
+  assert.equal(qualityInspectDecision('head', { headPostId: 'research-head', rng: () => 0.99, workerInspectProbability: 0 }), true, 'another head (research-head) stays 100% structural, ignores rng')
+  assert.equal(qualityInspectDecision('head', { headPostId: 'internal-programming-head', rng: () => 0, workerInspectProbability: 0 }), true, 'another configured head stays 100% structural')
+  assert.equal(qualityInspectDecision('head', { rng: () => 0, workerInspectProbability: 0 }), true, 'a head call with NO headPostId (legacy/plain) stays structural-true')
+  // (c) The HOST stays 100% (the host is NOT the QH — never gated by the dice).
+  assert.equal(qualityInspectDecision('host', { rng: () => 0, workerInspectProbability: 0 }), true, 'host stays 100% structural (never the QH dice)')
+  // (f) The ENV override affects ONLY the probability path (the QH dice + the
+  // worker dice); a NON-QH head stays structural-true even under an env override.
+  process.env[QUALITY_INSPECT_ENV_VAR] = '0'
+  try {
+    assert.equal(qualityInspectDecision('head', { headPostId: 'quality-head', rng: () => 0.05 }), false, 'env=0 forces the QH dice false (the probability path)')
+    assert.equal(qualityInspectDecision('head', { headPostId: 'research-head', rng: () => 0.99, workerInspectProbability: 0 }), true, 'env=0 never turns a NON-QH head mandate off (still structural)')
+  } finally {
+    delete process.env[QUALITY_INSPECT_ENV_VAR]
+  }
+  process.env[QUALITY_INSPECT_ENV_VAR] = '1'
+  try {
+    assert.equal(qualityInspectDecision('head', { headPostId: 'quality-head', rng: () => 0.99 }), true, 'env=1 forces the QH dice true (the probability path)')
+    assert.equal(qualityInspectDecision('head', { headPostId: 'research-head', rng: () => 0, workerInspectProbability: 0 }), true, 'env=1 leaves a NON-QH head structural-true')
+  } finally {
+    delete process.env[QUALITY_INSPECT_ENV_VAR]
+  }
 })
 
 test('QD config resolution: absent quality → code default 0.10; present valid → that; invalid → default', () => {
@@ -10551,6 +10685,47 @@ test('QD head dept_sleep ALWAYS emits a quality-inspect directive (D-Q3 mandate,
       assert.match(headDirs[0].text, /sleepEpoch \d+/, 'the head-slept directive carries the sleepEpoch surface')
     } finally {
       await env.dispose()
+    }
+  })
+})
+
+test('QD anti-loop QH emitter (owner m-178/m-182): the QH head dept_sleep directive is NOT always fired (gated by the dice), while another head dept_sleep IS always fired (100%) even under the same env override', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // env=0 FORCES the probability path (the QH dice + worker dice) false — so a
+    // QH head-slept directive is deterministically gated OUT. A NON-QH head stays
+    // at the STRUCTURAL 100% mandate (the env never turns it off).
+    process.env[QUALITY_INSPECT_ENV_VAR] = '0'
+    try {
+      const env = await bootWithQD(stateDir)
+      try {
+        const signal = new AbortController().signal
+        // The QH's OWN dept_sleep: the anti-loop dice gates the directive (NO
+        // head-slept for quality-head) — the dept_sleep still commits.
+        const { head: qh, headCtx: qhCtx, key: qhKey } = qdHead(env)
+        const qhMemo = qhCtx.tools.get('dept_memo_write', qhKey)
+        assert.ok(qhMemo, 'dept_memo_write is installed for the quality head')
+        await qhMemo.execute({ summary: 'QD anti-loop QH sleep memory.' }, { agent: qh, signal })
+        const qhSleep = qhCtx.tools.get('dept_sleep', qhKey)
+        assert.ok(qhSleep, 'dept_sleep is installed for the quality head')
+        await withTimeout(qhSleep.execute({}, { agent: qh, signal }), 1500, 'quality head dept_sleep returns (no self-deadlock wedge)')
+        // A DIFFERENT head's dept_sleep: STILL 100% structural (never the dice).
+        const { head, headCtx, key } = qdResearchHead(env)
+        const memo = headCtx.tools.get('dept_memo_write', key)
+        await memo.execute({ summary: 'QD anti-loop research sleep memory.' }, { agent: head, signal })
+        const sleep = headCtx.tools.get('dept_sleep', key)
+        await withTimeout(sleep.execute({}, { agent: head, signal }), 1500, 'research head dept_sleep returns (no self-deadlock wedge)')
+        const dirs = await qualityDirectives(stateDir)
+        const qhDirs = dirs.filter((d) => /head slept.*quality-head/.test(d.text))
+        const rhDirs = dirs.filter((d) => /head slept.*research-head/.test(d.text))
+        assert.equal(qhDirs.length, 0, 'the QH head-slept directive is gated by the anti-loop dice (env=0 → NOT fired) — never an unconditional QH q-i')
+        assert.equal(rhDirs.length, 1, 'another head dept_sleep ALWAYS fires exactly ONE head-slept directive (100% mandate) even under env=0')
+        assert.match(rhDirs[0].text, /post research-head/, 'the research-head directive names the archived head')
+        assert.match(rhDirs[0].text, /sleepEpoch \d+/, 'the research-head directive carries the sleepEpoch surface')
+      } finally {
+        await env.dispose()
+      }
+    } finally {
+      delete process.env[QUALITY_INSPECT_ENV_VAR]
     }
   })
 })
