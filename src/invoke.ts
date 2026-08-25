@@ -1987,6 +1987,15 @@ export function scanTurnErrorCaptures(events: readonly HealthSessionEvent[], pos
     if (event.type !== 'turn/end') continue
     const data = (typeof event.data === 'object' && event.data !== null ? event.data : {}) as Record<string, unknown>
     const reason = (typeof data.reason === 'object' && data.reason !== null ? data.reason : {}) as Record<string, unknown>
+    // The harness writes the turn/end error reason NESTED under `reason.error`
+    // (dsh-agent-loop lib/index.js:582-588: turnEnds = { kind:'error', error:
+    // error instanceof LlmError ? error.failure : { message: errorChain(error),
+    // code:'UNKNOWN' } }), so also surface the nested error (and its `failure`
+    // sub-object for the LlmError case) to extract the real message/code. The
+    // top-level `reason.message`/`reason.code` are preserved for backward-compat.
+    const nested = (typeof reason.error === 'object' && reason.error !== null ? reason.error : {}) as Record<string, unknown>
+    const failure = typeof nested.failure === 'object' && nested.failure !== null ? (nested.failure as Record<string, unknown>) : undefined
+    const errorSurface = failure ?? nested
     const kind = reason.kind
     const isError = kind === 'error' || (typeof kind === 'string' && /error/i.test(kind))
     if (!isError) continue
@@ -1995,9 +2004,13 @@ export function scanTurnErrorCaptures(events: readonly HealthSessionEvent[], pos
     const message =
       (typeof reason.message === 'string' && reason.message !== '')
         ? reason.message
-        : (typeof reason.code === 'string' && reason.code !== '')
-          ? reason.code
-          : `${String(kind ?? 'error')} (turn ${String(turn ?? '?')})`
+        : (typeof errorSurface.message === 'string' && errorSurface.message !== '')
+          ? errorSurface.message
+          : (typeof reason.code === 'string' && reason.code !== '')
+            ? reason.code
+            : (typeof errorSurface.code === 'string' && errorSurface.code !== '')
+              ? errorSurface.code
+              : `${String(kind ?? 'error')} (turn ${String(turn ?? '?')})`
     return {
       postId,
       error: message,

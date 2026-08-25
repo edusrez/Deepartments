@@ -9006,6 +9006,35 @@ test('FIX-1 (QD NO_ADAPTER alerting): a cleanly-retired WORKER whose live sessio
   })
 })
 
+test('FIX-1 (QD NO_ADAPTER alert-text fidelity): scanTurnErrorCaptures descends into the NESTED reason.error.{message,code} the harness writes (dsh-agent-loop lib/index.js:582-588), so a real NO_ADAPTER reason yields the root-cause text, NOT the generic "error (turn 1)"', () => {
+  const T0 = 1_000_000_000_000
+  // The REAL harness turn/end outage shape: { kind:'error', error:{ message, code } }.
+  const nested = scanTurnErrorCaptures([
+    { type: 'turn/end', time: T0, data: { turn: 1, reason: { kind: 'error', error: { message: 'no adapter registered for provider "opencode-zen"', code: 'NO_ADAPTER' } } } }
+  ], 'p-nested')
+  assert.ok(nested, 'the NESTED reason.error turn is captured')
+  assert.notEqual(nested.error, 'error (turn 1)', 'a real nested reason.error does NOT degrade to the generic "error (turn 1)" text')
+  assert.match(nested.error, /no adapter registered for provider "opencode-zen"/, 'the row carries the real nested reason.error.message (the exact outage text)')
+  // A nested error with ONLY a code (no message) still surfaces the code, not the generic fallback.
+  const codeOnly = scanTurnErrorCaptures([
+    { type: 'turn/end', time: T0, data: { turn: 1, reason: { kind: 'error', error: { code: 'NO_ADAPTER' } } } }
+  ], 'p-code-only')
+  assert.ok(codeOnly, 'a code-only nested reason.error is captured')
+  assert.notEqual(codeOnly.error, 'error (turn 1)', 'a nested reason.error.code does NOT degrade to the generic fallback')
+  assert.match(codeOnly.error, /NO_ADAPTER/, 'the row carries the nested reason.error.code')
+  // The LlmError sub-shape: { kind:'error', error:{ failure:{ message, code } } }.
+  const failure = scanTurnErrorCaptures([
+    { type: 'turn/end', time: T0, data: { turn: 1, reason: { kind: 'error', error: { failure: { message: 'no adapter registered for provider "opencode-zen"', code: 'NO_ADAPTER' } } } } }
+  ], 'p-failure')
+  assert.ok(failure, 'the reason.error.failure sub-shape is captured')
+  assert.match(failure.error, /opencode-zen/, 'the failure sub-shape carries the real message (not the generic fallback)')
+  // A nested error WITHOUT a message/code still degrades to the generic fallback (backward-compat).
+  const bare = scanTurnErrorCaptures([
+    { type: 'turn/end', time: T0, data: { turn: 1, reason: { kind: 'error', error: { foo: 'bar' } } } }
+  ], 'p-bare')
+  assert.equal(bare?.error, 'error (turn 1)', 'a nested error without message/code degrades to the generic fallback')
+})
+
 test('FIX-1 (QD NO_ADAPTER alerting): a retired WORKER WITHOUT a fresh error turn appends NO post-error row (a clean completion is not a false positive)', async () => {
   await withTempStateDir(async (stateDir) => {
     const env = await bootWithHead(stateDir)
