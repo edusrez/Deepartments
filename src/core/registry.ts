@@ -695,6 +695,37 @@ export function pickLiveHostEntry(entries: Iterable<HostEntryLike>): PickLiveHos
   return { live: liveEntries[0], ambiguous: true }
 }
 
+/** ONE ACTIVE (non-retired) catalog member as the roster / live-catalog lense
+ * sees it. A discriminated union so a consumer keeps the post-vs-host kind and
+ * its durable fields (postId/hostId, agentPreset, sleepEpoch) without re-deriving
+ * which map each came from. */
+export type ActiveCatalogMember =
+  | { kind: 'post'; entry: PostEntry }
+  | { kind: 'host'; entry: HostEntry }
+
+/** THE single-source ACTIVE-ONLY catalog list (FASE 2 STEP e): every non-retired
+ * post + every non-retired host, in catalog (map) iteration order — posts first,
+ * then hosts. This is the ONE implementation of "who is a live member" today: the
+ * condensed roster (`buildCondensedRoster`) and the future `dept_who` / live
+ * registry both derive the active-only filter from THIS function, so the filter
+ * is never duplicated across consumers. PURE: no I/O, no module-global mutable
+ * state — only iterates the two catalog maps it is handed. */
+export function listActiveMembers(
+  posts: Iterable<PostEntry>,
+  hosts: Iterable<HostEntry>
+): ActiveCatalogMember[] {
+  const members: ActiveCatalogMember[] = []
+  for (const entry of posts) {
+    if (entry.retired === true) continue
+    members.push({ kind: 'post', entry })
+  }
+  for (const entry of hosts) {
+    if (entry.retired === true) continue
+    members.push({ kind: 'host', entry })
+  }
+  return members
+}
+
 /** Minimal warn/info-capable logger the RegistryStore uses (the cordis logger
  * shape). `info` is optional (only the load paths need it). */
 export interface RegistryLogger {
