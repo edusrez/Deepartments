@@ -1,12 +1,12 @@
-// dsh-deepartments — custom web-fetch provider tests.
+// dshd-webfetch — the custom web-fetch provider tests (extracted package).
 //
 // Rule 5 (AGENTS.md): tests go through the REAL Cordis Loader. The web seam
-// (@deepseek-ai/dsh-web) is the REAL service; the dsh-deepartments bundle
-// registers its custom 'deepartments-fetch' provider into it. The classification /
-// detection / URL-hygiene logic is also exercised PURELY (network-free), and
-// the provider's actual fetch + WEB_BLOCKED detection is proven against a
-// local loopback HTTP server (hermetic: no external network, no live DSH_HOME).
-// Tests run against the compiled lib/ (pnpm build first).
+// (@deepseek-ai/dsh-web) is the REAL service; the dshd-webfetch plugin
+// registers its custom 'deepartments-fetch' provider into it. The
+// classification / detection / URL-hygiene logic is also exercised PURELY
+// (network-free), and the provider's actual fetch + WEB_BLOCKED detection is
+// proven against a local loopback HTTP server (hermetic: no external network,
+// no live DSH_HOME). Tests run against the compiled lib/ (pnpm build first).
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import { test } from 'node:test'
@@ -20,7 +20,7 @@ import {
   classifyContentType,
   detectBlock,
   resolveWebFetchConfig
-} from '../lib/webfetch.js'
+} from 'dshd-webfetch'
 
 // --- pure config / detection / message tests --------------------------------
 
@@ -204,8 +204,9 @@ test('provider.fetch: malformed redirect Location → WebError WEB_INVALID_URL (
 /**
  * Boot the REAL Cordis Loader with the REAL dsh services the bundle injects
  * (sessions, sessionProjections, tools) PLUS the REAL web seam
- * (@deepseek-ai/dsh-web), and the dsh-deepartments bundle itself. Asserts the
- * custom provider is registered and selectable as the default fetch provider.
+ * (@deepseek-ai/dsh-web) and the dshd-webfetch plugin (which registers the
+ * provider). Asserts the custom provider is registered and selectable as the
+ * default fetch provider.
  */
 async function bootWithWebSeam() {
   const root = new Context()
@@ -217,13 +218,12 @@ async function bootWithWebSeam() {
   loader.create({ id: 'tools', name: '@deepseek-ai/dsh-tools' })
   // The REAL web seam (its `fetchProvider` config selects our provider).
   loader.create({ id: 'web', name: '@deepseek-ai/dsh-web', config: { fetchProvider: WEBFETCH_PROVIDER_ID } })
+  // The extracted dshd-webfetch plugin registers the deepartments-fetch provider
+  // into the (already-created) web seam.
   loader.create({
-    id: 'deepartments',
-    name: '../lib/index.js',
-    config: {
-      stateDir: '/tmp/webfetch-test',
-      org: { rooms: [], departments: [] }
-    }
+    id: 'dshd-webfetch',
+    name: 'dshd-webfetch',
+    config: { enabled: true, maxUrlLength: 2048, timeoutMs: 30000, maxResponseBytes: 5000000, maxRedirects: 5 }
   })
   await loader.await()
   return { root, dispose: () => loaderFiber.dispose() }

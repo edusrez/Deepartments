@@ -3,7 +3,8 @@
 // no board files, no projections, no emit site. What remains is
 // CONFIGURATION: the department (agent) catalog — one head per department,
 // whose coordinator is materialized as a permanent root agent by
-// src/invoke.ts — plus the plugin configuration (stateDir, webfetch).
+// src/invoke.ts — plus the plugin configuration (stateDir, parallel, health,
+// quality).
 // Durable membership lives in posts.json/hosts.json (src/invoke.ts); agent
 // communication is the direct BUS (src/messages-store.ts + send_message).
 // A config with `org: { departments: [...] }` and NO rooms is valid.
@@ -18,8 +19,6 @@
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 import z from '@deepseek-ai/schemastery'
-import type { WebFetchConfig } from './webfetch.js'
-import type { ParallelConfig } from './invoke.js'
 
 /** The post spec of a department's coordinator (created in Batch 2). */
 export interface CoordinatorConfig {
@@ -128,6 +127,44 @@ export interface QualityConfig {
   workerInspectProbability?: number
 }
 
+/**
+ * One configured event_stream monitor of the deepartments plugin. The `query`
+ * is the NL intent Parallel runs (settings.query); `processor`/`frequency`
+ * mirror POST /v1/monitors (defaults `base`/`1d`). The whole array is read
+ * from `parallel.monitors` in the plugin config; when the section is ABSENT the
+ * CODE DEFAULT (DEFAULT_PARALLEL_MONITORS) is used, so the deployment works
+ * without touching the config (or /opt).
+ */
+export interface ParallelMonitorConfig {
+  /** Stable key for this monitor (its worker slug base + the state key). */
+  id: string
+  /** The natural-language query intent (settings.query). */
+  query: string
+  /** The Parallel processor: 'lite' ($3/1000 exec) or 'base' ($10/1000 exec,
+   * more recall — the default for a broad topic like DeepSeek/AI news). */
+  processor?: 'lite' | 'base'
+  /** The Parallel frequency (e.g. '1d', '6h'; default '1d'). */
+  frequency?: string
+  /** Optional `settings.output_schema` JSON so each event comes back as
+   * structured output (easier to parse for activation). */
+  outputSchema?: Record<string, unknown>
+  /** Optional `settings.advanced_settings.source_policy.include_domains`. */
+  sourcePolicy?: string[]
+  /** Optional `settings.include_backfill` (historical preview on the first run). */
+  includeBackfill?: boolean
+}
+
+/** The `parallel` plugin-config section (read via `config.parallel`). When
+ * `monitors` is ABSENT the code default is used; an EXPLICIT `[]` disables
+ * monitoring (nothing runs). */
+export interface ParallelConfig {
+  apiKey?: string
+  baseUrl?: string
+  /** Max concurrent LIVE worker-researchers per monitor (the storm guard). */
+  maxConsecutiveSpawns?: number
+  monitors?: ParallelMonitorConfig[]
+}
+
 /** Plugin config: workspace state dir + the department (agent) catalog. */
 export interface Config {
   stateDir: string
@@ -177,15 +214,10 @@ export interface Config {
     poolerBaseURL?: string
   }
   /**
-   * Custom `ctx.web` fetch provider config (blocking detection).
-   * Optional; defaults are applied in src/webfetch.ts.
-   */
-  webfetch?: WebFetchConfig
-  /**
    * Parallel Web Systems event_stream monitor config (W3b parallel-monitor).
    * Optional; when `monitors` is ABSENT the CODE default
    * (DEFAULT_PARALLEL_MONITORS) is used, an explicit `[]` disables monitoring.
-   * Mirrors the runtime shape declared in src/invoke.ts (ParallelConfig), so
+   * Declared here (org.ts) and consumed by the runtime in src/invoke.ts, so
    * the schema and the typed cast in invoke.ts always agree.
    */
   parallel?: ParallelConfig
@@ -251,25 +283,8 @@ export const Config: z<any, any> = z.object({
     // maxRetries:0 stale-profile signal is NEVER relaxed by this field.
     poolerBaseURL: z.string()
   }).required(),
-  webfetch: z.object({
-    enabled: z.boolean(),
-    userAgent: z.string(),
-    accept: z.string(),
-    maxUrlLength: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
-    timeoutMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
-    maxResponseBytes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
-    maxRedirects: z.number().step(1).min(0).max(100).default(5)
-  }).default(void 0 as unknown as {
-    enabled: boolean
-    userAgent: string
-    accept: string
-    maxUrlLength: number
-    timeoutMs: number
-    maxResponseBytes: number
-    maxRedirects: number
-  }),
   // W3b parallel-monitor (Parallel event_stream). Mirrors the runtime
-  // ParallelConfig/ParallelMonitorConfig in src/invoke.ts: `monitors` defaults
+  // ParallelConfig/ParallelMonitorConfig declared here in org.ts: `monitors` defaults
   // to `void 0` (= undefined) so an ABSENT section or absent `monitors` key both
   // fall through to the CODE default (DEFAULT_PARALLEL_MONITORS), while an
   // explicit `[]` still disables monitoring — exactly the resolver's contract.

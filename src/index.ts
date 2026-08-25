@@ -3,10 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Config } from './org.js'
 import { applyInvoke } from './invoke.js'
-import { applyWebFetch } from './webfetch.js'
-import type { WebFetchConfig } from './webfetch.js'
 export { Config } from './org.js'
-export type { WebFetchConfig } from './webfetch.js'
 
 export const name = 'deepartments'
 // agents/subagents are resolved OPTIONALLY inside applyInvoke (ctx.get): the
@@ -20,7 +17,7 @@ export const name = 'deepartments'
 // `inject` entries are a HARD service-availability gate: the plugin `apply` does
 // not run until every injected service is present, so adding 'sessionQuery'
 // here would prevent the bundle from booting in any composition that lacks it
-// (e.g. the org/head-presets/webfetch hermetic harnesses → 4 suite tests fail).
+// (e.g. the org/head-presets hermetic harnesses → 4 suite tests fail).
 // The spec's §Risks explicitly requires the opposite — "Service absence:
 // sessionPersistence may be absent → capture must stub + warn, never throw
 // (test 4)" — and its §Service-injection paragraph prescribes "the existing
@@ -47,9 +44,4 @@ export function apply(ctx: Context, config: Config) {
   // department lifecycle (dept_memo_write/dept_sleep/dept_post_create/
   // dept_post_retire). dept_invoke/fork and the board are retired.
   applyInvoke(ctx, config)
-
-  // Web-fetch provider: custom `ctx.web` fetch backend (blocking detection
-  // WEB_BLOCKED + investigate hint). The web seam is resolved OPTIONALLY,
-  // so this is a no-op in minimal compositions.
-  applyWebFetch(ctx, config.webfetch ?? {})
 }

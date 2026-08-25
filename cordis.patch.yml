@@ -89,20 +89,6 @@
         # 0.10 (a config with NO quality block still composes at the code default).
         quality:
           workerInspectProbability: 0.25
-        # Custom ctx.web fetch provider (webfetch.ts): detects blocking
-        # (403/429) and reports WEB_BLOCKED with a message that instructs
-        # API/JSON-endpoint investigation instead of guessing host endpoints.
-        # Plain scalars only — no !!js outside the runtime config engine.
-        webfetch:
-          enabled: true
-          # userAgent and accept default to the bundle's honest product UA and
-          # a JSON-preferring Accept; uncomment to override.
-          # userAgent: deepartments/0.1.0 (DeepSeek Harness plugin; +https://github.com/esuarez/deepartments)
-          # accept: application/vnd.github.raw+json, application/json;q=0.9, text/markdown;q=0.8, text/html;q=0.5
-          maxUrlLength: 2048
-          timeoutMs: 30000
-          maxResponseBytes: 5000000
-          maxRedirects: 5
 
 # HOST-SIDE FIRST-WAKE FIX (owner-owned bundle patch — "bundles → profile →
 # $DSH_HOME → --patch, last wins per row"). These top-level rows OVERRIDE the

@@ -82,7 +82,7 @@ import { createUserMessage, boundContextSummary, type MessageSource } from '@dee
 import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './session-cleanup.js'
 import { runHostRotation, validateHostsRotationFile, ROTATION_SCHEMA_VERSION, ASISTENTE_SESSION_TITLE, isArchivedSession } from './session-rotation.js'
 import type { RotationPersistenceLike, WorkspaceRegistryLike } from './session-rotation.js'
-import type { Config, CoordinatorConfig, DepartmentConfig } from './org.js'
+import type { Config, CoordinatorConfig, DepartmentConfig, ParallelConfig, ParallelMonitorConfig } from './org.js'
 import {
   COMPACTION_LINE_THRESHOLD,
   MessagesStore,
@@ -4237,41 +4237,9 @@ export async function runAgendaSchedulerTick(deps: AgendaSchedulerDeps): Promise
 // pure half (config resolution + state helpers + the tick) is module-level so
 // the tests exercise it deterministically with a fixed clock + stubbed hooks.
 
-/** One configured event_stream monitor of the deepartments plugin. The `query`
- * is the NL intent Parallel runs (settings.query); `processor`/`frequency`
- * mirror POST /v1/monitors (defaults `base`/`1d`). The whole array is read
- * from `parallel.monitors` in the plugin config; when the section is ABSENT the
- * CODE DEFAULT (DEFAULT_PARALLEL_MONITORS) is used, so the deployment works
- * without touching the config (or /opt). */
-export interface ParallelMonitorConfig {
-  /** Stable key for this monitor (its worker slug base + the state key). */
-  id: string
-  /** The natural-language query intent (settings.query). */
-  query: string
-  /** The Parallel processor: 'lite' ($3/1000 exec) or 'base' ($10/1000 exec,
-   * more recall — the default for a broad topic like DeepSeek/AI news). */
-  processor?: 'lite' | 'base'
-  /** The Parallel frequency (e.g. '1d', '6h'; default '1d'). */
-  frequency?: string
-  /** Optional `settings.output_schema` JSON so each event comes back as
-   * structured output (easier to parse for activation). */
-  outputSchema?: Record<string, unknown>
-  /** Optional `settings.advanced_settings.source_policy.include_domains`. */
-  sourcePolicy?: string[]
-  /** Optional `settings.include_backfill` (historical preview on the first run). */
-  includeBackfill?: boolean
-}
-
-/** The `parallel` plugin-config section (read via `config.parallel`). When
- * `monitors` is ABSENT the code default is used; an EXPLICIT `[]` disables
- * monitoring (nothing runs). */
-export interface ParallelConfig {
-  apiKey?: string
-  baseUrl?: string
-  /** Max concurrent LIVE worker-researchers per monitor (the storm guard). */
-  maxConsecutiveSpawns?: number
-  monitors?: ParallelMonitorConfig[]
-}
+// The ParallelConfig/ParallelMonitorConfig types are declared in org.ts (the
+// configuration module); invoke.ts imports them and keeps only the runtime
+// resolver + the code defaults below.
 
 /** The DEV default monitors (owner decision 2026-08-23: 2× `base`, `1d`). */
 export const DEFAULT_PARALLEL_MONITORS: readonly ParallelMonitorConfig[] = [

@@ -1,0 +1,17 @@
+# dshd-webfetch configuration layer — top-level YAML array of patch entries.
+# Registers the custom `ctx.web` fetch provider (blocking detection 403/429 +
+# WEB_BLOCKED investigation message). Plain scalars only — no !!js outside the
+# runtime config engine.
+- insert:
+    - id: dshd-webfetch
+      name: dshd-webfetch
+      config:
+        enabled: true
+        # userAgent and accept default to the provider's honest product UA and
+        # a JSON-preferring Accept; uncomment to override.
+        # userAgent: deepartments/0.1.0 (DeepSeek Harness plugin; +https://github.com/esuarez/deepartments)
+        # accept: application/vnd.github.raw+json, application/json;q=0.9, text/markdown;q=0.8, text/html;q=0.5
+        maxUrlLength: 2048
+        timeoutMs: 30000
+        maxResponseBytes: 5000000
+        maxRedirects: 5
