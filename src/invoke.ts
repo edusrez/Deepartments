@@ -207,6 +207,35 @@ export type {
   ReconcileDurableHostOpts,
   ReconcileDurablePostsOpts
 } from './core/registry.js'
+// FASE 2 step (c): the bus DELIVERY ENGINE + the `deliverOrQueue` gate is carved
+// out of this monolith into ./core/delivery.js — the SINGLE delivery seam of the
+// bus. The engine orchestrates the per-recipient delivery (write-ahead
+// 'prepared' → route → final), the catalog route, the defensive ACL application,
+// and the `noWake` gate; the CLOSURE-BOUND wake primitives (busDeliverToPost /
+// busDeliverToHost / materializePost) stay here and are INJECTED as deps.
+import {
+  createDeliveryEngine
+} from './core/delivery.js'
+import type {
+  DeliveryInterruptOptions,
+  DeliverOrQueueOptions,
+  BusMemberProfile,
+  BusSendResult,
+  DeliveryEngine,
+  CatalogRoute
+} from './core/delivery.js'
+// Re-export the delivery engine's public surface (value + type) so the compiled
+// lib/invoke.js stays a drop-in superset of the pre-extraction module.
+export { createDeliveryEngine, frameBusRecord } from './core/delivery.js'
+export type {
+  DeliveryInterruptOptions,
+  DeliverOrQueueOptions,
+  BusMemberProfile,
+  BusSendResult,
+  DeliveryEngine,
+  DeliveryEngineDeps,
+  CatalogRoute
+} from './core/delivery.js'
 
 /**
  * Task T4 — session header AS OBSERVED AT RUNTIME: dsh-session FLATTENS the
@@ -457,12 +486,6 @@ const stuckNow = (): number => {
 // durable session log) is untouched, so the NEXT turn continues from the
 // preserved state.
 // ---------------------------------------------------------------------------
-
-/** W9-b — one bus-delivery option. `interrupt: true` preempts a busy
- * recipient; `false`/absent (the default) keeps the QUEUE semantics. */
-interface DeliveryInterruptOptions {
-  interrupt?: boolean
-}
 
 /** The semantic interrupt cancel-cause: a `hook` cause whose `reason` carries
  * 'interrupted' (the harness `AgentCancelCause` union has no literal kind). */
@@ -9518,22 +9541,9 @@ export function applyInvoke(ctx: Context, config: Config) {
   // the record or the delivery sidecar, per spec §5.6 the denied surface only
   // in the tool result) — and (2) the catalog delivery seam (defensively, so
   // a boot re-delivery of a PRE-ACL record can never bypass the gate).
-
-  /** The bus member profile the ACL classifies on: kind + the durable
-   * department link (workers carry it on their post entry; a configured head
-   * derives it from config) + the creating-head link (workers only). */
-  interface BusMemberProfile {
-    kind: 'host' | 'head' | 'worker' | 'unclassified'
-    memberId: string
-    departmentId?: string
-    managerId?: string
-  }
-
-  /** Per-recipient send result: a settled DeliveryStatus, or an ACL denial
-   * (`failed:acl:<ground>`) which NEVER touches the record nor the delivery
-   * sidecar — it exists only in the tool result so the sender (e.g. the head)
-   * knows the message must be channeled via the recipient's department head. */
-  type BusSendResult = DeliveryStatus | `failed:acl:${string}`
+  // NOTE: `BusMemberProfile` / `BusSendResult` are imported from ./core/delivery.js
+  // (step c); the ACL PREDICATE (busProfileFor / aclDenyGround) is kept INLINE
+  // here — step (d) extracts it as a pure function.
 
   const busProfileFor = (memberId: string): BusMemberProfile => {
     const entry = byPost.get(memberId)
@@ -9607,14 +9617,44 @@ export function applyInvoke(ctx: Context, config: Config) {
     return 'unclassified-sender'
   }
 
+  /** The bus catalog-route resolver (spec §4.2 route 2): resolve a recipient
+   * against the DURABLE catalog — posts.json (head/worker) then non-retired
+   * hosts.json — PLUS the Issue-1 (owner m-331) host-family re-route: a
+   * `host-…` address that resolves to a RETIRED / UNRESOLVABLE host entry is
+   * re-resolved DURABLE-FIRST to the CURRENT LIVE host
+   * (pickLiveHostEntry from a FRESH hosts.json read). host-session-<uuid> means
+   * "the Asistente" (role), so this re-route honors the sender's intent; W7 (a
+   * retired host is terminal) is NOT revoked, it stays for NON-host-family ids.
+   * This resolver returns the candidate entry WITHOUT applying the ACL / retired
+   * gates — the DELIVERY ENGINE (./core/delivery.js) owns those (the defensive
+   * gate, step (c)). `{ kind: 'unknown' }` = no catalog member / not re-routable
+   * (the message settles 'failed' as today — no retry loop).
+   * TODO(owner): stable host alias. */
+  const resolveBusCatalogRoute = (recipientId: string): CatalogRoute => {
+    const entry = byPost.get(recipientId)
+    if (entry !== void 0) return { kind: 'post', entry }
+    const hostEntry = hosts.get(recipientId)
+    if (hostEntry !== void 0 && hostEntry.retired !== true) return { kind: 'host', entry: hostEntry }
+    if (recipientId.startsWith(HOST_ID_PREFIX)) {
+      const { live } = pickLiveHostEntry(readDurableHostEntries(config.stateDir) ?? hosts.values())
+      if (live !== void 0) return { kind: 'reroute', entry: live as HostEntry }
+    }
+    return { kind: 'unknown' }
+  }
+
   /**
    * Deliver ONE addressed record to ONE recipient and record the sidecar
-   * transition (write-ahead 'prepared' → final status; spec §4.4). THIS is the
-   * idempotent re-delivery unit: send_message calls it after persisting, and
-   * the boot re-delivery driver re-runs it for crash-pending pairs. Route order
-   * per recipient (spec §4.2): child route FIRST (the caller's direct
-   * continuable children — never validated against the catalog), then the
-   * catalog (posts.json ∪ non-retired hosts.json); unknown ids → failed.
+   * transition (write-ahead 'prepared' → final status; spec §4.4) — a THIN
+   * wrapper over the DELIVERY ENGINE's single seam (`delivery.deliverOrQueue`,
+   * FASE 2 step (c)). Kept with the legacy signature so the internal callers
+   * (dept_job_run / dept_worker_spawn / dept_post_create first-message
+   * deliveries + the boot re-delivery driver) route through the SAME gate; NEW
+   * code should call `delivery.deliverOrQueue` directly. THIS is the idempotent
+   * re-delivery unit: send_message calls it after persisting, and the boot
+   * re-delivery driver re-runs it for crash-pending pairs. Route order per
+   * recipient (spec §4.2): child route FIRST (the caller's direct continuable
+   * children — never validated against the catalog), then the catalog
+   * (posts.json ∪ non-retired hosts.json); unknown ids → failed.
    */
   const deliverBusRecord = async (
     record: MessageRecord,
@@ -9623,138 +9663,13 @@ export function applyInvoke(ctx: Context, config: Config) {
     senderSessionId: string | undefined,
     signal?: AbortSignal,
     opts?: DeliveryInterruptOptions
-  ): Promise<DeliveryStatus> => {
-    const framed = `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`
-    await markDelivery(messageStoreDir, record.id, recipientId, 'prepared')
-    try {
-      let status: DeliveryStatus
-      if (recipientId === record.from) {
-        // Ack-loop guard: a self-addressed send is held — persisted, no wake,
-        // never re-enters the caller's own turn.
-        status = 'self'
-      } else if (subagents !== void 0) {
-        // Route (1) — the caller's direct continuable child? Resolve BEFORE any
-        // catalog validation (a transient child id can never be 'unknown').
-        let isChild = false
-        try {
-          const children = await subagents.listChildren(SessionId(callerAgentId), signal ?? undefined)
-          isChild = children.some((child) => child.kind === 'child' && child.mode === 'continuable' && String(child.id) === recipientId)
-        } catch {
-          // listing unavailable (minimal composition): no child route — catalog next
-        }
-        if (isChild) {
-          try {
-            await subagents.followup(
-              await exec_agentFor(callerAgentId) as unknown as Parameters<typeof subagents.followup>[0],
-              SessionId(recipientId),
-              // W8-b prompt-literal safety: the child-followup text (bus
-              // message content injected into a continuable child) is run
-              // through the brace sanitizer so an unbound double-brace token
-              // can never break the child session assembly.
-              [{ type: 'text', text: sanitizePromptLiterals(framed) } as const],
-              {
-                // W7-B: the SAME JSON-safe projection as `busUserMessage` — the
-                // child-followup source is inserted into a durable session too,
-                // so a present-undefined `senderSessionId` / branded value must
-                // never reach the `agent/inbox/spliced` append boundary.
-                source: jsonSafeMessageSource({
-                  kind: 'agent',
-                  form: 'send',
-                  plugin: 'deepartments',
-                  summary: boundContextSummary(`New message from ${record.from} to ${record.to.length} recipient(s) (${record.kind}).`),
-                  to: [...record.to],
-                  messageId: record.id,
-                  from: record.from,
-                  senderSessionId: senderSessionId === undefined ? undefined : SessionId(senderSessionId)
-                }),
-                // A bare { agent, signal } tool exec is the test surface; the
-                // ABORT_SIGNAL default is never reached in production harness
-                // runs (exec.signal is always present there).
-                signal: signal ?? new AbortController().signal
-              }
-            )
-            status = 'delivered'
-          } catch (error: unknown) {
-            ctx.logger.warn(`[deepartments] bus child-followup to "${recipientId}" failed: ${error instanceof Error ? error.message : String(error)}`)
-            status = 'failed'
-          }
-        } else {
-          // W9-b: the `interrupt` option (preempt a busy recipient) applies to
-          // the CATALOG route (registered heads/workers + the host) — a
-          // continuable CHILD has no abort seam here, so the option is not
-          // threaded into the child route (children are always queue-delivered).
-          status = await busDeliverCatalog(record, recipientId, senderSessionId, opts)
-        }
-      } else {
-        status = await busDeliverCatalog(record, recipientId, senderSessionId, opts)
-      }
-      await markDelivery(messageStoreDir, record.id, recipientId, status)
-      return status
-    } catch (error: unknown) {
-      // The sidecar write failed (fs): the record is durable, the delivery is
-      // NOT recorded — fail loud to the caller (never silently lose a send).
-      ctx.logger.warn(`[deepartments] bus delivery sidecar write failed for ${record.id} → ${recipientId}: ${error instanceof Error ? error.message : String(error)}`)
-      throw error
-    }
-  }
-
-  /** Catalog route of the bus (spec §4.2 route 2 + §4.3 delivery): posts.json
-   * (head/worker) then non-retired hosts.json; unknown → 'failed'. F1: a
-   * RETIRED worker entry STAYS in byPost (marked, not erased) but is filtered
-   * from the LIVE catalog — addressing a retired member fails per-recipient
-   * like an unknown one. F2: the messaging ACL (spec §4.2 route 2 + §5.6)
-   * runs HERE, BEFORE any wake/materialization: the send_message persist
-   * filter already keeps denied recipients out of a record's to[], so this
-   * gate is the DEFENSIVE enforcement seam — a boot re-delivery of a PRE-ACL
-   * record (or any other delivery path) can never bypass the rules. A denial
-   * returns 'failed' (sidecar-compatible; the richer `failed:acl:<ground>`
-   * reason lives in the send_message tool result, NOT in the sidecar). */
-  const busDeliverCatalog = async (record: MessageRecord, recipientId: string, senderSessionId: string | undefined, opts?: DeliveryInterruptOptions): Promise<DeliveryStatus> => {
-    const sender = busProfileFor(record.from)
-    const entry = byPost.get(recipientId)
-    if (entry !== void 0) {
-      if (aclDenyGround(sender, busProfileFor(recipientId)) !== undefined) {
-        ctx.logger.warn(`[deepartments] bus delivery to "${recipientId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — skipped; it goes via the recipient's department head (spec 004 §5.6)`)
-        return 'failed'
-      }
-      if (entry.retired === true) {
-        ctx.logger.warn(`[deepartments] bus delivery to RETIRED member "${recipientId}" skipped (record ${record.id})`)
-        return 'failed'
-      }
-      return busDeliverToPost(entry, `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`, record, senderSessionId, opts)
-    }
-    const hostEntry = hosts.get(recipientId)
-    if (hostEntry !== void 0 && hostEntry.retired !== true) {
-      if (aclDenyGround(sender, busProfileFor(recipientId)) !== undefined) {
-        // D6: a worker reaches the host ONLY via its department head.
-        ctx.logger.warn(`[deepartments] bus delivery to the host "${recipientId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — a worker never writes to the Asistente (spec 004 §5.6/D6)`)
-        return 'failed'
-      }
-      return busDeliverToHost(hostEntry, `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`, record, senderSessionId, opts)
-    }
-    // Issue-1 (owner m-331, Option 1): a HOST-FAMILY address ('host-…') that
-    // resolves to a RETIRED / UNRESOLVABLE host entry is re-resolved DURABLE-FIRST
-    // to the CURRENT LIVE host (pickLiveHostEntry from a FRESH hosts.json read).
-    // host-session-<uuid> means "the Asistente" (role), so this re-route honors
-    // the sender's intent; W7 (a retired host is terminal — never attempted) is
-    // NOT revoked, it stays for NON-host-family ids addressed to a retired /
-    // unresolvable post. If NO live durable host exists (boot / scripting window)
-    // the message settles 'failed' as today — no retry loop.
-    // TODO(owner): stable host alias.
-    if (recipientId.startsWith(HOST_ID_PREFIX)) {
-      const { live } = pickLiveHostEntry(readDurableHostEntries(config.stateDir) ?? hosts.values())
-      if (live !== void 0) {
-        if (aclDenyGround(sender, { kind: 'host', memberId: live.hostId }) !== undefined) {
-          // D6: a worker reaches the host ONLY via its department head.
-          ctx.logger.warn(`[deepartments] bus delivery re-route to the live host "${live.hostId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — a worker never writes to the Asistente (spec 004 §5.6/D6)`)
-          return 'failed'
-        }
-        return busDeliverToHost(live as HostEntry, `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`, record, senderSessionId, opts)
-      }
-    }
-    ctx.logger.warn(`[deepartments] bus delivery to unknown member "${recipientId}" (record ${record.id})`)
-    return 'failed'
-  }
+  ): Promise<DeliveryStatus> =>
+    delivery.deliverOrQueue(recipientId, record, {
+      callerAgentId,
+      senderSessionId,
+      signal,
+      interrupt: opts?.interrupt
+    })
 
   /** The live parent Agent for the native-route followup (the caller is the
    * direct parent, per the route resolution above). Resolved from the agents
@@ -9769,6 +9684,93 @@ export function applyInvoke(ctx: Context, config: Config) {
    * id): the postId for a registered head/worker, else the deterministic
    * `host-<sessionId>` id for a host/plain session. */
   const busMemberIdFor = (agentId: string): string => postIdForChild(agentId) ?? hostIdForSession(agentId)
+
+  // --- FASE 2 step (c): the DELIVERY ENGINE (./core/delivery.js) -------------
+  // The single bus delivery seam. The engine owns the `deliverOrQueue` gate +
+  // the per-recipient delivery orchestration (write-ahead 'prepared' → route →
+  // final), the catalog route, the defensive ACL application, and the `noWake`
+  // gate (INERT today). The CLOSURE-BOUND primitives below are INJECTED as deps:
+  // the child route (resolveBusChild / deliverBusChild), the catalog resolver
+  // (resolveBusCatalogRoute), the ACL predicate (busProfileFor / aclDenyGround —
+  // kept inline for step (d)), and the always-wake primitives (busDeliverToPost /
+  // busDeliverToHost). Constructed ONCE per apply (AGENTS.md rule 4).
+
+  /** Resolve whether `recipientId` is the caller's direct CONTINUABLE child
+   * (delivered natively, never catalog-validated). Never throws — a listing
+   * failure (minimal composition) means "not a child", the catalog route next. */
+  const resolveBusChild = async (recipientId: string, callerAgentId: string, signal?: AbortSignal): Promise<boolean> => {
+    if (subagents === void 0) return false
+    try {
+      const children = await subagents.listChildren(SessionId(callerAgentId), signal ?? undefined)
+      return children.some((child) => child.kind === 'child' && child.mode === 'continuable' && String(child.id) === recipientId)
+    } catch {
+      // listing unavailable (minimal composition): no child route — catalog next
+      return false
+    }
+  }
+
+  /** Deliver ONE bus message to a continuable child (native followup). Returns
+   * 'delivered' or 'failed' (never throws). W9-b interrupt is NOT threaded into
+   * the child route (a continuable child has no abort seam here — children are
+   * always queue-delivered). */
+  const deliverBusChild = async (callerAgentId: string, recipientId: string, record: MessageRecord, framed: string, senderSessionId: string | undefined, signal?: AbortSignal): Promise<DeliveryStatus> => {
+    if (subagents === void 0) return 'failed'
+    try {
+      await subagents.followup(
+        await exec_agentFor(callerAgentId) as unknown as Parameters<typeof subagents.followup>[0],
+        SessionId(recipientId),
+        // W8-b prompt-literal safety: the child-followup text (bus message
+        // content injected into a continuable child) is run through the brace
+        // sanitizer so an unbound double-brace token can never break the child
+        // session assembly.
+        [{ type: 'text', text: sanitizePromptLiterals(framed) } as const],
+        {
+          // W7-B: the SAME JSON-safe projection as `busUserMessage` — the
+          // child-followup source is inserted into a durable session too, so a
+          // present-undefined `senderSessionId` / branded value must never reach
+          // the `agent/inbox/spliced` append boundary.
+          source: jsonSafeMessageSource({
+            kind: 'agent',
+            form: 'send',
+            plugin: 'deepartments',
+            summary: boundContextSummary(`New message from ${record.from} to ${record.to.length} recipient(s) (${record.kind}).`),
+            to: [...record.to],
+            messageId: record.id,
+            from: record.from,
+            senderSessionId: senderSessionId === undefined ? undefined : SessionId(senderSessionId)
+          }),
+          // A bare { agent, signal } tool exec is the test surface; the
+          // ABORT_SIGNAL default is never reached in production harness runs
+          // (exec.signal is always present there).
+          signal: signal ?? new AbortController().signal
+        }
+      )
+      return 'delivered'
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] bus child-followup to "${recipientId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+      return 'failed'
+    }
+  }
+
+  /** The delivery engine: the SINGLE bus delivery seam (constructed once per
+   * apply, deps injected — AGENTS.md rule 4, no module-global mutable state).
+   * Consumed by send_message (directly) and by the `deliverBusRecord` wrapper
+   * (dept_job_run / dept_worker_spawn / dept_post_create + the boot re-delivery
+   * driver). */
+  const delivery = createDeliveryEngine({
+    stateDir: messageStoreDir,
+    logger: ctx.logger,
+    markPrepared: (record, recipientId) => markDelivery(messageStoreDir, record.id, recipientId, 'prepared'),
+    markFinal: (record, recipientId, status) => markDelivery(messageStoreDir, record.id, recipientId, status),
+    subagents,
+    resolveChild: resolveBusChild,
+    deliverChild: deliverBusChild,
+    resolveCatalogRoute: resolveBusCatalogRoute,
+    busProfileFor,
+    aclDenyGround,
+    deliverPost: busDeliverToPost,
+    deliverHost: busDeliverToHost
+  })
 
   /** B3 gap fix (reviewer B2 note a): with the board gone, the host's
    * auto-registration must not depend on board tools. For every host-family
@@ -9905,9 +9907,17 @@ export function applyInvoke(ctx: Context, config: Config) {
         ...(args.sensitive === true ? { sensitive: true } : {})
       })
       // Per-message serialization: deliveries run one at a time (never parallel
-      // resume of N dormant agents — quota + race safety, spec §4.4).
+      // resume of N dormant agents — quota + race safety, spec §4.4). The SINGLE
+      // seam: send_message routes through `delivery.deliverOrQueue` (the bus
+      // delivery gate, FASE 2 step c) — default noWake:false = ALWAYS-WAKE, the
+      // behavior-neutral path.
       for (const recipient of allowed) {
-        delivered[recipient] = await deliverBusRecord(record, recipient, agent.id as string, agent.id as string, exec.signal, args.interrupt === true ? { interrupt: true } : undefined)
+        delivered[recipient] = await delivery.deliverOrQueue(recipient, record, {
+          callerAgentId: agent.id as string,
+          senderSessionId: agent.id as string,
+          signal: exec.signal,
+          interrupt: args.interrupt === true
+        })
       }
       return { messageId: record.id, delivered }
     }
