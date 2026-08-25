@@ -236,6 +236,20 @@ export type {
   DeliveryEngineDeps,
   CatalogRoute
 } from './core/delivery.js'
+// FASE 2 step (d): the pure messaging ACL is extracted into ./core/acl.js (the
+// busProfileFor / aclDenyGround semantics + canSend / aclDenyReason). invoke.ts
+// consumes the pure functions here — binding the apply catalog onto
+// `busProfileFor` and using `aclDenyGround` directly — and re-exports the ACL
+// surface so lib/invoke.js keeps them addressable (a drop-in superset: no
+// existing export is removed). `BusMemberProfile` is already re-exported above
+// (via delivery.js, which itself re-exports it from acl.js).
+import {
+  busProfileFor as aclBusProfileFor,
+  aclDenyGround
+} from './core/acl.js'
+import type { BusCatalogLens } from './core/acl.js'
+export { busProfileFor, aclDenyGround, aclDenyReason, canSend } from './core/acl.js'
+export type { BusCatalogLens } from './core/acl.js'
 
 /**
  * Task T4 — session header AS OBSERVED AT RUNTIME: dsh-session FLATTENS the
@@ -9542,80 +9556,14 @@ export function applyInvoke(ctx: Context, config: Config) {
   // in the tool result) — and (2) the catalog delivery seam (defensively, so
   // a boot re-delivery of a PRE-ACL record can never bypass the gate).
   // NOTE: `BusMemberProfile` / `BusSendResult` are imported from ./core/delivery.js
-  // (step c); the ACL PREDICATE (busProfileFor / aclDenyGround) is kept INLINE
-  // here — step (d) extracts it as a pure function.
-
-  const busProfileFor = (memberId: string): BusMemberProfile => {
-    const entry = byPost.get(memberId)
-    if (entry !== void 0) {
-      // A worker's department is its DURABLE link (recorded at create from the
-      // creating head's config department); a configured head derives it from
-      // config (departmentForPost). A legacy pre-F1 worker carries neither →
-      // an "orphan" (only its manager reaches it — see aclDenyGround).
-      return entry.provider === 'worker'
-        ? { kind: 'worker', memberId, departmentId: entry.departmentId, managerId: entry.managerId }
-        : { kind: 'head', memberId, departmentId: departmentForPost(memberId)?.id }
-    }
-    if (hosts.has(memberId)) return { kind: 'host', memberId }
-    return { kind: 'unclassified', memberId }
-  }
-
-  /** One ACL DENIAL ground (undefined = allowed). Spec 004 §5.6 table:
-   * host → everyone; head → any head (incl. the host) + its own department's
-   * agents; worker → its own department's agents (incl. its head) + self;
-   * worker → host PROHIBITED (D6 — it must go via its head). Orphan policy
-   * (builder-verified): a worker without a departmentId is reachable ONLY by
-   * the head that created it (managerId) — its "department" is its manager.
-   * A recipient the catalog does NOT know (a transient child id, an unknown
-   * id) is NOT an ACL subject: the child route and the unknown-per-recipient
-   * 'failed' path keep their own behavior (the front: children are never
-   * catalog-validated; unknown ids already fail as unknown). */
-  const aclDenyGround = (sender: BusMemberProfile, recipient: BusMemberProfile): string | undefined => {
-    // 'self' is always allowed (autocopy/ack-loop guard; held, never woken).
-    if (recipient.memberId === sender.memberId) return undefined
-    // NOT a catalog member → not an ACL subject (child route / unknown path).
-    if (recipient.kind === 'unclassified') return undefined
-    // host: everything (D6 — the Asistente talks to everyone).
-    if (sender.kind === 'host') return undefined
-    if (sender.kind === 'head') {
-      // any head, INCLUDING the host (the host is the top of the reporting
-      // chain: "RH ↔ Asistente ↔ other heads", D6).
-      if (recipient.kind === 'host' || recipient.kind === 'head') return undefined
-      if (recipient.kind === 'worker') {
-        // agents of its own department — by the durable departmentId OR (a
-        // legacy worker the head itself created — "my workers", §4.2).
-        if (recipient.departmentId !== undefined && recipient.departmentId === sender.departmentId) return undefined
-        if (recipient.departmentId === undefined && recipient.managerId === sender.memberId) return undefined
-        return 'other-department'
-      }
-      return 'unclassified-recipient'
-    }
-    if (sender.kind === 'worker') {
-      // D6: a worker NEVER writes to the Asistente — everything via its head.
-      if (recipient.kind === 'host') return 'host'
-      if (recipient.kind === 'head') {
-        // its own head: the manager link, OR (a manager head without the
-        // durable link — legacy) the same config department.
-        if (recipient.memberId === sender.managerId) return undefined
-        if (sender.departmentId !== undefined && recipient.departmentId === sender.departmentId) return undefined
-        return 'other-department'
-      }
-      if (recipient.kind === 'worker') {
-        // a department peer (same durable departmentId). An ORPHAN worker
-        // (no departmentId) is only its manager's (a head's) reach — a worker
-        // sender never is one.
-        if (recipient.departmentId !== undefined && recipient.departmentId === sender.departmentId) return undefined
-        return 'other-department'
-      }
-      return 'unclassified-recipient'
-    }
-    // Unclassified sender (a session the catalog does not know — e.g. a
-    // transient subagent that reached the plugin tool): conservative DENY.
-    // Transient subagents are documented NOT to be ACL subjects (spec 003
-    // D2: they keep the native tool and are not catalog members), so this
-    // branch is a defensive guard for foreign callers only.
-    return 'unclassified-sender'
-  }
+  // (step c). The ACL SEMANTICS (busProfileFor / aclDenyGround) live in the PURE
+  // ./core/acl.js (FASE 2 step d) — the catalog-route-only predicate is NOT
+  // INLINE here anymore. invoke.ts binds the apply catalog (the durable
+  // posts/hosts registries + the config department resolver) onto the pure
+  // `busProfileFor` and consumes the pure `aclDenyGround` directly; the
+  // delivery engine (delivery.ts) re-checks the SAME pure predicate defensively.
+  const busCatalogLens: BusCatalogLens = { byPost, hosts, departmentForPost }
+  const busProfileFor = (memberId: string): BusMemberProfile => aclBusProfileFor(memberId, busCatalogLens)
 
   /** The bus catalog-route resolver (spec §4.2 route 2): resolve a recipient
    * against the DURABLE catalog — posts.json (head/worker) then non-retired
@@ -9691,9 +9639,11 @@ export function applyInvoke(ctx: Context, config: Config) {
   // final), the catalog route, the defensive ACL application, and the `noWake`
   // gate (INERT today). The CLOSURE-BOUND primitives below are INJECTED as deps:
   // the child route (resolveBusChild / deliverBusChild), the catalog resolver
-  // (resolveBusCatalogRoute), the ACL predicate (busProfileFor / aclDenyGround —
-  // kept inline for step (d)), and the always-wake primitives (busDeliverToPost /
-  // busDeliverToHost). Constructed ONCE per apply (AGENTS.md rule 4).
+  // (resolveBusCatalogRoute), the ACL predicate (the pure busProfileFor /
+  // aclDenyGround from ./core/acl.js — FASE 2 step (d); invoke.ts binds the
+  // catalog lens onto `busProfileFor`), and the always-wake primitives
+  // (busDeliverToPost / busDeliverToHost). Constructed ONCE per apply
+  // (AGENTS.md rule 4).
 
   /** Resolve whether `recipientId` is the caller's direct CONTINUABLE child
    * (delivered natively, never catalog-validated). Never throws — a listing
@@ -9767,7 +9717,6 @@ export function applyInvoke(ctx: Context, config: Config) {
     deliverChild: deliverBusChild,
     resolveCatalogRoute: resolveBusCatalogRoute,
     busProfileFor,
-    aclDenyGround,
     deliverPost: busDeliverToPost,
     deliverHost: busDeliverToHost
   })

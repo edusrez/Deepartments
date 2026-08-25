@@ -25,9 +25,10 @@
 //           call-site sets it (QD acks/feedback are a later phase).
 //   - the `markDelivery` 'prepared'→final write-ahead orchestration;
 //   - the DEFENSIVE messaging ACL gate application for the recipient (the ACL
-//     predicate itself stays INLINE in invoke.ts — STEP (d) extracts it as a
-//     pure function; it is injected here so the delivery path is never the one
-//     to bypass the rules on a boot re-delivery of a pre-ACL record);
+//     predicate is the PURE ./acl.js `aclDenyGround` — FASE 2 STEP (d) extracted
+//     it out of invoke.ts; the catalog-bound `busProfileFor` is injected here so
+//     the delivery path is never the one to bypass the rules on a boot
+//     re-delivery of a pre-ACL record);
 //   - the catalog route resolution (posts.json ∪ non-retired hosts.json + the
 //     host-family re-route) via the injected resolver.
 //
@@ -47,6 +48,15 @@
 // NO export default (pitfall 0001 — breaks `inject`).
 import type { DeliveryStatus, MessageRecord } from './messages.js'
 import type { PostEntry, HostEntry } from './registry.js'
+// FASE 2 step (d): the messaging ACL is a PURE module (./acl.js — busProfileFor /
+// aclDenyGround / canSend / aclDenyReason). The delivery engine imports the pure
+// `aclDenyGround` for its defensive gate (instead of an injected closure-bound
+// predicate) and re-exports the ACL surface (value + type) so lib/delivery.js
+// stays a drop-in superset of the pre-step-(d) module.
+import { aclDenyGround } from './acl.js'
+import type { BusMemberProfile } from './acl.js'
+export { busProfileFor, aclDenyGround, aclDenyReason, canSend } from './acl.js'
+export type { BusMemberProfile, BusCatalogLens } from './acl.js'
 
 // ---------------------------------------------------------------------------
 // Types (spec 003 §4.1 / W9-b / step-c).
@@ -92,14 +102,9 @@ export type CatalogRoute =
   | { kind: 'reroute'; entry: HostEntry }
   | { kind: 'unknown' }
 
-/** The bus member profile the ACL classifies on (spec 004 §5.6). Defined here so
- * the engine's deps can name the ACL predicate without importing invoke.ts. */
-export interface BusMemberProfile {
-  kind: 'host' | 'head' | 'worker' | 'unclassified'
-  memberId: string
-  departmentId?: string
-  managerId?: string
-}
+// NOTE: `BusMemberProfile` is defined in ./acl.js (the pure ACL — FASE 2 step d)
+// and RE-EXPORTED here so the engine's deps can name the ACL predicate without
+// importing invoke.ts, and the delivery engine keeps its exported type surface.
 
 /** Per-recipient send result: a settled DeliveryStatus, or an ACL denial
  * (`failed:acl:<ground>`) which NEVER touches the record nor the delivery
@@ -141,11 +146,12 @@ export interface DeliveryEngineDeps {
    * hosts.json + the host-family re-route) WITHOUT applying the ACL / retired
    * gates (the engine applies those — the DEFENSIVE gate). */
   resolveCatalogRoute(recipientId: string): CatalogRoute
-  /** The messaging-ACL profile classifier (spec 004 §5.6). Kept INLINE in
-   * invoke.ts — STEP (d) extracts it as a pure function. */
+  /** The messaging-ACL profile classifier (spec 004 §5.6). Injected because it
+   * needs the apply-catalog closure (the durable posts/hosts registries + the
+   * config department resolver); the PURE classifier lives in ./acl.js
+   * (`busProfileFor(memberId, catalog)`) and invoke.ts binds its catalog here.
+   */
   busProfileFor(memberId: string): BusMemberProfile
-  /** The messaging-ACL per-pair denial predicate (spec 004 §5.6). Injected. */
-  aclDenyGround(sender: BusMemberProfile, recipient: BusMemberProfile): string | undefined
   /** The ALWAYS-WAKE post delivery (materializePost + followup + stuck recovery;
    * closure-bound in invoke.ts). Never throws (returns 'failed' on error). */
   deliverPost(
@@ -263,13 +269,14 @@ async function catalogRoute(
   // send_message persist filter already keeps denied recipients out of a record's
   // to[], so this is the reinforcement seam; a denial returns 'failed'
   // (sidecar-compatible; the richer `failed:acl:<ground>` lives in the tool result).
+  // The predicate is the PURE ./acl.js `aclDenyGround` (step (d)).
   const sender = deps.busProfileFor(record.from)
   if (route.kind === 'reroute') {
-    if (deps.aclDenyGround(sender, { kind: 'host', memberId: route.entry.hostId }) !== undefined) {
+    if (aclDenyGround(sender, { kind: 'host', memberId: route.entry.hostId }) !== undefined) {
       deps.logger.warn(`[deepartments] bus delivery re-route to the live host "${route.entry.hostId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — a worker never writes to the Asistente (spec 004 §5.6/D6)`)
       return 'failed'
     }
-  } else if (deps.aclDenyGround(sender, deps.busProfileFor(recipientId)) !== undefined) {
+  } else if (aclDenyGround(sender, deps.busProfileFor(recipientId)) !== undefined) {
     if (route.kind === 'host') {
       deps.logger.warn(`[deepartments] bus delivery to the host "${recipientId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — a worker never writes to the Asistente (spec 004 §5.6/D6)`)
     } else {
