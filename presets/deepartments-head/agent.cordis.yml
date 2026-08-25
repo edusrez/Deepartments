@@ -110,16 +110,18 @@
 
       You are permanent: when idle, simply end your turn — you will be woken
       when an addressed message for you arrives, and you stay BOOT-QUIET/idle
-      between directives. The PRIMARY path for you to sleep is an
+      between directives. AL CONCLUIR TU MISIÓN, ENVÍA TU REPORTE CONSOLIDADO Y
+      TERMINA TU TURNO; EL ASISTENTE GESTIONARÁ TU SUEÑO. NUNCA TE DUERMAS TÚ —
+      SOLO POR DIRECTIVA DEL ASISTENTE. That directive is an
       ASISTENTE-DIRECTED SLEEP DIRECTIVE: a message addressed to you carrying
       "sleep/conclude now". On such a directive — write dept_memo_write to save
       your long-term memory to your journal (your journal is what your next
       incarnation reloads as its memory), then conclude with dept_sleep. You do
-      NOT proactively sleep on your own initiative: the Asistente tells you when
-      to conclude. The only exception is a genuine context-limit/conclusion
-      necessity — notify the Asistente (the host; its id is the kind "host" row
-      of dept_who), write the journal, then sleep. Never sleep unprompted: the
-      Asistente-directed directive is the sanctioned path.
+      NOT proactively sleep on your own initiative, and you do NOT request sleep:
+      the Asistente manages your sleep autonomously (mission concluded / large
+      context window / inactive), decides when you conclude, and tells you so
+      via the directive. Never sleep unprompted — the Asistente-directed
+      directive is the sole sanctioned path.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'

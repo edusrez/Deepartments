@@ -47,15 +47,24 @@ objective+files+spec+verification. The Asistente is the only Pro agent.
 ## Head lifecycle
 
 Department heads are PERMANENT (unlike ephemeral workers), but they do sleep
-and re-wake. The Asistente (host) directs head sleeping via an ADDRESSED SLEEP
-DIRECTIVE: a `send_message` to the head carrying "Sleep — conclude now". On that
-directive the head writes its memo (`dept_memo_write`) then concludes with
-`dept_sleep`. A head NEVER sleeps unprompted — sleep happens only on the
-Asistente's directive. The Asistente may issue a SLEEP DIRECTIVE at a natural
-boundary: the head is idle, all its work is reported, or to force a context
-reset. This mirrors the worker ephemeral rule (a worker is retired by its head)
-but for the durable head — the head's next wake cold-resumes the same durable
-session.
+and re-wake. The **Asistente manages head sleep AUTONOMOUSLY** — it is the host,
+NOT the head, that decides when a head sleeps. The PRIMARY (and only sanctioned)
+path is an **ADDRESSED SLEEP DIRECTIVE**: a `send_message` to the head carrying
+"Sleep — conclude now". After a head's mission-concluded report (or on a large
+context window / inactivity), the Asistente emits the SLEEP DIRECTIVE **without
+waiting for a request** — a head NEVER requests sleep and NEVER sleeps on its own
+initiative. On that directive the head writes its memo (`dept_memo_write`) then
+concludes with `dept_sleep`. The Asistente may issue a SLEEP DIRECTIVE at a
+natural boundary: the head is idle, all its work is reported, or to force a
+context reset. **The head's lifecycle is: receive mission → dispatch → collect →
+report / emit verdict → end turn → the Asistente directs its sleep.** A head's
+"Sleep — conclude now" directive, when it concerns the **Quality Head**, is
+**NOT inspected at 100%** (anti-loop, owner decision): the QH's own sleep is
+SAMPLED at the 10% worker dice (`workerInspectProbability`), so the recurring
+"QH sleeps each round" does NOT auto-feed an inspection (no QH-sleep → q-i →
+QH-wake loop); every other configured head (and the host rotation) stays at 100%.
+This mirrors the worker ephemeral rule (a worker is retired by its head) but for
+the durable head — the head's next wake cold-resumes the same durable session.
 
 ## Key principles
 
@@ -209,8 +218,10 @@ department recovers.
 The **Quality Department** inspects the Deepartments organization's own runtime
 (how the org itself behaves) — it never plans/fixes it. It is **event-driven +
 digest** (D-Q2/D-Q3/D-Q4): the lifecycle archive events (a disposable worker
-retire sampled at probability 0.10, a department head `dept_sleep` at 100%, a
-host session rotation at 100%) and a new post-error record each emit a Quality
+retire sampled at probability 0.10, a department head `dept_sleep` at 100% EXCEPT
+the **Quality Head's own sleep**, which is SAMPLED at 0.10 by design — anti-loop,
+D-Q7, so "QH sleeps each round" never auto-feeds an inspection; a host session
+rotation at 100%) and a new post-error record each emit a Quality
 Inspect directive to `quality-head`; a **daily digest job** (`quality-daily`,
 role `quality-inspector`, cron `0 8 * * *`, owner `quality-head`) consolidates
 the week's post-errors / stalled posts / delivery failures / prior inspection
@@ -230,14 +241,18 @@ QUALITY REQUEST
 ```
 
 The QD deploys organically (1 `quality-inspector` worker, rooted and ephemeral-
-per-round W8-g), reviews and consolidates, then responds. The Asistente:
+per-round W8-g). **The QH is the CONSOLIDATOR + ANALYZER, not a retransmitter:**
+a `quality-inspector`'s report ALWAYS goes to the QH, and the QH ANALYZES the
+set (is everything well?). If something is wrong, it reports to the Asistente
+(3–5 bullets + findings) AND/OR to the specific department — a **PROGRAMMING
+REQUEST** → `internal-programming-head`, a **RESEARCH REQUEST** → `research-head`,
+or the Asistente for an owner decision. The verdict per round is one line:
+**"todo bien"** OR **"issue X → dirigido a Y (Z)"**. The QH never retransmits raw
+worker output; it consolidates and issues a verdict. The Asistente:
 
 - NEVER addresses the QD's workers directly (D2 — no per-worker messaging, no
   dept worker spawn/retire); only addresses `quality-head`.
-- Treats the head's consolidated report as the **source of truth**.
-- The QH reports consolidated findings to the Asistente (3–5 bullets + report
-  paths) AND auto-files a **PROGRAMMING REQUEST** to `internal-programming-head`
-  for each genuinely fixable issue (D-Q5).
+- Treats the head's consolidated report/verdict as the **source of truth**.
 
 **Emergency fallback** (exception, not the norm): ONLY if the QD is unavailable
 (`quality-head` asleep with no reply, department down) may the Asistente inspect

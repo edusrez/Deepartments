@@ -22,8 +22,9 @@ summary.
 ## Pipeline (organic, not a rigid depth)
 
 The org's own lifecycle archive events (a worker retire sampled at 10%, a head
-`dept_sleep` at 100%, a host session rotation at 100% — D-Q2/D-Q3 — and a new
-post-error record, D-Q4a) emit an **ADDRESSED QUALITY INSPECT directive** to the
+`dept_sleep` at 100% — **EXCEPT the Quality Head's own sleep, which is SAMPLED at
+10% by design, D-Q7 anti-loop** — a host session rotation at 100% — D-Q2/D-Q3 —
+and a new post-error record, D-Q4a) emit an **ADDRESSED QUALITY INSPECT directive** to the
 QH over the bus. The QH decides/spawns its own `quality-inspector` workers
 (`dept_worker_spawn`), which read the archived session logs, find the quality
 signal, write a report under `.dsh/reports/quality/`, and report to the QH. The
@@ -44,6 +45,21 @@ repetitive tasks, carrying a `jobId`) are EPHEMERAL PER ROUND (W8-g) too: they
 complete the round, report, reply to their head, and are retired; the NEXT round
 spawns a fresh worker with the same `jobId`. No round-to-round state carries
 over.
+
+## Head lifecycle (QH — autonomous Asistente governance)
+
+The Quality Head is PERMANENT but does sleep and re-wake. **The ASISTENTE manages
+the QH's sleep AUTONOMOUSLY** — the primary (and only sanctioned) path is an
+**ADDRESSED SLEEP DIRECTIVE** from the Asistente (a `send_message` carrying
+"Sleep — conclude now"). After the QH's mission-concluded report/verdict (or on a
+large context window / inactivity), the Asistente emits the SLEEP DIRECTIVE without
+waiting for a request. The QH **does NOT request sleep** (the "head requests
+sleep → Asistente approves" model is DISCARDED) and **never sleeps on its own** — on
+the directive it writes `dept_memo_write` then concludes with `dept_sleep`, or
+stays awake for a chained/pending round. **Anti-loop (D-Q7):** the QH's own sleep
+is NOT inspected at 100% — it is SAMPLED at the 0.10 worker dice, so its recurring
+per-round sleep never auto-feeds an inspection back into the QD (no QH-sleep →
+q-i → QH-wake loop); every other configured head stays at 100%.
 
 ## Messaging ACL (`send_message`)
 
