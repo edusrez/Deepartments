@@ -28,7 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { Config as configSchema } from '../lib/org.js'
@@ -8831,6 +8831,65 @@ test('Bug A DURABLE GATE (STALE in-memory registry, real Loader): a host that is
     } finally {
       delete process.env[QUALITY_INSPECT_ENV_VAR]
     }
+  })
+})
+
+test('HEALTH ALERT RECIPIENT (durable rotation chain beats a STALE in-memory registry): a daemon whose in-memory `deps.hosts` is STALE — host A still LIVE with no rotation knowledge (a long-lived/twin daemon that booted BEFORE the 12:30 rotation) — resolves the ALERT recipient DURABLE-FIRST from hosts.json, where host A is retired:true (rotatedTo B) + host B is the live successor (previousSessionId = A). notifyHost receives the alert addressed to B, and NOTHING is addressed to A (no alert / no re-alert row for the retired host)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 24, 12, 30, 0).getTime() // fixed epoch (post-rotation)
+    const sessionA = 'host-session-a'
+    const sessionB = 'host-session-b'
+    const hostA = `host-${sessionA}`
+    const hostB = `host-${sessionB}`
+    // (i) The DURABLE hosts.json — the truthful rotation record: host A RETIRED
+    // (rotatedTo B) + host B LIVE (the successor, previousSessionId = A). This is
+    // the state the rotation committed ON DISK AFTER the daemon already booted
+    // (the daemon's boot-time in-memory registry never re-reads it).
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      schemaVersion: 2,
+      [hostA]: { sessionId: sessionA, roomId: 'board', retired: true, retiredAt: T0 - 1000, rotatedTo: hostB },
+      [hostB]: { sessionId: sessionB, roomId: 'board', previousSessionId: sessionA }
+    }, null, 2))
+    // readDurableHostEntries must PRESERVE the rotation-chain metadata the Bug A
+    // `readDurableHostsRegistry` (a `{hostId:{retired}}` map) discards, so the
+    // successor detection in the follow-up pickLiveHostEntry works.
+    const durableEntries = readDurableHostEntries(stateDir)
+    assert.ok(durableEntries !== undefined, 'the durable hosts.json is read fresh')
+    const durableB = durableEntries?.find((e) => e.hostId === hostB)
+    const durableA = durableEntries?.find((e) => e.hostId === hostA)
+    assert.equal(durableB?.previousSessionId, sessionA, 'the live successor entry preserves previousSessionId (rotate-from) on the durable read')
+    assert.equal(durableA?.retired, true, 'the retired entry preserves retired:true on the durable read')
+    assert.equal(durableA?.rotatedTo, hostB, 'the retired entry preserves rotatedTo on the durable read')
+    // (ii) A net-new finding for the daemon to alert about.
+    await writeFile(path.join(stateDir, 'post-errors.jsonl'), JSON.stringify({ ts: T0 - 60_000, postId: 'worker-w', messageId: 'm-1', error: 'could not be materialized' }) + '\n', 'utf8')
+    const alerts = []
+    const warns = []
+    // (iii) The STALE in-memory registry: host A LIVE only (the twin booted pre-
+    // rotation; it has NO knowledge that A is retired or that B exists).
+    const staleInMemoryHosts = [{ hostId: hostA, sessionId: sessionA, roomId: 'board' }]
+    assert.equal(pickLiveHostEntry(staleInMemoryHosts).live?.hostId, hostA, 'sanity: the stale in-memory registry ALONE resolves the recipient to host A (the pre-fix behavior this regression guards)')
+    // (iv) Run the tick with the stale in-memory registry; the durable file is the
+    // truth the recipient must resolve from.
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-recipient',
+      hosts: staleInMemoryHosts,
+      posts: [],
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => warns.push(m) }
+    })
+    // (v) The alert is addressed to the DURABLE live successor (host B), NOT A.
+    assert.equal(alerts.length, 1, 'one alert fires for the net-new finding')
+    assert.equal(alerts[0].hostEntry.hostId, hostB, 'the alert targets the DURABLE live successor (host B), NOT the stale in-memory host A')
+    assert.notEqual(alerts[0].hostEntry.hostId, hostA, 'the alert is NOT addressed to the retired host A')
+    assert.match(alerts[0].frame, /^\[From deepartments\] System-health ALERT:/, 'the alert is framed correctly')
+    assert.match(alerts[0].frame, /post-error: worker-w/, 'the alert names the finding')
+    // (vi) The finding is deduped at now (delivered once); NOTHING ever targets A.
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state[`post-error:worker-w:${errorIdentityHash('could not be materialized')}`], T0, 'the finding is deduped at now')
+    assert.equal(alerts.every((a) => a.hostEntry.hostId !== hostA), true, 'NO alert is ever addressed to host A')
+    assert.equal(warns.length, 0, 'a fully-resolvable tick emits no warns')
   })
 })
 

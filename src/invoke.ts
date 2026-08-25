@@ -1116,6 +1116,45 @@ export function readDurableRetiredHostIds(stateDir: string): Set<string> | undef
   return ids
 }
 
+/** Read the DURABLE hosts registry (`<stateDir>/hosts.json`) FRESH and return
+ * ALL host entries as `HostEntryLike[]` (hostId, sessionId, roomId?, retired?,
+ * retiredAt?, rotatedTo?, previousSessionId?), PRESERVING the rotation-chain
+ * metadata so a subsequent `pickLiveHostEntry` succeeds exactly as it does for
+ * the in-memory registry (the successor detection reads `previousSessionId`).
+ * The top-level `schemaVersion` marker is skipped. Returns `undefined` (never
+ * throws) when the file is absent/unreadable/malformed, so the caller falls
+ * back to the in-memory registry; an EMPTY array (a readable file with no
+ * entries) is a valid read. This is the DURABLE source the system-health daemon
+ * ALERT recipient must resolve from — the on-disk file is the truthful rotation
+ * record, while the boot-loaded IN-MEMORY registry is STALE in a long-lived /
+ * twin daemon that booted BEFORE a rotation (it still lists the retired host as
+ * live and never learned the successor). Unlike `readDurableHostsRegistry`
+ * (Bug A: `{hostId:{retired}}` only), this keeps the full entry shape. */
+export function readDurableHostEntries(stateDir: string): HostEntryLike[] | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'hosts.json'), 'utf8')) as Record<string, unknown>
+    const entries: HostEntryLike[] = []
+    for (const [hostId, raw] of Object.entries(parsed)) {
+      if (hostId === 'schemaVersion') continue
+      if (raw === null || typeof raw !== 'object') continue
+      const e = raw as Record<string, unknown>
+      const entry: HostEntryLike = {
+        hostId,
+        sessionId: typeof e.sessionId === 'string' ? e.sessionId : ''
+      }
+      if (typeof e.roomId === 'string') entry.roomId = e.roomId
+      if (e.retired === true) entry.retired = true
+      if (typeof e.retiredAt === 'number') entry.retiredAt = e.retiredAt
+      if (typeof e.rotatedTo === 'string') entry.rotatedTo = e.rotatedTo
+      if (typeof e.previousSessionId === 'string') entry.previousSessionId = e.previousSessionId
+      entries.push(entry)
+    }
+    return entries
+  } catch {
+    return undefined
+  }
+}
+
 /** The owner-presence state (Feature A — the "Presencia/Ausencia" toggle), the
  * `presence/get` RPC value and the `presence.set` input. Persisted at
  * `<stateDir>/presence.json` as `{ present: boolean, updatedAt: number }`;
@@ -3984,6 +4023,19 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // undefined → the system-wait wake was silently dropped. Materialize it ONCE
     // and reuse the SAME array for BOTH picks AND the Bug A retired-host set.
     const hostList = [...(deps.hosts ?? [])]
+    // HEALTH ALERT RECIPIENT (the durable file is the truthful rotation record):
+    // the alert recipient MUST be resolved DURABLE-FIRST from hosts.json, NOT the
+    // in-memory `hostList`. `hostList` is a boot-loaded IN-MEMORY registry; in a
+    // LONG-LIVED/twin daemon that booted BEFORE a rotation it is STALE — it
+    // still lists the retired host as live and has no knowledge of the rotation
+    // successor (pickLiveHostEntry's `retired` skip is correct, but it never sees
+    // the new `retired` marker). Re-read hosts.json FRESH each tick and prefer
+    // its entries (falling back to `hostList` only when the durable file is
+    // unreadable/empty). This makes the ALERT + CONDITIONAL-WAIT paths address
+    // the CURRENT non-retired host (the rotation successor) robustly.
+    const durableHostEntries = readDurableHostEntries(deps.stateDir)
+    const pickLiveHost = () =>
+      durableHostEntries !== undefined && durableHostEntries.length > 0 ? pickLiveHostEntry(durableHostEntries) : pickLiveHostEntry(hostList)
     // Bug A (defense-in-depth): the set of RETIRED host ids, threaded into the
     // post-error scan so a legacy post-error row for a retired host on disk is
     // never a finding/alert (a retired host is terminal — W7 philosophy). The
@@ -4087,9 +4139,12 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         return nextState[identity] === undefined || nowMs - nextState[identity] > HEALTH_DEDUPE_WINDOW_MS
       })
       if (findingsToAlert.length > 0) {
-        // 5. resolve the live host (the Asistente); no host → warn + skip (the
-        // dedupe state is NOT advanced — the alert retries once a host is live).
-        const { live } = pickLiveHostEntry(hostList)
+        // 5. resolve the live host (the Asistente) DURABLE-FIRST (the on-disk
+        // hosts.json rotation chain is the truthful recipient; a stale in-memory
+        // registry in a long-lived/twin daemon must not address the retired
+        // host). No host → warn + skip (the dedupe state is NOT advanced — the
+        // alert retries once a host is live).
+        const { live } = pickLiveHost()
         if (live === undefined) {
           deps.logger?.warn('[deepartments] system-health: anomalies detected but no live host to alert — skip (retries on the next tick)')
         } else {
@@ -4120,9 +4175,11 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       const waits = scanHostWaits(hostWaits, nowMs, waitThresholdMs)
       const waitsToWake = waits.filter((wait) => nextState[wait.key] === undefined || nowMs - nextState[wait.key] > HEALTH_DEDUPE_WINDOW_MS)
       if (waitsToWake.length > 0) {
-        // LATENT BUG fix: use the materialized hostList (NOT the single-use
-        // deps.hosts iterator) — the ALERT path above already consumed it.
-        const { live } = pickLiveHostEntry(hostList)
+        // LATENT BUG fix: reuse the materialized hostList (NOT the single-use
+        // deps.hosts iterator — the ALERT path above already consumed it) via the
+        // DURABLE-first pickLiveHost() pick (the rotation chain, not a stale
+        // in-memory registry, chooses the wake recipient).
+        const { live } = pickLiveHost()
         if (live === undefined) {
           deps.logger?.warn('[deepartments] system-health: system-wait condition but no live host to wake — skip (retries on the next tick)')
         } else {
