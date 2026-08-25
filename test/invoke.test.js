@@ -870,7 +870,7 @@ async function waitForHeadMaterialized(agents) {
   await waitFor(() => agents.store.has('head-research-head'), 5000, 'head materialized at boot')
 }
 
-async function seedPost(stateDir, { postId, sessionId = `head-${postId}`, roomId, agentPreset = 'deepartments-head', provider, role, departmentId, managerId, jobId, retired, sleepEpoch, previousChildId }) {
+async function seedPost(stateDir, { postId, sessionId = `head-${postId}`, roomId, agentPreset = 'deepartments-head', provider, role, departmentId, managerId, jobId, retired, sleepEpoch, previousChildId, inflightWorkers }) {
   const postsPath = path.join(stateDir, 'posts.json')
   let existing = {}
   try {
@@ -892,6 +892,8 @@ async function seedPost(stateDir, { postId, sessionId = `head-${postId}`, roomId
   // incarnation's sessionId) in posts.json — seeded so the relay can respawn it.
   if (sleepEpoch !== undefined) entry.sleepEpoch = sleepEpoch
   if (previousChildId !== undefined) entry.previousChildId = previousChildId
+  // Fix (head-sleep worker drain): seed the durable in-flight worker ledger.
+  if (inflightWorkers !== undefined) entry.inflightWorkers = inflightWorkers
   existing[postId] = entry
   await writeFile(postsPath, JSON.stringify(existing, null, 2), 'utf8')
   postAdoption.set(sessionId, '')
@@ -1967,6 +1969,39 @@ test('Batch G dept_sleep requires a saved journal (throws otherwise / rejects a 
       const who = await root.tools.get('dept_who').execute({}, { agent: fakeParentAgent(), signal })
       const whoSelf = who.members.find((m) => m.agentId === postId)
       assert.equal(whoSelf.sleeping, true, 'dept_who surfaces the sleeping head')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Batch G head-sleep worker drain (Fix A): dept_sleep records the head\'s IN-FLIGHT workers (provider:"worker", managerId=head, not retired) as a durable inflightWorkers ledger on the head entry — mark, not reap', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const postId = 'research-head'
+      const signal = new AbortController().signal
+      // Spawn a worker of the head (provider:"worker", managerId=research-head,
+      // NOT retired) — the head's in-flight worker at the sleep boundary.
+      const spawned = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'investigate the worker drain' })
+      const workerId = spawned.result.workerId
+      assert.equal(workerId, 'researcher', 'the spawned worker slug is the role')
+
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      await memo.execute({ summary: 'drain memory' }, { agent: head, signal })
+      await sleep.execute({}, { agent: head, signal })
+
+      // Fix A: the slept head carries the durable in-flight ledger (the worker is
+      // MARKED in-flight — NOT reaped by dept_sleep, so it can still deliver).
+      await waitFor(async () => {
+        const posts = await readPosts(stateDir)
+        return Array.isArray(posts[postId]?.inflightWorkers) && posts[postId].inflightWorkers.includes(workerId)
+      }, 5000, 'head inflightWorkers ledger persisted to posts.json')
+      const posts = await readPosts(stateDir)
+      assert.deepEqual(posts[postId].inflightWorkers, [workerId], 'inflightWorkers = the spawned in-flight worker')
+      assert.equal(posts[postId].sleepEpoch !== undefined, true, 'the sleepEpoch mark persists alongside the ledger (same write)')
+      assert.equal(posts[workerId].retired, undefined, 'dept_sleep is MARK, not reap — the worker stays live for its report')
     } finally {
       await dispose()
     }
@@ -6414,6 +6449,45 @@ test('F3 dept_worker_retire: marks retired (entry kept, live catalog stops addre
   })
 })
 
+test('Fix B head-sleep worker drain: a worker report delivered to its DOMANT manager head is AUTO-RETIRED on delivery — status "resumed" (the sleep-boundary signature) and posts[workerId].retired === true', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      // Spawn a worker of the head (managerId = research-head), then sleep the head.
+      const spawned = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'do the work and report back' })
+      const workerId = spawned.result.workerId
+      const worker = spawned.worker
+      const wctx = spawned.ctx
+      const wkey = spawned.key
+
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      await memo.execute({ summary: 'drain memory' }, { agent: head, signal })
+      await sleep.execute({}, { agent: head, signal })
+      await waitFor(() => agents.store.has('head-research-head') === false, 5000, 'head handle disposed after sleep')
+
+      // The worker reports to its just-disposed (dormant) manager head. The
+      // delivery is the respawn-from-sleep branch → status "resumed", and Fix B
+      // auto-retires the worker on that very delivery.
+      const r = await wctx.tools.get('send_message', wkey).execute(
+        { to: ['research-head'], text: 'report: work complete' },
+        { agent: worker, signal }
+      )
+      assert.equal(r.delivered['research-head'], 'resumed', 'worker report to a dormant head delivers as resumed (the sleep-boundary signature)')
+
+      // Fix B: the delivery itself is the retire trigger — no head-side open item.
+      await waitFor(async () => (await readPosts(stateDir))[workerId]?.retired === true, 5000, 'the delivering worker is auto-retired')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts[workerId].retired, true, 'Fix B auto-retire is durable (posts.json marks the worker retired)')
+      // The sleep-boundary in-flight ledger is pruned as the worker is retired.
+      assert.equal(posts['research-head']?.inflightWorkers?.includes(workerId), undefined, 'the retired worker was pruned from the head\'s in-flight ledger')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('F3 dept_who rows: a LIVE worker row carries departmentId/role/jobId (and no retired flag), with the derived kind "worker"', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
@@ -9997,6 +10071,62 @@ test('W7-A boot re-delivery: a VALID (live) recipient with a re-attempt-eligible
   })
 })
 
+test('Issue-3 redelivery guard (a): a pending sidecar (messageIdX, other-head) whose store record X does NOT include other-head is NOT re-delivered (stale id reuse — the pair stays settled, no new row)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    // recipientB ('other-head') IS a valid registered head, so the skip can ONLY
+    // be the Issue-3 guard (record.to does not include it) — NOT recipientCatalogAlive.
+    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'board' })
+    await seedPost(stateDir, { postId: 'other-head', sessionId: 'head-other-head', roomId: 'board' })
+    const hostId = await seedHostRegistration(stateDir, 'host-live-1')
+    // Store record X: from the host, to ['research-head'] — 'other-head' NOT in to[].
+    await seedMessageRecords(stateDir, [
+      { id: 'm-0', seq: 0, ts: now, from: hostId, to: ['research-head'], text: 'hello research-head', kind: 'agent' }
+    ])
+    // Pending sidecar (m-0, other-head): a STALE reuse row — the id was rebound to
+    // a record that never addressed 'other-head'. needsRedelivery('prepared') === true.
+    const deliveriesPath = await seedDeliveryRows(stateDir, [{ messageId: 'm-0', recipientId: 'other-head', status: 'prepared', ts: now }])
+    const { dispose } = await bootPlugin(stateDir)
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 250)) // let the fire-and-forget boot driver run
+      // The pair is NOT re-delivered: the ONLY row for (m-0, other-head) stays 'prepared'.
+      const rows = parseDeliveryRows(await readFile(deliveriesPath, 'utf8'))
+      const pair = rows.filter((row) => row.messageId === 'm-0' && row.recipientId === 'other-head')
+      assert.deepEqual(pair.map((row) => row.status), ['prepared'], 'a stale (rebound) id whose record does NOT include the recipient is NOT re-delivered — no new row')
+      assert.equal(await deliveryStatus(stateDir, 'm-0', 'other-head'), 'prepared', 'the pair stays settled as prepared (no re-attempt)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Issue-3 redelivery guard (b): a pending sidecar (messageIdX, other-head) whose store record X DOES include other-head re-delivers idempotently (the legitimate rebound case proceeds, delivered/resumed)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'board' })
+    const hostId = await seedHostRegistration(stateDir, 'host-live-1')
+    // Store record X: from the host, to ['research-head'] — recipient IS in to[].
+    await seedMessageRecords(stateDir, [
+      { id: 'm-0', seq: 0, ts: now, from: hostId, to: ['research-head'], text: 'hello research-head', kind: 'agent' }
+    ])
+    // Pending sidecar (m-0, research-head), status 'failed' → needsRedelivery true.
+    const deliveriesPath = await seedDeliveryRows(stateDir, [{ messageId: 'm-0', recipientId: 'research-head', status: 'failed', ts: now }])
+    const { dispose } = await bootPlugin(stateDir)
+    try {
+      await waitFor(async () => {
+        const s = await deliveryStatus(stateDir, 'm-0', 'research-head')
+        return s === 'delivered' || s === 'resumed'
+      }, 5000, 'a record that DOES include the recipient is re-delivered idempotently (delivered/resumed)')
+      const s = await deliveryStatus(stateDir, 'm-0', 'research-head')
+      assert.ok(s === 'delivered' || s === 'resumed', `the legitimate rebound case proceeds (received ${s})`)
+      const rows = parseDeliveryRows(await readFile(deliveriesPath, 'utf8'))
+      assert.ok(rows.some((row) => row.messageId === 'm-0' && row.recipientId === 'research-head' && (row.status === 'delivered' || row.status === 'resumed')), 'the pair carries a delivered/resumed final status')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('W7-A scanDeliveryFindings: a terminal row is NOT an anomaly (only a fresh failed row alerts; stale + terminal rows are ignored)', async () => {
   await withTempStateDir(async (stateDir) => {
     const now = Date.now()
@@ -10534,6 +10664,11 @@ test('M3 RETIRED-HOST SOURCE GATE (spec acc 5, regression pin): a RETIRED host p
     const liveSessionId = SessionId(randomUUID())
     const liveHostId = `host-${liveSessionId}`
     const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
+    // A retired NON-host-family post (a department worker): Issue-1 re-route
+    // applies ONLY to a host-family recipient id, so W7 terminal ('failed')
+    // stays for a non-host-family address to a retired/unresolvable post.
+    const retiredPostId = 'retired-worker-nonhost'
+    await seedPost(stateDir, { postId: retiredPostId, sessionId: `worker-${retiredPostId}`, agentPreset: 'deepartments-worker', provider: 'worker', role: 'retired rank-and-file worker', managerId: 'research-head', retired: true })
     await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
       schemaVersion: 2,
       [liveHostId]: { sessionId: String(liveSessionId), roomId: 'board' },
@@ -10544,15 +10679,24 @@ test('M3 RETIRED-HOST SOURCE GATE (spec acc 5, regression pin): a RETIRED host p
       // STALE in-memory registry: the retired host's session is STILL a live
       // agent in the in-memory `agents` Map (a twin daemon that booted BEFORE the
       // rotation). The durable hosts.json (re-read fresh at the WRITE source) must
-      // win — the retired host is NEVER recorded and NEVER delivered.
+      // win — the retired host is NEVER recorded and NEVER delivered as terminal.
       agents.put(fakeParentAgent(retiredSessionId))
       const signal = new AbortController().signal
-      const send = async () => headCtx.tools.get('send_message', key).execute(
+      // (a) HOST-FAMILY retired id → Issue-1 re-route to the CURRENT live host
+      // (durable-first pickLiveHostEntry), so it is DELIVERED ('resumed' because
+      // the live host was dormant), never settled 'failed'.
+      const result = await headCtx.tools.get('send_message', key).execute(
         { to: [retiredHostId], text: 'wake the retired host' },
         { agent: head, signal }
       )
-      const result = await send()
-      assert.equal(result.delivered[retiredHostId], 'failed', 'a retired host delivery reports failed (terminal, never attempted)')
+      assert.equal(result.delivered[retiredHostId], 'resumed', 'a retired HOST-FAMILY id is re-routed to the CURRENT live host (Issue-1 re-route honors the Asistente role) — delivered, never terminal')
+      // (b) NON-host-family retired id → W7 terminal ('failed'), UNCHANGED by the
+      // Issue-1 re-route (it never touches a non-host-family address).
+      const resultNonHost = await headCtx.tools.get('send_message', key).execute(
+        { to: [retiredPostId], text: 'wake the retired member' },
+        { agent: head, signal }
+      )
+      assert.equal(resultNonHost.delivered[retiredPostId], 'failed', 'a retired NON-host-family id reports failed (W7 terminal — the Issue-1 re-route does NOT touch a non-host-family address)')
       assert.equal(readPostErrorsFile(stateDir).length, 0, 'ZERO post-error rows for a retired host even via a stale in-memory registry (durable source gate)')
     } finally {
       await dispose()

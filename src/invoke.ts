@@ -487,6 +487,14 @@ interface PostEntry {
   /** Batch G: the sessionId of the PREVIOUS incarnation (recording where a slept
    * head's old live session went), kept so trace stays honest. Absent = first. */
   previousChildId?: string
+  /** Fix (head-sleep worker drain): the durable list of the head's IN-FLIGHT
+   * workers (provider==='worker' && managerId===this.postId && retired!==true)
+   * recorded at dept_sleep, so the sleep is handed off through the SAME
+   * persistPosts write with a durable "n workers in flight" ledger. The boot
+   * reconcile (runHalfSleptHeadReconcile) reads it to reap/flag any worker whose
+   * manager is still dormant. Only set on a slept HEAD; cleared on respawn.
+   * Absent = never slept with in-flight workers. */
+  inflightWorkers?: string[]
 }
 
 /** The DURABLE shape persisted to posts.json. */
@@ -504,6 +512,7 @@ interface PostEntryPersisted {
   sleepEpoch?: number
   boundarySeq?: number
   previousChildId?: string
+  inflightWorkers?: string[]
 }
 
 /** One durable host registry entry (hostId → host session in a room). */
@@ -5682,7 +5691,11 @@ export function applyInvoke(ctx: Context, config: Config) {
         // (absent = never slept / no previous incarnation).
         ...(entry.sleepEpoch !== void 0 ? { sleepEpoch: entry.sleepEpoch } : {}),
         ...(entry.boundarySeq !== void 0 ? { boundarySeq: entry.boundarySeq } : {}),
-        ...(entry.previousChildId !== void 0 ? { previousChildId: entry.previousChildId } : {})
+        ...(entry.previousChildId !== void 0 ? { previousChildId: entry.previousChildId } : {}),
+        // Fix (head-sleep worker drain): persist the in-flight worker ledger only
+        // when non-empty (absent = no in-flight workers, byte-compatible for
+        // legacy/never-slept entries).
+        ...(Array.isArray(entry.inflightWorkers) && entry.inflightWorkers.length > 0 ? { inflightWorkers: entry.inflightWorkers } : {})
       }
     }
     return writeFile(postsPath, JSON.stringify(data, null, 2), 'utf8').catch(
@@ -5804,6 +5817,11 @@ export function applyInvoke(ctx: Context, config: Config) {
           const managerId = typeof entry.managerId === 'string' ? entry.managerId : undefined
           const jobId = typeof entry.jobId === 'string' ? entry.jobId : undefined
           const retired = entry.retired === true
+          // Fix (head-sleep worker drain): restore the durable in-flight worker
+          // ledger so the boot reconcile can read it for a loaded slept head.
+          const inflightWorkers = Array.isArray(entry.inflightWorkers)
+            ? entry.inflightWorkers.filter((w): w is string => typeof w === 'string')
+            : undefined
           registerEntry({
             postId,
             sessionId,
@@ -5817,7 +5835,8 @@ export function applyInvoke(ctx: Context, config: Config) {
             ...(retired ? { retired: true } : {}),
             ...(sleepEpoch !== void 0 ? { sleepEpoch } : {}),
             ...(boundarySeq !== void 0 ? { boundarySeq } : {}),
-            ...(previousChildId !== void 0 ? { previousChildId } : {})
+            ...(previousChildId !== void 0 ? { previousChildId } : {}),
+            ...(inflightWorkers !== void 0 && inflightWorkers.length > 0 ? { inflightWorkers } : {})
           })
         } else {
           // Legacy continuable-subagent entry (or a malformed one): leave out of
@@ -8044,6 +8063,18 @@ export function applyInvoke(ctx: Context, config: Config) {
         // capture falls back to `time > lastWakeMs`.
         const boundarySeq = (agent.session as { seq?: number } | undefined)?.seq
         if (boundarySeq !== undefined) entry.boundarySeq = boundarySeq
+        // Fix (head-sleep worker drain): durably mark the head's IN-FLIGHT workers
+        // (provider==='worker' && managerId===headId && retired!==true) on the
+        // head entry BEFORE the sleepEpoch persist — so the sleep is handed off
+        // through the SAME persistPosts write with a durable "n workers in flight"
+        // ledger. The boot reconcile (runHalfSleptHeadReconcile) reads this to
+        // reap/flag any worker whose manager is still dormant; a worker that
+        // delivered its report is cut clean by the auto-retire on delivery seam.
+        const inflight: string[] = []
+        for (const candidate of byPost.values()) {
+          if (candidate.provider === 'worker' && candidate.managerId === memberId && candidate.retired !== true) inflight.push(candidate.postId)
+        }
+        if (inflight.length > 0) entry.inflightWorkers = inflight
         // Fix (head-sleep idempotency/rotation-race): AWAIT the durable persist so
         // the sleepEpoch mark is on-disk BEFORE any async teardown step that a
         // host-session rotation / service restart could abort. The mark is the
@@ -8978,6 +9009,16 @@ export function applyInvoke(ctx: Context, config: Config) {
       await captureRetiredPostTurnError(config.stateDir, entry.sessionId, postId)
       // MARK, NOT ERASE (F1): the registry entry stays; the live catalog filters.
       entry.retired = true
+      // Fix (head-sleep worker drain): prune this worker from its manager head's
+      // durable in-flight ledger (if the head recorded it at dept_sleep), so the
+      // ledger stays accurate as workers are cut clean by any retire path.
+      if (entry.managerId !== void 0) {
+        const manager = byPost.get(entry.managerId)
+        if (manager !== void 0 && Array.isArray(manager.inflightWorkers)) {
+          const idx = manager.inflightWorkers.indexOf(postId)
+          if (idx >= 0) manager.inflightWorkers = manager.inflightWorkers.filter((w) => w !== postId)
+        }
+      }
       persistPosts()
     } else {
       // Configured head / non-worker: today's semantics (unregister; the config
@@ -9784,6 +9825,18 @@ export function applyInvoke(ctx: Context, config: Config) {
    * session), exactly as the F8 boot-dormancy invariant requires. */
   const runHalfSleptHeadReconcile = async (): Promise<void> => {
     try {
+      const persistence = ctx.get('sessionPersistence') as { readRaw?: (id: SessionId, signal?: AbortSignal) => Promise<{ content: string } | undefined> } | undefined
+      // Conservative session-gone resolver (mirrors reconcileDurablePostsRegistry):
+      // only a positively confirmed absent durable session counts as gone.
+      const isSessionGone = async (sessionId: string): Promise<boolean> => {
+        if (persistence === undefined || typeof persistence.readRaw !== 'function') return false
+        try {
+          const raw = await persistence.readRaw(SessionId(sessionId))
+          return raw === undefined
+        } catch {
+          return false
+        }
+      }
       for (const [postId, entry] of byPost) {
         if (entry.retired === true) continue
         if (entry.provider === 'worker') continue          // worker retire is its own path
@@ -9793,6 +9846,28 @@ export function applyInvoke(ctx: Context, config: Config) {
         // throws; a missing registry warns + returns false). The head is NEVER
         // woken — it stays dormant until its next bus delivery.
         await archivePostSessionOnSleep(entry.sessionId)
+        // Fix (head-sleep worker drain): the slept head carries a durable
+        // `inflightWorkers` ledger of the workers it slept with. Surface each
+        // durably so a worker that finished mid-boundary is not orphaned and a
+        // still-running worker is flagged. Only a worker whose durable session is
+        // DEFINITIVELY gone is auto-retired (safe-reap); the rest are left live
+        // (a delivered report cuts them, or the head reaps them on wake).
+        if (Array.isArray(entry.inflightWorkers) && entry.inflightWorkers.length > 0) {
+          for (const workerId of entry.inflightWorkers) {
+            const worker = byPost.get(workerId)
+            if (worker === void 0 || worker.retired === true) continue
+            if (await isSessionGone(worker.sessionId)) {
+              ctx.logger.warn(`[deepartments] half-slept reconcile: worker "${workerId}" (session ${worker.sessionId}) is in-flight for sleeping head "${postId}" but its durable session is gone — auto-retiring (it finished mid-boundary and was not cut clean)`)
+              try {
+                await retirePost(workerId, entry.sessionId)
+              } catch (retireError: unknown) {
+                ctx.logger.warn(`[deepartments] half-slept reconcile: auto-retire of worker "${workerId}" failed (non-fatal): ${retireError instanceof Error ? retireError.message : String(retireError)}`)
+              }
+            } else {
+              ctx.logger.warn(`[deepartments] half-slept reconcile: worker "${workerId}" is still in flight for sleeping head "${postId}" — left live; a delivered report to "${postId}" retires it, or ${postId} reaps it on wake`)
+            }
+          }
+        }
       }
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] half-slept-head reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -9861,7 +9936,10 @@ export function applyInvoke(ctx: Context, config: Config) {
       // is the separate archive path.
       if (!isWorker) {
         const freshSessionId = String(SessionId(`${HEAD_SESSION_PREFIX}${entry.postId}-${randomUUID()}`))
-        registerEntry({ ...entry, sessionId: freshSessionId, previousChildId: previousSession, sleepEpoch: undefined })
+        // Fix (head-sleep worker drain): the in-flight ledger is the sleep→boot
+        // handoff; once the head is materialized (woken) its agent handles its
+        // own workers, so clear the snapshot on the fresh incarnation.
+        registerEntry({ ...entry, sessionId: freshSessionId, previousChildId: previousSession, sleepEpoch: undefined, inflightWorkers: undefined })
         const role = coordinator?.role ?? entry.role ?? 'department worker'
         const headPreset = entry.agentPreset ?? PRESET_ID
         // F10 (spec 004 §9.1): the materialized head carries its department's
@@ -9899,7 +9977,9 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
       // Worker respawn: record the previous incarnation + clear the sleep flag,
       // then fall through to the shared cold-resume of the SAME session below.
-      registerEntry({ ...entry, previousChildId: previousSession, sleepEpoch: undefined })
+      // A worker has no in-flight ledger of its own (only a head does), but clear
+      // it for symmetry so a respawn never carries a stale snapshot.
+      registerEntry({ ...entry, previousChildId: previousSession, sleepEpoch: undefined, inflightWorkers: undefined })
       resumed = true
     }
     const sessionId = SessionId(entry.sessionId)
@@ -10056,40 +10136,68 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
       const { target, resumed } = await materializePost(entry)
       target.followup(busUserMessage(record, framed, senderSessionId))
-      return resumed ? 'resumed' : 'delivered'
+      const status = resumed ? 'resumed' : 'delivered'
+      // Fix B (head-sleep worker drain): a WORKER that has just delivered a
+      // message to ITS OWN MANAGER HEAD is cut clean immediately — the delivery
+      // itself is the retire trigger, so a worker that delivered its report to a
+      // (possibly dormant) head is retired WITHOUT relying on the head remembering
+      // an open item. The 'resumed' status is exactly the sleep-boundary signature
+      // (the recipient was dormant at delivery time and was re-materialized). The
+      // retire is a defensive no-op if the worker is already retired (idempotent).
+      if (status === 'resumed' || status === 'delivered') {
+        const senderEntry = byPost.get(record.from)
+        if (senderEntry !== void 0 && senderEntry.provider === 'worker' && senderEntry.retired !== true && senderEntry.managerId === entry.postId) {
+          try {
+            await retirePost(record.from, String(SessionId(entry.sessionId)))
+          } catch (error: unknown) {
+            ctx.logger.warn(`[deepartments] auto-retire of worker "${record.from}" on delivery to "${entry.postId}" failed (non-fatal to the delivery): ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+      }
+      return status
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] bus delivery to "${entry.postId}" failed: ${error instanceof Error ? error.message : String(error)}`)
       // W6 system-health: record the hard materialization/wake failure for the
       // health daemon (failures must reach the Asistente; post-errors.jsonl is
       // the durable anomaly source). A persist failure folds to a warn only.
+      // Issue-1 (b) (owner m-331): use the RECORDING DEDUPE (appendPostErrorDeduped
+      // in the shared health-alerts-state.json ledger) so a persistent failure of
+      // a NON-host post is recorded at most once per (post + class) per
+      // HEALTH_DEDUPE_WINDOW_MS — mirroring the host path — and the QD directive
+      // below is gated on an actually-NEW append, NOT emitted per attempt.
       try {
-        await appendPostError(config.stateDir, {
+        const errText = error instanceof Error ? error.message : String(error)
+        const cls = postErrorClass(errText)
+        const recordKey = `${POST_ERROR_RECORD_KEY_PREFIX}${entry.postId}:${cls ?? 'generic'}`
+        const appended = await appendPostErrorDeduped(config.stateDir, {
           ts: Date.now(),
           postId: entry.postId,
           messageId: record.id,
-          error: error instanceof Error ? error.message : String(error)
-        })
+          error: errText
+        }, recordKey, Date.now())
+        // QD (spec 007 §6.4, D-Q4a): a NEW post-error record (the spec-006 capture)
+        // triggers an ADDRESSED QUALITY INSPECT directive to quality-head (with the
+        // error record) — the event-driven, bus-ready analysis seam (additive to the
+        // spec-006 host ALERT). Non-fatal (the helper wraps its own try/catch).
+        // Issue-1 (b): `appended` is the recording-dedupe result — a dedupe-skip
+        // means no new record, so do NOT re-signal (Bound the non-host cascade).
+        // ECHO GUARD (reviewer gate): a failed QUALITY INSPECT directive delivery to
+        // `quality-head` lands in THIS SAME catch — if we re-emitted a post-error
+        // directive for it, the directive → busDeliverToPost(quality-head) → fail →
+        // re-append → re-emit loop is unbounded. Gate the emit so the QD target's
+        // OWN delivery failure is recorded (post-errors.jsonl) but is NEVER bubbled
+        // back into another directive. (The host-delivery site gates on `appended`
+        // instead; both bound the echo.)
+        if (appended && entry.postId !== 'quality-head') {
+          await maybeEmitQualityInspectDirective({
+            kind: 'post-error',
+            postId: entry.postId,
+            messageId: record.id,
+            error: errText
+          })
+        }
       } catch (appendError: unknown) {
         ctx.logger.warn(`[deepartments] post-error capture for "${entry.postId}" failed: ${appendError instanceof Error ? appendError.message : String(appendError)}`)
-      }
-      // QD (spec 007 §6.4, D-Q4a): a NEW post-error record (the spec-006 capture)
-      // triggers an ADDRESSED QUALITY INSPECT directive to quality-head (with the
-      // error record) — the event-driven, bus-ready analysis seam (additive to the
-      // spec-006 host ALERT). Non-fatal (the helper wraps its own try/catch).
-      // ECHO GUARD (reviewer gate): a failed QUALITY INSPECT directive delivery to
-      // `quality-head` lands in THIS SAME catch — if we re-emitted a post-error
-      // directive for it, the directive → busDeliverToPost(quality-head) → fail →
-      // re-append → re-emit loop is unbounded. Gate the emit so the QD target's
-      // OWN delivery failure is recorded (post-errors.jsonl) but is NEVER bubbled
-      // back into another directive. (The host-delivery site gates on `appended`
-      // instead; both bound the echo.)
-      if (entry.postId !== 'quality-head') {
-        await maybeEmitQualityInspectDirective({
-          kind: 'post-error',
-          postId: entry.postId,
-          messageId: record.id,
-          error: error instanceof Error ? error.message : String(error)
-        })
       }
       return 'failed'
     }
@@ -10113,6 +10221,15 @@ export function applyInvoke(ctx: Context, config: Config) {
     // second daemon twin) could still resolve the retired host as live and the
     // delivery catch would record its rows, re-alerting the CURRENT host about a
     // terminal entry forever.
+    // Issue-1 HOST-FAMILY EXCEPTION (owner m-331, Option 1): W7 applies as the
+    // TERMINAL rule for a NON-host-family address. A HOST-FAMILY recipient id
+    // ('host-…') that resolves to a RETIRED / UNRESOLVABLE host entry is instead
+    // re-resolved durable-first to the CURRENT LIVE host at the CATALOG seam
+    // (busDeliverCatalog, pickLiveHostEntry from a fresh hosts.json read) and
+    // delivered there — host-session-<uuid> means "the Asistente" (role), so the
+    // re-route honors the sender's intent. This branch therefore only sees a
+    // host entry that was ALREADY re-resolved to live, or a directly-addressed
+    // NON-host-family retired/unresolvable id.
     if (hostEntry.retired === true) {
       ctx.logger.warn(`[deepartments] bus delivery to RETIRED host "${hostEntry.hostId}" skipped (terminal — a retired host is never attempted or recorded)`)
       return 'failed'
@@ -10545,6 +10662,26 @@ export function applyInvoke(ctx: Context, config: Config) {
         return 'failed'
       }
       return busDeliverToHost(hostEntry, `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`, record, senderSessionId, opts)
+    }
+    // Issue-1 (owner m-331, Option 1): a HOST-FAMILY address ('host-…') that
+    // resolves to a RETIRED / UNRESOLVABLE host entry is re-resolved DURABLE-FIRST
+    // to the CURRENT LIVE host (pickLiveHostEntry from a FRESH hosts.json read).
+    // host-session-<uuid> means "the Asistente" (role), so this re-route honors
+    // the sender's intent; W7 (a retired host is terminal — never attempted) is
+    // NOT revoked, it stays for NON-host-family ids addressed to a retired /
+    // unresolvable post. If NO live durable host exists (boot / scripting window)
+    // the message settles 'failed' as today — no retry loop.
+    // TODO(owner): stable host alias.
+    if (recipientId.startsWith(HOST_ID_PREFIX)) {
+      const { live } = pickLiveHostEntry(readDurableHostEntries(config.stateDir) ?? hosts.values())
+      if (live !== void 0) {
+        if (aclDenyGround(sender, { kind: 'host', memberId: live.hostId }) !== undefined) {
+          // D6: a worker reaches the host ONLY via its department head.
+          ctx.logger.warn(`[deepartments] bus delivery re-route to the live host "${live.hostId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — a worker never writes to the Asistente (spec 004 §5.6/D6)`)
+          return 'failed'
+        }
+        return busDeliverToHost(live as HostEntry, `[From ${record.from} → ${record.to.join(', ')}]: ${record.text}`, record, senderSessionId, opts)
+      }
     }
     ctx.logger.warn(`[deepartments] bus delivery to unknown member "${recipientId}" (record ${record.id})`)
     return 'failed'
@@ -11006,9 +11143,14 @@ export function applyInvoke(ctx: Context, config: Config) {
       for (const row of latestPerKey.values()) {
         if (!needsRedelivery(row.status)) continue
         const record = store.get(row.messageId)
-        if (record === void 0) {
-          // Record trimmed by the boot compaction: nothing durable remains to
-          // re-deliver — the pair stays a settled no-op.
+        if (record === void 0 || !record.to.includes(row.recipientId)) {
+          // Record trimmed by the boot compaction (nothing durable remains), OR
+          // the id was REBOUND (the message store renumbered/reused this id for
+          // a DIFFERENT message that never addressed this recipient): nothing
+          // durable/RELEVANT remains to re-deliver, so the pair stays a settled
+          // no-op. A record that DOES still include the recipient is the
+          // legitimate rebound case and re-delivers below (idempotent).
+          // (Issue-3, owner acceptance.)
           continue
         }
         // W7-A: a dead/unknown recipient must NOT be re-attempted at every boot.
