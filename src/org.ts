@@ -149,6 +149,19 @@ export interface Config {
      * union of these roots + the defaults; anything else is out of scope.
      */
     execRoots?: string[]
+    /**
+     * MISSION-LEVEL owner grant of ADDITIONAL scoped roots for `dept_exec` — an
+     * EXPLICIT, REVOCABLE, AUDITABLE way to grant a worker shell access to an
+     * OWNER-PROTECTED surface (e.g. the STABLE home `/opt/dsh/.dsh`) for the
+     * DURATION of an owner-authorized mission. Populated by a mission-level
+     * owner approval; the guard reads it as ADDITIONAL allowed roots, and the
+     * stable-profile token is bypassed ONLY for a root this grant names (any
+     * reference NOT named by the grant stays protected-denied). Empty by
+     * default — an ABSENT key keeps the default deny (no silent widening);
+     * remove the entries to REVOKE. The grant is config-recorded (auditable),
+     * never an env default. The Asistente-direct path remains the alternative.
+     */
+    missionExecRoots?: string[]
   }
   /**
    * Custom `ctx.web` fetch provider config (blocking detection).
@@ -212,7 +225,12 @@ export const Config: z<any, any> = z.object({
     // B2 (spec W5): extra scoped roots for dept_exec — optional, empty default.
     // Mirrors Config.org.execRoots. An absent key (pre-B2 config) defaults to
     // [] so the existing behavior is byte-compatible.
-    execRoots: z.array(z.string()).default([])
+    execRoots: z.array(z.string()).default([]),
+    // MISSION-LEVEL owner grant of additional scoped roots (mirrors
+    // Config.org.missionExecRoots). An ABSENT key (no mission grant) defaults
+    // to [] so the protected stable profile stays DENIED without an explicit
+    // grant — never a silent/env-default widening. Config-recorded + revocable.
+    missionExecRoots: z.array(z.string()).default([])
   }).required(),
   webfetch: z.object({
     enabled: z.boolean(),

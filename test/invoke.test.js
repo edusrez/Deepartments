@@ -15,7 +15,7 @@
 // via StubAgents.resume — the faithful production path for bringing a
 // registered resident back.
 import assert from 'node:assert/strict'
-import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -28,7 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { Config as configSchema } from '../lib/org.js'
@@ -746,6 +746,16 @@ async function bootPlugin(stateDir, opts = {}) {
   const workspaceRegistry = opts.withoutWorkspaceRegistry === true
     ? undefined
     : new StubWorkspaceRegistry(root, stateDir, opts.workspaceEntities, sessionCwds)
+  // P2 VISIBILITY FIX (2026-08-25): a boot opt PRE-SEEDS the registry archive
+  // set — the archive-leak regression drives an ensureHead that observes a
+  // durable head id ALREADY archived before materialization (this is the
+  // resumed-archived-id state the fix rotates away from; the real registry
+  // persists the set across boots in workspace.json archivedSessionIds).
+  if (workspaceRegistry !== undefined && Array.isArray(opts.workspaceRegistryArchived)) {
+    for (const id of opts.workspaceRegistryArchived) {
+      if (!workspaceRegistry.archived.includes(id)) workspaceRegistry.archived.push(id)
+    }
+  }
   // FIX 1b.1 — `registryNotReadyRejects` models a provider whose init is still
   // in flight at boot (list() rejects mid-init) for the boot-repair retry
   // regression.
@@ -924,15 +934,21 @@ async function seedHostRegistration(stateDir, sessionId, roomId = 'board') {
 
 async function readPosts(stateDir) {
   const postsPath = path.join(stateDir, 'posts.json')
+  // Test hardening (mirrors readHosts below): retry until the file is present
+  // AND parses. persistPosts is fire-and-forget (registerEntry → void
+  // persistPosts, invoke.ts:5420), so a reader could otherwise catch the file
+  // mid-write and a torn JSON.parse would throw straight through the enclosing
+  // waitFor — the ~1/10 flake in the new "P2 visibility fix (b)" test.
+  let parsed
   await waitFor(async () => {
     try {
-      await access(postsPath)
+      parsed = JSON.parse(await readFile(postsPath, 'utf8'))
       return true
     } catch {
       return false
     }
-  }, 5000, 'posts.json written')
-  return JSON.parse(await readFile(postsPath, 'utf8'))
+  }, 5000, 'posts.json readable')
+  return parsed
 }
 
 async function readHosts(stateDir) {
@@ -7988,8 +8004,17 @@ test('B2 dept_exec (real Loader): a worker whose role DECLARES dept_exec runs a 
 
         // Denylist (case-insensitive substring) → DENIED before any execution.
         await assert.rejects(
+          () => exec.execute({ command: 'sudo rm -rf /tmp/x' }, { agent: worker, signal }),
+          /OUT_OF_SCOPE \/ DENIED — command contains a denied token "sudo"/, 'a sudo-style command is denied'
+        )
+
+        // A MUTATING systemctl form (not the read-only `is-active`) → DENIED
+        // before any execution (the read-only `is-active` allow is asserted
+        // deterministically in the PURE guard test below, not by running a real
+        // systemctl in this hermetic fixture).
+        await assert.rejects(
           () => exec.execute({ command: 'systemctl status' }, { agent: worker, signal }),
-          /OUT_OF_SCOPE \/ DENIED — command contains a denied token "systemctl"/, 'a systemctl-style command is denied'
+          /command contains a denied systemctl form/, 'a mutating systemctl-style command is denied'
         )
 
         // The protected stable-profile token → the specific protected reason.
@@ -8065,6 +8090,36 @@ test('B2 dept_exec (real Loader): a worker whose role DECLARES dept_exec runs a 
   }
 })
 
+test('B2 dept_exec mission grant (real Loader, QH auto-file item 1/2): an explicit `org.missionExecRoots` entry is read by the allowedRoots assembly → the worker may run a command referencing the GRANTED stable home `/opt/dsh/.dsh`; the same grant is config-recorded, and without it the stable home stays protected-denied', async () => {
+  const restore = await snapshotRoleTemplate(EXEC_ROLE)
+  try {
+    await writeFile(EXEC_ROLE_PATH, EXEC_ROLE_FRONTMATTER, 'utf8')
+    await withTempStateDir(async (stateDir) => {
+      // A config with an EXPLICIT mission-level owner grant naming the stable home.
+      const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { org: { departments: TEST_ORG.departments, missionExecRoots: ['/opt/dsh/.dsh'] } })
+      try {
+        const signal = new AbortController().signal
+        const { worker, ctx: workerCtx, key: workerKey } = await f3Spawn({ agents }, headCtx, key, head, { role: EXEC_ROLE, task: 'owner-authorized mission' })
+        const exec = workerCtx.tools.get('dept_exec', workerKey)
+        assert.ok(exec, 'dept_exec is installed for the exec role')
+        // The grant is read by deptExecAllowedRoots (config.org.missionExecRoots):
+        // a command referencing /opt/dsh/.dsh is ALLOWED (echo only touches the
+        // literal, so this is deterministic and needs no stable shell access).
+        const grantedRun = await exec.execute({ command: 'echo /opt/dsh/.dsh' }, { agent: worker, signal })
+        assert.equal(grantedRun.ok, true, 'a command referencing the GRANTED stable home is allowed')
+        assert.match(grantedRun.stdout, /\/opt\/dsh\/\.dsh/, 'the granted command actually ran')
+        // Config-recorded: the schema normalizes/returns the grant verbatim too.
+        const schemaOrg = configSchema({ stateDir, org: { departments: TEST_ORG.departments, missionExecRoots: ['/opt/dsh/.dsh'] } }).org
+        assert.deepEqual(schemaOrg.missionExecRoots, ['/opt/dsh/.dsh'], 'the mission grant is config-recorded (auditable)')
+      } finally {
+        await dispose()
+      }
+    })
+  } finally {
+    await restore()
+  }
+})
+
 test('B2 dept_exec guard (pure): deptExecDenyReason centralizes the scope policy (cwd root, denylist, boundary-aware stable-profile token, absolute-path tokens)', () => {
   const roots = ['/home/esuarez/projects', '/usr/lib/node_modules/@deepseek-ai/dsh', '/srv/dept-ws', '/opt/dsh/.dsh-dev']
   // cwd inside a root → no deny for a harmless command.
@@ -8072,9 +8127,17 @@ test('B2 dept_exec guard (pure): deptExecDenyReason centralizes the scope policy
   assert.equal(deptExecDenyReason('cat /home/esuarez/projects/README.md', '/srv/dept-ws', roots), undefined, 'an absolute path under a root passes')
   // cwd outside the roots → out of scope.
   assert.match(deptExecDenyReason('echo ok', '/etc', roots), /OUT_OF_SCOPE \/ DENIED — cwd "\/etc"/, 'cwd outside the roots is out of scope')
-  // denylist (case-insensitive).
-  assert.match(deptExecDenyReason('SYSTEMCTL list-units', '/srv/dept-ws', roots), /denied token "systemctl"/, 'the denylist is case-insensitive')
+  // denylist (case-insensitive) — reboot/sudo/etc unchanged, systemctl is a
+  // DEDICATED carve-out below (mutating forms denied, read-only is-active allowed).
   assert.match(deptExecDenyReason('sudo rm -rf /tmp/x', '/srv/dept-ws', roots), /denied token "sudo"/, 'sudo is denied')
+  assert.match(deptExecDenyReason('reboot now', '/srv/dept-ws', roots), /denied token "reboot"/, 'reboot is denied')
+  // systemctl carve-out: a MUTATING form is denied, the READ-ONLY is-active is allowed.
+  assert.match(deptExecDenyReason('SYSTEMCTL list-units', '/srv/dept-ws', roots), /command contains a denied systemctl form/, 'a mutating systemctl form is denied (case-insensitive)')
+  assert.match(deptExecDenyReason('systemctl restart dsh.service', '/srv/dept-ws', roots), /command contains a denied systemctl form/, 'systemctl restart is denied')
+  assert.match(deptExecDenyReason('systemctl start dsh.service', '/srv/dept-ws', roots), /command contains a denied systemctl form/, 'systemctl start is denied')
+  assert.match(deptExecDenyReason('systemctl stop dsh.service', '/srv/dept-ws', roots), /command contains a denied systemctl form/, 'systemctl stop is denied')
+  assert.equal(deptExecDenyReason('systemctl is-active dsh.service', '/srv/dept-ws', roots), undefined, 'the read-only systemctl is-active is allowed')
+  assert.equal(deptExecDenyReason('systemctl is-active dsh.service && foo', '/srv/dept-ws', roots)?.includes('denied systemctl form') === true, true, 'a chained is-active (&&) is NOT read-only → denied')
   // the protected stable-profile token (boundary-aware).
   assert.match(deptExecDenyReason('cat /opt/dsh/.dsh/agent.cordis.yml', '/srv/dept-ws', roots), /the stable profile is protected/, 'the stable-profile token is protected-denied')
   // (the /opt/dsh/.dsh-vs-/.dsh-dev boundary discrimination is the DEDICATED test
@@ -8114,6 +8177,51 @@ test('B2 dept_exec guard (boundary, W5-R2 review gap): the protected stable toke
   assert.equal(deptExecDenyReason('echo ok', '/opt/dsh/.dsh-dev/runner', roots), undefined, 'a cwd under the DEV home is allowed (not denied by any rule)')
   // (b) a command referencing the DEV home is ALLOWED (not stable).
   assert.equal(deptExecDenyReason('cat /opt/dsh/.dsh-dev/agent.cordis.yml', '/srv/dept-ws', roots), undefined, 'a command referencing the DEV home is allowed (not stable)')
+})
+
+test('B2 dept_exec guard (mission grant, QH auto-file item 1/2): an explicit MISSION-LEVEL owner grant (`org.missionExecRoots`) adds the STABLE home as an allowed root → the GRANTED stable path is ALLOWED; WITHOUT the grant the stable home stays DENIED (no silent widening); the grant bypasses ONLY the stable token, never the rest of the guard', () => {
+  const base = ['/home/esuarez/projects', '/usr/lib/node_modules/@deepseek-ai/dsh', '/srv/dept-ws', '/opt/dsh/.dsh-dev']
+  const grantRoots = [...base, '/opt/dsh/.dsh'] // the realpath-resolved missionExecRoots entry
+  // (c) WITHOUT the grant — the default deny is UNCHANGED (no silent widening).
+  assert.equal(isStableHomeGranted(base), false, 'without a grant the stable home is NOT granted')
+  assert.match(deptExecDenyReason('cat /opt/dsh/.dsh/settings.yaml', '/srv/dept-ws', base), /the stable profile is protected/, 'without a grant a stable-home command stays protected-denied')
+  assert.match(deptExecDenyReason('echo ok', '/opt/dsh/.dsh', base), /is not inside a scoped dept_exec root/, 'without a grant a cwd at the stable home is denied (cwd-in-root)')
+  // (a) WITH the grant — the granted stable path is ALLOWED (explicit, not silent).
+  assert.equal(isStableHomeGranted(grantRoots), true, 'with a grant the stable home IS granted')
+  assert.equal(deptExecDenyReason('cat /opt/dsh/.dsh/settings.yaml', '/srv/dept-ws', grantRoots), undefined, 'with a grant a command under the stable home is allowed')
+  assert.equal(deptExecDenyReason('echo ok', '/opt/dsh/.dsh', grantRoots), undefined, 'with a grant a cwd at the stable home is allowed')
+  assert.equal(deptExecDenyReason('cat /opt/dsh/.dsh/.deepartments/posts.json', '/opt/dsh/.dsh', grantRoots), undefined, 'with a grant a cwd + command under the stable home are allowed')
+  // The grant is SURGICAL — it lifts ONLY the stable token, never the other guards:
+  // a mutating systemctl, `sudo`, and an out-of-root abs path are STILL denied.
+  assert.match(deptExecDenyReason('systemctl restart dsh.service', '/opt/dsh/.dsh', grantRoots), /denied systemctl form/, 'a mutating systemctl is STILL denied even with the grant')
+  assert.match(deptExecDenyReason('sudo cat /opt/dsh/.dsh/settings.yaml', '/opt/dsh/.dsh', grantRoots), /denied token "sudo"/, 'sudo is STILL denied even with the grant')
+  assert.match(deptExecDenyReason('cat /etc/passwd', '/opt/dsh/.dsh', grantRoots), /references absolute path "\/etc\/passwd"/, 'an out-of-root path is STILL denied even with the grant')
+  // The DEV home never grants the stable home (a `-dev` root does not widen).
+  assert.equal(isStableHomeGranted(['/opt/dsh/.dsh-dev']), false, 'the DEV home never grants the stable home')
+  // The config schema accepts org.missionExecRoots (absent → [], present → verbatim).
+  const sAbsent = configSchema({ stateDir: '.d', org: { departments: [{ id: 'r', name: 'R' }] } })
+  assert.deepEqual(sAbsent.org.missionExecRoots, [], 'absent org.missionExecRoots defaults to []')
+  const sGranted = configSchema({ stateDir: '.d', org: { departments: [{ id: 'r', name: 'R' }], missionExecRoots: ['/opt/dsh/.dsh'] } })
+  assert.deepEqual(sGranted.org.missionExecRoots, ['/opt/dsh/.dsh'], 'a granted org.missionExecRoots entry is preserved verbatim')
+})
+
+test('B2 dept_exec guard (read-only systemctl helper, QH auto-file item 3): `isReadOnlySystemctl` permits EXACTLY the single `systemctl is-active <unit>` form and NOTHING else on the same line; every mutating systemctl form is not read-only', () => {
+  assert.equal(isReadOnlySystemctl('systemctl is-active dsh.service'), true, 'the canonical read-only form is read-only')
+  assert.equal(isReadOnlySystemctl('systemctl is-active'), true, 'is-active with no unit is read-only')
+  assert.equal(isReadOnlySystemctl('/usr/bin/systemctl is-active dsh.service'), true, 'a path-prefixed systemctl is read-only')
+  assert.equal(isReadOnlySystemctl('SYSTEMCTL IS-ACTIVE dsh.service'), true, 'is-active is case-insensitive')
+  // NOT read-only — the mutating/other forms.
+  assert.equal(isReadOnlySystemctl('systemctl restart dsh.service'), false, 'restart is not read-only')
+  assert.equal(isReadOnlySystemctl('systemctl start dsh.service'), false, 'start is not read-only')
+  assert.equal(isReadOnlySystemctl('systemctl stop dsh.service'), false, 'stop is not read-only')
+  assert.equal(isReadOnlySystemctl('systemctl enable dsh.service'), false, 'enable is not read-only')
+  assert.equal(isReadOnlySystemctl('systemctl status dsh.service'), false, 'status is not read-only')
+  assert.equal(isReadOnlySystemctl('systemctl list-units'), false, 'list-units is not read-only')
+  assert.equal(isReadOnlySystemctl('systemctl daemon-reload'), false, 'daemon-reload is not read-only')
+  // NOT read-only — NOTHING ELSE on the same line (no chaining/leading command).
+  assert.equal(isReadOnlySystemctl('systemctl is-active dsh.service && foo'), false, 'a chained is-active is NOT read-only')
+  assert.equal(isReadOnlySystemctl('echo x; systemctl is-active dsh.service'), false, 'a leading command sep is NOT read-only')
+  assert.equal(isReadOnlySystemctl('systemctl is-active dsh.service | grep active'), false, 'a piped is-active is NOT read-only')
 })
 
 test('B2 dept_exec guard (token normalization, W5-B2c review gap): a `..`-escape THROUGH an allowed root is canonicalized to its real target → OUT_OF_SCOPE; the fd-redirect digit-guard is REMOVED so every `>`/`<`-adjacent absolute path token is checked, EXCEPT the /dev sink whitelist (always allowed)', () => {
@@ -10672,6 +10780,533 @@ test('HOST-SIDE FIRST-WAKE FIX real-Loader regression: the plugin materializes i
       assert.ok(workerCall.agentOptions, 'the worker create carries agentOptions')
       assert.ok(typeof workerCall.agentOptions.provider === 'string' && workerCall.agentOptions.provider.length > 0, 'the worker provider is non-empty')
       assert.ok(typeof workerCall.agentOptions.model === 'string' && workerCall.agentOptions.model.length > 0, 'the worker model is non-empty')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// m-119 — DURABLE hosts.json/posts.json RECONCILIATION + rotation convergence.
+// The durable org stateDir is the SOURCE OF TRUTH; these tests validate the
+// invariant ("exactly ONE non-retired live host") against THE durable path the
+// bootPlugin uses (the temp stateDir, NOT a /root/.deepartments-style copy).
+// Pure helpers are exercised directly; the boot/tick hook convergence is
+// exercised through the REAL Loader with a seeded degenerate durable fixture.
+// ---------------------------------------------------------------------------
+
+test('m-119 analyzeDurableHostRegistry: exactly-one-live → clean no-op; continuity + issuer of the deterministic pick', async () => {
+  const oldHost = { hostId: 'host-old', sessionId: 's-old', roomId: 'board', retired: true, retiredAt: 100, rotatedTo: 'host-new' }
+  const newHost = { hostId: 'host-new', sessionId: 's-new', roomId: 'board', previousSessionId: 's-old' }
+  const result = analyzeDurableHostRegistry([oldHost, newHost])
+  assert.equal(result.liveCount, 1, 'exactly one non-retired live host')
+  assert.equal(result.zeroLive, false)
+  assert.equal(result.multiLive, false)
+  assert.equal(result.chainIntegrity, 'ok', 'the chain terminates at the LIVE successor → chain integrity ok')
+  assert.equal(result.issues.length, 0, 'no issues for a healthy registry')
+  assert.equal(result.repair.clean, true, 'healthy registry needs no repair')
+  assert.equal(result.repair.writable, false, 'healthy registry has no write to commit')
+  assert.equal(result.liveEntry?.hostId, 'host-new', 'the deterministic pick is the rotation successor')
+})
+
+test('m-119 analyzeDurableHostRegistry: TWO non-retired live hosts (bare, no successor) → deterministic pick + warn + the OTHER is the retire candidate', async () => {
+  const result = analyzeDurableHostRegistry([
+    { hostId: 'host-a', sessionId: 's-a', roomId: 'board' },
+    { hostId: 'host-b', sessionId: 's-b', roomId: 'board' }
+  ])
+  assert.equal(result.liveCount, 2)
+  assert.equal(result.multiLive, true)
+  assert.equal(result.ambiguous, true, 'no rotation successor → the ambiguity fallback fires')
+  assert.equal(result.liveEntry?.hostId, 'host-a', 'the first live entry is picked deterministically (ambiguous)')
+  assert.ok(result.issues.some((i) => i.code === 'multi-live'), 'a multi-live issue is reported (the loader warn case)')
+  assert.deepEqual(result.repair.retireHostIds, ['host-b'], 'the non-picked live entry is the retire candidate')
+  assert.equal(result.repair.writable, true)
+})
+
+test('m-119 analyzeDurableHostRegistry: multi-live WITH a rotation successor keeps the successor live and retires the stray', async () => {
+  const result = analyzeDurableHostRegistry([
+    { hostId: 'host-old', sessionId: 's-old', roomId: 'board', retired: true, retiredAt: 100, rotatedTo: 'host-new' },
+    { hostId: 'host-new', sessionId: 's-new', roomId: 'board', previousSessionId: 's-old' },
+    { hostId: 'host-stray', sessionId: 's-stray', roomId: 'board' }
+  ])
+  assert.equal(result.multiLive, true, 'two non-retired live (successor + stray)')
+  assert.equal(result.ambiguous, false, 'the rotation successor disambiguates the pick')
+  assert.equal(result.liveEntry?.hostId, 'host-new', 'the successor stays live')
+  assert.deepEqual(result.repair.retireHostIds, ['host-stray'], 'the stray live host is the retire candidate')
+})
+
+test('m-119 analyzeDurableHostRegistry: ZERO live with a clear chain terminal → the terminal is un-retired (the last rotation target becomes live)', async () => {
+  const result = analyzeDurableHostRegistry([
+    { hostId: 'host-a', sessionId: 's-a', roomId: 'board', retired: true, retiredAt: 100, rotatedTo: 'host-b' },
+    { hostId: 'host-b', sessionId: 's-b', roomId: 'board', retired: true, retiredAt: 200 }
+  ])
+  assert.equal(result.zeroLive, true, 'zero non-retired live hosts')
+  assert.equal(result.chainIntegrity, 'retired-terminal', 'the chain terminal is retired (the chain does not reach a live host)')
+  assert.ok(result.issues.some((i) => i.code === 'zero-live'), 'a zero-live issue is reported')
+  assert.ok(result.issues.some((i) => i.code === 'chain-integrity'), 'a chain-integrity issue is reported')
+  assert.equal(result.repair.unretireHostId, 'host-b', 'the last rotation target (chain terminal) is the un-retire candidate')
+  assert.equal(result.liveEntry, undefined, 'no live entry yet (it is restored by the repair)')
+  assert.equal(result.repair.writable, true, 'a safe un-retire repair is writable')
+})
+
+test('m-119 analyzeDurableHostRegistry: chain-integrity with a RETIRED terminal but a DETACHED live host → flagged (warn-only, no auto-repair of historical evidence)', async () => {
+  const result = analyzeDurableHostRegistry([
+    { hostId: 'host-a', sessionId: 's-a', roomId: 'board', retired: true, retiredAt: 100, rotatedTo: 'host-b' },
+    { hostId: 'host-b', sessionId: 's-b', roomId: 'board', retired: true, retiredAt: 200 },
+    { hostId: 'host-c', sessionId: 's-c', roomId: 'board' }
+  ])
+  assert.equal(result.liveCount, 1, 'one live host exists (host-c) → the primary invariant holds')
+  assert.equal(result.zeroLive, false)
+  assert.equal(result.multiLive, false)
+  assert.equal(result.chainIntegrity, 'retired-terminal', 'the A→B chain terminates in a RETIRED host (detached from the live C)')
+  assert.ok(result.issues.some((i) => i.code === 'chain-integrity'), 'chain-integrity is flagged')
+  assert.equal(result.repair.clean, true, 'no WRITE — the repair is warn-only (never rewrite historical rotation evidence)')
+  assert.equal(result.repair.writable, false)
+})
+
+test('m-119 analyzeDurableHostRegistry: dangling rotatedTo (lost successor) → chain-integrity flagged, zero-live, warn-only (never fabricate a host session)', async () => {
+  const result = analyzeDurableHostRegistry([
+    { hostId: 'host-a', sessionId: 's-a', roomId: 'board', retired: true, retiredAt: 100, rotatedTo: 'host-missing' },
+    { hostId: 'host-b', sessionId: 's-b', roomId: 'board', retired: true, retiredAt: 200 }
+  ])
+  assert.equal(result.chainIntegrity, 'dangling', 'the rotatedTo target is absent from the file')
+  assert.equal(result.zeroLive, true)
+  assert.equal(result.liveCount, 0)
+  assert.equal(result.repair.writable, false, 'no terminal in-file → warn-only, no fabricated host session')
+  assert.equal(result.repair.clean, true, 'no write is committed for a dangling chain')
+})
+
+test('m-119 reconcileDurableHostRegistry: WRITE repair commits a backup + an idempotent fix for a multi-live durable file', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      schemaVersion: 2,
+      'host-a': { sessionId: 's-a', roomId: 'board' },
+      'host-b': { sessionId: 's-b', roomId: 'board' }
+    }, null, 2))
+    const logged = []
+    // Run twice → the SECOND run is a no-op (idempotent convergence).
+    const first = await reconcileDurableHostRegistry(stateDir, { write: true, logger: { warn: (m) => logged.push(m) } })
+    const second = await reconcileDurableHostRegistry(stateDir, { write: true, logger: { warn: (m) => logged.push(m) } })
+    assert.equal(first.multiLive, true, 'first run sees the multi-live degeneration')
+    assert.ok(first.issues.some((i) => i.code === 'multi-live'), 'first run reports the multi-live warn')
+    assert.equal(first.repair.writable, true, 'the multi-live repair is writable')
+    const repaired = JSON.parse(await readFile(path.join(stateDir, 'hosts.json'), 'utf8'))
+    const live = Object.entries(repaired).filter(([k]) => k !== 'schemaVersion' && repaired[k]?.retired !== true)
+    assert.equal(live.length, 1, 'the repaired durable file has exactly ONE non-retired live host')
+    assert.equal(live[0][0], 'host-a', 'the deterministic pick (first live) is kept live')
+    assert.equal(repaired['host-b'].retired, true, 'the non-picked live host is marked retired')
+    // Idempotency: the second run sees the converged (single-live) state → clean.
+    assert.equal(second.multiLive, false, 'second run no longer sees a multi-live state')
+    assert.equal(second.repair.clean, true, 'second run is a clean no-op (idempotent convergence)')
+    // A pre-repair backup was created (and the SECOND run added NO duplicate backup).
+    const backups = (await readdir(stateDir)).filter((f) => f.startsWith('hosts.json.bak-') && f.endsWith('-reconcile'))
+    assert.equal(backups.length, 1, `exactly one pre-repair backup (idempotent)`)
+  })
+})
+
+test('m-119 reconcileDurableHostRegistry: ZERO live with a chain terminal → the repair un-retires the terminal to a live successor', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      schemaVersion: 2,
+      'host-a': { sessionId: 's-a', roomId: 'board', retired: true, retiredAt: 100, rotatedTo: 'host-b' },
+      'host-b': { sessionId: 's-b', roomId: 'board', retired: true, retiredAt: 200 }
+    }, null, 2))
+    const result = await reconcileDurableHostRegistry(stateDir, { write: true, logger: { warn: () => {} } })
+    assert.equal(result.zeroLive, true, 'the durable file was fully retired (zero live)')
+    const repaired = JSON.parse(await readFile(path.join(stateDir, 'hosts.json'), 'utf8'))
+    assert.equal(repaired['host-b'].retired, undefined, 'the chain terminal is un-retired (now live)')
+    assert.equal(repaired['host-b'].sessionId, 's-b', 'the un-retired terminal keeps its sessionId')
+    assert.equal(repaired['host-b'].retiredAt, undefined, 'the un-retired terminal loses its retiredAt')
+    const live = Object.entries(repaired).filter(([k]) => k !== 'schemaVersion' && repaired[k]?.retired !== true)
+    assert.equal(live.length, 1, 'exactly one live after the repair')
+    assert.equal(live[0][0], 'host-b', 'the last rotation target is the live host')
+  })
+})
+
+test('m-119 reconcileDurableHostRegistry: read-only (no write) returns the analysis and NEVER mutates the durable file', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const original = JSON.stringify({ schemaVersion: 2, 'host-a': { sessionId: 's-a', roomId: 'board' }, 'host-b': { sessionId: 's-b', roomId: 'board' } }, null, 2)
+    await writeFile(path.join(stateDir, 'hosts.json'), original)
+    const result = await reconcileDurableHostRegistry(stateDir, { write: false })
+    assert.equal(result.multiLive, true, 'validation detects the multi-live degeneration')
+    assert.equal(await readFile(path.join(stateDir, 'hosts.json'), 'utf8'), original, 'read-only mode leaves the durable file byte-identical')
+    assert.deepEqual((await readdir(stateDir)).filter((f) => f.includes('-reconcile')), [], 'no backup/reconcile write in read-only mode')
+  })
+})
+
+test('m-119 analyzeDurablePostsRegistry: a gone WORKER session is a retire candidate; a configured HEAD and a retired worker are never', async () => {
+  const gone = (entry) => entry.sessionId === 'worker-gone'
+  const result = analyzeDurablePostsRegistry([
+    { postId: 'worker-gone', sessionId: 'worker-gone', provider: 'worker', role: 'builder' },
+    { postId: 'worker-live', sessionId: 'worker-live', provider: 'worker', role: 'builder' },
+    { postId: 'head', sessionId: 'head-fixed', agentPreset: 'deepartments-head' },
+    { postId: 'worker-retired', sessionId: 'worker-retired', provider: 'worker', role: 'builder', retired: true }
+  ], gone)
+  assert.deepEqual(result.workerRetireCandidates, [{ postId: 'worker-gone', sessionId: 'worker-gone' }], 'only the gone, non-retired WORKER is a candidate')
+  assert.equal(result.changed, false, 'the pure analyzer never writes')
+})
+
+test('m-119 reconcileDurablePostsRegistry: retirees a gone WORKER (backup + idempotent) and NEVER touches a configured head', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, 'posts.json'), JSON.stringify({
+      'worker-gone': { sessionId: 'worker-gone', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'head' },
+      'head': { sessionId: 'head-fixed', roomId: 'research', agentPreset: 'deepartments-head' }
+    }, null, 2))
+    const logged = []
+    const first = await reconcileDurablePostsRegistry(stateDir, {
+      retireGoneWorkers: true,
+      logger: { warn: (m) => logged.push(m) },
+      isSessionGone: (sessionId) => sessionId === 'worker-gone'
+    })
+    assert.deepEqual(first.workerRetireCandidates, [{ postId: 'worker-gone', sessionId: 'worker-gone' }], 'the gone worker is the candidate')
+    assert.equal(first.changed, true, 'the retire was committed to the durable file')
+    const repaired = JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8'))
+    assert.equal(repaired['worker-gone'].retired, true, 'the gone worker is marked retired')
+    assert.equal(repaired['head'].retired, undefined, 'the configured head is NEVER touched')
+    assert.ok(logged.some((m) => m.includes('worker-gone') && m.includes('retire-leak')), 'the retire-leak warn is logged')
+    const backups = (await readdir(stateDir)).filter((f) => f.startsWith('posts.json.bak-') && f.endsWith('-reconcile'))
+    assert.equal(backups.length, 1, 'a pre-retire backup was created')
+    // Flag-only mode (retireGoneWorkers false) never writes.
+    await writeFile(path.join(stateDir, 'posts.json'), JSON.stringify({
+      'worker-gone': { sessionId: 'worker-gone', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker' }
+    }, null, 2))
+    const flagOnly = await reconcileDurablePostsRegistry(stateDir, {
+      retireGoneWorkers: false,
+      logger: { warn: () => {} },
+      isSessionGone: (sessionId) => sessionId === 'worker-gone'
+    })
+    assert.deepEqual(flagOnly.workerRetireCandidates, [{ postId: 'worker-gone', sessionId: 'worker-gone' }], 'flag-only still reports the candidate')
+    assert.equal(flagOnly.changed, false, 'flag-only does NOT write the retire mark')
+    assert.equal((JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8')))['worker-gone'].retired, undefined, 'flag-only leaves the worker live')
+  })
+})
+
+test('m-119 real Loader (boot hook convergence): a durable hosts.json with EXACTLY ONE live → the boot reconcile passes with NO change (no backup, no rewrite)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const liveSessionId = 's-live-m119'
+    const oldSessionId = 's-old-m119'
+    const liveHostId = `host-${liveSessionId}`
+    const oldHostId = `host-${oldSessionId}`
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      schemaVersion: 2,
+      [oldHostId]: { sessionId: String(oldSessionId), roomId: 'board', retired: true, retiredAt: 100, rotatedTo: liveHostId },
+      [liveHostId]: { sessionId: String(liveSessionId), roomId: 'board', previousSessionId: String(oldSessionId) }
+    }, null, 2))
+    const { dispose } = await bootPlugin(stateDir)
+    try {
+      // Let the boot hook settle (fire-and-forget) — assert NO reconcile backup.
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      const hosts = await readHosts(stateDir)
+      const live = Object.entries(hosts).filter(([k]) => k !== 'schemaVersion' && hosts[k]?.retired !== true)
+      assert.equal(live.length, 1, 'exactly one live host after boot')
+      assert.equal(live[0][0], liveHostId, 'the rotation successor is still the live host')
+      assert.equal(hosts[oldHostId].retired, true, 'the retired entry is untouched')
+      const backups = (await readdir(stateDir)).filter((f) => f.startsWith('hosts.json.bak-') && f.endsWith('-reconcile'))
+      assert.equal(backups.length, 0, 'a healthy registry produces NO reconcile backup (no rewrites)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('m-119 real Loader (boot hook): TWO non-retired live hosts → the boot reconcile warns (warn-on-degenerate) and does NOT mutate the durable file (a legitimate multi-host state stays resumable)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const original = JSON.stringify({ schemaVersion: 2, 'host-stray': { sessionId: 's-stray', roomId: 'board' }, 'host-live': { sessionId: 's-live', roomId: 'board' } }, null, 2)
+    await writeFile(path.join(stateDir, 'hosts.json'), original)
+    const { dispose } = await bootPlugin(stateDir)
+    try {
+      // Let the boot hook settle (fire-and-forget) — it warns but MUST NOT write.
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      const hosts = await readHosts(stateDir)
+      const live = Object.entries(hosts).filter(([k]) => k !== 'schemaVersion' && hosts[k]?.retired !== true)
+      assert.equal(live.length, 2, 'the boot reconcile (warn-only) leaves BOTH live hosts intact — a multi-host fleet stays resumable')
+      assert.equal(await readFile(path.join(stateDir, 'hosts.json'), 'utf8'), original, 'the durable file is byte-identical (warn-on-degenerate, no auto-write)')
+      const backups = (await readdir(stateDir)).filter((f) => f.startsWith('hosts.json.bak-') && f.endsWith('-reconcile'))
+      assert.equal(backups.length, 0, 'no reconcile backup (no write at boot)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('m-119 real Loader (boot hook): a gone WORKER session is FLAGGED (warn-on-degenerate) while a configured head is NEVER touched — the flag-only boot does NOT mutate the durable posts.json', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // A configured head (agentPreset, no provider) + a gone disposable worker.
+    await seedPost(stateDir, { postId: 'head-fixed', sessionId: 'head-fixed', roomId: 'research', agentPreset: 'deepartments-head' })
+    await seedPost(stateDir, { postId: 'worker-gone', sessionId: 'worker-gone', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'research-head' })
+    const { dispose } = await bootPlugin(stateDir, { rawPersistence: true })
+    try {
+      // Let the boot hook settle — it FLAGS (warns) but must NOT auto-retire.
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      const posts = JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8'))
+      assert.equal(posts['worker-gone'].retired, undefined, 'flag-only boot leaves the gone WORKER live (no auto-retire; retire-if-safe is an explicit opt-in)')
+      assert.equal(posts['head-fixed'].retired, undefined, 'the configured HEAD is never touched')
+      const backups = (await readdir(stateDir)).filter((f) => f.startsWith('posts.json.bak-') && f.endsWith('-reconcile'))
+      assert.equal(backups.length, 0, 'no retire write / backup (flag-only at boot)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// HEAD-SLEEP IDEMPOTENCY + ROTATION-RACE FIX (2026-08-25). The QH-verified
+// defect: the head own-layer dept_sleep teardown could leave a sleepEpoch-set
+// but UN-ARCHIVED + LIVE head session when a host-session rotation / service
+// restart landed on the AWAITED quality-inspect directive — which sat BETWEEN
+// the archive dispatch and the dispose in the pre-fix ordering. The fix (a):
+// (i) persistPosts AWAITED (the sleepEpoch mark is on-disk FIRST); (ii) the
+// HEAD-only archive AWAITED before the dispose dispatch; (iii) the dispose
+// stays fire-and-forget but is dispatched BEFORE the (async) QD directive; and
+// (iv) the QD head-slept directive STILL fires exactly once (100% mandate).
+// Plus (b) a boot reconcile that re-seals a half-slept head and (c) an
+// idempotency no-op on a re-issued directive.
+// ---------------------------------------------------------------------------
+
+test('head-sleep rotation-race (a): the dept_sleep teardown SEALS FIRST (durable sleepEpoch + session archived) and dispatches the dispose BEFORE the QD directive await — the seal + detach are committed even while the detach is held in-flight, and the head-slept mandate still fires exactly once', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const { head, headCtx, key } = qdResearchHead(env)
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      await memo.execute({ summary: 'rotation-race: the seal must commit before the detach.' }, { agent: head, signal })
+      // Hold the dispose in-flight (modeling a host-session rotation / restart
+      // whose detach cannot settle during the tool call) so we can observe that
+      // the SEAL + the dispose DISPATCH are committed independent of the detach
+      // settling — the fix guarantee (a).
+      env.agents.disposeGates.set('head-research-head', new Promise(() => {}))
+      const result = await withTimeout(sleep.execute({}, { agent: head, signal }), 1500, 'dept_sleep returns (archive awaited, dispose fire-and-forget, directive after dispose)')
+      assert.ok(typeof result.sleepEpoch === 'number' && result.sleepEpoch > 0, 'the sleep epoch is in the immediate result')
+      // The seal is complete BEFORE the dispose settles: the mark is durable
+      // (persistPosts AWAITED) AND the session is archived (archive AWAITED).
+      await waitFor(async () => (await readPosts(stateDir))['research-head'].sleepEpoch !== undefined, 5000, 'sleepEpoch durable (awaited persist) BEFORE the detach settles')
+      await waitFor(() => env.workspaceRegistry.archivedSessionIds.includes('head-research-head'), 5000, 'session archived (awaited archive) BEFORE the detach settles')
+      // The dispose is DISPATCHED (fire-and-forget side-effect) but NOT awaited —
+      // the tool returned while the detach is still in flight (the head is still
+      // in the live store). This is the anti-self-deadlock invariant (bc0d).
+      assert.equal(env.agents.disposeCalls.get('head-research-head'), 1, 'the dispose was dispatched before/independent of the detach settling')
+      assert.equal(env.agents.store.has('head-research-head'), true, 'the detach is still in flight — the tool did NOT await the dispose')
+      // The QD head-slept mandate STILL fires exactly once — moved AFTER the
+      // dispose dispatch, so the async bus deliver is no longer on the detach
+      // path (the rotation/restart window the old ordering left is gone).
+      await waitFor(async () => (await qualityDirectives(stateDir)).filter((d) => /head slept/.test(d.text)).length === 1, 5000, 'exactly ONE head-slept directive emitted after the dispose dispatch')
+      const headDirs = (await qualityDirectives(stateDir)).filter((d) => /head slept/.test(d.text))
+      assert.match(headDirs[0].text, /post research-head/, 'the head-slept directive names the archived head')
+      assert.match(headDirs[0].text, /sleepEpoch \d+/, 'the head-slept directive carries the sleepEpoch surface')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('head-sleep rotation-race (b): a HALF-SLEPT head (sleepEpoch set, session NOT archived) is RE-SEALED at boot by the reconcile — no dangling un-archived session; the head stays dormant (never materialized, never woken)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The half-slept dangling state: the post carries a durable sleepEpoch mark
+    // but its session was NEVER archived (a restart landed during the archive).
+    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'board', agentPreset: 'deepartments-head', sleepEpoch: Date.now() })
+    const { agents, workspaceRegistry, dispose } = await bootPlugin(stateDir)
+    try {
+      // The boot reconcile re-seals the archive for the half-slept session
+      // (idempotent — a no-op if already archived; non-fatal if the registry is
+      // absent). No dangling un-archived session remains.
+      await waitFor(() => workspaceRegistry.archivedSessionIds.includes('head-research-head'), 5000, 'the half-slept head session is re-archived at boot (no dangling un-archived session)')
+      assert.equal(workspaceRegistry.archivedSessionIds.filter((id) => id === 'head-research-head').length, 1, 're-sealed exactly once (idempotent archive)')
+      // The head stays DORMANT — the reconcile NEVER wakes/materializes it
+      // (ensureHead skips a sleepEpoch-set head; the reconcile only re-seals).
+      assert.equal(agents.store.has('head-research-head'), false, 'the slept head is NOT materialized at boot (dormant)')
+      assert.equal(agents.createCalls.some((c) => String(c.sessionId) === 'head-research-head'), false, 'boot does NOT re-create/revive the slept session')
+      const posts = await readPosts(stateDir)
+      assert.ok(typeof posts['research-head'].sleepEpoch === 'number', 'the slept mark survives boot (still dormant)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('head-sleep rotation-race (c): a RE-ISSUED dept_sleep on an already-slept head is a NO-OP — returns the already-slept sleepEpoch without re-archiving, re-disposing, re-marking or re-bumping the wake counter', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await seedJournal(stateDir, 'research-head', 'IDEMPOTENCY: a re-sleep must be a no-op.')
+    const { agents, workspaceRegistry, dispose } = await bootPlugin(stateDir)
+    await waitForHeadMaterialized(agents)
+    try {
+      const head = agents.store.get('head-research-head')
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      const signal = new AbortController().signal
+      // Hold the dispose in-flight so the head STAYS live after the first sleep
+      // (modeling the QH case where the first sleep did not close the session),
+      // letting us re-issue the SAME directive on the still-slept head.
+      agents.disposeGates.set('head-research-head', new Promise(() => {}))
+      await memo.execute({ summary: 'idempotent memory.' }, { agent: head, signal })
+      const first = await withTimeout(sleep.execute({}, { agent: head, signal }), 1500, 'first sleep returns')
+      assert.ok(typeof first.sleepEpoch === 'number' && first.sleepEpoch > 0, 'the first sleep marks a sleepEpoch')
+      await waitFor(() => workspaceRegistry.archivedSessionIds.includes('head-research-head'), 5000, 'first sleep archived the session')
+      // Re-issue the SAME dept_sleep directive on the (already-slept) head.
+      const second = await withTimeout(sleep.execute({}, { agent: head, signal }), 1500, 'a re-issued sleep returns (no-op)')
+      assert.equal(second.member, 'research-head', 'the no-op still reports the slept member')
+      assert.equal(second.sleepEpoch, first.sleepEpoch, 'the no-op returns the ALREADY-SLEPT epoch (no re-mark)')
+      assert.equal(agents.disposeCalls.get('head-research-head'), 1, 'the no-op does NOT re-dispose (still exactly one detach)')
+      assert.equal(workspaceRegistry.archivedSessionIds.filter((id) => id === 'head-research-head').length, 1, 'the no-op does NOT re-archive (recorded exactly once)')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['research-head'].sleepEpoch, first.sleepEpoch, 'the durable sleepEpoch is unchanged (no re-mark)')
+      assert.equal(agents.store.has('head-research-head'), true, 'the head is still live (the first detach is still in flight)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('head-sleep rotation-race (d): a close/sleep directive emitted at host-session close SURVIVES the emitting session retiring — the durable bus record is re-delivered at boot to the target head, which wakes FRESH (F8 rotation) and acts on it', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    // A SLEPT (dormant) TARGET head + the (rotating/retired) emitting host
+    // session that persisted the close directive before it went away.
+    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'board', agentPreset: 'deepartments-head', sleepEpoch: Date.now() })
+    const hostId = await seedHostRegistration(stateDir, 'host-session-rotating')
+    await seedMessageRecords(stateDir, [
+      { id: 'm-close', seq: 0, ts: now, from: hostId, to: ['research-head'], text: 'close signal: sleep now', kind: 'agent' }
+    ])
+    await seedDeliveryRows(stateDir, [{ messageId: 'm-close', recipientId: 'research-head', status: 'prepared', ts: now }])
+    const { agents, dispose } = await bootPlugin(stateDir)
+    try {
+      // The boot re-delivery reaches the TARGET head: it is delivered/resumed
+      // (the dormant head is recreated FRESH — never resumed from the archived
+      // artifact) and acts on the close directive.
+      await waitFor(async () => {
+        const s = await deliveryStatus(stateDir, 'm-close', 'research-head')
+        return s === 'resumed' || s === 'delivered'
+      }, 5000, 'the close directive is delivered/resumed at boot to the target head')
+      const status = await deliveryStatus(stateDir, 'm-close', 'research-head')
+      assert.ok(status === 'resumed' || status === 'delivered', `the close directive settled as ${status} (delivered to the target head)`)
+      await waitFor(() => agents.createCalls.length > 0, 5000, 'the dormant head is recreated fresh on the boot re-delivery')
+      const freshId = String(agents.createCalls.at(-1).sessionId)
+      assert.notEqual(freshId, 'head-research-head', 'the woke head is a NEW session id (F8 rotation), never the archived old one')
+      const fresh = agents.store.get(freshId)
+      assert.ok(fresh, 'the fresh head is materialized')
+      await waitFor(() => fresh.inboxMessages.length >= 1, 5000, 'the woke head received the close directive')
+      assert.equal(fresh.inboxMessages.at(-1).source.kind, 'agent', 'the close directive uses the bus agent source')
+      await waitFor(async () => (await readPosts(stateDir))['research-head'].sleepEpoch === undefined, 5000, 'sleepEpoch cleared after the respawn-from-sleep wake')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- P2 GUI head-session VISIBILITY fix (2026-08-25) — archive-leak rotation ---
+// A head whose durable session id is in the workspace registry's
+// `archivedSessionIds` must NEVER materialize (resume) on that id: the GUI
+// sidebar hides any archived session id (the Asistente's elevation). These
+// regressions assert the invariant directly — after any head (re)materialization
+// whose durable sessionId is archived, the current live head id is NEVER
+// archived — and that a NON-archived head resume / a WORKER resume are UNCHANGED.
+
+test('P2 visibility fix (a): a HEAD whose durable session id is ARCHIVED is ROTATED at boot (ensureHead) — a fresh head-<postId>-<uuid> id, never a resume of the archived id; the new current head id is never archived', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    // A configured head (research-head IS in TEST_ORG's org.departments) whose
+    // durable session id is ALREADY in the registry's archived set but whose
+    // sleepEpoch is UNSET (the archive-leak state: NOT a clean dept_sleep — the
+    // resumed-archived-id state the GUI hides). Boot's ensureHead must not
+    // revive the archived id — it rotates to a fresh id.
+    await seedPost(stateDir, { postId, sessionId: 'head-research-head', roomId: 'board', agentPreset: 'deepartments-head' })
+    const { agents, workspaceRegistry, dispose } = await bootPlugin(stateDir, { workspaceRegistryArchived: ['head-research-head'] })
+    try {
+      // The head is NOT live under the archived id, and a FRESH rotation id was
+      // created (the F8 fresh-mint) instead of a resume.
+      await waitFor(() => agents.createCalls.some((c) => String(c.sessionId).startsWith('head-research-head-')), 5000, 'a fresh head-research-head-<uuid> id was created at boot (rotation)')
+      assert.equal(agents.store.has('head-research-head'), false, 'the archived id is NOT materialized under the same id')
+      const freshCreate = agents.createCalls.find((c) => String(c.sessionId).startsWith('head-research-head-'))
+      const freshId = String(freshCreate.sessionId)
+      assert.notEqual(freshId, 'head-research-head', 'the fresh id is NOT the archived one')
+      assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === 'head-research-head').length, 0, 'the archived id is NEVER resumed')
+      assert.equal(workspaceRegistry.archivedSessionIds.includes(freshId), false, 'the NEW current head id is NOT archived (the invariant: a live head is never archived)')
+      assert.ok(agents.store.has(freshId), 'the rotated head is live')
+      await waitFor(() => workspaceRegistry.attachCalls.includes(freshId), 5000, 'the fresh head session is attached to the workspace (sidebar-visible)')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts[postId].sessionId, freshId, 'the durable registry now points at the FRESH session id')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('P2 visibility fix (b): a NON-slept HEAD whose durable session id is ARCHIVED is ROTATED on a bus wake (materializePost resume path) — a fresh head-<postId>-<uuid> id, never a resume of the archived id; the new current head id is never archived', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'ghost-head'
+    // ghost-head is NOT a configured coordinator, so it is never auto-materialized
+    // at boot — exactly the resumed-archived-id state: a durable entry whose
+    // sleepEpoch is unset but whose session id is archived.
+    await seedPost(stateDir, { postId, sessionId: 'head-ghost-head', roomId: 'board', agentPreset: 'deepartments-head' })
+    const { root, agents, workspaceRegistry, dispose } = await bootPlugin(stateDir)
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      // Simulate the archive leak WITHOUT a clean dept_sleep (sleepEpoch stays
+      // unset): the durable head id is archived server-side.
+      await workspaceRegistry.archiveSession('head-ghost-head')
+      assert.ok(workspaceRegistry.archivedSessionIds.includes('head-ghost-head'), 'the durable head id is archived (the leak)')
+      assert.equal((await readPosts(stateDir))[postId].sleepEpoch, undefined, 'the durable sleepEpoch is UNSET (not a clean sleep)')
+      // A bus wake → materializePost takes the RESUME path (sleepEpoch unset,
+      // head not live) and must rotate instead of resuming the archived id.
+      const r = await root.tools.get('send_message').execute({ to: [postId], text: 'wake the archived-unslept head' }, { agent: host, signal })
+      assert.equal(r.delivered[postId], 'resumed', 'bus delivery reports the materialize')
+      await waitFor(() => agents.createCalls.some((c) => String(c.sessionId).startsWith('head-ghost-head-')), 5000, 'a fresh head-ghost-head-<uuid> id was created (rotation)')
+      const freshCreate = agents.createCalls.find((c) => String(c.sessionId).startsWith('head-ghost-head-'))
+      const freshId = String(freshCreate.sessionId)
+      assert.notEqual(freshId, 'head-ghost-head', 'the fresh id is NOT the archived one')
+      assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === 'head-ghost-head').length, 0, 'the archived id is NEVER resumed')
+      assert.equal(workspaceRegistry.archivedSessionIds.includes(freshId), false, 'the NEW current head id is NOT archived (the invariant: a live head is never archived)')
+      assert.ok(agents.store.has(freshId), 'the rotated head is live')
+      await waitFor(() => workspaceRegistry.attachCalls.includes(freshId), 5000, 'the fresh head session is attached to the workspace (sidebar-visible)')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts[postId].sessionId, freshId, 'the durable registry now points at the FRESH session id')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('P2 visibility fix (c): a NON-archived head resume is UNCHANGED (no regression) — a non-archived durable head id is RESUMED on a bus wake, never rotated', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'ghost-head'
+    await seedPost(stateDir, { postId, sessionId: 'head-ghost-head', roomId: 'board', agentPreset: 'deepartments-head' })
+    const { root, agents, workspaceRegistry, dispose } = await bootPlugin(stateDir)
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const r = await root.tools.get('send_message').execute({ to: [postId], text: 'wake the non-archived head' }, { agent: host, signal })
+      assert.equal(r.delivered[postId], 'resumed', 'bus delivery materializes the head')
+      await waitFor(() => agents.store.has('head-ghost-head'), 5000, 'the head is live under its OWN (non-archived) id')
+      assert.ok(agents.resumeCalls.some((c) => String(c.resumeSessionId) === 'head-ghost-head'), 'the non-archived head was RESUMED under its id (the normal path)')
+      assert.ok(!agents.createCalls.some((c) => String(c.sessionId).startsWith('head-ghost-head-')), 'NO fresh rotation id was created (zero regression)')
+      assert.equal(workspaceRegistry.archivedSessionIds.includes('head-ghost-head'), false, 'the id is NOT archived (resume is the unchanged path)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('P2 visibility fix (d): a WORKER resume is UNCHANGED (no regression) — a worker keeps its legacy cold-resume of its own session, never rotated by the archive-leak fix', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'researcher-alpha'
+    await seedPost(stateDir, { postId, sessionId: 'worker-researcher-alpha', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'rank-and-file researcher' })
+    const { root, agents, workspaceRegistry, dispose } = await bootPlugin(stateDir)
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      // Even if the worker's durable id were archived (it is not, in this test),
+      // the worker resume path must stay the legacy cold-resume — the archive-leak
+      // fix is HEAD-specific.
+      const r = await root.tools.get('send_message').execute({ to: [postId], text: 'wake the worker' }, { agent: host, signal })
+      assert.equal(r.delivered[postId], 'resumed', 'bus delivery materializes the worker')
+      await waitFor(() => agents.store.has('worker-researcher-alpha'), 5000, 'the worker is live under its OWN id')
+      assert.ok(agents.resumeCalls.some((c) => String(c.resumeSessionId) === 'worker-researcher-alpha'), 'the worker was cold-RESUMED under its id (workers keep the legacy cold-resume)')
+      assert.ok(!agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-researcher-alpha-')), 'NO fresh rotation id was created for the worker (zero regression)')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts[postId].sessionId, 'worker-researcher-alpha', 'the worker durable registry entry is UNCHANGED (no rotation)')
     } finally {
       await dispose()
     }

@@ -303,6 +303,44 @@ export interface WorkspaceRegistryLike {
    * only once the bounded list() retry has proven the durable state is in
    * memory, so create stays idempotent). */
   resolveByPath?(path: string): Promise<WorkspaceEntityLike | undefined>
+  /** THE VISIBILITY FIX SEAM (2026-08-25 P2) — the registry-wide archived
+   * session set, READ-ONLY. The GUI sidebar hides any session whose id is in
+   * this set (`dsh-client-ui-workspace` sessionVisible — `!archived.has(id)`),
+   * so a head's CURRENT live id being archived is exactly why a live head is
+   * INVISIBLE in the GUI. The real dsh-workspace registry already exposes it
+   * as a getter ARRAY (dsh-workspace lib/index.js:412-414); the seam just
+   * didn't surface it. This seam accepts the real getter's array/Set property
+   * form OR a zero-arg method returning either — so older compositors/tests
+   * materializing the seam in either shape keep compiling. OPTIONAL: a registry
+   * without it reports nothing archived (the caller degrades to the pre-fix
+   * resume — zero regression). NO core capability is needed for the read. */
+  readonly archivedSessionIds?: string[] | ReadonlySet<string> | (() => string[] | ReadonlySet<string>)
+}
+
+/** Normalize a `WorkspaceRegistryLike`'s `archivedSessionIds` (the real getter
+ * ARRAY / a Set / a zero-arg method returning either) into a searchable string
+ * Set. Falls back to an empty set when the seam is absent or malformed (the FIX
+ * then degrades to the pre-fix resume — zero regression). */
+function archiveIdSetOf(registry: WorkspaceRegistryLike): ReadonlySet<string> {
+  const raw = registry.archivedSessionIds
+  if (raw === void 0) return new Set()
+  const resolved = typeof raw === 'function' ? raw() : raw
+  if (resolved === void 0 || resolved === null) return new Set()
+  return new Set(Array.from(resolved))
+}
+
+/** Whether `sessionId` is in the workspace registry's archived set. The
+ * visibility invariant this serves: a HEAD must NEVER materialize (resume) on an
+ * archived id — a live head's session is never archived, because the GUI
+ * sidebar hides any archived session id. Shape-agnostic over the seam (a getter
+ * array, a Set, or a zero-arg method). A registry without the seam reports NOT
+ * archived, so an older composition degrades to the exact pre-fix resume. */
+export function isArchivedSession(
+  registry: WorkspaceRegistryLike | undefined,
+  sessionId: string
+): boolean {
+  if (registry === void 0) return false
+  return archiveIdSetOf(registry).has(sessionId)
 }
 
 /**

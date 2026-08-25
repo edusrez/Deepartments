@@ -80,7 +80,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { createUserMessage, boundContextSummary, type MessageSource } from '@deepseek-ai/dsh-llm'
 import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './session-cleanup.js'
-import { runHostRotation, validateHostsRotationFile, ROTATION_SCHEMA_VERSION, ASISTENTE_SESSION_TITLE } from './session-rotation.js'
+import { runHostRotation, validateHostsRotationFile, ROTATION_SCHEMA_VERSION, ASISTENTE_SESSION_TITLE, isArchivedSession } from './session-rotation.js'
 import type { RotationPersistenceLike, WorkspaceRegistryLike } from './session-rotation.js'
 import type { Config, CoordinatorConfig, DepartmentConfig } from './org.js'
 import {
@@ -1153,6 +1153,416 @@ export function readDurableHostEntries(stateDir: string): HostEntryLike[] | unde
   } catch {
     return undefined
   }
+}
+
+// ---------------------------------------------------------------------------
+// m-119 — DURABLE hosts.json/posts.json RECONCILIATION + rotation convergence.
+//
+// The durable org stateDir (the filesystem ROOT `/.deepartments/hosts.json` +
+// `posts.json`) is the SOURCE OF TRUTH for the rotation chain and the post
+// registry. In the split-brain era a STALE daemon twin (a second process that
+// booted BEFORE a rotation, sharing the stateDir) wrote/read the durable
+// registry with a stale in-memory view, so hosts.json accumulated retired
+// entries + a long rotation chain. The runtime already re-reads the durable
+// file fresh each tick (the Bug A durable-gate + the alert-recipient fix), but
+// nothing VALIDATES the durable registry's invariant and nothing REPAIRS a
+// degenerate state. These helpers:
+//   - verify the INVARIANT "exactly ONE non-retired live host (the rotation
+//     successor)" against the durable hosts.json entries (pure + unit-testable,
+//     `analyzeDurableHostRegistry`),
+//   - detect + define an IDEMPOTENT repair for the degenerate cases: (a) ZERO
+//     live, (b) MULTIPLE live, (c) chain-integrity (a retired host's
+//     `rotatedTo` lost/dangling/cycling/terminating in a retired host),
+//   - write the repair ONLY under an explicit `write: true`, ALWAYS backing up
+//     the pre-repair file first (the safest idempotent repair),
+//   - analogously FLAG (and optionally retire-if-safe) a durable WORKER post
+//     whose session is definitively gone (the W8-g retire-leak class) — never
+//     auto-retiring a configured head.
+// The repair is idempotent: after it runs the state is non-degenerate, so a
+// re-run is a no-op (clean). A missing/unreadable durable file is never a
+// throw and never a fabricated host session (the loader already falls back to
+// the in-memory registry + the next ensureHost prunes on first register).
+// ---------------------------------------------------------------------------
+
+/** ONE issue the durable host-registry validation detected (warn-class). */
+export interface DurableHostReconcileIssue {
+  code: 'zero-live' | 'multi-live' | 'chain-integrity'
+  hostId?: string
+  message: string
+}
+
+/** The idempotent repair plan for a degenerate durable hosts.json. `clean` is
+ * true when NO host-entry change is needed (a no-op — the invariant already
+ * holds and the repair is a no-write). `writable` is true only when there is a
+ * CONCRETE, safe change to commit (a hostId to keep live + hosts to
+ * retire/unretire); a zero-live state with NO chain terminal is warn-only
+ * (`writable: false` — we never fabricate a host session). */
+export interface DurableHostRepair {
+  /** The single non-retired live host to keep (the deterministic pick). */
+  liveHostId: string | undefined
+  /** Non-picked live hostIds to mark RETIRED (multi-live repair). */
+  retireHostIds: string[]
+  /** The chain-terminal hostId to UN-RETIRE (zero-live repair). undefined = none. */
+  unretireHostId: string | undefined
+  /** True when NO write is needed (the invariant already holds). */
+  clean: boolean
+  /** True when there is a concrete, safe write to commit. */
+  writable: boolean
+}
+
+/** Result of the durable host-registry reconciliation (pure analysis). */
+export interface DurableHostReconcileResult {
+  /** The deterministic live entry (pickLiveHostEntry), or undefined when no live. */
+  liveEntry: HostEntryLike | undefined
+  /** Number of non-retired live entries. */
+  liveCount: number
+  /** True when the ambiguity fallback fired (multiple live, none rotation-created). */
+  ambiguous: boolean
+  /** Invariant breach: ZERO non-retired live hosts. */
+  zeroLive: boolean
+  /** Invariant breach: MORE THAN ONE non-retired live host. */
+  multiLive: boolean
+  /** Rotation-chain integrity: ok | dangling | cycle | retired-terminal. */
+  chainIntegrity: 'ok' | 'dangling' | 'cycle' | 'retired-terminal'
+  /** All detected issues (warn-class), in detection order. */
+  issues: DurableHostReconcileIssue[]
+  /** The idempotent repair plan (no-op when clean). */
+  repair: DurableHostRepair
+}
+
+/** The host that is the rotation-chain TERMINAL: the target of some host's
+ * `rotatedTo` AND carrying NO `rotatedTo` of its own (the chain end). Returns
+ * `undefined` when no single terminal exists (a dangling chain, a cycle, or a
+ * bare retired host with no chain — none of which are safe repair candidates). */
+export function findRotationTerminal(entries: HostEntryLike[], byId: Map<string, HostEntryLike>): string | undefined {
+  const targets = new Set<string>()
+  for (const entry of entries) {
+    if (typeof entry.rotatedTo === 'string' && entry.rotatedTo !== '') targets.add(entry.rotatedTo)
+  }
+  const terminals = entries.filter((entry) => targets.has(entry.hostId) && (entry.rotatedTo === undefined || entry.rotatedTo === ''))
+  return terminals.length === 1 ? terminals[0].hostId : undefined
+}
+
+/** Whether the `rotatedTo` graph contains a cycle among the entries present in
+ * the file (a chain-integrity violation — the chain never reaches a terminal). */
+export function hasRotatedToCycle(entries: HostEntryLike[], byId: Map<string, HostEntryLike>): boolean {
+  const visiting = new Set<string>()
+  const visited = new Set<string>()
+  const dfs = (hostId: string): boolean => {
+    if (visited.has(hostId)) return false
+    if (visiting.has(hostId)) return true
+    const entry = byId.get(hostId)
+    if (entry === undefined) return false
+    visiting.add(hostId)
+    const next = typeof entry.rotatedTo === 'string' ? entry.rotatedTo : ''
+    if (next !== '' && byId.has(next) && dfs(next)) return true
+    visiting.delete(hostId)
+    visited.add(hostId)
+    return false
+  }
+  for (const entry of entries) if (dfs(entry.hostId)) return true
+  return false
+}
+
+/** PURE durable host-registry invariant validator (m-119). Non-throwing,
+ * deterministic, and side-effect free — unit-testable without the invoke
+ * context. Given the durable hosts.json entries it verifies the invariant
+ * "exactly ONE non-retired live host (the rotation successor)" and reports the
+ * degenerate cases with an idempotent repair plan:
+ *   (a) ZERO non-retired live hosts → the rotation chain lost its successor;
+ *       the repair UN-RETIRES the chain terminal (the LAST rotation target) so
+ *       the chain reaches a live host again — or warns (no write) when no
+ *       terminal can be safely identified (never fabricate a host session).
+ *   (b) MULTIPLE non-retired live hosts → the loader's pickLiveHostEntry
+ *       ambiguity; the repair KEEPS the deterministic pick (successor-first)
+ *       and RETIRES the other live entries (deterministic, warn).
+ *   (c) chain-integrity → a retired host whose `rotatedTo` is dangling (target
+ *       absent from the file), forms a cycle, or terminates in a RETIRED host;
+ *       flagged + warned; repaired ONLY when it coincides with (a)/(b).
+ * The LIVE-side correctness is NOT changed: a host retired in the durable file
+ * stays terminal (never live-resolvable / row-producing) and a live host stays
+ * resolvable — this helper is purely about the durable registry's own shape. */
+export function analyzeDurableHostRegistry(entries: Iterable<HostEntryLike>): DurableHostReconcileResult {
+  const all = [...entries]
+  const byId = new Map(all.map((entry) => [entry.hostId, entry]))
+  const liveEntries = all.filter((entry) => entry.retired !== true)
+  const { live: selectedLive, ambiguous } = pickLiveHostEntry(all)
+  const liveCount = liveEntries.length
+  const zeroLive = liveCount === 0
+  const multiLive = liveCount > 1
+
+  const issues: DurableHostReconcileIssue[] = []
+  let chainIntegrity: DurableHostReconcileResult['chainIntegrity'] = 'ok'
+  const danglingTargets = all.filter((entry) => entry.retired === true && typeof entry.rotatedTo === 'string' && entry.rotatedTo !== '' && !byId.has(entry.rotatedTo))
+  const cycle = hasRotatedToCycle(all, byId)
+  const terminalId = findRotationTerminal(all, byId)
+  if (cycle) {
+    chainIntegrity = 'cycle'
+  } else if (danglingTargets.length > 0) {
+    chainIntegrity = 'dangling'
+  } else if (terminalId !== undefined && byId.get(terminalId)?.retired === true) {
+    chainIntegrity = 'retired-terminal'
+  }
+
+  if (zeroLive) {
+    issues.push({ code: 'zero-live', message: `durable hosts.json has ZERO non-retired live hosts (${all.length} entries, all retired) — the rotation chain lost its live successor` })
+  }
+  if (multiLive) {
+    issues.push({ code: 'multi-live', message: `durable hosts.json has ${liveCount} non-retired live hosts (exactly one required) — selected ${selectedLive?.hostId ?? 'none'} deterministically; the others are retire candidates` })
+  }
+  if (chainIntegrity !== 'ok') {
+    const detail = chainIntegrity === 'dangling'
+      ? `retired host(s) ${danglingTargets.map((d) => `${d.hostId}→${d.rotatedTo}`).join(', ')} point at a host NOT in hosts.json (lost successor)`
+      : chainIntegrity === 'cycle'
+        ? 'the rotatedTo chain contains a cycle'
+        : `the chain terminal ${terminalId} is RETIRED (the chain does not reach a live host)`
+    issues.push({ code: 'chain-integrity', message: `durable hosts.json chain-integrity: ${detail}` })
+  }
+
+  let repair: DurableHostRepair
+  if (multiLive && selectedLive !== undefined) {
+    const retireHostIds = liveEntries.filter((entry) => entry.hostId !== selectedLive.hostId).map((entry) => entry.hostId)
+    repair = { liveHostId: selectedLive.hostId, retireHostIds, unretireHostId: undefined, clean: retireHostIds.length === 0, writable: retireHostIds.length > 0 }
+  } else if (zeroLive && terminalId !== undefined && byId.get(terminalId)?.retired === true) {
+    repair = { liveHostId: terminalId, retireHostIds: [], unretireHostId: terminalId, clean: false, writable: true }
+  } else {
+    repair = { liveHostId: selectedLive?.hostId, retireHostIds: [], unretireHostId: undefined, clean: true, writable: false }
+  }
+
+  return { liveEntry: selectedLive, liveCount, ambiguous, zeroLive, multiLive, chainIntegrity, issues, repair }
+}
+
+/** Read + parse a DURABLE JSON registry file with a bounded RETRY for the
+ * boot-time torn-write race (a concurrent persistHosts/persistPosts may be
+ * wrote the file while this reads it — a transient `Unexpected end of JSON
+ * input`). An ABSENT file (ENOENT) is a clean no-op (returned immediately, no
+ * retry — it is a definitive absence, not a torn write). Returns the parsed
+ * object, or `undefined` after exhausting the retries (malformed). Never
+ * throws. */
+async function readDurableJsonFile(stateDir: string, filename: string): Promise<Record<string, unknown> | undefined> {
+  const filePath = path.join(stateDir, filename)
+  if (!existsSync(filePath)) return undefined
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const parsed = JSON.parse(readFileSync(filePath, 'utf8')) as Record<string, unknown>
+      if (parsed !== null && typeof parsed === 'object') return parsed
+    } catch {
+      // torn/malformed → retry after a short backoff (a concurrent write may
+      // still be in-flight); exhausted retries fall through to undefined.
+    }
+    if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 30))
+  }
+  return undefined
+}
+
+/** Apply the repair plan to the RAW parsed hosts.json (preserving every field
+ * the durable file carries that HostEntryLike does not model). Returns a new
+ * object; the input is never mutated. */
+function applyHostRepairToRaw(raw: Record<string, unknown>, repair: DurableHostRepair, nowMs: number): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...raw }
+  for (const hostId of repair.retireHostIds) {
+    const e = out[hostId]
+    if (e !== null && typeof e === 'object') {
+      out[hostId] = { ...(e as Record<string, unknown>), retired: true, retiredAt: nowMs }
+    }
+  }
+  if (repair.unretireHostId !== undefined) {
+    const e = out[repair.unretireHostId]
+    if (e !== null && typeof e === 'object') {
+      const { retired: _retired, retiredAt: _retiredAt, rotatedTo: _rotatedTo, ...rest } = e as Record<string, unknown>
+      out[repair.unretireHostId] = rest
+      if (repair.liveHostId !== undefined) out[repair.liveHostId] = out[repair.unretireHostId]
+    }
+  }
+  return out
+}
+
+/** Options for `reconcileDurableHostRegistry`. */
+export interface ReconcileDurableHostOpts {
+  logger?: { warn(message: string): void }
+  /** When true, WRITE the repaired durable hosts.json when degenerate (backing
+   * up the pre-repair file first). When false/absent the helper is read-only
+   * (validate + warn). */
+  write?: boolean
+  /** Clock (ms epoch) for retiredAt + the backup timestamp. Absent → Date.now. */
+  now?: () => number
+}
+
+/** Read-only validate, or WRITE a repaired durable hosts.json, per m-119.
+ * Never throws (an unreadable/malformed file → a warn + a clean no-op). When
+ * `write: true` and the state is degenerate + a safe repair exists, the
+ * pre-repair hosts.json is copied to `<stateDir>/hosts.json.bak-<ts>-reconcile`
+ * FIRST, then the repaired file is written atomically (tmp + rename). The
+ * repair is IDEMPOTENT: after it runs the state is non-degenerate, so a
+ * re-run is clean. Returns the analysis result (issues + repair plan). */
+export async function reconcileDurableHostRegistry(
+  stateDir: string,
+  opts: ReconcileDurableHostOpts = {}
+): Promise<DurableHostReconcileResult> {
+  const logger = opts.logger
+  const raw = await readDurableJsonFile(stateDir, 'hosts.json')
+  if (raw === undefined) {
+    // Absent (ENOENT) → nothing to reconcile (the loader is empty; the next
+    // ensureHost registers the first host on first register). Malformed (after
+    // the retry window) → warn.
+    if (!existsSync(path.join(stateDir, 'hosts.json'))) {
+      return { liveEntry: undefined, liveCount: 0, ambiguous: false, zeroLive: false, multiLive: false, chainIntegrity: 'ok', issues: [], repair: { liveHostId: undefined, retireHostIds: [], unretireHostId: undefined, clean: true, writable: false } }
+    }
+    logger?.warn('[deepartments] reconcile-host: hosts.json unreadable/malformed — cannot validate the durable rotation invariant (no repair)')
+    return { liveEntry: undefined, liveCount: 0, ambiguous: false, zeroLive: false, multiLive: false, chainIntegrity: 'ok', issues: [], repair: { liveHostId: undefined, retireHostIds: [], unretireHostId: undefined, clean: true, writable: false } }
+  }
+  // Build the HostEntryLike[] for the pure analysis from the raw (same shape as
+  // readDurableHostEntries).
+  const entries: HostEntryLike[] = []
+  for (const [hostId, rawEntry] of Object.entries(raw)) {
+    if (hostId === 'schemaVersion') continue
+    if (rawEntry === null || typeof rawEntry !== 'object') continue
+    const e = rawEntry as Record<string, unknown>
+    const entry: HostEntryLike = { hostId, sessionId: typeof e.sessionId === 'string' ? e.sessionId : '' }
+    if (typeof e.roomId === 'string') entry.roomId = e.roomId
+    if (e.retired === true) entry.retired = true
+    if (typeof e.retiredAt === 'number') entry.retiredAt = e.retiredAt
+    if (typeof e.rotatedTo === 'string') entry.rotatedTo = e.rotatedTo
+    if (typeof e.previousSessionId === 'string') entry.previousSessionId = e.previousSessionId
+    entries.push(entry)
+  }
+  const result = analyzeDurableHostRegistry(entries)
+  for (const issue of result.issues) logger?.warn(`[deepartments] reconcile-host: ${issue.message}`)
+  if (opts.write === true && !result.repair.clean && result.repair.writable) {
+    try {
+      const nowMs = (opts.now ?? (() => Date.now()))()
+      const backupPath = path.join(stateDir, `hosts.json.bak-${nowMs}-reconcile`)
+      await copyFile(path.join(stateDir, 'hosts.json'), backupPath)
+      const repairedRaw = applyHostRepairToRaw(raw, result.repair, nowMs)
+      const tmpPath = path.join(stateDir, `hosts.json.tmp-${nowMs}`)
+      await writeFile(tmpPath, JSON.stringify(repairedRaw, null, 2), 'utf8')
+      await rename(tmpPath, path.join(stateDir, 'hosts.json'))
+      logger?.warn(`[deepartments] reconcile-host: REPAIRED durable hosts.json (backup ${path.basename(backupPath)})`)
+    } catch (error: unknown) {
+      logger?.warn(`[deepartments] reconcile-host: repair write failed (the durable file is left untouched): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return result
+}
+
+/** Loose durable post-registry entry the posts reconcile reads (provider marks a
+ * disposable worker; a configured head has NO provider). */
+export interface DurablePostReconcileLike {
+  postId: string
+  sessionId: string
+  provider?: string
+  role?: string
+  retired?: boolean
+}
+
+/** Result of the durable posts-registry reconcile (m-119). */
+export interface DurablePostsReconcileResult {
+  /** Non-retired WORKER posts whose session is definitively gone (retire-leak
+   * candidates — flagged/warned, never auto-retired unless opted in). */
+  workerRetireCandidates: Array<{ postId: string; sessionId: string }>
+  /** Candidates that were actually marked retired (when `retireGoneWorkers`). */
+  workersRetired: Array<{ postId: string; sessionId: string }>
+  /** True when the durable posts.json was written (a retire happened). */
+  changed: boolean
+}
+
+/** PURE durable posts-registry leak detector (m-119, W8-g). Given the durable
+ * posts.json entries + a session-gone predicate, it FLAGS every non-retired
+ * WORKER (the disposable-worker marker `provider: 'worker'`) whose session is
+ * DEFINITIVELY gone — the retire-leak class. A CONFIGURED HEAD (no `provider`)
+ * is NEVER flagged and NEVER auto-retired. The retire decision itself is the
+ * caller's (`opts.retireGoneWorkers`): this function only classifies. */
+export function analyzeDurablePostsRegistry(
+  entries: Iterable<DurablePostReconcileLike>,
+  isSessionGone: (entry: DurablePostReconcileLike) => boolean
+): DurablePostsReconcileResult {
+  const candidates: Array<{ postId: string; sessionId: string }> = []
+  for (const entry of entries) {
+    if (entry.retired === true) continue
+    if (entry.provider !== 'worker') continue
+    if (isSessionGone(entry)) candidates.push({ postId: entry.postId, sessionId: entry.sessionId })
+  }
+  return { workerRetireCandidates: candidates, workersRetired: [], changed: false }
+}
+
+/** Options for `reconcileDurablePostsRegistry`. */
+export interface ReconcileDurablePostsOpts {
+  logger?: { warn(message: string): void }
+  /** Resolve whether a session is DEFINITIVELY gone (no durable session). A
+   * conservative resolver (unable to determine) MUST return false. */
+  isSessionGone: (sessionId: string) => boolean | Promise<boolean>
+  /** When true, WRITE the retire mark for the flagged candidates (backup the
+   * pre-repair posts.json first). Default false → flag + warn only. */
+  retireGoneWorkers?: boolean
+  /** Clock (ms epoch) for the backup timestamp. Absent → Date.now. */
+  now?: () => number
+}
+
+/** Read-only flag (or retire-if-safe) the durable posts.json for gone WORKER
+ * sessions, per m-119. Never throws. A configured head is never touched. When
+ * `retireGoneWorkers`, the pre-repair posts.json is copied to
+ * `<stateDir>/posts.json.bak-<ts>-reconcile` FIRST, then the retires are
+ * written atomically (tmp + rename). Idempotent (a re-run sees the workers
+ * already retired → no candidates → no write). */
+export async function reconcileDurablePostsRegistry(
+  stateDir: string,
+  opts: ReconcileDurablePostsOpts
+): Promise<DurablePostsReconcileResult> {
+  const logger = opts.logger
+  const raw = await readDurableJsonFile(stateDir, 'posts.json')
+  if (raw === undefined) {
+    if (!existsSync(path.join(stateDir, 'posts.json'))) {
+      return { workerRetireCandidates: [], workersRetired: [], changed: false }
+    }
+    logger?.warn('[deepartments] reconcile-posts: posts.json unreadable/malformed — cannot reconcile gone workers (no change)')
+    return { workerRetireCandidates: [], workersRetired: [], changed: false }
+  }
+  const entries: DurablePostReconcileLike[] = []
+  for (const [postId, rawEntry] of Object.entries(raw)) {
+    if (rawEntry === null || typeof rawEntry !== 'object') continue
+    const e = rawEntry as Record<string, unknown>
+    const entry: DurablePostReconcileLike = { postId, sessionId: typeof e.sessionId === 'string' ? e.sessionId : '' }
+    if (typeof e.provider === 'string') entry.provider = e.provider
+    if (typeof e.role === 'string') entry.role = e.role
+    if (e.retired === true) entry.retired = true
+    entries.push(entry)
+  }
+  // Resolve the session-gone predicate (async-tolerant) to a sync predicate.
+  const goneByPostId = new Map<string, boolean>()
+  for (const entry of entries) {
+    if (entry.retired === true || entry.provider !== 'worker') continue
+    let gone = false
+    try {
+      gone = Boolean(await opts.isSessionGone(entry.sessionId))
+    } catch {
+      gone = false
+    }
+    goneByPostId.set(entry.postId, gone)
+  }
+  const result = analyzeDurablePostsRegistry(entries, (entry) => goneByPostId.get(entry.postId) === true)
+  for (const candidate of result.workerRetireCandidates) {
+    logger?.warn(`[deepartments] reconcile-posts: worker "${candidate.postId}" (session ${candidate.sessionId}) is a retire-leak candidate — its durable session is gone${opts.retireGoneWorkers === true ? '; auto-retiring (retire-if-safe)' : '; NOT auto-retired (flag only)'}`)
+  }
+  if (opts.retireGoneWorkers === true && result.workerRetireCandidates.length > 0) {
+    try {
+      const nowMs = (opts.now ?? (() => Date.now()))()
+      const backupPath = path.join(stateDir, `posts.json.bak-${nowMs}-reconcile`)
+      await copyFile(path.join(stateDir, 'posts.json'), backupPath)
+      const repairedRaw = { ...raw }
+      for (const candidate of result.workerRetireCandidates) {
+        const e = repairedRaw[candidate.postId]
+        if (e !== null && typeof e === 'object') repairedRaw[candidate.postId] = { ...(e as Record<string, unknown>), retired: true }
+      }
+      const tmpPath = path.join(stateDir, `posts.json.tmp-${nowMs}`)
+      await writeFile(tmpPath, JSON.stringify(repairedRaw, null, 2), 'utf8')
+      await rename(tmpPath, path.join(stateDir, 'posts.json'))
+      logger?.warn(`[deepartments] reconcile-posts: RETIRED ${result.workerRetireCandidates.length} gone worker(s) in durable posts.json (backup ${path.basename(backupPath)})`)
+      return { workerRetireCandidates: result.workerRetireCandidates, workersRetired: result.workerRetireCandidates, changed: true }
+    } catch (error: unknown) {
+      logger?.warn(`[deepartments] reconcile-posts: retire write failed (the durable file is left untouched): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return result
 }
 
 /** The owner-presence state (Feature A — the "Presencia/Ausencia" toggle), the
@@ -2843,12 +3253,32 @@ export const DEPT_EXEC_DEFAULT_ROOTS: readonly string[] = [
 ]
 
 /** Case-insensitive substring denylist for dept_exec commands — a denied token
- * is an out-of-scope safety net; the caller escalates via the Asistente. */
+ * is an out-of-scope safety net; the caller escalates via the Asistente.
+ * `systemctl` is deliberately NOT in this list: the single READ-ONLY
+ * `systemctl is-active <unit>` form is permitted (non-mutating confirmation)
+ * and is carved out in `deptExecDenyReason` via `isReadOnlySystemctl`; every
+ * MUTATING systemctl form (start/stop/restart/enable/disable/daemon-reload/
+ * mask/…) is still denied there. */
 export const DEPT_EXEC_DENYLIST: readonly string[] = [
-  'systemctl', 'reboot', 'shutdown', 'poweroff', 'halt', 'init 0',
+  'reboot', 'shutdown', 'poweroff', 'halt', 'init 0',
   'sudo', 'su -', 'mkfs', 'fdisk', 'parted', 'dd if=', 'rm -rf /',
   'nsenter', ':(){'
 ]
+
+/** Whether the command is the SINGLE READ-ONLY `systemctl is-active <unit>` form
+ * (non-mutating confirmation). Matches EXACTLY the spec pattern
+ * `systemctl` + whitespace + `is-active` (word-boundary) then ANY non-`;|&`
+ * tail, ANCHORED to the whole (trimmed) command line, so there is NOTHING else
+ * on the same line — no `;`/`|`/`&` chaining, no leading/other command, no
+ * `systemctl status`/`restart`/`start`/`stop`/`enable`/`disable`/
+ * `daemon-reload`/`mask`. An optional path prefix ending in `/` (e.g.
+ * `/usr/bin/systemctl`) is tolerated; `sudo`/`reboot` etc. are caught by the
+ * denylist BEFORE this carve-out, and the denylist itself is a substring check
+ * so a mutating token elsewhere in the command is never smuggled past it. */
+export function isReadOnlySystemctl(command: string): boolean {
+  const cmd = String(command ?? '').trim()
+  return /^(?:[A-Za-z0-9_./:=]*\/)?systemctl\s+is-active\b[^;|&]*$/i.test(cmd)
+}
 
 /** The stable-instance state-token — any reference DENIES with the explicit
  * "stable profile is protected" reason (requires owner approval). */
@@ -2867,6 +3297,19 @@ export function isStablePath(p: string): boolean {
   const escaped = DEPT_EXEC_PROTECTED_TOKEN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const re = new RegExp(`(^|[^A-Za-z0-9_/.-])${escaped}(?![A-Za-z0-9_-])`)
   return re.test(s)
+}
+
+/** Whether a MISSION-LEVEL owner grant (an allowed root) covers the STABLE home
+ * `/opt/dsh/.dsh` — i.e. an explicit `org.missionExecRoots` (or `org.execRoots`)
+ * entry NAMED the stable home (or a parent of it) as an allowed exec root. When
+ * true the stable-token protection is bypassed ONLY for that granted root (the
+ * command/cwd is then still subject to the normal cwd-in-root + absolute-path
+ * containment checks, and to the denylist); for ANY mission WITHOUT such a grant
+ * this stays false and the stable home remains protected-denied. The `/opt/dsh/
+ * .dsh-dev` DEV home is NOT stable and NEVER grants the stable home here. */
+export function isStableHomeGranted(allowedRoots: readonly string[]): boolean {
+  const roots = allowedRoots.filter((r) => typeof r === 'string' && r !== '')
+  return roots.some((root) => isPathInside(DEPT_EXEC_PROTECTED_TOKEN, root))
 }
 
 /** execFile timeout + maxBuffer for dept_exec (a runaway command is killed). */
@@ -2955,30 +3398,49 @@ function deptExecCanonicalToken(token: string): string {
  * Returns an out-of-scope deny reason string when the command/cwd must NOT run,
  * or `undefined` when EVERY check passes (the command may execute). Checks, in
  * order: (1) the resolved cwd is inside an allowed root; (2) denylist
- * substring (case-insensitive); (3) a boundary-aware `/opt/dsh/.dsh` token in
- * command OR cwd → the stable profile is protected (its `-dev` sibling is NOT
- * denied); (4) every `/`-leading absolute path token in the command is under an
- * allowed root — each token is FIRST canonicalized (`deptExecCanonicalToken`),
- * and the stable + containment checks run on the canonical target, so a
+ * substring (case-insensitive, with `systemctl` removed to a dedicated
+ * carve-out); (2b) `systemctl` — ONLY the single READ-ONLY
+ * `systemctl is-active <unit>` form is permitted, every MUTATING systemctl
+ * form (start/stop/restart/enable/disable/daemon-reload/mask/…) is DENIED;
+ * (3) a boundary-aware `/opt/dsh/.dsh` token in command OR cwd → the stable
+ * profile is protected (its `-dev` sibling is NOT denied), UNLESS a
+ * MISSION-LEVEL owner grant (`org.missionExecRoots`/`org.execRoots`) named the
+ * stable home as an allowed root (the stable token is bypassed ONLY for that
+ * granted root — never silently, never for an ungranted reference);
+ * (4) every `/`-leading absolute path token in the command is under an allowed
+ * root — each token is FIRST canonicalized (`deptExecCanonicalToken`), and the
+ * stable + containment checks run on the canonical target, so a
  * `..`-escape/symlink to an out-of-root or stable path is denied and a `/dev`
  * sink in the whitelist is always allowed. */
 export function deptExecDenyReason(command: string, cwd: string, allowedRoots: readonly string[]): string | undefined {
   const cmd = String(command ?? '').trim()
   const roots = allowedRoots.filter((r) => typeof r === 'string' && r !== '')
+  // A MISSION-LEVEL owner grant (an allowed root NAMING the stable home) — the
+  // stable-token protection is bypassed ONLY for a root this grant names.
+  const stableHomeGranted = isStableHomeGranted(roots)
   // (1) the resolved cwd must be inside an allowed root (realpath equality).
   if (!roots.some((root) => isPathInside(cwd, root))) {
     return `OUT_OF_SCOPE / DENIED — cwd "${cwd}" is not inside a scoped dept_exec root (escalate via the Asistente / owner approval)`
   }
-  // (2) denylist (case-insensitive substring).
+  // (2) denylist (case-insensitive substring). Runs BEFORE the systemctl
+  // carve-out so a mutating token (sudo/reboot/…) is still denied even if the
+  // command also contains a read-only `systemctl is-active`.
   const lower = cmd.toLowerCase()
   for (const bad of DEPT_EXEC_DENYLIST) {
     if (lower.includes(bad)) {
       return `OUT_OF_SCOPE / DENIED — command contains a denied token "${bad}" (escalate via the Asistente / owner approval)`
     }
   }
+  // (2b) systemctl — ONLY the read-only `systemctl is-active <unit>` form is
+  // permitted; every mutating systemctl form stays DENIED (the Asistente/owner
+  // owns those). The denylist already ran, so a mutating token is caught above.
+  if (lower.includes('systemctl') && !isReadOnlySystemctl(cmd)) {
+    return 'OUT_OF_SCOPE / DENIED — command contains a denied systemctl form (only the read-only `systemctl is-active <unit>` is permitted; mutating forms are the Asistente/owner\'s)'
+  }
   // (3) the stable profile is protected — the boundary-aware token (a whole
   // path component; `/opt/dsh/.dsh-dev` is NOT stable) → explicit owner approval.
-  if (isStablePath(cmd) || isStablePath(cwd)) {
+  // Bypassed ONLY when a mission-level owner grant named the stable home.
+  if ((isStablePath(cmd) || isStablePath(cwd)) && !stableHomeGranted) {
     return 'OUT_OF_SCOPE / DENIED — the stable profile is protected — requires explicit owner approval via the Asistente'
   }
   // (4) every `/`-leading absolute path token must be under an allowed root.
@@ -2992,7 +3454,8 @@ export function deptExecDenyReason(command: string, cwd: string, allowedRoots: r
     if (DEPT_EXEC_DEV_WHITELIST.has(target)) continue
     // The stable-profile token, applied to the CANONICAL target — a normalized
     // `..`-escape to `/opt/dsh/.dsh/…` must NOT slip past the boundary check.
-    if (isStablePath(target)) {
+    // Bypassed ONLY when a mission-level owner grant named the stable home.
+    if (isStablePath(target) && !stableHomeGranted) {
       return 'OUT_OF_SCOPE / DENIED — the stable profile is protected — requires explicit owner approval via the Asistente'
     }
     if (!roots.some((root) => isPathInside(target, root))) {
@@ -4914,8 +5377,13 @@ export function applyInvoke(ctx: Context, config: Config) {
    * `host-<sessionId>` address used for the journal path and hosts.json. */
   const hostIdForSession = (sessionId: string): string => `${HOST_ID_PREFIX}${sessionId}`
 
-  // Fire-and-forget persistence of the post registry (callers never await it).
-  const persistPosts = (): void => {
+  // Persistence of the post registry. Callers MAY await it (returns the write
+  // promise) so a durability-critical step (the dept_sleep sleepEpoch mark) can
+  // be gated on the write completing; all other callers keep the fire-and-forget
+  // shape (`persistPosts()` as a statement ignores the returned promise). The
+  // promise ALWAYS settles — a failed write resolves (the error is logged), never
+  // rejects — so an awaiting caller can never be thrown on a disk hiccup.
+  const persistPosts = (): Promise<void> => {
     const data: Record<string, PostEntryPersisted> = {}
     for (const entry of byPost.values()) {
       data[entry.postId] = {
@@ -4941,7 +5409,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         ...(entry.previousChildId !== void 0 ? { previousChildId: entry.previousChildId } : {})
       }
     }
-    writeFile(postsPath, JSON.stringify(data, null, 2), 'utf8').catch(
+    return writeFile(postsPath, JSON.stringify(data, null, 2), 'utf8').catch(
       (error: unknown) => { ctx.logger.warn(`[deepartments] posts.json write failed: ${error instanceof Error ? error.message : String(error)}`) }
     )
   }
@@ -6865,9 +7333,12 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   /** The realpath-resolved SET of allowed roots for a dept_exec call: the fixed
    * DEPT_EXEC_DEFAULT_ROOTS, the repo root, the runtime stateDir, the caller's
-   * department workspace, and any configured org.execRoots. Each root is
-   * realpath'd when it resolves (a symlink root collapses to its target, so the
-   * cwd/path comparisons stay strict); an unresolvable root is kept verbatim. */
+   * department workspace, any configured org.execRoots, AND any configured
+   * org.missionExecRoots (an EXPLICIT, REVOCABLE, AUDITABLE mission-level owner
+   * grant that may name an OWNER-PROTECTED surface such as the STABLE home
+   * `/opt/dsh/.dsh` for the DURATION of an owner-authorized mission). Each root
+   * is realpath'd when it resolves (a symlink root collapses to its target, so
+   * the cwd/path comparisons stay strict); an unresolvable root is kept verbatim. */
   const deptExecAllowedRoots = async (department: DepartmentConfig | undefined): Promise<string[]> => {
     const raw = new Set<string>(DEPT_EXEC_DEFAULT_ROOTS)
     raw.add(repoRoot)
@@ -6876,6 +7347,14 @@ export function applyInvoke(ctx: Context, config: Config) {
     const deptCwd = await resolveDepartmentWorkspaceCwd(department)
     if (deptCwd !== '') raw.add(deptCwd)
     for (const entry of (config.org.execRoots ?? [])) {
+      if (typeof entry === 'string' && entry.trim() !== '') raw.add(entry.trim())
+    }
+    // MISSION-LEVEL owner grant: an explicit org.missionExecRoots entry adds the
+    // surface (e.g. the STABLE home /opt/dsh/.dsh) to the allowed roots for the
+    // DURATION of an OWNER-AUTHORIZED mission. It is EXPLICIT (an absent key
+    // keeps the default deny — the stable home stays protected), AUDITABLE
+    // (config-recorded, never an env default) and REVOCABLE (remove the entry).
+    for (const entry of (config.org.missionExecRoots ?? [])) {
       if (typeof entry === 'string' && entry.trim() !== '') raw.add(entry.trim())
     }
     const resolved: string[] = []
@@ -7143,7 +7622,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (opts.allowExec === true) {
       disposers.push(agentCtx.tools.register(defineTool({
         name: 'dept_exec',
-        description: 'Execute ONE shell command, scoped to your department (spec W5-B2). Runs `bash -lc <command>` with a sanitized env (PATH/HOME/LANG only) inside a scoped root. The command runs in your department workspace cwd by default; an explicit `cwd` must be inside a scoped root. Every command + cwd is guarded BEFORE execution: a denied token (systemctl/reboot/sudo/…), a reference to the protected stable profile (`/opt/dsh/.dsh`) or an absolute path outside a scoped root is DENIED (out of scope — escalate via the Asistente / owner approval). For a department WORKER whose role template declares this tool; it is never exposed to the host or a config head. Output: {ok, exitCode, stdout, stderr} — a non-zero exit is ok:false, never a throw.',
+        description: 'Execute ONE shell command, scoped to your department (spec W5-B2). Runs `bash -lc <command>` with a sanitized env (PATH/HOME/LANG only) inside a scoped root. The command runs in your department workspace cwd by default; an explicit `cwd` must be inside a scoped root. Every command + cwd is guarded BEFORE execution: a denied token (reboot/sudo/…), a mutating `systemctl` form (only the read-only `systemctl is-active <unit>` is permitted), a reference to the protected stable profile (`/opt/dsh/.dsh`) or an absolute path outside a scoped root is DENIED (out of scope — escalate via the Asistente / owner approval). For an OWNER-AUTHORIZED mission, an explicit mission grant (`org.missionExecRoots`) may allow `/opt/dsh/.dsh`; otherwise escalate via the Asistente/owner (the Asistente-direct path is the alternative). For a department WORKER whose role template declares this tool; it is never exposed to the host or a config head. Output: {ok, exitCode, stdout, stderr} — a non-zero exit is ok:false, never a throw.',
         parameters: {
           command: { type: 'string', required: true, description: 'The shell command to run (non-empty). Guarded before execution.' },
           cwd: { type: 'string', description: 'Working directory; default = your department workspace cwd. Must be inside a scoped root.' }
@@ -7246,6 +7725,14 @@ export function applyInvoke(ctx: Context, config: Config) {
         if (journal === void 0 || journal.trim() === '') {
           throw new Error('[deepartments] dept_sleep requires a saved journal — call dept_memo_write to save your memory first')
         }
+        // Fix (head-sleep idempotency): an ALREADY-SLEPT head carries a durable
+        // sleepEpoch mark. A RE-ISSUED dept_sleep directive on it is a NO-OP —
+        // return the already-slept state WITHOUT re-running the teardown (no
+        // re-mark, no re-persist, no re-archive, no re-dispose, no re-wake-counter
+        // bump). The head stays slept; only its next bus wake mints a fresh session.
+        if (entry.sleepEpoch !== void 0) {
+          return { room: entry.roomId, member: memberId, memoPath: journalPathFor(memberId), sleepEpoch: entry.sleepEpoch }
+        }
         // Head/worker wake_counter parity (owner decision: heads + workers, so
         // BOTH a manager head and a disposable worker route here through the
         // own-layer dept_sleep — the host never does, it is rejected above).
@@ -7281,28 +7768,26 @@ export function applyInvoke(ctx: Context, config: Config) {
         // capture falls back to `time > lastWakeMs`.
         const boundarySeq = (agent.session as { seq?: number } | undefined)?.seq
         if (boundarySeq !== undefined) entry.boundarySeq = boundarySeq
-        persistPosts()
+        // Fix (head-sleep idempotency/rotation-race): AWAIT the durable persist so
+        // the sleepEpoch mark is on-disk BEFORE any async teardown step that a
+        // host-session rotation / service restart could abort. The mark is the
+        // durable part; if the archive fails to seal (or a restart lands during
+        // the archive), the boot reconcile (runHalfSleptHeadReconcile) re-seals.
+        await persistPosts()
         // F8 (spec 002 head rotation) — ARCHIVE the slept head's durable session
         // server-side so the SIDEBAR ROW disappears (the journal + messages stay
         // intact — archive never deletes; D5). HEAD-ONLY: a disposable WORKER is
         // retired via dept_worker_retire (its own archive path) and keeps the
         // legacy cold-resume behavior — a worker dept_sleep is NOT rotated.
         // Non-fatal by design (archivePostSessionOnSleep never throws; a missing
-        // registry or a failing call WARNs and the sleep still commits — the
-        // sleep mark is the durable part). FIRE-AND-FORGET (`void`), exactly
-        // like the dispose below: the archive is cosmetic row-hiding and must
-        // never block the sleep (spec D1: archive ≠ delete — the journal +
-        // messages stay intact). Semantics verified S2.5: a pure registry-global
-        // set-add + persist; NOTHING terminates the agent, and the artifact
-        // stays intact.
+        // registry or a failing call WARNs + resolves false, and the sleep still
+        // commits — the sleep mark is the durable part). AWAITED (was `void`) so
+        // the row-hide SEALS before the dispose fires; the archive is cosmetic
+        // row-hiding and must never throw (spec D1: archive ≠ delete — the
+        // journal + messages stay intact). Semantics verified S2.5: a pure
+        // registry-global set-add + persist; NOTHING terminates the agent.
         if (entry.provider !== 'worker') {
-          void archivePostSessionOnSleep(sessionId)
-          // QD (spec 007 §6.2, D-Q3): the HEAD-sleep MANDATE — a department head
-          // archive is inspected at 100% (never gated by the dice). Emits an
-          // ADDRESSED QUALITY INSPECT directive to quality-head right after the
-          // archive seals. Non-fatal (the helper wraps its own try/catch); a
-          // failing directive degrades to a warn and the sleep still commits.
-          await maybeEmitQualityInspectDirective({ kind: 'head-slept', headPostId: memberId, sessionId, sleepEpoch: entry.sleepEpoch })
+          await archivePostSessionOnSleep(sessionId)
         }
         // Fix sleep-self-deadlock (2026-08-23): NEVER await our own handle's
         // dispose from our own turn — the harness dispose() sends
@@ -7312,8 +7797,22 @@ export function applyInvoke(ctx: Context, config: Config) {
         // Fire it (the retirePost precedent) so the tool returns immediately,
         // the turn/end settles and the dispose's whenIdle then resolves; the
         // per-session `disposingHeads` dedupe lets a concurrent wake JOIN the
-        // same detach instead of racing it.
+        // same detach instead of racing it. The dispose stays NON-awaited
+        // (fire-and-forget) AND is dispatched BEFORE the (async) QD directive
+        // below, so a host-session rotation landing on that directive await can
+        // no longer abort the detach — the archive seal + the dispose dispatch
+        // are already committed.
         void disposeHeadHandleOnce(sessionId)
+        // QD (spec 007 §6.2, D-Q3): the HEAD-sleep MANDATE — a department head
+        // archive is inspected at 100% (never gated by the dice). Emits an
+        // ADDRESSED QUALITY INSPECT directive to quality-head. Non-fatal (the
+        // helper wraps its own try/catch); a failing directive degrades to a
+        // warn and the sleep still commits. Runs AFTER the dispose dispatch so
+        // the async bus deliver is NOT on the detach path — a rotation/restart
+        // landing on this await can no longer leave the head LIVE.
+        if (entry.provider !== 'worker') {
+          await maybeEmitQualityInspectDirective({ kind: 'head-slept', headPostId: memberId, sessionId, sleepEpoch: entry.sleepEpoch })
+        }
         return { room: entry.roomId, member: memberId, memoPath: journalPathFor(memberId), sleepEpoch: entry.sleepEpoch }
       }
     })))
@@ -8506,6 +9005,25 @@ export function applyInvoke(ctx: Context, config: Config) {
     ctx.logger.warn(`[deepartments] head attach (${source}) failed: ${detail} — the session stays invisible in the sidebar (retried ${HOST_ATTACH_REPAIR_TIMEOUT_MS}ms)`)
   }
 
+  /** THE VISIBILITY FIX SEAM (2026-08-25 P2) — archive-leak rotation id
+   * (HEAD-only). A head's durable session id in the workspace registry's
+   * `archivedSessionIds` must NEVER be RESUMED: the GUI sidebar hides any
+   * session whose id is archived (`dsh-client-ui-workspace` sessionVisible —
+   * `!archived.has(id)`, client.js:100-101), so re-seeding a live head on an
+   * archived id makes it live-but-invisible (the reported P2). Returns a FRESH
+   * `head-<postId>-<uuid>` id when the durable id is archived (the F8 fresh-mint
+   * shape materializePost uses for a slept head), or `undefined` when it is NOT
+   * archived — the caller then proceeds with its NORMAL resume (zero regression).
+   * A WORKER's resume is untouched (the caller invokes this only for a head,
+   * provider !== 'worker'); the archive-leak is head-specific. */
+  const rotateArchivedHeadSessionId = async (postId: string, sessionId: string): Promise<string | undefined> => {
+    const registry = ctx.get('workspaceRegistry', false) as WorkspaceRegistryLike | undefined
+    if (!isArchivedSession(registry, sessionId)) return undefined
+    const fresh = String(SessionId(`${HEAD_SESSION_PREFIX}${postId}-${randomUUID()}`))
+    ctx.logger.warn(`[deepartments] head "${postId}" durable session ${sessionId} is ARCHIVED — rotating to fresh ${fresh} instead of resuming the archived id (a live head's session is never archived)`)
+    return fresh
+  }
+
   /** Ensure ONE configured head is materialized as a live root agent.
    * Idempotent: live → reuse (record the handle if create/resume just ran);
    * durable session in the registry → resume; else → create. Mirrors the
@@ -8532,7 +9050,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     // fresh session at its last wake carries that id here) — fall back to the
     // deterministic `head-<postId>` derivation ONLY when there is no durable
     // entry yet (first boot / fresh department).
-    const sessionId = SessionId(durableEntry?.sessionId ?? headSessionId(postId))
+    // `let` (not `const`): the archive-leak rotation below REPLACES a durable
+    // head session id that the workspace registry has archived, and the attach/
+    // title-pin tail must target the ROTATED (fresh) session id.
+    let sessionId = SessionId(durableEntry?.sessionId ?? headSessionId(postId))
     if (agents === void 0) return
     // F5 (spec 004 §6.2 L1): a department WITH a configured workspacePath owns a
     // REAL sidebar folder — ensure the workspace (mkdir + registry ensure — the
@@ -8558,20 +9079,40 @@ export function applyInvoke(ctx: Context, config: Config) {
       const agentOptions = coordinator.agentOptions
       const durableSession = durableEntry !== void 0
       if (durableSession) {
-        try {
-          handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions, setup })
-          registerEntry(makeEntry(department, roomId, String(sessionId)))
-        } catch (error: unknown) {
-          // Resume failed (e.g. no durable session in the persistence store after
-          // a stateDir wipe): fall back to creating a fresh session.
-          ctx.logger.warn(`[deepartments] head "${postId}" resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
+        // THE VISIBILITY FIX (2026-08-25 P2): a durable head session id in the
+        // workspace registry's archived set must NEVER be RESUMED — a live head's
+        // session is never archived, because the GUI sidebar hides any archived
+        // session id. The re-seed resume of an archived id is the root cause of
+        // the live-but-invisible head. Treat it like a slept head: rotate to a
+        // FRESH id (the F8 fresh-mint shape) and CREATE, never resume. A
+        // NON-archived head resume is byte-identical (zero regression); a
+        // WORKER's resume never reaches here (worker resume is its own lifecycle).
+        const rotatedSessionId = await rotateArchivedHeadSessionId(postId, String(sessionId))
+        if (rotatedSessionId !== void 0) {
+          sessionId = SessionId(rotatedSessionId)
           handle = await agents.create({
-            sessionId: String(sessionId),
+            sessionId: rotatedSessionId,
             meta: { cwd: departmentCwd !== '' ? departmentCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: presetId },
             agentOptions,
             setup
           })
-          registerEntry(makeEntry(department, roomId, String(sessionId)))
+          registerEntry(makeEntry(department, roomId, rotatedSessionId))
+        } else {
+          try {
+            handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions, setup })
+            registerEntry(makeEntry(department, roomId, String(sessionId)))
+          } catch (error: unknown) {
+            // Resume failed (e.g. no durable session in the persistence store after
+            // a stateDir wipe): fall back to creating a fresh session.
+            ctx.logger.warn(`[deepartments] head "${postId}" resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
+            handle = await agents.create({
+              sessionId: String(sessionId),
+              meta: { cwd: departmentCwd !== '' ? departmentCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: presetId },
+              agentOptions,
+              setup
+            })
+            registerEntry(makeEntry(department, roomId, String(sessionId)))
+          }
         }
       } else {
         handle = await agents.create({
@@ -8907,6 +9448,76 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  /** m-119 — DURABLE host/post registry VALIDATION at boot. After both
+   * registries cold-load, VALIDATE the durable hosts.json invariant and the
+   * durable posts.json retire-leak class and WARN on any degenerate state
+   * (warn-on-degenerate, idempotent, non-throwing) so the durable registry
+   * converges to the live reality WITHOUT manual intervention. The Boot hook is
+   * deliberately READ-ONLY: it never auto-retires/rewrites a legitimate
+   * multi-host or multi-live state (a fleet of dormant hosts, or a rotation in
+   * progress, must stay resumable — see the VARIANT-2 dormant-host resume
+   * regression). The WRITE repair is exposed on the exported helpers as an
+   * explicit `write` / `retireGoneWorkers` opt-in (unit-tested) and is safe to
+   * run when a degenerate state is confirmed. The Bug A durable-gate +
+   * alert-recipient behavior (already correct) is unchanged. */
+  const runDurableRegistryReconciliation = async (): Promise<void> => {
+    try {
+      // (1) durable HOSTS registry — validate + warn (read-only; no auto-write).
+      await reconcileDurableHostRegistry(config.stateDir, { logger: ctx.logger, write: false })
+      // (2) durable POSTS registry — flag + warn a gone WORKER session
+      // (retire-if-safe is an explicit opt-in; a configured head is never
+      // flagged). The session-gone resolver is CONSERVATIVE: only a positively
+      // confirmed absent durable session counts as gone (unable to determine →
+      // NOT gone → never flagged).
+      const persistence = ctx.get('sessionPersistence') as { readRaw?: (id: SessionId, signal?: AbortSignal) => Promise<{ content: string } | undefined> } | undefined
+      await reconcileDurablePostsRegistry(config.stateDir, {
+        logger: ctx.logger,
+        retireGoneWorkers: false,
+        isSessionGone: async (sessionId: string): Promise<boolean> => {
+          if (persistence === undefined || typeof persistence.readRaw !== 'function') return false
+          try {
+            const raw = await persistence.readRaw(SessionId(sessionId))
+            return raw === undefined
+          } catch {
+            return false
+          }
+        }
+      })
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] durable-registry validation failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** Fix (head-sleep idempotency/rotation-race) — (b) BOOT RECONCILE: a HEAD
+   * whose post entry carries a SLEPT mark (sleepEpoch set) but whose session was
+   * NEVER archived/closed — the "half-slept" dangling state left when a
+   * host-session rotation / service restart landed DURING the dept_sleep
+   * teardown (the pre-fix ordering put the awaited QD directive between the
+   * archive and the dispose, so an abort on that await left the archive
+   * un-sealed and the handle LIVE) — has an un-archived durable session that
+   * nothing else reconciles (ensureHead skips a sleepEpoch-set head at boot, so
+   * it is never touched). At boot, re-seal it: re-run the (idempotent)
+   * archivePostSessionOnSleep for that sessionId so no dangling un-archived
+   * session remains. NEVER throws and NEVER wakes/materializes the head — a
+   * slept head stays dormant until its next bus wake (which mints a fresh
+   * session), exactly as the F8 boot-dormancy invariant requires. */
+  const runHalfSleptHeadReconcile = async (): Promise<void> => {
+    try {
+      for (const [postId, entry] of byPost) {
+        if (entry.retired === true) continue
+        if (entry.provider === 'worker') continue          // worker retire is its own path
+        if (entry.sleepEpoch === void 0) continue          // only a SLEPT head
+        // Re-seal the archive. Idempotent (registry.archiveSession is a no-op on
+        // an already-archived id) + non-fatal (archivePostSessionOnSleep never
+        // throws; a missing registry warns + returns false). The head is NEVER
+        // woken — it stays dormant until its next bus delivery.
+        await archivePostSessionOnSleep(entry.sessionId)
+      }
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] half-slept-head reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   // Boot: materialize the head preset and every configured head once the
   // registries (posts/hosts) have cold-loaded — and re-drive any crash-pending
   // bus deliveries (see the re-delivery driver below). Head materialization no
@@ -8917,6 +9528,8 @@ export function applyInvoke(ctx: Context, config: Config) {
     void runPresetAudit()
     void runInterruptedPostReconciliation()
     void runProviderAdapterBootCheck()
+    void runDurableRegistryReconciliation()
+    void runHalfSleptHeadReconcile()
   })
 
   // ---------------------------------------------------------------------------
@@ -9029,6 +9642,41 @@ export function applyInvoke(ctx: Context, config: Config) {
       // falls back to the shared workspace root (deptCwd ''). The resume path
       // above keeps the session's stored header cwd (immutable per session).
       const deptCwd = await resolveDepartmentWorkspaceCwd(departmentForEntry(entry))
+      // THE VISIBILITY FIX (2026-08-25 P2): a NON-slept HEAD whose durable
+      // session id is in the workspace registry's archived set must NEVER be
+      // RESUMED — a live head's session is never archived, because the GUI
+      // sidebar hides any archived session id (the re-seed resume of an archived
+      // id is the root cause of the live-but-invisible head). Rotate to a FRESH
+      // id (the F8 fresh-mint shape) and CREATE. A NON-archived head resume is
+      // byte-identical (zero regression); a WORKER's resume is untouched here
+      // (isWorker skips the rotation entirely).
+      const rotatedSessionId = isWorker ? undefined : await rotateArchivedHeadSessionId(entry.postId, String(sessionId))
+      if (rotatedSessionId !== void 0) {
+        registerEntry({ ...entry, sessionId: rotatedSessionId, previousChildId: String(sessionId), sleepEpoch: undefined })
+        handle = await agents.create({
+          sessionId: rotatedSessionId,
+          meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: headPreset },
+          agentOptions,
+          setup
+        })
+        if (handle !== void 0) byHeadHandle.set(rotatedSessionId, handle)
+        const rotatedTarget = agents.get(rotatedSessionId)
+        if (rotatedTarget === void 0) throw new Error(`[deepartments] head "${entry.postId}" could not be materialized (archived-session rotation) for bus delivery`)
+        markHeadProgress(rotatedSessionId, rotatedTarget)
+        void attachHeadSession(rotatedSessionId, 'bus-deliver')
+        const titleSession = ctx.sessions.get(SessionId(rotatedSessionId))
+        if (titleSession !== void 0) {
+          const title = coordinator?.sessionTitle || HEAD_DEFAULT_SESSION_TITLE
+          const titlePin = pinSessionTitle(titleSession, title)
+          if (titlePin === 'pinned') {
+            ctx.logger.info(`[deepartments] archive-leak rotation: pinned fresh head title "${title}" (${rotatedSessionId})`)
+          } else if (titlePin === 'failed') {
+            ctx.logger.warn(`[deepartments] archive-leak rotation: fresh head title pin failed for ${rotatedSessionId} (non-fatal — materialization continues)`)
+          }
+        }
+        resumed = true
+        return { target: rotatedTarget, resumed: true }
+      }
       try {
         handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions, setup })
       } catch (error: unknown) {

@@ -53,13 +53,57 @@ fresh worker with the same `jobId`. No round-to-round state carries over.
 A worker's `dept_exec` is restricted to the allowed roots:
 `/home/esuarez/projects`, `/usr/lib/node_modules/@deepseek-ai/dsh`, the
 repository root, the department workspace, and the runtime stateDir. The STABLE
-profile `/opt/dsh/.dsh` is OUT OF SCOPE — a task that needs it stops and asks
-its head (which escalates via the Asistente to the owner); anything else outside
-the allowed roots likewise requires owner approval. Workers NEVER run
-`systemctl`/`reboot`/`sudo`/etc (the tool denies them). **Commits are the
-Asistente's job** — workers edit files and report, never commit. Only the
-`builder`/`reviewer`/`explore-deep` roles carry `dept_exec`, and the latter two
-use it read-only; the `organizer` has no `dept_exec` and no `edit`.
+profile `/opt/dsh/.dsh` is OUT OF SCOPE by default — a task that needs it stops
+and asks its head (which escalates via the Asistente to the owner); anything
+else outside the allowed roots likewise requires owner approval. Workers NEVER
+run `reboot`/`sudo`/etc, and NEVER a mutating `systemctl` form (the tool denies
+them); the single READ-ONLY `systemctl is-active <unit>` (non-mutating
+confirmation) IS permitted, while `start`/`stop`/`restart`/`enable`/`disable`/
+`daemon-reload`/`mask` etc. remain denied (the Asistente/owner owns them).
+**Commits are the Asistente's job** — workers edit files and report, never
+commit. Only the `builder`/`reviewer`/`explore-deep` roles carry `dept_exec`,
+and the latter two use it read-only; the `organizer` has no `dept_exec` and no
+`edit`.
+
+### Mission-level owner grant (explicit + revocable + auditable)
+
+An OWNER-AUTHORIZED mission may require the worker to reach an owner-protected
+surface (e.g. the STABLE home `/opt/dsh/.dsh`) — exactly what the M1
+stable-dismount mission hit. A mission-level owner approval is plumbed into the
+exec scoped-root whitelist through the config key `org.missionExecRoots?: string[]`
+(`src/org.ts`), read as ADDITIONAL allowed roots for the DURATION of that
+mission (`src/invoke.ts` `deptExecAllowedRoots`). The guard's stable-token
+protection is bypassed ONLY for a root the mission grant names. The grant is:
+
+- **EXPLICIT** — an absent/empty key keeps the default deny (no silent widening;
+  the stable home stays protected for any mission without a grant);
+- **AUDITABLE** — config-recorded (the entry lives in the deployment config,
+  never an accidental env default), and it surfaces in the same `dept_exec`
+  deny-reason path;
+- **REVOCABLE** — documented remove: delete the entry (and restore the default
+  deny); it is NOT baked into a preset.
+- The `/opt/dsh/.dsh` STABLE token stays in force for any reference the grant
+  does NOT name — only a root the grant names loses the token, never anything
+  else.
+
+### Both-path availability (worker-with-grant vs Asistente-direct)
+
+A mission authorized at the owner level may be executed EITHER by the worker
+(with an explicit `org.missionExecRoots` grant) OR by the Asistente directly
+(the path that carried M1). Both are first-class; the worker should escalate via
+its head → the Asistente/owner when it has no grant, rather than attempting an
+ungranted mutate.
+
+### ACL asymmetry (design-review item)
+
+File tools (`read`/`edit`/`write`/`glob`/`grep`, danger-full-access) can REACH
+an owner-protected surface (e.g. `/opt/dsh/.dsh`) while the exec shell is
+scoped-root-denied there — so a worker can READ an owner-protected surface it
+can never mutate or verify with the shell. The mission grant closes the mutation
+gap; the read without a grant is intentional (inspection is allowed, mutation is
+not). Keep the two boundaries coherent: grant the shell for a mission, and the
+file tool's read access becomes a verified read rather than an unverifiable one.
+
 
 ## Knowledge system
 
