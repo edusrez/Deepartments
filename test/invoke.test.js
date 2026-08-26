@@ -2998,6 +2998,135 @@ test('m-228 dept_who: a RETIRED worker with a LINGERING live AgentHandle renders
   })
 })
 
+test('m-64 dept_who member state: an ACTIVE member (turn IN FLIGHT — agents.get(sid).status === "running") renders "running"', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'worker-active', role: 'builder' }, { agent: head, signal })
+      const sid = created.sessionId
+      // The created worker IS resident (store) — make its turn IN FLIGHT by
+      // setting status === 'running' (the exact seam the QD report verified:
+      // `agents.get(SessionId(sid))?.status === 'running'`).
+      const workerAgent = agents.store.get(sid)
+      assert.ok(workerAgent, 'the created worker has a live AgentHandle in the registry')
+      workerAgent.status = 'running'
+      const who = await root.tools.get('dept_who').execute({}, { agent: agents.put(fakeParentAgent()), signal })
+      const row = who.members.find((m) => m.agentId === 'worker-active')
+      assert.ok(row, 'the active worker is listed')
+      assert.equal(row.live, true, 'an active member is live (AgentHandle present)')
+      assert.equal(row.state, 'running', 'm-64: a turn-in-flight member derives state "running"')
+      const rendered = root.tools.get('dept_who').output.render({}, { members: who.members })
+      const line = rendered[0].text.split('\n').find((l) => l.includes('worker-active'))
+      assert.ok(line, 'the active worker line is present in the rendered catalog')
+      assert.match(line, /, running/, 'the active member renders the "running" token (turn in flight)')
+      assert.doesNotMatch(line, /, live/, 'the active member never renders the flat "live" token (collapsed into running)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('m-64 dept_who member state: a RESIDENT-but-idle member (session loaded, turn finished/stopped) renders "idle"', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'worker-idle', role: 'builder' }, { agent: head, signal })
+      const sid = created.sessionId
+      // A freshly materialized worker is resident with status 'idle' — the turn
+      // finished/stopped, NOT in flight. This is the exact case that collapsed
+      // into "live" before m-64 and misled the IPD (builder-94 429).
+      assert.equal(agents.store.get(sid).status, 'idle', 'the created worker is resident and idle (turn finished)')
+      const who = await root.tools.get('dept_who').execute({}, { agent: agents.put(fakeParentAgent()), signal })
+      const row = who.members.find((m) => m.agentId === 'worker-idle')
+      assert.ok(row, 'the idle worker is listed')
+      assert.equal(row.live, true, 'a resident-but-idle member is live (AgentHandle present)')
+      assert.equal(row.state, 'idle', 'm-64: a resident-but-idle member derives state "idle"')
+      const rendered = root.tools.get('dept_who').output.render({}, { members: who.members })
+      const line = rendered[0].text.split('\n').find((l) => l.includes('worker-idle'))
+      assert.ok(line, 'the idle worker line is present in the rendered catalog')
+      assert.match(line, /, idle/, 'the resident-but-idle member renders the "idle" token (NOT "live")')
+      assert.doesNotMatch(line, /, live/, 'the idle member never renders the flat "live" token (collapsed into idle)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('m-64 dept_who member state precedence: a SLEPT-but-LIVE head (sleepEpoch set + a lingering AgentHandle — the deploy-restart case) renders "sleeping", NEVER the contradictory "live, sleeping"', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const postId = 'research-head'
+      const signal = new AbortController().signal
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      // Save a journal, then sleep the head durably (sleepEpoch persisted +
+      // live handle disposed).
+      await memo.execute({ summary: 'Memory saved before sleeping.' }, { agent: head, signal })
+      const result = await sleep.execute({}, { agent: head, signal })
+      assert.ok(typeof result.sleepEpoch === 'number' && result.sleepEpoch > 0, 'head slept durably')
+      await waitFor(async () => (await readPosts(stateDir))[postId].sleepEpoch !== undefined, 5000, 'sleepEpoch persisted to posts.json')
+      const posts = await readPosts(stateDir)
+      assert.ok(typeof posts[postId].sleepEpoch === 'number', 'sleepEpoch persisted durably')
+      // Reproduce the m-228/QD deploy-restart class: a slept head whose durable
+      // session id now has a LINGERING AgentHandle in the registry (the dispose
+      // never ran before the restart). `live` is therefore TRUE and `sleeping`
+      // is TRUE simultaneously — exactly the contradictory-combo case.
+      const headSessionId = posts[postId].sessionId
+      assert.equal(agents.store.has(headSessionId), false, 'the slept head has no live handle until we plant the lingering one')
+      agents.put(fakeParentAgent(SessionId(headSessionId)))
+      const who = await root.tools.get('dept_who').execute({}, { agent: agents.put(fakeParentAgent()), signal })
+      const row = who.members.find((m) => m.agentId === postId)
+      assert.ok(row, 'the slept head is listed')
+      assert.equal(row.sleeping, true, 'the slept head carries the durable sleeping marker')
+      assert.equal(row.live, true, 'the slept-but-live case: a lingering handle makes the row live')
+      assert.equal(row.state, 'sleeping', 'm-64 precedence: a slept-but-live head derives state "sleeping" (collapses live — no contradiction)')
+      const rendered = root.tools.get('dept_who').output.render({}, { members: who.members })
+      const line = rendered[0].text.split('\n').find((l) => l.includes(postId))
+      assert.ok(line, 'the slept head line is present in the rendered catalog')
+      assert.match(line, /, sleeping/, 'the slept head renders the "sleeping" token')
+      assert.doesNotMatch(line, /, live, sleeping/, 'NEVER the contradictory "live, sleeping"')
+      assert.doesNotMatch(line, /, live/, 'the slept head never renders the flat "live" token (collapsed into sleeping)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('m-64 dept_who member state precedence: a RETIRED member short-circuits to "offline" (m-228 preserved) even when its AgentHandle lingers AND is running', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'worker-retired', role: 'builder' }, { agent: head, signal })
+      const sid = created.sessionId
+      await root.tools.get('dept_post_retire').execute({ postId: 'worker-retired' }, { agent: agents.put(fakeParentAgent()), signal })
+      await waitFor(async () => (await readPosts(stateDir))['worker-retired']?.retired === true, 5000, 'worker marked retired')
+      // m-228 extended: the retired worker's AgentHandle LINGERS and is even
+      // mid-turn ('running') — retirement must STILL short-circuit to 'offline'
+      // and never evaluate live.
+      agents.put({ ...fakeParentAgent(SessionId(sid)), status: 'running' })
+      const who = await root.tools.get('dept_who').execute({ scope: 'includeRetired' }, { agent: agents.put(fakeParentAgent()), signal })
+      const row = who.members.find((m) => m.agentId === 'worker-retired')
+      assert.ok(row, 'the retired worker is listed in the management view')
+      assert.equal(row.retired, true, 'the retired row carries retired:true')
+      assert.equal(row.live, false, 'm-228 retained: a retired member is NEVER live, even with a running lingering handle')
+      assert.equal(row.state, 'offline', 'm-64 precedence: a retired member short-circuits to state "offline" (never running/never live)')
+      const rendered = root.tools.get('dept_who').output.render({}, { members: who.members })
+      const line = rendered[0].text.split('\n').find((l) => l.includes('worker-retired'))
+      assert.ok(line, 'the retired worker line is present in the rendered catalog')
+      assert.match(line, /, offline/, 'the retired worker renders "offline"')
+      assert.match(line, /, retired/, 'the retired worker renders the "retired" marker (never removed)')
+      assert.doesNotMatch(line, /, live/, 'the retired worker NEVER renders "live, retired" (m-228 short-circuit preserved)')
+      assert.doesNotMatch(line, /, running/, 'the retired worker NEVER renders "running" (retired short-circuits before running)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('A1/A2/A5 dept_who scope: default `active` HIDES retired rows; `{ scope: "includeRetired" }` lists them with retired:true — the header shows both counts', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)

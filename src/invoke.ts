@@ -130,8 +130,8 @@ export type {
   PageResult,
   DeliveryRedelivererDeps
 } from './core/messages.js'
-import { buildAgentRows } from './agents.js'
-import type { PostEntryLike } from './agents.js'
+import { buildAgentRows, computeDeptWhoState } from './agents.js'
+import type { PostEntryLike, DeptWhoState } from './agents.js'
 import {
   HEAD_PRESET_BASE_ID,
   headPresetIdFor,
@@ -9424,7 +9424,7 @@ export function applyInvoke(ctx: Context, config: Config) {
    * (the LIVE catalog — busDeliverCatalog addressing — still filters them). */
   const deptWhoTool = defineTool({
     name: 'dept_who',
-    description: 'List the whole Deepartments catalog — the Asistente host (kind "host", title "Asistente") and every registered department head/worker with its DERIVED kind (a configured department head is kind "head", a disposable worker is kind "worker"; title from the department configuration, PostEntry.role fallback) — each with live/sleeping state and session id, and your OWN entry marked you:true. Worker rows additionally carry departmentId/role/jobId (its department template and job link) and RETIRED workers are shown with retired:true (the head\'s management view; a retired worker is NOT addressed by the live catalog — sending to it fails per-recipient). This is the identity + roster tool: learn who exists and who you are in one call. No room parameter — the roster is the organization. The `scope` parameter selects the view: `active` (default) hides retired rows; `includeRetired` lists them (with retired:true).',
+    description: 'List the whole Deepartments catalog — the Asistente host (kind "host", title "Asistente") and every registered department head/worker with its DERIVED kind (a configured department head is kind "head", a disposable worker is kind "worker"; title from the department configuration, PostEntry.role fallback) — each with a derived per-member life-cycle state (`running` = a turn IN FLIGHT, `idle` = resident with the turn finished, `sleeping` = sleepEpoch set, `offline` = no live session; a single coherent enum so no contradictory "live, sleeping"/"live, retired" render), the live/sleeping markers and session id, and your OWN entry marked you:true. Worker rows additionally carry departmentId/role/jobId (its department template and job link) and RETIRED workers are shown with retired:true (the head\'s management view; a retired worker is NOT addressed by the live catalog — sending to it fails per-recipient). This is the identity + roster tool: learn who exists and who you are in one call. No room parameter — the roster is the organization. The `scope` parameter selects the view: `active` (default) hides retired rows; `includeRetired` lists them (with retired:true).',
     parameters: {
       scope: { type: 'string', enum: ['active', 'includeRetired'], default: 'active', description: 'Catalog scope: `active` (default) hides retired rows; `includeRetired` lists retired posts/hosts with retired:true.' }
     },
@@ -9445,6 +9445,7 @@ export function applyInvoke(ctx: Context, config: Config) {
                 title: { type: 'string', required: true },
                 live: { type: 'boolean', required: true },
                 sleeping: { type: 'boolean', required: true },
+                state: { type: 'string', enum: ['running', 'idle', 'sleeping', 'offline'], required: true },
                 sessionId: { type: 'string', required: true },
                 you: { type: 'boolean', required: true },
                 departmentId: { type: 'string' },
@@ -9458,13 +9459,17 @@ export function applyInvoke(ctx: Context, config: Config) {
         }
       },
       render: (_args, value) => {
+        // m-64: ONE coherent per-member state token (running|idle|sleeping|offline)
+        // replaces the flat `, live`/`, offline` + `, sleeping` combination, so a
+        // member never renders the contradictory "live, sleeping" nor "live,
+        // retired" (m-228) — `retired` and `YOU` stay as separate markers.
         const lines = value.members.map((member) =>
-          `  - ${member.agentId} (${member.kind}, "${member.title}"${member.live ? ', live' : ', offline'}${member.sleeping ? ', sleeping' : ''}${member.retired === true ? ', retired' : ''}${member.you ? ', YOU' : ''})`)
+          `  - ${member.agentId} (${member.kind}, "${member.title}"${member.state === 'running' ? ', running' : member.state === 'idle' ? ', idle' : member.state === 'sleeping' ? ', sleeping' : ', offline'}${member.retired === true ? ', retired' : ''}${member.you ? ', YOU' : ''})`)
         const retiredCount = value.retiredCount ?? 0
         return [{ type: 'text', text: `Deepartments catalog (${value.members.length} member(s), ${retiredCount} retired):\n${lines.join('\n')}` } as const]
       }
     },
-    async execute(args, exec): Promise<{ members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }>; retiredCount: number }> {
+    async execute(args, exec): Promise<{ members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; state: DeptWhoState; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }>; retiredCount: number }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_who requires a calling agent (exec.agent was undefined)')
       // A1/A2 — the catalog scope: `active` (default) hides retired rows;
@@ -9473,7 +9478,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // B3 gap fix: caller host self-registers when no live host exists (board
       // tools are gone; the roster must show the host with you:true).
       const callerMemberId = busEnsureHostForCaller(agent as { id: string; session?: { header?: SessionHeaderWithOrigin } })
-      const members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }> = []
+      const members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; state: DeptWhoState; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }> = []
       // A5 — `retiredCount` = the retired rows the DEFAULT (active) view hides
       // (0 when scope=includeRetired — nothing is hidden).
       let retiredCount = 0
@@ -9482,12 +9487,21 @@ export function applyInvoke(ctx: Context, config: Config) {
           if (scope === 'active') retiredCount++
           if (scope !== 'includeRetired') continue
         }
+        // m-64: the coherent single-state resolution. `live` is registry
+        // PRESENCE (AgentHandle present); `running` refines it to a turn IN
+        // FLIGHT (agents.get(sid).status === 'running'); `state` collapses
+        // live/sleeping/retired into one contradiction-free enum token.
+        const hostAgent = agents !== void 0 ? agents.get(SessionId(entry.sessionId)) : undefined
+        const hostLive = hostAgent !== undefined
+        const hostSleeping = entry.sleepEpoch !== void 0
+        const hostRunning = hostAgent?.status === 'running'
         members.push({
           agentId: entry.hostId,
           kind: 'host',
           title: 'Asistente',
-          live: agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined,
-          sleeping: entry.sleepEpoch !== void 0,
+          live: hostLive,
+          sleeping: hostSleeping,
+          state: computeDeptWhoState({ retired: entry.retired === true, sleeping: hostSleeping, live: hostLive, running: hostRunning }),
           sessionId: entry.sessionId,
           you: entry.hostId === callerMemberId,
           // A-series parity: the host row must carry `retired:true` when the
@@ -9507,6 +9521,14 @@ export function applyInvoke(ctx: Context, config: Config) {
         }
         const coordinator = coordinatorForPost(entry.postId)
         const isWorker = entry.provider === 'worker'
+        // m-64: the coherent single-state resolution for a post. `live` keeps the
+        // m-228 retired short-circuit (a retired post is NEVER live); `running`
+        // refines to a turn IN FLIGHT (agents.get(sid).status === 'running');
+        // `state` collapses live/sleeping/retired into one enum token.
+        const postAgent = agents !== void 0 ? agents.get(SessionId(entry.sessionId)) : undefined
+        const postLive = entry.retired !== true && postAgent !== undefined
+        const postSleeping = entry.sleepEpoch !== void 0
+        const postRunning = postAgent?.status === 'running'
         members.push({
           agentId: entry.postId,
           // F1: kind derived — a disposable worker is 'worker'; every other
@@ -9523,8 +9545,9 @@ export function applyInvoke(ctx: Context, config: Config) {
           // reads a consistent 'offline, retired', never the contradictory
           // 'live, retired'. The HOST loop above already continues on retired
           // hosts; this is the worker-post analogue.
-          live: entry.retired !== true && agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined,
-          sleeping: entry.sleepEpoch !== void 0,
+          live: postLive,
+          sleeping: postSleeping,
+          state: computeDeptWhoState({ retired: entry.retired === true, sleeping: postSleeping, live: postLive, running: postRunning }),
           sessionId: entry.sessionId,
           you: entry.postId === callerMemberId,
           // F3 (§5.1): worker rows carry the department template/department

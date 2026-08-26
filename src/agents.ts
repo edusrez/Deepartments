@@ -98,6 +98,38 @@ export function computeHeadStatus(input: {
 }
 
 /**
+ * The coherent per-member life-cycle state of one `dept_who` row (m-64). This is
+ * a SINGLE enum that collapses the flat `live`/`sleeping`/`retired` booleans of
+ * the old dept_who render into one contradiction-free token, so a member can
+ * NEVER render the conflicting `live, sleeping` / `live, retired` combinations.
+ *
+ * Precedence (highest first), mirroring the collapse in `computeHeadStatus`
+ * (`sleeping` outranks a live turn) plus the m-228 retired short-circuit:
+ *   retired → 'offline'  (a retired member is never live — m-228: the row must
+ *         stay "…, offline, retired", never "…, live, retired", even when a
+ *         lingering AgentHandle survives a deploy-restart)
+ *   sleeping → 'sleeping'  (a slept-but-live handle collapses to sleeping, NOT
+ *         the contradictory "live, sleeping")
+ *   live && running → 'running'  (turn IN FLIGHT — agents.get(sid).status === 'running')
+ *   live → 'idle'  (resident handle, turn finished/stopped — NOT "still processing")
+ *   else → 'offline'  (no live session)
+ */
+export type DeptWhoState = 'running' | 'idle' | 'sleeping' | 'offline'
+
+export function computeDeptWhoState(input: {
+  retired: boolean
+  sleeping: boolean
+  live: boolean
+  running: boolean
+}): DeptWhoState {
+  if (input.retired) return 'offline'
+  if (input.sleeping) return 'sleeping'
+  if (input.live && input.running) return 'running'
+  if (input.live) return 'idle'
+  return 'offline'
+}
+
+/**
  * Build one AgentRow per configured department, in config order. Live signals
  * (sessionLive/sessionRunning/unread) are INJECTED as functions so this stays
  * pure and testable; the caller (src/invoke.ts RPC handler) wires them to the
