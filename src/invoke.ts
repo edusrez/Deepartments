@@ -7072,6 +7072,38 @@ export function applyInvoke(ctx: Context, config: Config) {
     return run
   }
 
+  // DEADLOCK FIX (incident 2026-08-26): the BOUNDED detach-join window for the
+  // sleep respawn (materializePost). The real harness dispose() sends
+  // machine.cancel + `await machine.whenIdle()`; when the machine's OWN turn is
+  // still executing a TOOL (the QD-directive cascade of 2026-08-26 20:48Z/
+  // 21:18Z), whenIdle NEVER settles and the detach becomes a zombie. A plain
+  // `await disposeHeadHandleOnce` on that zombie pends forever — and every
+  // awaited bus delivery to the slept head joins it (the send_message that
+  // froze the host). Production default 10s — a NORMAL join settles in
+  // milliseconds (the turn ends right after the fire-and-forget detach
+  // dispatch), so the bound is a pure safety net. Hermetic tests override it.
+  const disposeJoinTimeoutMs = (): number => {
+    const raw = process.env.DEEPARTMENTS_DISPOSE_JOIN_TIMEOUT_MS
+    const n = raw === undefined ? NaN : Number(raw)
+    return Number.isFinite(n) && n >= 0 ? n : 10_000
+  }
+
+  /** DEADLOCK FIX (2026-08-26) — the BOUNDED `disposeHeadHandleOnce` join for
+   * the sleep respawn. Returns true when the detach settled before the bound;
+   * false on timeout. A timeout can NEVER corrupt the respawn: the fresh
+   * incarnation mints a NEW session id (F8), so the zombie machine (still on
+   * the OLD id, disposed in the background via the disposingHeads dedupe) can
+   * never collide with it — the join exists only to avoid racing a *settling*
+   * detach, and unbounded joining is strictly worse than proceeding. */
+  const joinHeadDisposeOnce = async (sessionId: string): Promise<boolean> => {
+    return Promise.race([
+      disposeHeadHandleOnce(sessionId).then(() => true),
+      new Promise<boolean>((resolve) => {
+        setTimeout(() => resolve(false), disposeJoinTimeoutMs())
+      })
+    ])
+  }
+
   /** Retire a registered post cleanly — the SHARED retirement path used by the
    * global HOST-plane `dept_post_retire` AND the head own-layer `dept_post_retire`.
    *
@@ -8146,7 +8178,13 @@ export function applyInvoke(ctx: Context, config: Config) {
       // previous incarnation, clear the flag. Joins any in-flight dept_sleep
       // detach (disposeHeadHandleOnce) so the incarnation below is guaranteed to
       // run only AFTER the machine is detached (no double-dispose race).
-      await disposeHeadHandleOnce(entry.sessionId)
+      // DEADLOCK FIX (2026-08-26): the join is BOUNDED — a zombie detach (a
+      // slept machine whose turn can never settle, e.g. the QD-directive
+      // cascade) would otherwise freeze THIS delivery forever, and every
+      // awaited bus delivery to the slept head with it.
+      if (!(await joinHeadDisposeOnce(entry.sessionId))) {
+        ctx.logger.warn(`[deepartments] sleep respawn for "${entry.postId}": detach join timed out after ${disposeJoinTimeoutMs()}ms — proceeding with the fresh mint (zombie detach; the fresh incarnation uses a NEW session id, no collision)`)
+      }
       byChild.delete(entry.sessionId)
       const previousSession = entry.sessionId
       // F8 (spec 002 head rotation) — a slept HEAD is recreated FRESH: mint a

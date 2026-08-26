@@ -2370,6 +2370,96 @@ test('Batch G self-deadlock fix: a bus wake DURING the in-flight detach joins th
   })
 })
 
+// --- Batch G2 (2026-08-26): the QD-directive CASCADE deadlock --------------
+// The Batch G fix fired the own-handle detach from dept_sleep (awaiting it is
+// invariant self-deadlock). The QD `head-slept` directive EMIT — dispatched
+// AFTER that fire but AWAITED — re-entered materializePost for the directive
+// target and JOINED the very detach: one level deeper, the same self-deadlock.
+// Live incident (all timestamps UTC 2026-08-26): quality-head self-slept at
+// 20:48:25 — its self directive (m-230) delivery joined its own never-settling
+// detach → QH turn 9 ended... never (frozen). ipd head slept at 21:18:28 — its
+// directive (m-237) delivery joined the QH zombie → ipd frozen. Host
+// send_message (m-238) at 21:18:58 joined the ipd zombie → the host
+// (session-1dcd7fda) froze mid-turn. Two fixes: (A) the sleep tool never
+// AWAITS the directive delivery (fire-and-forget, the dispose precedent — the
+// record is durable, boot re-delivers); (B) the materializePost detach join is
+// BOUNDED so a zombie detach can never freeze ANY bus delivery.
+
+test('Batch G2 QD cascade fix (A): a head dept_sleep RETURNS even when its own quality-inspect directive delivery joins the never-settling detach — the self-directive re-entry must not re-create the self-deadlock one level deeper (pre-fix: the awaited directive → materializePost → join of the just-fired detach → QH self-sleep freeze)', async () => {
+  const prevInspect = process.env[QUALITY_INSPECT_ENV_VAR]
+  const prevJoin = process.env.DEEPARTMENTS_DISPOSE_JOIN_TIMEOUT_MS
+  process.env[QUALITY_INSPECT_ENV_VAR] = '1' // force the D-Q2 dice hit deterministically (QH self-slept directive)
+  process.env.DEEPARTMENTS_DISPOSE_JOIN_TIMEOUT_MS = '300'
+  try {
+    await withTempStateDir(async (stateDir) => {
+      const env = await bootWithQD(stateDir)
+      try {
+        await seedJournal(stateDir, 'quality-head', 'G2-SELF-DIRECTIVE: sleep must return even when the self directive joins the detach.')
+        const { head, headCtx, key } = qdHead(env)
+        // The QH machine detach can never settle (the real dispose() → await
+        // machine.whenIdle() contract while this very turn runs the tool).
+        env.agents.disposeGates.set('head-quality-head', new Promise(() => {}))
+        const signal = new AbortController().signal
+        const result = await withTimeout(headCtx.tools.get('dept_sleep', key).execute({}, { agent: head, signal }), 1500, "dept_sleep must return while the self-directive delivery joins the never-settling detach (pre-fix: the awaited directive → materializePost join → self-deadlock)")
+        assert.equal(result.member, 'quality-head', 'the sleep commits immediately')
+        assert.equal(env.agents.disposeCalls.get('head-quality-head'), 1, 'exactly one detach launched (in the background)')
+        await waitFor(async () => (await readPosts(stateDir))['quality-head'].sleepEpoch !== undefined, 5000, 'sleepEpoch durable before the detach settles')
+        // The directive is STILL emitted (fire-and-forget): the record is
+        // durable; the bounded join lets its delivery settle instead of
+        // freezing the emit (and with it the sleep).
+        await waitFor(async () => (await qualityDirectives(stateDir)).filter((d) => /head slept.*quality-head/.test(d.text)).length >= 1, 5000, 'the self quality-inspect directive record was emitted')
+      } finally {
+        await env.dispose()
+      }
+    })
+  } finally {
+    if (prevInspect === undefined) delete process.env[QUALITY_INSPECT_ENV_VAR]
+    else process.env[QUALITY_INSPECT_ENV_VAR] = prevInspect
+    if (prevJoin === undefined) delete process.env.DEEPARTMENTS_DISPOSE_JOIN_TIMEOUT_MS
+    else process.env.DEEPARTMENTS_DISPOSE_JOIN_TIMEOUT_MS = prevJoin
+  }
+})
+
+test('Batch G2 QD cascade fix (B): a bus send_message to a SLEPT head whose detach can never settle resolves within the bounded detach join — the frozen-host incident (pre-fix: the delivery joined the zombie detach forever), minting + waking a FRESH incarnation', async () => {
+  const prevInspect = process.env[QUALITY_INSPECT_ENV_VAR]
+  const prevJoin = process.env.DEEPARTMENTS_DISPOSE_JOIN_TIMEOUT_MS
+  process.env[QUALITY_INSPECT_ENV_VAR] = '0' // no self-directive emit: the disposes are the ONLY zombie sources (deterministic)
+  process.env.DEEPARTMENTS_DISPOSE_JOIN_TIMEOUT_MS = '300'
+  try {
+    await withTempStateDir(async (stateDir) => {
+      const env = await bootWithQD(stateDir)
+      try {
+        await seedJournal(stateDir, 'quality-head', 'G2-ZOMBIE-DETACH: a send to a sleeper must settle.')
+        const { head, headCtx, key } = qdHead(env)
+        env.agents.disposeGates.set('head-quality-head', new Promise(() => {}))
+        const signal = new AbortController().signal
+        await withTimeout(headCtx.tools.get('dept_sleep', key).execute({}, { agent: head, signal }), 1500, 'QH sleeps (returns — fix A)')
+        assert.equal(env.agents.disposeCalls.get('head-quality-head'), 1, 'one zombie detach launched')
+        // The host send to the slept head: pre-fix it JOINED the zombie detach
+        // and never resolved (the incident: host frozen from 21:18:58Z).
+        const host = env.agents.put(fakeParentAgent())
+        const sent = await withTimeout(env.root.tools.get('send_message').execute({ to: ['quality-head'], text: 'wake after the zombie detach' }, { agent: host, signal }), 3000, 'send_message to the slept head must settle within the bounded join (pre-fix: joined the zombie detach forever)')
+        assert.equal(['delivered', 'resumed'].includes(sent.delivered['quality-head']), true, 'the delivery settles with a terminal status')
+        // F8: the respawn minted a FRESH session (never the archived old id).
+        await waitFor(() => env.agents.createCalls.length > 2, 5000, 'fresh head minted after the bounded join')
+        const freshId = String(env.agents.createCalls.at(-1).sessionId)
+        assert.notEqual(freshId, 'head-quality-head', 'the fresh wake session is a NEW id (not the archived old one)')
+        const fresh = env.agents.store.get(freshId)
+        assert.ok(fresh, 'fresh head materialized by the send')
+        await waitFor(() => fresh.inboxMessages.some((m) => /wake after the zombie detach/.test(m.content[0].text)), 5000, 'the sent message reached the fresh incarnation')
+        await waitFor(async () => (await readPosts(stateDir))['quality-head'].sleepEpoch === undefined, 5000, 'sleepEpoch cleared after the wake')
+      } finally {
+        await env.dispose()
+      }
+    })
+  } finally {
+    if (prevInspect === undefined) delete process.env[QUALITY_INSPECT_ENV_VAR]
+    else process.env[QUALITY_INSPECT_ENV_VAR] = prevInspect
+    if (prevJoin === undefined) delete process.env.DEEPARTMENTS_DISPOSE_JOIN_TIMEOUT_MS
+    else process.env.DEEPARTMENTS_DISPOSE_JOIN_TIMEOUT_MS = prevJoin
+  }
+})
+
 // --- F8: HEAD SESSION ROTATION at dept_sleep (spec 002 rotation pattern,
 // heads-only). A head dept_sleep ARCHIVES its durable session server-side
 // (sidebar row gone; journal + messages intact) and its next wake RECREATES a
@@ -11725,6 +11815,10 @@ test('QD head dept_sleep ALWAYS emits a quality-inspect directive (D-Q3 mandate,
       await memo.execute({ summary: 'QD head-sleep mandate memory.' }, { agent: head, signal })
       const sleep = headCtx.tools.get('dept_sleep', key)
       await withTimeout(sleep.execute({}, { agent: head, signal }), 1500, 'head dept_sleep returns (no self-deadlock wedge)')
+      // G2 (2026-08-26): the directive emit is FIRE-AND-FORGET (the sleep must
+      // never block on the directive delivery joining a zombie target detach),
+      // so the durable record lands async — waitFor it (still exactly one).
+      await waitFor(async () => (await qualityDirectives(stateDir)).filter((d) => /head slept/.test(d.text)).length === 1, 5000, 'exactly ONE head-slept directive emitted')
       const dirs = await qualityDirectives(stateDir)
       const headDirs = dirs.filter((d) => /head slept/.test(d.text))
       assert.equal(headDirs.length, 1, 'a head dept_sleep ALWAYS emits exactly ONE head-slept directive (100% mandate, no dice)')
@@ -11761,6 +11855,8 @@ test('QD anti-loop QH emitter (owner m-178/m-182): the QH head dept_sleep direct
         await memo.execute({ summary: 'QD anti-loop research sleep memory.' }, { agent: head, signal })
         const sleep = headCtx.tools.get('dept_sleep', key)
         await withTimeout(sleep.execute({}, { agent: head, signal }), 1500, 'research head dept_sleep returns (no self-deadlock wedge)')
+        // G2 (2026-08-26): the emit is fire-and-forget — waitFor the record.
+        await waitFor(async () => (await qualityDirectives(stateDir)).filter((d) => /head slept.*research-head/.test(d.text)).length === 1, 5000, 'exactly ONE research-head directive emitted (async emit)')
         const dirs = await qualityDirectives(stateDir)
         const qhDirs = dirs.filter((d) => /head slept.*quality-head/.test(d.text))
         const rhDirs = dirs.filter((d) => /head slept.*research-head/.test(d.text))
@@ -11793,6 +11889,10 @@ test('QD host rotation ALWAYS emits one quality-inspect directive (host = "H", n
       const result = await sleepTool.execute({}, { agent: host, signal, concludeTurn: () => { concluded = true } })
       assert.ok(concluded, 'the host turn concluded')
       assert.match(result.member, /^host-session-/, 'the rotation returned the NEW host id')
+      // G2 (2026-08-26): the directive emit is FIRE-AND-FORGET (a rotation must
+      // never block on the directive delivery joining a zombie target detach),
+      // so the durable record lands async — waitFor it (still exactly one).
+      await waitFor(async () => (await qualityDirectives(stateDir)).filter((d) => /host rotated/.test(d.text)).length === 1, 5000, 'exactly ONE host-rotated directive emitted')
       const dirs = await qualityDirectives(stateDir)
       const hostDirs = dirs.filter((d) => /host rotated/.test(d.text))
       assert.equal(hostDirs.length, 1, 'a host rotation ALWAYS emits exactly ONE host-rotated directive (100% mandate, no dice)')
