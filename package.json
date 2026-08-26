@@ -65,6 +65,7 @@
     "@deepseek-ai/schemastery": "^3.18.1",
     "@types/node": "^22.0.0",
     "@types/react": "~18.3.1",
+    "dshd-core": "workspace:*",
     "dshd-webfetch": "workspace:*",
     "react": "^18.3.1",
     "tsdown": "^0.22.14",
