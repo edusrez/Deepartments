@@ -74,6 +74,13 @@
                   provider: opencode-zen
                   model: deepseek-v4-flash-vision-exp
                   reasoningEffort: max
+          # Posts retention (A3/C2): keep the 50 newest RETIRED entries in
+          # posts.json; archive older ones to posts-retired-archive.jsonl
+          # (non-destructive) — owner-approved.
+          postsRetention:
+            maxRetiredKept: 50
+            archiveFile: posts-retired-archive.jsonl
+            enabled: true
           # P1 rewire-pooler: the pooler (dsh-key-pooler) baseURL — a LEGITIMATE
           # local/proxy LLM route. The endpoint-drift exemption treats a baseURL
           # EXACTLY equal to this as a HEALTHY route (NOT drift). MUST match the
