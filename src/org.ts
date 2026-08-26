@@ -32,7 +32,7 @@ export interface CoordinatorConfig {
    * back to the head default in invoke.ts when absent. */
   sessionTitle?: string
   provider?: string
-  agentOptions?: { provider?: string; model?: string; maxTokens?: number }
+  agentOptions?: { provider?: string; model?: string; maxTokens?: number; reasoningEffort?: 'max' | 'high' | 'medium' | 'low' }
 }
 
 /** One department: an agent of the catalog + the spec of its coordinator post. */
@@ -297,9 +297,15 @@ export const Config: z<any, any> = z.object({
         agentOptions: z.object({
           provider: z.string(),
           model: z.string(),
-          maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
-        }).default(void 0 as unknown as { provider: string; model: string; maxTokens: number })
-      }).default(void 0 as unknown as { postId: string; role: string; title: string; sessionTitle: string; provider: string; agentOptions: { provider: string; model: string; maxTokens: number } })
+          maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+          // F7 model-flash (uniformity heads=workers): the coordinator carries
+          // `reasoningEffort: max` (cordis.patch.yml) exactly like the worker
+          // preset; DECLARING it here (a union of the model's accepted literals)
+          // keeps it from being stripped by the schema on parse, so a head runs
+          // with max too. Optional — absent config composes untouched.
+          reasoningEffort: z.union([z.const('max'), z.const('high'), z.const('medium'), z.const('low')])
+        }).default(void 0 as unknown as { provider: string; model: string; maxTokens: number; reasoningEffort: 'max' | 'high' | 'medium' | 'low' })
+      }).default(void 0 as unknown as { postId: string; role: string; title: string; sessionTitle: string; provider: string; agentOptions: { provider: string; model: string; maxTokens: number; reasoningEffort: 'max' | 'high' | 'medium' | 'low' } })
     })).default([]),
     // B2 (spec W5): extra scoped roots for dept_exec — optional, empty default.
     // Mirrors Config.org.execRoots. An absent key (pre-B2 config) defaults to

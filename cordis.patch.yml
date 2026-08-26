@@ -43,7 +43,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash-vision-exp
+                  model: deepseek-v4-flash
                   reasoningEffort: max
             - id: internal-programming
               name: Internal Programming
@@ -56,7 +56,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash-vision-exp
+                  model: deepseek-v4-flash
                   reasoningEffort: max
             - id: quality
               name: Quality Department
@@ -69,7 +69,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash-vision-exp
+                  model: deepseek-v4-flash
                   reasoningEffort: max
           # P1 rewire-pooler: the pooler (dsh-key-pooler) baseURL — a LEGITIMATE
           # local/proxy LLM route. The endpoint-drift exemption

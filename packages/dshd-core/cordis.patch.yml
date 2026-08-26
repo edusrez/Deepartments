@@ -46,7 +46,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash-vision-exp
+                  model: deepseek-v4-flash
                   reasoningEffort: max
             - id: internal-programming
               name: Internal Programming
@@ -59,7 +59,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash-vision-exp
+                  model: deepseek-v4-flash
                   reasoningEffort: max
             - id: quality
               name: Quality Department
@@ -72,7 +72,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash-vision-exp
+                  model: deepseek-v4-flash
                   reasoningEffort: max
           # Posts retention (A3/C2): keep the 50 newest RETIRED entries in
           # posts.json; archive older ones to posts-retired-archive.jsonl

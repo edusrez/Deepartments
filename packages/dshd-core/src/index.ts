@@ -81,7 +81,7 @@ export interface OrgDepartment {
     title?: string
     sessionTitle?: string
     provider?: string
-    agentOptions?: { provider?: string; model?: string; maxTokens?: number }
+    agentOptions?: { provider?: string; model?: string; maxTokens?: number; reasoningEffort?: 'max' | 'high' | 'medium' | 'low' }
   }
 }
 

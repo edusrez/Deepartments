@@ -4704,12 +4704,12 @@ export function applyInvoke(ctx: Context, config: Config) {
   /** F7 (owner decision 2026-08-23 — provider migration to opencode-zen): the
    * runtime-materialized department workers run the SAME provider/model route
    * as the coordinator (cordis.patch.yml — opencode-zen /
-   * deepseek-v4-flash-vision-exp, reasoningEffort max). ONE source shared by
+   * deepseek-v4-flash, reasoningEffort max). ONE source shared by
    * the three spawn paths (dept_post_create, dept_job_run, dept_worker_spawn)
    * so the worker route cannot drift from the config again. */
   const WORKER_AGENT_OPTIONS: AgentOptionsLike = {
     provider: 'opencode-zen',
-    model: 'deepseek-v4-flash-vision-exp',
+    model: 'deepseek-v4-flash',
     reasoningEffort: 'max'
   }
   /** VARIANT-2 (2026-08-24) — post-restart host AgentOptions intermittently

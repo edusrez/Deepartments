@@ -2541,7 +2541,7 @@ test('dept_post_create (head): a head creates a DISPOSABLE worker root agent (se
       assert.equal(createCall.meta.cwd, stateDir, 'the worker is created under the workspace-root cwd (resolveWorkspaceRootPath), not the repo root')
       // F7 (provider migration): the runtime-minted worker is created with the
       // coordinator-aligned agentOptions (opencode-zen / vision-exp / max).
-      assert.deepEqual(createCall.agentOptions, { provider: 'opencode-zen', model: 'deepseek-v4-flash-vision-exp', reasoningEffort: 'max' }, 'worker agentOptions = opencode-zen / deepseek-v4-flash-vision-exp / reasoningEffort max (coordinator alignment)')
+      assert.deepEqual(createCall.agentOptions, { provider: 'opencode-zen', model: 'deepseek-v4-flash', reasoningEffort: 'max' }, 'worker agentOptions = opencode-zen / deepseek-v4-flash / reasoningEffort max (coordinator alignment)')
 
       // Durable registry: disposable entry (roomId is the INERT legacy field).
       const posts = await readPosts(stateDir)
@@ -6198,7 +6198,7 @@ test('F3 dept_worker_spawn: a head spawns a worker of its department (role templ
       // runtime materialization route (opencode-zen / vision-exp / max).
       const spawnCall = agents.createCalls.find((c) => String(c.sessionId) === workerSid)
       assert.ok(spawnCall, 'dept_worker_spawn issued one ctx.agents.create for the worker')
-      assert.deepEqual(spawnCall.agentOptions, { provider: 'opencode-zen', model: 'deepseek-v4-flash-vision-exp', reasoningEffort: 'max' }, 'dept_worker_spawn worker agentOptions = opencode-zen / deepseek-v4-flash-vision-exp / reasoningEffort max (coordinator alignment)')
+      assert.deepEqual(spawnCall.agentOptions, { provider: 'opencode-zen', model: 'deepseek-v4-flash', reasoningEffort: 'max' }, 'dept_worker_spawn worker agentOptions = opencode-zen / deepseek-v4-flash / reasoningEffort max (coordinator alignment)')
 
       // F3 persona mechanism (spec §7.4): the ROLE TEMPLATE body + the task are
       // injected as a systemPrompt section (the persona delta; the worker still
@@ -7070,7 +7070,7 @@ test('F4b dept_job_run: materializes the job worker (definition role task = the 
       // coordinator-aligned agentOptions (same discriminating assert as F3).
       const runCreate = agents.createCalls.find((c) => String(c.sessionId) === jobSid)
       assert.ok(runCreate, 'dept_job_run issued one ctx.agents.create for the job worker')
-      assert.deepEqual(runCreate.agentOptions, { provider: 'opencode-zen', model: 'deepseek-v4-flash-vision-exp', reasoningEffort: 'max' }, 'dept_job_run worker agentOptions = opencode-zen / deepseek-v4-flash-vision-exp / reasoningEffort max (coordinator alignment)')
+      assert.deepEqual(runCreate.agentOptions, { provider: 'opencode-zen', model: 'deepseek-v4-flash', reasoningEffort: 'max' }, 'dept_job_run worker agentOptions = opencode-zen / deepseek-v4-flash / reasoningEffort max (coordinator alignment)')
     } finally {
       await dispose()
     }
