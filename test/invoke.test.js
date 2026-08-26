@@ -2005,8 +2005,9 @@ test('Batch G dept_sleep requires a saved journal (throws otherwise / rejects a 
       const posts = await readPosts(stateDir)
       assert.ok(typeof posts[postId].sleepEpoch === 'number', 'sleepEpoch persisted durably')
       assert.equal(agents.store.has(`head-${postId}`), false, 'the head AgentHandle was disposed on sleep (live agent gone)')
-      // dept_who surfaces the sleeping head.
-      const who = await root.tools.get('dept_who').execute({}, { agent: fakeParentAgent(), signal })
+      // dept_who surfaces the sleeping head (C1: the FULL roster — `scope: "all"` —
+      // lists a non-caller sleeping member; the default `active` view hides it).
+      const who = await root.tools.get('dept_who').execute({ scope: 'all' }, { agent: fakeParentAgent(), signal })
       const whoSelf = who.members.find((m) => m.agentId === postId)
       assert.equal(whoSelf.sleeping, true, 'dept_who surfaces the sleeping head')
     } finally {
@@ -3001,13 +3002,27 @@ test('F1 host retire scope: the HOST retires any worker (marked, entry kept) —
     try {
       const signal = new AbortController().signal
       const createTool = headCtx.tools.get('dept_post_create', key)
-      await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const created = await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      // C3 — the deploy echo is dept_who-like: derived kind/state/title and no
+      // sleeping/offline member.
+      for (const m of created.activeMembers) {
+        assert.ok(m.kind === 'head' || m.kind === 'worker' || m.kind === 'host', 'C3: the deploy echo carries the derived kind (head|worker|host)')
+        assert.ok(['idle', 'running', 'sleeping', 'offline'].includes(m.state), 'C3: the deploy echo carries the coherent state token')
+        assert.equal(typeof m.title, 'string', 'C3: the deploy echo carries the title string')
+      }
+      const createdEchoRow = created.activeMembers.find((m) => m.agentId === 'researcher-alpha')
+      assert.ok(createdEchoRow && createdEchoRow.kind === 'worker', 'C3: the fresh worker is in the deploy echo with the derived worker kind')
+      assert.ok(created.activeMembers.every((m) => m.state === 'idle' || m.state === 'running'), 'C3: no sleeping/offline member ever shows in the deploy echo')
       const host = agents.put(fakeParentAgent())
 
       // HOST may retire ANY worker (the scope restriction applies to heads only).
       const retireTool = root.tools.get('dept_post_retire')
       const result = await retireTool.execute({ postId: 'researcher-alpha' }, { agent: host, signal })
       assert.equal(result.retired, true)
+      // C3 — the retire echo mirrors the default view: the retired worker is OUT.
+      assert.equal(result.activeMembers.some((m) => m.agentId === 'researcher-alpha'), false, 'C3: the retired worker is ABSENT from the retire echo')
+      assert.ok(result.activeMembers.some((m) => m.agentId === 'research-head'), 'C3: the head stays in the retire echo')
+      assert.ok(result.activeMembers.every((m) => m.state === 'idle' || m.state === 'running'), 'C3: no retired/sleeping/offline member ever shows in the retire echo')
       await waitFor(async () => (await readPosts(stateDir))['researcher-alpha']?.retired === true, 5000, 'worker marked retired (entry kept)')
       const posts = await readPosts(stateDir)
       assert.equal(posts['researcher-alpha'].retired, true, 'retire is a MARK, not an erase (posts.json keeps the entry)')
@@ -3068,6 +3083,11 @@ test('m-228 dept_who: a RETIRED worker with a LINGERING live AgentHandle renders
       // mark retired (entry kept) + dispose.
       const retireResult = await root.tools.get('dept_post_retire').execute({ postId: 'researcher-orphan' }, { agent: agents.put(fakeParentAgent()), signal })
       assert.equal(retireResult.retired, true)
+      // C3 — the retire echo drops the retired worker and mirrors the default
+      // view (rows carry the derived kind/state/title; no sleeping ever).
+      assert.equal(retireResult.activeMembers.some((m) => m.agentId === 'researcher-orphan'), false, 'C3: the retired worker is absent from the retire echo')
+      assert.ok(retireResult.activeMembers.every((m) => ['idle', 'running'].includes(m.state)), 'C3: no sleeping/offline/retired member ever shows in the retire echo')
+      assert.ok(retireResult.activeMembers.every((m) => m.kind === 'head' || m.kind === 'worker' || m.kind === 'host'), 'C3: retire echo rows carry the derived kind')
       // REPRODUCE the m-228 bug: a retired worker whose AgentHandle LINGERS in the
       // `agents` registry (the deploy-restart case where the dispose never ran) →
       // `agents.get(SessionId(entry.sessionId))` is DEFINED for a RETIRED post, so
@@ -3176,7 +3196,10 @@ test('m-64 dept_who member state precedence: a SLEPT-but-LIVE head (sleepEpoch s
       const headSessionId = posts[postId].sessionId
       assert.equal(agents.store.has(headSessionId), false, 'the slept head has no live handle until we plant the lingering one')
       agents.put(fakeParentAgent(SessionId(headSessionId)))
-      const who = await root.tools.get('dept_who').execute({}, { agent: agents.put(fakeParentAgent()), signal })
+      // C1 (m-264): the DEFAULT `active` view now HIDES a non-caller sleeping
+      // member — this precedence test needs the FULL roster (`scope: 'all'`,
+      // the includeRetired-compat superset) to observe the slept head row.
+      const who = await root.tools.get('dept_who').execute({ scope: 'all' }, { agent: agents.put(fakeParentAgent()), signal })
       const row = who.members.find((m) => m.agentId === postId)
       assert.ok(row, 'the slept head is listed')
       assert.equal(row.sleeping, true, 'the slept head carries the durable sleeping marker')
@@ -3201,8 +3224,11 @@ test('m-64 dept_who member state precedence: a RETIRED member short-circuits to 
       const signal = new AbortController().signal
       const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'worker-retired', role: 'builder' }, { agent: head, signal })
       const sid = created.sessionId
-      await root.tools.get('dept_post_retire').execute({ postId: 'worker-retired' }, { agent: agents.put(fakeParentAgent()), signal })
+      const retireResult = await root.tools.get('dept_post_retire').execute({ postId: 'worker-retired' }, { agent: agents.put(fakeParentAgent()), signal })
       await waitFor(async () => (await readPosts(stateDir))['worker-retired']?.retired === true, 5000, 'worker marked retired')
+      // C3 — the retire echo mirrors the default view: the retired worker is OUT.
+      assert.equal(retireResult.activeMembers.some((m) => m.agentId === 'worker-retired'), false, 'C3: the retired worker is absent from the retire echo')
+      assert.ok(retireResult.activeMembers.every((m) => ['idle', 'running'].includes(m.state)), 'C3: no sleeping/offline/retired member ever shows in the retire echo')
       // m-228 extended: the retired worker's AgentHandle LINGERS and is even
       // mid-turn ('running') — retirement must STILL short-circuit to 'offline'
       // and never evaluate live.
@@ -3249,10 +3275,74 @@ test('A1/A2/A5 dept_who scope: default `active` HIDES retired rows; `{ scope: "i
       assert.equal(retiredRow.retired, true, 'A2: the retired row carries retired:true')
       assert.equal(retiredRow.kind, 'worker', 'A2: the retired row keeps the derived worker kind')
       assert.equal(incl.retiredCount, 0, 'A5: retiredCount is 0 when nothing is hidden (includeRetired)')
-      // The render header shows BOTH the active count and the retired count.
-      const rendered = whoTool.output.render({ scope: 'active' }, { members: active.members, retiredCount: active.retiredCount })
+      // The render header shows the active count, the retired count AND the
+      // sleeping/offline-hidden count (C1 — the new header suffix).
+      const rendered = whoTool.output.render({ scope: 'active' }, { members: active.members, retiredCount: active.retiredCount, inactiveHiddenCount: active.inactiveHiddenCount })
       assert.ok(Array.isArray(rendered) && rendered.length > 0, 'dept_who renders a text page')
-      assert.match(rendered[0].text, new RegExp(`\\(${active.members.length} member\\(s\\), ${active.retiredCount} retired\\):`), 'A5: the render header shows active + retired counts')
+      assert.match(rendered[0].text, new RegExp(`\\(${active.members.length} member\\(s\\), ${active.retiredCount} retired, ${active.inactiveHiddenCount} sleeping/offline hidden\\):`), 'A5/C1: the render header shows member(s) + retired + sleeping/offline-hidden counts')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('A6 dept_who scope (C1): default `active` HIDES a SLEEPING (non-retired) worker; `all` (and its `includeRetired` alias) LIST it with state "sleeping" — the header shows the sleeping/offline-hidden count', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      // A LIVE worker — stays in every view (both scopes).
+      await headCtx.tools.get('dept_post_create', key).execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      // A SECOND worker — SLEPT (memo + dept_sleep through ITS OWN ctx, the
+      // m-64 :3156 precedent): sleepEpoch durable + handle disposed.
+      const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'worker-dormant', role: 'builder' }, { agent: head, signal })
+      const sid = created.sessionId
+      const wctx = childContextFor(agents, sid)
+      assert.ok(wctx, 'the dormant worker has its own scoped toolset')
+      const dormantWorker = agents.store.get(sid)
+      await wctx.ctx.tools.get('dept_memo_write', wctx.key).execute({ summary: 'memory before dormancy' }, { agent: dormantWorker, signal })
+      await wctx.ctx.tools.get('dept_sleep', wctx.key).execute({}, { agent: dormantWorker, signal })
+      await waitFor(async () => (await readPosts(stateDir))['worker-dormant']?.sleepEpoch !== undefined, 5000, 'the worker sleepEpoch is persisted durably')
+      await waitFor(() => agents.store.has(sid) === false, 5000, 'the worker AgentHandle is disposed after sleep')
+
+      const whoTool = root.tools.get('dept_who')
+      const host = agents.put(fakeParentAgent())
+      // Default `active`: the SLEPT member is HIDDEN (not you); the live worker
+      // and the live head stay; nothing is retired.
+      const active = await whoTool.execute({}, { agent: host, signal })
+      assert.equal(active.members.some((m) => m.agentId === 'worker-dormant'), false, 'A6: default `active` HIDES the sleeping member (fila ausente)')
+      assert.ok(active.members.some((m) => m.agentId === 'researcher-alpha'), 'A6: the live worker is still listed in the default view')
+      assert.equal(active.retiredCount, 0, 'A6: nothing is retired in this flow')
+      assert.equal(active.inactiveHiddenCount, 1, 'A6: inactiveHiddenCount = the (1) non-retired sleeping member the default view hides (the caller row is never counted)')
+      // `all` AND the includeRetired ALIAS: the slept member IS listed with the
+      // coherent "sleeping" state token (never retired).
+      for (const scope of ['all', 'includeRetired']) {
+        const full = await whoTool.execute({ scope }, { agent: host, signal })
+        const dormantRow = full.members.find((m) => m.agentId === 'worker-dormant')
+        assert.ok(dormantRow, `A6: scope ${scope} lists the slept member`)
+        assert.equal(dormantRow.state, 'sleeping', `A6: scope ${scope} derives the "sleeping" state token`)
+        assert.equal(dormantRow.sleeping, true, `A6: scope ${scope} keeps the durable sleeping marker`)
+        assert.equal(dormantRow.kind, 'worker', `A6: scope ${scope} keeps the derived worker kind`)
+        assert.equal(dormantRow.retired, undefined, `A6: scope ${scope} does NOT mark the slept worker retired`)
+        assert.equal(full.retiredCount, 0, `A6: scope ${scope} hides nothing retired`)
+        assert.equal(full.inactiveHiddenCount, 0, `A6: scope ${scope} hides nothing by inactivity`)
+      }
+      // The render header exposes the NEW counts for the default view.
+      const rendered = whoTool.output.render({ scope: 'active' }, { members: active.members, retiredCount: active.retiredCount, inactiveHiddenCount: active.inactiveHiddenCount })
+      assert.ok(Array.isArray(rendered) && rendered.length > 0, 'A6: dept_who renders a text page')
+      assert.match(rendered[0].text, new RegExp(`\\(${active.members.length} member\\(s\\), ${active.retiredCount} retired, ${active.inactiveHiddenCount} sleeping/offline hidden\\):`), 'A6: the header shows member(s) + retired + sleeping/offline-hidden counts')
+      // A slept member listed under `all` renders the sleeping token.
+      const full = await whoTool.execute({ scope: 'all' }, { agent: host, signal })
+      const renderedAll = whoTool.output.render({ scope: 'all' }, { members: full.members, retiredCount: full.retiredCount, inactiveHiddenCount: full.inactiveHiddenCount })
+      const line = renderedAll[0].text.split('\n').find((l) => l.includes('worker-dormant'))
+      assert.ok(line, 'A6: the slept worker line is present in the `all` render')
+      assert.match(line, /, sleeping/, 'A6: the slept worker line renders the "sleeping" token')
+      // C3 — the activeMembers ECO never shows a sleeping member: deploy ANOTHER
+      // worker while worker-dormant sleeps → the echo has NO sleeping row.
+      const echo = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'researcher-echo', role: 'rank-and-file researcher' }, { agent: head, signal })
+      assert.ok(echo.activeMembers.some((m) => m.agentId === 'researcher-echo'), 'A6: the echo includes the just-created worker')
+      assert.equal(echo.activeMembers.some((m) => m.agentId === 'worker-dormant'), false, 'A6: the slept member is ABSENT from the activeMembers echo')
+      assert.ok(echo.activeMembers.every((m) => m.state === 'idle' || m.state === 'running'), 'A6: no sleeping/offline/retired member ever shows in the echo (C3)')
     } finally {
       await dispose()
     }
@@ -3270,8 +3360,14 @@ test('A4 deploy/retire activeMembers: dept_post_create returns the new worker ac
       assert.ok(created.activeMembers.some((m) => m.agentId === 'research-head'), 'A4: activeMembers includes the creating head')
       for (const m of created.activeMembers) {
         assert.equal(typeof m.agentId, 'string', 'A4: activeMembers carries a string agentId')
-        assert.ok(m.kind === 'post' || m.kind === 'host', 'A4: activeMembers kind is post|host')
+        assert.ok(m.kind === 'head' || m.kind === 'worker' || m.kind === 'host', 'A4/C3: activeMembers kind is derived head|worker|host (no raw post)')
+        assert.ok(['idle', 'running', 'sleeping', 'offline'].includes(m.state), 'A4: activeMembers rows carry the coherent state token')
+        assert.equal(typeof m.title, 'string', 'A4: activeMembers rows carry the title string')
       }
+      assert.ok(created.activeMembers.every((m) => m.state === 'idle' || m.state === 'running'), 'A4/C3: the echo only ever contains idle|running members (no sleeping/offline/retired)')
+      const createdEcho = created.activeMembers.find((m) => m.agentId === 'researcher-alpha')
+      assert.equal(createdEcho.state, 'idle', 'C3: the just-created worker echoes with the coherent idle state')
+      assert.equal(createdEcho.title, 'rank-and-file researcher', 'C3: the worker echoes with the durable role title')
       const host = agents.put(fakeParentAgent())
       const ret = await root.tools.get('dept_post_retire').execute({ postId: 'researcher-alpha' }, { agent: host, signal })
       assert.ok(Array.isArray(ret.activeMembers), 'A4: dept_post_retire returns activeMembers')
@@ -3317,12 +3413,19 @@ test('F1 legacy PostEntry compat: a posts.json worker WITHOUT the new F1 fields 
     try {
       const signal = new AbortController().signal
       const host = agents.put(fakeParentAgent())
-      // Loaded without error and listed with the DERIVED worker kind.
-      const who = await root.tools.get('dept_who').execute({}, { agent: host, signal })
+      // Loaded without error and listed with the DERIVED worker kind. C1 (m-264):
+      // the legacy worker has NO live AgentHandle and NO sleepEpoch → its state
+      // is 'offline', so the DEFAULT `active` view hides it (non-caller
+      // sleeping/offline rows are hidden); the FULL roster (`scope: 'all'`) is
+      // the surface that still derives kind/title for the legacy post.
+      const who = await root.tools.get('dept_who').execute({ scope: 'all' }, { agent: host, signal })
       const workerRow = who.members.find((m) => m.agentId === 'researcher-alpha')
       assert.ok(workerRow, 'the legacy worker is listed (loaded without error)')
       assert.equal(workerRow.kind, 'worker', 'the legacy worker derives kind "worker" (no hardcoded "head")')
       assert.equal(workerRow.title, 'rank-and-file researcher', 'worker title falls back to the durable role')
+      assert.equal(workerRow.state, 'offline', 'C1: a never-materialized legacy post derives state "offline"')
+      const activeView = await root.tools.get('dept_who').execute({}, { agent: host, signal })
+      assert.equal(activeView.members.some((m) => m.agentId === 'researcher-alpha'), false, 'C1: the DEFAULT `active` view hides the offline (non-caller) legacy worker')
       // Still a LIVE catalog member (legacy is actively resumed + delivered).
       const send = await root.tools.get('send_message').execute({ to: ['researcher-alpha'], text: 'wake' }, { agent: host, signal })
       assert.equal(send.delivered['researcher-alpha'], 'resumed', 'a legacy worker is still addressed by the live catalog')
@@ -4069,12 +4172,17 @@ test('Batch 7 U2 host dept_sleep ROTATES: no journal rejects loudly; with a jour
       assert.equal(concluded, true, 'dept_sleep concluded the host turn')
 
       // The roster reflects the rotation: the OLD (retired) host is excluded
-      // from "present"; the NEW host shows as the sleeping member.
-      const who = await root.tools.get('dept_who').execute({}, { agent: host, signal })
+      // from "present"; the NEW host shows as the sleeping member. C1 (m-264):
+      // the DEFAULT `active` view hides NON-caller sleeping rows — the caller
+      // IS the new sleeping host here, so its own row (you:true) is ALWAYS
+      // included even while sleeping (the you-row rule), and the retired old
+      // host (not you) stays excluded.
+      const who = await root.tools.get('dept_who').execute({}, { agent: agents.put(fakeParentAgent(newSessionId)), signal })
       const whoHosts = who.members.filter((m) => m.kind === 'host')
       assert.ok(!whoHosts.some((h) => h.agentId === oldHostId), 'retired host is filtered from the roster (§4/C7)')
       const newSleepingHost = whoHosts.find((h) => h.agentId === newHostId)
       assert.ok(newSleepingHost, 'the NEW host is in the catalog roster')
+      assert.equal(newSleepingHost.you, true, 'C1: the new sleeping host row is the CALLER (you:true — the you-row is always visible)')
       assert.equal(newSleepingHost.sleeping, true, 'dept_who surfaces the sleeping NEW host')
 
       // (d) The wake pack targets ONLY the new host (§4): the NEW session's
@@ -5318,12 +5426,16 @@ test('Batch 7 U2 regression (B3): dept_who reports the NEW rotated host as sleep
       assert.equal(workspaceRegistry.attachCalls.filter((id) => id === newSessionId).length, 1, 'S2.2 attached the rotated session exactly once (the boot head attach is separate)')
 
       const who = root.tools.get('dept_who')
-      const result = await who.execute({}, { agent: host, signal })
+      // C1 (m-264): the caller IS the new sleeping host — the default `active`
+      // view always keeps its OWN (you:true) row, even while sleeping.
+      const result = await who.execute({}, { agent: agents.put(fakeParentAgent(newSessionId)), signal })
       // The NEW host is present and reported as sleeping; the RETIRED old host
       // is excluded (spec 002 §4/C7) via dept_who (B3).
       const sleepingHost = result.members.find((h) => h.kind === 'host' && h.agentId === newHostId)
       assert.ok(sleepingHost, 'the NEW sleeping host is in the global roster')
+      assert.equal(sleepingHost.you, true, 'C1: the new sleeping host row is the caller (you:true — always visible)')
       assert.equal(sleepingHost.sleeping, true, 'dept_who reports the sleeping NEW host')
+      assert.equal(result.inactiveHiddenCount, 0, 'C1 corner fix: the SLEEPING CALLER (you:true) is listed but NEVER counted as inactive-hidden — the count only covers non-you sleeping/offline rows (here the caller is the only non-retired sleeping member)')
       assert.ok(!result.members.some((h) => h.kind === 'host' && h.agentId === oldHostId), 'the retired old host is excluded from "present"')
 
       // (b) The DECLARED output schema must actually allow `sleeping` on a

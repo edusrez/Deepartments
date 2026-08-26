@@ -4322,19 +4322,106 @@ export function applyInvoke(ctx: Context, config: Config) {
   const hosts = registry.hosts
   const hostForSession = registry.hostForSession
 
-  /** A4 — the compact, JSON-lossless ACTIVE member list (non-retired posts +
-   * non-retired hosts) returned by the deploy/retire tools AFTER a mutation so
-   * a caller sees the updated live catalog immediately. Derives from the
-   * single-source `listActiveMembers` (posts then hosts, catalog order). */
-  const activeCatalogMembers = (): Array<{ agentId: string; kind: 'post' | 'host' }> =>
-    listActiveMembers(byPost.values(), hosts.values()).map((member) =>
-      member.kind === 'post'
-        ? { agentId: member.entry.postId, kind: 'post' as const }
-        : { agentId: member.entry.hostId, kind: 'host' as const }
-    )
+  /** C1/C3 (m-264) — the SINGLE shared catalog row builder. One source of truth
+   * for a dept_who-like row {agentId, kind:'head'|'worker'|'host', title, state}
+   * plus every other data field the `dept_who` output carries: BOTH the
+   * `dept_who` execute (scope filtering) AND the deploy/retire `activeMembers`
+   * echo consume THIS builder, so the echo and the default view can never
+   * diverge. State via the shared `computeDeptWhoState` (live/running = agents
+   * registry presence/status); title = coordinator.title → coordinator.role →
+   * entry.role → entry.postId; kind derived 'worker' (provider:'worker') vs
+   * 'head'. Order: hosts first, then posts (the dept_who catalog order — kept
+   * for BOTH consumers). NOTE: references `coordinatorForPost` (declared LATER
+   * in this closure) — legal because the builder only ever RUNS inside async
+   * executes, after apply() has fully initialized the scope (the const
+   * declaration order is not blocking for invocation). */
+  type CatalogRow = {
+    agentId: string
+    kind: 'head' | 'worker' | 'host'
+    title: string
+    live: boolean
+    sleeping: boolean
+    state: DeptWhoState
+    sessionId: string
+    retired: boolean
+    departmentId?: string
+    role?: string
+    jobId?: string
+  }
+  const buildCatalogRows = (): CatalogRow[] => {
+    const rows: CatalogRow[] = []
+    for (const entry of hosts.values()) {
+      // m-64: the coherent single-state resolution. `live` is registry
+      // PRESENCE (AgentHandle present); `running` refines it to a turn IN
+      // FLIGHT (agents.get(sid).status === 'running'); `state` collapses
+      // live/sleeping/retired into one contradiction-free enum token.
+      const hostAgent = agents !== void 0 ? agents.get(SessionId(entry.sessionId)) : undefined
+      rows.push({
+        agentId: entry.hostId,
+        kind: 'host',
+        title: 'Asistente',
+        live: hostAgent !== undefined,
+        sleeping: entry.sleepEpoch !== void 0,
+        state: computeDeptWhoState({
+          retired: entry.retired === true,
+          sleeping: entry.sleepEpoch !== void 0,
+          live: hostAgent !== undefined,
+          running: hostAgent?.status === 'running'
+        }),
+        sessionId: entry.sessionId,
+        retired: entry.retired === true
+      })
+    }
+    for (const entry of byPost.values()) {
+      const coordinator = coordinatorForPost(entry.postId)
+      const isWorker = entry.provider === 'worker'
+      // m-64/m-228: a retired post is NEVER live, even when its AgentHandle
+      // lingers in the registry (the deploy-restart case) — the data field
+      // stays live:false so any consumer (and the render) reads a consistent
+      // 'offline, retired', never the contradictory 'live, retired'.
+      const postAgent = agents !== void 0 ? agents.get(SessionId(entry.sessionId)) : undefined
+      const postLive = entry.retired !== true && postAgent !== undefined
+      rows.push({
+        agentId: entry.postId,
+        // F1: kind derived — a disposable worker is 'worker'; every other
+        // post (configured head) is 'head' (pre-F1 hardcode).
+        kind: isWorker ? 'worker' : 'head',
+        // Spec §6: coordinator.title for department heads; PostEntry.role
+        // fallback for worker posts. Fallback chain follows head-presets.ts
+        // (`headRoleLine`, the established convention): title → role → postId.
+        title: coordinator?.title || coordinator?.role || entry.role || entry.postId,
+        live: postLive,
+        sleeping: entry.sleepEpoch !== void 0,
+        state: computeDeptWhoState({
+          retired: entry.retired === true,
+          sleeping: entry.sleepEpoch !== void 0,
+          live: postLive,
+          running: postAgent?.status === 'running'
+        }),
+        sessionId: entry.sessionId,
+        retired: entry.retired === true,
+        // F3 (§5.1): worker rows carry the department template/department
+        // link + job link (conditioned — never undefined, F9 lossless).
+        ...(isWorker && entry.departmentId !== void 0 ? { departmentId: entry.departmentId } : {}),
+        ...(isWorker && entry.role !== void 0 ? { role: entry.role } : {}),
+        ...(isWorker && entry.jobId !== void 0 ? { jobId: entry.jobId } : {})
+      })
+    }
+    return rows
+  }
 
-  /** A4 — the shared `activeMembers` output-schema fragment (a compact,
-   * JSON-lossless active member list: `{ agentId, kind }`). */
+  /** C3 (m-264) — the compact, JSON-lossless ACTIVE member echo returned by the
+   * deploy/retire tools AFTER a mutation so a caller sees the updated live
+   * catalog immediately. The SAME shared builder the dept_who default view uses,
+   * filtered to non-retired rows whose state is {idle, running} — NO
+   * sleeping/offline/retired member ever shows in the echo. */
+  const activeCatalogMembers = (): Array<{ agentId: string; kind: 'head' | 'worker' | 'host'; title: string; state: DeptWhoState }> =>
+    buildCatalogRows()
+      .filter((row) => row.retired !== true && (row.state === 'idle' || row.state === 'running'))
+      .map((row) => ({ agentId: row.agentId, kind: row.kind, title: row.title, state: row.state }))
+
+  /** A4/C3 — the shared `activeMembers` output-schema fragment (a compact,
+   * JSON-lossless active member list: `{ agentId, kind, title, state }`). */
   const activeMembersSchema = {
     type: 'array',
     required: true,
@@ -4343,10 +4430,106 @@ export function applyInvoke(ctx: Context, config: Config) {
       additionalProperties: false,
       properties: {
         agentId: { type: 'string', required: true },
-        kind: { type: 'string', required: true }
+        kind: { type: 'string', enum: ['head', 'worker', 'host'], required: true },
+        title: { type: 'string', required: true },
+        state: { type: 'string', enum: ['running', 'idle', 'sleeping', 'offline'], required: true }
       }
     }
   } as const
+
+  /** C3 — the compact ONE-LINE active-roster suffix shared by the 5
+   * deploy/retire renders (m-264): `active roster: id (kind, "title"), …`
+   * — one line, so the post-mutation echo reads the roster, not a count. */
+  const renderActiveRoster = (members: ReadonlyArray<{ agentId: string; kind: string; title: string }>): string =>
+    `active roster: ${members.map((m) => `${m.agentId} (${m.kind}, "${m.title}")`).join(', ')}`
+
+  /** R1 (m-264): ONE shared definition per lifecycle tool — dept_memo_write,
+   * dept_sleep and dept_post_retire were each defineTool'd TWICE (post own-layer
+   * in installHeadBoardTools + the global host plane) with duplicated
+   * describe/parameters/schema/render. These factories single-source the full
+   * specification; the two registration sites stay EXACTLY where they were and
+   * differ ONLY in the lifecycle `execute` branch (post own-layer → head/worker
+   * path; global host plane → host path). Behavior is unchanged; for
+   * dept_post_retire the executes were already identical, so it is ONE shared
+   * ToolDefinition registered in both planes. */
+  const memoWriteTool = (hostPlane: boolean) => defineTool({
+    name: 'dept_memo_write',
+    description: 'Write this department member\'s long-term memory to its journal (a department head or worker; from the host plane, the HOST Asistente): a durable, schema-constrained markdown memo at <stateDir>/journals/<memberId>.md (frontmatter author/room/timestamp/wake_counter/last_wake/board_cursor + decisions/constraints/openItems (+ optional current_step) + a free-form summary with a wake-routine footer). A registered head writes journals/<postId>.md; a HOST (no registered post) writes journals/host-<sessionId>.md. Use it BEFORE sleeping to hand your memory to your future (re-materialized) self. Returns the durable memo path.',
+    parameters: {
+      summary: { type: 'string', required: true, description: 'The memo body: a summary of your state, conclusions, and what your next incarnation must know.' },
+      decisions: { type: 'array', items: { type: 'string' }, description: 'Decisions taken (optional).' },
+      constraints: { type: 'array', items: { type: 'string' }, description: 'Constraints your future self must respect (optional).' },
+      openItems: { type: 'array', items: { type: 'string' }, description: 'Open items for your future self (optional).' },
+      currentStep: { type: 'string', description: 'Where you currently are (explicit durable state): a short status line the next wake can verify against (current_step in the journal). Optional.' }
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          room: { type: 'string', required: true },
+          member: { type: 'string', required: true },
+          memoPath: { type: 'string', required: true }
+        }
+      },
+      render: (_args, value) => [{ type: 'text', text: `journal written: ${value.memoPath}` } as const]
+    },
+    async execute(args, exec): Promise<{ room: string; member: string; memoPath: string }> {
+      return lifecycle.memoWrite(args, exec as Parameters<typeof lifecycle.memoWrite>[1], hostPlane)
+    }
+  })
+
+  const sleepTool = (hostPlane: boolean) => defineTool({
+    name: 'dept_sleep',
+    description: 'Sleep (dormir): persist your memory to your journal (dept_memo_write MUST be called first — this is enforced) and mark yourself for a context RESET. Conclude the turn after calling this; on your NEXT wake you are recreated as a FRESH incarnation. For a department HEAD (F8): your live AgentHandle is disposed, your durable session is ARCHIVED server-side (the sidebar row disappears, the journal + messages stay), and your next wake creates a NEW session — you keep your identity but get a fresh context. A disposable WORKER keeps the legacy cold-resume of the same session (worker retire is the separate archive path). For the HOST Asistente (host plane) it ROTATES the host session (spec 002): the old session is retired + archived server-side and a NEW session seeded with the re-keyed journal becomes the registered host (durable host sleepEpoch set on the new entry), then the turn concludes (falls back to the legacy in-place reset when the rotation cannot run). Rejects loudly if no journal has been saved.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          room: { type: 'string', required: true },
+          member: { type: 'string', required: true },
+          memoPath: { type: 'string', required: true },
+          sleepEpoch: { type: 'number', required: true }
+        }
+      },
+      render: (_args, value) => [{ type: 'text', text: `sleeping: ${value.member} marked for context reset (epoch ${value.sleepEpoch}); journal: ${value.memoPath}` } as const]
+    },
+    async execute(_args, exec): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }> {
+      if (hostPlane) return lifecycle.sleepHost(_args, exec as Parameters<typeof lifecycle.sleepHost>[1])
+      return lifecycle.sleepMember(_args, exec as Parameters<typeof lifecycle.sleepMember>[1])
+    }
+  })
+
+  const postRetireTool = defineTool({
+    name: 'dept_post_retire',
+    description: 'Retire a registered post (spec 004 §4.3 — retirement is MARKED, never erased): for a DISPOSABLE WORKER it marks the entry `retired: true` (the post stays in the registry and its history stays queryable; every live-catalog consumer — busDeliverCatalog addressing, dept_who, the wake-pack roster — filters it) and disposes its live AgentHandle; a permanent CONFIGURED head keeps today\'s semantics (registry entry removed, re-materialized by config at boot). Scope: a HEAD caller may retire ONLY the DISPOSABLE WORKERS of its own department (the workers it created — managerId match — or the workers of its own config department; a worker of another head/department and a permanent department head are rejected loudly); a HOST caller may retire any registered post. Unknown postIds are rejected loudly.',
+    parameters: {
+      postId: { type: 'string', required: true, description: 'The post id to retire (e.g. "research-head").' }
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          postId: { type: 'string', required: true },
+          retired: { type: 'boolean', required: true },
+          activeMembers: activeMembersSchema
+        }
+      },
+      render: (_args, value) => [{ type: 'text', text: `retired ${value.postId} (${renderActiveRoster(value.activeMembers)})` } as const]
+    },
+    async execute(args, exec): Promise<{ postId: string; retired: boolean; activeMembers: Array<{ agentId: string; kind: 'head' | 'worker' | 'host'; title: string; state: DeptWhoState }> }> {
+      const agent = exec.agent
+      if (!agent) throw new Error('dept_post_retire requires a calling agent (exec.agent was undefined)')
+      // Delegate to the shared retirement path (Batch 3a): a HOST caller (no
+      // registered post) may retire any post; a head caller is scoped by
+      // retirePost's F1 checks (own workers only — today's semantics preserved).
+      const result = await retirePost(args.postId, agent.id as string)
+      return { ...result, activeMembers: activeCatalogMembers() }
+    }
+  })
 
   // Fire-and-forget persistence of the host registry (callers never await it).
   // (The durable write + `.bak` backup live in the RegistryStore.)
@@ -6190,7 +6373,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (opts.allowExec === true) {
       disposers.push(agentCtx.tools.register(defineTool({
         name: 'dept_exec',
-        description: 'Execute ONE shell command, scoped to your department (spec W5-B2). Runs `bash -lc <command>` with a sanitized env (PATH/HOME/LANG only) inside a scoped root. The command runs in your department workspace cwd by default; an explicit `cwd` must be inside a scoped root. Every command + cwd is guarded BEFORE execution: a denied token (reboot/sudo/…), a mutating `systemctl` form (only the read-only `systemctl is-active <unit>` is permitted), a reference to the protected stable profile (`/opt/dsh/.dsh`) or an absolute path outside a scoped root is DENIED (out of scope — escalate via the Asistente / owner approval). For an OWNER-AUTHORIZED mission, an explicit mission grant (`org.missionExecRoots`) may allow `/opt/dsh/.dsh`; otherwise escalate via the Asistente/owner (the Asistente-direct path is the alternative). For a department WORKER whose role template declares this tool; it is never exposed to the host or a config head. Output: {ok, exitCode, stdout, stderr} — a non-zero exit is ok:false, never a throw.',
+        description: 'Execute ONE shell command, scoped to your department (spec W5-B2). Runs `bash -lc <command>` with a sanitized env (PATH/HOME/LANG only) inside a scoped root. The command runs in your department workspace cwd by default; an explicit `cwd` must be inside a scoped root. Every command + cwd is guarded BEFORE execution: a denied token (reboot/sudo/…), a mutating `systemctl` form (only the read-only `systemctl is-active <unit>` is permitted), a reference to the protected stable profile (`/opt/dsh/.dsh`) or an absolute path outside a scoped root is DENIED (out of scope — escalate via the Asistente / owner approval). For an OWNER-AUTHORIZED mission, an explicit mission grant (`org.missionExecRoots`) may allow `/opt/dsh/.dsh`; otherwise escalate via the Asistente/owner (the Asistente-direct path is the alternative). For a department WORKER whose role template declares this tool; it is never exposed to the host or a config head. Prefer the native read/glob/grep tools for reading/searching FILES; use dept_exec only for zstd/git/shell tooling that the native tools cannot do. Output: {ok, exitCode, stdout, stderr} — a non-zero exit is ok:false, never a throw.',
         parameters: {
           command: { type: 'string', required: true, description: 'The shell command to run (non-empty). Guarded before execution.' },
           cwd: { type: 'string', description: 'Working directory; default = your department workspace cwd. Must be inside a scoped root.' }
@@ -6232,54 +6415,9 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
 
 
-    disposers.push(agentCtx.tools.register(defineTool({
-      name: 'dept_memo_write',
-      description: 'Write this department head\'s long-term memory to its journal: a durable, schema-constrained markdown memo at <stateDir>/journals/<memberId>.md (frontmatter author/room/timestamp/wake_counter/last_wake/board_cursor + decisions/constraints/openItems (+ optional current_step) + a free-form summary with a wake-routine footer). Use it BEFORE sleeping to hand your memory to your future (re-materialized) self. Returns the durable memo path.',
-      parameters: {
-        summary: { type: 'string', required: true, description: 'The memo body: a summary of your state, conclusions, and what your next incarnation must know.' },
-        decisions: { type: 'array', items: { type: 'string' }, description: 'Decisions taken (optional).' },
-        constraints: { type: 'array', items: { type: 'string' }, description: 'Constraints your future self must respect (optional).' },
-        openItems: { type: 'array', items: { type: 'string' }, description: 'Open items for your future self (optional).' },
-        currentStep: { type: 'string', description: 'Where you currently are (explicit durable state): a short status line the next wake can verify against (current_step in the journal). Optional.' }
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            room: { type: 'string', required: true },
-            member: { type: 'string', required: true },
-            memoPath: { type: 'string', required: true }
-          }
-        },
-        render: (_args, value) => [{ type: 'text', text: `journal written: ${value.memoPath}` } as const]
-      },
-      async execute(args, exec): Promise<{ room: string; member: string; memoPath: string }> {
-        return lifecycle.memoWrite(args, exec as Parameters<typeof lifecycle.memoWrite>[1], false)
-      }
-    })))
+    disposers.push(agentCtx.tools.register(memoWriteTool(false)))
 
-    disposers.push(agentCtx.tools.register(defineTool({
-      name: 'dept_sleep',
-      description: 'Sleep (dormir): persist your memory to your journal (dept_memo_write MUST be called first — this is enforced) and mark yourself for a context RESET. Conclude the turn after calling this; on your NEXT wake you are recreated as a FRESH incarnation. For a department HEAD (F8): your live AgentHandle is disposed, your durable session is ARCHIVED server-side (the sidebar row disappears, the journal + messages stay), and your next wake creates a NEW session — you keep your identity but get a fresh context. A disposable WORKER keeps the legacy cold-resume of the same session (worker retire is the separate archive path). Rejects loudly if no journal has been saved.',
-      parameters: {},
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            room: { type: 'string', required: true },
-            member: { type: 'string', required: true },
-            memoPath: { type: 'string', required: true },
-            sleepEpoch: { type: 'number', required: true }
-          }
-        },
-        render: (_args, value) => [{ type: 'text', text: `sleeping: ${value.member} marked for context reset (epoch ${value.sleepEpoch}); journal: ${value.memoPath}` } as const]
-      },
-      async execute(_args, exec): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }> {
-        return lifecycle.sleepMember(_args, exec as Parameters<typeof lifecycle.sleepMember>[1])
-      }
-    })))
+    disposers.push(agentCtx.tools.register(sleepTool(false)))
 
     // --- Batch 3a: department-lifecycle tools — HEAD (manager) only ------
     // A department HEAD creates and retires DISPOSABLE WORKERS. These register
@@ -6291,7 +6429,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (manager) {
       disposers.push(agentCtx.tools.register(defineTool({
         name: 'dept_post_create',
-        description: 'Create a DISPOSABLE department worker: spawn a fresh root agent (sessionId worker-<postId>-<uuid> — a UNIQUE session, never reused across a retired-and-respawned same-role worker), register it in posts.json as a disposable entry (provider:"worker"; F1: YOU are recorded as its manager — managerId — and your config department as its departmentId), and deliver its first message via the messaging bus. The worker works your assigned task and sleeps when done; you retire it later with dept_post_retire. The first message (firstMessage, or prompt) is persisted as a durable bus message addressed to the worker (the `deepartments/post-created` signal).',
+        description: 'Create a DISPOSABLE department worker: spawn a fresh root agent (sessionId worker-<postId>-<uuid> — a UNIQUE session, never reused across a retired-and-respawned same-role worker), register it in posts.json as a disposable entry (provider:"worker"; F1: YOU are recorded as its manager — managerId — and your config department as its departmentId), and deliver its first message via the messaging bus. The worker works your assigned task and sleeps when done; you retire it later with dept_post_retire. The first message (firstMessage, or prompt) is persisted as a durable bus message addressed to the worker (the `deepartments/post-created` signal). DEPRECATED — use dept_worker_spawn (persona+tools+task) instead; kept registered for legacy compatibility (R6).',
         parameters: {
           postId: { type: 'string', required: true, description: 'Short slug for the worker, e.g. "researcher-alpha" (unique; not already registered).' },
           role: { type: 'string', required: true, description: 'The worker role, e.g. "rank-and-file researcher".' },
@@ -6308,9 +6446,9 @@ export function applyInvoke(ctx: Context, config: Config) {
               activeMembers: activeMembersSchema
             }
           },
-          render: (_args, value) => [{ type: 'text', text: `created worker ${value.postId} (session ${value.sessionId}, ${value.activeMembers.length} active member(s))` } as const]
+          render: (_args, value) => [{ type: 'text', text: `created worker ${value.postId} (session ${value.sessionId}; ${renderActiveRoster(value.activeMembers)})` } as const]
         },
-        async execute(args, exec): Promise<{ postId: string; sessionId: string; activeMembers: Array<{ agentId: string; kind: 'post' | 'host' }> }> {
+        async execute(args, exec): Promise<{ postId: string; sessionId: string; activeMembers: Array<{ agentId: string; kind: 'head' | 'worker' | 'host'; title: string; state: DeptWhoState }> }> {
           const agent = exec.agent
           if (!agent) throw new Error('dept_post_create requires a calling agent (exec.agent was undefined)')
           if (agents === void 0) throw new Error('[deepartments] dept_post_create requires the agents service')
@@ -6394,31 +6532,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         }
       })))
 
-      disposers.push(agentCtx.tools.register(defineTool({
-        name: 'dept_post_retire',
-        description: 'Retire a DISPOSABLE WORKER of YOUR department: mark it retired (the registry entry STAYS in posts.json with retired:true — the live catalog stops addressing it), dispose its live AgentHandle and persist. Scope (F1): you may only retire the workers YOU created (managerId match) or the workers of your OWN config department — a worker of another head/department is rejected loudly, and permanent department heads are NOT retired by this path. Unknown postIds are rejected loudly.',
-        parameters: {
-          postId: { type: 'string', required: true, description: 'The worker post id to retire (e.g. "researcher-alpha").' }
-        },
-        output: {
-          schema: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              postId: { type: 'string', required: true },
-              retired: { type: 'boolean', required: true },
-              activeMembers: activeMembersSchema
-            }
-          },
-          render: (_args, value) => [{ type: 'text', text: `retired worker ${value.postId} (${value.activeMembers.length} active member(s))` } as const]
-        },
-        async execute(args, exec): Promise<{ postId: string; retired: boolean; activeMembers: Array<{ agentId: string; kind: 'post' | 'host' }> }> {
-          const agent = exec.agent
-          if (!agent) throw new Error('dept_post_retire requires a calling agent (exec.agent was undefined)')
-          const result = await retirePost(args.postId, agent.id as string)
-          return { ...result, activeMembers: activeCatalogMembers() }
-        }
-      })))
+      disposers.push(agentCtx.tools.register(postRetireTool))
 
       // --- F4 (spec 004 §5.4-§5.5, D7): JOB tools — dept_job_list /
       // dept_job_run (registered ONLY here, in the head own-layer: the RH
@@ -6627,9 +6741,9 @@ export function applyInvoke(ctx: Context, config: Config) {
               activeMembers: activeMembersSchema
             }
           },
-          render: (_args, value) => [{ type: 'text', text: `spawned worker ${value.workerId} (session ${value.sessionId}, title "${value.title}", ${value.activeMembers.length} active member(s))` } as const]
+          render: (_args, value) => [{ type: 'text', text: `spawned worker ${value.workerId} (session ${value.sessionId}, title "${value.title}"; ${renderActiveRoster(value.activeMembers)})` } as const]
         },
-        async execute(args, exec): Promise<{ workerId: string; sessionId: string; title: string; activeMembers: Array<{ agentId: string; kind: 'post' | 'host' }> }> {
+        async execute(args, exec): Promise<{ workerId: string; sessionId: string; title: string; activeMembers: Array<{ agentId: string; kind: 'head' | 'worker' | 'host'; title: string; state: DeptWhoState }> }> {
           const agent = exec.agent
           if (!agent) throw new Error('dept_worker_spawn requires a calling agent (exec.agent was undefined)')
           if (agents === void 0) throw new Error('[deepartments] dept_worker_spawn requires the agents service')
@@ -6681,9 +6795,9 @@ export function applyInvoke(ctx: Context, config: Config) {
               activeMembers: activeMembersSchema
             }
           },
-          render: (_args, value) => [{ type: 'text', text: `retired worker ${value.workerId} (${value.archived ? 'session archived' : 'session archive skipped (non-fatal)'}, ${value.activeMembers.length} active member(s))` } as const]
+          render: (_args, value) => [{ type: 'text', text: `retired worker ${value.workerId} (${value.archived ? 'session archived' : 'session archive skipped (non-fatal)'}; ${renderActiveRoster(value.activeMembers)})` } as const]
         },
-        async execute(args, exec): Promise<{ workerId: string; retired: boolean; archived: boolean; activeMembers: Array<{ agentId: string; kind: 'post' | 'host' }> }> {
+        async execute(args, exec): Promise<{ workerId: string; retired: boolean; archived: boolean; activeMembers: Array<{ agentId: string; kind: 'head' | 'worker' | 'host'; title: string; state: DeptWhoState }> }> {
           const agent = exec.agent
           if (!agent) throw new Error('dept_worker_retire requires a calling agent (exec.agent was undefined)')
           const workerId = String(args.workerId ?? '').trim()
@@ -9462,9 +9576,9 @@ export function applyInvoke(ctx: Context, config: Config) {
    * (the LIVE catalog — busDeliverCatalog addressing — still filters them). */
   const deptWhoTool = defineTool({
     name: 'dept_who',
-    description: 'List the whole Deepartments catalog — the Asistente host (kind "host", title "Asistente") and every registered department head/worker with its DERIVED kind (a configured department head is kind "head", a disposable worker is kind "worker"; title from the department configuration, PostEntry.role fallback) — each with a derived per-member life-cycle state (`running` = a turn IN FLIGHT, `idle` = resident with the turn finished, `sleeping` = sleepEpoch set, `offline` = no live session; a single coherent enum so no contradictory "live, sleeping"/"live, retired" render), the live/sleeping markers and session id, and your OWN entry marked you:true. Worker rows additionally carry departmentId/role/jobId (its department template and job link) and RETIRED workers are shown with retired:true (the head\'s management view; a retired worker is NOT addressed by the live catalog — sending to it fails per-recipient). This is the identity + roster tool: learn who exists and who you are in one call. No room parameter — the roster is the organization. The `scope` parameter selects the view: `active` (default) hides retired rows; `includeRetired` lists them (with retired:true).',
+    description: 'List the whole Deepartments catalog — the Asistente host (kind "host", title "Asistente") and every registered department head/worker with its DERIVED kind (a configured department head is kind "head", a disposable worker is kind "worker"; title from the department configuration, PostEntry.role fallback) — each with a derived per-member life-cycle state (`running` = a turn IN FLIGHT, `idle` = resident with the turn finished, `sleeping` = sleepEpoch set, `offline` = no live session; a single coherent enum so no contradictory "live, sleeping"/"live, retired" render), the live/sleeping markers and session id, and your OWN entry marked you:true. Worker rows additionally carry departmentId/role/jobId (its department template and job link) and RETIRED workers are shown with retired:true (the head\'s management view; a retired worker is NOT addressed by the live catalog — sending to it fails per-recipient). This is the identity + roster tool: learn who exists and who you are in one call. No room parameter — the roster is the organization. The `scope` parameter selects the view: `active` (default) = non-retired rows whose state is {idle, running} PLUS your OWN (you:true) row ALWAYS (even when you are sleeping/offline/retired) — non-caller sleeping/offline rows are HIDDEN (reported via `inactiveHiddenCount`); `all` = the full superset (idle|running|sleeping|offline + retired with retired:true); `includeRetired` is the DEPRECATED COMPAT ALIAS of `all` (kept per R6 — never remove; existing callers/tests keep using it).',
     parameters: {
-      scope: { type: 'string', enum: ['active', 'includeRetired'], default: 'active', description: 'Catalog scope: `active` (default) hides retired rows; `includeRetired` lists retired posts/hosts with retired:true.' }
+      scope: { type: 'string', enum: ['active', 'all', 'includeRetired'], default: 'active', description: 'Catalog scope: `active` (default) shows non-retired members whose state is idle|running plus the caller\'s own row (you:true) always; `all` shows the full roster (idle|running|sleeping|offline + retired with retired:true); `includeRetired` is the DEPRECATED COMPAT ALIAS of `all` (kept per R6 — never remove).' }
     },
     output: {
       schema: {
@@ -9493,7 +9607,8 @@ export function applyInvoke(ctx: Context, config: Config) {
               }
             }
           },
-          retiredCount: { type: 'integer', required: true }
+          retiredCount: { type: 'integer', required: true },
+          inactiveHiddenCount: { type: 'integer', required: true }
         }
       },
       render: (_args, value) => {
@@ -9504,99 +9619,73 @@ export function applyInvoke(ctx: Context, config: Config) {
         const lines = value.members.map((member) =>
           `  - ${member.agentId} (${member.kind}, "${member.title}"${member.state === 'running' ? ', running' : member.state === 'idle' ? ', idle' : member.state === 'sleeping' ? ', sleeping' : ', offline'}${member.retired === true ? ', retired' : ''}${member.you ? ', YOU' : ''})`)
         const retiredCount = value.retiredCount ?? 0
-        return [{ type: 'text', text: `Deepartments catalog (${value.members.length} member(s), ${retiredCount} retired):\n${lines.join('\n')}` } as const]
+        // C1 (m-264): the header adds the sleeping/offline-hidden count — the
+        // NON-retired rows the DEFAULT active view hides (the caller's own
+        // you:true row is always kept and never counted).
+        const inactiveHiddenCount = value.inactiveHiddenCount ?? 0
+        return [{ type: 'text', text: `Deepartments catalog (${value.members.length} member(s), ${retiredCount} retired, ${inactiveHiddenCount} sleeping/offline hidden):\n${lines.join('\n')}` } as const]
       }
     },
-    async execute(args, exec): Promise<{ members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; state: DeptWhoState; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }>; retiredCount: number }> {
+    async execute(args, exec): Promise<{ members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; state: DeptWhoState; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }>; retiredCount: number; inactiveHiddenCount: number }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_who requires a calling agent (exec.agent was undefined)')
-      // A1/A2 — the catalog scope: `active` (default) hides retired rows;
-      // `includeRetired` lists them with retired:true (the head management view).
-      const scope = args.scope === 'includeRetired' ? 'includeRetired' : 'active'
+      // C1 (m-264) — the catalog scope: `active` (default) = non-retired rows
+      // whose state is {idle, running} PLUS the caller's OWN row (you:true)
+      // ALWAYS (even when it is sleeping/offline/retired); `all` = the full
+      // superset (idle|running|sleeping|offline + retired with retired:true).
+      // `includeRetired` is the DOCUMENTED COMPAT ALIAS of `all` (R6: never
+      // remove — existing tests and callers keep using it).
+      const scope = args.scope === 'all' || args.scope === 'includeRetired' ? 'all' : 'active'
       // B3 gap fix: caller host self-registers when no live host exists (board
       // tools are gone; the roster must show the host with you:true).
       const callerMemberId = busEnsureHostForCaller(agent as { id: string; session?: { header?: SessionHeaderWithOrigin } })
       const members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; state: DeptWhoState; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }> = []
       // A5 — `retiredCount` = the retired rows the DEFAULT (active) view hides
-      // (0 when scope=includeRetired — nothing is hidden).
+      // (0 when scope=all/includeRetired — nothing is hidden).
       let retiredCount = 0
-      for (const entry of hosts.values()) {
-        if (entry.retired === true) {
-          if (scope === 'active') retiredCount++
-          if (scope !== 'includeRetired') continue
+      // C1 — `inactiveHiddenCount` = the NON-retired rows the DEFAULT active
+      // view hides because their state is sleeping/offline (the caller's own
+      // you:true row is ALWAYS kept and NEVER counted).
+      let inactiveHiddenCount = 0
+      // C3 — ONE shared row builder for the roster AND the activeMembers echo,
+      // so the echo and the default view can never diverge.
+      for (const row of buildCatalogRows()) {
+        const you = row.agentId === callerMemberId
+        if (row.retired) {
+          if (scope === 'active') {
+            retiredCount++
+            if (!you) continue
+          }
+          // all/includeRetired keeps the row (the retired:true marker is
+          // conditioned below).
+        } else if (scope === 'active' && (row.state === 'sleeping' || row.state === 'offline')) {
+          // C1 FIX (reviewer-4 PR-A point 1): a NON-you sleeping/offline row is
+          // counted AND hidden; the caller's OWN you:true row stays SHOWN but is
+          // NEVER counted (the count must exclude it — see the header comment).
+          if (!you) {
+            inactiveHiddenCount++
+            continue
+          }
         }
-        // m-64: the coherent single-state resolution. `live` is registry
-        // PRESENCE (AgentHandle present); `running` refines it to a turn IN
-        // FLIGHT (agents.get(sid).status === 'running'); `state` collapses
-        // live/sleeping/retired into one contradiction-free enum token.
-        const hostAgent = agents !== void 0 ? agents.get(SessionId(entry.sessionId)) : undefined
-        const hostLive = hostAgent !== undefined
-        const hostSleeping = entry.sleepEpoch !== void 0
-        const hostRunning = hostAgent?.status === 'running'
         members.push({
-          agentId: entry.hostId,
-          kind: 'host',
-          title: 'Asistente',
-          live: hostLive,
-          sleeping: hostSleeping,
-          state: computeDeptWhoState({ retired: entry.retired === true, sleeping: hostSleeping, live: hostLive, running: hostRunning }),
-          sessionId: entry.sessionId,
-          you: entry.hostId === callerMemberId,
-          // A-series parity: the host row must carry `retired:true` when the
-          // entry is retired (matching the worker push below) so the `, retired`
-          // render marker appears under `{ scope: 'includeRetired' }`.
-          ...(entry.retired === true ? { retired: true } : {})
+          agentId: row.agentId,
+          kind: row.kind,
+          title: row.title,
+          live: row.live,
+          sleeping: row.sleeping,
+          state: row.state,
+          sessionId: row.sessionId,
+          you,
+          // F3 (§5.1) + F9: conditioned spreads — the worker extras and the
+          // retired marker are never undefined; the render appends ', retired'
+          // from the data field (the A-series host/worker parity).
+          ...(row.departmentId !== void 0 ? { departmentId: row.departmentId } : {}),
+          ...(row.role !== void 0 ? { role: row.role } : {}),
+          ...(row.jobId !== void 0 ? { jobId: row.jobId } : {}),
+          ...(row.retired ? { retired: true } : {})
         })
       }
-      for (const entry of byPost.values()) {
-        // F3 (§5.1): retired workers stay LISTED (the head-management view)
-        // with `retired: true` — the LIVE catalog (busDeliverCatalog
-        // addressing) keeps filtering them; the entry stays durable. A1/A2: the
-        // SAME scope gate applies here (active hides retired posts).
-        if (entry.retired === true) {
-          if (scope === 'active') retiredCount++
-          if (scope !== 'includeRetired') continue
-        }
-        const coordinator = coordinatorForPost(entry.postId)
-        const isWorker = entry.provider === 'worker'
-        // m-64: the coherent single-state resolution for a post. `live` keeps the
-        // m-228 retired short-circuit (a retired post is NEVER live); `running`
-        // refines to a turn IN FLIGHT (agents.get(sid).status === 'running');
-        // `state` collapses live/sleeping/retired into one enum token.
-        const postAgent = agents !== void 0 ? agents.get(SessionId(entry.sessionId)) : undefined
-        const postLive = entry.retired !== true && postAgent !== undefined
-        const postSleeping = entry.sleepEpoch !== void 0
-        const postRunning = postAgent?.status === 'running'
-        members.push({
-          agentId: entry.postId,
-          // F1: kind derived — a disposable worker is 'worker'; every other
-          // post (configured head) is 'head' (pre-F1 hardcode).
-          kind: isWorker ? 'worker' : 'head',
-          // Spec §6: coordinator.title for department heads; PostEntry.role
-          // fallback for worker posts. Fallback chain follows head-presets.ts
-          // (`headRoleLine`, the established convention): title → role → postId.
-          title: coordinator?.title || coordinator?.role || entry.role || entry.postId,
-          // m-228 (QD flag, dept_who 'live,retired'): a RETIRED worker must NEVER
-          // render live — even when its AgentHandle lingers in the `agents`
-          // registry (the deploy-restart case), the data field is live:false so
-          // any consumer (and the render, which appends ', retired' separately)
-          // reads a consistent 'offline, retired', never the contradictory
-          // 'live, retired'. The HOST loop above already continues on retired
-          // hosts; this is the worker-post analogue.
-          live: postLive,
-          sleeping: postSleeping,
-          state: computeDeptWhoState({ retired: entry.retired === true, sleeping: postSleeping, live: postLive, running: postRunning }),
-          sessionId: entry.sessionId,
-          you: entry.postId === callerMemberId,
-          // F3 (§5.1): worker rows carry the department template/department
-          // link + job link (the head filters its workers by departmentId).
-          ...(isWorker && entry.departmentId !== void 0 ? { departmentId: entry.departmentId } : {}),
-          ...(isWorker && entry.role !== void 0 ? { role: entry.role } : {}),
-          ...(isWorker && entry.jobId !== void 0 ? { jobId: entry.jobId } : {}),
-          ...(isWorker && entry.retired === true ? { retired: true } : {})
-        })
-      }
-      return { members, retiredCount }
+      return { members, retiredCount, inactiveHiddenCount }
     }
   })
 
@@ -9805,34 +9894,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }))
 
-  const globalRetire = ctx.tools.register(defineTool({
-    name: 'dept_post_retire',
-    description: 'Retire a registered post (spec 004 §4.3 — retirement is MARKED, never erased): for a DISPOSABLE WORKER it marks the entry `retired: true` (the post stays in the registry and its history stays queryable; every live-catalog consumer — busDeliverCatalog addressing, dept_who, the wake-pack roster — filters it) and disposes its live AgentHandle; a permanent CONFIGURED head keeps today\'s semantics (registry entry removed, re-materialized by config at boot). Scope: a HOST caller may retire any post; a HEAD caller only the workers of its own department. Unknown postIds are rejected loudly.',
-    parameters: {
-      postId: { type: 'string', required: true, description: 'The post id to retire (e.g. "research-head").' }
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          postId: { type: 'string', required: true },
-          retired: { type: 'boolean', required: true },
-          activeMembers: activeMembersSchema
-        }
-      },
-      render: (_args, value) => [{ type: 'text', text: `retired post ${value.postId} (${value.activeMembers.length} active member(s))` } as const]
-    },
-    async execute(args, exec): Promise<{ postId: string; retired: boolean; activeMembers: Array<{ agentId: string; kind: 'post' | 'host' }> }> {
-      const agent = exec.agent
-      if (!agent) throw new Error('dept_post_retire requires a calling agent (exec.agent was undefined)')
-      // Delegate to the shared retirement path (Batch 3a). From the HOST plane
-      // the caller is not a registered post → a HOST, so any post may be retired
-      // (today's semantics preserved).
-      const result = await retirePost(args.postId, agent.id as string)
-      return { ...result, activeMembers: activeCatalogMembers() }
-    }
-  }))
+  const globalRetire = ctx.tools.register(postRetireTool)
 
   // --- Batch G: memo (journal) and sleep (dormir) — host plane --------------
   // The owner's lifecycle model: department heads are PERMANENT agents that go
@@ -9844,54 +9906,9 @@ export function applyInvoke(ctx: Context, config: Config) {
   // dept_sleep requires a prior memo, marks the post (sleepEpoch), and the
   // relay re-materializes it fresh.
 
-  const globalMemo = ctx.tools.register(defineTool({
-    name: 'dept_memo_write',
-    description: 'Write this department head\'s — or, from the host plane, the HOST Asistente\'s — long-term memory to its journal: a durable, schema-constrained markdown memo at <stateDir>/journals/<memberId>.md (frontmatter author/room/timestamp/wake_counter/last_wake/board_cursor + decisions/constraints/openItems (+ optional current_step) + a free-form summary with a wake-routine footer). A registered head writes journals/<postId>.md; a HOST (no registered post) writes journals/host-<sessionId>.md. Use it BEFORE sleeping to hand your memory to your future (re-materialized) self. Returns the durable memo path.',
-    parameters: {
-      summary: { type: 'string', required: true, description: 'The memo body: a summary of your state, conclusions, and what your next incarnation must know.' },
-      decisions: { type: 'array', items: { type: 'string' }, description: 'Decisions taken (optional).' },
-      constraints: { type: 'array', items: { type: 'string' }, description: 'Constraints your future self must respect (optional).' },
-      openItems: { type: 'array', items: { type: 'string' }, description: 'Open items for your future self (optional).' },
-      currentStep: { type: 'string', description: 'Where you currently are (explicit durable state): a short status line the next wake can verify against (current_step in the journal). Optional.' }
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          room: { type: 'string', required: true },
-          member: { type: 'string', required: true },
-          memoPath: { type: 'string', required: true }
-        }
-      },
-      render: (_args, value) => [{ type: 'text', text: `journal written: ${value.memoPath}` } as const]
-    },
-    async execute(args, exec): Promise<{ room: string; member: string; memoPath: string }> {
-      return lifecycle.memoWrite(args, exec as Parameters<typeof lifecycle.memoWrite>[1], true)
-    }
-  }))
+  const globalMemo = ctx.tools.register(memoWriteTool(true))
 
-  const globalSleep = ctx.tools.register(defineTool({
-    name: 'dept_sleep',
-    description: 'Sleep (dormir): persist your memory to your journal (dept_memo_write MUST be called first — this is enforced) and mark yourself for a context RESET. For a department HEAD this marks the post + disposes its AgentHandle (fresh resume on next wake). For the HOST Asistente it ROTATES the host session (spec 002): the old session is retired + archived server-side and a NEW session seeded with the re-keyed journal becomes the registered host (durable host sleepEpoch set on the new entry), then the turn concludes. Falls back to the legacy in-place reset when the rotation cannot run. Rejects loudly if no journal has been saved.',
-    parameters: {},
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          room: { type: 'string', required: true },
-          member: { type: 'string', required: true },
-          memoPath: { type: 'string', required: true },
-          sleepEpoch: { type: 'number', required: true }
-        }
-      },
-      render: (_args, value) => [{ type: 'text', text: `sleeping: ${value.member} marked for context reset (epoch ${value.sleepEpoch}); journal: ${value.memoPath}` } as const]
-    },
-    async execute(_args, exec): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }> {
-      return lifecycle.sleepHost(_args, exec as Parameters<typeof lifecycle.sleepHost>[1])
-    }
-  }))
+  const globalSleep = ctx.tools.register(sleepTool(true))
 
   // --- B1: org-wide quiet-sleep orchestration (host plane) -------------------
   // The Asistente owns the coordinated quiet-sleep. `dept_sleep_all` durably

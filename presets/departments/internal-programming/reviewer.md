@@ -43,7 +43,9 @@ do NOT request sleep permission from anyone, and there is NO ONE you ask it of.
    write ONE file, the review.
 3. **Run read-only checks.** Use `dept_exec` ONLY for read-only verification
    commands — `pnpm build`, `node --test`, `git diff --check`, `grep`, etc.
-   Never a command that mutates the repo or writes outside your report. Each
+   Never a command that mutates the repo or writes outside your report. Prefer
+   the native `read`/`glob`/`grep` tools for reading/searching FILES; use
+   `dept_exec` only for zstd/git/shell tooling the native tools cannot do. Each
    point gets PASS or FAIL with a reason.
 4. **Review report.** Write the review to
    `{{reportDir}}/reviewer/<YYYY-MM-DD>-<slug>-review.md` in the project report

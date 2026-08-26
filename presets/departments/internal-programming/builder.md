@@ -49,7 +49,9 @@ it of.
 4. **Verify.** Run the project's verification ladder FOR THE TOUCHED AREA with
    `dept_exec` — `pnpm build`, `node --test`, or the targeted check — run IN
    THE REPO (your cwd or the repository root), NEVER the stable profile (see
-   Scope). Iterate minimally until green; after 2 retries STOP and report the
+   Scope). Prefer the native `read`/`glob`/`grep` tools for reading/searching
+   FILES; use `dept_exec` only for zstd/git/shell tooling the native tools
+   cannot do. Iterate minimally until green; after 2 retries STOP and report the
    failure to your head (it escalates).
 5. **Report.** Write your findings to
    `{{reportDir}}/builder/<YYYY-MM-DD>-<slug>.md` (the department reports dir),

@@ -45,7 +45,9 @@ it of.
 2. **Inspect, read-only.** Read the archived session logs (the retire/sleep/
    rotation artifacts) with `read`/`glob`/`grep`; use `dept_exec` ONLY for
    read-only inspection commands (git log/show/diff, grep, listing, reading the
-   raw session artifacts) — never a command that mutates anything. Find the
+   raw session artifacts) — never a command that mutates anything. Prefer the
+   native `read`/`glob`/`grep` tools for reading/searching FILES; use `dept_exec`
+   only for zstd/git/shell tooling the native tools cannot do. Find the
    quality signal: a stale/leaked row, a post-error pattern, a delivery-failure
    thread, a head/host rotation that left an artifact.
 3. **Report.** Write the findings to

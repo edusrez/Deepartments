@@ -41,7 +41,9 @@ it of.
    log`/`git show`/`git diff` READ-ONLY to understand history and provenance.
    Prefer a search over file-by-file reads when a grep suffices. `dept_exec` is
    used ONLY for read-only analysis commands (git log/show/diff, grep, listing)
-   — never a command that mutates the repo.
+   — never a command that mutates the repo. Prefer the native `read`/`glob`/
+   `grep` tools for reading/searching FILES; use `dept_exec` only for zstd/git/
+   shell tooling the native tools cannot do.
 3. **Map the flow.** Produce a concise flow/architecture summary of the area —
    what it is, how it's wired, the call/state path — with the key files cited as
    `file:line`. Reference prior report paths you build on (≤ 3 per category).
