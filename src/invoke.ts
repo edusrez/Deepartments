@@ -84,7 +84,7 @@ import { runHostRotation, ASISTENTE_SESSION_TITLE, isArchivedSession } from './c
 import type { RotationPersistenceLike, WorkspaceRegistryLike } from './core/session-rotation.js'
 import { createLifecycleService, buildSleepJournalMessage, shouldClearCleanupPending } from './core/lifecycle.js'
 import type { LifecycleService } from './core/lifecycle.js'
-import type { Config, CoordinatorConfig, DepartmentConfig, ParallelConfig, ParallelMonitorConfig } from './org.js'
+import type { Config, CoordinatorConfig, DepartmentConfig, ParallelConfig, ParallelMonitorConfig, PostsRetentionConfig } from './org.js'
 import {
   MessagesStore,
   markDelivery,
@@ -4211,7 +4211,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   // dshd-core row carries the org). `stateDir`/`org` are the ONLY local bindings
   // every consumer below reads (they replace the direct config.* reads).
   const coreOrg = ctx.get('deepartments.org') as
-    | { stateDir?: string; org?: { departments?: DepartmentConfig[]; execRoots?: string[]; missionExecRoots?: string[]; poolerBaseURL?: string } }
+    | { stateDir?: string; org?: { departments?: DepartmentConfig[]; execRoots?: string[]; missionExecRoots?: string[]; poolerBaseURL?: string; postsRetention?: PostsRetentionConfig } }
     | undefined
   // `cfg` alias: the fallback reads the bundle's OWN patch config without the
   // `config.stateDir` / `config.org` TOKENS that the body-wide replacement below
@@ -7942,12 +7942,23 @@ export function applyInvoke(ctx: Context, config: Config) {
       // confirmed absent durable session counts as gone (unable to determine →
       // NOT gone → never flagged).
       const persistence = ctx.get('sessionPersistence') as { readRaw?: (id: SessionId, signal?: AbortSignal) => Promise<{ content: string } | undefined> } | undefined
-      // A3/C2 — the durable posts.json RETIRED-entry retention policy knob
-      // (config.org.postsRetention). Only wired when the section is present;
-      // an ABSENT section falls through to the code defaults in the registrar,
-      // which are CONSERVATIVE: retired-entry pruning is OFF by default and is
-      // enabled ONLY by an explicit `org.postsRetention.enabled: true`.
-      const postsRetention = config.org.postsRetention
+      // A3/C2 — the durable posts.json RETIRED-entry retention policy knob.
+      // Read SHARED-first from the resolved `org` binding (coreOrg?.org ?? cfg.org
+      // — see :4222), NOT from the bundle row's own `config.org` (the FASE 2.6
+      // MIRROR, which does NOT carry the relocated org values; the dshd-core row
+      // is the SHARED CONFIG SOURCE and is where the knob actually lives). This
+      // mirrors the shared-first consumption pattern of every other
+      // deepartments.org consumer (e.g. :4213-4222). Only wired when the section
+      // is present; an ABSENT section falls through to the code defaults in the
+      // registrar, which are CONSERVATIVE: retired-entry pruning is OFF by
+      // default and is enabled ONLY by an explicit
+      // `org.postsRetention.enabled: true`. The shared-surface value is read via
+      // an explicit typed cast for clarity; the dshd-core `OrgConfig` NOW
+      // declares postsRetention (FASE 2.6 shared source devexpone postsRetention)
+      // and the bundle's `Config['org']` (which `org` is typed as) exposes it
+      // too, so the in-bundle fallback (`cfg.org`) stays behavior-neutral (same
+      // nested config when dshd-core is not composed).
+      const postsRetention = (org as { postsRetention?: PostsRetentionConfig }).postsRetention
       await reconcileDurablePostsRegistry(stateDir, {
         logger: ctx.logger,
         retireGoneWorkers: false,

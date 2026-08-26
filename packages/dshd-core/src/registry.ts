@@ -1134,7 +1134,12 @@ export class RegistryStore {
         const inflightWorkers = Array.isArray(entry.inflightWorkers)
           ? entry.inflightWorkers.filter((w): w is string => typeof w === 'string')
           : undefined
-        this.registerEntry({
+        // Populate the in-memory catalog DIRECTLY (mirroring `loadHosts`) instead
+        // of `registerEntry`, which fired a fire-and-forget `persistPosts()` PER
+        // ENTRY — an unawaited, non-atomic write storm that raced the boot
+        // reconcile's single read+prune of posts.json (the C2 boot-gate hang).
+        // posts.json is persisted ONCE, awaited, after the loop (see below).
+        this.byPost.set(postId, {
           postId,
           sessionId,
           roomId: entry.roomId,
@@ -1150,9 +1155,20 @@ export class RegistryStore {
           ...(previousChildId !== void 0 ? { previousChildId } : {}),
           ...(inflightWorkers !== void 0 && inflightWorkers.length > 0 ? { inflightWorkers } : {})
         })
+        this.byChild.set(sessionId, postId)
       } else {
         sweptLegacy++
       }
+    }
+    // ONE awaited persist at the end INSTEAD of the per-entry fire-and-forget
+    // write storm — posts.json is STABLE before `registryLoaded` resolves, so
+    // the boot reconcile always reads a complete file (deterministic C2 prune).
+    // Only fires when legacy/fork entries were actually swept (the loaded file
+    // was rewritten): in the common no-drop case the file is already complete
+    // and is left untouched (no gratuitous boot-time rewrite — preserves the
+    // pre-fix boot timing for the delivery/noWake/QD tests).
+    if (sweptLegacy > 0) {
+      await this.persistPosts()
     }
     this.deps.logger.info?.(`[deepartments] loaded ${this.byPost.size} head registry entries from posts.json${sweptLegacy > 0 ? `; skipped ${sweptLegacy} legacy/non-head entry/entries (head model)` : ''}`)
   }

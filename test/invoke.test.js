@@ -677,6 +677,20 @@ class StubAgentPresets extends Service {
   }
 }
 
+/** FASE 2.6 shared-config-source stub: provides the `deepartments.org` SHARED
+ * CONFIG SOURCE service (the surface the bundle consumes in the full/FASE 2.6
+ * composition where the dshd-core row is the source of truth). A test sets it
+ * to carry org.postsRetention while the bundle's OWN mirror (`opts.org`) does
+ * NOT, so the boot reconcile's SHARED-first read is exercised. Absent → dshd-core
+ * is NOT composed (the hermetic default) → the bundle falls back to cfg.org. */
+class StubDeepartmentsOrg extends Service {
+  constructor(ctx, stateDir, org) {
+    super(ctx, 'deepartments.org')
+    this.stateDir = stateDir
+    this.org = org
+  }
+}
+
 /**
  * Boot the REAL Loader with the REAL dsh services, the REAL SubagentRuntime,
  * stub agents/persistence services, two stub subagent providers, and the
@@ -780,6 +794,29 @@ async function bootPlugin(stateDir, opts = {}) {
   // per-agent own-layer).
   if (opts.nativeControlTool === true) {
     await loader.create({ id: 'native-tool-subagent-control', name: '@deepseek-ai/dsh-tool-subagent-control' })
+  }
+
+  // FASE 2.6 shared-config-source fixture: `opts.composeCore === true` composes
+  // the REAL dshd-core plugin BEFORE the bundle, so its `apply` SYNCHRONOUSLY
+  // provides `deepartments.org` (the SHARED CONFIG SOURCE) with the org config
+  // given in `opts.deepartmentsOrg` (e.g. carrying org.postsRetention) while the
+  // bundle's OWN mirror (`opts.org`) does NOT — the exact post-relocation split
+  // the boot reconcile reads SHARED-first (`coreOrg?.org ?? cfg.org`). ABSENT →
+  // dshd-core is NOT composed (the hermetic default) → the bundle falls back to
+  // cfg.org (behavior-neutral). Composing dshd-core via the Loader (rather than
+  // a stub Service) is REQUIRED for determinism: it provides `deepartments.org`
+  // synchronously inside its `apply`, so it is resolvable at the bundle's own
+  // apply time (a stub Service registers asynchronously and is NOT yet visible
+  // when the bundle's `apply` reads `ctx.get('deepartments.org')`).
+  if (opts.composeCore === true) {
+    await loader.create({
+      id: 'dshd-core',
+      name: 'dshd-core',
+      config: {
+        stateDir,
+        org: opts.deepartmentsOrg ?? { departments: [] }
+      }
+    })
   }
 
   loader.create({
@@ -12174,6 +12211,86 @@ test('A3/C2 reconcileDurablePostsRegistry pruning: ABSENT `enableRetiredPrune` �
     assert.ok(!files.some((f) => f.startsWith('posts.json.bak-') && f.endsWith('-prune')), 'A3: NO pre-prune backup is written when pruning is off')
     assert.ok(!files.some((f) => f === 'posts-retired-archive.jsonl'), 'A3: NO retired archive is written when pruning is off')
     assert.ok(!logged.some((m) => m.includes('PRUNED')), 'A3: no prune warn is logged when pruning is off')
+  })
+})
+
+test('A3/C2 boot wiring (FASE 2.6): the postsRetention knob is read SHARED-first (deepartments.org) — a dshd-core org carrying postsRetention{maxRetiredKept:50,enabled:true} prunes posts.json at boot EVEN THOUGH the bundle mirror (config.org) does NOT carry it', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Seed a head + 60 retired entries (> the default retiredKeep 50). An EMPTY
+    // org.departments keeps `ensureAllHeads` a no-op so the boot reconcile is the
+    // SOLE writer of posts.json — the prune outcome is deterministic (no
+    // head-materialization write racing the reconcile).
+    await writeFile(path.join(stateDir, 'posts.json'), JSON.stringify({
+      'head': { sessionId: 'head-fixed', roomId: 'research', agentPreset: 'deepartments-head' },
+      ...Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`w-${i}`, { sessionId: `w-${i}`, roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'head', retired: true, retiredAt: 100 + i }]))
+    }, null, 2))
+    // Seed an (empty) hosts.json so the boot `registry.loadHosts` resolves
+    // deterministically (the absent-hosts.json ENOENT path is what the C2 boot
+    // reconcile races on — a host-registry load that hangs leaves the
+    // `Promise.all([registryLoaded, hostsLoaded])` boot gate unsettled and the
+    // boot `runDurableRegistryReconciliation` never runs → prune OFF → timeout).
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({}, null, 2))
+    // Boot the bundle with the SHARED config source (`deepartments.org`) carrying
+    // postsRetention, while the bundle's OWN mirror (`org`) deliberately does NOT
+    // carry it — the exact post-relocation split (the dshd-core row is the source
+    // of truth; the bundle mirror no longer carries the relocated org values).
+    const env = await bootPlugin(stateDir, {
+      // composeCore: true composes the REAL dshd-core plugin BEFORE the bundle so
+      // its apply SYNCHRONOUSLY provides `deepartments.org` (the shared config
+      // source) carrying the postsRetention knob. Without it dshd-core is never
+      // composed, `coreOrg` stays undefined and `org` falls back to the bundle
+      // mirror (`cfg.org = { departments: [] }`, NO postsRetention) → prune OFF
+      // → this test would time out. With it the shared-first read resolves the
+      // knob and the boot reconcile actually prunes posts.json.
+      composeCore: true,
+      deepartmentsOrg: {
+        departments: [],
+        postsRetention: { maxRetiredKept: 50, archiveFile: 'posts-retired-archive.jsonl', enabled: true }
+      },
+      org: { departments: [] }
+    })
+    try {
+      await waitFor(async () => {
+        const files = await readdir(stateDir)
+        return files.some((f) => f === 'posts-retired-archive.jsonl') && files.some((f) => f.startsWith('posts.json.bak-') && f.endsWith('-prune'))
+      }, 20000, 'boot reconcile pruned posts.json using the SHARED postsRetention knob')
+      const posts = JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8'))
+      const retiredIds = Object.keys(posts).filter((id) => posts[id]?.retired === true)
+      assert.equal(retiredIds.length, 50, 'A3/C2 wiring: exactly the newest 50 retired entries are kept (60 - 10 = 50)')
+      const archive = (await readFile(path.join(stateDir, 'posts-retired-archive.jsonl'), 'utf8')).trim().split('\n')
+      assert.equal(archive.length, 10, 'A3/C2 wiring: the 10 oldest retired entries (beyond newest 50) are archived to posts-retired-archive.jsonl')
+      assert.ok(posts['head'] !== undefined && posts['head'].retired === undefined, 'A3/C2 wiring: the live head REMAINS after the shared-knob prune')
+    } catch (e) {
+      throw e
+    }
+    finally {
+      env.dispose()
+    }
+  })
+})
+
+test('A3/C2 boot wiring (FASE 2.6): an ABSENT shared postsRetention (dshd-core NOT composed → in-bundle fallback cfg.org) leaves retired pruning OFF (conservative behavior-neutral default)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, 'posts.json'), JSON.stringify({
+      'head': { sessionId: 'head-fixed', roomId: 'research', agentPreset: 'deepartments-head' },
+      ...Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`w-${i}`, { sessionId: `w-${i}`, roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'head', retired: true, retiredAt: 100 + i }]))
+    }, null, 2))
+    // No `deepartmentsOrg` → dshd-core is NOT composed; the bundle falls back to
+    // its OWN mirror (`org: { departments: [] }`, which has NO postsRetention)
+    // → pruning stays OFF.
+    const env = await bootPlugin(stateDir, { org: { departments: [] } })
+    try {
+      // Give the boot reconcile a window to make its (no-op) decision.
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      const files = await readdir(stateDir)
+      assert.ok(!files.some((f) => f === 'posts-retired-archive.jsonl'), 'A3/C2 wiring: NO retired archive is written when the knob is absent (prune OFF)')
+      assert.ok(!files.some((f) => f.startsWith('posts.json.bak-') && f.endsWith('-prune')), 'A3/C2 wiring: NO prune backup is written when the knob is absent (prune OFF)')
+      const posts = JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8'))
+      const retiredIds = Object.keys(posts).filter((id) => posts[id]?.retired === true)
+      assert.equal(retiredIds.length, 60, 'A3/C2 wiring: all 60 retired entries remain when pruning is OFF (conservative default)')
+    } finally {
+      env.dispose()
+    }
   })
 })
 

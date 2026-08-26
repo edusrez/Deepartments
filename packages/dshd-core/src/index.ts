@@ -93,6 +93,19 @@ export interface OrgConfig {
   execRoots?: string[]
   missionExecRoots?: string[]
   poolerBaseURL?: string
+  /** A3/C2 — durable posts.json RETIRED-entry retention (the prune/archive
+   * policy). Optional; mirrors the bundle's `Config.org.postsRetention` shape
+   * (maxRetiredKept defaults 50, archiveFile defaults
+   * 'posts-retired-archive.jsonl', enabled defaults false — pruning OFF unless
+   * explicitly true). Delivered VERBATIM via `deepartments.org` (the dshd-core
+   * row carries it — see cordis.patch.yml), so the bundle reads the SHARED
+   * source value at boot reconcile (not the post-FASE-2.6 bundle MIRROR which
+   * no longer carries it). */
+  postsRetention?: {
+    maxRetiredKept?: number
+    archiveFile?: string
+    enabled?: boolean
+  }
 }
 
 /** The `deepartments.org` service surface (FASE 2.6 BATCH A) — the shared
