@@ -21,8 +21,10 @@
 //           (`materializePost` / `busDeliverToPost`), byte-identical to the
 //           pre-step (c) delivery;
 //       (4) `noWake:true` → persist the record but DO NOT materialize/wake
-//           (queue for the recipient's next real wake) — INERT today: NO
-//           call-site sets it (QD acks/feedback are a later phase).
+//           (queue for the recipient's next real wake). WIRED (B2/B3): the
+//           explicit send_message `noWake` tool param + the B3 dormant-ack
+//           gate (a QD ack to a just-slept head is no-waked) SET it — it is no
+//           longer an inert branch.
 //   - the `markDelivery` 'prepared'→final write-ahead orchestration;
 //   - the DEFENSIVE messaging ACL gate application for the recipient (the ACL
 //     predicate is the PURE ./acl.js `aclDenyGround` — FASE 2 STEP (d) extracted
@@ -71,15 +73,17 @@ export interface DeliveryInterruptOptions {
 }
 
 /** The `deliverOrQueue` gate options. `noWake: false` (the DEFAULT) is the
- * behavior-neutral always-wake path; `noWake: true` is the INERT queue branch
- * (present but not yet wired to any call-site). The remaining fields are the
- * delivery TRANSPORT context threaded through from the caller (the caller agent
- * id + sender session id for the child route / source, the abort signal, and the
- * W9-b interrupt option). */
+ * behavior-neutral always-wake path; `noWake: true` is the no-wake-until-wake
+ * queue branch (WIRED — B2/B3: the explicit send_message `noWake` param + the
+ * B3 dormant-ack gate set it). The remaining fields are the delivery TRANSPORT
+ * context threaded through from the caller (the caller agent id + sender
+ * session id for the child route / source, the abort signal, and the W9-b
+ * interrupt option). */
 export interface DeliverOrQueueOptions {
   /** Default false → the ALWAYS-WAKE path (byte-identical to pre-step (c)).
    * true → persist the record but DO NOT materialize/wake (queue for the
-   * recipient's next real wake). INERT today (no call-site sets it). */
+   * recipient's next real wake). WIRED (B2/B3) — the no-wake-until-wake
+   * semantics the dormant-ack gate + the explicit send_message `noWake` use. */
   noWake?: boolean
   /** W9-b: preempt a busy recipient (abort the current turn). Default false. */
   interrupt?: boolean
@@ -181,7 +185,7 @@ export interface DeliveryEngine {
    * it for crash-pending pairs. Route order per recipient (spec §4.2): child
    * route FIRST (the caller's direct continuable children — never catalog-
    * validated), then the catalog (posts.json ∪ non-retired hosts.json); unknown
-   * ids → 'failed'. `opts.noWake: true` (INERT today) persists the 'prepared'
+   * ids → 'failed'. `opts.noWake: true` (WIRED — B2/B3) persists the 'prepared'
    * record but does NOT materialize/wake — it queues for the recipient's next
    * real wake.
    *
@@ -251,7 +255,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
  * ACL (spec §4.2 route 2 + §5.6) runs HERE, BEFORE any wake/materialization — the
  * DEFENSIVE enforcement seam (a boot re-delivery of a pre-ACL record can never
  * bypass the rules). A denial / retired / unknown resolves to 'failed'
- * (sidecar-compatible). The `noWake` gate (INERT today) returns 'prepared' —
+ * (sidecar-compatible). The `noWake` gate (WIRED — B2/B3) returns 'prepared' —
  * the record is persisted but the recipient is NOT materialized/woken. */
 async function catalogRoute(
   deps: DeliveryEngineDeps,
@@ -289,10 +293,10 @@ async function catalogRoute(
     deps.logger.warn(`[deepartments] bus delivery to RETIRED member "${recipientId}" skipped (record ${record.id})`)
     return 'failed'
   }
-  // noWake gate (INERT today — no call-site sets it). The 'prepared' record was
-  // persisted above; this branch does NOT materialize/wake, so the message waits
-  // for the recipient's next real wake (the precise no-wake-until-wake semantics
-  // are the LATER phase that introduces the B6 post-state enum).
+  // noWake gate (WIRED — B2/B3: the explicit send_message `noWake` param + the
+  // B3 dormant-ack gate set it). The 'prepared' record was persisted above; this
+  // branch does NOT materialize/wake, so the message waits for the recipient's
+  // next real wake (the no-wake-until-wake semantics).
   if (opts.noWake === true) {
     return 'prepared'
   }

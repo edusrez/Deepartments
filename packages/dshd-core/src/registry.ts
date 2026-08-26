@@ -544,36 +544,64 @@ export interface DurablePostReconcileLike {
   provider?: string
   role?: string
   retired?: boolean
+  /** A configured HEAD (or worker) deliberately put to sleep by dept_sleep_all
+   * — a session archived + this epoch set. A slept head is DORMANT-BY-DESIGN,
+   * NOT absent-by-accident, so it is never classified as a stale candidate. */
+  sleepEpoch?: number
 }
 
-/** Result of the durable posts-registry reconcile (m-119). */
+/** Result of the durable posts-registry reconcile (m-119 + B5). */
 export interface DurablePostsReconcileResult {
-  /** Non-retired WORKER posts whose session is definitively gone (retire-leak
-   * candidates — flagged/warned, never auto-retired unless opted in). */
+  /** Non-retired WORKER posts whose session is definitively gone OR unusable
+   * (retire-leak candidates — flagged/warned, never auto-retired unless opted
+   * in). B5: "unusable" = a DURABLE session PRESENT but with no usable
+   * AgentOptions (the builder-87 / VARIANT-2 ghost — an interrupted materialize
+   * that left a catalog-live worker with no working session). */
   workerRetireCandidates: Array<{ postId: string; sessionId: string }>
   /** Candidates that were actually marked retired (when `retireGoneWorkers`). */
   workersRetired: Array<{ postId: string; sessionId: string }>
+  /** B5 — a CONFIGURED HEAD (no `provider`) whose durable session is gone OR
+   * unusable. WARN-ONLY: a configured head is NEVER auto-retired (the invariant
+   * at the analyzer comment below); this surface exists so a head-session leak
+   * is visible without ever touching the head. */
+  headStaleCandidates: Array<{ postId: string; sessionId: string }>
   /** True when the durable posts.json was written (a retire happened). */
   changed: boolean
 }
 
 /** PURE durable posts-registry leak detector (m-119, W8-g). Given the durable
- * posts.json entries + a session-gone predicate, it FLAGS every non-retired
- * WORKER (the disposable-worker marker `provider: 'worker'`) whose session is
- * DEFINITIVELY gone — the retire-leak class. A CONFIGURED HEAD (no `provider`)
- * is NEVER flagged and NEVER auto-retired. The retire decision itself is the
+ * posts.json entries + a session-gone predicate + (B5) an optional
+ * session-unusable predicate, it FLAGS every non-retired WORKER (the
+ * disposable-worker marker `provider: 'worker'`) whose session is DEFINITIVELY
+ * gone OR definitively unusable — the retire-leak class. B5: it ALSO surfaces a
+ * CONFIGURED HEAD (no `provider`) whose session is gone OR unusable as a
+ * `headStaleCandidates` entry — WARN-ONLY, never a worker retire candidate (a
+ * configured head is NEVER auto-retired). The retire decision itself is the
  * caller's (`opts.retireGoneWorkers`): this function only classifies. */
 export function analyzeDurablePostsRegistry(
   entries: Iterable<DurablePostReconcileLike>,
-  isSessionGone: (entry: DurablePostReconcileLike) => boolean
+  isSessionGone: (entry: DurablePostReconcileLike) => boolean,
+  isSessionUnusable: (entry: DurablePostReconcileLike) => boolean = () => false
 ): DurablePostsReconcileResult {
   const candidates: Array<{ postId: string; sessionId: string }> = []
+  const headStale: Array<{ postId: string; sessionId: string }> = []
   for (const entry of entries) {
     if (entry.retired === true) continue
-    if (entry.provider !== 'worker') continue
-    if (isSessionGone(entry)) candidates.push({ postId: entry.postId, sessionId: entry.sessionId })
+    const gone = isSessionGone(entry)
+    const unusable = isSessionUnusable(entry)
+    if (entry.provider !== 'worker') {
+      // B5 — a CONFIGURED HEAD (or a non-worker entry): its session is gone OR
+      // unusable → a STALE candidate. Never auto-retired (warn-only surface).
+      // EXCEPTION: a head with `sleepEpoch` set was deliberately put to sleep
+      // (dept_sleep_all — session ARCHIVED). A slept head is DORMANT-BY-DESIGN,
+      // NOT absent-by-accident, so it is NOT a stale candidate. Only a head with
+      // NO sleepEpoch (a genuinely-abandoned session) is surfaced as stale.
+      if ((gone || unusable) && entry.sleepEpoch === undefined) headStale.push({ postId: entry.postId, sessionId: entry.sessionId })
+      continue
+    }
+    if (gone || unusable) candidates.push({ postId: entry.postId, sessionId: entry.sessionId })
   }
-  return { workerRetireCandidates: candidates, workersRetired: [], changed: false }
+  return { workerRetireCandidates: candidates, workersRetired: [], headStaleCandidates: headStale, changed: false }
 }
 
 /** Options for `reconcileDurablePostsRegistry`. */
@@ -582,6 +610,13 @@ export interface ReconcileDurablePostsOpts {
   /** Resolve whether a session is DEFINITIVELY gone (no durable session). A
    * conservative resolver (unable to determine) MUST return false. */
   isSessionGone: (sessionId: string) => boolean | Promise<boolean>
+  /** B5 — resolve whether a session is DEFINITIVELY UNUSABLE (a DURABLE session
+   * PRESENT but with no usable AgentOptions — the builder-87 / VARIANT-2 ghost:
+   * an interrupted materialize that left a catalog-live worker with no working
+   * session). A conservative resolver (unable to determine) MUST return false.
+   * Optional — ABSENT ⇒ never treats a session as unusable (the pre-B5
+   * flag-gone-only behavior is a strict subset). */
+  isSessionUnusable?: (sessionId: string, postId: string) => boolean | Promise<boolean>
   /** When true, WRITE the retire mark for the flagged candidates (backup the
    * pre-repair posts.json first). Default false → flag + warn only. */
   retireGoneWorkers?: boolean
@@ -625,10 +660,10 @@ export async function reconcileDurablePostsRegistry(
   const raw = await readDurableJsonFile(stateDir, 'posts.json')
   if (raw === undefined) {
     if (!existsSync(path.join(stateDir, 'posts.json'))) {
-      return { workerRetireCandidates: [], workersRetired: [], changed: false }
+      return { workerRetireCandidates: [], workersRetired: [], headStaleCandidates: [], changed: false }
     }
     logger?.warn('[deepartments] reconcile-posts: posts.json unreadable/malformed — cannot reconcile gone workers (no change)')
-    return { workerRetireCandidates: [], workersRetired: [], changed: false }
+    return { workerRetireCandidates: [], workersRetired: [], headStaleCandidates: [], changed: false }
   }
   const entries: DurablePostReconcileLike[] = []
   for (const [postId, rawEntry] of Object.entries(raw)) {
@@ -638,12 +673,16 @@ export async function reconcileDurablePostsRegistry(
     if (typeof e.provider === 'string') entry.provider = e.provider
     if (typeof e.role === 'string') entry.role = e.role
     if (e.retired === true) entry.retired = true
+    if (typeof e.sleepEpoch === 'number') entry.sleepEpoch = e.sleepEpoch
     entries.push(entry)
   }
-  // Resolve the session-gone predicate (async-tolerant) to a sync predicate.
+  // Resolve the session-gone + session-unusable predicates (async-tolerant) to
+  // sync predicates, for EVERY non-retired entry (workers AND configured heads
+  // — B5 surfaces a stale HEAD as a warn-only candidate too).
   const goneByPostId = new Map<string, boolean>()
+  const unusableByPostId = new Map<string, boolean>()
   for (const entry of entries) {
-    if (entry.retired === true || entry.provider !== 'worker') continue
+    if (entry.retired === true) continue
     let gone = false
     try {
       gone = Boolean(await opts.isSessionGone(entry.sessionId))
@@ -651,10 +690,30 @@ export async function reconcileDurablePostsRegistry(
       gone = false
     }
     goneByPostId.set(entry.postId, gone)
+    if (opts.isSessionUnusable !== undefined) {
+      let unusable = false
+      try {
+        unusable = Boolean(await opts.isSessionUnusable(entry.sessionId, entry.postId))
+      } catch {
+        unusable = false
+      }
+      unusableByPostId.set(entry.postId, unusable)
+    }
   }
-  const result = analyzeDurablePostsRegistry(entries, (entry) => goneByPostId.get(entry.postId) === true)
+  const result = analyzeDurablePostsRegistry(
+    entries,
+    (entry) => goneByPostId.get(entry.postId) === true,
+    (entry) => unusableByPostId.get(entry.postId) === true
+  )
   for (const candidate of result.workerRetireCandidates) {
-    logger?.warn(`[deepartments] reconcile-posts: worker "${candidate.postId}" (session ${candidate.sessionId}) is a retire-leak candidate — its durable session is gone${opts.retireGoneWorkers === true ? '; auto-retiring (retire-if-safe)' : '; NOT auto-retired (flag only)'}`)
+    logger?.warn(`[deepartments] reconcile-posts: worker "${candidate.postId}" (session ${candidate.sessionId}) is a retire-leak candidate — its durable session is gone or unusable${opts.retireGoneWorkers === true ? '; auto-retiring (retire-if-safe)' : '; NOT auto-retired (flag only)'}`)
+  }
+  // B5 — a configured HEAD whose session is gone OR unusable is a STALE
+  // candidate: WARN ONLY (a configured head is NEVER auto-retired — the
+  // analyzer's invariant). Purposely separate from the worker warn so the
+  // operator sees the head leak WITHOUT any retire-eligibility ambiguity.
+  for (const stale of result.headStaleCandidates) {
+    logger?.warn(`[deepartments] reconcile-posts: head "${stale.postId}" (session ${stale.sessionId}) is a STALE candidate — its durable session is gone or unusable; WARN ONLY (a configured head is NEVER auto-retired)`)
   }
   // Stage the retired marks into `workingRaw` (NOT written yet — the single
   // atomic write at the end folds in any pruning so posts.json is written ONCE
@@ -749,7 +808,7 @@ export async function reconcileDurablePostsRegistry(
     }
   }
 
-  return { workerRetireCandidates: result.workerRetireCandidates, workersRetired, changed }
+  return { workerRetireCandidates: result.workerRetireCandidates, workersRetired, headStaleCandidates: result.headStaleCandidates, changed }
 }
 
 /** Result of the deterministic live-host selection (U3 fix, spec 002 §6.1). */

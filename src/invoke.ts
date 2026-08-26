@@ -991,6 +991,105 @@ export async function appendPostError(stateDir: string, entry: PostErrorEntry): 
   await writeFile(filePath, bounded.join('\n') + '\n', 'utf8')
 }
 
+// ---------------------------------------------------------------------------
+// B5 — the durable "unusable worker session" marker.
+// ---------------------------------------------------------------------------
+// A worker whose materialization throws the harness `agent "session-<uuid>" has
+// no provider/model` error (the VARIANT-2 / builder-87 ghost — a DURABLE session
+// PRESENT but with NO usable AgentOptions) is recorded here so the boot
+// reconcile's `isSessionUnusable` resolver can classify it as a retire-leak
+// candidate WITHOUT needing to inspect the session content (which carries no
+// provider/model field). The marker is CLEARED on a successful materialization,
+// and CHECKED against the current sessionId — so a worker that recovers (a later
+// create with proper options) is never over-retired (conservative). A new
+// sidecar file (not a posts.json field) keeps the on-disk registry shape
+// unchanged (R6).
+
+/** The marker sidecar filename: `<stateDir>/unusable-agent-options.json`. */
+export const UNUSABLE_SESSIONS_FILE = 'unusable-agent-options.json'
+
+/** One durable "unusable worker session" mark (the latest per worker postId). */
+export interface UnusableSessionMark {
+  sessionId: string
+  ts: number
+  error: string
+}
+
+/** Read `<stateDir>/unusable-agent-options.json` → `{ [postId]: mark }`.
+ * Absent / unreadable / malformed → {} (never throws). */
+export function readUnusableSessionsMark(stateDir: string): Record<string, UnusableSessionMark> {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, UNUSABLE_SESSIONS_FILE), 'utf8')) as Record<string, unknown>
+    const out: Record<string, UnusableSessionMark> = {}
+    for (const [postId, raw] of Object.entries(parsed)) {
+      if (raw === null || typeof raw !== 'object') continue
+      const m = raw as Record<string, unknown>
+      if (typeof m.sessionId !== 'string') continue
+      out[postId] = {
+        sessionId: m.sessionId,
+        ts: typeof m.ts === 'number' ? m.ts : 0,
+        error: typeof m.error === 'string' ? m.error : ''
+      }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/unusable-agent-options.json` atomically (mkdir -p first).
+ * Never throws — callers fold a persist failure into a warn. */
+export async function writeUnusableSessionsMark(stateDir: string, marks: Record<string, UnusableSessionMark>): Promise<void> {
+  try {
+    await mkdir(path.dirname(path.join(stateDir, UNUSABLE_SESSIONS_FILE)), { recursive: true })
+    const tmpPath = path.join(stateDir, `${UNUSABLE_SESSIONS_FILE}.tmp-${Date.now()}`)
+    await writeFile(tmpPath, JSON.stringify(marks, null, 2), 'utf8')
+    await rename(tmpPath, path.join(stateDir, UNUSABLE_SESSIONS_FILE))
+  } catch (error: unknown) {
+    // Never throw — the marker is a conservative hint, not a hard requirement.
+  }
+}
+
+/** Record (or refresh) the unusable mark for a worker post. */
+export async function markUnusableWorkerSession(stateDir: string, postId: string, sessionId: string, error: string): Promise<void> {
+  const marks = readUnusableSessionsMark(stateDir)
+  marks[postId] = { sessionId, ts: Date.now(), error }
+  await writeUnusableSessionsMark(stateDir, marks)
+}
+
+/** Clear the unusable mark for a worker post (a SUCCESSFUL materialization —
+ * the worker is usable again). */
+export async function clearUnusableWorkerSession(stateDir: string, postId: string): Promise<void> {
+  const marks = readUnusableSessionsMark(stateDir)
+  if (marks[postId] === undefined) return
+  delete marks[postId]
+  await writeUnusableSessionsMark(stateDir, marks)
+}
+
+// ---------------------------------------------------------------------------
+// B4 — the daemon re-wake gate decision helper.
+// ---------------------------------------------------------------------------
+// A ROUTINE daemon notice (agenda scheduler calendar notice / parallel-monitor
+// "a worker is working" notice) to a DORMANT head (sleepEpoch set — an owner-
+// scheduled quiet-sleep) must NOT re-wake it. The notice is already appended
+// durably by the caller, so this helper returns 'queued' (no delivery / no
+// materialize) — the record drains at the head's next real wake. The ALWAYS-WAKE
+// default is preserved for a non-dormant head. NEVER route the CRITICAL
+// deliveries (health ALERT / system-wait / interrupt) through this helper —
+// those MUST keep waking.
+export type DaemonNoticeDelivery = 'queued' | 'woken'
+
+export async function deliverDaemonNotice(
+  targetEntry: { postId: string; sleepEpoch?: number | undefined },
+  record: MessageRecord,
+  framed: string,
+  deliver: (entry: PostEntry, framed: string, record: MessageRecord, senderSessionId: string | undefined) => Promise<DeliveryStatus>
+): Promise<DaemonNoticeDelivery> {
+  if (targetEntry.sleepEpoch !== void 0) return 'queued'
+  await deliver(targetEntry as PostEntry, framed, record, undefined)
+  return 'woken'
+}
+
 /** The heartbeat written every daemon tick. */
 export interface HealthHeartbeat {
   ts: number
@@ -8278,6 +8377,17 @@ export function applyInvoke(ctx: Context, config: Config) {
           } catch {
             return false
           }
+        },
+        // B5 — the conservative unusability classifier: ONLY a worker whose
+        // materialization threw the "has no provider/model" error (recorded in
+        // the durable unusable-agent-options.json marker) counts as unusable,
+        // AND only when the marker's session id matches the CURRENT durable
+        // session id (a worker that later got a fresh session is never
+        // over-retired). Never throws — a marker read failure degrades to false.
+        isSessionUnusable: async (sessionId: string, postId: string): Promise<boolean> => {
+          const marks = readUnusableSessionsMark(stateDir)
+          const mark = marks[postId]
+          return mark !== undefined && mark.sessionId === sessionId
         }
       })
     } catch (error: unknown) {
@@ -8383,6 +8493,17 @@ export function applyInvoke(ctx: Context, config: Config) {
    * minimal composition (dshd-core absent) we fall back to the in-bundle open
    * — the SAME store, behavior-neutral. */
   const messagesStoreReady = (ctx.get('deepartments.bus') as BusSurface | undefined)?.storeReady ?? MessagesStore.open(messageStoreDir)
+
+  /**
+   * B5 — whether an agent materialization error is the harness "no
+   * provider/model" signature (the VARIANT-2 / builder-87 ghost: a worker whose
+   * durable session is PRESENT but whose AgentOptions carry no provider/model).
+   * Conservative: only an EXACT signature match marks a worker unusable.
+   */
+  const isNoProviderModelError = (error: unknown): boolean => {
+    const text = error instanceof Error ? error.message : String(error)
+    return /has no provider\/model/.test(text)
+  }
 
   /**
    * The SHARED post-materialization core of the wakePost seam (spec §4.3 step 2
@@ -8526,6 +8647,18 @@ export function applyInvoke(ctx: Context, config: Config) {
           meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: preset },
           agentOptions,
           setup
+        }).catch((createError: unknown) => {
+          // B5 — a WORKER whose create throws "has no provider/model" is the
+          // VARIANT-2 / builder-87 ghost: a DURABLE session PRESENT but with NO
+          // usable AgentOptions. Record the durable marker so the boot
+          // reconcile's `isSessionUnusable` classifies it as a retire-leak
+          // candidate (under the existing retireGoneWorkers opt-in). The marker
+          // is CLEARED on a successful materialization (see the return below),
+          // so a worker that recovers is never over-retired (conservative).
+          if (isWorker && isNoProviderModelError(createError)) {
+            void markUnusableWorkerSession(stateDir, entry.postId, entry.sessionId, createError instanceof Error ? createError.message : String(createError))
+          }
+          throw createError
         })
       }
       if (handle !== void 0) byHeadHandle.set(String(sessionId), handle)
@@ -8533,6 +8666,9 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
     const target = agents.get(String(sessionId))
     if (target === void 0) throw new Error(`[deepartments] ${isWorker ? 'worker' : 'head'} "${entry.postId}" could not be materialized for bus delivery`)
+    // Clear a B5 unusable mark: this worker materialized successfully, so its
+    // session is usable again (never over-retire a recovered worker).
+    if (isWorker) await clearUnusableWorkerSession(stateDir, entry.postId)
     // Fresh baseline for the (re)materialized incarnation so the stuck check
     // never misjudges a just-cold-resumed post.
     markHeadProgress(String(sessionId), target)
@@ -8901,6 +9037,12 @@ export function applyInvoke(ctx: Context, config: Config) {
       // mandate. The directive gate lives HERE (the surface already carries
       // headPostId); a missed dice simply drops the directive — the dept_sleep
       // still commits.
+      // B1 batch bypass: the org-wide `dept_sleep_all` orchestration calls
+      // `lifecycle.sleepAll`, which NEVER invokes this emitter (it marks every
+      // configured NON-QH head in ONE write and emits ZERO per-head directives)
+      // — a batch that slept N heads must not re-wake the QD inspector once per
+      // head (the D-Q7 anti-loop). The SINGLE-agent `dept_sleep` path
+      // (`sleepMember`) STILL emits its per-head directive here — untouched.
       if (surface.kind === 'head-slept' && !qualityInspectDecision('head', { headPostId: surface.headPostId, rng: Math.random, workerInspectProbability: qualityWorkerInspectProbability })) {
         return
       }
@@ -9027,7 +9169,9 @@ export function applyInvoke(ctx: Context, config: Config) {
    * re-delivery driver re-runs it for crash-pending pairs. Route order per
    * recipient (spec §4.2): child route FIRST (the caller's direct continuable
    * children — never validated against the catalog), then the catalog
-   * (posts.json ∪ non-retired hosts.json); unknown ids → failed.
+   * (posts.json ∪ non-retired hosts.json); unknown ids → failed. `opts.noWake`
+   * (B2) is threaded through so an internal caller can set it, but the CURRENT
+   * default (absent = always-wake) is unchanged — only threading the option.
    */
   const deliverBusRecord = async (
     record: MessageRecord,
@@ -9035,13 +9179,14 @@ export function applyInvoke(ctx: Context, config: Config) {
     callerAgentId: string,
     senderSessionId: string | undefined,
     signal?: AbortSignal,
-    opts?: DeliveryInterruptOptions
+    opts?: DeliveryInterruptOptions & { noWake?: boolean }
   ): Promise<DeliveryStatus> =>
     delivery.deliverOrQueue(recipientId, record, {
       callerAgentId,
       senderSessionId,
       signal,
-      interrupt: opts?.interrupt
+      interrupt: opts?.interrupt,
+      noWake: opts?.noWake
     })
 
   /** The live parent Agent for the native-route followup (the caller is the
@@ -9151,6 +9296,20 @@ export function applyInvoke(ctx: Context, config: Config) {
     })
   })()
 
+  /** B3 (m-361): whether a CATALOG recipient is DORMANT — its durable entry
+   * (posts.json `byPost` OR hosts.json `hosts`) carries a `sleepEpoch` mark
+   * (deliberately asleep by a sleep directive; its pending queue drains at its
+   * next real wake). A child-route / unknown recipient has NO catalog entry →
+   * never dormant (a transient subagent or unknown id is never no-waked by B3).
+   * Used by send_message to no-wake ONLY the ack to a just-slept head — the
+   * m-361 regression where a QD ack re-woke a head that had just dept_slept. */
+  const isDormantRecipient = (recipientId: string): boolean => {
+    const post = byPost.get(recipientId)
+    if (post !== void 0) return post.sleepEpoch !== void 0
+    const host = hosts.get(recipientId)
+    return host !== void 0 && host.sleepEpoch !== void 0
+  }
+
   /** B3 gap fix (reviewer B2 note a): with the board gone, the host's
    * auto-registration must not depend on board tools. For every host-family
    * caller (no post entry; NOT a transient subagent) dept_who / send_message
@@ -9210,7 +9369,8 @@ export function applyInvoke(ctx: Context, config: Config) {
       ack: { type: 'boolean', description: 'Set true when this is a pure acknowledgement/receipt (no new content) — recorded kind "ack".' },
       sensitive: { type: 'boolean', description: 'Mark this message as sensitive (trust semantics carried over from the board).' },
       threadId: { type: 'string', description: 'Optional: a message id to reply to (recorded as threadId).' },
-      interrupt: { type: 'boolean', description: 'Optional, default false. When true, delivery PREEMPTS a busy recipient: a recipient LIVE mid-turn has its CURRENT turn aborted (reason "interrupted") and the message is the FIRST item of its next turn; a DORMANT recipient still wakes + processes immediately. Default false keeps the QUEUE semantics (enqueued behind the current work) — zero regression for normal flows.' }
+      interrupt: { type: 'boolean', description: 'Optional, default false. When true, delivery PREEMPTS a busy recipient: a recipient LIVE mid-turn has its CURRENT turn aborted (reason "interrupted") and the message is the FIRST item of its next turn; a DORMANT recipient still wakes + processes immediately. Default false keeps the QUEUE semantics (enqueued behind the current work) — zero regression for normal flows.' },
+      noWake: { type: 'boolean', description: 'Optional, default false (absent). When true, delivery to EVERY allowed recipient persists the message record but does NOT materialize/wake the recipient (the record drains at the recipient\'s next real wake — the no-wake-until-wake send). Default false (absent) = the ALWAYS-WAKE path (zero change to normal sends). NOTE: this is the explicit opt-in gate — the caller must never set it for a legitimate work delivery (a worker report to its manager that must auto-retire is always-wake).' }
     },
     output: {
       schema: {
@@ -9290,12 +9450,20 @@ export function applyInvoke(ctx: Context, config: Config) {
       // seam: send_message routes through `delivery.deliverOrQueue` (the bus
       // delivery gate, FASE 2 step c) — default noWake:false = ALWAYS-WAKE, the
       // behavior-neutral path.
+      // B2 + B3 (m-361): the per-recipient noWake gate. The EXPLICIT
+      // `noWake:true` tool param gates the WHOLE send; otherwise B3 no-wakes
+      // ONLY the ack (record kind 'ack') to a DORMANT recipient — a QD ack must
+      // never re-wake a just-slept head (the record persists 'prepared' and
+      // drains at the recipient's next real wake). A non-ack send, an ack to a
+      // non-dormant recipient, and the default (no param) stay ALWAYS-WAKE.
       for (const recipient of allowed) {
+        const noWake = args.noWake === true || (args.ack === true && isDormantRecipient(recipient))
         delivered[recipient] = await delivery.deliverOrQueue(recipient, record, {
           callerAgentId: agent.id as string,
           senderSessionId: agent.id as string,
           signal: exec.signal,
-          interrupt: args.interrupt === true
+          interrupt: args.interrupt === true,
+          noWake
         })
       }
       return { messageId: record.id, delivered }
@@ -9799,11 +9967,44 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }))
 
+  // --- B1: org-wide quiet-sleep orchestration (host plane) -------------------
+  // The Asistente owns the coordinated quiet-sleep. `dept_sleep_all` durably
+  // marks EVERY configured department head (EXCLUDING quality-head, which stays
+  // live as the QD inspector) as slept in ONE persistPosts write and disposes
+  // each live AgentHandle fire-and-forget. Crucially it emits ZERO per-head QD
+  // `head-slept` directives (see the note at `maybeEmitQualityInspectDirective`):
+  // a batch that slept N heads must not re-wake the QD inspector once per head
+  // (the D-Q7 anti-loop). The SINGLE-agent `dept_sleep` path is UNTOUCHED — its
+  // own QD directive still emits via `sleepMember`. NO journal is required (the
+  // heads were memoized before the orchestration; the batch is mark+dormant).
+  const globalSleepAll = ctx.tools.register(defineTool({
+    name: 'dept_sleep_all',
+    description: 'Org-wide quiet-sleep orchestration (host plane): durably mark EVERY configured department head as slept (sleepEpoch) in ONE write and dispose each live AgentHandle fire-and-forget — the coordinated quiet-sleep the Asistente owns. Excludes quality-head (stays live as the quality inspector — the D-Q7 anti-loop) and emits NO per-head quality-inspect directive (a batch must not re-wake QH once per head). Idempotent on an already-slept head (no-op). Returns how many heads slept and how many were skipped (already-slept). Never throws. Use the single-agent dept_sleep for one head (it still emits its quality-inspect directive).',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          slept: { type: 'number', required: true },
+          skipped: { type: 'number', required: true }
+        }
+      },
+      render: (_args, value) => [{ type: 'text', text: `sleep-all: ${value.slept} head(s) slept, ${value.skipped} skipped (already-slept excluded; quality-head stays live, no per-head directive)` } as const]
+    },
+    async execute(_args, exec): Promise<{ slept: number; skipped: number }> {
+      // The batch marks every configured head, not the caller — no exec.agent
+      // needed; the injected lifecycle service owns the iteration + persist.
+      return lifecycle.sleepAll(_args, exec as Parameters<typeof lifecycle.sleepAll>[1])
+    }
+  }))
+
   ctx.effect(() => () => {
     globalWakeSnapshot()
     globalRetire()
     globalMemo()
     globalSleep()
+    globalSleepAll()
   }, 'deepartments: host-plane tools')
 
   // --- W1 agenda scheduler daemon (spec 004 §5.7) ---------------------------
@@ -9873,7 +10074,14 @@ export function applyInvoke(ctx: Context, config: Config) {
             if (headEntry === void 0) return
             const store = await messagesStoreReady
             const record = await store.append({ from: 'deepartments', to: [headPostId], text: `Agenda notice: ${message}`, kind: 'agent' })
-            await busDeliverToPost(headEntry, `[From deepartments → ${headPostId}]: Agenda notice: ${message}`, record, undefined)
+            // B4 daemon re-wake gate: a DORMANT head (sleepEpoch set) is NOT
+            // re-woken by a routine calendar notice — the record is already
+            // appended durably (above), so deliverDaemonNotice returns 'queued'
+            // and the notice drains at the head's next real wake. The ALWAYS-WAKE
+            // default is preserved for non-dormant heads; the health ALERT (a
+            // separate notifyHost) is NEVER gated.
+            const outcome = await deliverDaemonNotice(headEntry, record, `[From deepartments → ${headPostId}]: Agenda notice: ${message}`, busDeliverToPost)
+            if (outcome === 'queued') ctx.logger.info(`[deepartments] scheduler: agenda notice to "${headPostId}" queued (head is dormant — no wake)`)
           } catch (error: unknown) {
             ctx.logger.warn(`[deepartments] scheduler: agenda notice to "${headPostId}" failed: ${error instanceof Error ? error.message : String(error)}`)
           }
@@ -9989,7 +10197,14 @@ export function applyInvoke(ctx: Context, config: Config) {
           const store = await messagesStoreReady
           const text = `A researcher is working (monitor ${monitor.id}): ${event.output?.content ?? '(no content)'}`
           const record = await store.append({ from: 'deepartments', to: [head.postId], text, kind: 'agent' })
-          await busDeliverToPost(head, `[From deepartments → ${head.postId}]: ${text}`, record, void 0)
+          // B4 daemon re-wake gate: a DORMANT head (sleepEpoch set) is NOT re-woken
+          // by this routine monitor notice — the record is already appended
+          // durably (above), so deliverDaemonNotice returns 'queued' and the
+          // notice drains at the head's next real wake. The deliberate worker
+          // SPAWN (a separate path) is UNTOUCHED — a spawn must wake. The
+          // ALWAYS-WAKE default is preserved for non-dormant heads.
+          const outcome = await deliverDaemonNotice(head, record, `[From deepartments → ${head.postId}]: ${text}`, busDeliverToPost)
+          if (outcome === 'queued') ctx.logger.info(`[deepartments] parallel-monitor: notice to "${head.postId}" queued (head is dormant — no wake)`)
         } catch (error: unknown) {
           ctx.logger.warn(`[deepartments] parallel-monitor: notify head failed: ${error instanceof Error ? error.message : String(error)}`)
         }

@@ -31,6 +31,7 @@ import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
 import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
+import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
 import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
 import {
@@ -5573,6 +5574,93 @@ test('B2 send_message: fan-out cap — 21 recipients is a hard error (cap 20, sp
       assert.equal(records.length, 0, 'no record persisted for a rejected send')
     } finally {
       await dispose()
+    }
+  })
+})
+
+test('B2 send_message noWake gate: a noWake:true send to a dormant catalog head persists the record as prepared (NO materialize/wake — the dormant head stays dormant, sleepEpoch preserved), and the default (noWake absent) send to the SAME dormant head still ALWAYS wakes (the always-wake path is byte-identical)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // A dormant head that is NOT a configured coordinator (ensureAllHeads skips it
+    // — it stays dormant). The same shape as the B2 dormant-wake test.
+    await seedPost(stateDir, { postId: 'sleeper-head', sessionId: 'head-sleeper-head', roomId: 'research', agentPreset: 'deepartments-head', sleepEpoch: Date.now() })
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const send = pluginCtx().tools.get('send_message')
+
+      // B2: EXPLICIT noWake:true — the record persists 'prepared' and the dormant
+      // head is NOT materialized/woken (the dormant recipient stays dormant).
+      const result = await send.execute({ to: ['sleeper-head'], text: 'queue for later', noWake: true }, { agent: host, signal })
+      assert.equal(result.delivered['sleeper-head'], 'prepared', 'noWake:true to a dormant recipient returns prepared (persisted, NOT woken)')
+      // No wake = NO F8 rotation: the durable entry's sessionId is untouched (a wake
+      // would update it to a fresh id) and the sleep mark is preserved.
+      const postsAfterNoWake = await readPosts(stateDir)
+      assert.equal(postsAfterNoWake['sleeper-head'].sessionId, 'head-sleeper-head', 'noWake does NOT materialize/rotate the dormant head (sessionId unchanged)')
+      assert.equal(postsAfterNoWake['sleeper-head'].sleepEpoch !== undefined, true, 'the dormant head stays dormant (sleepEpoch preserved)')
+      // The write-ahead + final sidecar row is 'prepared' (the pair stays pending-unwoken).
+      assert.equal(await deliveryStatus(stateDir, result.messageId, 'sleeper-head'), 'prepared', 'the sidecar row is prepared (noWake leaves the pair pending-unwoken)')
+      const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+      assert.equal(records.length, 1, 'the noWake send still persists its record')
+      assert.equal(records[0].to[0], 'sleeper-head', 'the record targets the dormant recipient')
+
+      // Default path (noWake absent): the SAME dormant head STILL ALWAYS wakes.
+      const beforeWake = agents.createCalls.length
+      const wake = await send.execute({ to: ['sleeper-head'], text: 'wake now' }, { agent: host, signal })
+      assert.equal(wake.delivered['sleeper-head'], 'resumed', 'the default (noWake absent) send to a dormant head still ALWAYS wakes (resumed)')
+      await waitFor(() => agents.createCalls.length > beforeWake, 5000, 'the default send materializes the dormant head')
+      await waitFor(async () => (await readPosts(stateDir))['sleeper-head'].sleepEpoch === undefined, 5000, 'sleepEpoch cleared after the default wake')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('B3 m-361 regression: a QD ack (ack:true) to a JUST-SLEPT head stays dormant (sleepEpoch preserved, NO materialize/wake) and the ack record persists as prepared (drains at the next real wake); a NON-ack send to the same dormant head still ALWAYS wakes it (the exempt work-delivery path); the head-slept DIRECTIVE to quality-head is STILL always-wake (emitted + delivered to the LIVE QH, never no-waked by B3)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const { head, headCtx, key } = qdResearchHead(env)
+
+      // 1) Just-sleep the research head → dormant (sleepEpoch durable).
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      await memo.execute({ summary: 'm-361 sleep memory.' }, { agent: head, signal })
+      const sleep = headCtx.tools.get('dept_sleep', key)
+      await withTimeout(sleep.execute({}, { agent: head, signal }), 1500, 'head dept_sleep returns (no self-deadlock wedge)')
+      await waitFor(() => env.agents.store.has('head-research-head') === false, 5000, 'research head handle disposed after sleep')
+      await waitFor(async () => (await readPosts(stateDir))['research-head'].sleepEpoch !== undefined, 5000, 'research head marked dormant')
+
+      // 2) The QD ack (send_message ack:true) to the just-slept head — must NOT re-wake it (m-361).
+      const host = env.agents.put(fakeParentAgent())
+      const send = env.pluginCtx().tools.get('send_message')
+      const ack = await send.execute({ to: ['research-head'], text: 'ack', ack: true }, { agent: host, signal })
+      assert.equal(ack.delivered['research-head'], 'prepared', 'the ack to a just-slept head returns prepared (NOT re-woken)')
+      assert.equal(await deliveryStatus(stateDir, ack.messageId, 'research-head'), 'prepared', 'the ack record persists as prepared (drains at the next real wake)')
+      const postsAfterAck = await readPosts(stateDir)
+      assert.equal(postsAfterAck['research-head'].sleepEpoch !== undefined, true, 'the just-slept head STAYS dormant (sleepEpoch NOT cleared)')
+
+      // 3) A NON-ack send to the SAME dormant head STILL ALWAYS wakes it (the exempt
+      //    work-delivery path — never no-wake a legitimate delivery).
+      const beforeWake = env.agents.createCalls.length
+      const work = await send.execute({ to: ['research-head'], text: 'work' }, { agent: host, signal })
+      assert.equal(work.delivered['research-head'], 'resumed', 'a NON-ack send to a dormant head still ALWAYS wakes it (resumed)')
+      await waitFor(() => env.agents.createCalls.length > beforeWake, 5000, 'the non-ack send materializes the dormant head')
+      await waitFor(async () => (await readPosts(stateDir))['research-head'].sleepEpoch === undefined, 5000, 'sleepEpoch cleared after the non-ack wake')
+
+      // 4) The head-slept DIRECTIVE to quality-head is STILL always-wake (the exempt
+      //    path): emitted as a normal agent record (kind agent, NOT ack — so B3's
+      //    `ack === true` condition never applies) and DELIVERED to the LIVE QH.
+      await waitFor(async () => (await qualityDirectives(stateDir)).filter((d) => /head slept/.test(d.text)).length === 1, 5000, 'the head-slept directive to quality-head was emitted')
+      const dirs = (await qualityDirectives(stateDir)).filter((d) => /head slept/.test(d.text))
+      assert.equal(dirs.length, 1, 'exactly ONE head-slept directive was emitted')
+      assert.equal(dirs[0].kind, 'agent', 'the directive is a normal agent record (kind agent, NOT ack) — B3 never no-wakes it')
+      assert.equal(dirs[0].to.includes('quality-head'), true, 'the directive targets quality-head')
+      const qh = env.agents.store.get('head-quality-head')
+      assert.ok(qh, 'quality-head agent is live')
+      await waitFor(() => qh.inboxMessages.some((m) => /head slept/.test(m.content[0].text)), 5000, 'the directive was delivered to the LIVE quality-head (always-wake, not queued prepared)')
+    } finally {
+      await env.dispose()
     }
   })
 })
@@ -11376,6 +11464,70 @@ test('QD host rotation ALWAYS emits one quality-inspect directive (host = "H", n
   })
 })
 
+// --- B1: dept_sleep_all (host plane) — org-wide quiet-sleep orchestration -----
+// The Asistente owns the coordinated quiet-sleep. `dept_sleep_all` durably marks
+// EVERY configured department head (EXCLUDING quality-head, which stays live as
+// the QD inspector) as slept in ONE persistPosts write and disposes each live
+// AgentHandle fire-and-forget. It emits ZERO per-head QD `head-slept` directives
+// (a batch must not re-wake QH once per head — the D-Q7 anti-loop); the
+// SINGLE-agent dept_sleep path is untouched (its own directive still emits).
+test('B1 dept_sleep_all (host plane): every configured NON-QH head is slept durably (sleepEpoch persisted, live handle disposed, dormant-not-respawned) in the batch; quality-head stays LIVE (never slept); ZERO head-slept directives reach quality-head; idempotent re-issue no-ops', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Three configured department heads: research + programming (the batch
+    // sleeps these) and quality (the QD inspector — MUST stay live).
+    const org = {
+      departments: [
+        { id: 'research', name: 'Research', coordinator: { postId: 'research-head', role: 'Research department head', provider: 'deepseek-official', agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' } } },
+        { id: 'programming', name: 'Programming', coordinator: { postId: 'programming-head', role: 'Programming department head', provider: 'deepseek-official', agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' } } },
+        { id: 'quality', name: 'Quality', coordinator: { postId: 'quality-head', role: 'Quality department head', provider: 'deepseek-official', agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' } } }
+      ]
+    }
+    const env = await bootPlugin(stateDir, { org })
+    try {
+      await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'research head materialized at boot')
+      await waitFor(() => env.agents.store.has('head-programming-head'), 5000, 'programming head materialized at boot')
+      await waitFor(() => env.agents.store.has('head-quality-head'), 5000, 'quality head materialized at boot')
+      const signal = new AbortController().signal
+      const host = env.agents.put(fakeParentAgent())
+
+      const sleepAll = env.root.tools.get('dept_sleep_all')
+      assert.ok(sleepAll, 'dept_sleep_all is registered on the host plane (the org-wide quiet-sleep orchestration)')
+      const result = await sleepAll.execute({}, { agent: host, signal })
+      assert.equal(result.slept, 2, 'exactly TWO configured non-QH heads slept (research + programming)')
+      assert.equal(result.skipped, 0, 'no already-slept head on a fresh batch (zero skipped)')
+
+      // Durable marks in ONE write: EVERY configured NON-QH head carries the
+      // sleepEpoch; quality-head does NOT (stays live as the QD inspector).
+      const posts = await readPosts(stateDir)
+      assert.equal(typeof posts['research-head'].sleepEpoch, 'number', 'research-head sleepEpoch persisted durably')
+      assert.equal(typeof posts['programming-head'].sleepEpoch, 'number', 'programming-head sleepEpoch persisted durably')
+      assert.equal(posts['quality-head'].sleepEpoch, undefined, 'quality-head is NOT slept by the batch (never put to sleep — the D-Q7 anti-loop)')
+
+      // Each slept head's live AgentHandle was disposed (dormant, NOT re-woken /
+      // NOT re-materialized until its next bus wake); quality-head stays live.
+      await waitFor(() => env.agents.store.has('head-research-head') === false, 5000, 'research-head handle disposed (dormant)')
+      await waitFor(() => env.agents.store.has('head-programming-head') === false, 5000, 'programming-head handle disposed (dormant)')
+      assert.equal(env.agents.store.has('head-quality-head'), true, 'quality-head handle is STILL LIVE (never disposed)')
+
+      // ZERO per-head QD `head-slept` directives reached quality-head (the batch
+      // suppresses them — QH is not re-woken once per slept head).
+      const dirs = await qualityDirectives(stateDir)
+      assert.equal(dirs.filter((d) => /head slept/.test(d.text)).length, 0, 'NO per-head head-slept directive emitted for the batch (QH not re-woken N times)')
+
+      // Idempotent: a RE-ISSUED dept_sleep_all on the same state counts both
+      // already-slept heads as SKIPPED (no re-mark, no re-dispose) — slept 0.
+      const rerun = await sleepAll.execute({}, { agent: host, signal })
+      assert.equal(rerun.slept, 0, 're-issue no-ops: no head newly slept')
+      assert.equal(rerun.skipped, 2, 're-issue counts BOTH already-slept heads as skipped (idempotent no-op)')
+      const posts2 = await readPosts(stateDir)
+      assert.equal(typeof posts2['research-head'].sleepEpoch, 'number', 're-issue does not erase the research-head sleepEpoch')
+      assert.equal(typeof posts2['programming-head'].sleepEpoch, 'number', 're-issue does not erase the programming-head sleepEpoch')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
 test('QD event-driven post-error: a bus-delivery failure appends a post-error record AND emits a post-error directive to quality-head', async () => {
   await withTempStateDir(async (stateDir) => {
     await seedPost(stateDir, { postId: 'ghost-head', sessionId: 'head-ghost-head', roomId: 'board', agentPreset: 'deepartments-head' })
@@ -11848,6 +12000,172 @@ test('A3/C2 reconcileDurablePostsRegistry pruning: ABSENT `enableRetiredPrune` �
     assert.ok(!files.some((f) => f.startsWith('posts.json.bak-') && f.endsWith('-prune')), 'A3: NO pre-prune backup is written when pruning is off')
     assert.ok(!files.some((f) => f === 'posts-retired-archive.jsonl'), 'A3: NO retired archive is written when pruning is off')
     assert.ok(!logged.some((m) => m.includes('PRUNED')), 'A3: no prune warn is logged when pruning is off')
+  })
+})
+
+test('B5 analyzeDurablePostsRegistry: a gone OR unusable non-retired WORKER is a retire candidate; a configured HEAD (gone/unusable session) is a STALE candidate — warn-only, never retired', async () => {
+  const result = analyzeDurablePostsRegistry([
+    { postId: 'worker-gone', sessionId: 'worker-gone', provider: 'worker', role: 'builder' },
+    { postId: 'worker-unusable', sessionId: 'worker-unusable', provider: 'worker', role: 'builder' },
+    { postId: 'worker-live', sessionId: 'worker-live', provider: 'worker', role: 'builder' },
+    { postId: 'head-stale', sessionId: 'head-stale' }, // a CONFIGURED head — no provider
+    { postId: 'head-live', sessionId: 'head-live' },
+    { postId: 'worker-retired', sessionId: 'worker-retired', provider: 'worker', role: 'builder', retired: true }
+  ],
+    (entry) => entry.sessionId === 'worker-gone' || entry.sessionId === 'head-stale',
+    (entry) => entry.sessionId === 'worker-unusable')
+  assert.deepEqual(result.workerRetireCandidates, [
+    { postId: 'worker-gone', sessionId: 'worker-gone' },
+    { postId: 'worker-unusable', sessionId: 'worker-unusable' }
+  ], 'a gone AND a present-but-unusable worker are both retire candidates')
+  assert.deepEqual(result.headStaleCandidates, [{ postId: 'head-stale', sessionId: 'head-stale' }], 'a configured HEAD with a gone session is a STALE candidate (warn-only)')
+  assert.equal(result.changed, false, 'the pure analyzer never writes')
+})
+
+test('B5 reconcileDurablePostsRegistry: a gone OR unusable WORKER is flagged (and retired under retireGoneWorkers — mark-not-erase + backup); a configured HEAD with a missing/unusable session is a STALE candidate (warn-only, NEVER retired); the builder-87 present-but-unusable-AgentOptions case is classified gone', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, 'posts.json'), JSON.stringify({
+      'worker-gone': { sessionId: 'worker-gone', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'head' },
+      'worker-unusable': { sessionId: 'worker-unusable', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'head' },
+      'worker-live': { sessionId: 'worker-live', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'head' },
+      'head-stale': { sessionId: 'head-stale', roomId: 'research', agentPreset: 'deepartments-head' }
+    }, null, 2))
+    const logged = []
+    const first = await reconcileDurablePostsRegistry(stateDir, {
+      retireGoneWorkers: true,
+      logger: { warn: (m) => logged.push(m) },
+      isSessionGone: (sessionId) => sessionId === 'worker-gone' || sessionId === 'head-stale',
+      isSessionUnusable: (sessionId, postId) => sessionId === 'worker-unusable'
+    })
+    // The gone worker AND the present-but-unusable worker are BOTH candidates.
+    assert.deepEqual(first.workerRetireCandidates, [
+      { postId: 'worker-gone', sessionId: 'worker-gone' },
+      { postId: 'worker-unusable', sessionId: 'worker-unusable' }
+    ], 'gone + unusable workers are retire candidates (builder-87 classified gone)')
+    // The configured HEAD with a missing/unusable session is a STALE candidate.
+    assert.deepEqual(first.headStaleCandidates, [{ postId: 'head-stale', sessionId: 'head-stale' }], 'the configured head is a STALE candidate (warn-only)')
+    assert.equal(first.changed, true, 'the retire was committed to the durable file')
+    const repaired = JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8'))
+    assert.equal(repaired['worker-gone'].retired, true, 'the gone worker is marked retired (mark-not-erase)')
+    assert.equal(repaired['worker-unusable'].retired, true, 'the unusable worker is marked retired (mark-not-erase)')
+    assert.equal(repaired['worker-live'].retired, undefined, 'the live worker is untouched')
+    assert.equal(repaired['head-stale'].retired, undefined, 'the configured HEAD is NEVER retired (warn-only)')
+    assert.ok(logged.some((m) => m.includes('worker-gone') && m.includes('retire-leak')), 'a retire-leak warn for the gone worker')
+    assert.ok(logged.some((m) => m.includes('worker-unusable') && m.includes('retire-leak')), 'a retire-leak warn for the unusable worker')
+    assert.ok(logged.some((m) => m.includes('head-stale') && m.includes('STALE') && m.includes('WARN ONLY')), 'a STALE warn for the configured head (warn-only, never retired)')
+    const backups = (await readdir(stateDir)).filter((f) => f.startsWith('posts.json.bak-') && f.endsWith('-reconcile'))
+    assert.equal(backups.length, 1, 'a pre-retire backup was created')
+    // Flag-only mode (retireGoneWorkers false) never writes. Use a FRESH
+    // posts.json (the first run marked the gone/unusable workers retired).
+    await writeFile(path.join(stateDir, 'posts.json'), JSON.stringify({
+      'worker-unusable': { sessionId: 'worker-unusable', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker' }
+    }, null, 2))
+    const flagOnly = await reconcileDurablePostsRegistry(stateDir, {
+      retireGoneWorkers: false,
+      logger: { warn: () => {} },
+      isSessionGone: () => false,
+      isSessionUnusable: (sessionId, postId) => sessionId === 'worker-unusable'
+    })
+    assert.deepEqual(flagOnly.workerRetireCandidates, [{ postId: 'worker-unusable', sessionId: 'worker-unusable' }], 'flag-only still reports the unusable candidate')
+    assert.equal(flagOnly.changed, false, 'flag-only does NOT write the retire mark')
+  })
+})
+
+test('B5 slept-head no-stale: a CONFIGURED HEAD with `sleepEpoch` set + a gone/unusable session is DORMANT-BY-DESIGN — NOT surfaced as a stale candidate (no STALE warn); a CONFIGURED HEAD WITHOUT `sleepEpoch` + a gone/unusable session IS still a stale candidate (warn-only); a WORKER with a gone session REMAINS a retire-leak candidate REGARDLESS of sleepEpoch (workers do not sleep)', async () => {
+  // (a) PURE ANALYZER — the classification is driven by `sleepEpoch === undefined`
+  // on the non-worker branch. A slept head (sleepEpoch set) is excluded; an
+  // un-slept head is still surfaced; a slept WORKER is still a retire candidate.
+  const gone = (entry) => entry.sessionId === 'head-slept' || entry.sessionId === 'head-stale' || entry.sessionId === 'worker-gone'
+  const result = analyzeDurablePostsRegistry([
+    { postId: 'head-slept', sessionId: 'head-slept', agentPreset: 'deepartments-head', sleepEpoch: 123 } // slept head — archived session
+    ,
+    { postId: 'head-stale', sessionId: 'head-stale', agentPreset: 'deepartments-head' }, // no sleepEpoch
+    { postId: 'worker-gone', sessionId: 'worker-gone', provider: 'worker', role: 'builder', sleepEpoch: 456 } // slept worker (still a leak)
+  ], gone)
+  // (a1) The slept head + a GONE session is NOT stale — dormant-by-design.
+  assert.deepEqual(result.headStaleCandidates, [{ postId: 'head-stale', sessionId: 'head-stale' }], 'only the un-slept head is a STALE candidate; the slept head (archived session) is dormant-by-design and NOT flagged')
+  // (a2) The slept WORKER (gone session) is STILL a retire-leak candidate — a
+  // worker does not sleep; a leak is a leak regardless of a (mis-set) sleepEpoch.
+  assert.deepEqual(result.workerRetireCandidates, [{ postId: 'worker-gone', sessionId: 'worker-gone' }], 'a slept WORKER with a gone session is still a retire-leak candidate')
+  assert.equal(result.changed, false, 'the pure analyzer never writes')
+
+  // (b) RECONCILE (warn path) — a slept head produces NO STALE warn, while an
+  // un-slept head still does. The reconcile builds `sleepEpoch` off the raw entry.
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, 'posts.json'), JSON.stringify({
+      'head-slept': { sessionId: 'head-slept', roomId: 'research', agentPreset: 'deepartments-head', sleepEpoch: Date.now() },
+      'head-stale': { sessionId: 'head-stale', roomId: 'research', agentPreset: 'deepartments-head' }
+    }, null, 2))
+    const logged = []
+    const reconciled = await reconcileDurablePostsRegistry(stateDir, {
+      logger: { warn: (m) => logged.push(m) },
+      isSessionGone: (sessionId) => sessionId === 'head-slept' || sessionId === 'head-stale'
+    })
+    // (b1) The slept head (gone session) is NOT a stale candidate — no STALE warn.
+    assert.deepEqual(reconciled.headStaleCandidates, [{ postId: 'head-stale', sessionId: 'head-stale' }], 'reconcile surfaces ONLY the un-slept head as stale')
+    // (b2) Exactly ONE stale warn — the genuinely-stale head, NOT the slept head.
+    const staleWarns = logged.filter((m) => m.includes('STALE'))
+    assert.equal(staleWarns.length, 1, 'exactly one STALE warn (the un-slept head only)')
+    assert.ok(staleWarns[0].includes('head-stale') && staleWarns[0].includes('WARN ONLY'), 'the STALE warn names the un-slept head and is warn-only')
+    assert.ok(!logged.some((m) => m.includes('head-slept') && m.includes('STALE')), 'NO STALE warn for the slept head')
+    assert.equal(reconciled.changed, false, 'no retire was committed (a configured head is never auto-retired)')
+  })
+})
+
+test('B5 unusable-worker durable marker helpers: mark/read/clear round-trip; a clear removes the mark; absent/malformed degrades to {} (never throws)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    assert.deepEqual(readUnusableSessionsMark(stateDir), {}, 'absent marker → {} (never throws)')
+    await markUnusableWorkerSession(stateDir, 'w1', 'sess-w1', 'agent "session-sess-w1" has no provider/model')
+    let marks = readUnusableSessionsMark(stateDir)
+    assert.equal(marks['w1'].sessionId, 'sess-w1', 'the mark is recorded for the worker post')
+    assert.ok(typeof marks['w1'].ts === 'number', 'the mark carries a numeric ts')
+    assert.match(marks['w1'].error, /has no provider\/model/, 'the mark carries the error')
+    // A second mark refreshes (latest wins — one row per post).
+    await markUnusableWorkerSession(stateDir, 'w1', 'sess-w1', 'refreshed')
+    marks = readUnusableSessionsMark(stateDir)
+    assert.equal(Object.keys(marks).length, 1, 'one mark for the one worker (latest wins)')
+    // A successful materialization clears the mark.
+    await clearUnusableWorkerSession(stateDir, 'w1')
+    assert.deepEqual(readUnusableSessionsMark(stateDir), {}, 'a clear removes the mark')
+    // Malformed → {} (never throws).
+    await writeFile(path.join(stateDir, UNUSABLE_SESSIONS_FILE), 'not-json', 'utf8')
+    assert.deepEqual(readUnusableSessionsMark(stateDir), {}, 'a malformed marker reads as {}')
+  })
+})
+
+test('B4 deliverDaemonNotice (daemon re-wake gate): a routine notice to a SLEEPING head is QUEUED (no delivery, no materialize — the always-wake deliver primitive is NOT called); a non-dormant head is WOKEN (the deliver primitive IS called); the ALWAYS-WAKE default for ordinary sends is preserved', async () => {
+  const record = { id: 'm-1', from: 'deepartments', to: ['head'], text: 'Agenda notice: x', kind: 'agent' }
+  const framed = '[From deepartments → head]: Agenda notice: x'
+  let delivered = 0
+  // A SLEEPING head (sleepEpoch set) → queued. This is the gate the agenda
+  // scheduler + parallel-monitor daemon closures use.
+  const sleeping = await deliverDaemonNotice({ postId: 'head', sleepEpoch: Date.now() }, record, framed, async () => { delivered++; return 'delivered' })
+  assert.equal(sleeping, 'queued', 'a SLEEPING head is NOT woken by a routine daemon notice')
+  assert.equal(delivered, 0, 'the always-wake deliver primitive is NOT called (no materialize — the dormant head stays dormant)')
+  // A non-dormant head → woken (the always-wake default is preserved).
+  const awake = await deliverDaemonNotice({ postId: 'head', sleepEpoch: undefined }, record, framed, async () => { delivered++; return 'delivered' })
+  assert.equal(awake, 'woken', 'a non-dormant head IS woken (the always-wake default is preserved)')
+  assert.equal(delivered, 1, 'the deliver primitive runs once for the awake head')
+})
+
+test('B4 daemon-gate: the health ALERT to the host STILL wakes (interrupt path preserved) and the routine-notice dormant guard NEVER gates the ALERT / system-wait path', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 23, 12, 0, 0).getTime()
+    const researchError = 'could not be materialized'
+    await writeFile(path.join(stateDir, 'post-errors.jsonl'), JSON.stringify({ ts: T0 - 5 * 60000, postId: 'research-head', messageId: 'm-1', error: researchError }) + '\n', 'utf8')
+    const alerts = []
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-b4',
+      hosts,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: () => {} }
+    })
+    assert.equal(alerts.length, 1, 'the health ALERT STILL wakes the host (never gated by the B4 routine-notice dormant guard)')
+    assert.equal(alerts[0].hostEntry.hostId, 'host-asst', 'the alert targets the live host')
+    assert.match(alerts[0].frame, /^\[From deepartments\] System-health ALERT:/, 'the ALERT is framed (the interrupt + system-wait path is preserved)')
   })
 })
 

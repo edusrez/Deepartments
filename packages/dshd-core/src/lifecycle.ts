@@ -170,6 +170,19 @@ export interface LifecycleService {
   /** dept_sleep core on the host plane — the subagent guard + HOST ROTATION
    * branch + legacy-in-place fallback + (preserved) head-path fallback. */
   sleepHost(_args: Record<string, never>, exec: LifecycleExecLike): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }>
+  /** dept_sleep_all core (B1) — the org-wide quiet-sleep orchestration the
+   * Asistente owns. For every CONFIGURED department head entry (root permanent
+   * head, never a disposable worker), EXCLUDING `quality-head` (stays live as
+   * the QD inspector — the D-Q7 anti-loop) and excluding already-slept no-ops,
+   * it mimics the `sleepMember` marking: set `entry.sleepEpoch = Date.now()`,
+   * record the head's in-flight worker ledger, `await persistPosts()` ONCE for
+   * the whole batch, and dispose each live AgentHandle fire-and-forget (the
+   * injected `disposeHeadHandleOnce` seam). It does NOT emit per-head QD
+   * `head-slept` directives (a batch must not re-wake QH once per head) —
+   * callers wanting the single-agent QD behavior use `sleepMember`. Never
+   * throws; idempotent on an already-slept head (no-op). Returns the summary:
+   * `slept` = heads newly marked, `skipped` = already-slept heads (no-op). */
+  sleepAll(_args: Record<string, never>, exec: LifecycleExecLike): Promise<{ slept: number; skipped: number }>
 }
 
 /** Build the single per-apply lifecycle service (FASE 2 STEP f), closing over
@@ -432,6 +445,64 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
       entry.sleepEpoch = Date.now()
       ctx.persistPosts()
       return { room: entry.roomId, member: memberId, memoPath: ctx.journalPath(memberId), sleepEpoch: entry.sleepEpoch }
+    },
+
+    async sleepAll(_args, _exec) {
+      // B1 — org-wide quiet-sleep orchestration. Mirrors the `sleepMember`
+      // marking (sleepEpoch + in-flight worker ledger) for EVERY configured
+      // department head entry, but excludes `quality-head` (stays LIVE as the
+      // QD inspector — the D-Q7 anti-loop) and emits NO per-head QD
+      // `head-slept` directive (a batch must not re-wake QH once per head).
+      // Non-fatal / never-throws; idempotent on an already-slept head (no-op).
+      let slept = 0
+      let skipped = 0
+      const toDispose: string[] = []
+      try {
+        const now = Date.now()
+        for (const entry of ctx.byPost.values()) {
+          // Only a CONFIGURED permanent department head — the `provider !==
+          // 'worker'` discriminator is exactly what `sleepMember` uses to select
+          // the archive/dispose head path (a configured head has NO provider; a
+          // disposable worker carries `provider: 'worker'` and is NEVER slept by
+          // the org-wide batch). A retired entry is out of scope (a retired head
+          // is re-materialized by config at boot, not slept here).
+          if (entry.provider === 'worker') continue
+          if (entry.retired === true) continue
+          // quality-head EXCLUDED — the QD coordinator stays live as the
+          // inspector (the anti-loop: a batch must never put the QH to sleep).
+          if (entry.postId === 'quality-head') continue
+          // Idempotent: an ALREADY-SLEPT head is a NO-OP (never re-mark, never
+          // re-persist, never re-dispose) — it stays slept until its next bus
+          // wake. Count it as skipped.
+          if (entry.sleepEpoch !== void 0) { skipped += 1; continue }
+          // Fix (head-sleep worker drain): durably record the head's IN-FLIGHT
+          // workers (provider==='worker' && managerId===headId && !retired) on
+          // the entry — the same ledger `sleepMember` writes — so the org-wide
+          // sleep hands the batch off through the SAME persistPosts write.
+          const inflight: string[] = []
+          for (const candidate of ctx.byPost.values()) {
+            if (candidate.provider === 'worker' && candidate.managerId === entry.postId && candidate.retired !== true) inflight.push(candidate.postId)
+          }
+          if (inflight.length > 0) entry.inflightWorkers = inflight
+          entry.sleepEpoch = now
+          toDispose.push(entry.sessionId)
+          slept += 1
+        }
+        // ONE durable write for the whole batch (every sleepEpoch mark lands
+        // together — the atomic sleep-all). A no-op batch (nothing new slept)
+        // SKIPS the redundant write.
+        if (slept > 0) await ctx.persistPosts()
+        // Dispose each live AgentHandle fire-and-forget (reuse the injected
+        // seam). The already-slept heads were skipped above, so only the
+        // CURRENTLY-live handles are detached; a dispose failure is non-fatal to
+        // the batch (the durable sleepEpoch mark is already committed).
+        for (const sessionId of toDispose) {
+          try { void ctx.disposeHeadHandleOnce(sessionId) } catch { /* non-fatal */ }
+        }
+      } catch (error: unknown) {
+        ctx.logger.warn(`[deepartments] dept_sleep_all: batch sleep failed (${slept} head(s) already marked in-memory; any on-disk write is best-effort): ${error instanceof Error ? error.message : String(error)}`)
+      }
+      return { slept, skipped }
     }
   }
 }

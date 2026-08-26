@@ -233,7 +233,8 @@ function lazyLifecycle(build: () => LifecycleService): LifecycleService {
   return {
     get memoWrite() { return ensure().memoWrite },
     get sleepMember() { return ensure().sleepMember },
-    get sleepHost() { return ensure().sleepHost }
+    get sleepHost() { return ensure().sleepHost },
+    get sleepAll() { return ensure().sleepAll }
   }
 }
 
