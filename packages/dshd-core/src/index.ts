@@ -48,20 +48,64 @@ export const name = 'dshd-core'
 export const inject: string[] = []
 
 /** A configured department mirror (the bundle's `org.departments[]` shape used to
- * classify a configured head in the ACL lens). */
+ * classify a configured head in the ACL lens). The SUFFICIENT head-classification
+ * fields; the full bundle `DepartmentConfig` carries more (workspacePath, jobDir,
+ * coordinator.role/provider/agentOptions) — those are conveyed verbatim via
+ * `deepartments.org` (the shared config source), not re-declared here. */
 export interface CoreDepartment {
   id?: string
   name?: string
   coordinator?: { postId?: string }
 }
 
-/** The dshd-core plugin config. Only `stateDir` is required; the optional
- * `departments` (the org.departments mirror) lets `deepartments.acl` classify a
- * configured head by its department. */
+/** One department of the org config mirror (FASE 2.6 BATCH A) — structurally
+ * compatible with the bundle's `DepartmentConfig` so `deepartments.org` can be
+ * consumed verbatim by the bundle (the shared config source). */
+export interface OrgDepartment {
+  id?: string
+  name?: string
+  workspacePath?: string
+  jobDir?: string
+  coordinator?: {
+    postId?: string
+    role?: string
+    title?: string
+    sessionTitle?: string
+    provider?: string
+    agentOptions?: { provider?: string; model?: string; maxTokens?: number }
+  }
+}
+
+/** The org config mirror (FASE 2.6 BATCH A) — the SHARED CONFIG SOURCE the
+ * bundle consumes via `ctx.get('deepartments.org')`. Mirrors the bundle's
+ * `Config.org` shape so the relocation is behavior-neutral. */
+export interface OrgConfig {
+  departments?: OrgDepartment[]
+  execRoots?: string[]
+  missionExecRoots?: string[]
+  poolerBaseURL?: string
+}
+
+/** The `deepartments.org` service surface (FASE 2.6 BATCH A) — the shared
+ * config source: the org stateDir + org config. */
+export interface OrgConfigSurface {
+  /** The org stateDir (posts.json + hosts.json + messages.jsonl). */
+  stateDir: string
+  /** The org config (departments, execRoots, missionExecRoots, poolerBaseURL). */
+  org: OrgConfig
+}
+
+/** The dshd-core plugin config. `stateDir` is required; the optional `org` (the
+ * relocated org config) is the SHARED CONFIG SOURCE; the legacy top-level
+ * `departments` is retained as a backward-compatible ACL mirror (used only when
+ * `org.departments` is absent). */
 export interface CoreConfig {
   /** The org stateDir (posts.json + hosts.json + messages.jsonl). */
   stateDir: string
-  /** The configured departments (optional, for the ACL lens). */
+  /** The relocated org config (FASE 2.6 BATCH A) — the shared config source. */
+  org?: OrgConfig
+  /** The configured departments (optional, for the ACL lens; backwards
+   * compatible mirror of `org.departments`). */
   departments?: CoreDepartment[]
 }
 
@@ -105,6 +149,10 @@ export function buildAclSurface(catalog: RegistryStore, departments: CoreDepartm
 export function apply(ctx: Context, config: CoreConfig) {
   const stateDir = config.stateDir
   const logger = ctx.logger
+  // FASE 2.6 BATCH A (config relocation): the org config now lives in the
+  // dshd-core row (`config.org`); the legacy top-level `departments` mirror is
+  // the backward-compatible fallback used only when `org.departments` is absent.
+  const departments = config.org?.departments ?? config.departments
 
   // --- deepartments.catalog: the durable RegistryStore (the single source of
   // the hosts/posts catalog). Constructed from config + the cordis logger; the
@@ -115,10 +163,21 @@ export function apply(ctx: Context, config: CoreConfig) {
   ctx.provide('deepartments.catalog', catalog)
 
   // --- deepartments.acl: the pure messaging ACL bound onto the catalog lens. ---
-  const acl = buildAclSurface(catalog, config.departments)
+  const acl = buildAclSurface(catalog, departments)
   ctx.provide('deepartments.acl', acl)
 
   // --- deepartments.postState: the delivery post-state holder (B6 placeholder). ---
   const postState: PostStateSurface = { stateDir }
   ctx.provide('deepartments.postState', postState)
+
+  // --- deepartments.org (FASE 2.6 BATCH A): the SHARED CONFIG SOURCE. The org
+  // config (departments, execRoots, missionExecRoots, poolerBaseURL) + stateDir
+  // are relocated HERE; the bundle consumes them via ctx.get('deepartments.org')
+  // (falling back to its own patch row in a minimal composition). Provided
+  // verbatim so bundle and dshd-core always agree on the same org. ---
+  const orgSurface: OrgConfigSurface = {
+    stateDir,
+    org: config.org ?? { departments: departments as OrgDepartment[] }
+  }
+  ctx.provide('deepartments.org', orgSurface)
 }

@@ -645,7 +645,7 @@ export interface PresenceState {
  * (the route handler in applyInvoke) wires these to the live registries; tests
  * construct this directly. */
 export interface DeepartmentsEndpointDeps {
-  /** config.org.departments — one row built per (coordinator-bearing) department. */
+  /** org.departments — one row built per (coordinator-bearing) department. */
   departments: DepartmentConfig[]
   /** The durable post registry (postId → entry). */
   byPost: Map<string, PostEntryLike>
@@ -2040,7 +2040,7 @@ export function parseLlmPiAiProviderSettings(text: string): Record<string, { bas
 
 /** FIX-2 — read the pi-ai provider endpoint surface from `<stateDir>/settings.yaml`
  * (best-effort: absent/unreadable/malformed → {}, never throws). The plugin's own
- * config.stateDir is the DSH runtime state dir that carries settings.yaml. */
+ * stateDir is the DSH runtime state dir that carries settings.yaml. */
 export function readLlmPiAiProviderSettings(stateDir: string): Record<string, { baseURL?: string; maxRetries?: number }> {
   try {
     const text = readFileSync(path.join(stateDir, 'settings.yaml'), 'utf8')
@@ -3486,7 +3486,7 @@ export interface ParallelMonitorDaemonDeps {
   stateDir: string
   /** The clock (ms epoch) — injectable so a tick test is deterministic. */
   now(): number
-  /** The configured departments (from config.org.departments). */
+  /** The configured departments (from org.departments). */
   departments: DepartmentConfig[]
   /** The live post registry. Read LAZILY on each tick (the boot race — the
    * registry may still be empty when the daemon effect is registered). */
@@ -4428,6 +4428,26 @@ export function applyInvoke(ctx: Context, config: Config) {
   // preset when present, and ALWAYS registers its board tools regardless.
   const agentPresets = ctx.get('agentPresets') as AgentPresetsLike | undefined
 
+  // FASE 2.6 BATCH A (config relocation): the org config + stateDir are relocated
+  // to dshd-core, which exposes them as `deepartments.org` — the SHARED CONFIG
+  // SOURCE. The bundle reads THAT source first and falls back to its own patch
+  // config (config.stateDir / config.org) in a minimal/hermetic composition (e.g.
+  // the hermetic real-Loader tests, where dshd-core is NOT composed).
+  // BEHAVIOR-NEUTRAL: the fallback resolves to EXACTLY config.stateDir /
+  // config.org, and when dshd-core is composed the values are the SAME (the
+  // dshd-core row carries the org). `stateDir`/`org` are the ONLY local bindings
+  // every consumer below reads (they replace the direct config.* reads).
+  const coreOrg = ctx.get('deepartments.org') as
+    | { stateDir?: string; org?: { departments?: DepartmentConfig[]; execRoots?: string[]; missionExecRoots?: string[]; poolerBaseURL?: string } }
+    | undefined
+  // `cfg` alias: the fallback reads the bundle's OWN patch config without the
+  // `config.stateDir` / `config.org` TOKENS that the body-wide replacement below
+  // rewrites into `stateDir` / `org` — a naive match would make the initializer
+  // self-referencing (const stateDir = ... ?? stateDir, a TDZ error).
+  const cfg = config
+  const stateDir = coreOrg?.stateDir ?? cfg.stateDir
+  const org = (coreOrg?.org ?? cfg.org) as Config['org']
+
   // --- mutable state (all owned by this invocation's closure; reversible) ---
   // FASE 2 step (a): the DURABLE REGISTRY (the single source of the hosts/posts
   // catalog) is constructed here on the plugin fiber — AGENTS.md rule 4 (no
@@ -4441,7 +4461,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   // we fall back to a behavior-neutral in-bundle construction + a warn.
   const registry = (ctx.get('deepartments.catalog') as RegistryStore | undefined) ?? ((): RegistryStore => {
     ctx.logger.warn('[deepartments] dshd-core is not composed — the catalog is constructed in-bundle (behavior-neutral fallback).')
-    return new RegistryStore({ stateDir: config.stateDir, logger: ctx.logger })
+    return new RegistryStore({ stateDir: stateDir, logger: ctx.logger })
   })()
   const byPost = registry.byPost
   // QD (spec 007 §4.1): the resolved worker-archive dice probability from the
@@ -4607,9 +4627,9 @@ export function applyInvoke(ctx: Context, config: Config) {
   // (2026-08-23): the pre-step no longer injects a presence TRANSITION node —
   // the only transition channel is the bus notify (`notifyHostPresence`); the
   // current state is baked into every host wake pack via buildWakePack.
-  const presenceCache: PresenceState = readPresenceStateFile(config.stateDir)
+  const presenceCache: PresenceState = readPresenceStateFile(stateDir)
   const refreshPresence = (): void => {
-    const next = readPresenceStateFile(config.stateDir)
+    const next = readPresenceStateFile(stateDir)
     presenceCache.present = next.present
     if (next.updatedAt !== undefined) presenceCache.updatedAt = next.updatedAt
   }
@@ -4620,7 +4640,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     presenceCache.present = state.present
     presenceCache.updatedAt = state.updatedAt
     try {
-      await writePresenceStateFile(config.stateDir, state)
+      await writePresenceStateFile(stateDir, state)
     } catch (error) {
       ctx.logger.warn(`[deepartments] presence.json write failed: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -4726,7 +4746,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     const persistence = ctx.get('sessionPersistence') as { root?: string } | undefined
     const sessionsRoot = typeof persistence?.root === 'string' && persistence.root !== ''
       ? persistence.root
-      : path.join(config.stateDir, '..', 'sessions')
+      : path.join(stateDir, '..', 'sessions')
     const stateHome = path.dirname(sessionsRoot)
     const projCachePath = path.join(stateHome, 'storages', 'session_projcache.json')
     const archiveDir = path.join(stateHome, 'archive')
@@ -5042,7 +5062,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   // handoff note, not the relevo witness).
 
   /** Durable path of a post's long-term memory journal. */
-  const journalPathFor = (memberId: string): string => path.join(config.stateDir, 'journals', `${memberId}.md`)
+  const journalPathFor = (memberId: string): string => path.join(stateDir, 'journals', `${memberId}.md`)
 
   // --- Task T1: SESSION MEMORY ARCHIVE (append-only history + one-cycle session
   // log + searchable index). Best-effort/non-fatal everywhere: a failure here
@@ -5058,11 +5078,11 @@ export function applyInvoke(ctx: Context, config: Config) {
   const MAX_FILE_BYTES = 512 * 1024
 
   /** Path of one member's append-only archive. */
-  const archivePathFor = (memberId: string): string => path.join(config.stateDir, 'journals', 'archive', `${memberId}.md`)
+  const archivePathFor = (memberId: string): string => path.join(stateDir, 'journals', 'archive', `${memberId}.md`)
   /** Path of the per-member search index. */
-  const indexPathFor = (): string => path.join(config.stateDir, 'journals', 'index.json')
+  const indexPathFor = (): string => path.join(stateDir, 'journals', 'index.json')
   /** Path of one member+ordinal one-cycle session log. */
-  const sessionLogPathFor = (memberId: string, wakeCounter: number): string => path.join(config.stateDir, 'journals', 'sessions', `${memberId}-${wakeCounter}.md`)
+  const sessionLogPathFor = (memberId: string, wakeCounter: number): string => path.join(stateDir, 'journals', 'sessions', `${memberId}-${wakeCounter}.md`)
 
   /** Deterministic per-write UNIQUE archive marker so interleaved appends across
    * the shared stateDir stay parseable (spec §Artifacts (a) — each
@@ -5565,7 +5585,7 @@ export function applyInvoke(ctx: Context, config: Config) {
    * Not every resident post maps to a configured department (a postId is usually
    * a coordinator, but the lifecycle should not hard-depend on one). */
   const coordinatorForPost = (postId: string): CoordinatorConfig | undefined => {
-    for (const department of config.org.departments) {
+    for (const department of org.departments) {
       if (department.coordinator?.postId === postId) return department.coordinator
     }
     return undefined
@@ -5577,7 +5597,7 @@ export function applyInvoke(ctx: Context, config: Config) {
    * department — `departmentForPost(creatorId)`) and has no config row.
    * Undefined = not a configured head (a worker, or a legacy/non-config post). */
   const departmentForPost = (postId: string): DepartmentConfig | undefined => {
-    for (const department of config.org.departments) {
+    for (const department of org.departments) {
       if (department.coordinator?.postId === postId) return department
     }
     return undefined
@@ -5592,7 +5612,7 @@ export function applyInvoke(ctx: Context, config: Config) {
    * (compat — the session keeps its cwd; a fresh create uses the root). */
   const departmentForEntry = (entry: PostEntry): DepartmentConfig | undefined => {
     if (entry.departmentId !== void 0) {
-      const byId = config.org.departments.find((d) => d.id === entry.departmentId)
+      const byId = org.departments.find((d) => d.id === entry.departmentId)
       if (byId !== void 0) return byId
     }
     return departmentForPost(entry.postId)
@@ -5621,7 +5641,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     try {
       const nowMs = Date.now()
       const waitThresholdMs = resolveSystemWaitMs(health)
-      const { inboxTsByPost, hostRowsByPost } = readInboxByPost(config.stateDir, hostId, nowMs, HEALTH_ERROR_WINDOW_MS)
+      const { inboxTsByPost, hostRowsByPost } = readInboxByPost(stateDir, hostId, nowMs, HEALTH_ERROR_WINDOW_MS)
       // HOST last-activity (the Asistente session's last logged event) — reuse
       // the same snapshot primitive with an empty inbox (only activity matters).
       const hostEntry = [...hosts.values()].find((entry) => entry.hostId === hostId)
@@ -5706,7 +5726,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // Lazy getter: the message store is opened later in applyInvoke (single-
       // process open); resolved at assembly time, never at construction.
       messagesStoreReady: () => messagesStoreReady,
-      stateDir: config.stateDir,
+      stateDir: stateDir,
       repoRoot,
       logger: ctx.logger
     })
@@ -6045,12 +6065,12 @@ export function applyInvoke(ctx: Context, config: Config) {
   // warn so an RPC/tick never fails on a persist error (mirrors savePresence).
 
   /** The runtime calendar state (always `{entries:[...]}`, never throws). */
-  const readCalendar = (): CalendarState => readCalendarStateFile(config.stateDir)
+  const readCalendar = (): CalendarState => readCalendarStateFile(stateDir)
 
   /** Persist the runtime calendar, folding an fs failure to a warn. */
   const writeCalendarBestEffort = async (state: CalendarState): Promise<void> => {
     try {
-      await writeCalendarStateFile(config.stateDir, state)
+      await writeCalendarStateFile(stateDir, state)
     } catch (error) {
       ctx.logger.warn(`[deepartments] calendar.json write failed: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -6086,11 +6106,10 @@ export function applyInvoke(ctx: Context, config: Config) {
   const deptExecAllowedRoots = async (department: DepartmentConfig | undefined): Promise<string[]> => {
     const raw = new Set<string>(DEPT_EXEC_DEFAULT_ROOTS)
     raw.add(repoRoot)
-    const stateDir = config.stateDir
     if (typeof stateDir === 'string' && stateDir.trim() !== '') raw.add(stateDir)
     const deptCwd = await resolveDepartmentWorkspaceCwd(department)
     if (deptCwd !== '') raw.add(deptCwd)
-    for (const entry of (config.org.execRoots ?? [])) {
+    for (const entry of (org.execRoots ?? [])) {
       if (typeof entry === 'string' && entry.trim() !== '') raw.add(entry.trim())
     }
     // MISSION-LEVEL owner grant: an explicit org.missionExecRoots entry adds the
@@ -6098,7 +6117,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     // DURATION of an OWNER-AUTHORIZED mission. It is EXPLICIT (an absent key
     // keeps the default deny — the stable home stays protected), AUDITABLE
     // (config-recorded, never an env default) and REVOCABLE (remove the entry).
-    for (const entry of (config.org.missionExecRoots ?? [])) {
+    for (const entry of (org.missionExecRoots ?? [])) {
       if (typeof entry === 'string' && entry.trim() !== '') raw.add(entry.trim())
     }
     const resolved: string[] = []
@@ -6923,7 +6942,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         },
         async execute(): Promise<{ monitors: Array<{ id: string; query: string; monitorId?: string; lastFiredAt?: number; lastPolledAt?: number; cursor?: string; lastEventCount?: number }> }> {
           const monitors = resolveParallelMonitorConfig((config as unknown as { parallel?: ParallelConfig }).parallel)
-          const state = readParallelMonitorsState(config.stateDir)
+          const state = readParallelMonitorsState(stateDir)
           return {
             monitors: monitors.map((m) => {
               const s = state.monitors[m.id]
@@ -7335,7 +7354,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // so the health daemon ALERTS the host even though this post is about to be
       // retired (the daemon skips retired posts AND the dispose empties the events
       // — see captureRetiredPostTurnError). Never throws / non-fatal to the retire.
-      await captureRetiredPostTurnError(config.stateDir, entry.sessionId, postId)
+      await captureRetiredPostTurnError(stateDir, entry.sessionId, postId)
       // MARK, NOT ERASE (F1): the registry entry stays; the live catalog filters.
       // The store owns the durable MARK (retired:true + manager-ledger prune +
       // persist) — it never erases a post from the catalog.
@@ -7564,7 +7583,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         // workspace is never the shared root; fall through to the next one
         // (or the repoRoot floor when every workspace is a department's own).
         const departmentWorkspacePaths = new Set<string>()
-        for (const department of config.org.departments) {
+        for (const department of org.departments) {
           const deptWs = departmentWorkspacePath(department)
           if (deptWs !== '') departmentWorkspacePaths.add(deptWs)
         }
@@ -7810,17 +7829,17 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (presets !== void 0) {
       await materializePreset(PRESET_ID)
       await materializePreset(WORKER_PRESET_ID)
-      for (const department of config.org.departments) {
+      for (const department of org.departments) {
         await materializeHeadPreset(department)
       }
     }
     // CRITICAL (Batch 3a guarantee): ensureAllHeads ONLY ever iterates the
-    // CONFIGURED departments' coordinators (`config.org.departments`). Workers
+    // CONFIGURED departments' coordinators (`org.departments`). Workers
     // are created at RUNTIME by dept_post_create and are NEVER present in this
     // config — so a retired worker (whose registry entry was removed) is never
     // re-materialized by a later boot. The "retired worker stays retired"
     // invariant holds structurally.
-    for (const department of config.org.departments) {
+    for (const department of org.departments) {
       const coordinator = department.coordinator
       if (coordinator === void 0) continue
       // B3: the department config no longer carries a roomId (spec 003 §7 —
@@ -7892,7 +7911,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
     // Each department's ARCHITECTURE.md (the raw text, comments included, BEFORE
     // templating — so an unbound reference in any comment/style is caught).
-    for (const department of config.org.departments) {
+    for (const department of org.departments) {
       const archPath = path.join(repoRoot, 'presets', 'departments', department.id, 'ARCHITECTURE.md')
       try {
         sources.push({ name: `departments/${department.id}/ARCHITECTURE.md`, text: await readFile(archPath, 'utf8') })
@@ -7918,7 +7937,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
     if (bad.length === 0) return
     for (const finding of bad) {
-      await appendConfigPresetMarker(config.stateDir, { ts: Date.now(), preset: finding.preset, unbound: finding.unbound })
+      await appendConfigPresetMarker(stateDir, { ts: Date.now(), preset: finding.preset, unbound: finding.unbound })
     }
     try {
       ctx.logger.warn(`[deepartments] preset-audit: unbound template reference(s) in preset text: ${bad.map((b) => `${b.preset} (${b.unbound.join(', ')})`).join('; ')}`)
@@ -7947,7 +7966,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // The previous boot's last heartbeat ts — the restart-window lower bound.
       // The CURRENT daemon has not ticked yet at reconciliation time, so
       // health-heartbeat.json still holds the PREVIOUS process's last tick.
-      const prevHeartbeat = readHealthHeartbeatFile(config.stateDir)
+      const prevHeartbeat = readHealthHeartbeatFile(stateDir)
       const postEvents: InterruptedPostInput[] = []
       for (const [postId, entry] of byPost) {
         if (entry.retired === true) continue
@@ -7984,7 +8003,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
       const result = await reconcileInterruptedPosts({
         now: () => Date.now(),
-        stateDir: config.stateDir,
+        stateDir: stateDir,
         postEvents,
         restartAfterTs: prevHeartbeat?.ts
       })
@@ -8035,7 +8054,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       const configuredProviders = new Set<string>()
       if (WORKER_AGENT_OPTIONS.provider) configuredProviders.add(WORKER_AGENT_OPTIONS.provider)
       if (HOST_AGENT_OPTIONS.provider) configuredProviders.add(HOST_AGENT_OPTIONS.provider)
-      for (const department of config.org.departments ?? []) {
+      for (const department of org.departments ?? []) {
         const c = department.coordinator
         if (c?.agentOptions?.provider) configuredProviders.add(c.agentOptions.provider)
         else if (c?.provider) configuredProviders.add(c.provider)
@@ -8063,12 +8082,12 @@ export function applyInvoke(ctx: Context, config: Config) {
         // Re-read BOTH the registry and the settings surface on every poll so a
         // transient registration/settings-loading race cannot false-alert.
         const registeredProviders = (llm.listProviders() ?? [])
-        const providerSettings = readLlmPiAiProviderSettings(config.stateDir)
+        const providerSettings = readLlmPiAiProviderSettings(stateDir)
         const findings = resolveProviderAdapterBootFindings({
           configuredProviders: configuredProviderList,
           registeredProviders,
           providerSettings,
-          poolerBaseURL: config.org.poolerBaseURL
+          poolerBaseURL: org.poolerBaseURL
         })
         // Provider registered (or the drift resolved) WITHIN the window → this is a
         // healthy-but-slow boot → NO finding, no alert.
@@ -8077,7 +8096,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           // STILL missing/drifted AFTER the window elapses → a GENUINE outage →
           // the HARD NO_ADAPTER/endpoint alert (the ~49-min outage case).
           for (const finding of findings) {
-            await appendPostError(config.stateDir, { ts: Date.now(), postId: finding.postId, error: finding.error })
+            await appendPostError(stateDir, { ts: Date.now(), postId: finding.postId, error: finding.error })
           }
           ctx.logger.warn(`[deepartments] provider-adapter boot check: ${findings.length} finding(s) → ${findings.map((f) => f.error).join('; ')}`)
           return
@@ -8104,14 +8123,14 @@ export function applyInvoke(ctx: Context, config: Config) {
   const runDurableRegistryReconciliation = async (): Promise<void> => {
     try {
       // (1) durable HOSTS registry — validate + warn (read-only; no auto-write).
-      await reconcileDurableHostRegistry(config.stateDir, { logger: ctx.logger, write: false })
+      await reconcileDurableHostRegistry(stateDir, { logger: ctx.logger, write: false })
       // (2) durable POSTS registry — flag + warn a gone WORKER session
       // (retire-if-safe is an explicit opt-in; a configured head is never
       // flagged). The session-gone resolver is CONSERVATIVE: only a positively
       // confirmed absent durable session counts as gone (unable to determine →
       // NOT gone → never flagged).
       const persistence = ctx.get('sessionPersistence') as { readRaw?: (id: SessionId, signal?: AbortSignal) => Promise<{ content: string } | undefined> } | undefined
-      await reconcileDurablePostsRegistry(config.stateDir, {
+      await reconcileDurablePostsRegistry(stateDir, {
         logger: ctx.logger,
         retireGoneWorkers: false,
         isSessionGone: async (sessionId: string): Promise<boolean> => {
@@ -8217,7 +8236,7 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   /** The one record the bus persists per send (spec §3.1): the durable source
    * of truth, on disk BEFORE any delivery (persist-before-deliver, D4). */
-  const messageStoreDir = config.stateDir
+  const messageStoreDir = stateDir
 
   /** The boot-opened message store (load + compact + per-recipient index).
    * Rejects loud on mid-file corruption (spec §3.2 — fail loud, never hide);
@@ -8446,7 +8465,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // interrupted again (the re-entrancy guard); a delivery that falls inside
       // the cooldown races through to QUEUE semantics (no abort).
       if (interrupt && live !== void 0 && live.status === 'running') {
-        const aborted = await safeInterrupt(live, entry.postId, Date.now(), config.stateDir)
+        const aborted = await safeInterrupt(live, entry.postId, Date.now(), stateDir)
         if (aborted) {
           ctx.logger.warn(`[deepartments] bus delivery to "${entry.postId}": interrupt=true — aborted the current turn (reason 'interrupted'); delivery is the first item of the next turn`)
         } else {
@@ -8488,7 +8507,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         const errText = error instanceof Error ? error.message : String(error)
         const cls = postErrorClass(errText)
         const recordKey = `${POST_ERROR_RECORD_KEY_PREFIX}${entry.postId}:${cls ?? 'generic'}`
-        const appended = await appendPostErrorDeduped(config.stateDir, {
+        const appended = await appendPostErrorDeduped(stateDir, {
           ts: Date.now(),
           postId: entry.postId,
           messageId: record.id,
@@ -8573,7 +8592,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           // → it is NEVER interrupted again (the re-entrancy guard); a delivery
           // inside the cooldown races through to QUEUE semantics (no abort).
           if (interrupt && live.status === 'running') {
-            const aborted = await safeInterrupt(live, hostEntry.hostId, Date.now(), config.stateDir)
+            const aborted = await safeInterrupt(live, hostEntry.hostId, Date.now(), stateDir)
             if (aborted) {
               ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}": interrupt=true — aborted the current turn (reason 'interrupted'); delivery is the first item of the next turn`)
             } else {
@@ -8615,7 +8634,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // M3 cascade guard: a SUCCESSFUL materialization clears the host's
       // consecutive-failure counter (a recovered host must not be treated as a
       // threshold already met → an immediate re-quarantine).
-      await resetHostMaterializeFailures(config.stateDir, hostEntry.hostId)
+      await resetHostMaterializeFailures(stateDir, hostEntry.hostId)
       return first.status
     }
     // W8-i: a SINGLE transient 'session "<id>" not found' first-attempt failure
@@ -8634,7 +8653,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
       const second = await attemptHostDelivery()
       if (second.status !== 'failed') {
-        await resetHostMaterializeFailures(config.stateDir, hostEntry.hostId)
+        await resetHostMaterializeFailures(stateDir, hostEntry.hostId)
         return second.status
       }
       recordedError = second.error ?? first.error
@@ -8662,7 +8681,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // file here closes the stale-twin bypass: the scan gate only suppresses the
       // FINDING; this suppresses the ROW at the source, per the Asistente's
       // "ZERO new rows" acceptance.
-      const durableRetiredOnDisk = isHostRetiredOnDisk(config.stateDir, hostEntry.hostId)
+      const durableRetiredOnDisk = isHostRetiredOnDisk(stateDir, hostEntry.hostId)
       // Belt-and-suspenders: the in-memory Map check is a FALLBACK for the window
       // where hosts.json is unreadable/malformed (durableRetiredOnDisk === undefined),
       // and never over-suppresses a DURABLY-LIVE host (durableRetiredOnDisk === false
@@ -8688,16 +8707,16 @@ export function applyInvoke(ctx: Context, config: Config) {
         messageId: record.id,
         error: recordedError instanceof Error ? recordedError.message : String(recordedError)
       }
-      const matState = readMaterializeState(config.stateDir)
+      const matState = readMaterializeState(stateDir)
       const { next: nextMat, quarantined } = markHostMaterializeFailure(matState, hostEntry.hostId, entry.ts)
-      await writeMaterializeState(config.stateDir, nextMat)
+      await writeMaterializeState(stateDir, nextMat)
       if (quarantined) {
         ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}": ${MATERIALIZE_QUARANTINE_N} consecutive materialization failures — quarantined until ${new Date(entry.ts + MATERIALIZE_QUARANTINE_MS).toISOString()} (post-error recording + QD directive suppressed; the delivery attempt + durable repair are unchanged)`)
         return 'failed'
       }
       const cls = postErrorClass(entry.error)
       const recordKey = `${POST_ERROR_RECORD_KEY_PREFIX}${hostEntry.hostId}:${cls ?? 'generic'}`
-      const appended = await appendPostErrorDeduped(config.stateDir, entry, recordKey, entry.ts)
+      const appended = await appendPostErrorDeduped(stateDir, entry, recordKey, entry.ts)
       // QD (spec 007 §6.4, D-Q4a): after a NEW post-error record is actually
       // appended, trigger the ADDRESSED QUALITY INSPECT directive to quality-head
       // (a dedupe-skip means no new record — do not re-signal). M3: `appended`
@@ -8791,7 +8810,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       maybeEmitQualityInspectDirective,
       runHostRotation,
       deptGet: (key) => ctx.get(key),
-      stateDir: config.stateDir,
+      stateDir: stateDir,
       deferredSleepReplace,
       wakePackInjected,
       buildSleepJournalMessage,
@@ -8841,7 +8860,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     const hostEntry = hosts.get(recipientId)
     if (hostEntry !== void 0 && hostEntry.retired !== true) return { kind: 'host', entry: hostEntry }
     if (recipientId.startsWith(HOST_ID_PREFIX)) {
-      const { live } = pickLiveHostEntry(readDurableHostEntries(config.stateDir) ?? hosts.values())
+      const { live } = pickLiveHostEntry(readDurableHostEntries(stateDir) ?? hosts.values())
       if (live !== void 0) return { kind: 'reroute', entry: live as HostEntry }
     }
     return { kind: 'unknown' }
@@ -9570,10 +9589,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     const tick = (): void => {
       void runAgendaSchedulerTick({
         now: () => Date.now(),
-        departments: config.org.departments,
+        departments: org.departments,
         repoRoot,
-        calendarStateDir: config.stateDir,
-        jobRunsStateDir: config.stateDir,
+        calendarStateDir: stateDir,
+        jobRunsStateDir: stateDir,
         // Resolve the department's registered head postId (sin head → the tick
         // skips + warns). A configured head derives it from config.coordinator;
         // a department with no coordinator/head is unresolved.
@@ -9590,7 +9609,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         runJob: async (department, headPostId, jobId): Promise<boolean> => {
           const headEntry = byPost.get(headPostId)
           if (headEntry === void 0) {
-            await captureSchedulerAutoRunFailure({ stateDir: config.stateDir, now: () => Date.now(), jobId, reason: 'no head', error: 'no head' })
+            await captureSchedulerAutoRunFailure({ stateDir: stateDir, now: () => Date.now(), jobId, reason: 'no head', error: 'no head' })
             return false
           }
           try {
@@ -9599,7 +9618,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           } catch (error: unknown) {
             const errorText = error instanceof Error ? error.message : String(error)
             const reason = /job already running/.test(errorText) ? 'idempotency-skip' : errorText
-            await captureSchedulerAutoRunFailure({ stateDir: config.stateDir, now: () => Date.now(), jobId, reason, error: errorText })
+            await captureSchedulerAutoRunFailure({ stateDir: stateDir, now: () => Date.now(), jobId, reason, error: errorText })
             ctx.logger.warn(`[deepartments] scheduler: job "${jobId}" could not run (${errorText}) — skip`)
             return false
           }
@@ -9612,7 +9631,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         // flows through here, so the same no-fire is never double-recorded.
         onAutoRunSkip: async (finding) => {
           if (finding.reason !== 'no head') return
-          await captureSchedulerAutoRunFailure({ stateDir: config.stateDir, now: () => Date.now(), jobId: finding.jobId, reason: 'no head', error: 'no head' })
+          await captureSchedulerAutoRunFailure({ stateDir: stateDir, now: () => Date.now(), jobId: finding.jobId, reason: 'no head', error: 'no head' })
         },
         // A plain (non-job) calendar entry notice: deliver a bus message to the
         // owning head. The scheduler is NOT a catalog member, so the bus ACL
@@ -9634,7 +9653,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           return creator === void 0 ? undefined : departmentForEntry(creator)
         },
         departmentForJob: (jobId) => {
-          for (const department of config.org.departments) {
+          for (const department of org.departments) {
             const jobDir = jobDirFor(repoRoot, department)
             if (existsSync(path.join(jobDir, `${jobId}.md`))) return department
           }
@@ -9716,9 +9735,9 @@ export function applyInvoke(ctx: Context, config: Config) {
       baseUrl: parallelBaseUrl,
       maxConsecutiveSpawns: parallelMaxSpawns,
       monitors: parallelMonitors,
-      stateDir: config.stateDir,
+      stateDir: stateDir,
       now: () => Date.now(),
-      departments: config.org.departments,
+      departments: org.departments,
       byPost,
       logger: ctx.logger,
       createMonitor,
@@ -9780,7 +9799,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // `readInboxByPost` (W8-d) reads the delivery sidecar + messages.jsonl ONCE
       // and resolves the per-post inbox ts for both the W8-c safeguards and the
       // W8-d host-wait scan (hostId '' → no host rows, only the general inbox).
-      const { inboxTsByPost } = readInboxByPost(config.stateDir, '', Date.now(), HEALTH_ERROR_WINDOW_MS)
+      const { inboxTsByPost } = readInboxByPost(stateDir, '', Date.now(), HEALTH_ERROR_WINDOW_MS)
       const out: PostActivityInput[] = []
       for (const [postId, entry] of byPost) {
         const live = agents?.get(entry.sessionId)
@@ -9818,7 +9837,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       const { live } = pickLiveHostEntry(hosts.values())
       if (live === undefined) return []
       const nowMs = Date.now()
-      const { hostRowsByPost } = readInboxByPost(config.stateDir, live.hostId, nowMs, HEALTH_ERROR_WINDOW_MS)
+      const { hostRowsByPost } = readInboxByPost(stateDir, live.hostId, nowMs, HEALTH_ERROR_WINDOW_MS)
       const out: HostWaitPostInput[] = []
       for (const [postId, entry] of byPost) {
         const liveAgent = agents?.get(entry.sessionId)
@@ -9838,7 +9857,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       const tick = (): void => {
         void runHealthDaemonTick({
           now: () => Date.now(),
-          stateDir: config.stateDir,
+          stateDir: stateDir,
           bootId: healthBootId,
           config,
           // A FRESH single-use iterator per tick (Map.values() is single-use).
@@ -9955,7 +9974,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       `[deepartments] /deepartments channel mounted; trustedHosts=${JSON.stringify(trustedHosts)}; routes: agents/list, host/status, presence/get, presence/set, agenda/list`
     )
     const endpointDeps: DeepartmentsEndpointDeps = {
-      departments: config.org.departments,
+      departments: org.departments,
       byPost: byPost as unknown as Map<string, PostEntryLike>,
       // U3 fix (reviewer 2026-08-22): `Map.values()` returns a SINGLE-USE
       // iterator, and `endpointDeps` is shared for the process lifetime. The
@@ -10001,7 +10020,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // resolution via the apply scope repoRoot) and the runtime calendar from
       // the shared stateDir. The clock picks the live next-due snapshot.
       repoRoot,
-      calendarStateDir: config.stateDir,
+      calendarStateDir: stateDir,
       now: () => Date.now()
     }
     // Register each client path as a `kind:'exact'` POST route. `webServer.register`

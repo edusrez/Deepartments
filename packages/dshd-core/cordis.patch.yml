@@ -1,13 +1,18 @@
 # dshd-core configuration layer — top-level YAML array of patch entries.
 # FASE 2.5 BATCH A (scaffold) → B (services plugin): dshd-core is now a real
 # Cordis PLUGIN (name/inject/apply in lib/index.js) that registers the core
-# SERVICES (deepartments.catalog / deepartments.acl / deepartments.postState)
-# for the dsh-deepartments bundle to consume via ctx.get. The plugin row below
-# registers dshd-core with its core config (stateDir default + core constants)
-# so it composes. Because dshd-core is a `dependencies` of dsh-deepartments, the
-# composed configuration orders it BEFORE dsh-deepartments (a dependency applies
-# before its dependent), so `--dump-config` shows `# == dshd-core` before
-# `# == dsh-deepartments`.
+# SERVICES for the dsh-deepartments bundle to consume via ctx.get. The plugin
+# row below registers dshd-core with its core config (stateDir + the org
+# mirror + core constants) so it composes.
+# FASE 2.6 BATCH A (config relocation): the org configuration (departments,
+# execRoots, missionExecRoots, poolerBaseURL) + stateDir are declared HERE —
+# dshd-core is the SHARED CONFIG SOURCE. The bundle (dsh-deepartments) consumes
+# them via `ctx.get('deepartments.org')` (falling back to its own patch row in
+# minimal/hermetic compositions), and dshd-core builds its ACL lens from its
+# OWN `org.departments` mirror. Because dshd-core is a `dependencies` of
+# dsh-deepartments, the composed configuration orders it BEFORE dsh-deepartments
+# (a dependency applies before its dependent), so `--dump-config` shows
+# `# == dshd-core` before `# == dsh-deepartments`.
 # Plain scalars only — no !!js outside the runtime config engine.
 - insert:
     - id: dshd-core
@@ -15,7 +20,62 @@
       config:
         # The org stateDir — MUST match dsh-deepartments' config.stateDir so the
         # catalog the bundle consumes points at the SAME posts.json/hosts.json.
+        # FASE 2.6 BATCH A: stateDir is relocated HERE (the dshd-core row), the
+        # shared config source. The bundle reads it via `deepartments.org`.
         stateDir: .deepartments
+        # The static organization architecture (FASE 2.6 BATCH A relocation —
+        # moved from the bundle's `deepartments` row to dshd-core's row): the
+        # org is an AGENTS CATALOG — the host plus the departments, each headed
+        # by a coordinator. Departments are defined HERE, never created by
+        # agents. This is the SHARED config source the bundle consumes via
+        # `ctx.get('deepartments.org')` (with an in-bundle fallback for minimal
+        # compositions), and dshd-core builds its ACL lens from this mirror.
+        org:
+          departments:
+            - id: research
+              name: Research Department
+              workspacePath: /root/.deepartments/departments/research
+              coordinator:
+                postId: research-head
+                title: Head of Research
+                role: Research department head
+                sessionTitle: Research Head
+                provider: opencode-zen
+                agentOptions:
+                  provider: opencode-zen
+                  model: deepseek-v4-flash-vision-exp
+                  reasoningEffort: max
+            - id: internal-programming
+              name: Internal Programming
+              workspacePath: /root/.deepartments/departments/internal-programming
+              coordinator:
+                postId: internal-programming-head
+                title: Internal Programming Head
+                role: Internal Programming department head
+                sessionTitle: Internal Programming Head
+                provider: opencode-zen
+                agentOptions:
+                  provider: opencode-zen
+                  model: deepseek-v4-flash-vision-exp
+                  reasoningEffort: max
+            - id: quality
+              name: Quality Department
+              workspacePath: /root/.deepartments/departments/quality
+              coordinator:
+                postId: quality-head
+                title: Quality Head
+                role: Quality department head
+                sessionTitle: Quality Head
+                provider: opencode-zen
+                agentOptions:
+                  provider: opencode-zen
+                  model: deepseek-v4-flash-vision-exp
+                  reasoningEffort: max
+          # P1 rewire-pooler: the pooler (dsh-key-pooler) baseURL — a LEGITIMATE
+          # local/proxy LLM route. The endpoint-drift exemption treats a baseURL
+          # EXACTLY equal to this as a HEALTHY route (NOT drift). MUST match the
+          # opencode-zen baseURL set in settings.yaml.
+          poolerBaseURL: http://127.0.0.1:4097/v1
         # core constants (configurable, code-defaulted): the catalog is the
         # single source; no daemons / role registry here (single source stays the
         # bundle's role-orient.ts).
