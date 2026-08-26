@@ -22,7 +22,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { copyFile, writeFile, rename, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { ROTATION_SCHEMA_VERSION, validateHostsRotationFile } from '../session-rotation.js'
+import { ROTATION_SCHEMA_VERSION, validateHostsRotationFile } from './session-rotation.js'
 
 /** Prefix of a runtime host-address registry entry: `host-<sessionId>`. */
 export const HOST_ID_PREFIX = 'host-'

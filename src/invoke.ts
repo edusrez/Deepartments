@@ -79,9 +79,10 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
-import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './session-cleanup.js'
-import { runHostRotation, ASISTENTE_SESSION_TITLE, isArchivedSession } from './session-rotation.js'
-import type { RotationPersistenceLike, WorkspaceRegistryLike } from './session-rotation.js'
+import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './core/session-cleanup.js'
+import { runHostRotation, ASISTENTE_SESSION_TITLE, isArchivedSession } from './core/session-rotation.js'
+import type { RotationPersistenceLike, WorkspaceRegistryLike } from './core/session-rotation.js'
+import { createLifecycleService, buildSleepJournalMessage, shouldClearCleanupPending } from './core/lifecycle.js'
 import type { Config, CoordinatorConfig, DepartmentConfig, ParallelConfig, ParallelMonitorConfig } from './org.js'
 import {
   MessagesStore,
@@ -574,25 +575,13 @@ export function computeHostSleepSurfacePlan(nodes: readonly number[]): HostSleep
   }
 }
 
-/**
- * Build the single landing node for a host surface reset: the agent's journal
- * as a `user/message` whose `source` is `kind:'plugin' / form:'notice'` (NOT
- * `kind:'user'`) so it renders as a collapsed context/notice row in the GUI,
- * not as if the owner said it (the KEY property: `deriveMessages()` folds the
- * node's content verbatim on the next turn). The frame is bound via
- * `boundContextSummary` per the dsh-llm notice contract.
- */
-export function buildSleepJournalMessage(journalText: string) {
-  return createUserMessage({
-    content: [{ type: 'text', text: journalText }],
-    source: {
-      kind: 'plugin',
-      plugin: 'deepartments',
-      form: 'notice',
-      summary: boundContextSummary('Reopened after sleep — in-place surface reset to your journal (long-term memory).')
-    }
-  })
-}
+// ---------------------------------------------------------------------------
+// FASE 2 STEP f (lifecycle carve): the `buildSleepJournalMessage` host surface
+// reset node and `shouldClearCleanupPending` cleanup gate moved to
+// ./core/lifecycle.js. Re-exported here so lib/invoke.js stays a drop-in
+// superset for the rotation/session-cleanup tests that import them.
+// ---------------------------------------------------------------------------
+export { buildSleepJournalMessage, shouldClearCleanupPending } from './core/lifecycle.js'
 
 // ---------------------------------------------------------------------------
 // Batch W4 — WAKE CONTEXT PACK (owner doctrine: inject, don't let the model
@@ -4335,18 +4324,13 @@ async function handleDeepartmentsRequest(
   }
 }
 
-/** Flag-clear decision for the boot web-UI cleanup (PURE + exported so the
- * regression suite unit-tests the exact production rule): the durable
- * `webUiCleanupPending` marker is cleared ONLY when the cleanup actually RAN
- * AND the GUI-critical truncation succeeded. A skipped report (host session
- * live — `skipped: true, skipReason: 'session-live'`) or a failed/absent
- * truncate (`truncateError` set / `truncate` undefined) KEEPS the flag so the
- * NEXT boot retries — a live-skipped cleanup is retried at a boot where the
- * session is verifiably NOT materialized (see runSleepCleanup's live guard;
- * the wake-11 mid-log-seam corruption fix). */
-export function shouldClearCleanupPending(report: Pick<SleepCleanupReport, 'skipped' | 'truncate' | 'truncateError'>): boolean {
-  return report.skipped !== true && report.truncate !== undefined && report.truncateError === undefined
-}
+// The `shouldClearCleanupPending` flag-clear decision for the boot web-UI
+// cleanup moved to ./core/lifecycle.js (FASE 2 STEP f); re-exported above so
+// lib/invoke.js stays a drop-in superset for the session-cleanup regression
+// tests. The durable `webUiCleanupPending` marker is cleared ONLY when the
+// cleanup actually RAN AND the GUI-critical truncation succeeded; a skipped
+// report (host session live) or a failed/absent truncate KEEPS the flag so the
+// NEXT boot retries.
 
 /** Outcome of one host-session title pin (U4 — the "Asistente" sidebar
  * label). 'pinned' = the `session/title` user event was appended now;
@@ -6432,13 +6416,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         render: (_args, value) => [{ type: 'text', text: `journal written: ${value.memoPath}` } as const]
       },
       async execute(args, exec): Promise<{ room: string; member: string; memoPath: string }> {
-        const agent = exec.agent
-        if (!agent) throw new Error('dept_memo_write requires a calling agent (exec.agent was undefined)')
-        const memberId = postIdForChild(agent.id as string) ?? 'unknown'
-        const entry = byPost.get(memberId)
-        const roomId = entry?.roomId ?? 'unknown'
-        const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [], args.currentStep, { sessionId: agent.id as string })
-        return { room: roomId, member: memberId, memoPath }
+        return lifecycle.memoWrite(args, exec as Parameters<typeof lifecycle.memoWrite>[1], false)
       }
     })))
 
@@ -6460,121 +6438,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         render: (_args, value) => [{ type: 'text', text: `sleeping: ${value.member} marked for context reset (epoch ${value.sleepEpoch}); journal: ${value.memoPath}` } as const]
       },
       async execute(_args, exec): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }> {
-        const agent = exec.agent
-        if (!agent) throw new Error('dept_sleep requires a calling agent (exec.agent was undefined)')
-        const memberId = postIdForChild(agent.id as string)
-        if (memberId === undefined) throw new Error('[deepartments] dept_sleep is for a department head (registered post), not the host')
-        const entry = byPost.get(memberId)
-        if (entry === void 0) throw new Error(`[deepartments] dept_sleep: "${memberId}" is not a registered post`)
-        const journal = await readJournal(memberId)
-        if (journal === void 0 || journal.trim() === '') {
-          throw new Error('[deepartments] dept_sleep requires a saved journal — call dept_memo_write to save your memory first')
-        }
-        // Fix (head-sleep idempotency): an ALREADY-SLEPT head carries a durable
-        // sleepEpoch mark. A RE-ISSUED dept_sleep directive on it is a NO-OP —
-        // return the already-slept state WITHOUT re-running the teardown (no
-        // re-mark, no re-persist, no re-archive, no re-dispose, no re-wake-counter
-        // bump). The head stays slept; only its next bus wake mints a fresh session.
-        if (entry.sleepEpoch !== void 0) {
-          return { room: entry.roomId, member: memberId, memoPath: journalPathFor(memberId), sleepEpoch: entry.sleepEpoch }
-        }
-        // Head/worker wake_counter parity (owner decision: heads + workers, so
-        // BOTH a manager head and a disposable worker route here through the
-        // own-layer dept_sleep — the host never does, it is rejected above).
-        // Bump the ordinal at this SAME seed boundary the host uses (see
-        // bumpHostSleepCounter/bumpPostSleepCounter): the counter advances
-        // exactly +1 on disk BEFORE the handle is disposed, so the next wake's
-        // fresh materialization (cold resume from the journal) reads the
-        // incremented ordinal — mirroring host semantics.
-        await bumpPostSleepCounter(memberId, journal, { sessionId: agent.id as string, roomId: entry.roomId, boundarySeq: entry.boundarySeq })
-        // Mark first (durable), then dispose the live AgentHandle. Dispose
-        // tears the agent+session OUT of the in-memory registry (rc.8
-        // dsh-agent-loop prepare() dispose, index.js:1132-1152 — it detaches
-        // `agents.enter`/`sessions.enter` registrations only, NOT the
-        // sessionPersistence backend), so the durable session survives and the
-        // next wake resumes it. The registry keeps the head wakeable-while-
-        // asleep via sleepEpoch.
-        // F8 ghost-row fix (owner 2026-08-23): archive the session the head is
-        // ACTUALLY running in (agent.id), NOT the registry's entry.sessionId.
-        // A stale reload (a mid-cycle post/process restart re-reading an older
-        // posts.json) can leave entry.sessionId pointing at the PREVIOUS
-        // (already-archived) incarnation while the head really runs in a FRESH
-        // one — archiving the stale id hides nothing and leaves the CURRENT row
-        // as a sidebar ghost. Converge the registry to the real session id
-        // BEFORE the durable persist so the CURRENT session is archived and the
-        // next wake traces the correct previous incarnation. Never-resume-
-        // archived + the retire flow are untouched.
-        const sessionId = String(agent.id)
-        entry.sessionId = sessionId
-        entry.sleepEpoch = Date.now()
-        // Task T1 — persist the session-event `seq` at this sleep boundary so
-        // the NEXT cycle's session-log capture can slice EXACTLY by seq
-        // (`seq > boundarySeq`), clock-independent. Absent (stub session) →
-        // capture falls back to `time > lastWakeMs`.
-        const boundarySeq = (agent.session as { seq?: number } | undefined)?.seq
-        if (boundarySeq !== undefined) entry.boundarySeq = boundarySeq
-        // Fix (head-sleep worker drain): durably mark the head's IN-FLIGHT workers
-        // (provider==='worker' && managerId===headId && retired!==true) on the
-        // head entry BEFORE the sleepEpoch persist — so the sleep is handed off
-        // through the SAME persistPosts write with a durable "n workers in flight"
-        // ledger. The boot reconcile (runHalfSleptHeadReconcile) reads this to
-        // reap/flag any worker whose manager is still dormant; a worker that
-        // delivered its report is cut clean by the auto-retire on delivery seam.
-        const inflight: string[] = []
-        for (const candidate of byPost.values()) {
-          if (candidate.provider === 'worker' && candidate.managerId === memberId && candidate.retired !== true) inflight.push(candidate.postId)
-        }
-        if (inflight.length > 0) entry.inflightWorkers = inflight
-        // Fix (head-sleep idempotency/rotation-race): AWAIT the durable persist so
-        // the sleepEpoch mark is on-disk BEFORE any async teardown step that a
-        // host-session rotation / service restart could abort. The mark is the
-        // durable part; if the archive fails to seal (or a restart lands during
-        // the archive), the boot reconcile (runHalfSleptHeadReconcile) re-seals.
-        await persistPosts()
-        // F8 (spec 002 head rotation) — ARCHIVE the slept head's durable session
-        // server-side so the SIDEBAR ROW disappears (the journal + messages stay
-        // intact — archive never deletes; D5). HEAD-ONLY: a disposable WORKER is
-        // retired via dept_worker_retire (its own archive path) and keeps the
-        // legacy cold-resume behavior — a worker dept_sleep is NOT rotated.
-        // Non-fatal by design (archivePostSessionOnSleep never throws; a missing
-        // registry or a failing call WARNs + resolves false, and the sleep still
-        // commits — the sleep mark is the durable part). AWAITED (was `void`) so
-        // the row-hide SEALS before the dispose fires; the archive is cosmetic
-        // row-hiding and must never throw (spec D1: archive ≠ delete — the
-        // journal + messages stay intact). Semantics verified S2.5: a pure
-        // registry-global set-add + persist; NOTHING terminates the agent.
-        if (entry.provider !== 'worker') {
-          await archivePostSessionOnSleep(sessionId)
-        }
-        // Fix sleep-self-deadlock (2026-08-23): NEVER await our own handle's
-        // dispose from our own turn — the harness dispose() sends
-        // machine.cancel + `await machine.whenIdle()`, i.e. it waits for the
-        // very driver that is currently executing this tool (invariant
-        // self-deadlock — explore-deep/2026-08-23-head-sleep-hang.md §5a).
-        // Fire it (the retirePost precedent) so the tool returns immediately,
-        // the turn/end settles and the dispose's whenIdle then resolves; the
-        // per-session `disposingHeads` dedupe lets a concurrent wake JOIN the
-        // same detach instead of racing it. The dispose stays NON-awaited
-        // (fire-and-forget) AND is dispatched BEFORE the (async) QD directive
-        // below, so a host-session rotation landing on that directive await can
-        // no longer abort the detach — the archive seal + the dispose dispatch
-        // are already committed.
-        void disposeHeadHandleOnce(sessionId)
-        // QD (spec 007 §6.2, D-Q3): the HEAD-sleep MANDATE — a department head
-        // archive is inspected at 100% (never gated by the dice) for ANY head
-        // EXCEPT the QD's own coordinator ('quality-head'), whose OWN sleep is
-        // sampled by the worker dice to break the QH sleep → q-i → wake → sleep
-        // anti-loop (owner m-178/m-182 — the gate lives in
-        // maybeEmitQualityInspectDirective, which reads the surface headPostId).
-        // Emits an ADDRESSED QUALITY INSPECT directive to quality-head. Non-fatal
-        // (the helper wraps its own try/catch); a failing directive degrades to a
-        // warn and the sleep still commits. Runs AFTER the dispose dispatch so
-        // the async bus deliver is NOT on the detach path — a rotation/restart
-        // landing on this await can no longer leave the head LIVE.
-        if (entry.provider !== 'worker') {
-          await maybeEmitQualityInspectDirective({ kind: 'head-slept', headPostId: memberId, sessionId, sleepEpoch: entry.sleepEpoch })
-        }
-        return { room: entry.roomId, member: memberId, memoPath: journalPathFor(memberId), sleepEpoch: entry.sleepEpoch }
+        return lifecycle.sleepMember(_args, exec as Parameters<typeof lifecycle.sleepMember>[1])
       }
     })))
 
@@ -8876,6 +8740,44 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  // --- FASE 2 STEP f (lifecycle carve) ---------------------------------------
+  // The dept_sleep / dept_memo_write SEMANTICS are owned by the core lifecycle
+  // service (./core/lifecycle.js): the sleepEpoch marking policy + idempotent
+  // re-issue no-op + journal requirement, the host-rotation decision (delegating
+  // to ./core/session-rotation.js), and the journal/archive policy. The TOOLS
+  // below still register here (their MODEL-FACING contract is unchanged) but now
+  // DELEGATE to `lifecycle`. ONE service per apply, deps injected from these
+  // closures (AGENTS.md rule 4 — no module-global mutable state). The service is
+  // constructed AFTER every closure it consumes is defined (this point); the
+  // tool `execute` handlers reference `lifecycle` lazily, so even the earlier
+  // head own-layer registrations (installHeadBoardTools) bind it correctly at
+  // tool-call time.
+  const lifecycle = createLifecycleService({
+    byPost,
+    hosts,
+    hostForSession,
+    postIdForChild,
+    hostIdForSession,
+    ensureHost,
+    persistPosts,
+    persistHosts,
+    journalPath: (memberId) => journalPathFor(memberId),
+    writeJournal,
+    readJournal,
+    bumpHostSleepCounter,
+    bumpPostSleepCounter,
+    archivePostSessionOnSleep,
+    disposeHeadHandleOnce,
+    maybeEmitQualityInspectDirective,
+    runHostRotation,
+    deptGet: (key) => ctx.get(key),
+    stateDir: config.stateDir,
+    deferredSleepReplace,
+    wakePackInjected,
+    buildSleepJournalMessage,
+    logger: ctx.logger
+  })
+
   // --- F2 (spec 004 §5.6): messaging ACL by department — catalog route ONLY --
   // THE FRONTIER (documented, per spec §5.6): the ACL gates ONLY the catalog
   // route. The CHILD route (subagents.followup — the Asistente's transient
@@ -9596,19 +9498,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       render: (_args, value) => [{ type: 'text', text: `journal written: ${value.memoPath}` } as const]
     },
     async execute(args, exec): Promise<{ room: string; member: string; memoPath: string }> {
-      const agent = exec.agent
-      if (!agent) throw new Error('dept_memo_write requires a calling agent (exec.agent was undefined)')
-      // Batch 7 host-aware member resolution: a registered HEAD writes under
-      // its postId (unchanged); a HOST (no post entry) writes under the durable
-      // `host-<sessionId>` member id instead of the old `'unknown'` fallback, so
-      // its journal lives at journals/host-<sessionId>.md for the host sleep
-      // branch to reload.
-      const memberId = postIdForChild(agent.id as string) ?? hostIdForSession(agent.id as string)
-      const entry = byPost.get(memberId)
-      const hostEntry = hosts.get(memberId)
-      const roomId = entry?.roomId ?? hostEntry?.roomId ?? 'board'
-      const memoPath = await writeJournal(memberId, roomId, args.summary, args.decisions ?? [], args.constraints ?? [], args.openItems ?? [], args.currentStep, { sessionId: agent.id as string })
-      return { room: roomId, member: memberId, memoPath }
+      return lifecycle.memoWrite(args, exec as Parameters<typeof lifecycle.memoWrite>[1], true)
     }
   }))
 
@@ -9630,213 +9520,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       render: (_args, value) => [{ type: 'text', text: `sleeping: ${value.member} marked for context reset (epoch ${value.sleepEpoch}); journal: ${value.memoPath}` } as const]
     },
     async execute(_args, exec): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }> {
-      const agent = exec.agent
-      if (!agent) throw new Error('dept_sleep requires a calling agent (exec.agent was undefined)')
-      // ---- Task T4: REFUSE a TRANSIENT SUBAGENT. A one-shot delegated worker
-      // has no durable post identity and must NEVER enter the host sleep/reset
-      // branch below — which would misclassify it as a HOST and bump a bogus
-      // `host-<subagentUuid>` wake counter (and historically left headless
-      // one-shots hanging after sleep). `origin === 'subagent'` is set only on
-      // startContinuable children; registered members (host, head, worker) carry
-      // origin undefined and are unaffected. Fail loud; no context reset.
-      const deptSleepHeader = agent.session?.header as SessionHeaderWithOrigin | undefined
-      const deptSleepOrigin = deptSleepHeader?.origin ?? deptSleepHeader?.meta?.origin
-      if (deptSleepOrigin === 'subagent') {
-        ctx.logger.warn(`[deepartments] dept_sleep refused for transient subagent ${agent.id as string}`)
-        throw new Error('dept_sleep is refused for a transient delegated subagent — a subagent cannot sleep; its task ends with the settlement notice (role-scoped context reset is not supported).')
-      }
-      const memberId = postIdForChild(agent.id as string)
-
-      // ---- U2: HOST branch (the sleeping Asistente) — SESSION ROTATION ------
-      // The caller has no registered post entry → it is a HOST. Spec 002
-      // (docs/specs/002-host-session-rotation.md): the OLD host session is
-      // RETIRED + ARCHIVED server-side (D1) and a NEW session (seeded with the
-      // re-keyed journal, D3) becomes the registered host, so the GUI's native
-      // sidebar shows the fresh "New Session" row and hides the old one. The
-      // old session's artifact + journal are preserved in FULL (G4/D2 — the
-      // rotation never truncates, never deletes, never appends to the old live
-      // surface). The web api-proxy owns the host's AgentHandle (we do NOT
-      // dispose it — unlike a head): the old session stays live but INERT
-      // (nothing targets host-<oldId> for wake anymore — gate §4). Heads never
-      // reach this branch (a head calls its own-layer dept_sleep, which
-      // dispose+resumes — unaffected).
-      if (memberId === undefined) {
-        const sessionId = agent.id as string
-        const hostId = hostIdForSession(sessionId)
-        const existing = hosts.get(hostId)
-        const journal = await readJournal(hostId)
-        if (journal === void 0 || journal.trim() === '') {
-          throw new Error(`[deepartments] dept_sleep requires a saved journal — call dept_memo_write to save your memory first (no journal for host ${hostId})`)
-        }
-        // S1 — journal REQUIRED (dept_memo_write must have run first): the
-        // journal is the ONLY durable surface the next wake resumes from.
-        // S1.5 (unchanged) — advance the HOST's wake ordinal at the sleep
-        // boundary, BEFORE the rotation, so the NEXT wake's fresh context
-        // (seeded from the re-keyed journal) already shows the incremented
-        // counter (wake K → sleep → the woken session is wake K+1).
-        // bumpHostSleepCounter persists the bump atomically on the OLD file
-        // (kept byte-identical as the archive copy, G4) and returns the
-        // bumped content the rotation re-keys.
-        const seeded = await bumpHostSleepCounter(hostId, journal, { sessionId, roomId: existing?.roomId ?? 'board', boundarySeq: hosts.get(hostId)?.boundarySeq })
-        // U2 — perform the ROTATION (S1.5b re-keyed journal → S2 server-side
-        // session creation → S2.5 server-side archive → S2.7 evidence copy →
-        // S3/S7 hosts.json rotation with the durable markers). S6 (the old
-        // session's wake-pack flag) + S8 (concludeTurn) stay HERE; the old
-        // entry keeps its identity but is retired (evidence stays queryable).
-        const boundarySeqAtSleep = (agent.session as { seq?: number } | undefined)?.seq ?? hosts.get(hostId)?.boundarySeq
-        // Resolve the state-home sessions root + evidence archive dir exactly
-        // like the boot cleanup hook (sessionPersistence.root ?? `../sessions`).
-        // FIX 1: the SAME persistence service also feeds the rotation's S2
-        // cold-seed seam (create/append — dsh-session-persistence), so the new
-        // host session is written to disk WITHOUT ever being attached to
-        // ctx.sessions (the attached-but-agentless poison state; the resume
-        // live-guard). Optional — the rotation falls back when absent.
-        const deptSleepPersistence = ctx.get('sessionPersistence') as (RotationPersistenceLike & { root?: string }) | undefined
-        const deptSleepSessionsRoot = typeof deptSleepPersistence?.root === 'string' && deptSleepPersistence.root !== ''
-          ? deptSleepPersistence.root
-          : path.join(config.stateDir, '..', 'sessions')
-        const rotation = await runHostRotation({
-          oldSessionId: sessionId,
-          oldHostId: hostId,
-          roomId: existing?.roomId ?? 'board',
-          seededJournal: seeded,
-          journalsDir: path.join(config.stateDir, 'journals'),
-          workspacePath: (agent.session?.header as { cwd?: string } | undefined)?.cwd ?? process.cwd(),
-          boundarySeq: boundarySeqAtSleep,
-          persistence: deptSleepPersistence,
-          workspaceRegistry: ctx.get('workspaceRegistry'),
-          sessionsRoot: deptSleepSessionsRoot,
-          archiveDir: path.join(path.dirname(deptSleepSessionsRoot), 'archive'),
-          hosts,
-          hostForSession,
-          persistHosts,
-          logger: ctx.logger
-        })
-        if (rotation.rotated) {
-          // S6 — retired identity: the OLD session never gets the wake pack
-          // again (retired-skip gate §4); the NEW session's per-process set is
-          // empty by definition, so its first pre-step injects the full pack.
-          wakePackInjected.delete(sessionId)
-          // S8 — conclude the sleeping Asistente's turn (the loop stops after
-          // this successful tool result) — the host analog of a head ending
-          // its turn. Guarded: dsh-tools ToolRunContext exposes concludeTurn();
-          // a bare { agent, signal } test exec does not.
-          if (typeof (exec as { concludeTurn?: unknown }).concludeTurn === 'function') {
-            (exec as { concludeTurn: () => void }).concludeTurn()
-          }
-          // QD (spec 007 §6.3, D-Q3): the HOST-rotation MANDATE — a host session
-          // rotation is inspected at 100% (the host counts as "H", never a die).
-          // Emits an ADDRESSED QUALITY INSPECT directive to quality-head on
-          // `rotation.rotated === true` REGARDLESS of the S2.5 archive ok (an
-          // `archive.ok === false` is still a COMMITTED rotation). Non-fatal
-          // (the helper wraps its own try/catch); a failing directive degrades
-          // to a warn and the rotation still commits. Do NOT move this into
-          // session-rotation.ts (bus-less).
-          await maybeEmitQualityInspectDirective({
-            kind: 'host-rotated',
-            oldSessionId: sessionId,
-            newSessionId: rotation.newSessionId,
-            oldHostId: hostId,
-            newHostId: rotation.newHostId,
-            sleepEpoch: rotation.sleepEpoch,
-            archiveOk: rotation.archive?.ok === true
-          })
-          return { room: existing?.roomId ?? 'board', member: rotation.newHostId, memoPath: rotation.newJournalPath, sleepEpoch: rotation.sleepEpoch }
-        }
-        // FALLBACK — the legacy IN-PLACE path, reachable ONLY when the rotation
-        // cannot run (missing/partial persistence seam or a re-key / seed-
-        // persist failure — spec §3.6 crash tolerance). Loud log + the pre-rotation
-        // behavior (journal append + deferred fold + webUiCleanupPending) — the
-        // machinery stays for hosts that slept under the old plugin (§5).
-        ctx.logger.error(`[deepartments] dept_sleep: host session ROTATION could not run (${rotation.reason}); falling back to the legacy in-place reset (journal append + deferred fold + webUiCleanupPending)`)
-        // Step 2 — register/refresh the durable host identity. ensureHost is
-        // idempotent for an existing entry and refuses to change its roomId away
-        // from what it has.
-        ensureHost(sessionId, existing?.roomId ?? 'board')
-        const hostEntry = hosts.get(hostId) as HostEntry
-        // Step 3 — in-place surface reset, DEFERRED to the wake pre-step (Fix A,
-        // root cause of the wake-7 tool-role 400s — explore-deep/2026-08-21-
-        // failedmessages-tool-role-error.md): append the journal node NOW as a
-        // PLAIN append (durability unchanged — the journal FILE is persisted by
-        // bumpHostSleepCounter above and this node is recorded durably in the
-        // session log), but DO NOT run the full-window replace here. Replacing
-        // at close would shadow the assistant message carrying the dept_sleep
-        // tool-call while the harness still appends the tool's own result AFTER
-        // the replace — orphaning a role:'tool' node on the wake surface that
-        // the strict opencode-go API rejects (400 INVALID_REQUEST). The
-        // full-window replace is therefore DEFERRED: the intent (sessionId →
-        // seeded journal text) is recorded in `deferredSleepReplace` and the
-        // NEXT `agent/pre-step` (the Batch C injector below) performs it over
-        // ALL current nodes INCLUDING the pending tool result — the assistant
-        // tool-call and its result stay a legal sequence and the orphan never
-        // reaches the API. Guarded so an agent-less / stub context (no real
-        // Session surface) degrades safely (no append, no deferred intent).
-        const session = agent.session
-        if (session !== undefined && typeof session.append === 'function') {
-          const message = buildSleepJournalMessage(seeded)
-          session.append('user/message', message, { surfaceOp: 'append' })
-          deferredSleepReplace.set(sessionId, seeded)
-          // Fix wake-12: mirror the in-memory intent into the DURABLE host
-          // entry so a process restart BETWEEN this dept_sleep and the wake
-          // pre-step still folds the surface at the first pre-step of the new
-          // process (the map does not survive the process; hosts.json does —
-          // restored by the hosts loader at boot). persistHosts() below writes
-          // it. Cleared when the fold consumes the intent.
-          hostEntry.deferredJournalSeed = seeded
-        }
-        // Step 3.5 — web-UI sleep cleanup marker (Option A; src/session-
-        // cleanup.ts): record the pending flag ONLY. The physical cleanup
-        // (truncate the host session artifact, reset its projcache row,
-        // archive+delete the child subagent dirs) must NOT run in this live
-        // process — the harness appends the dept_sleep tool result + step/end
-        // + turn/end AFTER execute() returns with the LIVE in-memory seqs, and
-        // dsh-session's Session requires every persisted artifact to be
-        // contiguous from seq 0 (else the next process's resume throws). The
-        // next BOOT (which cold-boots from the truncated artifact by design)
-        // performs the cleanup exactly once and clears this flag.
-        hostEntry.webUiCleanupPending = true
-        // Batch C — the wake context pack is NO LONGER frozen into the surface
-        // at dept_sleep. It is now injected FRESH at the next `agent/pre-step`
-        // (message-arrival time) by the host pre-step injector, so its board
-        // delta / git / roster / cursor are current at the moment the user's
-        // message arrives, not stale from the previous sleep. The reset surface
-        // here is just the journal node (the durable memory). Clear the
-        // wake-pack presence flag so the next wake's first pre-step re-injects.
-        wakePackInjected.delete(sessionId)
-        // Step 4 — ONLY AFTER the surface append is committed, set+persist the
-        // durable sleep marker ("the Asistente slept at T"). This ordering closes
-        // the crash window where sleepEpoch was durably persisted but the journal
-        // had NOT been injected into the live surface yet (a stale resume while
-        // marked slept).
-        hostEntry.sleepEpoch = Date.now()
-        // Task T1 — persist the session-event `seq` at this sleep boundary
-        // (immediately after the boundary append) so the NEXT cycle's session-log
-        // capture slices exactly by `seq > boundarySeq`, clock-independent.
-        // Absent (stub session) → capture falls back to `time > lastWakeMs`.
-        const hostBoundarySeq = (agent.session as { seq?: number } | undefined)?.seq
-        if (hostBoundarySeq !== undefined) hostEntry.boundarySeq = hostBoundarySeq
-        persistHosts()
-        // Step 5 — conclude the sleeping Asistente's turn (the loop stops after
-        // this successful tool result) — the host analog of a head ending its turn.
-        // Guarded: dsh-tools ToolRunContext exposes concludeTurn(); a bare
-        // { agent, signal } test exec does not.
-        if (typeof (exec as { concludeTurn?: unknown }).concludeTurn === 'function') {
-          (exec as { concludeTurn: () => void }).concludeTurn()
-        }
-        return { room: hostEntry.roomId, member: hostId, memoPath: journalPathFor(hostId), sleepEpoch: hostEntry.sleepEpoch }
-      }
-
-      // ---- head path (a registered post calling the host plane — preserved,
-      // effectively a no-op today since heads call their own-layer tool). ----
-      const entry = byPost.get(memberId)
-      if (entry === void 0) throw new Error(`[deepartments] dept_sleep: "${memberId}" is not a registered post`)
-      const journal = await readJournal(memberId)
-      if (journal === void 0 || journal.trim() === '') {
-        throw new Error('[deepartments] dept_sleep requires a saved journal — call dept_memo_write to save your memory first')
-      }
-      entry.sleepEpoch = Date.now()
-      persistPosts()
-      return { room: entry.roomId, member: memberId, memoPath: journalPathFor(memberId), sleepEpoch: entry.sleepEpoch }
+      return lifecycle.sleepHost(_args, exec as Parameters<typeof lifecycle.sleepHost>[1])
     }
   }))
 
