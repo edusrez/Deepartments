@@ -9,10 +9,13 @@
 # dshd-core is the SHARED CONFIG SOURCE. The bundle (dsh-deepartments) consumes
 # them via `ctx.get('deepartments.org')` (falling back to its own patch row in
 # minimal/hermetic compositions), and dshd-core builds its ACL lens from its
-# OWN `org.departments` mirror. Because dshd-core is a `dependencies` of
-# dsh-deepartments, the composed configuration orders it BEFORE dsh-deepartments
-# (a dependency applies before its dependent), so `--dump-config` shows
-# `# == dshd-core` before `# == dsh-deepartments`.
+# OWN `org.departments` mirror. NOTE: the CLI composes ONLY the
+# `dsh.profile.bundles` layers (in order); being a `dependencies` of
+# dsh-deepartments does NOT add a bundle layer, so dshd-core is NOT composed
+# today. To compose it, dshd-core MUST be added to the profile's
+# `dsh.profile.bundles` IMMEDIATELY BEFORE dsh-deepartments (compose-first,
+# Asistente checkpoint) — then `--dump-config` shows `# == dshd-core` before
+# `# == dsh-deepartments`.
 # Plain scalars only — no !!js outside the runtime config engine.
 - insert:
     - id: dshd-core

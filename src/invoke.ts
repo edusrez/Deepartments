@@ -94,7 +94,7 @@ import {
   resolveMessagesPath,
   DeliveryRedeliverer
 } from './core/messages.js'
-import type { DeliveryRow, DeliveryStatus, MessageRecord } from './core/messages.js'
+import type { DeliveryRow, DeliveryStatus, MessageRecord, DeliveryRedelivererDeps } from './core/messages.js'
 // Re-export the message-store + redelivery-guard public surface (value + type)
 // so the compiled lib/invoke.js stays a drop-in superset of the pre-extraction
 // module (same pattern as step (a) — the registry).
@@ -223,7 +223,10 @@ import type {
   BusMemberProfile,
   BusSendResult,
   DeliveryEngine,
-  CatalogRoute
+  CatalogRoute,
+  AclSurface,
+  Binder,
+  BusSurface
 } from './core/delivery.js'
 // Re-export the delivery engine's public surface (value + type) so the compiled
 // lib/invoke.js stays a drop-in superset of the pre-extraction module.
@@ -246,7 +249,7 @@ export type {
 // (via delivery.js, which itself re-exports it from acl.js).
 import {
   busProfileFor as aclBusProfileFor,
-  aclDenyGround
+  aclDenyGround as aclDenyGroundImpl
 } from './core/acl.js'
 import type { BusCatalogLens } from './core/acl.js'
 export { busProfileFor, aclDenyGround, aclDenyReason, canSend } from './core/acl.js'
@@ -8240,8 +8243,12 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   /** The boot-opened message store (load + compact + per-recipient index).
    * Rejects loud on mid-file corruption (spec §3.2 — fail loud, never hide);
-   * tools surface the rejection at use. */
-  const messagesStoreReady = MessagesStore.open(messageStoreDir)
+   * tools surface the rejection at use.
+   * FASE 2.6-C: when the dshd-core bus service is composed, the store is the
+   * CORE's (opened once on first use from the shared org stateDir); in a
+   * minimal composition (dshd-core absent) we fall back to the in-bundle open
+   * — the SAME store, behavior-neutral. */
+  const messagesStoreReady = (ctx.get('deepartments.bus') as BusSurface | undefined)?.storeReady ?? MessagesStore.open(messageStoreDir)
 
   /**
    * The SHARED post-materialization core of the wakePost seam (spec §4.3 step 2
@@ -8838,8 +8845,16 @@ export function applyInvoke(ctx: Context, config: Config) {
   // posts/hosts registries + the config department resolver) onto the pure
   // `busProfileFor` and consumes the pure `aclDenyGround` directly; the
   // delivery engine (delivery.ts) re-checks the SAME pure predicate defensively.
+  // FASE 2.6-C: consume the dshd-core ACL SERVICE when composed — the core ACL
+  // is fed the SAME departments mirror (relocated to the dshd-core config in
+  // 2.6-A), so it is BEHAVIOR-IDENTICAL (same grounds 'host' /
+  // 'other-department' / 'unclassified'; worker→host PROHIBIDO intact). The
+  // bundle keeps its own busCatalogLens/busProfileFor ACL as the fallback in a
+  // minimal composition (dshd-core absent).
+  const aclService = ctx.get('deepartments.acl') as AclSurface | undefined
   const busCatalogLens: BusCatalogLens = { byPost, hosts, departmentForPost }
-  const busProfileFor = (memberId: string): BusMemberProfile => aclBusProfileFor(memberId, busCatalogLens)
+  const busProfileFor = aclService?.busProfileFor ?? ((memberId: string): BusMemberProfile => aclBusProfileFor(memberId, busCatalogLens))
+  const aclDenyGround = aclService?.aclDenyGround ?? aclDenyGroundImpl
 
   /** The bus catalog-route resolver (spec §4.2 route 2): resolve a recipient
    * against the DURABLE catalog — posts.json (head/worker) then non-retired
@@ -9430,16 +9445,73 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (host !== void 0) return host.retired !== true
     return false
   }
-  const redeliverPendingDeliveries = new DeliveryRedeliverer({
+  const resolveCallerSessionIdForRedeliver = (from: string): string =>
+    byPost.get(from)?.sessionId ?? hosts.get(from)?.sessionId ?? from
+  const deliverBusRecordForRedeliver = (record: MessageRecord, recipientId: string, callerSessionId: string): Promise<DeliveryStatus> =>
+    deliverBusRecord(record, recipientId, callerSessionId, callerSessionId)
+  const redeliverDeps: DeliveryRedelivererDeps = {
     stateDir: messageStoreDir,
     logger: ctx.logger,
     recipientAlive: recipientCatalogAlive,
     getRecord: async (messageId: string): Promise<MessageRecord | undefined> =>
       (await messagesStoreReady).get(messageId),
-    resolveCallerSessionId: (from: string): string =>
-      byPost.get(from)?.sessionId ?? hosts.get(from)?.sessionId ?? from,
-    deliver: (record: MessageRecord, recipientId: string, callerSessionId: string): Promise<DeliveryStatus> =>
-      deliverBusRecord(record, recipientId, callerSessionId, callerSessionId)
+    resolveCallerSessionId: resolveCallerSessionIdForRedeliver,
+    deliver: deliverBusRecordForRedeliver
+  }
+  // FASE 2.6-C: consume the boot re-delivery driver from the dshd-core bus
+  // service when composed (the store + getRecord are bound internally by the
+  // shell); fall back to the in-bundle DeliveryRedeliverer in a minimal
+  // composition (dshd-core absent) — behavior-neutral.
+  const redeliverPendingDeliveries = (ctx.get('deepartments.bus') as BusSurface | undefined)?.redeliver({
+    recipientAlive: recipientCatalogAlive,
+    resolveCallerSessionId: resolveCallerSessionIdForRedeliver,
+    deliver: deliverBusRecordForRedeliver
+  }) ?? new DeliveryRedeliverer(redeliverDeps)
+
+  // FASE 2.6-C: LATE-BIND the bundle's closure-bound bucket-(c) deps into the
+  // dshd-core service shells. EVERY closure the lazy builders need is defined by
+  // this point (the wake-relay maps, the framing/user-message helpers, the live
+  // identity resolvers, the tool/daemon wiring). The deps are passed BY
+  // REFERENCE (live closures) so the core service shells mutate the SAME maps /
+  // sets / registries the tools and daemons read. Guarded: `binder` is
+  // undefined in a minimal composition (dshd-core absent), making this a
+  // behavior-neutral NO-OP for the bundle-alone suite.
+  const binder = ctx.get('deepartments.binder') as Binder | undefined
+  binder?.register({
+    bus: { redeliver: { recipientAlive: recipientCatalogAlive, resolveCallerSessionId: resolveCallerSessionIdForRedeliver, deliver: deliverBusRecordForRedeliver } },
+    deliver: {
+      resolveChild: resolveBusChild,
+      deliverChild: deliverBusChild,
+      resolveCatalogRoute: resolveBusCatalogRoute,
+      busProfileFor,
+      deliverPost: busDeliverToPost,
+      deliverHost: busDeliverToHost
+    },
+    wakepack: {
+      refreshPresence,
+      wakePackInjected,
+      deferredSleepReplace,
+      roleForSession,
+      buildSubagentOrientation,
+      computeHostSleepSurfacePlan,
+      assembleHeartbeat,
+      readPresenceStateFile,
+      messagesStoreReady: () => messagesStoreReady,
+      repoRoot
+    },
+    lifecycle: {
+      ensureHost,
+      writeJournal,
+      readJournal,
+      bumpHostSleepCounter,
+      bumpPostSleepCounter,
+      archivePostSessionOnSleep,
+      disposeHeadHandleOnce,
+      maybeEmitQualityInspectDirective,
+      deferredSleepReplace,
+      wakePackInjected
+    },
+    redeliver: { recipientAlive: recipientCatalogAlive, resolveCallerSessionId: resolveCallerSessionIdForRedeliver, deliver: deliverBusRecordForRedeliver }
   })
 
 
