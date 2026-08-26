@@ -3745,8 +3745,14 @@ export function scanPostErrorFindings(stateDir: string, nowMs: number, retiredHo
 }
 
 /** Group fresh delivery 'failed' rows inside HEALTH_ERROR_WINDOW_MS, deduped per
- * messageId (multiple rows for the same messageId → ONE finding). */
-export function scanDeliveryFindings(stateDir: string, nowMs: number): HealthFinding[] {
+ * messageId (multiple rows for the same messageId → ONE finding).
+ * Bug (re-alert loop): a `retiredMemberIds` set of RETIRED member ids (hosts +
+ * posts) is threaded in so a `failed` row whose recipient is a RETIRED member is
+ * never a finding/alert — a retired member is terminal (W7 philosophy) and its
+ * `failed` rows must not re-alert the live host every ~30 min until a boot lets
+ * the redeliver driver settle them to 'terminal'. Optional (logical OR default)
+ * so existing callers/tests that do not have the set keep working. */
+export function scanDeliveryFindings(stateDir: string, nowMs: number, retiredMemberIds?: ReadonlySet<string>): HealthFinding[] {
   let rows: DeliveryRow[] = []
   try {
     const text = readFileSync(resolveDeliveriesPath(stateDir), 'utf8')
@@ -3760,7 +3766,8 @@ export function scanDeliveryFindings(stateDir: string, nowMs: number): HealthFin
   // excluded here — a terminal row can never become a `delivery-failed` alert.
   // Guard: an unknown/garbage status is likewise never an anomaly (the filter
   // is the whitelist — only 'failed' is scanned).
-  const fresh = rows.filter((row) => row.status === 'failed' && nowMs - row.ts <= HEALTH_ERROR_WINDOW_MS)
+  const inWindow = rows.filter((row) => row.status === 'failed' && nowMs - row.ts <= HEALTH_ERROR_WINDOW_MS)
+  const fresh = retiredMemberIds === undefined ? inWindow : inWindow.filter((row) => !retiredMemberIds.has(row.recipientId))
   const byMessage = new Map<string, DeliveryRow>()
   for (const row of fresh) byMessage.set(row.messageId, row) // last-wins
   const findings: HealthFinding[] = []
@@ -3868,6 +3875,14 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         ? health.staleLiveMinutes
         : STALE_LIVE_DEFAULT_MINUTES
     const posts = [...(deps.posts ?? [])]
+    // Bug (delivery-failed re-alert loop): the set of RETIRED member ids — the
+    // union of the retired HOST ids (already computed above) and the RETIRED
+    // POST ids from the catalog — is threaded into the delivery-failed scan so a
+    // `failed` row for a retired recipient (e.g. m-570 → builder-82) is never a
+    // finding/alert. A retired member is terminal (W7 philosophy) and its rows
+    // must not re-alert the live host every ~30 min until the next boot lets the
+    // redeliver driver settle them to 'terminal'.
+    const retiredMemberIds = new Set<string>([...retiredHostIds, ...posts.filter((p) => p.retired === true).map((p) => p.postId)])
     // 2. W8-c PART 1 — turn-failure capture: a fresh turn/end ERROR reason in a
     // live post's session event log is recorded into post-errors.jsonl (deduped
     // via turn-errors-state.json so a turn is never double-counted) so the
@@ -3897,7 +3912,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // 3. scan.
     const findings = [
       ...scanPostErrorFindings(deps.stateDir, nowMs, retiredHostIds),
-      ...scanDeliveryFindings(deps.stateDir, nowMs),
+      ...scanDeliveryFindings(deps.stateDir, nowMs, retiredMemberIds),
       ...(presetAuditEnabled ? scanConfigPresetFindings(deps.stateDir, nowMs) : []),
       ...(staleLiveWatchdogEnabled ? scanStalledPosts(posts, nowMs, staleLiveMinutes) : [])
     ]

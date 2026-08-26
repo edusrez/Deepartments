@@ -10301,6 +10301,24 @@ test('W7-A scanDeliveryFindings: a terminal row is NOT an anomaly (only a fresh 
   })
 })
 
+test('W7-A scanDeliveryFindings: a fresh failed row for a RETIRED recipient is never a finding (Bug re-alert loop); the set is optional (backward-compat)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    // A fresh failed row for a RETIRED recipient (would re-alert forever today —
+    // the bug) + a fresh failed row for a live recipient (still a finding).
+    await seedDeliveryRows(stateDir, [
+      { messageId: 'm-0', recipientId: 'retired-worker', status: 'failed', ts: now },
+      { messageId: 'm-1', recipientId: 'live-worker', status: 'failed', ts: now }
+    ])
+    const onlyLive = scanDeliveryFindings(stateDir, now, new Set(['retired-worker']))
+    assert.deepEqual(onlyLive.map((finding) => finding.messageId), ['m-1'], 'a failed row to a retired recipient is skipped; only the live one alerts')
+    assert.equal(onlyLive.length, 1, 'one delivery-failed finding when the retired set is provided')
+    const both = scanDeliveryFindings(stateDir, now)
+    assert.deepEqual(both.map((finding) => finding.messageId), ['m-0', 'm-1'], 'without the set both fresh failed rows alert (EXACT old behavior)')
+    assert.equal(both.length, 2, 'two delivery-failed findings without the set')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // W7-B — HOST-SPLICE ERROR (non-JSON-serializable agent/inbox/spliced data):
 // the bus UserMessage source is projected to a PLAIN JSON-safe value before it
