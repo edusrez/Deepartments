@@ -29,7 +29,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
@@ -9013,29 +9013,140 @@ test('W6 health config SCHEMA: the `health` section is declared in Config, defau
 
 test('W6 appendPostError / readPostErrorsFile: appends JSONL, is BOUNDED to the last 500 rows, and a malformed/nonexistent file degrades to empty', async () => {
   await withTempStateDir(async (stateDir) => {
+    // C9: the append-side window discard needs a clock — the fixture ts are
+    // fixed deterministic epochs, so append with an explicit `nowMs` that keeps
+    // them inside HEALTH_ERROR_WINDOW_MS (the cap assertions are the point).
+    const NOW = 1_900_000_000_000
     // Nonexistent → [] (never throws).
     assert.deepEqual(readPostErrorsFile(stateDir), [], 'a nonexistent post-errors file reads as empty')
     // Append 5 entries; the reader returns them in file order (newest last).
-    for (let i = 0; i < 5; i++) await appendPostError(stateDir, { ts: 1000 + i, postId: `p${i}`, messageId: `m-${i}`, error: `err ${i}` })
+    for (let i = 0; i < 5; i++) await appendPostError(stateDir, { ts: NOW - 60_000 + i, postId: `p${i}`, messageId: `m-${i}`, error: `err ${i}` }, NOW)
     let rows = readPostErrorsFile(stateDir)
     assert.equal(rows.length, 5, '5 appended rows read back')
     assert.equal(rows[0].postId, 'p0', 'file order preserved (oldest first)')
     assert.equal(rows[4].postId, 'p4', 'the last appended row is the newest')
     assert.equal(rows[0].error, 'err 0', 'the error message round-trips')
     // Bounding: pre-write 600 rows directly, then read → the newest 500 survive.
-    const many = Array.from({ length: 600 }, (_, i) => ({ ts: 100_000 + i, postId: `bulk-${i}`, error: `e${i}` }))
+    const many = Array.from({ length: 600 }, (_, i) => ({ ts: NOW - 60_000 + i, postId: `bulk-${i}`, error: `e${i}` }))
     await writeFile(path.join(stateDir, POST_ERRORS_FILE), many.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8')
     let bounded = readPostErrorsFile(stateDir)
     assert.equal(bounded.length, POST_ERRORS_MAX_LINES, 'the reader returns at most 500 rows')
     assert.equal(bounded[0].postId, 'bulk-100', 'the oldest 100 rows are trimmed (newest 500 kept, no off-by-one from the trailing newline)')
     // Append one more → STILL 500, the appended row is the newest (line 500).
-    await appendPostError(stateDir, { ts: 999_999, postId: 'new-last', error: 'fresh' })
+    await appendPostError(stateDir, { ts: NOW, postId: 'new-last', error: 'fresh' }, NOW)
     bounded = readPostErrorsFile(stateDir)
     assert.equal(bounded.length, POST_ERRORS_MAX_LINES, 'append keeps the file bounded to 500 rows')
     assert.equal(bounded.at(-1).postId, 'new-last', 'the appended row is the newest (line 500)')
     // A malformed file degrades to empty (a partial/garbage line is dropped).
     await writeFile(path.join(stateDir, POST_ERRORS_FILE), 'not-json\n{"ts":"bad"}\n', 'utf8')
     assert.deepEqual(readPostErrorsFile(stateDir), [], 'a malformed post-errors file reads as empty (never throws)')
+  })
+})
+
+test('C4 appendHealthAlertAudit: health-alerts.jsonl is BOUNDED to the last HEALTH_ALERTS_MAX_LINES audit rows; the audit-row format round-trips; a malformed file degrades to a fresh append', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Cold start: mkdir + write; the audit-row JSON round-trips (format intact).
+    const entry1 = { ts: 1_000, findings: [{ kind: 'delivery-failed', key: 'delivery-failed:m-1', messageId: 'm-1', ts: 1_000, count: 1 }], dedupeKeys: ['delivery-failed:m-1'] }
+    await appendHealthAlertAudit(stateDir, entry1)
+    const first = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    assert.equal(first.length, 1, 'one audit row after the first append')
+    assert.deepEqual(first[0], entry1, 'the audit-row format is intact (ts/findings/dedupeKeys JSON round-trip)')
+    // Bounding: pre-write HEALTH_ALERTS_MAX_LINES + 600 rows, then append → the
+    // newest HEALTH_ALERTS_MAX_LINES survive (the appendPostError pattern).
+    const many = Array.from({ length: HEALTH_ALERTS_MAX_LINES + 600 }, (_, i) => ({ ts: 100_000 + i, findings: [], dedupeKeys: [`k-${i}`] }))
+    await writeFile(path.join(stateDir, 'health-alerts.jsonl'), many.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8')
+    await appendHealthAlertAudit(stateDir, { ts: 999_999, findings: [], dedupeKeys: ['k-new'] })
+    const bounded = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    assert.equal(bounded.length, HEALTH_ALERTS_MAX_LINES, 'append keeps health-alerts.jsonl bounded to HEALTH_ALERTS_MAX_LINES rows')
+    assert.equal(bounded[0].dedupeKeys[0], 'k-601', 'the oldest rows are trimmed (the newest 500 of 1101 rows are kept)')
+    assert.equal(bounded.at(-1).dedupeKeys[0], 'k-new', 'the appended audit row is the newest (line 500)')
+    // A malformed file degrades to a fresh append (never throws). The malformed
+    // line is KEPT (the appendPostError pattern: the reader side drops it) — the
+    // appended audit row lands and is the last line.
+    await writeFile(path.join(stateDir, 'health-alerts.jsonl'), 'not-json\n', 'utf8')
+    await appendHealthAlertAudit(stateDir, { ts: 1_000_000, findings: [], dedupeKeys: ['k-recover'] })
+    const recovered = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter((line) => {
+      try { JSON.parse(line); return true } catch { return false }
+    }).map((l) => JSON.parse(l))
+    assert.equal(recovered.length, 1, 'a malformed audit file degrades to a fresh append (never throws)')
+    assert.equal(recovered[0].dedupeKeys[0], 'k-recover', 'the recovered audit row lands')
+  })
+})
+
+test('C9 appendPostError: rows OLDER than HEALTH_ERROR_WINDOW_MS are discarded AT APPEND (before the cap); fresh rows keep operating under the cap', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const NOW = 1_900_000_000_000 // fixed deterministic clock
+    // A stale row appended onto an EMPTY file is discarded (the scan window can
+    // never alert it — pure hygiene).
+    await appendPostError(stateDir, { ts: NOW - HEALTH_ERROR_WINDOW_MS - 60_000, postId: 'stale-one', error: 'e1' }, NOW)
+    assert.deepEqual(readPostErrorsFile(stateDir), [], 'an out-of-window row is discarded at append (never persisted)')
+    // A fresh row lands.
+    await appendPostError(stateDir, { ts: NOW - 60_000, postId: 'fresh-one', error: 'e2' }, NOW)
+    assert.equal(readPostErrorsFile(stateDir).length, 1, 'a fresh row lands')
+    // A stale PRE-EXISTING row (raw-write) is pruned when a fresh append lands;
+    // the fresh rows survive in file order.
+    await writeFile(path.join(stateDir, POST_ERRORS_FILE), JSON.stringify({ ts: NOW - 60_000, postId: 'fresh-one', error: 'e2' }) + '\n' + JSON.stringify({ ts: NOW - HEALTH_ERROR_WINDOW_MS - 30_000, postId: 'stale-two', error: 'e3' }) + '\n', 'utf8')
+    await appendPostError(stateDir, { ts: NOW - 30_000, postId: 'fresh-two', error: 'e4' }, NOW)
+    assert.deepEqual(readPostErrorsFile(stateDir).map((r) => r.postId), ['fresh-one', 'fresh-two'], 'a stale pre-existing row is pruned; fresh rows survive in file order')
+    // The cap still operates for FRESH rows: 600 fresh rows + 1 append → 500 kept.
+    const many = Array.from({ length: 600 }, (_, i) => ({ ts: NOW - 60_000 + i, postId: `bulk-${i}`, error: `e${i}` }))
+    await writeFile(path.join(stateDir, POST_ERRORS_FILE), many.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8')
+    await appendPostError(stateDir, { ts: NOW, postId: 'new-last', error: 'fresh' }, NOW)
+    const bounded = readPostErrorsFile(stateDir)
+    assert.equal(bounded.length, POST_ERRORS_MAX_LINES, '600 fresh rows + 1 append → the file stays bounded to 500')
+    assert.equal(bounded[0].postId, 'bulk-101', 'the oldest 101 fresh rows are trimmed by the cap (601 lines → the newest 500)')
+    assert.equal(bounded.at(-1).postId, 'new-last', 'the appended fresh row is the newest (line 500)')
+  })
+})
+
+test('C6 runHealthDaemonTick: an injected TAIL delivery reader reads ONLY the delta (byte cursor); a shrunken sidecar re-scans from 0; the findings are IDENTICAL to the full scan in the same window — and the tick never writes a delivery row (C8)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_900_000_000_000 // fixed deterministic clock
+    const reader = createDeliveryRowsTailReader() // ONE tail reader per daemon (the cursor lives in its closure)
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const alerts = []
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs, stateDir, bootId: 'boot-c6', hosts,
+      deliveryRowsReader: reader,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: () => {} }
+    })
+    // Tick 1 over a sidecar seeded with ONE fresh failed row: the reader's FIRST
+    // call (cursor at 0) re-reads the WHOLE file — the findings are byte-identical
+    // to the legacy full read in the same window.
+    const seedPath = await seedDeliveryRows(stateDir, [
+      { messageId: 'm-1', recipientId: 'dead-worker', status: 'failed', ts: T0 - 300_000 }
+    ])
+    const fullFindings = scanDeliveryFindings(stateDir, T0, undefined, readDeliveryRowsFull)
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'tick 1 alerts the seeded failed row (fresh-cursor initial read covers everything)')
+    // A SEPARATE fresh-tail reader must return the SAME row set as the full scan
+    // in the same window (the tick's own reader cursor has already advanced past
+    // the file — its next calls read only the delta).
+    const freshCompare = createDeliveryRowsTailReader()
+    assert.deepEqual(scanDeliveryFindings(stateDir, T0, undefined, freshCompare), fullFindings, 'a fresh tail reader returns the SAME row set as the full scan in the same window')
+    // Tick 2 with NO new rows → the reader reads ZERO delta bytes → no findings,
+    // no re-alert (identical outcome to a full re-scan inside the 30min dedupe).
+    await tick(T0 + 60_000)
+    assert.equal(alerts.length, 1, 'tick 2 reads no delta → no new alert (identical to a full re-scan inside the dedupe window)')
+    // A NEW failed row appended (the sidecar grows by a whole line — the cursor
+    // stays valid) → tick 3 reads ONLY the delta and still finds it.
+    const current = await readFile(seedPath, 'utf8')
+    await writeFile(seedPath, current + JSON.stringify({ messageId: 'm-2', recipientId: 'live-worker', status: 'failed', ts: T0 + 120_000 }) + '\n', 'utf8')
+    await tick(T0 + 120_000)
+    assert.equal(alerts.length, 2, 'tick 3 reads the DELTA (only the rows appended since tick 2) and alerts the new failed row')
+    // Clamp: the boot redeliver driver REWRITES the sidecar (it SHRINKS below the
+    // cursor) → the next read re-scans from 0 and the findings match the full
+    // scan in the same window (byte-identical alert outcome).
+    await writeFile(seedPath, JSON.stringify({ messageId: 'm-3', recipientId: 'other-worker', status: 'failed', ts: T0 + 180_000 }) + '\n', 'utf8')
+    assert.deepEqual(scanDeliveryFindings(stateDir, T0 + 180_000, undefined, reader), scanDeliveryFindings(stateDir, T0 + 180_000, undefined, readDeliveryRowsFull), 'after a shrink the tail reader re-scans from 0 — findings IDENTICAL to the full scan in the same window')
+    // C8 fold-in: the daemon scan path NEVER writes a delivery row (the ALERT
+    // goes store.append + busDeliverToHost direct, never through the engine) —
+    // a tick leaves the sidecar exactly as seeded (no alert→failed-row loop).
+    await tick(T0 + 240_000)
+    assert.equal(alerts.length, 2, 'a tick after the clamp re-read alerts nothing NEW (dedupe + no delta)')
+    const rowsAfter = parseDeliveryRows(await readFile(seedPath, 'utf8'))
+    assert.deepEqual(rowsAfter.map((r) => r.messageId), ['m-3'], 'the tick never appends a delivery row — an ALERT can never create a delivery-failed loop row (C8)')
   })
 })
 
@@ -9097,7 +9208,7 @@ test('W6 runHealthDaemonTick: heartbeat written; scans post-errors + delivery-fa
     assert.equal(state2[researchIdentity], T0, 'the delivered post-error identity is NOT advanced (it never re-alerts)')
     assert.equal(state2['delivery-failed:m-2'], T1, 'the delivery-failed ledger advances on the re-alert')
     // A FRESH post-error for a NEW postId (a NEW error identity) → alerts immediately (no prior dedupe).
-    await appendPostError(stateDir, { ts: T1, postId: 'worker-x', messageId: 'm-9', error: 'boom' })
+    await appendPostError(stateDir, { ts: T1, postId: 'worker-x', messageId: 'm-9', error: 'boom' }, T1)
     await tick(T1)
     assert.equal(alerts.length, 3, 'a fresh post-error for a NEW postId (a new error identity) alerts immediately')
     assert.match(alerts.at(-1).frame, /post-error: worker-x/, 'the new alert names the fresh postId')
@@ -9741,20 +9852,20 @@ test('P2 Bug C: an ALREADY-delivered post-error identity is NEVER re-alerted (no
       logger: { warn: () => {} }
     })
     // A post-error row for worker-a (error 'boom').
-    await appendPostError(stateDir, { ts: T0, postId: 'worker-a', messageId: 'm-1', error: 'boom' })
+    await appendPostError(stateDir, { ts: T0, postId: 'worker-a', messageId: 'm-1', error: 'boom' }, T0)
     await tick(T0)
     assert.equal(alerts.length, 1, 'the FIRST error identity alerts')
     assert.match(alerts[0].frame, /post-error: worker-a/, 'the alert names the post')
     // A RE-CURRENCE of the SAME error identity (new row, fresh ts) inside the
     // 2h window → NOT a new alert (Bug C: a delivered identity never re-alerts).
-    await appendPostError(stateDir, { ts: T0 + 10 * 60000, postId: 'worker-a', messageId: 'm-1b', error: 'boom' })
+    await appendPostError(stateDir, { ts: T0 + 10 * 60000, postId: 'worker-a', messageId: 'm-1b', error: 'boom' }, T0 + 10 * 60000)
     await tick(T0 + 10 * 60000)
     assert.equal(alerts.length, 1, 'a re-current SAME error identity is NOT re-alerted')
     // After the 30min window elapses the identity is STILL delivered → NOT re-alerted.
     await tick(T0 + 31 * 60000)
     assert.equal(alerts.length, 1, 'the SAME error identity is NEVER re-alerted even after the dedupe window (Bug C)')
     // A NEW postId (a genuinely NEW error identity) → alerts immediately.
-    await appendPostError(stateDir, { ts: T0 + 32 * 60000, postId: 'worker-b', messageId: 'm-2', error: 'a new error' })
+    await appendPostError(stateDir, { ts: T0 + 32 * 60000, postId: 'worker-b', messageId: 'm-2', error: 'a new error' }, T0 + 32 * 60000)
     await tick(T0 + 32 * 60000)
     assert.equal(alerts.length, 2, 'a NEW postId (a new error identity) alerts immediately')
     assert.match(alerts.at(-1).frame, /post-error: worker-b/, 'the new-alert names the new postId')
@@ -9764,7 +9875,7 @@ test('P2 Bug C: an ALREADY-delivered post-error identity is NEVER re-alerted (no
 test('P2 LATENT FIX: the daemon tick does NOT drop the conditional system-wait when the ALERT path ALSO fires in the SAME tick (deps.hosts is materialized ONCE — no exhausted single-use iterator)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 24, 12, 0, 0).getTime()
-    await appendPostError(stateDir, { ts: T0, postId: 'worker-a', messageId: 'm-1', error: 'boom' })
+    await appendPostError(stateDir, { ts: T0, postId: 'worker-a', messageId: 'm-1', error: 'boom' }, T0)
     const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
     const frames = []
     // A quiet host expectation (a host-sent message without a reply/resources).
@@ -11205,7 +11316,7 @@ test('M3 STABLE-CLASS ALERT IDENTITY (spec acc 2): a recurring identical-CLASS e
     // A second tick with a NET-NEW session id (SAME class, DIFFERENT per-attempt
     // text): the scan re-groups to the SAME class → the alert is a ONE-SHOT
     // (no re-alert, no per-window re-arm).
-    await appendPostError(stateDir, { ts: T0 - 10_000, postId: 'research-head', messageId: 'm-2', error: 'session "s-2" not found' })
+    await appendPostError(stateDir, { ts: T0 - 10_000, postId: 'research-head', messageId: 'm-2', error: 'session "s-2" not found' }, T0)
     await tick(T0 + 5_000)
     assert.equal(alerts.length, 1, 'the SAME class with rotating per-attempt text is NOT re-alerted (one-shot per (postId,class))')
   })
@@ -11231,7 +11342,7 @@ test('M3 STABLE-CLASS ALERT IDENTITY (spec acc 2, no over-suppression): a genuin
     // A genuinely NEW error identity — a DIFFERENT (generic, no stable class)
     // error whose text differs from the delivered classed text → a NET-NEW
     // identity (raw-text hash fallback) → alerts.
-    await appendPostError(stateDir, { ts: T0 - 10_000, postId: 'research-head', messageId: 'm-2', error: 'provider adapter not registered for "deepseek-official"' })
+    await appendPostError(stateDir, { ts: T0 - 10_000, postId: 'research-head', messageId: 'm-2', error: 'provider adapter not registered for "deepseek-official"' }, T0)
     await tick(T0 + 5_000)
     assert.equal(alerts.length, 2, 'a NET-NEW error identity still alerts (no over-suppression)')
   })

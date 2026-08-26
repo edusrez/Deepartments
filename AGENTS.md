@@ -79,6 +79,29 @@ are cached); user edits to `cordis.patch.yml` are HMR. All dsh commands for deve
 Details and rationale for each rule: skill `dsh-plugin-dev`
 (`.dsh/skills/dsh-plugin-dev/SKILL.md`).
 
+## Environment variables
+
+Runtime knobs read by the plugin (`src/invoke.ts`) — all OPTIONAL:
+
+- `DEEPARTMENTS_QUALITY_INSPECT` — a numeric string in `[0,1]`; the **single
+  documented override** of the quality-inspect dice probability (dec5): the
+  worker-retire and QH-sleep dice (spec 007 §4.1/§5.2, D-Q2/D-Q7). When set and
+  valid it wins over the `quality.workerInspectProbability` config value
+  (priority: env > config > code default `0.10`); the structural NON-QH
+  head/host 100% inspect mandate is never overridden (it is not a dice).
+- `DEEPARTMENTS_TEST_NOW` — **test-only**: a fixed clock (epoch ms) for hermetic
+  Loader tests (rule 5); unset → the real wall clock.
+- `DEEPARTMENTS_DISPOSE_JOIN_TIMEOUT_MS` — the bounded detach-join window (ms)
+  for the sleep respawn; default `10_000` (a normal join settles in
+  milliseconds; the bound is a safety net — tests override it).
+- `PARALLEL_API_KEY` — fallback API key for the parallel-monitor daemon when
+  the `parallel` config section defines no `apiKey`.
+- `DSH_HOME` — the harness home (`$DSH_HOME` if set, else `~/.dsh`);
+  harness-level, not a Deepartments knob.
+
+Note: `dept_exec` sanitizes the environment to `PATH`/`HOME`/`LANG` only — the
+overrides above apply to the plugin daemon process, not to command tooling.
+
 ## Session ritual
 
 - **START** (injected wake, see "Wake routine"): the Deepartments wake pack is

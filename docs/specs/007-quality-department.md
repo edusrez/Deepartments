@@ -311,12 +311,18 @@ back to code defaults for absent keys; the schema and the typed cast always agre
 - The **head/host 100% mandate is NOT a knob** — it is structural (D-Q3): the
   gate returns `true` for `kind 'head' | 'host'` regardless of any probability —
   for a **NON-QH head** (and the host); the QH's OWN sleep is a dice (D-Q7).
-- **Determinism for tests (D-Q2):** the gate accepts an **injected rng** (a
-  `() => number` in `[0,1)`) and/or a **seed**; the **env override**
-  `DEEPARTMENTS_QUALITY_INSPECT` (a number string in `[0,1]`) overrides the
-  **worker** probability path for determinism — the SAME path the QH dice takes
-  (D-Q7). The structural NON-QH head/host mandate is never overridden (it is not a
-  dice).
+- **Determinism for tests AND the single documented runtime override (D-Q2,
+  dec5):** the gate accepts an **injected rng** (a `() => number` in `[0,1)`)
+  and/or a **seed**; the **env override** `DEEPARTMENTS_QUALITY_INSPECT` (a
+  number string in `[0,1]`) is the **single documented config==env override**
+  of the dice probability — NOT just a test seam. When set and valid it wins
+  over `quality.workerInspectProbability` (priority: env > config > code
+  default `0.10`) on the **worker** probability path — the SAME path the QH
+  dice takes (D-Q7). The structural NON-QH head/host mandate is never
+  overridden (it is not a dice). Drop-in coherence (C16): the repo config value
+  is `0.25` and the owner-scoped `quality-inspect.conf` drop-in (`/etc`,
+  `Environment=DEEPARTMENTS_QUALITY_INSPECT=0.25`) matches it — the live `/etc`
+  file is owner-scoped to verify, outside this repo's reach.
 
 ### 4.2 PostEntry / delivery seam (what the QD reads)
 
@@ -398,9 +404,11 @@ qualityInspectDecision(kind, deps): boolean
   can make it false (D-Q3 "never gated by the dice") for a **NON-QH head** (and the
   host); the Quality Head's OWN sleep is the one head case that IS a dice (D-Q7).
 - The **env override** `DEEPARTMENTS_QUALITY_INSPECT` (a number string in `[0,1]`)
-  overrides the **worker** probability path (when present and valid) so tests are
-  deterministic — the SAME path the QH dice takes (D-Q7) — and it never turns the
-  structural NON-QH head/host mandate off.
+  is the **single documented config==env override** of the dice probability
+  (dec5): when present and valid it wins over `workerInspectProbability`
+  (priority: env > config > code default `0.10`) on the **worker** probability
+  path — the SAME path the QH dice takes (D-Q7) — in tests and production alike,
+  and it never turns the structural NON-QH head/host mandate off.
 - **Purity** — `kind` + `deps` in, boolean out, no side effects. This is what makes
   the QD probability-gate tests (f-1, §8) trivial to write through the real Loader.
 

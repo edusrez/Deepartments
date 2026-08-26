@@ -66,7 +66,7 @@ import { mkdir, readFile, writeFile, readdir, copyFile, stat, rename, unlink, ap
 // materialization, before the agent can be awaited; there is no await seam).
 // readFileSync keeps that contract; ENOENT = the department has no
 // architecture (omit the section, never an error).
-import { readFileSync, existsSync, realpathSync } from 'node:fs'
+import { readFileSync, existsSync, realpathSync, openSync, fstatSync, readSync, closeSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -926,6 +926,9 @@ export interface PostErrorEntry {
 export const POST_ERRORS_FILE = 'post-errors.jsonl'
 /** The bounded record cap of post-errors.jsonl (the oldest lines are trimmed). */
 export const POST_ERRORS_MAX_LINES = 500
+/** The bounded record cap of health-alerts.jsonl (the oldest audit lines are
+ * trimmed on append, mirroring POST_ERRORS_MAX_LINES — C4). */
+export const HEALTH_ALERTS_MAX_LINES = 500
 
 /** Read `<stateDir>/post-errors.jsonl` → the bounded post-error rows, in file
  * order. Absent / unreadable / malformed → [] (never throws); a malformed line
@@ -964,11 +967,17 @@ export function readPostErrorsFile(stateDir: string): PostErrorEntry[] {
 }
 
 /** Append ONE post-error row to `<stateDir>/post-errors.jsonl` and keep the
- * file BOUNDED to the most-recent POST_ERRORS_MAX_LINES rows (read + append +
- * slice-most-recent on write). mkdir -p the dir first; a malformed/nonexistent
- * file degrades to empty (the append still lands). Never throws — callers fold
- * a persist failure into a warn. */
-export async function appendPostError(stateDir: string, entry: PostErrorEntry): Promise<void> {
+ * file BOUNDED: rows OLDER than the HEALTH_ERROR_WINDOW_MS anomaly window are
+ * DISCARDED AT APPEND (C9 — the scan window-filters the same rows
+ * (`scanPostErrorFindings`), so a row the scan can never alert is pure hygiene
+ * to drop), and the file stays capped to the most-recent POST_ERRORS_MAX_LINES
+ * surviving rows (read + append + window-discard + slice-most-recent on write).
+ * `nowMs` is injectable (default Date.now()) so tests are deterministic; every
+ * production call-site ends a fresh `ts` nearby `now`, so nothing observable
+ * changes there. mkdir -p the dir first; a malformed/nonexistent file degrades
+ * to empty (the append still lands). Never throws — callers fold a persist
+ * failure into a warn. */
+export async function appendPostError(stateDir: string, entry: PostErrorEntry, nowMs: number = Date.now()): Promise<void> {
   const filePath = path.join(stateDir, POST_ERRORS_FILE)
   await mkdir(path.dirname(filePath), { recursive: true })
   const lines: string[] = []
@@ -979,7 +988,21 @@ export async function appendPostError(stateDir: string, entry: PostErrorEntry): 
     /* ENOENT or unreadable → a cold start; lines stays [] */
   }
   lines.push(JSON.stringify(entry))
-  const bounded = lines.slice(-POST_ERRORS_MAX_LINES)
+  // C9: drop parsed rows older than the anomaly window BEFORE the cap-slice. A
+  // line that fails to parse (e.g. a crash-mid-append partial) is KEPT (the
+  // read side drops it anyway), and a row without a numeric ts is KEPT too (the
+  // reader-side validation is the single source of truth for the row shape).
+  const inWindow = lines.filter((line) => {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line)
+    } catch {
+      return true
+    }
+    const row = parsed as { ts?: unknown }
+    return typeof row.ts !== 'number' || nowMs - row.ts <= HEALTH_ERROR_WINDOW_MS
+  })
+  const bounded = inWindow.slice(-POST_ERRORS_MAX_LINES)
   await writeFile(filePath, bounded.join('\n') + '\n', 'utf8')
 }
 
@@ -1161,11 +1184,24 @@ export interface HealthAlertAuditEntry {
   dedupeKeys: string[]
 }
 
-/** Append ONE audit row to `<stateDir>/health-alerts.jsonl` (mkdir + appendFile). */
+/** Append ONE audit row to `<stateDir>/health-alerts.jsonl` and keep the file
+ * BOUNDED to the most-recent HEALTH_ALERTS_MAX_LINES rows (read + append +
+ * slice-most-recent on write — the appendPostError pattern; C4). mkdir -p the
+ * dir first; a malformed/nonexistent file degrades to a fresh append. Never
+ * throws — callers fold a persist failure into a warn. */
 export async function appendHealthAlertAudit(stateDir: string, entry: HealthAlertAuditEntry): Promise<void> {
   const filePath = path.join(stateDir, 'health-alerts.jsonl')
   await mkdir(path.dirname(filePath), { recursive: true })
-  await appendFile(filePath, JSON.stringify(entry) + '\n', 'utf8')
+  const lines: string[] = []
+  try {
+    const existing = await readFile(filePath, 'utf8')
+    lines.push(...existing.split('\n').filter((line) => line.trim() !== ''))
+  } catch {
+    /* ENOENT or unreadable → a cold start; lines stays [] */
+  }
+  lines.push(JSON.stringify(entry))
+  const bounded = lines.slice(-HEALTH_ALERTS_MAX_LINES)
+  await writeFile(filePath, bounded.join('\n') + '\n', 'utf8')
 }
 
 /** Anomaly freshness window: only anomalies with `now - ts <= 2h` are scanned. */
@@ -1240,7 +1276,9 @@ export function isSessionNotFoundError(error: unknown): boolean {
 export async function appendPostErrorDeduped(stateDir: string, entry: PostErrorEntry, key: string, nowMs: number): Promise<boolean> {
   const state = readHealthAlertsState(stateDir)
   if (state[key] !== undefined && nowMs - state[key] <= HEALTH_DEDUPE_WINDOW_MS) return false
-  await appendPostError(stateDir, entry)
+  // The recording `nowMs` doubles as the append's window clock (C9): the row was
+  // just recorded as fresh, so it can never be discarded by the window filter.
+  await appendPostError(stateDir, entry, nowMs)
   await writeHealthAlertsState(stateDir, { ...state, [key]: nowMs })
   return true
 }
@@ -2674,7 +2712,7 @@ export async function reconcileInterruptedPosts(deps: {
         postId: post.postId,
         ...(capture.messageId !== undefined ? { messageId: capture.messageId } : {}),
         error: `interrupted-post: ${capture.evidence}`
-      })
+      }, nowMs)
       nextState[key] = nowMs
       stateChanged = true
       out.appended++
@@ -2975,18 +3013,21 @@ export async function captureSchedulerAutoRunFailure(opts: {
   const normalizedReason = normalizeSchedulerAutoRunReason(opts.reason)
   const key = schedulerAutoRunKey(opts.jobId, normalizedReason)
   try {
+    const nowMs = opts.now()
     const state = readHealthAlertsState(opts.stateDir)
     const last = state[key]
-    if (last !== undefined && opts.now() - last < HEALTH_DEDUPE_WINDOW_MS) return false
+    if (last !== undefined && nowMs - last < HEALTH_DEDUPE_WINDOW_MS) return false
     const errorText = `job "${opts.jobId}" scheduler auto-run no-fire: ${normalizedReason}${opts.error !== undefined && opts.error !== normalizedReason ? ` (${opts.error})` : ''}`
+    // The recording clock is passed as the append's window clock (C9): the row
+    // was just captured as fresh, so it can never be discarded at append.
     await appendPostError(opts.stateDir, {
-      ts: opts.now(),
+      ts: nowMs,
       postId: 'scheduler',
       error: errorText,
       jobId: opts.jobId,
       reason: normalizedReason
-    })
-    state[key] = opts.now()
+    }, nowMs)
+    state[key] = nowMs
     await writeHealthAlertsState(opts.stateDir, state)
     return true
   } catch (error: unknown) {
@@ -3378,6 +3419,15 @@ export interface HealthDaemonDeps {
    * `buildPostSnapshot` computation. The production wiring resolves it from the
    * LIVE host's sent messages (see buildHostWaits). */
   hostWaits?: Iterable<HostWaitPostInput>
+  /** C6 — the delivery-row reader for the delivery-failed scan. Absent → the
+   * legacy FULL-file read (every tick re-parses ALL of deliveries.jsonl — the
+   * default/tests); the PRODUCTION daemon injects a TAIL reader
+   * (createDeliveryRowsTailReader) whose byte-offset cursor lives in its own
+   * closure (created once per daemon), so a 60 s tick parses only the rows
+   * written since the previous tick. The findings/alerts are IDENTICAL either
+   * way (the scan filter pipeline is unchanged) — only the per-tick work
+   * shrinks. */
+  deliveryRowsReader?: DeliveryRowsReader
   /** Deliver the framed ALERT bus message to the host (production:
    * messagesStoreReady.append + busDeliverToHost; tests: a recording stub).
    * NEVER throws. */
@@ -3425,6 +3475,79 @@ export function scanPostErrorFindings(stateDir: string, nowMs: number, retiredHo
   return findings
 }
 
+/** The delivery-row read seam of one health scan (C6). A `DeliveryRowsReader`
+ * returns the rows a tick must scan from `<stateDir>/deliveries.jsonl` and
+ * NEVER throws (an absent sidecar → []). */
+export type DeliveryRowsReader = (stateDir: string) => DeliveryRow[]
+
+/** The DEFAULT reader — the legacy FULL-file read: every call re-reads + parses
+ * ALL of deliveries.jsonl (byte-identical to the pre-C6 behavior). Any caller
+ * that does not inject a reader (the W7-A direct-scan tests included) keeps
+ * working unchanged. */
+export function readDeliveryRowsFull(stateDir: string): DeliveryRow[] {
+  try {
+    return parseDeliveryRows(readFileSync(resolveDeliveriesPath(stateDir), 'utf8'))
+  } catch {
+    return []
+  }
+}
+
+/** C6 — build ONE tail-reading `DeliveryRowsReader` for a daemon process. The
+ * reader keeps a `{ fileSize, offset }` byte-offset cursor in its own closure
+ * (created ONCE per daemon in the production wiring, so the cursor survives the
+ * 60 s ticks): a call parses ONLY the rows written AFTER the previous call —
+ * the sidecar is append-only JSONL (one writer `markDelivery`, rows timestamped
+ * at write), so the delta is exactly what the tick has not scanned yet. This
+ * replaces the O(n)-per-tick full re-parse (n unbounded between boots) with
+ * O(delta) typical work. Correctness guards: (1) the FIRST call (cursor at 0)
+ * and a call after a SHRINK — the boot redelivery driver REWRITES the sidecar,
+ * `stat.size < offset` — re-read from byte 0 ONCE (a read from a past-the-end
+ * offset would silently return nothing); (2) an absent sidecar → [] (cursor
+ * reset). The tick's filter pipeline (status window, retired set, last-wins
+ * dedupe) is applied by the CALLER unchanged, so the observed findings/alerts
+ * are identical to the full scan in the same window — only the per-tick parse
+ * work shrinks. NOTE (twin-daemon safety): the cursor points INTO THE FILE,
+ * never into a per-process index — a twin daemon sharing the stateDir appends
+ * rows the file tail still exposes to BOTH daemons (no false negatives). */
+export function createDeliveryRowsTailReader(): DeliveryRowsReader {
+  let fileSize = 0
+  let offset = 0
+  return (stateDir: string): DeliveryRow[] => {
+    const filePath = resolveDeliveriesPath(stateDir)
+    let fd: number
+    try {
+      fd = openSync(filePath, 'r')
+    } catch {
+      fileSize = 0
+      offset = 0
+      return []
+    }
+    try {
+      const stat = fstatSync(fd)
+      // Clamp: the file shrank below the cursor (boot compaction / rewrite) →
+      // re-scan from byte 0 once; otherwise resume from the previous EOF.
+      const start = stat.size < offset ? 0 : offset
+      const tailSize = stat.size - start
+      fileSize = stat.size
+      offset = stat.size
+      if (tailSize <= 0) return []
+      const buffer = Buffer.alloc(tailSize)
+      let read = 0
+      while (read < tailSize) {
+        const n = readSync(fd, buffer, read, tailSize - read, start + read)
+        if (n <= 0) break
+        read += n
+      }
+      // The tail starts right after a '\n' (every row is written with a trailing
+      // newline) → the delta is whole rows; parseDeliveryRows keeps its tolerance
+      // for a trailing partial line (a crash mid-append).
+      return parseDeliveryRows(buffer.toString('utf8', 0, read))
+    } finally {
+      closeSync(fd)
+    }
+  }
+}
+
 /** Group fresh delivery 'failed' rows inside HEALTH_ERROR_WINDOW_MS, deduped per
  * messageId (multiple rows for the same messageId → ONE finding).
  * Bug (re-alert loop): a `retiredMemberIds` set of RETIRED member ids (hosts +
@@ -3432,12 +3555,29 @@ export function scanPostErrorFindings(stateDir: string, nowMs: number, retiredHo
  * never a finding/alert — a retired member is terminal (W7 philosophy) and its
  * `failed` rows must not re-alert the live host every ~30 min until a boot lets
  * the redeliver driver settle them to 'terminal'. Optional (logical OR default)
- * so existing callers/tests that do not have the set keep working. */
-export function scanDeliveryFindings(stateDir: string, nowMs: number, retiredMemberIds?: ReadonlySet<string>): HealthFinding[] {
+ * so existing callers/tests that do not have the set keep working.
+ * C6: the OPTIONAL 4th arg is the delivery-row READER (default = the legacy
+ * full-file read, `readDeliveryRowsFull`) — the production daemon injects a TAIL
+ * reader whose byte-offset cursor re-reads only the rows appended since the last
+ * tick; the filter pipeline below is IDENTICAL either way (same window, same
+ * dedupe, same alerts — only the per-tick parse work shrinks).
+ * C8 (structural-loop invariant): the daemon's ALERT is delivered via
+ * store.append + busDeliverToHost DIRECT (`notifyHost` in the production wiring)
+ * and NEVER through the delivery engine — no `prepared`/`failed`/`terminal` row
+ * for an ALERT is ever written to deliveries.jsonl. This scanner therefore can
+ * never see an ALERT as a `failed` row, so the audit's theoretical
+ * alert→delivery-failed→re-alert loop is structurally impossible here; a
+ * delivery failure of an ALERT is bounded elsewhere (W8-i attach-repair retry +
+ * the DEDUPED post-error recording + M3 quarantine). */
+export function scanDeliveryFindings(
+  stateDir: string,
+  nowMs: number,
+  retiredMemberIds?: ReadonlySet<string>,
+  reader: DeliveryRowsReader = readDeliveryRowsFull
+): HealthFinding[] {
   let rows: DeliveryRow[] = []
   try {
-    const text = readFileSync(resolveDeliveriesPath(stateDir), 'utf8')
-    rows = parseDeliveryRows(text)
+    rows = reader(stateDir)
   } catch {
     rows = []
   }
@@ -3581,7 +3721,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
           if (lastCaptured !== undefined && nowMs - lastCaptured < TURN_ERROR_FRESH_WINDOW_MS) continue
           // Only a FRESH error (<= the turn-error window) is recorded now.
           if (nowMs - capture.ts > TURN_ERROR_FRESH_WINDOW_MS) continue
-          await appendPostError(deps.stateDir, { ts: capture.ts, postId: capture.postId, error: capture.error })
+          await appendPostError(deps.stateDir, { ts: capture.ts, postId: capture.postId, error: capture.error }, nowMs)
           captureState[capture.key] = nowMs
           changed = true
         }
@@ -3593,7 +3733,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // 3. scan.
     const findings = [
       ...scanPostErrorFindings(deps.stateDir, nowMs, retiredHostIds),
-      ...scanDeliveryFindings(deps.stateDir, nowMs, retiredMemberIds),
+      ...scanDeliveryFindings(deps.stateDir, nowMs, retiredMemberIds, deps.deliveryRowsReader),
       ...(presetAuditEnabled ? scanConfigPresetFindings(deps.stateDir, nowMs) : []),
       ...(staleLiveWatchdogEnabled ? scanStalledPosts(posts, nowMs, staleLiveMinutes) : [])
     ]
@@ -7274,7 +7414,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       const captureState = readTurnErrorsState(stateDir)
       const lastCaptured = captureState[capture.key]
       if (lastCaptured !== undefined && nowMs - lastCaptured < TURN_ERROR_FRESH_WINDOW_MS) return
-      await appendPostError(stateDir, { ts: capture.ts, postId: capture.postId, error: capture.error })
+      await appendPostError(stateDir, { ts: capture.ts, postId: capture.postId, error: capture.error }, nowMs)
       await writeTurnErrorsState(stateDir, { ...captureState, [capture.key]: nowMs })
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] dept_worker_retire: turn-error capture failed (non-fatal to the retire): ${error instanceof Error ? error.message : String(error)}`)
@@ -10252,6 +10392,12 @@ export function applyInvoke(ctx: Context, config: Config) {
       return out
     }
     ctx.effect(() => {
+      // C6: ONE tail reader per daemon — its byte-offset cursor survives ticks
+      // (created here, outside the per-tick deps object), so a 60 s tick parses
+      // only the deliveries rows appended since the previous tick instead of
+      // re-reading the whole (unbounded-between-boots) sidecar. The scanner's
+      // filter pipeline is unchanged → same findings, same alerts.
+      const deliveryRowsTailReader = createDeliveryRowsTailReader()
       const tick = (): void => {
         void runHealthDaemonTick({
           now: () => Date.now(),
@@ -10266,12 +10412,19 @@ export function applyInvoke(ctx: Context, config: Config) {
           // W8-d: the host-sender-aware inputs for the conditional system-wait
           // scan — resolved lazily per tick.
           hostWaits: buildHostWaits(),
+          // C6: the bounded tail reader (absent → the legacy full read).
+          deliveryRowsReader: deliveryRowsTailReader,
           // The daemon is NOT a catalog member, so the bus ACL would deny it —
           // deliver the alert via the HOST delivery seam directly, framing it
           // `[From deepartments] System-health ALERT:` (exactly like the other
           // daemons' notify hooks). The host entry is the LIVE Asistente entry
           // resolved per tick (setInterval re-evaluates, so the boot race where
           // the hosts registry is still empty cannot permanently disable it).
+          // C8 (structural-loop invariant): the ALERT is delivered DIRECT here
+          // (store.append + busDeliverToHost) — it NEVER goes through the
+          // delivery engine, so NO 'prepared'/'failed' delivery row is ever
+          // written for an ALERT → scanDeliveryFindings can never re-alert an
+          // ALERT (the alert→delivery-failed→alert loop is impossible).
           notifyHost: async (hostEntry, alertFrame): Promise<void> => {
             try {
               const store = await messagesStoreReady
