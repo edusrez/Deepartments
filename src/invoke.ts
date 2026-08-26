@@ -1587,6 +1587,58 @@ export const STALE_LIVE_DEFAULT_MINUTES = 10
  * never masks a truly-stalled post. */
 export const POST_RECENT_ACTIVITY_WINDOW_MS = 2 * 60 * 1000
 
+/** PURE — does an error surface a benign transient PROVIDER-QUOTA / rate-limit /
+ * 429 / usage-limit failure (the exhausted-monthly-quota a holding head records
+ * at its last turn/end)? Matched against the message OR its `code`, tolerant of
+ * a nested `reason.error.{message,code}` / LlmError `.failure` surface. A hard
+ * crash / generic LLM failure does NOT match (it must not exempt a genuine
+ * stall). */
+export function isProviderQuotaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /429|quota|rate.?limit|usage.?limit|go.?usage.?limit|too many request|resource.*exhausted/i.test(message)
+}
+
+/** PURE — did a post's MOST-RECENT turn/end event terminate BENIGNLY? A turn/end
+ * is benign when it is NOT an error termination (a clean/normal end,
+ * `kind !== 'error'`) OR when its error reason is a benign transient
+ * provider-quota / rate-limit error. A configured head whose last turn ended
+ * benignly AND who has no in-flight turn is DELIBERATELY idle-holding (a
+ * quota-hold, a post-delivery hold, a boot-quiet-between-tasks pause) → healthy,
+ * NOT a stall. The signal is DURABLE (NOT freshness-bounded): a benign-ended
+ * head is exempt REGARDLESS of how long ago that turn ended — the honest
+ * discriminator is the durable "demonstrably finished its last turn benignly +
+ * not in-flight" signal, not a recency window (a deliberate quota-hold resets
+ * over many hours / days). A genuine stall NEVER matches: a HARD-crash /
+ * non-quota error reason, or NO turn/end at all (stuck mid-turn), returns false
+ * so the existing predicate still flags it. Pure, never throws (a malformed
+ * event degrades to "not benign"). Only the MOST-RECENT turn/end is judged — an
+ * earlier benign end is discounted once a later (non-benign) termination
+ * superseded it. `nowMs` is retained for caller/API compatibility; the decision
+ * does not depend on it. */
+export function lastTurnEndedBenignly(events: readonly HealthSessionEvent[], nowMs: number): boolean {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]
+    if (event.type !== 'turn/end') continue
+    const data = (typeof event.data === 'object' && event.data !== null ? event.data : {}) as Record<string, unknown>
+    const reason = (typeof data.reason === 'object' && data.reason !== null ? data.reason : {}) as Record<string, unknown>
+    const nested = (typeof reason.error === 'object' && reason.error !== null ? reason.error : {}) as Record<string, unknown>
+    const failure = typeof nested.failure === 'object' && nested.failure !== null ? (nested.failure as Record<string, unknown>) : undefined
+    const errorSurface = failure ?? nested
+    const kind = reason.kind
+    // (a) clean / normal end (kind !== 'error'): the turn terminated NOT in an error.
+    const isError = kind === 'error' || (typeof kind === 'string' && /error/i.test(kind))
+    if (!isError) return true
+    // (b) benign transient provider-quota / rate-limit error: the reason (or its
+    // nested error / LlmError failure / top-level message-carrying field) matches
+    // the quota class.
+    const candidates: unknown[] = [reason.message, reason.code, nested.message, nested.code, errorSurface.message, errorSurface.code]
+    if (candidates.some((candidate) => typeof candidate === 'string' && isProviderQuotaError(candidate))) return true
+    // A non-quota error termination (a hard crash / generic failure) is NOT benign.
+    return false
+  }
+  return false
+}
+
 /** W8-c PART 2 — flag a catalog-live post that is STALLED: it holds at least
  * one PENDING unprocessed addressed message AND its session log has NO writes
  * for >= `staleMinutes` (or no writes at all for that long — the oldest pending
@@ -1648,6 +1700,26 @@ export function scanStalledPosts(
       (snap.lastActivityTs !== undefined && nowMs - snap.lastActivityTs >= windowMs) ||
       (snap.lastActivityTs === undefined && snap.oldestPendingTs !== undefined && nowMs - snap.oldestPendingTs >= windowMs)
     if (!stale) continue
+    // FASE (system-health STALLED-POST false-positive, 2026-08-26): the GENERAL
+    // deliberate-idle-hold exemption. A CONFIGURED HEAD (provider !== 'worker')
+    // that is NOT running (no in-flight turn) AND whose MOST-RECENT turn/end
+    // event terminated BENIGNLY — a clean/normal end (kind !== 'error') OR a
+    // benign transient provider-quota/rate-limit error — is DELIBERATELY
+    // idle-holding between tasks (a quota-hold, a post-delivery hold, a
+    // boot-quiet-between-tasks pause) → HEALTHY, NOT a stall. The signal is
+    // DURABLE, NOT freshness-bounded: a benign-ended head is exempt REGARDLESS of
+    // how long ago that turn ended (a deliberate quota-hold resets over many
+    // hours / days), because the honest discriminator is the durable
+    // "demonstrably finished its last turn benignly + not in-flight" signal, not
+    // recency. A genuine stall is NEVER exempted: its last turn/end is a HARD
+    // crash / non-quota error, or its turn never terminated cleanly (no benign
+    // turn/end), or it is actively running (the Bug-B short-circuit at the
+    // `post.running === true` check above has ALREADY skipped a running post — so
+    // a post reaching here is not running, satisfying the no-in-flight-turn
+    // condition). WORKERS (provider === 'worker') are unaffected — the
+    // orphan/phantom detection and the worker stale-clearing stay intact; the
+    // retired/sleeping/orphan exclusions run ABOVE, unchanged.
+    if (post.provider !== 'worker' && lastTurnEndedBenignly(post.events ?? [], nowMs)) continue
     findings.push({
       kind: 'stalled-post',
       key: `stalled:${post.postId}`,
