@@ -1,0 +1,23 @@
+{
+  "name": "dshd-feedback",
+  "version": "0.1.0-rc.1",
+  "description": "Deepartments universal feedback store (FeedbackStore + state machine) for the quality department — a pure library package extracted for the dshd-feedback phase of the modular Cordis split. Owns the durable append-only <stateDir>/feedback.jsonl backlog + feedback-archive.jsonl (non-destructive prune).",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "license": "MIT"
+}

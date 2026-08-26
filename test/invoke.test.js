@@ -27,6 +27,7 @@ import { Session, SessionId, snapshotJsonValue } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
+import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
 import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
@@ -11228,6 +11229,179 @@ async function qualityDirectives(stateDir) {
   const records = await loadMessageRecords(resolveMessagesPath(stateDir))
   return records.filter((r) => r.from === 'deepartments' && (r.to ?? []).includes('quality-head'))
 }
+
+// --- dshd-feedback tools (m-371) ---------------------------------------------
+
+/** The LAST dshd-feedback notification record addressed to quality-head. */
+async function lastFeedbackNotification(stateDir) {
+  const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+  const notifs = records.filter((r) => r.text.includes('[dept_feedback') && (r.to ?? []).includes('quality-head'))
+  return notifs[notifs.length - 1]
+}
+
+test('dshd-feedback: the 3 tools register on EVERY post own layer (head AND worker) and the host plane', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir)
+    try {
+      const { head, headCtx, key } = qdResearchHead(env)
+      const signal = new AbortController().signal
+      for (const name of ['dept_feedback', 'dept_feedback_list', 'dept_feedback_update']) {
+        assert.ok(headCtx.tools.get(name, key), `${name} installed in the head own layer`)
+      }
+      // Host plane (global): the host Asistente has the feedback tools too.
+      assert.ok(env.root.tools.get('dept_feedback'), 'dept_feedback registered globally (host plane)')
+      assert.ok(env.root.tools.get('dept_feedback_list'), 'dept_feedback_list registered globally')
+      assert.ok(env.root.tools.get('dept_feedback_update'), 'dept_feedback_update registered globally')
+      // A worker created by the head also has the tools (universal write; the
+      // QH-authority of update + the head-only list are enforced in execute).
+      const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const { ctx: workerCtx, key: workerKey } = childContextFor(env.agents, created.sessionId)
+      for (const name of ['dept_feedback', 'dept_feedback_list', 'dept_feedback_update']) {
+        assert.ok(workerCtx.tools.get(name, workerKey), `a WORKER has ${name} (owned by its own layer)`)
+      }
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('dshd-feedback R7: a WORKER emits feedback with NO ACL block — the record is durable (emisor=worker) and the QH notification uses an ACL-legal forwarder, severity-gated noWake', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir)
+    try {
+      const { head, headCtx, key } = qdResearchHead(env)
+      const signal = new AbortController().signal
+      const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'fb-worker', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const { ctx: workerCtx, key: workerKey } = childContextFor(env.agents, created.sessionId)
+      const worker = env.agents.store.get(created.sessionId)
+
+      const record = await workerCtx.tools.get('dept_feedback', workerKey).execute(
+        { tipo: 'fallo', severidad: 'medio', resumen: 'worker leak', evidencia: 'trace-1' },
+        { agent: worker, signal }
+      )
+      assert.equal(record.id, 'fb-0')
+      assert.equal(record.emisor, 'fb-worker', 'the real emisor is the worker postId')
+      assert.equal(record.estado, 'abierto')
+      assert.equal(record.source, 'dshd-feedback')
+      assert.equal(record.tipo, 'fallo')
+      assert.equal(record.severidad, 'medio')
+
+      // The record is durable (feedback.jsonl append-only).
+      const fbLines = await loadFeedbackRecords(resolveFeedbackPath(stateDir))
+      assert.equal(fbLines.length, 1)
+      assert.equal(fbLines[0].emisor, 'fb-worker')
+
+      // R7: the QH notification is delivered by an ACL-LEGAL forwarder (the
+      // worker's manager = research-head) — NOT blocked (never a "failed:acl").
+      // The real emisor travels in the body.
+      const notif = await lastFeedbackNotification(stateDir)
+      assert.ok(notif, 'a feedback notification reached the messages log')
+      assert.equal(notif.from, 'research-head', 'forwarder = the worker manager (ACL-legal head)')
+      assert.deepEqual(notif.to, ['quality-head'])
+      assert.ok(notif.text.includes('from fb-worker'), 'the real emisor travels in the body')
+      // medio → noWake → the delivery settles 'prepared' (queued, NOT woken).
+      assert.equal(await deliveryStatus(stateDir, notif.id, 'quality-head'), 'prepared', 'medio severity → no-wake queue (prepared)')
+
+      // A head surfaces the live backlog.
+      const listed = await headCtx.tools.get('dept_feedback_list', key).execute({}, { agent: head, signal })
+      assert.equal(listed.total, 1)
+      assert.equal(listed.items[0].emisor, 'fb-worker')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('dshd-feedback severity gating: critico → always-wake (delivered/resumed, interrupt); bajo/mejora → no-wake (prepared)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir)
+    try {
+      const { head, headCtx, key } = qdResearchHead(env)
+      const signal = new AbortController().signal
+      const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'fb-worker', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const { ctx: workerCtx, key: workerKey } = childContextFor(env.agents, created.sessionId)
+      const worker = env.agents.store.get(created.sessionId)
+
+      // critico → always-wake (noWake:false, interrupt:true) — delivery reaches QH.
+      const crit = await workerCtx.tools.get('dept_feedback', workerKey).execute({ tipo: 'fallo', severidad: 'critico', resumen: 'critical break' }, { agent: worker, signal })
+      assert.equal(crit.id, 'fb-0')
+      const critNotif = await lastFeedbackNotification(stateDir)
+      const critStatus = await deliveryStatus(stateDir, critNotif.id, 'quality-head')
+      assert.ok(critStatus === 'delivered' || critStatus === 'resumed' || critStatus === 'self', `critico → always-wake (got ${critStatus})`)
+      assert.notEqual(critStatus, 'prepared', 'critico is NOT no-wake')
+
+      // bajo (tipo mejora) → no-wake (prepared).
+      const low = await workerCtx.tools.get('dept_feedback', workerKey).execute({ tipo: 'mejora', severidad: 'bajo', resumen: 'suggestion' }, { agent: worker, signal })
+      assert.equal(low.id, 'fb-1')
+      const lowNotif = await lastFeedbackNotification(stateDir)
+      assert.equal(await deliveryStatus(stateDir, lowNotif.id, 'quality-head'), 'prepared', 'bajo + tipo mejora → no-wake queue (prepared)')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('dshd-feedback_update: QH-only terminal transition (cerrado_por), head-only en-estudio, reopen only en-estudio→abierto & only QH, never from terminal; a worker is rejected', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir)
+    try {
+      const { head, headCtx, key } = qdResearchHead(env)
+      const { head: qh, headCtx: qhCtx, key: qhKey } = qdHead(env)
+      const signal = new AbortController().signal
+
+      const record = await headCtx.tools.get('dept_feedback', key).execute({ tipo: 'fallo', severidad: 'alto', resumen: 'flaky test' }, { agent: head, signal })
+      assert.equal(record.id, 'fb-0')
+
+      // A non-QH head may set en-estudio.
+      const inStudy = await headCtx.tools.get('dept_feedback_update', key).execute({ id: 'fb-0', estado: 'en-estudio', notas_qh: 'investigating' }, { agent: head, signal })
+      assert.equal(inStudy.estado, 'en-estudio')
+      assert.equal(inStudy.notas_qh, 'investigating')
+
+      // A non-QH head may NOT close (terminal) — only QH.
+      await assert.rejects(
+        () => headCtx.tools.get('dept_feedback_update', key).execute({ id: 'fb-0', estado: 'resuelto' }, { agent: head, signal }),
+        /only quality-head may move feedback to a TERMINAL estado/, 'a head cannot pass to terminal'
+      )
+
+      // QH closes → cerrado_por = quality-head.
+      const closed = await qhCtx.tools.get('dept_feedback_update', qhKey).execute({ id: 'fb-0', estado: 'resuelto' }, { agent: qh, signal })
+      assert.equal(closed.estado, 'resuelto')
+      assert.equal(closed.cerrado_por, 'quality-head')
+
+      // A terminal record can NEVER reopen (even the QH).
+      await assert.rejects(
+        () => qhCtx.tools.get('dept_feedback_update', qhKey).execute({ id: 'fb-0', estado: 'abierto' }, { agent: qh, signal }),
+        /terminal/, 'reopen from a terminal state is blocked'
+      )
+
+      // A fresh feedback: en-estudio → abierto (reopen) is allowed ONLY for QH.
+      const second = await headCtx.tools.get('dept_feedback', key).execute({ tipo: 'mejora', severidad: 'bajo', resumen: 'minor idea' }, { agent: head, signal })
+      await headCtx.tools.get('dept_feedback_update', key).execute({ id: second.id, estado: 'en-estudio' }, { agent: head, signal })
+      await assert.rejects(
+        () => headCtx.tools.get('dept_feedback_update', key).execute({ id: second.id, estado: 'abierto' }, { agent: head, signal }),
+        /only quality-head may reopen/, 'a non-QH head cannot reopen'
+      )
+      const reopened = await qhCtx.tools.get('dept_feedback_update', qhKey).execute({ id: second.id, estado: 'abierto' }, { agent: qh, signal })
+      assert.equal(reopened.estado, 'abierto')
+
+      // A WORKER caller is rejected for list + update.
+      const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'fb-worker', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const { ctx: workerCtx, key: workerKey } = childContextFor(env.agents, created.sessionId)
+      const worker = env.agents.store.get(created.sessionId)
+      await assert.rejects(
+        () => workerCtx.tools.get('dept_feedback_list', workerKey).execute({}, { agent: worker, signal }),
+        /read-only for department HEADS/, 'a worker cannot call dept_feedback_list'
+      )
+      await assert.rejects(
+        () => workerCtx.tools.get('dept_feedback_update', workerKey).execute({ id: 'fb-0', estado: 'en-estudio' }, { agent: worker, signal }),
+        /for department HEADS/, 'a worker cannot call dept_feedback_update'
+      )
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
 
 test('QD probability gate: worker default 0.10 + clamp; worker uses injected rng + env override; head+host ALWAYS true even prob<1', () => {
   // worker default (prob 0.10): rng below the threshold → true; above → false.

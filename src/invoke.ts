@@ -230,6 +230,20 @@ import type {
   Binder,
   BusSurface
 } from './core/delivery.js'
+// dshd-feedback phase: the universal feedback store + state machine +
+// record types live in the dshd-feedback package, consumed via the drop-in
+// bridge (./core/feedback.js -> `export * from 'dshd-feedback'`).
+import { FeedbackStore, isTerminalEstado } from './core/feedback.js'
+import type {
+  FeedbackEstado,
+  FeedbackInput,
+  FeedbackListOptions,
+  FeedbackListResult,
+  FeedbackRecord,
+  FeedbackSeveridad,
+  FeedbackTipo,
+  FeedbackUpdateInput
+} from './core/feedback.js'
 // Re-export the delivery engine's public surface (value + type) so the compiled
 // lib/invoke.js stays a drop-in superset of the pre-extraction module.
 export { createDeliveryEngine, frameBusRecord } from './core/delivery.js'
@@ -6419,6 +6433,12 @@ export function applyInvoke(ctx: Context, config: Config) {
     // globals anyway so this own layer is the ONLY visible toolset.
     for (const tool of busTools) disposers.push(agentCtx.tools.register(tool))
 
+    // dshd-feedback phase (universal, ACL-free write): register the 3 feedback
+    // tools on EVERY post's OWN layer (head AND worker — any agent may emit
+    // feedback; the QH-authority of `dept_feedback_update` + the head-only
+    // `dept_feedback_list` are enforced in `execute`, not at registration).
+    for (const tool of feedbackTools) disposers.push(agentCtx.tools.register(tool))
+
     // --- W1 (spec 004 §5.7 + ROADMAP W1): calendar tools — dept_calendar_add /
     // dept_calendar_list / dept_calendar_remove. Registered on EVERY post's OWN
     // layer (head AND worker — the runtime agenda is department-scoped, not
@@ -7332,7 +7352,8 @@ export function applyInvoke(ctx: Context, config: Config) {
   const OWN_LAYER_POST_TOOLS: ReadonlySet<string> = new Set([
     'send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep',
     'dept_post_create', 'dept_post_retire', 'dept_worker_spawn', 'dept_worker_retire',
-    'dept_job_list', 'dept_job_run', 'dept_monitor_list', 'dept_exec'
+    'dept_job_list', 'dept_job_run', 'dept_monitor_list', 'dept_exec',
+    'dept_feedback', 'dept_feedback_list', 'dept_feedback_update'
   ])
 
   /** Build the `setup(agentCtx)` for one post (head OR worker): mount the post's
@@ -8494,6 +8515,13 @@ export function applyInvoke(ctx: Context, config: Config) {
    * — the SAME store, behavior-neutral. */
   const messagesStoreReady = (ctx.get('deepartments.bus') as BusSurface | undefined)?.storeReady ?? MessagesStore.open(messageStoreDir)
 
+  /** The boot-opened feedback store (load + prune-to-cap + live-by-id index).
+   * The dshd-feedback package is a pure LIBRARY (no composed Cordis service),
+   * so this is opened in-bundle from the shared org stateDir — the single
+   * per-apply instance the `dept_feedback*` tools own (AGENTS.md rule 4).
+   * Rejects loud on mid-file corruption (spec §3.2 — fail loud, never hide). */
+  const feedbackStoreReady = FeedbackStore.open(messageStoreDir)
+
   /**
    * B5 — whether an agent materialization error is the harness "no
    * provider/model" signature (the VARIANT-2 / builder-87 ghost: a worker whose
@@ -9025,6 +9053,38 @@ export function applyInvoke(ctx: Context, config: Config) {
    * coordinator materialized by `ensureAllHeads` at boot). */
   const resolveQualityHeadEntry = (): PostEntry | undefined => byPost.get('quality-head')
 
+  /**
+   * dshd-feedback R7 — the ACL-LEGAL NOTIFICATION FORWARDER: `record.from` for
+   * the quality-head notification must be a sender the delivery-engine defensive
+   * ACL allows (head→head / host→head allowed; worker→head DENIED). The real
+   * `emisor` always travels in the feedback record + the notification body.
+   *   - a HEAD (or the host) self-forwards: from = the emisor itself;
+   *   - a WORKER forwards as its managerId (the creating head), else as the
+   *     coordinator postId of its config department;
+   *   - neither resolves → undefined → the caller falls back to the direct QD
+   *     seam (`busDeliverToPost` with record.from='deepartments' — the
+   *     QD-directive precedent, invoke.ts maybeEmitQualityInspectDirective).
+   */
+  const feedbackForwarderFor = (emisor: string): string | undefined => {
+    const entry = byPost.get(emisor)
+    if (entry === undefined) return hosts.has(emisor) ? emisor : undefined
+    if (entry.provider !== 'worker') return emisor // a head: self (head→head is legal)
+    const manager = entry.managerId
+    if (manager !== undefined && byPost.has(manager)) return manager
+    const coordinatorPostId = departmentForEntry(entry)?.coordinator?.postId
+    if (coordinatorPostId !== undefined && byPost.has(coordinatorPostId)) return coordinatorPostId
+    return undefined
+  }
+
+  /** dshd-feedback severity-gated delivery options (R7): critico → wake+interrupt;
+   * alto → wake (no interrupt); medio/bajo/mejora → no-wake queue. */
+  const feedbackDeliveryOptions = (tipo: FeedbackTipo, severidad: FeedbackSeveridad): { noWake: boolean; interrupt?: boolean } => {
+    if (tipo === 'mejora') return { noWake: true }
+    if (severidad === 'critico') return { noWake: false, interrupt: true }
+    if (severidad === 'alto') return { noWake: false }
+    return { noWake: true } // medio / bajo
+  }
+
   const maybeEmitQualityInspectDirective = async (surface: QualityInspectDirectiveSurface): Promise<void> => {
     try {
       // QD anti-loop (owner m-178/m-182): the QH's OWN sleep is NOT part of the
@@ -9349,6 +9409,217 @@ export function applyInvoke(ctx: Context, config: Config) {
   // post OWN layer + the host agent's own layer + (when the name is free) the
   // GLOBAL host plane — see the override note before the registrations).
   // ---------------------------------------------------------------------------
+
+  // --- dshd-feedback TOOL DEFINITIONS (ONE body per tool; registered in the
+  // post OWN layer (universal — ANY agent may emit feedback) + the GLOBAL host
+  // plane. The QH-authority of `dept_feedback_update` is enforced in `execute`.
+  // The store is the dshd-feedback library FeedbackStore (opened per-apply).
+  // ---------------------------------------------------------------------------
+
+  /** The FeedbackRecord output JSON schema (shared by the 3 feedback tools). */
+  const feedbackRecordSchema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      id: { type: 'string', required: true },
+      createdAt: { type: 'number', required: true },
+      updatedAt: { type: 'number', required: true },
+      emisor: { type: 'string', required: true },
+      source: { type: 'string', required: true },
+      tipo: { type: 'string', required: true },
+      severidad: { type: 'string', required: true },
+      estado: { type: 'string', required: true },
+      resumen: { type: 'string', required: true },
+      archivo_linea: { type: 'string' },
+      event: { type: 'string' },
+      evidencia: { type: 'string' },
+      notas_qh: { type: 'string' },
+      report_path: { type: 'string' },
+      escalado: { type: 'boolean' },
+      escalado_a: { type: 'string' },
+      cerrado_por: { type: 'string' }
+    }
+  } as const
+
+  /** `dept_feedback` — the universal feedback emitter (R7): ANY agent (worker /
+   * head / host) writes a durable feedback record to the FeedbackStore and
+   * notifies quality-head severity-gated via `deliverOrQueue` (record.from is an
+   * ACL-legal FORWARDER — head/host self, worker = its manager or dept
+   * coordinator; the real emisor travels in the record + the body). */
+  const feedbackTool = defineTool({
+    name: 'dept_feedback',
+    description: 'Emit a quality/feedback record to the durable feedback backlog (the quality-head backlog). ANY agent — a worker, a department head, or the host — may send; the record.write is ACL-free. `tipo` = the kind ("fallo" | "mejora"); `severidad` = priority ("critico" | "alto" | "medio" | "bajo"); `resumen` = the one-line summary (required); `evidencia`/`archivo_linea` = optional supporting detail. The record is written to <stateDir>/feedback.jsonl with estado "abierto" (emisor = YOU) and the quality-head is notified SEVERITY-GATED: critico → wake + interrupt; alto → wake; medio/bajo/mejora → no-wake queue. The notification is ACL-legal (a worker forwards via its head; the real emisor is in the record + body). Returns the created FeedbackRecord (id included).',
+    parameters: {
+      tipo: { type: 'string', required: true, description: 'The feedback type: "fallo" (defect) | "mejora" (improvement).' },
+      severidad: { type: 'string', required: true, description: 'The priority: "critico" | "alto" | "medio" | "bajo".' },
+      resumen: { type: 'string', required: true, description: 'The one-line summary (non-empty).' },
+      evidencia: { type: 'string', description: 'Optional supporting evidence/snippet.' },
+      archivo_linea: { type: 'string', description: 'Optional file:line reference (e.g. src/invoke.ts:1234).' }
+    },
+    output: { schema: feedbackRecordSchema, render: feedbackRecordRender },
+    async execute(args, exec): Promise<FeedbackRecord> {
+      const agent = exec.agent
+      if (!agent) throw new Error('dept_feedback requires a calling agent (exec.agent was undefined)')
+      const emisor = busMemberIdFor(agent.id as string)
+      const tipo = String(args.tipo).trim() as FeedbackTipo
+      const severidad = String(args.severidad).trim() as FeedbackSeveridad
+      const resumen = String(args.resumen).trim()
+      const store = await feedbackStoreReady
+      const input: FeedbackInput = { emisor, tipo, severidad, resumen }
+      const evidencia = args.evidencia === undefined ? undefined : String(args.evidencia).trim()
+      const archivo_linea = args.archivo_linea === undefined ? undefined : String(args.archivo_linea).trim()
+      if (evidencia !== undefined && evidencia !== '') input.evidencia = evidencia
+      if (archivo_linea !== undefined && archivo_linea !== '') input.archivo_linea = archivo_linea
+      const record = await store.append(input)
+      // R7 — notify quality-head severity-gated (fire-and-forget; the feedback
+      // record is durable regardless of the notification outcome).
+      const qualityHead = resolveQualityHeadEntry()
+      if (qualityHead !== undefined) {
+        const forwarder = feedbackForwarderFor(emisor)
+        const text = `[dept_feedback ${severidad}/${tipo} from ${emisor}]: ${resumen}` +
+          (evidencia !== undefined && evidencia !== '' ? `\nEvidencia: ${evidencia}` : '') +
+          (archivo_linea !== undefined && archivo_linea !== '' ? `\n${archivo_linea}` : '')
+        const deliverOpts = feedbackDeliveryOptions(tipo, severidad)
+        try {
+          const messageStore = await messagesStoreReady
+          if (forwarder !== undefined) {
+            const notifRecord = await messageStore.append({ from: forwarder, to: ['quality-head'], text, kind: 'agent' })
+            const status = await delivery.deliverOrQueue('quality-head', notifRecord, {
+              callerAgentId: agent.id as string,
+              senderSessionId: agent.id as string,
+              signal: exec.signal,
+              ...deliverOpts
+            })
+            if (status === 'failed') ctx.logger.warn(`[deepartments] dept_feedback notification to quality-head failed (${status}) — feedback ${record.id} is durable`)
+          } else {
+            // No ACL-legal forwarder: fall back to the direct QD seam (the
+            // QD-directive precedent — bypasses the delivery-engine ACL).
+            const notifRecord = await messageStore.append({ from: 'deepartments', to: ['quality-head'], text, kind: 'agent' })
+            await busDeliverToPost(qualityHead, `[From deepartments → quality-head]: ${text}`, notifRecord, void 0)
+          }
+        } catch (error: unknown) {
+          ctx.logger.warn(`[deepartments] dept_feedback notification to quality-head failed (non-fatal — the feedback record is durable): ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      return record
+    }
+  })
+
+  /** `dept_feedback_list` — surfacing (read-only). Available to heads (incl.
+   * quality-head) and the host; a WORKER caller is rejected in `execute`. */
+  const feedbackListTool = defineTool({
+    name: 'dept_feedback_list',
+    description: 'Surface the durable feedback backlog (read-only). Lists the LIVE feedback records (latest tail per id), optionally filtered by `estado`/`severidad`/`tipo`/`emisor`, sorted severity desc then createdAt asc, paged (default 20, cap 100) with an exclusive `cursor` id (the previous page\'s last id). Available to department heads (incl. quality-head) and the host — a WORKER is rejected. Returns {total, items, remaining, cursor?}.',
+    parameters: {
+      estado: { type: 'string', description: 'Filter by estado: "abierto" | "en-estudio" | "resuelto" | "descartado".' },
+      severidad: { type: 'string', description: 'Filter by severidad: "critico" | "alto" | "medio" | "bajo".' },
+      tipo: { type: 'string', description: 'Filter by tipo: "fallo" | "mejora".' },
+      emisor: { type: 'string', description: 'Filter by the emitter member id.' },
+      cursor: { type: 'string', description: 'Optional exclusive cursor: a feedback record id (the previous page\'s last id).' },
+      limit: { type: 'number', description: 'Optional page size (default 20, cap 100).' }
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          total: { type: 'number', required: true },
+          items: { type: 'array', required: true, items: feedbackRecordSchema },
+          remaining: { type: 'number', required: true },
+          cursor: { type: 'string' }
+        }
+      },
+      render: (_args, value) => {
+        const head = `feedback backlog (${value.total} total, showing ${value.items.length}${value.remaining > 0 ? `, ${value.remaining} more${value.cursor !== void 0 ? ` (cursor ${value.cursor})` : ''}` : ''}):`
+        if (value.items.length === 0) return [{ type: 'text', text: `${head}\n  (no matching feedback records)` } as const]
+        const lines = value.items.map((r) => `  - ${r.id} [${r.severidad}] ${r.tipo} ${r.estado} ${r.emisor}: ${r.resumen}`)
+        return [{ type: 'text', text: `${head}\n${lines.join('\n')}` } as const]
+      }
+    },
+    async execute(args, exec): Promise<FeedbackListResult> {
+      const agent = exec.agent
+      if (!agent) throw new Error('dept_feedback_list requires a calling agent (exec.agent was undefined)')
+      const postId = postIdForChild(agent.id as string)
+      if (postId !== void 0 && byPost.get(postId)?.provider === 'worker') {
+        throw new Error('[deepartments] dept_feedback_list is read-only for department HEADS (incl. quality-head) and the host, not a worker')
+      }
+      const store = await feedbackStoreReady
+      const opts: FeedbackListOptions = {}
+      const estado = String(args.estado ?? '').trim()
+      const severidad = String(args.severidad ?? '').trim()
+      const tipo = String(args.tipo ?? '').trim()
+      const emisor = String(args.emisor ?? '').trim()
+      const cursor = String(args.cursor ?? '').trim()
+      if (estado !== '') opts.estado = estado as FeedbackEstado
+      if (severidad !== '') opts.severidad = severidad as FeedbackSeveridad
+      if (tipo !== '') opts.tipo = tipo as FeedbackTipo
+      if (emisor !== '') opts.emisor = emisor
+      if (cursor !== '') opts.cursor = cursor
+      if (args.limit !== undefined) opts.limit = args.limit as number
+      return store.list(opts)
+    }
+  })
+
+  /** `dept_feedback_update` — append-only state transition (m-371). AUTHORITY:
+   * only quality-head may move a record to a TERMINAL estado (resuelto |
+   * descartado — stamping `cerrado_por` = the caller); a non-QH head may set
+   * `en-estudio`; a reopen (estado → abierto) is only legal from `en-estudio`
+   * and ONLY for quality-head, never from a terminal state. Each change is a NEW
+   * tail line (same id, updatedAt, estado) — append-only, no in-place edit. */
+  const feedbackUpdateTool = defineTool({
+    name: 'dept_feedback_update',
+    description: 'Transition the state of one durable feedback record (append-only): each change appends a NEW tail line with the SAME id, a bumped `updatedAt`, and the new `estado`. AUTHORITY (spec §4): only `quality-head` may pass a record to a TERMINAL estado (`resuelto` | `descartado` — it stamps `cerrado_por` = the caller); a department head (non-QH) may set `en-estudio`; a reopen (`estado` → `abierto`) is legal only from `en-estudio` (with new evidence) and ONLY for quality-head, and is NEVER allowed from a terminal state. `notas_qh`/`escalado`/`escalado_a` are metadata update fields. WORKER callers are rejected. Returns the updated FeedbackRecord.',
+    parameters: {
+      id: { type: 'string', required: true, description: 'The feedback record id (fb-<seq>).' },
+      estado: { type: 'string', description: 'The target estado: "abierto" | "en-estudio" | "resuelto" | "descartado".' },
+      notas_qh: { type: 'string', description: 'Quality-head notes on the record.' },
+      escalado: { type: 'boolean', description: 'Mark the record as escalated.' },
+      escalado_a: { type: 'string', description: 'Who/where the record was escalated to.' }
+    },
+    output: { schema: feedbackRecordSchema, render: feedbackUpdateRender },
+    async execute(args, exec): Promise<FeedbackRecord> {
+      const agent = exec.agent
+      if (!agent) throw new Error('dept_feedback_update requires a calling agent (exec.agent was undefined)')
+      const postId = postIdForChild(agent.id as string)
+      if (postId !== void 0 && byPost.get(postId)?.provider === 'worker') {
+        throw new Error('[deepartments] dept_feedback_update is for department HEADS (incl. quality-head) and the host, not a worker')
+      }
+      const memberId = busMemberIdFor(agent.id as string)
+      const isQh = memberId === 'quality-head'
+      const store = await feedbackStoreReady
+      const id = String(args.id ?? '').trim()
+      if (id === '') throw new Error('[deepartments] dept_feedback_update: `id` is required')
+      const current = store.get(id)
+      if (current === undefined) throw new Error(`[deepartments] dept_feedback_update: no feedback record with id "${id}"`)
+      const input: FeedbackUpdateInput = {}
+      const estadoRaw = String(args.estado ?? '').trim()
+      if (estadoRaw !== '') {
+        const estado = estadoRaw as FeedbackEstado
+        if (isTerminalEstado(estado)) {
+          if (!isQh) throw new Error('[deepartments] dept_feedback_update: only quality-head may move feedback to a TERMINAL estado (resuelto | descartado)')
+        } else if (estado === 'abierto') {
+          if (!isQh) throw new Error('[deepartments] dept_feedback_update: only quality-head may reopen feedback (en-estudio → abierto, with new evidence)')
+        }
+        input.estado = estado
+      }
+      if (args.notas_qh !== undefined) input.notas_qh = String(args.notas_qh)
+      if (args.escalado !== undefined) input.escalado = args.escalado === true
+      if (args.escalado_a !== undefined) input.escalado_a = String(args.escalado_a)
+      return store.update(id, input, isQh ? { cerradoPor: memberId } : {})
+    }
+  })
+
+  const feedbackTools: readonly ReturnType<typeof defineTool>[] = [feedbackTool, feedbackListTool, feedbackUpdateTool]
+
+  /** Shared render for a single FeedbackRecord (create/update). */
+  function feedbackRecordRender(_args: unknown, value: FeedbackRecord) {
+    return [{ type: 'text', text: `feedback ${value.id} ${value.estado} (${value.severidad}/${value.tipo} from ${value.emisor}): ${value.resumen}${value.cerrado_por !== void 0 ? ` — closed by ${value.cerrado_por}` : ''}` } as const]
+  }
+
+  /** Shared render for the update tool (append-only transition result). */
+  function feedbackUpdateRender(_args: unknown, value: FeedbackRecord) {
+    return [{ type: 'text', text: `feedback ${value.id} → ${value.estado}${value.cerrado_por !== void 0 ? ` (closed by ${value.cerrado_por})` : ''}` } as const]
+  }
 
   /** `send_message` — the unified plugin-owned tool (spec §4). NEVER registers
    * globally when the harness native owns the name (dsh-tool-subagent-control);
@@ -9999,7 +10270,17 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }))
 
+  // --- dshd-feedback tools (host plane): the host may emit feedback + list +
+  // update the backlog. Registered globally (the host is every agent's top of
+  // the reporting chain — D6); the QH-authority is enforced in `execute`.
+  const globalFeedback = ctx.tools.register(feedbackTool)
+  const globalFeedbackList = ctx.tools.register(feedbackListTool)
+  const globalFeedbackUpdate = ctx.tools.register(feedbackUpdateTool)
+
   ctx.effect(() => () => {
+    globalFeedback()
+    globalFeedbackList()
+    globalFeedbackUpdate()
     globalWakeSnapshot()
     globalRetire()
     globalMemo()
