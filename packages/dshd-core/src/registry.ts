@@ -567,6 +567,16 @@ export interface DurablePostsReconcileResult {
   headStaleCandidates: Array<{ postId: string; sessionId: string }>
   /** True when the durable posts.json was written (a retire happened). */
   changed: boolean
+  /** A3/C2 — the postIds of the retired entries that were PRUNED (moved to the
+   * retired archive) in this reconcile, when `enableRetiredPrune` ran AND the
+   * retired count exceeded `retiredKeep`. Empty when no prune happened. The
+   * caller MUST drop these from the in-memory catalog (`byPost`/`byChild`) so a
+   * LATER `persistPosts()` writes the PRUNED set, not the full pre-prune set
+   * (the C2 partial-prune regression — a file-based prune with no in-memory
+   * sync gets overwritten by the next full-set persist). Never erased: the
+   * pruned entries are preserved in the retired archive + the pre-prune
+   * backup. */
+  prunedPostIds: string[]
 }
 
 /** PURE durable posts-registry leak detector (m-119, W8-g). Given the durable
@@ -601,7 +611,7 @@ export function analyzeDurablePostsRegistry(
     }
     if (gone || unusable) candidates.push({ postId: entry.postId, sessionId: entry.sessionId })
   }
-  return { workerRetireCandidates: candidates, workersRetired: [], headStaleCandidates: headStale, changed: false }
+  return { workerRetireCandidates: candidates, workersRetired: [], headStaleCandidates: headStale, changed: false, prunedPostIds: [] }
 }
 
 /** Options for `reconcileDurablePostsRegistry`. */
@@ -660,10 +670,10 @@ export async function reconcileDurablePostsRegistry(
   const raw = await readDurableJsonFile(stateDir, 'posts.json')
   if (raw === undefined) {
     if (!existsSync(path.join(stateDir, 'posts.json'))) {
-      return { workerRetireCandidates: [], workersRetired: [], headStaleCandidates: [], changed: false }
+      return { workerRetireCandidates: [], workersRetired: [], headStaleCandidates: [], changed: false, prunedPostIds: [] }
     }
     logger?.warn('[deepartments] reconcile-posts: posts.json unreadable/malformed — cannot reconcile gone workers (no change)')
-    return { workerRetireCandidates: [], workersRetired: [], headStaleCandidates: [], changed: false }
+    return { workerRetireCandidates: [], workersRetired: [], headStaleCandidates: [], changed: false, prunedPostIds: [] }
   }
   const entries: DurablePostReconcileLike[] = []
   for (const [postId, rawEntry] of Object.entries(raw)) {
@@ -720,6 +730,7 @@ export async function reconcileDurablePostsRegistry(
   // when either operation changed it).
   let changed = false
   let workersRetired: Array<{ postId: string; sessionId: string }> = []
+  let prunedPostIds: string[] = []
   let workingRaw: Record<string, unknown> | undefined
   if (opts.retireGoneWorkers === true && result.workerRetireCandidates.length > 0) {
     try {
@@ -788,6 +799,7 @@ export async function reconcileDurablePostsRegistry(
         }
         workingRaw = newRaw
         changed = true
+        prunedPostIds = pruned.map((item) => item.postId)
         logger?.warn(`[deepartments] reconcile-posts: PRUNED ${pruned.length} retired post(s) beyond the newest ${retiredKeep} (backup ${path.basename(backupPath)}, archive ${path.basename(archivePath)})`)
       }
     } catch (error: unknown) {
@@ -808,7 +820,7 @@ export async function reconcileDurablePostsRegistry(
     }
   }
 
-  return { workerRetireCandidates: result.workerRetireCandidates, workersRetired, headStaleCandidates: result.headStaleCandidates, changed }
+  return { workerRetireCandidates: result.workerRetireCandidates, workersRetired, headStaleCandidates: result.headStaleCandidates, changed, prunedPostIds }
 }
 
 /** Result of the deterministic live-host selection (U3 fix, spec 002 §6.1). */
@@ -1066,6 +1078,31 @@ export class RegistryStore {
     this.byChild.delete(entry.sessionId)
     this.persistPosts()
     return true
+  }
+
+  /** A3/C2 — DROP the given postIds from the in-memory catalog ONLY (NO persist).
+   * The durable A3/C2 prune already rewrote posts.json atomically; calling this
+   * keeps the in-memory `byPost`/`byChild` CONSISTENT with the pruned file so a
+   * LATER `persistPosts()` writes the PRUNED set — never the full pre-prune set
+   * (the C2 partial-prune regression: a file-based prune with no in-memory sync
+   * is overwritten by the next full-set persist). The pruned entries are the
+   * OLDEST retired posts beyond `retiredKeep` — already archived + backed up, so
+   * removing them from the live catalog is safe (a pruned post is no longer a
+   * roster/wake target). The reverse index (`byChild`: sessionId → postId) is
+   * dropped for the same entries. Unknown ids are ignored. Returns the count of
+   * posts actually removed. Do NOT call `persistPosts()` here — the durable file
+   * is ALREADY the pruned (correct) state; persisting would be a redundant write
+   * and would resurrect a boot race with a concurrent writer. */
+  removePosts(postIds: string[]): number {
+    let removed = 0
+    for (const postId of postIds) {
+      const entry = this.byPost.get(postId)
+      if (entry === void 0) continue
+      this.byPost.delete(postId)
+      this.byChild.delete(entry.sessionId)
+      removed++
+    }
+    return removed
   }
 
   /** Lazy host registration — the SINGLE-LIVE-HOST guard + rotation MERGE

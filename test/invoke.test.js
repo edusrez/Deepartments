@@ -33,6 +33,7 @@ import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPre
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
+import { RegistryStore } from '../lib/invoke.js'
 import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
 import {
@@ -12214,6 +12215,58 @@ test('A3/C2 reconcileDurablePostsRegistry pruning: ABSENT `enableRetiredPrune` �
   })
 })
 
+test('C2 partial-prune fix (wiring): the durable prune reports prunedPostIds; removePosts syncs the in-memory catalog; a later persistPosts writes the PRUNED set, not the full set', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Seed a FULL posts.json: a live head + 60 retired entries (much > retiredKeep=10).
+    await writeFile(path.join(stateDir, 'posts.json'), JSON.stringify({
+      'head': { sessionId: 'head-fixed', roomId: 'research', agentPreset: 'deepartments-head' },
+      ...Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`w-${i}`, { sessionId: `w-${i}`, roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'head', retired: true, retiredAt: 100 + i }]))
+    }, null, 2))
+    // Cold-load the FULL set into a real RegistryStore (the boot catalog — the
+    // C2 partial-prune regression is exactly this: the FILE-based prune leaves
+    // the in-memory byPost holding the FULL pre-prune set).
+    const registry = new RegistryStore({ stateDir, logger: { warn: () => {}, info: () => {} } })
+    await registry.loadPosts()
+    assert.equal(registry.byPost.size, 61, 'C2: the boot catalog cold-loads the FULL 61-entry set (head + 60 retired)')
+    // Run the durable A3/C2 prune (the `runDurableRegistryReconciliation` path):
+    // retiredKeep=10 → the oldest 50 retired posts beyond the newest 10 are
+    // pruned + archived (the reconcile is FILE-based — it does NOT touch byPost).
+    const result = await reconcileDurablePostsRegistry(stateDir, {
+      logger: { warn: () => {} },
+      isSessionGone: () => false,
+      enableRetiredPrune: true,
+      retiredKeep: 10
+    })
+    assert.equal(result.changed, true, 'C2: the durable prune changed posts.json')
+    assert.equal(result.prunedPostIds.length, 50, 'C2: the reconcile reports the 50 pruned postIds')
+    // The durable file IS pruned (head + the newest 10 retired remain = 11).
+    const onDisk = JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8'))
+    assert.equal(Object.keys(onDisk).length, 11, 'C2: posts.json is pruned to 11 entries (head + newest 10 retired)')
+    // The in-memory catalog is STILL the FULL set — the pre-fix regression.
+    assert.equal(registry.byPost.size, 61, 'C2: the in-memory catalog is STILL the full 61 set (the pre-fix regression: a file-based prune leaves byPost stale)')
+    // The caller's sync: drop the pruned postIds from the in-memory catalog.
+    const removed = registry.removePosts(result.prunedPostIds)
+    assert.equal(removed, 50, 'C2: removePosts dropped exactly the 50 pruned posts from the in-memory catalog')
+    assert.equal(registry.byPost.size, 11, 'C2: the in-memory catalog now matches the pruned file (11 entries)')
+    // byChild consistency: no pruned session is left reverse-indexed.
+    for (const postId of result.prunedPostIds) {
+      assert.equal(registry.byChild.get(postId), undefined, `C2: the pruned post "${postId}" has NO dangling sessionId reverse-index`)
+    }
+    // Archive + backup preserved (non-destructive — R6).
+    const archive = (await readFile(path.join(stateDir, 'posts-retired-archive.jsonl'), 'utf8')).trim().split('\n')
+    assert.equal(archive.length, 50, 'C2: all 50 pruned retired entries are archived (never erased)')
+    assert.ok((await readdir(stateDir)).some((f) => f.startsWith('posts.json.bak-') && f.endsWith('-prune')), 'C2: a pre-prune backup was written')
+    // THE REGRESSION GUARD: a LATER persistPosts must write the PRUNED set, NOT
+    // the full pre-prune set (the C2 bug — the prune was undone moments later).
+    await registry.persistPosts()
+    const afterPersist = JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8'))
+    assert.equal(Object.keys(afterPersist).length, 11, 'C2: a later persistPosts writes the PRUNED set (11), NOT the restored full set (61) — the fix holds')
+    for (const postId of result.prunedPostIds) {
+      assert.equal(afterPersist[postId], undefined, `C2: the pruned post "${postId}" is NOT restored by the later persist`)
+    }
+  })
+})
+
 test('A3/C2 boot wiring (FASE 2.6): the postsRetention knob is read SHARED-first (deepartments.org) — a dshd-core org carrying postsRetention{maxRetiredKept:50,enabled:true} prunes posts.json at boot EVEN THOUGH the bundle mirror (config.org) does NOT carry it', async () => {
   await withTempStateDir(async (stateDir) => {
     // Seed a head + 60 retired entries (> the default retiredKeep 50). An EMPTY
@@ -12250,9 +12303,17 @@ test('A3/C2 boot wiring (FASE 2.6): the postsRetention knob is read SHARED-first
       org: { departments: [] }
     })
     try {
+      // Wait for the prune to be FULLY applied: the archive + backup exist AND
+      // posts.json is atomically rewritten to the pruned set. (The reconcile
+      // writes the archive/backup BEFORE the final tmp+rename of posts.json, so
+      // waiting only on the archive/backup can read the OLD un-pruned file mid
+      // write — a flaky C2 regression surface. Requiring the pruned on-disk
+      // count makes the read deterministic.)
       await waitFor(async () => {
         const files = await readdir(stateDir)
-        return files.some((f) => f === 'posts-retired-archive.jsonl') && files.some((f) => f.startsWith('posts.json.bak-') && f.endsWith('-prune'))
+        if (!(files.some((f) => f === 'posts-retired-archive.jsonl') && files.some((f) => f.startsWith('posts.json.bak-') && f.endsWith('-prune')))) return false
+        const p = JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8'))
+        return Object.keys(p).filter((id) => p[id]?.retired === true).length === 50
       }, 20000, 'boot reconcile pruned posts.json using the SHARED postsRetention knob')
       const posts = JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8'))
       const retiredIds = Object.keys(posts).filter((id) => posts[id]?.retired === true)

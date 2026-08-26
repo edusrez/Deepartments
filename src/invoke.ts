@@ -7959,7 +7959,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // too, so the in-bundle fallback (`cfg.org`) stays behavior-neutral (same
       // nested config when dshd-core is not composed).
       const postsRetention = (org as { postsRetention?: PostsRetentionConfig }).postsRetention
-      await reconcileDurablePostsRegistry(stateDir, {
+      const reconcilePosts = await reconcileDurablePostsRegistry(stateDir, {
         logger: ctx.logger,
         retireGoneWorkers: false,
         ...(postsRetention !== void 0
@@ -7990,6 +7990,21 @@ export function applyInvoke(ctx: Context, config: Config) {
           return mark !== undefined && mark.sessionId === sessionId
         }
       })
+      // C2 partial-prune FIX: `reconcileDurablePostsRegistry` is FILE-based —
+      // it rewrites posts.json (the pruned set) but does NOT touch the
+      // in-memory catalog, which `loadPosts` populated with the FULL pre-prune
+      // set. Without an in-memory sync, ANY later `persistPosts()` (a
+      // registerEntry / markPostRetired / ensureHost) writes the FULL set back
+      // to posts.json — undoing the prune (posts.json reverts to the pre-prune
+      // count moments after the reconcile). Synchronize the catalog to the
+      // PRUNED set so the next persist writes the pruned entries. This only
+      // drops the OLDEST retired posts beyond `retiredKeep` — already archived
+      // + backed up, never a live roster/wake target (R6 intact; the archive
+      // and the pre-prune backup are NOT touched).
+      if (reconcilePosts.prunedPostIds.length > 0) {
+        const removed = registry.removePosts(reconcilePosts.prunedPostIds)
+        ctx.logger.info(`[deepartments] durable-registry reconcile: dropped ${removed} pruned retired post(s) from the in-memory catalog to keep it consistent with the pruned posts.json (a later persist now writes the pruned set, not the full set)`)
+      }
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] durable-registry validation failed: ${error instanceof Error ? error.message : String(error)}`)
     }
