@@ -83,6 +83,7 @@ import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from '.
 import { runHostRotation, ASISTENTE_SESSION_TITLE, isArchivedSession } from './core/session-rotation.js'
 import type { RotationPersistenceLike, WorkspaceRegistryLike } from './core/session-rotation.js'
 import { createLifecycleService, buildSleepJournalMessage, shouldClearCleanupPending } from './core/lifecycle.js'
+import type { LifecycleService } from './core/lifecycle.js'
 import type { Config, CoordinatorConfig, DepartmentConfig, ParallelConfig, ParallelMonitorConfig } from './org.js'
 import {
   MessagesStore,
@@ -139,7 +140,7 @@ import {
   buildHeadPresetComposition,
   buildHeadPresetMetadata
 } from './head-presets.js'
-import { roleForSession } from './role-orient.js'
+import { roleForSession, buildSubagentOrientation } from './role-orient.js'
 // FASE 2 step (a): the durable registry store (hosts/posts catalog) is carved
 // out of this monolith into ./core/registry.js — the SINGLE source of the
 // catalog. Everything registry-related below (mintWorkerSessionId, the durable
@@ -4434,7 +4435,14 @@ export function applyInvoke(ctx: Context, config: Config) {
   // durable read/persist + registerEntry/ensureHost/markRetired. The consts
   // below are references to its maps so EVERY existing consumer reads/writes
   // the SAME live catalog (behavior-neutral, R6 byte-compatible on disk).
-  const registry = new RegistryStore({ stateDir: config.stateDir, logger: ctx.logger })
+  // FASE 2.5 BATCH B: the catalog is now a dshd-core SERVICE
+  // (`ctx.get('deepartments.catalog')`). In the FULL composition dshd-core
+  // applied first and provided it; in a MINIMAL composition (dshd-core absent)
+  // we fall back to a behavior-neutral in-bundle construction + a warn.
+  const registry = (ctx.get('deepartments.catalog') as RegistryStore | undefined) ?? ((): RegistryStore => {
+    ctx.logger.warn('[deepartments] dshd-core is not composed — the catalog is constructed in-bundle (behavior-neutral fallback).')
+    return new RegistryStore({ stateDir: config.stateDir, logger: ctx.logger })
+  })()
   const byPost = registry.byPost
   // QD (spec 007 §4.1): the resolved worker-archive dice probability from the
   // `quality` config block (absent/invalid → code default 0.10). Consumed by
@@ -5673,29 +5681,36 @@ export function applyInvoke(ctx: Context, config: Config) {
   // injector. The deps below are the closure-bound catalog maps + identity
   // resolvers + the deferred sleep surface replace + the W8-d heartbeat
   // assembly (kept in invoke.ts — health concern), mirroring registry/delivery.
-  const wakePackService = createWakePackService({
-    byPost,
-    hosts,
-    getHost: (hostId) => hosts.get(hostId),
-    postIdForChild,
-    hostIdForSession,
-    refreshPresence,
-    wakePackInjected,
-    deferredSleepReplace,
-    persistHosts,
-    roleForSession,
-    computeHostSleepSurfacePlan,
-    buildSleepJournalMessage,
-    assembleHeartbeat,
-    readPresenceStateFile,
-    journalPathFor,
-    // Lazy getter: the message store is opened later in applyInvoke (single-
-    // process open); resolved at assembly time, never at construction.
-    messagesStoreReady: () => messagesStoreReady,
-    stateDir: config.stateDir,
-    repoRoot,
-    logger: ctx.logger
-  })
+  // FASE 2.5 BATCH B: consume the wakepack SERVICE from dshd-core when composed;
+  // fall back to a behavior-neutral in-bundle construction + warn in a minimal
+  // composition (dshd-core absent).
+  const wakePackService = (ctx.get('deepartments.wakepack') as WakePackService | undefined) ?? (() => {
+    ctx.logger.warn('[deepartments] dshd-core is not composed — the wakepack service is constructed in-bundle (behavior-neutral fallback).')
+    return createWakePackService({
+      byPost,
+      hosts,
+      getHost: (hostId) => hosts.get(hostId),
+      postIdForChild,
+      hostIdForSession,
+      refreshPresence,
+      wakePackInjected,
+      deferredSleepReplace,
+      persistHosts,
+      roleForSession,
+      buildSubagentOrientation,
+      computeHostSleepSurfacePlan,
+      buildSleepJournalMessage,
+      assembleHeartbeat,
+      readPresenceStateFile,
+      journalPathFor,
+      // Lazy getter: the message store is opened later in applyInvoke (single-
+      // process open); resolved at assembly time, never at construction.
+      messagesStoreReady: () => messagesStoreReady,
+      stateDir: config.stateDir,
+      repoRoot,
+      logger: ctx.logger
+    })
+  })()
 
   // The wake pack is registered on the SAME `agent/pre-step` Cordis waterfall
   // the runtime-context + skill-catalog use (no dsh-core change). The actual
@@ -8752,31 +8767,37 @@ export function applyInvoke(ctx: Context, config: Config) {
   // tool `execute` handlers reference `lifecycle` lazily, so even the earlier
   // head own-layer registrations (installHeadBoardTools) bind it correctly at
   // tool-call time.
-  const lifecycle = createLifecycleService({
-    byPost,
-    hosts,
-    hostForSession,
-    postIdForChild,
-    hostIdForSession,
-    ensureHost,
-    persistPosts,
-    persistHosts,
-    journalPath: (memberId) => journalPathFor(memberId),
-    writeJournal,
-    readJournal,
-    bumpHostSleepCounter,
-    bumpPostSleepCounter,
-    archivePostSessionOnSleep,
-    disposeHeadHandleOnce,
-    maybeEmitQualityInspectDirective,
-    runHostRotation,
-    deptGet: (key) => ctx.get(key),
-    stateDir: config.stateDir,
-    deferredSleepReplace,
-    wakePackInjected,
-    buildSleepJournalMessage,
-    logger: ctx.logger
-  })
+  // FASE 2.5 BATCH B: consume the lifecycle SERVICE from dshd-core when composed;
+  // fall back to a behavior-neutral in-bundle construction + warn in a minimal
+  // composition (dshd-core absent).
+  const lifecycle = (ctx.get('deepartments.lifecycle') as LifecycleService | undefined) ?? (() => {
+    ctx.logger.warn('[deepartments] dshd-core is not composed — the lifecycle service is constructed in-bundle (behavior-neutral fallback).')
+    return createLifecycleService({
+      byPost,
+      hosts,
+      hostForSession,
+      postIdForChild,
+      hostIdForSession,
+      ensureHost,
+      persistPosts,
+      persistHosts,
+      journalPath: (memberId) => journalPathFor(memberId),
+      writeJournal,
+      readJournal,
+      bumpHostSleepCounter,
+      bumpPostSleepCounter,
+      archivePostSessionOnSleep,
+      disposeHeadHandleOnce,
+      maybeEmitQualityInspectDirective,
+      runHostRotation,
+      deptGet: (key) => ctx.get(key),
+      stateDir: config.stateDir,
+      deferredSleepReplace,
+      wakePackInjected,
+      buildSleepJournalMessage,
+      logger: ctx.logger
+    })
+  })()
 
   // --- F2 (spec 004 §5.6): messaging ACL by department — catalog route ONLY --
   // THE FRONTIER (documented, per spec §5.6): the ACL gates ONLY the catalog
@@ -8942,20 +8963,25 @@ export function applyInvoke(ctx: Context, config: Config) {
    * apply, deps injected — AGENTS.md rule 4, no module-global mutable state).
    * Consumed by send_message (directly) and by the `deliverBusRecord` wrapper
    * (dept_job_run / dept_worker_spawn / dept_post_create + the boot re-delivery
-   * driver). */
-  const delivery = createDeliveryEngine({
-    stateDir: messageStoreDir,
-    logger: ctx.logger,
-    markPrepared: (record, recipientId) => markDelivery(messageStoreDir, record.id, recipientId, 'prepared'),
-    markFinal: (record, recipientId, status) => markDelivery(messageStoreDir, record.id, recipientId, status),
-    subagents,
-    resolveChild: resolveBusChild,
-    deliverChild: deliverBusChild,
-    resolveCatalogRoute: resolveBusCatalogRoute,
-    busProfileFor,
-    deliverPost: busDeliverToPost,
-    deliverHost: busDeliverToHost
-  })
+   * driver). FASE 2.5 BATCH B: consume the delivery SERVICE from dshd-core when
+   * composed; fall back to a behavior-neutral in-bundle construction + warn in a
+   * minimal composition (dshd-core absent). */
+  const delivery = (ctx.get('deepartments.deliver') as DeliveryEngine | undefined) ?? (() => {
+    ctx.logger.warn('[deepartments] dshd-core is not composed — the delivery engine is constructed in-bundle (behavior-neutral fallback).')
+    return createDeliveryEngine({
+      stateDir: messageStoreDir,
+      logger: ctx.logger,
+      markPrepared: (record, recipientId) => markDelivery(messageStoreDir, record.id, recipientId, 'prepared'),
+      markFinal: (record, recipientId, status) => markDelivery(messageStoreDir, record.id, recipientId, status),
+      subagents,
+      resolveChild: resolveBusChild,
+      deliverChild: deliverBusChild,
+      resolveCatalogRoute: resolveBusCatalogRoute,
+      busProfileFor,
+      deliverPost: busDeliverToPost,
+      deliverHost: busDeliverToHost
+    })
+  })()
 
   /** B3 gap fix (reviewer B2 note a): with the board gone, the host's
    * auto-registration must not depend on board tools. For every host-family

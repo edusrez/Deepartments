@@ -35,12 +35,25 @@ import { execFile as execFileCb } from 'node:child_process'
 import { promisify } from 'node:util'
 import path from 'node:path'
 import { createUserMessage, boundContextSummary, type MessageSource } from '@deepseek-ai/dsh-llm'
-import { buildSubagentOrientation, type SubagentRole } from './role-orient.js'
 import type { PostEntry, HostEntry } from './registry.js'
 import { listActiveMembers } from './registry.js'
 import type { MessageRecord } from './messages.js'
 
 const execFileP = promisify(execFileCb)
+
+/**
+ * The transient-subagent role. ROLE_CONTRACTS CONSOLIDATION (FASE 2.5 BATCH B):
+ * the bundle `src/role-orient.ts` is the SINGLE SOURCE OF TRUTH. This package
+ * does NOT own a role-orient copy; the runtime `buildSubagentOrientation`
+ * (which the bundle's role-orient.ts provides) is INJECTED via `WakePackDeps`.
+ * This is only the structural string-union type used in the injected-signature
+ * types (a type is compile-time; the package cannot import it from the bundle
+ * without a backwards dependency — dshd-core is a dependency OF the bundle).
+ * It is structurally identical to the bundle's `SubagentRole`.
+ *
+ * NO export default (pitfall 0001 — breaks `inject`).
+ */
+export type SubagentRole = 'builder' | 'reviewer' | 'researcher' | 'scribe' | 'explore' | 'generic'
 
 // ---------------------------------------------------------------------------
 // PURE wake-pack helpers (shared with the assembly; unit-tested via lib/invoke).
@@ -272,12 +285,22 @@ export function buildPresenceMessage(present: boolean) {
  * Task T4 — the compact ROLE-focused orientation injected into a TRANSIENT
  * dispatched subagent (origin === 'subagent') at its first pre-step, in place
  * of the full ~4.6-4.9k-token host wake pack. One org line + the per-role
- * contract block (from src/role-orient.ts) + a reporting pointer. Same
- * plugin/notice surface as the host pack so it lands as a collapsed row.
+ * contract block (from the bundle `src/role-orient.ts` — the single source,
+ * injected as `buildSubagentOrientation` via `WakePackDeps`) + a reporting
+ * pointer. Same plugin/notice surface as the host pack so it lands as a
+ * collapsed row.
+ *
+ * ROLE_CONTRACTS CONSOLIDATION (FASE 2.5 BATCH B): `buildSubagentOrientation`
+ * is NOT imported from a role-orient copy here — it is the injected bundle
+ * function (`deps.buildSubagentOrientation`), so this package owns no copy of
+ * the role contracts.
  */
-export function buildSubagentOrientationMessage(role: SubagentRole) {
-  // role-orient.ts still takes a `roomId` parameter (out of B3a scope — its
-  // identity line is being cleaned in the persona-wording phase); the B3
+export function buildSubagentOrientationMessage(
+  role: SubagentRole,
+  buildSubagentOrientation: (role: SubagentRole, roomId: string) => string
+) {
+  // The injected builder still takes a `roomId` parameter (out of B3a scope —
+  // its identity line is being cleaned in the persona-wording phase); the B3
   // cutover passes the org label so the subagent identity never names a board
   // room.
   return createUserMessage({
@@ -533,8 +556,11 @@ export interface WakePackDeps {
   deferredSleepReplace: Map<string, string>
   /** Fire-and-forget hosts.json persistence (the deferred seed consume). */
   persistHosts(): void
-  /** Resolve the transient-subagent role (role-orient). */
+  /** Resolve the transient-subagent role (single source = bundle role-orient). */
   roleForSession(sessionId: string): SubagentRole
+  /** Build the compact subagent-orientation block (single source = bundle
+   * `src/role-orient.ts` — INJECTED, never a role-orient copy in this package). */
+  buildSubagentOrientation(role: SubagentRole, roomId: string): string
   /** The deferred sleep surface replace plan (Batch 7 helper — kept in invoke). */
   computeHostSleepSurfacePlan(nodes: readonly number[]): HostSleepSurfacePlan
   /** The deferred journal node builder (Batch 7 helper — kept in invoke). */
@@ -830,8 +856,9 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
     // childSessionMeta); a root host/head/worker carries origin undefined. A
     // one-shot atomic-task worker needs its role contract + a one-line org
     // identity, never journal/git/system/ROADMAP/roster/full-skill. The role
-    // comes from the in-process dispatch-time registry (src/role-orient.ts),
-    // defaulting to `generic` when unknown or after a cold resume.
+    // comes from the in-process dispatch-time registry (the bundle's
+    // src/role-orient.ts — the single source of truth), defaulting to `generic`
+    // when unknown or after a cold resume.
     // Read the FLAT top-level origin — the real runtime shape (dsh-session
     // flattens the creation meta into header.origin; header.meta never exists
     // at runtime — dsh-session/lib/index.js:1657-1668). The nested
@@ -845,7 +872,7 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
       deps.wakePackInjected.add(sessionId)
       return {
         kind: 'enter',
-        messages: [...d.messages, buildSubagentOrientationMessage(role)]
+        messages: [...d.messages, buildSubagentOrientationMessage(role, deps.buildSubagentOrientation)]
       }
     }
     args.signal?.throwIfAborted?.()

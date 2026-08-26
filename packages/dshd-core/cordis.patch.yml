@@ -1,12 +1,21 @@
 # dshd-core configuration layer — top-level YAML array of patch entries.
-# FASE 2.5 BATCH A (scaffold): dshd-core is a LIBRARY — a barrel that re-exports
-# the core surface (registry/messages/delivery/acl/wakepack/lifecycle/rotation/
-# cleanup). It is NOT yet a Cordis plugin: the plugin row below exists so the
-# package ships a patch-complete configuration layer, but it is INERT until the
-# bundle wires dshd-core as a plugin with apply/inject/services (Batch B). The
-# bundle's own cordis.patch.yml does NOT reference this row in Batch A, so it is
-# never composed into a live configuration (it does not affect dump-config).
+# FASE 2.5 BATCH A (scaffold) → B (services plugin): dshd-core is now a real
+# Cordis PLUGIN (name/inject/apply in lib/index.js) that registers the core
+# SERVICES (deepartments.catalog / deepartments.acl / deepartments.postState)
+# for the dsh-deepartments bundle to consume via ctx.get. The plugin row below
+# registers dshd-core with its core config (stateDir default + core constants)
+# so it composes. Because dshd-core is a `dependencies` of dsh-deepartments, the
+# composed configuration orders it BEFORE dsh-deepartments (a dependency applies
+# before its dependent), so `--dump-config` shows `# == dshd-core` before
+# `# == dsh-deepartments`.
 # Plain scalars only — no !!js outside the runtime config engine.
 - insert:
     - id: dshd-core
       name: dshd-core
+      config:
+        # The org stateDir — MUST match dsh-deepartments' config.stateDir so the
+        # catalog the bundle consumes points at the SAME posts.json/hosts.json.
+        stateDir: .deepartments
+        # core constants (configurable, code-defaulted): the catalog is the
+        # single source; no daemons / role registry here (single source stays the
+        # bundle's role-orient.ts).

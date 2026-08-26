@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      dshd-core:
+        specifier: workspace:*
+        version: link:packages/dshd-core
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
@@ -77,9 +81,6 @@ importers:
       '@types/react':
         specifier: ~18.3.1
         version: 18.3.31
-      dshd-core:
-        specifier: workspace:*
-        version: link:packages/dshd-core
       dshd-webfetch:
         specifier: workspace:*
         version: link:packages/dshd-webfetch
