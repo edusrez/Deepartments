@@ -12674,3 +12674,76 @@ test('P2 visibility fix (d): a WORKER resume is UNCHANGED (no regression) — a 
     }
   })
 })
+
+test('dshd-jobs daemon production closure: the agenda scheduler effect registers setInterval(30000), resolves the LIVE closures (headForDepartment→coordinator.postId, notifyHead→bus notice) to fire a due calendar entry + deliver the notice, and clears the interval on dispose', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Seed ONE due plain calendar entry BEFORE boot so the daemon tick has an
+    // observable effect. createdBy = the configured research head so the live
+    // departmentForEntry closure resolves the owning department.
+    await writeCalendarStateFile(stateDir, {
+      entries: [{
+        id: 'e1', label: 'Due sync', at: new Date(Date.now() - 5 * 60000).toISOString(),
+        createdBy: 'research-head', createdAt: Date.now(), fired: false
+      }]
+    })
+    // Capture the real setInterval/clearInterval calls the plugin effects make.
+    const setCalls = []
+    const clearCalls = []
+    const origSet = global.setInterval
+    const origClear = global.clearInterval
+    let agendaHandle
+    global.setInterval = (fn, delay, ...args) => { const handle = { fn, delay, args }; setCalls.push(handle); return handle }
+    global.clearInterval = (handle) => { clearCalls.push(handle) }
+    try {
+      const { agents, dispose } = await bootPlugin(stateDir)
+      try {
+        await waitForHeadMaterialized(agents)
+        // The agenda scheduler daemon is the ONLY 30_000ms interval the plugin
+        // registers (parallel monitor = 20_000ms; health = 60_000ms default).
+        const agenda = setCalls.find((c) => c.delay === 30000)
+        assert.ok(agenda, 'the agenda scheduler daemon registered a setInterval at AGENDA_SCHEDULER_INTERVAL_MS (30s)')
+        agendaHandle = agenda
+        // Drive the captured tick once — it must resolve the LIVE closures:
+        // headForDepartment → research-head (the coordinator.postId), and
+        // notifyHead → the bus agenda notice, then mark the entry fired.
+        agenda.fn()
+        await waitFor(() => readCalendarStateFile(stateDir).entries.some((e) => e.fired === true), 5000, 'the byCalendar due entry marked fired by the daemon tick')
+        const messages = await loadMessageRecords(resolveMessagesPath(stateDir))
+        assert.ok(messages.some((m) => (m.text ?? '').includes('Agenda notice: Due sync')), 'notifyHead closure delivered the agenda notice to the owning head')
+      } finally {
+        await dispose()
+      }
+    } finally {
+      global.setInterval = origSet
+      global.clearInterval = origClear
+    }
+    // The reversible effect (AGENTS.md rule 4) cleared the interval on dispose.
+    assert.ok(agendaHandle !== undefined, 'the agenda interval was registered')
+    assert.ok(clearCalls.includes(agendaHandle), 'the agenda scheduler interval is cleared on dispose (clearInterval)')
+  })
+})
+
+test('post-carve smoke: the 5 jobs/calendar tools register post-carve in their correct scopes (dept_job_list/run HEAD-own-layer only; dept_calendar_add/list/remove on EVERY post)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      // The configured head (a manager post) gets ALL FIVE in its OWN layer.
+      for (const name of ['dept_job_list', 'dept_job_run', 'dept_calendar_add', 'dept_calendar_list', 'dept_calendar_remove']) {
+        assert.ok(headCtx.tools.get(name, key), `${name} present in the head own layer`)
+      }
+      // A WORKER (a non-manager post) gets the calendar_* tools (they are
+      // registered on EVERY post's OWN layer) but NEVER the job_* tools (those
+      // are registered ONLY in the head own-layer manager block).
+      const { result, ctx: workerCtx, key: workerKey } = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'track DSH updates and report' })
+      assert.ok(result.sessionId, 'the worker materialized')
+      for (const name of ['dept_calendar_add', 'dept_calendar_list', 'dept_calendar_remove']) {
+        assert.ok(workerCtx.tools.get(name, workerKey), `a worker inherits the calendar tool ${name}`)
+      }
+      for (const name of ['dept_job_list', 'dept_job_run']) {
+        assert.equal(workerCtx.tools.get(name, workerKey), undefined, `a worker NEVER sees ${name} (registered head-only)`)
+      }
+    } finally {
+      await dispose()
+    }
+  })
+})

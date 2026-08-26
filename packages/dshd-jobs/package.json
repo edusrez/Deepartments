@@ -1,0 +1,23 @@
+{
+  "name": "dshd-jobs",
+  "version": "0.1.0-rc.1",
+  "description": "Deepartments agenda/jobs engine: the pure cron scheduler (parseCronSchedule/cronMatches/nextCronFire/cronIsDue), the job-definition reader (parseJobDefFrontmatter/jobDirFor/readJobDefinitionFile/readAgendaJobs), the calendar + job-runs state store helpers (read/write calendar.json + job-runs-state.json) and the pure scheduler tick runAgendaSchedulerTick — extracted for the dshd-jobs phase of the modular Cordis split. A pure library package (NO cordis plugin, NO tool, NO patch): the bundle consumes it through the drop-in bridge src/core/jobs.ts.",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "license": "MIT"
+}

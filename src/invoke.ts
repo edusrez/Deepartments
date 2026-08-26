@@ -244,6 +244,63 @@ import type {
   FeedbackTipo,
   FeedbackUpdateInput
 } from './core/feedback.js'
+// dshd-jobs phase: the pure agenda/jobs engine (cron + job-def reader +
+// calendar/job-runs state helpers + the scheduler tick + its deps type) lives in
+// the dshd-jobs package (packages/dshd-jobs/src/index.ts), consumed via the
+// drop-in bridge (./core/jobs.js -> `export * from 'dshd-jobs'`). invoke.ts
+// imports the helpers the bundle wires (the dept_calendar_*/dept_job_list tools +
+// the agenda scheduler daemon) and RE-EXPORTS the whole surface so the compiled
+// lib/invoke.js stays a drop-in superset of the pre-extraction module (the
+// existing tests import these symbols from lib/invoke.js).
+import {
+  parseCronSchedule,
+  cronMatches,
+  nextCronFire,
+  cronIsDue,
+  CRON_DESYNC_WINDOW_MIN,
+  unwrapQuotedScalar,
+  parseJobDefFrontmatter,
+  jobDirFor,
+  readJobDefinitionFile,
+  readAgendaJobs,
+  readCalendarStateFile,
+  writeCalendarStateFile,
+  readJobRunsStateFile,
+  writeJobRunsStateFile,
+  runAgendaSchedulerTick,
+  normalizeSchedulerAutoRunReason,
+  schedulerAutoRunKey
+} from './core/jobs.js'
+import type { CalendarEntry, CalendarState } from './core/jobs.js'
+export {
+  parseCronSchedule,
+  cronMatches,
+  nextCronFire,
+  cronIsDue,
+  CRON_DESYNC_WINDOW_MIN,
+  unwrapQuotedScalar,
+  parseJobDefFrontmatter,
+  jobDirFor,
+  readJobDefinitionFile,
+  readAgendaJobs,
+  readCalendarStateFile,
+  writeCalendarStateFile,
+  readJobRunsStateFile,
+  writeJobRunsStateFile,
+  runAgendaSchedulerTick,
+  normalizeSchedulerAutoRunReason,
+  schedulerAutoRunKey
+} from './core/jobs.js'
+export type {
+  CronSchedule,
+  JobDefParsed,
+  AgendaJobItem,
+  CalendarEntry,
+  CalendarState,
+  AgendaSchedulerDeps,
+  SchedulerAutoRunFinding,
+  JobsDepartment
+} from './core/jobs.js'
 // Re-export the delivery engine's public surface (value + type) so the compiled
 // lib/invoke.js stays a drop-in superset of the pre-extraction module.
 export { createDeliveryEngine, frameBusRecord } from './core/delivery.js'
@@ -828,88 +885,9 @@ export async function writePresenceStateFile(stateDir: string, state: PresenceSt
  * `applyInvoke` `repoRoot` (same expression, same value). */
 export const REPO_ROOT = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
 
-/** One runtime calendar entry (spec §Agenda — `<stateDir>/calendar.json`).
- * `at` is an ISO datetime; `fired` is the scheduler's ONE-SHOT marker (an
- * ad-hoc entry fires once — no recurrence; a job's recurrence lives in its own
- * `schedule`). All optional fields are omitted, never `undefined` (the caller
- * and the client output stay JSON-lossless). */
-export interface CalendarEntry {
-  id: string
-  label: string
-  at: string
-  jobId?: string
-  createdBy?: string
-  createdAt?: number
-  fired?: boolean
-  /** B2 (spec W5): the CONFIG department id of the caller that added the entry
-   * (stamped at `dept_calendar_add` from the caller's department). Optional so
-   * a legacy/malformed entry loads untouched; set for every entry added by a
-   * configured department post. Lets `dept_calendar_list` filter by department
-   * while the DEFAULT (no filter) still returns the FULL shared (global)
-   * agenda — the agenda stays unified across departments. */
-  departmentId?: string
-}
-
-export interface CalendarState {
-  entries: CalendarEntry[]
-}
-
-/** Structural guard for a calendar entry (a malformed/partial record is dropped
- * rather than leaking an unrenderable shape). */
-function isCalendarEntry(value: unknown): value is CalendarEntry {
-  if (typeof value !== 'object' || value === null) return false
-  const entry = value as Record<string, unknown>
-  return typeof entry.id === 'string' && typeof entry.label === 'string' && typeof entry.at === 'string'
-}
-
-/** Read `<stateDir>/calendar.json`. Absent, unreadable or malformed →
- * `{ entries: [] }` (never throws — PURE, mirrors readPresenceStateFile).
- * Exported so the dispatch/scheduler tests exercise the same reader as the
- * live wiring. */
-export function readCalendarStateFile(stateDir: string): CalendarState {
-  try {
-    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'calendar.json'), 'utf8')) as { entries?: unknown }
-    if (parsed !== null && typeof parsed === 'object' && Array.isArray(parsed.entries)) {
-      return { entries: parsed.entries.filter(isCalendarEntry) }
-    }
-    return { entries: [] }
-  } catch {
-    return { entries: [] }
-  }
-}
-
-/** Write `<stateDir>/calendar.json` (mkdir -p the dir, then write the state).
- * Returns nothing; throws on an fs failure — the writing tool folds that into a
- * warn so an RPC/tick never fails on a persist error, while a test can assert
- * the write directly. */
-export async function writeCalendarStateFile(stateDir: string, state: CalendarState): Promise<void> {
-  await mkdir(path.dirname(path.join(stateDir, 'calendar.json')), { recursive: true })
-  await writeFile(path.join(stateDir, 'calendar.json'), JSON.stringify(state), 'utf8')
-}
-
-/** Read `<stateDir>/job-runs-state.json` — the idempotency ledger
- * `{ jobId: lastFiredAtMs }`. Absent/unreadable/malformed → `{}` (never throws).
- * Value = the ms epoch of the last scheduler fire for that job (minute
- * resolution; the scheduler relies on the minute floor so a per-minute job
- * fires exactly once a minute and never re-fires inside the same window). */
-export function readJobRunsStateFile(stateDir: string): Record<string, number> {
-  try {
-    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'job-runs-state.json'), 'utf8')) as Record<string, unknown>
-    const out: Record<string, number> = {}
-    for (const [jobId, value] of Object.entries(parsed)) {
-      if (typeof value === 'number' && Number.isFinite(value)) out[jobId] = value
-    }
-    return out
-  } catch {
-    return {}
-  }
-}
-
-/** Write `<stateDir>/job-runs-state.json` (mkdir -p the dir, then the ledger). */
-export async function writeJobRunsStateFile(stateDir: string, state: Record<string, number>): Promise<void> {
-  await mkdir(path.dirname(path.join(stateDir, 'job-runs-state.json')), { recursive: true })
-  await writeFile(path.join(stateDir, 'job-runs-state.json'), JSON.stringify(state), 'utf8')
-}
+// (calendar + job-runs state helpers MOVED to packages/dshd-jobs — see the
+// dshd-jobs phase note above; the CalendarEntry/CalendarState types and the
+// read/write helpers are now imported + re-exported from ./core/jobs.js.)
 
 // ---------------------------------------------------------------------------
 // W6 system-health (owner request 2026-08-23: "monitorizar que todo va bien").
@@ -2944,283 +2922,15 @@ export function deptExecDenyReason(command: string, cwd: string, allowedRoots: r
   return undefined
 }
 
-/** A parsed 5-field cron expression (`m h dom mon dow`), each a Set of the
- * matching minute/hour/day/month/weekday values. `undefined` from
- * `parseCronSchedule` means "NOT a cron schedule" (e.g. the deployment's HUMAN
- * job `schedule` text) — such a schedule is displayed but never auto-fires. */
-export interface CronSchedule {
-  minutes: Set<number>
-  hours: Set<number>
-  dom: Set<number>
-  months: Set<number>
-  dow: Set<number>
-}
+// (cron scheduler engine MOVED to packages/dshd-jobs — see the dshd-jobs phase
+// note above; the CronSchedule type + parseCronSchedule/cronMatches/nextCronFire/
+// cronIsDue/CRON_DESYNC_WINDOW_MIN are now imported + re-exported from
+// ./core/jobs.js.)
 
-/** Build the full value set `[min..max]` for a cron field. */
-function cronAll(min: number, max: number): Set<number> {
-  const out = new Set<number>()
-  for (let v = min; v <= max; v++) out.add(v)
-  return out
-}
-
-/** Parse ONE cron field (min..max) into a value set, or undefined on a
- * non-cron token. Supported: an asterisk, an asterisk-slash-step, plain
- * numbers, comma lists and `n-m` ranges. Anything else → undefined (the
- * expression is NOT cron). */
-function cronFieldParse(expr: string, min: number, max: number): Set<number> | undefined {
-  const out = new Set<number>()
-  for (const partRaw of expr.split(',')) {
-    const part = partRaw.trim()
-    if (part === '*') {
-      for (let v = min; v <= max; v++) out.add(v)
-      continue
-    }
-    const step = /^\*\/(\d+)$/.exec(part)
-    if (step !== null) {
-      const n = Number(step[1])
-      if (!Number.isFinite(n) || n <= 0) return undefined
-      for (let v = min; v <= max; v += n) out.add(v)
-      continue
-    }
-    const range = /^(\d+)(?:-(\d+))?$/.exec(part)
-    if (range !== null) {
-      const start = Number(range[1])
-      const end = range[2] !== undefined ? Number(range[2]) : start
-      if (!Number.isFinite(start) || !Number.isFinite(end)) return undefined
-      for (let v = start; v <= end; v++) out.add(v)
-      continue
-    }
-    return undefined
-  }
-  for (const v of out) {
-    if (v < min || v > max) return undefined
-  }
-  return out
-}
-
-/** Parse a 5-field cron string, or undefined when it is not a valid cron
- * schedule. Includes the common `@` aliases (`@daily`/`@hourly`/`@weekly`/
- * `@monthly`/`@yearly`); a NON-5-field (HUMAN) schedule returns undefined. */
-export function parseCronSchedule(schedule: string): CronSchedule | undefined {
-  const s = String(schedule ?? '').trim()
-  if (s === '') return undefined
-  const allMin = cronAll(0, 59)
-  const allHour = cronAll(0, 23)
-  const allDom = cronAll(1, 31)
-  const allMon = cronAll(1, 12)
-  const allDow = cronAll(0, 7)
-  const aliases: Record<string, CronSchedule> = {
-    '@minutely': { minutes: allMin, hours: allHour, dom: allDom, months: allMon, dow: allDow },
-    '@hourly': { minutes: new Set([0]), hours: allHour, dom: allDom, months: allMon, dow: allDow },
-    '@daily': { minutes: new Set([0]), hours: new Set([0]), dom: allDom, months: allMon, dow: allDow },
-    '@weekly': { minutes: new Set([0]), hours: new Set([0]), dom: allDom, months: allMon, dow: new Set([0]) },
-    '@monthly': { minutes: new Set([0]), hours: new Set([0]), dom: new Set([1]), months: allMon, dow: allDow },
-    '@yearly': { minutes: new Set([0]), hours: new Set([0]), dom: new Set([1]), months: new Set([1]), dow: allDow },
-    '@annually': { minutes: new Set([0]), hours: new Set([0]), dom: new Set([1]), months: new Set([1]), dow: allDow }
-  }
-  const alias = aliases[s]
-  if (alias !== undefined) return alias
-  const parts = s.split(/\s+/)
-  if (parts.length !== 5) return undefined
-  const minutes = cronFieldParse(parts[0], 0, 59)
-  const hours = cronFieldParse(parts[1], 0, 23)
-  const dom = cronFieldParse(parts[2], 1, 31)
-  const months = cronFieldParse(parts[3], 1, 12)
-  const dow = cronFieldParse(parts[4], 0, 7)
-  if (minutes === undefined || hours === undefined || dom === undefined || months === undefined || dow === undefined) return undefined
-  return { minutes, hours, dom, months, dow }
-}
-
-/** Whether `at` falls on a minute the cron matches (minute resolution). */
-export function cronMatches(cron: CronSchedule, at: Date): boolean {
-  return (
-    cron.minutes.has(at.getMinutes()) &&
-    cron.hours.has(at.getHours()) &&
-    cron.dom.has(at.getDate()) &&
-    cron.months.has(at.getMonth() + 1) &&
-    cron.dow.has(at.getDay())
-  )
-}
-
-const CRON_HORIZON_MS = 366 * 24 * 60 * 60 * 1000 // 1 year: the next-fire search horizon
-
-/** The NEXT fire of `cron` STRICTLY AFTER `from`, or undefined when none falls
- * within the 1-year horizon. Minute-resolution forward scan (cheap — a cron
- * that rarely matches still only scans to its first match). */
-export function nextCronFire(cron: CronSchedule, from: Date): Date | undefined {
-  const candidate = new Date(from.getTime())
-  candidate.setSeconds(0, 0)
-  candidate.setMinutes(candidate.getMinutes() + 1)
-  const horizon = from.getTime() + CRON_HORIZON_MS
-  while (candidate.getTime() <= horizon) {
-    if (cronMatches(cron, candidate)) return new Date(candidate.getTime())
-    candidate.setMinutes(candidate.getMinutes() + 1)
-  }
-  return undefined
-}
-
-/** Cron desync window for the scheduler: a fire whose aligned minute is within
- * the last N minutes of `now` (a small wake/skew tolerance) is treated as due. */
-export const CRON_DESYNC_WINDOW_MIN = 2
-
-/** Whether the cron job should FIRE at `now`, given the persisted
- * `lastFiredAt` (ms epoch, optional). Idempotent: a fire ALIGNED minute that is
- * still within the desync window is due ONLY if it is STRICTLY after the last
- * fired minute (so a per-minute cron fires once a minute, never re-fires inside
- * the same window). Never throws. */
-export function cronIsDue(cron: CronSchedule, now: Date, lastFiredAt?: number): boolean {
-  const lastMinute = lastFiredAt === undefined ? -1 : Math.floor(lastFiredAt / 60000)
-  for (let back = 0; back <= CRON_DESYNC_WINDOW_MIN; back++) {
-    const candidate = new Date(now.getTime() - back * 60000)
-    if (!cronMatches(cron, candidate)) continue
-    if (Math.floor(candidate.getTime() / 60000) > lastMinute) return true
-  }
-  return false
-}
-
-// ---- job definition reading (shared by dept_job_list/dept_job_run + agenda) ---
-
-/** Unwrap a QUOTED-YAML scalar (the F4a jobs convention quotes free-text values
- * like `schedule`: `"daily 09:00 (reserved — …)"`). */
-export function unwrapQuotedScalar(value: string): string {
-  if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
-    return value.slice(1, -1)
-  }
-  return value
-}
-
-export interface JobDefParsed {
-  meta: Record<string, string>
-  body: string
-}
-
-/** Parse a JOB definition frontmatter (spec 004 §5.4-§5.5): the `---`-delimited
- * `key: value` one-line scalars for id/title/role/description/schedule?/owner/
- * outbox? PLUS a NON-EMPTY task body. Same lean YAML-lite shape as the role
- * parser, with the quoted-scalar unwrapping + REQUIRED-key validation
- * (id/title/role/description/owner). Returns undefined when the file has no
- * well-formed frontmatter block or omits a required key. PURE + exported so the
- * agenda/dispatch reader and the scheduler reuse the SAME reader as
- * dept_job_list/dept_job_run. */
-export function parseJobDefFrontmatter(text: string): JobDefParsed | undefined {
-  const lines = text.split('\n')
-  if (lines[0]?.trim() !== '---') return undefined
-  let end = -1
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
-      end = i
-      break
-    }
-  }
-  if (end < 0) return undefined
-  const meta: Record<string, string> = {}
-  for (let i = 1; i < end; i++) {
-    const scalar = /^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/.exec(lines[i])
-    if (scalar !== null) meta[scalar[1]] = unwrapQuotedScalar(scalar[2].trim())
-  }
-  const body = lines.slice(end + 1).join('\n').trim()
-  if (body === '') return undefined
-  for (const key of ['id', 'title', 'role', 'description', 'owner']) {
-    if (typeof meta[key] !== 'string' || meta[key].trim() === '') return undefined
-  }
-  return { meta, body }
-}
-
-/** Resolve the department jobDir (spec 004 §3.1/§3.3): the config
- * `org.departments[].jobDir` (repo-relative OR absolute), defaulting to
- * `<repoRoot>/docs/departments/<dept-id>/jobs` when absent/empty. */
-export function jobDirFor(repoRoot: string, department: { id: string; jobDir?: string }): string {
-  const configured = (department.jobDir ?? '').trim()
-  if (configured === '') return path.join(repoRoot, 'docs', 'departments', department.id, 'jobs')
-  return path.isAbsolute(configured) ? configured : path.join(repoRoot, configured)
-}
-
-/** Read + resolve ONE job definition (spec 004 §5.4): locate `<jobId>.md` in the
- * department jobDir, parse the frontmatter, validate the declared `id` matches
- * the requested jobId. LOUD errors — a versioned definition with broken
- * syntax/keys must fail the run, never spawn a task-less worker. Reused by
- * dept_job_run AND the scheduler (identical messages). */
-export async function readJobDefinitionFile(
-  repoRoot: string,
-  department: { id: string; jobDir?: string },
-  jobId: string
-): Promise<{ meta: Record<string, string>; body: string; path: string }> {
-  const jobDir = jobDirFor(repoRoot, department)
-  const filePath = path.join(jobDir, `${jobId}.md`)
-  let text: string
-  try {
-    text = await readFile(filePath, 'utf8')
-  } catch {
-    throw new Error(`[deepartments] dept_job_run: job not found: ${jobId} (searched ${jobDir})`)
-  }
-  const parsed = parseJobDefFrontmatter(text)
-  if (parsed === void 0) {
-    throw new Error(`[deepartments] dept_job_run: job "${jobId}" (${filePath}) has no valid frontmatter — expected a '---' block (id/title/role/description/owner required; schedule/outbox optional) plus a non-empty task body`)
-  }
-  if (parsed.meta.id !== jobId) {
-    throw new Error(`[deepartments] dept_job_run: job "${jobId}" (${filePath}) declares frontmatter id "${parsed.meta.id}" — the file name must match the job id it is referenced by`)
-  }
-  return { meta: parsed.meta, body: parsed.body, path: filePath }
-}
-
-/** One agenda job item: the dept_job_list frontmatter fields, a human `next`
- * (the ISO next-cron-fire, when the `schedule` is cron-style), and the internal
- * `cron` (a parsed CronSchedule, omitted when the schedule is NOT cron — e.g.
- * the deployment's HUMAN schedule text, which never auto-fires). The client
- * (AgendaJob) reads id/title/schedule/next; role/description are extras. */
-export interface AgendaJobItem {
-  id: string
-  title: string
-  role?: string
-  description?: string
-  schedule?: string
-  next?: string
-  cron?: CronSchedule
-}
-
-/** Read ALL departments' job definitions into agenda items (pure-ish fs read;
- * `nowMs` supplies the clock for the `next` computation so the dispatch tests
- * are deterministic). A missing jobDir is an empty list; an INVALID definition
- * is SKIPPED (the agenda is a read-only listing — per-entry errors belong to
- * dept_job_list, which keeps its own per-entry reporting). */
-export async function readAgendaJobs(repoRoot: string, departments: DepartmentConfig[], nowMs: number): Promise<AgendaJobItem[]> {
-  const now = new Date(nowMs)
-  const items: AgendaJobItem[] = []
-  for (const department of departments) {
-    const jobDir = jobDirFor(repoRoot, department)
-    let files: string[]
-    try {
-      files = (await readdir(jobDir)).filter((name) => name.endsWith('.md')).sort()
-    } catch {
-      continue
-    }
-    for (const name of files) {
-      let parsed: JobDefParsed | undefined
-      try {
-        parsed = parseJobDefFrontmatter(await readFile(path.join(jobDir, name), 'utf8'))
-      } catch {
-        parsed = void 0
-      }
-      if (parsed === void 0) continue
-      const schedule = parsed.meta.schedule !== undefined ? parsed.meta.schedule : undefined
-      const cron = schedule !== undefined ? parseCronSchedule(schedule) : undefined
-      const next = cron === undefined ? undefined : (() => {
-        const fire = nextCronFire(cron, now)
-        return fire === undefined ? undefined : fire.toISOString()
-      })()
-      items.push({
-        id: parsed.meta.id,
-        title: parsed.meta.title,
-        ...(parsed.meta.role !== undefined ? { role: parsed.meta.role } : {}),
-        ...(parsed.meta.description !== undefined ? { description: parsed.meta.description } : {}),
-        ...(schedule !== undefined ? { schedule } : {}),
-        ...(next !== undefined ? { next } : {}),
-        ...(cron !== undefined ? { cron } : {})
-      })
-    }
-  }
-  return items
-}
+// (job-definition reader MOVED to packages/dshd-jobs — see the dshd-jobs phase
+// note above; unwrapQuotedScalar/parseJobDefFrontmatter/jobDirFor/
+// readJobDefinitionFile/readAgendaJobs + JobDefParsed/AgendaJobItem are now
+// imported + re-exported from ./core/jobs.js.)
 
 // ---------------------------------------------------------------------------
 // W8-c DISCRETE FOLLOW-UP (scheduler auto-run visibility) — the agenda-scheduler
@@ -3235,31 +2945,10 @@ export async function readAgendaJobs(repoRoot: string, departments: DepartmentCo
 // a tick test is deterministic.
 // ---------------------------------------------------------------------------
 
-/** A scheduler auto-run no-fire finding surfaced by the pure tick (W8-c
- * scheduler-visibility): the fire resolved a head but runJob THREW, OR it
- * SKIPPED because the head post was unresolved, OR it returned FALSE (an
- * idempotency skip). */
-export interface SchedulerAutoRunFinding {
-  /** The job id that did not fire. */
-  jobId: string
-  /** The no-fire reason: 'no head' | 'idempotency-skip' | the thrown error text. */
-  reason: string
-  /** The thrown error text (when reason is a thrown error). */
-  error?: string
-}
-
-/** Normalize a scheduler no-fire reason into the dedupe-key reason: a
- * 'job already running' idempotency trip maps to 'idempotency-skip'; every
- * other reason is used verbatim. */
-export function normalizeSchedulerAutoRunReason(reason: string): string {
-  return /job already running/.test(reason) ? 'idempotency-skip' : reason
-}
-
-/** The scheduler dedupe key (W8-c scheduler-visibility): one key per
- * (jobId, reason) so a given no-fire is recorded ≤1 per HEALTH_DEDUPE_WINDOW_MS. */
-export function schedulerAutoRunKey(jobId: string, reason: string): string {
-  return `scheduler:${jobId}:${normalizeSchedulerAutoRunReason(reason)}`
-}
+// (SchedulerAutoRunFinding + normalizeSchedulerAutoRunReason +
+// schedulerAutoRunKey MOVED to packages/dshd-jobs — the pure tick + W8-c
+// scheduler-visibility helpers; the bundle imports the latter two for the
+// captureSchedulerAutoRunFailure sink below, from ./core/jobs.js.)
 
 /** Record ONE scheduler auto-run no-fire into post-errors.jsonl (postId
  * 'scheduler', the message = the jobId + the reason/cause) so the W6 health
@@ -3306,131 +2995,10 @@ export async function captureSchedulerAutoRunFailure(opts: {
   }
 }
 
-// ---- W1 scheduler tick (PURE — an injectable clock + injected hooks) -------
-
-/** Injected hooks + inputs the scheduler tick reads. The PRODUCTION wiring
- * (applyInvoke) binds the live registries (departments, post registry, the
- * job-run engine, the bus delivery seam); tests construct this directly with a
- * FIXED clock + stub runJob/notifyHead. Abstracted exactly like the endpoint
- * dispatcher deps so the tick is unit-testable without a booted plugin. */
-export interface AgendaSchedulerDeps {
-  /** The clock (ms epoch) — injectable so a tick test is deterministic. */
-  now(): number
-  /** Every configured department the scheduler fires for. */
-  departments: DepartmentConfig[]
-  /** The repo root for the default department jobDir resolution. */
-  repoRoot: string
-  /** The stateDir whose `calendar.json` the tick reads/marks fired. */
-  calendarStateDir: string
-  /** The stateDir whose `job-runs-state.json` persists the last-fired ledger. */
-  jobRunsStateDir: string
-  /** Resolve the head MEMBER id (postId) a department fires under, or undefined
-   * when the department has no registered head ("sin head" → skip + warn). */
-  headForDepartment(department: DepartmentConfig): string | undefined
-  /** Run ONE department job. Resolves `true` when it FIRED (spawned the worker);
-   * `false` when it was SKIPPED (already running / no head / any non-fatal
-   * error) — the tick never throws from here. */
-  runJob(department: DepartmentConfig, headPostId: string, jobId: string): Promise<boolean>
-  /** Deliver a simple agenda NOTICE to a head (never throws). */
-  notifyHead(headPostId: string, message: string): Promise<void>
-  /** Which department OWNS a calendar entry (its `createdBy` post). */
-  departmentForEntry(entry: CalendarEntry): DepartmentConfig | undefined
-  /** Which department owns a jobId (scans the jobDirs). */
-  departmentForJob(jobId: string): DepartmentConfig | undefined
-  /** Optional warn-capable logger (absent dep → the warn is dropped). */
-  logger?: { warn(message: string): void }
-  /** W8-c scheduler-visibility: optional AUTO-RUN no-fire sink. The tick calls
-   * it for every job auto-run that did NOT fire — (a) the fire resolved a head
-   * but runJob THREW, (b) the fire SKIPPED because the head post was unresolved
-   * (no head), (c) the fire returned FALSE (idempotency skip). Absent dep → the
-   * finding is dropped (the existing tests keep the tick hermetic). May be
-   * async (the tick awaits it, so a capture is never lost to a fire-and-forget). */
-  onAutoRunSkip?: (finding: SchedulerAutoRunFinding) => void | Promise<void>
-}
-
-/** ONE scheduler tick (spec §5.7 — W1): (a) fire any cron-scheduled job whose
- * next run is DUE within the desync window and not already fired (idempotent by
- * the persisted job-runs-state ledger), attempting the SAME dept_job_run engine
- * and skipping+warn on "already running" / no-head; (b) fire any CALENDAR entry
- * whose `at ≤ now` and `fired:false` — a `jobId` entry runs the job, a plain
- * entry notifies the owning head with the label; (c) NEVER throws (every
- * internal failure is a warn). The deps keep it pure: a fixed clock + stubbed
- * hooks make a tick test deterministic. */
-export async function runAgendaSchedulerTick(deps: AgendaSchedulerDeps): Promise<void> {
-  try {
-    const nowMs = deps.now()
-    const now = new Date(nowMs)
-    // (a) cron-scheduled jobs, per department.
-    const runs = readJobRunsStateFile(deps.jobRunsStateDir)
-    let runsChanged = false
-    for (const department of deps.departments) {
-      const headPostId = deps.headForDepartment(department)
-      const jobs = await readAgendaJobs(deps.repoRoot, [department], nowMs)
-      for (const job of jobs) {
-        if (job.cron === undefined) continue
-        if (!cronIsDue(job.cron, now, runs[job.id])) continue
-        if (headPostId === undefined) {
-          deps.logger?.warn(`[deepartments] scheduler: job "${job.id}" (department ${department.id}) is due but the department has NO head — skip`)
-          await deps.onAutoRunSkip?.({ jobId: job.id, reason: 'no head' })
-          continue
-        }
-        try {
-          const fired = await deps.runJob(department, headPostId, job.id)
-          if (fired) {
-            runs[job.id] = nowMs
-            runsChanged = true
-          } else {
-            await deps.onAutoRunSkip?.({ jobId: job.id, reason: 'idempotency-skip' })
-          }
-        } catch (error: unknown) {
-          const errorText = error instanceof Error ? error.message : String(error)
-          deps.logger?.warn(`[deepartments] scheduler: job "${job.id}" run failed: ${errorText}`)
-          await deps.onAutoRunSkip?.({ jobId: job.id, reason: errorText, error: errorText })
-        }
-      }
-    }
-    if (runsChanged) await writeJobRunsStateFile(deps.jobRunsStateDir, runs)
-    // (b) calendar entries due (at ≤ now, not fired).
-    const cal = readCalendarStateFile(deps.calendarStateDir)
-    let calChanged = false
-    for (const entry of cal.entries) {
-      if (entry.fired === true) continue
-      const at = Date.parse(entry.at)
-      if (Number.isNaN(at) || at > nowMs) continue
-      if (entry.jobId !== undefined && entry.jobId !== '') {
-        const department = deps.departmentForJob(entry.jobId) ?? deps.departmentForEntry(entry)
-        const headPostId = department === void 0 ? undefined : deps.headForDepartment(department)
-        if (headPostId === void 0) {
-          deps.logger?.warn(`[deepartments] scheduler: calendar "${entry.id}" (job ${entry.jobId}) is due but no head is available — skip`)
-          await deps.onAutoRunSkip?.({ jobId: entry.jobId, reason: 'no head' })
-        } else {
-          try {
-            const fired = await deps.runJob(department as DepartmentConfig, headPostId, entry.jobId)
-            if (!fired) await deps.onAutoRunSkip?.({ jobId: entry.jobId, reason: 'idempotency-skip' })
-          } catch (error: unknown) {
-            const errorText = error instanceof Error ? error.message : String(error)
-            deps.logger?.warn(`[deepartments] scheduler: calendar job "${entry.jobId}" run failed: ${errorText}`)
-            await deps.onAutoRunSkip?.({ jobId: entry.jobId, reason: errorText, error: errorText })
-          }
-        }
-      } else {
-        const department = deps.departmentForEntry(entry)
-        const ownHead = department === void 0 ? undefined : deps.headForDepartment(department)
-        const target = ownHead ?? (deps.departments[0] !== void 0 ? deps.headForDepartment(deps.departments[0]) : undefined)
-        if (target === void 0) {
-          deps.logger?.warn(`[deepartments] scheduler: calendar "${entry.id}" is due but no head is available for the notice — skip`)
-        } else {
-          await deps.notifyHead(target, entry.label)
-        }
-      }
-      entry.fired = true
-      calChanged = true
-    }
-    if (calChanged) await writeCalendarStateFile(deps.calendarStateDir, cal)
-  } catch (error: unknown) {
-    deps.logger?.warn(`[deepartments] scheduler tick failed: ${error instanceof Error ? error.message : String(error)}`)
-  }
-}
+// (the W1 agenda scheduler tick + its deps type MOVED to packages/dshd-jobs —
+// see the dshd-jobs phase note above; AgendaSchedulerDeps/runAgendaSchedulerTick
+// are now imported + re-exported from ./core/jobs.js. The PRODUCTION daemon
+// (below) binds the live registries onto the pure tick's deps.)
 
 
 // ---- W3b parallel-monitor (Parallel Web Systems event_stream monitors) ------
