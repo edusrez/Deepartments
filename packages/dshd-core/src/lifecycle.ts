@@ -295,26 +295,26 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
       // coordinator ('quality-head'). Emits an ADDRESSED QUALITY INSPECT
       // directive to quality-head. Non-fatal; Runs AFTER the dispose dispatch.
       //
-      // DEADLOCK FIX (incident 2026-08-26 — the frozen-bus cascade): the
-      // directive DELIVERY must never be awaited inside the sleep tool. The
-      // emit delivers via busDeliverToPost → materializePost; when the
-      // directive TARGET is a just-slept head (the QH self-case — the QH's own
+      // DEADLOCK FIX (incident 2026-08-26 — the frozen-bus cascade): this
+      // await is SAFE ONLY because materializePost's detach join is BOUNDED
+      // (src/invoke.ts joinHeadDisposeOnce — the same commit). The emit
+      // delivers via busDeliverToPost → materializePost; when the directive
+      // TARGET is a just-slept head (the QH self-case — the QH's own
       // 'head-slept' directive in the D-Q2 dice path — or ANY head once the
       // target machine is slept), that materialization JOINS the in-flight
       // detach just dispatched above — the very detach whose whenIdle cannot
       // settle while THIS turn is still executing the tool (the self-deadlock
-      // contract documented above). An awaited emit therefore freezes the
-      // sleep turn forever; its detach then never settles, and EVERY
-      // subsequent bus delivery to the slept head joins the zombie detach
+      // contract documented above). Pre-fix that join was UNBOUNDED: it froze
+      // the sleep turn forever, its detach then never settled, and EVERY
+      // subsequent bus delivery to the slept head joined the zombie detach
       // (the send_message that froze the host on 2026-08-26 21:18Z — the QH
-      // self-sleep had frozen the bus an hour earlier at 20:48Z). FIRE IT
-      // (the dispose precedent, same rationale): the directive record is
-      // appended DURABLY before its delivery, so a racing/dropped delivery
-      // re-delivers idempotently at boot; the sleep never blocks on it.
+      // self-sleep had frozen the bus an hour earlier at 20:48Z). With the
+      // bounded join the delivery resolves within the bound (the zombie
+      // detach self-heals: the sleep return ends the turn → whenIdle settles)
+      // — the sleep may be delayed by at most the bound when a zombie exists,
+      // it can never freeze.
       if (entry.provider !== 'worker') {
-        void ctx.maybeEmitQualityInspectDirective({ kind: 'head-slept', headPostId: memberId, sessionId, sleepEpoch: entry.sleepEpoch }).catch((error: unknown) => {
-          ctx.logger?.warn?.(`[deepartments] dept_sleep: quality-inspect directive dispatch failed (non-fatal — the sleep already committed): ${error instanceof Error ? error.message : String(error)}`)
-        })
+        await ctx.maybeEmitQualityInspectDirective({ kind: 'head-slept', headPostId: memberId, sessionId, sleepEpoch: entry.sleepEpoch })
       }
       return { room: entry.roomId, member: memberId, memoPath: ctx.journalPath(memberId), sleepEpoch: entry.sleepEpoch }
     },
@@ -389,11 +389,11 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
           // rotation is inspected at 100%. Emits an ADDRESSED QUALITY INSPECT
           // directive to quality-head. Non-fatal. Do NOT move this into
           // session-rotation.ts (bus-less). DEADLOCK FIX (2026-08-26): same
-          // rationale as the head-sleep directive above — the delivery must
-          // never be awaited while a rotation/sleep is committing (it can join
-          // a zombie detach of the directive target). Fire it: the record is
-          // durable, boot re-delivers.
-          void ctx.maybeEmitQualityInspectDirective({
+          // rationale as the head-sleep directive above — the await is safe
+          // ONLY because materializePost's detach join is BOUNDED (the same
+          // commit); a zombie target delays it by at most the bound, it can
+          // never freeze the rotation.
+          await ctx.maybeEmitQualityInspectDirective({
             kind: 'host-rotated',
             oldSessionId: sessionId,
             newSessionId: rotation.newSessionId,
@@ -401,8 +401,6 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
             newHostId: rotation.newHostId,
             sleepEpoch: rotation.sleepEpoch,
             archiveOk: rotation.archive?.ok === true
-          }).catch((error: unknown) => {
-            ctx.logger?.warn?.(`[deepartments] dept_sleep (host): quality-inspect directive dispatch failed (non-fatal — the rotation already committed): ${error instanceof Error ? error.message : String(error)}`)
           })
           return { room: existing?.roomId ?? 'board', member: rotation.newHostId, memoPath: rotation.newJournalPath, sleepEpoch: rotation.sleepEpoch }
         }
