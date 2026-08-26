@@ -19,7 +19,7 @@
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 import { readFileSync, existsSync } from 'node:fs'
-import { copyFile, writeFile, rename, readFile } from 'node:fs/promises'
+import { copyFile, writeFile, rename, readFile, appendFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { ROTATION_SCHEMA_VERSION, validateHostsRotationFile } from './session-rotation.js'
@@ -585,6 +585,19 @@ export interface ReconcileDurablePostsOpts {
   /** When true, WRITE the retire mark for the flagged candidates (backup the
    * pre-repair posts.json first). Default false → flag + warn only. */
   retireGoneWorkers?: boolean
+  /** A3/C2 — max RETIRED entries to KEEP in posts.json when pruning is enabled.
+   * Absent → 50. When the durable posts.json holds MORE retired entries than
+   * this, the OLDEST retired entries beyond the newest `retiredKeep` are Moved
+   * to the retired archive (non-destructive; never erased). */
+  retiredKeep?: number
+  /** A3/C2 — the archive filename to append pruned retired entries to, under
+   * `stateDir`. Absent → `posts-retired-archive.jsonl`. */
+  retiredArchiveFile?: string
+  /** A3/C2 — when TRUE, retired-entry pruning RUNS. When false or ABSENT,
+   * pruning is SKIPPED (the retire mark + gone-worker logic still run).
+   * Absent → false (conservative default — pruning is OFF unless explicitly
+   * enabled with true). */
+  enableRetiredPrune?: boolean
   /** Clock (ms epoch) for the backup timestamp. Absent → Date.now. */
   now?: () => number
 }
@@ -593,7 +606,17 @@ export interface ReconcileDurablePostsOpts {
  * sessions, per m-119. Never throws. A configured head is never touched. When
  * `retireGoneWorkers`, the pre-repair posts.json is copied to
  * `<stateDir>/posts.json.bak-<ts>-reconcile` FIRST, then the retires are
- * written atomically (tmp + rename). Idempotent. */
+ * written atomically (tmp + rename). Idempotent.
+ *
+ * A3/C2 — RETIRED-ENTRY PRUNING (non-destructive): when `enableRetiredPrune`
+ * is EXPLICITLY true (default false — pruning is OFF unless enabled) and the
+ * durable posts.json holds MORE than `retiredKeep`
+ * (default 50) retired entries, the OLDEST retired entries beyond the newest
+ * `retiredKeep` are moved to the retired archive (`retiredArchiveFile`,
+ * default `posts-retired-archive.jsonl`) — FIRST backing up posts.json to
+ * `<stateDir>/posts.json.bak-<ts>-prune`, then appending a JSONL line per pruned
+ * entry, then writing posts.json atomically. The remaining on-disk shape is
+ * UNCHANGED (R6); the pruned entries are preserved in the archive, never erased. */
 export async function reconcileDurablePostsRegistry(
   stateDir: string,
   opts: ReconcileDurablePostsOpts
@@ -633,6 +656,12 @@ export async function reconcileDurablePostsRegistry(
   for (const candidate of result.workerRetireCandidates) {
     logger?.warn(`[deepartments] reconcile-posts: worker "${candidate.postId}" (session ${candidate.sessionId}) is a retire-leak candidate — its durable session is gone${opts.retireGoneWorkers === true ? '; auto-retiring (retire-if-safe)' : '; NOT auto-retired (flag only)'}`)
   }
+  // Stage the retired marks into `workingRaw` (NOT written yet — the single
+  // atomic write at the end folds in any pruning so posts.json is written ONCE
+  // when either operation changed it).
+  let changed = false
+  let workersRetired: Array<{ postId: string; sessionId: string }> = []
+  let workingRaw: Record<string, unknown> | undefined
   if (opts.retireGoneWorkers === true && result.workerRetireCandidates.length > 0) {
     try {
       const nowMs = (opts.now ?? (() => Date.now()))()
@@ -643,16 +672,84 @@ export async function reconcileDurablePostsRegistry(
         const e = repairedRaw[candidate.postId]
         if (e !== null && typeof e === 'object') repairedRaw[candidate.postId] = { ...(e as Record<string, unknown>), retired: true }
       }
-      const tmpPath = path.join(stateDir, `posts.json.tmp-${nowMs}`)
-      await writeFile(tmpPath, JSON.stringify(repairedRaw, null, 2), 'utf8')
-      await rename(tmpPath, path.join(stateDir, 'posts.json'))
+      workingRaw = repairedRaw
+      changed = true
+      workersRetired = result.workerRetireCandidates
       logger?.warn(`[deepartments] reconcile-posts: RETIRED ${result.workerRetireCandidates.length} gone worker(s) in durable posts.json (backup ${path.basename(backupPath)})`)
-      return { workerRetireCandidates: result.workerRetireCandidates, workersRetired: result.workerRetireCandidates, changed: true }
     } catch (error: unknown) {
       logger?.warn(`[deepartments] reconcile-posts: retire write failed (the durable file is left untouched): ${error instanceof Error ? error.message : String(error)}`)
     }
   }
-  return result
+
+  // A3/C2 — prune OLDEST retired entries beyond the newest `retiredKeep`.
+  // Gated on an EXPLICIT `true` so an ABSENT/false value (conservative default)
+  // SKIPS pruning entirely.
+  if (opts.enableRetiredPrune === true) {
+    try {
+      const retiredKeep = opts.retiredKeep ?? 50
+      const archiveFile = opts.retiredArchiveFile ?? 'posts-retired-archive.jsonl'
+      const archivePath = path.join(stateDir, archiveFile)
+      const baseRaw = workingRaw ?? raw
+      // Collect retired postIds in on-disk (insertion) order.
+      const retiredPostIds: string[] = []
+      for (const [postId, rawEntry] of Object.entries(baseRaw)) {
+        if (rawEntry !== null && typeof rawEntry === 'object' && (rawEntry as Record<string, unknown>).retired === true) retiredPostIds.push(postId)
+      }
+      if (retiredPostIds.length > retiredKeep) {
+        const nowMs = (opts.now ?? (() => Date.now()))()
+        const backupPath = path.join(stateDir, `posts.json.bak-${nowMs}-prune`)
+        await copyFile(path.join(stateDir, 'posts.json'), backupPath)
+        // Order retired entries OLDEST-first so the oldest beyond `retiredKeep`
+        // are pruned. Prefer `retiredAt` (readable ms epoch) when present;
+        // otherwise fall back to the entry's insertion-index in posts.json (a
+        // monotonic fallback — a legacy entry with no retiredAt sorts as the
+        // pre-timestamp lineage, i.e. OLDER than any explicit retiredAt).
+        const items = retiredPostIds.map((postId, idx) => {
+          const e = baseRaw[postId] as Record<string, unknown>
+          const retiredAt = typeof e.retiredAt === 'number' ? e.retiredAt : undefined
+          return { postId, idx, retiredAt }
+        })
+        items.sort((a, b) => {
+          if (a.retiredAt !== undefined && b.retiredAt !== undefined) return a.retiredAt - b.retiredAt
+          if (a.retiredAt !== undefined && b.retiredAt === undefined) return 1
+          if (a.retiredAt === undefined && b.retiredAt !== undefined) return -1
+          return a.idx - b.idx
+        })
+        const pruneCount = items.length - retiredKeep
+        const pruned = items.slice(0, pruneCount)
+        const prunedSet = new Set(pruned.map((item) => item.postId))
+        // Archive each pruned entry (append-only JSONL — full entry preserved).
+        const archiveLines = pruned.map((item) => JSON.stringify({ postId: item.postId, entry: baseRaw[item.postId], prunedAt: nowMs }))
+        await appendFile(archivePath, `${archiveLines.join('\n')}\n`, 'utf8')
+        // Rebuild posts.json WITHOUT the pruned entries (live + newest retirement
+        // keep the exact on-disk shape — R6).
+        const newRaw: Record<string, unknown> = {}
+        for (const [postId, value] of Object.entries(baseRaw)) {
+          if (!prunedSet.has(postId)) newRaw[postId] = value
+        }
+        workingRaw = newRaw
+        changed = true
+        logger?.warn(`[deepartments] reconcile-posts: PRUNED ${pruned.length} retired post(s) beyond the newest ${retiredKeep} (backup ${path.basename(backupPath)}, archive ${path.basename(archivePath)})`)
+      }
+    } catch (error: unknown) {
+      logger?.warn(`[deepartments] reconcile-posts: retired-prune failed (the durable file is left untouched): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  // Write the now-current posts.json atomically (tmp + rename) when either the
+  // gone-retire mark or the retired-prune changed the durable file.
+  if (changed && workingRaw !== undefined) {
+    try {
+      const nowMs = (opts.now ?? (() => Date.now()))()
+      const tmpPath = path.join(stateDir, `posts.json.tmp-${nowMs}`)
+      await writeFile(tmpPath, JSON.stringify(workingRaw, null, 2), 'utf8')
+      await rename(tmpPath, path.join(stateDir, 'posts.json'))
+    } catch (error: unknown) {
+      logger?.warn(`[deepartments] reconcile-posts: posts.json write failed (the process state stays in-memory only): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  return { workerRetireCandidates: result.workerRetireCandidates, workersRetired, changed }
 }
 
 /** Result of the deterministic live-host selection (U3 fix, spec 002 §6.1). */

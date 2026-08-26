@@ -2885,7 +2885,7 @@ test('F1 host retire scope: the HOST retires any worker (marked, entry kept) —
       // LISTED in dept_who (the head's management view) with retired:true,
       // while the LIVE delivery catalog (the send above) fails it. The two
       // surfaces are distinct: visible-with-flag, never addressed.
-      const who = await root.tools.get('dept_who').execute({}, { agent: host, signal })
+      const who = await root.tools.get('dept_who').execute({ scope: 'includeRetired' }, { agent: host, signal })
       const retiredRow = who.members.find((m) => m.agentId === 'researcher-alpha')
       assert.ok(retiredRow, 'F3: the retired worker IS listed in dept_who (management view shows retired rows)')
       assert.equal(retiredRow.retired, true, 'F3: the retired row carries retired:true')
@@ -2935,7 +2935,7 @@ test('m-228 dept_who: a RETIRED worker with a LINGERING live AgentHandle renders
       // WITHOUT the fix `live` computes true → the render appends ', live' AND
       // ', retired' (the contradictory "live, retired").
       agents.put(fakeParentAgent(SessionId(sid)))
-      const who = await root.tools.get('dept_who').execute({}, { agent: agents.put(fakeParentAgent()), signal })
+      const who = await root.tools.get('dept_who').execute({ scope: 'includeRetired' }, { agent: agents.put(fakeParentAgent()), signal })
       const row = who.members.find((m) => m.agentId === 'researcher-orphan')
       assert.ok(row, 'the retired worker is listed in dept_who (the head management view)')
       assert.equal(row.retired, true, 'the row carries retired:true')
@@ -2952,6 +2952,63 @@ test('m-228 dept_who: a RETIRED worker with a LINGERING live AgentHandle renders
       assert.match(line, /, offline/, 'the worker line renders offline (live:false)')
       assert.match(line, /, retired/, 'the worker line renders retired')
       assert.doesNotMatch(line, /, live/, 'the worker line NEVER renders "live, retired" (the m-228 contradiction)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('A1/A2/A5 dept_who scope: default `active` HIDES retired rows; `{ scope: "includeRetired" }` lists them with retired:true — the header shows both counts', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      await headCtx.tools.get('dept_post_create', key).execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      const host = agents.put(fakeParentAgent())
+      await root.tools.get('dept_post_retire').execute({ postId: 'researcher-alpha' }, { agent: host, signal })
+      await waitFor(async () => (await readPosts(stateDir))['researcher-alpha']?.retired === true, 5000, 'worker marked retired')
+
+      const whoTool = root.tools.get('dept_who')
+      // Default scope = `active` → the retired row is HIDDEN.
+      const active = await whoTool.execute({}, { agent: agents.put(fakeParentAgent()), signal })
+      assert.equal(active.members.some((m) => m.agentId === 'researcher-alpha'), false, 'A1: default `active` scope HIDES the retired row')
+      assert.ok(active.members.some((m) => m.agentId === 'research-head'), 'A1: the live head is still listed')
+      assert.equal(active.retiredCount, 1, 'A5: retiredCount counts the (1) retired member the active view hides')
+      // includeRetired → the retired row IS listed with retired:true.
+      const incl = await whoTool.execute({ scope: 'includeRetired' }, { agent: agents.put(fakeParentAgent()), signal })
+      const retiredRow = incl.members.find((m) => m.agentId === 'researcher-alpha')
+      assert.ok(retiredRow, 'A2: includeRetired lists the retired row')
+      assert.equal(retiredRow.retired, true, 'A2: the retired row carries retired:true')
+      assert.equal(retiredRow.kind, 'worker', 'A2: the retired row keeps the derived worker kind')
+      assert.equal(incl.retiredCount, 0, 'A5: retiredCount is 0 when nothing is hidden (includeRetired)')
+      // The render header shows BOTH the active count and the retired count.
+      const rendered = whoTool.output.render({ scope: 'active' }, { members: active.members, retiredCount: active.retiredCount })
+      assert.ok(Array.isArray(rendered) && rendered.length > 0, 'dept_who renders a text page')
+      assert.match(rendered[0].text, new RegExp(`\\(${active.members.length} member\\(s\\), ${active.retiredCount} retired\\):`), 'A5: the render header shows active + retired counts')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('A4 deploy/retire activeMembers: dept_post_create returns the new worker active, dept_post_retire returns the retired worker OUT of activeMembers (live members remain)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
+      assert.ok(Array.isArray(created.activeMembers), 'A4: dept_post_create returns activeMembers')
+      assert.ok(created.activeMembers.some((m) => m.agentId === 'researcher-alpha'), 'A4: activeMembers includes the just-created worker')
+      assert.ok(created.activeMembers.some((m) => m.agentId === 'research-head'), 'A4: activeMembers includes the creating head')
+      for (const m of created.activeMembers) {
+        assert.equal(typeof m.agentId, 'string', 'A4: activeMembers carries a string agentId')
+        assert.ok(m.kind === 'post' || m.kind === 'host', 'A4: activeMembers kind is post|host')
+      }
+      const host = agents.put(fakeParentAgent())
+      const ret = await root.tools.get('dept_post_retire').execute({ postId: 'researcher-alpha' }, { agent: host, signal })
+      assert.ok(Array.isArray(ret.activeMembers), 'A4: dept_post_retire returns activeMembers')
+      assert.ok(ret.activeMembers.some((m) => m.agentId === 'research-head'), 'A4: the head is still in activeMembers after retire')
+      assert.equal(ret.activeMembers.some((m) => m.agentId === 'researcher-alpha'), false, 'A4: the retired worker is NOT in activeMembers after retire')
     } finally {
       await dispose()
     }
@@ -5717,6 +5774,44 @@ test('F9 dept_who result is JSON-lossless: worker optional departmentId/role/job
   })
 })
 
+test('A-series parity: dept_who with { scope: "includeRetired" } lists a RETIRED HOST row carrying retired:true (the host push carries the same retired parity as the worker push)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // A rotated v2 hosts.json: a LIVE host + a RETIRED host (retiredAt +
+    // rotatedTo) — the exact shape dept_sleep/u2-rotation writes.
+    const liveSessionId = SessionId('a-series-live-host')
+    const retiredSessionId = SessionId('a-series-retired-host')
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      schemaVersion: 2,
+      [`host-${liveSessionId}`]: { sessionId: String(liveSessionId), roomId: 'board' },
+      [`host-${retiredSessionId}`]: { sessionId: String(retiredSessionId), roomId: 'board', retired: true, retiredAt: 1787261781000, rotatedTo: `host-${liveSessionId}` }
+    }, null, 2))
+    const { agents, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitForHeadMaterialized(agents)
+      // Caller is the LIVE registered host (so dept_who runs against the seeded
+      // registry — no fresh self-registration, no retired entry mutated).
+      const host = agents.put(fakeParentAgent(liveSessionId))
+      const signal = new AbortController().signal
+      const who = pluginCtx().tools.get('dept_who')
+      const result = await who.execute({ scope: 'includeRetired' }, { agent: host, signal })
+      const retiredRow = result.members.find((m) => m.kind === 'host' && m.agentId === `host-${retiredSessionId}`)
+      assert.ok(retiredRow, 'A-series: includeRetired lists the retired HOST row')
+      assert.equal(retiredRow.retired, true, 'A-series: the retired HOST row carries retired:true (host-push parity)')
+      assert.equal(retiredRow.sessionId, String(retiredSessionId), 'A-series: the retired host row carries its session id')
+      assert.equal(retiredRow.title, 'Asistente', 'A-series: the retired host row keeps the host title')
+      // The LIVE host row must NOT carry a retired flag (conditioned spread).
+      const liveRow = result.members.find((m) => m.kind === 'host' && m.agentId === `host-${liveSessionId}`)
+      assert.ok(liveRow, 'A-series: the live host row is listed')
+      assert.equal(liveRow.retired, undefined, 'A-series: the live host row carries no retired flag')
+      // Regression guard: the DEFAULT `active` scope still HIDES the retired host.
+      const active = await who.execute({}, { agent: host, signal })
+      assert.equal(active.members.some((m) => m.kind === 'host' && m.agentId === `host-${retiredSessionId}`), false, 'A-series: default `active` scope HIDES the retired host')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('B2 send_message: the unified implementation is the ONE bound after the override — native control tool owns the global name, deepartments agents still get the unified UNIFIED (to array works, native error absent)', async () => {
   await withTempStateDir(async (stateDir) => {
     // Compose the REAL harness control plugin (dsh-tool-subagent-control: the
@@ -6433,7 +6528,7 @@ test('F3 dept_worker_retire: marks retired (entry kept, live catalog stops addre
       assert.equal(send.delivered['researcher'], 'failed', 'a retired worker is not addressed by the live catalog')
 
       // dept_who (the MANAGEMENT view) still lists it WITH retired:true.
-      const who = await env.root.tools.get('dept_who').execute({}, { agent: host, signal })
+      const who = await env.root.tools.get('dept_who').execute({ scope: 'includeRetired' }, { agent: host, signal })
       const row = who.members.find((m) => m.agentId === 'researcher')
       assert.ok(row, 'the retired worker IS listed in dept_who')
       assert.equal(row.retired, true, 'the row carries retired:true')
@@ -11658,6 +11753,83 @@ test('m-119 reconcileDurablePostsRegistry: retirees a gone WORKER (backup + idem
     assert.deepEqual(flagOnly.workerRetireCandidates, [{ postId: 'worker-gone', sessionId: 'worker-gone' }], 'flag-only still reports the candidate')
     assert.equal(flagOnly.changed, false, 'flag-only does NOT write the retire mark')
     assert.equal((JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8')))['worker-gone'].retired, undefined, 'flag-only leaves the worker live')
+  })
+})
+
+test('A3/C2 reconcileDurablePostsRegistry pruning: retired entries beyond `retiredKeep` are ARCHIVED (backup written, live head + newest retired kept, idempotent)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, 'posts.json'), JSON.stringify({
+      'head': { sessionId: 'head-fixed', roomId: 'research', agentPreset: 'deepartments-head' },
+      'w-old-1': { sessionId: 'w-old-1', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'head', retired: true, retiredAt: 100 },
+      'w-old-2': { sessionId: 'w-old-2', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'head', retired: true, retiredAt: 200 },
+      'w-old-3': { sessionId: 'w-old-3', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'head', retired: true, retiredAt: 300 },
+      'w-new': { sessionId: 'w-new', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'head', retired: true, retiredAt: 400 }
+    }, null, 2))
+    const logged = []
+    const first = await reconcileDurablePostsRegistry(stateDir, {
+      logger: { warn: (m) => logged.push(m) },
+      isSessionGone: () => false,
+      enableRetiredPrune: true,
+      retiredKeep: 1
+    })
+    assert.equal(first.changed, true, 'A3: the prune changed the durable file')
+    const repaired = JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8'))
+    assert.equal(repaired['head'].retired, undefined, 'A3: the live head REMAINS')
+    assert.equal(repaired['w-new'].retired, true, 'A3: the newest retired entry (retiredKeep=1) REMAINS')
+    assert.equal(repaired['w-old-1'], undefined, 'A3: the oldest retired entry was pruned')
+    assert.equal(repaired['w-old-2'], undefined, 'A3: the second-oldest retired entry was pruned')
+    assert.equal(repaired['w-old-3'], undefined, 'A3: the third-oldest retired entry was pruned')
+    // The archive holds the pruned entries as JSONL with the full entry + prunedAt.
+    const archiveLines = (await readFile(path.join(stateDir, 'posts-retired-archive.jsonl'), 'utf8')).trim().split('\n')
+    assert.equal(archiveLines.length, 3, 'A3: 3 retired entries are archived')
+    const archivedIds = archiveLines.map((l) => JSON.parse(l).postId)
+    assert.ok(archivedIds.includes('w-old-1') && archivedIds.includes('w-old-2') && archivedIds.includes('w-old-3'), 'A3: the pruned postIds are in the archive')
+    for (const line of archiveLines) {
+      const rec = JSON.parse(line)
+      assert.equal(typeof rec.prunedAt, 'number', 'A3: each archive line carries a numeric prunedAt')
+      assert.equal(rec.entry.retired, true, 'A3: the archived entry keeps its full retired:true object')
+      assert.equal(rec.entry.sessionId, rec.postId, 'A3: the archived entry keeps its full on-disk fields (sessionId preserved)')
+    }
+    // A pre-prune backup was written.
+    const pruneBackups = (await readdir(stateDir)).filter((f) => f.startsWith('posts.json.bak-') && f.endsWith('-prune'))
+    assert.equal(pruneBackups.length, 1, 'A3: a pre-prune backup posts.json.bak-*-prune was written')
+    assert.ok(logged.some((m) => m.includes('PRUNED')), 'A3: the prune warn is logged with the backup/archive paths')
+    // Idempotency: a second run with nothing beyond the window changes nothing.
+    const second = await reconcileDurablePostsRegistry(stateDir, {
+      logger: { warn: () => {} },
+      isSessionGone: () => false,
+      enableRetiredPrune: true,
+      retiredKeep: 1
+    })
+    assert.equal(second.changed, false, 'A3: a second run with no entries beyond the window changes nothing')
+  })
+})
+
+test('A3/C2 reconcileDurablePostsRegistry pruning: ABSENT `enableRetiredPrune` → pruning is OFF (retired entries beyond the window are NOT removed, no archive/backup)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, 'posts.json'), JSON.stringify({
+      'head': { sessionId: 'head-fixed', roomId: 'research', agentPreset: 'deepartments-head' },
+      'w-old-1': { sessionId: 'w-old-1', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'head', retired: true, retiredAt: 100 },
+      'w-old-2': { sessionId: 'w-old-2', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'head', retired: true, retiredAt: 200 },
+      'w-new': { sessionId: 'w-new', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'head', retired: true, retiredAt: 400 }
+    }, null, 2))
+    const logged = []
+    const result = await reconcileDurablePostsRegistry(stateDir, {
+      logger: { warn: (m) => logged.push(m) },
+      isSessionGone: () => false,
+      retiredKeep: 1
+      // `enableRetiredPrune` is ABSENT → conservative default, pruning OFF.
+    })
+    assert.equal(result.changed, false, 'A3: an ABSENT enableRetiredPrune leaves the durable file UNCHANGED (no prune)')
+    const posts = JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8'))
+    assert.equal(posts['w-old-1'].retired, true, 'A3: the oldest retired entry is NOT removed when enableRetiredPrune is absent')
+    assert.equal(posts['w-old-2'].retired, true, 'A3: the second-oldest retired entry is NOT removed when enableRetiredPrune is absent')
+    assert.equal(posts['w-new'].retired, true, 'A3: the newest retired entry remains when enableRetiredPrune is absent')
+    assert.equal(posts['head'].retired, undefined, 'A3: the live head remains when enableRetiredPrune is absent')
+    const files = await readdir(stateDir)
+    assert.ok(!files.some((f) => f.startsWith('posts.json.bak-') && f.endsWith('-prune')), 'A3: NO pre-prune backup is written when pruning is off')
+    assert.ok(!files.some((f) => f === 'posts-retired-archive.jsonl'), 'A3: NO retired archive is written when pruning is off')
+    assert.ok(!logged.some((m) => m.includes('PRUNED')), 'A3: no prune warn is logged when pruning is off')
   })
 })
 

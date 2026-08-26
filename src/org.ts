@@ -128,6 +128,32 @@ export interface QualityConfig {
 }
 
 /**
+ * A3/C2 — durable posts.json RETIRED-entry retention policy (the prune/archive
+ * knob). Optional. Defaults are CODE-level: `maxRetiredKept` defaults to 50,
+ * `archiveFile` defaults to `posts-retired-archive.jsonl`, `enabled` defaults to
+ * false (pruning OFF unless explicitly true). Mirrors the `health`/`quality` pattern: an ABSENT section
+ * (or an absent key) falls through to the code defaults, so the config composes
+ * untouched.
+ *
+ * > PRODUCTION GATE: enabling pruning in production requires owner confirmation
+ * > of the retention policy (the default N retiradas conservadas = 50 is PENDING
+ * > confirmation) before the prune runs on the live registry.
+ */
+export interface PostsRetentionConfig {
+  /** Max RETIRED entries to KEEP in posts.json when pruning runs. Absent →
+   * code default 50. When the durable posts.json holds MORE retired entries
+   * than this, the OLDEST retired entries beyond the newest `maxRetiredKept`
+   * are moved to the retired archive (never erased). */
+  maxRetiredKept?: number
+  /** The archive filename to append pruned retired entries to, under stateDir.
+   * Absent → code default `posts-retired-archive.jsonl`. */
+  archiveFile?: string
+  /** When explicitly false (or absent), retired-entry pruning is SKIPPED (the retire mark +
+   * gone-worker logic still run). Absent → false (pruning OFF unless explicitly enabled). */
+  enabled?: boolean
+}
+
+/**
  * One configured event_stream monitor of the deepartments plugin. The `query`
  * is the NL intent Parallel runs (settings.query); `processor`/`frequency`
  * mirror POST /v1/monitors (defaults `base`/`1d`). The whole array is read
@@ -212,6 +238,14 @@ export interface Config {
      * signal is NEVER exempted by this field.
      */
     poolerBaseURL?: string
+    /**
+     * A3/C2 — durable posts.json RETIRED-entry retention (the prune/archive
+     * policy). Optional; defaults are CODE-level (maxRetiredKept 50,
+     * archiveFile 'posts-retired-archive.jsonl', enabled false (pruning OFF unless explicitly true)). An ABSENT section
+     * (or absent key) falls through to the code defaults — the config composes
+     * untouched. Mirrors the `health`/`quality` pattern.
+     */
+    postsRetention?: PostsRetentionConfig
   }
   /**
    * Parallel Web Systems event_stream monitor config (W3b parallel-monitor).
@@ -281,7 +315,17 @@ export const Config: z<any, any> = z.object({
     // endpoint-drift rule stays valid for every other local/proxy baseURL); an
     // EXACT-MATCH of the configured value is never flagged as drift. The
     // maxRetries:0 stale-profile signal is NEVER relaxed by this field.
-    poolerBaseURL: z.string()
+    poolerBaseURL: z.string(),
+    // A3/C2 — durable posts.json RETIRED-entry retention (mirrors Config.org.
+    // postsRetention). `default(void 0)` so an ABSENT section or absent key
+    // falls through to the CODE defaults (maxRetiredKept 50, archiveFile
+    // 'posts-retired-archive.jsonl', enabled false (pruning OFF unless explicitly
+    // true)) — exactly the health/quality section's contract.
+    postsRetention: z.object({
+      maxRetiredKept: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
+      archiveFile: z.string(),
+      enabled: z.boolean()
+    }).default(void 0 as unknown as { maxRetiredKept: number; archiveFile: string; enabled: boolean })
   }).required(),
   // W3b parallel-monitor (Parallel event_stream). Mirrors the runtime
   // ParallelConfig/ParallelMonitorConfig declared here in org.ts: `monitors` defaults

@@ -165,6 +165,7 @@ import {
   reconcileDurableHostRegistry,
   analyzeDurablePostsRegistry,
   reconcileDurablePostsRegistry,
+  listActiveMembers,
   pickLiveHostEntry
 } from './core/registry.js'
 import type {
@@ -192,6 +193,7 @@ export {
   reconcileDurableHostRegistry,
   analyzeDurablePostsRegistry,
   reconcileDurablePostsRegistry,
+  listActiveMembers,
   pickLiveHostEntry
 } from './core/registry.js'
 export type {
@@ -4624,6 +4626,32 @@ export function applyInvoke(ctx: Context, config: Config) {
   const hosts = registry.hosts
   const hostForSession = registry.hostForSession
 
+  /** A4 — the compact, JSON-lossless ACTIVE member list (non-retired posts +
+   * non-retired hosts) returned by the deploy/retire tools AFTER a mutation so
+   * a caller sees the updated live catalog immediately. Derives from the
+   * single-source `listActiveMembers` (posts then hosts, catalog order). */
+  const activeCatalogMembers = (): Array<{ agentId: string; kind: 'post' | 'host' }> =>
+    listActiveMembers(byPost.values(), hosts.values()).map((member) =>
+      member.kind === 'post'
+        ? { agentId: member.entry.postId, kind: 'post' as const }
+        : { agentId: member.entry.hostId, kind: 'host' as const }
+    )
+
+  /** A4 — the shared `activeMembers` output-schema fragment (a compact,
+   * JSON-lossless active member list: `{ agentId, kind }`). */
+  const activeMembersSchema = {
+    type: 'array',
+    required: true,
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        agentId: { type: 'string', required: true },
+        kind: { type: 'string', required: true }
+      }
+    }
+  } as const
+
   // Fire-and-forget persistence of the host registry (callers never await it).
   // (The durable write + `.bak` backup live in the RegistryStore.)
   const persistHosts = (): void => { registry.persistHosts() }
@@ -6574,12 +6602,13 @@ export function applyInvoke(ctx: Context, config: Config) {
             additionalProperties: false,
             properties: {
               postId: { type: 'string', required: true },
-              sessionId: { type: 'string', required: true }
+              sessionId: { type: 'string', required: true },
+              activeMembers: activeMembersSchema
             }
           },
-          render: (_args, value) => [{ type: 'text', text: `created worker ${value.postId} (session ${value.sessionId})` } as const]
+          render: (_args, value) => [{ type: 'text', text: `created worker ${value.postId} (session ${value.sessionId}, ${value.activeMembers.length} active member(s))` } as const]
         },
-        async execute(args, exec): Promise<{ postId: string; sessionId: string }> {
+        async execute(args, exec): Promise<{ postId: string; sessionId: string; activeMembers: Array<{ agentId: string; kind: 'post' | 'host' }> }> {
           const agent = exec.agent
           if (!agent) throw new Error('dept_post_create requires a calling agent (exec.agent was undefined)')
           if (agents === void 0) throw new Error('[deepartments] dept_post_create requires the agents service')
@@ -6659,7 +6688,7 @@ export function applyInvoke(ctx: Context, config: Config) {
             kind: 'agent'
           })
           await deliverBusRecord(record, args.postId, agent.id as string, agent.id as string, exec.signal)
-          return { postId: args.postId, sessionId: String(SessionId(sessionId)) }
+          return { postId: args.postId, sessionId: String(SessionId(sessionId)), activeMembers: activeCatalogMembers() }
         }
       })))
 
@@ -6675,15 +6704,17 @@ export function applyInvoke(ctx: Context, config: Config) {
             additionalProperties: false,
             properties: {
               postId: { type: 'string', required: true },
-              retired: { type: 'boolean', required: true }
+              retired: { type: 'boolean', required: true },
+              activeMembers: activeMembersSchema
             }
           },
-          render: (_args, value) => [{ type: 'text', text: `retired worker ${value.postId}` } as const]
+          render: (_args, value) => [{ type: 'text', text: `retired worker ${value.postId} (${value.activeMembers.length} active member(s))` } as const]
         },
-        async execute(args, exec): Promise<{ postId: string; retired: boolean }> {
+        async execute(args, exec): Promise<{ postId: string; retired: boolean; activeMembers: Array<{ agentId: string; kind: 'post' | 'host' }> }> {
           const agent = exec.agent
           if (!agent) throw new Error('dept_post_retire requires a calling agent (exec.agent was undefined)')
-          return retirePost(args.postId, agent.id as string)
+          const result = await retirePost(args.postId, agent.id as string)
+          return { ...result, activeMembers: activeCatalogMembers() }
         }
       })))
 
@@ -6890,12 +6921,13 @@ export function applyInvoke(ctx: Context, config: Config) {
             properties: {
               workerId: { type: 'string', required: true },
               sessionId: { type: 'string', required: true },
-              title: { type: 'string', required: true }
+              title: { type: 'string', required: true },
+              activeMembers: activeMembersSchema
             }
           },
-          render: (_args, value) => [{ type: 'text', text: `spawned worker ${value.workerId} (session ${value.sessionId}, title "${value.title}")` } as const]
+          render: (_args, value) => [{ type: 'text', text: `spawned worker ${value.workerId} (session ${value.sessionId}, title "${value.title}", ${value.activeMembers.length} active member(s))` } as const]
         },
-        async execute(args, exec): Promise<{ workerId: string; sessionId: string; title: string }> {
+        async execute(args, exec): Promise<{ workerId: string; sessionId: string; title: string; activeMembers: Array<{ agentId: string; kind: 'post' | 'host' }> }> {
           const agent = exec.agent
           if (!agent) throw new Error('dept_worker_spawn requires a calling agent (exec.agent was undefined)')
           if (agents === void 0) throw new Error('[deepartments] dept_worker_spawn requires the agents service')
@@ -6912,7 +6944,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           // The SHARED worker-spawn engine — the EXACT path dept_job_run uses and
           // the parallel-monitor daemon uses for its researcher workers, so there
           // is no tool-vs-scheduler-vs-daemon drift on registration/pin/delivery.
-          return spawnWorkerForDepartment(department, headEntry, {
+          const result = await spawnWorkerForDepartment(department, headEntry, {
             role,
             task: args.task,
             ...(args.jobId !== void 0 ? { jobId: String(args.jobId) } : {}),
@@ -6921,6 +6953,7 @@ export function applyInvoke(ctx: Context, config: Config) {
             senderSessionId: agent.id as string,
             signal: exec.signal
           })
+          return { ...result, activeMembers: activeCatalogMembers() }
         }
       })))
 
@@ -6942,12 +6975,13 @@ export function applyInvoke(ctx: Context, config: Config) {
             properties: {
               workerId: { type: 'string', required: true },
               retired: { type: 'boolean', required: true },
-              archived: { type: 'boolean', required: true }
+              archived: { type: 'boolean', required: true },
+              activeMembers: activeMembersSchema
             }
           },
-          render: (_args, value) => [{ type: 'text', text: `retired worker ${value.workerId} (${value.archived ? 'session archived' : 'session archive skipped (non-fatal)'})` } as const]
+          render: (_args, value) => [{ type: 'text', text: `retired worker ${value.workerId} (${value.archived ? 'session archived' : 'session archive skipped (non-fatal)'}, ${value.activeMembers.length} active member(s))` } as const]
         },
-        async execute(args, exec): Promise<{ workerId: string; retired: boolean; archived: boolean }> {
+        async execute(args, exec): Promise<{ workerId: string; retired: boolean; archived: boolean; activeMembers: Array<{ agentId: string; kind: 'post' | 'host' }> }> {
           const agent = exec.agent
           if (!agent) throw new Error('dept_worker_retire requires a calling agent (exec.agent was undefined)')
           const workerId = String(args.workerId ?? '').trim()
@@ -6977,7 +7011,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           if (!wasRetired && qualityInspectDecision('worker', { rng: Math.random, workerInspectProbability: qualityWorkerInspectProbability })) {
             await maybeEmitQualityInspectDirective({ kind: 'worker-retired', workerPostId: workerId, sessionId: entry.sessionId, archived })
           }
-          return { workerId, retired: true, archived }
+          return { workerId, retired: true, archived, activeMembers: activeCatalogMembers() }
         }
       })))
 
@@ -8205,9 +8239,22 @@ export function applyInvoke(ctx: Context, config: Config) {
       // confirmed absent durable session counts as gone (unable to determine →
       // NOT gone → never flagged).
       const persistence = ctx.get('sessionPersistence') as { readRaw?: (id: SessionId, signal?: AbortSignal) => Promise<{ content: string } | undefined> } | undefined
+      // A3/C2 — the durable posts.json RETIRED-entry retention policy knob
+      // (config.org.postsRetention). Only wired when the section is present;
+      // an ABSENT section falls through to the code defaults in the registrar,
+      // which are CONSERVATIVE: retired-entry pruning is OFF by default and is
+      // enabled ONLY by an explicit `org.postsRetention.enabled: true`.
+      const postsRetention = config.org.postsRetention
       await reconcileDurablePostsRegistry(stateDir, {
         logger: ctx.logger,
         retireGoneWorkers: false,
+        ...(postsRetention !== void 0
+          ? {
+              retiredKeep: postsRetention.maxRetiredKept,
+              retiredArchiveFile: postsRetention.archiveFile,
+              enableRetiredPrune: postsRetention.enabled
+            }
+          : {}),
         isSessionGone: async (sessionId: string): Promise<boolean> => {
           if (persistence === undefined || typeof persistence.readRaw !== 'function') return false
           try {
@@ -9329,8 +9376,10 @@ export function applyInvoke(ctx: Context, config: Config) {
    * (the LIVE catalog — busDeliverCatalog addressing — still filters them). */
   const deptWhoTool = defineTool({
     name: 'dept_who',
-    description: 'List the whole Deepartments catalog — the Asistente host (kind "host", title "Asistente") and every registered department head/worker with its DERIVED kind (a configured department head is kind "head", a disposable worker is kind "worker"; title from the department configuration, PostEntry.role fallback) — each with live/sleeping state and session id, and your OWN entry marked you:true. Worker rows additionally carry departmentId/role/jobId (its department template and job link) and RETIRED workers are shown with retired:true (the head\'s management view; a retired worker is NOT addressed by the live catalog — sending to it fails per-recipient). This is the identity + roster tool: learn who exists and who you are in one call. No room parameter — the roster is the organization.',
-    parameters: {},
+    description: 'List the whole Deepartments catalog — the Asistente host (kind "host", title "Asistente") and every registered department head/worker with its DERIVED kind (a configured department head is kind "head", a disposable worker is kind "worker"; title from the department configuration, PostEntry.role fallback) — each with live/sleeping state and session id, and your OWN entry marked you:true. Worker rows additionally carry departmentId/role/jobId (its department template and job link) and RETIRED workers are shown with retired:true (the head\'s management view; a retired worker is NOT addressed by the live catalog — sending to it fails per-recipient). This is the identity + roster tool: learn who exists and who you are in one call. No room parameter — the roster is the organization. The `scope` parameter selects the view: `active` (default) hides retired rows; `includeRetired` lists them (with retired:true).',
+    parameters: {
+      scope: { type: 'string', enum: ['active', 'includeRetired'], default: 'active', description: 'Catalog scope: `active` (default) hides retired rows; `includeRetired` lists retired posts/hosts with retired:true.' }
+    },
     output: {
       schema: {
         type: 'object',
@@ -9356,24 +9405,35 @@ export function applyInvoke(ctx: Context, config: Config) {
                 retired: { type: 'boolean' }
               }
             }
-          }
+          },
+          retiredCount: { type: 'integer', required: true }
         }
       },
       render: (_args, value) => {
         const lines = value.members.map((member) =>
           `  - ${member.agentId} (${member.kind}, "${member.title}"${member.live ? ', live' : ', offline'}${member.sleeping ? ', sleeping' : ''}${member.retired === true ? ', retired' : ''}${member.you ? ', YOU' : ''})`)
-        return [{ type: 'text', text: `Deepartments catalog (${value.members.length} member(s)):\n${lines.join('\n')}` } as const]
+        const retiredCount = value.retiredCount ?? 0
+        return [{ type: 'text', text: `Deepartments catalog (${value.members.length} member(s), ${retiredCount} retired):\n${lines.join('\n')}` } as const]
       }
     },
-    async execute(_args, exec): Promise<{ members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }> }> {
+    async execute(args, exec): Promise<{ members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }>; retiredCount: number }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_who requires a calling agent (exec.agent was undefined)')
+      // A1/A2 — the catalog scope: `active` (default) hides retired rows;
+      // `includeRetired` lists them with retired:true (the head management view).
+      const scope = args.scope === 'includeRetired' ? 'includeRetired' : 'active'
       // B3 gap fix: caller host self-registers when no live host exists (board
       // tools are gone; the roster must show the host with you:true).
       const callerMemberId = busEnsureHostForCaller(agent as { id: string; session?: { header?: SessionHeaderWithOrigin } })
       const members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }> = []
+      // A5 — `retiredCount` = the retired rows the DEFAULT (active) view hides
+      // (0 when scope=includeRetired — nothing is hidden).
+      let retiredCount = 0
       for (const entry of hosts.values()) {
-        if (entry.retired === true) continue
+        if (entry.retired === true) {
+          if (scope === 'active') retiredCount++
+          if (scope !== 'includeRetired') continue
+        }
         members.push({
           agentId: entry.hostId,
           kind: 'host',
@@ -9381,13 +9441,22 @@ export function applyInvoke(ctx: Context, config: Config) {
           live: agents !== void 0 && agents.get(SessionId(entry.sessionId)) !== undefined,
           sleeping: entry.sleepEpoch !== void 0,
           sessionId: entry.sessionId,
-          you: entry.hostId === callerMemberId
+          you: entry.hostId === callerMemberId,
+          // A-series parity: the host row must carry `retired:true` when the
+          // entry is retired (matching the worker push below) so the `, retired`
+          // render marker appears under `{ scope: 'includeRetired' }`.
+          ...(entry.retired === true ? { retired: true } : {})
         })
       }
       for (const entry of byPost.values()) {
         // F3 (§5.1): retired workers stay LISTED (the head-management view)
         // with `retired: true` — the LIVE catalog (busDeliverCatalog
-        // addressing) keeps filtering them; the entry stays durable.
+        // addressing) keeps filtering them; the entry stays durable. A1/A2: the
+        // SAME scope gate applies here (active hides retired posts).
+        if (entry.retired === true) {
+          if (scope === 'active') retiredCount++
+          if (scope !== 'includeRetired') continue
+        }
         const coordinator = coordinatorForPost(entry.postId)
         const isWorker = entry.provider === 'worker'
         members.push({
@@ -9418,7 +9487,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           ...(isWorker && entry.retired === true ? { retired: true } : {})
         })
       }
-      return { members }
+      return { members, retiredCount }
     }
   })
 
@@ -9639,18 +9708,20 @@ export function applyInvoke(ctx: Context, config: Config) {
         additionalProperties: false,
         properties: {
           postId: { type: 'string', required: true },
-          retired: { type: 'boolean', required: true }
+          retired: { type: 'boolean', required: true },
+          activeMembers: activeMembersSchema
         }
       },
-      render: (_args, value) => [{ type: 'text', text: `retired post ${value.postId}` } as const]
+      render: (_args, value) => [{ type: 'text', text: `retired post ${value.postId} (${value.activeMembers.length} active member(s))` } as const]
     },
-    async execute(args, exec): Promise<{ postId: string; retired: boolean }> {
+    async execute(args, exec): Promise<{ postId: string; retired: boolean; activeMembers: Array<{ agentId: string; kind: 'post' | 'host' }> }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_post_retire requires a calling agent (exec.agent was undefined)')
       // Delegate to the shared retirement path (Batch 3a). From the HOST plane
       // the caller is not a registered post → a HOST, so any post may be retired
       // (today's semantics preserved).
-      return retirePost(args.postId, agent.id as string)
+      const result = await retirePost(args.postId, agent.id as string)
+      return { ...result, activeMembers: activeCatalogMembers() }
     }
   }))
 
