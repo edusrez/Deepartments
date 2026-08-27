@@ -2,7 +2,7 @@
 id: quality-daily
 title: Quality daily digest
 role: quality-inspector
-description: "Consolidate post-errors, stalled posts, delivery failures and prior inspection results into a once-a-day quality digest."
+description: "Consolidate post-errors, stalled posts, delivery failures and prior inspection results into a once-a-day quality digest. Post-error delta is diffed from health-alerts.jsonl (post-errors.jsonl is subject to log-rotation and no longer diff-able)."
 schedule: '0 8 * * *'
 owner: quality-head
 outbox: .dsh/reports/quality/<YYYY-MM-DD>-quality-daily.md
@@ -25,13 +25,20 @@ weekly/Asistente-facing report.
 
 ## What to read
 
-1. `<stateDir>/post-errors.jsonl` — the spec-006 post-error capture (bounded
-   500). Diff against the previous digest: what new post-errors appeared since
-   the last run, and any recurring `postId`/`error` pattern (a symptom of a real
-   bug).
+1. `<stateDir>/health-alerts.jsonl` + `<stateDir>/health-alerts-state.json` —
+   the **DURABLE per-tick capture** and the PRIMARY source for the post-error
+   delta (RE-BASED 2026-08-27, per QH decision on the digest's own open
+   question). `<stateDir>/post-errors.jsonl` is subject to 26ac649-style
+   log-rotation (observed 184→1 at the 02:07-08-27 deploy), so its live rows
+   vanish between digests and all-time totals are NOT diff-able. Diff the
+   health-alerts `post-error` findings with row-ts > previous digest run ts;
+   treat post-errors.jsonl as a SECONDARY sanity check. Note the rotation
+   caveat in the digest body when a mid-window reset occurred.
 2. `<stateDir>/deliveries.jsonl` — the delivery sidecar (messages-store §4.4).
    Filter `status: 'failed'` and diff against the previous digest: the
-   delivery-failure delta.
+   delivery-failure delta. NOTE (forensics gap): after the 26ac649 renumber,
+   sidecar rows may carry pre-renumber ids that do not resolve to
+   messages.jsonl (epoch-map them; flag unresolvable rows).
 3. The **archived session logs** (the retire/sleep/rotation artifacts under
    stateDir: `journals/sessions/*.md`, `journals/archive/`,
    `sessions/*.jsonl.zstd`) — look for a stale/leaked row, a post-error pattern,
@@ -47,12 +54,13 @@ weekly/Asistente-facing report.
 
 Produce the digest sections:
 
-- **Post-error delta** — new post-errors since the last run, with the recurring
-  `postId`/`error` pattern (+ its likely cause if evident from the session logs).
+- **Post-error delta** — new post-errors since the last run (health-alerts
+  findings row-ts > prior digest run), with the recurring `postId`/`error`
+  pattern (+ its likely cause if evident from the session logs).
 - **Stalled posts** — posts that show as interrupted/stalled in the session logs
   (a reconcile/auto-run failure footprint).
 - **Delivery-failure delta** — the `status: 'failed'` delivery delta since the
-  last run (`deliveries.jsonl`).
+  last run (`deliveries.jsonl`), with id-resolution caveat.
 - **Prior inspection results** — what the recent inspector reports found, and
   whether any signal is repeating.
 
