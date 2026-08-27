@@ -62,6 +62,13 @@ export const Config = z.object({
 /**
  * Model-facing wording from the provider's conversation-history descriptor
  * ({@link SubagentProvider.inheritsParentContext}).
+ * M2 (owner decision 2026-08-28): the ONE tool deploys a personal NON-CODE
+ * READ-ONLY secretary — for the HOST and for department HEADS alike. It reads
+ * journals/files/reports, searches (glob/grep) and summarises; it never edits,
+ * writes, runs commands, or deploys anything (internal code work always
+ * belongs to the Internal Programming Department). The pre-M2 transient roles
+ * (builder/reviewer/scribe/researcher) are R6-deprecated and unified into this
+ * single contract via normalizeRole — no per-role wording remains.
  * A fresh child needs a standalone prompt; a forked child already sees the
  * conversation's completed turns — telling the model to restate everything
  * (or, worse, that the child "does not see this conversation") would be false
@@ -73,12 +80,12 @@ export const Config = z.object({
  */
 function providerWording(inheritsConversation: boolean) {
   if (inheritsConversation) return {
-    description: 'Delegate a task to a subagent that inherits this conversation: a child agent seeded with all completed turns so far (it does not see the current in-flight turn). Use this when the subtask builds on this conversation\'s context — a follow-up review, a continuation, a NON-CODE subtask — without consuming this conversation\'s context for the work itself. Internal programming and deep code analysis are NOT delegated here: route them via send_message to internal-programming-head. You receive its result, not its intermediate steps.',
-    promptDescription: 'The task for the subagent. It already sees this conversation\'s completed turns, so build on them freely and state only what is new.'
+    description: 'Delegate a follow-up to your personal NON-CODE secretary that inherits this conversation: a READ-ONLY child agent seeded with all completed turns so far (it does not see the current in-flight turn). Use it when the ask builds on this conversation\'s context — a follow-up review of a report, a journal summary, a search — without consuming this conversation\'s context for the work itself. It never edits, writes, runs commands, or deploys anything. Internal programming and deep code analysis are NOT delegated here: route them via send_message to internal-programming-head. You receive its result, not its intermediate steps.',
+    promptDescription: 'The follow-up request for the secretary. It already sees this conversation\'s completed turns, so build on them freely and state only what is new.'
   }
   return {
-    description: 'Delegate a self-contained NON-CODE task to a subagent (a separate agent that works in its own context) to offload focused, independent work — research (RD), doc drafts (scribe), review (reviewer), or an emergency-fallback builder — so it does not consume this conversation\'s context. Internal programming and deep code analysis are NOT delegated here: they belong to the Internal Programming Department — route them with ONE send_message to internal-programming-head. The subagent returns its result, not its intermediate steps. Give it a complete, standalone prompt: it does not see this conversation.',
-    promptDescription: 'The complete, self-contained task for the subagent. It does not share this conversation\'s context, so include everything it needs.'
+    description: 'Deploy your personal NON-CODE secretary: a separate READ-ONLY child agent that reads files, reports and journals, searches (glob/grep) and summarises for you — e.g. "read my journal at <path> and summarise the open items" — without consuming this conversation\'s context. It never edits, writes, runs commands, or deploys anything. Internal programming and deep code analysis are NOT delegated here: they belong to the Internal Programming Department — route them with ONE send_message to internal-programming-head. The secretary returns its result (a concise summary), not its intermediate steps. Give it a complete, standalone prompt: it does not see this conversation.',
+    promptDescription: 'The complete, self-contained request for the secretary — what to read/search/summarise (path + ask). It does not share this conversation\'s context, so include everything it needs.'
   }
 }
 
@@ -123,7 +130,7 @@ export function apply(ctx: Context, config: Config) {
         },
         role: {
           type: 'string',
-          description: 'Optional Deepartments role for the child (builder|reviewer|scribe|researcher; NON-CODE/emergency only — `explore` is retired: internal code and deep analysis go to the Internal Programming Department via send_message; default generic). Drives the slim role-contract context injection instead of the full host wake pack; unknown roles fall back to generic.'
+          description: 'Optional Deepartments contract for the child (default secretary): the ONE read-only NON-CODE role — a personal secretary that reads journal/files/reports, searches and summarises, never edits/writes/runs commands. builder|reviewer|scribe|researcher are R6-DEPRECATED and UNIFIED into secretary (normalizeRole maps them); explore is retired; unknown roles fall back to generic.'
         }
       },
       output: {
@@ -173,15 +180,19 @@ export function apply(ctx: Context, config: Config) {
           request,
           signal: exec.signal
         })
-        // Task T4: record the dispatch-time role keyed by the child session id so
-        // the pre-step injector can give THIS transient subagent a slim per-role
-        // contract block instead of the full host wake pack (D3: written via the
-        // `deepartments.subagentRoles` core service — see src/role-orient.ts).
-        // The child id is available synchronously after startContinuable; the same
-        // code path serves BOTH `subagent` and the `subagent_fork` provider (they
-        // differ only by inheritsParentContext/mount), so the role plumbing covers
-        // both variants automatically.
-        remember(child.childId as string, args.role)
+        // Task T4 + M2: record the dispatch-time role keyed by the child session
+        // id so the pre-step injector can give THIS transient subagent a slim
+        // per-role contract block instead of the full host wake pack (D3:
+        // written via the `deepartments.subagentRoles` core service — see
+        // src/role-orient.ts). M2 (owner decision 2026-08-28): the ONE role is
+        // `secretary` — a dispatch with NO role param defaults to the secretary
+        // contract (the read-only personal helper); the deprecated pre-M2 names
+        // (builder/reviewer/scribe/researcher) map to it inside normalizeRole.
+        // The child id is available synchronously after startContinuable; the
+        // same code path serves BOTH `secretary` spawn and a context-inheriting
+        // fork variant (they differ only by inheritsParentContext/mount), so
+        // the role plumbing covers both automatically.
+        remember(child.childId as string, args.role ?? 'secretary')
         return {
           kind: 'continuable',
           subagentId: child.childId as string

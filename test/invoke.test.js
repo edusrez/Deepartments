@@ -3891,6 +3891,17 @@ test('materialization materializes per-head presets into the harness-home user r
         const composition = await readFile(path.join(dshHome, '.agent-presets', 'deepartments-head-research', 'agent.cordis.yml'), 'utf8')
         assert.ok(composition.includes('You are Research department head, the head of the "Research" department.'), 'per-head role line present in the composition')
         assert.ok(composition.includes('BE IDLE UNLESS ADDRESSED'), 'neutral persona preserved in the per-head composition')
+        // M2 (owner decision 2026-08-28): the per-head composition inherits the
+        // base preset's `tool-secretary` delegation row VERBATIM (proliferation
+        // via materializeHeadPreset → buildHeadPresetComposition — only the
+        // persona role line changes; every other row, incl. the secretary
+        // delegation, must reach the per-head preset untouched).
+        assert.ok(composition.includes('- id: tool-secretary'), 'the per-head preset carries the tool-secretary row (M2 proliferation)')
+        assert.ok(composition.includes("name: 'dsh-deepartments/subagent'"), 'the row mounts the dsh-deepartments/subagent plugin (the host\'s delegation plugin, renamed secretary)')
+        assert.ok(composition.includes('toolName: secretary'), 'the row registers the tool under the SINGLE toolName secretary')
+        assert.ok(composition.includes('You are a personal NON-CODE secretary in the Deepartments organization'), 'the row carries the read-only NON-CODE secretary persona')
+        assert.ok(composition.includes('allow: [read, glob, grep]'), 'the row restricts the child to the minimal inherited read-only allow whitelist')
+        assert.ok(composition.includes('deny: [write, secretary]'), 'the row denies only names the child inherits (write + secretary itself — loud-validation-safe)')
         // The real agent-presets service can RESOLVE the per-head preset (the
         // native picker will surface it).
         const presets = root.get('agentPresets')
@@ -5014,19 +5025,22 @@ function fakeSubagentAgent(id = SessionId(randomUUID())) {
   }
 }
 
-test('Task T4 pre-step: a TRANSIENT subagent (origin=subagent, role=reviewer) is injected a slim ROLE-focused block AND NOT the full host wake pack', async () => {
+test('Task T4/M2 pre-step: a TRANSIENT subagent (origin=subagent, role=secretary) is injected a slim ROLE-focused block AND NOT the full host wake pack', async () => {
   await withTempStateDir(async (stateDir) => {
     const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir)
     try {
       await waitForHeadMaterialized(agents)
-      const reviewer = agents.put(fakeSubagentAgent())
+      const secretary = agents.put(fakeSubagentAgent())
       // Dispatch-time role recording is what src/subagent.ts execute does; the
       // shared module registry is the same instance the real-loader injector reads.
-      rememberRole(String(reviewer.id), 'reviewer')
+      // M2 (owner decision 2026-08-28): the ONE transient contract is 'secretary'
+      // (the read-only NON-CODE personal helper); the pre-M2 role names are
+      // R6-deprecated and UNIFIED into it by normalizeRole.
+      rememberRole(String(secretary.id), 'secretary')
       const signal = new AbortController().signal
 
-      const claimed = preStepClaimed('review the change please')
-      const decision = await runPreStep(pluginCtx, reviewer, claimed, signal)
+      const claimed = preStepClaimed('read my journal and summarise the open items')
+      const decision = await runPreStep(pluginCtx, secretary, claimed, signal)
 
       assert.equal(decision.kind, 'enter')
       assert.equal(decision.messages.length, claimed.length + 1, 'subagent pre-step injects exactly ONE extra node (the slim role block)')
@@ -5038,10 +5052,11 @@ test('Task T4 pre-step: a TRANSIENT subagent (origin=subagent, role=reviewer) is
       // Slim role-focused block present:
       assert.match(text, /^## Deepartments context$/m, 'subagent orientation opens with its OWN header, not the wake pack header')
       assert.match(text, /pack-v1: present/, 'carries the deterministic presence sentinel')
-      assert.match(text, /identity: Deepartments subagent \(role: reviewer, room: deepartments\)/, 'identity is a Deepartments subagent with the REVIEWER role — never a host')
+      assert.match(text, /identity: Deepartments subagent \(role: secretary, room: deepartments\)/, 'identity is a Deepartments subagent with the SECRETARY role — never a host')
       assert.match(text, /## Your role contract/, 'role contract section present')
-      assert.match(text, /READ-ONLY: you do NOT write or edit code\./, 'reviewer contract injected')
-      assert.match(text, /VERDICT: PASS \(1-2 line note\) or FAIL/, 'reviewer contract verdict line injected')
+      assert.match(text, /READ-ONLY NON-CODE: you READ files, reports and journals/, 'secretary contract injected (read-only NON-CODE)')
+      assert.match(text, /CODE BELONGS TO THE IPD/, 'secretary contract carries the NON-CODE → IPD limit')
+      assert.match(text, /Return the deployer a concise self-contained summary/, 'the secretary reporting line is a summary to the deployer (never a report-file write)')
 
       // NO full host wake pack markers:
       assert.ok(!text.includes('## Deepartments wake pack'), 'no host wake pack header')
@@ -5068,10 +5083,18 @@ test('Task T4 pre-step: role plumbing — known role injects its contract; unkno
       const signal = new AbortController().signal
 
       // normalizeRole is the authoritative normalizer.
-      // F2/F3 (owner decision 2026-08-27): 'explore' is RETIRED from the transient
-      // SubagentRole — deep code analysis is the IPD explore-deep worker (deployed
-      // only by internal-programming-head), never a host subagent.
-      assert.equal(normalizeRole('builder'), 'builder')
+      // M2 (owner decision 2026-08-28): the transient surface is UNIFIED into
+      // ONE read-only NON-CODE role — 'secretary'. The pre-M2 transient roles
+      // (builder/reviewer/scribe/researcher) are R6-DEPRECATED and normalize to
+      // 'secretary' (a legacy dispatch still works, with the secretary's
+      // read-only contract); 'explore' stays RETIRED (F2/F3 — deep code
+      // analysis is the IPD explore-deep worker, deployed only by
+      // internal-programming-head, never a host subagent).
+      assert.equal(normalizeRole('secretary'), 'secretary')
+      assert.equal(normalizeRole('builder'), 'secretary', 'deprecated transient role builder R6-unifies into secretary (M2)')
+      assert.equal(normalizeRole('reviewer'), 'secretary', 'deprecated transient role reviewer R6-unifies into secretary (M2)')
+      assert.equal(normalizeRole('scribe'), 'secretary', 'deprecated transient role scribe R6-unifies into secretary (M2)')
+      assert.equal(normalizeRole('researcher'), 'secretary', 'deprecated transient role researcher R6-unifies into secretary (M2)')
       assert.equal(normalizeRole('explore'), 'generic', "'explore' retired from transient roles — falls back to generic (F2/F3)")
       assert.equal(normalizeRole('bogus'), 'generic')
       assert.equal(normalizeRole(undefined), 'generic')
@@ -5112,8 +5135,11 @@ test('Task T4 follow-up: the roleRegistry entry is EVICTED at the subagent/end l
       await root.plugin({ name: 'deepartments-subagent', inject: ['tools', 'subagents', 'systemPrompt'], apply: subagentForkApply }, { provider: 'spawn', toolName: 'subagent' })
 
       // Seed a dispatch-time role and confirm it is readable pre-settlement.
-      rememberRole('child-abc', 'reviewer')
-      assert.equal(roleForSession('child-abc'), 'reviewer', 'dispatch-time role recorded before settlement')
+      // M2: the secretary is the ONE contract — the pre-M2 names (reviewer
+      // below, builder in the malformed probe) R6-unify into it via the
+      // service's normalizeRole on set.
+      rememberRole('child-abc', 'secretary')
+      assert.equal(roleForSession('child-abc'), 'secretary', 'dispatch-time role recorded before settlement')
 
       // Fire the lifecycle edge through the real ctx the subagent.ts listener
       // is registered on (the plugin fiber ctx), with the production payload
@@ -5129,12 +5155,13 @@ test('Task T4 follow-up: the roleRegistry entry is EVICTED at the subagent/end l
       await waitFor(() => roleForSession('child-abc') === 'generic', 5000, 'registry entry evicted on subagent/end')
 
       // Malformed payloads must be silent no-ops: no id at all, and a
-      // non-string id. The entry survives both.
+      // non-string id. The entry survives both. The seeded legacy 'builder'
+      // role normalizes to the unified 'secretary' on set (R6 mapping).
       rememberRole('child-noop', 'builder')
-      assert.equal(roleForSession('child-noop'), 'builder', 'entry seeded for the malformed-payload probe')
+      assert.equal(roleForSession('child-noop'), 'secretary', 'entry seeded for the malformed-payload probe (deprecated builder unifies into secretary)')
       pluginCtx().emit('subagent/end', { stopReason: 'completed' })
       pluginCtx().emit('subagent/end', { id: 123, stopReason: 'completed' })
-      assert.equal(roleForSession('child-noop'), 'builder', 'malformed subagent/end payloads (no id / non-string id) are a no-op — the entry survives')
+      assert.equal(roleForSession('child-noop'), 'secretary', 'malformed subagent/end payloads (no id / non-string id) are a no-op — the entry survives')
     } finally {
       await dispose()
     }
@@ -5195,14 +5222,14 @@ test('Task T4 REGRESSION: a subagent-origin child with the REAL FLAT header (ori
       const sub = agents.put(fakeSubagentAgent())
       assert.equal(sub.session.header.meta, undefined, 'fixture is the REAL flat shape: no nested meta key on the header')
       assert.equal(sub.session.header.origin, 'subagent', 'fixture carries the top-level flat origin discriminator')
-      rememberRole(String(sub.id), 'reviewer')
-      const claimed = preStepClaimed('review the change please')
+      rememberRole(String(sub.id), 'secretary')
+      const claimed = preStepClaimed('read my journal please')
       const decision = await runPreStep(pluginCtx, sub, claimed, signal)
       assert.equal(decision.kind, 'enter')
       assert.equal(decision.messages.length, claimed.length + 1, 'subagent pre-step injects exactly ONE extra node (the slim role block)')
       const text = decision.messages[decision.messages.length - 1].content[0].text
       assert.match(text, /^## Deepartments context$/m, 'slim block opens with its OWN header — not the wake-pack header')
-      assert.match(text, /identity: Deepartments subagent \(role: reviewer, room: deepartments\)/, 'slim block: subagent identity with the reviewer role — never a host')
+      assert.match(text, /identity: Deepartments subagent \(role: secretary, room: deepartments\)/, 'slim block: subagent identity with the secretary role — never a host')
       // The wake-pack markers the dead-code bug used to inject:
       assert.ok(!text.includes('## Deepartments wake pack'), 'NO wake-pack header text (dead-code regression: old code injected the full pack)')
       assert.ok(!text.includes('Pre-resolved journal path'), 'NO journal pointer')
@@ -5228,6 +5255,144 @@ test('Task T4 REGRESSION: a subagent-origin child with the REAL FLAT header (ori
         /dept_sleep is refused for a transient delegated subagent — a subagent cannot sleep/,
         'dept_sleep refuses a caller whose header carries the flat origin'
       )
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- M2 SECRETARIOS (owner decision 2026-08-28) ------------------------------
+// The transient subagent surface becomes ONE tool: a personal NON-CODE
+// READ-ONLY secretary (plugin `dsh-deepartments/subagent`, toolName
+// 'secretary') deployed by the HOST and by department HEADS. The four pre-M2
+// transient roles (builder/reviewer/scribe/researcher) are R6-deprecated and
+// UNIFIED into the single 'secretary' contract (normalizeRole maps them);
+// 'explore' stays retired. The head's preset row (tool-secretary) contributes
+// the tool as an INHERITED (standing-mount) tool, so HEAD_BASE_TOOLS carries
+// 'secretary' in the head restrict allow-list; workers never carry it.
+
+/** The EXACT secretary persona of the head preset's tool-secretary row
+ * (presets/deepartments-head/agent.cordis.yml, `persona: >-` folded) — the
+ * deploy-journal test asserts the child receives this verbatim. */
+const M2_SECRETARY_PERSONA =
+  'You are a personal NON-CODE secretary in the Deepartments organization (DeepSeek Harness): you READ files, reports and journals, SEARCH (glob/grep) and SUMMARISE for the agent that deployed you. You never edit, write, run commands, or deploy anything. Focus on journals, reports and files the deployer points you at. Internal code work and deep code analysis belong to the Internal Programming Department — never attempt them; state the limitation instead. Report your result concisely to the agent that deployed you.'
+
+test('M2 SECRETARIOS: a HEAD sees its personal secretary (restrict allow-list carries the inherited preset contribution) and a WORKER never sees it (role allow-list does not carry it)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, root, head, headCtx, key, workspaceRegistry, dispose } = await bootWithHead(stateDir, { globalTools: F10_GLOBAL_TOOLS })
+    const signal = new AbortController().signal
+    try {
+      // Mount the REAL always-async delegation plugin with the toolName
+      // 'secretary' and the EXACT head-preset row config — the production
+      // standing-mount contribution is an INHERITED tool, registered here on
+      // the global plane so the restrict allow-list is the deciding gate.
+      await root.plugin({ name: 'deepartments-subagent', inject: ['tools', 'subagents', 'systemPrompt'], apply: subagentForkApply }, {
+        provider: 'spawn',
+        toolName: 'secretary',
+        persona: M2_SECRETARY_PERSONA,
+        toolFilter: { allow: ['read', 'glob', 'grep'], deny: ['write', 'secretary'] },
+        maxDepth: 'provider-managed'
+      })
+
+      // A worker spawned AFTER the registration: the researcher role template
+      // does NOT declare 'secretary' → the restrict allow-list masks it
+      // (workers never carry the tool — one-visibility; inheritance NEVER
+      // widens a scope).
+      const researcher = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'investigate X' })
+      assert.equal(researcher.ctx.tools.get('secretary', researcher.key), undefined, 'a worker NEVER sees the secretary tool (not in its role allow-list)')
+
+      // The booted head materialized BEFORE the registration → rotate it (the
+      // P2 archive-leak path of the F10 head test) so a FRESH head setup probes
+      // the surface AFTER 'secretary' is registered — the real boot order.
+      await headCtx.tools.get('dept_memo_write', key).execute({ summary: 'rotate to expose the secretary surface' }, { agent: head, signal })
+      agents.store.delete('head-research-head')
+      if (!workspaceRegistry.archived.includes('head-research-head')) workspaceRegistry.archived.push('head-research-head')
+      const r = await root.tools.get('send_message').execute(
+        { to: ['research-head'], text: 'wake' },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
+      assert.equal(r.delivered['research-head'], 'resumed', 'bus wake of the archived-session head reports resumed')
+      await waitFor(() => agents.createCalls.length > 1, 5000, 'a fresh head session was created on wake (rotation)')
+      const fresh = childContextFor(agents, String(agents.createCalls.at(-1).sessionId))
+      assert.ok(fresh !== undefined, 'the re-materialized (fresh) head context resolves')
+      // M2 wiring: 'secretary' is in HEAD_BASE_TOOLS, so the fresh head's
+      // restrict allow-list KEEPS the inherited secretary contribution visible.
+      assert.ok(fresh.ctx.tools.get('secretary', fresh.key) !== undefined, 'the fresh department head SEES its personal secretary (HEAD_BASE_TOOLS carries secretary)')
+      // The head still never sees the denied subagent machinery names.
+      assert.equal(fresh.ctx.tools.get('subagent', fresh.key), undefined, 'secretary does not leak the denied subagent name to a head')
+      assert.equal(fresh.ctx.tools.get('subagent_fork', fresh.key), undefined, 'secretary does not leak the denied subagent_fork name to a head')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('M2 SECRETARIOS deploy-journal: a HEAD deploys ONE secretary — execute starts a continuable child with the EXACT persona + toolFilter, remembers the default secretary role, the child scope is read-only one-visibility (read/glob/grep only), and its pre-step injects the slim secretary contract', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, root, head, spawnStub, pluginCtx, dispose } = await bootWithHead(stateDir, { globalTools: F10_GLOBAL_TOOLS })
+    const signal = new AbortController().signal
+    try {
+      // Mount the plugin exactly as the head preset's tool-secretary row does.
+      await root.plugin({ name: 'deepartments-subagent', inject: ['tools', 'subagents', 'systemPrompt'], apply: subagentForkApply }, {
+        provider: 'spawn',
+        toolName: 'secretary',
+        persona: M2_SECRETARY_PERSONA,
+        toolFilter: { allow: ['read', 'glob', 'grep'], deny: ['write', 'secretary'] },
+        maxDepth: 'provider-managed'
+      })
+
+      const tool = root.tools.get('secretary')
+      assert.ok(tool, 'the secretary tool registers under its own toolName (not subagent)')
+      const preparesBefore = spawnStub.prepareCalls.length
+
+      // The head asks its secretary to READ ITS JOURNAL — the smoke scenario.
+      const result = await tool.execute(
+        { description: 'read my journal', prompt: 'Read <stateDir>/journals/internal-programming-head.md and summarise the open items.' },
+        { agent: head, signal }
+      )
+      assert.equal(result.kind, 'continuable', 'the secretary deploy is ALWAYS-async: returns a continuable child id, never blocks')
+      const childId = String(result.subagentId)
+      assert.ok(childId, 'startContinuable returned a durable child id')
+
+      // Dispatch-time role: NO role param → the M2 default secretary.
+      assert.equal(roleForSession(childId), 'secretary', 'a dispatch without a role param remembers the DEFAULT secretary role')
+
+      // The child is composed with the EXACT persona + toolFilter of the row.
+      const child = childContextFor(agents, childId)
+      assert.ok(child !== undefined, 'the continuable child was materialized in the agents store')
+      const personaSection = await findPromptSection(child.ctx, child.key, 'deployment:persona', true)
+      assert.ok(personaSection !== undefined, 'the child carries the shadowing deployment:persona section')
+      assert.equal(personaSection.text, M2_SECRETARY_PERSONA, 'the child persona is the EXACT secretary persona of the preset row (persona EXACTA)')
+
+      // Read-only one-visibility: the allow whitelist [read, glob, grep] IS the
+      // child's full inherited surface — write/web/edit/secretary/board all masked.
+      for (const name of ['read', 'glob', 'grep']) {
+        assert.ok(child.ctx.tools.get(name, child.key) !== undefined, `the secretary child keeps the inherited tool ${name} (allow whitelist)`)
+      }
+      for (const name of ['write', 'edit', 'web_search', 'web_fetch', 'secretary', 'send_message', 'dept_exec', 'subagent']) {
+        assert.equal(child.ctx.tools.get(name, child.key), undefined, `the secretary child NEVER sees ${name} (read-only one-visibility)`)
+      }
+
+      // The provider seam was exercised (prepareContinuable recorded the start).
+      assert.ok(spawnStub.prepareCalls.length > preparesBefore, 'the provider prepareContinuable seam was exercised at deploy')
+
+      // The child's first pre-step injects the slim SECRETARY contract block (the
+      // real runtime shape: a startContinuable child carries the flat
+      // header.origin 'subagent' — the stub materializes it without the flat
+      // header, so we stamp it to mirror production before running the pre-step).
+      const childAgent = agents.store.get(childId)
+      assert.ok(childAgent, 'the live child agent handle resolves')
+      childAgent.session.header.origin = 'subagent'
+      const claimed = preStepClaimed('read my journal and summarise the open items')
+      const decision = await runPreStep(pluginCtx, childAgent, claimed, signal)
+      assert.equal(decision.kind, 'enter')
+      assert.equal(decision.messages.length, claimed.length + 1, 'the secretary pre-step injects exactly ONE extra node (the slim contract block)')
+      const text = decision.messages[decision.messages.length - 1].content[0].text
+      assert.match(text, /^## Deepartments context$/m, 'the secretary receives its OWN slim context, not the wake pack')
+      assert.match(text, /identity: Deepartments subagent \(role: secretary, room: deepartments\)/, 'the secretary identity carries the secretary role')
+      assert.match(text, /READ-ONLY NON-CODE: you READ files, reports and journals/, 'the secretary contract block is injected for the deploy-journal child')
+      assert.match(text, /CODE BELONGS TO THE IPD/, 'the NON-CODE → IPD limit is injected')
+      assert.ok(!text.includes('## Deepartments wake pack'), 'NO full host wake pack for the secretary child (slim block wakepack)')
     } finally {
       await dispose()
     }

@@ -2,12 +2,15 @@
 # permanent department head (a first-class root agent). This is deliberately
 # LEAN — it carries identity framing, persona, and the department-management
 # protocol (spec 004 §7.2): a head manages its OWN department's workers/jobs.
-# It has NO host/builder/delegation tools: a head does not edit the repo, does
-# not run builders, and does not spawn subagents — its deployment unit is the
-# department WORKER (dept_worker_spawn/dept_worker_retire, dept_job_run/
-# dept_job_list are registered by the plugin's setup() in its own layer, like
-# the messaging tools below). Its whole world is its INBOX: messages addressed
-# to it, delivered as its next turns.
+# It has NO host/builder tools and does NOT edit the repo or run builders — its
+# deployment unit is the department WORKER (dept_worker_spawn/dept_worker_retire,
+# dept_job_run/dept_job_list are registered by the plugin's setup() in its own
+# layer, like the messaging tools below). The ONE delegation a head has is the
+# `tool-secretary` row below (M2, owner decision 2026-08-28): a personal
+# NON-CODE READ-ONLY secretary (the same plugin the host uses, toolName
+# 'secretary') — a child that reads journals/files/reports, searches
+# (glob/grep) and summarises; it never edits/writes/runs commands. Its whole
+# world is its INBOX: messages addressed to it, delivered as its next turns.
 #
 # What a head actually gets:
 #   * The messaging tools (send_message, agent_messages, dept_who) are NOT
@@ -136,3 +139,41 @@
   name: '@deepseek-ai/dsh-tool-fs-search'
   config:
     sampleOverCapGlobResults: false
+
+# ── delegation (M2, owner decision 2026-08-28) ────────────────────────────────
+
+# The ONE delegation row a department head carries: a personal NON-CODE
+# READ-ONLY secretary — the same plugin (`dsh-deepartments/subagent`) the host
+# mounts, renamed `secretary`. The child JOINS this head's preset (persona +
+# tool-fs/tool-fs-search) and is RESTRICTED by `toolFilter` to `read`/`glob`/
+# `grep`: the allow is the whitelist (one-visibility — everything else
+# inherited vanishes from the child's prompt AND refuses to execute; the
+# harness validates the names loudly). `deny` names only tools the child
+# INHERITS and must never expose: `write` (from tool-fs above) and `secretary`
+# itself (the row below is inherited by the child too — a secretary can never
+# deploy another secretary). `edit`/`dept_exec`/`subagent` etc. are NOT named:
+# a head's child does NOT inherit them, and harness `tools.restrict()` rejects
+# any name missing from the child's inherited set (loud unknown-name
+# validation) — the allow whitelist already hides them. `web_search`/`web_fetch`
+# stay OUT until the real smoke confirms they are visible in a head-child's
+# scope. The head's own restrict allow-list (HEAD_BASE_TOOLS in src/invoke.ts)
+# carries 'secretary' so this preset contribution stays visible to the head.
+# Workers never carry this row (their role templates declare no secretary).
+- id: tool-secretary
+  name: 'dsh-deepartments/subagent'
+  config:
+    provider: spawn
+    toolName: secretary
+    persona: >-
+      You are a personal NON-CODE secretary in the Deepartments organization
+      (DeepSeek Harness): you READ files, reports and journals, SEARCH
+      (glob/grep) and SUMMARISE for the agent that deployed you. You never
+      edit, write, run commands, or deploy anything. Focus on journals,
+      reports and files the deployer points you at. Internal code work and
+      deep code analysis belong to the Internal Programming Department —
+      never attempt them; state the limitation instead. Report your result
+      concisely to the agent that deployed you.
+    toolFilter:
+      allow: [read, glob, grep]
+      deny: [write, secretary]
+    maxDepth: provider-managed

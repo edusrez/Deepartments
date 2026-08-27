@@ -30,9 +30,12 @@ test('D3: the subagent-roles service is ONE per-process registry — set/get/del
   const svc = createSubagentRolesService()
   assert.equal(createSubagentRolesService(), svc, 'createSubagentRolesService is a per-process singleton')
 
-  // set → get roundtrip (the rememberRole semantics at dispatch).
+  // set → get roundtrip (the rememberRole semantics at dispatch). M2 (owner
+  // decision 2026-08-28): the ONE transient contract is 'secretary' — the
+  // pre-M2 role names (reviewer here, builder below) R6-unify into it at write
+  // time via normalizeRole.
   svc.set('child-a', 'reviewer')
-  assert.equal(svc.get('child-a'), 'reviewer', 'set records the dispatch-time role')
+  assert.equal(svc.get('child-a'), 'secretary', 'set records the dispatch-time role (deprecated reviewer R6-unifies into secretary)')
 
   // set NORMALIZES unknown values (rememberRole semantics — an arbitrary role
   // falls back to generic at write time, never later at read time).
@@ -45,7 +48,7 @@ test('D3: the subagent-roles service is ONE per-process registry — set/get/del
   assert.equal(roleForSession('missing'), 'generic', 'roleForSession defaults unknown sessions to generic')
 
   // entries reflects the LIVE store.
-  assert.deepEqual([...svc.entries()].sort(), [['child-a', 'reviewer'], ['child-b', 'generic']], 'entries iterates the live registry')
+  assert.deepEqual([...svc.entries()].sort(), [['child-a', 'secretary'], ['child-b', 'generic']], 'entries iterates the live registry')
 
   // delete EVICTS at settlement (forgetRole semantics — silent no-op when missing).
   svc.delete('child-a')
@@ -58,7 +61,7 @@ test('D3: the subagent-roles service is ONE per-process registry — set/get/del
   // SAME channel as the service — a role written via rememberRole is readable
   // via the service and vice versa (one store, never two registries).
   rememberRole('child-c', 'builder')
-  assert.equal(svc.get('child-c'), 'builder', 'rememberRole writes into the SAME service store')
+  assert.equal(svc.get('child-c'), 'secretary', 'rememberRole writes into the SAME service store (deprecated builder R6-unifies into secretary)')
   forgetRole('child-c')
   assert.equal(svc.get('child-c'), undefined, 'forgetRole evicts from the SAME service store')
   assert.equal(roleRegistry.size, 1, 'the eviction left only the seeded child-b entry')

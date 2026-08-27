@@ -1,6 +1,6 @@
 ---
 name: deepartments-workflow
-description: Multi-agent workflow for the Deepartments project — Asistente (the main agent) + builders + reviewer + scribe (transient, NON-CODE/emergency; deep analysis is the IPD's explore-deep), with research delegated to the Research Department (RD), internal programming delegated to the Internal Programming Department (IPD), and org-runtime quality inspection delegated to the Quality Department (QD). Use it when planning or executing multi-agent code changes, when dispatching subagents, or when resuming a session of this project. Port of the multi-agent-workflow pattern to DeepSeek Harness.
+description: Multi-agent workflow for the Deepartments project — Asistente (the main agent) + its personal secretary (transient, read-only NON-CODE; the pre-M2 builder/reviewer/scribe/researcher roles are R6-unified into it; deep analysis is the IPD's explore-deep), with research delegated to the Research Department (RD), internal programming delegated to the Internal Programming Department (IPD), and org-runtime quality inspection delegated to the Quality Department (QD). Use it when planning or executing multi-agent code changes, when dispatching a secretary, or when resuming a session of this project. Port of the multi-agent-workflow pattern to DeepSeek Harness.
 ---
 
 # Deepartments — Multi-Agent Workflow (DSH)
@@ -21,32 +21,39 @@ Department (QD)".
 | **Asistente** (host main agent) | (this agent) | deepseek-v4-flash-vision-exp | All tools, but NEVER edits; interface/coordinator — positional authority (HOST), NOT a model tier; translates the owner's vision, asks microdecisions, and runs verification/commits/deploys; does NOT plan internal programming (the IPD head does) |
 | **Internal Programming Head** (`internal-programming-head`) | `send_message` | deepseek-v4-flash | DELEGATING head of the Internal Programming Department; ephemeral workers builder/reviewer/explore-deep/organizer. Owns all internal programming work — see "Programming requests → Internal Programming Department (IPD)" |
 | **Quality Head** (`quality-head`) | `send_message` | deepseek-v4-flash | DELEGATING head of the Quality Department; ephemeral-per-round worker quality-inspector. Inspects the org's own runtime (archive events sampled/100%, post-errors, daily digest) — see "Quality requests → Quality Department (QD)" |
-| **builder** | `subagent` | deepseek-v4-flash-vision-exp | EMERGENCY fallback + non-code atomic edits (e.g. docs/spec drafts); NOT the normal path for internal code changes — those go via the IPD. All such builders run Flash, no tiered models |
-| **reviewer** | `subagent` | deepseek-v4-flash-vision-exp | Read-only verifier after each builder/batch; PASS/FAIL |
-| **scribe** | `subagent` | deepseek-v4-flash-vision-exp | Non-code doc drafts to `.dsh/reports/scribe/` (never auto-commits); normal document work is department-owned |
+| **Secretary** (HOST + HEADS) | `secretary` (`dsh-deepartments/subagent`, HOST's tool row / heads' `tool-secretary`) | inherits the parent (host vision-exp; a head flash) | UNIFIED transient role (M2, owner 2026-08-28): ONE personal NON-CODE READ-ONLY helper that reads journals/files/reports, searches (glob/grep) and summarises for its deployer; never edits/writes/runs commands (code → IPD). It is a transient subagent child (followups via `send_message` to the child id), NOT a department worker |
+| **builder** (R6-deprecated) | `secretary` | inherits parent | DEPRECATED transient role (M2): `normalizeRole` maps it to the secretary contract. EMERGENCY fallback + non-code atomic edits are now READ-ONLY — code changes go via the IPD. Kept for vocabulary/record (R6) |
+| **reviewer** (R6-deprecated) | `secretary` | inherits parent | DEPRECATED transient role (M2): maps to the secretary contract. Read-only review/verdict work is now the secretary's read+summarise |
+| **scribe** (R6-deprecated) | `secretary` | inherits parent | DEPRECATED transient role (M2): maps to the secretary contract — the secretary NEVER writes files; doc drafting that needs writes is department-owned work |
 | **explore** (RETIRED from host dispatch) | — | — | Deep code analysis that feeds an internal change is the IPD's `explore-deep` worker (presets/departments/internal-programming/explore-deep.md) — deployed ONLY by the Internal Programming Head via a PROGRAMMING REQUEST; the Asistente does NOT dispatch analysis subagents. (Deprecated transient role: see "Explore (code analysis)" below.) |
 
-The Asistente's transient subagents (`subagent`/`subagent_fork`) are the
-**emergency fallback** and **non-code** path (e.g. scribe doc drafts). Normal
-**internal code changes do NOT go through them** — they are delegated to the
-Internal Programming Department, which owns its own ephemeral workers (builder
-/ reviewer / explore-deep / organizer) under a delegating head. For the
-department dispatch flow see "Programming requests → Internal Programming
-Department (IPD)".
+The Asistente's transient delegation (`secretary` / the context-inheriting fork
+variant of the same tool) is the **personal NON-CODE read-only helper** path
+(M2, owner decision 2026-08-28): a secretary reads journals/files/reports,
+searches (glob/grep) and summarises for its deployer — it NEVER edits, writes,
+runs commands, or deploys anything. Normal **internal code changes do NOT go
+through it** — they are delegated to the Internal Programming Department, which
+owns its own ephemeral workers (builder / reviewer / explore-deep / organizer)
+under a delegating head. For the department dispatch flow see "Programming
+requests → Internal Programming Department (IPD)".
 
-That transient roster is not rigid: every dispatch is via `subagent` or
-`subagent_fork` — all transient subagents run `deepseek-v4-flash-vision-exp`
-via the direct DeepSeek API route — provider `opencode-zen` (OpenCode Go),
-reasoning_effort `max`, endpoint/API key wired in the dev profile
-(pooler/gateway); stable profile untouched. The Asistente is the only agent on
-the host role; department heads and workers run `deepseek-v4-flash`.
-The `_fork` variants inherit the conversation: use them for context-inheriting
-follow-ups. The per-role contract is NOT re-written into the prompt — it is
-INJECTED at the child's first pre-step from the bundled ROLE_CONTRACTS map
-(Task T4): pass the `role` param and the dispatch prompt stays
-objective+files+spec+verification. There is NO Pro model tier (redesign F10):
-the Asistente's authority is POSITIONAL (host/orchestrator), not model-based.
-Fleet: the host + its transient subagents run `deepseek-v4-flash-vision-exp`
+That transient surface is a single role, not a roster: every dispatch is the
+same tool (`secretary` for the host; `tool-secretary` for department heads —
+the SAME plugin `dsh-deepartments/subagent`, renamed). The child's MODEL
+INHERITS the parent's (the host's secretary runs `deepseek-v4-flash-vision-exp`
+via `opencode-zen`; a head's secretary runs the head's `deepseek-v4-flash`) —
+no override, no new tier (M2 decision: "herencia del padre"). The child JOINS
+the parent's preset + a shadow persona + the tool's `toolFilter` restrict
+(read/glob/grep only — one-visibility; inheritance never widens). The pre-M2
+transient roles builder/reviewer/scribe/researcher are R6-DEPRECATED and
+UNIFIED into `secretary` (`normalizeRole` maps them — the dispatch `role` param
+defaults to secretary); `explore` stays retired (F2/F3). The per-role contract
+is NOT re-written into the prompt — it is INJECTED at the child's first
+pre-step from the bundled ROLE_CONTRACTS map (Task T4): pass the `role` param
+and the dispatch prompt stays objective+files+spec+verification. Department
+heads run `deepseek-v4-flash`. There is NO Pro model tier (redesign F10): the
+Asistente's authority is POSITIONAL (host/orchestrator), not model-based. Fleet:
+the host + its transient secretaries run `deepseek-v4-flash-vision-exp`
 (provider `opencode-zen`, reasoning_effort `max`); department heads +
 department workers run `deepseek-v4-flash` (provider `opencode-zen`, reasoning
 max).
@@ -87,11 +94,11 @@ its head); only the host sleeps.
 - **Specs first**: write/update the spec before implementing.
 - **Reports are inter-agent memory**: dispatch prompts reference paths of
   previous reports instead of re-dumping context.
-- **Always-async delegation.** The subagent tools
-  (`subagent`/`subagent_fork`) have no blocking mode: every dispatch returns
-  a child id immediately and the settlement notice wakes the Asistente when
-  the child finishes. Dispatch
-  independent builders in parallel in one message; continue dependent work
+- **Always-async delegation.** The secretary tool (the `dsh-deepartments/
+  subagent` plugin, host row renamed `secretary`, heads' `tool-secretary`) has
+  no blocking mode: every dispatch returns a child id immediately and the
+  settlement notice wakes the deployer when the child finishes. Dispatch
+  independent secretaries in parallel in one message; continue dependent work
   only when the notice arrives; never wait inline or busy-poll. Use
   `send_message` for follow-up turns in the same child conversation.
 - **Restart only with `smart_restart`.** Never restart the DSH service with a
@@ -114,17 +121,49 @@ the single line telling the child its role contract is injected.
 
 All dispatch tools run in the background automatically — there is no
 `run_in_background` parameter; results arrive via the settlement notice. Pass the
-role with the `role` param on `subagent`/`subagent_fork`
-(builder|reviewer|scribe|researcher; `researcher` = emergency RD-fallback only,
-`builder` = IPD-emergency/non-code only; default generic; `explore` is RETIRED —
-see F2/F3). Unknown roles fall back to generic.
+role with the `role` param on the tool: `secretary` is the ONE read-only
+NON-CODE contract (default); `builder`|`reviewer`|`scribe`|`researcher` are
+R6-DEPRECATED and map to secretary; `explore` is RETIRED (see F2/F3). Unknown
+roles fall back to generic.
 
-### Builder (default tier)
+### Secretary (personal NON-CODE read-only helper)
 
-Dispatched via `subagent` (Flash model, `role: builder`) — the default for
-atomic edits with a clear spec.
+The ONE transient delegation: HOST and HEADS deploy a personal secretary with
+the same tool (the host's delegation row renamed `secretary`; a head's
+`tool-secretary` preset row — both are the `dsh-deepartments/subagent` plugin).
+The secretary is a transient subagent CHILD (followups via `send_message` to
+the child id — the CHILD route is outside the ACL, F2), NOT a department
+worker (those are root agents via `dept_worker_spawn`).
 
-> Your role contract (builder) is injected by Deepartments — follow it.
+- **READ-ONLY NON-CODE**: it reads journals/files/reports, searches (glob/grep)
+  and summarises — e.g. "read my journal and summarise the open items", "review
+  the report at <path>". Its `toolFilter` allow whitelist is exactly
+  `[read, glob, grep]` (one-visibility: write/edit/web/delegation tools are
+  masked from prompt AND execution; the harness validates the names loudly).
+- **Model: inherits the parent** (M2): the host's secretary runs
+  `deepseek-v4-flash-vision-exp`; a head's secretary runs `deepseek-v4-flash` —
+  no override, no new tier.
+- **CODE BELONGS TO THE IPD**: the secretary NEVER edits, writes, runs commands,
+  or deploys anything (the pre-M2 builder/reviewer/scribe/researcher transient
+  contracts are R6-deprecated and unified into it). Internal programming and
+  deep code analysis are routed with ONE `send_message` to
+  `internal-programming-head` — never attempted by the secretary.
+- **Report**: the secretary returns a concise self-contained summary to its
+  deployer (it does not write report files). Follow-ups continue the same child
+  conversation via `send_message` to the child id.
+
+### Builder (default tier) — R6-DEPRECATED (unified into Secretary, M2)
+
+> R6 (M2, owner 2026-08-28): the transient `builder` role maps to the unified
+> `secretary` contract — a dispatched `role: builder` child is now READ-ONLY
+> (the injected contract is the secretary's). Template kept verbatim for the
+> record; code/edits are NEVER dispatched here — they go to the IPD.
+
+Dispatched via `secretary` (model inherits parent; `role: builder` R6-maps) —
+historically the default for atomic edits with a clear spec.
+
+> Your role contract (builder — now the secretary contract) is injected by
+> Deepartments — follow it.
 > - **Objective**: <one atomic task>.
 > - **Files in scope**: <only these — do not touch others>.
 > - **Spec / acceptance**: <what "done" means>.
@@ -134,22 +173,18 @@ atomic edits with a clear spec.
 >   convention below) + a concise Summary/Changes/Verification/Risks back to the
 >   Asistente.
 
-### Builder — hard/architectural tasks
+### Builder — hard/architectural tasks (R6-DEPRECATED, unified into Secretary)
 
-No tiered models: ALL builders run Flash via `subagent` (`role: builder`) with
-the same contract. Hard/architectural tasks are dispatched exactly like default
-builders, with a tighter spec and more granular verification steps.
+> R6 (M2): same deprecation — no tiered models remain; the transient surface is
+> the single read-only secretary. Internal code work → IPD (PROGRAMMING
+> REQUEST), never a transient dispatch.
 
-### Reviewer (read-only)
+### Reviewer (read-only) — R6-DEPRECATED (unified into Secretary, M2)
 
-Dispatched via `subagent` (Flash model, `role: reviewer`), after a builder.
-
-> Your role contract (reviewer) is injected by Deepartments — follow it.
-> - **Diff scope**: <the exact touched files + spec>.
-> - **Verdict**: PASS (1-2 line note) or FAIL (each failure file:line + one-line
->   fix) in ≤30 lines. Read-only: do NOT fix anything.
-> - **Report**: `.dsh/reports/reviewer/<YYYY-MM-DD>-<task-slug>.md` (frontmatter
->   convention below) + the verdict back to the Asistente.
+> R6 (M2, owner 2026-08-28): the transient `reviewer` role maps to the unified
+> `secretary` contract (read-only verdict/summary work). Template kept verbatim
+> for the record; the department reviewer WORKER (presets/departments/
+> internal-programming/reviewer.md) remains the normal independent-review path.
 
 ### Research requests → Research Department (RD)
 
@@ -180,7 +215,7 @@ by the Asistente that FAILS (delivery error) or gets no reply after the wait
 window. Only THEN, and BEFORE any fallback dispatch, the Asistente escalates to
 the owner with `ask_user_question` (the fallback requires owner approval). With
 approval, it may run the research itself via its transient `researcher`
-subagent (`subagent`, `role: researcher`). Every such use MUST be annotated in
+subagent (`secretary`, `role: researcher` R6-maps to the read-only secretary contract — web research is not the secretary's surface). Every such use MUST be annotated in
 the session summary to the owner as an exception, with the reason. Return to RD
 delegation as soon as the department recovers.
 
@@ -218,7 +253,7 @@ IPD's head) sent by the Asistente that FAILS (delivery error) or gets no reply
 after the wait window. Only THEN, and BEFORE any fallback dispatch, the
 Asistente escalates to the owner with `ask_user_question` (the fallback requires
 owner approval). With approval, it may run the work via its transient `builder`
-subagent (`subagent`, `role: builder`). The fallback NEVER includes
+subagent (`secretary`, `role: builder` R6-maps to the read-only secretary contract — no edits; `edit` never leaves the IPD `builder` worker). The fallback NEVER includes
 explore/code analysis (the transient surface is NON-CODE only — see F1/F2).
 Every such use MUST be annotated in the session summary to the owner as an
 exception, with the reason. Return to IPD delegation as soon as the department
@@ -326,7 +361,11 @@ true`, so a health alert preempts a busy host/head turn rather than queueing
 behind it. Keep `interrupt` OFF (the default) for normal flows — a preemptive
 abort is only for a time-sensitive, must-surface-now notice.
 
-### Scribe (documentation)
+### Scribe (documentation) — R6-DEPRECATED (unified into Secretary, M2)
+
+> R6 (M2): the transient `scribe` role maps to the secretary contract — the
+> secretary NEVER writes report files (read-only). Template kept verbatim for
+> the record; doc drafting that needs writes is department-owned work.
 
 > Your role contract (scribe) is injected by Deepartments — follow it.
 > - **Draft to** `.dsh/reports/scribe/<YYYY-MM-DD>-<topic>.md` ONLY.
@@ -395,7 +434,9 @@ The dispatch prompt is a contract. It must specify:
 
 ## Report convention
 
-All subagents write their report after EACH task:
+All subagents write their report after EACH task — EXCEPT the read-only
+`secretary` (M2): it returns its concise summary to its deployer instead of
+writing a report file (it never writes).
 
 - agents → `.dsh/reports/<agent>/<YYYY-MM-DD>-<task-slug>.md`
 - researcher → `.dsh/reports/researcher/<YYYY-MM-DD>-<topic>.md`
@@ -446,8 +487,8 @@ channel peerDependencies with CLI pin) live in AGENTS.md and the
 
 ## Escalation ladder
 
-- Builders: builder (`subagent`, Flash). If a builder fails twice, the
-  Asistente asks the human for a decision (no tiered models).
+- Builders: the transient surface is the read-only `secretary` — if a delegated
+  read/summary task fails twice, human decision (no tiered models).
 - Reviewer: if a review fails twice, human decision.
 
 ## Session ritual
@@ -463,8 +504,8 @@ channel peerDependencies with CLI pin) live in AGENTS.md and the
   list state dirs (the journal is the memory) → present the session plan to the
   owner.
 - **WORK**: break into atomic tasks → internal code work via the PROGRAMMING
-  REQUEST route (not `subagent` builders); "dispatch builders" applies only to
-  the emergency-fallback/non-code path (parallel if no file overlap) →
+  REQUEST route (not the transient secretary); "dispatch the secretary" applies
+  only to the read-only/non-code path (parallel if no file overlap) →
   reviewer gate after each batch → commit after each green batch.
 - **END**: verification, commit, update `docs/ROADMAP.md` (transient status
   only; git is the permanent record; never auto-generated), concise summary. At

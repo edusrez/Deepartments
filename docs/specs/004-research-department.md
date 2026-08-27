@@ -427,10 +427,14 @@ pattern of unknown ids (invoke.ts:3704-3705):
   and the wakePost/materializePost delivery seam are untouched; only the
   permission gate is added.
 - **The child route is OUTSIDE the ACL**: `subagents.followup` targets (the
-  Asistente's transient builders/reviewers) are NOT department workers — they
-  are never catalog-validated, and the router already decides child-first
-  (:3639-3676). Workers are ROOT agents of the catalog, NOT children, so they
-  always go through the catalog route — the ACL always applies to them.
+  Asistente's and department heads' transient personal SECRETARIES — M2, owner
+  2026-08-28: the ONE read-only NON-CODE transient tool, plugin
+  `dsh-deepartments/subagent` with toolName `secretary`, deployed from the
+  host's delegation row and from each head's preset `tool-secretary` row) are
+  NOT department workers — they are never catalog-validated, and the router
+  already decides child-first (:3639-3676). Workers are ROOT agents of the
+  catalog, NOT children, so they always go through the catalog route — the ACL
+  always applies to them.
 - ❓ Builder-verify: sender resolution edge — a plain session that self-registered
   as host via `busEnsureHostForCaller` (:3731-3742) is a `'host'` (full reach);
   a transient subagent calling `send_message` keeps the native tool (spec 003

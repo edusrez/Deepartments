@@ -5,19 +5,27 @@
 // eliminating the bundle's module-global mutable Map (AGENTS.md rule 4 — the
 // wakepack pre-step and the subagent tool resolve the same single store).
 //
-// Every tool-dispatched subagent (builder/reviewer/researcher/scribe/explore via
-// `subagent`/`subagent_fork`) today receives the FULL host wake pack ~4.6-4.9k
-// tokens: identity branded `host-<uuid> (role: host)`, journal path, board
+// Every tool-dispatched subagent (the single `secretary` role — see VOCAB —
+// via the `dsh-deepartments/subagent` plugin, toolName 'secretary') today
+// receives the FULL host wake pack ~4.6-4.9k tokens: identity branded
+// `host-<uuid> (role: host)`, journal path, board
 // delta, roster, git, system state, ROADMAP tail, and the full
 // deepartments-workflow skill body — nearly all irrelevant to a one-shot atomic
 // task and misleading (role labelled "host").
 //
-// VOCAB (F3, owner 2026-08-27): the transient roles builder/reviewer/scribe/
-// researcher are HOST-dispatched subagents (NON-CODE/emergency only — explore
-// retired, F2). The IPD's workers with the SAME names (presets/departments/
-// internal-programming/) are DEPARTMENT ROOT AGENTS — a different class
-// (dept_worker_spawn; never the subagent tool). Shared names are vocabulary,
-// not identity; never conflate a transient host subagent with an IPD worker.
+// VOCAB (M2, owner decision 2026-08-28): the transient tool dispatches ONE
+// read-only NON-CODE role — `secretary` — a personal helper (deployed by the
+// HOST and by department HEADS through the same plugin, toolName 'secretary')
+// that reads journals/files/reports, searches (glob/grep) and summarises; it
+// never edits, writes, or runs commands (internal code work always belongs to
+// the IPD). The pre-M2 transient roles builder/reviewer/scribe/researcher
+// (HOST-dispatched NON-CODE/emergency subagents — F3 vocabulary) are
+// R6-DEPRECATED and UNIFIED into 'secretary' (normalizeRole maps them — see
+// below); 'explore' stays retired (F2). The IPD's workers with the SAME names
+// (presets/departments/internal-programming/) are DEPARTMENT ROOT AGENTS — a
+// different class (dept_worker_spawn; never the subagent tool). Shared names
+// are vocabulary, not identity; never conflate a transient subagent with an
+// IPD worker.
 //
 // This module is the SINGLE SOURCE OF TRUTH for the role contract blocks injected
 // instead. The per-role contracts below are distilled from the repo-tracked
@@ -47,25 +55,36 @@
 //
 // NO export default (pitfall 0001).
 
-export type SubagentRole = 'builder' | 'reviewer' | 'researcher' | 'scribe' | 'generic'
+export type SubagentRole = 'secretary' | 'generic'
 
-const KNOWN_ROLES: readonly SubagentRole[] = ['builder', 'reviewer', 'researcher', 'scribe', 'generic']
+const KNOWN_ROLES: readonly SubagentRole[] = ['secretary', 'generic']
 
 /**
  * Normalize an arbitrary dispatch `role` value to a known {@link SubagentRole}.
- * Unknown/empty/undefined over and under-specified values all fall back to
- * `'generic'` (the robust default the audit recommends). The default is what a
- * cold-resumed continuable child also gets when the in-process dispatch-time
- * registry (below) no longer holds its role.
- *
- * F2/F3 (owner decision 2026-08-27): the transient `'explore'` role is RETIRED
- * and has an EXPLICIT rule here — it is no longer a {@link SubagentRole} member,
- * so `normalizeRole('explore')` → `'generic'`. Deep code analysis is the IPD
- * `explore-deep` worker (presets/departments/internal-programming/explore-deep.md),
- * deployed ONLY by `internal-programming-head` — never a host subagent.
+ * M2 (owner decision 2026-08-28): the transient surface is UNIFIED into ONE
+ * read-only NON-CODE contract — `'secretary'` — so the pre-M2 transient roles
+ * `builder`/`reviewer`/`scribe`/`researcher` are R6-DEPRECATED and normalize
+ * **to `'secretary'`** (a legacy dispatch still works, but with the
+ * secretary's read-only contract instead of the old per-role one). `'explore'`
+ * stays RETIRED (F2/F3) with an explicit rule here. Unknown/empty/undefined
+ * values fall back to `'generic'` (the robust default, and also what a
+ * cold-resumed continuable child gets when the in-process dispatch-time
+ * registry (below) no longer holds its role).
  */
 export function normalizeRole(role: unknown): SubagentRole {
-  if (typeof role === 'string' && (KNOWN_ROLES as readonly string[]).includes(role)) return role as SubagentRole
+  if (typeof role === 'string') {
+    // M2: the ONE read-only NON-CODE transient contract.
+    if (role === 'secretary') return 'secretary'
+    // R6 — deprecated pre-M2 transient roles, UNIFIED into the secretary
+    // (builder/reviewer/scribe/researcher were host-dispatched NON-CODE/
+    // emergency subagents; the IPD's department WORKERS with the same names
+    // are a different class — dept_worker_spawn — never the subagent tool).
+    if (role === 'builder' || role === 'reviewer' || role === 'scribe' || role === 'researcher') return 'secretary'
+  }
+  // 'explore' (retired F2/F3) + unknown/empty/undefined → generic: deep code
+  // analysis is the IPD `explore-deep` worker (presets/departments/
+  // internal-programming/explore-deep.md), deployed ONLY by
+  // internal-programming-head — never a host subagent.
   return 'generic'
 }
 
@@ -190,39 +209,39 @@ export function roleForSession(sessionId: string): SubagentRole {
  * the injected discipline rules — consistent-by-design, not identical.
  */
 export const ROLE_CONTRACTS: Record<SubagentRole, string> = {
-  builder:
-    '- SCOPE DISCIPLINE: make ONLY the specified changes; flag, do not fix, adjacent problems.\n' +
-    '- VERIFY BEFORE REPORTING: run the given verification command EXACTLY; iterate minimally until green; after 2 retries STOP and report (the Asistente escalates).\n' +
-    '- NEVER COMMIT: the Asistente verifies and commits each batch.\n' +
-    '- FOLLOW AGENTS.md: read it before editing; respect its invariants.\n' +
-    '- REPORT: changed files + line refs, verification tail, spec deviations, escalate yes/no.',
+  secretary:
+    '- READ-ONLY NON-CODE: you READ files, reports and journals and you SEARCH (glob/grep) to SUMMARISE for the agent that deployed you — you never write, edit, run commands, or deploy anything.\n' +
+    '- FOCUS: read and summarise only what the deployer asked for (e.g. "read my journal and summarise the open items", "review the report at <path>").\n' +
+    '- CODE BELONGS TO THE IPD: any internal programming or deep code analysis is NEVER attempted here — state the limitation instead (the deployer routes it to internal-programming-head via send_message).\n' +
+    '- REPORT: a concise self-contained summary to the agent that deployed you (it does not see your transcript).',
 
-  reviewer:
-    '- READ-ONLY: you do NOT write or edit code.\n' +
-    '- REVIEW ONLY the given diff scope; focused gate, not a full audit.\n' +
-    '- CHECKLIST: spec conformance (no drive-by edits), AGENTS.md invariants, edge cases, concurrency hazards, test coverage.\n' +
-    '- VERIFICATION HONESTY: is the reported output plausible? Be skeptical.\n' +
-    '- VERDICT: PASS (1-2 line note) or FAIL (each failure file:line + one-line fix) — do NOT fix anything. Keep < ~30 lines.',
-
-  researcher:
-    '- WEB-FIRST: your training cutoff is 2025 — use web_search for anything current and RESPECT DATES.\n' +
-    '- STRATEGY: start wide and narrow; vary queries (2-4 angles); read in parallel; prefer PRIMARY sources (official docs, GitHub); saturate after 3+ sources repeat.\n' +
-    '- REPORT: full findings to .dsh/reports/researcher/<YYYY-MM-DD>-<topic>.md; return the Asistente ONLY a concise summary (3-5 bullets) + the report path.',
-
-  scribe:
-    '- DRAFT-ONLY: write to .dsh/reports/scribe/<YYYY-MM-DD>-<topic>.md ONLY — never into AGENTS.md, README.md, docs/ or any live doc.\n' +
-    '- NEVER AUTO-COMMIT; never edit AGENTS.md (propose additions marked "PROPOSED for AGENTS.md:" and the human decides).\n' +
-    '- You may READ live docs for context; no bash.\n' +
-    '- RETURN: a 3-line summary — what you drafted, where, which proposals need a decision.',
-
-  // R6 — RETIRED transient role (F2/F3, owner decision 2026-08-27): 'explore' is
-  // no longer a valid transient SubagentRole; normalizeRole('explore') → 'generic'.
-  // Deep code analysis is the IPD `explore-deep` worker (presets/departments/
-  // internal-programming/explore-deep.md), deployed ONLY by internal-programming-head.
-  // Former contract, kept verbatim for the record:
-  //   '- READ-ONLY: no edits, no bash.\n' +
-  //   '- TRACE the full flow: grep/glob + reads, follow imports and callers, cross-refs, check against AGENTS.md.\n' +
-  //   '- REPORT IN DEPTH: flow/architecture summary, key files + file:line, patterns (good and bad), invariant status, surprises. Write to .dsh/reports/explore/<YYYY-MM-DD>-<task-slug>.md.',
+  // R6 — DEPRECATED pre-M2 transient roles (M2, owner decision 2026-08-28):
+  // builder/reviewer/scribe/researcher are no longer SubagentRole members;
+  // normalizeRole maps them → 'secretary' (the ONE read-only NON-CODE
+  // contract). The IPD's department WORKERS with the same names
+  // (presets/departments/internal-programming/) are a different class —
+  // dept_worker_spawn root agents, never the subagent tool. Former contracts,
+  // kept verbatim for the record (pre-M2 repo history):
+  //   builder:    make ONLY the specified changes; verify EXACTLY; never commit;
+  //               follow AGENTS.md; report changed files + line refs. (Now the
+  //               read-only secretary contract instead — code → IPD only.)
+  //   reviewer:   READ-ONLY PASS/FAIL verdict over a diff scope (now subsumed
+  //               by the secretary's read contract; verdicts → the deployer).
+  //   researcher: WEB-FIRST research with web_search (now subsumed by the
+  //               secretary; a host researcher subagent is NOT the normal path
+  //               — D2 delegates research to research-head).
+  //   scribe:     DRAFT-ONLY writes to .dsh/reports/scribe/ (now retired from
+  //               the transient surface — the secretary never writes files;
+  //               doc drafting that needs writes is department-owned work).
+  //
+  // R6 — RETIRED transient role (F2/F3, owner decision 2026-08-27): 'explore'
+  // remains no longer a valid transient SubagentRole; normalizeRole('explore')
+  // → 'generic'. Deep code analysis is the IPD `explore-deep` worker
+  // (presets/departments/internal-programming/explore-deep.md), deployed ONLY
+  // by internal-programming-head. Former contract, kept verbatim for the
+  // record: READ-ONLY (no edits, no bash); TRACE the full flow (grep/glob +
+  // reads, follow imports and callers, cross-refs, AGENTS.md check); REPORT IN
+  // DEPTH to .dsh/reports/explore/<YYYY-MM-DD>-<task-slug>.md.
 
   generic:
     '- You are a delegated Deepartments subagent for a single atomic task.\n' +
@@ -234,6 +253,9 @@ export const ROLE_CONTRACTS: Record<SubagentRole, string> = {
 
 /** One-line org identity for the compact subagent injection. */
 export function buildSubagentOrientation(role: SubagentRole, roomId: string): string {
+  const reporting = role === 'secretary'
+    ? 'Return the deployer a concise self-contained summary (they do not see your transcript).'
+    : 'Write your report to `.dsh/reports/<role>/<YYYY-MM-DD>-<task-slug>.md` with the convention frontmatter; return the parent a concise self-contained summary referencing shared paths.'
   return [
     '## Deepartments context',
     'pack-v1: present',
@@ -243,6 +265,6 @@ export function buildSubagentOrientation(role: SubagentRole, roomId: string): st
     ROLE_CONTRACTS[role],
     '',
     '## Reporting',
-    'Write your report to `.dsh/reports/<role>/<YYYY-MM-DD>-<task-slug>.md` with the convention frontmatter; return the parent a concise self-contained summary referencing shared paths.'
+    reporting
   ].join('\n')
 }

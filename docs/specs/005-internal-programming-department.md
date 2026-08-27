@@ -200,14 +200,17 @@ Identical to the RD (§3.4 spec 004): a **DISCONNECTED root agent**
 (`worker-<slug>-<uuid>`, `provider:'worker'`, own sidebar session in the IPD
 folder), never a harness subagent.
 
-**Vocabulary note (F3):** the host's transient subagent roles
-(builder/reviewer/scribe/researcher via `subagent`/`subagent_fork`) are a
-DIFFERENT class from the IPD workers with the same names (`builder`/`reviewer`/
-`explore-deep`/`organizer` — ROOT agents via `dept_worker_spawn`). The Asistente
-never dispatches a transient subagent for IPD-owned work (AGENTS.md rule 10);
-shared names are vocabulary, not identity. A transient host `explore` subagent
-does not exist anymore (F2/F3): deep analysis belongs to the IPD's
-`explore-deep` worker.
+**Vocabulary note (F3/M2):** the host's (and heads') transient subagent surface
+is the single read-only NON-CODE **`secretary`** (M2, owner decision 2026-08-28:
+plugin `dsh-deepartments/subagent`, toolName `secretary` — deployed from the
+host's delegation row and from each head's preset `tool-secretary` row); the
+pre-M2 transient names builder/reviewer/scribe/researcher are R6-DEPRECATED and
+UNIFIED into `secretary` by `normalizeRole`, and `explore` stays retired (F2/F3).
+Those names are a DIFFERENT class from the IPD workers with the same names
+(`builder`/`reviewer`/`explore-deep`/`organizer` — ROOT agents via
+`dept_worker_spawn`). The Asistente never dispatches a transient subagent for
+IPD-owned work (AGENTS.md rule 10); shared names are vocabulary, not identity.
+Deep code analysis belongs to the IPD's `explore-deep` worker.
 
 Lifecycle: spawn (role persona + task) → work
 the task → write the report & reply to the head (`dept_memo_write` only if durable

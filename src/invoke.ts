@@ -4606,13 +4606,20 @@ export function applyInvoke(ctx: Context, config: Config) {
 
   /** The GLOBAL tools every department HEAD inherits from the host surface
    * (spec 004 §7.1 / F10): read, write, glob, grep + the research web tools.
+   * M2 (owner decision 2026-08-28): `secretary` is ALSO named — a head's
+   * personal NON-CODE READ-ONLY secretary (the `tool-secretary` row of the
+   * deepartments-head preset) is contributed as an INHERITED (standing-mount)
+   * tool, and the restrict allow-list is exactly what keeps an inherited
+   * contribution visible; without the name the head would never see its own
+   * secretary. The probe drops it softly (warn) if the preset row is absent
+   * or fails to mount — board-only degradation, never a failed spawn.
    * The head's own-layer board + department-lifecycle tools
    * (send_message/agent_messages/dept_who/dept_memo_write +
    * dept_worker_spawn/retire, dept_post_create/retire) are SCOPED-registered
    * and ALWAYS visible (exempt from the restrict mask — naming a scope-local
    * name in restrict() would THROW), so only these GLOBAL capability tools need
    * naming in the allow list. */
-  const HEAD_BASE_TOOLS: readonly string[] = ['read', 'write', 'glob', 'grep', 'web_search', 'web_fetch']
+  const HEAD_BASE_TOOLS: readonly string[] = ['read', 'write', 'glob', 'grep', 'web_search', 'web_fetch', 'secretary']
   /** Security posture (spec 004 §7.1; OWNER DECISION 2026-08-23): `edit` is NOT
    * a hard deny — it flows through the role's allow-list like any other tool,
    * so only a role whose template DECLARES it inherits it (the organizer
