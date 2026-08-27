@@ -390,7 +390,8 @@ import {
   clearUnusableWorkerSession,
   auditPresetText,
   appendConfigPresetMarker,
-  readHealthHeartbeatFile
+  readHealthHeartbeatFile,
+  POOLER_STATE_FILE
 } from './core/health.js'
 import type {
   PostActivityInput,
@@ -7973,6 +7974,19 @@ export function applyInvoke(ctx: Context, config: Config) {
           hostWaits: buildHostWaits(),
           // C6: the bounded tail reader (absent → the legacy full read).
           deliveryRowsReader: deliveryRowsTailReader,
+          // M1 (a) — the pooler-capacity watchdog READS the pooler's OWN state
+          // file (join(DSH_HOME||cwd,'keyPooler-state.json') — dshHome() at
+          // :2542), SOLO-LECTURA (the pooler owns every write; the watchdog
+          // never writes it). The `health.poolerStateFilePath` knob overrides
+          // the path; absent dep → the scan is a no-op (hermetic tick tests).
+          poolerStatePath: config.health?.poolerStateFilePath !== undefined && config.health.poolerStateFilePath.trim() !== ''
+            ? config.health.poolerStateFilePath
+            : path.join(dshHome(), POOLER_STATE_FILE),
+          // M1 (b) — the qi-silence watchdog shares the SAME worker-inspect dice
+          // p as the directive EMITTER (single source of truth, resolved at
+          // :1819) so its rate-aware minimum (P(0|p) ≤ 5% → ceil(ln(.05)/ln(1-p)))
+          // tracks the real trigger probability; absent dep → 0.25 code default.
+          qiDirectiveRate: qualityWorkerInspectProbability,
           // The daemon is NOT a catalog member, so the bus ACL would deny it —
           // deliver the alert via the HOST delivery seam directly, framing it
           // `[From deepartments] System-health ALERT:` (exactly like the other

@@ -107,6 +107,51 @@ export interface HealthConfig {
    * long, waking the host once per window via a `system-wait:` bus message.
    * Must be a positive number; invalid/absent → the code default (30 min). */
   waitThresholdMs?: number
+  /** M1 (owner decision, anti-hang) — the POOLER-CAPACITY watchdog gate
+   * (default ON; an explicit `false` disables the scan): the system-health
+   * daemon alerts the host BEFORE the pooler paralyzes when the usable-key
+   * count drops, blocks accumulate, an usage percent runs hot, the state file
+   * goes stale (the dead-man's switch), or the last rotation was a 429 to NO
+   * key (the 503 prelude). The scan READS the pooler's own
+   * `<DSH_HOME>/keyPooler-state.json` SOLO-LECTURA (the pooler owns every
+   * write; the watchdog never writes it). All numeric knobs are optional —
+   * absent/invalid → the code defaults below. */
+  poolerCapacityEnabled?: boolean
+  /** M1 — ≤ this many USABLE keys (the pooler's own eligibility:
+   * !invalid && blockedUntil<=now && cooldownUntil<=now) → a
+   * `pooler-capacity:warning` finding (default 2). */
+  warningUsableKeys?: number
+  /** M1 — ≤ this many USABLE keys → a `pooler-capacity:critical` finding — the
+   * mission's "alert BEFORE paralysis" threshold (default 1). */
+  criticalUsableKeys?: number
+  /** M1 — ≥ this many currently blocked/cooldown keys → a
+   * `pooler-capacity:warning` finding (default 3). */
+  blockedKeysInWindow?: number
+  /** M1 — a usable key whose upstream usage percent is ≥ this → a
+   * `pooler-capacity:warning` finding (default 90 — the pooler's own highPercent). */
+  highPercent?: number
+  /** M1 — the dead-man's switch: when `now − updatedAt` of the pooler state
+   * file exceeds this (default 600000 = 10 min) the state is STALE →
+   * `pooler-capacity:critical` (the pooler writes the file only on health
+   * changes, so a silent pooler is a suspect pooler). */
+  stateStaleMs?: number
+  /** M1 — the absolute path of the pooler state file the watchdog READS;
+   * absent → the derived default `join(DSH_HOME||~/.dsh, 'keyPooler-state.json')`. */
+  poolerStateFilePath?: string
+  /** M1 — the QI-SILENCE watchdog gate (default ON; an explicit `false`
+   * disables the scan): the daemon guarantees the worker-retire quality-inspect
+   * TRIGGER — it alerts the host when worker retirements accumulate inside the
+   * window with ZERO emitted directives, using a RATE-AWARE threshold so the
+   * 25% dice's normal per-retirement silence never screams. */
+  qiSilenceEnabled?: boolean
+  /** M1 — the qi-silence window in minutes (default 120): retirements
+   * (ledger firstSeen) and directives (messages.jsonl ts) are counted inside it. */
+  qiSilenceWindowMinutes?: number
+  /** M1 — the minimum worker retirements in the window with ZERO directives
+   * that alerts; absent → the RATE-AWARE default: ceil(ln(0.05)/ln(1-p)) with p
+   * = the shared worker-inspect dice (`quality.workerInspectProbability`;
+   * p=0.25 → 11, p=1 → 1, p≤0 → never alerts). An explicit value overrides. */
+  qiSilenceMinRetiresInWindow?: number
 }
 
 /**
@@ -382,7 +427,19 @@ export const Config: z<any, any> = z.object({
     staleLiveMinutes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
     presetAuditEnabled: z.boolean(),
     heartbeatEnabled: z.boolean(),
-    waitThresholdMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+    waitThresholdMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    // M1 — the pooler-capacity + qi-silence watchdog knobs (all `default(void 0)`
+    // → absent = code defaults, the existing health-section contract).
+    poolerCapacityEnabled: z.boolean(),
+    warningUsableKeys: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
+    criticalUsableKeys: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
+    blockedKeysInWindow: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
+    highPercent: z.number().min(0).max(100),
+    stateStaleMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    poolerStateFilePath: z.string(),
+    qiSilenceEnabled: z.boolean(),
+    qiSilenceWindowMinutes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    qiSilenceMinRetiresInWindow: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
   }).default(void 0 as unknown as {
     enabled: boolean
     intervalMs: number
@@ -392,6 +449,16 @@ export const Config: z<any, any> = z.object({
     presetAuditEnabled: boolean
     heartbeatEnabled: boolean
     waitThresholdMs: number
+    poolerCapacityEnabled: boolean
+    warningUsableKeys: number
+    criticalUsableKeys: number
+    blockedKeysInWindow: number
+    highPercent: number
+    stateStaleMs: number
+    poolerStateFilePath: string
+    qiSilenceEnabled: boolean
+    qiSilenceWindowMinutes: number
+    qiSilenceMinRetiresInWindow: number
   }),
   // QD (spec 007 §4.1, D-Q2). Mirrors the runtime QualityConfig in src/invoke.ts:
   // `default(void 0)` so an ABSENT section or absent key falls through to the

@@ -175,6 +175,9 @@ importers:
       dshd-core:
         specifier: workspace:*
         version: link:../dshd-core
+      dshd-quality:
+        specifier: workspace:*
+        version: link:../dshd-quality
     devDependencies:
       '@types/node':
         specifier: ^22.0.0

@@ -38,7 +38,10 @@
 // parseMessageRecords/resolveMessagesPath (+ type DeliveryRow), the durable
 // registry readers readDurableHostEntries/readDurableRetiredHostIds/
 // pickLiveHostEntry (+ type HostEntryLike) and the wake-pack
-// BOUND_TEMPLATE_VARS.
+// BOUND_TEMPLATE_VARS. M1 adds `dshd-quality` (workspace:*, a leaf package —
+// dshd-quality depends on NOTHING, so no cycle): the exported
+// QUALITY_INSPECT_WORKER_RETIRED_PREFIX, the SINGLE literal the qi-silence
+// watchdog matches messages.jsonl records against (one literal, no drift).
 //
 // CONFIG SPLIT: the tick's `config` dep is a STRUCTURAL HealthConfigLike
 // (declared below) — ONLY the `health.*` knobs the tick reads. The bundle
@@ -59,6 +62,7 @@ import {
   pickLiveHostEntry,
   BOUND_TEMPLATE_VARS
 } from 'dshd-core'
+import { QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from 'dshd-quality'
 import type { DeliveryRow, HostEntryLike } from 'dshd-core'
 
 /** The semantic interrupt cancel-cause: a `hook` cause whose `reason` carries
@@ -316,8 +320,12 @@ export interface HealthFinding {
    * session activity while it holds pending messages). W8-d adds `system-wait`
    * (a host-sent message to a post with no reply + no session activity within
    * `waitThresholdMs` — the conditional wake; NOT part of the System-health
-   * ALERT frame, it rides `buildSystemWaitFrame`). */
-  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait'
+   * ALERT frame, it rides `buildSystemWaitFrame`). M1 adds `pooler-capacity`
+   * (the key-pooler capacity watchdog: usable-key count / blocks / 429-rotation
+   * / stale state, warning|critical via the dedupe key) and `qi-silence` (a
+   * rate-aware silence of quality-inspect directives over worker retirements —
+   * the anti-hang guarantee over the worker-retire trigger). */
+  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence'
   /** The dedupe key (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS). */
   key: string
   /** The postId (post-error / stalled-post). */
@@ -1587,6 +1595,51 @@ export interface HealthConfigLike {
     heartbeatEnabled?: boolean
     /** W8-d PART C — the quiet-expectation wait threshold (default 30 min). */
     waitThresholdMs?: number
+    /** M1 — pooler-capacity watchdog gate (default ON; explicit false disables
+     * the pooler-capacity scan). The scan READS the pooler's own state file
+     * (`<dshHome>/keyPooler-state.json` — the path the bundle injects via
+     * `deps.poolerStatePath`, override `health.poolerStateFilePath`) SOLO-LECTURA:
+     * the pooler owns every write, the watchdog never writes it. */
+    poolerCapacityEnabled?: boolean
+    /** M1 — ≤ this many USABLE keys (same eligibility the pooler uses:
+     * `!invalid && blockedUntil<=now && cooldownUntil<=now`) → a
+     * `pooler-capacity:warning` finding (default 2). */
+    warningUsableKeys?: number
+    /** M1 — ≤ this many USABLE keys → a `pooler-capacity:critical` finding —
+     * the mission's "alert BEFORE paralysis" threshold (default 1). */
+    criticalUsableKeys?: number
+    /** M1 — ≥ this many currently BLOCKED/cooldown keys (blockedUntil/cooldownUntil
+     * in the future) → a `pooler-capacity:warning` finding (default 3). */
+    blockedKeysInWindow?: number
+    /** M1 — a usable key whose upstream usage percent (`lastUsage.percent`, the
+     * x-ratelimit leading indicator the pooler already fetched) is >= this →
+     * a `pooler-capacity:warning` finding (default 90 — mirrors the pooler's own
+     * highPercent). */
+    highPercent?: number
+    /** M1 — the staleness window (default 10 min): the pooler writes the state
+     * file ONLY on health changes, so `updatedAt` ages on a quiet grid. When
+     * `now - updatedAt` exceeds this the pool's state is STALE = UNKNOWN → the
+     * scan logs a `warn` (naming the age) and returns NO finding — a
+     * quiet-but-healthy grid looks stale by design; the real exhaustion (the
+     * dead-man's-switch intent) is caught by the CERTAIN critical branches: a
+     * 429 rotation to NO key (`lastRotation.to === null`) or usable ≤
+     * `criticalUsableKeys`. */
+    stateStaleMs?: number
+    /** M1 — qi-silence watchdog gate (default ON; explicit false disables the
+     * qi-silence scan). */
+    qiSilenceEnabled?: boolean
+    /** M1 — the qi-silence window in minutes: worker retirements (ledger
+     * firstSeen) AND quality-inspect directives (messages.jsonl ts) are counted
+     * inside this window (default 120). */
+    qiSilenceWindowMinutes?: number
+    /** M1 — the minimum worker retirements in the window with ZERO emitted
+     * quality-inspect directives that alerts (`qi-silence`). Absent → the
+     * RATE-AWARE default: the smallest n with P(0 directives | p)^n <= 5% =
+     * ceil(ln(0.05)/ln(1-p)) (p = the shared worker-inspect dice from
+     * `deps.qiDirectiveRate`): p=0.25 → 11, p=1 → 1 (any silent retirement is a
+     * symptom), p<=0 → never (by-design silence). An explicit value overrides
+     * the rate-aware formula. */
+    qiSilenceMinRetiresInWindow?: number
   }
 }
 
@@ -1631,6 +1684,19 @@ export interface HealthDaemonDeps {
    * way (the scan filter pipeline is unchanged) — only the per-tick work
    * shrinks. */
   deliveryRowsReader?: DeliveryRowsReader
+  /** M1 — the absolute path of the pooler's `keyPooler-state.json` the
+   * pooler-capacity watchdog READS (READ-ONLY — the pooler owns every write;
+   * the scan never writes it). Absent → the pooler-capacity scan is a no-op
+   * (the production wiring resolves it as `<dshHome>/keyPooler-state.json`,
+   * `health.poolerStateFilePath` override; a hermetic tick test injects a path
+   * into a temp fixture). */
+  poolerStatePath?: string
+  /** M1 — the shared worker-inspect dice probability p (the bundle resolves it
+   * from `quality.workerInspectProbability` via resolveQualityWorkerInspectProbability
+   * — the SAME p the directive EMITTER samples, single source of truth). The
+   * qi-silence watchdog derives its rate-aware minimum on it. Absent →
+   * 0.25 (the code default). */
+  qiDirectiveRate?: number
   /** Deliver the framed ALERT bus message to the host (production:
    * messagesStoreReady.append + busDeliverToHost; tests: a recording stub).
    * NEVER throws. */
@@ -1807,6 +1873,384 @@ export function scanDeliveryFindings(
   return findings
 }
 
+/**
+ * M1 — the pooled-key capacity watchdog (owner decision 2026-08-27; the
+ * anti-hang hardening after the key-pooler incident). TWO new scans in the
+ * system-health tick, both alerting the host BEFORE paralysis:
+ *
+ *   (a) `pooler-capacity`: READS the pooler's OWN `keyPooler-state.json`
+ *       (join(DSH_HOME||cwd,'keyPooler-state.json'); in DEV
+ *       /opt/dsh/.dsh-dev/keyPooler-state.json) — SOLO-LECTURA, the scan NEVER
+ *       writes it. The snapshot is the pooler's truthful health: `updatedAt`,
+ *       `keys{id,workspace,invalid,blockedUntil,cooldownUntil,
+ *       lastUsage{status,percent,resetsAt},lastError,lastCheckedAt}`, and
+ *       `lastRotation`. A key is USABLE with the SAME eligibility the pooler's
+ *       `select()` uses (pool.ts:237-241): `!invalid && blockedUntil<=now &&
+ *       cooldownUntil<=now`. Levels: warning (usable<=warningUsableKeys OR
+ *       blocked>=blockedKeysInWindow OR a usable key's usage percent >=
+ *       highPercent); critical (usable<=criticalUsableKeys OR the state file is
+ *       STALE beyond stateStaleMs — the dead-man's switch — OR the last
+ *       rotation was a 429-usage-limit rotation to NO key, to:null — the exact
+ *       prelude of the 503 KeyPoolerExhausted).
+ *
+ *   (b) `qi-silence`: the guarantee over the worker-retire quality-inspect
+ *       TRIGGER (A+B fixed the trigger; this WATCHDOG guarantees it). RETIREMENTS
+ *       = the delta of the catalog `posts` the tick already receives (posts with
+ *       retired+provider==='worker'; posts.json has NO retiredAt → the watchdog
+ *       keeps its OWN ledger `qi-silence-state.json` {postId → firstSeenRetiredMs},
+ *       the turn-errors-state pattern; the firstSeen MARKER is pruned only when
+ *       the post leaves the retired catalog, never by age — the window bound
+ *       applies at COUNT time, so a pruned entry can never re-count).
+ *       DIRECTIVES = messages.jsonl records from='deepartments' → ['quality-head']
+ *       whose text STARTS WITH the EXPORTED
+ *       QUALITY_INSPECT_WORKER_RETIRED_PREFIX (dshd-quality — one literal, no
+ *       drift). Finding when retirements-in-window >= the RATE-AWARE minimum
+ *       (ceil(ln(0.05)/ln(1-p)): P(0 directives | p) <= 5%; p=0.25 → 11,
+ *       p=1 → 1) AND directives-in-window == 0 — so a SINGLE silent retirement
+ *       at p=0.25 (expected 75% of the time) never alerts, while a TRUE trigger
+ *       outage (≥11 retirements, ZERO directives) does.
+ * --------------------------------------------------------------------------- */
+
+/** The default pooler state FILE NAME (the pooler writes
+ * join(DSH_HOME||cwd, 'keyPooler-state.json'); the bundle derives the path). */
+export const POOLER_STATE_FILE = 'keyPooler-state.json'
+
+/** Resolve a positive-number safeguard knob shared by the M1 watchdogs: a
+ * finite value > 0 → it; absent/invalid → the fallback (the staleLiveMinutes +
+ * resolveSystemWaitMs pattern — an explicit knob always wins, a broken one
+ * never throws). */
+export function resolvePositiveKnob(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
+}
+
+/** M1-a code defaults (absent knobs → these). */
+export const POOLER_CAPACITY_DEFAULT_WARNING_USABLE_KEYS = 2
+export const POOLER_CAPACITY_DEFAULT_CRITICAL_USABLE_KEYS = 1
+export const POOLER_CAPACITY_DEFAULT_BLOCKED_KEYS_IN_WINDOW = 3
+export const POOLER_CAPACITY_DEFAULT_HIGH_PERCENT = 90
+export const POOLER_CAPACITY_DEFAULT_STATE_STALE_MS = 10 * 60 * 1000
+
+/** The pooler-capacity dedupe key LEVEL marker (the finding `key` is
+ * `pooler-capacity:critical` | `pooler-capacity:warning` — DISTINCT keys so a
+ * warning→critical escalation re-alerts instead of being swallowed by the
+ * 30-min dedupe). */
+export const POOLER_CAPACITY_KEY_CRITICAL = 'pooler-capacity:critical'
+export const POOLER_CAPACITY_KEY_WARNING = 'pooler-capacity:warning'
+
+/** M1 (b) code defaults. */
+export const QI_SILENCE_DEFAULT_WINDOW_MS = 120 * 60 * 1000
+/** The rate-aware false-positive tolerance: the default minimum n satisfies
+ * P(0 directives | p)^n <= 0.05 (a ≤5% chance a healthy dice emits zero
+ * directives over n retirements). */
+export const QI_SILENCE_DEFAULT_FALSE_POSITIVE_TOLERANCE = 0.05
+/** The worker-inspect dice fallback when `deps.qiDirectiveRate` is absent
+ * (mirrors QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY). */
+export const QI_SILENCE_DEFAULT_DIRECTIVE_RATE = 0.25
+/** The qi-silence ledger file (a SEPARATE file — the shared health-alerts
+ * ledger's defensive 2h prune would drop its entries; precedent
+ * interrupt-state.json). */
+export const QI_SILENCE_STATE_FILE = 'qi-silence-state.json'
+/** The qi-silence dedupe key (one key — re-alerts only after the 30-min dedupe
+ * window, and only while the silence condition STILL holds). */
+export const QI_SILENCE_KEY = 'qi-silence'
+
+/** One key of the pooler snapshot — STRUCTURAL (only the fields the watchdog
+ * reads, so the pooler's own type never hard-depends on this package). */
+export interface PoolerKeyStateLike {
+  id?: string
+  workspace?: string
+  invalid?: boolean
+  /** Epoch-ms until which the key is blocked (a usage-limit 429 blocks the WHOLE
+   * workspace). Absent/0 = not blocked. */
+  blockedUntil?: number
+  /** Epoch-ms until which the key is on a transient cooldown. Absent/0 = none. */
+  cooldownUntil?: number
+  /** The last upstream /usage result the pooler fetched (the leading indicator;
+   * null when the pooler has no usage data). */
+  lastUsage?: { status?: string; percent?: number; resetsAt?: string } | null
+  lastError?: string | null
+  lastCheckedAt?: number
+}
+
+/** The last rotation record of the pooler snapshot (a 429 usage-limit rotation
+ * to NO key — `to: null` — is the prelude of the 503 KeyPoolerExhausted). */
+export interface PoolerRotationLike {
+  from?: string
+  to?: string | null
+  reason?: string
+  at?: string
+  resetsAt?: string
+  message?: string
+}
+
+/** The pooler snapshot — STRUCTURAL mirror of dsh-key-pooler PoolSnapshot
+ * (pool.ts:71-93). */
+export interface PoolerSnapshotLike {
+  /** ISO ts of the LAST health CHANGE the pooler persisted (the file is written
+   * ONLY when health changed — proxy.ts:691 — so an old updatedAt means a quiet
+   * grid, judged by the stateStaleMs dead-man's switch). */
+  updatedAt?: string
+  keys?: Record<string, PoolerKeyStateLike>
+  lastRotation?: PoolerRotationLike | null
+}
+
+/** Read the pooler's `keyPooler-state.json` snapshot. Absent / unreadable /
+ * malformed → undefined (never throws) — the scan is then a no-op. READ-ONLY:
+ * this helper never writes the pooler's file. */
+export function readPoolerStateFile(statePath: string): PoolerSnapshotLike | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as unknown
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    return parsed as PoolerSnapshotLike
+  } catch {
+    return undefined
+  }
+}
+
+/** The resolved pooler-capacity knobs (code defaults when the config knob is
+ * absent/invalid — the staleLiveMinutes fallback pattern). */
+export interface PoolerCapacityKnobs {
+  warningUsableKeys: number
+  criticalUsableKeys: number
+  blockedKeysInWindow: number
+  highPercent: number
+  stateStaleMs: number
+}
+
+/** M1-a — scan the pooler state file for capacity findings. ONE finding per
+ * tick (a single dedupe key per level), priority critical > warning. The state
+ * file is READS ONLY; an absent/unreadable file → [] (no-op). The CRITICAL
+ * branches are the CERTAIN exhaustion signals ONLY — the three candidate
+ * branches, and the one that is NOT critical:
+ *  (1) the 429-rotation prelude — the last rotation was a 429 usage-limit to
+ *      NO key (`lastRotation.to === null`, the pool is one request away from
+ *      the 503 KeyPoolerExhausted) → CRITICAL;
+ *  (2) usable keys ≤ `criticalUsableKeys` (the same eligibility the pooler's
+ *      scheduler uses: !invalid && blockedUntil<=now && cooldownUntil<=now) →
+ *      CRITICAL;
+ *  (3) STALE state (`updatedAt` missing/unparseable or older than
+ *      `stateStaleMs`) — NOT a critical branch: the pooler writes the file
+ *      ONLY on health changes, so a quiet-but-healthy grid looks stale by
+ *      design → stale = UNKNOWN, and unknown ≠ exhausted. A stale snapshot →
+ *      return [] (NO finding) + a logger `warn` naming the age (absent logger
+ *      dep → the warn is dropped). The dead-man's-switch intent is served by
+ *      the CERTAIN branches (1)+(2), which detect the real exhaustion.
+ * The WARNING branches (fresh state only): usable ≤ `warningUsableKeys`,
+ * blocked/cooldown keys ≥ `blockedKeysInWindow`, a usable key at usage percent
+ * ≥ `highPercent` (the x-ratelimit leading indicator). */
+export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: PoolerCapacityKnobs, logger?: { warn(message: string): void }): HealthFinding[] {
+  const state = readPoolerStateFile(statePath)
+  if (state === undefined) return []
+  const updatedMs = state.updatedAt !== undefined ? Date.parse(state.updatedAt) : Number.NaN
+  const stale = !Number.isFinite(updatedMs) || nowMs - updatedMs > knobs.stateStaleMs
+  if (stale) {
+    const ageMin = Number.isFinite(updatedMs) ? Math.round((nowMs - updatedMs) / 60000) : Number.NaN
+    // M1 — stale = UNKNOWN, never a finding: a silent pooler on a quiet-but-
+    // healthy grid is the EXPECTED case (the pooler writes the file ONLY on
+    // health changes). Warn (naming the age) and return [] — the real
+    // dead-man's-switch is the CERTAIN exhaustion branches below (a 429
+    // rotation to:null, usable ≤ critical).
+    logger?.warn(Number.isFinite(ageMin)
+      ? `pooler state unknown/stale (age ${ageMin} min) — no capacity finding`
+      : `pooler state unknown/stale (unparseable updatedAt) — no capacity finding`)
+    return []
+  }
+  const keys = Object.values(state.keys ?? {})
+  const totalCount = keys.length
+  const usable = keys.filter((k) => !k.invalid && (Number(k.blockedUntil) || 0) <= nowMs && (Number(k.cooldownUntil) || 0) <= nowMs)
+  const usableCount = usable.length
+  const blockedCount = keys.filter((k) => (Number(k.blockedUntil) || 0) > nowMs || (Number(k.cooldownUntil) || 0) > nowMs).length
+  // The 429-usage-limit rotation to NO key (`lastRotation.to === null` — the
+  // pool rotated a key OUT and NO other key was eligible) — the pool is one
+  // request away from the 503 KeyPoolerExhausted. Critical (owner M1).
+  const rotation = state.lastRotation ?? undefined
+  const rotation429ToNull = rotation !== undefined && rotation.to === null && (rotation.reason ?? '').includes('429')
+  if (rotation429ToNull) {
+    return [{
+      kind: 'pooler-capacity',
+      key: POOLER_CAPACITY_KEY_CRITICAL,
+      ts: nowMs,
+      count: usableCount,
+      error: `last rotation ${rotation?.reason ?? '429 usage-limit'} → no key (to:null) — 503 prelude`
+    }]
+  }
+  if (usableCount <= knobs.criticalUsableKeys) {
+    return [{
+      kind: 'pooler-capacity',
+      key: POOLER_CAPACITY_KEY_CRITICAL,
+      ts: nowMs,
+      count: usableCount,
+      error: `${usableCount} usable / ${totalCount} keys (≤ ${knobs.criticalUsableKeys} critical)`
+    }]
+  }
+  if (usableCount <= knobs.warningUsableKeys) {
+    return [{
+      kind: 'pooler-capacity',
+      key: POOLER_CAPACITY_KEY_WARNING,
+      ts: nowMs,
+      count: usableCount,
+      error: `${usableCount} usable / ${totalCount} keys (≤ ${knobs.warningUsableKeys} warning)`
+    }]
+  }
+  if (blockedCount >= knobs.blockedKeysInWindow) {
+    return [{
+      kind: 'pooler-capacity',
+      key: POOLER_CAPACITY_KEY_WARNING,
+      ts: nowMs,
+      count: usableCount,
+      error: `${blockedCount} blocked / ${totalCount} keys (≥ ${knobs.blockedKeysInWindow})`
+    }]
+  }
+  const hot = usable.find((k) => typeof k.lastUsage?.percent === 'number' && (k.lastUsage?.percent ?? 0) >= knobs.highPercent)
+  if (hot !== undefined) {
+    return [{
+      kind: 'pooler-capacity',
+      key: POOLER_CAPACITY_KEY_WARNING,
+      ts: nowMs,
+      count: usableCount,
+      error: `usable key ${hot.id} usage percent ${hot.lastUsage?.percent}% ≥ ${knobs.highPercent}% (rate-limit headroom low)`
+    }]
+  }
+  return []
+}
+
+/** The qi-silence ledger: `postId → firstSeenRetiredMs` — when the watchdog
+ * FIRST observed the post as retired+worker in the catalog (posts.json has no
+ * retiredAt, so the ledger IS the retirement timestamp; the turn-errors-state
+ * pattern). */
+export type QiSilenceState = Record<string, number>
+
+/** Read `<stateDir>/qi-silence-state.json` → `{ [postId]: firstSeenRetiredMs }`.
+ * Absent / unreadable / malformed → {} (never throws). */
+export function readQiSilenceState(stateDir: string): QiSilenceState {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, QI_SILENCE_STATE_FILE), 'utf8')) as Record<string, unknown>
+    const out: QiSilenceState = {}
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === 'number' && Number.isFinite(value)) out[key] = value
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/qi-silence-state.json` (mkdir -p the dir, then the file). */
+export async function writeQiSilenceState(stateDir: string, state: QiSilenceState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, QI_SILENCE_STATE_FILE)), { recursive: true })
+  await writeFile(path.join(stateDir, QI_SILENCE_STATE_FILE), JSON.stringify(state), 'utf8')
+}
+
+/** The RATE-AWARE minimum: the smallest n retirements with which a ZERO-directive
+ * window is suspicious — P(0 directives | n, p) = (1-p)^n <= `tolerance`
+ * (default 0.05) → n = ceil(ln(tolerance)/ln(1-p)). p=0.25 → 11 (a single silent
+ * retirement is the EXPECTED 75% case — the dice — and never alerts); p=1 → 1
+ * (a 100%-inspect deployment must emit a directive per retirement, so ANY silent
+ * retirement is a symptom); p<=0 → Infinity (by-design zero-inspection → silence
+ * is expected, the finding can never fire). The `qiSilenceMinRetiresInWindow`
+ * knob overrides this formula. PURE. */
+export function qiSilenceMinRetiresForRate(rate: number, tolerance: number = QI_SILENCE_DEFAULT_FALSE_POSITIVE_TOLERANCE): number {
+  if (!Number.isFinite(rate) || rate <= 0) return Number.POSITIVE_INFINITY
+  if (rate >= 1) return 1
+  if (!Number.isFinite(tolerance) || tolerance <= 0 || tolerance >= 1) return Number.POSITIVE_INFINITY
+  return Math.max(1, Math.ceil(Math.log(tolerance) / Math.log(1 - rate)))
+}
+
+/** Count the QUALITY-INSPECT WORKER-RETIRED directives inside the window:
+ * messages.jsonl records `from==='deepartments'` → includes 'quality-head'
+ * whose text STARTS WITH the exported dshd-quality prefix (the SINGLE literal —
+ * no drift) and whose `ts` is within `windowMs`. A missing/unreadable/malformed
+ * messages file → 0 (never throws — the scan degrades to "no directives", the
+ * conservative direction for the guarantee). */
+export function readQiDirectiveCount(stateDir: string, windowMs: number, nowMs: number): number {
+  try {
+    const records = parseMessageRecords(readFileSync(resolveMessagesPath(stateDir), 'utf8'))
+    return records.filter(
+      (r) => r.from === 'deepartments' && r.to.includes('quality-head') && r.text.startsWith(QUALITY_INSPECT_WORKER_RETIRED_PREFIX) && nowMs - r.ts <= windowMs
+    ).length
+  } catch {
+    return 0
+  }
+}
+
+/** The qi-silence scan inputs: the catalog posts (already materialized by the
+ * tick — retired+provider workers), the stateDir (messages.jsonl), the clock,
+ * the window + the RESOLVED minimum (rate-aware or knob) + the dice p (for the
+ * finding text), and the current ledger. */
+export interface QiSilenceScanInput {
+  posts: readonly PostActivityInput[]
+  stateDir: string
+  nowMs: number
+  windowMs: number
+  /** The RESOLVED minimum (knob override `qiSilenceMinRetiresInWindow`, else
+   * `qiSilenceMinRetiresForRate(rate)`); Number.POSITIVE_INFINITY never fires. */
+  minRetires: number
+  /** The shared worker-inspect dice p (deps.qiDirectiveRate fallback 0.25) —
+   * carried into the finding text so the alert states the bound it enforced. */
+  rate: number
+  /** The CURRENT ledger (read by the tick; mutated → the returned next ledger). */
+  ledger: QiSilenceState
+}
+
+/** The qi-silence scan result: the findings (≤1 per tick, key `qi-silence`),
+ * the NEXT ledger, and whether the ledger CHANGED (the tick persists only then —
+ * the turn-errors pattern: 1914-1935). */
+export interface QiSilenceScanResult {
+  findings: HealthFinding[]
+  ledger: QiSilenceState
+  changed: boolean
+}
+
+/** M1-b — scan the qi-silence condition: retirements in the window (a post
+ * retired+worker observed for the first time = a retirement AT nowMs; a
+ * re-observation within the window keeps counting) vs directives in the window
+ * (messages.jsonl prefix records). Finding: retirements >= minRetires AND zero
+ * directives — the aggregate guarantee (never a per-retirement alarm, so the
+ * 25% dice's normal silence does not scream). LEDGER SEMANTICS: the entry is
+ * the post's FIRST-SEEN marker and is pruned ONLY when the post leaves the
+ * retired+worker catalog (retention dropped it). It is NEVER time-pruned while
+ * the post stays in the catalog — the WINDOW bound applies at COUNT time
+ * (`now - firstSeen <= windowMs`), never at storage time: deleting an aged
+ * marker and re-stamping the SAME still-retired post on the next tick would
+ * re-count an OLD retirement as fresh (permanent false alerts — the very
+ * guarantee this watchdog must not fabricate). NEVER throws. */
+export function scanQiSilence(input: QiSilenceScanInput): QiSilenceScanResult {
+  const retiredWorkers = input.posts.filter((p) => p.provider === 'worker' && p.retired === true)
+  const retiredPostIds = new Set(retiredWorkers.map((p) => p.postId))
+  const ledger = { ...input.ledger }
+  let changed = false
+  let inWindow = 0
+  for (const post of retiredWorkers) {
+    const firstSeen = ledger[post.postId]
+    if (firstSeen === undefined) {
+      ledger[post.postId] = input.nowMs
+      changed = true
+      inWindow += 1
+    } else if (input.nowMs - firstSeen <= input.windowMs) {
+      inWindow += 1
+    }
+  }
+  for (const [postId] of Object.entries(ledger)) {
+    if (!retiredPostIds.has(postId)) {
+      delete ledger[postId]
+      changed = true
+    }
+  }
+  const directives = readQiDirectiveCount(input.stateDir, input.windowMs, input.nowMs)
+  const findings: HealthFinding[] = []
+  if (inWindow > 0 && inWindow >= input.minRetires && directives === 0) {
+    const windowMinutes = Math.round(input.windowMs / 60000)
+    findings.push({
+      kind: 'qi-silence',
+      key: QI_SILENCE_KEY,
+      ts: input.nowMs,
+      count: inWindow,
+      error: `${inWindow} worker retire(s) in ${windowMinutes} min with zero quality-inspect directive(s) (workerInspectProbability=${input.rate}, min retires ${input.minRetires})`
+    })
+  }
+  return { findings, ledger, changed }
+}
+
 /** Build the framed host ALERT text — `[From deepartments] System-health ALERT:
  * <grouped findings>`. Each finding is a one-line bullet. The config-preset and
  * stalled-post bullets describe their anomaly verbally (never the literal
@@ -1823,6 +2267,15 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     if (finding.kind === 'config-preset') {
       return `- config-preset: unbound template reference(s) in preset text${finding.error !== undefined && finding.error !== '' ? `: ${finding.error}` : ''}`
     }
+    // M1 — the two new kinds need their OWN branches (the fallback below would
+    // render an unknown kind as a stalled-post — never let these kinds hit it).
+    if (finding.kind === 'pooler-capacity') {
+      const level = finding.key === POOLER_CAPACITY_KEY_CRITICAL ? 'critical' : 'warning'
+      return `- pooler-capacity ${level}: ${finding.error ?? `pool capacity low (${finding.count ?? 0} usable)`}`
+    }
+    if (finding.kind === 'qi-silence') {
+      return `- qi-silence: ${finding.error ?? `worker retirements with no quality-inspect directive (${finding.count ?? 0})`}`
+    }
     return `- stalled-post: ${finding.postId} (${finding.count ?? 1} pending message(s), ${finding.error ?? 'no session activity'})`
   })
   return `[From deepartments] System-health ALERT:\n${lines.join('\n')}`
@@ -1830,14 +2283,20 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
 
 /** ONE system-health tick: (1) write the heartbeat; (2) W8-c turn-failure
  * capture (record fresh turn errors into post-errors.jsonl); (3) scan
- * post-errors + delivery-failed + config-preset + stalled-post for anomalies
- * inside HEALTH_ERROR_WINDOW_MS; (4) dedupe per key inside
+ * post-errors + delivery-failed + config-preset + stalled-post + the M1
+ * watchdogs (pooler-capacity: the key-pooler state file when
+ * `deps.poolerStatePath` is injected; qi-silence: the retirement/directive
+ * silence guarantee) for anomalies inside HEALTH_ERROR_WINDOW_MS; (4) dedupe
+ * per key inside
  * HEALTH_DEDUPE_WINDOW_MS (persisted to health-alerts-state.json so the ≤1
  * alert per key per 30min invariant survives restarts); (5) resolve the live
  * host and alert it by bus for each NET-NEW anomaly; (6) append one audit row
  * per alert. The W8-c per-safeguard knobs are read from `config.health`
  * (default-on): `turnErrorCaptureEnabled`, `staleLiveWatchdogEnabled` +
- * `staleLiveMinutes`, `presetAuditEnabled`. NEVER throws (every internal
+ * `staleLiveMinutes`, `presetAuditEnabled` — and the M1 watchdog knobs
+ * (`poolerCapacityEnabled` + the pooler thresholds / `qiSilenceEnabled` +
+ * `qiSilenceWindowMinutes` + `qiSilenceMinRetiresInWindow`). NEVER throws
+ * (every internal
  * failure is a warn). If no host is registered the anomaly is NOT deduped (it
  * retries — a real deployment without a reachable host must not silently
  * forget an alert). */
@@ -1898,6 +2357,34 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       typeof health?.staleLiveMinutes === 'number' && Number.isFinite(health.staleLiveMinutes) && health.staleLiveMinutes > 0
         ? health.staleLiveMinutes
         : STALE_LIVE_DEFAULT_MINUTES
+    // M1 — the pooler-capacity + qi-silence watchdog knobs (default-on gates;
+    // numeric knobs fall back to the code defaults when absent/invalid — the
+    // staleLiveMinutes pattern).
+    const poolerCapacityEnabled = health?.poolerCapacityEnabled !== false
+    const qiSilenceEnabled = health?.qiSilenceEnabled !== false
+    const poolerKnobs: PoolerCapacityKnobs = {
+      warningUsableKeys: resolvePositiveKnob(health?.warningUsableKeys, POOLER_CAPACITY_DEFAULT_WARNING_USABLE_KEYS),
+      criticalUsableKeys: resolvePositiveKnob(health?.criticalUsableKeys, POOLER_CAPACITY_DEFAULT_CRITICAL_USABLE_KEYS),
+      blockedKeysInWindow: resolvePositiveKnob(health?.blockedKeysInWindow, POOLER_CAPACITY_DEFAULT_BLOCKED_KEYS_IN_WINDOW),
+      highPercent: resolvePositiveKnob(health?.highPercent, POOLER_CAPACITY_DEFAULT_HIGH_PERCENT),
+      stateStaleMs: resolvePositiveKnob(health?.stateStaleMs, POOLER_CAPACITY_DEFAULT_STATE_STALE_MS)
+    }
+    const qiWindowMs =
+      typeof health?.qiSilenceWindowMinutes === 'number' && Number.isFinite(health.qiSilenceWindowMinutes) && health.qiSilenceWindowMinutes > 0
+        ? health.qiSilenceWindowMinutes * 60_000
+        : QI_SILENCE_DEFAULT_WINDOW_MS
+    const qiDirectiveRate =
+      typeof deps.qiDirectiveRate === 'number' && Number.isFinite(deps.qiDirectiveRate) && deps.qiDirectiveRate >= 0 && deps.qiDirectiveRate <= 1
+        ? deps.qiDirectiveRate
+        : QI_SILENCE_DEFAULT_DIRECTIVE_RATE
+    // The rate-aware minimum (the owner's decision): P(0 directives | p) ≤ 5% →
+    // ceil(ln(0.05)/ln(1-p)) — p=0.25 → 11 (a single silent retirement at the
+    // 25% dice is the EXPECTED 75% case), p=1 → 1, p≤0 → never. An explicit
+    // `qiSilenceMinRetiresInWindow` knob overrides the formula.
+    const qiMinRetires =
+      typeof health?.qiSilenceMinRetiresInWindow === 'number' && Number.isFinite(health.qiSilenceMinRetiresInWindow) && health.qiSilenceMinRetiresInWindow >= 1
+        ? Math.floor(health.qiSilenceMinRetiresInWindow)
+        : qiSilenceMinRetiresForRate(qiDirectiveRate, QI_SILENCE_DEFAULT_FALSE_POSITIVE_TOLERANCE)
     const posts = [...(deps.posts ?? [])]
     // Bug (delivery-failed re-alert loop): the set of RETIRED member ids — the
     // union of the retired HOST ids (already computed above) and the RETIRED
@@ -1933,12 +2420,44 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         deps.logger?.warn(`[deepartments] system-health: turn-error capture failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    // M1 (b) — the qi-silence watchdog: maintain the retirement ledger
+    // (firstSeen per retired+worker post; pruned by the scan) and find a
+    // silence once retirements in the window pass the rate-aware minimum with
+    // ZERO emitted directives. The ledger is persisted ONLY when it changed
+    // (the turn-errors pattern); it never relies on the shared health-alerts
+    // ledger (whose defensive 2h prune would drop its entries).
+    let qiFindings: HealthFinding[] = []
+    if (qiSilenceEnabled) {
+      try {
+        const qiLedger = readQiSilenceState(deps.stateDir)
+        const qiScan = scanQiSilence({
+          posts,
+          stateDir: deps.stateDir,
+          nowMs,
+          windowMs: qiWindowMs,
+          minRetires: qiMinRetires,
+          rate: qiDirectiveRate,
+          ledger: qiLedger
+        })
+        qiFindings = qiScan.findings
+        if (qiScan.changed) await writeQiSilenceState(deps.stateDir, qiScan.ledger)
+      } catch (error: unknown) {
+        deps.logger?.warn(`[deepartments] system-health: qi-silence scan failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    // M1 (a) — the pooler-capacity watchdog: READS the pooler's own
+    // keyPooler-state.json (path injected by the wiring; absent dep → no-op).
+    const poolerFindings = poolerCapacityEnabled && deps.poolerStatePath !== undefined
+      ? scanPoolerCapacity(deps.poolerStatePath, nowMs, poolerKnobs, deps.logger)
+      : []
     // 3. scan.
     const findings = [
       ...scanPostErrorFindings(deps.stateDir, nowMs, retiredHostIds),
       ...scanDeliveryFindings(deps.stateDir, nowMs, retiredMemberIds, deps.deliveryRowsReader),
       ...(presetAuditEnabled ? scanConfigPresetFindings(deps.stateDir, nowMs) : []),
-      ...(staleLiveWatchdogEnabled ? scanStalledPosts(posts, nowMs, staleLiveMinutes) : [])
+      ...(staleLiveWatchdogEnabled ? scanStalledPosts(posts, nowMs, staleLiveMinutes) : []),
+      ...poolerFindings,
+      ...qiFindings
     ]
     // W8-d PART B/C — the system-heartbeat knobs: `heartbeatEnabled` (default
     // on) gates the CONDITIONAL-WAKE path; `waitThresholdMs` is resolved with

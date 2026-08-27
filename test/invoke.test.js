@@ -29,7 +29,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
@@ -9263,6 +9263,457 @@ test('W6 runHealthDaemonTick: an anomaly with NO live host → warn + skip; the 
     assert.equal(alerts.length, 0, 'no live host → no alert delivered')
     assert.ok(warns.some((w) => /no live host/.test(w)), 'a no-live-host skip warns')
     assert.deepEqual(readHealthAlertsState(stateDir), {}, 'the dedupe ledger is NOT advanced when no host is reachable')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M1 (owner decision 2026-08-27, anti-hang hardening) — the two watchdog scans
+// in the system-health tick: (a) POOLER-CAPACITY — READS the pooler's own
+// keyPooler-state.json (SOLO-LECTURA; usable = the pooler's own eligibility:
+// !invalid && blockedUntil<=now && cooldownUntil<=now) and alerts BEFORE
+// paralysis (warning ≤2 usable / ≥3 blocked / usage percent ≥90; critical ≤1
+// usable / stale state dead-man's switch > 10min / last rotation 429 → to:null
+// — the 503 prelude); (b) QI-SILENCE — retirements in the window (own ledger
+// qi-silence-state.json, posts.json has no retiredAt) vs quality-inspect
+// directives (messages.jsonl prefix records) with the RATE-AWARE minimum
+// ceil(ln(0.05)/ln(1-p)) (p=0.25 → 11, p=1 → 1) so the 25% dice's normal
+// single-retirement silence NEVER screams but a true trigger outage does.
+// ---------------------------------------------------------------------------
+
+test('M1 runHealthDaemonTick pooler-capacity SMOKE (acceptance): a fixture keyPooler-state.json with ALL keys invalid/blocked → the real tick alerts `pooler-capacity: critical` (frame with level + usable/total) + audit + dedupe (no re-alert inside the 30min window); the scan NEVER writes the fixture (read-only)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 27, 10, 0, 0).getTime() // fixed epoch
+    // Fixture: every key UNUSABLE (invalid OR blocked in the future) with a
+    // FRESH updatedAt (staleness — stale=unknown, no finding — must not mask
+    // the usable-count critical branch).
+    const snap = {
+      updatedAt: new Date(T0 - 60_000).toISOString(),
+      keys: {
+        'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: true, blockedUntil: 0, cooldownUntil: 0 },
+        'oc-7': { id: 'oc-7', workspace: 'ws7', invalid: false, blockedUntil: T0 + 3600_000, cooldownUntil: 0 },
+        'oc-8': { id: 'oc-8', workspace: 'ws8', invalid: false, blockedUntil: T0 + 3600_000, cooldownUntil: 0 }
+      },
+      lastRotation: null
+    }
+    const statePath = path.join(stateDir, POOLER_STATE_FILE)
+    await writeFile(statePath, JSON.stringify(snap), 'utf8')
+    const bytesBefore = (await readFile(statePath)).byteLength
+    const alerts = []
+    const warns = []
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-m1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      // M1: the injected pooler-state path points at the fixture (the scan only READS it).
+      poolerStatePath: statePath,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => warns.push(m) }
+    })
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'a critical pooler-capacity finding alerts once (grouped)')
+    assert.match(alerts[0].frame, /^\[From deepartments\] System-health ALERT:/, 'the alert frame is the system-health frame')
+    assert.match(alerts[0].frame, /pooler-capacity critical: 0 usable \/ 3 keys \(≤ 1 critical\)/, 'the frame bullet carries the LEVEL + the usable/total detail (never the stalled-post fallback)')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state[POOLER_CAPACITY_KEY_CRITICAL], T0, 'the pooler-capacity:critical dedupe key is advanced at now')
+    const auditRows = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l))
+    assert.equal(auditRows.length, 1, 'one audit line per alert')
+    assert.deepEqual(auditRows[0].dedupeKeys, [POOLER_CAPACITY_KEY_CRITICAL], 'the audit records the pooler dedupe key')
+    assert.equal((await readFile(statePath)).byteLength, bytesBefore, 'the scan NEVER writes the pooler state file (READ-ONLY)')
+    // Tick 2 inside the dedupe window → NO re-alert; the fixture is untouched.
+    await tick(T0 + 60_000)
+    assert.equal(alerts.length, 1, 'a second tick inside the 30min dedupe window does NOT re-alert')
+    assert.equal(warns.length, 0, 'a fully-resolvable tick emits no warns')
+  })
+})
+
+test('M1 scanPoolerCapacity: the level matrix — 2 usable → warning; ≤1 usable → critical; ≥3 blocked → warning; a hot usage percent (≥90) → warning; highPercent knob', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_234_567_890_000
+    const knobs = { warningUsableKeys: 2, criticalUsableKeys: 1, blockedKeysInWindow: 3, highPercent: 90, stateStaleMs: 600000 }
+    const pathFor = async (name, keys) => {
+      const p = path.join(stateDir, `${name}.json`)
+      await writeFile(p, JSON.stringify({ updatedAt: new Date(T0 - 60_000).toISOString(), keys, lastRotation: null }), 'utf8')
+      return p
+    }
+    const usableKey = (id, percent) => ({ id, workspace: `ws-${id}`, invalid: false, blockedUntil: 0, cooldownUntil: 0, lastUsage: { status: 'ok', percent, resetsAt: new Date(T0 + 3600_000).toISOString() }, lastError: null, lastCheckedAt: T0 })
+    const blockedKey = (id) => ({ id, workspace: `ws-${id}`, invalid: false, blockedUntil: T0 + 3600_000, cooldownUntil: 0, lastUsage: null, lastError: null, lastCheckedAt: T0 })
+    // 2 usable of 3 → warning.
+    const warnPath = await pathFor('warn', { 'k1': usableKey('k1', 5), 'k2': usableKey('k2', 5), 'k3': blockedKey('k3') })
+    const warn = scanPoolerCapacity(warnPath, T0, knobs)
+    assert.equal(warn.length, 1, '2 usable → one warning finding')
+    assert.equal(warn[0].key, POOLER_CAPACITY_KEY_WARNING, 'the warning dedupe key')
+    assert.match(warn[0].error, /2 usable \/ 3 keys/, 'the warning error carries usable/total')
+    // 1 usable of 3 → critical.
+    const critPath = await pathFor('crit', { 'k1': usableKey('k1', 5), 'k2': blockedKey('k2'), 'k3': blockedKey('k3') })
+    const crit = scanPoolerCapacity(critPath, T0, knobs)
+    assert.equal(crit.length, 1, '1 usable → one critical finding')
+    assert.equal(crit[0].key, POOLER_CAPACITY_KEY_CRITICAL, 'the critical dedupe key')
+    assert.match(crit[0].error, /1 usable \/ 3 keys \(≤ 1 critical\)/, 'the critical error carries usable/total')
+    // 3 usable + 3 blocked (total 6): usable 3 > warning, blocked 3 ≥ 3 → warning (the block branch, NOT the usable branch).
+    const blockPath = await pathFor('block', { 'k1': usableKey('k1', 5), 'k2': usableKey('k2', 5), 'k3': usableKey('k3', 5), 'k4': blockedKey('k4'), 'k5': blockedKey('k5'), 'k6': blockedKey('k6') })
+    const block = scanPoolerCapacity(blockPath, T0, knobs)
+    assert.equal(block[0].key, POOLER_CAPACITY_KEY_WARNING, '3 of 6 blocked → warning (the blocked branch)')
+    assert.match(block[0].error, /3 blocked \/ 6 keys \(≥ 3\)/, 'the blocked warning carries blocked/total')
+    // 3 usable, one at 95% percent → warning (the hot-percent branch).
+    const hotPath = await pathFor('hot', { 'k1': usableKey('k1', 95), 'k2': usableKey('k2', 5), 'k3': usableKey('k3', 5) })
+    const hot = scanPoolerCapacity(hotPath, T0, knobs)
+    assert.equal(hot[0].key, POOLER_CAPACITY_KEY_WARNING, 'a usable key at 95% → warning (the leading indicator)')
+    assert.match(hot[0].error, /usage percent 95% ≥ 90%/, 'the hot warning names the percent')
+    // 3 usable all ≤ 90% → NO finding.
+    const okPath = await pathFor('ok', { 'k1': usableKey('k1', 10), 'k2': usableKey('k2', 20), 'k3': usableKey('k3', 30) })
+    assert.deepEqual(scanPoolerCapacity(okPath, T0, knobs), [], 'a healthy pool (3 usable, low percent) → no finding')
+    // A custom highPercent knob (96) — the 95% key is NOT hot anymore (95 < 96).
+    const custom = scanPoolerCapacity(hotPath, T0, { ...knobs, highPercent: 96 })
+    assert.deepEqual(custom, [], 'the highPercent knob raises the warning bar (95 < 96)')
+  })
+})
+
+test('M1 scanPoolerCapacity: the last-rotation 429 prelude — a 429 usage-limit rotation to NO key (to:null) is critical even when keys remain usable; a rotation to a key is NOT', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_234_567_890_000
+    const knobs = { warningUsableKeys: 2, criticalUsableKeys: 1, blockedKeysInWindow: 3, highPercent: 90, stateStaleMs: 600000 }
+    const p = path.join(stateDir, 'rot.json')
+    await writeFile(p, JSON.stringify({
+      updatedAt: new Date(T0 - 60_000).toISOString(),
+      keys: { 'k1': { id: 'k1', invalid: false, blockedUntil: 0, cooldownUntil: 0 }, 'k2': { id: 'k2', invalid: false, blockedUntil: 0, cooldownUntil: 0 } },
+      lastRotation: { from: 'k1', to: null, reason: '429 usage-limit', at: new Date(T0 - 60_000).toISOString(), resetsAt: new Date(T0 + 7 * 86400_000).toISOString(), message: 'key rotada k1 por error 429 (usage limit)' }
+    }), 'utf8')
+    const finding = scanPoolerCapacity(p, T0, knobs)
+    assert.equal(finding.length, 1, 'the 429-rotation-to-null prelude alerts even with usable keys left')
+    assert.equal(finding[0].key, POOLER_CAPACITY_KEY_CRITICAL, 'the rotation prelude is CRITICAL')
+    assert.match(finding[0].error, /last rotation 429 usage-limit → no key \(to:null\) — 503 prelude/, 'the critical error names the 503 prelude')
+    // Control: the SAME pool with a rotation to a key (recovered) → 2 usable → warning at most, NOT the rotation critical.
+    await writeFile(p, JSON.stringify({
+      updatedAt: new Date(T0 - 60_000).toISOString(),
+      keys: { 'k1': { id: 'k1', invalid: false, blockedUntil: 0, cooldownUntil: 0 }, 'k2': { id: 'k2', invalid: false, blockedUntil: 0, cooldownUntil: 0 } },
+      lastRotation: { from: 'k3', to: 'k2', reason: '429 usage-limit', at: new Date(T0 - 60_000).toISOString(), message: 'key rotada k3 → k2' }
+    }), 'utf8')
+    assert.equal(scanPoolerCapacity(p, T0, knobs)[0].key, POOLER_CAPACITY_KEY_WARNING, 'a rotation to a key is NOT the critical prelude (2 usable → warning)')
+  })
+})
+
+test('M1 scanPoolerCapacity: staleness is UNKNOWN → NO finding + a logger warn naming the age — a state file older than stateStaleMs (or with an unparseable updatedAt) NEVER alerts; the CERTAIN critical branch (usable ≤ critical) still fires on a FRESH snapshot; an ABSENT file → no-op ([])', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_234_567_890_000
+    const knobs = { warningUsableKeys: 2, criticalUsableKeys: 1, blockedKeysInWindow: 3, highPercent: 90, stateStaleMs: 600000 }
+    const p = path.join(stateDir, 'stale.json')
+    // 11 min old (> the 10min default) while the keys are HEALTHY — a quiet
+    // grid looks stale by design → NO finding, only a warn naming the age.
+    await writeFile(p, JSON.stringify({
+      updatedAt: new Date(T0 - 11 * 60_000).toISOString(),
+      keys: { 'k1': { id: 'k1', invalid: false, blockedUntil: 0, cooldownUntil: 0 }, 'k2': { id: 'k2', invalid: false, blockedUntil: 0, cooldownUntil: 0 }, 'k3': { id: 'k3', invalid: false, blockedUntil: 0, cooldownUntil: 0 } },
+      lastRotation: null
+    }), 'utf8')
+    const warns = []
+    assert.deepEqual(scanPoolerCapacity(p, T0, knobs, { warn: (m) => warns.push(m) }), [], 'a stale state file → NO finding (stale = unknown, not exhausted)')
+    assert.equal(warns.length, 1, 'staleness emits ONE warn (never a finding)')
+    assert.match(warns[0], /pooler state unknown\/stale \(age 11 min\) — no capacity finding/, 'the warn names the age')
+    // The stateStaleMs knob: a larger threshold makes the same file fresh → no
+    // finding AND no warn.
+    const none = []
+    assert.deepEqual(scanPoolerCapacity(p, T0, { ...knobs, stateStaleMs: 12 * 60_000 }, { warn: (m) => none.push(m) }), [], 'the stateStaleMs knob extends the freshness window')
+    assert.equal(none.length, 0, 'a fresh window emits no stale warn')
+    // Unparseable updatedAt → cannot trust the snapshot → still UNKNOWN: no
+    // finding + warn (the unparseable flavor).
+    await writeFile(p, JSON.stringify({ updatedAt: 'not-a-date', keys: {}, lastRotation: null }), 'utf8')
+    const warns2 = []
+    assert.deepEqual(scanPoolerCapacity(p, T0, knobs, { warn: (m) => warns2.push(m) }), [], 'an unparseable updatedAt is stale → NO finding')
+    assert.equal(warns2.length, 1, 'the unparseable staleness also warns')
+    assert.match(warns2[0], /pooler state unknown\/stale \(unparseable updatedAt\) — no capacity finding/, 'the warn names the unparseable updatedAt')
+    // A FRESH file with NO keys at all — the CERTAIN usable branch: the pool
+    // can never serve → critical (0 usable ≤ 1).
+    await writeFile(p, JSON.stringify({ updatedAt: new Date(T0 - 60_000).toISOString(), keys: {}, lastRotation: null }), 'utf8')
+    assert.equal(scanPoolerCapacity(p, T0, knobs)[0].key, POOLER_CAPACITY_KEY_CRITICAL, 'a FRESH pool with zero keys is exhausted → critical (the certain usable-count branch)')
+    // ABSENT file → no-op.
+    assert.deepEqual(scanPoolerCapacity(path.join(stateDir, 'missing.json'), T0, knobs), [], 'an absent state file → no finding (no-op)')
+  })
+})
+
+test('M1 runHealthDaemonTick pooler-capacity: an ABSENT state file → the scan is a no-op (no pooler alert) even with the path injected; a DISABLED knob (poolerCapacityEnabled:false) suppresses the scan', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 27, 12, 0, 0).getTime()
+    const alerts = []
+    const warns = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-nop',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      poolerStatePath: path.join(stateDir, POOLER_STATE_FILE), // injected but the file does NOT exist
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => warns.push(m) }
+    })
+    assert.equal(alerts.length, 0, 'no pooler state file → no pooler alert (no-op)')
+    assert.equal(warns.length, 0, 'the no-op is silent (never throws)')
+    // A bad fixture + the knob explicitly OFF → no alert.
+    await writeFile(path.join(stateDir, POOLER_STATE_FILE), JSON.stringify({
+      updatedAt: new Date(T0 - 60_000).toISOString(),
+      keys: { 'k1': { id: 'k1', invalid: true } },
+      lastRotation: null
+    }), 'utf8')
+    const alerts2 = []
+    await runHealthDaemonTick({
+      now: () => T0 + 60_000,
+      stateDir,
+      bootId: 'boot-off',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      config: { health: { poolerCapacityEnabled: false } },
+      poolerStatePath: path.join(stateDir, POOLER_STATE_FILE),
+      notifyHost: async (hostEntry, frame) => { alerts2.push({ hostEntry, frame }) },
+      logger: { warn: (m) => warns.push(m) }
+    })
+    assert.equal(alerts2.length, 0, 'poolerCapacityEnabled:false suppresses the pooler scan')
+  })
+})
+
+test('M1 qiSilenceMinRetiresForRate: the owner RATE-AWARE bound — P(0 directives | p, n) ≤ 5% → n = ceil(ln(0.05)/ln(1-p)); p=0.25 → 11 (a single silent retirement is the EXPECTED 75% case), p=1 → 1 (any silent retirement is a symptom), p≤0 → Infinity (by-design silence never fires)', () => {
+  assert.equal(qiSilenceMinRetiresForRate(0.25), 11, 'p=0.25 → ceil(ln(.05)/ln(.75)) = 11')
+  assert.equal(qiSilenceMinRetiresForRate(1), 1, 'p=1 → 1')
+  assert.equal(qiSilenceMinRetiresForRate(0.5), 5, 'p=0.5 → ceil(ln(.05)/ln(.5)) = 5')
+  assert.equal(qiSilenceMinRetiresForRate(0), Number.POSITIVE_INFINITY, 'p=0 → never fires')
+  assert.equal(qiSilenceMinRetiresForRate(-0.1), Number.POSITIVE_INFINITY, 'an invalid rate → never fires')
+  assert.equal(qiSilenceMinRetiresForRate(0.25, 0.01), 17, 'a tighter tolerance (1%) raises the bound: ceil(ln(.01)/ln(.75)) = 17')
+})
+
+test('M1 runHealthDaemonTick qi-silence SMOKE (acceptance): 11 worker retirements (p=0.25 → rate-aware min 11) with ZERO directives → the real tick alerts `qi-silence` + the ledger persists + dedupe; a re-tick at 25% with a SINGLE retirement does NOT alert (the normal dice case)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 27, 11, 0, 0).getTime()
+    const retirements = Array.from({ length: 11 }, (_, i) => ({ postId: `builder-r${i}`, retired: true, provider: 'worker' }))
+    const alerts = []
+    const warns = []
+    const tick = (nowMs, posts) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-m1q',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts,
+      // The SHARED dice p (the wiring passes qualityWorkerInspectProbability) —
+      // the watchdog and the directive emitter use the SAME p.
+      qiDirectiveRate: 0.25,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => warns.push(m) }
+    })
+    // 11 retirements at the 25% dice → the rate-aware min (11) passes → alert.
+    await tick(T0, retirements)
+    assert.equal(alerts.length, 1, '11 retirements with zero directives alert the host (the trigger-outage guarantee)')
+    assert.match(alerts[0].frame, /qi-silence: 11 worker retire\(s\) in 120 min with zero quality-inspect directive\(s\) \(workerInspectProbability=0.25, min retires 11\)/, 'the qi-silence frame names retirements/window/dice')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state[QI_SILENCE_KEY], T0, 'the qi-silence dedupe key is advanced')
+    const ledger = readQiSilenceState(stateDir)
+    assert.equal(Object.keys(ledger).length, 11, 'the qi-silence ledger records every firstSeen')
+    assert.equal(ledger['builder-r0'], T0, 'the firstSeen is the observation tick ts (posts.json has no retiredAt)')
+    assert.ok(await readFile(path.join(stateDir, QI_SILENCE_STATE_FILE), 'utf8'), 'the ledger file is persisted (qi-silence-state.json)')
+    // Directives ARE present now → the same retirements do NOT re-alert (dedupe anyway).
+    await tick(T0 + 60_000, retirements)
+    assert.equal(alerts.length, 1, 'no re-alert inside the 30min dedupe window')
+  })
+})
+
+test('M1 qi-silence long-window recall: the 11 retirements KEEP counting inside the 120min window → after the 30min dedupe the silence RE-ALERTS while no directive arrives (the guarantee re-fires while the trigger outage persists, never a one-shot)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 27, 14, 0, 0).getTime()
+    const retirements = Array.from({ length: 11 }, (_, i) => ({ postId: `builder-w${i}`, retired: true, provider: 'worker' }))
+    const alerts = []
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-window',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: retirements,
+      qiDirectiveRate: 0.25,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'the window opens with the first alert (11 retirements, zero directives)')
+    // 31 min later the dedupe window is over, the SAME 11 retirements are STILL
+    // inside the 120min window and NO directive arrived → re-alert.
+    await tick(T0 + 31 * 60_000)
+    assert.equal(alerts.length, 2, 'the silence condition re-alerts after the dedupe window while it persists')
+  })
+})
+
+test('M1 qi-silence the NORMAL dice case: a SINGLE silent retirement at p=0.25 NEVER alerts (the dice expected it 75% of the time — the rate-aware min 11 is the aggregate guard)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 27, 14, 30, 0).getTime()
+    const alerts = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-solo',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [{ postId: 'builder-solo', retired: true, provider: 'worker' }],
+      qiDirectiveRate: 0.25,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts.length, 0, '1 retirement at p=0.25 (min 11) → NO alert — the normal silent-dice case')
+    const ledger = readQiSilenceState(stateDir)
+    assert.equal(ledger['builder-solo'], T0, 'the ledger still OBSERVES the retirement (observation and alerting are decoupled)')
+  })
+})
+
+test('M1 qi-silence: directives present inside the window → NO finding/alert even with 11 retirements; a NON-worker retirement (configured head) is NOT a retirement signal', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 27, 11, 30, 0).getTime()
+    // A REAL directive record, written exactly as maybeEmitQualityInspectDirective does:
+    // from 'deepartments' → ['quality-head'], text STARTING WITH the exported prefix.
+    await writeFile(path.join(stateDir, 'messages.jsonl'), JSON.stringify({
+      id: 'm-q-1', seq: 1, ts: T0 - 5 * 60_000, from: 'deepartments', to: ['quality-head'],
+      text: `${QUALITY_INSPECT_WORKER_RETIRED_PREFIX} (post builder-r0, session s-x, archived true). ANALYZE the retired agent: its log/session, the tools it used, its flows, its failures, and optimization opportunities → write the report to .dsh/reports/quality/ and report to quality-head`,
+      kind: 'agent'
+    }) + '\n', 'utf8')
+    const retirements = Array.from({ length: 11 }, (_, i) => ({ postId: `builder-r${i}`, retired: true, provider: 'worker' }))
+    const alerts = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-qdir',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: retirements,
+      qiDirectiveRate: 0.25,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts.length, 0, 'a directive inside the window → silence is explained → NO alert')
+    // Control: a record that does NOT start with the exported prefix (another
+    // directive variant) does NOT count → the silence alerts again.
+    await writeFile(path.join(stateDir, 'messages.jsonl'), JSON.stringify({
+      id: 'm-q-2', seq: 2, ts: T0 - 5 * 60_000, from: 'deepartments', to: ['quality-head'],
+      text: 'Quality inspect: head slept (post research-head, session s-y, sleepEpoch 3)', kind: 'agent'
+    }) + '\n', 'utf8')
+    const alerts2 = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-qdir2',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: retirements,
+      qiDirectiveRate: 0.25,
+      notifyHost: async (hostEntry, frame) => { alerts2.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts2.length, 1, 'a NON-matching directive record does not explain the silence → the trigger outage alerts')
+    // A retired CONFIGURED HEAD (no provider) is not a worker retirement.
+    const alerts3 = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-qdir3',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [{ postId: 'research-head', retired: true }],
+      qiDirectiveRate: 1, // min 1 — but a head is NOT a retirement signal
+      notifyHost: async (hostEntry, frame) => { alerts3.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts3.length, 0, 'a retired configured HEAD (no provider) is never a qi-silence retirement signal')
+  })
+})
+
+test('M1 qi-silence rate-aware at p=1.0: the rate-aware minimum is 1 → a SINGLE silent retirement alerts (a 100%-inspect deployment must emit per retirement); the knob qiSilenceMinRetiresInWindow overrides the formula', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 27, 13, 0, 0).getTime()
+    const alerts = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-p1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [{ postId: 'builder-one', retired: true, provider: 'worker' }],
+      qiDirectiveRate: 1, // the deployment runs with DEEPARTMENTS_QUALITY_INSPECT=1 → p=1
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts.length, 1, 'p=1 → 1 silent retirement alerts (min 1)')
+    assert.match(alerts[0].frame, /qi-silence: 1 worker retire\(s\) in 120 min with zero quality-inspect directive\(s\) \(workerInspectProbability=1, min retires 1\)/, 'the frame carries the resolved rate-aware minimum')
+    // Knob override: qiSilenceMinRetiresInWindow: 5 with the p=1 default being 1 — the knob wins.
+    await writeFile(path.join(stateDir, 'messages.jsonl'), '', 'utf8')
+    const alerts2 = []
+    await runHealthDaemonTick({
+      now: () => T0 + 60_000,
+      stateDir,
+      bootId: 'boot-knob',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      config: { health: { qiSilenceMinRetiresInWindow: 3 } },
+      posts: [{ postId: 'builder-two', retired: true, provider: 'worker' }],
+      qiDirectiveRate: 1,
+      notifyHost: async (hostEntry, frame) => { alerts2.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts2.length, 0, 'the knob override (3) replaces the rate-aware minimum (1) → 1 retirement does NOT pass')
+    const alerts3 = []
+    await runHealthDaemonTick({
+      now: () => T0 + 31 * 60_000,
+      stateDir,
+      bootId: 'boot-knob2',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      config: { health: { qiSilenceMinRetiresInWindow: 3 } },
+      posts: Array.from({ length: 3 }, (_, i) => ({ postId: `builder-k${i}`, retired: true, provider: 'worker' })),
+      qiDirectiveRate: 1,
+      notifyHost: async (hostEntry, frame) => { alerts3.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts3.length, 1, '3 retirements pass the knob override (3) → alert (dedupe window expired)')
+    // A DISABLED knob suppresses the whole scan (11 retirements, zero directives, no alert).
+    const alerts4 = []
+    await runHealthDaemonTick({
+      now: () => T0 + 180_000,
+      stateDir,
+      bootId: 'boot-qoff',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      config: { health: { qiSilenceEnabled: false } },
+      posts: Array.from({ length: 11 }, (_, i) => ({ postId: `builder-o${i}`, retired: true, provider: 'worker' })),
+      qiDirectiveRate: 0.25,
+      notifyHost: async (hostEntry, frame) => { alerts4.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts4.length, 0, 'qiSilenceEnabled:false suppresses the qi-silence scan')
+  })
+})
+
+test('M1 scanQiSilence: the ledger mechanics — a firstSeen retirement counts inside the window and stops counting after it; the MARKER is pruned ONLY when the post leaves the retired catalog (a time-pruned marker would be re-stamped → an OLD retirement re-counts as fresh → permanent false alerts)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_234_567_890_000
+    const windowMs = 120 * 60_000
+    const ledger = {
+      'builder-keep': T0 - 60_000,             // in the catalog + inside the window → counts
+      'builder-third': T0 - 121 * 60_000,      // in the catalog + OUTSIDE the window → marker kept (never re-stamped), never counts
+      'builder-gone': T0 - 60_000              // NOT in the catalog anymore → pruned
+    }
+    const posts = [
+      { postId: 'builder-keep', retired: true, provider: 'worker' },
+      { postId: 'builder-third', retired: true, provider: 'worker' }
+    ]
+    // Scan 1 @ T0: builder-keep counts (min 1), builder-third is OUT of the
+    // window (never counts but its marker survives) and builder-gone is pruned.
+    const first = scanQiSilence({ posts, stateDir, nowMs: T0, windowMs, minRetires: 1, rate: 1, ledger })
+    assert.equal(first.findings.length, 1, '1 in-window retirement (builder-keep) ≥ min 1 with zero directives → finding')
+    assert.equal(first.findings[0].count, 1, 'the finding count is the in-window retirements (builder-third does NOT count)')
+    assert.equal(first.changed, true, 'builder-gone is pruned → the ledger changed')
+    assert.deepEqual(Object.keys(first.ledger).sort(), ['builder-keep', 'builder-third'], 'only the post NO LONGER in the catalog is pruned')
+    assert.equal(first.ledger['builder-keep'], T0 - 60_000, 'an existing firstSeen is preserved (never re-stamped)')
+    // Scan 2 @ T0+30min: builder-keep still inside the window (re-observation
+    // keeps counting); NO prune → the ledger is unchanged (the tick then skips
+    // the write — the turn-errors pattern).
+    const second = scanQiSilence({ posts, stateDir, nowMs: T0 + 30 * 60_000, windowMs, minRetires: 1, rate: 1, ledger: first.ledger })
+    assert.equal(second.findings.length, 1, 'the in-window retirement re-counts at +30min (still ≤ 120min)')
+    assert.equal(second.changed, false, 'no post left the catalog → the ledger is unchanged')
+    // Scan 3 @ T0+121min: builder-keep is now OLDER than the window → stops
+    // counting (no finding); the MARKERS survive (never re-stamped, never
+    // time-pruned — the counting window bound applies at count time).
+    const third = scanQiSilence({ posts, stateDir, nowMs: T0 + 121 * 60_000, windowMs, minRetires: 1, rate: 1, ledger: second.ledger })
+    assert.equal(third.findings.length, 0, 'a retirement OLDER than the window stops counting (no finding)')
+    assert.equal(third.changed, false, 'aged markers are KEPT (a time-pruned marker would re-count on the next tick)')
+    assert.deepEqual(Object.keys(third.ledger).sort(), ['builder-keep', 'builder-third'], 'the aged markers are never pruned while the posts stay in the catalog')
+    // Scan 4 @ T0+241min: still no finding, markers still kept. Then the posts
+    // LEAVE the catalog (retention) → their markers are pruned for good.
+    const fourth = scanQiSilence({ posts, stateDir, nowMs: T0 + 241 * 60_000, windowMs, minRetires: 1, rate: 1, ledger: third.ledger })
+    assert.equal(fourth.findings.length, 0, 'months-old retirements never re-alert (no false positives)')
+    assert.deepEqual(Object.keys(fourth.ledger).sort(), ['builder-keep', 'builder-third'], 'the markers are still held for catalog residents')
+    const fifth = scanQiSilence({ posts: [{ postId: 'builder-keep', retired: true, provider: 'worker' }], stateDir, nowMs: T0 + 242 * 60_000, windowMs, minRetires: 1, rate: 1, ledger: fourth.ledger })
+    assert.equal(fifth.changed, true, 'builder-third left the catalog → its marker is pruned')
+    assert.deepEqual(Object.keys(fifth.ledger), ['builder-keep'], 'only the catalog-resident marker survives')
   })
 })
 

@@ -16,7 +16,8 @@
     "build": "tsc"
   },
   "dependencies": {
-    "dshd-core": "workspace:*"
+    "dshd-core": "workspace:*",
+    "dshd-quality": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

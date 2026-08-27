@@ -58,6 +58,15 @@
 /** The code default for the worker-retire dice (D-Q2). */
 export const QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY = 0.25
 
+/** The DIRECTIVE text prefix of the worker-retired variant of the QUALITY
+ * INSPECT directive (`qualityInspectDirectiveText`, kind 'worker-retired').
+ * EXPORTED as the single literal source of truth: the dshd-health qi-silence
+ * watchdog matches messages.jsonl records by this prefix (M1), so a reword of
+ * the frame never silently drifts the watchdog (one literal, no drift). The
+ * directive text builds on this prefix; every record written by
+ * maybeEmitQualityInspectDirective for a retired worker STARTS WITH it. */
+export const QUALITY_INSPECT_WORKER_RETIRED_PREFIX = 'Quality inspect: worker retired'
+
 /** The deterministic env override for the worker probability path (a numeric
  * [0,1] string). Overrides ONLY the worker dice; the head/host mandate is never
  * a dice and is never overridden. Invalid/absent → undefined (code default). */
@@ -169,8 +178,10 @@ export function qualityInspectDirectiveText(surface: QualityInspectDirectiveSurf
     case 'worker-retired':
       // LOTE B (owner 2026-08-27): the worker-retired directive carries the
       // explicit ANALYZE mission for the inspector (R6 — the previous frame is
-      // KEPT, the mission text is ADDED, never removed).
-      return `Quality inspect: worker retired (post ${surface.workerPostId}, session ${surface.sessionId}, archived ${surface.archived}). ANALYZE the retired agent: its log/session, the tools it used, its flows, its failures, and optimization opportunities → write the report to .dsh/reports/quality/ and report to quality-head`
+      // KEPT, the mission text is ADDED, never removed). The literal STARTS
+      // WITH the exported QUALITY_INSPECT_WORKER_RETIRED_PREFIX (the qi-silence
+      // watchdog matches on it — M1; never fork the literal here).
+      return `${QUALITY_INSPECT_WORKER_RETIRED_PREFIX} (post ${surface.workerPostId}, session ${surface.sessionId}, archived ${surface.archived}). ANALYZE the retired agent: its log/session, the tools it used, its flows, its failures, and optimization opportunities → write the report to .dsh/reports/quality/ and report to quality-head`
     case 'head-slept':
       return `Quality inspect: head slept (post ${surface.headPostId}, session ${surface.sessionId}, sleepEpoch ${surface.sleepEpoch})`
     case 'host-rotated':
