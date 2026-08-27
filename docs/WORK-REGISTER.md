@@ -8,12 +8,17 @@
 
 ## 1. IPD — cola activa
 
-- M1.1 qi-silence priming (CERRADO hoy — commit 7172b19) · M3 este registro.
+- **M4** watchdog de inactividad del sistema (owner, alta — si 15-30 min sin
+  agente running con pendientes → alerta) · **M2.3** secretary en heads (3
+  smokes fallidos M2/M2.1/M2.2; instrumentación en vivo del standing pedida al
+  IPD) · seguimiento log-sweep del QD (objetivos nuevos → misiones).
 
 ## 2. DAG técnico — CERRADO (referencia)
 
 PASO 9 (c5131af) · fb-6 (32d6314) · F-HIGH (630a59c) · fb-7 pooler (3d55bbf) ·
-A+B (408f1c6) · M1 (6f638d4) · M2 (274d550) · E2-IMPL (e09e687).
+A+B (408f1c6) · M1 (6f638d4) · M2 (274d550) · E2-IMPL (e09e687) · M1.1
+(7172b19) · M2.1 (6416a34) · M2.2 (3e47993) · C12+O2+fb-8 (d94f5ea) ·
+M3 (f159eda).
 
 ## 3. PENDIENTE-OWNER (decisiones)
 
@@ -33,8 +38,9 @@ A+B (408f1c6) · M1 (6f638d4) · M2 (274d550) · E2-IMPL (e09e687).
 
 ## 5. BACKLOG
 
-- flake 1b.1 (:4686) + m-64 intermitente (de-flake o skip R6 — ORDENADO por el
-  Asistente) · fb-2/fb-3 QD · comentario stale dshd-health:31-32 · dshmarket
+- ~~flake 1b.1 (:4686)~~ ~~m-64 intermitente~~ ~~fb-8 (flag deliverable)~~ —
+  **DONE** (de-flakeados en C12+O2, commit d94f5ea; 0 skips, cobertura
+  preservada) · fb-2/fb-3 QD · comentario stale dshd-health:31-32 · dshmarket
   1.33.0 dev (bundlear en próximo deploy) · B6/B7 (revisar obsoletas con A+B).
 
 ## 6. SINERGIA
