@@ -89,8 +89,9 @@ head.
 - Read-only analysis: you NEVER `edit` the source you analyze.
 - **BOOT-QUIET**: work only on the head's addressed message.
 - **Execution scope** (`dept_exec`): allowed roots are `/home/esuarez/projects`,
-  `/usr/lib/node_modules/@deepseek-ai/dsh`, the repository root, the department
-  workspace, and the runtime stateDir; `dept_exec` is used ONLY for read-only
+  `/usr/lib/node_modules/@deepseek-ai/dsh`, `/opt/dsh/.dsh-dev` (DEV harness
+  home), the repository root, the department workspace, and the runtime
+  stateDir; `dept_exec` is used ONLY for read-only
   analysis commands (git log/show/diff, grep, listing). The STABLE profile
   `/opt/dsh/.dsh` is OUT OF SCOPE — if a task needs it, STOP and ask your head.
   NEVER run `systemctl`/`reboot`/`sudo`/etc. Commits are the Asistente's job —

@@ -51,9 +51,10 @@ fresh worker with the same `jobId`. No round-to-round state carries over.
 ## Execution scope (`dept_exec`)
 
 A worker's `dept_exec` is restricted to the allowed roots:
-`/home/esuarez/projects`, `/usr/lib/node_modules/@deepseek-ai/dsh`, the
-repository root, the department workspace, and the runtime stateDir. The STABLE
-profile `/opt/dsh/.dsh` is OUT OF SCOPE by default — a task that needs it stops
+`/home/esuarez/projects`, `/usr/lib/node_modules/@deepseek-ai/dsh`,
+`/opt/dsh/.dsh-dev` (DEV harness home), the repository root, the department
+workspace, and the runtime stateDir. The STABLE profile `/opt/dsh/.dsh` is OUT
+OF SCOPE by default — a task that needs it stops
 and asks its head (which escalates via the Asistente to the owner); anything
 else outside the allowed roots likewise requires owner approval. Workers NEVER
 run `reboot`/`sudo`/etc, and NEVER a mutating `systemctl` form (the tool denies

@@ -415,6 +415,10 @@ pattern of unknown ids (invoke.ts:3704-3705):
 | **head** | any head (incl. the host — the host is the top head in the reporting chain; D6 "RH ↔ Asistente ↔ other heads") + agents of its own department | workers of other departments (they go via the other department's head) |
 | **host** | everyone (any head, any worker, any host entry) (D6) | — |
 
+- **Scope of the ACL**: it applies ONLY to root agents (heads and workers); a
+  transient subagent is NOT an ACL subject — never apply the worker ACL to a
+  child, nor treat a worker root as a child.
+
 - Violation → that recipient is reported `'failed'` with an ACL reason (the send
   is not aborted; one blocked recipient does not kill a multi-send — the
   `unknown` precedent, invoke.ts:3704).

@@ -75,6 +75,15 @@ are cached); user edits to `cordis.patch.yml` are HMR. All dsh commands for deve
    `list_agents`, `job_list`, `cat`/`grep` loops to check completion. The
    harness wakes you with a settlement notice; continue dependent work only
    when that notice arrives. One `send_message` per follow-up turn.
+10. **Ownership & delegation.** The repo's internal programming and deep
+   analysis belong to the Internal Programming Department (IPD) — route them
+   with ONE `send_message` to `internal-programming-head`; the Asistente never
+   deploys IPD workers itself, and never dispatches a transient subagent for
+   IPD-owned work (the emergency fallback is defined by spec 005 / the
+   deepartments-workflow skill — reference it, never rewrite it). The ACL
+   applies ONLY to root agents (heads and workers): a transient subagent is NOT
+   an ACL subject — never apply the worker ACL to a child, nor treat a worker
+   root as a child.
 
 Details and rationale for each rule: skill `dsh-plugin-dev`
 (`.dsh/skills/dsh-plugin-dev/SKILL.md`).

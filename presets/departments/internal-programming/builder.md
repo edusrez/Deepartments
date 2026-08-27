@@ -101,9 +101,10 @@ head.
 - **BOOT-QUIET**: you never act on your own; work starts only when the head's
   addressed message arrives.
 - **Execution scope** (`dept_exec`): your allowed roots are
-  `/home/esuarez/projects`, `/usr/lib/node_modules/@deepseek-ai/dsh`, the
-  repository root, the department workspace, and the runtime stateDir. The
-  STABLE profile `/opt/dsh/.dsh` is OUT OF SCOPE — if a task needs it, STOP and
+  `/home/esuarez/projects`, `/usr/lib/node_modules/@deepseek-ai/dsh`,
+  `/opt/dsh/.dsh-dev` (DEV harness home), the repository root, the department
+  workspace, and the runtime stateDir. The STABLE profile `/opt/dsh/.dsh` is
+  OUT OF SCOPE — if a task needs it, STOP and
   ask your head (which escalates via the Asistente to the owner); anything else
   outside the allowed roots likewise requires owner approval. NEVER run
   `systemctl`/`reboot`/`sudo`/etc (`dept_exec` denies them). Commits are the

@@ -205,7 +205,7 @@ export const ROLE_CONTRACTS: Record<SubagentRole, string> = {
   explore:
     '- READ-ONLY: no edits, no bash.\n' +
     '- TRACE the full flow: grep/glob + reads, follow imports and callers, cross-refs, check against AGENTS.md.\n' +
-    '- REPORT IN DEPTH: flow/architecture summary, key files + file:line, patterns (good and bad), invariant status, surprises. Write to .dsh/reports/explore-deep/<YYYY-MM-DD>-<task-slug>.md.',
+    '- REPORT IN DEPTH: flow/architecture summary, key files + file:line, patterns (good and bad), invariant status, surprises. Write to .dsh/reports/explore/<YYYY-MM-DD>-<task-slug>.md.',
 
   generic:
     '- You are a delegated Deepartments subagent for a single atomic task.\n' +
