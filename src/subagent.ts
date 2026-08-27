@@ -110,11 +110,35 @@ export function apply(ctx: Context, config: Config) {
   const forget = roles === undefined
     ? forgetRole
     : (childSessionId: string) => roles.delete(childSessionId)
-  let disposeTool: (() => void) | undefined
-  const mount = (provider: { name: string; capabilities: { depthLimit: boolean }; inheritsParentContext: boolean }) => {
-    if (typeof config.maxDepth === 'number' && !provider.capabilities.depthLimit) throw new Error(`deepartments-subagent: provider "${provider.name}" cannot enforce maxDepth (no depthLimit capability) — set maxDepth: 'provider-managed' to leave the recursion budget to the provider`)
-    const wording = providerWording(provider.inheritsParentContext)
-    disposeTool = ctx.tools.register(defineTool({
+  // M2.1 (deploy fix, 2026-08-28): the delegation tool is registered
+  // UNCONDITIONALLY at apply time. Pre-M2.1 the registration was gated on the
+  // subagent provider being resolvable at apply (sync mount) or on a later
+  // `subagent/provider-added` event — a standing preset mount that applied the
+  // row while the provider was absent left the tool missing at the postSetup
+  // probe's FIRST read (invoke.ts HEAD_BASE_TOOLS allow-list), and the
+  // restrict({allow}) then masked the inherited contribution PERMANENTLY for
+  // that incarnation (the M2.1 deploy finding: a rematerialized department head
+  // never saw its own `secretary`, while the host — whose provider is already
+  // hot at composition time — did). The fix: the row ALWAYS leaves the tool
+  // bound under `toolName` in the standing mount, so the probe always finds it
+  // and the allow-list keeps it; the provider is resolved at EXECUTE time
+  // (startContinuable by name — expectProvider fails loud on a missing
+  // provider), never at registration. Plugin semantics are unchanged: always-
+  // async continuable dispatch, agentOptions heredity, dispatch-time role
+  // registry + eviction, and the system-prompt section. The provider-dependent
+  // facts still validated at registration are: (a) the maxDepth depthLimit
+  // capability — checked synchronously when the provider is present at apply,
+  // else when it registers later (provider-added, same fail-loud throw); and
+  // (b) the inheritsParentContext wording — taken from the present provider,
+  // or the fresh-spawn wording while it is absent (the shipped head rows are
+  // `spawn`; the host's fork row mounts with its provider already present, so
+  // the fallback never mislabels a fork).
+  const present = ctx.subagents.getProvider(config.provider)
+  if (present !== void 0 && typeof config.maxDepth === 'number' && !present.capabilities.depthLimit) {
+    throw new Error(`deepartments-subagent: provider "${present.name}" cannot enforce maxDepth (no depthLimit capability) — set maxDepth: 'provider-managed' to leave the recursion budget to the provider`)
+  }
+  const wording = providerWording(present?.inheritsParentContext === true)
+  ctx.tools.register(defineTool({
       name: toolName,
       description: wording.description + ALWAYS_BACKGROUND_SUFFIX,
       parameters: {
@@ -199,14 +223,15 @@ export function apply(ctx: Context, config: Config) {
         }
       }
     }))
-  }
   ctx.on('subagent/provider-added', (provider) => {
-    if (provider.name === config.provider && disposeTool === void 0) mount(provider)
-  })
-  ctx.on('subagent/provider-removed', (name) => {
-    if (name !== config.provider || disposeTool === void 0) return
-    disposeTool()
-    disposeTool = void 0
+    if (provider.name !== config.provider) return
+    // A provider surfacing after apply is validated here (the pre-M2.1
+    // mount-time throw, kept fail-loud) — the tool itself needs no
+    // re-registration (M2.1 binds the NAME unconditionally; the provider is
+    // resolved at execute time).
+    if (typeof config.maxDepth === 'number' && !provider.capabilities.depthLimit) {
+      throw new Error(`deepartments-subagent: provider "${provider.name}" cannot enforce maxDepth (no depthLimit capability) — set maxDepth: 'provider-managed' to leave the recursion budget to the provider`)
+    }
   })
   // Task T4 follow-up: evict the dispatch-time role from the in-process
   // roleRegistry the moment a child settles, so the map stays bounded by
@@ -214,21 +239,21 @@ export function apply(ctx: Context, config: Config) {
   // D3: the eviction goes through the `deepartments.subagentRoles` core service
   // (delete semantics — a superset of remember: silently no-ops in the
   // malformed-payload branch). Registered ONCE here at module scope inside
-  // `apply` — NOT inside `mount()`, which would double-register for the two
-  // mounted providers. The payload's `id` is the child session id — the exact
-  // key `rememberRole` wrote. Guard on `typeof id === 'string'` and never
-  // throw: an unexpected payload shape is a silent no-op (a malformed edge must
-  // not break settlement teardown).
+  // `apply` — NOT on any provider-mount path, which would double-register for
+  // the two mounted providers. The payload's `id` is the child session id —
+  // the exact key `rememberRole` wrote. Guard on `typeof id === 'string'` and
+  // never throw: an unexpected payload shape is a silent no-op (a malformed
+  // edge must not break settlement teardown).
   ctx.on('subagent/end', (payload) => {
     const id = (payload as { id?: unknown } | undefined)?.id
     if (typeof id === 'string') forget(id)
   })
-  const present = ctx.subagents.getProvider(config.provider)
-  if (present !== void 0) mount(present)
-  else ctx.logger.info(`subagent provider "${config.provider}" not registered yet; the "${toolName}" tool will register when it appears`)
+  if (present === void 0) {
+    ctx.logger.info(`subagent provider "${config.provider}" not registered yet; the "${toolName}" tool is bound anyway and resolves the provider at execute time`)
+  }
   ctx.systemPrompt.section({
     name: `tool:${toolName}`,
     order: SUBAGENT_SECTION_ORDER,
-    text: (context: AssembleContext) => disposeTool === void 0 || ctx.tools.get(toolName, context.scope) === void 0 ? '' : `Use ${toolName} ALWAYS in the background — it has no blocking mode. Start independent delegations together in one assistant message and continue useful work while they run. When a background run settles, the runtime sends you a notice containing its outcome and any final assistant message; continue dependent work only when that notice arrives. Use send_message to give a child follow-up work. Never wait inline for a subagent; never busy-poll.`
+    text: (context: AssembleContext) => ctx.tools.get(toolName, context.scope) === void 0 ? '' : `Use ${toolName} ALWAYS in the background — it has no blocking mode. Start independent delegations together in one assistant message and continue useful work while they run. When a background run settles, the runtime sends you a notice containing its outcome and any final assistant message; continue dependent work only when that notice arrives. Use send_message to give a child follow-up work. Never wait inline for a subagent; never busy-poll.`
   })
 }

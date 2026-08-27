@@ -15,10 +15,12 @@
 // via StubAgents.resume — the faithful production path for bringing a
 // registered resident back.
 import assert from 'node:assert/strict'
-import { access, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { access, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { register } from 'node:module'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -5397,6 +5399,187 @@ test('M2 SECRETARIOS deploy-journal: a HEAD deploys ONE secretary — execute st
       assert.ok(!text.includes('## Deepartments wake pack'), 'NO full host wake pack for the secretary child (slim block wakepack)')
     } finally {
       await dispose()
+    }
+  })
+})
+
+test('M2.1 live-case (REAL agent-presets): a head whose tool-secretary preset row mounted while the spawn provider was ABSENT still sees its secretary — first materialization AND after a durable resume (unconditional tool registration closes the postSetup probe race)', async () => {
+  const dshHome = await mkdtemp(path.join(tmpdir(), 'dsh-home-m21-'))
+  const prev = process.env.DSH_HOME
+  const cleanup = async () => {
+    if (prev === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = prev
+    await rm(dshHome, { recursive: true, force: true })
+  }
+  process.env.DSH_HOME = dshHome
+  await withTempStateDir(async (stateDir) => {
+    try {
+      // M2.1 test seam: the hermetic profile ships only a SUBSET of the DSH
+      // packages (AGENTS.md Rule 5), so the REAL agent-presets standing mount
+      // cannot import a production preset's rows — bare specifiers resolve from
+      // the harness base, and `dsh-deepartments` (THIS repo),
+      // `@deepseek-ai/dsh-persona`, `@deepseek-ai/dsh-agent-instructions`,
+      // `@deepseek-ai/dsh-tool-fs` and `@deepseek-ai/dsh-tool-fs-search` are
+      // NOT in the repo's pnpm store. This in-process resolve hook maps ONLY
+      // those environment rows: `dsh-deepartments` → THIS repo's compiled lib
+      // (the code under test), and the persona/instructions/fs rows → a no-op
+      // plugin stub (their behavior is not the system under test — the
+      // standing-mount apply + postSetup probe + restrict mask + durable
+      // resume mechanics and the tool-secretary row ARE, and they stay REAL).
+      // Everything else passes through to Node unchanged. Both hook files live
+      // in the temp DSH_HOME (self-cleaning) and carry the repo path LITERALLY.
+      const m21RepoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+      const m21HookDir = await mkdtemp(path.join(dshHome, 'm21-hook-'))
+      const m21StubPath = path.join(m21HookDir, 'env-row-stub.mjs')
+      await writeFile(m21StubPath, "export const name = 'm21-env-row-stub'; export function apply() {}\n", 'utf8')
+      const m21HookPath = path.join(m21HookDir, 'resolve-hook.mjs')
+      await writeFile(m21HookPath, `
+        import { pathToFileURL } from 'node:url'
+        import path from 'node:path'
+        const repoRoot = ${JSON.stringify(m21RepoRoot)}
+        const stubUrl = ${JSON.stringify(pathToFileURL(m21StubPath).href)}
+        export async function resolve(specifier, context, nextResolve) {
+          if (specifier === 'dsh-deepartments') return { url: pathToFileURL(path.join(repoRoot, 'lib', 'index.js')).href, shortCircuit: true }
+          if (specifier === 'dsh-deepartments/subagent') return { url: pathToFileURL(path.join(repoRoot, 'lib', 'subagent.js')).href, shortCircuit: true }
+          if (specifier === 'dsh-deepartments/package.json') return { url: pathToFileURL(path.join(repoRoot, 'package.json')).href, shortCircuit: true }
+          if (specifier === '@deepseek-ai/dsh-persona' || specifier === '@deepseek-ai/dsh-agent-instructions'
+            || specifier === '@deepseek-ai/dsh-tool-fs' || specifier === '@deepseek-ai/dsh-tool-fs-search') {
+            return { url: stubUrl, shortCircuit: true }
+          }
+          return nextResolve(specifier, context)
+        }
+      `.trim() + '\n', 'utf8')
+      register(pathToFileURL(m21HookPath).href)
+
+      // A durable HEAD post that predates the M2.1 deploy: NOT configured (the
+      // org below has zero departments, so ensureAllHeads creates NOTHING at
+      // boot — the materialization is driven below via the wake, deterministically
+      // AFTER loader.await, so the agent scope anchor is fully settled).
+      await seedPost(stateDir, {
+        postId: 'ghost-head',
+        sessionId: 'head-ghost-head',
+        roomId: 'board',
+        agentPreset: 'deepartments-head'
+      })
+
+      // Author the REAL generic head preset into the harness-home user root
+      // DIRECTLY (copies of the repo's presets/deepartments-head — the same
+      // content the bundle's async boot materialization would write; the
+      // discover-then-mount below therefore never races the boot hook). The
+      // tool-secretary row is REAL: dsh-deepartments/subagent with toolName
+      // secretary.
+      const presetSrcDir = path.join(m21RepoRoot, 'presets', 'deepartments-head')
+      const presetDstDir = path.join(dshHome, '.agent-presets', 'deepartments-head')
+      await mkdir(presetDstDir, { recursive: true })
+      await copyFile(path.join(presetSrcDir, 'agent.cordis.yml'), path.join(presetDstDir, 'agent.cordis.yml'))
+      await copyFile(path.join(presetSrcDir, 'preset.yml'), path.join(presetDstDir, 'preset.yml'))
+
+      // Boot the REAL Loader + the REAL @deepseek-ai/dsh-agent-presets service
+      // (temp DSH_HOME) — in TWO stages so the deepartments entry's APPLY-TIME
+      // `ctx.get('agentPresets')` capture (src/invoke.ts:1785 — the head
+      // postSetup's mount gate) deterministically resolves: the loader applies
+      // entries concurrently, and with a single `loader.await()` the bundle can
+      // apply BEFORE the agentPresets entry settles (a real ordering race —
+      // the F10 harness avoids it by registering the stub as a direct service).
+      // Stage 1: base services + the REAL agentPresets service are fully up.
+      const root = new Context()
+      const loaderFiber = await root.plugin(Loader, { baseUrl: new URL('.', import.meta.url).href })
+      const loader = root.loader
+      loader.create({ id: 'sessions', name: '@deepseek-ai/dsh-session' })
+      loader.create({ id: 'projections', name: '@deepseek-ai/dsh-session-projection' })
+      loader.create({ id: 'systemPrompt', name: '@deepseek-ai/dsh-system-prompt' })
+      loader.create({ id: 'tools', name: '@deepseek-ai/dsh-tools' })
+      loader.create({ id: 'agentPresets', name: '@deepseek-ai/dsh-agent-presets', config: { default: 'deepartments-head', roots: [] } })
+      await loader.await()
+      const agents = new StubAgents(root)
+      const persistence = new StubPersistence(root)
+      await root.plugin(SubagentRuntime)
+      // M2.1 race window (the deploy finding): NO subagent provider is
+      // registered — the head's preset row below must apply while the provider
+      // is absent (pre-M2.1 the tool then never bound, so the postSetup probe
+      // dropped 'secretary' and the restrict masked it permanently).
+      // Stage 2: the bundle — its agentPresets capture is now DEFINED.
+      loader.create({
+        id: 'deepartments',
+        name: '../lib/index.js',
+        config: { stateDir, org: { departments: [] } }
+      })
+      await loader.await()
+      agents.scopeAnchor = loader.resolve('tools').fiber?.ctx ?? root
+      // The host profile composes the GLOBAL capability tools (read/write/glob/
+      // grep/web_search/web_fetch) in the base bundle BEFORE any head mounts; the
+      // hermetic harness registers no native tools, so stub them on the global
+      // plane exactly like bootPlugin does (the head's probe/restrict then sees
+      // them as real inherited globals, and a secretary child's toolFilter allow
+      // [read,glob,grep] restrict finds them).
+      for (const name of F10_GLOBAL_TOOLS) {
+        if (root.tools.get(name) === undefined) root.tools.register(stubGlobalTool(name))
+      }
+      try {
+        assert.equal(agents.store.has('head-ghost-head'), false, 'no head is materialized at boot (the durable ghost stays dormant)')
+        // The preset files were authored directly above (never racing the
+        // bundle's async boot materialization, which by now either ran or is a
+        // no-op) — the wake's mount resolves them through the REAL
+        // dsh-agent-presets discovery.
+        await access(path.join(dshHome, '.agent-presets', 'deepartments-head', 'agent.cordis.yml'))
+        const signal = new AbortController().signal
+
+        // FIRST materialization of the durable head: the bus wake RESUMES the
+        // durable session through the SAME headSetup — postSetup mounts the REAL
+        // deepartments-head preset (the tool-secretary row included) and probes
+        // HEAD_BASE_TOOLS while the 'spawn' provider is still ABSENT.
+        const r1 = await root.tools.get('send_message').execute(
+          { to: ['ghost-head'], text: 'wake' },
+          { agent: { id: 'host-any', session: { header: {} } }, signal }
+        )
+        assert.equal(r1.delivered['ghost-head'], 'resumed', 'the bus wake materializes the durable head (resume path, not a rotation)')
+        await waitFor(() => agents.store.has('head-ghost-head'), 5000, 'the durable head session is live after the wake')
+        const head = agents.store.get('head-ghost-head')
+        const headIndex = agents.childAgents.findIndex((a) => a === head)
+        assert.ok(headIndex >= 0, 'the materialized head context resolves')
+        const headCtx = agents.childContexts[headIndex].ctx
+        const headKey = agents.childContexts[headIndex].key
+        // The discriminator for the fix: pre-M2.1 the registration was gated on
+        // the provider, so this FIRST surface read was undefined → the probe
+        // dropped the name → restrict masked it forever. M2.1 registers the
+        // tool unconditionally, so the probe keeps it from the first instant.
+        assert.ok(headCtx.tools.get('secretary', headKey) !== undefined, 'the materialized head sees its secretary even though the spawn provider was ABSENT when its preset row mounted (M2.1 unconditional registration)')
+
+        // Register the provider AFTER the row mounted — the late window the
+        // deploy hit. The tool is already bound; execute resolves the provider
+        // at call time (no re-registration needed).
+        const spawnStub = stubProvider('spawn')
+        const forkStub = stubProvider('fork')
+        root.subagents.registerProvider(spawnStub)
+        root.subagents.registerProvider(forkStub)
+        const result = await headCtx.tools.get('secretary', headKey).execute(
+          { description: 'read my journal', prompt: 'Read the journal and summarise the open items.' },
+          { agent: head, signal }
+        )
+        assert.equal(result.kind, 'continuable', 'the secretary deploy is always-async and the LATE provider is resolved at execute time')
+
+        // The LIVE case (the one the fixed harness test did not cover): a SECOND
+        // materialization of the SAME durable session. The standing mount is
+        // one-shot per preset generation (no row re-apply), so the resumed setup
+        // re-runs postSetup's probe + restrict and must STILL keep the inherited
+        // secretary contribution.
+        agents.store.delete('head-ghost-head')
+        const r2 = await root.tools.get('send_message').execute(
+          { to: ['ghost-head'], text: 'wake again' },
+          { agent: { id: 'host-any', session: { header: {} } }, signal }
+        )
+        assert.equal(r2.delivered['ghost-head'], 'resumed', 'the second bus wake RESUMES the durable head session again (not a rotation)')
+        await waitFor(() => agents.store.has('head-ghost-head'), 5000, 'the durable head session is live again')
+        assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === 'head-ghost-head').length >= 2, true, 'both wakes went through ctx.agents.resume with the same head setup')
+        const resumedAgent = agents.store.get('head-ghost-head')
+        const resumedIndex = agents.childAgents.findIndex((a) => a === resumedAgent)
+        assert.ok(resumedIndex >= 0, 'the resumed agent context resolves')
+        assert.ok(agents.childContexts[resumedIndex].ctx.tools.get('secretary', agents.childContexts[resumedIndex].key) !== undefined, 'the RESUMED department head SEES its personal secretary (M2.1 live case: the probe keeps the unconditionally-registered inherited tool)')
+      } finally {
+        loaderFiber.dispose()
+      }
+    } finally {
+      await cleanup()
     }
   })
 })

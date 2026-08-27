@@ -4725,6 +4725,19 @@ export function applyInvoke(ctx: Context, config: Config) {
       // lifecycle tools the role templates ALSO declare) are excluded FIRST via
       // OWN_LAYER_POST_TOOLS — naming a scope-local name in restrict() would
       // THROW and degrade to allow:[] again.
+      // M2.1 (deploy fix, 2026-08-28): the 'secretary' name in HEAD_BASE_TOOLS
+      // is now ALWAYS found here — the tool-secretary row of the head preset
+      // registers its tool UNCONDITIONALLY at apply time (src/subagent.ts), so
+      // a standing mount that applies the row while the 'spawn' provider is
+      // still absent no longer leaves the tool missing at this probe (the M2.1
+      // finding: a rematerialized head never saw its own secretary because the
+      // pre-fix registration was gated on the provider and this drop-warn then
+      // masked it permanently). The drop-warn stays the correct degradation for
+      // a row that is genuinely ABSENT (a template bug): the probe is
+      // deliberately NOT widened to allow declared-but-unseen names blindly —
+      // restrict() validates inherited names loudly, so naming an unseen name
+      // would throw and the allow:[] fallback would mask EVERY inherited tool
+      // (strictly worse than dropping one name).
       const agentScope = scopeOf(agentCtx)
       const allowList: string[] = []
       for (const name of declared) {
