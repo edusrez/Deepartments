@@ -13,6 +13,7 @@ import z from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { assertSubagentMaxDepth } from '@deepseek-ai/dsh-subagent'
+import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type { AssembleContext } from '@deepseek-ai/dsh-system-prompt'
 // D3 (subagent/gui/pooler phase): the dispatch-time role registry is now the
 // CORE SERVICE `deepartments.subagentRoles` (one per-process store in
@@ -23,7 +24,19 @@ import { rememberRole, forgetRole } from './role-orient.js'
 import type { SubagentRolesService } from './role-orient.js'
 
 export const name = 'deepartments-subagent'
-export const inject = ['tools', 'subagents', 'systemPrompt']
+// M2.2 (deploy fix, 2026-08-28): `subagents` is NO LONGER a hard inject. The
+// cordis inject names are a HARD service-availability gate: a fiber whose
+// injected service is absent never executes, and dsh-agent-presets REJECTS a
+// standing mount whose row sits inactive (`inactiveRows`/`mountPreset`), so a
+// tool-secretary row mounted in a chain WITHOUT the subagents service (a
+// department head — the host composition is the only plane that hosts it)
+// would fail the WHOLE head preset mount, leaving the tool absent even though
+// the registration itself has been provider-independent since M2.1. The
+// service is therefore resolved OPTIONALLY, the codebase's `ctx.get(...)`
+// discipline (mirrors src/index.ts / applyInvoke): at apply for the late
+// provider checks, and LAZILY at execute for startContinuable, failing loud
+// there with a clear absent-service error instead of never registering.
+export const inject = ['tools', 'systemPrompt']
 
 /** Prompt order after bounded delegation policy and before child reporting. */
 const SUBAGENT_SECTION_ORDER = 116.5
@@ -133,7 +146,17 @@ export function apply(ctx: Context, config: Config) {
   // or the fresh-spawn wording while it is absent (the shipped head rows are
   // `spawn`; the host's fork row mounts with its provider already present, so
   // the fallback never mislabels a fork).
-  const present = ctx.subagents.getProvider(config.provider)
+  // M2.2 (deploy fix continuation): resolve the subagents service OPTIONALLY.
+  // When the service is absent from this chain (a department head — the host
+  // composition hosts it, a head chain does not), `present` stays undefined and
+  // the tool is registered UNCONDITIONALLY anyway (the M2.1 principle extended
+  // to the SERVICE); the provider and the service are both resolved at EXECUTE
+  // time with fail-loud errors, never at registration. The read goes through
+  // `ctx.get` — a bare `ctx.subagents` property read on an undeclared missing
+  // service would THROW (cordis inline-inject guard), which is exactly the
+  // hard dependency this fix removes.
+  const subagents = ctx.get('subagents') as SubagentRuntime | undefined
+  const present = subagents === void 0 ? void 0 : subagents.getProvider(config.provider)
   if (present !== void 0 && typeof config.maxDepth === 'number' && !present.capabilities.depthLimit) {
     throw new Error(`deepartments-subagent: provider "${present.name}" cannot enforce maxDepth (no depthLimit capability) — set maxDepth: 'provider-managed' to leave the recursion budget to the provider`)
   }
@@ -198,7 +221,18 @@ export function apply(ctx: Context, config: Config) {
         // The ONLY branch: start a durable continuable child and hand its id
         // back immediately. There is no blocking path — the model cannot wait
         // inline for the child even if it wanted to.
-        const child = await ctx.subagents.startContinuable({
+        // M2.2: the service is resolved LAZILY at call time. A secretary row
+        // mounted into a standing whose chain lacks the subagents service (a
+        // department head) still lands the tool in the session — invoking it
+        // fails loud HERE with a clear absent-service error instead of failing
+        // (or, pre-M2.2, silently never registering) at mount time. With the
+        // service present, `startContinuable` resolves the named provider
+        // internally and fails loud on a provider that never registered
+        // (expectProvider), so the provider-side check does not need this
+        // plugin's own code path.
+        const subagents = ctx.get('subagents') as SubagentRuntime | undefined
+        if (subagents === void 0) throw new Error(`${toolName} unavailable: subagents service absent in this session`)
+        const child = await subagents.startContinuable({
           provider: config.provider,
           label: args.description,
           request,

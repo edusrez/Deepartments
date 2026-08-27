@@ -5584,6 +5584,170 @@ test('M2.1 live-case (REAL agent-presets): a head whose tool-secretary preset ro
   })
 })
 
+test('M2.2 live-case (REAL agent-presets, NO subagents service): a PRE-EXISTING durable head session resumed 1st AND 2nd over a real PER-HEAD standing (deepartments-head-<dept>) still sees its `secretary` — the M2.1 unconditional registration now also ignores the SERVICE (no cordis inject gate, optional ctx.get), and executing it without the service fails loud with the clear absent-service error instead of failing (or silently never registering) at mount', async () => {
+  const dshHome = await mkdtemp(path.join(tmpdir(), 'dsh-home-m22-'))
+  const prev = process.env.DSH_HOME
+  const cleanup = async () => {
+    if (prev === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = prev
+    await rm(dshHome, { recursive: true, force: true })
+  }
+  process.env.DSH_HOME = dshHome
+  await withTempStateDir(async (stateDir) => {
+    try {
+      // M2.2 test seam: same hermetic resolve hook as the M2.1 test — the
+      // profile ships only a SUBSET of the DSH packages, so the REAL standing
+      // mount cannot import a production preset's rows directly; only the
+      // environment rows are mapped to a no-op stub, `dsh-deepartments` (THIS
+      // repo, the code under test) resolves to the compiled lib, and everything
+      // else passes through. The per-head preset, the standing mount, the
+      // postSetup probe/restrict and the durable resume are all REAL.
+      const m22RepoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+      const m22HookDir = await mkdtemp(path.join(dshHome, 'm22-hook-'))
+      const m22StubPath = path.join(m22HookDir, 'env-row-stub.mjs')
+      await writeFile(m22StubPath, "export const name = 'm22-env-row-stub'; export function apply() {}\n", 'utf8')
+      const m22HookPath = path.join(m22HookDir, 'resolve-hook.mjs')
+      await writeFile(m22HookPath, `
+        import { pathToFileURL } from 'node:url'
+        import path from 'node:path'
+        const repoRoot = ${JSON.stringify(m22RepoRoot)}
+        const stubUrl = ${JSON.stringify(pathToFileURL(m22StubPath).href)}
+        export async function resolve(specifier, context, nextResolve) {
+          if (specifier === 'dsh-deepartments') return { url: pathToFileURL(path.join(repoRoot, 'lib', 'index.js')).href, shortCircuit: true }
+          if (specifier === 'dsh-deepartments/subagent') return { url: pathToFileURL(path.join(repoRoot, 'lib', 'subagent.js')).href, shortCircuit: true }
+          if (specifier === 'dsh-deepartments/package.json') return { url: pathToFileURL(path.join(repoRoot, 'package.json')).href, shortCircuit: true }
+          if (specifier === '@deepseek-ai/dsh-persona' || specifier === '@deepseek-ai/dsh-agent-instructions'
+            || specifier === '@deepseek-ai/dsh-tool-fs' || specifier === '@deepseek-ai/dsh-tool-fs-search') {
+            return { url: stubUrl, shortCircuit: true }
+          }
+          return nextResolve(specifier, context)
+        }
+      `.trim() + '\n', 'utf8')
+      register(pathToFileURL(m22HookPath).href)
+
+      // A PRE-EXISTING durable HEAD post (created BEFORE the M2.2 deploy):
+      // NOT configured (the org below has zero departments, so ensureAllHeads
+      // creates nothing at boot — the materialization is driven below via the
+      // wake, deterministically AFTER loader.await). The header names the
+      // PER-HEAD preset id — the resume seam (invoke.ts materializePost) mounts
+      // EXACTLY that preset (entry.agentPreset), the standing
+      // `deepartments-head-<dept>` of the M2.2 case.
+      await seedPost(stateDir, {
+        postId: 'quality-head',
+        sessionId: 'head-quality-head',
+        roomId: 'board',
+        agentPreset: headPresetIdFor('quality')
+      })
+
+      // Author the REAL PER-HEAD preset into the harness-home user root using
+      // the PRODUCTION generator (the deepartments-head base composition + the
+      // per-head role line + the metadata — materializeHeadPreset's exact
+      // buildHeadPresetComposition/buildHeadPresetMetadata shape). The
+      // tool-secretary row is REAL: dsh-deepartments/subagent with toolName
+      // secretary.
+      const baseComposition = await readFile(path.join(m22RepoRoot, 'presets', 'deepartments-head', 'agent.cordis.yml'), 'utf8')
+      const perHeadPresetId = headPresetIdFor('quality')
+      const perHeadPresetDir = path.join(dshHome, '.agent-presets', perHeadPresetId)
+      await mkdir(perHeadPresetDir, { recursive: true })
+      await writeFile(path.join(perHeadPresetDir, 'agent.cordis.yml'), buildHeadPresetComposition(baseComposition, 'Quality Head', 'Quality'), 'utf8')
+      await writeFile(path.join(perHeadPresetDir, 'preset.yml'), buildHeadPresetMetadata('Quality Head - Deepartments'), 'utf8')
+
+      // Boot the REAL Loader + the REAL @deepseek-ai/dsh-agent-presets service
+      // (temp DSH_HOME) in TWO stages (the M2.1 pattern). THE M2.2
+      // DISCRIMINATOR: SubagentRuntime is NOT mounted anywhere in this
+      // composition — no `root.plugin(SubagentRuntime)`, no subagents loader
+      // entry — so the head chain (and the standing it mounts) has NO
+      // subagents service at all.
+      const root = new Context()
+      const loaderFiber = await root.plugin(Loader, { baseUrl: new URL('.', import.meta.url).href })
+      const loader = root.loader
+      loader.create({ id: 'sessions', name: '@deepseek-ai/dsh-session' })
+      loader.create({ id: 'projections', name: '@deepseek-ai/dsh-session-projection' })
+      loader.create({ id: 'systemPrompt', name: '@deepseek-ai/dsh-system-prompt' })
+      loader.create({ id: 'tools', name: '@deepseek-ai/dsh-tools' })
+      loader.create({ id: 'agentPresets', name: '@deepseek-ai/dsh-agent-presets', config: { default: 'deepartments-head', roots: [] } })
+      await loader.await()
+      const agents = new StubAgents(root)
+      const persistence = new StubPersistence(root)
+      // Stage 2: the bundle — its agentPresets capture is now DEFINED.
+      loader.create({
+        id: 'deepartments',
+        name: '../lib/index.js',
+        config: { stateDir, org: { departments: [] } }
+      })
+      await loader.await()
+      agents.scopeAnchor = loader.resolve('tools').fiber?.ctx ?? root
+      // The hermetic harness registers no native tools, so stub the GLOBAL
+      // capability tools on the global plane exactly like bootPlugin does (the
+      // head's probe/restrict then sees them as real inherited globals).
+      for (const name of F10_GLOBAL_TOOLS) {
+        if (root.tools.get(name) === undefined) root.tools.register(stubGlobalTool(name))
+      }
+      try {
+        assert.equal(agents.store.has('head-quality-head'), false, 'no head is materialized at boot (the durable ghost stays dormant)')
+        // The per-head preset files were authored directly above — the wake's
+        // mount resolves them through the REAL dsh-agent-presets discovery.
+        await access(path.join(dshHome, '.agent-presets', perHeadPresetId, 'agent.cordis.yml'))
+        const signal = new AbortController().signal
+
+        // FIRST materialization of the pre-existing durable head: the bus wake
+        // RESUMES it through headSetup — postSetup mounts the REAL PER-HEAD
+        // preset standing (tool-secretary row included) and probes
+        // HEAD_BASE_TOOLS. The standing's chain has NO subagents service, so
+        // pre-M2.2 the row could not activate (inject gate) and the whole mount
+        // failed; M2.2 registers the tool regardless of the SERVICE.
+        const r1 = await root.tools.get('send_message').execute(
+          { to: ['quality-head'], text: 'wake' },
+          { agent: { id: 'host-any', session: { header: {} } }, signal }
+        )
+        assert.equal(r1.delivered['quality-head'], 'resumed', 'the bus wake materializes the durable head (resume path, not a rotation)')
+        await waitFor(() => agents.store.has('head-quality-head'), 5000, 'the durable head session is live after the wake')
+        const head1 = agents.store.get('head-quality-head')
+        const headIndex1 = agents.childAgents.findIndex((a) => a === head1)
+        assert.ok(headIndex1 >= 0, 'the materialized head context resolves')
+        const headCtx1 = agents.childContexts[headIndex1].ctx
+        const headKey1 = agents.childContexts[headIndex1].key
+        // THE M2.2 DISCRIMINATOR: the standing per-head preset mounted WITHOUT
+        // the subagents service in the chain, and the secretary tool IS bound.
+        assert.ok(headCtx1.tools.get('secretary', headKey1) !== undefined, 'the materialized head sees its secretary even though the subagents SERVICE is absent from the head chain (M2.2: unconditional also WRT the service)')
+
+        // Execute WITHOUT the service → the clear fail-loud absent-service
+        // error (NOT a mount-time throw, NOT a TypeError, NOT a silently
+        // missing tool).
+        await assert.rejects(
+          headCtx1.tools.get('secretary', headKey1).execute(
+            { description: 'read my journal', prompt: 'Read the journal and summarise the open items.' },
+            { agent: head1, signal }
+          ),
+          /subagents service absent in this session/,
+          'executing secretary in a head chain WITHOUT the subagents service fails loud with the clear absent-service error'
+        )
+
+        // SECOND materialization of the SAME durable session (the standing
+        // per-head mount is one-shot per preset generation — no row re-apply —
+        // so the resumed postSetup re-probes and must STILL keep the inherited
+        // secretary contribution).
+        agents.store.delete('head-quality-head')
+        const r2 = await root.tools.get('send_message').execute(
+          { to: ['quality-head'], text: 'wake again' },
+          { agent: { id: 'host-any', session: { header: {} } }, signal }
+        )
+        assert.equal(r2.delivered['quality-head'], 'resumed', 'the second bus wake RESUMES the durable head session again (not a rotation)')
+        await waitFor(() => agents.store.has('head-quality-head'), 5000, 'the durable head session is live again')
+        assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === 'head-quality-head').length >= 2, true, 'both wakes went through ctx.agents.resume with the same head setup')
+        const head2 = agents.store.get('head-quality-head')
+        const headIndex2 = agents.childAgents.findIndex((a) => a === head2)
+        assert.ok(headIndex2 >= 0, 'the resumed agent context resolves')
+        assert.ok(agents.childContexts[headIndex2].ctx.tools.get('secretary', agents.childContexts[headIndex2].key) !== undefined, 'the RESUMED department head SEES its personal secretary over the real per-head standing with NO subagents service (M2.2 live case)')
+      } finally {
+        loaderFiber.dispose()
+      }
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
 test('Batch W4 pure: buildWakePack composes all sections in order (identity, owner presence, journal path, delta TOC, roster, departments directory, git, system, ROADMAP tail, skill body, guidance)', async () => {
   const pack = buildWakePack({
     memberId: 'host-session-abc',
