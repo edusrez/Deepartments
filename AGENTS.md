@@ -123,6 +123,21 @@ compressed with zstd, nothing is ever destructively garbage-collected.
   missing `zstd` → compression is reported but skipped (mtime fallback for log
   tails); `--apply` refuses to target the STABLE profile `/opt/dsh/.dsh`; dev
   home `/opt/dsh/.dsh-dev` is fine. Full usage/params live in the script header.
+- **Directory resolution**: WITHOUT `--state-dir`, the stateDir resolves to
+  `$DSH_HOME/.deepartments` (fallback `~/.dsh/.deepartments`) — the HARNESS
+  home's Deepartments stateDir, which is NOT the dev deployment's relocated
+  stateDir. The dev deployment ALWAYS needs the core dirs explicit (example
+  below); the STABLE profile `/opt/dsh/.dsh` is excluded by the guard.
+- **Bounded census** (a dry-run against a live state home must finish in
+  seconds, not hang): the last-turn scan runs an in-process promise pool
+  (`--scan-concurrency`, default 8, no worker threads), a per-file zstd tail
+  timeout (`--tail-timeout-ms`, default 4000 — on expiry the session reports
+  "unknown-last-turn (timeout)" and the mtime fallback covers), a candidate cap
+  (`--scan-limit`, default 2000) and a global soft deadline (`--max-scan-ms`,
+  default 30000) — truncation (limit or deadline) is always warned and
+  reported, and progress lines go to stderr ("scanned i/N (k dead so far)",
+  `--no-progress` silences them). Memory stays bounded to a 256 KiB tail
+  window per log; the per-file timeout bounds the decompression time.
 
 The dev deployment relocates the Deepartments stateDir, so pass the core dirs
 explicitly there, e.g.:

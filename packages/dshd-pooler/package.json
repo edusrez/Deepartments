@@ -1,0 +1,23 @@
+{
+  "name": "dshd-pooler",
+  "version": "0.1.0-rc.1",
+  "description": "Deepartments provider-adapter boot-check helpers for the pooler re-wire: the pure endpoint-drift detector (providerAdapterEndpointDrift + LOCAL_ENDPOINT_RE), the pure boot-findings resolver (resolveProviderAdapterBootFindings), and the dependency-free settings.yaml reader/parser (readLlmPiAiProviderSettings/parseLlmPiAiProviderSettings) — extracted for the dshd-pooler phase of the modular Cordis split. A pure library package (NO cordis plugin, NO tool, NO patch): the bundle consumes it through the drop-in bridge src/core/pooler.ts; the ONLY impure surface is the readFileSync in readLlmPiAiProviderSettings (the stateDir path is passed by parameter).",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "license": "MIT"
+}

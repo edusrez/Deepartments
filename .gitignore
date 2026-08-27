@@ -6,6 +6,7 @@ node_modules/
 dist/
 lib/
 /client/
+packages/dshd-gui/client/
 *.tgz
 
 # OS

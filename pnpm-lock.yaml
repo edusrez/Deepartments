@@ -14,9 +14,15 @@ importers:
       dshd-feedback:
         specifier: workspace:*
         version: link:packages/dshd-feedback
+      dshd-gui:
+        specifier: workspace:*
+        version: link:packages/dshd-gui
       dshd-jobs:
         specifier: workspace:*
         version: link:packages/dshd-jobs
+      dshd-pooler:
+        specifier: workspace:*
+        version: link:packages/dshd-pooler
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
@@ -130,7 +136,44 @@ importers:
         specifier: ^5.6.0
         version: 5.9.3
 
+  packages/dshd-gui:
+    dependencies:
+      dshd-jobs:
+        specifier: workspace:*
+        version: link:../dshd-jobs
+    devDependencies:
+      '@deepseek-ai/dsh-client-connection':
+        specifier: 0.1.0-rc.7
+        version: 0.1.0-rc.7(18ff0c05ab41670b8daa2e2e166479db)
+      '@deepseek-ai/dsh-client-runtime':
+        specifier: 0.1.0-rc.7
+        version: 0.1.0-rc.7(18f137ce0d99ed41b8282f4e6c952969)
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      '@types/react':
+        specifier: ~18.3.1
+        version: 18.3.31
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+      tsdown:
+        specifier: ^0.22.14
+        version: 0.22.14(typescript@5.9.3)
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
   packages/dshd-jobs:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
+  packages/dshd-pooler:
     devDependencies:
       '@types/node':
         specifier: ^22.0.0

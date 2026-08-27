@@ -1,12 +1,7 @@
 import { defineConfig } from "tsdown";
 
 export default defineConfig({
-  // dshd-gui phase: the client SOURCE moved to packages/dshd-gui/src/client/
-  // (the dshd-gui package owns it + builds its own packages/dshd-gui/client/
-  // bundle); this bundle-side build still produces the DEPLOYED root
-  // client/client.js (exports "./client" + dsh.client.inject + the
-  // /plugins/dsh-deepartments/client.js route) FROM the package source.
-  entry: ["packages/dshd-gui/src/client/index.tsx"],
+  entry: ["src/client/index.tsx"],
   outDir: "client",
   format: ["cjs"],
   platform: "browser",

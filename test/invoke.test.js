@@ -34,6 +34,7 @@ import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
 import { RegistryStore } from '../lib/invoke.js'
+import { readLlmPiAiProviderSettings } from '../lib/invoke.js'
 import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply } from '../lib/subagent.js'
 import {
@@ -10129,6 +10130,33 @@ test('FIX-2 (QD NO_ADAPTER alerting): PURE provider-adapter boot check — a mis
   assert.deepEqual(parsed, { 'opencode-zen': { baseURL: 'http://127.0.0.1:4097/v1', maxRetries: 0 } }, 'the parser resolves baseURL + maxRetries per provider')
   // A settings.yaml without the pi-ai namespace is a no-op (never a finding source).
   assert.deepEqual(parseLlmPiAiProviderSettings('other: {}\n'), {}, 'a non-pi-ai settings.yaml resolves to {}')
+})
+
+test('FIX-2 (QD NO_ADAPTER alerting): readLlmPiAiProviderSettings reads + parses <stateDir>/settings.yaml; absent/unreadable/malformed degrade to {} (never throws)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Absent file → {} (the drift half is a no-op; the missing-adapter half
+    // still fires — the graceful degradation production needs).
+    assert.deepEqual(readLlmPiAiProviderSettings(stateDir), {}, 'absent settings.yaml → {}')
+    // A real pi-ai provider surface → the parsed settings (the SAME parser the
+    // production boot check re-reads on every bounded-retry poll).
+    await writeFile(path.join(stateDir, 'settings.yaml'), [
+      'llm-pi-ai:',
+      '  providers:',
+      '    opencode-zen:',
+      '      api: openai-completions',
+      '      baseURL: http://127.0.0.1:4097/v1',
+      '      apiKeyEnv: OPENCODE_GO_API_KEY',
+      '      maxRetries: 0'
+    ].join('\n'), 'utf8')
+    assert.deepEqual(readLlmPiAiProviderSettings(stateDir), { 'opencode-zen': { baseURL: 'http://127.0.0.1:4097/v1', maxRetries: 0 } }, 'the reader resolves baseURL + maxRetries per provider')
+    // Malformed content → the parser degrades to {} (never throws).
+    await writeFile(path.join(stateDir, 'settings.yaml'), 'not: [valid', 'utf8')
+    assert.deepEqual(readLlmPiAiProviderSettings(stateDir), {}, 'malformed settings.yaml → {} (the parser degrades)')
+    // An UNREADABLE path (a directory where the file must be) → {} (never throws).
+    await rm(path.join(stateDir, 'settings.yaml'), { force: true })
+    await mkdir(path.join(stateDir, 'settings.yaml'))
+    assert.deepEqual(readLlmPiAiProviderSettings(stateDir), {}, 'an unreadable settings.yaml → {} (never throws)')
+  })
 })
 
 test('P1 rewire-pooler (GAP 1): the deepartments plugin org config SETS org.poolerBaseURL to the pooler route, so the endpoint-drift exemption is ACTIVE and the boot check does NOT flag the pooler as drift', async () => {

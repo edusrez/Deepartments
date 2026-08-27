@@ -52,6 +52,35 @@
  *   relocated by a deployment (e.g. the dev box: state home
  *   /opt/dsh/.dsh-dev, stateDir /.deepartments) — pass both explicitly then.
  *
+ * DIRECTORY RESOLUTION (the defaults vs the dev deployment)
+ *   WITHOUT --state-dir, the stateDir resolves to $DSH_HOME/.deepartments
+ *   (fallback ~/.dsh/.deepartments) — the HARNESS home's Deepartments
+ *   stateDir. That is NOT the dev deployment stateDir: on the dev box run with
+ *   the core dirs explicit:
+ *     --state-dir /.deepartments --sessions-dir /opt/dsh/.dsh-dev/sessions
+ *   (verified on-disk: hosts.json/posts.json at /.deepartments, session dirs
+ *   under /opt/dsh/.dsh-dev/sessions, rotation archive at
+ *   /opt/dsh/.dsh-dev/archive). The STABLE profile /opt/dsh/.dsh is excluded
+ *   by the guard (--apply refuses); the dev home /opt/dsh/.dsh-dev is fine
+ *   (dry-run only reads it).
+ *
+ * BOUNDED SCAN (a dry-run against a live state home must finish, not hang)
+ *   The census is bounded: --scan-limit (default 2000) caps how many
+ *   unreferenced candidates the last-turn scan processes; --max-scan-ms
+ *   (default 30000) is a global soft deadline after which the census stops and
+ *   the report completes with what was scanned; --tail-timeout-ms (default
+ *   4000) is a per-file zstd tail timeout (on expiry the session last turn is
+ *   reported as "unknown-last-turn (timeout)" and the mtime fallback covers);
+ *   --scan-concurrency (default 8) is the in-process promise pool for zstd
+ *   tail reads (same thread, no worker_threads, no new deps). Truncation
+ *   (limit or deadline) is always WARNED and reported. Progress lines are
+ *   written to stderr ("scanned i/N (k dead so far)") so the run never looks
+ *   hung; --no-progress silences them. readZstdTail streams and keeps ONLY the
+ *   last 256 KiB of decompressed output in memory (never the whole log);
+ *   because zstd solid frames cannot be seeked, the child must decompress the
+ *   whole stream to REACH the tail — the per-file TIMEOUT is what bounds that
+ *   time.
+ *
  * USAGE
  *   node scripts/session-hygiene.mjs [options]
  *
@@ -117,6 +146,16 @@ function usage(stream = process.stdout) {
   --tmp-stale-days <n>   *.tmp older than N days = orphan (default 1).
   --zstd <path>          zstd binary (default: \`zstd\` via PATH).
   --now <epoch-ms>       Clock override for tests.
+  --scan-limit <n>       Census cap: max unreferenced session candidates the
+                        last-turn scan processes (default 2000; when hit the
+                        census is truncated — warned and reported).
+  --max-scan-ms <n>      Census soft deadline, ms (default 30000: stop early,
+                        complete the report with what was scanned).
+  --tail-timeout-ms <n>  Per-file zstd tail read timeout, ms (default 4000;
+                        timeout → "unknown-last-turn (timeout)" + mtime).
+  --scan-concurrency <n> In-process promise pool for zstd tail reads
+                        (default 8; no worker threads).
+  --no-progress          Silence the stderr progress lines.
   --apply                EXECUTE mutations. WITHOUT it: dry-run only.
   --help                 This text.
 
@@ -132,6 +171,8 @@ function parseArgs(argv) {
     stateDir: process.env.DSH_HOME ? join(process.env.DSH_HOME, ".deepartments") : join(homedir(), ".dsh", ".deepartments"),
     sessionsDir: null, archiveDir: null, stateHome: null, tmpDir: null,
     staleDays: 14, hotRotations: 3, tmp: false, tmpStaleDays: 1,
+    scanLimit: 2000, maxScanMs: 30000, tailTimeoutMs: 4000, scanConcurrency: 8,
+    noProgress: false,
     zstd: "zstd", now: Date.now(), apply: false, help: false,
   };
   const readInt = (name, raw, min = 1) => {
@@ -159,6 +200,11 @@ function parseArgs(argv) {
       case "--stale-days": opts.staleDays = readInt("stale-days", next()); break;
       case "--hot-rotations": opts.hotRotations = readInt("hot-rotations", next()); break;
       case "--tmp-stale-days": opts.tmpStaleDays = readInt("tmp-stale-days", next()); break;
+      case "--scan-limit": opts.scanLimit = readInt("scan-limit", next()); break;
+      case "--max-scan-ms": opts.maxScanMs = readInt("max-scan-ms", next()); break;
+      case "--tail-timeout-ms": opts.tailTimeoutMs = readInt("tail-timeout-ms", next()); break;
+      case "--scan-concurrency": opts.scanConcurrency = readInt("scan-concurrency", next()); break;
+      case "--no-progress": opts.noProgress = true; break;
       case "--zstd": opts.zstd = next(); break;
       case "--now": opts.now = readInt("now", next(), 0); break;
       default: throw new Error(`unknown option "${arg}"`);
@@ -193,27 +239,39 @@ function zstdAvailable(bin) {
  * the decompressed output and keeping the last `keep` bytes. Resolves with the
  * last non-empty line (may span the keep window → caller retries with a bigger
  * window before falling back to mtime). Resolves on BOTH 'error' and 'close'
- * (spawn failure never hangs the caller).
+ * (spawn failure never hangs the caller). The child is SIGKILLed after
+ * `timeoutMs`; the promise then resolves with { failReason: "timeout",
+ * timedOut: true } so the caller falls back to mtime. Memory stays bounded to
+ * the keep window; the zstd child must decompress the whole stream to REACH
+ * the tail (solid frames are not seekable) — the timeout bounds that time.
  */
-function readZstdTail(bin, file, keep = 262144) {
+function readZstdTail(bin, file, keep = 262144, timeoutMs = 4000) {
   return new Promise((done) => {
     const child = spawn(bin, ["-dcq", "--", file], { stdio: ["ignore", "pipe", "inherit"] });
     let buf = Buffer.alloc(0);
     let failReason = null;
+    let timedOut = false;
     let settled = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      failReason = "timeout";
+      child.kill("SIGKILL");
+      child.stdout.destroy(); // force the pipe closed so the timeout is authoritative
+    }, timeoutMs);
     const settle = () => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       const lines = buf.toString("utf8").split("\n").filter((l) => l.trim() !== "");
-      done({ lastLine: lines.length > 0 ? lines[lines.length - 1] : null, failReason });
+      done({ lastLine: lines.length > 0 ? lines[lines.length - 1] : null, failReason, timedOut });
     };
     child.stdout.on("data", (chunk) => {
       buf = Buffer.concat([buf, chunk]);
       if (buf.length > keep * 2) buf = buf.subarray(buf.length - keep);
     });
-    child.on("error", (err) => { failReason = `zstd: ${err?.message ?? err}`; settle(); });
+    child.on("error", (err) => { if (!timedOut) failReason = `zstd: ${err?.message ?? err}`; settle(); });
     child.on("close", (code) => {
-      if (failReason === null && code !== 0) failReason = `zstd exit ${code}`;
+      if (!timedOut && failReason === null && code !== 0) failReason = `zstd exit ${code}`;
       settle();
     });
   });
@@ -235,8 +293,9 @@ function readPlainTail(file, keep = 262144) {
 }
 
 /** Last-turn epoch-ms of a session log: the last row's `time` (fallbacks:
- * `.ts`, `.timestamp`), else file mtime. Never throws. */
-async function lastTurnMs(file, plain, bin) {
+ * `.ts`, `.timestamp`), else file mtime. Never throws. On a zstd tail read
+ * timeout the source is "unknown-last-turn (timeout)" and mtime covers. */
+async function lastTurnMs(file, plain, bin, timeoutMs = 4000) {
   const mtime = statSync(file).mtimeMs;
   const parseRow = (row) => {
     if (!row) return null;
@@ -253,8 +312,12 @@ async function lastTurnMs(file, plain, bin) {
     return t === null ? { ms: mtime, source: "mtime" } : { ms: t, source: "log" };
   }
   for (const keep of [262144, 4 * 262144]) {
-    const { lastLine, failReason } = await readZstdTail(bin, file, keep);
-    if (failReason !== null) return { ms: mtime, source: `mtime (${failReason})` };
+    const { lastLine, failReason, timedOut } = await readZstdTail(bin, file, keep, timeoutMs);
+    if (failReason !== null) {
+      return timedOut
+        ? { ms: mtime, source: "unknown-last-turn (timeout)" }
+        : { ms: mtime, source: `mtime (${failReason})` };
+    }
     const t = parseRow(lastLine);
     if (t !== null) return { ms: t, source: "log" };
   }
@@ -371,6 +434,87 @@ function scanTmpFiles(tmpDir) {
   return { exists: true, files };
 }
 
+/** stderr progress ("scanned i/N (k dead so far)"), throttled, TTY-aware. */
+function makeProgress(opts, totalTasks) {
+  if (opts.noProgress || totalTasks === 0) return { step() {}, finish() {} };
+  const tty = Boolean(process.stderr.isTTY);
+  let doneCount = 0;
+  let deadSoFar = 0;
+  let lastAt = 0;
+  const step = (isDead) => {
+    doneCount += 1;
+    if (isDead) deadSoFar += 1;
+    if (doneCount >= totalTasks || Date.now() - lastAt >= 100) {
+      lastAt = Date.now();
+      const line = `[session-hygiene] scanned ${doneCount}/${totalTasks} (${deadSoFar} dead so far)`;
+      process.stderr.write(tty ? `\r${line}\x1b[K` : `${line}\n`);
+    }
+  };
+  const finish = () => {
+    if (tty && doneCount > 0) process.stderr.write("\n");
+  };
+  return { step, finish };
+}
+
+/**
+ * Bounded last-turn census over unreferenced sessions: in-process promise pool
+ * of --scan-concurrency, candidate cap of --scan-limit, per-file
+ * --tail-timeout-ms (via lastTurnMs), global soft deadline --max-scan-ms,
+ * stderr progress. Deterministic aggregate regardless of pool interleaving
+ * (DEAD rows are re-sorted by the caller). Never throws for per-session
+ * failures (lastTurnMs always resolves).
+ */
+async function censusLastTurns(sessions, liveIds, opts) {
+  const cut = opts.now - opts.staleDays * DAY_MS;
+  let referenced = 0;
+  const candidates = [];
+  for (const s of sessions) {
+    if (liveIds.has(s.id)) { referenced += 1; continue; }
+    candidates.push(s);
+  }
+  const toScan = candidates.slice(0, opts.scanLimit);
+  let notScanned = candidates.length - toScan.length; // beyond the limit
+  let truncated = notScanned > 0
+    ? `--scan-limit ${opts.scanLimit} hit (${notScanned} unreferenced candidate(s) beyond the limit)`
+    : null;
+  const start = Date.now();
+  const progress = makeProgress(opts, toScan.length);
+  let fresh = 0;
+  const dead = [];
+  let scanned = 0;
+  let stop = false;
+  let next = 0;
+  const runOne = async (s) => {
+    const { ms, source } = await lastTurnMs(s.logFile, s.plain, opts.zstd, opts.tailTimeoutMs);
+    scanned += 1;
+    const isDead = ms < cut;
+    if (isDead) dead.push({ ...s, lastMs: ms, source, bytes: statSync(s.logFile).size });
+    else fresh += 1;
+    progress.step(isDead);
+    if (Date.now() - start >= opts.maxScanMs && !stop) {
+      stop = true;
+      truncated = truncated === null
+        ? `--max-scan-ms ${opts.maxScanMs} soft deadline hit while scanning`
+        : `${truncated}; --max-scan-ms ${opts.maxScanMs} soft deadline hit while scanning`;
+    }
+  };
+  const workers = [];
+  for (let w = 0; w < opts.scanConcurrency && w < toScan.length; w += 1) {
+    workers.push((async () => {
+      while (!stop) {
+        const i = next;
+        next += 1;
+        if (i >= toScan.length) break;
+        await runOne(toScan[i]);
+      }
+    })());
+  }
+  await Promise.all(workers);
+  progress.finish();
+  notScanned = candidates.length - scanned;
+  return { referenced, candidates: candidates.length, scanned, notScanned, fresh, dead, truncated };
+}
+
 // ---------------------------------------------------------------------------
 // mutations (ONLY invoked under --apply)
 // ---------------------------------------------------------------------------
@@ -434,6 +578,7 @@ async function main() {
   say(`  state-home    ${opts.stateHome}`);
   say(`  tmp-dir       ${opts.tmpDir}`);
   say(`  stale-days    ${opts.staleDays}   hot-rotations ${opts.hotRotations}   tmp-stale-days ${opts.tmpStaleDays}`);
+  say(`  scan bounds   limit ${opts.scanLimit}  concurrency ${opts.scanConcurrency}  tail-timeout ${opts.tailTimeoutMs}ms  max-scan ${opts.maxScanMs}ms  progress ${opts.noProgress ? "off" : "stderr"}`);
   const zstdOk = zstdAvailable(opts.zstd);
   say(`  zstd          ${opts.zstd} ${zstdOk ? "available" : "NOT available (compression skipped; mtime fallback for log tails)"}`);
   say("");
@@ -461,25 +606,18 @@ async function main() {
   const sessions = collectSessions(opts.sessionsDir);
   say("");
   say(`SESSIONS (base ${opts.sessionsDir})`);
-  const cut = opts.now - opts.staleDays * DAY_MS;
-  const dead = [];
-  let referenced = 0;
-  let fresh = 0;
-  for (const s of sessions) {
-    if (liveIds.live.has(s.id)) { referenced += 1; continue; }
-    const { ms, source } = await lastTurnMs(s.logFile, s.plain, opts.zstd);
-    if (ms < cut) {
-      dead.push({ ...s, lastMs: ms, source, bytes: statSync(s.logFile).size });
-    } else {
-      fresh += 1;
-    }
-  }
-  dead.sort((a, b) => a.lastMs - b.lastMs);
+  const census = await censusLastTurns(sessions, liveIds.live, opts);
+  const dead = census.dead.sort((a, b) => a.lastMs - b.lastMs || a.id.localeCompare(b.id));
   const deadBytes = dead.reduce((acc, d) => acc + d.bytes, 0);
   say(`  total session dirs: ${sessions.length}`);
-  say(`    referenced (live registry): ${referenced}`);
-  say(`    fresh (recent turn):        ${fresh}`);
+  say(`    referenced (live registry): ${census.referenced}`);
+  say(`    unreferenced candidates:    ${census.candidates}  (last-turn scanned: ${census.scanned}${census.notScanned > 0 ? `, ${census.notScanned} NOT scanned` : ""})`);
+  say(`    fresh (recent turn):        ${census.fresh}`);
   say(`    DEAD (stale + unreferenced): ${dead.length}  (log bytes ${fmtBytes(deadBytes)} — reported only, never deleted by this script)`);
+  if (census.truncated !== null && census.notScanned > 0) {
+    warnings.push(`census truncated (${census.truncated}): ${census.notScanned} unreferenced session(s) NOT scanned — dead/fresh counts may be understated; raise --scan-limit / --max-scan-ms for a full census.`);
+    say(`    !! census TRUNCATED (${census.truncated}) — ${census.notScanned} unreferenced session(s) NOT scanned`);
+  }
   for (const d of dead) {
     const ageDays = ((opts.now - d.lastMs) / DAY_MS).toFixed(1);
     say(`      - ${d.id}  last turn ${ageDays}d ago (${d.source}, ${fmtBytes(d.bytes)})`);

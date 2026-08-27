@@ -44,7 +44,9 @@
   "dependencies": {
     "dshd-core": "workspace:*",
     "dshd-feedback": "workspace:*",
-    "dshd-jobs": "workspace:*"
+    "dshd-gui": "workspace:*",
+    "dshd-jobs": "workspace:*",
+    "dshd-pooler": "workspace:*"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

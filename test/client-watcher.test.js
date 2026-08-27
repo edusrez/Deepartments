@@ -1,11 +1,12 @@
 // dsh-deepartments — client lifecycle watcher decision logic (U3, spec 002 §6).
 //
-// The watcher lives in src/client/index.tsx, which compiles ONLY through the
+// The watcher lives in packages/dshd-gui/src/client/index.tsx (moved from
+// src/client/ in the dshd-gui phase), which compiles ONLY through the
 // browser bundle pipeline (tsdown → client/client.js, wrapped in the
 // `window.__ModuleLoader__.load` envelope by scripts/normalize-client-banner.mjs)
 // — it is not part of the server lib/ the other suites import. This test
 // evaluates the REAL compiled envelope (client/client.js; regenerate with
-// `pnpm build:client` after touching src/client) with a stubbed loader,
+// `pnpm build:client` after touching the client source) with a stubbed loader,
 // reaches the exported pure decision functions (`shouldOpenHostSession`,
 // `shouldRefreshForHost`) and drives the real `apply`/poll pipeline with a
 // mocked ctx for the rotation open flow — no browser, no test framework

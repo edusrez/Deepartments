@@ -132,7 +132,7 @@ export type {
   DeliveryRedelivererDeps
 } from './core/messages.js'
 import { buildAgentRows, computeDeptWhoState } from './agents.js'
-import type { PostEntryLike, DeptWhoState } from './agents.js'
+import type { DeptWhoState } from './agents.js'
 import {
   HEAD_PRESET_BASE_ID,
   headPresetIdFor,
@@ -142,6 +142,10 @@ import {
   buildHeadPresetMetadata
 } from './head-presets.js'
 import { roleForSession, buildSubagentOrientation } from './role-orient.js'
+// D3 (subagent/gui/pooler phase): the `deepartments.subagentRoles` core service
+// type — the dispatch-time transient-subagent role registry, promoted from the
+// bundle module-global Map into dshd-core (see the wake-pack wiring below).
+import type { SubagentRolesService } from './role-orient.js'
 // FASE 2 step (a): the durable registry store (hosts/posts catalog) is carved
 // out of this monolith into ./core/registry.js — the SINGLE source of the
 // catalog. Everything registry-related below (mintWorkerSessionId, the durable
@@ -302,6 +306,85 @@ export type {
   SchedulerAutoRunFinding,
   JobsDepartment
 } from './core/jobs.js'
+// dshd-pooler phase: the PURE provider-adapter boot-check helpers (endpoint
+// drift + the boot-findings resolver + the settings.yaml reader/parser + the
+// retry constants + the synthetic finding postId) live in the dshd-pooler
+// package (packages/dshd-pooler/src/index.ts), consumed via the drop-in bridge
+// (./core/pooler.js -> `export * from 'dshd-pooler'`). invoke.ts imports the
+// helpers the boot check (runProviderAdapterBootCheck) wires and RE-EXPORTS the
+// whole surface so the compiled lib/invoke.js stays a drop-in superset of the
+// pre-extraction module (the existing tests import these symbols from
+// lib/invoke.js). The boot check closure itself STAYS in the bundle.
+import {
+  PROVIDER_ADAPTER_RETRY_WINDOW_MS,
+  PROVIDER_ADAPTER_RETRY_MS,
+  readLlmPiAiProviderSettings,
+  resolveProviderAdapterBootFindings
+} from './core/pooler.js'
+import type {
+  ProviderAdapterBootFinding,
+  ProviderAdapterBootInput,
+  ProviderAdapterEndpointDriftDeps
+} from './core/pooler.js'
+export {
+  PROVIDER_ADAPTER_CHECK_POST_ID,
+  PROVIDER_ADAPTER_RETRY_WINDOW_MS,
+  PROVIDER_ADAPTER_RETRY_MS,
+  providerAdapterEndpointDrift,
+  resolveProviderAdapterBootFindings,
+  parseLlmPiAiProviderSettings,
+  readLlmPiAiProviderSettings
+} from './core/pooler.js'
+export type {
+  ProviderAdapterBootFinding,
+  ProviderAdapterBootInput,
+  ProviderAdapterEndpointDriftDeps
+} from './core/pooler.js'
+// dshd-gui phase: the PURE `/deepartments` RPC channel (endpoint dispatcher +
+// client-request envelope + authority/trust fence + the thin node:http route
+// handler + the channel types) lives in the dshd-gui package
+// (packages/dshd-gui/src/index.ts), consumed via the drop-in bridge
+// (./core/gui.js -> `export * from 'dshd-gui'`). invoke.ts keeps the webServer
+// MOUNT EFFECT + the endpointDeps WIRING CLOSURE (they bind the LIVE
+// apply-fiber registries AND inject the bundle-owned pure deps
+// buildAgentRows/pickLiveHostEntry — the agents/list + host/status branches) +
+// the presence persistence helpers, and RE-EXPORTS the moved public surface so
+// the compiled lib/invoke.js stays a drop-in superset of the pre-extraction
+// module (the existing tests import these symbols from lib/invoke.js).
+import { dispatchDeepartmentsEndpoint, handleDeepartmentsRequest } from './core/gui.js'
+import type {
+  DeepartmentsDispatchResult,
+  DeepartmentsEndpointDeps,
+  EndpointPostEntryLike,
+  HostStatusPayload,
+  PresenceState,
+  WebServerRouteLike,
+  WebServerLike
+} from './core/gui.js'
+// The envelope/trust primitives are imported for the RE-EXPORT below only (the
+// route handler that used them moved to the package); explicit here so the
+// drop-in surface is declared next to the other moved-export blocks.
+export {
+  dispatchDeepartmentsEndpoint,
+  isLoopbackHostname,
+  parseAuthority,
+  isTrustedAuthority,
+  isTrustedHostFact,
+  parseClientEnvelope,
+  handleDeepartmentsRequest
+} from './core/gui.js'
+export type {
+  DeepartmentsDispatchResult,
+  DeepartmentsEndpointDeps,
+  HostStatusPayload,
+  PresenceState,
+  WebServerRouteLike,
+  WebServerLike,
+  HostTrustFacts,
+  ClientEnvelope,
+  ParseClientEnvelopeResult,
+  EndpointPostEntryLike
+} from './core/gui.js'
 // Re-export the delivery engine's public surface (value + type) so the compiled
 // lib/invoke.js stays a drop-in superset of the pre-extraction module.
 export { createDeliveryEngine, frameBusRecord } from './core/delivery.js'
@@ -680,163 +763,12 @@ export { buildSleepJournalMessage, shouldClearCleanupPending } from './core/life
 // assembly now live in ./core/wakepack.js (FASE 2 STEP e).
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// `/deepartments` sidebar RPC channel — server half.
-//
-// rc.8 TRANSPORT FIX (see the effect below): the channel is served over
-// self-mounted `kind:'exact'` POST routes on the live `webServer` (the pattern
-// dshmarket + dsh-client-connection prove works in rc.8), NOT via
-// `ctx.connection.rpc.handle(...)` (which rc.8 does not mount as an HTTP route,
-// so a browser POST fell through to the SPA fallback → 405 and the sidebar was
-// always empty). The client contract is unchanged and the extraction below is
-// deliberately PURE + exportable so it is directly unit-testable without
-// node:http (test/rpc-channel.test.js) — mirroring how buildAgentRows is tested.
-// ---------------------------------------------------------------------------
-
-/** Loose structural view of a `webServer`/`httpServer` HTTP route. */
-export interface WebServerRouteLike {
-  kind: 'exact' | 'prefix'
-  path: string
-  handler: (req: unknown, res: unknown) => void | Promise<void>
-}
-
-/** Loose structural view of the renamable `webServer`/`httpServer` service
- * (AGENTS.md rule 7; resolved via `ctx.get('webServer') ?? ctx.get('httpServer')`). */
-export interface WebServerLike {
-  register(route: WebServerRouteLike): () => void
-}
-
-
-/** The owner-presence state (Feature A — the "Presencia/Ausencia" toggle), the
- * `presence/get` RPC value and the `presence.set` input. Persisted at
- * `<stateDir>/presence.json` as `{ present: boolean, updatedAt: number }`;
- * DEFAULT present:true — the owner is considered present until explicitly
- * toggled absent, so the guard is never over-eager at boot. `updatedAt` is
- * omitted when the file has none (the owner never toggled). */
-export interface PresenceState {
-  present: boolean
-  updatedAt?: number
-}
-
-/** Injected data/closure bundle the PURE endpoint dispatcher reads. The caller
- * (the route handler in applyInvoke) wires these to the live registries; tests
- * construct this directly. */
-export interface DeepartmentsEndpointDeps {
-  /** org.departments — one row built per (coordinator-bearing) department. */
-  departments: DepartmentConfig[]
-  /** The durable post registry (postId → entry). */
-  byPost: Map<string, PostEntryLike>
-  /** The host registry, iterated to resolve a caller host member id by sessionId. */
-  hosts: Iterable<HostEntryLike>
-  /** Live signal: the head's session is present in the agents registry. */
-  sessionLive(sessionId: string): boolean
-  /** Optional refinement: the head's session is currently running (status). */
-  sessionRunning?: (sessionId: string) => boolean
-  /** Optional (U3): read the live host's journal wake_counter (number) for the
-   * `host/status` payload. Absent dep → the payload omits wakeCounter (the
-   * payload must stay minimal and stable). Contract: never throws (a read
-   * failure is an omission, never an RPC error). */
-  loadHostWakeCounter?: (hostId: string) => Promise<number | undefined>
-  /** Optional (U3 fix): a minimal warn-capable logger for AMBIGUOUS live-host
-   * selection in `host/status` (the pickLiveHostEntry fallback — multiple live
-   * entries with no rotation successor). Absent dep → the warn is skipped and
-   * the fallback pick is still deterministic (never throws). */
-  logger?: { warn: (message: string) => void }
-  /** A2 — read the current owner-presence state. Absent dep → `presence/get`
-   * defaults to present:true (the owner is here until toggled). Never throws
-   * (an unreadable state file defaults present:true). */
-  presenceState?: () => Promise<PresenceState>
-  /** A2 — persist a new owner-presence state (atomic write to
-   * `presence.json`). Absent dep → `presence/set` returns the value but does
-   * NOT persist (a graceful degrade, never an RPC error). */
-  savePresenceState?: (state: PresenceState) => Promise<void>
-  /** A3/A4 — fire-and-forget host notification fired when `presence/set`
-   * CHANGES the state. Absent dep → the notification is dropped (the reliable
-   * transition signal remains the A4 pre-step injector). */
-  notifyPresenceChange?: (present: boolean) => void
-  /** W1 — `agenda/list`: the repo root used to resolve the DEFAULT department
-   * jobDir (matches the live applyInvoke `repoRoot`). Absent dep → module
-   * `REPO_ROOT` (the bundle-dir parent, the same value). */
-  repoRoot?: string
-  /** W1 — `agenda/list`: the stateDir whose `calendar.json` supplies the
-   * calendar entries. Absent dep → an EMPTY calendar (never an error). */
-  calendarStateDir?: string
-  /** W1 — `agenda/list`: a clock for the next-due job computation (ms epoch).
-   * Absent dep → `Date.now` — the agenda shows the live next-due snapshot. */
-  now?: () => number
-}
-
-/** The `/deepartments host/status` RPC payload (U3, spec 002 §6.1): the CURRENT
- * registered host session — the live (non-retired) hosts.json entry — plus the
- * RETIRED entries. Client contract (src/client/index.tsx mirrors it): the
- * watcher opens ONLY transitions to a DIFFERENT non-null `hostSessionId`;
- * `retired` is informative (the native sidebar already hides archived rows). */
-export interface HostStatusPayload {
-  /** The current registered host session id, or null when no host is
-   * registered (and no live entry — e.g. only retired entries remain). */
-  hostSessionId: string | null
-  /** The live entry's rotation-source session id; null when absent (legacy
-   * in-place host, or no live entry). */
-  previousSessionId: string | null
-  /** Retired host entries (sessionId + when they were retired), in hosts.json
-   * order (oldest rotation first). */
-  retired: Array<{ sessionId: string; retiredAt: number }>
-  /** The live host's journal wake_counter, when readable; OMITTED otherwise
-   * (the payload stays minimal and stable). */
-  wakeCounter?: number
-}
-
-
-/** PURE builder of the `host/status` payload — derived from the in-memory host
- * registry only (no side effects; the only non-pure part is an optional
- * ambiguity `deps.logger.warn`). Empty hosts / no live entry →
- * `{ hostSessionId: null, previousSessionId: null, retired: [] }`. Live-host
- * selection is DETERMINISTIC via pickLiveHostEntry (U3 fix): prefer the
- * rotation successor (`previousSessionId`), then the single live entry, then
- * the first live entry with an ambiguity warn (post-mortem finding #2 — the
- * old first-non-retired pick returned a stale live entry after a rotation). */
-async function buildHostStatusPayload(deps: DeepartmentsEndpointDeps): Promise<HostStatusPayload> {
-  const { live, ambiguous } = pickLiveHostEntry(deps.hosts)
-  if (ambiguous && deps.logger !== undefined) {
-    // Multiple live entries with no rotation successor — the pre-fix selection
-    // silently chose the FIRST one (a stale live entry, e.g. a dead bare
-    // `host-1a4af1ea`). Warn with the candidates so the Asistente can clean
-    // the drifted live state; the payload still picks deterministically.
-    const candidates = [...deps.hosts]
-      .filter((entry) => entry.retired !== true)
-      .map((entry) => `${entry.hostId} (sessionId=${entry.sessionId}${entry.previousSessionId === undefined ? '' : `, previousSessionId=${entry.previousSessionId}`})`)
-    deps.logger.warn(
-      `[deepartments] host/status: ${candidates.length} live host entries with no rotation successor — picked ${live?.hostId ?? 'none'} deterministically; candidates: ${candidates.join(', ')}`
-    )
-  }
-  const retired: Array<{ sessionId: string; retiredAt: number }> = []
-  for (const entry of deps.hosts) {
-    if (entry.retired === true) {
-      // The loader validator guarantees retiredAt on retired entries (spec 002
-      // §3.5); the defensive skip keeps the payload shape strict.
-      if (typeof entry.retiredAt === 'number') {
-        retired.push({ sessionId: entry.sessionId, retiredAt: entry.retiredAt })
-      }
-    }
-  }
-  const hostSessionId = live === undefined ? null : live.sessionId
-  const previousSessionId = live?.previousSessionId ?? null
-  let wakeCounter: number | undefined
-  if (live !== undefined && deps.loadHostWakeCounter !== undefined) {
-    try {
-      const counter = await deps.loadHostWakeCounter(live.hostId)
-      if (typeof counter === 'number' && Number.isFinite(counter)) wakeCounter = counter
-    } catch {
-      // Never throw from the dispatcher; the field is simply omitted.
-    }
-  }
-  return {
-    hostSessionId,
-    previousSessionId,
-    retired,
-    ...(wakeCounter === undefined ? {} : { wakeCounter })
-  }
-}
+// (the `/deepartments` channel server-half — the types
+// WebServerRouteLike/WebServerLike/PresenceState/DeepartmentsEndpointDeps/
+// HostStatusPayload + the PURE builders buildHostStatusPayload + the
+// dispatcher/envelope/trust + the route handler — MOVED to packages/dshd-gui;
+// see the dshd-gui phase note above: they are now imported + re-exported
+// from ./core/gui.js, and the mount effect below wires the live deps.)
 
 // ---- Feature A — owner-presence persistence + guard predicate (PURE) -------
 
@@ -2061,201 +1993,12 @@ export function scanConfigPresetFindings(stateDir: string, nowMs: number): Healt
   ]
 }
 
-/** FIX-2 (QD NO_ADAPTER alerting) — the synthetic postId under which a BOOT
- * provider-adapter-registration/endpoint finding is written. It is a NON-post
- * id (a postId the registry never mints), so it can never collide with a real
- * post, and the W6 daemon's `scanPostErrorFindings` surfaces it as a
- * `post-error` finding → the host is ALERTED from the break even with NO agent
- * spawned in the window (the QH acceptance "boot check that fires a finding
- * independent of any spawned agent"). */
-export const PROVIDER_ADAPTER_CHECK_POST_ID = 'provider-adapter-check'
-
-/** FIX-2 race-tolerance — the boot provider-adapter check is RACE-TOLERANT: it
- * waits (within a bounded window) for an ASYNC provider-adapter registration
- * (`ctx.llm.registerAdapter` in the dsh-llm-pi-ai apply) to settle before it
- * decides. The check is fired in the boot `.then` block (microseconds after
- * plugin boot) but the adapter registration is ASYNC — so the naive first read
- * of `llm.listProviders()` can FALSE-POSITIVE on a healthy-but-still-registering
- * boot ("provider adapter not registered for ..." even though the adapter IS
- * registered for live calls). A DELAYED registration is NOT an alert; only a
- * provider STILL MISSING after the window elapses is a GENUINE outage (the HARD
- * NO_ADAPTER alert). Mirrors the `HOST_ATTACH_REPAIR_*` bounded-retry discipline
- * (invoke.ts:5224). Both knobs are injectable/testable via
- * `health.providerAdapterRetryWindowMs` / `health.providerAdapterRetryMs` (the
- * health daemon config), defaulting to these code-level constants. */
-export const PROVIDER_ADAPTER_RETRY_WINDOW_MS = 5_000
-export const PROVIDER_ADAPTER_RETRY_MS = 250
-
-/** ONE provider-adapter boot finding: a configured provider route that is either
- * (a) NOT registered as a live adapter (the NO_ADAPTER class — configured but the
- * pi-ai adapter was never registered, the exact condition that produces a silent
- * first-call NO_ADAPTER), or (b) registered but with a drifted/stale endpoint
- * surface (a baseURL to a local/proxy endpoint or a `maxRetries: 0` profile — the
- * QD config-hygiene signal). */
-export interface ProviderAdapterBootFinding {
-  postId: string
-  error: string
-}
-
-/** FIX-2 — the PURE provider-adapter boot-check inputs. */
-export interface ProviderAdapterBootInput {
-  /** The configured provider routes (worker route, host route, coordinators). */
-  configuredProviders: readonly string[]
-  /** The provider routes CURRENTLY registered as adapters (llm.listProviders():
-   * [{id, name}], NO endpoint stored — the trace crux for the drift half). */
-  registeredProviders: readonly { id: string; name: string }[]
-  /** Optional per-provider endpoint surface (llm-pi-ai.providers.<p>.baseURL /
-   * .maxRetries). Absent → the drift half is a no-op (the missing-adapter half
-   * still fires), exactly the graceful degradation production needs. */
-  providerSettings?: Readonly<Record<string, { baseURL?: string; maxRetries?: number }>>
-  /** P1 rewire-pooler: the config `org.poolerBaseURL` — the pooler (dsh-key-pooler)
-   * baseURL, a LEGITIMATE local/proxy LLM route. When a configured provider's
-   * baseURL EXACTLY equals this value, the endpoint-drift rule treats it as a
-   * healthy route (NOT drift) — so the boot check does not false-alert on the
-   * pooler. Absent (undefined) → NO exemption (every local/proxy baseURL is still
-   * drift). The `maxRetries: 0` stale-profile signal is NEVER exempted. */
-  poolerBaseURL?: string
-}
-
-/** P1 rewire-pooler — optional endpoint-drift exemption deps. `poolerBaseURL` is
- * the pooler (dsh-key-pooler) LLM route: a LEGITIMATE local/proxy endpoint that
- * must NOT be flagged as drift. An EXACT match only — never a blind localhost
- * hardcode — so a random 127.0.0.1 that is not the configured pooler STAYS drift. */
-export interface ProviderAdapterEndpointDriftDeps {
-  poolerBaseURL?: string
-}
-
-/** A baseURL that points at a LOCAL/PROXY surface rather than the remote provider
- * endpoint — the value the outage's stale settings carried (the QD re-wire
- * http://127.0.0.1:4097/v1 → https://opencode.ai/zen/go/v1). */
-const LOCAL_ENDPOINT_RE = /(?:127\.0\.0\.1|localhost|0\.0\.0\.0)(?::|\/|$)/i
-
-/** Detect a provider ENDPOINT DRIFT (the QD config-hygiene signal): a baseURL
- * pointing at a local/proxy surface (127.0.0.1 / localhost / 0.0.0.0) or a
- * `maxRetries: 0` profile. Returns a human-readable drift error, or undefined
- * when the endpoint surface is healthy. Pure, never throws. `deps.poolerBaseURL`
- * (the P1 rewire-pooler config `org.poolerBaseURL`) is an EXACT-MATCH exemption:
- * a baseURL EQUAL to it is a LEGITIMATE local/proxy LLM route (not drift), while
- * ANY OTHER local/proxy baseURL STAYS a drift. The `maxRetries: 0` stale-profile
- * signal is NEVER exempted. */
-export function providerAdapterEndpointDrift(provider: string, settings: { baseURL?: string; maxRetries?: number }, deps?: ProviderAdapterEndpointDriftDeps): string | undefined {
-  const baseURL = (settings.baseURL ?? '').trim()
-  if (baseURL !== '') {
-    const poolerBaseURL = (deps?.poolerBaseURL ?? '').trim()
-    const isExemptPooler = poolerBaseURL !== '' && baseURL === poolerBaseURL
-    if (!isExemptPooler && LOCAL_ENDPOINT_RE.test(baseURL)) {
-      return `provider endpoint drift for "${provider}": baseURL "${baseURL}" is a local/proxy endpoint, not the remote provider surface`
-    }
-  }
-  if (settings.maxRetries === 0) {
-    return `provider endpoint drift for "${provider}": maxRetries is 0 (the QD outage's stale-profile signal)`
-  }
-  return undefined
-}
-
-/** FIX-2 — PURE provider-adapter boot check. Returns ONE finding per configured
- * provider that is either (a) NOT registered as a live adapter (the NO_ADAPTER
- * class — the provider is configured but its adapter was never registered, the
- * condition that produced the silent ~49-min outage), or (b) registered but with a
- * drifted/stale endpoint surface. Never throws. */
-export function resolveProviderAdapterBootFindings(input: ProviderAdapterBootInput): ProviderAdapterBootFinding[] {
-  const registered = new Set<string>((input.registeredProviders ?? []).map((p) => p.id))
-  const findings: ProviderAdapterBootFinding[] = []
-  for (const provider of input.configuredProviders ?? []) {
-    if (provider === undefined || provider === '') continue
-    if (!registered.has(provider)) {
-      findings.push({ postId: PROVIDER_ADAPTER_CHECK_POST_ID, error: `provider adapter not registered for "${provider}"` })
-      continue
-    }
-    const settings = input.providerSettings?.[provider]
-    if (settings !== undefined) {
-      const drift = providerAdapterEndpointDrift(provider, settings, { poolerBaseURL: input.poolerBaseURL })
-      if (drift !== undefined) findings.push({ postId: PROVIDER_ADAPTER_CHECK_POST_ID, error: drift })
-    }
-  }
-  return findings
-}
-
-/** Strip surrounding single/double quotes from a YAML scalar (best-effort). */
-function unquoteYamlScalar(value: string): string {
-  const v = value.trim()
-  if (v.length >= 2 && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))) return v.slice(1, -1)
-  return v
-}
-
-/** FIX-2 — parse a minimal `settings.yaml` surface for the pi-ai provider
- * profiles: `llm-pi-ai.providers.<provider>.baseURL` / `.maxRetries`. This is a
- * bounded, DEPENDENCY-FREE line scan (the plugin loads in hermetic/minimal
- * profiles with no yaml package), so a parse failure or a non-matching structure
- * degrades to an empty map → the drift half of fix-2 is a NO-OP (the
- * missing-adapter half still fires). Never throws. */
-export function parseLlmPiAiProviderSettings(text: string): Record<string, { baseURL?: string; maxRetries?: number }> {
-  const out: Record<string, { baseURL?: string; maxRetries?: number }> = {}
-  const indentOf = (value: string): number => {
-    const m = /^\s*/.exec(value)
-    return m ? m[0].length : 0
-  }
-  let mode: 'none' | 'llm-pi-ai' | 'providers' = 'none'
-  let providersIndent = -1
-  let providerIndent = -1
-  let current: { baseURL?: string; maxRetries?: number } | undefined
-  for (const raw of text.split('\n')) {
-    const line = raw.replace(/\r$/, '')
-    const trimmed = line.trim()
-    if (trimmed === '' || trimmed.startsWith('#') || trimmed === '---') continue
-    const indent = indentOf(line)
-    if (mode === 'none') {
-      if (indent === 0 && /^llm-pi-ai\s*:/.test(trimmed)) mode = 'llm-pi-ai'
-      continue
-    }
-    if (mode === 'llm-pi-ai') {
-      if (indent === 0) break /* the llm-pi-ai block ended */
-      if (/^providers\s*:/.test(trimmed)) {
-        mode = 'providers'
-        providersIndent = indent
-      }
-      continue
-    }
-    /* mode === 'providers' */
-    if (indent <= providersIndent) {
-      mode = 'none'
-      current = undefined
-      continue
-    }
-    const isProviderKey = /^[A-Za-z0-9_.-]+\s*:\s*$/.test(trimmed)
-    if (isProviderKey && (current === undefined || indent === providerIndent)) {
-      const name = trimmed.replace(/:\s*$/, '').trim()
-      current = { baseURL: undefined, maxRetries: undefined }
-      out[name] = current
-      providerIndent = indent
-      continue
-    }
-    if (current === undefined) continue
-    const baseMatch = /^baseURL\s*:\s*(.+)$/i.exec(trimmed)
-    if (baseMatch) {
-      current.baseURL = unquoteYamlScalar(baseMatch[1])
-      continue
-    }
-    const retryMatch = /^maxRetries\s*:\s*(.+)$/i.exec(trimmed)
-    if (retryMatch) {
-      const parsed = Number(unquoteYamlScalar(retryMatch[1]))
-      current.maxRetries = Number.isFinite(parsed) ? parsed : undefined
-    }
-  }
-  return out
-}
-
-/** FIX-2 — read the pi-ai provider endpoint surface from `<stateDir>/settings.yaml`
- * (best-effort: absent/unreadable/malformed → {}, never throws). The plugin's own
- * stateDir is the DSH runtime state dir that carries settings.yaml. */
-export function readLlmPiAiProviderSettings(stateDir: string): Record<string, { baseURL?: string; maxRetries?: number }> {
-  try {
-    const text = readFileSync(path.join(stateDir, 'settings.yaml'), 'utf8')
-    return parseLlmPiAiProviderSettings(text)
-  } catch {
-    return {}
-  }
-}
+// (provider-adapter pooler helpers MOVED to packages/dshd-pooler — see the
+// dshd-pooler phase note above; the constants, the finding/input/drift types
+// and providerAdapterEndpointDrift/resolveProviderAdapterBootFindings/
+// parseLlmPiAiProviderSettings/readLlmPiAiProviderSettings are now imported +
+// re-exported from ./core/pooler.js. runProviderAdapterBootCheck below keeps
+// using them via the bridge.)
 
 /** W8-c PART 2 — the production inbox reader: map recipientId → the ts of its
  * ADDRESSED messages (delivery rows with status 'prepared'/'delivered'/'resumed'
@@ -3889,355 +3632,9 @@ export function askUserGuardReason(
   return 'owner absent (presence flag)'
 }
 
-/** The RpcResult-shaped value the client already understands
- * (serverResponseSchema.result: `{ok:true, value}` | `{ok:false, error}`). */
-export type DeepartmentsDispatchResult =
-  | { ok: true; value: unknown }
-  | { ok: false; error: { code: string; message: string; details: Record<string, unknown> } }
-
-/**
- * PURE endpoint dispatcher for the `/deepartments` channel — the SAME endpoint
- * logic the legacy `ctx.connection.rpc.handle('/deepartments', ...)` served,
- * extracted into a testable function (no node:http imports). Handles
- * `agents`/`list` (department-head roster rows with per-host unread counts —
- * the client roster heartbeat; kept per U1, it is NOT part of the removed
- * sidebar) and `host/status` (U3 — the client lifecycle watcher's rotation
- * signal, spec 002 §6.1). Never throws for a normal call:
- * an unknown endpoint is a bad-request result, and internal failures are left
- * to the caller to fold (the route handler maps them to the `internal` branch).
- */
-export async function dispatchDeepartmentsEndpoint(
-  endpoint: string,
-  payload: unknown,
-  deps: DeepartmentsEndpointDeps
-): Promise<DeepartmentsDispatchResult> {
-  if (endpoint === 'host/status') {
-    return { ok: true, value: await buildHostStatusPayload(deps) }
-  }
-  if (endpoint === 'presence/get') {
-    // A2 — return the current owner-presence state. Absent/unreadable state →
-    // default present:true (never an error); the dep must never throw.
-    const state = deps.presenceState === undefined
-      ? { present: true as const }
-      : await deps.presenceState()
-    return {
-      ok: true,
-      value: {
-        present: state.present === true,
-        ...(typeof state.updatedAt === 'number' ? { updatedAt: state.updatedAt } : {})
-      }
-    }
-  }
-  if (endpoint === 'presence/set') {
-    // A2 — toggle the owner presence. The payload MUST be a boolean `present`
-    // (any other shape is a bad-request, mirroring the strict client contract).
-    const rawPresent = typeof payload === 'object' && payload !== null
-      ? (payload as { present?: unknown }).present
-      : undefined
-    if (typeof rawPresent !== 'boolean') {
-      return {
-        ok: false,
-        error: {
-          code: 'bad-request',
-          message: 'presence.set requires a boolean `present`',
-          details: { issues: [] }
-        }
-      }
-    }
-    const present = rawPresent
-    // Capture the PRIOR value BEFORE the save (the state object the dep writes
-    // may be the same reference the reader returns — never compare after write).
-    const prior = deps.presenceState === undefined
-      ? { present: true as const }
-      : await deps.presenceState()
-    const priorPresent = prior.present === true
-    const changed = priorPresent !== present
-    const updatedAt = Date.now()
-    if (deps.savePresenceState !== undefined) {
-      await deps.savePresenceState({ present, updatedAt })
-    }
-    // A3/A4 — notify the HOST only when the state actually CHANGED (an
-    // idempotent re-set to the same value must not re-wake/re-notify).
-    if (changed && deps.notifyPresenceChange !== undefined) {
-      deps.notifyPresenceChange(present)
-    }
-    return { ok: true, value: { present, updatedAt } }
-  }
-  if (endpoint === 'agenda/list') {
-    // W1 — the client Agenda view (src/client/index.tsx calls `agenda/list`).
-    // `jobs` = every configured department's JOB definitions (dept_job_list's
-    // reader, reused: id/title/role/description/schedule + a human `next` when
-    // the schedule is cron-style), `calendar` = the runtime calendar.json
-    // entries. Never throws: an empty/missing jobDir or calendar state degrades
-    // to an empty list, and the client already defaults to empty arrays.
-    const repoRoot = deps.repoRoot ?? REPO_ROOT
-    const nowMs = deps.now === undefined ? Date.now() : deps.now()
-    const jobs = await readAgendaJobs(repoRoot, deps.departments, nowMs)
-    const rawCalendar = deps.calendarStateDir === undefined ? [] : readCalendarStateFile(deps.calendarStateDir).entries
-    // Client contract (AgendaCalendarEntry reads `label`/`time`): map the
-    // runtime `at` ISO to `time` and keep the full runtime shape as extras. The
-    // client ignores the extras; the raw `at`/`id`/`fired` remain for tooling.
-    const calendar = rawCalendar.map((entry) => ({ ...entry, time: entry.at }))
-    return {
-      ok: true,
-      value: {
-        jobs: jobs.map((job) => ({
-          id: job.id,
-          title: job.title,
-          ...(job.schedule !== undefined ? { schedule: job.schedule } : {}),
-          ...(job.next !== undefined ? { next: job.next } : {}),
-          ...(job.role !== undefined ? { role: job.role } : {}),
-          ...(job.description !== undefined ? { description: job.description } : {})
-        })),
-        calendar
-      }
-    }
-  }
-  if (endpoint !== 'agents' && endpoint !== 'list') {
-    return {
-      ok: false,
-      error: {
-        code: 'bad-request',
-        message: 'unknown endpoint: ' + endpoint,
-        details: { issues: [] }
-      }
-    }
-  }
-  // Resolve the caller host member id (host-<sessionId>) from its sessionId.
-  // If the caller host is not (yet) registered in `hosts`, nothing to count
-  // against. B3 cutover: the board-based unread derivation is KILLED (spec
-  // 003 §7.1 — no read/seen marks in the messaging phase, §5 note: repoint to
-  // messages.jsonl counts or kill); the row's `unread` is a stable 0 and the
-  // `completed-notice` status branch simply never fires.
-  let sessionId: string | undefined
-  if (typeof payload === 'object' && payload !== null) {
-    const rawSession = (payload as { sessionId?: unknown }).sessionId
-    if (typeof rawSession === 'string') sessionId = rawSession
-  }
-  const unreadFor = (_postId: string): number => 0
-  const rows = buildAgentRows({
-    departments: deps.departments,
-    posts: deps.byPost as unknown as Map<string, PostEntryLike>,
-    sessionLive: deps.sessionLive,
-    sessionRunning: deps.sessionRunning,
-    unreadFor,
-    sessionId
-  })
-  return {
-    ok: true,
-    value: {
-      host: { id: 'asistente', name: 'Asistente', department: "User's Office" },
-      agents: rows
-    }
-  }
-}
-
-/** Whether a normalized URL hostname names the local loopback authority
- * (localhost, IPv6 `[::1]`, or any IPv4 address in 127/8). Pure — mirrors
- * dsh-client-connection isLoopbackHostname. */
-export function isLoopbackHostname(hostname: string): boolean {
-  if (hostname === 'localhost' || hostname === '[::1]') return true
-  const parts = hostname.split('.')
-  return parts.length === 4 && parts[0] === '127' &&
-    parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
-}
-
-/** Normalized URL of a Host-header authority, or undefined when unparsable. */
-export function parseAuthority(authority: string): URL | undefined {
-  try {
-    return new URL(`http://${authority}`)
-  } catch {
-    return undefined
-  }
-}
-
-/** Whether the parsed request authority matches a `trustedHosts` entry (an
- * exact host:port, or a port-less host matching the hostname on any port).
- * Pure — mirrors dsh-client-connection isTrustedAuthority. */
-export function isTrustedAuthority(hostUrl: URL, trustedHosts: string[]): boolean {
-  return trustedHosts.some((entry) => {
-    const entryUrl = parseAuthority(entry)
-    if (entryUrl === undefined) return false
-    const port = entryUrl.port !== '' ? entryUrl.port : new URL(`https://${entry}`).port
-    const canonical = port === '' ? entryUrl.hostname : `${entryUrl.hostname}:${port}`
-    // An entry with no explicit port matches the hostname on ANY port; an entry
-    // with an explicit port matches that exact host:port.
-    return canonical === entryUrl.hostname
-      ? entryUrl.hostname === hostUrl.hostname
-      : entryUrl.host === hostUrl.host
-  })
-}
-
-/** Plain request-header facts (no node:http / Headers dependency) the trust
- * fence reads; unit-testable directly. */
-export interface HostTrustFacts {
-  host?: unknown
-  origin?: unknown
-  secFetchSite?: unknown
-}
-
-/** Decide whether one request's headers may reach the channel: loopback hosts
- * always accepted; otherwise the Host:port must be a declared trusted host;
- * a `cross-site` fetch or a cross-origin page never passes. Pure — mirrors
- * dsh-client-connection isTrustedApiRequest without node/http types. */
-export function isTrustedHostFact(facts: HostTrustFacts, trustedHosts: string[]): boolean {
-  const host = typeof facts.host === 'string' ? facts.host : undefined
-  if (host === undefined) return false
-  const hostUrl = parseAuthority(host)
-  if (hostUrl === undefined) return false
-  if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, trustedHosts)) return false
-  if (facts.secFetchSite === 'cross-site') return false
-  if (facts.origin === undefined) return true
-  try {
-    return new URL(String(facts.origin)).host === hostUrl.host
-  } catch {
-    return false
-  }
-}
-
-/** A validated `client-request` envelope (client-proxy schema). */
-export interface ClientEnvelope {
-  rpcId: string
-  method: string
-  payload: unknown
-}
-
-export type ParseClientEnvelopeResult =
-  | { ok: true; message: ClientEnvelope }
-  | { ok: false; issues: unknown[] }
-
-/** Validate the client-request envelope `{type, rpcId, method, payload}`.
- * Pure — no deps, mirrors the reference clientRequestSchema constraints. */
-export function parseClientEnvelope(body: unknown): ParseClientEnvelopeResult {
-  if (typeof body !== 'object' || body === null) return { ok: false, issues: ['body is not an object'] }
-  const raw = body as Record<string, unknown>
-  const issues: unknown[] = []
-  if (raw.type !== 'client-request') issues.push('type must be "client-request"')
-  if (typeof raw.rpcId !== 'string') issues.push('rpcId must be a string')
-  if (typeof raw.method !== 'string') issues.push('method must be a string')
-  if (issues.length > 0) return { ok: false, issues }
-  return { ok: true, message: { rpcId: raw.rpcId as string, method: raw.method as string, payload: raw.payload } }
-}
-
-// ---- thin node:http wiring (NOT pure; kept minimal — the logic lives above) --
-
-/** Loose structural view of the node:http request the route handler receives. */
-interface HttpRequestLike {
-  method?: string
-  headers?: Record<string, string | string[] | undefined>
-  [Symbol.asyncIterator](): AsyncIterator<Buffer>
-}
-
-/** Loose structural view of the node:http response the route handler owns. */
-interface HttpResponseLike {
-  writeHead(status: number, headers?: Record<string, string>): unknown
-  end(chunk?: string): unknown
-}
-
-/** Carrier cap for channel bodies (tiny JSON; bound resident memory defensively). */
-const MAX_REQUEST_BODY_BYTES = 160 * 1024 * 1024
-
-function headerValue(value: string | string[] | undefined): string | undefined {
-  return Array.isArray(value) ? value[0] : value
-}
-
-async function readRequestBody(req: HttpRequestLike): Promise<string> {
-  const chunks: Buffer[] = []
-  let received = 0
-  for await (const chunk of req) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-    received += buf.byteLength
-    if (received > MAX_REQUEST_BODY_BYTES) throw new Error('request body too large')
-    chunks.push(buf)
-  }
-  return Buffer.concat(chunks).toString('utf8')
-}
-
-function respondJson(res: HttpResponseLike, rpcId: string, result: DeepartmentsDispatchResult): void {
-  res.writeHead(200, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ type: 'server-response', rpcId, result }))
-}
-
-/** Echo-token for an invalid envelope: the request's rpcId when readable, else
- * the dsh-reference sentinel `invalid-request`. */
-function envelopeRpcId(body: unknown): string {
-  const raw = body as { rpcId?: unknown } | null
-  return typeof raw?.rpcId === 'string' ? raw.rpcId : 'invalid-request'
-}
-
-/** One exact `/deepartments/<endpoint>` POST route handler. Enforces the trust
- * fence (method + authority), decodes + validates the envelope, checks the
- * method↔endpoint match, then delegates to the PURE dispatch and answers the
- * standard `{type:'server-response', rpcId, result}` the client validates.
- * A dispatch THROW is folded into the `internal` error result — never crossed
- * the wire as a parse failure. */
-async function handleDeepartmentsRequest(
-  req: unknown,
-  res: unknown,
-  endpoint: string,
-  trustedHosts: string[],
-  deps: DeepartmentsEndpointDeps
-): Promise<void> {
-  const httpReq = req as HttpRequestLike
-  const httpRes = res as HttpResponseLike
-  // Only the channel's POST endpoints are served; any other method on these
-  // EXACT paths returns 405 so the SPA fallback never leaks index.html for the
-  // channel (the old rc.8 behavior handed those GETs the SPA HTML).
-  if (httpReq.method !== 'POST') {
-    httpRes.writeHead(405, { 'content-type': 'text/plain; charset=utf-8' })
-    httpRes.end('method not allowed')
-    return
-  }
-  // Trust fence: loopback always accepted; otherwise the request Host:port must
-  // be in the deployment's trusted hosts (mirrors isTrustedApiRequest loopback
-  // behavior + the connection channel's trusted-host authority).
-  if (!isTrustedHostFact({
-    host: headerValue(httpReq.headers?.['host']),
-    origin: headerValue(httpReq.headers?.['origin']),
-    secFetchSite: headerValue(httpReq.headers?.['sec-fetch-site'])
-  }, trustedHosts)) {
-    httpRes.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
-    httpRes.end('forbidden')
-    return
-  }
-  let body: unknown
-  try {
-    body = JSON.parse(await readRequestBody(httpReq))
-  } catch {
-    httpRes.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
-    httpRes.end('body is not JSON')
-    return
-  }
-  const parsed = parseClientEnvelope(body)
-  if (!parsed.ok) {
-    respondJson(httpRes, envelopeRpcId(body), {
-      ok: false,
-      error: { code: 'bad-request', message: 'invalid client-request message', details: { issues: parsed.issues } }
-    })
-    return
-  }
-  const { rpcId, method } = parsed.message
-  if (method !== endpoint) {
-    respondJson(httpRes, rpcId, {
-      ok: false,
-      error: {
-        code: 'bad-request',
-        message: `method ${JSON.stringify(method)} does not match endpoint ${JSON.stringify(endpoint)}`,
-        details: { issues: [] }
-      }
-    })
-    return
-  }
-  try {
-    const result = await dispatchDeepartmentsEndpoint(endpoint, parsed.message.payload, deps)
-    respondJson(httpRes, rpcId, result)
-  } catch (error) {
-    respondJson(httpRes, rpcId, {
-      ok: false,
-      error: { code: 'internal', message: String(error), details: {} }
-    })
-  }
-}
+// (dispatchDeepartmentsEndpoint + the envelope/trust primitives +
+// handleDeepartmentsRequest MOVED to packages/dshd-gui — see the dshd-gui
+// phase note above; the mount effect below calls them via ./core/gui.js.)
 
 // The `shouldClearCleanupPending` flag-clear decision for the boot web-UI
 // cleanup moved to ./core/lifecycle.js (FASE 2 STEP f); re-exported above so
@@ -4939,7 +4336,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   // hosts.json entry with ZERO rows in the durable workspace sessionIds) is
   // INVISIBLE in the GUI sidebar: the native sidebar groups sessions by
   // workspace membership and the U3 watcher's membership check
-  // (src/client/index.tsx:115) never passes → the host is unreachable. The
+  // (packages/dshd-gui/src/client/index.tsx) never passes → the host is unreachable. The
   // rotation now attaches at S2.2 (src/session-rotation.ts), and this hook
   // HEALS legacy/crash states at boot: when hosts.json holds EXACTLY ONE
   // non-retired live host entry, attach its session to the workspace whose
@@ -5816,6 +5213,20 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  // D3 (subagent/gui/pooler phase): the dispatch-time transient-subagent role
+  // registry is now a CORE SERVICE (`deepartments.subagentRoles` — ONE
+  // per-process store in dshd-core; written by src/subagent.ts at dispatch).
+  // The wake-pack `roleForSession` dep READS it here, in BOTH the in-bundle
+  // fallback construction and the dshd-core binder registration below, so the
+  // composed and the bundle-alone paths resolve the SAME role. When the service
+  // is absent (a minimal composition), fall back to the drop-in compat function
+  // the role-orient bridge re-exports — the SAME store (R6, behavior-neutral:
+  // `get` with the `?? 'generic'` default is exactly `roleForSession`).
+  const subagentRoles = ctx.get('deepartments.subagentRoles') as SubagentRolesService | undefined
+  const roleForSessionLive = subagentRoles === undefined
+    ? roleForSession
+    : (sessionId: string) => subagentRoles.get(sessionId) ?? 'generic'
+
   // FASE 2 step (e): build the ONE per-apply WakePackService (the wake-pack
   // injector + roster). The service lives in ./core/wakepack.js and owns the
   // condensed roster (`buildCondensedRoster`, which derives the ACTIVE-ONLY
@@ -5839,7 +5250,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       wakePackInjected,
       deferredSleepReplace,
       persistHosts,
-      roleForSession,
+      roleForSession: roleForSessionLive,
       buildSubagentOrientation,
       computeHostSleepSurfacePlan,
       buildSleepJournalMessage,
@@ -10024,7 +9435,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       refreshPresence,
       wakePackInjected,
       deferredSleepReplace,
-      roleForSession,
+      roleForSession: roleForSessionLive,
       buildSubagentOrientation,
       computeHostSleepSurfacePlan,
       assembleHeartbeat,
@@ -10580,7 +9991,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     )
     const endpointDeps: DeepartmentsEndpointDeps = {
       departments: org.departments,
-      byPost: byPost as unknown as Map<string, PostEntryLike>,
+      // dshd-gui phase: the deps interface is now owned by the dshd-gui package
+      // (its structural EndpointPostEntryLike mirror is the cast target — the
+      // live registry type is the bundle's richer PostEntry).
+      byPost: byPost as unknown as Map<string, EndpointPostEntryLike>,
       // U3 fix (reviewer 2026-08-22): `Map.values()` returns a SINGLE-USE
       // iterator, and `endpointDeps` is shared for the process lifetime. The
       // new buildHostStatusPayload iterates `deps.hosts` up to 3× (pick,
@@ -10595,6 +10009,11 @@ export function applyInvoke(ctx: Context, config: Config) {
       hosts: { [Symbol.iterator]: (): Iterator<HostEntryLike> => hosts.values() as Iterator<HostEntryLike> },
       sessionLive: (sid) => agents !== void 0 && agents.get(SessionId(sid)) !== undefined,
       sessionRunning: (sid) => agents !== void 0 && agents.get(SessionId(sid))?.status === 'running',
+      // dshd-gui phase: the two bundle-owned PURE deps the dispatcher's
+      // agents/list + host/status branches need — injected here exactly like
+      // the sessionLive/unread signals (the package has no bundle import).
+      buildAgentRows,
+      pickLiveHostEntry,
       // U3: the live host's journal wake_counter for the `host/status` payload.
       // Best-effort and NEVER throwing — an unreadable journal simply omits the
       // field (the payload contract stays minimal and stable).

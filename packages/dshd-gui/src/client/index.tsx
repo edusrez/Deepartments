@@ -26,6 +26,13 @@
  * id is NOT the registered host — the wake pack would never fire for it).
  *
  * Named exports only (AGENTS.md rule 1); no export default.
+ *
+ * dshd-gui phase: this file MOVED verbatim from the bundle
+ * (src/client/index.tsx → packages/dshd-gui/src/client/index.tsx). The bundle
+ * build:client pipeline still produces the deployed root client/client.js
+ * FROM this source (tsdown entry re-pointed), and the package's own
+ * build:client produces packages/dshd-gui/client/client.js — byte-identical
+ * envelopes. The wire contract and the module surface are unchanged.
  */
 
 import { useEffect, useState, type CSSProperties } from "react";

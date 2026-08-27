@@ -14,7 +14,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { assertSubagentMaxDepth } from '@deepseek-ai/dsh-subagent'
 import type { AssembleContext } from '@deepseek-ai/dsh-system-prompt'
+// D3 (subagent/gui/pooler phase): the dispatch-time role registry is now the
+// CORE SERVICE `deepartments.subagentRoles` (one per-process store in
+// dshd-core). The compat functions below are the R6 drop-in fallback (same
+// store) used when the service is not reachable from this plugin's ctx (a
+// minimal composition where dshd-core is absent).
 import { rememberRole, forgetRole } from './role-orient.js'
+import type { SubagentRolesService } from './role-orient.js'
 
 export const name = 'deepartments-subagent'
 export const inject = ['tools', 'subagents', 'systemPrompt']
@@ -79,6 +85,20 @@ export function apply(ctx: Context, config: Config) {
   if (config.maxDepth !== 'provider-managed' && config.maxDepth !== void 0) assertSubagentMaxDepth(config.maxDepth)
   if (config.toolFilter !== void 0 && config.toolFilter.allow === void 0 && config.toolFilter.deny === void 0) throw new Error('deepartments-subagent: `toolFilter` is configured but names neither `allow` nor `deny` — remove the key or fill the filter')
   const toolName = config.toolName ?? 'subagent'
+  // D3: WRITE the dispatch-time role through the core service
+  // (`deepartments.subagentRoles` — ONE per-process store in dshd-core) so the
+  // wakepack pre-step reader can never split onto a second registry. When the
+  // service is unreachable (a minimal composition / a plugin ctx without the
+  // dshd-core row), fall back to the drop-in compat functions the role-orient
+  // bridge re-exports — they run the SAME service semantics over the SAME
+  // store (R6, behavior-neutral).
+  const roles = ctx.get('deepartments.subagentRoles') as SubagentRolesService | undefined
+  const remember = roles === undefined
+    ? rememberRole
+    : (childSessionId: string, role: unknown) => roles.set(childSessionId, role)
+  const forget = roles === undefined
+    ? forgetRole
+    : (childSessionId: string) => roles.delete(childSessionId)
   let disposeTool: (() => void) | undefined
   const mount = (provider: { name: string; capabilities: { depthLimit: boolean }; inheritsParentContext: boolean }) => {
     if (typeof config.maxDepth === 'number' && !provider.capabilities.depthLimit) throw new Error(`deepartments-subagent: provider "${provider.name}" cannot enforce maxDepth (no depthLimit capability) — set maxDepth: 'provider-managed' to leave the recursion budget to the provider`)
@@ -151,12 +171,13 @@ export function apply(ctx: Context, config: Config) {
         })
         // Task T4: record the dispatch-time role keyed by the child session id so
         // the pre-step injector can give THIS transient subagent a slim per-role
-        // contract block instead of the full host wake pack (see src/role-orient.ts).
+        // contract block instead of the full host wake pack (D3: written via the
+        // `deepartments.subagentRoles` core service — see src/role-orient.ts).
         // The child id is available synchronously after startContinuable; the same
         // code path serves BOTH `subagent` and the `subagent_fork` provider (they
         // differ only by inheritsParentContext/mount), so the role plumbing covers
         // both variants automatically.
-        rememberRole(child.childId as string, args.role)
+        remember(child.childId as string, args.role)
         return {
           kind: 'continuable',
           subagentId: child.childId as string
@@ -175,14 +196,17 @@ export function apply(ctx: Context, config: Config) {
   // Task T4 follow-up: evict the dispatch-time role from the in-process
   // roleRegistry the moment a child settles, so the map stays bounded by
   // in-flight children (no unbounded global mutable state, AGENTS.md rule 4).
-  // Registered ONCE here at module scope inside `apply` — NOT inside `mount()`,
-  // which would double-register for the two mounted providers. The payload's
-  // `id` is the child session id — the exact key `rememberRole` wrote. Guard on
-  // `typeof id === 'string'` and never throw: an unexpected payload shape is a
-  // silent no-op (a malformed edge must not break settlement teardown).
+  // D3: the eviction goes through the `deepartments.subagentRoles` core service
+  // (delete semantics — a superset of remember: silently no-ops in the
+  // malformed-payload branch). Registered ONCE here at module scope inside
+  // `apply` — NOT inside `mount()`, which would double-register for the two
+  // mounted providers. The payload's `id` is the child session id — the exact
+  // key `rememberRole` wrote. Guard on `typeof id === 'string'` and never
+  // throw: an unexpected payload shape is a silent no-op (a malformed edge must
+  // not break settlement teardown).
   ctx.on('subagent/end', (payload) => {
     const id = (payload as { id?: unknown } | undefined)?.id
-    if (typeof id === 'string') forgetRole(id)
+    if (typeof id === 'string') forget(id)
   })
   const present = ctx.subagents.getProvider(config.provider)
   if (present !== void 0) mount(present)

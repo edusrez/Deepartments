@@ -26,6 +26,11 @@ import {
   parseClientEnvelope,
   pickLiveHostEntry
 } from '../lib/invoke.js'
+// dshd-gui phase: the dispatcher's agents/list branch now receives the PURE
+// roster-row builder as an INJECTED dep (the package owns the dispatcher; the
+// builder stays bundle-owned in src/agents.ts). The test wires the REAL
+// builder exactly like the live endpointDeps closure does.
+import { buildAgentRows } from '../lib/agents.js'
 
 // --- department configs (two configured heads, mirroring cordis.patch.yml) ---
 
@@ -65,6 +70,11 @@ function makeDeps(overrides = {}) {
     hosts: [],
     sessionLive: () => false,
     sessionRunning: () => false,
+    // dshd-gui phase: the two bundle-owned PURE deps the dispatcher injects
+    // (buildAgentRows + pickLiveHostEntry — the live endpointDeps closure wires
+    // the same functions).
+    buildAgentRows,
+    pickLiveHostEntry,
     ...overrides
   }
 }

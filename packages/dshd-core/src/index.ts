@@ -26,6 +26,13 @@ import { createDeliveryEngine } from './delivery.js'
 import type { DeliveryEngine, DeliveryEngineDeps } from './delivery.js'
 import { DeliveryRedeliverer, MessagesStore, markDelivery } from './messages.js'
 import type { DeliveryRedelivererDeps, DeliveryRow, DeliveryStatus } from './messages.js'
+// D3 (subagent/gui/pooler phase): the dispatch-time transient-subagent role
+// registry promoted to a core SERVICE (`deepartments.subagentRoles`) — ONE
+// per-process store shared by the bundle writer (subagent.ts) and reader
+// (wakepack pre-step); the module also exports the drop-in compat functions the
+// bundle bridge re-exports for R6.
+import { createSubagentRolesService } from './role-orient.js'
+import type { SubagentRolesService } from './role-orient.js'
 
 // acl.js defines `busProfileFor`/`aclDenyGround`/`aclDenyReason`/`canSend` (+
 // types `BusMemberProfile`/`BusCatalogLens`); delivery.js RE-EXPORTS the same
@@ -44,6 +51,7 @@ export * from './wakepack.js'
 export * from './lifecycle.js'
 export * from './session-rotation.js'
 export * from './session-cleanup.js'
+export * from './role-orient.js'
 
 // ---------------------------------------------------------------------------
 // FASE 2.5 BATCH B — the dshd-core Cordis plugin surface.
@@ -530,6 +538,19 @@ export function apply(ctx: Context, config: CoreConfig) {
     org: config.org ?? { departments: departments as OrgDepartment[] }
   }
   ctx.provide('deepartments.org', orgSurface)
+
+  // --- deepartments.subagentRoles (subagent/gui/pooler phase — D3): the
+  // dispatch-time TRANSIENT-SUBAGENT role registry, promoted from the bundle's
+  // module-global Map into a CORE SERVICE. Provided EAGERLY (it is
+  // self-contained — no binder/closure deps), so it is resolvable at the
+  // bundle's own apply time like the other eager services. ONE store per
+  // process (module-scoped in ./role-orient.js): the bundle's `subagent.ts`
+  // WRITES here at dispatch and the wakepack pre-step READS here (via the
+  // injected `roleForSession`), and they can never split across two registries.
+  // In a minimal composition (this plugin absent) the bundle falls back to the
+  // drop-in compat functions the role-orient bridge re-exports — the SAME
+  // store, so R6 behavior-neutral. ---
+  ctx.provide('deepartments.subagentRoles', createSubagentRolesService())
 
   // --- deepartments.binder (FASE 2.6-B-1): the mutable LATE-BINDING seam. The
   // bundle (in the compose-first wiring) fills this with its closure-bound

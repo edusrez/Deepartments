@@ -38,22 +38,30 @@ import { createUserMessage, boundContextSummary, type MessageSource } from '@dee
 import type { PostEntry, HostEntry } from './registry.js'
 import { listActiveMembers } from './registry.js'
 import type { MessageRecord } from './messages.js'
+// D3 consolidation (subagent/gui/pooler phase): the transient-subagent role
+// type's SINGLE SOURCE OF TRUTH is now THIS package's ./role-orient.js (the
+// `deepartments.subagentRoles` service, promoted from the bundle's
+// role-orient.ts — see FASE 2.5 BATCH B history below). The bundle consumes it
+// through the drop-in bridge (src/role-orient.ts -> 'dshd-core'), so this
+// module imports the type here instead of declaring a structural duplicate
+// (same package, one declaration).
+import type { SubagentRole } from './role-orient.js'
 
 const execFileP = promisify(execFileCb)
 
 /**
- * The transient-subagent role. ROLE_CONTRACTS CONSOLIDATION (FASE 2.5 BATCH B):
- * the bundle `src/role-orient.ts` is the SINGLE SOURCE OF TRUTH. This package
- * does NOT own a role-orient copy; the runtime `buildSubagentOrientation`
- * (which the bundle's role-orient.ts provides) is INJECTED via `WakePackDeps`.
- * This is only the structural string-union type used in the injected-signature
- * types (a type is compile-time; the package cannot import it from the bundle
- * without a backwards dependency — dshd-core is a dependency OF the bundle).
- * It is structurally identical to the bundle's `SubagentRole`.
+ * The transient-subagent role. ROLE-CONTRACTS CONSOLIDATION (FASE 2.5 BATCH B
+ * + D3): the bundle `src/role-orient.ts` was the SINGLE SOURCE OF TRUTH and
+ * this package did NOT own a role-orient copy — the runtime
+ * `buildSubagentOrientation` was INJECTED via `WakePackDeps`. D3 promoted the
+ * registry + role-orient surface INTO this package (`./role-orient.js`, the
+ * `deepartments.subagentRoles` service), so this module now imports the type
+ * from there (one declaration per package); the wake-pack DEP contract is
+ * unchanged — `roleForSession` / `buildSubagentOrientation` are still injected
+ * by the bundle (which resolves them to the same service store).
  *
  * NO export default (pitfall 0001 — breaks `inject`).
  */
-export type SubagentRole = 'builder' | 'reviewer' | 'researcher' | 'scribe' | 'explore' | 'generic'
 
 // ---------------------------------------------------------------------------
 // PURE wake-pack helpers (shared with the assembly; unit-tested via lib/invoke).
