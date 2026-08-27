@@ -10863,6 +10863,139 @@ test('Issue-3 redelivery guard (b): a pending sidecar (messageIdX, other-head) w
   })
 })
 
+test('W7-A in-session settle: a retired WORKER settles its pending prepared/failed delivery rows to ONE terminal row per messageId AT RETIRE TIME (before any boot); a LIVE recipient is untouched; the W6 tick NEVER alerts for the retired worker; the NEXT boot does not re-attempt', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    const workerId = 'worker-inflight'
+    // A manager head + a LIVE worker whose deliveries are pending + a DIFFERENT
+    // LIVE recipient (a head) that must be untouched by retiring the worker.
+    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'board' })
+    await seedPost(stateDir, { postId: workerId, sessionId: 'w-inflight-sess', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'research-head' })
+    await seedPost(stateDir, { postId: 'other-head', sessionId: 'head-other-head', roomId: 'board' })
+    // The CANARY (pre-boot): a 'failed' row to a DEAD recipient whose message
+    // record EXISTS. The boot re-delivery pass is FIRE-AND-FORGET (runs after
+    // bootPlugin resolves) — the canary becomes 'terminal' only when the pass
+    // has consumed the pre-boot sidecar, which deterministically proves the
+    // pass COMPLETED before the in-session seed below (the pass race that would
+    // otherwise re-deliver the in-session rows at boot #1). The canary row is
+    // overwritten away by the in-session seed (its record stays, harmless).
+    await seedMessageRecords(stateDir, [
+      { id: 'm-canary', seq: 0, ts: now, from: 'research-head', to: ['dead-canary'], text: 'pass-completion canary', kind: 'agent' },
+      { id: 'm-1', seq: 1, ts: now, from: 'research-head', to: [workerId], text: 'crash mid-fan-out', kind: 'agent' },
+      { id: 'm-2', seq: 2, ts: now, from: 'research-head', to: [workerId], text: 'rejected delivery', kind: 'agent' },
+      { id: 'm-3', seq: 3, ts: now, from: 'research-head', to: ['other-head'], text: 'live neighbor', kind: 'agent' }
+    ])
+    await seedDeliveryRows(stateDir, [{ messageId: 'm-canary', recipientId: 'dead-canary', status: 'failed', ts: now }])
+    const first = await bootPlugin(stateDir)
+    try {
+      // BARRIER: the pre-boot canary is settled to 'terminal' ONLY BY the boot
+      // re-delivery pass — observing it proves the pass finished (no in-flight
+      // re-delivery can touch the rows seeded next).
+      await waitFor(async () => (await deliveryStatus(stateDir, 'm-canary', 'dead-canary')) === 'terminal', 5000, 'boot re-delivery pass completed (canary settled)')
+      // The pending rows are seeded IN-SESSION (post-pass), exactly like a
+      // mid-session crash/failure leaves them before the next boot.
+      await seedDeliveryRows(stateDir, [
+        { messageId: 'm-1', recipientId: workerId, status: 'prepared', ts: now },
+        { messageId: 'm-2', recipientId: workerId, status: 'prepared', ts: now },
+        { messageId: 'm-2', recipientId: workerId, status: 'failed', ts: now + 1 },
+        { messageId: 'm-3', recipientId: 'other-head', status: 'failed', ts: now }
+      ])
+      // Retire the worker IN-SESSION via the HOST-plane dept_post_retire (the
+      // shared retirePost path — the same one dept_worker_retire/auto-retire use).
+      const host = first.agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const retire = await first.root.tools.get('dept_post_retire').execute({ postId: workerId }, { agent: host, signal })
+      assert.equal(retire.retired, true, 'the worker is retired')
+      // THE FIX: the retired worker's pairs are ALREADY terminal — BEFORE any boot.
+      assert.equal(await deliveryStatus(stateDir, 'm-1', workerId), 'terminal', 'the prepared pair is settled to terminal AT RETIRE TIME (no boot involved)')
+      assert.equal(await deliveryStatus(stateDir, 'm-2', workerId), 'terminal', 'the failed pair is settled to terminal AT RETIRE TIME')
+      assert.equal(await deliveryStatus(stateDir, 'm-3', 'other-head'), 'failed', 'a LIVE recipient with a failed row is NOT settled when a DIFFERENT post retires')
+      const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+      assert.deepEqual(rows.filter((r) => r.messageId === 'm-1' && r.recipientId === workerId).map((r) => r.status), ['prepared', 'terminal'], 'the prepared pair gains ONLY ONE terminal row')
+      assert.deepEqual(rows.filter((r) => r.messageId === 'm-2' && r.recipientId === workerId).map((r) => r.status), ['prepared', 'failed', 'terminal'], 'the failed pair gains ONLY ONE terminal row (UNA fila terminal por messageId)')
+      assert.equal(rows.filter((r) => r.status === 'terminal').length, 2, 'exactly TWO terminal rows (one per settled messageId — never one per pending row)')
+      assert.ok(rows.filter((r) => r.messageId === 'm-3').every((r) => r.status !== 'terminal'), 'the LIVE recipient never gains a terminal row')
+      // The W6 health daemon does NOT re-alert for the retired worker: a tick
+      // over the settled sidecar alerts ONLY for the LIVE recipient's anomaly
+      // (m-3 delivery-failed) — the retired worker's terminal pairs are not
+      // findings (scanDeliveryFindings ignores terminal rows) and a retired
+      // member is excluded anyway (C6/Bug-A).
+      const alertFrames = []
+      await runHealthDaemonTick({
+        now: () => Date.now(),
+        stateDir,
+        bootId: 'boot-1-tick',
+        hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+        posts: [{ postId: workerId, retired: true, events: [], inboxTs: [], running: false }],
+        notifyHost: async (_hostEntry, frame) => { alertFrames.push(frame) },
+        logger: { warn: () => {} }
+      })
+      assert.ok(alertFrames.length >= 1, 'the tick alerts for the LIVE-recipient anomaly (m-3)')
+      assert.ok(alertFrames.every((frame) => !frame.includes(workerId) && !/delivery-failed: m-[12]/.test(frame)), 'NO alert names the retired worker or its settled pairs — the in-session settle stopped the re-alert loop')
+      assert.ok(alertFrames.some((frame) => /delivery-failed: m-3/.test(frame)), 'the LIVE recipient failed row still alerts (unchanged W6 semantics)')
+    } finally {
+      await first.dispose()
+    }
+    // Boot #2 over the SAME stateDir: the settled pairs are NOT re-attempted
+    // (terminal → needsRedelivery false → no re-delivery, no fresh failed rows).
+    const second = await bootPlugin(stateDir)
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200)) // give the fire-and-forget driver a chance
+      const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+      const workerRows = rows.filter((r) => r.recipientId === workerId)
+      assert.deepEqual(workerRows.filter((r) => r.messageId === 'm-1').map((r) => r.status), ['prepared', 'terminal'], 'boot #2 does not re-attempt the settled prepared pair (no new rows)')
+      assert.deepEqual(workerRows.filter((r) => r.messageId === 'm-2').map((r) => r.status), ['prepared', 'failed', 'terminal'], 'boot #2 does not re-attempt the settled failed pair (no new rows)')
+      assert.equal(workerRows.length, 5, 'NO new prepared/failed/terminal row for the retired worker at boot #2 (2 m-1 rows + 3 m-2 rows, unchanged — the in-session settle made the boot pass a no-op)')
+    } finally {
+      await second.dispose()
+    }
+  })
+})
+
+test('W7-A in-session settle: an ALREADY-SETTLED (delivered) pair and the rows of a SECOND live worker are NOT touched when ANOTHER worker retires; a DOUBLE retire adds NO extra terminal row', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    await seedPost(stateDir, { postId: 'research-head', sessionId: 'head-research-head', roomId: 'board' })
+    await seedPost(stateDir, { postId: 'worker-a', sessionId: 'w-a-sess', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'research-head' })
+    await seedPost(stateDir, { postId: 'worker-b', sessionId: 'w-b-sess', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', departmentId: 'research', managerId: 'research-head' })
+    // The same pass-completion CANARY barrier as the retire-time test above.
+    await seedMessageRecords(stateDir, [
+      { id: 'm-canary', seq: 0, ts: now, from: 'research-head', to: ['dead-canary'], text: 'pass-completion canary', kind: 'agent' },
+      { id: 'm-1', seq: 1, ts: now, from: 'research-head', to: ['worker-a'], text: 'to a', kind: 'agent' },
+      { id: 'm-2', seq: 2, ts: now, from: 'research-head', to: ['worker-b'], text: 'to b', kind: 'agent' },
+      { id: 'm-3', seq: 3, ts: now, from: 'research-head', to: ['worker-b'], text: 'already delivered', kind: 'agent' }
+    ])
+    await seedDeliveryRows(stateDir, [{ messageId: 'm-canary', recipientId: 'dead-canary', status: 'failed', ts: now }])
+    const first = await bootPlugin(stateDir)
+    try {
+      await waitFor(async () => (await deliveryStatus(stateDir, 'm-canary', 'dead-canary')) === 'terminal', 5000, 'boot re-delivery pass completed (canary settled)')
+      await seedDeliveryRows(stateDir, [
+        { messageId: 'm-1', recipientId: 'worker-a', status: 'failed', ts: now },
+        { messageId: 'm-2', recipientId: 'worker-b', status: 'failed', ts: now },
+        { messageId: 'm-3', recipientId: 'worker-b', status: 'delivered', ts: now }
+      ])
+      const host = first.agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const retireTool = first.root.tools.get('dept_post_retire')
+      await retireTool.execute({ postId: 'worker-a' }, { agent: host, signal })
+      // Only worker-a's pending pair settles.
+      assert.equal(await deliveryStatus(stateDir, 'm-1', 'worker-a'), 'terminal', 'the retired worker-a pair is settled')
+      assert.equal(await deliveryStatus(stateDir, 'm-2', 'worker-b'), 'failed', 'a SECOND live worker with a failed row is NOT settled when another worker retires')
+      assert.equal(await deliveryStatus(stateDir, 'm-3', 'worker-b'), 'delivered', 'an ALREADY-SETTLED (delivered) pair is untouched')
+      let rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+      assert.deepEqual(rows.filter((r) => r.messageId === 'm-1' && r.recipientId === 'worker-a').map((r) => r.status), ['failed', 'terminal'], 'the settled pair gains exactly ONE terminal row')
+      assert.equal(rows.filter((r) => r.status === 'terminal').length, 1, 'exactly one terminal row in the whole sidecar')
+      // A DOUBLE retire of the same worker is an idempotent no-op — no extra row.
+      await retireTool.execute({ postId: 'worker-a' }, { agent: host, signal })
+      rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+      assert.deepEqual(rows.filter((r) => r.messageId === 'm-1' && r.recipientId === 'worker-a').map((r) => r.status), ['failed', 'terminal'], 'the double retire adds NO extra terminal row (idempotent)')
+      assert.equal(rows.filter((r) => r.status === 'terminal').length, 1, 'still exactly one terminal row after the double retire')
+    } finally {
+      await first.dispose()
+    }
+  })
+})
+
 test('W7-A scanDeliveryFindings: a terminal row is NOT an anomaly (only a fresh failed row alerts; stale + terminal rows are ignored)', async () => {
   await withTempStateDir(async (stateDir) => {
     const now = Date.now()
@@ -11635,21 +11768,56 @@ test('W9-b (d): the System-health ALERT path delivers to a busy host with interr
       const signal = new AbortController().signal
       // Self-register the live host (B3 gap fix — dept_who ensures a host entry).
       await env.root.tools.get('dept_who').execute({}, { agent: host, signal })
+      // C12 (de-flake): drive the host into the BUSY (mid-turn) state BEFORE the
+      // anomaly exists. The daemon ticks every 50 ms; with the historical order
+      // (anomaly first, busy second) a tick that landed in between delivered the
+      // ALERT to an IDLE host — no abort (cancelCalls never grew) — and advanced
+      // the dedupe ledger, so every later tick found nothing new to alert and the
+      // waitFor below timed out (the flaky W9-b(d), ~1/3 runs). With the busy
+      // state set FIRST, ANY tick that observes the fresh anomaly also observes
+      // `status: running` → the production notifyHost hook (wired
+      // `busDeliverToHost(..., { interrupt: true })`) ALWAYS preempts the turn.
+      host.status = 'running'
       // A fresh anomaly → the daemon must ALERT the host.
       await appendPostError(stateDir, { ts: Date.now(), postId: 'research-head', messageId: 'm-alert', error: 'could not be materialized' })
-      // Drive the host into a BUSY (mid-turn) state so the interrupt fires.
-      host.status = 'running'
       const cancelBefore = host.cancelCalls.length
       // Wait for the daemon tick to deliver the alert through the production
       // notifyHost hook (wired `busDeliverToHost(..., { interrupt: true })`).
-      await waitFor(() => host.cancelCalls.length > cancelBefore, 5000, 'the health daemon alert interrupted the busy host')
+      // Deterministic now: the next tick after the append (≤50 ms ≪ the 5000 ms
+      // waitFor) always interrupts the busy host — there is no losing ordering.
+      // The predicate waits for the abort AND the followup together: inside the
+      // tick the cancel and the inbox delivery land with a small async gap
+      // between them (safeInterrupt writes its cooldown marker before the
+      // followup), so asserting only on cancelCalls could read the inbox before
+      // the followup was delivered (a second race of the original flaky test).
+      await waitFor(() => host.cancelCalls.length > cancelBefore && host.inboxMessages.length >= 1, 5000, 'the health daemon alert interrupted the busy host and delivered the ALERT frame')
       const abort = host.cancelCalls.at(-1)
       assert.deepEqual(abort.cause, { kind: 'hook', reason: 'interrupted' }, 'the System-health ALERT aborts the busy host with reason "interrupted"')
       assert.deepEqual(abort.options, { keepInbox: true }, 'the ALERT keeps pending work (keepInbox) — no data loss')
       assert.equal(host.inboxMessages.length >= 1, true, 'the System-health ALERT bus message is delivered')
       assert.match(host.inboxMessages.at(-1).content[0].text, /System-health ALERT/, 'the ALERT frame reaches the host')
+      // C12 (de-flake): let the alert PASS settle BEFORE dispose — the audit line
+      // (health-alerts.jsonl) is appended only AFTER notifyHost resolves and the
+      // dedupe ledger advances, so reading it proves no daemon delivery is still
+      // in flight when `env.dispose()` tears the composition down (dispose never
+      // races the wired notifyHost).
+      await waitFor(async () => {
+        try {
+          const audit = await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')
+          return audit.trim().length > 0
+        } catch {
+          return false
+        }
+      }, 5000, 'the System-health alert pass settled (audit written before dispose)')
     } finally {
       await env.dispose()
+      // C12 (de-flake): let any daemon tick already in flight at clearInterval
+      // FINISH before the withTempStateDir teardown removes the stateDir — the
+      // last in-flight heartbeat/scan write must never land inside the rm()
+      // (the historical ENOTEMPTY teardown failure). clearInterval stops NEW
+      // ticks; a 200 ms epoch wait (4× the 50 ms interval) lets a started one
+      // complete — deterministic, the tick is file ops only.
+      await new Promise((resolve) => setTimeout(resolve, 200))
     }
   })
 })

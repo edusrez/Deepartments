@@ -92,7 +92,8 @@ import {
   parseMessageRecords,
   resolveDeliveriesPath,
   resolveMessagesPath,
-  DeliveryRedeliverer
+  DeliveryRedeliverer,
+  needsRedelivery
 } from './core/messages.js'
 import type { DeliveryRow, DeliveryStatus, MessageRecord, DeliveryRedelivererDeps } from './core/messages.js'
 // Re-export the message-store + redelivery-guard public surface (value + type)
@@ -7421,6 +7422,50 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  /** W7-A (in-session settlement of a retiring post's pending deliveries): the
+   * dead-recipient `terminal`-una-vez settlement of the boot re-delivery driver
+   * (DeliveryRedeliverer.run) runs ONLY at boot — a post RETIRED in-session
+   * (dept_post_retire / dept_worker_retire / the auto-retire seams) left its
+   * pending 'prepared'/'failed' write-ahead sidecar rows parked until the next
+   * boot. This mirror settles them AT RETIRE TIME so a retired worker's stale
+   * deliveries are 'terminal' BEFORE any boot; the boot pass keeps working as
+   * the crash fallback (untouched — it re-settles idempotently after a crash).
+   * Semantics are the boot driver's EXACTLY: iterate the LATEST row per
+   * (messageId, recipientId) (a later 'delivered'/'resumed'/'self'/'terminal'
+   * row shadows an earlier 'prepared'/'failed' one — the same latestPerKey
+   * dedupe as DeliveryRedeliverer.run), settle the pairs of the ONE retiring
+   * recipient whose latest status `needsRedelivery` by appending a SINGLE
+   * 'terminal' row via the shared markDelivery utility, and NEVER emit a fresh
+   * 'prepared'/'failed' row (the settle only appends 'terminal' → the W6 health
+   * daemon never re-alerts for the retired post, and scanDeliveryFindings keeps
+   * excluding a retired member — C6/Bug-A already covered). A pair ALREADY
+   * settled (delivered/resumed/self/terminal) is untouched, and a LIVE
+   * recipient's rows are untouched (scoped strictly to `retiredPostId`).
+   * Non-fatal by design (mirrors captureRetiredPostTurnError): a sidecar
+   * read/mark failure only warns — the retire still commits and the boot pass
+   * re-settles on the next boot. */
+  const settleRetiredPostDeliveries = async (retiredPostId: string): Promise<void> => {
+    try {
+      let text: string
+      try {
+        text = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return // nothing ever sent
+        throw error
+      }
+      const latestPerKey = new Map<string, DeliveryRow>()
+      for (const row of parseDeliveryRows(text)) latestPerKey.set(`${row.messageId}\u0000${row.recipientId}`, row)
+      for (const row of latestPerKey.values()) {
+        if (row.recipientId !== retiredPostId) continue
+        if (!needsRedelivery(row.status)) continue
+        await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal')
+        ctx.logger.info(`[deepartments] retire settle: ${row.messageId} → ${row.recipientId} (was ${row.status}) → 'terminal' — post retired in-session, settled once (no boot needed)`)
+      }
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] retire settle for "${retiredPostId}" failed (non-fatal — the boot re-delivery pass re-settles): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   const retirePost = async (postId: string, callerAgentId: string): Promise<{ postId: string; retired: true }> => {
     const entry = byPost.get(postId)
     if (entry === void 0) throw new Error(`[deepartments] dept_post_retire: "${postId}" is not a registered post`)
@@ -7457,6 +7502,15 @@ export function applyInvoke(ctx: Context, config: Config) {
       // The store owns the durable MARK (retired:true + manager-ledger prune +
       // persist) — it never erases a post from the catalog.
       registry.markPostRetired(postId)
+      // W7-A (in-session settlement): right after the durable mark commits,
+      // settle the retiring worker's pending 'prepared'/'failed' delivery rows
+      // to ONE 'terminal' row per messageId — in-session, so the stale rows are
+      // terminal BEFORE any boot (the historical debt; the boot pass remains
+      // the crash fallback). Non-fatal (a failure warns only — retirePost's
+      // semantics are unchanged) and scoped to DISPOSABLE WORKERS: a configured
+      // head retire unregisters and is re-materialized LIVE at boot — never
+      // settled, exactly like the boot driver (it settles only DEAD recipients).
+      await settleRetiredPostDeliveries(postId)
     } else {
       // Configured head / non-worker: today's semantics (unregister; the config
       // re-materializes it at boot — cosmetic retire). The store owns the

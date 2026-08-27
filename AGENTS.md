@@ -102,6 +102,38 @@ Runtime knobs read by the plugin (`src/invoke.ts`) — all OPTIONAL:
 Note: `dept_exec` sanitizes the environment to `PATH`/`HOME`/`LANG` only — the
 overrides above apply to the plugin daemon process, not to command tooling.
 
+## Operations — session hygiene
+
+`scripts/session-hygiene.mjs` is the reusable LOW vehicle (ROADMAP late-9 debt
+"higiene sesiones muertas m-162") for the dec4 owner policy — "NO borrar,
+COMPRIMIR": the full session history is always preserved, the cold tier is
+compressed with zstd, nothing is ever destructively garbage-collected.
+
+- **dec4 archive policy**: per session, the newest N rotation artifacts in the
+  archive (default `--hot-rotations 3`) stay untouched ("hot"); every older
+  artifact is compressed to `<file>.zstd` ("cold"), the uncompressed original
+  being removed ONLY with `--apply`. One-way: nothing is ever decompressed.
+- **Dead-session census** (report only, no deletes): a session dir whose last
+  recorded turn is older than `--stale-days` (default 14) AND whose id is not
+  referenced by a live (non-retired) `hosts.json`/`posts.json` entry.
+- **`--tmp`**: reports (and with `--apply` sweeps) orphan `*.tmp` scratch
+  files older than one boot cycle (`--tmp-stale-days`, default 1) in the state
+  home's `storages` dir.
+- **Safety**: DRY-RUN by default — `--apply` is the ONLY mutation switch;
+  missing `zstd` → compression is reported but skipped (mtime fallback for log
+  tails); `--apply` refuses to target the STABLE profile `/opt/dsh/.dsh`; dev
+  home `/opt/dsh/.dsh-dev` is fine. Full usage/params live in the script header.
+
+The dev deployment relocates the Deepartments stateDir, so pass the core dirs
+explicitly there, e.g.:
+
+```bash
+node scripts/session-hygiene.mjs \
+  --state-dir /.deepartments \
+  --sessions-dir /opt/dsh/.dsh-dev/sessions \
+  --tmp
+```
+
 ## Session ritual
 
 - **START** (injected wake, see "Wake routine"): the Deepartments wake pack is
