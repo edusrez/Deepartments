@@ -112,18 +112,18 @@ export interface HealthConfig {
 /**
  * Quality Department (QD) config (spec 007 §4.1, D-Q2). Optional; the ONLY knob
  * is the worker-archive dice probability. Defaults are CODE-level:
- * `workerInspectProbability` defaults to 0.10 so an ABSENT section (or an absent
- * key) keeps the 10% worker sample — the config composes untouched. An
- * invalid / out-of-[0,1] value falls back to 0.10 (the
+ * `workerInspectProbability` defaults to 0.25 so an ABSENT section (or an absent
+ * key) keeps the 25% worker sample — the config composes untouched. An
+ * invalid / out-of-[0,1] value falls back to 0.25 (the
  * `health.staleLiveMinutes` fallback pattern). The head+host 100% mandate
  * (D-Q3) is NOT a knob — it is structural in `qualityInspectDecision`
  * (kind 'head'/'host' always true, never a die).
  */
 export interface QualityConfig {
-  /** The worker-retire dice probability (default 0.10): when a disposable
+  /** The worker-retire dice probability (default 0.25): when a disposable
    * WORKER session is archived (`dept_worker_retire`), wake a QD inspection with
    * this probability. Must be in [0,1]; invalid/absent → the code default
-   * 0.10. The head/host 100% mandate (D-Q3) is never gated by this knob. */
+   * 0.25. The head/host 100% mandate (D-Q3) is never gated by this knob. */
   workerInspectProbability?: number
 }
 
@@ -264,7 +264,7 @@ export interface Config {
   health?: HealthConfig
   /**
    * Quality Department (QD) config (spec 007 §4.1, D-Q2). Optional — the sole
-   * knob is `workerInspectProbability` (code default 0.10); an ABSENT section or
+   * knob is `workerInspectProbability` (code default 0.25); an ABSENT section or
    * absent key composes untouched. Mirrors the runtime shape declared in
    * src/invoke.ts, so the schema and the typed cast in invoke.ts always agree.
    */
@@ -395,8 +395,8 @@ export const Config: z<any, any> = z.object({
   }),
   // QD (spec 007 §4.1, D-Q2). Mirrors the runtime QualityConfig in src/invoke.ts:
   // `default(void 0)` so an ABSENT section or absent key falls through to the
-  // CODE default (workerInspectProbability 0.10); a present invalid or
-  // out-of-[0,1] value likewise falls back to 0.10 — exactly the health
+  // CODE default (workerInspectProbability 0.25); a present invalid or
+  // out-of-[0,1] value likewise falls back to 0.25 — exactly the health
   // section's contract. The head+host 100% mandate is NOT a knob (structural in
   // qualityInspectDecision, kind 'head'/'host' always true).
   quality: z.object({

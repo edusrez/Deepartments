@@ -5,7 +5,7 @@
 // extracted VERBATIM from the bundle (src/invoke.ts, extraction map
 // 2026-08-27-health-quality-extraction-map.md §2):
 //   - QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY (the D-Q2 worker-retire dice
-//     default 0.10) + the QUALITY_INSPECT_ENV_VAR env override (a numeric
+//     default 0.25) + the QUALITY_INSPECT_ENV_VAR env override (a numeric
 //     [0,1] string — overrides ONLY the probability path: the worker dice and
 //     the QH's own-sleep dice; never the structural non-QH head/host mandate),
 //   - qualityInspectDecision — the PURE gate (kind + injectable deps in,
@@ -14,10 +14,10 @@
 //     anti-loop exclusion — the QH's own sleep is sampled by the SAME worker
 //     dice so the "QH sleeps each round → q-i → QH wakes → QH sleeps again"
 //     feedback cannot recur), 'worker' → `(rng ?? Math.random)() <
-//     clamp(workerInspectProbability ?? 0.10, 0, 1)` (D-Q2 dice),
+//     clamp(workerInspectProbability ?? 0.25, 0, 1)` (D-Q2 dice),
 //   - resolveQualityWorkerInspectProbability — the PURE config-resolution
 //     helper (spec 007 §4.1): reads `quality?.workerInspectProbability`,
-//     validated to [0,1]; invalid/absent → the code default 0.10,
+//     validated to [0,1]; invalid/absent → the code default 0.25,
 //   - QualityInspectDirectiveSurface + qualityInspectDirectiveText — the
 //     QUALITY INSPECT directive frame (one variant per archive/post-error
 //     event; the human-readable text is PURE — testable).
@@ -49,14 +49,14 @@
 // --- QD (spec 007 Quality Department) RUNTIME — the probability gate + config --
 // The Quality Department inspects the org's OWN runtime: every department HEAD
 // archive (dept_sleep) and every HOST session rotation is inspected at 100%
-// (D-Q3, the mandate), while a disposable WORKER retire is SAMPLED at 0.10 by
+// (D-Q3, the mandate), while a disposable WORKER retire is SAMPLED at 0.25 by
 // default (D-Q2). The gate below is PURE (kind + deps in, boolean out, no side
 // effects beyond reading the deterministic env/seed seam) so a test drives it
 // offline through the real Loader. It is an INTERNAL helper — there is NO
 // public `dept_quality_*` tool; the hooks are the bus-directive emitters in
 // applyInvoke (maybeEmitQualityInspectDirective, bundle).
 /** The code default for the worker-retire dice (D-Q2). */
-export const QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY = 0.10
+export const QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY = 0.25
 
 /** The deterministic env override for the worker probability path (a numeric
  * [0,1] string). Overrides ONLY the worker dice; the head/host mandate is never
@@ -69,11 +69,11 @@ export type QualityInspectKind = 'worker' | 'head' | 'host'
 export interface QualityInspectDecisionDeps {
   /** An injected [0,1) random source (default Math.random). */
   rng?: () => number
-  /** The worker dice probability (default 0.10), clamped to [0,1]. */
+  /** The worker dice probability (default 0.25), clamped to [0,1]. */
   workerInspectProbability?: number
   /** The caller head's postId (a 'head' kind). The 100% head-inspect mandate
    * (D-Q3) EXCLUDES the QD's OWN head — 'quality-head' (owner m-178/m-182): the
-   * QH's OWN sleep is sampled by the SAME worker dice (D-Q2, default 0.10) so
+   * QH's OWN sleep is sampled by the SAME worker dice (D-Q2, default 0.25) so
    * the "QH sleeps each round → q-i → QH wakes → QH sleeps again" feedback
    * cannot recur. Any OTHER head (research-head, internal-programming-head, …)
    * stays structural-true (100%). Absent → structural-true (a plain/legacy
@@ -106,7 +106,7 @@ const clamp01 = (n: number): number => Math.min(1, Math.max(0, n))
  *   kind 'host'  → ALWAYS true (the host counts as "H", head-equivalent — D-Q3;
  *                  the host is NOT the QH, so it is never gated)
  *   kind 'worker' → `(rng ?? Math.random)() < clamp(workerInspectProbability ??
- *                                 0.10, 0, 1)`  (D-Q2 dice)
+ *                                 0.25, 0, 1)`  (D-Q2 dice)
  *
  * The non-QH head/host branch is STRUCTURAL — no knob / env override can make it
  * false. The QH-head dice and the worker dice are the SAME probability path
@@ -144,7 +144,7 @@ export function qualityInspectDecision(kind: QualityInspectKind, deps: QualityIn
  * config block and return the effective worker dice probability.
  * `(config as unknown as { quality?: { workerInspectProbability?: number } })`
  * → `quality?.workerInspectProbability`, validated to [0,1]; invalid/absent →
- * the code default 0.10. Mirrors the `health.staleLiveMinutes` fallback
+ * the code default 0.25. Mirrors the `health.staleLiveMinutes` fallback
  * (org.ts:86-90). The head/host 100% mandate is NOT resolved here — it is
  * structural in `qualityInspectDecision`. PURE (config in, number out).
  */

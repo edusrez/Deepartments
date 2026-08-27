@@ -198,7 +198,18 @@ schedule never auto-fires (agenda §1.6).
 
 Identical to the RD (§3.4 spec 004): a **DISCONNECTED root agent**
 (`worker-<slug>-<uuid>`, `provider:'worker'`, own sidebar session in the IPD
-folder), never a harness subagent. Lifecycle: spawn (role persona + task) → work
+folder), never a harness subagent.
+
+**Vocabulary note (F3):** the host's transient subagent roles
+(builder/reviewer/scribe/researcher via `subagent`/`subagent_fork`) are a
+DIFFERENT class from the IPD workers with the same names (`builder`/`reviewer`/
+`explore-deep`/`organizer` — ROOT agents via `dept_worker_spawn`). The Asistente
+never dispatches a transient subagent for IPD-owned work (AGENTS.md rule 10);
+shared names are vocabulary, not identity. A transient host `explore` subagent
+does not exist anymore (F2/F3): deep analysis belongs to the IPD's
+`explore-deep` worker.
+
+Lifecycle: spawn (role persona + task) → work
 the task → write the report & reply to the head (`dept_memo_write` only if durable
 notes are wanted) → head retires (`dept_worker_retire`). EPHEMERAL PER ROUND — a
 worker does NOT sleep and does NOT request permission from ITS head (never the
@@ -220,10 +231,18 @@ task and **job-backed** for the scheduled jobs — both are EPHEMERAL PER ROUND
   only path is **one `send_message` to `internal-programming-head`** carrying the
   mission + its shape. The Asistente never addresses IPD workers directly
   (structural, like D2 research).
+
+The Asistente's persona is UNIVOCAL (F4): internal programming = IPD, ONE
+`send_message` to `internal-programming-head`; its transient subagents are the
+NON-CODE/emergency path only ("You are the Asistente — the host main agent…",
+cordis.patch.yml system-prompt row).
 - **The IPD head's consolidated report is the source of truth** for what was
-  done. **Emergency fallback:** only if the IPD is unavailable may the Asistente
-  dispatch a transient builder directly — and that must be annotated as an
-  *exception* in the report/ROADMAP.
+  done. **Emergency fallback:** only if the IPD is unavailable — DEFINED as
+  exactly ONE `send_message` to `internal-programming-head` that fails or goes
+  unanswered — and only AFTER the Asistente escalates to the owner via
+  `ask_user_question` (fallback needs owner approval), may it dispatch a
+  transient builder directly (NON-CODE only; never explore/analysis). Must be
+  annotated as an *exception* in the report/ROADMAP.
 
 ---
 

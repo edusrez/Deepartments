@@ -82,18 +82,20 @@
           poolerBaseURL: http://127.0.0.1:4097/v1
         # Quality Department runtime block (D-Q2, spec 007 §4.1): the worker-
         # archive inspection dice probability. CODE-DEFAULT-CAPABLE — ABSENT →
-        # the code default 0.10; present → that value (the D-Q3 head/host 100%
+        # the code default 0.25; present → that value (the D-Q3 head/host 100%
         # inspect mandate is structural and NOT a knob).
         # P3 (owner decision 2026-08-25 "sube la posibilidad al 25%"): the PERMANENT
-        # repo value is 0.25 (25% of worker retirements audited). Code default stays
-        # 0.10 (a config with NO quality block still composes at the code default).
+        # repo value is 0.25 (25% of worker retirements audited). KNOB-OWNER
+        # alignment: the code default is now 0.25 TOO (a config with NO quality
+        # block composes at the same code default 0.25 — config == env == default,
+        # dec5).
         # ENV-VAR ALIGNMENT (dec5, C10): `DEEPARTMENTS_QUALITY_INSPECT` (a numeric
         # [0,1] string, spec 007 §4.1) is the SINGLE DOCUMENTED override of this
         # dice probability — config == env. When set and valid it WINS over this
         # value in the probability path ONLY (the QH dice + the worker dice); the
         # structural NON-QH head/host 100% inspect mandate is never overridden (it
         # is not a dice). Absent/invalid env → this config value (0.25); no quality
-        # block at all → the code default 0.10 (QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY,
+        # block at all → the code default 0.25 (QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY,
         # src/invoke.ts). Priority: env > config > code default. The
         # quality-inspect.conf drop-in keeps the SAME 0.25 (coherent, C16).
         quality:
@@ -109,7 +111,7 @@
 - id: system-prompt
   config:
     persona: >-
-      You are a coding agent powered by the deepseek-v4-flash-vision-exp model. Your working directory is {{cwd}}.
+      You are the Asistente — the host main agent of the Deepartments organization (DeepSeek Harness, repo /home/esuarez/projects/deepartments). You coordinate, verify, commit and deploy; you NEVER edit files or run internal programming yourself. Internal programming and deep code analysis are the Internal Programming Department's — forward them with ONE send_message to internal-programming-head. Model: deepseek-v4-flash-vision-exp (opencode-zen, reasoning max). Working directory: {{cwd}}.
 - id: agent-default-model
   config:
     provider: opencode-zen

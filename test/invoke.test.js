@@ -5060,8 +5060,11 @@ test('Task T4 pre-step: role plumbing — known role injects its contract; unkno
       const signal = new AbortController().signal
 
       // normalizeRole is the authoritative normalizer.
+      // F2/F3 (owner decision 2026-08-27): 'explore' is RETIRED from the transient
+      // SubagentRole — deep code analysis is the IPD explore-deep worker (deployed
+      // only by internal-programming-head), never a host subagent.
       assert.equal(normalizeRole('builder'), 'builder')
-      assert.equal(normalizeRole('explore'), 'explore')
+      assert.equal(normalizeRole('explore'), 'generic', "'explore' retired from transient roles — falls back to generic (F2/F3)")
       assert.equal(normalizeRole('bogus'), 'generic')
       assert.equal(normalizeRole(undefined), 'generic')
       assert.equal(normalizeRole(''), 'generic')
@@ -12201,12 +12204,12 @@ test('dshd-feedback_update: QH-only terminal transition (cerrado_por), head-only
 })
 
 
-test('QD probability gate: worker default 0.10 + clamp; worker uses injected rng + env override; head+host ALWAYS true even prob<1', () => {
-  // worker default (prob 0.10): rng below the threshold → true; above → false.
-  assert.equal(qualityInspectDecision('worker', { rng: () => 0.05 }), true, 'rng 0.05 < default 0.10 → true')
-  assert.equal(qualityInspectDecision('worker', { rng: () => 0.95 }), false, 'rng 0.95 ≥ default 0.10 → false')
-  assert.equal(qualityInspectDecision('worker', { rng: () => 0.0999 }), true, 'rng 0.0999 < 0.10 → true')
-  assert.equal(qualityInspectDecision('worker', { rng: () => 0.1 }), false, 'rng 0.1 is NOT < 0.10 (strict) → false')
+test('QD probability gate: worker default 0.25 + clamp; worker uses injected rng + env override; head+host ALWAYS true even prob<1', () => {
+  // worker default (prob 0.25): rng below the threshold → true; above → false.
+  assert.equal(qualityInspectDecision('worker', { rng: () => 0.05 }), true, 'rng 0.05 < default 0.25 → true')
+  assert.equal(qualityInspectDecision('worker', { rng: () => 0.95 }), false, 'rng 0.95 ≥ default 0.25 → false')
+  assert.equal(qualityInspectDecision('worker', { rng: () => 0.24 }), true, 'rng 0.24 < 0.25 → true')
+  assert.equal(qualityInspectDecision('worker', { rng: () => 0.25 }), false, 'rng 0.25 is NOT < 0.25 (strict) → false')
   // clamp: prob > 1 → clamped to 1; prob < 0 → clamped to 0.
   assert.equal(qualityInspectDecision('worker', { rng: () => 0.5, workerInspectProbability: 2 }), true, 'prob 2 clamps to 1 → true')
   assert.equal(qualityInspectDecision('worker', { rng: () => 0.5, workerInspectProbability: -1 }), false, 'prob -1 clamps to 0 → false')
@@ -12244,12 +12247,12 @@ test('QD probability gate: worker default 0.10 + clamp; worker uses injected rng
 })
 
 test('QD anti-loop QH exclusion (owner m-178/m-182): the QD head (quality-head) OWN head decision is gated by the worker dice; every OTHER head + host stays structural-true', () => {
-  // (a) The QH's OWN 'head' decision IS the dice (D-Q2, default 0.10): rng below
+  // (a) The QH's OWN 'head' decision IS the dice (D-Q2, default 0.25): rng below
   // the threshold → true, above → false. The anti-loop exclusion makes the
-  // QH's own sleep SAMPLED (10%) so "QH sleeps → q-i → QH wakes → QH sleeps
+  // QH's own sleep SAMPLED (25%) so "QH sleeps → q-i → QH wakes → QH sleeps
   // again" cannot recur.
-  assert.equal(qualityInspectDecision('head', { headPostId: 'quality-head', rng: () => 0.0 }), true, 'QH dice rng 0.0 < default 0.10 → true')
-  assert.equal(qualityInspectDecision('head', { headPostId: 'quality-head', rng: () => 0.99 }), false, 'QH dice rng 0.99 ≥ 0.10 → false')
+  assert.equal(qualityInspectDecision('head', { headPostId: 'quality-head', rng: () => 0.0 }), true, 'QH dice rng 0.0 < default 0.25 → true')
+  assert.equal(qualityInspectDecision('head', { headPostId: 'quality-head', rng: () => 0.99 }), false, 'QH dice rng 0.99 ≥ 0.25 → false')
   // The QH dice reuses the worker probability (no dedicated knob): it respects an
   // injected workerInspectProbability with the same strict < semantics.
   assert.equal(qualityInspectDecision('head', { headPostId: 'quality-head', rng: () => 0.05, workerInspectProbability: 0.05 }), false, 'QH dice 0.05 < 0.05 (strict) → false')
@@ -12278,9 +12281,9 @@ test('QD anti-loop QH exclusion (owner m-178/m-182): the QD head (quality-head) 
   }
 })
 
-test('QD config resolution: absent quality → code default 0.10; present valid → that; invalid → default', () => {
-  assert.equal(resolveQualityWorkerInspectProbability({}), QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, 'no org field → code default 0.10')
-  assert.equal(resolveQualityWorkerInspectProbability({ quality: {} }), QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, 'absent knob → code default 0.10')
+test('QD config resolution: absent quality → code default 0.25; present valid → that; invalid → default', () => {
+  assert.equal(resolveQualityWorkerInspectProbability({}), QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, 'no org field → code default 0.25')
+  assert.equal(resolveQualityWorkerInspectProbability({ quality: {} }), QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, 'absent knob → code default 0.25')
   assert.equal(resolveQualityWorkerInspectProbability({ quality: { workerInspectProbability: 0.3 } }), 0.3, 'present valid in [0,1] → that')
   assert.equal(resolveQualityWorkerInspectProbability({ quality: { workerInspectProbability: 1 } }), 1, 'upper bound 1 accepted')
   assert.equal(resolveQualityWorkerInspectProbability({ quality: { workerInspectProbability: 0 } }), 0, 'lower bound 0 accepted')

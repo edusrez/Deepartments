@@ -3,7 +3,8 @@
 The Internal Programming Department (IPD) is a Deepartments department that owns
 the project's implementation work, so the Asistente (host) never edits files
 directly. It is a **head + workers** organization: a worker is a root agent (not
-a harness subagent); the head addresses them over the bus, collects and verifies
+a harness subagent — a transient host `subagent` child is a different class);
+the head addresses them over the bus, collects and verifies
 results, consolidates, and reports back to the requester with ONE report +
 summary.
 

@@ -41,7 +41,10 @@ agent preset (the neutral head/worker bases live in
 - Bus / lifecycle (plugin own layer): `send_message`, `agent_messages`,
   `dept_who`, `dept_memo_write`, `dept_sleep`.
 - NEVER for department workers: `subagent`/`subagent_fork`/`workflow`/`ralph`
-  — a worker is a root agent, not a coordinator (D3, §3.4).
+  — a worker is a root agent, not a coordinator (D3, §3.4). Conversely, a
+  transient host `builder`/`reviewer` subagent is NOT an IPD worker: the IPD's
+  builder/reviewer/explore-deep are root agents spawned by the head — the
+  shared names are vocabulary, not identity (F3).
 - Role-specific allowance, by design: `edit` is granted to `builder` (it
   implements) but NOT to `reviewer`/`explore-deep` (read-only) or `organizer`
   (planning/consolidation only); `dept_exec` is granted to `builder`/`reviewer`/

@@ -1814,7 +1814,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   })()
   const byPost = registry.byPost
   // QD (spec 007 §4.1): the resolved worker-archive dice probability from the
-  // `quality` config block (absent/invalid → code default 0.10). Consumed by
+  // `quality` config block (absent/invalid → code default 0.25). Consumed by
   // the worker-retire hook; the head+host 100% mandate is NOT resolved here.
   const qualityWorkerInspectProbability = resolveQualityWorkerInspectProbability(config)
   const byChild = registry.byChild
@@ -4424,7 +4424,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           // already-retired no-op: archiveSession is idempotent.
           const archived = await archiveWorkerSession(entry.sessionId)
           // QD (spec 007 §6.1): the WORKER-retire dice. A FRESH retire rolls the
-          // gate (sample 0.10 by default, D-Q2); an already-retired worker is
+          // gate (sample 0.25 by default, D-Q2); an already-retired worker is
           // NOT re-inspected (`!wasRetired`). The directive is non-fatal (the
           // helper wraps its own try/catch) and is emitted AFTER the retire mark
           // commits + the archive runs. The dice lives HERE, NOT in retirePost
@@ -6516,7 +6516,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     try {
       // QD anti-loop (owner m-178/m-182): the QH's OWN sleep is NOT part of the
       // 100% head-inspect mandate — a 'head-slept' surface whose headPostId is
-      // 'quality-head' is gated by the SAME worker dice (D-Q2, default 0.10), so
+      // 'quality-head' is gated by the SAME worker dice (D-Q2, default 0.25), so
       // the "QH sleeps each round → q-i → QH wakes → QH sleeps again" feedback
       // cannot recur. ANY OTHER head (and the host rotation, which is not the
       // QH) stays at 100% structural-true. The ENV override affects only the

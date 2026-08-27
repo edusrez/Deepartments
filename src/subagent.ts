@@ -28,7 +28,11 @@ export const inject = ['tools', 'subagents', 'systemPrompt']
 /** Prompt order after bounded delegation policy and before child reporting. */
 const SUBAGENT_SECTION_ORDER = 116.5
 
-/** Deployment policy for one always-async delegation tool instance. */
+/** Deployment policy for one always-async delegation tool instance.
+ * `toolFilter.deny` (optional) excludes the named tool ids from the child's
+ * catalog, and `toolFilter.allow` restricts it to the named ids — the supported
+ * way to keep a transient child's surface scoped (e.g. NON-CODE/emergency
+ * delegations that must never reach `edit`/bash/commit tools). */
 export interface Config {
   provider: string
   toolName?: string
@@ -69,11 +73,11 @@ export const Config = z.object({
  */
 function providerWording(inheritsConversation: boolean) {
   if (inheritsConversation) return {
-    description: 'Delegate a task to a subagent that inherits this conversation: a child agent seeded with all completed turns so far (it does not see the current in-flight turn). Use this when the subtask builds on this conversation\'s context — a follow-up analysis, a review, a continuation — without consuming this conversation\'s context for the work itself. You receive its result, not its intermediate steps.',
+    description: 'Delegate a task to a subagent that inherits this conversation: a child agent seeded with all completed turns so far (it does not see the current in-flight turn). Use this when the subtask builds on this conversation\'s context — a follow-up review, a continuation, a NON-CODE subtask — without consuming this conversation\'s context for the work itself. Internal programming and deep code analysis are NOT delegated here: route them via send_message to internal-programming-head. You receive its result, not its intermediate steps.',
     promptDescription: 'The task for the subagent. It already sees this conversation\'s completed turns, so build on them freely and state only what is new.'
   }
   return {
-    description: 'Delegate a self-contained task to a subagent (a separate agent that works in its own context) to offload focused, independent work — research, a scoped implementation, an analysis — so it does not consume this conversation\'s context. The subagent returns its result, not its intermediate steps. Give it a complete, standalone prompt: it does not see this conversation.',
+    description: 'Delegate a self-contained NON-CODE task to a subagent (a separate agent that works in its own context) to offload focused, independent work — research (RD), doc drafts (scribe), review (reviewer), or an emergency-fallback builder — so it does not consume this conversation\'s context. Internal programming and deep code analysis are NOT delegated here: they belong to the Internal Programming Department — route them with ONE send_message to internal-programming-head. The subagent returns its result, not its intermediate steps. Give it a complete, standalone prompt: it does not see this conversation.',
     promptDescription: 'The complete, self-contained task for the subagent. It does not share this conversation\'s context, so include everything it needs.'
   }
 }
@@ -119,7 +123,7 @@ export function apply(ctx: Context, config: Config) {
         },
         role: {
           type: 'string',
-          description: 'Optional Deepartments role for the child (builder|reviewer|researcher|scribe|explore; default generic). Drives the slim role-contract context injection instead of the full host wake pack; unknown roles fall back to generic.'
+          description: 'Optional Deepartments role for the child (builder|reviewer|scribe|researcher; NON-CODE/emergency only — `explore` is retired: internal code and deep analysis go to the Internal Programming Department via send_message; default generic). Drives the slim role-contract context injection instead of the full host wake pack; unknown roles fall back to generic.'
         }
       },
       output: {

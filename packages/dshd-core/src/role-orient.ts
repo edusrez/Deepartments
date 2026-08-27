@@ -12,6 +12,13 @@
 // deepartments-workflow skill body — nearly all irrelevant to a one-shot atomic
 // task and misleading (role labelled "host").
 //
+// VOCAB (F3, owner 2026-08-27): the transient roles builder/reviewer/scribe/
+// researcher are HOST-dispatched subagents (NON-CODE/emergency only — explore
+// retired, F2). The IPD's workers with the SAME names (presets/departments/
+// internal-programming/) are DEPARTMENT ROOT AGENTS — a different class
+// (dept_worker_spawn; never the subagent tool). Shared names are vocabulary,
+// not identity; never conflate a transient host subagent with an IPD worker.
+//
 // This module is the SINGLE SOURCE OF TRUTH for the role contract blocks injected
 // instead. The per-role contracts below are distilled from the repo-tracked
 // skill (`.dsh/skills/deepartments-workflow/SKILL.md`) "Dispatch templates":
@@ -40,9 +47,9 @@
 //
 // NO export default (pitfall 0001).
 
-export type SubagentRole = 'builder' | 'reviewer' | 'researcher' | 'scribe' | 'explore' | 'generic'
+export type SubagentRole = 'builder' | 'reviewer' | 'researcher' | 'scribe' | 'generic'
 
-const KNOWN_ROLES: readonly SubagentRole[] = ['builder', 'reviewer', 'researcher', 'scribe', 'explore', 'generic']
+const KNOWN_ROLES: readonly SubagentRole[] = ['builder', 'reviewer', 'researcher', 'scribe', 'generic']
 
 /**
  * Normalize an arbitrary dispatch `role` value to a known {@link SubagentRole}.
@@ -50,6 +57,12 @@ const KNOWN_ROLES: readonly SubagentRole[] = ['builder', 'reviewer', 'researcher
  * `'generic'` (the robust default the audit recommends). The default is what a
  * cold-resumed continuable child also gets when the in-process dispatch-time
  * registry (below) no longer holds its role.
+ *
+ * F2/F3 (owner decision 2026-08-27): the transient `'explore'` role is RETIRED
+ * and has an EXPLICIT rule here — it is no longer a {@link SubagentRole} member,
+ * so `normalizeRole('explore')` → `'generic'`. Deep code analysis is the IPD
+ * `explore-deep` worker (presets/departments/internal-programming/explore-deep.md),
+ * deployed ONLY by `internal-programming-head` — never a host subagent.
  */
 export function normalizeRole(role: unknown): SubagentRole {
   if (typeof role === 'string' && (KNOWN_ROLES as readonly string[]).includes(role)) return role as SubagentRole
@@ -202,10 +215,14 @@ export const ROLE_CONTRACTS: Record<SubagentRole, string> = {
     '- You may READ live docs for context; no bash.\n' +
     '- RETURN: a 3-line summary — what you drafted, where, which proposals need a decision.',
 
-  explore:
-    '- READ-ONLY: no edits, no bash.\n' +
-    '- TRACE the full flow: grep/glob + reads, follow imports and callers, cross-refs, check against AGENTS.md.\n' +
-    '- REPORT IN DEPTH: flow/architecture summary, key files + file:line, patterns (good and bad), invariant status, surprises. Write to .dsh/reports/explore/<YYYY-MM-DD>-<task-slug>.md.',
+  // R6 — RETIRED transient role (F2/F3, owner decision 2026-08-27): 'explore' is
+  // no longer a valid transient SubagentRole; normalizeRole('explore') → 'generic'.
+  // Deep code analysis is the IPD `explore-deep` worker (presets/departments/
+  // internal-programming/explore-deep.md), deployed ONLY by internal-programming-head.
+  // Former contract, kept verbatim for the record:
+  //   '- READ-ONLY: no edits, no bash.\n' +
+  //   '- TRACE the full flow: grep/glob + reads, follow imports and callers, cross-refs, check against AGENTS.md.\n' +
+  //   '- REPORT IN DEPTH: flow/architecture summary, key files + file:line, patterns (good and bad), invariant status, surprises. Write to .dsh/reports/explore/<YYYY-MM-DD>-<task-slug>.md.',
 
   generic:
     '- You are a delegated Deepartments subagent for a single atomic task.\n' +

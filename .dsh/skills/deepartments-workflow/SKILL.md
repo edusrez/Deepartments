@@ -1,6 +1,6 @@
 ---
 name: deepartments-workflow
-description: Multi-agent workflow for the Deepartments project — Asistente (the main agent) + builders + reviewer + scribe + explore, with research delegated to the Research Department (RD), internal programming delegated to the Internal Programming Department (IPD), and org-runtime quality inspection delegated to the Quality Department (QD). Use it when planning or executing multi-agent code changes, when dispatching subagents, or when resuming a session of this project. Port of the multi-agent-workflow pattern to DeepSeek Harness.
+description: Multi-agent workflow for the Deepartments project — Asistente (the main agent) + builders + reviewer + scribe (transient, NON-CODE/emergency; deep analysis is the IPD's explore-deep), with research delegated to the Research Department (RD), internal programming delegated to the Internal Programming Department (IPD), and org-runtime quality inspection delegated to the Quality Department (QD). Use it when planning or executing multi-agent code changes, when dispatching subagents, or when resuming a session of this project. Port of the multi-agent-workflow pattern to DeepSeek Harness.
 ---
 
 # Deepartments — Multi-Agent Workflow (DSH)
@@ -18,13 +18,13 @@ Department (QD)".
 
 | Role | Dispatch tool | Model | Notes |
 |-----|----------------|-------|-------|
-| **Asistente** (the main agent, Pro) | (this agent) | Pro | All tools, but NEVER edits; interface/coordinator — translates the owner's vision, asks microdecisions, and runs verification/commits/deploys; does NOT plan internal programming (the IPD head does) |
-| **Internal Programming Head** (`internal-programming-head`) | `send_message` | (department tier) | DELEGATING head of the Internal Programming Department; ephemeral workers builder/reviewer/explore-deep/organizer. Owns all internal programming work — see "Programming requests → Internal Programming Department (IPD)" |
-| **Quality Head** (`quality-head`) | `send_message` | (department tier) | DELEGATING head of the Quality Department; ephemeral-per-round worker quality-inspector. Inspects the org's own runtime (archive events sampled/100%, post-errors, daily digest) — see "Quality requests → Quality Department (QD)" |
-| **builder** | `subagent` | deepseek-v4-flash-vision-exp | EMERGENCY fallback + non-code atomic edits (e.g. docs/spec drafts); NOT the normal path for internal code changes — those go via the IPD. All such builders run Flash, no Pro tier |
+| **Asistente** (host main agent) | (this agent) | deepseek-v4-flash-vision-exp | All tools, but NEVER edits; interface/coordinator — positional authority (HOST), NOT a model tier; translates the owner's vision, asks microdecisions, and runs verification/commits/deploys; does NOT plan internal programming (the IPD head does) |
+| **Internal Programming Head** (`internal-programming-head`) | `send_message` | deepseek-v4-flash | DELEGATING head of the Internal Programming Department; ephemeral workers builder/reviewer/explore-deep/organizer. Owns all internal programming work — see "Programming requests → Internal Programming Department (IPD)" |
+| **Quality Head** (`quality-head`) | `send_message` | deepseek-v4-flash | DELEGATING head of the Quality Department; ephemeral-per-round worker quality-inspector. Inspects the org's own runtime (archive events sampled/100%, post-errors, daily digest) — see "Quality requests → Quality Department (QD)" |
+| **builder** | `subagent` | deepseek-v4-flash-vision-exp | EMERGENCY fallback + non-code atomic edits (e.g. docs/spec drafts); NOT the normal path for internal code changes — those go via the IPD. All such builders run Flash, no tiered models |
 | **reviewer** | `subagent` | deepseek-v4-flash-vision-exp | Read-only verifier after each builder/batch; PASS/FAIL |
 | **scribe** | `subagent` | deepseek-v4-flash-vision-exp | Non-code doc drafts to `.dsh/reports/scribe/` (never auto-commits); normal document work is department-owned |
-| **explore** | `subagent` | deepseek-v4-flash-vision-exp | Read-only; code search, flow analysis |
+| **explore** (RETIRED from host dispatch) | — | — | Deep code analysis that feeds an internal change is the IPD's `explore-deep` worker (presets/departments/internal-programming/explore-deep.md) — deployed ONLY by the Internal Programming Head via a PROGRAMMING REQUEST; the Asistente does NOT dispatch analysis subagents. (Deprecated transient role: see "Explore (code analysis)" below.) |
 
 The Asistente's transient subagents (`subagent`/`subagent_fork`) are the
 **emergency fallback** and **non-code** path (e.g. scribe doc drafts). Normal
@@ -35,14 +35,21 @@ department dispatch flow see "Programming requests → Internal Programming
 Department (IPD)".
 
 That transient roster is not rigid: every dispatch is via `subagent` or
-`subagent_fork` (all Flash-tier, defaulting to `deepseek-v4-flash-vision-exp`
-via the direct DeepSeek API — provider `deepseek-official`, reasoning_effort
-`max`, endpoint/API key wired in the dev profile; stable profile untouched).
+`subagent_fork` — all transient subagents run `deepseek-v4-flash-vision-exp`
+via the direct DeepSeek API route — provider `opencode-zen` (OpenCode Go),
+reasoning_effort `max`, endpoint/API key wired in the dev profile
+(pooler/gateway); stable profile untouched. The Asistente is the only agent on
+the host role; department heads and workers run `deepseek-v4-flash`.
 The `_fork` variants inherit the conversation: use them for context-inheriting
 follow-ups. The per-role contract is NOT re-written into the prompt — it is
 INJECTED at the child's first pre-step from the bundled ROLE_CONTRACTS map
 (Task T4): pass the `role` param and the dispatch prompt stays
-objective+files+spec+verification. The Asistente is the only Pro agent.
+objective+files+spec+verification. There is NO Pro model tier (redesign F10):
+the Asistente's authority is POSITIONAL (host/orchestrator), not model-based.
+Fleet: the host + its transient subagents run `deepseek-v4-flash-vision-exp`
+(provider `opencode-zen`, reasoning_effort `max`); department heads +
+department workers run `deepseek-v4-flash` (provider `opencode-zen`, reasoning
+max).
 
 ## Head lifecycle
 
@@ -81,7 +88,7 @@ the durable head — the head's next wake cold-resumes the same durable session.
 - **Never auto-commit docs**: scribe drafts to `.dsh/reports/scribe/`, the
   human merges.
 - **Escalate, don't trash**: if a builder (Flash) fails twice, human
-  decision (no Pro tier).
+  decision (no tiered models).
 - **Specs first**: write/update the spec before implementing.
 - **Reports are inter-agent memory**: dispatch prompts reference paths of
   previous reports instead of re-dumping context.
@@ -113,8 +120,9 @@ the single line telling the child its role contract is injected.
 All dispatch tools run in the background automatically — there is no
 `run_in_background` parameter; results arrive via the settlement notice. Pass the
 role with the `role` param on `subagent`/`subagent_fork`
-(builder|reviewer|scribe|explore; `researcher` = emergency RD-fallback only;
-default generic). Unknown roles fall back to generic.
+(builder|reviewer|scribe|researcher; `researcher` = emergency RD-fallback only,
+`builder` = IPD-emergency/non-code only; default generic; `explore` is RETIRED —
+see F2/F3). Unknown roles fall back to generic.
 
 ### Builder (default tier)
 
@@ -133,8 +141,8 @@ atomic edits with a clear spec.
 
 ### Builder — hard/architectural tasks
 
-No Pro tier: ALL builders run Flash via `subagent` (`role: builder`) with the
-same contract. Hard/architectural tasks are dispatched exactly like default
+No tiered models: ALL builders run Flash via `subagent` (`role: builder`) with
+the same contract. Hard/architectural tasks are dispatched exactly like default
 builders, with a tighter spec and more granular verification steps.
 
 ### Reviewer (read-only)
@@ -171,12 +179,15 @@ on nuance), reviews and consolidates, then responds. The Asistente:
   per-worker messaging); only addresses `research-head`.
 - Treats the head's consolidated report as the **source of truth**.
 
-**Emergency fallback** (exception, not the norm): ONLY if the RD is unavailable
-(`research-head` asleep with no reply, department down) may the Asistente run
-research itself via its transient `researcher` subagent (`subagent`,
-`role: researcher`). Such use MUST be annotated in the session summary to the
-owner as an exception, with the reason. Return to RD delegation as soon as the
-department recovers.
+**Emergency fallback** (exception, not the norm, owner-strict F5): "unavailable"
+is DEFINED — exactly ONE `send_message` to `research-head` (the RD's head) sent
+by the Asistente that FAILS (delivery error) or gets no reply after the wait
+window. Only THEN, and BEFORE any fallback dispatch, the Asistente escalates to
+the owner with `ask_user_question` (the fallback requires owner approval). With
+approval, it may run the research itself via its transient `researcher`
+subagent (`subagent`, `role: researcher`). Every such use MUST be annotated in
+the session summary to the owner as an exception, with the reason. Return to RD
+delegation as soon as the department recovers.
 
 ### Programming requests → Internal Programming Department (IPD)
 
@@ -206,12 +217,17 @@ The Asistente:
   docs**, and the **smart_restart responsibility**. Version-watch installs end
   with a request to the Asistente, which restarts with canary and reports.
 
-**Emergency fallback** (exception, not the norm): ONLY if the IPD is unavailable
-(`internal-programming-head` asleep with no reply, department down) may the Asistente run
-internal code changes itself via its transient `builder` subagent (`subagent`,
-`role: builder`). Such use MUST be annotated in the session summary to the owner
-as an exception, with the reason. Return to IPD delegation as soon as the
-department recovers.
+**Emergency fallback** (exception, not the norm, owner-strict F5): "unavailable"
+is DEFINED — exactly ONE `send_message` to `internal-programming-head` (the
+IPD's head) sent by the Asistente that FAILS (delivery error) or gets no reply
+after the wait window. Only THEN, and BEFORE any fallback dispatch, the
+Asistente escalates to the owner with `ask_user_question` (the fallback requires
+owner approval). With approval, it may run the work via its transient `builder`
+subagent (`subagent`, `role: builder`). The fallback NEVER includes
+explore/code analysis (the transient surface is NON-CODE only — see F1/F2).
+Every such use MUST be annotated in the session summary to the owner as an
+exception, with the reason. Return to IPD delegation as soon as the department
+recovers.
 
 ### Quality requests → Quality Department (QD)
 
@@ -254,11 +270,14 @@ worker output; it consolidates and issues a verdict. The Asistente:
   dept worker spawn/retire); only addresses `quality-head`.
 - Treats the head's consolidated report/verdict as the **source of truth**.
 
-**Emergency fallback** (exception, not the norm): ONLY if the QD is unavailable
-(`quality-head` asleep with no reply, department down) may the Asistente inspect
-the org's own runtime itself — annotated in the session summary to the owner as
-an exception, with the reason. Return to QD delegation as soon as the department
-recovers.
+**Emergency fallback** (exception, not the norm, owner-strict F5): "unavailable"
+is DEFINED — exactly ONE `send_message` to `quality-head` (the QD's head) sent
+by the Asistente that FAILS (delivery error) or gets no reply after the wait
+window. Only THEN, and BEFORE any fallback dispatch, the Asistente escalates to
+the owner with `ask_user_question` (the fallback requires owner approval). With
+approval, it may inspect the org's own runtime itself — annotated in the session
+summary to the owner as an exception, with the reason. Return to QD delegation
+as soon as the department recovers.
 
 ## Cross-department synergies (heads talk to heads)
 
@@ -314,14 +333,21 @@ abort is only for a time-sensitive, must-surface-now notice.
 > - **Return**: a 3-line summary — what you drafted, where, which proposals need
 >   a decision.
 
-### Explore (code analysis)
+### Explore (code analysis) — GATED (IPD only)
 
-> Your role contract (explore) is injected by Deepartments — follow it.
-> - **Question**: <trace the flow from X to Y / analyze how Z is produced and
->   consumed / explain the interaction between A and B>.
-> - **Report**: write to
->   `.dsh/reports/explore-deep/<YYYY-MM-DD>-<task-slug>.md`; return a concise
->   flow/architecture summary + key files (file:line) back to the Asistente.
+Deep code analysis that feeds an internal change is NOT dispatched via transient
+subagents: it belongs to the Internal Programming Department. The Asistente routes
+it as ONE `send_message` to `internal-programming-head` (a PROGRAMMING REQUEST with
+objective "trace the flow from X to Y / explain how Z is produced and consumed");
+the IPD head deploys its `explore-deep` worker, which reports to
+`.dsh/reports/explore-deep/<YYYY-MM-DD>-<task-slug>.md` (department workspace
+`reports/explore-deep/`).
+
+DEPRECATED (transient host role, kept verbatim for the record — R6): the old
+transient `explore` template was "Your role contract (explore) is injected by
+Deepartments — follow it. Question: <trace the flow from X to Y …>; Report:
+write to .dsh/reports/explore-deep/<YYYY-MM-DD>-<task-slug>.md; return a concise
+flow/architecture summary + key files (file:line) back to the Asistente."
 
 ## Agenda & department jobs
 
@@ -421,7 +447,7 @@ channel peerDependencies with CLI pin) live in AGENTS.md and the
 ## Escalation ladder
 
 - Builders: builder (`subagent`, Flash). If a builder fails twice, the
-  Asistente asks the human for a decision (no Pro tier).
+  Asistente asks the human for a decision (no tiered models).
 - Reviewer: if a review fails twice, human decision.
 
 ## Session ritual

@@ -2,15 +2,15 @@
 agent: builder
 date: 2026-08-24
 task: quality-department-spec
-spec_ref: "Owner decisions (2026-08-24), Epic QD: the Deepartments organization gains a **Quality Department (QD)** — the QA/analysis counterpart of the Research Department (RD, spec 004) and the Internal Programming Department (IPD, spec 005). It OWNS nothing and FIXES nothing: every department head archive (a head's dept_sleep) AND every host session rotation (the Asistente's dept_sleep host branch) is INSPECTED at 100% (EXCEPT the Quality Head's own sleep, which is SAMPLED at the 10% worker dice — D-Q7), and every DISPOSABLE WORKER retire is INSPECTED with probability 0.10 (configurable, deterministic under a test seed / env override). Findings are REPORTED, never auto-fixed: the Quality Head (QH) reports to the Asistente AND auto-files a PROGRAMMING REQUEST to internal-programming-head (head↔head synergy). TWO analysis paths: (a) EVENT-DRIVEN — a new post-error record (spec 006 post-errors.jsonl capture) triggers a QD analysis directive to quality-head (with the error record); (b) A DAILY DIGEST JOB `quality-daily` (role quality-inspector, cron 0 8 * * *, owner quality-head, calendar entry departmentId=quality). ONE role — `quality-inspector` (ephemeral-per-round, W8-g lifecycle, Flash tier, literal model deepseek-v4-flash-vision-exp provider opencode-zen reasoning max, reports to `.dsh/reports/quality/<YYYY-MM-DD>-<slug>.md`). Primary sources: docs/specs/005-internal-programming-department.md (master style + departments/roles/jobs/ACL/phases), docs/specs/004-research-department.md (§0 owner table, §3 conceptual model, §7 personas, §9 open questions), docs/specs/006-system-health.md (the post-error capture seam, post-errors.jsonl, the daemon ALERT-to-host pattern, the daily digest job precedent), src/org.ts + src/invoke.ts + presets/ + .dsh/skills verified in-repo at spec time."
+spec_ref: "Owner decisions (2026-08-24), Epic QD: the Deepartments organization gains a **Quality Department (QD)** — the QA/analysis counterpart of the Research Department (RD, spec 004) and the Internal Programming Department (IPD, spec 005). It OWNS nothing and FIXES nothing: every department head archive (a head's dept_sleep) AND every host session rotation (the Asistente's dept_sleep host branch) is INSPECTED at 100% (EXCEPT the Quality Head's own sleep, which is SAMPLED at the 25% worker dice — D-Q7), and every DISPOSABLE WORKER retire is INSPECTED with probability 0.25 (configurable, deterministic under a test seed / env override). Findings are REPORTED, never auto-fixed: the Quality Head (QH) reports to the Asistente AND auto-files a PROGRAMMING REQUEST to internal-programming-head (head↔head synergy). TWO analysis paths: (a) EVENT-DRIVEN — a new post-error record (spec 006 post-errors.jsonl capture) triggers a QD analysis directive to quality-head (with the error record); (b) A DAILY DIGEST JOB `quality-daily` (role quality-inspector, cron 0 8 * * *, owner quality-head, calendar entry departmentId=quality). ONE role — `quality-inspector` (ephemeral-per-round, W8-g lifecycle, Flash tier, literal model deepseek-v4-flash-vision-exp provider opencode-zen reasoning max, reports to `.dsh/reports/quality/<YYYY-MM-DD>-<slug>.md`). Primary sources: docs/specs/005-internal-programming-department.md (master style + departments/roles/jobs/ACL/phases), docs/specs/004-research-department.md (§0 owner table, §3 conceptual model, §7 personas, §9 open questions), docs/specs/006-system-health.md (the post-error capture seam, post-errors.jsonl, the daemon ALERT-to-host pattern, the daily digest job precedent), src/org.ts + src/invoke.ts + presets/ + .dsh/skills verified in-repo at spec time."
 outcome: FINAL DRAFT (owner decisions adopted) — DRAFT-ONLY, no commit, no other files touched; DOCUMENTATION-ONLY (only docs/specs/007 created)
 files_touched:
   - docs/specs/007-quality-department.md (this draft)
 error_type: none (design doc — no build/test required)
 key_findings:
   - The QD is a REPORT-ONLY department: it never repairs code, never spawns on its own (the hook only sends a bus directive to quality-head — quality-head orchestrates), and is deliberately SINGLE-ROLE (quality-inspector).
-  - OWNER AMENDMENT (2026-08-25, M4 docs-only): the QH is the CONSOLIDATOR + ANALYZER (verdict per round "todo bien" / "issue X → dirigido a Y (Z)"; findings to the Asistente AND/OR a PROGRAMMING REQUEST → IPD, a RESEARCH REQUEST → RD, or the Asistente for an owner decision); the QH's sleep is governed AUTONOMOUSLY by the Asistente via the SLEEP DIRECTIVE (no request/approval — DISCARDED); and the QH's OWN sleep is SAMPLED at 0.10 (anti-loop D-Q7), not 100%.
-  - The worker-archive dice (D-Q2) and the head/host 100% mandate (D-Q3) are the same event hook: `qualityInspectDecision(kind, deps)` — a PURE injectable-rng function where kind 'head' ALWAYS true EXCEPT 'quality-head' (D-Q7 dice — the QH's own sleep is sampled at the 0.10 worker dice), kind 'host' ALWAYS true, and kind 'worker' rolls `rng() < (workerInspectProbability ?? 0.10)`.
+  - OWNER AMENDMENT (2026-08-25, M4 docs-only): the QH is the CONSOLIDATOR + ANALYZER (verdict per round "todo bien" / "issue X → dirigido a Y (Z)"; findings to the Asistente AND/OR a PROGRAMMING REQUEST → IPD, a RESEARCH REQUEST → RD, or the Asistente for an owner decision); the QH's sleep is governed AUTONOMOUSLY by the Asistente via the SLEEP DIRECTIVE (no request/approval — DISCARDED); and the QH's OWN sleep is SAMPLED at 0.25 (anti-loop D-Q7), not 100%.
+  - The worker-archive dice (D-Q2) and the head/host 100% mandate (D-Q3) are the same event hook: `qualityInspectDecision(kind, deps)` — a PURE injectable-rng function where kind 'head' ALWAYS true EXCEPT 'quality-head' (D-Q7 dice — the QH's own sleep is sampled at the 0.25 worker dice), kind 'host' ALWAYS true, and kind 'worker' rolls `rng() < (workerInspectProbability ?? 0.25)`.
   - All three archive events have an EXISTING seam to hang the hook on (verified): worker retire dept_worker_retire → retirePost (invoke.ts:7593) + archiveWorkerSession (invoke.ts:7644); head dept_sleep head-branch → archivePostSessionOnSleep (invoke.ts:6779-6781/7667); host dept_sleep host-branch → runHostRotation (invoke.ts:9479, S2.5 archives the OLD host session).
   - The hook must NEVER throw and NEVER spawn; it emits an ADDRESSED QUALITY INSPECT directive to quality-head via the plugin's direct delivery seam (store.append + busDeliverToPost, the daemon notifyHead pattern), reusable because the hook fires inside plugin-internal functions (not the host send_message).
   - The QD inspector reports under `.dsh/reports/quality/` (stateDir/repo), NOT the department-workspace reports dir — per D-Q6, a deliberate divergence from RD/IPD.
@@ -24,7 +24,7 @@ are requirements, not proposals. Ready for builder dispatch (phases Q1–Q5, §8
 (§3.5/§7.2 — the QH is the CONSOLIDATOR + ANALYZER, verdict per round), the QH's
 autonomous sleep lifecycle (§7.2 — the Asistente manages head sleep; heads do NOT
 request/approve sleep — the "request/approval" model is DISCARDED), and the
-anti-loop QH inspect exception (D-Q7 — the QH's own sleep is SAMPLED at 0.10, not
+anti-loop QH inspect exception (D-Q7 — the QH's own sleep is SAMPLED at 0.25, not
 100%).
 `❓` marks owner-decision points (§9) and builder-verify points (implementation
 detail, deferred to the builder). All harness/plugin file:line facts were verified
@@ -43,12 +43,12 @@ line refs are treated as design-level.
 | # | Decision | Baked in as |
 |---|---|---|
 | D-Q1 | **Naming.** Department id `quality`; name "Quality Department"; coordinator postId `quality-head`, title "Quality Head", role "Quality department head", sessionTitle "Quality Head"; head preset `deepartments-head-quality`; workspacePath `/root/.deepartments/departments/quality`; jobDir `docs/departments/quality/jobs`; spec `docs/specs/007-quality-department.md`. | §3.1, §7.4 |
-| D-Q2 | **Random control (worker archive).** When a NON-head agent session is archived (a disposable WORKER retired via `dept_worker_retire`/`dept_post_retire`), wake a QD inspection with probability `0.10` — a configurable constant (default 0.10) in the org config (`quality: { workerInspectProbability?: number }`), testable deterministically via an injected seed / env override (`DEEPARTMENTS_QUALITY_INSPECT`-style env OR an injected rng so tests are deterministic). | §4, §5.2, §6.1 |
-| D-Q3 | **Mandatory 100% (head + host) — with a single anti-loop exception.** EVERY head archive (a department head's `dept_sleep`, which archives the head session) AND EVERY host session rotation (the Asistente's `dept_sleep` host branch, which archives the OLD host session) is inspected at **100% — never gated by the dice** — EXCEPT the **Quality Head's own sleep**, which is SAMPLED at the 0.10 worker dice (D-Q7). The host counts as a "H" (head-equivalent). | §6.2, §6.3, §7.2 |
+| D-Q2 | **Random control (worker archive).** When a NON-head agent session is archived (a disposable WORKER retired via `dept_worker_retire`/`dept_post_retire`), wake a QD inspection with probability `0.25` — a configurable constant (default 0.25) in the org config (`quality: { workerInspectProbability?: number }`), testable deterministically via an injected seed / env override (`DEEPARTMENTS_QUALITY_INSPECT`-style env OR an injected rng so tests are deterministic). | §4, §5.2, §6.1 |
+| D-Q3 | **Mandatory 100% (head + host) — with a single anti-loop exception.** EVERY head archive (a department head's `dept_sleep`, which archives the head session) AND EVERY host session rotation (the Asistente's `dept_sleep` host branch, which archives the OLD host session) is inspected at **100% — never gated by the dice** — EXCEPT the **Quality Head's own sleep**, which is SAMPLED at the 0.25 worker dice (D-Q7). The host counts as a "H" (head-equivalent). | §6.2, §6.3, §7.2 |
 | D-Q4 | **Analysis of architecture errors — two paths.** (a) EVENT-DRIVEN: a new post-error record (the spec 006 system-health post-error capture, `post-errors.jsonl`) triggers a QD analysis directive to quality-head (with the error record); (b) A DAILY DIGEST JOB `quality-daily` (role `quality-inspector`, cron `0 8 * * *`, owner `quality-head`, calendar entry `departmentId=quality`) that consolidates patterns (post-errors, stalled posts, delivery failures, inspection results). | §6.4, §6.5 |
 | D-Q5 | **Fix flow.** QD findings → report to the Asistente AND auto-request a PROGRAMMING REQUEST to `internal-programming-head` (head↔head synergy). QD does NOT fix directly. | §3.5, §6.6, §7.2 |
 | D-Q6 | **Subagents — ONE role.** `quality-inspector` (ephemeral per round, W8-g lifecycle, Flash tier, model literal `deepseek-v4-flash-vision-exp` provider `opencode-zen` reasoning max, reports to `.dsh/reports/quality/<YYYY-MM-DD>-<slug>.md` — the stateDir/repo `.dsh/reports/quality/` path, NOT the department-workspace reports dir, per the owner decision). | §7.1, §7.2 |
-| D-Q7 | **Anti-loop inspection (Quality Head only).** The head-sleep 100% mandate (D-Q3) EXCLUDES the quality-head: the QH's OWN sleep is inspected with the DICE 10% (`workerInspectProbability`), like a worker retire. Every OTHER configured head stays at 100%. Invariant: "QH sleeps each round" must NOT auto-feed inspections (no QH-sleep → q-i → QH-wake loop). | §6.2, §7.2 |
+| D-Q7 | **Anti-loop inspection (Quality Head only).** The head-sleep 100% mandate (D-Q3) EXCLUDES the quality-head: the QH's OWN sleep is inspected with the DICE 25% (`workerInspectProbability`), like a worker retire. Every OTHER configured head stays at 100%. Invariant: "QH sleeps each round" must NOT auto-feed inspections (no QH-sleep → q-i → QH-wake loop). | §6.2, §7.2 |
 
 ---
 
@@ -66,10 +66,10 @@ recurring post-error pattern is a symptom of a real bug.
 The owner wants (D-Q1–D-Q6) a **Quality Department** so that:
 
 1. **Every lifecycle archive is a QA sample.** Worker retires are sampled
-   (10% by default, D-Q2), head sleeps and host rotations are sampled 100%
+   (25% by default, D-Q2), head sleeps and host rotations are sampled 100%
    (D-Q3) — because a bad head/host archive is a *systemic* signal while a bad
    worker retire is a *noisy* one. (**Anti-loop D-Q7:** the Quality Head's OWN
-   sleep is the one head sleep NOT sampled 100% — it is SAMPLED at the 0.10
+   sleep is the one head sleep NOT sampled 100% — it is SAMPLED at the 0.25
    worker dice, so the QH's recurring per-round sleep never auto-feeds an
    inspection back into the QD.)
 2. **The QD inspects and reports; it never fixes.** Findings go to the
@@ -112,8 +112,8 @@ but scoped to the **organization's own runtime**, not to report factuality.
    three archive events — worker retire (`dept_post_retire`/`dept_worker_retire`),
    head `dept_sleep`, host session rotation — emit an ADDRESSED QUALITY INSPECT
    directive to `quality-head` via the message bus. Worker retire: dice (default
-   0.10). Head + host: always (100%) except the Quality Head's own sleep, which is
-   SAMPLED at 0.10 (D-Q7). The hooks NEVER throw, NEVER spawn a QD
+   0.25). Head + host: always (100%) except the Quality Head's own sleep, which is
+   SAMPLED at 0.25 (D-Q7). The hooks NEVER throw, NEVER spawn a QD
    worker, and are non-fatal to the retire/sleep/rotation they hook.
 3. **G3 — Event-driven post-error analysis (D-Q4a).** A NEW post-error record
    (the spec 006 capture, `post-errors.jsonl`) triggers a QD analysis directive
@@ -301,11 +301,11 @@ back to code defaults for absent keys; the schema and the typed cast always agre
 ```jsonc
 // config.org.quality — optional; defaults are CODE-level
 {
-  workerInspectProbability?: number   // default 0.10; must be in [0,1]; the worker-retire dice (D-Q2)
+  workerInspectProbability?: number   // default 0.25; must be in [0,1]; the worker-retire dice (D-Q2)
 }
 ```
 
-- `workerInspectProbability` **ABSENT** → **code default `0.10`** (the worker-retire
+- `workerInspectProbability` **ABSENT** → **code default `0.25`** (the worker-retire
   dice probability). Present → that value. Invalid/out-of-[0,1] → code default
   (the same fallback pattern as `health.staleLiveMinutes`, org.ts:86-90).
 - The **head/host 100% mandate is NOT a knob** — it is structural (D-Q3): the
@@ -317,7 +317,7 @@ back to code defaults for absent keys; the schema and the typed cast always agre
   number string in `[0,1]`) is the **single documented config==env override**
   of the dice probability — NOT just a test seam. When set and valid it wins
   over `quality.workerInspectProbability` (priority: env > config > code
-  default `0.10`) on the **worker** probability path — the SAME path the QH
+  default `0.25`) on the **worker** probability path — the SAME path the QH
   dice takes (D-Q7). The structural NON-QH head/host mandate is never
   overridden (it is not a dice). Drop-in coherence (C16): the repo config value
   is `0.25` and the owner-scoped `quality-inspect.conf` drop-in (`/etc`,
@@ -389,16 +389,16 @@ qualityInspectDecision(kind, deps): boolean
   kind: 'worker' | 'head' | 'host'
   deps: {
     rng?: () => number              // injected [0,1) rng (default Math.random)
-    workerInspectProbability?: number  // default 0.10 (D-Q2); clamped to [0,1]
+    workerInspectProbability?: number  // default 0.25 (D-Q2); clamped to [0,1]
     headPostId?: string             // the caller head postId (D-Q7): 'quality-head' → SAME worker dice; any other head → structural true
   }
 ```
 
 | kind | result |
 |---|---|
-| `'head'` | **ALWAYS true** (D-Q3 mandate — the head archive is never gated) for ANY head EXCEPT the QD's own `'quality-head'` (D-Q7 anti-loop: the QH's OWN sleep is sampled by the SAME worker dice, default 0.10, no dedicated knob) |
+| `'head'` | **ALWAYS true** (D-Q3 mandate — the head archive is never gated) for ANY head EXCEPT the QD's own `'quality-head'` (D-Q7 anti-loop: the QH's OWN sleep is sampled by the SAME worker dice, default 0.25, no dedicated knob) |
 | `'host'` | **ALWAYS true** (D-Q3 mandate — the host counts as "H", head-equivalent) |
-| `'worker'` | `(rng ?? Math.random)() < (workerInspectProbability ?? 0.10)` (D-Q2 dice) |
+| `'worker'` | `(rng ?? Math.random)() < (workerInspectProbability ?? 0.25)` (D-Q2 dice) |
 
 - The head/host branch is **structural** — no probability, no knob, no env override
   can make it false (D-Q3 "never gated by the dice") for a **NON-QH head** (and the
@@ -406,7 +406,7 @@ qualityInspectDecision(kind, deps): boolean
 - The **env override** `DEEPARTMENTS_QUALITY_INSPECT` (a number string in `[0,1]`)
   is the **single documented config==env override** of the dice probability
   (dec5): when present and valid it wins over `workerInspectProbability`
-  (priority: env > config > code default `0.10`) on the **worker** probability
+  (priority: env > config > code default `0.25`) on the **worker** probability
   path — the SAME path the QH dice takes (D-Q7) — in tests and production alike,
   and it never turns the structural NON-QH head/host mandate off.
 - **Purity** — `kind` + `deps` in, boolean out, no side effects. This is what makes
@@ -475,7 +475,7 @@ the journal + messages stay). The hook:
 1. resolves `kind = 'head'`, `sessionId` (the ACTUAL head session id, per the
    F8 ghost-row fix);
 2. for a NON-QH head: **ALWAYS** emits (no dice — the D-Q3 100% mandate); for the
-   **Quality Head's OWN sleep**: rolls the 0.10 worker dice (D-Q7) so it does
+   **Quality Head's OWN sleep**: rolls the 0.25 worker dice (D-Q7) so it does
    NOT reliably trigger — the "QH sleeps each round" recurrence must never
    auto-feed an inspection (no QH-sleep → q-i → QH-wake loop);
 3. emits the ADDRESSED QUALITY INSPECT directive to `quality-head` with the
@@ -551,8 +551,8 @@ The `deepartments-head-quality` persona becomes, in effect:
 > You are the **Quality Head** of the **Quality Department** (Deepartments,
 > DeepSeek Harness). You OWN the QUALITY of the Deepartments organization's own
 > runtime — you do NOT fix it. You receive **Quality Inspect directives** (bus
-> messages from the archive-event hooks: a retired worker sampled at 10%, a
-> department head sleep at 100% — EXCEPT your own sleep, which is SAMPLED at 10%
+> messages from the archive-event hooks: a retired worker sampled at 25%, a
+> department head sleep at 100% — EXCEPT your own sleep, which is SAMPLED at 25%
 > by design, D-Q7; a host session rotation at 100%; a new post-error record; the
 > daily digest) and you DECIDE/SPAWN your own `quality-inspector`
 > workers with `dept_worker_spawn`/`dept_worker_retire` and run the `quality-daily`
@@ -575,7 +575,7 @@ a mission-concluded report/verdict — or on a large context window / inactivity
 the **Asistente** emits the SLEEP DIRECTIVE autonomously and the QH concludes with
 `dept_memo_write` + `dept_sleep` (or the Asistente keeps it awake for a chained /
 pending round). The QH's own sleep is NOT inspected at 100% (D-Q7, anti-loop): it
-is SAMPLED at the 0.10 worker dice, so its recurring per-round sleep never
+is SAMPLED at the 0.25 worker dice, so its recurring per-round sleep never
 auto-feeds an inspection back into the QD.
 
 ### 7.3 Literals, never `{{model}}` (lesson 3203b69)
@@ -618,8 +618,8 @@ owner's brief is the org config source; the file in this repo is `src/org.ts`.)
 
 | Phase | Scope | Files |
 |---|---|---|
-| **Q1 — config + probability gate** | `org` config gains the `quality` block (D-Q1 + the `quality: { workerInspectProbability?: number }` knob, §4.1); `QualityConfig` + schema (mirror `health`); `qualityInspectDecision(kind, deps)` PURE function (§5.2) + the env override `DEEPARTMENTS_QUALITY_INSPECT` | `src/org.ts` (`Config` + schema), `src/invoke.ts` (the gate fn + env override), `test/invoke.test.js` (probability-gate unit tests: 0.10 / clamp / mandate 100% head+host except the QH's own sleep (D-Q7) / deterministic seed+env) |
-| **Q2 — archive-event hooks** | The three archive-event hooks (D-Q2/D-Q3): worker retire dice (invoke.ts:7175/7593/7644 seam), head `dept_sleep` 100% (invoke.ts:6779-6781/7667 seam; EXCEPT the QH's own sleep — D-Q7, sampled at 10%), host rotation 100% (invoke.ts:9479 seam); the emit-to-`quality-head` directive seam (store.append + busDeliverToPost, daemon-not-a-catalog-member pattern); NEVER throw / NEVER spawn; non-fatal | `src/invoke.ts` (the hook seams + the resolve-quality-head + directive emit), `test/invoke.test.js` (hook wiring: worker dice OFF/ON, head+host always, non-fatal, no worker spawn) |
+| **Q1 — config + probability gate** | `org` config gains the `quality` block (D-Q1 + the `quality: { workerInspectProbability?: number }` knob, §4.1); `QualityConfig` + schema (mirror `health`); `qualityInspectDecision(kind, deps)` PURE function (§5.2) + the env override `DEEPARTMENTS_QUALITY_INSPECT` | `src/org.ts` (`Config` + schema), `src/invoke.ts` (the gate fn + env override), `test/invoke.test.js` (probability-gate unit tests: 0.25 / clamp / mandate 100% head+host except the QH's own sleep (D-Q7) / deterministic seed+env) |
+| **Q2 — archive-event hooks** | The three archive-event hooks (D-Q2/D-Q3): worker retire dice (invoke.ts:7175/7593/7644 seam), head `dept_sleep` 100% (invoke.ts:6779-6781/7667 seam; EXCEPT the QH's own sleep — D-Q7, sampled at 25%), host rotation 100% (invoke.ts:9479 seam); the emit-to-`quality-head` directive seam (store.append + busDeliverToPost, daemon-not-a-catalog-member pattern); NEVER throw / NEVER spawn; non-fatal | `src/invoke.ts` (the hook seams + the resolve-quality-head + directive emit), `test/invoke.test.js` (hook wiring: worker dice OFF/ON, head+host always, non-fatal, no worker spawn) |
 | **Q3 — event-driven post-error + daily digest** | The event-driven post-error analysis directive (D-Q4a, spec-006 capture → directive to `quality-head` with the error record); the `quality-daily` job (role `quality-inspector`, cron `0 8 * * *`, owner `quality-head`) + the calendar entry `departmentId=quality` | `src/invoke.ts` (the post-error → directive hook), `docs/departments/quality/jobs/quality-daily.md` (job def), `test/invoke.test.js` (event wiring) |
 | **Q4 — role / head preset / workspace** | `quality-inspector` role template + the QH head preset (D-Q6, literal model, BOOT-QUIET, report path `.dsh/reports/quality/`) + the department workspace autogen (`/root/.deepartments/departments/quality`) + the fs-scope for the archived session logs (§5.3) | `presets/departments/quality/quality-inspector.md`, `presets/departments/quality/{ARCHITECTURE.md,README.md}`, `src/invoke.ts` (fs-scope widening for the inspector role), the workspace dir |
 | **Q5 — skill + docs** | Add the QD to the workflow skill (roster + a "Quality requests → Quality Department" section mirroring RD/IPD); the department job docs + workspace README/ARCHITECTURE; the report path `.dsh/reports/quality/` documented | `.dsh/skills/deepartments-workflow/SKILL.md`, `docs/departments/quality/*`, `presets/departments/quality/{README,ARCHITECTURE}.md` |
@@ -707,7 +707,7 @@ NOT re-open an owner decision.
    the same never-throw wrap.
 5. **`quality` config location + defaults (❓).** Confirm a single optional
    `org.quality` block (mirror `health`/`parallel`, `default(void 0)` → code
-   default `workerInspectProbability: 0.10`). Recommended: yes — a config with no
+   default `workerInspectProbability: 0.25`). Recommended: yes — a config with no
    `quality` section keeps composing untouched.
 6. **Does the QD need an ADJUNCT role (`reviewer`-style) or a report archivist (❓).**
    D-Q6 names ONE role (`quality-inspector`). Confirm the QD stays single-role for
@@ -755,7 +755,7 @@ NOT re-open an owner decision.
   `edit`, no mutating `dept_exec`, no commit); the QD NEVER spawns from a hook (the
   hook only sends a bus directive — D2 principle); the head/host mandate is
   structural (100%, D-Q3 — a bug must never make it a die), with the single
-  anti-loop D-Q7 exception (the Quality Head's OWN sleep is sampled at 0.10, not
+  anti-loop D-Q7 exception (the Quality Head's OWN sleep is sampled at 0.25, not
   100%).
 - **Surprises verified**: (1) the QD is the ONLY department where a worker's report
   path is `.dsh/reports/quality/` (stateDir/repo) NOT the department-workspace
