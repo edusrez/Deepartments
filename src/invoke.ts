@@ -3518,7 +3518,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     // the head — the worker wakes on it. ACL (F2): head → own department worker.
     const text = (opts.task ?? '').trim() !== ''
       ? opts.task as string
-      : `[created] worker "${postId}" (${role}) is registered. You are disposable — work your assigned task, then dept_memo_write and dept_sleep; your head retires you with dept_worker_retire when you are done.`
+      : `[created] worker "${postId}" (${role}) is registered. You are disposable — work your assigned task, then dept_memo_write and report to your head; your head retires you with dept_worker_retire when you are done.`
     const store = await messagesStoreReady
     const record = await store.append({
       from: headEntry.postId,
@@ -4022,7 +4022,13 @@ export function applyInvoke(ctx: Context, config: Config) {
 
     disposers.push(agentCtx.tools.register(memoWriteTool(false)))
 
-    disposers.push(agentCtx.tools.register(sleepTool(false)))
+    // LOTE A (owner decision 2026-08-27 — head/worker sleep RETIRED): the
+    // post own-layer dept_sleep is deliberately NOT registered here. Heads and
+    // workers stay `idle|running`; only the HOST plane keeps dept_sleep
+    // (spec 002 rotation). The unregistered `sleepMember`/`sleepAll` remain in
+    // lifecycle.ts as dead code (R6 — never remove; a post entry carrying a
+    // legacy `sleepEpoch` on disk still resurrects fresh on wake).
+    // (sleepTool(false) removed — head/worker sleep is hosts-only.)
 
     // --- Batch 3a: department-lifecycle tools — HEAD (manager) only ------
     // A department HEAD creates and retires DISPOSABLE WORKERS. These register
@@ -4124,7 +4130,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           // `deepartments/post-created` signal; the bus delivery wakes the
           // worker (always-wake, D4). No direct followup needed; the store is
           // durable.
-          const text = firstMessage ?? `[created] worker "${args.postId}" (${args.role || 'department worker'}) is registered. You are disposable — work your assigned task, then dept_memo_write and dept_sleep; your head retires you when done.`
+          const text = firstMessage ?? `[created] worker "${args.postId}" (${args.role || 'department worker'}) is registered. You are disposable — work your assigned task, then dept_memo_write and report to your head; your head retires you when done.`
           const store = await messagesStoreReady
           const record = await store.append({
             from: headId,
@@ -4412,26 +4418,18 @@ export function applyInvoke(ctx: Context, config: Config) {
           if (entry.provider !== 'worker') throw new Error(`[deepartments] dept_worker_retire: "${workerId}" is not a disposable worker — a head may only retire workers, never a permanent head`)
           // Scope (manager/department match — "only MY workers") + mark + dispose
           // are the F1 shared path (retirePost); idempotent on an already-retired
-          // worker (no-op success).
-          // QD (spec 007 §6.1, D-Q2): capture the PRE-retire state so the
-          // worker-retire dice fires ONCE per REAL archive, never on the
-          // idempotent no-op of an already-retired worker (R1).
-          const wasRetired = entry.retired === true
+          // worker (no-op success). The worker-retire QD dice lives INSIDE
+          // retirePost (LOTE B, 2026-08-27) — the ONE shared retire seam covering
+          // every real retire path — so this tool carries NO dice/emit of its own
+          // (a re-retire no-op naturally never re-emits: retirePost's idempotent
+          // early return happens before its dice).
           await retirePost(workerId, agent.id as string)
           // F3 (spec §5.3): archive the DURABLE session so the sidebar row
           // disappears — non-fatal (a failed archive only warns; the retire
           // mark is the durable part). Runs on every retire INCLUDING the
-          // already-retired no-op: archiveSession is idempotent.
+          // already-retired no-op: archiveSession is idempotent (retirePost's
+          // dice-side archive — LOTE B — is a harmless double).
           const archived = await archiveWorkerSession(entry.sessionId)
-          // QD (spec 007 §6.1): the WORKER-retire dice. A FRESH retire rolls the
-          // gate (sample 0.25 by default, D-Q2); an already-retired worker is
-          // NOT re-inspected (`!wasRetired`). The directive is non-fatal (the
-          // helper wraps its own try/catch) and is emitted AFTER the retire mark
-          // commits + the archive runs. The dice lives HERE, NOT in retirePost
-          // (shared with dept_post_retire which does NOT archive).
-          if (!wasRetired && qualityInspectDecision('worker', { rng: Math.random, workerInspectProbability: qualityWorkerInspectProbability })) {
-            await maybeEmitQualityInspectDirective({ kind: 'worker-retired', workerPostId: workerId, sessionId: entry.sessionId, archived })
-          }
           return { workerId, retired: true, archived, activeMembers: activeCatalogMembers() }
         }
       })))
@@ -4562,8 +4560,8 @@ export function applyInvoke(ctx: Context, config: Config) {
       name: `deepartments:${isWorker ? 'worker' : 'head'}:role:${postId}`,
       order: 1,
       text: isWorker
-        ? `You are "${postId}", a ${role || 'rank-and-file researcher'} DISPOSABLE department worker of Deepartments (DeepSeek Harness). Your department HEAD created you as a temporary worker agent; you do not edit the repository, run builders, or spawn other agents. Read your messages with agent_messages, send with send_message, orient with dept_who, and persist your findings/memory with dept_memo_write. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives. Work the task your department head assigns you; when you are DONE, write dept_memo_write to save your results, then conclude with dept_sleep. You are DISPOSABLE: your head retires you with dept_worker_retire when you are finished.`
-        : `You are "${postId}", the ${role || 'department head'}. You are a permanent, first-class agent: you do not edit the repository, run builders, or spawn other agents. Your world is the messaging bus — read with agent_messages, send with send_message, orient with dept_who, and persist memory with dept_memo_write before dept_sleep. You may create and retire DISPOSABLE WORKERS of your department with dept_worker_spawn and dept_worker_retire (the department-scoped worker tools — the legacy dept_post_create/dept_post_retire still exist as the raw machinery). BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives; you never proactively send.`
+        ? `You are "${postId}", a ${role || 'rank-and-file researcher'} DISPOSABLE department worker of Deepartments (DeepSeek Harness). Your department HEAD created you as a temporary worker agent; you do not edit the repository, run builders, or spawn other agents. Read your messages with agent_messages, send with send_message, orient with dept_who, and persist your findings/memory with dept_memo_write. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives. Work the task your department head assigns you; when you are DONE, write dept_memo_write to save your results, then report to your head and end your turn (head/worker sleep is retired — you never dept_sleep; only the Asistente/host rotates its own session, spec 002). You are DISPOSABLE: your head retires you with dept_worker_retire when you are finished.`
+        : `You are "${postId}", the ${role || 'department head'}. You are a permanent, first-class agent: you do not edit the repository, run builders, or spawn other agents. Your world is the messaging bus — read with agent_messages, send with send_message, orient with dept_who, and persist memory with dept_memo_write. You are permanent: you stay idle|running (head sleep is retired — only the Asistente/host keeps dept_sleep session rotation, spec 002). You may create and retire DISPOSABLE WORKERS of your department with dept_worker_spawn and dept_worker_retire (the department-scoped worker tools — the legacy dept_post_create/dept_post_retire still exist as the raw machinery). BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives; you never proactively send.`
     })
     // F3 (spec §7.4): the ROLE PERSONA — the role template's body (+ the task)
     // as a second section when dept_worker_spawn resolved one. The worker
@@ -4608,7 +4606,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   /** The GLOBAL tools every department HEAD inherits from the host surface
    * (spec 004 §7.1 / F10): read, write, glob, grep + the research web tools.
    * The head's own-layer board + department-lifecycle tools
-   * (send_message/agent_messages/dept_who/dept_memo_write/dept_sleep +
+   * (send_message/agent_messages/dept_who/dept_memo_write +
    * dept_worker_spawn/retire, dept_post_create/retire) are SCOPED-registered
    * and ALWAYS visible (exempt from the restrict mask — naming a scope-local
    * name in restrict() would THROW), so only these GLOBAL capability tools need
@@ -4628,16 +4626,18 @@ export function applyInvoke(ctx: Context, config: Config) {
   const DENIED_POST_TOOLS: ReadonlySet<string> = new Set(['subagent', 'subagent_fork', 'workflow', 'ralph', 'run_code'])
   /** The post's OWN-LAYER board + department-lifecycle tools, registered SCOPED
    * to the post agent by `installHeadBoardTools` (`src/invoke.ts:3089-3794`,
-   * `:5130,:5230,:5314`): send_message/agent_messages/dept_who/dept_memo_write/
-   * dept_sleep + the department-lifecycle create/retire/spawn/retire/job tools.
+   * `:5130,:5230,:5314`): send_message/agent_messages/dept_who/dept_memo_write
+   * + the department-lifecycle create/retire/spawn/retire/job tools. (LOTE A,
+   * 2026-08-27: dept_sleep is NO LONGER in the own layer — head/worker sleep
+   * retired; it is hosts-only, spec 002.)
    * The role templates ALSO DECLARE the bus tools (e.g. researcher.md declares
-   * send_message/agent_messages/dept_who/dept_memo_write/dept_sleep), so when the
+   * send_message/agent_messages/dept_who/dept_memo_write), so when the
    * allow-list is probed against the AGENT scope (see postSetup) these names are
    * "found" (own-layer is visible) — but naming a scope-local name in
    * restrict() THROWS. They are explicitly EXCLUDED here (they are exempt from
    * the restrict mask and never belong in the allow list). */
   const OWN_LAYER_POST_TOOLS: ReadonlySet<string> = new Set([
-    'send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep',
+    'send_message', 'agent_messages', 'dept_who', 'dept_memo_write',
     'dept_post_create', 'dept_post_retire', 'dept_worker_spawn', 'dept_worker_retire',
     'dept_job_list', 'dept_job_run', 'dept_monitor_list', 'dept_exec',
     'dept_feedback', 'dept_feedback_list', 'dept_feedback_update'
@@ -4975,6 +4975,25 @@ export function applyInvoke(ctx: Context, config: Config) {
       // head retire unregisters and is re-materialized LIVE at boot — never
       // settled, exactly like the boot driver (it settles only DEAD recipients).
       await settleRetiredPostDeliveries(postId)
+      // QD (spec 007 §6.1, D-Q2 — LOTE B, owner 2026-08-27): the worker-retire
+      // dice lives HERE, on retirePost — the ONE shared retire seam that covers
+      // every REAL retire path (dept_worker_retire, the host dept_post_retire,
+      // the AUTO-RETIRE on delivery, and the boot-reconcile half-slept reap), so
+      // a worker retired by ANY of them rolls the 25% sample. The idempotent
+      // no-op (entry.retired === true) returned BEFORE this point ⇒ a re-retire
+      // of an already-retired worker NEVER re-emits (R1). Non-fatal by design:
+      // a directive failure only warns — the retire mark above already committed.
+      // `archived` is the archive result of THIS retire (idempotent —
+      // dept_worker_retire's own archive call stays as a harmless double; a
+      // missing registry resolves false). The retire path NEVER breaks here.
+      try {
+        if (qualityInspectDecision('worker', { rng: Math.random, workerInspectProbability: qualityWorkerInspectProbability })) {
+          const archived = await archiveWorkerSession(entry.sessionId)
+          await maybeEmitQualityInspectDirective({ kind: 'worker-retired', workerPostId: postId, sessionId: entry.sessionId, archived })
+        }
+      } catch (error: unknown) {
+        ctx.logger.warn(`[deepartments] retirePost worker-retired QD directive for "${postId}" failed (non-fatal — the retire already committed): ${error instanceof Error ? error.message : String(error)}`)
+      }
     } else {
       // Configured head / non-worker: today's semantics (unregister; the config
       // re-materializes it at boot — cosmetic retire). The store owns the
@@ -7592,18 +7611,16 @@ export function applyInvoke(ctx: Context, config: Config) {
   const globalSleep = ctx.tools.register(sleepTool(true))
 
   // --- B1: org-wide quiet-sleep orchestration (host plane) -------------------
-  // The Asistente owns the coordinated quiet-sleep. `dept_sleep_all` durably
-  // marks EVERY configured department head (EXCLUDING quality-head, which stays
-  // live as the QD inspector) as slept in ONE persistPosts write and disposes
-  // each live AgentHandle fire-and-forget. Crucially it emits ZERO per-head QD
-  // `head-slept` directives (see the note at `maybeEmitQualityInspectDirective`):
-  // a batch that slept N heads must not re-wake the QD inspector once per head
-  // (the D-Q7 anti-loop). The SINGLE-agent `dept_sleep` path is UNTOUCHED — its
-  // own QD directive still emits via `sleepMember`. NO journal is required (the
-  // heads were memoized before the orchestration; the batch is mark+dormant).
+  // LOTE A (owner decision 2026-08-27): head/worker sleep is RETIRED — heads
+  // and workers stay `idle|running` permanently. `dept_sleep_all` remains
+  // REGISTERED host-plane as a documented NO-OP (R6 — never remove; the harness
+  // lifecycle service `sleepAll` stays as dead code in lifecycle.ts). It emits
+  // a warn and returns `{slept: 0, skipped: 0}` — it never marks, never
+  // persists, never disposes. The HOST's single-agent dept_sleep (spec 002
+  // rotation) is UNTOUCHED.
   const globalSleepAll = ctx.tools.register(defineTool({
     name: 'dept_sleep_all',
-    description: 'Org-wide quiet-sleep orchestration (host plane): durably mark EVERY configured department head as slept (sleepEpoch) in ONE write and dispose each live AgentHandle fire-and-forget — the coordinated quiet-sleep the Asistente owns. Excludes quality-head (stays live as the quality inspector — the D-Q7 anti-loop) and emits NO per-head quality-inspect directive (a batch must not re-wake QH once per head). Idempotent on an already-slept head (no-op). Returns how many heads slept and how many were skipped (already-slept). Never throws. Use the single-agent dept_sleep for one head (it still emits its quality-inspect directive).',
+    description: 'Retired orchestration tool (host plane) — a NO-OP since 2026-08-27 (LOTE A: head/worker sleep removed; heads and workers are permanent `idle|running`). Kept registered for R6 compatibility: calling it warns and returns {slept: 0, skipped: 0}. The single-agent host dept_sleep (spec 002 session rotation) is the only remaining sleep path.',
     parameters: {},
     output: {
       schema: {
@@ -7614,12 +7631,13 @@ export function applyInvoke(ctx: Context, config: Config) {
           skipped: { type: 'number', required: true }
         }
       },
-      render: (_args, value) => [{ type: 'text', text: `sleep-all: ${value.slept} head(s) slept, ${value.skipped} skipped (already-slept excluded; quality-head stays live, no per-head directive)` } as const]
+      render: (_args, value) => [{ type: 'text', text: `dept_sleep_all is a NO-OP since 2026-08-27 (head/worker sleep retired): ${value.slept} slept, ${value.skipped} skipped (nothing done — only the host dept_sleep rotation remains, spec 002)` } as const]
     },
     async execute(_args, exec): Promise<{ slept: number; skipped: number }> {
-      // The batch marks every configured head, not the caller — no exec.agent
-      // needed; the injected lifecycle service owns the iteration + persist.
-      return lifecycle.sleepAll(_args, exec as Parameters<typeof lifecycle.sleepAll>[1])
+      // No-op with warn (R6): the batch orchestration is retired — heads stay
+      // idle|running; sleepAll remains as dead code in lifecycle.ts.
+      ctx.logger.warn('[deepartments] dept_sleep_all is a NO-OP since 2026-08-27 (LOTE A): head/worker sleep retired — heads and workers stay idle|running; only the host dept_sleep rotation remains (spec 002)')
+      return { slept: 0, skipped: 0 }
     }
   }))
 

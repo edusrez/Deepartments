@@ -167,7 +167,10 @@ export type QualityInspectDirectiveSurface =
 export function qualityInspectDirectiveText(surface: QualityInspectDirectiveSurface): string {
   switch (surface.kind) {
     case 'worker-retired':
-      return `Quality inspect: worker retired (post ${surface.workerPostId}, session ${surface.sessionId}, archived ${surface.archived})`
+      // LOTE B (owner 2026-08-27): the worker-retired directive carries the
+      // explicit ANALYZE mission for the inspector (R6 — the previous frame is
+      // KEPT, the mission text is ADDED, never removed).
+      return `Quality inspect: worker retired (post ${surface.workerPostId}, session ${surface.sessionId}, archived ${surface.archived}). ANALYZE the retired agent: its log/session, the tools it used, its flows, its failures, and optimization opportunities → write the report to .dsh/reports/quality/ and report to quality-head`
     case 'head-slept':
       return `Quality inspect: head slept (post ${surface.headPostId}, session ${surface.sessionId}, sleepEpoch ${surface.sleepEpoch})`
     case 'host-rotated':

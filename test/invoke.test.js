@@ -1272,8 +1272,9 @@ test('head setup: the messaging toolset is registered scoped to the head agent (
       }
 
       // The head's own layer carries the messaging tools (installed by head setup).
+      // LOTE A (2026-08-27): dept_sleep is RETIRED from the own layer — not asserted.
       const { ctx: headCtx, key } = agents.childContexts[0]
-      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write']) {
         assert.ok(headCtx.tools.get(name, key), `${name} installed in the head own layer`)
       }
 
@@ -1765,8 +1766,9 @@ test('a head is lean: own-layer messaging tools present, host-plane tools NOT ex
       const head = agents.store.get('head-research-head')
       const { ctx: headCtx, key } = agents.childContexts[0]
       // Own-layer messaging tools are installed by head setup; B3: the board
-      // tools are GONE from every layer.
-      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
+      // tools are GONE from every layer. LOTE A (2026-08-27): dept_sleep is
+      // RETIRED from the own layer — not asserted.
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write']) {
         assert.ok(headCtx.tools.get(name, key), `${name} installed in the head own layer`)
       }
       for (const name of ['dept_room_read', 'dept_room_write', 'dept_room_who', 'dept_whereami', 'dept_witness_write']) {
@@ -1937,7 +1939,8 @@ test('Batch G head wake_counter parity: a SECOND dept_memo_write within one awak
   })
 })
 
-test('Batch G head wake_counter parity: dept_sleep bumps the ordinal (1→2) at the seed boundary on disk; the cold-resumed next incarnation reads the bumped ordinal', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('Batch G head wake_counter parity: dept_sleep bumps the ordinal (1→2) at the seed boundary on disk; the cold-resumed next incarnation reads the bumped ordinal', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     const journalText = 'HEAD-SLEEP-COUNTER: carry the bumped ordinal into the next incarnation.'
@@ -1983,7 +1986,8 @@ test('Batch G head wake_counter parity: dept_sleep bumps the ordinal (1→2) at 
   })
 })
 
-test('Batch G dept_sleep requires a saved journal (throws otherwise / rejects a host), then marks sleepEpoch durably AND disposes the AgentHandle', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('Batch G dept_sleep requires a saved journal (throws otherwise / rejects a host), then marks sleepEpoch durably AND disposes the AgentHandle', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     const { root, agents, dispose } = await bootPlugin(stateDir)
@@ -2028,7 +2032,8 @@ test('Batch G dept_sleep requires a saved journal (throws otherwise / rejects a 
   })
 })
 
-test('Batch G head-sleep worker drain (Fix A): dept_sleep records the head\'s IN-FLIGHT workers (provider:"worker", managerId=head, not retired) as a durable inflightWorkers ledger on the head entry — mark, not reap', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('Batch G head-sleep worker drain (Fix A): dept_sleep records the head\'s IN-FLIGHT workers (provider:"worker", managerId=head, not retired) as a durable inflightWorkers ledger on the head entry — mark, not reap', async () => {
   await withTempStateDir(async (stateDir) => {
     const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
     try {
@@ -2061,7 +2066,8 @@ test('Batch G head-sleep worker drain (Fix A): dept_sleep records the head\'s IN
   })
 })
 
-test('Batch G head sleep ROTATION (F8): a slept head is ARCHIVED on dept_sleep (sidebar row gone, journal+messages stay) and RECREATED FRESH — NEW session id, never resumed from the archived artifact — on its next wake: sleepEpoch cleared, previous incarnation traced, wake delivered, pinned title on the fresh row', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('Batch G head sleep ROTATION (F8): a slept head is ARCHIVED on dept_sleep (sidebar row gone, journal+messages stay) and RECREATED FRESH — NEW session id, never resumed from the archived artifact — on its next wake: sleepEpoch cleared, previous incarnation traced, wake delivered, pinned title on the fresh row', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     const journalText = 'RESPAWN-MEMORY: the research department settled on vanilla; carry this forward. SECRET-PHRASE-respawn-v1'
@@ -2124,7 +2130,8 @@ test('Batch G head sleep ROTATION (F8): a slept head is ARCHIVED on dept_sleep (
   })
 })
 
-test('Batch G F8 ghost-row fix (owner 2026-08-23): dept_sleep archives the LIVE agent session (agent.id) and converges the durable registry entry.sessionId to it at EVERY sleep — a head slept, woken fresh, slept AGAIN archives the CURRENT (fresh) incarnation, never an older/stale id', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('Batch G F8 ghost-row fix (owner 2026-08-23): dept_sleep archives the LIVE agent session (agent.id) and converges the durable registry entry.sessionId to it at EVERY sleep — a head slept, woken fresh, slept AGAIN archives the CURRENT (fresh) incarnation, never an older/stale id', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     await seedJournal(stateDir, postId, 'GHOST-ROW-FIX: two full rotation cycles. SECRET-PHRASE-ghost-v1')
@@ -2177,7 +2184,8 @@ test('Batch G F8 ghost-row fix (owner 2026-08-23): dept_sleep archives the LIVE 
   })
 })
 
-test('Piece 1: wakePost re-attaches the head session to the workspace (idempotent — the boot-race recovery for the native sidebar)', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('Piece 1: wakePost re-attaches the head session to the workspace (idempotent — the boot-race recovery for the native sidebar)', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     await seedJournal(stateDir, postId, 'PIECE-1-WAKE-ATTACH: re-attach on cold wake')
@@ -2251,7 +2259,8 @@ test('Batch G regression: a head that never slept wakes normally via the live fo
 // double dept_sleep) JOIN the same detach instead of racing it. The stub gates
 // below model the real whenIdle never settling while the turn runs.
 
-test('Batch G self-deadlock fix: a head dept_sleep RETURNS immediately even when its own handle dispose machine cannot settle (never-settling whenIdle) — the detach runs in the background', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('Batch G self-deadlock fix: a head dept_sleep RETURNS immediately even when its own handle dispose machine cannot settle (never-settling whenIdle) — the detach runs in the background', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     await seedJournal(stateDir, postId, 'SELF-DEADLOCK-FIX: sleep must return while the dispose hangs.')
@@ -2280,7 +2289,8 @@ test('Batch G self-deadlock fix: a head dept_sleep RETURNS immediately even when
   })
 })
 
-test('Batch G self-deadlock fix: a DOUBLE dept_sleep shares ONE in-flight detach (no double-dispose), and the shared promise settles + cleans once the gate opens', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('Batch G self-deadlock fix: a DOUBLE dept_sleep shares ONE in-flight detach (no double-dispose), and the shared promise settles + cleans once the gate opens', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     await seedJournal(stateDir, postId, 'DOUBLE-SLEEP: one detach for two sleeps.')
@@ -2314,7 +2324,8 @@ test('Batch G self-deadlock fix: a DOUBLE dept_sleep shares ONE in-flight detach
   })
 })
 
-test('Batch G self-deadlock fix: a bus wake DURING the in-flight detach joins the same promise, resumes cleanly after the detach (one dispose, one resume), and a later cycle disposes the RE-materialized handle (no stale map leak)', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('Batch G self-deadlock fix: a bus wake DURING the in-flight detach joins the same promise, resumes cleanly after the detach (one dispose, one resume), and a later cycle disposes the RE-materialized handle (no stale map leak)', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     await seedJournal(stateDir, postId, 'WAKE-DURING-DISPOSE: resume only after the detach.')
@@ -2400,7 +2411,8 @@ test('Batch G self-deadlock fix: a bus wake DURING the in-flight detach joins th
 // then the sleep returns, the turn ends, whenIdle settles and the zombie
 // self-heals (no persistence of the freeze).
 
-test('Batch G2 QD cascade fix (A): a head dept_sleep RETURNS within the bounded detach join even when its own quality-inspect directive delivery joins the never-settling detach — the self-directive re-entry must not re-create the self-deadlock one level deeper (pre-fix: the awaited directive → materializePost → UNBOUNDED join of the just-fired detach → QH self-sleep freeze)', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('Batch G2 QD cascade fix (A): a head dept_sleep RETURNS within the bounded detach join even when its own quality-inspect directive delivery joins the never-settling detach — the self-directive re-entry must not re-create the self-deadlock one level deeper (pre-fix: the awaited directive → materializePost → UNBOUNDED join of the just-fired detach → QH self-sleep freeze)', async () => {
   const prevInspect = process.env[QUALITY_INSPECT_ENV_VAR]
   const prevJoin = process.env.DEEPARTMENTS_DISPOSE_JOIN_TIMEOUT_MS
   process.env[QUALITY_INSPECT_ENV_VAR] = '1' // force the D-Q2 dice hit deterministically (QH self-slept directive)
@@ -2442,7 +2454,8 @@ test('Batch G2 QD cascade fix (A): a head dept_sleep RETURNS within the bounded 
   }
 })
 
-test('Batch G2 QD cascade fix (B): a bus send_message to a SLEPT head whose detach can never settle resolves within the bounded detach join — the frozen-host incident (pre-fix: the delivery joined the zombie detach forever), minting + waking a FRESH incarnation', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('Batch G2 QD cascade fix (B): a bus send_message to a SLEPT head whose detach can never settle resolves within the bounded detach join — the frozen-host incident (pre-fix: the delivery joined the zombie detach forever), minting + waking a FRESH incarnation', async () => {
   const prevInspect = process.env[QUALITY_INSPECT_ENV_VAR]
   const prevJoin = process.env.DEEPARTMENTS_DISPOSE_JOIN_TIMEOUT_MS
   process.env[QUALITY_INSPECT_ENV_VAR] = '0' // no self-directive emit: the disposes are the ONLY zombie sources (deterministic)
@@ -2488,7 +2501,8 @@ test('Batch G2 QD cascade fix (B): a bus send_message to a SLEPT head whose deta
 // FRESH session (a new id) instead of resuming the archived artifact. Host
 // rotation + worker retire are untouched (their own paths).
 
-test('F8 (a): a head dept_sleep with an ACTIVE session archives it server-side + marks the post dormant, and returns immediately (no self-deadlock wedge)', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('F8 (a): a head dept_sleep with an ACTIVE session archives it server-side + marks the post dormant, and returns immediately (no self-deadlock wedge)', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     await seedJournal(stateDir, postId, 'F8-A: sleep must archive + mark + not wedge.')
@@ -2563,7 +2577,8 @@ test('F8 (c): a head WITHOUT a session (post-only entry whose durable resume FAI
   })
 })
 
-test('F8 (e): journal and MESSAGES are preserved across a head dept_sleep (the archived session does NOT delete or truncate them)', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('F8 (e): journal and MESSAGES are preserved across a head dept_sleep (the archived session does NOT delete or truncate them)', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     const journalText = 'F8-E: this memory must SURVIVE the sleep rotation intact. SECRET-ARCHIVE-v1'
@@ -2708,8 +2723,9 @@ test('a worker is lean: board tools present, the department-lifecycle (create/re
       const createTool = headCtx.tools.get('dept_post_create', key)
       const created = await createTool.execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
       const { ctx: workerCtx, key: workerKey } = childContextFor(agents, created.sessionId)
-      // Worker gets the messaging toolset (B3: no board tools anywhere)...
-      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
+      // Worker gets the messaging toolset (B3: no board tools anywhere)... LOTE A
+      // (2026-08-27): dept_sleep is RETIRED from the own layer — not asserted.
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write']) {
         assert.ok(workerCtx.tools.get(name, workerKey), `${name} installed in the worker own layer`)
       }
       for (const name of ['dept_room_read', 'dept_room_write', 'dept_room_who', 'dept_whereami', 'dept_witness_write']) {
@@ -2724,7 +2740,8 @@ test('a worker is lean: board tools present, the department-lifecycle (create/re
   })
 })
 
-test('worker sleep + respawn: a slept worker is cold-resumed as a fresh incarnation on its next wake (deepartments-worker setup)', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('worker sleep + respawn: a slept worker is cold-resumed as a fresh incarnation on its next wake (deepartments-worker setup)', async () => {
   await withTempStateDir(async (stateDir) => {
     const { agents, head, headCtx, key, root, dispose } = await bootWithHead(stateDir)
     try {
@@ -2802,7 +2819,8 @@ test('Piece 1 cwd fix: a wake whose RESUME fails falls back to a FRESH create un
   })
 })
 
-test('worker wake_counter parity: a WRITE does not inflate the ordinal, but dept_sleep bumps it (1→2) at the seed boundary on disk', async () => {
+// legacy A+B: worker sleep retired 2026-08-27 — kept for history (R6)
+test.skip('worker wake_counter parity: a WRITE does not inflate the ordinal, but dept_sleep bumps it (1→2) at the seed boundary on disk', async () => {
   await withTempStateDir(async (stateDir) => {
     const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
     try {
@@ -3187,27 +3205,22 @@ test('m-64 dept_who member state: a RESIDENT-but-idle member (session loaded, tu
 
 test('m-64 dept_who member state precedence: a SLEPT-but-LIVE head (sleepEpoch set + a lingering AgentHandle — the deploy-restart case) renders "sleeping", NEVER the contradictory "live, sleeping"', async () => {
   await withTempStateDir(async (stateDir) => {
-    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    const postId = 'research-head'
+    const signal = new AbortController().signal
+    // LOTE A (2026-08-27): head dept_sleep is RETIRED — the slept state is
+    // SEEDED directly as the legacy on-disk shape (sleepEpoch entry). The boot
+    // leaves a slept CONFIGURED head DORMANT (ensureHead sleepEpoch gate),
+    // exactly the legacy entry the catalog still renders as "sleeping".
+    await seedPost(stateDir, { postId, sessionId: 'head-research-head', roomId: 'research', agentPreset: 'deepartments-head', sleepEpoch: Date.now() })
+    const { root, agents, dispose } = await bootPlugin(stateDir)
     try {
-      const postId = 'research-head'
-      const signal = new AbortController().signal
-      const memo = headCtx.tools.get('dept_memo_write', key)
-      const sleep = headCtx.tools.get('dept_sleep', key)
-      // Save a journal, then sleep the head durably (sleepEpoch persisted +
-      // live handle disposed).
-      await memo.execute({ summary: 'Memory saved before sleeping.' }, { agent: head, signal })
-      const result = await sleep.execute({}, { agent: head, signal })
-      assert.ok(typeof result.sleepEpoch === 'number' && result.sleepEpoch > 0, 'head slept durably')
-      await waitFor(async () => (await readPosts(stateDir))[postId].sleepEpoch !== undefined, 5000, 'sleepEpoch persisted to posts.json')
-      const posts = await readPosts(stateDir)
-      assert.ok(typeof posts[postId].sleepEpoch === 'number', 'sleepEpoch persisted durably')
+      await waitFor(async () => (await readPosts(stateDir))[postId].sleepEpoch !== undefined, 5000, 'sleepEpoch persisted durably (seeded legacy entry)')
+      assert.equal(agents.store.has('head-research-head'), false, 'the slept head has no live handle until we plant the lingering one')
       // Reproduce the m-228/QD deploy-restart class: a slept head whose durable
       // session id now has a LINGERING AgentHandle in the registry (the dispose
       // never ran before the restart). `live` is therefore TRUE and `sleeping`
       // is TRUE simultaneously — exactly the contradictory-combo case.
-      const headSessionId = posts[postId].sessionId
-      assert.equal(agents.store.has(headSessionId), false, 'the slept head has no live handle until we plant the lingering one')
-      agents.put(fakeParentAgent(SessionId(headSessionId)))
+      agents.put(fakeParentAgent(SessionId('head-research-head')))
       // C1 (m-264): the DEFAULT `active` view now HIDES a non-caller sleeping
       // member — this precedence test needs the FULL roster (`scope: 'all'`,
       // the includeRetired-compat superset) to observe the slept head row.
@@ -3300,22 +3313,17 @@ test('A1/A2/A5 dept_who scope: default `active` HIDES retired rows; `{ scope: "i
 
 test('A6 dept_who scope (C1): default `active` HIDES a SLEEPING (non-retired) worker; `all` (and its `includeRetired` alias) LIST it with state "sleeping" — the header shows the sleeping/offline-hidden count', async () => {
   await withTempStateDir(async (stateDir) => {
+    // LOTE A (2026-08-27): worker dept_sleep is RETIRED — the DORMANT worker is
+    // SEEDED directly as the legacy on-disk shape (a worker entry carrying
+    // sleepEpoch — the legacy entry the catalog still renders as "sleeping").
+    await seedPost(stateDir, { postId: 'worker-dormant', sessionId: 'worker-worker-dormant-legacy', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', departmentId: 'research', managerId: 'research-head', sleepEpoch: Date.now() })
     const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
     try {
       const signal = new AbortController().signal
       // A LIVE worker — stays in every view (both scopes).
       await headCtx.tools.get('dept_post_create', key).execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
-      // A SECOND worker — SLEPT (memo + dept_sleep through ITS OWN ctx, the
-      // m-64 :3156 precedent): sleepEpoch durable + handle disposed.
-      const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'worker-dormant', role: 'builder' }, { agent: head, signal })
-      const sid = created.sessionId
-      const wctx = childContextFor(agents, sid)
-      assert.ok(wctx, 'the dormant worker has its own scoped toolset')
-      const dormantWorker = agents.store.get(sid)
-      await wctx.ctx.tools.get('dept_memo_write', wctx.key).execute({ summary: 'memory before dormancy' }, { agent: dormantWorker, signal })
-      await wctx.ctx.tools.get('dept_sleep', wctx.key).execute({}, { agent: dormantWorker, signal })
-      await waitFor(async () => (await readPosts(stateDir))['worker-dormant']?.sleepEpoch !== undefined, 5000, 'the worker sleepEpoch is persisted durably')
-      await waitFor(() => agents.store.has(sid) === false, 5000, 'the worker AgentHandle is disposed after sleep')
+      await waitFor(async () => (await readPosts(stateDir))['worker-dormant']?.sleepEpoch !== undefined, 5000, 'the seeded worker sleepEpoch is persisted durably')
+      assert.equal(agents.store.has('worker-worker-dormant-legacy'), false, 'the dormant worker AgentHandle is never live (seeded entry)')
 
       const whoTool = root.tools.get('dept_who')
       const host = agents.put(fakeParentAgent())
@@ -5467,7 +5475,8 @@ test('Batch 7 U2 regression (B3): dept_who reports the NEW rotated host as sleep
   })
 })
 
-test('Batch 7 head regression: a head still sleeps through its own-layer dept_sleep (journal + sleepEpoch + dispose; no surface reset)', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('Batch 7 head regression: a head still sleeps through its own-layer dept_sleep (journal + sleepEpoch + dispose; no surface reset)', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     const { root, agents, dispose } = await bootPlugin(stateDir)
@@ -5543,34 +5552,15 @@ test('T1 archive: dept_memo_write archives each entry (archive grows per write; 
   })
 })
 
-test('T1 sleep boundary: dept_sleep records a per-session log named by the BUMPED ordinal (head own-layer AND host-plane host dept_sleep)', async () => {
+test('T1 sleep boundary (host plane): host-plane dept_sleep records a per-session log named by the BUMPED ordinal (head own-layer sleep retired 2026-08-27 — legacy A+B)', async () => {
   await withTempStateDir(async (stateDir) => {
-    // Head own-layer dept_sleep (seedJournal wake 1 → memo → sleep bumps to 2).
-    const headPostId = 'research-head'
-    const headJournalPath = await seedJournal(stateDir, headPostId, 'HEAD-ARCHIVE: archive the sleep boundary.')
     const { root, agents, dispose } = await bootPlugin(stateDir)
-    await waitFor(() => agents.store.has(`head-${headPostId}`), 5000, 'head created at boot')
     try {
-      const head = agents.store.get(`head-${headPostId}`)
-      const { ctx: headCtx, key } = agents.childContexts[0]
-      const memo = headCtx.tools.get('dept_memo_write', key)
-      const sleep = headCtx.tools.get('dept_sleep', key)
-      const signal = new AbortController().signal
-
-      await memo.execute({ summary: 'HEAD-ARCHIVE: archive the sleep boundary.' }, { agent: head, signal })
-      await sleep.execute({}, { agent: head, signal })
-      await waitFor(() => agents.store.has(`head-${headPostId}`) === false, 5000, 'handle disposed after sleep')
-
-      // The sleep boundary archives a session log named by the BUMPED ordinal (2).
-      const headSessionLog = path.join(stateDir, 'journals', 'sessions', `${headPostId}-2.md`)
-      const logText = await readFile(headSessionLog, 'utf8')
-      assert.match(logText, /^member: research-head$/m, 'head session log carries the member id')
-      assert.match(logText, /^wake_counter: 2$/m, 'head session log named by the BUMPED ordinal (2)')
-
       // Host-plane host dept_sleep (seedJournal wake 1 → sleep bumps to 2).
       const host = agents.put(fakeParentAgent())
       const hostId = `host-${host.id}`
       await seedJournal(stateDir, hostId, 'HOST-ARCHIVE: host sleep boundary.')
+      const signal = new AbortController().signal
       const sleepTool = root.tools.get('dept_sleep')
       await sleepTool.execute({}, { agent: host, signal })
       const hostSessionLog = path.join(stateDir, 'journals', 'sessions', `${hostId}-2.md`)
@@ -5614,7 +5604,7 @@ test('T1 index: journals/index.json reflects BOTH the archive entry AND the sess
   })
 })
 
-test('T1 degrade-silently: an unavailable transcript (no sessionPersistence.readRaw) still lets dept_memo_write AND dept_sleep succeed — stub written, never throws', async () => {
+test('T1 degrade-silently: an unavailable transcript (no sessionPersistence.readRaw) still lets dept_memo_write succeed — stub written, never throws (dept_sleep leg retired 2026-08-27 — legacy A+B)', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     const { root, agents, dispose } = await bootPlugin(stateDir)
@@ -5623,7 +5613,6 @@ test('T1 degrade-silently: an unavailable transcript (no sessionPersistence.read
       const head = agents.store.get(`head-${postId}`)
       const { ctx: headCtx, key } = agents.childContexts[0]
       const memo = headCtx.tools.get('dept_memo_write', key)
-      const sleep = headCtx.tools.get('dept_sleep', key)
       const signal = new AbortController().signal
 
       // Memo write: capture degrades to the stub form but the write still succeeds.
@@ -5632,12 +5621,6 @@ test('T1 degrade-silently: an unavailable transcript (no sessionPersistence.read
       assert.match(checkpoint, /^wake_counter: 1$/m, 'checkpoint written with ordinal 1 despite no transcript')
       const stubLog = await readFile(path.join(stateDir, 'journals', 'sessions', `${postId}-1.md`), 'utf8')
       assert.match(stubLog, /^transcript: unavailable$/m, 'session log is the STUB form when no transcript is capturable')
-
-      // Sleep: still succeeds (bumps the ordinal) despite the stub capture path.
-      const sleepResult = await sleep.execute({}, { agent: head, signal })
-      assert.ok(typeof sleepResult.sleepEpoch === 'number' && sleepResult.sleepEpoch > 0, 'dept_sleep succeeds (no throw) despite the stub capture')
-      const bumpedCheckpoint = await readFile(memoResult.memoPath, 'utf8')
-      assert.match(bumpedCheckpoint, /^wake_counter: 2$/m, 'dept_sleep bumped the ordinal 1 → 2 (checkpoint write + sleep unaffected)')
     } finally {
       await dispose()
     }
@@ -6010,7 +5993,8 @@ test('B2 send_message noWake gate: a noWake:true send to a dormant catalog head 
   })
 })
 
-test('B3 m-361 regression: a QD ack (ack:true) to a JUST-SLEPT head stays dormant (sleepEpoch preserved, NO materialize/wake) and the ack record persists as prepared (drains at the next real wake); a NON-ack send to the same dormant head still ALWAYS wakes it (the exempt work-delivery path); the head-slept DIRECTIVE to quality-head is STILL always-wake (emitted + delivered to the LIVE QH, never no-waked by B3)', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('B3 m-361 regression: a QD ack (ack:true) to a JUST-SLEPT head stays dormant (sleepEpoch preserved, NO materialize/wake) and the ack record persists as prepared (drains at the next real wake); a NON-ack send to the same dormant head still ALWAYS wakes it (the exempt work-delivery path); the head-slept DIRECTIVE to quality-head is STILL always-wake (emitted + delivered to the LIVE QH, never no-waked by B3)', async () => {
   await withTempStateDir(async (stateDir) => {
     const env = await bootWithQD(stateDir)
     try {
@@ -6543,7 +6527,7 @@ test('F10 (spec 004 §7.1): a worker inherits its role template REAL GLOBAL tool
       for (const name of ['web_search', 'web_fetch', 'read', 'write', 'glob', 'grep']) {
         assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher worker "${r.workerId}" inherits the global role tool ${name}`)
       }
-      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write']) {
         assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher worker "${r.workerId}" still sees the bus/ciclo tool ${name}`)
       }
       assert.equal(researcher.ctx.tools.get('edit', researcher.key), undefined, 'researcher has NO edit (role does not declare it)')
@@ -6580,7 +6564,8 @@ test('F10 (spec 004 §7.1): a worker with NO declared role tools (legacy dept_po
       assert.equal(workerCtx.tools.get('web_search', workerKey), undefined, 'a tool-less worker does NOT inherit the global web_search (board-only)')
       assert.equal(workerCtx.tools.get('read', workerKey), undefined, 'a tool-less worker does NOT inherit the global read (board-only)')
       // The own-layer bus/ciclo tools are exempt from the mask — still visible.
-      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
+      // LOTE A (2026-08-27): dept_sleep is RETIRED from the own layer — not asserted.
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write']) {
         assert.ok(workerCtx.tools.get(name, workerKey), `tool-less worker still sees the bus/ciclo tool ${name}`)
       }
     } finally {
@@ -6591,28 +6576,32 @@ test('F10 (spec 004 §7.1): a worker with NO declared role tools (legacy dept_po
 
 test('F10 (spec 004 §7.1): a department HEAD inherits the head base tools (read/write/glob/grep/web_search/web_fetch) + its own-layer board/lifecycle tools, and never edit', async () => {
   await withTempStateDir(async (stateDir) => {
-    const { agents, root, head, headCtx, key, dispose } = await bootWithHead(stateDir, { globalTools: F10_GLOBAL_TOOLS })
+    const { agents, root, head, headCtx, key, workspaceRegistry, dispose } = await bootWithHead(stateDir, { globalTools: F10_GLOBAL_TOOLS })
     const signal = new AbortController().signal
     try {
       // The booted head's OWN-LAYER board + department-lifecycle tools are
       // always visible (exempt from the mask) — asserted on the booted context.
-      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep', 'dept_worker_spawn', 'dept_worker_retire', 'dept_post_create', 'dept_post_retire', 'dept_job_run', 'dept_job_list']) {
+      // LOTE A (2026-08-27): dept_sleep is RETIRED from the own layer — not asserted.
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_worker_spawn', 'dept_worker_retire', 'dept_post_create', 'dept_post_retire', 'dept_job_run', 'dept_job_list']) {
         assert.ok(headCtx.tools.get(name, key), `department head sees its own-layer tool ${name}`)
       }
       assert.equal(headCtx.tools.get('edit', key), undefined, 'department head has NO edit (never granted)')
       // The INHERITED surface (read/web_search) only lands where the head setup
       // ran AFTER the globals were registered — the booted head materialized at
-      // boot (before the post-boot global registration), so sleep + bus wake
-      // rotates it to a FRESH session whose setup IS post-globals (the F8
-      // re-materialization runs materializePost → headSetup).
+      // boot (before the post-boot global registration), so a wake ROTATES it to
+      // a FRESH session whose setup IS post-globals. LOTE A (2026-08-27): head
+      // dept_sleep is RETIRED — the rotation is driven through the ARCHIVE-LEAK
+      // path (P2) instead: a head whose durable session id is in the workspace
+      // registry's archived set is rotated to a FRESH session on its next bus
+      // wake (never resumed).
       await headCtx.tools.get('dept_memo_write', key).execute({ summary: 'rotate to expose inherited head tools' }, { agent: head, signal })
-      await headCtx.tools.get('dept_sleep', key).execute({}, { agent: head, signal })
-      await waitFor(() => agents.store.has('head-research-head') === false, 5000, 'head handle disposed after sleep')
+      agents.store.delete('head-research-head')
+      if (!workspaceRegistry.archived.includes('head-research-head')) workspaceRegistry.archived.push('head-research-head')
       const r = await root.tools.get('send_message').execute(
         { to: ['research-head'], text: 'wake' },
         { agent: { id: 'host-any', session: { header: {} } }, signal }
       )
-      assert.equal(r.delivered['research-head'], 'resumed', 'bus wake of the slept head reports resumed')
+      assert.equal(r.delivered['research-head'], 'resumed', 'bus wake of the archived-session head reports resumed')
       await waitFor(() => agents.createCalls.length > 1, 5000, 'a fresh head session was created on wake (rotation)')
       const fresh = childContextFor(agents, String(agents.createCalls.at(-1).sessionId))
       assert.ok(fresh !== undefined, 'the re-materialized (fresh) head context resolves')
@@ -6684,7 +6673,7 @@ test('F10 (spec 004 §7.1): a role that DECLARES the own-layer bus/lifecycle too
         assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher conserves the inherited tool ${name} (restrict did not fall to allow:[])`)
       }
       // The own-layer bus/lifecycle tools are exempt from the mask — still visible.
-      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write']) {
         assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher still sees the own-layer bus tool ${name}`)
       }
     } finally {
@@ -6733,7 +6722,7 @@ test('F10 (spec 004 §7.1): the preset mount is AWAITED BEFORE the capability pr
       }
       assert.equal(researcher.ctx.tools.get('edit', researcher.key), undefined, 'researcher has NO edit (the role does not declare it)')
       // The worker's own-layer bus tools stay visible (exempt from the mask).
-      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write', 'dept_sleep']) {
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write']) {
         assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher still sees the bus/ciclo tool ${name}`)
       }
       assert.ok(agentPresets.mountCalls.includes('deepartments-worker'), 'the worker preset was mounted during setup')
@@ -7026,7 +7015,8 @@ test('F3 dept_worker_retire: marks retired (entry kept, live catalog stops addre
   })
 })
 
-test('Fix B head-sleep worker drain: a worker report delivered to its DOMANT manager head is AUTO-RETIRED on delivery — status "resumed" (the sleep-boundary signature) and posts[workerId].retired === true', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('Fix B head-sleep worker drain: a worker report delivered to its DOMANT manager head is AUTO-RETIRED on delivery — status "resumed" (the sleep-boundary signature) and posts[workerId].retired === true', async () => {
   await withTempStateDir(async (stateDir) => {
     const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
     try {
@@ -12242,6 +12232,9 @@ test('QD probability gate: worker default 0.25 + clamp; worker uses injected rng
   }
   // directive text is pure and human-readable.
   assert.match(qualityInspectDirectiveText({ kind: 'worker-retired', workerPostId: 'researcher', sessionId: 's-1', archived: true }), /worker retired.*post researcher/)
+  // LOTE B (2026-08-27): the worker-retired directive carries the explicit
+  // ANALYZE mission (the previous frame is KEPT, the mission is ADDED — R6).
+  assert.match(qualityInspectDirectiveText({ kind: 'worker-retired', workerPostId: 'researcher', sessionId: 's-1', archived: true }), /ANALYZE the retired agent: its log\/session, the tools it used, its flows, its failures, and optimization opportunities → write the report to \.dsh\/reports\/quality\/ and report to quality-head/, 'the worker-retired directive text carries the ANALYZE mission (LOTE B)')
   assert.match(qualityInspectDirectiveText({ kind: 'head-slept', headPostId: 'research-head', sessionId: 'head-research-head', sleepEpoch: 123 }), /head slept.*sleepEpoch 123/)
   assert.match(qualityInspectDirectiveText({ kind: 'post-error', postId: 'ghost-head', messageId: 'm-1', error: 'boom' }), /post-error.*post ghost-head.*error boom/)
 })
@@ -12311,12 +12304,35 @@ test('QD worker retire (env forced true): a fresh retire emits ONE quality-inspe
         const retiredDirs = dirs.filter((d) => /worker retired/.test(d.text))
         assert.equal(retiredDirs.length, 1, 'a fresh retire (dice true) emits exactly ONE worker-retired directive')
         assert.match(retiredDirs[0].text, new RegExp(`worker retired.*post ${spawned.result.workerId}`), 'the directive names the retired worker')
-        // Idempotent no-op retire: wasRetired=true → the QD hook never re-fires (R1).
+        // LOTE B (2026-08-27): the directive carries the explicit ANALYZE mission.
+        assert.match(retiredDirs[0].text, /ANALYZE the retired agent: its log\/session, the tools it used, its flows, its failures, and optimization opportunities → write the report to \.dsh\/reports\/quality\/ and report to quality-head/, 'the smoke directive carries the ANALYZE mission (LOTE B)')
+        // Idempotent no-op retire: retirePost's idempotent early return (R1) runs
+        // BEFORE its dice → the QD hook never re-fires (one directive per REAL
+        // archive, never on the no-op).
         const again = await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: spawned.result.workerId }, { agent: head, signal })
         assert.equal(again.retired, true, 'the second retire succeeds as a no-op')
         await new Promise((r) => setTimeout(r, 100))
         dirs = await qualityDirectives(stateDir)
         assert.equal(dirs.filter((d) => /worker retired/.test(d.text)).length, 1, 'the idempotent no-op retire emits NO additional directive')
+        // LOTE B seam (2/4): the HOST dept_post_retire path goes through the SAME
+        // retirePost → its worker branch rolls the SAME dice (env=1 → emits).
+        const spawnedHost = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'qd host-seam' })
+        const hostAgent = env.agents.put(fakeParentAgent())
+        const hostRetire = await env.root.tools.get('dept_post_retire').execute({ postId: spawnedHost.result.workerId }, { agent: hostAgent, signal })
+        assert.equal(hostRetire.retired, true, 'the host dept_post_retire commits (shared retirePost)')
+        const hostDirs = (await qualityDirectives(stateDir)).filter((d) => /worker retired/.test(d.text))
+        assert.equal(hostDirs.length, 2, 'the host dept_post_retire seam emits the worker-retired directive too (exactly TWO total)')
+        assert.ok(hostDirs.some((d) => d.text.includes(spawnedHost.result.workerId)), 'the host-seam directive names the host-retired worker')
+        // LOTE B seam (3/4): the AUTO-RETIRE by delivery — a worker that delivers
+        // a message to its manager head is retired during the delivery via the
+        // SAME retirePost (Fix B path) → the dice fires there too.
+        const spawnedDelivery = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'qd delivery-seam' })
+        await spawnedDelivery.ctx.tools.get('send_message', spawnedDelivery.key).execute({ to: ['research-head'], text: 'report: work complete' }, { agent: spawnedDelivery.worker, signal })
+        await waitFor(async () => (await readPosts(stateDir))[spawnedDelivery.result.workerId]?.retired === true, 5000, 'the delivering worker is auto-retired at delivery (Fix B)')
+        await new Promise((r) => setTimeout(r, 100))
+        const deliveryDirs = (await qualityDirectives(stateDir)).filter((d) => /worker retired/.test(d.text))
+        assert.equal(deliveryDirs.length, 3, 'the delivery AUTO-RETIRE seam emits the worker-retired directive too (exactly THREE total)')
+        assert.ok(deliveryDirs.some((d) => d.text.includes(spawnedDelivery.result.workerId)), 'the delivery-seam directive names the auto-retired worker')
       } finally {
         await env.dispose()
       }
@@ -12326,7 +12342,7 @@ test('QD worker retire (env forced true): a fresh retire emits ONE quality-inspe
   })
 })
 
-test('QD worker retire rng-false: emits no quality-inspect directive (worker sample misses)', async () => {
+test('QD worker retire rng-false (env=0) + deterministic Math.random seed: a worker retire that misses the dice emits NO directive; a seeded rng 0.1 (hits the 0.25 sample) emits exactly ONE with the ANALYZE mission — each on the SHARED retirePost seam', async () => {
   await withTempStateDir(async (stateDir) => {
     process.env[QUALITY_INSPECT_ENV_VAR] = '0' // force the worker dice false
     try {
@@ -12338,8 +12354,53 @@ test('QD worker retire rng-false: emits no quality-inspect directive (worker sam
         const result = await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: spawned.result.workerId }, { agent: head, signal })
         assert.equal(result.retired, true, 'the retire still commits outside the dice')
         await new Promise((r) => setTimeout(r, 100))
-        const dirs = await qualityDirectives(stateDir)
+        let dirs = await qualityDirectives(stateDir)
         assert.equal(dirs.filter((d) => /worker retired/.test(d.text)).length, 0, 'a worker retire that misses the dice emits NO directive')
+        // LOTE B seam (2/4) under env=0: the HOST dept_post_retire path (same
+        // retirePost worker branch) also misses the dice → NO directive.
+        const spawnedHost = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'qd host-miss' })
+        const hostAgent = env.agents.put(fakeParentAgent())
+        await env.root.tools.get('dept_post_retire').execute({ postId: spawnedHost.result.workerId }, { agent: hostAgent, signal })
+        await new Promise((r) => setTimeout(r, 100))
+        dirs = await qualityDirectives(stateDir)
+        assert.equal(dirs.filter((d) => /worker retired/.test(d.text)).length, 0, 'the host dept_post_retire seam misses the dice → NO directive')
+        // LOTE B seam (3/4) under env=0: the delivery AUTO-RETIRE (worker
+        // delivering to its manager head is retired in the delivery via the same
+        // retirePost) also misses the dice → NO directive.
+        const spawnedDelivery = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'qd delivery-miss' })
+        await spawnedDelivery.ctx.tools.get('send_message', spawnedDelivery.key).execute({ to: ['research-head'], text: 'report: work complete' }, { agent: spawnedDelivery.worker, signal })
+        await waitFor(async () => (await readPosts(stateDir))[spawnedDelivery.result.workerId]?.retired === true, 5000, 'the delivering worker is auto-retired at delivery (Fix B)')
+        await new Promise((r) => setTimeout(r, 100))
+        dirs = await qualityDirectives(stateDir)
+        assert.equal(dirs.filter((d) => /worker retired/.test(d.text)).length, 0, 'the delivery AUTO-RETIRE seam misses the dice → NO directive')
+        // LOTE B deterministic dice: DELETE the env override and seed Math.random
+        // directly — rng 0.1 < default 0.25 → the retirePost dice FIRES; rng 0.9
+        // ≥ 0.25 → it misses. (The default probability path is exercised.)
+        delete process.env[QUALITY_INSPECT_ENV_VAR]
+        const originalRandom = Math.random
+        try {
+          // Spawn with the REAL Math.random (crypto UUIDs are unaffected, but the
+          // stub stays scoped to the retire execute only).
+          const seededHit = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'qd rng-0.1' })
+          Math.random = () => 0.1 // below the 0.25 sample threshold → dice TRUE
+          await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: seededHit.result.workerId }, { agent: head, signal })
+          Math.random = originalRandom
+          await new Promise((r) => setTimeout(r, 100))
+          dirs = await qualityDirectives(stateDir)
+          const hitDirs = dirs.filter((d) => /worker retired/.test(d.text))
+          assert.equal(hitDirs.length, 1, 'seeded rng 0.1 (< 0.25) → EXACTLY ONE worker-retired directive (the retirePost dice fired)')
+          assert.match(hitDirs[0].text, /ANALYZE the retired agent/, 'the seeded-hit directive carries the ANALYZE mission')
+          assert.match(hitDirs[0].text, new RegExp(`post ${seededHit.result.workerId}`), 'the seeded-hit directive names the seeded worker')
+          const seededMiss = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'qd rng-0.9' })
+          Math.random = () => 0.9 // above the 0.25 sample threshold → dice FALSE
+          await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: seededMiss.result.workerId }, { agent: head, signal })
+          Math.random = originalRandom
+          await new Promise((r) => setTimeout(r, 100))
+          dirs = await qualityDirectives(stateDir)
+          assert.equal(dirs.filter((d) => /worker retired/.test(d.text)).length, 1, 'seeded rng 0.9 (≥ 0.25) → NO additional directive (the dice misses)')
+        } finally {
+          Math.random = originalRandom
+        }
       } finally {
         await env.dispose()
       }
@@ -12349,7 +12410,9 @@ test('QD worker retire rng-false: emits no quality-inspect directive (worker sam
   })
 })
 
-test('QD head dept_sleep ALWAYS emits a quality-inspect directive (D-Q3 mandate, no dice)', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6) — D-Q3
+// head-slept mandate removed with the head sleep system
+test.skip('QD head dept_sleep ALWAYS emits a quality-inspect directive (D-Q3 mandate, no dice)', async () => {
   await withTempStateDir(async (stateDir) => {
     const env = await bootWithQD(stateDir)
     try {
@@ -12370,7 +12433,9 @@ test('QD head dept_sleep ALWAYS emits a quality-inspect directive (D-Q3 mandate,
   })
 })
 
-test('QD anti-loop QH emitter (owner m-178/m-182): the QH head dept_sleep directive is NOT always fired (gated by the dice), while another head dept_sleep IS always fired (100%) even under the same env override', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6) — D-Q7
+// anti-loop removed with the head sleep system
+test.skip('QD anti-loop QH emitter (owner m-178/m-182): the QH head dept_sleep directive is NOT always fired (gated by the dice), while another head dept_sleep IS always fired (100%) even under the same env override', async () => {
   await withTempStateDir(async (stateDir) => {
     // env=0 FORCES the probability path (the QH dice + worker dice) false — so a
     // QH head-slept directive is deterministically gated OUT. A NON-QH head stays
@@ -12446,10 +12511,11 @@ test('QD host rotation ALWAYS emits one quality-inspect directive (host = "H", n
 // AgentHandle fire-and-forget. It emits ZERO per-head QD `head-slept` directives
 // (a batch must not re-wake QH once per head — the D-Q7 anti-loop); the
 // SINGLE-agent dept_sleep path is untouched (its own directive still emits).
-test('B1 dept_sleep_all (host plane): every configured NON-QH head is slept durably (sleepEpoch persisted, live handle disposed, dormant-not-respawned) in the batch; quality-head stays LIVE (never slept); ZERO head-slept directives reach quality-head; idempotent re-issue no-ops', async () => {
+test('B1 dept_sleep_all (host plane): RETIRED since 2026-08-27 (LOTE A) — the org-wide orchestration is a NO-OP with warn: no head is slept, no handle disposed, {slept: 0, skipped: 0}; every head stays idle|running (R6 — tool stays registered, sleepAll dead code)', async () => {
   await withTempStateDir(async (stateDir) => {
-    // Three configured department heads: research + programming (the batch
-    // sleeps these) and quality (the QD inspector — MUST stay live).
+    // Three configured department heads: research + programming (the OLD batch
+    // slept these) and quality (the QD inspector — always stayed live). Under
+    // LOTE A none of them sleeps at all.
     const org = {
       departments: [
         { id: 'research', name: 'Research', coordinator: { postId: 'research-head', role: 'Research department head', provider: 'deepseek-official', agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' } } },
@@ -12466,37 +12532,32 @@ test('B1 dept_sleep_all (host plane): every configured NON-QH head is slept dura
       const host = env.agents.put(fakeParentAgent())
 
       const sleepAll = env.root.tools.get('dept_sleep_all')
-      assert.ok(sleepAll, 'dept_sleep_all is registered on the host plane (the org-wide quiet-sleep orchestration)')
+      assert.ok(sleepAll, 'dept_sleep_all is STILL registered on the host plane (R6 — never removed)')
       const result = await sleepAll.execute({}, { agent: host, signal })
-      assert.equal(result.slept, 2, 'exactly TWO configured non-QH heads slept (research + programming)')
-      assert.equal(result.skipped, 0, 'no already-slept head on a fresh batch (zero skipped)')
+      // LOTE A: the orchestration is a documented NO-OP — heads/workers never sleep.
+      assert.equal(result.slept, 0, 'NO head slept (head sleep retired 2026-08-27)')
+      assert.equal(result.skipped, 0, 'nothing skipped, nothing touched')
 
-      // Durable marks in ONE write: EVERY configured NON-QH head carries the
-      // sleepEpoch; quality-head does NOT (stays live as the QD inspector).
+      // No durable marks were written: every head stays permanently idle|running.
       const posts = await readPosts(stateDir)
-      assert.equal(typeof posts['research-head'].sleepEpoch, 'number', 'research-head sleepEpoch persisted durably')
-      assert.equal(typeof posts['programming-head'].sleepEpoch, 'number', 'programming-head sleepEpoch persisted durably')
-      assert.equal(posts['quality-head'].sleepEpoch, undefined, 'quality-head is NOT slept by the batch (never put to sleep — the D-Q7 anti-loop)')
+      assert.equal(posts['research-head'].sleepEpoch, undefined, 'research-head is NOT slept (no-op)')
+      assert.equal(posts['programming-head'].sleepEpoch, undefined, 'programming-head is NOT slept (no-op)')
+      assert.equal(posts['quality-head'].sleepEpoch, undefined, 'quality-head is NOT slept (no-op)')
+      assert.equal(env.agents.store.has('head-research-head'), true, 'research-head handle STAYS LIVE (never disposed)')
+      assert.equal(env.agents.store.has('head-programming-head'), true, 'programming-head handle STAYS LIVE (never disposed)')
+      assert.equal(env.agents.store.has('head-quality-head'), true, 'quality-head handle STAYS LIVE (never disposed)')
 
-      // Each slept head's live AgentHandle was disposed (dormant, NOT re-woken /
-      // NOT re-materialized until its next bus wake); quality-head stays live.
-      await waitFor(() => env.agents.store.has('head-research-head') === false, 5000, 'research-head handle disposed (dormant)')
-      await waitFor(() => env.agents.store.has('head-programming-head') === false, 5000, 'programming-head handle disposed (dormant)')
-      assert.equal(env.agents.store.has('head-quality-head'), true, 'quality-head handle is STILL LIVE (never disposed)')
-
-      // ZERO per-head QD `head-slept` directives reached quality-head (the batch
-      // suppresses them — QH is not re-woken once per slept head).
+      // ZERO per-head QD `head-slept` directives (the no-op emits nothing).
       const dirs = await qualityDirectives(stateDir)
-      assert.equal(dirs.filter((d) => /head slept/.test(d.text)).length, 0, 'NO per-head head-slept directive emitted for the batch (QH not re-woken N times)')
+      assert.equal(dirs.filter((d) => /head slept/.test(d.text)).length, 0, 'NO head-slept directive emitted for the no-op batch')
 
-      // Idempotent: a RE-ISSUED dept_sleep_all on the same state counts both
-      // already-slept heads as SKIPPED (no re-mark, no re-dispose) — slept 0.
+      // Idempotent by construction: a RE-ISSUED dept_sleep_all is also {0, 0}.
       const rerun = await sleepAll.execute({}, { agent: host, signal })
-      assert.equal(rerun.slept, 0, 're-issue no-ops: no head newly slept')
-      assert.equal(rerun.skipped, 2, 're-issue counts BOTH already-slept heads as skipped (idempotent no-op)')
+      assert.equal(rerun.slept, 0, 're-issue stays a no-op (slept 0)')
+      assert.equal(rerun.skipped, 0, 're-issue stays a no-op (skipped 0)')
       const posts2 = await readPosts(stateDir)
-      assert.equal(typeof posts2['research-head'].sleepEpoch, 'number', 're-issue does not erase the research-head sleepEpoch')
-      assert.equal(typeof posts2['programming-head'].sleepEpoch, 'number', 're-issue does not erase the programming-head sleepEpoch')
+      assert.equal(typeof posts2['research-head'].sleepEpoch, 'undefined', 're-issue touches nothing (no sleepEpoch anywhere)')
+      assert.equal(typeof posts2['programming-head'].sleepEpoch, 'undefined', 're-issue touches nothing (no sleepEpoch anywhere)')
     } finally {
       await env.dispose()
     }
@@ -13366,7 +13427,8 @@ test('m-119 real Loader (boot hook): a gone WORKER session is FLAGGED (warn-on-d
 // idempotency no-op on a re-issued directive.
 // ---------------------------------------------------------------------------
 
-test('head-sleep rotation-race (a): the dept_sleep teardown SEALS FIRST (durable sleepEpoch + session archived) and dispatches the dispose BEFORE the QD directive await — the seal + detach are committed even while the detach is held in-flight, and the head-slept mandate still fires exactly once', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('head-sleep rotation-race (a): the dept_sleep teardown SEALS FIRST (durable sleepEpoch + session archived) and dispatches the dispose BEFORE the QD directive await — the seal + detach are committed even while the detach is held in-flight, and the head-slept mandate still fires exactly once', async () => {
   await withTempStateDir(async (stateDir) => {
     const env = await bootWithQD(stateDir)
     try {
@@ -13428,7 +13490,8 @@ test('head-sleep rotation-race (b): a HALF-SLEPT head (sleepEpoch set, session N
   })
 })
 
-test('head-sleep rotation-race (c): a RE-ISSUED dept_sleep on an already-slept head is a NO-OP — returns the already-slept sleepEpoch without re-archiving, re-disposing, re-marking or re-bumping the wake counter', async () => {
+// legacy A+B: head sleep retired 2026-08-27 — kept for history (R6)
+test.skip('head-sleep rotation-race (c): a RE-ISSUED dept_sleep on an already-slept head is a NO-OP — returns the already-slept sleepEpoch without re-archiving, re-disposing, re-marking or re-bumping the wake counter', async () => {
   await withTempStateDir(async (stateDir) => {
     await seedJournal(stateDir, 'research-head', 'IDEMPOTENCY: a re-sleep must be a no-op.')
     const { agents, workspaceRegistry, dispose } = await bootPlugin(stateDir)

@@ -359,10 +359,12 @@ git-capable dept role; `dept_exec` closes that gap **scoped**, not open).
 ### 5.3 Existing tools reused (no change)
 
 The IPD head uses the same head-layer tools as the RD head: `dept_worker_spawn`,
-`dept_worker_retire`, `dept_job_run`, `dept_job_list`, `dept_who`, `dept_sleep`,
+`dept_worker_retire`, `dept_job_run`, `dept_job_list`, `dept_who`,
 `dept_memo_write` — all resolve the department from the calling head, so a
 `internal-programming-head` config immediately gets the lifecycle tools for its
-own department (agenda §5c: invoke.ts:5007, 5086, 5133). The messaging ACL
+own department (agenda §5c: invoke.ts:5007, 5086, 5133). (LOTE A, 2026-08-27:
+heads no longer carry `dept_sleep` in their own layer — only the host sleeps.)
+The messaging ACL
 (`aclDenyGround`, invoke.ts:4678-4723) is generic — a new `internal-programming`
 department is automatically scoped: workers message only within the dept (incl.
 the IPD head), never the Asistente directly; the IPD head is addressed by the
@@ -426,10 +428,10 @@ workspace, so deliverable paths are relative to that workspace (`reports/...`).
 
 | Role | Persona (template intent) | Tools (allow-list → restrict mask) | Notes |
 |---|---|---|---|
-| `builder` | Internal programming executor: edits code in the repos/plugin, builds + tests, fixes READMEs, runs scoped `dept_exec` commands; reports to the IPD head | read, write, **edit**, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write, dept_sleep, **dept_exec** | **ONLY role with `edit`** and the ONLY role that legitimately needs `dept_exec` for full code changes. Never commits (the Asistente commits); reports. |
-| `reviewer` | Independent review: reads changed files, runs verification commands via `dept_exec` (read-only usage), issues PASS/FAIL; **never writes code** | read, write, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write, dept_sleep, **dept_exec** | **minus `edit`** (no code writes); `dept_exec` used read-only (verification commands only — build/test/lint/`git log`/`git diff`, never a mutating command). Its deliverable is its review report. |
-| `explore-deep` | Deep read-only code analysis: traces machinery, git/log/diff analysis, writes a report for the head | read, write, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write, dept_sleep, **dept_exec** | **minus `edit`**; `dept_exec` read-only (git/log/diff, never a mutating command). Never writes code. |
-| `organizer` | Planning/consolidation: indexes/normalizes the dept's report archive, consolidates findings for the head | read, write, glob, grep, send_message, agent_messages, dept_who, dept_memo_write, dept_sleep | **no `edit`, NO `dept_exec`** — purely planning/consolidation via messaging + reads (it must never mutate code or run a command). |
+| `builder` | Internal programming executor: edits code in the repos/plugin, builds + tests, fixes READMEs, runs scoped `dept_exec` commands; reports to the IPD head | read, write, **edit**, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write, **dept_exec** | **ONLY role with `edit`** and the ONLY role that legitimately needs `dept_exec` for full code changes. Never commits (the Asistente commits); reports. |
+| `reviewer` | Independent review: reads changed files, runs verification commands via `dept_exec` (read-only usage), issues PASS/FAIL; **never writes code** | read, write, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write, **dept_exec** | **minus `edit`** (no code writes); `dept_exec` used read-only (verification commands only — build/test/lint/`git log`/`git diff`, never a mutating command). Its deliverable is its review report. |
+| `explore-deep` | Deep read-only code analysis: traces machinery, git/log/diff analysis, writes a report for the head | read, write, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write, **dept_exec** | **minus `edit`**; `dept_exec` read-only (git/log/diff, never a mutating command). Never writes code. |
+| `organizer` | Planning/consolidation: indexes/normalizes the dept's report archive, consolidates findings for the head | read, write, glob, grep, send_message, agent_messages, dept_who, dept_memo_write | **no `edit`, NO `dept_exec`** — purely planning/consolidation via messaging + reads (it must never mutate code or run a command). |
 
 - All four: **BOOT-QUIET** (never act unaddressed); message only inside the IPD
   (ACL); memory via `dept_memo_write`; **ephemeral by default**, and JOB workers

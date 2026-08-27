@@ -204,6 +204,10 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
       return { room: roomId, member: memberId, memoPath }
     },
 
+    // R6 dead code (LOTE A, 2026-08-27 — head/worker sleep RETIRED): the post
+    // own-layer dept_sleep is no longer registered (invoke.ts) — heads/workers
+    // stay idle|running. KEPT (never remove): a post entry carrying a legacy
+    // sleepEpoch on disk must still resurrect through the same marking paths.
     async sleepMember(_args, exec) {
       const agent = exec.agent
       if (!agent) throw new Error('dept_sleep requires a calling agent (exec.agent was undefined)')
@@ -470,6 +474,9 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
       return { room: entry.roomId, member: memberId, memoPath: ctx.journalPath(memberId), sleepEpoch: entry.sleepEpoch }
     },
 
+    // R6 dead code (LOTE A, 2026-08-27 — dept_sleep_all is a host-plane NO-OP with
+    // warn in invoke.ts): the org-wide batch orchestration is RETIRED. KEPT
+    // (never remove) for history/regression of the retired path.
     async sleepAll(_args, _exec) {
       // B1 — org-wide quiet-sleep orchestration. Mirrors the `sleepMember`
       // marking (sleepEpoch + in-flight worker ledger) for EVERY configured

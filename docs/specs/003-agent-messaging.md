@@ -28,7 +28,7 @@ All harness file:line facts come from the explore trace listed in `spec_ref`.
 | D5 | **Tool `agent_messages`**: own history (only messages where self ∈ to[]); `{limit=10, before?}` (before = message-id cursor); `{total, messages, remaining}`; newest-first. **No read/seen marks in this phase.** | §5 |
 | D6 | **Tool `dept_who`** = fusion of `dept_room_who` + `dept_whereami`: whole catalog (host + heads), each `{agentId, kind: 'host'\|'head', title, live, sleeping, sessionId?}`, own entry marked `you: true`. No `room` parameter. **`dept_whereami` is deleted.** | §6 |
 | D7 | **Eliminations**: `org.rooms`/room members (config); `org.departments` is KEPT as the agent catalog (postId/title/sessionTitle/agentOptions — ensureHead/attach/pin unchanged); `board-store.ts`; the `deepartments/room` projection; `emitRoomRecord` + room relay; room read-deltas in `cursors.json`; rooms wording in presets/personas (cleanup phase, noted here); board docs in the skill. | §7.1 |
-| D8 | **Kept intact**: ensureHost/single-live; ensureHead + attach + pinning; posts.json/hosts.json (recipient catalog); dept_sleep/dept_memo_write/journals/archive; wakePost + guards (stuck-head, ack-loop); U3 watcher; role-contract injector; host session rotation; presets/subagent projection. **wakePost becomes the bus core** — head sleep/wake now happens via direct message, not room delta. | §7.2 |
+| D8 | **Kept intact**: ensureHost/single-live; ensureHead + attach + pinning; posts.json/hosts.json (recipient catalog); dept_memo_write/journals/archive; wakePost + guards (stuck-head, ack-loop); U3 watcher; role-contract injector; **host session rotation** (dept_sleep host branch, spec 002); presets/subagent projection. **wakePost becomes the bus core** — a legacy dormant entry (sleepEpoch on disk) still wakes via direct message, not room delta. (LOTE A 2026-08-27: the head/worker sleep is RETIRED — dept_sleep remains only on the host plane.) | §7.2 |
 | D9 | **Migration**: Batch B2 (core, dual-run) then B3 (cleanup/tests/docs); legacy `<stateDir>/rooms/` dirs renamed to `.bak-legacy`; tiered verification per AGENTS.md + headless smoke. | §8 |
 
 ---
@@ -109,8 +109,10 @@ citations in `spec_ref`):
 
 - **No read receipts / seen marks** (§5 note): read state, unread counts and a GUI inbox
   view are a later phase.
-- **No sleep-request protocol** (the head sleep stays self-directed by persona; wakePost
-  remains the only wake path — `dept_sleep` machinery untouched, D8).
+- **No sleep-request protocol** (LOTE A, 2026-08-27: the head/worker sleep is RETIRED — heads
+  stay `idle|running`, no self-directed head sleep; the HOST conserves `dept_sleep`
+  (spec 002 rotation); wakePost remains the only wake path for a legacy dormant entry —
+  `dept_sleep` host machinery untouched, D8).
 - **No context compaction/reset changes** for heads (current semantics: resume of the same
   durable session; the session log is the memory).
 - **No change to worker lifecycle** (`dept_post_create`/`dept_post_retire` stays; workers are
@@ -411,9 +413,11 @@ same `threadId` or a delivery retry (§4.4).
   native sidebar row, host-pin analogue `pinHostSessionTitle`).
 - `posts.json`/`hosts.json` (recipient catalog), `byPost`/`byChild`/`registerEntry`/
   `persistPosts`/`PostEntry` — kept; `roomId` falls back removed (or defaulted).
-- `dept_sleep` (head + host incl. rotation), `dept_memo_write`, journals + archive +
+- `dept_memo_write`, journals + archive +
   session-log capture — the `room:` frontmatter field becomes informational-only (default
-  kept; no behavior).
+  kept; no behavior). (`dept_sleep` head branch + host rotation were "kept intact" pre-LOTE-A;
+  **2026-08-27 (LOTE A)**: the head branch is RETIRED (heads/workers stay idle|running);
+  the HOST branch — session rotation, spec 002 — stays.)
 - **wakePost + its guards — now the bus core** (D8): sleep-wake of heads happens by direct
   message (bus delivery), not by room delta; `wakePost`'s body becomes the shared deliver
   helper used by `send_message`. Stuck-head recovery, ack-loop guard, serialization all live
@@ -470,9 +474,10 @@ Per AGENTS.md tiered verification, both phases:
    `# == dsh-deepartments` layer, and — after B3 — NO `rooms` section.
 4. Headless smoke in `deepartments-dev-headless`: boot with a departments config →
    `dept_who` lists host + heads with `you: true` on self → `send_message` to a live head
-   returns `delivered` and the target's `agent_messages` shows it → `dept_sleep` the head →
-   `send_message` to the dormant head returns `resumed` and the head's next turn processes it
-   → fan-out to 21 recipients is rejected → self-send is held (`self`).
+   returns `delivered` and the target's `agent_messages` shows it → a (legacy)
+   dormant head wakes with `resumed` on `send_message` → fan-out to 21 recipients is rejected
+   → self-send is held (`self`). (Head `dept_sleep` is RETIRED — LOTE A 2026-08-27; the host
+   rotation keeps `dept_sleep`, spec 002.)
 
 ### 8.4 Risks
 

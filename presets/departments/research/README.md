@@ -36,7 +36,8 @@ base agent preset (the neutral head/worker bases live in
 - Web: `web_search`, `web_fetch`. Files: `read`, `write`, `edit`, `glob`,
   `grep`.
 - Bus / lifecycle (plugin own layer): `send_message`, `agent_messages`,
-  `dept_who`, `dept_memo_write`, `dept_sleep`.
+  `dept_who`, `dept_memo_write`. (2026-08-27 LOTE A: `dept_sleep` is RETIRED for
+  heads/workers — they stay `idle|running`; only the host keeps dept_sleep.)
 - NEVER for department workers: `subagent`/`subagent_fork`/`workflow`/`ralph`
   — a worker is a root agent, not a coordinator (D3, §3.4).
 - Role-specific allowance, by design: `edit` is granted to `organizer` (safe

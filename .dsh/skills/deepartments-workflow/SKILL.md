@@ -53,25 +53,20 @@ max).
 
 ## Head lifecycle
 
-Department heads are PERMANENT (unlike ephemeral workers), but they do sleep
-and re-wake. The **Asistente manages head sleep AUTONOMOUSLY** — it is the host,
-NOT the head, that decides when a head sleeps. The PRIMARY (and only sanctioned)
-path is an **ADDRESSED SLEEP DIRECTIVE**: a `send_message` to the head carrying
-"Sleep — conclude now". After a head's mission-concluded report (or on a large
-context window / inactivity), the Asistente emits the SLEEP DIRECTIVE **without
-waiting for a request** — a head NEVER requests sleep and NEVER sleeps on its own
-initiative. On that directive the head writes its memo (`dept_memo_write`) then
-concludes with `dept_sleep`. The Asistente may issue a SLEEP DIRECTIVE at a
-natural boundary: the head is idle, all its work is reported, or to force a
-context reset. **The head's lifecycle is: receive mission → dispatch → collect →
-report / emit verdict → end turn → the Asistente directs its sleep.** A head's
-"Sleep — conclude now" directive, when it concerns the **Quality Head**, is
-**NOT inspected at 100%** (anti-loop, owner decision): the QH's own sleep is
-SAMPLED at the 10% worker dice (`workerInspectProbability`), so the recurring
-"QH sleeps each round" does NOT auto-feed an inspection (no QH-sleep → q-i →
-QH-wake loop); every other configured head (and the host rotation) stays at 100%.
-This mirrors the worker ephemeral rule (a worker is retired by its head) but for
-the durable head — the head's next wake cold-resumes the same durable session.
+Department heads are PERMANENT and **do NOT sleep** (owner decision 2026-08-27,
+LOTE A: the head/worker sleep system is RETIRED — heads and workers stay
+`idle|running`). There is **no more SLEEP DIRECTIVE**: the Asistente no longer
+emits head sleeps, a head NEVER requests sleep and NEVER concludes with
+`dept_sleep` — it simply ends its turn and stays idle until the next addressed
+message arrives (BOOT-QUIET). The head's lifecycle is: receive mission →
+dispatch → collect → report / emit verdict → end turn → idle until addressed.
+A head's long-term memory is persisted with `dept_memo_write` (its journal), but
+the head itself remains a live resident. Only the **Asistente (host)** conserves
+its own `dept_sleep` session rotation (spec 002) and the host rotation stays
+inspected at 100% by the Quality Department. (Legacy entries carrying a
+`sleepEpoch` on disk still resurrect fresh on their next wake — the residual
+legacy path, R6.) This mirrors the worker ephemeral rule (a worker is retired by
+its head); only the host sleeps.
 
 ## Key principles
 
@@ -234,11 +229,10 @@ recovers.
 The **Quality Department** inspects the Deepartments organization's own runtime
 (how the org itself behaves) — it never plans/fixes it. It is **event-driven +
 digest** (D-Q2/D-Q3/D-Q4): the lifecycle archive events (a disposable worker
-retire sampled at probability 0.10, a department head `dept_sleep` at 100% EXCEPT
-the **Quality Head's own sleep**, which is SAMPLED at 0.10 by design — anti-loop,
-D-Q7, so "QH sleeps each round" never auto-feeds an inspection; a host session
-rotation at 100%) and a new post-error record each emit a Quality
-Inspect directive to `quality-head`; a **daily digest job** (`quality-daily`,
+retire sampled at probability 0.25, a host session rotation at 100% — head
+sleep is RETIRED since 2026-08-27, LOTE A — and a new post-error record each
+emit a Quality Inspect directive to `quality-head`; a **daily digest job**
+(`quality-daily`,
 role `quality-inspector`, cron `0 8 * * *`, owner `quality-head`) consolidates
 the week's post-errors / stalled posts / delivery failures / prior inspection
 results. The QD is **report-only**: it has no `edit`, no mutating `dept_exec`, no
@@ -251,10 +245,16 @@ format:
 
 ```
 QUALITY REQUEST
-- Surface: <what to inspect — an archive event (retired worker / head sleep / host rotation) or a signal (post-error / stalled post / delivery failure / digest)>
+- Surface: <what to inspect — an archive event (retired worker / host rotation) or a signal (post-error / stalled post / delivery failure / digest)>
 - Why/context: <why now; what decision it feeds>
 - Return: report to .dsh/reports/quality/<YYYY-MM-DD>-<slug>.md (stateDir/repo, D-Q6) + a 3-5 bullet summary back via messaging
 ```
+
+The **worker-retired** directive carries an explicit ANALYZE mission (LOTE B,
+2026-08-27): *"ANALYZE the retired agent: its log/session, the tools it used,
+its flows, its failures, and optimization opportunities → write the report to
+`.dsh/reports/quality/` and report to quality-head"* — the inspector's report
+path is fixed (D-Q6) and the analysis is always the same shape.
 
 The QD deploys organically (1 `quality-inspector` worker, rooted and ephemeral-
 per-round W8-g). **The QH is the CONSOLIDATOR + ANALYZER, not a retransmitter:**
@@ -468,8 +468,9 @@ channel peerDependencies with CLI pin) live in AGENTS.md and the
   reviewer gate after each batch → commit after each green batch.
 - **END**: verification, commit, update `docs/ROADMAP.md` (transient status
   only; git is the permanent record; never auto-generated), concise summary. At
-  session end (or when directed) the Asistente may issue a SLEEP DIRECTIVE to
-  each head before its own sleep/rotation.
+  session end (or when directed) the Asistente rotates its OWN host session
+  (dept_sleep, spec 002); it no longer issues SLEEP DIRECTIVES to heads (head
+  sleep retired 2026-08-27 — heads stay idle|running).
 - **Microdecisions**: any ambiguous detail (library, pattern, naming,
   structure, tier) → `ask_user_question` BEFORE dispatching. Present options;
   the owner decides. No silent defaults.

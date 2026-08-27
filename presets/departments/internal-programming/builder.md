@@ -13,7 +13,6 @@ tools:
   - agent_messages
   - dept_who
   - dept_memo_write
-  - dept_sleep
   - dept_exec
 ---
 

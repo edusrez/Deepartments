@@ -39,7 +39,8 @@ agent preset (the neutral head/worker bases live in
   `explore-deep` roles. See ARCHITECTURE (execution scope) for the allowed roots
   and the read-only rule for `reviewer`/`explore-deep`.
 - Bus / lifecycle (plugin own layer): `send_message`, `agent_messages`,
-  `dept_who`, `dept_memo_write`, `dept_sleep`.
+  `dept_who`, `dept_memo_write`. (2026-08-27 LOTE A: `dept_sleep` is RETIRED for
+  heads/workers — they stay `idle|running`; only the host keeps dept_sleep.)
 - NEVER for department workers: `subagent`/`subagent_fork`/`workflow`/`ralph`
   — a worker is a root agent, not a coordinator (D3, §3.4). Conversely, a
   transient host `builder`/`reviewer` subagent is NOT an IPD worker: the IPD's
