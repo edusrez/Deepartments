@@ -2,7 +2,7 @@
 agent: builder
 date: 2026-08-24
 task: quality-department-spec
-spec_ref: "Owner decisions (2026-08-24), Epic QD: the Deepartments organization gains a **Quality Department (QD)** — the QA/analysis counterpart of the Research Department (RD, spec 004) and the Internal Programming Department (IPD, spec 005). It OWNS nothing and FIXES nothing: every DISPOSABLE WORKER retire is INSPECTED with probability 0.25 (configurable, deterministic under a test seed / env override), and every host session rotation (the Asistente's dept_sleep host branch) is INSPECTED at 100% (D-Q3). **LOTE A (2026-08-27): the head/worker sleep system is RETIRED** — heads/workers stay `idle|running`, so there is no more head archive to inspect and no D-Q7 anti-loop (the Quality Head's own sleep exception is gone with the head sleeps). Findings are REPORTED, never auto-fixed: the Quality Head (QH) reports to the Asistente AND auto-files a PROGRAMMING REQUEST to internal-programming-head (head↔head synergy). TWO analysis paths: (a) EVENT-DRIVEN — a new post-error record (spec 006 post-errors.jsonl capture) triggers a QD analysis directive to quality-head (with the error record); (b) A DAILY DIGEST JOB `quality-daily` (role quality-inspector, cron 0 8 * * *, owner quality-head, calendar entry departmentId=quality). ONE role — `quality-inspector` (ephemeral-per-round, W8-g lifecycle, Flash tier, literal model deepseek-v4-flash-vision-exp provider opencode-zen reasoning max, reports to `.dsh/reports/quality/<YYYY-MM-DD>-<slug>.md`). Primary sources: docs/specs/005-internal-programming-department.md (master style + departments/roles/jobs/ACL/phases), docs/specs/004-research-department.md (§0 owner table, §3 conceptual model, §7 personas, §9 open questions), docs/specs/006-system-health.md (the post-error capture seam, post-errors.jsonl, the daemon ALERT-to-host pattern, the daily digest job precedent), src/org.ts + src/invoke.ts + presets/ + .dsh/skills verified in-repo at spec time."
+spec_ref: "Owner decisions (2026-08-24), Epic QD: the Deepartments organization gains a **Quality Department (QD)** — the QA/analysis counterpart of the Research Department (RD, spec 004) and the Internal Programming Department (IPD, spec 005). It OWNS nothing and FIXES nothing: every DISPOSABLE WORKER retire is INSPECTED with probability 0.25 (configurable, deterministic under a test seed / env override), and every host session rotation (the Asistente's dept_sleep host branch) is INSPECTED at 100% (D-Q3). **LOTE A (2026-08-27): the head/worker sleep system is RETIRED** — heads/workers stay `idle|running`, so there is no more head archive to inspect and no D-Q7 anti-loop (the Quality Head's own sleep exception is gone with the head sleeps). Findings are REPORTED, never auto-fixed: the Quality Head (QH) reports to the Asistente AND auto-files a PROGRAMMING REQUEST to internal-programming-head (head↔head synergy). TWO analysis paths: (a) EVENT-DRIVEN — a new post-error record (spec 006 post-errors.jsonl capture) triggers a QD analysis directive to quality-head (with the error record); (b) A DAILY DIGEST JOB `quality-daily` (role quality-inspector, cron 0 8 * * *, owner quality-head, calendar entry departmentId=quality). ONE role — `quality-inspector` (ephemeral-per-round, W8-g lifecycle, Flash tier, literal model deepseek-v4-flash provider opencode-zen reasoning max, reports to `.dsh/reports/quality/<YYYY-MM-DD>-<slug>.md`). Primary sources: docs/specs/005-internal-programming-department.md (master style + departments/roles/jobs/ACL/phases), docs/specs/004-research-department.md (§0 owner table, §3 conceptual model, §7 personas, §9 open questions), docs/specs/006-system-health.md (the post-error capture seam, post-errors.jsonl, the daemon ALERT-to-host pattern, the daily digest job precedent), src/org.ts + src/invoke.ts + presets/ + .dsh/skills verified in-repo at spec time."
 outcome: FINAL DRAFT (owner decisions adopted) — DRAFT-ONLY, no commit, no other files touched; DOCUMENTATION-ONLY (only docs/specs/007 created)
 files_touched:
   - docs/specs/007-quality-department.md (this draft)
@@ -48,7 +48,7 @@ line refs are treated as design-level.
 | D-Q3 | **Mandatory 100% (host).** EVERY host session rotation (the Asistente's `dept_sleep` host branch, which archives the OLD host session) is inspected at **100% — never gated by the dice**. The host counts as a "H" (head-equivalent). **LOTE A (2026-08-27): the head archive part of D-Q3 is RETIRED** — heads/workers no longer sleep, so there is no head archive event to inspect (and no D-Q7 exception). | §6.2, §7.2 |
 | D-Q4 | **Analysis of architecture errors — two paths.** (a) EVENT-DRIVEN: a new post-error record (the spec 006 system-health post-error capture, `post-errors.jsonl`) triggers a QD analysis directive to quality-head (with the error record); (b) A DAILY DIGEST JOB `quality-daily` (role `quality-inspector`, cron `0 8 * * *`, owner `quality-head`, calendar entry `departmentId=quality`) that consolidates patterns (post-errors, stalled posts, delivery failures, inspection results). | §6.4, §6.5 |
 | D-Q5 | **Fix flow.** QD findings → report to the Asistente AND auto-request a PROGRAMMING REQUEST to `internal-programming-head` (head↔head synergy). QD does NOT fix directly. | §3.5, §6.6, §7.2 |
-| D-Q6 | **Subagents — ONE role.** `quality-inspector` (ephemeral per round, W8-g lifecycle, Flash tier, model literal `deepseek-v4-flash-vision-exp` provider `opencode-zen` reasoning max, reports to `.dsh/reports/quality/<YYYY-MM-DD>-<slug>.md` — the stateDir/repo `.dsh/reports/quality/` path, NOT the department-workspace reports dir, per the owner decision). | §7.1, §7.2 |
+| D-Q6 | **Subagents — ONE role.** `quality-inspector` (ephemeral per round, W8-g lifecycle, Flash tier, model literal `deepseek-v4-flash` provider `opencode-zen` reasoning max, reports to `.dsh/reports/quality/<YYYY-MM-DD>-<slug>.md` — the stateDir/repo `.dsh/reports/quality/` path, NOT the department-workspace reports dir, per the owner decision). | §7.1, §7.2 |
 | D-Q7 | **~~Anti-loop inspection (Quality Head only).~~ RETIRED (LOTE A, 2026-08-27).** The head-sleep 100% mandate (D-Q3) no longer exists — heads/workers never sleep, so the Quality Head's own sleep exception is obsolete (nothing to anti-loop). Kept as a historical row (R6); the acronym D-Q7 is not used in the active spec. | — |
 
 ---
@@ -188,7 +188,7 @@ Quality Department (org.departments[], id: quality)
     "role": "Quality department head",
     "sessionTitle": "Quality Head",
     "provider": "opencode-zen",
-    "agentOptions": { "provider": "opencode-zen", "model": "deepseek-v4-flash-vision-exp", "reasoningEffort": "max" }
+    "agentOptions": { "provider": "opencode-zen", "model": "deepseek-v4-flash", "reasoningEffort": "max" }
   }
 }
 ```
@@ -546,7 +546,7 @@ worker reports to the QH (never the host — worker → host is PROHIBITED).
   `dept_memo_write`; ephemeral by default; job workers EPHEMERAL PER ROUND** (§7.5
   of spec 004 carries).
 - The role template uses the **literal model**
-  `deepseek-v4-flash-vision-exp` (provider `opencode-zen`, reasoning max) — never
+  `deepseek-v4-flash` (provider `opencode-zen`, reasoning max) — never
   `{{model}}` (spec 005 §7.3 / fix 3203b69).
 
 ### 7.2 Quality Head (QH) persona (D-Q5, D-Q6)
@@ -584,8 +584,8 @@ sleeps there is no D-Q7 anti-loop exception to document.
 ### 7.3 Literals, never `{{model}}` (lesson 3203b69)
 
 Same discipline as spec 004 §7.3 / spec 005 §7.3: persona text uses the **fixed
-literal** `deepseek-v4-flash-vision-exp` (provider `opencode-zen`, reasoning max);
-base profile `opencode-zen`/`deepseek-v4-flash-vision-exp`; **no Pro subagents** in
+literal** `deepseek-v4-flash` (provider `opencode-zen`, reasoning max);
+base profile `opencode-zen`/`deepseek-v4-flash`; **no Pro subagents** in
 the department. `{{cwd}}` stays (it is bound).
 
 ### 7.4 Head preset id (D-Q1)
@@ -598,12 +598,17 @@ automatically, head-presets.ts — the same derivation as
 
 ### 7.5 Cross-department requests
 
-The QD **does not request research** (unlike the IPD's `version-watch` it needs no
-external community evidence). Its one cross-department synergy is the **auto-file
-PROGRAMMING REQUEST to the IPD** (D-Q5): the QH sends it to
-`internal-programming-head`, which plans/fixes. Workers never message across
-departments — everything crosses through the QH. The QD is served by the IPD (fix
-requests) and produces for the Asistente (findings); it needs no RD service.
+The QD's cross-department synergies (head↔head as operational habit — m-422, M3
+SYNERGY-DOCS 2026-08-27): the **auto-file PROGRAMMING REQUEST to the IPD**
+(D-Q5) for genuinely fixable findings — the QH sends it to
+`internal-programming-head`, which plans/fixes — **and a RESEARCH REQUEST to the
+RD** when a finding needs investigation beyond the QD's own inspection
+(failure analysis / context of failures; the RD also collaborates proactively
+with the QD on failure analysis and feeds the IPD with its biweekly tech-watch).
+Workers never message across departments — everything crosses through the QH.
+Rule: **results, not exchanges, toward the Asistente** (consolidated verdicts,
+never the raw head↔head exchanges). See the skill "Cross-department synergies
+(heads talk to heads)" and the pending-work register `docs/WORK-REGISTER.md`.
 
 ---
 

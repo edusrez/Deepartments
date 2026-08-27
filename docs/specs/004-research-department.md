@@ -600,12 +600,12 @@ own-layer tool block (`if (manager)`) carry the wording; F6 rewrites both.
 ### 7.3 Literals, never `{{model}}` (fix 3203b69 lesson)
 
 - Persona text uses the **fixed literal**
-  `deepseek-v4-flash-vision-exp` (provider `opencode-zen`, reasoning max)
+  `deepseek-v4-flash` (provider `opencode-zen`, reasoning max)
   — the `{{model}}`-style variable is NOT bound at first post-restart assembly
   and broke the persona (3203b69; the current presets already carry the literal:
   presets/deepartments-head/agent.cordis.yml:44, worker :51). F6 keeps that.
 - **Base profile**: workers inherit the current base —
-  `opencode-zen` / `deepseek-v4-flash-vision-exp` (reasoning max), materialized
+  `opencode-zen` / `deepseek-v4-flash` (reasoning max), materialized
   via `WORKER_AGENT_OPTIONS` (invoke.ts:1878). **No Pro
   subagents anywhere in the department** — the worker is flash, same as today's
   transient subagents (cordis.patch.yml:24-28).
@@ -654,6 +654,17 @@ version, practice evidence) with its normal rigour, and may in turn request
 internal programming from the IPD via its head when a need requires code
 (scripts, automation, repo tooling → a PROGRAMMING REQUEST). Workers never
 message across departments (D2); everything crosses through the head.
+
+**Head↔head as operational habit (m-422, M3 SYNERGY-DOCS 2026-08-27).** Serving
+research-on-demand from the other heads is THE NORM, not an exception: the IPD
+routes research-on-demand in its missions via the Internal Programming Head; the
+QD requests failure analysis/context of failures via the Quality Head; and the
+RD is PROACTIVE — tech-watch biweekly feeds the IPD (ecosystem/new-release
+assessments for its `version-watch`) and it collaborates with the QD on failure
+analysis. Rule: **results, not exchanges, toward the Asistente** — the Asistente
+receives only consolidated reports/verdicts, never the raw head↔head
+exchanges. See the skill "Cross-department synergies (heads talk to heads)" and
+the pending-work register `docs/WORK-REGISTER.md`.
 
 ---
 

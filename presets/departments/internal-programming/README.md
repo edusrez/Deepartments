@@ -26,7 +26,7 @@ agent preset (the neutral head/worker bases live in
   `restrict` allow-list binding to this list is **implemented**, so the declared
   `tools` ARE the effective allowance for the role).
 - **Body**: the persona text. English (AGENTS.md language policy).
-- **Literals**: the model is a FIXED literal `deepseek-v4-flash-vision-exp`
+- **Literals**: the model is a FIXED literal `deepseek-v4-flash`
   (provider `opencode-zen`, reasoning max) — never the model template variable;
   `{{cwd}}`, `{{deptName}}`, `{{headPostId}}`, `{{workspacePath}}`,
   `{{reportDir}}` are allowed and templated at runtime.

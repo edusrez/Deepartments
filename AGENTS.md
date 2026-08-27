@@ -96,7 +96,7 @@ Runtime knobs read by the plugin (`src/invoke.ts`) — all OPTIONAL:
   documented override** of the quality-inspect dice probability (dec5): the
   worker-retire and QH-sleep dice (spec 007 §4.1/§5.2, D-Q2/D-Q7). When set and
   valid it wins over the `quality.workerInspectProbability` config value
-  (priority: env > config > code default `0.10`); the structural NON-QH
+  (priority: env > config > code default `0.25`); the structural NON-QH
   head/host 100% inspect mandate is never overridden (it is not a dice).
 - `DEEPARTMENTS_TEST_NOW` — **test-only**: a fixed clock (epoch ms) for hermetic
   Loader tests (rule 5); unset → the real wall clock.

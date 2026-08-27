@@ -363,6 +363,36 @@ REQUEST** to `internal-programming-head`.
   Department, and the consolidated answer is folded back into the version-watch
   report the IPH forwards to the Asistente.
 
+### Head↔head as operational habit (m-422)
+
+> Directiva m-422 (institutionalized by M3 SYNERGY-DOCS, 2026-08-27): the
+> head↔head flows below are the OPERATIONAL HABIT of the org — heads reach for
+> the other department's head by default, not as an exception. The TOTAL
+> pending-work register lives in `docs/WORK-REGISTER.md` (maintained by the IPD
+> + the Asistente — the single source of truth for the active IPD queue,
+> PENDIENTE-OWNER decisions, capacity, backlog and synergies; take it into
+> account when planning or dispatching multi-department work).
+
+- **IPD → RD — research-on-demand in missions is THE NORM.** A programming
+  mission that needs information, advice, strategies or community opinions
+  ALWAYS routes a single RESEARCH REQUEST through the Internal Programming Head
+  to `research-head` (research-on-demand), and the head folds the RD's
+  consolidated answer into its own mission report — the standard path of an IPD
+  mission, not a nice-to-have.
+- **QD → RD — failure analysis & context.** When a quality finding needs
+  investigation beyond the QD's own inspection (analysis of a failure pattern,
+  context for a post-error burst, root-cause research), the Quality Head sends a
+  RESEARCH REQUEST to `research-head`.
+- **RD proactive — tech-watch biweekly for the IPD + failure analysis with the
+  QD.** The RD's tech-watch feeds the IPD (biweekly ecosystem/new-release
+  assessments that inform the IPD's `version-watch` and library choices) and
+  collaborates with the QD on failure analysis when a finding needs research
+  context.
+- **Resultados, no intercambios, hacia el Asistente.** The Asistente receives
+  only RESULTS from the heads — consolidated reports, verdicts and 3-5 bullet
+  summaries — never the raw head↔head exchanges. The department-to-department
+  conversation is internal to the heads; only its outcome reaches the Asistente.
+
 ### Delivery semantics (interrupt vs queue)
 
 `send_message` (and the internal bus deliveries: the system-health daemon's host

@@ -147,7 +147,7 @@ Internal Programming Department (org.departments[], id: internal-programming)
     "role": "Internal Programming department head",
     "sessionTitle": "Internal Programming Head",
     "provider": "opencode-zen",
-    "agentOptions": { "provider": "opencode-zen", "model": "deepseek-v4-flash-vision-exp", "reasoningEffort": "max" }
+    "agentOptions": { "provider": "opencode-zen", "model": "deepseek-v4-flash", "reasoningEffort": "max" }
   }
 }
 ```
@@ -467,8 +467,8 @@ The `deepartments-head-internal-programming` persona becomes, in effect:
 ### 7.3 Literals, never `{{model}}` (lesson 3203b69)
 
 Same discipline as spec 004 §7.3: persona text uses the **fixed literal**
-`deepseek-v4-flash-vision-exp` (provider `opencode-zen`, reasoning max); base
-profile `opencode-zen`/`deepseek-v4-flash-vision-exp`; **no Pro subagents** in the
+`deepseek-v4-flash` (provider `opencode-zen`, reasoning max); base
+profile `opencode-zen`/`deepseek-v4-flash`; **no Pro subagents** in the
 department.
 
 ### 7.4 Head preset id (I7)
@@ -499,6 +499,15 @@ assessment of a new release, library-choice evidence, practice research), the
 mission report. Workers never contact the other department directly — everything
 crosses departments through the IPD head (D2). See the skill section
 "Cross-department synergies (heads talk to heads)".
+
+**Head↔head as operational habit (m-422, M3 SYNERGY-DOCS 2026-08-27).** The
+IPD→RD RESEARCH REQUEST is **research-on-demand in missions — THE NORM**: a
+programming mission that needs information/advice/community opinions ALWAYS
+routes ONE RESEARCH REQUEST via the IPD head into its mission report, never as an
+afterthought. Rule: **results, not exchanges, toward the Asistente** — the
+Asistente receives the consolidated mission report, never the raw head↔head
+exchanges. The total pending-work register lives in `docs/WORK-REGISTER.md`
+(maintained by the IPD + the Asistente).
 
 ---
 
@@ -621,7 +630,7 @@ crosses departments through the IPD head (D2). See the skill section
   §4); (4) there is NO `bash` tool in the department vocabulary today — `dept_exec`
   is the scoped capability that closes the git/build gap (machinery §7 `:190`); (5)
   the 0859823 reversal is a REFERENCE, not a drop-in — the current schema has no
-  `rooms`/`roomId` and uses `opencode-zen`/`deepseek-v4-flash-vision-exp`, so the
+  `rooms`/`roomId` and uses `opencode-zen`/`deepseek-v4-flash`, so the
   IPD is a copy of the current `research` config block, never a re-add of the
   deleted board lines (machinery §2 `:102`).
 - **Primary source refs for builders**: explore-deep/2026-08-23-programming-dept-
