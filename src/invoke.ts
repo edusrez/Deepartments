@@ -657,6 +657,23 @@ interface AgentOptionsLike {
   reasoningEffort?: string
 }
 
+/** fb-6 (QH — the resume/re-materialization "has no provider/model" class):
+ * whether AgentOptions carry a USABLE provider/model route (provider AND model
+ * are non-empty strings). PURE. The materializePost seam falls back to
+ * WORKER_AGENT_OPTIONS when this is false: a department-less/legacy worker —
+ * or a config-less head — whose durable session survived an interrupted spawn
+ * resolves `coordinator?.agentOptions` to undefined, and the empty waterfall
+ * threw `agent "session-<uuid>" has no provider/model` at resume/create. */
+export function isUsableAgentOptions(agentOptions: AgentOptionsLike | undefined): boolean {
+  return (
+    agentOptions !== undefined &&
+    typeof agentOptions.provider === 'string' &&
+    agentOptions.provider.length > 0 &&
+    typeof agentOptions.model === 'string' &&
+    agentOptions.model.length > 0
+  )
+}
+
 /** Structural view of the `agents` service surface the head lifecycle touches
  * (rc.8 dsh-agent types/index.d.ts:288-370). */
 interface AgentsLike {
@@ -4454,6 +4471,21 @@ export function applyInvoke(ctx: Context, config: Config) {
     model: 'deepseek-v4-flash-vision-exp',
     reasoningEffort: 'max'
   }
+  /** fb-6 (QH — the resume/re-materialization "has no provider/model" class):
+   * the ONE materializePost AgentOptions resolution point — the configured
+   * `coordinator?.agentOptions` when it carries a USABLE provider/model, else
+   * the WORKER_AGENT_OPTIONS fallback. An interrupted SPAWN leaves the post
+   * registered with its durable session PRESENT but with NO usable
+   * AgentOptions (a department-less/legacy worker — or a config-less head —
+   * has no coordinator row) → the pre-fix waterfall threw
+   * `agent "session-<uuid>" has no provider/model` at the resume AND at the
+   * create-fresh fallback. Workers AND heads both run the flash route today,
+   * so the fallback is the SAME constant for both; the HOST never passes
+   * through here — busDeliverToHost passes the FULL HOST_AGENT_OPTIONS at its
+   * own D4 resume (untouched). ZERO regression: a usable candidate is returned
+   * unchanged, so normal spawns/materializations pass through byte-identical. */
+  const resolveMaterializeAgentOptions = (candidate: AgentOptionsLike | undefined): AgentOptionsLike =>
+    isUsableAgentOptions(candidate) ? (candidate as AgentOptionsLike) : WORKER_AGENT_OPTIONS
   /** Repo root, used as the preset source AND as the FINAL fallback cwd for
    * head/worker sessions (the canonical cwd is the workspace root path — see
    * `resolveWorkspaceRootPath`). `new URL('.', import.meta.url)` already yields
@@ -7878,6 +7910,20 @@ export function applyInvoke(ctx: Context, config: Config) {
     return /has no provider\/model/.test(text)
   }
 
+  /** fb-6 (B5 forensics): attach the RESOLVED (post-fallback) AgentOptions
+   * VERBATIM (JSON) to a residual no-provider/model error's message, so BOTH
+   * the durable post-error row AND the B5 marker carry diagnostic context
+   * ("what options did the failed create actually receive?"). The original
+   * message text is PRESERVED (the JSON is APPENDED), so the
+   * isNoProviderModelError regex classification is unchanged; the original
+   * error is also kept as `cause` (ES2023) and its stack is retained. */
+  const withAgentOptionsContext = (error: unknown, agentOptions: AgentOptionsLike | undefined): Error => {
+    const message = error instanceof Error ? error.message : String(error)
+    const wrapped = new Error(`${message} agentOptions=${JSON.stringify(agentOptions ?? null)}`, error instanceof Error ? { cause: error } : undefined)
+    if (error instanceof Error && error.stack !== undefined) wrapped.stack = error.stack
+    return wrapped
+  }
+
   /**
    * The SHARED post-materialization core of the wakePost seam (spec §4.3 step 2
    * — "EXACTLY wakePost"): respawn-from-sleep (dispose stale handle, clear
@@ -7924,7 +7970,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         // F10 (spec 004 §9.1): the materialized head carries its department's
         // architecture section (if any).
         const setup = headSetup(entry.postId, entry.roomId, role, headPreset, departmentForEntry(entry))
-        const agentOptions = coordinator?.agentOptions
+        const agentOptions = resolveMaterializeAgentOptions(coordinator?.agentOptions)
         // F5: the fresh incarnation lands in its department workspace (config
         // workspacePath); a department-less/legacy head falls back to the root.
         const deptCwd = await resolveDepartmentWorkspaceCwd(departmentForEntry(entry))
@@ -7973,7 +8019,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       const setup = isWorker
         ? workerSetup(entry.postId, entry.roomId, role, { department: dept })
         : headSetup(entry.postId, entry.roomId, role, headPreset, dept)
-      const agentOptions = coordinator?.agentOptions
+      const agentOptions = resolveMaterializeAgentOptions(coordinator?.agentOptions)
       const preset: string = isWorker ? WORKER_PRESET_ID : headPreset
       let handle: AgentHandleLike | undefined
       // F5 (spec 004 §6.2 L1): the FRESH-create fallback of a bus wake lands the
@@ -8029,13 +8075,22 @@ export function applyInvoke(ctx: Context, config: Config) {
         }).catch((createError: unknown) => {
           // B5 — a WORKER whose create throws "has no provider/model" is the
           // VARIANT-2 / builder-87 ghost: a DURABLE session PRESENT but with NO
-          // usable AgentOptions. Record the durable marker so the boot
-          // reconcile's `isSessionUnusable` classifies it as a retire-leak
-          // candidate (under the existing retireGoneWorkers opt-in). The marker
-          // is CLEARED on a successful materialization (see the return below),
-          // so a worker that recovers is never over-retired (conservative).
+          // usable AgentOptions. The fb-6 fallback above has ALREADY resolved a
+          // usable provider/model (WORKER_AGENT_OPTIONS) into `agentOptions`, so
+          // this branch is the RESIDUAL case: the create fails even WITH
+          // options. Record the durable marker so the boot reconcile's
+          // `isSessionUnusable` classifies it as a retire-leak candidate (under
+          // the existing retireGoneWorkers opt-in), and attach the RESOLVED
+          // AgentOptions VERBATIM (JSON) to the error message (fb-6 forensics)
+          // so BOTH the post-error row and the marker carry the exact options
+          // the failed create received (the appended JSON never changes the
+          // isNoProviderModelError classification — the original text is kept).
+          // The marker is CLEARED on a successful materialization (see the
+          // return below), so a worker that recovers is never over-retired.
           if (isWorker && isNoProviderModelError(createError)) {
-            void markUnusableWorkerSession(stateDir, entry.postId, entry.sessionId, createError instanceof Error ? createError.message : String(createError))
+            const forensic = withAgentOptionsContext(createError, agentOptions)
+            void markUnusableWorkerSession(stateDir, entry.postId, entry.sessionId, forensic.message)
+            throw forensic
           }
           throw createError
         })

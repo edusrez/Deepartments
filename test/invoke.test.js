@@ -246,6 +246,11 @@ class StubAgents extends Service {
     // a content-free bus delivery can be driven to the 'failed' catch block that
     // records a post-error line (both resume AND create must throw).
     this.createRejects = new Set()
+    // fb-6 forensics: forced CREATE failures with the REAL harness
+    // no-provider/model signature (per durable session id) — the residual case
+    // where the WORKER_AGENT_OPTIONS fallback ALSO fails is drivable
+    // deterministically (B5 marker + post-error forensics tests).
+    this.createNoProviderRejects = new Set()
     // W8-i: per-session 'session "<id>" not found' ONCE (the transient first-
     // attempt failure the host delivery retries through the host-attach repair
     // seam) — the FIRST resume throws the harness not-found class, the retry
@@ -293,6 +298,7 @@ class StubAgents extends Service {
 
   async create(options) {
     this.createCalls.push(options)
+    if (this.createNoProviderRejects.has(String(options.sessionId))) throw new Error(`agent "session-${String(options.sessionId)}" has no provider/model`)
     if (this.createRejects.has(String(options.sessionId))) throw new Error('stub: forced create failure (W6 post-error script)')
     this.sessionCwds?.set(String(options.sessionId), options.meta?.cwd)
     this.ensureStoreSession(options.sessionId, options.meta)
@@ -727,6 +733,11 @@ async function bootPlugin(stateDir, opts = {}) {
   // resume AND create throw → a bus delivery reaches the 'failed' catch block
   // that records the post-error-line class).
   if (opts.createRejects !== undefined) agents.createRejects = new Set(opts.createRejects)
+  // fb-6 forensics: a boot opt forces per-session CREATE failures with the
+  // real "has no provider/model" SIGNATURE (distinct from the generic W6
+  // createRejects — the B5 marker + post-error forensics need the exact
+  // harness class), so the residual fallback-ALSO-fails path is drivable.
+  if (opts.createNoProviderRejects !== undefined) agents.createNoProviderRejects = new Set(opts.createNoProviderRejects)
   // W8-i: a boot opt forces a per-session transient 'session "<id>" not found'
   // ONCE (so the host delivery retry is exercised: first resume throws, the
   // retry resume succeeds → NO post-error row).
@@ -11679,6 +11690,108 @@ test('VARIANT-2 host materialization (PRIMARY gap): the D4 DORMANT-host bus resu
         assert.ok(typeof target.options.model === 'string' && target.options.model.length > 0, `host ${i} materialized agent.options.model is non-empty`)
         assert.equal(target.options.reasoningEffort, 'max', `host ${i} materialized agent.options.reasoningEffort is max`)
       }
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// fb-6 (QH — the "has no provider/model" class in the resume/re-materialization
+// seam after a restart): a department-less/legacy worker whose durable session
+// survived an INTERRUPTED spawn has NO usable AgentOptions (`coordinator?.
+// agentOptions` is undefined — a worker maps to no config row) → the pre-fix
+// waterfall threw `agent "session-<id>" has no provider/model` at BOTH the
+// resume and the create-fresh fallback. The seam now falls back to the
+// WORKER_AGENT_OPTIONS constant (ONE resolution point shared by resume +
+// create; the HOST path is untouched), and a residual failure carries the
+// resolved AgentOptions VERBATIM (JSON) in the B5 marker + post-error.
+// Modeled on the VARIANT-2 host resume precedent above.
+// ---------------------------------------------------------------------------
+
+test('fb-6 seam fallback: a department-less/legacy worker (durable session present, NO coordinator AgentOptions) is materialized with the WORKER_AGENT_OPTIONS fallback — the resume carries provider/model (never "has no provider/model") and a prior B5 mark is CLEARED (recovery)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // A LEGACY worker (NO departmentId — the department-less/legacy shape) with
+    // a durable session present at boot; its postId maps to NO coordinator row,
+    // so coordinator?.agentOptions is undefined — the exact interrupted-spawn
+    // ghost the fb-6 fallback repairs.
+    const wsid = 'worker-legacy-alpha'
+    await seedPost(stateDir, {
+      postId: 'legacy-alpha',
+      sessionId: wsid,
+      roomId: 'research',
+      agentPreset: 'deepartments-worker',
+      provider: 'worker',
+      role: 'builder'
+    })
+    // A prior B5 mark (a previous materialization had failed with the
+    // no-provider/model class) — the SUCCESSFUL materialization below must
+    // CLEAR it (recovery: a worker that recovers is never over-retired).
+    await markUnusableWorkerSession(stateDir, 'legacy-alpha', wsid, 'agent "session-worker-legacy-alpha" has no provider/model')
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      assert.equal(agents.store.has(wsid), false, 'the legacy worker is DORMANT at boot (a worker is materialized on demand)')
+      const signal = new AbortController().signal
+      const r = await root.tools.get('send_message').execute(
+        { to: ['legacy-alpha'], text: 'wake the legacy worker' },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
+      assert.equal(r.delivered['legacy-alpha'], 'resumed', 'the legacy worker was materialized WITHOUT the no-provider/model throw')
+      await waitFor(() => agents.resumeCalls.some((c) => String(c.resumeSessionId) === wsid), 5000, 'the worker was cold-resumed (durable session present)')
+      assert.equal(agents.createCalls.some((c) => String(c.sessionId) === wsid), false, 'no fresh create — the RESUME succeeded (the fallback made it viable)')
+      const resumeCall = agents.resumeCalls.find((c) => String(c.resumeSessionId) === wsid)
+      assert.ok(resumeCall.agentOptions, 'the resume carries agentOptions (was UNDEFINED pre-fix — the empty waterfall)')
+      assert.equal(resumeCall.agentOptions.provider, 'opencode-zen', 'fallback provider = WORKER_AGENT_OPTIONS.provider')
+      assert.equal(resumeCall.agentOptions.model, 'deepseek-v4-flash', 'fallback model = WORKER_AGENT_OPTIONS.model')
+      assert.equal(resumeCall.agentOptions.reasoningEffort, 'max', 'fallback reasoningEffort = max (the FULL constant, not a provider/model-only partial)')
+      const target = agents.store.get(wsid)
+      assert.ok(target !== undefined, 'worker materialized')
+      assert.equal(target.options.provider, 'opencode-zen', 'materialized agent.options.provider is non-empty (the dsh-agent-loop request-waterfall carrier)')
+      assert.equal(target.options.model, 'deepseek-v4-flash', 'materialized agent.options.model is non-empty')
+      // A SUCCESSFUL materialization clears the unusable mark (recovery).
+      assert.deepEqual(readUnusableSessionsMark(stateDir), {}, 'the prior B5 mark was CLEARED by the successful materialization (never over-retired)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-6 forensics: when the WORKER_AGENT_OPTIONS fallback ALSO fails (the fresh create still throws the no-provider/model signature), the B5 marker AND the post-error row carry the resolved AgentOptions VERBATIM (JSON) for diagnostics', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const wsid = 'worker-forensic-alpha'
+    await seedPost(stateDir, {
+      postId: 'forensic-alpha',
+      sessionId: wsid,
+      roomId: 'research',
+      agentPreset: 'deepartments-worker',
+      provider: 'worker',
+      role: 'builder'
+    })
+    // RESUME fails (generic) AND the fresh create STILL throws the REAL harness
+    // no-provider/model signature — the RESIDUAL case the forensics serve: the
+    // durable session is unusable EVEN WITH the fallback options resolved.
+    const { root, agents, dispose } = await bootPlugin(stateDir, { resumeRejects: [wsid], createNoProviderRejects: [wsid] })
+    try {
+      const signal = new AbortController().signal
+      const r = await root.tools.get('send_message').execute(
+        { to: ['forensic-alpha'], text: 'wake' },
+        { agent: { id: 'host-any', session: { header: {} } }, signal }
+      )
+      assert.equal(r.delivered['forensic-alpha'], 'failed', 'the residual no-provider create failure is a FAILED delivery (never silent)')
+      // The failed create received the RESOLVED (fallback) AgentOptions...
+      const createCall = agents.createCalls.find((c) => String(c.sessionId) === wsid)
+      assert.ok(createCall?.agentOptions, 'the create-fresh fallback received the resolved agentOptions')
+      assert.equal(createCall.agentOptions.provider, 'opencode-zen', 'the create got the fallback provider (resolution happened BEFORE the waterfall)')
+      // ...the B5 marker records the error WITH the AgentOptions JSON verbatim...
+      const marks = readUnusableSessionsMark(stateDir)
+      assert.ok(marks['forensic-alpha'], 'the B5 unusable mark is recorded for the worker')
+      assert.match(marks['forensic-alpha'].error, /has no provider\/model/, 'the mark still classifies as the no-provider/model class (classification unchanged)')
+      assert.match(marks['forensic-alpha'].error, /agentOptions=\{"provider":"opencode-zen","model":"deepseek-v4-flash","reasoningEffort":"max"\}/, 'the mark carries the resolved AgentOptions VERBATIM (JSON)')
+      // ...and the post-error row carries the SAME forensic context.
+      const rows = readPostErrorsFile(stateDir).filter((r) => r.postId === 'forensic-alpha')
+      assert.equal(rows.length, 1, 'one post-error row for the worker')
+      assert.match(rows[0].error, /has no provider\/model/, 'the post-error classifies as the no-provider/model class')
+      assert.match(rows[0].error, /agentOptions=\{"provider":"opencode-zen","model":"deepseek-v4-flash"/, 'the post-error carries the resolved AgentOptions JSON')
     } finally {
       await dispose()
     }
