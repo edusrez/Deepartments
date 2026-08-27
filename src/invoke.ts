@@ -372,6 +372,7 @@ import {
   readTurnErrorsState,
   writeTurnErrorsState,
   appendPostError,
+  readPostErrorsFile,
   readHealthAlertsState,
   writeHealthAlertsState,
   safeInterrupt,
@@ -4965,6 +4966,82 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  /** O2 (MICRO-BATCH O2, QD compromiso — ANALYZE m-598): predict whether a
+   * RETIRED worker produced a DELIVERABLE, for the worker-retired q-i directive
+   * (`deliverable: none|report`). CONSERVATIVE, DURABLE heuristic (decided with
+   * the code; documented for the QD pipeline):
+   *   'none'    ⇔ a RECENT turn-error row for this worker EXISTS in
+   *              `<stateDir>/post-errors.jsonl` (inside HEALTH_ERROR_WINDOW_MS —
+   *              2h, the SAME anomaly window the health daemon scans) AND the
+   *              worker produced NO durable OUTBOUND in that anomaly window (no
+   *              messages.jsonl record `from === workerPostId` with `ts >=
+   *              latestErrorTs - HEALTH_ERROR_WINDOW_MS` — every send_message
+   *              the worker ever made persists there; a WRITE-only worker counts
+   *              as outbound-less in the error case because a report that was
+   *              never SENT left no durable trace, and the conservative label
+   *              is 'none').
+   *   'report'  otherwise (DEFAULT — a clean retire, an error with ANY durable
+   *              outbound in the window, or any read/parse failure: the
+   *              existing flow never changes and the retire never breaks).
+   * ORDER/DURABILITY (fb-8 verification — mission fix (a)): the outbound read
+   * is read-after-write GUARANTEED. send_message appends the record durably
+   * BEFORE any delivery ("durable first (persist-before-deliver)" —
+   * MessagesStore.append awaits appendMessageRecord, which awaits appendFile,
+   * BEFORE delivering — dshd-core messages.ts:419; the worker's send_message
+   * appends at invoke.ts:7242), the delivery auto-retire (busDeliverToPost)
+   * and any head retire therefore run AFTER the record is on disk, and this
+   * predictor reads messages.jsonl
+   * directly (a fresh readFile) AFTER settleRetiredPostDeliveries +
+   * archiveWorkerSession — ordered AFTER the worker's own delivery path.
+   * BIAS SKEW (fb-8 verification — mission fix (b)): the comparison is
+   * `record.ts >= latestErrorTs - HEALTH_ERROR_WINDOW_MS`, NOT a strict
+   * `ts > latestErrorTs`. A strict-after comparison mislabels the REAL
+   * production shape: the worker's FINAL turn SENDS its report (durable record
+   * ts = send time) and THEN the same turn ENDS in error — the error row's ts
+   * is the turn/end EVENT time (scanTurnErrorCaptures uses event.time,
+   * dshd-health index.ts:947), which lands AFTER the same-turn sends, so a
+   * legitimately-published report read 'none'. With the skew (the SAME 2h
+   * anomaly window the error itself must be inside), any durable outbound the
+   * worker made within the window — BEFORE or AFTER the error row — proves
+   * published content → 'report'; only an error with ZERO outbound in the
+   * window is 'none'. The 3 O2 test cases are deterministic under this rule:
+   * (a) error + 0 outbound → 'none'; (b) clean retire (no error) → 'report';
+   * (c) error + a durable send (either in-turn order) → 'report'.
+   * Rationale: a worker whose FINAL turn died (the 400 reasoning_content class:
+   * a long silent turn, 0 outbound) leaves its error row FRESH at retire time
+   * (captureRetiredPostTurnError appends it right before this predictor runs —
+   * the retire seam at retirePost) and has no durable message in the window, so
+   * 'none' lets the ANALYZE pipeline QUESTION the retire instead of citing a
+   * conclusion that was never published. Never throws (a failure degrades to
+   * 'report'). */
+  const predictRetiredWorkerDeliverable = async (workerPostId: string): Promise<'none' | 'report'> => {
+    try {
+      const nowMs = Date.now()
+      const errors = readPostErrorsFile(stateDir)
+        .filter((row) => row.postId === workerPostId && nowMs - row.ts <= HEALTH_ERROR_WINDOW_MS)
+      if (errors.length === 0) return 'report'
+      const latestErrorTs = Math.max(...errors.map((row) => row.ts))
+      let text: string
+      try {
+        text = await readFile(resolveMessagesPath(stateDir), 'utf8')
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') text = '' // no message ever persisted
+        else throw error
+      }
+      // fb-8 bias skew: an outbound at-or-after `latestErrorTs - HEALTH_ERROR_WINDOW_MS`
+      // (the SAME 2h anomaly window) counts — a durable send BEFORE or AFTER the
+      // error proves the worker published content; only error + ZERO outbound in
+      // the window is 'none'. (A strict `ts > latestErrorTs` mislabeled the
+      // send-then-turn-error shape: the error row's ts is the turn/end EVENT
+      // time, AFTER the same-final-turn sends.)
+      const outboundInWindow = parseMessageRecords(text)
+        .some((record) => record.from === workerPostId && record.ts >= latestErrorTs - HEALTH_ERROR_WINDOW_MS)
+      return outboundInWindow ? 'report' : 'none'
+    } catch {
+      return 'report'
+    }
+  }
+
   const retirePost = async (postId: string, callerAgentId: string): Promise<{ postId: string; retired: true }> => {
     const entry = byPost.get(postId)
     if (entry === void 0) throw new Error(`[deepartments] dept_post_retire: "${postId}" is not a registered post`)
@@ -5024,7 +5101,12 @@ export function applyInvoke(ctx: Context, config: Config) {
       try {
         if (qualityInspectDecision('worker', { rng: Math.random, workerInspectProbability: qualityWorkerInspectProbability })) {
           const archived = await archiveWorkerSession(entry.sessionId)
-          await maybeEmitQualityInspectDirective({ kind: 'worker-retired', workerPostId: postId, sessionId: entry.sessionId, archived })
+          // O2 (MICRO-BATCH O2, QD compromiso — ANALYZE m-598): label the
+          // directive with the retire-time DELIVERABLE prediction ('none' =
+          // turn-error + 0 outbound — the ANALYZE pipeline must QUESTION the
+          // retire; 'report' = the normal flow, the default). Never throws.
+          const deliverable = await predictRetiredWorkerDeliverable(postId)
+          await maybeEmitQualityInspectDirective({ kind: 'worker-retired', workerPostId: postId, sessionId: entry.sessionId, archived, deliverable })
         }
       } catch (error: unknown) {
         ctx.logger.warn(`[deepartments] retirePost worker-retired QD directive for "${postId}" failed (non-fatal — the retire already committed): ${error instanceof Error ? error.message : String(error)}`)

@@ -165,9 +165,16 @@ export function resolveQualityWorkerInspectProbability(config: unknown): number 
 }
 
 /** The QUALITY INSPECT directive surface (the archive event details a hook
- * carries to `quality-head`). One variant per archive/post-error event. */
+ * carries to `quality-head`). One variant per archive/post-error event.
+ * O2 (MICRO-BATCH O2, QD compromiso — ANALYZE m-598): the worker-retired
+ * variant OPTIONALLY carries `deliverable` — the retire-time prediction of
+ * whether the retired session PRODUCED a deliverable: 'none' = the session
+ * ended in a turn-error with 0 outbound (the ANALYZE pipeline must QUESTION
+ * the retire instead of citing content that was never published); 'report' =
+ * a normal retire. Absent (legacy/other emitters) → the text renders WITHOUT
+ * the label (the existing flow never changes). */
 export type QualityInspectDirectiveSurface =
-  | { kind: 'worker-retired'; workerPostId: string; sessionId: string; archived: boolean }
+  | { kind: 'worker-retired'; workerPostId: string; sessionId: string; archived: boolean; deliverable?: 'none' | 'report' }
   | { kind: 'head-slept'; headPostId: string; sessionId: string; sleepEpoch: number }
   | { kind: 'host-rotated'; oldSessionId: string; newSessionId: string; oldHostId: string; newHostId: string; sleepEpoch: number; archiveOk?: boolean }
   | { kind: 'post-error'; postId: string; messageId: string; error: string }
@@ -181,7 +188,22 @@ export function qualityInspectDirectiveText(surface: QualityInspectDirectiveSurf
       // KEPT, the mission text is ADDED, never removed). The literal STARTS
       // WITH the exported QUALITY_INSPECT_WORKER_RETIRED_PREFIX (the qi-silence
       // watchdog matches on it — M1; never fork the literal here).
-      return `${QUALITY_INSPECT_WORKER_RETIRED_PREFIX} (post ${surface.workerPostId}, session ${surface.sessionId}, archived ${surface.archived}). ANALYZE the retired agent: its log/session, the tools it used, its flows, its failures, and optimization opportunities → write the report to .dsh/reports/quality/ and report to quality-head`
+      // O2 (MICRO-BATCH O2, QD compromiso — ANALYZE m-598): when the retire
+      // KNOWS the retired session produced no deliverable (turn-error, 0
+      // outbound) the directive labels it `deliverable: none` and instructs
+      // the inspector to QUESTION the retire instead of citing published
+      // content — the ANALYZE pipeline must never assume a 0-outbound session
+      // published a conclusion. 'report' (or absent) = the normal flow.
+      // The label lives AFTER the parenthesized frame and BEFORE the mission,
+      // so the prefix match (M1) and the mission-match asserts (LOTE B) are
+      // both untouched.
+      {
+        const deliverableFrame = surface.deliverable === undefined ? ''
+          : surface.deliverable === 'none'
+            ? `deliverable: none. The worker produced NO deliverable (turn-error, 0 outbound) — do NOT cite published content; analyze the session for the failure cause instead. `
+            : 'deliverable: report. '
+        return `${QUALITY_INSPECT_WORKER_RETIRED_PREFIX} (post ${surface.workerPostId}, session ${surface.sessionId}, archived ${surface.archived}). ${deliverableFrame}ANALYZE the retired agent: its log/session, the tools it used, its flows, its failures, and optimization opportunities → write the report to .dsh/reports/quality/ and report to quality-head`
+      }
     case 'head-slept':
       return `Quality inspect: head slept (post ${surface.headPostId}, session ${surface.sessionId}, sleepEpoch ${surface.sleepEpoch})`
     case 'host-rotated':

@@ -3226,9 +3226,20 @@ test('m-64 dept_who member state precedence: a SLEPT-but-LIVE head (sleepEpoch s
       // C1 (m-264): the DEFAULT `active` view now HIDES a non-caller sleeping
       // member — this precedence test needs the FULL roster (`scope: 'all'`,
       // the includeRetired-compat superset) to observe the slept head row.
-      const who = await root.tools.get('dept_who').execute({ scope: 'all' }, { agent: agents.put(fakeParentAgent()), signal })
+      // DE-FLAKE (C12, 2026-09): dept_who builds its roster from the IN-MEMORY
+      // post catalog (`byPost`), which the boot populates ASYNCHRONOUSLY
+      // (`registry.loadPosts()` — an awaited durable readFile). The file waitFor
+      // above proves the SEED, not the catalog load; a dept_who landing before
+      // `registryLoaded` resolves returns NO row for the slept head (the
+      // intermittent «the slept head is listed» fail, 2/4 full-suite runs).
+      // Poll the tool itself until the row materializes — deterministic
+      // regardless of the load timing — then assert the sleeping/live semantics.
+      let who
+      await waitFor(async () => {
+        who = await root.tools.get('dept_who').execute({ scope: 'all' }, { agent: agents.put(fakeParentAgent()), signal })
+        return who.members.some((m) => m.agentId === postId)
+      }, 5000, 'the slept head row is listed once the boot catalog load settles')
       const row = who.members.find((m) => m.agentId === postId)
-      assert.ok(row, 'the slept head is listed')
       assert.equal(row.sleeping, true, 'the slept head carries the durable sleeping marker')
       assert.equal(row.live, true, 'the slept-but-live case: a lingering handle makes the row live')
       assert.equal(row.state, 'sleeping', 'm-64 precedence: a slept-but-live head derives state "sleeping" (collapses live — no contradiction)')
@@ -4727,7 +4738,7 @@ test('FIX 1b.1 boot repair REGRESSION: the workspace registry is NOT ready at bo
     // NON-STRICT get + a bounded retry loop — the strict-get version raced
     // the init and silently skipped (production: session-6e49895c did not
     // heal at the 17:24:59 UTC restart; zero `host attach repair` lines).
-    const { root, workspaceRegistry, dispose } = await bootPlugin(stateDir, { registryNotReadyRejects: 2 })
+    const { root, agents, workspaceRegistry, dispose } = await bootPlugin(stateDir, { registryNotReadyRejects: 2 })
     try {
       const logged = []
       const disposeExporter = root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
@@ -4738,6 +4749,21 @@ test('FIX 1b.1 boot repair REGRESSION: the workspace registry is NOT ready at bo
       assert.equal(workspaceRegistry.attachCalls.filter((id) => id === sessionId).length, 1, 'retry attach targets the live host session id exactly once')
       await waitFor(() => logged.some((m) => m?.type === 'info' && String(m.args?.[0] ?? '').includes(`host attach repair: attached ${sessionId}`)), 5000, 'attach success logged after retries')
       disposeExporter()
+      // DE-FLAKE (C12, 2026-09): the boot materialization + attach chains are
+      // FIRE-AND-FORGET (`void Promise.all([registryLoaded, hostsLoaded]).then(
+      // ...)` → `void ensureAllHeads()` → `ensureHead` → `agents.create`
+      // → `createScope` on the tools fiber, and `void attachHeadSession(...)`
+      // — a bounded retry loop that calls `ctx.get` on EVERY iteration). If the
+      // test disposes while either chain is still in flight, the continuation
+      // runs on the DISPOSED ctx and throws INACTIVE_EFFECT («cannot create
+      // effect on inactive context») as an UNHANDLED REJECTION (the latent
+      // 1b.1 flake: fails isolated, green in suite — pure boot-vs-teardown
+      // timing). Wait for BOTH to settle BEFORE dispose is allowed: the head
+      // materialized (store.set runs AFTER the createScope, so its presence
+      // closes the createScope window) and the head's attach id recorded (the
+      // attach loop returns right after attaching — no pending timer).
+      await waitForHeadMaterialized(agents)
+      await waitFor(() => workspaceRegistry.attachCalls.includes('head-research-head'), 5000, 'the configured-head attach settled before teardown')
     } finally {
       await dispose()
     }
@@ -13487,6 +13513,19 @@ test('QD probability gate: worker default 0.25 + clamp; worker uses injected rng
   // LOTE B (2026-08-27): the worker-retired directive carries the explicit
   // ANALYZE mission (the previous frame is KEPT, the mission is ADDED — R6).
   assert.match(qualityInspectDirectiveText({ kind: 'worker-retired', workerPostId: 'researcher', sessionId: 's-1', archived: true }), /ANALYZE the retired agent: its log\/session, the tools it used, its flows, its failures, and optimization opportunities → write the report to \.dsh\/reports\/quality\/ and report to quality-head/, 'the worker-retired directive text carries the ANALYZE mission (LOTE B)')
+  // O2 (MICRO-BATCH O2, QD compromiso — ANALYZE m-598): the deliverable label.
+  // A retire WITHOUT the label (legacy surface) renders NO deliverable line (R6).
+  const legacyText = qualityInspectDirectiveText({ kind: 'worker-retired', workerPostId: 'researcher', sessionId: 's-1', archived: true })
+  assert.ok(!legacyText.includes('deliverable:'), 'an UNLABELED worker-retired surface renders NO deliverable line (legacy flow unchanged)')
+  // 'report' (the default — a normal retire) renders the label + keeps the mission.
+  const reportText = qualityInspectDirectiveText({ kind: 'worker-retired', workerPostId: 'researcher', sessionId: 's-1', archived: true, deliverable: 'report' })
+  assert.match(reportText, /deliverable: report\. /, 'deliverable: report is rendered for a normal retire')
+  assert.match(reportText, /ANALYZE the retired agent:/, 'the deliverable label never removes the ANALYZE mission')
+  // 'none' (turn-error + 0 outbound) renders the label + the NO-cite instruction
+  // (the ANALYZE pipeline must QUESTION the retire, never cite unpublished content).
+  const noneText = qualityInspectDirectiveText({ kind: 'worker-retired', workerPostId: 'researcher', sessionId: 's-1', archived: true, deliverable: 'none' })
+  assert.match(noneText, /deliverable: none\. The worker produced NO deliverable \(turn-error, 0 outbound\) — do NOT cite published content; analyze the session for the failure cause instead\. /, 'deliverable: none carries the no-cite instruction')
+  assert.match(noneText, /ANALYZE the retired agent:/, 'the none label still carries the ANALYZE mission (LOTE B kept)')
   assert.match(qualityInspectDirectiveText({ kind: 'head-slept', headPostId: 'research-head', sessionId: 'head-research-head', sleepEpoch: 123 }), /head slept.*sleepEpoch 123/)
   assert.match(qualityInspectDirectiveText({ kind: 'post-error', postId: 'ghost-head', messageId: 'm-1', error: 'boom' }), /post-error.*post ghost-head.*error boom/)
 })
@@ -13558,6 +13597,10 @@ test('QD worker retire (env forced true): a fresh retire emits ONE quality-inspe
         assert.match(retiredDirs[0].text, new RegExp(`worker retired.*post ${spawned.result.workerId}`), 'the directive names the retired worker')
         // LOTE B (2026-08-27): the directive carries the explicit ANALYZE mission.
         assert.match(retiredDirs[0].text, /ANALYZE the retired agent: its log\/session, the tools it used, its flows, its failures, and optimization opportunities → write the report to \.dsh\/reports\/quality\/ and report to quality-head/, 'the smoke directive carries the ANALYZE mission (LOTE B)')
+        // O2 (MICRO-BATCH O2, QD compromiso — ANALYZE m-598): a NORMAL retire
+        // (no turn-error row, nothing lost) is labeled deliverable: report — the
+        // default that keeps the existing flow (the ANALYZE pipeline still cites).
+        assert.match(retiredDirs[0].text, /deliverable: report\. /, 'a clean retire (no turn-error) is labeled deliverable: report (O2)')
         // Idempotent no-op retire: retirePost's idempotent early return (R1) runs
         // BEFORE its dice → the QD hook never re-fires (one directive per REAL
         // archive, never on the no-op).
@@ -13574,7 +13617,7 @@ test('QD worker retire (env forced true): a fresh retire emits ONE quality-inspe
         assert.equal(hostRetire.retired, true, 'the host dept_post_retire commits (shared retirePost)')
         const hostDirs = (await qualityDirectives(stateDir)).filter((d) => /worker retired/.test(d.text))
         assert.equal(hostDirs.length, 2, 'the host dept_post_retire seam emits the worker-retired directive too (exactly TWO total)')
-        assert.ok(hostDirs.some((d) => d.text.includes(spawnedHost.result.workerId)), 'the host-seam directive names the host-retired worker')
+        assert.ok(hostDirs.some(workerRetiredDirectiveFor(spawnedHost.result.workerId)), 'the host-seam directive names the host-retired worker')
         // LOTE B seam (3/4): the AUTO-RETIRE by delivery — a worker that delivers
         // a message to its manager head is retired during the delivery via the
         // SAME retirePost (Fix B path) → the dice fires there too.
@@ -13585,6 +13628,79 @@ test('QD worker retire (env forced true): a fresh retire emits ONE quality-inspe
         const deliveryDirs = (await qualityDirectives(stateDir)).filter((d) => /worker retired/.test(d.text))
         assert.equal(deliveryDirs.length, 3, 'the delivery AUTO-RETIRE seam emits the worker-retired directive too (exactly THREE total)')
         assert.ok(deliveryDirs.some((d) => d.text.includes(spawnedDelivery.result.workerId)), 'the delivery-seam directive names the auto-retired worker')
+        // O2: the auto-retired delivery worker DID send outbound → report, never none.
+        const deliveryDir = deliveryDirs.find(workerRetiredDirectiveFor(spawnedDelivery.result.workerId))
+        assert.match(deliveryDir.text, /deliverable: report\. /, 'the delivery auto-retire directive (worker sent outbound) is labeled deliverable: report (O2)')
+      } finally {
+        await env.dispose()
+      }
+    } finally {
+      delete process.env[QUALITY_INSPECT_ENV_VAR]
+    }
+  })
+})
+
+/** O2 DE-FLAKE (fb-8): match a worker-retired directive by its OWN `post
+ * <postId>,` token. A bare `text.includes(postId)` collides with OTHER
+ * directives' SESSION ids: `worker-<slug>-<uuid>` embeds `<slug>-<N>` whenever
+ * the uuid starts with that deduped-suffix byte (session
+ * worker-researcher-2507d77c… contains the workerId "researcher-2",
+ * worker-researcher-3d001d74… contains "researcher-3"), so the find() could
+ * intermittently pick the DEAD worker's `deliverable: none` directive for a
+ * CLEAN/'report' worker — the documented fb-8 flake (1/6 + 1/2 aislado + 1/5
+ * suite); the O2-RETIRE forensics showed the predictor labels were always
+ * right and the SELECTION was wrong. `post <postId>,` never occurs inside a
+ * session id, so the token makes the selection deterministic. */
+const workerRetiredDirectiveFor = (postId) => (d) =>
+  /worker retired/.test(d.text) && d.text.includes(`post ${postId},`)
+
+test('O2 (QD compromiso — ANALYZE m-598): the worker-retired directive carries `deliverable: none` when the retired session ended in a FRESH turn-error with 0 outbound (the ANALYZE pipeline must QUESTION the retire, never cite unpublished content); a clean retire stays `deliverable: report`; an outbound AFTER the error reverts to `report`', async () => {
+  await withTempStateDir(async (stateDir) => {
+    process.env[QUALITY_INSPECT_ENV_VAR] = '1' // force the worker dice true (deterministic directives)
+    try {
+      const env = await bootWithQD(stateDir)
+      try {
+        const signal = new AbortController().signal
+        const { head, headCtx, key } = qdResearchHead(env)
+        // (a) THE FAILURE CASE (the live 400 reasoning_content class): the worker
+        // dies mid-turn (turn/end reason=error) and produced ZERO outbound — its
+        // retire must be labeled deliverable: none. PRE-FIX this directive carried
+        // NO label → this assert FAILS pre-fix (the test is NOT tautological).
+        const dead = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'produce the report' })
+        const deadPostId = dead.result.workerId
+        dead.worker.session.events.push({
+          type: 'turn/end', time: Date.now(),
+          data: { turn: 1, reason: { kind: 'error', message: '400 reasoning_content: 570s/55k tokens, 0 outbound', code: '400' } }
+        })
+        const deadRetire = await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: deadPostId }, { agent: head, signal })
+        assert.equal(deadRetire.retired, true, 'the dead worker retire commits (the C9-old capture + the O2 predictor are non-fatal)')
+        assert.equal(readPostErrorsFile(stateDir).filter((r) => r.postId === deadPostId).length, 1, 'the retire seam captured the fresh turn-error row (the predictor source)')
+        let dirs = await qualityDirectives(stateDir)
+        const deadDir = dirs.find(workerRetiredDirectiveFor(deadPostId))
+        assert.ok(deadDir, 'the dead worker retire emits ONE worker-retired directive')
+        assert.match(deadDir.text, /deliverable: none\. The worker produced NO deliverable \(turn-error, 0 outbound\) — do NOT cite published content; analyze the session for the failure cause instead\. /, 'a turn-error + 0-outbound retire is labeled deliverable: none with the no-cite instruction')
+        assert.ok(!/deliverable: report/.test(deadDir.text), 'the 0-outbound dead worker is NEVER labeled deliverable: report')
+        assert.match(deadDir.text, /ANALYZE the retired agent:/, 'the none directive still carries the ANALYZE mission (LOTE B kept)')
+        // (b) A CLEAN retire (no turn-error row) keeps the DEFAULT report label.
+        const clean = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'clean task' })
+        const cleanRetire = await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: clean.result.workerId }, { agent: head, signal })
+        assert.equal(cleanRetire.retired, true, 'the clean worker retire commits')
+        dirs = await qualityDirectives(stateDir)
+        const cleanDir = dirs.find(workerRetiredDirectiveFor(clean.result.workerId))
+        assert.ok(cleanDir, 'the clean retire emits a worker-retired directive')
+        assert.match(cleanDir.text, /deliverable: report\. /, 'a clean retire (no turn-error) keeps deliverable: report (the default — existing flow unchanged)')
+        // (c) A turn-error FOLLOWED by a durable outbound (the worker SENT its
+        // report after the error) is NOT lost output → the retire is labeled report.
+        const last = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'recovered task' })
+        const lastPostId = last.result.workerId
+        await appendPostError(stateDir, { ts: Date.now() - 60_000, postId: lastPostId, error: '400 reasoning_content (previous turn)' }, Date.now())
+        await last.ctx.tools.get('send_message', last.key).execute({ to: ['research-head'], text: 'report: recovered and sent' }, { agent: last.worker, signal })
+        await waitFor(async () => (await readPosts(stateDir))[lastPostId]?.retired === true, 5000, 'the recovered worker is auto-retired at delivery (Fix B)')
+        await new Promise((r) => setTimeout(r, 100))
+        dirs = await qualityDirectives(stateDir)
+        const lastDir = dirs.find(workerRetiredDirectiveFor(lastPostId))
+        assert.ok(lastDir, 'the recovered worker retire emits a worker-retired directive')
+        assert.match(lastDir.text, /deliverable: report\. /, 'a turn-error FOLLOWED by outbound is deliverable: report (the report exists and was sent)')
       } finally {
         await env.dispose()
       }
