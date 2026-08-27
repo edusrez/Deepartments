@@ -1895,12 +1895,25 @@ export function scanDeliveryFindings(
  *
  *   (b) `qi-silence`: the guarantee over the worker-retire quality-inspect
  *       TRIGGER (A+B fixed the trigger; this WATCHDOG guarantees it). RETIREMENTS
- *       = the delta of the catalog `posts` the tick already receives (posts with
- *       retired+provider==='worker'; posts.json has NO retiredAt → the watchdog
- *       keeps its OWN ledger `qi-silence-state.json` {postId → firstSeenRetiredMs},
- *       the turn-errors-state pattern; the firstSeen MARKER is pruned only when
- *       the post leaves the retired catalog, never by age — the window bound
- *       applies at COUNT time, so a pruned entry can never re-count).
+ *       = the post-census DELTA of the catalog `posts` the tick already receives
+ *       (posts with retired+provider==='worker'; posts.json has NO retiredAt →
+ *       the watchdog keeps its OWN ledger `qi-silence-state.json`
+ *       {postId → firstSeenRetiredMs} + the reserved census marker
+ *       QI_SILENCE_CENSUS_KEY → baseline ts, the turn-errors-state pattern; the
+ *       firstSeen MARKER is pruned only when the post leaves the retired
+ *       catalog, never by age — the window bound applies at COUNT time, so a
+ *       pruned entry can never re-count). M1.1 CENSUS PRIMING (the deployed
+ *       false-positive incident 2026-08-27 19:26Z, 2 min post-deploy): the
+ *       FIRST tick after a boot is a CENSUS — the already-retired posts the C2
+ *       prune retains (~50) are PRIMED with the sentinel QI_SILENCE_PRIMED_MS
+ *       (0) and NEVER count as window events (the pre-fix code stamped + counted
+ *       them at the boot census ts with 0 directives → a false `qi-silence`
+ *       alert). The window count is the post-census DELTA ONLY: (a) a post
+ *       observed NOT-retired in an earlier tick and retired in the next, or
+ *       (b) a post NEW to the catalog, already retired, whose FIRST observation
+ *       is post-census (firstSeen > the census baseline). RE-observations of
+ *       already-known / primed retired posts NEVER re-count or re-stamp (the
+ *       ledger entry IS the retirement; the latent bug of the incident).
  *       DIRECTIVES = messages.jsonl records from='deepartments' → ['quality-head']
  *       whose text STARTS WITH the EXPORTED
  *       QUALITY_INSPECT_WORKER_RETIRED_PREFIX (dshd-quality — one literal, no
@@ -1953,6 +1966,20 @@ export const QI_SILENCE_STATE_FILE = 'qi-silence-state.json'
 /** The qi-silence dedupe key (one key — re-alerts only after the 30-min dedupe
  * window, and only while the silence condition STILL holds). */
 export const QI_SILENCE_KEY = 'qi-silence'
+/** M1.1 — the RESERVED census-marker ledger key (never a postId): its value is
+ * the epoch-ms of the FIRST tick (the boot-census baseline). The ledger is
+ * ARMING (census pending) while the key is absent and ARMED once present. A
+ * legacy marker-less ledger (deployed pre-M1.1 — every entry stamped at the
+ * boot census ts, the false-positive incident) is RE-CENSUSED on the first
+ * post-fix tick: present retired posts are re-primed so the stale boot stamps
+ * can never alert again. */
+export const QI_SILENCE_CENSUS_KEY = '__qi-silence-census'
+/** M1.1 — the PRIMED sentinel firstSeenRetiredMs: an entry stamped with 0 was
+ * ALREADY retired when the watchdog FIRST ticked (the boot census baseline —
+ * the ~50 posts the C2 prune retains). A primed entry is NEVER a window event
+ * (now - 0 is beyond any window) and is never re-stamped; it lives until the
+ * post leaves the retired catalog (the prune-by-catalog rule). */
+export const QI_SILENCE_PRIMED_MS = 0
 
 /** One key of the pooler snapshot — STRUCTURAL (only the fields the watchdog
  * reads, so the pooler's own type never hard-depends on this package). */
@@ -2117,7 +2144,11 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
 /** The qi-silence ledger: `postId → firstSeenRetiredMs` — when the watchdog
  * FIRST observed the post as retired+worker in the catalog (posts.json has no
  * retiredAt, so the ledger IS the retirement timestamp; the turn-errors-state
- * pattern). */
+ * pattern). M1.1 CENSUS PRIMING: the ledger ALSO holds ONE reserved key
+ * QI_SILENCE_CENSUS_KEY → the boot-census baseline ts (armed once the census
+ * ran); an entry stamped with the sentinel QI_SILENCE_PRIMED_MS (0) was PRIMED
+ * by that census (the post was already retired before the watchdog existed =
+ * the baseline, NOT a window event). */
 export type QiSilenceState = Record<string, number>
 
 /** Read `<stateDir>/qi-silence-state.json` → `{ [postId]: firstSeenRetiredMs }`.
@@ -2201,36 +2232,72 @@ export interface QiSilenceScanResult {
   changed: boolean
 }
 
-/** M1-b — scan the qi-silence condition: retirements in the window (a post
- * retired+worker observed for the first time = a retirement AT nowMs; a
- * re-observation within the window keeps counting) vs directives in the window
+/** M1-b — scan the qi-silence condition: retirements in the window (the
+ * post-census DELTA of retired+worker posts) vs directives in the window
  * (messages.jsonl prefix records). Finding: retirements >= minRetires AND zero
  * directives — the aggregate guarantee (never a per-retirement alarm, so the
- * 25% dice's normal silence does not scream). LEDGER SEMANTICS: the entry is
- * the post's FIRST-SEEN marker and is pruned ONLY when the post leaves the
- * retired+worker catalog (retention dropped it). It is NEVER time-pruned while
- * the post stays in the catalog — the WINDOW bound applies at COUNT time
- * (`now - firstSeen <= windowMs`), never at storage time: deleting an aged
- * marker and re-stamping the SAME still-retired post on the next tick would
- * re-count an OLD retirement as fresh (permanent false alerts — the very
- * guarantee this watchdog must not fabricate). NEVER throws. */
+ * 25% dice's normal silence does not scream). LEDGER SEMANTICS (M1.1 — the
+ * deployed false-positive incident): the entry is the post's FIRST-SEEN marker
+ * and is pruned ONLY when the post leaves the retired+worker catalog (retention
+ * dropped it). It is NEVER time-pruned while the post stays in the catalog —
+ * the WINDOW bound applies at COUNT time (`now - firstSeen <= windowMs`), never
+ * at storage time: deleting an aged marker and re-stamping the SAME still-
+ * retired post on the next tick would re-count an OLD retirement as fresh
+ * (permanent false alerts — the very guarantee this watchdog must not
+ * fabricate). CENSUS PRIMING (M1.1): a ledger WITHOUT the QI_SILENCE_CENSUS_KEY
+ * marker means the watchdog has never ticked — the CURRENT tick is the BOOT
+ * CENSUS: every present retired+worker post was retired BEFORE the watchdog
+ * existed (the ~50 the C2 prune retains), so each is PRIMED with the sentinel
+ * QI_SILENCE_PRIMED_MS (0) and NEVER counts as a window event (the real 19:26Z
+ * incident: 50 boot-retired posts stamped + counted with 0 directives → false
+ * `qi-silence` alert 2 min post-deploy). A legacy marker-less ledger (the
+ * pre-fix boot stamps) is re-primed → healed. Only the DELTA observed AFTER the
+ * census counts: (a) a post observed NOT-retired in an earlier tick and retired
+ * in the next, or (b) a post NEW to the catalog, already retired, whose FIRST
+ * observation is post-census — both stamp firstSeenRetiredMs = nowMs and count
+ * while inside the window. RE-observations of an already-known / primed retired
+ * post NEVER re-count and NEVER re-stamp (the ledger entry IS the retirement —
+ * the latent re-count bug of the incident). NEVER throws. */
 export function scanQiSilence(input: QiSilenceScanInput): QiSilenceScanResult {
   const retiredWorkers = input.posts.filter((p) => p.provider === 'worker' && p.retired === true)
   const retiredPostIds = new Set(retiredWorkers.map((p) => p.postId))
   const ledger = { ...input.ledger }
   let changed = false
   let inWindow = 0
-  for (const post of retiredWorkers) {
-    const firstSeen = ledger[post.postId]
-    if (firstSeen === undefined) {
-      ledger[post.postId] = input.nowMs
-      changed = true
-      inWindow += 1
-    } else if (input.nowMs - firstSeen <= input.windowMs) {
-      inWindow += 1
+  const censusMs = ledger[QI_SILENCE_CENSUS_KEY]
+  if (censusMs === undefined) {
+    // THE BOOT CENSUS (the FIRST tick — no marker in the ledger): the already-
+    // retired workers the catalog retains are the BASELINE, not events. Prime
+    // each present retired+worker post with the sentinel 0 — never counts, never
+    // re-stamped. A legacy marker-less ledger (the deployed pre-M1.1 boot stamps)
+    // is re-primed here → healed (the stale stamps can never alert again).
+    for (const post of retiredWorkers) {
+      if (ledger[post.postId] !== QI_SILENCE_PRIMED_MS) {
+        ledger[post.postId] = QI_SILENCE_PRIMED_MS
+        changed = true
+      }
+    }
+    ledger[QI_SILENCE_CENSUS_KEY] = input.nowMs
+    changed = true
+  } else {
+    // Census done → the ledger is ARMED: every NEW retired+worker observation is
+    // a real post-census retirement (a transition or a catalog arrival) →
+    // stamped at its observation ts and counted while inside the window. A
+    // PRIMED entry (0) NEVER counts (now - 0 is beyond any window) — the census
+    // is not a retirement event and re-observations never re-count.
+    for (const post of retiredWorkers) {
+      const firstSeen = ledger[post.postId]
+      if (firstSeen === undefined) {
+        ledger[post.postId] = input.nowMs
+        changed = true
+        inWindow += 1
+      } else if (firstSeen !== QI_SILENCE_PRIMED_MS && input.nowMs - firstSeen <= input.windowMs) {
+        inWindow += 1
+      }
     }
   }
   for (const [postId] of Object.entries(ledger)) {
+    if (postId === QI_SILENCE_CENSUS_KEY) continue
     if (!retiredPostIds.has(postId)) {
       delete ledger[postId]
       changed = true

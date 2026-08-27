@@ -29,7 +29,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
@@ -9604,11 +9604,18 @@ test('W6 runHealthDaemonTick: an anomaly with NO live host → warn + skip; the 
 // !invalid && blockedUntil<=now && cooldownUntil<=now) and alerts BEFORE
 // paralysis (warning ≤2 usable / ≥3 blocked / usage percent ≥90; critical ≤1
 // usable / stale state dead-man's switch > 10min / last rotation 429 → to:null
-// — the 503 prelude); (b) QI-SILENCE — retirements in the window (own ledger
-// qi-silence-state.json, posts.json has no retiredAt) vs quality-inspect
-// directives (messages.jsonl prefix records) with the RATE-AWARE minimum
-// ceil(ln(0.05)/ln(1-p)) (p=0.25 → 11, p=1 → 1) so the 25% dice's normal
-// single-retirement silence NEVER screams but a true trigger outage does.
+// — the 503 prelude); (b) QI-SILENCE — the post-census DELTA of retirements in
+// the window (own ledger qi-silence-state.json, posts.json has no retiredAt) vs
+// quality-inspect directives (messages.jsonl prefix records) with the
+// RATE-AWARE minimum ceil(ln(0.05)/ln(1-p)) (p=0.25 → 11, p=1 → 1) so the 25%
+// dice's normal single-retirement silence NEVER screams but a true trigger
+// outage does. M1.1 (2026-08-27 19:26Z live incident — 2 min post-deploy a
+// false `qi-silence` alert) CENSUS PRIMING: the FIRST tick after a boot is a
+// CENSUS — the ALREADY-retired posts the C2 prune retains (~50) are PRIMED with
+// the sentinel 0 and NEVER count as window events (the pre-fix code stamped +
+// counted the boot census with 0 directives → false alert). Only the
+// post-census DELTA counts (a transition or a post-census catalog arrival).
+// Re-observations of known/primed retired posts never re-count or re-stamp.
 // ---------------------------------------------------------------------------
 
 test('M1 runHealthDaemonTick pooler-capacity SMOKE (acceptance): a fixture keyPooler-state.json with ALL keys invalid/blocked → the real tick alerts `pooler-capacity: critical` (frame with level + usable/total) + audit + dedupe (no re-alert inside the 30min window); the scan NEVER writes the fixture (read-only)', async () => {
@@ -9807,10 +9814,11 @@ test('M1 qiSilenceMinRetiresForRate: the owner RATE-AWARE bound — P(0 directiv
   assert.equal(qiSilenceMinRetiresForRate(0.25, 0.01), 17, 'a tighter tolerance (1%) raises the bound: ceil(ln(.01)/ln(.75)) = 17')
 })
 
-test('M1 runHealthDaemonTick qi-silence SMOKE (acceptance): 11 worker retirements (p=0.25 → rate-aware min 11) with ZERO directives → the real tick alerts `qi-silence` + the ledger persists + dedupe; a re-tick at 25% with a SINGLE retirement does NOT alert (the normal dice case)', async () => {
+test('M1 runHealthDaemonTick qi-silence SMOKE (acceptance, M1.1): the FIRST tick is the BOOT CENSUS — 11 pre-existing retired workers are PRIMED (sentinel 0) and NEVER alert (the deployed false-positive incident case); 11 NEW post-census retirements (p=0.25 → rate-aware min 11) with ZERO directives → the real tick alerts `qi-silence` + the ledger persists + dedupe; a primed post is NEVER re-stamped; a directed re-tick does NOT re-alert', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 27, 11, 0, 0).getTime()
-    const retirements = Array.from({ length: 11 }, (_, i) => ({ postId: `builder-r${i}`, retired: true, provider: 'worker' }))
+    const preExisting = Array.from({ length: 11 }, (_, i) => ({ postId: `builder-old${i}`, retired: true, provider: 'worker' }))
+    const fresh = Array.from({ length: 11 }, (_, i) => ({ postId: `builder-r${i}`, retired: true, provider: 'worker' }))
     const alerts = []
     const warns = []
     const tick = (nowMs, posts) => runHealthDaemonTick({
@@ -9825,26 +9833,49 @@ test('M1 runHealthDaemonTick qi-silence SMOKE (acceptance): 11 worker retirement
       notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
       logger: { warn: (m) => warns.push(m) }
     })
-    // 11 retirements at the 25% dice → the rate-aware min (11) passes → alert.
-    await tick(T0, retirements)
-    assert.equal(alerts.length, 1, '11 retirements with zero directives alert the host (the trigger-outage guarantee)')
+    // Tick 1: the boot census — the 11 pre-existing retirements were retired
+    // BEFORE the watchdog existed → primed, never a window event (the M1.1
+    // incident: 50 such posts falsely alerted 2 min post-deploy).
+    await tick(T0, preExisting)
+    assert.equal(alerts.length, 0, 'the BOOT CENSUS never alerts — 0 retirements in the window (the false-positive incident case)')
+    let ledger = readQiSilenceState(stateDir)
+    assert.equal(Object.keys(ledger).length, 12, 'the census ledger records the 11 primed posts + the census marker')
+    assert.equal(ledger['builder-old0'], QI_SILENCE_PRIMED_MS, 'a census-primed post carries the PRIMED sentinel (0 — never a window event)')
+    assert.equal(ledger[QI_SILENCE_CENSUS_KEY], T0, 'the census marker records the first-tick baseline ts')
+    // Tick 2: 11 NEW post-census retirements (the DELTA) → the rate-aware min
+    // (11) passes → alert; the primed 11 are NOT in the count.
+    await tick(T0 + 60_000, [...preExisting, ...fresh])
+    assert.equal(alerts.length, 1, '11 NEW post-census retirements with zero directives alert the host (the trigger-outage guarantee)')
     assert.match(alerts[0].frame, /qi-silence: 11 worker retire\(s\) in 120 min with zero quality-inspect directive\(s\) \(workerInspectProbability=0.25, min retires 11\)/, 'the qi-silence frame names retirements/window/dice')
     const state = readHealthAlertsState(stateDir)
-    assert.equal(state[QI_SILENCE_KEY], T0, 'the qi-silence dedupe key is advanced')
-    const ledger = readQiSilenceState(stateDir)
-    assert.equal(Object.keys(ledger).length, 11, 'the qi-silence ledger records every firstSeen')
-    assert.equal(ledger['builder-r0'], T0, 'the firstSeen is the observation tick ts (posts.json has no retiredAt)')
+    assert.equal(state[QI_SILENCE_KEY], T0 + 60_000, 'the qi-silence dedupe key is advanced')
+    ledger = readQiSilenceState(stateDir)
+    assert.equal(Object.keys(ledger).length, 23, 'the ledger now holds the 11 primes + 11 fresh stamps + the census marker')
+    assert.equal(ledger['builder-r0'], T0 + 60_000, 'a NEW post-census retirement is stamped at its observation ts and counts')
+    assert.equal(ledger['builder-old0'], QI_SILENCE_PRIMED_MS, 'a primed census post is NEVER re-stamped (still the sentinel)')
     assert.ok(await readFile(path.join(stateDir, QI_SILENCE_STATE_FILE), 'utf8'), 'the ledger file is persisted (qi-silence-state.json)')
-    // Directives ARE present now → the same retirements do NOT re-alert (dedupe anyway).
-    await tick(T0 + 60_000, retirements)
+    // Tick 3: a directive arrived → the same retirements do NOT re-alert.
+    await writeFile(path.join(stateDir, 'messages.jsonl'), JSON.stringify({
+      id: 'm-q-smoke', seq: 1, ts: T0 + 120_000, from: 'deepartments', to: ['quality-head'],
+      text: `${QUALITY_INSPECT_WORKER_RETIRED_PREFIX} (post builder-r0, session s-x) analyze the retired agent`,
+      kind: 'agent'
+    }) + '\n', 'utf8')
+    await tick(T0 + 120_000, [...preExisting, ...fresh])
     assert.equal(alerts.length, 1, 'no re-alert inside the 30min dedupe window')
   })
 })
 
-test('M1 qi-silence long-window recall: the 11 retirements KEEP counting inside the 120min window → after the 30min dedupe the silence RE-ALERTS while no directive arrives (the guarantee re-fires while the trigger outage persists, never a one-shot)', async () => {
+test('M1 qi-silence long-window recall: post-census retirements KEEP counting inside the 120min window → after the 30min dedupe the silence RE-ALERTS while no directive arrives (the guarantee re-fires while the trigger outage persists, never a one-shot)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 27, 14, 0, 0).getTime()
     const retirements = Array.from({ length: 11 }, (_, i) => ({ postId: `builder-w${i}`, retired: true, provider: 'worker' }))
+    // M1.1: seed an ARMED ledger (the census ran in the past + the 11 retirements
+    // were OBSERVED post-census at T0-1min) so the recall property is exercised
+    // post-census (a FRESH ledger's first tick would be a PRIMING census — no alert).
+    await writeFile(path.join(stateDir, QI_SILENCE_STATE_FILE), JSON.stringify({
+      [QI_SILENCE_CENSUS_KEY]: T0 - 60_000,
+      ...Object.fromEntries(retirements.map((p) => [p.postId, T0 - 60_000]))
+    }), 'utf8')
     const alerts = []
     const tick = (nowMs) => runHealthDaemonTick({
       now: () => nowMs,
@@ -9857,7 +9888,7 @@ test('M1 qi-silence long-window recall: the 11 retirements KEEP counting inside 
       logger: { warn: (m) => {} }
     })
     await tick(T0)
-    assert.equal(alerts.length, 1, 'the window opens with the first alert (11 retirements, zero directives)')
+    assert.equal(alerts.length, 1, 'the window opens with the first alert (11 in-window retirements, zero directives)')
     // 31 min later the dedupe window is over, the SAME 11 retirements are STILL
     // inside the 120min window and NO directive arrived → re-alert.
     await tick(T0 + 31 * 60_000)
@@ -9865,7 +9896,7 @@ test('M1 qi-silence long-window recall: the 11 retirements KEEP counting inside 
   })
 })
 
-test('M1 qi-silence the NORMAL dice case: a SINGLE silent retirement at p=0.25 NEVER alerts (the dice expected it 75% of the time — the rate-aware min 11 is the aggregate guard)', async () => {
+test('M1 qi-silence the NORMAL dice case: a SINGLE silent retirement at p=0.25 NEVER alerts (the dice expected it 75% of the time — the rate-aware min 11 is the aggregate guard); the census OBSERVES it as a PRIMED baseline entry (observation and alerting are decoupled)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 27, 14, 30, 0).getTime()
     const alerts = []
@@ -9881,13 +9912,22 @@ test('M1 qi-silence the NORMAL dice case: a SINGLE silent retirement at p=0.25 N
     })
     assert.equal(alerts.length, 0, '1 retirement at p=0.25 (min 11) → NO alert — the normal silent-dice case')
     const ledger = readQiSilenceState(stateDir)
-    assert.equal(ledger['builder-solo'], T0, 'the ledger still OBSERVES the retirement (observation and alerting are decoupled)')
+    assert.equal(ledger['builder-solo'], QI_SILENCE_PRIMED_MS, 'the first tick is the census → the single retirement is PRIMED (never a window event; still OBSERVED — observation and alerting are decoupled)')
+    assert.equal(ledger[QI_SILENCE_CENSUS_KEY], T0, 'the census marker records the baseline')
   })
 })
 
 test('M1 qi-silence: directives present inside the window → NO finding/alert even with 11 retirements; a NON-worker retirement (configured head) is NOT a retirement signal', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 27, 11, 30, 0).getTime()
+    const retirements = Array.from({ length: 11 }, (_, i) => ({ postId: `builder-r${i}`, retired: true, provider: 'worker' }))
+    // M1.1: seed an ARMED ledger (census ran at T0-10min; the 11 retirements were
+    // OBSERVED post-census at T0-5min) so the directive-vs-silence comparison runs
+    // post-census (a fresh ledger would PRIME on the first tick — no alert either way).
+    await writeFile(path.join(stateDir, QI_SILENCE_STATE_FILE), JSON.stringify({
+      [QI_SILENCE_CENSUS_KEY]: T0 - 10 * 60_000,
+      ...Object.fromEntries(retirements.map((p) => [p.postId, T0 - 5 * 60_000]))
+    }), 'utf8')
     // A REAL directive record, written exactly as maybeEmitQualityInspectDirective does:
     // from 'deepartments' → ['quality-head'], text STARTING WITH the exported prefix.
     await writeFile(path.join(stateDir, 'messages.jsonl'), JSON.stringify({
@@ -9895,7 +9935,6 @@ test('M1 qi-silence: directives present inside the window → NO finding/alert e
       text: `${QUALITY_INSPECT_WORKER_RETIRED_PREFIX} (post builder-r0, session s-x, archived true). ANALYZE the retired agent: its log/session, the tools it used, its flows, its failures, and optimization opportunities → write the report to .dsh/reports/quality/ and report to quality-head`,
       kind: 'agent'
     }) + '\n', 'utf8')
-    const retirements = Array.from({ length: 11 }, (_, i) => ({ postId: `builder-r${i}`, retired: true, provider: 'worker' }))
     const alerts = []
     await runHealthDaemonTick({
       now: () => T0,
@@ -9945,6 +9984,10 @@ test('M1 qi-silence: directives present inside the window → NO finding/alert e
 test('M1 qi-silence rate-aware at p=1.0: the rate-aware minimum is 1 → a SINGLE silent retirement alerts (a 100%-inspect deployment must emit per retirement); the knob qiSilenceMinRetiresInWindow overrides the formula', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 27, 13, 0, 0).getTime()
+    // M1.1: seed an ARMED ledger (only the census marker — no retirements yet) so
+    // builder-one is a POST-CENSUS retirement and counts at p=1 (a fresh ledger
+    // would PRIME it on the census tick → no alert).
+    await writeFile(path.join(stateDir, QI_SILENCE_STATE_FILE), JSON.stringify({ [QI_SILENCE_CENSUS_KEY]: T0 - 60_000 }), 'utf8')
     const alerts = []
     await runHealthDaemonTick({
       now: () => T0,
@@ -10003,11 +10046,12 @@ test('M1 qi-silence rate-aware at p=1.0: the rate-aware minimum is 1 → a SINGL
   })
 })
 
-test('M1 scanQiSilence: the ledger mechanics — a firstSeen retirement counts inside the window and stops counting after it; the MARKER is pruned ONLY when the post leaves the retired catalog (a time-pruned marker would be re-stamped → an OLD retirement re-counts as fresh → permanent false alerts)', async () => {
+test('M1 scanQiSilence: the ledger mechanics — a firstSeen retirement counts inside the window and stops counting after it; the MARKER is pruned ONLY when the post leaves the retired catalog (a time-pruned marker would be re-stamped → an OLD retirement re-counts as fresh → permanent false alerts); the reserved census marker survives the prune', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = 1_234_567_890_000
     const windowMs = 120 * 60_000
     const ledger = {
+      [QI_SILENCE_CENSUS_KEY]: T0 - 4 * 60 * 60_000,  // the census ran long ago → the ledger is ARMED (post-census)
       'builder-keep': T0 - 60_000,             // in the catalog + inside the window → counts
       'builder-third': T0 - 121 * 60_000,      // in the catalog + OUTSIDE the window → marker kept (never re-stamped), never counts
       'builder-gone': T0 - 60_000              // NOT in the catalog anymore → pruned
@@ -10022,8 +10066,9 @@ test('M1 scanQiSilence: the ledger mechanics — a firstSeen retirement counts i
     assert.equal(first.findings.length, 1, '1 in-window retirement (builder-keep) ≥ min 1 with zero directives → finding')
     assert.equal(first.findings[0].count, 1, 'the finding count is the in-window retirements (builder-third does NOT count)')
     assert.equal(first.changed, true, 'builder-gone is pruned → the ledger changed')
-    assert.deepEqual(Object.keys(first.ledger).sort(), ['builder-keep', 'builder-third'], 'only the post NO LONGER in the catalog is pruned')
+    assert.deepEqual(Object.keys(first.ledger).sort(), [QI_SILENCE_CENSUS_KEY, 'builder-keep', 'builder-third'], 'only the post NO LONGER in the catalog is pruned (the census marker is reserved and survives)')
     assert.equal(first.ledger['builder-keep'], T0 - 60_000, 'an existing firstSeen is preserved (never re-stamped)')
+    assert.equal(first.ledger[QI_SILENCE_CENSUS_KEY], T0 - 4 * 60 * 60_000, 'the census marker is never pruned (not a catalog post)')
     // Scan 2 @ T0+30min: builder-keep still inside the window (re-observation
     // keeps counting); NO prune → the ledger is unchanged (the tick then skips
     // the write — the turn-errors pattern).
@@ -10036,15 +10081,93 @@ test('M1 scanQiSilence: the ledger mechanics — a firstSeen retirement counts i
     const third = scanQiSilence({ posts, stateDir, nowMs: T0 + 121 * 60_000, windowMs, minRetires: 1, rate: 1, ledger: second.ledger })
     assert.equal(third.findings.length, 0, 'a retirement OLDER than the window stops counting (no finding)')
     assert.equal(third.changed, false, 'aged markers are KEPT (a time-pruned marker would re-count on the next tick)')
-    assert.deepEqual(Object.keys(third.ledger).sort(), ['builder-keep', 'builder-third'], 'the aged markers are never pruned while the posts stay in the catalog')
+    assert.deepEqual(Object.keys(third.ledger).sort(), [QI_SILENCE_CENSUS_KEY, 'builder-keep', 'builder-third'], 'the aged markers are never pruned while the posts stay in the catalog')
     // Scan 4 @ T0+241min: still no finding, markers still kept. Then the posts
     // LEAVE the catalog (retention) → their markers are pruned for good.
     const fourth = scanQiSilence({ posts, stateDir, nowMs: T0 + 241 * 60_000, windowMs, minRetires: 1, rate: 1, ledger: third.ledger })
     assert.equal(fourth.findings.length, 0, 'months-old retirements never re-alert (no false positives)')
-    assert.deepEqual(Object.keys(fourth.ledger).sort(), ['builder-keep', 'builder-third'], 'the markers are still held for catalog residents')
+    assert.deepEqual(Object.keys(fourth.ledger).sort(), [QI_SILENCE_CENSUS_KEY, 'builder-keep', 'builder-third'], 'the markers are still held for catalog residents')
     const fifth = scanQiSilence({ posts: [{ postId: 'builder-keep', retired: true, provider: 'worker' }], stateDir, nowMs: T0 + 242 * 60_000, windowMs, minRetires: 1, rate: 1, ledger: fourth.ledger })
     assert.equal(fifth.changed, true, 'builder-third left the catalog → its marker is pruned')
-    assert.deepEqual(Object.keys(fifth.ledger), ['builder-keep'], 'only the catalog-resident marker survives')
+    assert.deepEqual(Object.keys(fifth.ledger).sort(), [QI_SILENCE_CENSUS_KEY, 'builder-keep'], 'only the catalog-resident marker + the census marker survive')
+  })
+})
+
+test('M1.1 runHealthDaemonTick: the DEPLOYED INCIDENT replayed — a boot census with 50 pre-existing retired workers (the C2-retained ~50) and ZERO post-census retirements → NO qi-silence alert (0 retirements in the window); the ledger persists 50 PRIMED entries + the census marker; a second census-only tick STILL does not alert', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_787_858_789_166 // 19:26:29Z — the REAL boot-census ts of the live incident (2026-08-27)
+    const preExisting = Array.from({ length: 50 }, (_, i) => ({ postId: `builder-50-${i}`, retired: true, provider: 'worker' }))
+    const alerts = []
+    const warns = []
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-incident',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: preExisting,
+      qiDirectiveRate: 0.25,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => warns.push(m) }
+    })
+    // The incident: 50 boot-retired posts (the C2 prune) with 0 directives → the
+    // PRE-FIX code stamped + counted them → a false `qi-silence` alert 2 min
+    // post-deploy. The census-priming fix: 0 retirements in the window → NO alert.
+    await tick(T0)
+    assert.equal(alerts.length, 0, 'the incident replay: 50 boot-retired posts with 0 directives → NO qi-silence alert (the false positive is gone)')
+    const ledger = readQiSilenceState(stateDir)
+    assert.equal(Object.keys(ledger).length, 51, 'the ledger records the 50 primes + the census marker')
+    assert.equal(Object.values(ledger).filter((v) => v === QI_SILENCE_PRIMED_MS).length, 50, 'all 50 census entries are PRIMED (sentinel 0) — none is a window event')
+    assert.equal(ledger[QI_SILENCE_CENSUS_KEY], T0, 'the census marker = the first-tick ts (19:26:29Z)')
+    // A second tick (the real posts.json had 0 retirements post-deploy) → the
+    // re-observation of the 50 primed posts never re-counts → STILL silent.
+    await tick(T0 + 120_000)
+    assert.equal(alerts.length, 0, 're-observing the same 50 primed posts never re-counts → no alert on the next tick either')
+    assert.equal(warns.length, 0, 'the incident replay tick is fully silent (no warns)')
+  })
+})
+
+test('M1.1 scanQiSilence: the boot CENSUS PRIMES — N pre-existing retired worker posts on a FRESH ledger → 0 in-window events → NO finding (the deployed false-positive incident case); re-observations NEVER re-count or re-stamp a primed entry (the latent bug)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_787_858_789_166 // the real incident census ts (19:26:29Z)
+    const windowMs = 120 * 60_000
+    const preExisting = Array.from({ length: 50 }, (_, i) => ({ postId: `builder-x${i}`, retired: true, provider: 'worker' }))
+    // (a) THE INCIDENT CASE: a FRESH ledger + a catalog of ALREADY-retired workers.
+    const census = scanQiSilence({ posts: preExisting, stateDir, nowMs: T0, windowMs, minRetires: 11, rate: 0.25, ledger: {} })
+    assert.deepEqual(census.findings, [], 'the boot census NEVER alerts — 0 retirements in the window (the false-positive incident)')
+    assert.equal(Object.keys(census.ledger).length, 51, 'the census ledger records the 50 primed posts + the census marker')
+    assert.equal(census.ledger['builder-x0'], QI_SILENCE_PRIMED_MS, 'a census-primed post carries the sentinel 0 (never a window event)')
+    assert.equal(census.ledger[QI_SILENCE_CENSUS_KEY], T0, 'the census marker records the first-tick baseline ts')
+    // (c) Re-observation of a KNOWN retired post → NEVER re-counts or re-stamps.
+    const reobs = scanQiSilence({ posts: preExisting, stateDir, nowMs: T0 + 60_000, windowMs, minRetires: 11, rate: 0.25, ledger: census.ledger })
+    assert.deepEqual(reobs.findings, [], 'a re-observation of the 50 primed posts → STILL 0 in-window retirements (the latent re-count bug is closed)')
+    assert.equal(reobs.changed, false, 're-observation does NOT re-stamp or prune (the ledger is unchanged)')
+    assert.equal(reobs.ledger['builder-x0'], QI_SILENCE_PRIMED_MS, 'the primed sentinel survives re-observation (still 0)')
+  })
+})
+
+test('M1.1 scanQiSilence: the retirement DELTA — after the census, 12 NEW retired posts (6 transitions + 6 post-census catalog arrivals) with 0 directives → 12 in window ≥ min 11 → qi-silence finding; a PRIMED census post never joins the count; a SINGLE post-census retirement still never alerts (the dice-consistent aggregate guard)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 27, 19, 30, 0).getTime()
+    const windowMs = 120 * 60_000
+    const preExisting = Array.from({ length: 50 }, (_, i) => ({ postId: `builder-p${i}`, retired: true, provider: 'worker' }))
+    const census = scanQiSilence({ posts: preExisting, stateDir, nowMs: T0, windowMs, minRetires: 11, rate: 0.25, ledger: {} })
+    assert.deepEqual(census.findings, [], 'the census primes the pre-existing retirees (the incident case)')
+    // 12 NEW post-census retirements: 6 posts that TRANSITION (not-retired →
+    // retired) + 6 brand-NEW catalog arrivals, already retired.
+    const transitions = Array.from({ length: 6 }, (_, i) => ({ postId: `builder-t${i}`, retired: true, provider: 'worker' }))
+    const arrivals = Array.from({ length: 6 }, (_, i) => ({ postId: `builder-a${i}`, retired: true, provider: 'worker' }))
+    const delta = scanQiSilence({ posts: [...preExisting, ...transitions, ...arrivals], stateDir, nowMs: T0 + 5 * 60_000, windowMs, minRetires: 11, rate: 0.25, ledger: census.ledger })
+    assert.equal(delta.findings.length, 1, '12 NEW post-census retirements ≥ min 11 with zero directives → qi-silence finding')
+    assert.equal(delta.findings[0].count, 12, 'the finding counts ONLY the post-census delta (never the 50 primed)')
+    assert.equal(delta.ledger['builder-t0'], T0 + 5 * 60_000, 'a transitioned post is stamped at its observed-retired ts')
+    assert.equal(delta.ledger['builder-a0'], T0 + 5 * 60_000, 'a post-census catalog arrival is stamped at its first observation')
+    assert.equal(delta.ledger['builder-p0'], QI_SILENCE_PRIMED_MS, 'the 50 primed posts stay primed (never re-stamped, never counted)')
+    // Control (dice consistency): a census + a SINGLE post-census retirement at
+    // p=0.25 → NO finding (1 < min 11 — the normal 75% silent-dice case).
+    const armed = scanQiSilence({ posts: preExisting, stateDir, nowMs: T0, windowMs, minRetires: 11, rate: 0.25, ledger: {} })
+    const solo = scanQiSilence({ posts: [...preExisting, { postId: 'builder-solo', retired: true, provider: 'worker' }], stateDir, nowMs: T0 + 30_000, windowMs, minRetires: 11, rate: 0.25, ledger: armed.ledger })
+    assert.deepEqual(solo.findings, [], 'a SINGLE post-census retirement (1 < min 11) never alerts — the normal dice silence')
+    assert.equal(solo.ledger['builder-solo'], T0 + 30_000, 'the solo retirement is STAMPED and observed but below the aggregate minimum (observation and alerting are decoupled)')
   })
 })
 
