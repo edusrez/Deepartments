@@ -53,6 +53,21 @@ export interface DepartmentConfig {
    * phase (F1): absent/empty = no jobs declared yet.
    */
   jobDir?: string
+  /**
+   * E2 — OPTIONAL one-line description of WHAT the department does (used by the
+   * wake-pack `## Departments directory` section + its SKILL.md mirror: how any
+   * agent knows each department's purpose). Absent/empty → the department
+   * contributes NO directory line (a legacy config without the new fields
+   * composes untouched and the pack omits the section, R6).
+   */
+  purpose?: string
+  /**
+   * E2 — OPTIONAL how-to-request line for the department's services (the
+   * RESEARCH/PROGRAMMING/QUALITY REQUEST format + the send_message target head).
+   * Used by the wake-pack `## Departments directory` section + its SKILL.md
+   * mirror. Absent/empty → no directory line (R6).
+   */
+  services?: string
   coordinator?: CoordinatorConfig
 }
 
@@ -333,6 +348,12 @@ export const Config: z<any, any> = z.object({
       // a config without them (the pre-F1 shape) keeps composing untouched.
       workspacePath: z.string().default(''),
       jobDir: z.string().default(''),
+      // E2 — optional department directory info (wake-pack `## Departments
+      // directory` section + skill mirror). `default('')` like the F1 fields:
+      // a legacy config without them composes untouched (R6) and the pack
+      // omits the section.
+      purpose: z.string().default(''),
+      services: z.string().default(''),
       coordinator: z.object({
         postId: z.string().required(),
         role: z.string().default(''),

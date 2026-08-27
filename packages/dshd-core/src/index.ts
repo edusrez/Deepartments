@@ -83,6 +83,13 @@ export interface OrgDepartment {
   name?: string
   workspacePath?: string
   jobDir?: string
+  /** E2 — optional one-line department purpose (the wake-pack `## Departments
+   * directory` section + SKILL.md mirror). Absent/empty → the department
+   * contributes NO directory line (R6). */
+  purpose?: string
+  /** E2 — optional how-to-request line (RESEARCH/PROGRAMMING/QUALITY REQUEST
+   * format + send_message target). Absent/empty → no directory line (R6). */
+  services?: string
   coordinator?: {
     postId?: string
     role?: string
@@ -363,6 +370,13 @@ function buildWakePackLazy(ctx: Context, binder: Binder): WakePackService {
     persistHosts: () => catalog.persistHosts(),
     roleForSession: bound.roleForSession!,
     buildSubagentOrientation: bound.buildSubagentOrientation!,
+    // E2 — the DIRECTORIO section is assembled from the SHARED CONFIG SOURCE
+    // (`deepartments.org` → the dshd-core org.departments row): the pack never
+    // hardcodes the org chart; add/remove a department = edit the config. The
+    // departments slice carries name + coordinator.postId + purpose/services
+    // (the two E2 descriptor fields, optional — a legacy config composes and
+    // the directory section renders only what carries purpose/services, R6).
+    departments: org.org.departments,
     computeHostSleepSurfacePlan: bound.computeHostSleepSurfacePlan!,
     buildSleepJournalMessage,
     assembleHeartbeat: bound.assembleHeartbeat!,

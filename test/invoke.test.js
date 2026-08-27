@@ -29,7 +29,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
@@ -1880,7 +1880,7 @@ test('Batch D fork-ghost sweep: retired fork-provider posts are removed from pos
 // head's live AgentHandle (context reset — the durable session survives, so
 // the next wake cold-resumes it). On the next wake the relay clears the flag
 // and cold-resumes the SAME durable session (ctx.agents.resume) then follows up
-// with the pointer-only board delta; the fresh incarnation reloads its journal.
+// with the pointer-only message delta; the fresh incarnation reloads its journal.
 
 test('Batch G dept_memo_write persists a head\'s long-term memory journal (author/timestamp frontmatter, durable path)', async () => {
   await withTempStateDir(async (stateDir) => {
@@ -4217,7 +4217,7 @@ test('Batch 7 U2 host dept_sleep ROTATES: no journal rejects loudly; with a jour
       assert.equal(newSleepingHost.sleeping, true, 'dept_who surfaces the sleeping NEW host')
 
       // (d) The wake pack targets ONLY the new host (§4): the NEW session's
-      // first pre-step injects the full pack (fresh board delta, wake_counter 2
+      // first pre-step injects the full pack (fresh message delta, wake_counter 2
       // KPI from the re-keyed journal); a pre-step against the OLD (retired)
       // session injects NOTHING (retired-skip gate); a second pre-step on the
       // new session stays gated (no re-inject).
@@ -5052,7 +5052,7 @@ test('Task T4/M2 pre-step: a TRANSIENT subagent (origin=subagent, role=secretary
       // Slim role-focused block present:
       assert.match(text, /^## Deepartments context$/m, 'subagent orientation opens with its OWN header, not the wake pack header')
       assert.match(text, /pack-v1: present/, 'carries the deterministic presence sentinel')
-      assert.match(text, /identity: Deepartments subagent \(role: secretary, room: deepartments\)/, 'identity is a Deepartments subagent with the SECRETARY role — never a host')
+      assert.match(text, /identity: Deepartments subagent \(role: secretary, org: deepartments\)/, 'identity is a Deepartments subagent with the SECRETARY role — never a host')
       assert.match(text, /## Your role contract/, 'role contract section present')
       assert.match(text, /READ-ONLY NON-CODE: you READ files, reports and journals/, 'secretary contract injected (read-only NON-CODE)')
       assert.match(text, /CODE BELONGS TO THE IPD/, 'secretary contract carries the NON-CODE → IPD limit')
@@ -5064,6 +5064,7 @@ test('Task T4/M2 pre-step: a TRANSIENT subagent (origin=subagent, role=secretary
       assert.ok(!text.includes('Pre-resolved journal path'), 'no journal pointer')
       assert.ok(!text.includes('## Message delta (received)'), 'no message delta section')
       assert.ok(!text.includes('## Condensed roster'), 'no roster')
+      assert.ok(!text.includes('## Departments directory'), 'E2: no departments-directory section in the slim subagent block (the directory is wake-pack only)')
       assert.ok(!text.includes('## Git bearings'), 'no git bearings section')
       assert.ok(!text.includes('## System state'), 'no system state section')
       assert.ok(!text.includes('## ROADMAP current status (tail)'), 'no ROADMAP tail')
@@ -5229,10 +5230,11 @@ test('Task T4 REGRESSION: a subagent-origin child with the REAL FLAT header (ori
       assert.equal(decision.messages.length, claimed.length + 1, 'subagent pre-step injects exactly ONE extra node (the slim role block)')
       const text = decision.messages[decision.messages.length - 1].content[0].text
       assert.match(text, /^## Deepartments context$/m, 'slim block opens with its OWN header — not the wake-pack header')
-      assert.match(text, /identity: Deepartments subagent \(role: secretary, room: deepartments\)/, 'slim block: subagent identity with the secretary role — never a host')
+      assert.match(text, /identity: Deepartments subagent \(role: secretary, org: deepartments\)/, 'slim block: subagent identity with the secretary role — never a host')
       // The wake-pack markers the dead-code bug used to inject:
       assert.ok(!text.includes('## Deepartments wake pack'), 'NO wake-pack header text (dead-code regression: old code injected the full pack)')
       assert.ok(!text.includes('Pre-resolved journal path'), 'NO journal pointer')
+      assert.ok(!text.includes('## Departments directory'), 'E2: NO departments-directory section in the slim T4 block (the directory is wake-pack only)')
       assert.ok(!text.includes('## Git bearings'), 'NO git bearings section')
 
       // ---- host: the real root-agent header (flat, no origin key) still gets
@@ -5389,7 +5391,7 @@ test('M2 SECRETARIOS deploy-journal: a HEAD deploys ONE secretary — execute st
       assert.equal(decision.messages.length, claimed.length + 1, 'the secretary pre-step injects exactly ONE extra node (the slim contract block)')
       const text = decision.messages[decision.messages.length - 1].content[0].text
       assert.match(text, /^## Deepartments context$/m, 'the secretary receives its OWN slim context, not the wake pack')
-      assert.match(text, /identity: Deepartments subagent \(role: secretary, room: deepartments\)/, 'the secretary identity carries the secretary role')
+      assert.match(text, /identity: Deepartments subagent \(role: secretary, org: deepartments\)/, 'the secretary identity carries the secretary role')
       assert.match(text, /READ-ONLY NON-CODE: you READ files, reports and journals/, 'the secretary contract block is injected for the deploy-journal child')
       assert.match(text, /CODE BELONGS TO THE IPD/, 'the NON-CODE → IPD limit is injected')
       assert.ok(!text.includes('## Deepartments wake pack'), 'NO full host wake pack for the secretary child (slim block wakepack)')
@@ -5399,13 +5401,16 @@ test('M2 SECRETARIOS deploy-journal: a HEAD deploys ONE secretary — execute st
   })
 })
 
-test('Batch W4 pure: buildWakePack composes all 10 sections in order (identity, owner presence, journal path, delta TOC, roster, git, system, ROADMAP tail, skill body, guidance)', async () => {
+test('Batch W4 pure: buildWakePack composes all sections in order (identity, owner presence, journal path, delta TOC, roster, departments directory, git, system, ROADMAP tail, skill body, guidance)', async () => {
   const pack = buildWakePack({
     memberId: 'host-session-abc',
     role: 'host',
     journalPath: '/state/journals/host-session-abc.md',
     messageDelta: '- m-4 | sender-1 → host-session-abc | preview text',
     roster: '- research-head (deepartments-head)',
+    // E2 — DIRECTORIO de departamentos (assembled by the assembly from
+    // config.org.departments; the pure builder just renders what it is given).
+    departmentsDirectory: '- Research (research-head): investigación web-first de la org. Pídelo con un RESEARCH REQUEST (send_message a research-head).\n- Cualquier head puede pedir los servicios de otro departamento por send_message a su head (ACL head↔head); un worker nunca cruza departamentos — pide a su propio head, que retransmite.',
     git: 'status: clean working tree\nlast 2 commits:\n  abc123 feat(x)\n  def456 fix(y)',
     systemState: '- DSH dev home: /opt/dsh/.dsh-dev',
     roadmapTail: '- **2026-08-20** — W3 committed.',
@@ -5421,13 +5426,15 @@ test('Batch W4 pure: buildWakePack composes all 10 sections in order (identity, 
   assert.match(pack, /pack-v1: present/, 'pack carries the deterministic `pack-v1: present` sentinel in section 1')
   assert.match(pack, /- kpi: wake_counter 3; top open item: finish W4/, 'pack section 1 carries the wake_counter + top open-item KPI line')
 
-  // Every section header present, in order 1-10.
+  // Every section header present, in order 1-10 (5b = the directory, between
+  // the roster and git bearings).
   const headers = [
     '## Deepartments wake pack',
     '## Owner presence: present',
     '## Journal (long-term memory)',
     '## Message delta (received)',
     '## Condensed roster',
+    '## Departments directory',
     '## Git bearings',
     '## System state',
     '## ROADMAP current status (tail)',
@@ -5441,6 +5448,11 @@ test('Batch W4 pure: buildWakePack composes all 10 sections in order (identity, 
     assert.ok(idx > lastIdx, `section header in order: ${header}`)
     lastIdx = idx
   }
+
+  // The directory body is caller-provided verbatim (the pure builder never
+  // hardcodes the org chart — the assembly passes the config-derived slice).
+  assert.match(pack, /- Research \(research-head\): investigación web-first de la org/, 'directory assembles the department line verbatim')
+  assert.match(pack, /ACL head↔head/, 'directory carries the org-wide ACL note (head ↔ head; a worker never crosses)')
 
   assert.match(pack, /Pre-resolved journal path: `\/state\/journals\/host-session-abc\.md`/, 'journal path is pre-resolved')
   assert.match(pack, /- m-4 \| sender-1 → host-session-abc \| preview text/, 'message delta TOC included')
@@ -5473,9 +5485,10 @@ test('Batch W4 pure: buildWakePack renders an EMPTY board-delta section when the
   assert.ok(!deltaBody.includes('|'), 'no TOC lines for an empty delta')
   assert.match(deltaBody, /^\s*$/, 'delta section body is empty when no new messages')
 
-  // Lean snapshot shape: sections 2,3,6,7,8,9,10 absent.
+  // Lean snapshot shape: sections 2,3,5b,6,7,8,9,10 absent.
   assert.ok(!pack.includes('## Owner presence:'), 'no owner-presence section for a lean snapshot')
   assert.ok(!pack.includes('## Journal (long-term memory)'), 'no journal section for a lean snapshot')
+  assert.ok(!pack.includes('## Departments directory'), 'E2: no departments-directory section for a lean snapshot (the directory is wake-injection only)')
   assert.ok(!pack.includes('## Git bearings'), 'no git section for a lean snapshot')
   assert.ok(!pack.includes('## System state'), 'no system-state section for a lean snapshot')
   assert.ok(!pack.includes('## Guidance (wake routine)'), 'no guidance section for a lean snapshot')
@@ -5488,6 +5501,7 @@ test('Batch W4 pure: buildWakePack degrades gracefully — undefined optional in
   assert.ok(!lean.includes('## deepartments-workflow skill'), 'undefined skill omitted gracefully')
   assert.ok(!lean.includes('## System state'), 'undefined system state omitted gracefully')
   assert.ok(!lean.includes('## Owner presence:'), 'undefined owner-presence omitted gracefully')
+  assert.ok(!lean.includes('## Departments directory'), 'E2: undefined departments-directory omitted gracefully (a legacy config composes untouched)')
 
   // Markers produced by the NON-pure assembly layer pass through untouched.
   const degraded = buildWakePack({
@@ -5497,6 +5511,153 @@ test('Batch W4 pure: buildWakePack degrades gracefully — undefined optional in
   })
   assert.match(degraded, /\(git unavailable\)/, 'git unavailable marker passes through')
   assert.match(degraded, /\(skill unavailable\)/, 'skill unavailable marker passes through')
+})
+
+test('E2 DIRECTORIO: buildDepartmentsDirectory assembles ONE line per configured department (name + head id + purpose/services) + the ACL note, and degrades to \'\' for a legacy config without purpose/services (R6 → section omitted)', async () => {
+  // The 3 configured departments (the current cordis.patch.yml reality): each
+  // line carries the head id the requester send_message's to.
+  const directory = buildDepartmentsDirectory([
+    { name: 'Research Department', coordinator: { postId: 'research-head' }, purpose: 'investigación web-first de la org', services: 'RESEARCH REQUEST (send_message a research-head)' },
+    { name: 'Internal Programming', coordinator: { postId: 'internal-programming-head' }, purpose: 'todo el trabajo de código interno', services: 'PROGRAMMING REQUEST (send_message a internal-programming-head)' },
+    { name: 'Quality Department', coordinator: { postId: 'quality-head' }, purpose: 'inspecciona el runtime de la org', services: 'QUALITY REQUEST (send_message a quality-head)' }
+  ])
+  assert.match(directory, /- Research Department \(research-head\): investigación web-first de la org\. Pídelo con un RESEARCH REQUEST \(send_message a research-head\)\./, 'research directory line: head id correct')
+  assert.match(directory, /- Internal Programming \(internal-programming-head\): todo el trabajo de código interno\. Pídelo con un PROGRAMMING REQUEST \(send_message a internal-programming-head\)\./, 'IPD directory line: head id correct')
+  assert.match(directory, /- Quality Department \(quality-head\): inspecciona el runtime de la org\. Pídelo con un QUALITY REQUEST \(send_message a quality-head\)\./, 'QD directory line: head id correct')
+  assert.ok(directory.includes(`- ${DIRECTORY_ACL_NOTE}`), 'the org-wide ACL note closes the directory (head ↔ head; workers via their own head)')
+
+  // R6: a legacy config (departments WITHOUT purpose/services) contributes NO
+  // line → '' → the wake-pack section is absent (the pack never invents an org
+  // chart from nothing).
+  const legacy = buildDepartmentsDirectory([
+    { name: 'Legacy', coordinator: { postId: 'legacy-head' } },
+    { name: '', coordinator: { postId: '' } }
+  ])
+  assert.equal(legacy, '', 'a legacy config without purpose/services renders an empty directory (section omitted)')
+  const legacyPack = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x', departmentsDirectory: legacy, includeGuidance: false })
+  assert.ok(!legacyPack.includes('## Departments directory'), 'R6: the empty directory body → the pack omits the section')
+
+  // No departments at all → '' → absent.
+  assert.equal(buildDepartmentsDirectory([]), '', 'no departments → empty directory → section absent')
+})
+
+test('E2 DIRECTORIO (real Loader): a config whose org.departments carry purpose/services injects the directory between roster and git bearings in the HOST pack (the assembly passes the config slice; the pack never hardcodes the org chart), and a legacy config gets NO 5b section', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Three departments WITH the E2 fields (the current cordis.patch.yml
+    // reality) — the config is the single source; the pack assembles from it.
+    const directoryOrg = {
+      departments: [
+        { id: 'research', name: 'Research Department', purpose: 'investigación web-first de la org', services: 'RESEARCH REQUEST (send_message a research-head)', coordinator: { postId: 'research-head', role: 'Research department head', provider: 'deepseek-official', agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' } } },
+        { id: 'internal-programming', name: 'Internal Programming', purpose: 'todo el trabajo de código interno', services: 'PROGRAMMING REQUEST (send_message a internal-programming-head)', coordinator: { postId: 'internal-programming-head', role: 'Internal Programming department head', provider: 'deepseek-official', agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' } } },
+        { id: 'quality', name: 'Quality Department', purpose: 'inspecciona el runtime de la org', services: 'QUALITY REQUEST (send_message a quality-head)', coordinator: { postId: 'quality-head', role: 'Quality department head', provider: 'deepseek-official', agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' } } }
+      ]
+    }
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir, { org: directoryOrg })
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'research head created at boot')
+      // Register the host (B3 self-registration via dept_who) so the catalog
+      // resolves it and the pre-step injector gates it in as the board host.
+      await root.tools.get('dept_who').execute({}, { agent: host, signal })
+
+      const claimed = preStepClaimed('wake up')
+      const decision = await runPreStep(pluginCtx, host, claimed, signal)
+      assert.equal(decision.kind, 'enter', 'host pre-step decision is enter')
+      const packText = decision.messages[decision.messages.length - 1].content[0].text
+      // The directory section sits BETWEEN the roster and git bearings (5b).
+      const rosterIdx = packText.indexOf('## Condensed roster')
+      const directoryIdx = packText.indexOf('## Departments directory')
+      const gitIdx = packText.indexOf('## Git bearings')
+      assert.ok(rosterIdx !== -1 && directoryIdx !== -1 && gitIdx !== -1, 'roster + directory + git sections present')
+      assert.ok(rosterIdx < directoryIdx && directoryIdx < gitIdx, 'E2: the directory section renders right after the roster, before git bearings')
+      assert.match(packText, /- Research Department \(research-head\): investigación web-first de la org\. Pídelo con un RESEARCH REQUEST \(send_message a research-head\)\./, 'host pack directory: research line with the correct head id')
+      assert.match(packText, /- Internal Programming \(internal-programming-head\): todo el trabajo de código interno\. Pídelo con un PROGRAMMING REQUEST \(send_message a internal-programming-head\)\./, 'host pack directory: IPD line with the correct head id')
+      assert.match(packText, /- Quality Department \(quality-head\): inspecciona el runtime de la org\. Pídelo con un QUALITY REQUEST \(send_message a quality-head\)\./, 'host pack directory: QD line with the correct head id')
+      assert.ok(packText.includes(`- ${DIRECTORY_ACL_NOTE}`), 'host pack directory: the org-wide ACL note closes it')
+    } finally {
+      await dispose()
+    }
+  })
+
+  // R6 (real Loader): a legacy config (departments WITHOUT purpose/services —
+  // the pre-E2 shape) renders NO 5b directory section in the injected pack.
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir) // TEST_ORG: no purpose/services
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
+      await root.tools.get('dept_who').execute({}, { agent: host, signal })
+
+      const claimed = preStepClaimed('wake up')
+      const decision = await runPreStep(pluginCtx, host, claimed, signal)
+      const packText = decision.messages[decision.messages.length - 1].content[0].text
+      // The directory must NOT appear between roster and git (no 5b section for
+      // a legacy config). The host pack embeds the full skill body (section 9),
+      // which ALSO carries the directory MIRROR — so assert on the 5b POSITION,
+      // not on the string alone.
+      const rosterIdx = packText.indexOf('## Condensed roster')
+      const gitIdx = packText.indexOf('## Git bearings')
+      const between = packText.slice(rosterIdx, gitIdx)
+      assert.ok(!between.includes('## Departments directory'), 'R6: legacy config (no purpose/services) → NO 5b directory section between roster and git')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('E2 DIRECTORIO + staleness (b): the deepartments-workflow SKILL.md (the mirror the pack embeds as section 9 AND the section workers read directly) carries the research-head Roster row + the `## Departments directory` mirror with the 3 head ids + the 25% QD dice', async () => {
+  const skill = await readFile(path.join(REPO_ROOT, '.dsh', 'skills', 'deepartments-workflow', 'SKILL.md'), 'utf8')
+  // (b) — the Roster table now lists the research head, identical in form to
+  // the IPD/QD rows (the gap the E2 report flagged).
+  assert.match(skill, /\| \*\*Research Head\*\* \(`research-head`\) \| `send_message` \| deepseek-v4-flash \|/, 'staleness (b): the Roster table carries the research-head row (same form as IPD/QD)')
+  // The mirror section (workers never receive the pack — this is their copy).
+  assert.match(skill, /## Departments directory/, 'skill carries the E2 Departments-directory mirror section')
+  assert.match(skill, /- Research Department \(research-head\): /, 'mirror: research line with the head id')
+  assert.match(skill, /- Internal Programming \(internal-programming-head\): /, 'mirror: IPD line with the head id')
+  assert.match(skill, /- Quality Department \(quality-head\): /, 'mirror: QD line with the head id')
+  assert.match(skill, /ACL head↔head/, 'mirror: the org-wide ACL note')
+  // staleness (a) — the QD dice text is 25% (the F-HIGH knob reality), NOT 10%.
+  assert.match(skill, /retire sampled at probability 0\.25/, 'staleness (a): the skill says the QD worker-retire dice is 0.25 (the F-HIGH reality)')
+})
+
+test('E2 R6 schema: org.departments[].purpose/services are OPTIONAL — a legacy department (pre-E2 shape) parses and defaults to empty; a filled department keeps its texts (the config always composes, R6)', () => {
+  // Legacy shape: NO purpose/services → parses (defaults ''), no throw.
+  const legacy = configSchema({
+    stateDir: '.deepartments',
+    org: { departments: [{ id: 'legacy', name: 'Legacy', coordinator: { postId: 'legacy-head', role: 'Legacy department head' } }] }
+  }).org.departments[0]
+  assert.equal(legacy.purpose, '', 'R6: a legacy department without purpose defaults to empty')
+  assert.equal(legacy.services, '', 'R6: a legacy department without services defaults to empty')
+
+  // Filled shape: the texts survive the schema parse (the assembly reads them).
+  const filled = configSchema({
+    stateDir: '.deepartments',
+    org: { departments: [{ id: 'research', name: 'Research Department', purpose: 'investigación web-first de la org', services: 'RESEARCH REQUEST (send_message a research-head)', coordinator: { postId: 'research-head', role: 'Research department head' } }] }
+  }).org.departments[0]
+  assert.equal(filled.purpose, 'investigación web-first de la org', 'the E2 purpose field survives the schema parse')
+  assert.equal(filled.services, 'RESEARCH REQUEST (send_message a research-head)', 'the E2 services field survives the schema parse')
+})
+
+test('E2 vocab fix (c): buildSubagentOrientation identity names the ORG (org: deepartments) — never the B3-dead "room:" wording (rooms were removed)', async () => {
+  const { buildSubagentOrientation } = await import('../lib/role-orient.js')
+  const text = buildSubagentOrientation('secretary', 'deepartments')
+  assert.match(text, /- identity: Deepartments subagent \(role: secretary, org: deepartments\)/, 'E2 (c): the T4 identity names the org label, not a room (B3-dead vocab cleaned)')
+  assert.ok(!text.includes('room:'), 'E2 (c): NO "room:" wording remains in the injected subagent identity')
+  // The message-delta rename (board → message) is asserted in the
+  // buildWakePackMessage test; here we also confirm the DIRECTORY_ACL_NOTE
+  // constant is exported verbatim (the cross-department pointer text).
+  assert.match(DIRECTORY_ACL_NOTE, /ACL head↔head/, 'the ACL note constant is exported (skill mirror + pack share it)')
+})
+
+test('E2 model fix (d): the deepartments HEAD + WORKER preset literals name deepseek-v4-flash (the runtime reality), NOT deepseek-v4-flash-vision-exp', async () => {
+  const headPreset = await readFile(path.join(REPO_ROOT, 'presets', 'deepartments-head', 'agent.cordis.yml'), 'utf8')
+  const workerPreset = await readFile(path.join(REPO_ROOT, 'presets', 'deepartments-worker', 'agent.cordis.yml'), 'utf8')
+  for (const [label, text] of [['head preset', headPreset], ['worker preset', workerPreset]]) {
+    assert.match(text, /Model: deepseek-v4-flash \(provider opencode-zen, reasoning max\)/, `${label}: the persona names deepseek-v4-flash (heads/workers run flash, not vision-exp)`)
+    assert.ok(!text.includes('deepseek-v4-flash-vision-exp'), `${label}: NO vision-exp literal remains (runtime reality is flash — invoke.ts WORKER_AGENT_OPTIONS)`)
+  }
 })
 
 test('Batch W4 pure: buildWakePack renders the `## Owner presence: present|absent` line + matching guidance per the supplied state, and omits it when no state is supplied', async () => {
@@ -5545,6 +5706,10 @@ test('Batch W4 pure: buildWakePackMessage frames the wake pack as a plugin/notic
   assert.equal(msg.source.kind, 'plugin')
   assert.equal(msg.source.form, 'notice')
   assert.equal(msg.content[0].text, '## Deepartments wake pack\ncontent')
+  // Vocab (staleness c): the notice summary names the MESSAGE delta (B3: the
+  // board is gone) — never the removed "board delta".
+  assert.match(String(msg.source.summary), /message delta/, 'notice summary names the message delta')
+  assert.ok(!String(msg.source.summary).includes('board delta'), 'notice summary no longer says "board delta" (B3 dead vocab)')
 })
 
 test('Batch W4 dept_wake_snapshot: registers globally (host plane), and ONE call returns the identity+delta+roster shape with NO live sessionLive liveness', async () => {
@@ -5567,6 +5732,7 @@ test('Batch W4 dept_wake_snapshot: registers globally (host plane), and ONE call
       // Lean on-demand snapshot: no journal/git/skill/guidance (or presence) sections.
       assert.ok(!result.snapshot.includes('## Journal (long-term memory)'), 'lean snapshot has no journal section')
       assert.ok(!result.snapshot.includes('## Git bearings'), 'lean snapshot has no git section')
+      assert.ok(!result.snapshot.includes('## Departments directory'), 'E2: lean snapshot has no departments-directory section')
       assert.ok(!result.snapshot.includes('## deepartments-workflow skill'), 'lean snapshot has no skill section')
       assert.ok(!result.snapshot.includes('## Guidance (wake routine)'), 'lean snapshot has no guidance section')
       assert.ok(!result.snapshot.includes('## Owner presence:'), 'lean snapshot has no owner-presence section (reserved for the host wake pack)')

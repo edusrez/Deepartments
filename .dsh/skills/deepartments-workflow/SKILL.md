@@ -19,6 +19,7 @@ Department (QD)".
 | Role | Dispatch tool | Model | Notes |
 |-----|----------------|-------|-------|
 | **Asistente** (host main agent) | (this agent) | deepseek-v4-flash-vision-exp | All tools, but NEVER edits; interface/coordinator — positional authority (HOST), NOT a model tier; translates the owner's vision, asks microdecisions, and runs verification/commits/deploys; does NOT plan internal programming (the IPD head does) |
+| **Research Head** (`research-head`) | `send_message` | deepseek-v4-flash | DELEGATING head of the Research Department; ephemeral workers researcher/analyst/reviewer/organizer. Owns all research — see "Research requests → Research Department (RD)" |
 | **Internal Programming Head** (`internal-programming-head`) | `send_message` | deepseek-v4-flash | DELEGATING head of the Internal Programming Department; ephemeral workers builder/reviewer/explore-deep/organizer. Owns all internal programming work — see "Programming requests → Internal Programming Department (IPD)" |
 | **Quality Head** (`quality-head`) | `send_message` | deepseek-v4-flash | DELEGATING head of the Quality Department; ephemeral-per-round worker quality-inspector. Inspects the org's own runtime (archive events sampled/100%, post-errors, daily digest) — see "Quality requests → Quality Department (QD)" |
 | **Secretary** (HOST + HEADS) | `secretary` (`dsh-deepartments/subagent`, HOST's tool row / heads' `tool-secretary`) | inherits the parent (host vision-exp; a head flash) | UNIFIED transient role (M2, owner 2026-08-28): ONE personal NON-CODE READ-ONLY helper that reads journals/files/reports, searches (glob/grep) and summarises for its deployer; never edits/writes/runs commands (code → IPD). It is a transient subagent child (followups via `send_message` to the child id), NOT a department worker |
@@ -57,6 +58,23 @@ the host + its transient secretaries run `deepseek-v4-flash-vision-exp`
 (provider `opencode-zen`, reasoning_effort `max`); department heads +
 department workers run `deepseek-v4-flash` (provider `opencode-zen`, reasoning
 max).
+
+## Departments directory
+
+> E2 mirror of the wake pack's `## Departments directory` section (section 5b):
+> SAME text in BOTH places, but the PACK assembles it live from
+> `config.org.departments[].purpose/services` (the org chart is never hardcoded
+> in the pack — add/remove a department = edit the config); this skill mirror
+> is the static render of the CURRENT configuration. KEEP THE TWO IN SYNC when
+> editing `cordis.patch.yml` (`org.departments[].purpose`/`services`) — the pack
+> renders it automatically; update this mirror to the same text. Any agent that
+> does NOT receive the pack (department workers — the pack is HOST-only) reads
+> the directory HERE.
+
+- Research Department (research-head): investigación web-first de la org — evidencia actual/community/security (research-on-demand + tech-watch biweekly; roles researcher/analyst/reviewer/organizer). Pídelo con un RESEARCH REQUEST (send_message a research-head) — devuelve informe + resumen 3-5 bullets.
+- Internal Programming (internal-programming-head): todo el trabajo de código interno de DSH/dsh-deepartments/plugins — planificación, implementación (builder), análisis profundo (explore-deep), revisión (reviewer), jobs semanales (weekly-repo-health, version-watch); DAG/cola IPD. Pídelo con un PROGRAMMING REQUEST (send_message a internal-programming-head).
+- Quality Department (quality-head): inspecciona el runtime de la propia org (eventos de archivo 25%/100%, post-errors, digest diario quality-daily); SOLO reporta, nunca arregla (los fixes van al IPD vía PROGRAMMING REQUEST). Pídelo con un QUALITY REQUEST (send_message a quality-head).
+- Cualquier head puede pedir los servicios de otro departamento por send_message a su head (ACL head↔head); un worker nunca cruza departamentos — pide a su propio head, que retransmite.
 
 ## Head lifecycle
 

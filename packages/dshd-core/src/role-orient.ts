@@ -251,15 +251,19 @@ export const ROLE_CONTRACTS: Record<SubagentRole, string> = {
     '- REPORT your result (the parent does not see your transcript).'
 }
 
-/** One-line org identity for the compact subagent injection. */
-export function buildSubagentOrientation(role: SubagentRole, roomId: string): string {
+/** One-line org identity for the compact subagent injection. The second param
+ * is the ORG label (E2 persona-wording cleanup of the B3 `roomId` debt): rooms
+ * were removed in B3 (spec 003 §7.1), so the identity names the ORG, never a
+ * board room — the wakepack pre-step passes the org label ('deepartments').
+ * (The legacy registry `roomId` field stays inert/deprecated — untouched.) */
+export function buildSubagentOrientation(role: SubagentRole, orgLabel: string): string {
   const reporting = role === 'secretary'
     ? 'Return the deployer a concise self-contained summary (they do not see your transcript).'
     : 'Write your report to `.dsh/reports/<role>/<YYYY-MM-DD>-<task-slug>.md` with the convention frontmatter; return the parent a concise self-contained summary referencing shared paths.'
   return [
     '## Deepartments context',
     'pack-v1: present',
-    `- identity: Deepartments subagent (role: ${role}, room: ${roomId})`,
+    `- identity: Deepartments subagent (role: ${role}, org: ${orgLabel})`,
     '',
     '## Your role contract',
     ROLE_CONTRACTS[role],

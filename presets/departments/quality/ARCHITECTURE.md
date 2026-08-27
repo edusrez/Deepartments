@@ -64,6 +64,10 @@ emits head sleeps, and the QH never concludes with `dept_sleep`.
 - **head** → heads (incl. the host) + its own department; not other dept workers.
 - **host** → everyone.
 
+**Cross-department:** cómo pedir servicios a OTROS departamentos (QUÉ hace cada
+uno, a QUÉ head, en qué formato) → sección **Departments directory** del skill
+`deepartments-workflow` (o del wake pack del host — el mismo texto).
+
 ## Report-only fix flow (D-Q5, §3.5)
 
 The QD inspects and reports; it NEVER repairs (no `edit`, no mutating

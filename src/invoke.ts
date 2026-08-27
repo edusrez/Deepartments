@@ -26,7 +26,7 @@
 //     (`sleepEpoch`), DISPOSES the head's AgentHandle, and (F8, spec 002 head
 //     rotation) ARCHIVES the head's durable session server-side. The next wake
 //     RECREATES the head FRESH (mints a NEW session id — the archive old one is
-//     never resumed) and follows up with the pointer-only board delta. A
+//     never resumed) and follows up with the pointer-only message delta. A
 //     disposable WORKER keeps the legacy cold-resume of the SAME durable
 //     session. The durable session survives `dispose()` (dispose tears the LIVE
 //     agent+session out of the in-memory registry, not the sessionPersistence
@@ -507,6 +507,8 @@ import {
   buildPresenceMessage,
   presenceGuidance,
   formatMessageDeltaLine,
+  buildDepartmentsDirectory,
+  DIRECTORY_ACL_NOTE,
   toJsonSafe,
   jsonSafeMessageSource,
   sanitizePromptLiterals,
@@ -520,7 +522,8 @@ import type {
   WakePackDeps,
   WakePackParts,
   WakePreStepArgs,
-  HostSleepSurfacePlan
+  HostSleepSurfacePlan,
+  DirectoryDepartment
 } from './core/wakepack.js'
 export {
   createWakePackService,
@@ -529,6 +532,8 @@ export {
   buildPresenceMessage,
   presenceGuidance,
   formatMessageDeltaLine,
+  buildDepartmentsDirectory,
+  DIRECTORY_ACL_NOTE,
   toJsonSafe,
   jsonSafeMessageSource,
   sanitizePromptLiterals,
@@ -543,7 +548,8 @@ export type {
   WakePreStepArgs,
   WakePreStepDecision,
   WakeMessageStoreLike,
-  HostSleepSurfacePlan
+  HostSleepSurfacePlan,
+  DirectoryDepartment
 } from './core/wakepack.js'
 
 /**
@@ -3193,7 +3199,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   }
 
   // FASE 2 step (e): the NON-pure wake-pack assembly (git bearings, ROADMAP
-  // tail, skill body, board delta, condensed roster, system state) + the
+  // tail, skill body, message delta, condensed roster, system state) + the
   // `agent/pre-step` injector now live in ./core/wakepack.js (the WAKE CONTEXT
   // PACK + ROSTER module). The apply fiber builds ONE WakePackService below and
   // injects the closure-bound deps (the catalog maps + identity resolvers + the
@@ -3306,6 +3312,14 @@ export function applyInvoke(ctx: Context, config: Config) {
       persistHosts,
       roleForSession: roleForSessionLive,
       buildSubagentOrientation,
+      // E2 — the DIRECTORIO section is assembled from the bundle's own org
+      // departments (the minimal-composition fallback of the SHARED CONFIG
+      // SOURCE `deepartments.org` — the dshd-core row when composed): the pack
+      // never hardcodes the org chart; add/remove a department = edit config.
+      // Optional slice (name + coordinator.postId + purpose/services) — a
+      // legacy config without the E2 fields composes and the directory section
+      // renders only what carries purpose/services (R6).
+      departments: org.departments,
       computeHostSleepSurfacePlan,
       buildSleepJournalMessage,
       assembleHeartbeat,

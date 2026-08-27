@@ -38,6 +38,17 @@
             - id: research
               name: Research Department
               workspacePath: /root/.deepartments/departments/research
+              # E2 — DIRECTORIO de departamentos (wake-pack section 5b + skill
+              # mirror): purpose = WHAT the department does; services = HOW to
+              # request it (the REQUEST format + send_message target). The pack
+              # section is assembled FROM these config fields — never hardcoded.
+              purpose: >-
+                investigación web-first de la org — evidencia
+                actual/community/security (research-on-demand + tech-watch
+                biweekly; roles researcher/analyst/reviewer/organizer)
+              services: >-
+                RESEARCH REQUEST (send_message a research-head) — devuelve
+                informe + resumen 3-5 bullets
               coordinator:
                 postId: research-head
                 title: Head of Research
@@ -51,6 +62,14 @@
             - id: internal-programming
               name: Internal Programming
               workspacePath: /root/.deepartments/departments/internal-programming
+              # E2 — dirección: PROGRAMMING REQUEST + DAG/cola IPD (builder /
+              # reviewer / explore-deep / organizer).
+              purpose: >-
+                todo el trabajo de código interno de DSH/dsh-deepartments/
+                plugins — planificación, implementación (builder), análisis
+                profundo (explore-deep), revisión (reviewer), jobs semanales
+                (weekly-repo-health, version-watch); DAG/cola IPD
+              services: PROGRAMMING REQUEST (send_message a internal-programming-head)
               coordinator:
                 postId: internal-programming-head
                 title: Internal Programming Head
@@ -64,6 +83,14 @@
             - id: quality
               name: Quality Department
               workspacePath: /root/.deepartments/departments/quality
+              # E2 — dirección: QUALITY REQUEST/feedback; report-only (los fixes
+              # van al IPD vía PROGRAMMING REQUEST).
+              purpose: >-
+                inspecciona el runtime de la propia org (eventos de archivo
+                25%/100%, post-errors, digest diario quality-daily); SOLO
+                reporta, nunca arregla (los fixes van al IPD vía PROGRAMMING
+                REQUEST)
+              services: QUALITY REQUEST (send_message a quality-head)
               coordinator:
                 postId: quality-head
                 title: Quality Head

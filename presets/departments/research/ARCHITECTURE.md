@@ -46,6 +46,10 @@ fresh worker with the same `jobId`. No round-to-round state carries over.
 - **head** → heads (incl. the host) + its own department; not other dept workers.
 - **host** → everyone.
 
+**Cross-department:** cómo pedir servicios a OTROS departamentos (QUÉ hace cada
+uno, a QUÉ head, en qué formato) → sección **Departments directory** del skill
+`deepartments-workflow` (o del wake pack del host — el mismo texto).
+
 ## Knowledge system
 
 `{{workspacePath}}/sources/` — the curated source archive. A role consults it

@@ -9,7 +9,7 @@
 //     registered posts + non-retired hosts, with their durable REGISTRY
 //     sleeping flags, NEVER live `sessionLive` liveness);
 //   - the ASSEMBLY (`assembleWakePack` / `assembleWakeSnapshot`): the live
-//     git/board/ROADMAP/skill/journal reads folded into the pure builder;
+//     git/ROADMAP/skill/journal reads folded into the pure builder;
 //   - the `agent/pre-step` INJECTOR (Batch C): the host-only, retired-gated,
 //     once-per-session wake-pack injection at message-arrival time (and the
 //     Task T4 transient-subagent role orientation).
@@ -235,7 +235,7 @@ export function presenceGuidance(present: boolean): string {
  * (`kind:'plugin' / form:'notice'` → collapsed notice row, NOT a user-typed
  * message, so `deriveMessages()` folds its content verbatim on the next turn).
  * Injected FRESH via `agent/pre-step` at message-arrival time by the host
- * pre-step injector (not frozen into the surface at dept_sleep), so its board
+ * pre-step injector (not frozen into the surface at dept_sleep), so its message
  * delta / git / roster / cursor are current when the user's message arrives.
  * Kept separate from `buildSleepJournalMessage` so the journal node stays
  * byte-identical; the pack gets its own notice summary.
@@ -254,7 +254,7 @@ export function buildWakePackMessage(packText: string) {
       kind: 'plugin',
       plugin: 'deepartments',
       form: 'notice',
-      summary: boundContextSummary('Deepartments wake context pack — injected orientation (identity, journal path, board delta, roster, git, system state, full deepartments-workflow skill).')
+      summary: boundContextSummary('Deepartments wake context pack — injected orientation (identity, journal path, message delta, roster, git, system state, full deepartments-workflow skill).')
     })
   })
 }
@@ -305,12 +305,12 @@ export function buildPresenceMessage(present: boolean) {
  */
 export function buildSubagentOrientationMessage(
   role: SubagentRole,
-  buildSubagentOrientation: (role: SubagentRole, roomId: string) => string
+  buildSubagentOrientation: (role: SubagentRole, orgLabel: string) => string
 ) {
-  // The injected builder still takes a `roomId` parameter (out of B3a scope —
-  // its identity line is being cleaned in the persona-wording phase); the B3
-  // cutover passes the org label so the subagent identity never names a board
-  // room.
+  // The injected builder takes an ORG label (E2: the B3 `roomId` param debt is
+  // cleaned — rooms were removed, so the identity names the org, never a room);
+  // the pre-step passes the org label so the subagent identity never names a
+  // board room.
   return createUserMessage({
     content: [{ type: 'text', text: buildSubagentOrientation(role, 'deepartments') }],
     source: {
@@ -320,6 +320,59 @@ export function buildSubagentOrientationMessage(
       summary: boundContextSummary('Deepartments · subagent — role-focused orientation (role contract injected; no host wake pack).')
     }
   })
+}
+
+/** One configured department as the wake-pack DIRECTORIO (E2) consumes it: the
+ * structural slice of `org.departments[]` the directory needs (display name +
+ * head postId + the E2 purpose/services descriptors). Sourced EXCLUSIVELY from
+ * config (the assembly passes it; the org chart is NEVER hardcoded here) —
+ * adding/removing a department = editing the config. */
+export interface DirectoryDepartment {
+  /** The department display name (config.org.departments[].name). */
+  name?: string
+  /** The department's coordinator (head) post id — the send_message target. */
+  coordinator?: { postId?: string }
+  /** E2 — one-line: what the department does. */
+  purpose?: string
+  /** E2 — one-line: how to request the department's services (the REQUEST
+   * format + the send_message target). */
+  services?: string
+}
+
+/** The org-wide ACL note appended to the DIRECTORIO section (E2): head ↔ head
+ * requests cross departments; a worker never crosses — it asks its own head. */
+export const DIRECTORY_ACL_NOTE =
+  'Cualquier head puede pedir los servicios de otro departamento por send_message a su head (ACL head↔head); un worker nunca cruza departamentos — pide a su propio head, que retransmite.'
+
+/**
+ * Build the compact `## Departments directory` section BODY (E2): ONE line per
+ * configured department that carries directory info (`- <name> (<head>): <purpose>
+ * Pídelo con un <services>.`), then the org-wide ACL note. PURE: the input is
+ * the slice of `config.org.departments[]` the assembly passes — nothing is read
+ * from config here. A department WITHOUT purpose AND services contributes NO
+ * line (a legacy config without the E2 fields → no directory info → no line, and
+ * an empty result returns '' so the caller omits the section, R6). An EMPTY
+ * departments array → '' (no directory present → section absent).
+ */
+export function buildDepartmentsDirectory(departments: readonly DirectoryDepartment[]): string {
+  const lines: string[] = []
+  for (const department of departments) {
+    const name = (department.name ?? '').trim()
+    const head = department.coordinator?.postId?.trim() ?? ''
+    const purpose = (department.purpose ?? '').trim()
+    const services = (department.services ?? '').trim()
+    if (name === '' || head === '') continue
+    if (purpose === '' && services === '') continue // R6: no directory info → no line
+    // Join purpose + how-to-request into ONE compact line, ending with a
+    // single period: `- Name (head): purpose. Pídelo con un services.`
+    const bits = [`- ${name} (${head})`]
+    if (purpose !== '') bits.push(`: ${purpose}`)
+    if (services !== '') bits.push(`${purpose !== '' ? '.' : ''} Pídelo con un ${services}`)
+    lines.push(`${bits.join('')}.`)
+  }
+  if (lines.length === 0) return '' // no directory info anywhere → section absent
+  lines.push(`- ${DIRECTORY_ACL_NOTE}`)
+  return lines.join('\n')
 }
 
 /** Canonical host wake routine (verbatim — wake-pack section 9 guidance; the
@@ -355,6 +408,13 @@ export interface WakePackParts {
   messageDelta: string
   /** Condensed roster (registry flags only — NEVER live session liveness). */
   roster: string
+  /** E2 — the `## Departments directory` section BODY (one line per configured
+   * department + the ACL note), assembled by the caller from
+   * `config.org.departments[]` via `buildDepartmentsDirectory`. Undefined/'' →
+   * the section is OMITTED (a legacy config without purpose/services, or no
+   * departments at all, gets no directory — R6; the lean on-demand snapshot
+   * does NOT carry it either). */
+  departmentsDirectory?: string
   /** Git bearings (section 6; wake injection only). */
   git?: string
   /** System state (section 7; wake injection only). */
@@ -450,6 +510,16 @@ export function buildWakePack(parts: WakePackParts): string {
 
   // 5 — condensed roster (always rendered)
   sections.push(`## Condensed roster\n${parts.roster}`)
+
+  // 5b — E2 DIRECTORIO de departamentos: the compact cross-department
+  // directory, assembled from config.org.departments[] (buildDepartmentsDirectory
+  // is pure — the assembly supplies the slice; the org chart is NEVER hardcoded
+  // here). Present only when a non-empty body is supplied: a legacy config
+  // without purpose/services (or no departments at all) → no directory info →
+  // the section is OMITTED (R6); the lean on-demand snapshot also omits it.
+  if (parts.departmentsDirectory !== undefined && parts.departmentsDirectory.trim() !== '') {
+    sections.push(`## Departments directory\n${parts.departmentsDirectory}`)
+  }
 
   // 6 — git bearings
   if (parts.git !== undefined && parts.git.trim() !== '') {
@@ -567,8 +637,14 @@ export interface WakePackDeps {
   /** Resolve the transient-subagent role (single source = bundle role-orient). */
   roleForSession(sessionId: string): SubagentRole
   /** Build the compact subagent-orientation block (single source = bundle
-   * `src/role-orient.ts` — INJECTED, never a role-orient copy in this package). */
-  buildSubagentOrientation(role: SubagentRole, roomId: string): string
+   * `src/role-orient.ts` — INJECTED, never a role-orient copy in this package).
+   * The second param is the ORG label (E2 cleanup of the B3 `roomId` debt). */
+  buildSubagentOrientation(role: SubagentRole, orgLabel: string): string
+  /** E2 — the configured departments (the slice of `config.org.departments[]`
+   * the DIRECTORIO section needs: name + coordinator.postId + purpose/services).
+   * Optional: absent/undefined → the directory section is omitted (R6; a
+   * composition without the dep degrades to the pre-E2 pack). */
+  departments?: readonly DirectoryDepartment[]
   /** The deferred sleep surface replace plan (Batch 7 helper — kept in invoke). */
   computeHostSleepSurfacePlan(nodes: readonly number[]): HostSleepSurfacePlan
   /** The deferred journal node builder (Batch 7 helper — kept in invoke). */
@@ -783,6 +859,11 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
       journalPath,
       messageDelta,
       roster: buildCondensedRoster(),
+      // E2 — the DIRECTORIO de departamentos: assembled from the deps-provided
+      // config.org.departments[] slice (the pack NEVER hardcodes the org chart;
+      // add/remove a department = edit the config). Empty result → the section
+      // is omitted by the pure builder (legacy config / no departments → R6).
+      departmentsDirectory: buildDepartmentsDirectory(deps.departments ?? []),
       git,
       systemState: buildWakeSystemState(),
       roadmapTail,
@@ -812,7 +893,7 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
   // ---------------------------------------------------------------------------
   // Batch C — FRESH wake-pack injection at message-arrival time (owner
   // directive: the pack must arrive AFTER the user's message, together with the
-  // standard DSH context injections, so its board delta / git bearings / roster
+  // standard DSH context injections, so its message delta / git bearings / roster
   // / cursor are fresh at message arrival, NOT frozen at the previous
   // dept_sleep). Driven by the SAME `agent/pre-step` Cordis waterfall the
   // runtime-context + skill-catalog use (no dsh-core change — the canonical
@@ -830,7 +911,7 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
   // by the agent session id) that is cleared only at the host dept_sleep
   // boundary, so a post-sleep wake (or a fresh never-slept session) injects
   // exactly once. Never injects into a registered POST (head/worker) — those
-  // keep their lean board-delta wake, not the host pack.
+  // keep their lean message-delta wake, not the host pack.
   // ---------------------------------------------------------------------------
   const preStepHandler = async (args: WakePreStepArgs, next: () => Promise<unknown>): Promise<unknown> => {
     const decision = await next()
