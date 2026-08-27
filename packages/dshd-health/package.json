@@ -1,0 +1,26 @@
+{
+  "name": "dshd-health",
+  "version": "0.1.0-rc.1",
+  "description": "Deepartments system-health domain (the dshd-health phase of the modular Cordis split): the W6 post-error capture + unusable-session markers, heartbeat/alerts ledger + audit, W8-i error class, M3 interrupt back-off + materialization quarantine, the W8-c safeguards (turn-error capture, stale-live watchdog, preset audit), the W8-d system heartbeat (wait scan, inbox reader, heartbeat section), the W8-h interrupted-post reconciliation, and the C6 delivery-row tail-reader factory + scans + the pure health daemon tick — extracted verbatim from the dsh-deepartments bundle. A pure library package (NO cordis plugin, NO tool, NO patch): the bundle consumes it through the drop-in bridge src/core/health.ts; the ONLY state is the per-process byte-offset cursor inside each createDeliveryRowsTailReader closure (created by the bundle wiring once per daemon — C6 twin-safe), everything else is stateless (ledgers on-disk). Depends on dshd-core (workspace:*) for messages/registry/wakepack machinery; the tick's config is a structural HealthConfigLike (no back-dependency on the bundle's org.ts).",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "dshd-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "license": "MIT"
+}

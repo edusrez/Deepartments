@@ -1,0 +1,23 @@
+{
+  "name": "dshd-quality",
+  "version": "0.1.0-rc.1",
+  "description": "Deepartments Quality-Department (QD, spec 007) probability gate (the dshd-quality phase of the modular Cordis split): the PURE QD dice — QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY (D-Q2 worker-retire sample 0.10), the QUALITY_INSPECT_ENV_VAR env override (numeric [0,1], worker/QH probability path only), the structural 100% head/host mandate (D-Q3) with the quality-head anti-loop exclusion (D-Q2 dice for the QH's own sleep), resolveQualityWorkerInspectProbability config resolution, and the QUALITY INSPECT directive surface + text — extracted verbatim from the dsh-deepartments bundle (extraction map 2026-08-27-health-quality-extraction-map.md §2). A PURE LIBRARY package (NO cordis plugin, NO tool, NO patch): the bundle consumes it through the drop-in bridge src/core/quality.ts; the ONLY impurity is the process.env read inside the internal parseQualityInspectEnvOverride. NO dependencies (leaf package — the gate is pure: Math + process.env only). The directive EMITTER (maybeEmitQualityInspectDirective — the store.append + busDeliverToPost closure), the per-apply config resolution and every gate call-site STAY in the bundle and call the gate through the bridge.",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "license": "MIT"
+}

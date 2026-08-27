@@ -17,12 +17,18 @@ importers:
       dshd-gui:
         specifier: workspace:*
         version: link:packages/dshd-gui
+      dshd-health:
+        specifier: workspace:*
+        version: link:packages/dshd-health
       dshd-jobs:
         specifier: workspace:*
         version: link:packages/dshd-jobs
       dshd-pooler:
         specifier: workspace:*
         version: link:packages/dshd-pooler
+      dshd-quality:
+        specifier: workspace:*
+        version: link:packages/dshd-quality
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
@@ -164,6 +170,19 @@ importers:
         specifier: ^5.6.0
         version: 5.9.3
 
+  packages/dshd-health:
+    dependencies:
+      dshd-core:
+        specifier: workspace:*
+        version: link:../dshd-core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
   packages/dshd-jobs:
     devDependencies:
       '@types/node':
@@ -174,6 +193,15 @@ importers:
         version: 5.9.3
 
   packages/dshd-pooler:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
+  packages/dshd-quality:
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
