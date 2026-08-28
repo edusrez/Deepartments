@@ -370,7 +370,10 @@ is PROHIBITED):
    presence** (`ps`/`pgrep` for the serving binary + cwd), and **reading the
    systemd unit state files** if reachable. If an authoritative
    `systemctl is-active` is strictly required, it goes on the **ESCALATION**
-   list (only the Asistente/owner may run `systemctl`).
+   list (only the Asistente/owner may run `systemctl`). The job's enabled/
+   disabled reading + the known-DEcommissioned `dsh-vanilla` unit (warn, never
+   escalate) are specified in the job definition
+   (`docs/departments/internal-programming/jobs/system-health-report.md`).
 2. **Endpoints** — HTTP 200 on the DEV local URL(s) of this deployment
    (`web_fetch`).
 3. **Repo git statuses** — `git status --porcelain` on

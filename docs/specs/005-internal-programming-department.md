@@ -221,6 +221,19 @@ unaddressed). The IPD `builder` worker is typically **ephemeral** for a one-off
 task and **job-backed** for the scheduled jobs — both are EPHEMERAL PER ROUND
 (§7.5 pattern of spec 004).
 
+**O3 knowledge note (QD, 2026-08-28 — «race dispose-vs-tool-result» is the
+NORMAL retire signature, not a loss; sample 7/7 of the QD).** The LAST tool
+result of a retiring worker can surface as **«tool call aborted»** after the
+worker session is DISPOSED at retire — because the retire disposed the session
+before that final result's render/ack. It is a cosmetic signature of the retire
+order, NOT a delivery defect: the result was **persisted + delivered BEFORE the
+dispose** (the write-ahead record is durable first — spec 003 §4.4,
+`deliveries.jsonl`), so the content is NEVER lost — the «aborted» frame only
+marks the post-dispose tail.
+Do NOT treat an «aborted» last tool call in a retired worker's log as a missing
+deliverable; check the durable record (deliveries/messages sidecar) for the
+delivered row. Mirrored in the WORK-REGISTER §5 backlog (O3, firma NORMAL).
+
 ### 3.5 Who coordinates what (I2)
 
 - **The IPD Head coordinates the Internal Programming Department**: plans the
@@ -367,7 +380,13 @@ The IPD head uses the same head-layer tools as the RD head: `dept_worker_spawn`,
 `internal-programming-head` config immediately gets the lifecycle tools for its
 own department (agenda §5c: invoke.ts:5007, 5086, 5133). (LOTE A, 2026-08-27:
 heads no longer carry `dept_sleep` in their own layer — only the host sleeps.)
-The messaging ACL
+**R6 rare-use notes (tools-audit 2026-08-26, kept):** `dept_calendar_add/list/
+remove` and `dept_monitor_list` are **expected-usage RARE** — «uso esperado:
+raro (infra del scheduler/poller — conservar)»: the scheduler daemon consumes
+the SAME `calendar.json` (`dept_calendar_*` lands entries the daemon fires) and
+`dept_monitor_list` is a read-only mirror of the poller state — both are
+infrastructure surfaces for the scheduler/poller, NOT daily-use tools; keep
+them registered (R6, no retire; do NOT remove on low usage). The messaging ACL
 (`aclDenyGround`, invoke.ts:4678-4723) is generic — a new `internal-programming`
 department is automatically scoped: workers message only within the dept (incl.
 the IPD head), never the Asistente directly; the IPD head is addressed by the
@@ -617,7 +636,15 @@ exchanges. The total pending-work register lives in `docs/WORK-REGISTER.md`
   subagent/descriptor); the catalog route + bus is their only delivery path;
   BOOT-QUIET; the manager gate (head own-layer only) stays structural (the host
   CANNOT mint IPD workers — I2); retire is idempotent + dispose deduped; archive
-  is non-fatal; per-recipient failure never fails a whole send; the messaging ACL
+  is non-fatal; D5 (Dx1 F1) — the WORKER-SESSION archive is UNCONDITIONAL on
+  every retire (retirePost archives BEFORE the QD dice; the 25% dice only
+  samples the inspect DIRECTIVE, never the archive — so the delivery/half-slept
+  auto-retire seams never leave a retired row visible); D5 (Dx1 F2) — the BOOT
+  residue pass archives the entry session of every retired worker PLUS every
+  durable session of its slug (`worker-<slug>-*`) via sessionPersistence.list()
+  / the sessions-root scan; both are hide-set-only (ZERO-LOSS: nothing deleted,
+  artifacts + catalog intact) and idempotent; per-recipient failure never fails
+  a whole send; the messaging ACL
   is generic and a new department is automatically scoped (machinery §6).
 - **Surprises verified by exploration**: (1) `dept_exec` is the only genuinely NEW
   tool in W5 — the lifecycle, catalog, job-run and spawn engines are all

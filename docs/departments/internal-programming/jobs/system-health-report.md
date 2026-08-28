@@ -40,6 +40,21 @@ forwards it.
    - **Reading the systemd unit state files** if reachable (e.g.
      `/run/systemd/system/*.service`, `/etc/systemd/system/*.service`) — read
      only, to confirm the unit exists/Enabled — never `systemctl`.
+   **Enabled/disabled reading (verified by the Asistente).** The unit's
+   **is-enabled** state is read from the unit state files (a `[Installed]` /
+   `WantedBy=` row + the symlinks in `/etc/systemd/system/*.wants/`), NOT from
+   `is-active`: a unit can be **live while `is-enabled = disabled`** (e.g.
+   started by a drop-in/override or manually). Report each unit's enabled state
+   as read — do NOT assume `live ⇔ enabled` nor `disabled ⇔ down`.
+   **Known-DEcommissioned unit `dsh-vanilla`.** The old vanilla web unit
+   (`dsh-vanilla`, the pre-deepartments 3081 instance) is a **KNOWN
+   DEcommissioned** unit: the Asistente verified its unit state — **`is-enabled
+   = disabled`** (decommissioned by design, 2026-08-28). Treat it as
+   **warn-NOT-escalate**: report it in the health table with a **warn** status
+   + the verified reading (`dsh-vanilla: decommissioned — is-enabled disabled,
+   expected; no escalation`), and NEVER put it on the ESCALATION list. A
+   decommissioned unit whose state file read matches the expected `disabled` is
+   HEALTHY-expected, not an anomaly.
    If the authoritative `systemctl is-active` state is strictly required for a
    unit, add it to the report's **ESCALATION** list instead of running it (only
    the Asistente/owner may run `systemctl`). Record the unit's name(s) as you
