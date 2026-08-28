@@ -4715,6 +4715,27 @@ export function applyInvoke(ctx: Context, config: Config) {
    * the department-lifecycle tools (a head creates/retires; a worker cannot).
    * F10 adds `tools` (a worker's role-template frontmatter `tools`) and
    * `department` (its config department for the architecture section). */
+  /** M2.4 (2026-08-28): resolve the POST agent's scope key for the audit
+   * waypoints WITHOUT depending on which module instance of
+   * `@deepseek-ai/dsh-scope` the plugin resolved. The live profile loads TWO
+   * copies of the package (the harness bundle's at /usr/lib/…/dsh/node_modules
+   * and the repo's own under node_modules/.pnpm/…), and `kScope` is a
+   * module-local symbol — so the harness's `createScope` (dsh-agent-loop) tags
+   * the agent ctx with ITS symbol while the plugin's `scopeOf(agentCtx)` reads
+   * ITS OWN symbol → returns undefined in live (post-boot 01:26Z audit:
+   * toolset-final `count:14` with secretary 'no' — the waypoints fell back to
+   * the GLOBAL view: the same 14 host-plane names for heads AND workers, incl.
+   * the manager-gated `dept_post_retire` for a WORKER, while NO own-layer name
+   * (calendar/dept_exec/secretary) was visible, even though the own-layer
+   * registration demonstrably landed — the live worker session carries the
+   * calendar+dept_exec tools). THE KEY: the harness's scope key IS the agent
+   * object itself (`ReactLoopAgent`: `createScope(loopCtx, this)` +
+   * `ctx.extend({ agent: this })`), so `agentCtx.agent` is the real key
+   * whenever `scopeOf` is shadow-unreadable. The fallback keeps the waypoints
+   * on the agent's OWN layer in both worlds: hermetic (scopeOf resolves — one
+   * instance) and live (scopeOf → undefined → `agentCtx.agent`). */
+  const agentScopeOf = (agentCtx: Context): object | undefined => scopeOf(agentCtx) ?? (agentCtx as unknown as { agent?: object }).agent
+
   const postSetup = (postId: string, roomId: string, role: string, opts: { preset: string; manager: boolean; persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig }): ((agentCtx: Context) => unknown) => {
     const presetId = opts.preset
     const kind = opts.manager ? 'head' : 'worker'
@@ -4752,13 +4773,19 @@ export function applyInvoke(ctx: Context, config: Config) {
       // depends on it). Written to the guaranteed audit channel
       // `<stateDir>/toolset-audit.jsonl` — the deepartments warns never reach
       // the harness stdout (M2.2 finding).
+      // M2.4: `scopeOf(agentCtx)` may be undefined in the LIVE profile (the
+      // plugin resolves a DIFFERENT dsh-scope module instance than the harness
+      // — see agentScopeOf) — the waypoint therefore reads via the resolved
+      // key (scopeOf → `agentCtx.agent` fallback), never the broken global
+      // view; `scopeKeySource` records which seam produced the key.
       appendToolsetAudit(stateDir, {
         wp: 'post-mount',
         postId,
         kind,
         presetId,
         ts: Date.now(),
-        secretary: agentCtx.tools.get('secretary', scopeOf(agentCtx)) === void 0 ? 'no' : 'yes'
+        scopeKeySource: scopeOf(agentCtx) === void 0 ? (agentCtx as unknown as { agent?: unknown }).agent === void 0 ? 'unscoped' : 'ctx-agent' : 'scopeOf',
+        secretary: agentCtx.tools.get('secretary', agentScopeOf(agentCtx)) === void 0 ? 'no' : 'yes'
       })
       // (0) Tool restriction: a root agent has no startContinuable toolFilter,
       // so we mask the GLOBAL host-plane tools to `allowList` (rc.8 dsh-tools
@@ -4796,7 +4823,7 @@ export function applyInvoke(ctx: Context, config: Config) {
       // restrict() validates inherited names loudly, so naming an unseen name
       // would throw and the allow:[] fallback would mask EVERY inherited tool
       // (strictly worse than dropping one name).
-      const agentScope = scopeOf(agentCtx)
+      const agentScope = agentScopeOf(agentCtx)
       const allowList: string[] = []
       for (const name of declared) {
         if (DENIED_POST_TOOLS.has(name)) {
@@ -4818,11 +4845,23 @@ export function applyInvoke(ctx: Context, config: Config) {
       // 'dropped(not-visible)' would mean a future reordering ran the own-layer
       // registration BEFORE the probe, and 'found' would mean the name leaked
       // back into HEAD_BASE_TOOLS (the M2.3 coherence condition).
+      // M2.4: the probe MUST resolve the agent's own layer the same way the
+      // tool registry does (`agentScopeOf` — scopeOf with the `agentCtx.agent`
+      // fallback for the live dual-dsh-scope profile; the 01:26Z post-boot
+      // audit showed `count:14` with the SAME 14 host-plane names for heads AND
+      // workers — incl. the manager-gated dept_post_retire for a WORKER — i.e.
+      // the waypoint had read the GLOBAL view because the plugin's `scopeOf`
+      // module instance differs from the harness's: two copies of dsh-scope,
+      // two `kScope` symbols). `scopeKeySource` + `allowCount` record what the
+      // probe saw and through which seam, so the audit says WHY the toolset
+      // landed (or not).
       appendToolsetAudit(stateDir, {
         wp: 'probe',
         postId,
         kind,
         allow: allowList.join(','),
+        allowCount: allowList.length,
+        scopeKeySource: scopeOf(agentCtx) === void 0 ? (agentCtx as unknown as { agent?: unknown }).agent === void 0 ? 'unscoped' : 'ctx-agent' : 'scopeOf',
         secretary: DENIED_POST_TOOLS.has('secretary')
           ? 'dropped(denied)'
           : OWN_LAYER_POST_TOOLS.has('secretary')
@@ -4854,14 +4893,24 @@ export function applyInvoke(ctx: Context, config: Config) {
       // dept_who, dept_memo_write). `secretary=yes` here proves the OWN layer
       // carried it (post-restrict); `secretary=no` with the own-layer
       // registration present would expose a registration-order regression.
+      // M2.4: `scopeKeySource` says WHICH seam produced the key the waypoint
+      // read through — 'scopeOf' (hermetic: one module instance) or 'ctx-agent'
+      // (live: the harness's own key object — the dual-dsh-scope fallback). A
+      // line with scopeKeySource 'unscoped' would mean the audit re-fell to the
+      // GLOBAL view (the pre-fix false 'no' of the 01:26Z post-boot audit).
+      // `ownVisible` counts the own-layer candidate names that landed (proves
+      // the registration, not just secretary alone).
       {
         const candidates = [...new Set([...HEAD_BASE_TOOLS, ...OWN_LAYER_POST_TOOLS, 'dept_calendar_add', 'dept_calendar_list', 'dept_calendar_remove', 'dept_feedback', 'dept_feedback_list', 'dept_feedback_update'])]
         const visible = candidates.filter((name) => agentCtx.tools.get(name, agentScope) !== void 0)
+        const ownVisible = visible.filter((name) => OWN_LAYER_POST_TOOLS.has(name)).length
         appendToolsetAudit(stateDir, {
           wp: 'toolset-final',
           postId,
           kind,
           count: visible.length,
+          ownVisible,
+          scopeKeySource: scopeOf(agentCtx) === void 0 ? (agentCtx as unknown as { agent?: unknown }).agent === void 0 ? 'unscoped' : 'ctx-agent' : 'scopeOf',
           secretary: visible.includes('secretary') ? 'yes' : 'no',
           send_message: visible.includes('send_message') ? 'yes' : 'no',
           names: visible.join(',')
