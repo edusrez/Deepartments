@@ -210,6 +210,24 @@ export interface LifecycleCtx {
   maybeEmitQualityInspectDirective: (surface: LifecycleQualityInspectSurface) => Promise<void>
   // Host-rotation + deferred wake-surface seams.
   runHostRotation: (deps: RotationDeps) => Promise<HostRotationOutcome>
+  /** fb-11 — the ROTATION-SUCCESSOR AUTO-WAKE seam (the host-rotation no-wake
+   * defect): at the moment a dept_sleep rotation COMMITS (S3/S7 — the NEW
+   * hosts.json live entry exists), the new host session is registered but
+   * NOTHING materializes it — it waits for the first EXTERNAL wake, so an org
+   * at rest parks the host (and with it the governance) indefinitely. This
+   * optional callback is invoked by `sleepHost` right after the commit so the
+   * NEW session starts its first turn WITHOUT external traffic. The LIFECYCLE
+   * owns only the SEMANTIC MOMENT (when — the commit); the TRANSPORT (how) is
+   * the bundle's: it implements the callback with the existing deliver
+   * machinery (a durable 'rotation-wake' bus record from 'deepartments' to the
+   * new host id via the message-store append — write-ahead durable-first — and
+   * then the D4 host delivery `busDeliverToHost`, which resumes the dormant
+   * session and starts its first turn with the wake pack). CONTRACT: never
+   * throws and never blocks the rotation — a failed wake only warns (the
+   * rotation already committed; a later external wake or boot remains the
+   * fallback). OPTIONAL: a caller that omits it keeps the pre-fb-11 behavior
+   * (no auto-wake — zero regression for minimal compositions). */
+  enqueueHostWake?: (wake: { newHostId: string; newSessionId: string; sleepEpoch: number }) => Promise<void>
   deptGet: (key: string) => unknown
   stateDir: string
   deferredSleepReplace: Map<string, string>
@@ -449,6 +467,28 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
           // S6 — retired identity: the OLD session never gets the wake pack
           // again; the NEW session's per-process set is empty by definition.
           ctx.wakePackInjected.delete(sessionId)
+          // fb-11 — AUTO-WAKE the rotation SUCCESSOR (the host-rotation no-wake
+          // defect, QH fb-11): the new hosts.json live entry is committed at
+          // S3/S7, but NOTHING materializes the new session — it parked until
+          // the first EXTERNAL wake, so an org at rest slept the host (and the
+          // governance) indefinitely (evidence: 5c5fc173→024447d9, 2m47s gap).
+          // Enqueue + deliver the rotation's OWN successor wake RIGHT HERE —
+          // closest to the commit (a crash after this leaves the minimal gap):
+          // the callback appends a DURABLE 'rotation-wake' bus record
+          // (write-ahead: flushed before any delivery) and delivers it to the
+          // new host id, which RESUMES the new session and starts its first
+          // turn with the wake pack / the new sessionId identity — no external
+          // traffic, journal + handoff untouched (no re-key). NEVER fatal: a
+          // miss/throw only warns — the rotation already committed and a later
+          // external wake or boot remains the fallback (crash windows §3.6).
+          if (ctx.enqueueHostWake !== void 0) {
+            try {
+              await ctx.enqueueHostWake({ newHostId: rotation.newHostId, newSessionId: rotation.newSessionId, sleepEpoch: rotation.sleepEpoch })
+              ctx.logger.info?.(`[deepartments] host rotation: successor wake enqueued+delivered to the new host session ${rotation.newSessionId} (no external traffic needed)`)
+            } catch (error: unknown) {
+              ctx.logger.warn(`[deepartments] host rotation: successor wake failed (non-fatal — the rotation already committed; a later external wake or boot resumes the host): ${error instanceof Error ? error.message : String(error)}`)
+            }
+          }
           // PR-2 (m-243/m-356): W7-A in-session settlement — the OLD host
           // session just durably retired at S3/S7 (hosts.json: retired:true +
           // rotatedTo), so its pending 'prepared'/'failed' sidecar rows are

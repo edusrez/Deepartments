@@ -436,7 +436,8 @@ export * from './core/health.js'
 import {
   qualityInspectDecision,
   resolveQualityWorkerInspectProbability,
-  qualityInspectDirectiveText
+  qualityInspectDirectiveText,
+  QUALITY_INSPECT_ENV_VAR
 } from './core/quality.js'
 import type { QualityInspectDirectiveSurface } from './core/quality.js'
 export * from './core/quality.js'
@@ -1102,6 +1103,65 @@ export function isPathInside(candidate: string, root: string): boolean {
   return c === r || c.startsWith(r.endsWith(path.sep) ? r : r + path.sep)
 }
 
+/** fb-10 (QH): a `/`-leading token is a PATH WORD only when it carries a real
+ * path NAME component. A token that is `/` followed ONLY by digits (a bare
+ * `/3600000`, a `//3600000` after the leading separators collapse to the same
+ * digit-only form) or that is all `/` with NO name at all (a `//` between two
+ * numbers in a `5 // 2`-style expression) is ARITHMETIC/units (division), not
+ * a filesystem path — real paths carry a name component (letters/guiones).
+ * Multi-segment and letter-bearing absolute words are STILL path words and are
+ * checked EXACTLY as before. */
+function deptExecIsPathWord(token: string): boolean {
+  const rest = token.replace(/^\/+/, '')
+  if (rest === '') return false
+  return !/^[0-9]+$/.test(rest)
+}
+
+/** fb-10 (QH): mask the `$(( ... ))` arithmetic-expansion spans of a command
+ * (balanced parens, incl. a NESTED `$((...))`) with spaces, so the path-word
+ * scanner never reads the ARITHMETIC INTERNALS as absolute-path tokens (a
+ * `/3600000` division or a `/ b` term inside `$((...))` is arithmetic, not a
+ * path). Chars are replaced 1:1 with spaces — position-preserving — and a span
+ * that never closes (an unterminated `$((` is NOT valid bash) is left
+ * untouched, so a REAL `/`-word after a literal `$((` is NEVER hidden (a
+ * `$((x))/etc/passwd` still yields a standalone path token for the scope
+ * check). Masking with a WHITESPACE (the regex boundary class) is deliberate:
+ * a real absolute path DIRECTLY after `))` keeps its own token boundary and
+ * stays checked. */
+function deptExecMaskArithmetic(command: string): string {
+  const chars = String(command ?? '').split('')
+  const n = chars.length
+  let i = 0
+  while (i < n - 2) {
+    if (chars[i] === '$' && chars[i + 1] === '(' && chars[i + 2] === '(') {
+      let depth = 2
+      let j = i + 2
+      let closed = false
+      while (j < n) {
+        const c = chars[j]
+        if (c === '(') depth++
+        else if (c === ')') {
+          depth--
+          if (depth === 0) {
+            closed = true
+            break
+          }
+        }
+        j++
+      }
+      if (closed) {
+        for (let k = i; k <= j; k++) chars[k] = ' '
+        i = j + 1
+      } else {
+        i += 3
+      }
+    } else {
+      i++
+    }
+  }
+  return chars.join('')
+}
+
 /** The `/`-leading ABSOLUTE-path tokens in a command ("path words"): a token
  * beginning at `^` or a whitespace/metacharacter boundary, terminated by
  * whitespace or a shell metacharacter. `--opt=/a` is NOT matched (the `/` is
@@ -1111,15 +1171,22 @@ export function isPathInside(candidate: string, root: string): boolean {
  * `>`/`<`-adjacent absolute path token is checked (the `/dev/null`-style sink
  * exemption is the explicit whitelist in `deptExecCanonicalToken`, NOT a
  * lexical digit-guard). The stable-profile token is handled by the dedicated
- * protected check. */
+ * protected check. fb-10 (QH): the scan runs on the `$((...))`-MASKED command
+ * (arithmetic internals are never path tokens) and a candidate word must pass
+ * `deptExecIsPathWord` — `/`+digits-only and `//`-only words are DIVISIONS
+ * (units), not paths, and are skipped; real letter-bearing/multi-segment
+ * absolute words are extracted EXACTLY as before. */
 function deptExecPathTokens(command: string): string[] {
   const tokens: string[] = []
-  const cmd = String(command ?? '')
+  const cmd = deptExecMaskArithmetic(String(command ?? ''))
   const re = /(^|[\s|&;'`"()<>])(\/[^\s|&;'`"()<>]+)/g
   for (const match of cmd.matchAll(re)) {
     const boundary = match[1] as string
     const token = match[2]
     if (typeof token !== 'string' || token.length <= 1) continue
+    // fb-10 (QH): a `/`+digits-only or `//`-only word (a division/units token,
+    // e.g. `$((10-fails))/10`, `/3600000`, `//3600000`) is NOT a path.
+    if (!deptExecIsPathWord(token)) continue
     tokens.push(token)
   }
   return tokens
@@ -1186,7 +1253,11 @@ function deptExecCanonicalToken(token: string): string {
  * root — each token is FIRST canonicalized (`deptExecCanonicalToken`), and the
  * stable + containment checks run on the canonical target, so a
  * `..`-escape/symlink to an out-of-root or stable path is denied and a `/dev`
- * sink in the whitelist is always allowed. */
+ * sink in the whitelist is always allowed. fb-10 (QH): the token scan masks
+ * `$((...))` arithmetic internals and skips `/`+digits-only / `//`-only words
+ * (division/units — e.g. `$((10-fails))/10`, `/3600000`, `//3600000` — are NOT
+ * paths); real letter-bearing/multi-segment absolute words are checked exactly
+ * as before (access preserved, out-of-root paths still denied). */
 export function deptExecDenyReason(command: string, cwd: string, allowedRoots: readonly string[]): string | undefined {
   const cmd = String(command ?? '').trim()
   const roots = allowedRoots.filter((r) => typeof r === 'string' && r !== '')
@@ -5295,9 +5366,37 @@ export function applyInvoke(ctx: Context, config: Config) {
       // `archived` is the archive result of THIS retire (idempotent —
       // dept_worker_retire's own archive call stays as a harmless double; a
       // missing registry resolves false). The retire path NEVER breaks here.
+      // Dx1 F1 (owner bug — the sidebar painted retired workers as 'idle'): the
+      // DURABLE-SESSION ARCHIVE is UNCONDITIONAL on EVERY retire — the QD dice
+      // below ONLY samples the inspect DIRECTIVE, never the archive. Before
+      // this, the archive traveled INSIDE the 25% dice, so 75% of the
+      // auto-retire seams (delivery auto-retire / half-slept reap) left the
+      // workspace-registry hide-set unpopulated and the row stayed visible
+      // forever. archiveWorkerSession is idempotent (a re-archive is a no-op
+      // hide-set add — dept_worker_retire's own archive call stays a harmless
+      // double) + non-fatal (a missing registry resolves false + a warn). The
+      // retire path NEVER breaks here.
+      const archived = await archiveWorkerSession(entry.sessionId)
+      // QD DICE INSTRUMENTATION (QH [HIGH] 2026-08-28 — qi-silence
+      // characterization): ONE INFO line per RETIRE with postId/roll/prob/emitted —
+      // the ONLY runtime way to separate a dice RUN (the 15-retire/0-directive
+      // event, P=1.34%, was a by-design true positive) from a TRANSIENT
+      // degradation of the dice→emit path. PURE INFORMATION: the roll is drawn
+      // ONCE and fed to the gate as its rng (the gate's single draw — bit-identical
+      // dice semantics) and `retireProb` mirrors the gate's effective probability
+      // resolution (env DEEPARTMENTS_QUALITY_INSPECT → config → code default
+      // 0.25). The dice outcome and the emit are UNCHANGED. INFO, not warn (normal
+      // cadence); no `isFirstRetire` guard exists on this seam.
+      const retireRoll = Math.random()
+      const qualityInspectEnvOverride = process.env[QUALITY_INSPECT_ENV_VAR]
+      const qualityInspectEnvProb = qualityInspectEnvOverride === undefined || qualityInspectEnvOverride === '' ? undefined : Number(qualityInspectEnvOverride)
+      const retireProb = qualityInspectEnvProb !== undefined && Number.isFinite(qualityInspectEnvProb) && qualityInspectEnvProb >= 0 && qualityInspectEnvProb <= 1
+        ? qualityInspectEnvProb
+        : qualityWorkerInspectProbability
+      const retireEmitted = qualityInspectDecision('worker', { rng: () => retireRoll, workerInspectProbability: qualityWorkerInspectProbability })
+      ctx.logger.info(`[deepartments] retirePost worker-retire QD dice: postId="${postId}" roll=${retireRoll} prob=${retireProb} emitted=${retireEmitted}`)
       try {
-        if (qualityInspectDecision('worker', { rng: Math.random, workerInspectProbability: qualityWorkerInspectProbability })) {
-          const archived = await archiveWorkerSession(entry.sessionId)
+        if (retireEmitted) {
           // O2 (MICRO-BATCH O2, QD compromiso — ANALYZE m-598): label the
           // directive with the retire-time DELIVERABLE prediction ('none' =
           // turn-error + 0 outbound — the ANALYZE pipeline must QUESTION the
@@ -6236,6 +6335,131 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  /** Dx1 F2 (owner bug — sidebar showed RETIRED workers as 'idle'): a boot
+   * residue pass that populates the workspace-registry hide-set (spec §5.3,
+   * D5) for the session residue NO retire seam ever archived. Before F1, the
+   * archive traveled inside the 25% QD dice of retirePost, so most AUTO-
+   * RETIRES (delivery auto-retire / half-slept reap) left the row visible
+   * forever — and even the tool retires archived ONLY entry.sessionId, so an
+   * OLDER/PARALLEL incarnation of the SAME slug (`worker-<slug>-<uuid>` #2)
+   * stayed visible too. This pass (modeled on runHalfSleptHeadReconcile) runs
+   * ONCE at boot and:
+   *   (a) archives the CURRENT durable session (entry.sessionId) of EVERY
+   *       RETIRED WORKER post — independent of the (optional) persistence
+   *       enumeration below, so a headless/minimal persistence still seals it;
+   *   (b) sweeps EVERY durable session the persistence knows
+   *       (sessionPersistence.list() — the backend header ids; a bounded
+   *       sessions-root dir scan as a best-effort fallback when the service is
+   *       absent) and archives each id whose slug prefix `worker-<postId>-`
+   *       matches a RETIRED worker post — the multi-session residue.
+   * F3 (ORPHANS — a `worker-*` durable session with NO post at all) is
+   * DELIBERATELY OUT of this pass: the session store is harness-shared and a
+   * no-post sweep cannot safely distinguish an org-owned orphan from another
+   * composition's registered worker (production sessions attach under
+   * stateDir / repoRoot / a department workspacePath / the harness root —
+   * resolveWorkspaceRootPath) — documented, deferred to a workspace-ownership
+   * decision (the researcher-2 class stays visible).
+   * Conservatism (ZERO-LOSS, R6/dec4): NOTHING is deleted or terminated —
+   * archiveSession is a PURE hide-set add (the durable artifact stays; the
+   * posts/hosts catalogs are untouched); a session that is CURRENTLY LIVE in
+   * the stores is never archived; and a session whose prefix matches a LIVE
+   * post is never archived (a live post's row must stay visible — the
+   * slug-chain collision guard: `worker-builder-2-*` also starts with the
+   * retired `worker-builder-` prefix). Idempotent: a second boot re-archives
+   * nothing (an already-archived id is a registry no-op). Non-fatal by design:
+   * a missing sessionPersistence / workspaceRegistry only DEGRADES the sweep
+   * (warn, never a boot break), exactly like runHalfSleptHeadReconcile. */
+  const runRetiredWorkerResidueReconcile = async (): Promise<void> => {
+    try {
+      // Slug-prefix indexes over the DURABLE catalog. Only WORKER posts mint
+      // `worker-<slug>-` sessions (a retired head is unregistered, never here).
+      const livePrefixes: string[] = []
+      const retiredPrefixes: string[] = []
+      for (const [postId, entry] of byPost) {
+        if (entry.provider !== 'worker') continue
+        const prefix = `worker-${postId}-`
+        if (entry.retired === true) retiredPrefixes.push(prefix)
+        else livePrefixes.push(prefix)
+      }
+      // (a) the CURRENT durable session of every retired worker — independent
+      // of the (optional) enumeration below (idempotent; a no-op when already
+      // in the hide-set).
+      if (retiredPrefixes.length > 0) {
+        for (const [, entry] of byPost) {
+          if (entry.provider === 'worker' && entry.retired === true) {
+            await archiveWorkerSession(entry.sessionId)
+          }
+        }
+      }
+      // (b) the slug-prefix sweep over the durability-known sessions.
+      const persistence = ctx.get('sessionPersistence') as
+        | { list?: (signal?: AbortSignal) => Promise<Array<{ id?: unknown } | null | undefined>>; root?: string }
+        | undefined
+      let durableSessionIds: string[] = []
+      if (persistence !== void 0 && typeof persistence.list === 'function') {
+        try {
+          durableSessionIds = (await persistence.list())
+            .map((header) => (header !== null && header !== void 0 && header.id !== void 0 ? String(header.id) : ''))
+            .filter((id) => id !== '')
+        } catch (error: unknown) {
+          ctx.logger.warn(`[deepartments] retired-residue reconcile: sessionPersistence.list() failed — the slug-prefix sweep is skipped (the entry sessions above are still archived): ${error instanceof Error ? error.message : String(error)}`)
+        }
+      } else {
+        // Best-effort fallback (headless/minimal composition): the jsonl
+        // session-store layout puts every session under
+        // <root>/<project>/<encoded-id>/session.jsonl*; for the harness id
+        // charset the ENCODED DIR NAME IS the session id (identity encoding —
+        // dsh-session-persistence-jsonl format.js:129-141), so a bounded
+        // two-level scan (stat-only, no full-log parse) collects the ids.
+        const sessionsRoot = typeof persistence?.root === 'string' && persistence.root !== ''
+          ? persistence.root
+          : path.join(stateDir, '..', 'sessions')
+        const sessionIds: string[] = []
+        try {
+          const projects = (await readdir(sessionsRoot, { withFileTypes: true }))
+            .filter((e) => e.isDirectory()).map((e) => e.name)
+          for (const project of projects) {
+            const projectDir = path.join(sessionsRoot, project)
+            let dirs: string[] = []
+            try {
+              dirs = (await readdir(projectDir, { withFileTypes: true }))
+                .filter((e) => e.isDirectory()).map((e) => e.name)
+            } catch {
+              continue
+            }
+            for (const dir of dirs) {
+              for (const suffix of ['session.jsonl.zstd', 'session.jsonl']) {
+                try {
+                  await stat(path.join(projectDir, dir, suffix))
+                  sessionIds.push(dir)
+                  break
+                } catch { /* try the next suffix */ }
+              }
+            }
+          }
+        } catch {
+          /* sessions root absent/unreadable — no fallback corpus (safe no-op) */
+        }
+        durableSessionIds = sessionIds
+      }
+      if (durableSessionIds.length === 0) return
+      const sessions = ctx.get('sessions') as { get?: (id: unknown) => unknown } | undefined
+      const isLive = (sessionId: string): boolean =>
+        sessions?.get?.(sessionId) !== undefined ||
+        (agents !== void 0 && agents.get(SessionId(sessionId)) !== undefined)
+      for (const id of durableSessionIds) {
+        if (!id.startsWith('worker-')) continue
+        if (isLive(id)) continue // never hide a RUNNING session
+        if (livePrefixes.some((prefix) => id.startsWith(prefix))) continue // a LIVE post's session stays visible (also the slug-chain collision guard)
+        if (retiredPrefixes.some((prefix) => id.startsWith(prefix))) {
+          await archiveWorkerSession(id)
+        }
+      }
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] retired-residue reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   // Boot: materialize the head preset and every configured head once the
   // registries (posts/hosts) have cold-loaded — and re-drive any crash-pending
   // bus deliveries (see the re-delivery driver below). Head materialization no
@@ -6249,6 +6473,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     void runReasoningContentBootAssert()
     void runDurableRegistryReconciliation()
     void runHalfSleptHeadReconcile()
+    void runRetiredWorkerResidueReconcile()
   })
 
   // ---------------------------------------------------------------------------
@@ -6903,6 +7128,58 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  // --- fb-11: the ROTATION-SUCCESSOR AUTO-WAKE (the host-rotation no-wake
+  // defect, QH fb-11) ----------------------------------------------
+  // After `runHostRotation` commits (S3/S7 — the NEW hosts.json live entry
+  // exists), the new host session is COLD: registered + workspace-attached +
+  // artifact-persisted, but NOTHING materializes it — it waits for the first
+  // EXTERNAL wake, so an org at rest parks the host (and the governance)
+  // indefinitely (evidence: 5c5fc173→024447d9, 2m47s of gap; structural in
+  // the 3 prior rotations). This closure is the bundle-side TRANSPORT of the
+  // lifecycle's `enqueueHostWake` seam (the lifecycle owns the SEMANTIC MOMENT
+  // — the commit; this owns the HOW): it appends a DURABLE 'rotation-wake'
+  // bus record from 'deepartments' to the NEW host id and delivers it via the
+  // D4 host delivery — the SAME dormant-host resume seam external traffic
+  // uses (`busDeliverToHost` → `agents.resume` + followup), so the new session
+  // starts its first turn with the wake pack / the new sessionId identity and
+  // NO external traffic; journal/handoff untouched (the rotation already
+  // re-keyed).
+  // Write-ahead + exactly-once (mission test 4): the record is flushed to
+  // messages.jsonl BEFORE the delivery (durable-first, the store's own
+  // persist-before-deliver contract), the delivery is attempted exactly ONCE
+  // and NO delivery-sidecar row is written — deliberately mirroring the QD-
+  // directive daemon-notify pattern (maybeEmitQualityInspectDirective above:
+  // store.append + DIRECT busDeliverToPost). The delivery-engine route is NOT
+  // usable here: `deliverOrQueue`'s defensive ACL gate would DENY a
+  // 'deepartments'-from record (an unclassified sender — acl.ts
+  // 'unclassified-sender', delivery.ts catalogRoute), and a sidecar
+  // 'prepared' row would make the BOOT re-delivery pass re-drive it through
+  // that same denied route → a 'failed' row the W6 health scan re-alerts on
+  // every boot. With NO sidecar row there is no boot re-drive and no W6
+  // anomaly: one record, one delivery, no double tuple. A delivery failure
+  // only warns (the rotation already committed; a later external wake or boot
+  // resumes the host — crash windows spec 002 §3.6). NEVER throws.
+  const enqueueHostWake = async (wake: { newHostId: string; newSessionId: string; sleepEpoch: number }): Promise<void> => {
+    if (agents === void 0) return
+    try {
+      const text = `[deepartments] host session rotation complete (spec 002): session ${wake.newSessionId} is now the registered host (sleepEpoch ${wake.sleepEpoch}); the rotation persisted your re-keyed journal and archived the previous session whole; this is the rotation's OWN successor handoff — no external traffic. Start your turn and run your wake routine.`
+      // Durable FIRST (write-ahead): the record is on disk before any delivery
+      // (MessagesStore.append flushes awaited — persist-before-deliver).
+      const store = await messagesStoreReady
+      const record = await store.append({ from: 'deepartments', to: [wake.newHostId], text, kind: 'notice' })
+      const hostEntry = hosts.get(wake.newHostId)
+      if (hostEntry === void 0) {
+        ctx.logger.warn(`[deepartments] rotation wake: new host entry "${wake.newHostId}" not found in the in-memory registry (record ${record.id} stays durable)`)
+        return
+      }
+      const framed = `[From deepartments → ${wake.newHostId}]: ${text}`
+      await busDeliverToHost(hostEntry as HostEntry, framed, record, void 0)
+      ctx.logger.info?.(`[deepartments] rotation wake: delivered to the new host ${wake.newHostId} (record ${record.id}; session ${wake.newSessionId} started its first turn)`)
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] rotation wake failed (non-fatal — the rotation already committed; a later external wake or boot resumes the host): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   // --- FASE 2 STEP f (lifecycle carve) ---------------------------------------
   // The dept_sleep / dept_memo_write SEMANTICS are owned by the core lifecycle
   // service (./core/lifecycle.js): the sleepEpoch marking policy + idempotent
@@ -6938,6 +7215,8 @@ export function applyInvoke(ctx: Context, config: Config) {
       disposeHeadHandleOnce,
       maybeEmitQualityInspectDirective,
       runHostRotation,
+      // fb-11 — the ROTATION-SUCCESSOR AUTO-WAKE seam (bundle transport).
+      enqueueHostWake,
       deptGet: (key) => ctx.get(key),
       stateDir: stateDir,
       deferredSleepReplace,
@@ -7887,6 +8166,9 @@ export function applyInvoke(ctx: Context, config: Config) {
       archivePostSessionOnSleep,
       disposeHeadHandleOnce,
       maybeEmitQualityInspectDirective,
+      // fb-11 — the ROTATION-SUCCESSOR AUTO-WAKE seam (the dshd-core lazy
+      // lifecycle reads it from this bucket; OPTIONAL there, provided here).
+      enqueueHostWake,
       deferredSleepReplace,
       wakePackInjected
     },

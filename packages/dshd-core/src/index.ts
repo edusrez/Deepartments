@@ -323,6 +323,12 @@ function buildLifecycleLazy(ctx: Context, binder: Binder): LifecycleService {
     archivePostSessionOnSleep: bound.archivePostSessionOnSleep!,
     disposeHeadHandleOnce: bound.disposeHeadHandleOnce!,
     maybeEmitQualityInspectDirective: bound.maybeEmitQualityInspectDirective!,
+    // fb-11 — the ROTATION-SUCCESSOR AUTO-WAKE callback (OPTIONAL like the
+    // caller-provided hooks above but NOT in `required`: a bundle that omits
+    // it keeps the pre-fb-11 behavior — the rotation commits and the new host
+    // waits for the first external wake; the bundle in this repo ALWAYS
+    // provides it (invoke.ts), so the composed org gets the auto-wake).
+    enqueueHostWake: bound.enqueueHostWake,
     runHostRotation,
     deptGet: (key) => ctx.get(key),
     stateDir,

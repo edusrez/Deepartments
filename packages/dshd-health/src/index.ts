@@ -28,8 +28,11 @@
 //   - STAYED in src/invoke.ts: the DAEMON WIRING (the setInterval + the ONE
 //     per-daemon createDeliveryRowsTailReader call + the notifyHost closure
 //     that store.append + busDeliverToHost-delivers the ALERT — C8), the
-//     deliverDaemonNotice gate (shared scheduler/monitor), the QD quality gate
-//     (Lote Q), and every bundle call-site (assembleHeartbeat, the W8-h boot
+//     deliverDaemonNotice gate (shared scheduler/monitor), and the QD gate
+//     CALL-SITES (the retire/head-slept inspect DICE, Lote Q — the gate
+//     DECISION + directive text live in the dshd-quality LIB; only the
+//     call-sites/emitter stay in the bundle), and every bundle call-site
+//     (assembleHeartbeat, the W8-h boot
 //     reconciliation, the scheduler/retire captures, the busDeliverToPost/Host
 //     catches, the B5 boot reconcile/materializePost marks, the preset audit).
 //

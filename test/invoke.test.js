@@ -429,10 +429,15 @@ class StubLLM extends Service {
  * needed — the rotation unit tests cover artifact shape; here the point is
  * that the seed landed via the persistence seam and NOT in the live store). */
 class StubPersistence extends Service {
-  constructor(ctx) {
+  constructor(ctx, durableSessions = []) {
     super(ctx, 'sessionPersistence')
     this.createCalls = []
     this.appendCalls = []
+    // Dx1 F2 (boot residue): the durable sessions the STUB knows — ids the
+    // boot residue sweep enumerates via list() (each becomes a header {id}).
+    // Default [] keeps the pre-fixture behavior byte-identical for every
+    // existing test (the bootPlugin `durableSessions` opt opts in).
+    this.durableSessions = durableSessions
   }
 
   /** S2 `persistence.create(meta)` — detached lazy metadata (spy). */
@@ -462,9 +467,11 @@ class StubPersistence extends Service {
   /** B2: `sessionPersistence.list()` — the persistence-header enumeration the
    * continuation manager's listChildren uses to build its cold corpus. The
    * stub has no detached sessions, so the live-preferred corpus stays
-   * live-only (a cold child cannot be resumed in this harness either). */
+   * live-only (a cold child cannot be resumed in this harness either). Dx1 F2:
+   * when the boot opted into `durableSessions`, those ids ARE the corpus (the
+   * boot residue sweep enumerates them). */
   async list() {
-    return []
+    return [...this.durableSessions].map((id) => ({ id: String(id) }))
   }
 }
 
@@ -506,6 +513,16 @@ class StubPersistenceWithRaw extends StubPersistence {
 class StubPersistenceWithRoot extends StubPersistence {
   constructor(ctx, root) {
     super(ctx)
+    this.root = root
+  }
+}
+
+/** Dx1 F2 fallback — a persistence carrying a sessions `root` but NO `list()`
+ * (the headless/minimal shape) so the boot residue sweep exercises its
+ * bounded sessions-root dir scan. */
+class StubPersistenceRootOnly extends Service {
+  constructor(ctx, root) {
+    super(ctx, 'sessionPersistence')
     this.root = root
   }
 }
@@ -800,7 +817,9 @@ async function bootPlugin(stateDir, opts = {}) {
     ? new StubPersistenceWithRaw(root)
     : opts.persistenceRoot !== undefined
       ? new StubPersistenceWithRoot(root, opts.persistenceRoot)
-      : new StubPersistence(root)
+      : opts.persistenceRootOnly !== undefined
+        ? new StubPersistenceRootOnly(root, opts.persistenceRootOnly)
+        : new StubPersistence(root, opts.durableSessions)
   // U2: the canonical session-archive service (`workspaceRegistry`) — mounted
   // like the real GUI profile has it, so the rotated dept_sleep's server-side
   // archive (spec 002 §3.3 S2.5) is exercised through the same seam. FIX 1b:
@@ -4198,7 +4217,23 @@ test('Batch 7 U2 host dept_sleep ROTATES: no journal rejects loudly; with a jour
       // seed landed via the dsh-session-persistence seam (create → detached
       // metadata; append → the seed artifact).
       const newSessionId = hostsFile[newHostId].sessionId
-      assert.equal(root.sessions.get(SessionId(newSessionId)), undefined, 'FIX 1: the rotated session is COLD — not in the LIVE sessions store')
+      // FIX 1 (INTACT): the ROTATION still persists the seed via the
+      // dsh-session-persistence seam (create → detached metadata; append → the
+      // seed artifact) — exactly one each, NEVER the live sessions store; the
+      // attached-but-agentless poison (incident session-6e49895c…, 2026-08-22
+      // 16:19:52 UTC) is still impossible. fb-11 (the host-rotation no-wake
+      // defect): the NEW host is NO LONGER parked cold after the commit — the
+      // rotation's OWN successor wake RESUMES it right after S3/S7 (the D4
+      // dormant-host path: agents.resume enters it in the store WITH its
+      // agent — the healthy attached-and-agentful state) and starts its first
+      // turn WITHOUT external traffic.
+      const storeSession = root.sessions.get(SessionId(newSessionId))
+      assert.ok(storeSession !== undefined, 'fb-11: the rotated session is LIVE in the sessions store right after the rotate commit (the successor wake resumed it — not parked cold)')
+      const wakeTarget = agents.get(newSessionId)
+      assert.ok(wakeTarget !== undefined, 'fb-11: the successor wake MATERIALIZED the new host session (agents registry)')
+      assert.equal(wakeTarget.inboxMessages.length, 1, 'fb-11: the new host received EXACTLY the rotation-wake message as its first turn input')
+      assert.match(wakeTarget.inboxMessages[0].content[0].text, /^\[From deepartments → /, 'fb-11: the wake message is the org-system rotation handoff (no external sender)')
+      assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === newSessionId).length, 1, 'fb-11: the new session was resumed EXACTLY once (the rotation wake — never a second resume, never a double wake)')
       assert.equal(persistence.createCalls.length, 1, 'exactly one persistence.create call (the detached seed metadata)')
       assert.equal(persistence.appendCalls.length, 1, 'exactly one persistence.append call (the seed artifact)')
       const createMeta = persistence.createCalls[0]
@@ -6777,7 +6812,18 @@ test('Batch 7 U2 regression (B3): dept_who reports the NEW rotated host as sleep
       const hostsFile = await readHosts(stateDir)
       const newSessionId = hostsFile[newHostId].sessionId
       assert.match(newSessionId, /^session-/, 'the NEW rotated host entry carries a session-<uuid> id')
-      assert.equal(root.sessions.get(SessionId(newSessionId)), undefined, 'FIX 1: the rotated session is COLD — not entered in the live sessions store')
+      // fb-11 (the host-rotation no-wake defect): the NEW host is NO LONGER
+      // parked cold — the rotation's own successor wake resumed it right after
+      // the commit (the D4 dormant-host path; the sessions-store entry now
+      // exists WITH its agent — the healthy attached-and-agentful state, NOT
+      // the attached-but-agentless poison FIX 1's persistence-seam persists
+      // below still forbid). The rotated host starts its first turn without
+      // external traffic.
+      assert.ok(root.sessions.get(SessionId(newSessionId)) !== undefined, 'fb-11: the rotated session is LIVE in the sessions store right after the rotate commit (the successor wake resumed it — not parked cold)')
+      assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === newSessionId).length, 1, 'fb-11: the new session was resumed EXACTLY once by the rotation wake')
+      const wakeTarget = agents.get(newSessionId)
+      assert.ok(wakeTarget !== undefined, 'fb-11: the successor wake MATERIALIZED the new host session')
+      assert.equal(wakeTarget.inboxMessages.length, 1, 'fb-11: the wake message is the new host\'s first turn input')
       assert.equal(persistence.createCalls.length, 1, 'S2 registered the detached seed metadata via the persistence seam')
       assert.equal(persistence.appendCalls.length, 1, 'S2 appended the seed artifact via the persistence seam')
       assert.equal(persistence.createCalls[0].id, newSessionId, 'persistence.create targets the pre-minted id')
@@ -10285,6 +10331,32 @@ test('B2 dept_exec guard (token normalization, W5-B2c review gap): a `..`-escape
     /the stable profile is protected/,
     'a `..`-escape to the stable home is protected-denied'
   )
+})
+
+test('B2 dept_exec guard (fb-10, QH): URL-LIKE ARITHMETIC tokens are NOT paths — `$((10-fails))/10`, a pipeline with `/3600000` and `//3600000` are NO LONGER denied; `$((...))` internals never tokenize; real letter-bearing paths PRESERVE access (inside roots allowed, outside roots denied)', () => {
+  const roots = ['/home/esuarez/projects', '/usr/lib/node_modules/@deepseek-ai/dsh', '/srv/dept-ws', '/opt/dsh/.dsh-dev']
+  // (1) the QH native reproduction — `$((10-fails))/10` (a division by 10) is NOT denied.
+  assert.equal(deptExecDenyReason('echo $((10-fails))/10', '/srv/dept-ws', roots), undefined, '`$((10-fails))/10` is a division, not a path')
+  // (2) a pipeline with `/3600000` and `//3600000` (ms→h unit division) is NOT denied.
+  assert.equal(deptExecDenyReason('echo $((86400000/24)) //3600000 | cat', '/srv/dept-ws', roots), undefined, 'a pipeline with /3600000 and //3600000 units is not denied')
+  assert.equal(deptExecDenyReason('echo $((ms))/3600000 | awk "{printf \\"%.2f\\", \\$1}"', '/srv/dept-ws', roots), undefined, 'a bare /3600000 division after arithmetic is not denied')
+  // (2b) the `$((...))` INTERNALS never tokenize — even a LETTER term (`/ b`) inside
+  // arithmetic is not a path (rule (b): arithmetic is opaque to the path scanner).
+  assert.equal(deptExecDenyReason('echo $((a / b))', '/srv/dept-ws', roots), undefined, 'an arithmetic-internal `/ b` term is not a path')
+  // (4) the ACCESS flow is intact: a real path INSIDE a root stays allowed.
+  assert.equal(deptExecDenyReason('cat /opt/dsh/.dsh-dev/settings.yaml', '/srv/dept-ws', roots), undefined, 'a real path inside a root stays allowed')
+  assert.equal(deptExecDenyReason('cat /home/esuarez/projects/README.md', '/srv/dept-ws', roots), undefined, 'a real in-root path stays allowed')
+  // (3) a real path OUTSIDE the roots stays DENIED (access preserved): drop the DEV
+  // home from the roots → the very same /opt/dsh/.dsh-dev/settings.yaml is out of scope.
+  const rootsNoDev = ['/home/esuarez/projects', '/usr/lib/node_modules/@deepseek-ai/dsh', '/srv/dept-ws']
+  assert.match(deptExecDenyReason('cat /opt/dsh/.dsh-dev/settings.yaml', '/srv/dept-ws', rootsNoDev), /command references absolute path "\/opt\/dsh\/\.dsh-dev\/settings\.yaml" outside a scoped dept_exec root/, 'a real letter-bearing path outside the roots is STILL denied')
+  assert.match(deptExecDenyReason('cat /etc/passwd', '/srv/dept-ws', roots), /references absolute path "\/etc\/passwd"/, 'an out-of-root real path stays denied')
+  // The masking is SURGICAL — a REAL absolute path DIRECTLY after `$((...))` (no
+  // space) keeps its own boundary and is STILL scoped-checked (no smuggling).
+  assert.match(deptExecDenyReason('cat $((x))/etc/passwd', '/srv/dept-ws', roots), /references absolute path "\/etc\/passwd"/, 'a real path right after arithmetic is STILL denied')
+  // The digit rule is SURGICAL — a multi-segment real path with digits under a
+  // root stays ALLOWED (only `/`+digits-ONLY words are divisions, never a path shape).
+  assert.equal(deptExecDenyReason('cat /home/esuarez/projects/deepartments/v1/bin/run.sh', '/srv/dept-ws', roots), undefined, 'a multi-segment real path under a root stays allowed')
 })
 
 test('B2 calendar attribution (real Loader): dept_calendar_add stamps departmentId; list with NO filter returns the FULL shared agenda; list with departmentId returns only that department; a legacy entry without departmentId is NOT matched by a filter', async () => {
@@ -16362,6 +16434,228 @@ test('post-carve smoke: the 5 jobs/calendar tools register post-carve in their c
       }
     } finally {
       await dispose()
+    }
+  })
+})
+
+// --- Dx1 (owner bug — the sidebar showed retired workers as 'idle') ---------
+// The sidebar feed is the RAW session store crossed ONLY with the
+// workspace-registry hide-set (archivedSessionIds); a retired worker's row
+// disappears ONLY when its durable session id is in that hide-set (spec 004
+// §5.3, D5). The map (explore-deep/2026-08-28-dx1-sidebar-retired-map.md)
+// located the defect in OUR layer: the retire archive traveled INSIDE the 25%
+// QD dice (75% of the auto-retire seams never archived) and only
+// entry.sessionId was ever archived (older slug incarnations + residue stayed
+// visible). F1 = the archive is UNCONDITIONAL on every retire (the dice only
+// samples the inspect directive); F2 = a boot residue pass archives the entry
+// session AND every durable session of a retired worker's slug. Both are
+// hide-set-only (ZERO-LOSS: nothing deleted/terminated; the artifacts and the
+// posts/hosts catalogs stay intact) and idempotent.
+
+test('Dx1 F1 (a): a delivery AUTO-RETIRE archives the durable session UNCONDITIONALLY — with the QD dice forced FALSE (env=0) the worker session still lands in the registry hide-set (pre-fix it stayed visible forever)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    process.env[QUALITY_INSPECT_ENV_VAR] = '0' // force the worker dice false — the ARCHIVE must not depend on it
+    try {
+      const env = await bootWithQD(stateDir)
+      try {
+        const signal = new AbortController().signal
+        const { head, headCtx, key } = qdResearchHead(env)
+        const spawned = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'dx1 delivery auto-retire' })
+        const sid = spawned.result.sessionId
+        // The delivery to the manager head IS the retire trigger (Fix B —
+        // busDeliverToPost auto-retires the sender via the SHARED retirePost).
+        await spawned.ctx.tools.get('send_message', spawned.key).execute({ to: ['research-head'], text: 'report: work complete' }, { agent: spawned.worker, signal })
+        await waitFor(async () => (await readPosts(stateDir))[spawned.result.workerId]?.retired === true, 5000, 'the delivering worker is auto-retired at delivery (Fix B)')
+        // F1: retirePost archives BEFORE the dice → the row hides even though
+        // the dice is forced false. PRE-FIX this waitFor timed out (the archive
+        // sat inside the 25% dice).
+        await waitFor(() => env.workspaceRegistry.archivedSessionIds.includes(sid), 5000, 'the auto-retired worker session is archived (Dx1 F1 — no dice dependency)')
+        // The dice semantics are UNCHANGED: env=0 still gates the inspect
+        // directive off (the archive is what became unconditional, not the emit).
+        await new Promise((r) => setTimeout(r, 100))
+        const dirs = await qualityDirectives(stateDir)
+        assert.equal(dirs.filter((d) => /worker retired/.test(d.text)).length, 0, 'the dice still gates the INSPECT DIRECTIVE (env=0 → none)')
+        // ZERO-LOSS: the retire is a mark, not an erase; the catalog keeps the
+        // entry with retired:true (dept_who still lists it in the management view).
+        const posts = await readPosts(stateDir)
+        assert.equal(posts[spawned.result.workerId].retired, true, 'the auto-retire stays a MARK (entry kept)')
+      } finally {
+        await env.dispose()
+      }
+    } finally {
+      delete process.env[QUALITY_INSPECT_ENV_VAR]
+    }
+  })
+})
+
+test('Dx1 F1 (b): a retire that HITS the 25% QD dice emits the inspect directive AND archives — both, independently (the archive is no longer conditional on the dice)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    process.env[QUALITY_INSPECT_ENV_VAR] = '1' // force the worker dice true (deterministic directive)
+    try {
+      const env = await bootWithQD(stateDir)
+      try {
+        const signal = new AbortController().signal
+        const { head, headCtx, key } = qdResearchHead(env)
+        const spawned = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'dx1 dice-hit' })
+        const sid = spawned.result.sessionId
+        const result = await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: spawned.result.workerId }, { agent: head, signal })
+        assert.equal(result.retired, true, 'the retire commits')
+        assert.equal(result.archived, true, 'dept_worker_retire reports the archive requested')
+        await waitFor(() => env.workspaceRegistry.archivedSessionIds.includes(sid), 5000, 'the worker session is archived (D5 hide-set)')
+        const dirs = (await qualityDirectives(stateDir)).filter((d) => /worker retired/.test(d.text))
+        assert.equal(dirs.length, 1, 'the dice-HIT retire emits exactly ONE inspect directive (the dice still samples the emit)')
+        assert.ok(dirs.some(workerRetiredDirectiveFor(spawned.result.workerId)), 'the directive names the retired worker')
+      } finally {
+        await env.dispose()
+      }
+    } finally {
+      delete process.env[QUALITY_INSPECT_ENV_VAR]
+    }
+  })
+})
+
+test('Dx1 F2 (c): at boot, EVERY retired worker\'s CURRENT session AND its slug\'s durable sessions (worker-<slug>-*) are archived (hide-set); a session of a LIVE post is NEVER archived (slug-chain guard) and an orphan (no post) is left for F3; a SECOND boot re-adds nothing (idempotent)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Retired workers: 'explore-deep-10' (entry session + a SECOND durable
+    // incarnation of the SAME slug — the multi-session residue) and 'builder'
+    // (whose slug chain collides with live 'builder-2').
+    await seedPost(stateDir, { postId: 'explore-deep-10', sessionId: 'worker-explore-deep-10-aaaaaaaa', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'explore-deep', managerId: 'research-head', retired: true })
+    await seedPost(stateDir, { postId: 'builder', sessionId: 'worker-builder-eeeeeeee', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', managerId: 'research-head', retired: true })
+    // LIVE post 'builder-2' — its slug prefix shadows the retired 'builder'
+    // prefix for the residue session below (the collision the guard must win).
+    await seedPost(stateDir, { postId: 'builder-2', sessionId: 'worker-builder-2-dddddddd', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', managerId: 'research-head' })
+    const durableSessions = [
+      'worker-explore-deep-10-bbbbbbbb', // the 2nd incarnation of retired explore-deep-10 (residue)
+      'worker-builder-eeeeeeee', // the current session of retired builder
+      'worker-builder-2-dddddddd', // belongs to LIVE builder-2 (share the retired 'builder' prefix!)
+      'worker-ghost-ffffffff' // orphan — no post at all (F3 is deliberately OUT)
+    ]
+    const booted = await bootPlugin(stateDir, { durableSessions })
+    try {
+      // (a) entry.sessionId archived; (b) the slug residue archived.
+      await waitFor(() => booted.workspaceRegistry.archivedSessionIds.includes('worker-explore-deep-10-aaaaaaaa'), 5000, 'the retired worker\'s CURRENT session is archived at boot (F2 a)')
+      await waitFor(() => booted.workspaceRegistry.archivedSessionIds.includes('worker-explore-deep-10-bbbbbbbb'), 5000, 'the retired worker\'s slug RESIDUE session is archived at boot (F2 b sweep)')
+      await waitFor(() => booted.workspaceRegistry.archivedSessionIds.includes('worker-builder-eeeeeeee'), 5000, 'the second retired worker\'s session is archived')
+      // Guards: the LIVE post's session and the orphan stay untouched.
+      assert.equal(booted.workspaceRegistry.archivedSessionIds.includes('worker-builder-2-dddddddd'), false, 'a session of a LIVE post is NEVER archived (the slug-chain collision guard — despite matching the retired "worker-builder-" prefix)')
+      assert.equal(booted.workspaceRegistry.archivedSessionIds.includes('worker-ghost-ffffffff'), false, 'an orphan session (no post) is NOT archived (F3 deliberately out — documented)')
+      const firstBoot = [...booted.workspaceRegistry.archivedSessionIds]
+      assert.ok(firstBoot.includes('worker-explore-deep-10-aaaaaaaa') && firstBoot.includes('worker-explore-deep-10-bbbbbbbb'), 'boot #1 seeded the hide-set with both archetypes')
+      await booted.dispose()
+      // SECOND boot on the SAME stateDir with the SAME durable corpus + the
+      // already-archived hide-set pre-seeded (the real registry persists
+      // archivedSessionIds across boots in workspace.json): the pass re-runs
+      // but re-archives NOTHING (idempotent no-op; an already-archived id is a
+      // registry early-return, so the set stays byte-identical).
+      const rebooted = await bootPlugin(stateDir, { durableSessions, workspaceRegistryArchived: firstBoot })
+      try {
+        await waitFor(() => rebooted.workspaceRegistry.archivedSessionIds.includes('worker-explore-deep-10-aaaaaaaa'), 5000, 'boot #2 pass settled (archive no-op on the pre-seeded hide-set)')
+        await new Promise((r) => setTimeout(r, 100))
+        assert.deepEqual([...rebooted.workspaceRegistry.archivedSessionIds].sort(), [...firstBoot].sort(), 'boot #2 re-adds NOTHING (idempotent residue pass)')
+      } finally {
+        await rebooted.dispose()
+      }
+    } finally {
+      await booted.dispose()
+    }
+  })
+})
+
+test('Dx1 F2 (d): a LIVE post (not retired) with a durable session is NEVER archived by the boot pass — nothing in the hide-set for it', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await seedPost(stateDir, { postId: 'researcher', sessionId: 'worker-researcher-99999999', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', managerId: 'research-head' })
+    // A retired PROBE post proves the pass RAN (its session MUST be archived)
+    // before we assert the live post's session stayed out of the hide-set.
+    await seedPost(stateDir, { postId: 'probe-retired', sessionId: 'worker-probe-retired-00000000', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', managerId: 'research-head', retired: true })
+    const { workspaceRegistry, dispose } = await bootPlugin(stateDir, { durableSessions: ['worker-researcher-99999999', 'worker-probe-retired-00000000'] })
+    try {
+      // The pass ran iff the retired probe session is archived.
+      await waitFor(() => workspaceRegistry.archivedSessionIds.includes('worker-probe-retired-00000000'), 5000, 'the retired probe session was archived — the residue pass ran')
+      // The LIVE post's session (dormant at boot) must NOT be in the hide-set.
+      assert.equal(workspaceRegistry.archivedSessionIds.includes('worker-researcher-99999999'), false, 'a LIVE post\'s durable session is NEVER archived (a live row stays visible)')
+      assert.equal(workspaceRegistry.archivedSessionIds.filter((id) => id === 'worker-probe-retired-00000000').length, 1, 'the probe is archived exactly once (idempotent add)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('Dx1 F2 (e): the sessions-root dir-scan FALLBACK (a persistence with a root but NO list()) archives a retired worker\'s slug sessions it finds on disk — and skips non-worker and worker-less matches', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const sessionsRoot = path.join(stateDir, 'sessions-root')
+    // The jsonl store layout: <root>/<project>/<encoded-id>/session.jsonl*.
+    const residueDir = path.join(sessionsRoot, '--proj-1--', 'worker-retired-9-bbbbbbbb')
+    await mkdir(residueDir, { recursive: true })
+    await writeFile(path.join(residueDir, 'session.jsonl.zstd'), '')
+    const foreignDir = path.join(sessionsRoot, '--proj-1--', 'other-org-worker-99')
+    await mkdir(foreignDir, { recursive: true })
+    await writeFile(path.join(foreignDir, 'session.jsonl.zstd'), '')
+    const headDir = path.join(sessionsRoot, '--proj-1--', 'head-other')
+    await mkdir(headDir, { recursive: true })
+    await writeFile(path.join(headDir, 'session.jsonl'), '')
+    await seedPost(stateDir, { postId: 'retired-9', sessionId: 'worker-retired-9-aaaaaaaa', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', managerId: 'research-head', retired: true })
+    const { workspaceRegistry, dispose } = await bootPlugin(stateDir, { persistenceRootOnly: sessionsRoot })
+    try {
+      await waitFor(() => workspaceRegistry.archivedSessionIds.includes('worker-retired-9-aaaaaaaa'), 5000, 'the retired worker\'s entry session is archived (F2 a — independent of the enumeration)')
+      await waitFor(() => workspaceRegistry.archivedSessionIds.includes('worker-retired-9-bbbbbbbb'), 5000, 'the dir-scanned slug residue is archived (F2 b fallback)')
+      assert.equal(workspaceRegistry.archivedSessionIds.includes('other-org-worker-99'), false, 'a non-worker-prefixed session in the dir scan is NEVER touched')
+      assert.equal(workspaceRegistry.archivedSessionIds.includes('head-other'), false, 'a head session in the dir scan is NEVER touched')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('QD worker-retire dice instrumentation (QH [HIGH] 2026-08-28 — qi-silence characterization): ONE INFO dice line per retire with postId/roll/prob/emitted — seeded rng 0.1 (< default 0.25) logs emitted=true and emits the directive; seeded rng 0.9 (≥ 0.25) logs emitted=false and emits nothing (dice + emit semantics unchanged)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    delete process.env[QUALITY_INSPECT_ENV_VAR] // exercise the code default 0.25 (never an env override)
+    const env = await bootWithQD(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const { head, headCtx, key } = qdResearchHead(env)
+      // Capture the plugin ctx.logger INFO lines: the bundle's ctx.logger IS the
+      // same callable the tests reach via env.pluginCtx().logger (pluginCtx() =
+      // the booted deepartments row ctx), so the retire's ctx.logger.info(...)
+      // lands here. The own-property patch shadows the LoggerService prototype
+      // method; the original sink is restored in the finally below.
+      const logger = env.pluginCtx().logger
+      const infos = []
+      const origInfo = logger.info
+      logger.info = (m) => { infos.push(String(m)); origInfo.call(logger, m) }
+      const originalRandom = Math.random
+      try {
+        // (a) seeded rng 0.1 → the 0.25 dice HITS: emitted=true + the directive.
+        const hit = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'qd dice log hit' })
+        Math.random = () => 0.1 // below the 0.25 sample threshold → dice TRUE
+        await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: hit.result.workerId }, { agent: head, signal })
+        Math.random = originalRandom
+        await new Promise((r) => setTimeout(r, 100))
+        let dirs = await qualityDirectives(stateDir)
+        assert.equal(dirs.filter((d) => /worker retired/.test(d.text)).length, 1, 'seeded rng 0.1 → EXACTLY ONE worker-retired directive (the dice fired — emit semantics unchanged)')
+        const hitLines = infos.filter((l) => l.includes('retirePost worker-retire QD dice') && l.includes(`postId="${hit.result.workerId}"`))
+        assert.equal(hitLines.length, 1, 'the HIT retire emits EXACTLY ONE INFO dice line naming the worker')
+        assert.ok(hitLines[0].includes('roll=0.1'), 'the dice line carries the roll the gate drew (0.1)')
+        assert.ok(hitLines[0].includes('prob=0.25'), 'the dice line carries the RESOLVED probability (env → config → default: the code default 0.25 here)')
+        assert.ok(hitLines[0].includes('emitted=true'), 'the hit dice line marks emitted=true')
+        // (b) seeded rng 0.9 → the 0.25 dice MISSES: emitted=false + no directive.
+        const miss = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'qd dice log miss' })
+        Math.random = () => 0.9 // above the 0.25 sample threshold → dice FALSE
+        await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: miss.result.workerId }, { agent: head, signal })
+        Math.random = originalRandom
+        await new Promise((r) => setTimeout(r, 100))
+        dirs = await qualityDirectives(stateDir)
+        assert.equal(dirs.filter((d) => /worker retired/.test(d.text)).length, 1, 'seeded rng 0.9 → NO additional directive (the dice misses — semantics unchanged)')
+        const missLines = infos.filter((l) => l.includes('retirePost worker-retire QD dice') && l.includes(`postId="${miss.result.workerId}"`))
+        assert.equal(missLines.length, 1, 'the MISS retire ALSO emits EXACTLY ONE INFO dice line naming the worker (every retire is logged — the runtime-observability guarantee)')
+        assert.ok(missLines[0].includes('roll=0.9'), 'the miss dice line carries the roll the gate drew (0.9)')
+        assert.ok(missLines[0].includes('prob=0.25'), 'the miss dice line carries the resolved probability (0.25)')
+        assert.ok(missLines[0].includes('emitted=false'), 'the miss dice line marks emitted=false')
+      } finally {
+        Math.random = originalRandom
+        logger.info = origInfo
+      }
+    } finally {
+      await env.dispose()
     }
   })
 })
