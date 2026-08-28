@@ -44,7 +44,7 @@ line refs are treated as design-level.
 | # | Decision | Baked in as |
 |---|---|---|
 | D-Q1 | **Naming.** Department id `quality`; name "Quality Department"; coordinator postId `quality-head`, title "Quality Head", role "Quality department head", sessionTitle "Quality Head"; head preset `deepartments-head-quality`; workspacePath `/root/.deepartments/departments/quality`; jobDir `docs/departments/quality/jobs`; spec `docs/specs/007-quality-department.md`. | §3.1, §7.4 |
-| D-Q2 | **Random control (worker archive).** When a NON-head agent session is archived (a disposable WORKER retired via `dept_worker_retire`/`dept_post_retire`), wake a QD inspection with probability `0.25` — a configurable constant (default 0.25) in the org config (`quality: { workerInspectProbability?: number }`), testable deterministically via an injected seed / env override (`DEEPARTMENTS_QUALITY_INSPECT`-style env OR an injected rng so tests are deterministic). **LOTE B (2026-08-27): the dice lives INSIDE the shared `retirePost` seam** — every REAL retire path (dept_worker_retire, the host dept_post_retire, the AUTO-RETIRE on delivery, the boot-reconcile half-slept reap) rolls the sample; the idempotent no-op never re-emits. The emitted directive carries the **ANALYZE mission** (LOTE B): *"ANALYZE the retired agent: its log/session, the tools it used, its flows, its failures, and optimization opportunities → write the report to `.dsh/reports/quality/` and report to quality-head"* (§6.1). | §4, §5.2, §6.1 |
+| D-Q2 | **Random control (worker archive).** When a NON-head agent session is archived (a disposable WORKER retired via `dept_worker_retire`/`dept_post_retire`), wake a QD inspection with probability `0.25` — a configurable constant (default 0.25) in the org config (`quality: { workerInspectProbability?: number }`), testable deterministically via an injected seed / env override (`DEEPARTMENTS_QUALITY_INSPECT`-style env OR an injected rng so tests are deterministic). **LOTE B (2026-08-27): the dice lives INSIDE the shared `retirePost` seam** — every REAL retire path (dept_worker_retire, the host dept_post_retire, the AUTO-RETIRE on delivery, the boot-reconcile half-slept reap) rolls the sample; the idempotent no-op never re-emits. The emitted directive carries the **ANALYZE mission** (LOTE B): *"ANALYZE the retired agent: its log/session, the tools it used, its flows, its failures, and optimization opportunities → write the report to `.dsh/reports/quality/` and report to quality-head"* (§6.1). **M-C (2026-08-28, owner): the ANALYZE mission audits the PROCESS — the errors the agent received, the obstacles it faced, how its TOOLS behaved, its prompts/context quality, friction, optimization opportunities — NOT the merit of the produced result** (reinforces the existing tools/flows/failures/optimizations items and adds prompts/context; the `deliverable` flag, O2/fb-8, is preserved). | §4, §5.2, §6.1 |
 | D-Q3 | **Mandatory 100% (host).** EVERY host session rotation (the Asistente's `dept_sleep` host branch, which archives the OLD host session) is inspected at **100% — never gated by the dice**. The host counts as a "H" (head-equivalent). **LOTE A (2026-08-27): the head archive part of D-Q3 is RETIRED** — heads/workers no longer sleep, so there is no head archive event to inspect (and no D-Q7 exception). | §6.2, §7.2 |
 | D-Q4 | **Analysis of architecture errors — two paths.** (a) EVENT-DRIVEN: a new post-error record (the spec 006 system-health post-error capture, `post-errors.jsonl`) triggers a QD analysis directive to quality-head (with the error record); (b) A DAILY DIGEST JOB `quality-daily` (role `quality-inspector`, cron `0 8 * * *`, owner `quality-head`, calendar entry `departmentId=quality`) that consolidates patterns (post-errors, stalled posts, delivery failures, inspection results). | §6.4, §6.5 |
 | D-Q5 | **Fix flow.** QD findings → report to the Asistente AND auto-request a PROGRAMMING REQUEST to `internal-programming-head` (head↔head synergy). QD does NOT fix directly. | §3.5, §6.6, §7.2 |
@@ -126,8 +126,10 @@ but scoped to the **organization's own runtime**, not to report factuality.
 5. **G5 — One role, read-only inspector (D-Q6).** `quality-inspector` role
    template materializes root-agent workers that read the archived session logs
    (stateDir `journals/sessions/*.md`, `journals/archive/`, `sessions/*.jsonl.zstd`),
-   find the signal, write the report under `.dsh/reports/quality/`, and report to
-   the QH.
+   **audit the PROCESS** — the errors the agent received, the obstacles it faced,
+   how its TOOLS behaved, its prompts/context quality, friction, optimization
+   opportunities (NOT the merit of the produced result, M-C) — find the signal,
+   write the report under `.dsh/reports/quality/`, and report to the QH.
 6. **G6 — Report-only fix flow (D-Q5).** The QH consolidates inspector findings and
    reports to the Asistente (3–5 bullets + report paths), AND auto-files a
    PROGRAMMING REQUEST to `internal-programming-head` for real fixable issues.
@@ -211,7 +213,7 @@ The QD has **ONE role**:
 
 | Role | Persona (template intent) | Tools (allow-list → restrict mask) |
 |---|---|---|
-| `quality-inspector` | Read-only QA inspector: reads the archived session logs (the retire/rotation artifacts), finds the quality signal (stale rows, leaked artifacts, post-error patterns, delivery-failure patterns), writes a report under `.dsh/reports/quality/`, and reports to the QH | read, write, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write — **NO `edit`, NO `dept_exec` by default** (LOTE A: `dept_sleep` removed — only the host sleeps) |
+| `quality-inspector` | Read-only QA inspector: reads the archived session logs (the retire/rotation artifacts), **audits the PROCESS** — the errors the agent received, the obstacles it faced, how its TOOLS behaved, its prompts/context quality, friction, optimization opportunities (NOT the merit of the produced result) — finds the quality signal (stale rows, leaked artifacts, post-error patterns, delivery-failure patterns), writes a report under `.dsh/reports/quality/`, and reports to the QH | read, write, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write, **dept_feedback** (universal/ACL-free — any agent may emit a feedback record) — **NO `edit`, NO `dept_exec` by default** (LOTE A: `dept_sleep` removed — only the host sleeps) |
 
 - **NO `edit`** (deliberate — the QD never repairs; D-Q5). **NO `dept_exec`** by
   default (a read-only inspector does not need a shell; the file-tools + fs-scope
@@ -468,7 +470,14 @@ When a NON-head agent session is archived — a disposable WORKER retired via
    and optimization opportunities → write the report to
    `.dsh/reports/quality/` and report to quality-head"* — so the inspector
    always knows its task (R6: the previous frame text is kept, the mission is
-   ADDED).
+   ADDED). **M-C (2026-08-28, owner): the mission audits the PROCESS — the
+   errors the agent received, the obstacles it faced, how its TOOLS behaved,
+   its prompts/context quality, friction, optimization opportunities — NOT the
+   merit of the produced result.** The analysis target is the agent's run
+   quality (tool behavior, prompt/context quality, the errors/obstacles it
+   hit), not a verdict on the deliverable it produced; the `deliverable` flag
+   (O2/fb-8 — `deliverable: none|report`) stays the O2 QUERY signal, never a
+   result-score.
 
 **LOTE B (2026-08-27, owner decision): the dice lives INSIDE `retirePost`** —
 the ONE shared retire seam that covers EVERY real retire path (the
@@ -513,7 +522,14 @@ The hook fires where the post-error row is appended (the capture seam) or when
 the health daemon scan surfaces a fresh row; it emits a directive to `quality-head`
 carrying the `{ts, postId, messageId?, error}` record. ❓ §9 whether this is
 wired at the capture seam (append-time) or the daemon scan (tick-time) — both are
-non-fatal; the seam-report cross-check decides.
+non-fatal; the seam-report cross-check decides. **M-C (2026-08-28, owner): the
+post-error analysis audits the PROCESS — the errors the affected agent received,
+the obstacles it faced, how its TOOLS behaved (a bad tool result, a 400-class
+provider error, a delivery failure), its prompts/context quality, friction, and
+the optimization opportunities the error exposes — NOT a judgment on the merit
+of what the agent produced.** The error is a process signal (a tool/provider/
+context defect), analysed for the fixable cause, not a verdict on the agent's
+result.
 
 ### 6.5 The daily digest job + calendar (D-Q4b)
 
@@ -539,7 +555,7 @@ worker reports to the QH (never the host — worker → host is PROHIBITED).
 
 | Role | Persona (template intent) | Tools (allow-list → restrict mask) | Report protocol |
 |---|---|---|---|
-| `quality-inspector` | Read-only QA inspector for the QD: reads the archived session logs (the retire/rotation artifacts under stateDir), finds the quality signal (a stale/leaked row, a post-error pattern, a delivery-failure thread, a host rotation that left an artifact), writes a report under `.dsh/reports/quality/`, and reports to the QH | read, write, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write — **NO `edit`, NO `dept_exec` (default)** | writes `.dsh/reports/quality/<YYYY-MM-DD>-<slug>.md`; replies to the QH via send_message; communicates ONLY within the QD (ACL, D-Q5/D-Q6). **BOOT-QUIET**, **EPHEMERAL PER ROUND** (W8-g) |
+| `quality-inspector` | Read-only QA inspector for the QD: reads the archived session logs (the retire/rotation artifacts under stateDir), **audits the PROCESS** — the errors the agent received, the obstacles it faced, how its TOOLS behaved, its prompts/context quality, friction, optimization opportunities — and finds the quality signal (a stale/leaked row, a post-error pattern, a delivery-failure thread, a host rotation that left an artifact). It does NOT judge the merit of the produced result (M-C): the analysis target is the agent's run quality, not a verdict on its deliverable. Writes a report under `.dsh/reports/quality/`, and reports to the QH | read, write, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write, **dept_feedback** (universal/ACL-free — any agent may emit a feedback record) — **NO `edit`, NO `dept_exec` (default)** | writes `.dsh/reports/quality/<YYYY-MM-DD>-<slug>.md`; replies to the QH via send_message; communicates ONLY within the QD (ACL, D-Q5/D-Q6). **BOOT-QUIET**, **EPHEMERAL PER ROUND** (W8-g) |
 
 - **NO `edit`** — the QD never repairs (D-Q5). **NO harness subagent tools** — it is
   a root worker. **BOOT-QUIET** — it acts only when the QH addresses it. **Memory via
@@ -555,7 +571,10 @@ The `deepartments-head-quality` persona becomes, in effect:
 
 > You are the **Quality Head** of the **Quality Department** (Deepartments,
 > DeepSeek Harness). You OWN the QUALITY of the Deepartments organization's own
-> runtime — you do NOT fix it. You receive **Quality Inspect directives** (bus
+> runtime — you do NOT fix it. **You audit the PROCESS — the errors agents
+> received, the obstacles they faced, how their TOOLS behaved, their
+> prompts/context quality, friction, optimization opportunities — NOT the merit
+> of the produced result (M-C, 2026-08-28).** You receive **Quality Inspect directives** (bus
 > messages from the archive-event hooks: a retired worker sampled at 25%, a host
 > session rotation at 100%, a new post-error record; the
 > daily digest) and you DECIDE/SPAWN your own `quality-inspector`

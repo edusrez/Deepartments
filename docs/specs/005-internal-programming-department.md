@@ -234,6 +234,18 @@ Do NOT treat an «aborted» last tool call in a retired worker's log as a missin
 deliverable; check the durable record (deliveries/messages sidecar) for the
 delivered row. Mirrored in the WORK-REGISTER §5 backlog (O3, firma NORMAL).
 
+**fb-16 no-dump discipline note (QD, 2026-08-28).** NUNCA dumps de
+credenciales/toolresults verbatim en journals/reports — redacta u omite
+secretos (`sk-…`, `=KEY_=` env-style) en los toolresults que se persisten, y no
+pegues env-dumps/resultados crudos de herramientas en nada que se persista
+(journals, reports, memos, cuerpos de mensaje). Los dumps de env en los
+toolresults corpora son la fuente del leak RAG (fb-15): todo lo que un agente
+persiste puede ser re-leído por agentes posteriores, así que un secreto pegado
+o un env-dump crudo es una superficie de leak permanente. Cuando se necesite
+evidencia, cita file:line / la ruta del registro o una paráfrasis redactada, no
+el dump crudo. Aplica a TODO agente — host, heads y workers por igual
+(mirror: skill deepartments-workflow, sección "Report convention").
+
 ### 3.5 Who coordinates what (I2)
 
 - **The IPD Head coordinates the Internal Programming Department**: plans the
@@ -450,10 +462,10 @@ workspace, so deliverable paths are relative to that workspace (`reports/...`).
 
 | Role | Persona (template intent) | Tools (allow-list → restrict mask) | Notes |
 |---|---|---|---|
-| `builder` | Internal programming executor: edits code in the repos/plugin, builds + tests, fixes READMEs, runs scoped `dept_exec` commands; reports to the IPD head | read, write, **edit**, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write, **dept_exec** | **ONLY role with `edit`** and the ONLY role that legitimately needs `dept_exec` for full code changes. Never commits (the Asistente commits); reports. |
-| `reviewer` | Independent review: reads changed files, runs verification commands via `dept_exec` (read-only usage), issues PASS/FAIL; **never writes code** | read, write, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write, **dept_exec** | **minus `edit`** (no code writes); `dept_exec` used read-only (verification commands only — build/test/lint/`git log`/`git diff`, never a mutating command). Its deliverable is its review report. |
-| `explore-deep` | Deep read-only code analysis: traces machinery, git/log/diff analysis, writes a report for the head | read, write, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write, **dept_exec** | **minus `edit`**; `dept_exec` read-only (git/log/diff, never a mutating command). Never writes code. |
-| `organizer` | Planning/consolidation: indexes/normalizes the dept's report archive, consolidates findings for the head | read, write, glob, grep, send_message, agent_messages, dept_who, dept_memo_write | **no `edit`, NO `dept_exec`** — purely planning/consolidation via messaging + reads (it must never mutate code or run a command). |
+| `builder` | Internal programming executor: edits code in the repos/plugin, builds + tests, fixes READMEs, runs scoped `dept_exec` commands; reports to the IPD head | read, write, **edit**, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write, **dept_feedback** (universal/ACL-free — any agent may emit a feedback record), **dept_exec** | **ONLY role with `edit`** and the ONLY role that legitimately needs `dept_exec` for full code changes. Never commits (the Asistente commits); reports. |
+| `reviewer` | Independent review: reads changed files, runs verification commands via `dept_exec` (read-only usage), issues PASS/FAIL; **never writes code** | read, write, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write, **dept_feedback** (universal/ACL-free — any agent may emit a feedback record), **dept_exec** | **minus `edit`** (no code writes); `dept_exec` used read-only (verification commands only — build/test/lint/`git log`/`git diff`, never a mutating command). Its deliverable is its review report. |
+| `explore-deep` | Deep read-only code analysis: traces machinery, git/log/diff analysis, writes a report for the head | read, write, glob, grep, web_search, web_fetch, send_message, agent_messages, dept_who, dept_memo_write, **dept_feedback** (universal/ACL-free — any agent may emit a feedback record), **dept_exec** | **minus `edit`**; `dept_exec` read-only (git/log/diff, never a mutating command). Never writes code. |
+| `organizer` | Planning/consolidation: indexes/normalizes the dept's report archive, consolidates findings for the head | read, write, glob, grep, send_message, agent_messages, dept_who, dept_memo_write, **dept_feedback** (universal/ACL-free — any agent may emit a feedback record) | **no `edit`, NO `dept_exec`** — purely planning/consolidation via messaging + reads (it must never mutate code or run a command). |
 
 - All four: **BOOT-QUIET** (never act unaddressed); message only inside the IPD
   (ACL); memory via `dept_memo_write`; **ephemeral by default**, and JOB workers

@@ -12,6 +12,8 @@ tools:
   - agent_messages
   - dept_who
   - dept_memo_write
+  # dept_feedback — universal/ACL-free (ANY agent — worker, head, host): emit a quality/feedback record to the durable backlog (<stateDir>/feedback.jsonl).
+  - dept_feedback
   - dept_exec
 ---
 

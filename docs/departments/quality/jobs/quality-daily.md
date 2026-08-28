@@ -21,7 +21,13 @@ this body is the concrete task).
 Consolidate the organization's runtime quality signal into a once-a-day digest:
 the post-error deltas, stalled posts, delivery-failure deltas, and the previous
 day's inspection results — the pattern report the QH folds into its
-weekly/Asistente-facing report.
+weekly/Asistente-facing report. **The digest reads the signal through the
+PROCESS lens (M-C, 2026-08-28): the errors agents received, the obstacles they
+faced, how their TOOLS behaved, their prompts/context quality, friction, and
+the optimization opportunities the patterns expose — NOT a judgment on the
+merit of the produced results.** Each section below answers "what does this
+pattern say about the process / what is optimizable?", not "was the result
+good?".
 
 ## What to read
 
@@ -59,11 +65,19 @@ Produce the digest sections:
 
 - **Post-error delta** — new post-errors since the last run (health-alerts
   findings row-ts > prior digest run), with the recurring `postId`/`error`
-  pattern (+ its likely cause if evident from the session logs).
+  pattern (+ its likely cause if evident from the session logs). **PROCESS lens
+  (M-C):** read each error as a process signal — what the affected agent
+  received (a bad tool result, a provider 400-class error, a delivery failure),
+  what obstacle/question it exposes in TOOLS / prompts / context, and the
+  fixable optimization. Do NOT score the agent's produced result.
 - **Stalled posts** — posts that show as interrupted/stalled in the session logs
-  (a reconcile/auto-run failure footprint).
+  (a reconcile/auto-run failure footprint). **PROCESS lens:** what friction
+  stalled the run (a tool hang, a wake gap, a context limit) and what is
+  optimizable.
 - **Delivery-failure delta** — the `status: 'failed'` delivery delta since the
-  last run (`deliveries.jsonl`), with id-resolution caveat.
+  last run (`deliveries.jsonl`), with id-resolution caveat. **PROCESS lens:**
+  what the failure says about the delivery/TOOL path and its friction, not a
+  verdict on the recipient's output.
 - **WATCH CLASSES (post-barrido 2026-08-27)** — track recurrence of two
   low-severity state classes with no owner yet: (i) `config-preset "model"
   unbound` — `config-presets.jsonl` markers / health-alerts `config-preset`
@@ -74,7 +88,10 @@ Produce the digest sections:
   recurrence; no re-filing as PRs.
 - **Prior inspection results** — what the recent inspector reports found, and
   whether any signal is repeating (incl. the worker-retired ANALYZE
-  opportunities that remain undirected).
+  opportunities that remain undirected). **PROCESS lens (M-C):** repeat the
+  process reading — recurring errors/obstacles/TOOL or prompt/context friction
+  across rounds → the optimization opportunity; do NOT re-judge the merit of
+  the results the inspections covered.
 
 ## Report
 

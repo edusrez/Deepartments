@@ -280,7 +280,12 @@ recovers.
 ### Quality requests → Quality Department (QD)
 
 The **Quality Department** inspects the Deepartments organization's own runtime
-(how the org itself behaves) — it never plans/fixes it. It is **event-driven +
+(how the org itself behaves) — it never plans/fixes it. **The inspection
+target is the PROCESS, not the merit of the produced result (M-C, 2026-08-28):
+the QD audits the errors agents received, the obstacles they faced, how their
+TOOLS behaved, their prompts/context quality, friction, and optimization
+opportunities — never a verdict on the quality of the produced result.** It is
+**event-driven +
 digest** (D-Q2/D-Q3/D-Q4): the lifecycle archive events (a disposable worker
 retire sampled at probability 0.25, a host session rotation at 100% — head
 sleep is RETIRED since 2026-08-27, LOTE A — and a new post-error record each
@@ -288,7 +293,8 @@ emit a Quality Inspect directive to `quality-head`; a **daily digest job**
 (`quality-daily`,
 role `quality-inspector`, cron `0 8 * * *`, owner `quality-head`) consolidates
 the week's post-errors / stalled posts / delivery failures / prior inspection
-results. The QD is **report-only**: it has no `edit`, no mutating `dept_exec`, no
+results — read as process signals (tool/prompt/context friction, optimization
+opportunities). The QD is **report-only**: it has no `edit`, no mutating `dept_exec`, no
 commit — findings go to the Asistente AND are auto-requested as a PROGRAMMING
 REQUEST to `internal-programming-head` for the genuinely fixable ones (it never
 fixes; the IPD fixes).
@@ -307,7 +313,11 @@ The **worker-retired** directive carries an explicit ANALYZE mission (LOTE B,
 2026-08-27): *"ANALYZE the retired agent: its log/session, the tools it used,
 its flows, its failures, and optimization opportunities → write the report to
 `.dsh/reports/quality/` and report to quality-head"* — the inspector's report
-path is fixed (D-Q6) and the analysis is always the same shape.
+path is fixed (D-Q6) and the analysis is always the same shape. **The ANALYSIS
+audits the PROCESS (M-C, 2026-08-28): the errors the agent received, the
+obstacles it faced, how its TOOLS behaved, its prompts/context quality,
+friction, and optimization opportunities — NOT the merit of the produced
+result** (the `deliverable` flag, O2/fb-8, is preserved as the query signal).
 
 The QD deploys organically (1 `quality-inspector` worker, rooted and ephemeral-
 per-round W8-g). **The QH is the CONSOLIDATOR + ANALYZER, not a retransmitter:**
@@ -508,6 +518,18 @@ key_findings:
 
 Lightweight: structured frontmatter + concise body (≤1 page). Never edit
 other agents' reports.
+
+**No-dump discipline (fb-16, QD 2026-08-28):** NEVER dump credentials or
+tool results VERBATIM into journals/reports. Redact or omit secrets — API keys
+(`sk-…`), env-style `=KEY_=` assignments, tokens — and do NOT paste raw
+toolresults (env dumps, full command outputs, config blobs) into anything that
+gets persisted (journals, reports, memos, message bodies). Verbatim env/tool
+dumps in toolresult corpora are exactly the source of the RAG leak (fb-15):
+whatever an agent persists can be re-read by later agents, so a pasted secret
+or a raw env dump is a permanent leak surface. When evidence is needed, cite
+the file:line / record path or a redacted paraphrase instead of the raw dump.
+This applies to EVERY agent — host, head, and worker alike, including the QD
+inspector's own reports.
 
 **Searching past reports** (report-awareness when dispatching): search past
 reports with grep/glob over `.dsh/reports/`. Include the paths of relevant

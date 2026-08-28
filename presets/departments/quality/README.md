@@ -38,7 +38,9 @@ agent preset (the neutral head/worker bases live in
   role. See ARCHITECTURE (execution scope) for the allowed roots + the read-only
   rule.
 - Bus / lifecycle (plugin own layer): `send_message`, `agent_messages`,
-  `dept_who`, `dept_memo_write`. (2026-08-27 LOTE A: `dept_sleep` is RETIRED for
+  `dept_who`, `dept_memo_write`, `dept_feedback` (universal/ACL-free — ANY
+  agent, worker/head/host, may emit a durable feedback record to the
+  quality-head backlog). (2026-08-27 LOTE A: `dept_sleep` is RETIRED for
   heads/workers — they stay `idle|running`; only the host keeps dept_sleep.)
 - NEVER for department workers: `subagent`/`subagent_fork`/`workflow`/`ralph`
   — a worker is a root agent, not a coordinator (D3, §3.4).
