@@ -43,7 +43,10 @@ M3 (f159eda).
 ## 4. CAPACIDAD
 
 - oc-11 monthly 5% (sana) · oc-10 libre (16:57) · oc-6/8/9 hasta 08-31 salvo
-  top-up · vías RD (reports/researcher/2026-08-27-capacity-provider-options.md)
+  top-up · **oc-12 REGISTRADA 2026-08-28 (otra cuenta opencode → cuota
+  independiente; drop-in key-pooler, sin workspace; ACTIVA tras la ventana de
+  deploy — pooler lee env al boot)** · vías RD
+  (reports/researcher/2026-08-27-capacity-provider-options.md)
   · watchdogs M1 activos.
 
 ## 5. BACKLOG
