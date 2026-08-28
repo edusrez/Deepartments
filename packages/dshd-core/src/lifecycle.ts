@@ -17,7 +17,15 @@
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 import path from 'node:path'
+import { readFile } from 'node:fs/promises'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
+// PR-2 (m-243/m-356): the shared write-ahead sidecar utilities the rotation
+// settle reuses — the SAME helpers the boot re-delivery driver
+// (DeliveryRedeliverer.run) and the retirePost in-session settle consume
+// (latestPerKey dedupe + needsRedelivery + markDelivery 'terminal'; see
+// settleRetiredHostDeliveries below).
+import { parseDeliveryRows, needsRedelivery, markDelivery, resolveDeliveriesPath } from './messages.js'
+import type { DeliveryRow } from './messages.js'
 import type { PostEntry, HostEntry } from './registry.js'
 import type {
   RotationPersistenceLike,
@@ -74,6 +82,62 @@ export interface SleepCleanupReportLike {
  * the state dir explicitly so the core module owns the path policy). */
 export function journalPathFor(stateDir: string, memberId: string): string {
   return path.join(stateDir, 'journals', `${memberId}.md`)
+}
+
+/**
+ * PR-2 (m-243/m-356 — the 2nd instance of the gap class, first documented by
+ * m-356): W7-A IN-SESSION settlement of a RETIRED HOST's pending deliveries —
+ * the host-rotation counterpart of the retirePost in-session settle (invoke.ts
+ * settleRetiredPostDeliveries). The boot re-delivery driver
+ * (DeliveryRedeliverer.run) settles dead/unknown recipients ONLY at boot — a
+ * host session retired by the dept_sleep ROTATION (sleepHost) left its pending
+ * 'prepared'/'failed' write-ahead sidecar rows parked until the NEXT boot. This
+ * mirror settles them AT ROTATION TIME so the retired host's stale deliveries
+ * are 'terminal' BEFORE any boot; the boot pass keeps working as the crash
+ * fallback (untouched — it re-settles idempotently after a crash, and its
+ * dead-recipient settle is a no-op once the pair is 'terminal').
+ * Semantics are the boot driver's EXACTLY: iterate the LATEST row per
+ * (messageId, recipientId) (a later 'delivered'/'resumed'/'self'/'terminal'
+ * row shadows an earlier 'prepared'/'failed' one — the same latestPerKey dedupe
+ * as DeliveryRedeliverer.run), settle the pairs whose recipient is one of the
+ * retired ids AND whose latest status `needsRedelivery` by appending a SINGLE
+ * 'terminal' row via the shared markDelivery utility, and NEVER emit a fresh
+ * 'prepared'/'failed' row (the W6 health daemon never re-alerts for the retired
+ * host — a terminal row is never a scanDeliveryFindings anomaly). A pair ALREADY
+ * settled (delivered/resumed/self/terminal) is untouched, so a re-run (e.g. a
+ * crash between the hosts.json retire and this settle) adds NO extra row, and a
+ * LIVE recipient's rows are untouched (strictly scoped to `retiredRecipientIds`
+ * — the retired host member id `host-<oldSessionId>` plus the raw retired
+ * session id, exactly the two addresses the boot's dead-recipient resolution
+ * would settle; the NEW rotated entry's ids are never passed, so the fresh host
+ * is never touched).
+ * Non-fatal by design: a sidecar read/mark failure only warns — the rotation
+ * already committed and the boot pass re-settles on the next boot.
+ */
+export async function settleRetiredHostDeliveries(
+  stateDir: string,
+  logger: { info?: (message: string) => void; warn: (message: string) => void },
+  retiredRecipientIds: readonly string[]
+): Promise<void> {
+  try {
+    let text: string
+    try {
+      text = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return // nothing ever sent
+      throw error
+    }
+    const latestPerKey = new Map<string, DeliveryRow>()
+    for (const row of parseDeliveryRows(text)) latestPerKey.set(`${row.messageId}\u0000${row.recipientId}`, row)
+    for (const row of latestPerKey.values()) {
+      if (!retiredRecipientIds.includes(row.recipientId)) continue
+      if (!needsRedelivery(row.status)) continue
+      await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal')
+      logger.info?.(`[deepartments] rotation settle: ${row.messageId} → ${row.recipientId} (was ${row.status}) → 'terminal' — host session retired in-session (rotation), settled once (no boot needed)`)
+    }
+  } catch (error: unknown) {
+    logger.warn(`[deepartments] rotation settle for "${retiredRecipientIds.join(', ')}" failed (non-fatal — the boot re-delivery pass re-settles): ${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 /** The QUALITY INSPECT directive surface the lifecycle passes to
@@ -385,6 +449,23 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
           // S6 — retired identity: the OLD session never gets the wake pack
           // again; the NEW session's per-process set is empty by definition.
           ctx.wakePackInjected.delete(sessionId)
+          // PR-2 (m-243/m-356): W7-A in-session settlement — the OLD host
+          // session just durably retired at S3/S7 (hosts.json: retired:true +
+          // rotatedTo), so its pending 'prepared'/'failed' sidecar rows are
+          // settled to ONE 'terminal' row per pair RIGHT HERE, before the
+          // sleep turn concludes and BEFORE any boot (previously they stayed
+          // 'prepared' without a terminal until the NEXT boot — the gap). The
+          // boot re-delivery pass remains the crash fallback (untouched — a
+          // crash between the hosts.json retire and this settle re-settles
+          // idempotently at the next boot). Scoped strictly to the retired
+          // member's ids — `hostId` (`host-<oldSessionId>`, the durable host
+          // member id the sidecar rows carry) and the raw retired `sessionId`
+          // (what the boot's dead-recipient resolution would settle the same
+          // way) — NEVER the new entry: `rotation.newHostId` /
+          // `rotation.newSessionId` are different ids, so the fresh host and
+          // the exactly-one-live chain are untouched. Non-fatal (a failure
+          // warns only — the rotation already committed).
+          await settleRetiredHostDeliveries(ctx.stateDir, ctx.logger, [hostId, sessionId])
           // S8 — conclude the sleeping Asistente's turn.
           if (typeof (exec as { concludeTurn?: unknown }).concludeTurn === 'function') {
             (exec as { concludeTurn: () => void }).concludeTurn()

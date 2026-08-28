@@ -323,17 +323,23 @@ export type {
 // helpers the boot check (runProviderAdapterBootCheck) wires and RE-EXPORTS the
 // whole surface so the compiled lib/invoke.js stays a drop-in superset of the
 // pre-extraction module (the existing tests import these symbols from
-// lib/invoke.js). The boot check closure itself STAYS in the bundle.
+// lib/invoke.js). The boot check closure itself STAYS in the bundle. fb-9: the
+// same reader now also resolves the reasoning surface + the
+// resolveReasoningContentPreflight guard (the DISPATCH pre-flight the two
+// spawn engines run BEFORE any agents.create).
 import {
   PROVIDER_ADAPTER_RETRY_WINDOW_MS,
   PROVIDER_ADAPTER_RETRY_MS,
   readLlmPiAiProviderSettings,
-  resolveProviderAdapterBootFindings
+  resolveProviderAdapterBootFindings,
+  resolveReasoningContentPreflight,
+  REASONING_CONTENT_PREFLIGHT_POST_ID
 } from './core/pooler.js'
 import type {
   ProviderAdapterBootFinding,
   ProviderAdapterBootInput,
-  ProviderAdapterEndpointDriftDeps
+  ProviderAdapterEndpointDriftDeps,
+  LlmPiAiProviderSettings
 } from './core/pooler.js'
 export {
   PROVIDER_ADAPTER_CHECK_POST_ID,
@@ -342,12 +348,15 @@ export {
   providerAdapterEndpointDrift,
   resolveProviderAdapterBootFindings,
   parseLlmPiAiProviderSettings,
-  readLlmPiAiProviderSettings
+  readLlmPiAiProviderSettings,
+  resolveReasoningContentPreflight,
+  REASONING_CONTENT_PREFLIGHT_POST_ID
 } from './core/pooler.js'
 export type {
   ProviderAdapterBootFinding,
   ProviderAdapterBootInput,
-  ProviderAdapterEndpointDriftDeps
+  ProviderAdapterEndpointDriftDeps,
+  LlmPiAiProviderSettings
 } from './core/pooler.js'
 // dshd-health phase: the system-health DOMAIN (post-error capture +
 // unusable-session markers, heartbeat/alerts ledger + audit, W8-i error class,
@@ -3468,6 +3477,26 @@ export function applyInvoke(ctx: Context, config: Config) {
     return undefined
   }
 
+  /** fb-9 (QH MEDIA — the class 400 `reasoning_content must be passed back`
+   * that burned a whole mission: 570s/~55k tokens, 0 deliverable): the ACTIVE
+   * worker route (WORKER_AGENT_OPTIONS.provider — 'opencode-zen', the route
+   * every spawn/job worker materializes with) is PRE-FLIGHTED against the
+   * <stateDir>/settings.yaml profile BEFORE any worker materialization. A
+   * provider the profile positively declares reasoning-enabled whose profile
+   * lacks `requiresReasoningContentOnAssistantMessages: true` → a CLEAR EARLY
+   * error (the expensive 400 never happens mid-mission). CONSERVATIVE guard:
+   * flag present / reasoning off / profile absent-or-unreadable → undefined
+   * (passthrough — the pre-flight is a guard, never a blocker). The decision
+   * is one read of the same settings.yaml the FIX-2 boot check already reads
+   * (via the dshd-pooler reader — consumption only). */
+  const workerReasoningContentPreflightError = (): string | undefined => {
+    const provider = WORKER_AGENT_OPTIONS.provider
+    if (typeof provider !== 'string' || provider === '') return undefined
+    const settings = readLlmPiAiProviderSettings(stateDir)
+    const verdict = resolveReasoningContentPreflight(provider, settings, stateDir)
+    return verdict.ok ? undefined : verdict.reason
+  }
+
   /** Run ONE department job — the dept_worker_spawn contract (dept_job_run's
    * body, minus the exec.agent derivation): read the definition, validate the
    * role, enforce the already-running idempotency, materialize the worker root
@@ -3483,6 +3512,11 @@ export function applyInvoke(ctx: Context, config: Config) {
     opts: { callerSessionId?: string; signal?: AbortSignal } = {}
   ): Promise<{ workerId: string; sessionId: string; title: string; jobId: string; role: string; jobPath: string }> => {
     if (agents === void 0) throw new Error('[deepartments] dept_job_run requires the agents service')
+    // 0. fb-9 pre-flight (BEFORE anything — never a mid-mission 400): reject
+    // the dispatch LOUDLY when the active worker route's profile has reasoning
+    // enabled but lacks requiresReasoningContentOnAssistantMessages=true.
+    const preflightError = workerReasoningContentPreflightError()
+    if (preflightError !== undefined) throw new Error(`[deepartments] ${preflightError}`)
     // 1. Read + parse the definition FIRST (loud: missing/broken → fail).
     const definition = await readJobDefinitionFile(repoRoot, department, jobId)
     // 2. Role validation against the department role template tree.
@@ -3557,6 +3591,13 @@ export function applyInvoke(ctx: Context, config: Config) {
     opts: { role: string; task?: string; title?: string; jobId?: string; callerAgentId?: string; senderSessionId?: string; signal?: AbortSignal }
   ): Promise<{ workerId: string; sessionId: string; title: string }> => {
     if (agents === void 0) throw new Error('[deepartments] dept_worker_spawn requires the agents service')
+    // 0. fb-9 pre-flight (BEFORE any materialization — never a mid-mission 400):
+    // the active worker route's profile must carry
+    // requiresReasoningContentOnAssistantMessages=true when reasoning is
+    // enabled, else the dispatch is rejected with a CLEAR EARLY error (the
+    // expensive 400 that burned the fb-9 mission can never happen again).
+    const preflightError = workerReasoningContentPreflightError()
+    if (preflightError !== undefined) throw new Error(`[deepartments] ${preflightError}`)
     const role = String(opts.role ?? '').trim()
     if (role === '') throw new Error('[deepartments] dept_worker_spawn: `role` is required (a role template name, e.g. "researcher")')
     // Role template is resolved BEFORE any create: a missing/malformed role file
@@ -4171,6 +4212,13 @@ export function applyInvoke(ctx: Context, config: Config) {
           // ensured first); otherwise the shared workspace root (the
           // resolveDepartmentWorkspaceCwd '' fallback — pre-F1 behavior).
           const deptCwd = await resolveDepartmentWorkspaceCwd(department)
+          // fb-9: the legacy dept_post_create path shares the SAME DISPATCH
+          // pre-flight as the two spawn engines — a reasoning-enabled provider
+          // without requiresReasoningContentOnAssistantMessages=true rejects
+          // HERE, BEFORE any agents.create (never a mid-mission 400; nothing
+          // is registered).
+          const preflightError = workerReasoningContentPreflightError()
+          if (preflightError !== undefined) throw new Error(`[deepartments] ${preflightError}`)
           const handle = await agents.create({
             sessionId: String(SessionId(sessionId)),
             meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
@@ -6009,6 +6057,31 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
+  /** fb-9 boot-assert (LIGHT, non-fatal — drift detection even when nobody
+   * dispatches): at boot, pre-flight the ACTIVE worker route
+   * (WORKER_AGENT_OPTIONS.provider) against the stateDir settings.yaml. A
+   * provider profile with reasoning enabled that lacks
+   * requiresReasoningContentOnAssistantMessages=true → a warn + ONE drift
+   * post-error row (the synthetic REASONING_CONTENT_PREFLIGHT_POST_ID post —
+   * the W6 daemon surfaces it as a post-error finding, so the drift is visible
+   * from the break, no spawn needed). Never throws; an absent/unreadable
+   * settings.yaml or a healthy profile → silent no-op. The DISPATCH guard
+   * itself (spawnWorkerForDepartment/runJobForDepartment) is the hard stop;
+   * this is only the early visibility. */
+  const runReasoningContentBootAssert = async (): Promise<void> => {
+    try {
+      const provider = WORKER_AGENT_OPTIONS.provider
+      if (typeof provider !== 'string' || provider === '') return
+      const settings = readLlmPiAiProviderSettings(stateDir)
+      const verdict = resolveReasoningContentPreflight(provider, settings, stateDir)
+      if (verdict.ok) return
+      ctx.logger.warn(`[deepartments] ${verdict.reason} (boot drift — DISPATCH rejects until the flag is set; non-fatal)`)
+      await appendPostError(stateDir, { ts: Date.now(), postId: REASONING_CONTENT_PREFLIGHT_POST_ID, error: verdict.reason })
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] reasoning-content boot assert failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   /** m-119 — DURABLE host/post registry VALIDATION at boot. After both
    * registries cold-load, VALIDATE the durable hosts.json invariant and the
    * durable posts.json retire-leak class and WARN on any degenerate state
@@ -6173,6 +6246,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     void runPresetAudit()
     void runInterruptedPostReconciliation()
     void runProviderAdapterBootCheck()
+    void runReasoningContentBootAssert()
     void runDurableRegistryReconciliation()
     void runHalfSleptHeadReconcile()
   })

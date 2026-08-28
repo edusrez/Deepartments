@@ -36,7 +36,7 @@ import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
 import { RegistryStore } from '../lib/invoke.js'
-import { readLlmPiAiProviderSettings } from '../lib/invoke.js'
+import { readLlmPiAiProviderSettings, resolveReasoningContentPreflight, REASONING_CONTENT_PREFLIGHT_POST_ID } from '../lib/invoke.js'
 import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply, SECRETARY_PERSONA, SECRETARY_TOOL_FILTER, SECRETARY_TOOL_NAME, SECRETARY_PROVIDER, SECRETARY_MAX_DEPTH } from '../lib/subagent.js'
 import { HEAD_BASE_TOOLS, OWN_LAYER_POST_TOOLS } from '../lib/invoke.js'
@@ -12463,6 +12463,338 @@ test('FIX-2 (QD NO_ADAPTER alerting): a boot where the configured provider IS re
       // Let the boot provider-adapter check settle (it runs in the boot .then block).
       await new Promise((resolve) => setTimeout(resolve, 150))
       assert.equal(readPostErrorsFile(stateDir).filter((r) => r.postId === PROVIDER_ADAPTER_CHECK_POST_ID).length, 0, 'a boot with the configured provider registered + a clean endpoint is NOT flagged')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// fb-9 (QH MEDIA) — reasoning-content DISPATCH PRE-FLIGHT + boot-assert. The
+// class 400 `reasoning_content must be passed back` burned a whole mission
+// (570s/~55k tokens, 0 deliverable); the REACTIVE fix is settings.yaml:20
+// (requiresReasoningContentOnAssistantMessages: true on the opencode-zen
+// profile). This batch proves the PRE-FLIGHT: a profile with reasoning enabled
+// but WITHOUT the flag REJECTS dept_worker_spawn / dept_job_run BEFORE any
+// agents.create (the expensive mid-mission 400 can never happen again); with
+// the flag / reasoning off / absent-or-unreadable settings → passthrough
+// (zero regression); the boot-assert flags the drift at boot, NON-fatal.
+// The settings fixtures are written into the temp stateDir (the SAME
+// <stateDir>/settings.yaml the dshd-pooler reader + the boot check consume).
+// ---------------------------------------------------------------------------
+
+test('fb-9 PRE-FLIGHT (pure): parseLlmPiAiProviderSettings resolves the reasoning surface — provider-level reasoningEffort, requiresReasoningContentOnAssistantMessages, and the model-level reasoningEfforts key union (inline braces + multi-line brace block)', () => {
+  // (a) A dev-like profile: flag present + models with a multi-line brace block.
+  const full = parseLlmPiAiProviderSettings([
+    'llm-pi-ai:',
+    '  providers:',
+    '    opencode-zen:',
+    '      api: openai-completions',
+    '      baseURL: http://127.0.0.1:4097/v1',
+    '      requiresReasoningContentOnAssistantMessages: true',
+    '      models:',
+    '        - id: deepseek-v4-flash',
+    '          name: DeepSeek V4 Flash',
+    '          reasoningEfforts:',
+    '            {',
+    '              off: null,',
+    '              low: low,',
+    '              high: high,',
+    '              max: max',
+    '            }',
+    '        - id: deepseek-v4-flash-vision-exp',
+    '          reasoningEfforts: { off: null, minimal: minimal, max: max }'
+  ].join('\n'))
+  assert.equal(full['opencode-zen'].baseURL, 'http://127.0.0.1:4097/v1', 'baseURL preserved')
+  assert.equal(full['opencode-zen'].requiresReasoningContentOnAssistantMessages, true, 'the flag is resolved')
+  assert.deepEqual(full['opencode-zen'].reasoningEfforts, ['off', 'low', 'high', 'max', 'minimal'], 'the model-level reasoningEfforts keys UNION (multi-line + inline brace forms)')
+  // (b) Reasoning OFF: model-level efforts only off (no flag needed).
+  const off = parseLlmPiAiProviderSettings([
+    'llm-pi-ai:',
+    '  providers:',
+    '    opencode-zen:',
+    '      api: openai-completions',
+    '      models:',
+    '        - id: deepseek-v4-flash',
+    '          reasoningEfforts: { off: null }'
+  ].join('\n'))
+  assert.deepEqual(off['opencode-zen'].reasoningEfforts, ['off'], 'off-only efforts resolved')
+  assert.equal(off['opencode-zen'].requiresReasoningContentOnAssistantMessages, undefined, 'no flag key → undefined (never a false literal)')
+  // (c) A provider-level reasoningEffort scalar — the PLURAL map key must NOT
+  // collide with the SINGULAR scalar.
+  const scalar = parseLlmPiAiProviderSettings([
+    'llm-pi-ai:',
+    '  providers:',
+    '    opencode-zen:',
+    '      reasoningEffort: off',
+    '      maxRetries: 0'
+  ].join('\n'))
+  assert.equal(scalar['opencode-zen'].reasoningEffort, 'off', 'provider-level scalar resolved')
+  assert.equal(scalar['opencode-zen'].reasoningEfforts, undefined, 'no models → no efforts union')
+  assert.equal(scalar['opencode-zen'].maxRetries, 0, 'the pre-fb-9 surface is untouched')
+  // (d) A pre-fb-9 fixture (no new keys) stays BYTE-identical (zero regression).
+  const legacy = parseLlmPiAiProviderSettings([
+    'llm-pi-ai:',
+    '  providers:',
+    '    opencode-zen:',
+    '      api: openai-completions',
+    '      baseURL: http://127.0.0.1:4097/v1',
+    '      maxRetries: 0'
+  ].join('\n'))
+  assert.deepEqual(legacy, { 'opencode-zen': { baseURL: 'http://127.0.0.1:4097/v1', maxRetries: 0 } }, 'the legacy surface is unchanged (absent keys stay absent)')
+})
+
+test('fb-9 PRE-FLIGHT (pure): resolveReasoningContentPreflight blocks ONLY a provider positively declared reasoning-enabled WITHOUT the flag; flag / reasoning-off / no-signal / unresolved-profile → pass (conservative guard, never a blocker)', () => {
+  const label = '/state/example'
+  // (a) Provider ABSENT (absent/unreadable profile) → pass (the reader degraded).
+  assert.deepEqual(resolveReasoningContentPreflight('opencode-zen', {}), { ok: true }, 'an absent profile → passthrough')
+  // (b) Flag present + reasoning on → pass.
+  assert.deepEqual(resolveReasoningContentPreflight('opencode-zen', { 'opencode-zen': { reasoningEfforts: ['off', 'max'], requiresReasoningContentOnAssistantMessages: true } }), { ok: true }, 'the flag is set → pass')
+  // (c) Reasoning OFF (model efforts all off) → pass.
+  assert.deepEqual(resolveReasoningContentPreflight('opencode-zen', { 'opencode-zen': { reasoningEfforts: ['off'] } }), { ok: true }, 'off-only efforts → pass')
+  // (d) Reasoning OFF (provider-level reasoningEffort: off) → pass.
+  assert.deepEqual(resolveReasoningContentPreflight('opencode-zen', { 'opencode-zen': { reasoningEffort: 'off' } }), { ok: true }, 'provider reasoningEffort off → pass')
+  // (e) NO reasoning signal (profile present, but neither field declared) → pass
+  // (the pre-flight is a guard, not a blocker — only a POSITIVE declaration
+  // blocks).
+  assert.deepEqual(resolveReasoningContentPreflight('opencode-zen', { 'opencode-zen': { baseURL: 'http://127.0.0.1:4097/v1' } }), { ok: true }, 'no reasoning signal → passthrough')
+  // (f) THE BLOCK: reasoning enabled (model efforts non-off) + flag missing →
+  // the EXACT early error.
+  const verdict = resolveReasoningContentPreflight('opencode-zen', { 'opencode-zen': { reasoningEfforts: ['off', 'low', 'max'] } }, label)
+  assert.equal(verdict.ok, false, 'reasoning enabled without the flag → BLOCKED')
+  assert.equal(verdict.reason, 'preflight: provider «opencode-zen» has reasoning enabled but missing requiresReasoningContentOnAssistantMessages=true (settings /state/example) — configure the flag before dispatching', 'the EXACT preflight message (provider, flag, settings label, remediation)')
+  // (g) A provider-level scalar non-off without the flag → blocked too.
+  const scalar = resolveReasoningContentPreflight('opencode-zen', { 'opencode-zen': { reasoningEffort: 'max' } }, label)
+  assert.equal(scalar.ok, false, 'provider reasoningEffort max without the flag → BLOCKED')
+  // (h) An EXPLICIT false flag → still blocked (only a literal true counts).
+  const explicitFalse = resolveReasoningContentPreflight('opencode-zen', { 'opencode-zen': { reasoningEfforts: ['off', 'max'], requiresReasoningContentOnAssistantMessages: false } }, label)
+  assert.equal(explicitFalse.ok, false, 'requiresReasoningContentOnAssistantMessages: false → still BLOCKED')
+})
+
+test('fb-9 DISPATCH PRE-FLIGHT (acceptance 1): a fixture settings.yaml with reasoning enabled but WITHOUT the flag REJECTS dept_worker_spawn with the CLEAR EARLY error BEFORE any materialization (no agents.create, no durable post)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Fixture: provider 'opencode-zen' (the WORKER_AGENT_OPTIONS.provider route)
+    // with model-level reasoning efforts (non-off) and NO flag.
+    await writeFile(path.join(stateDir, 'settings.yaml'), [
+      'llm-pi-ai:',
+      '  providers:',
+      '    opencode-zen:',
+      '      api: openai-completions',
+      '      baseURL: http://127.0.0.1:4097/v1',
+      '      models:',
+      '        - id: deepseek-v4-flash',
+      '          reasoningEfforts: { off: null, low: low, high: high, max: max }'
+    ].join('\n'), 'utf8')
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      await assert.rejects(
+        () => headCtx.tools.get('dept_worker_spawn', key).execute({ role: 'researcher', task: 'fb-9 blocked spawn' }, { agent: head, signal }),
+        /preflight: provider «opencode-zen» has reasoning enabled but missing requiresReasoningContentOnAssistantMessages=true \(settings .*\) — configure the flag before dispatching/,
+        'dept_worker_spawn rejects with the CLEAR EARLY preflight error'
+      )
+      // BEFORE materializing: NO ctx.agents.create for a worker session and NO
+      // durable worker post — the rejection fires before any create.
+      assert.equal(agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-')), false, 'no worker agent was created (the pre-flight fires BEFORE agents.create)')
+      const posts = await readPosts(stateDir)
+      assert.equal(Object.values(posts).some((p) => p.provider === 'worker'), false, 'no durable worker post was registered')
+      assert.ok(agents.store.has('head-research-head'), 'the head stays materialized (the guard only blocks dispatch)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-9 DISPATCH PRE-FLIGHT (acceptance 1 — dept_job_run): the SAME fixture rejects dept_job_run LOUDLY before any materialization (no agents.create) — the shared engine guard covers both dispatch paths', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, 'settings.yaml'), [
+      'llm-pi-ai:',
+      '  providers:',
+      '    opencode-zen:',
+      '      models:',
+      '        - id: deepseek-v4-flash',
+      '          reasoningEfforts: { off: null, max: max }'
+    ].join('\n'), 'utf8')
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      await assert.rejects(
+        () => headCtx.tools.get('dept_job_run', key).execute({ jobId: 'monitor-dsh-updates' }, { agent: head, signal }),
+        /preflight: provider «opencode-zen» has reasoning enabled but missing requiresReasoningContentOnAssistantMessages=true/,
+        'dept_job_run rejects with the SAME preflight error (runJobForDepartment — the shared job engine)'
+      )
+      assert.equal(agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-')), false, 'no job worker was created (the rejection precedes agents.create)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-9 DISPATCH PRE-FLIGHT (acceptance 1 — dept_post_create): the SAME fixture ALSO rejects the LEGACY create seam (R6 dept_post_create) LOUDLY before any materialization — no agents.create, no durable post (the THIRD seam is covered)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The SAME fixture as acceptance 1: provider 'opencode-zen' with reasoning
+    // efforts (non-off) and NO flag.
+    await writeFile(path.join(stateDir, 'settings.yaml'), [
+      'llm-pi-ai:',
+      '  providers:',
+      '    opencode-zen:',
+      '      api: openai-completions',
+      '      baseURL: http://127.0.0.1:4097/v1',
+      '      models:',
+      '        - id: deepseek-v4-flash',
+      '          reasoningEfforts: { off: null, low: low, high: high, max: max }'
+    ].join('\n'), 'utf8')
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      await assert.rejects(
+        () => headCtx.tools.get('dept_post_create', key).execute({ postId: 'legacy-worker', role: 'rank-and-file researcher', firstMessage: 'fb-9 blocked legacy create' }, { agent: head, signal }),
+        /preflight: provider «opencode-zen» has reasoning enabled but missing requiresReasoningContentOnAssistantMessages=true \(settings .*\) — configure the flag before dispatching/,
+        'dept_post_create rejects with the SAME CLEAR EARLY preflight error (the legacy seam is guarded too)'
+      )
+      // BEFORE materializing: NO ctx.agents.create for a worker session and NO
+      // durable worker post — the pre-flight fires before agents.create.
+      assert.equal(agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-')), false, 'no worker agent was created via the legacy path (the pre-flight fires BEFORE agents.create)')
+      const posts = await readPosts(stateDir)
+      assert.equal(Object.values(posts).some((p) => p.provider === 'worker'), false, 'no durable worker post was registered by the legacy path')
+      assert.equal(agents.store.has('legacy-worker'), false, 'no legacy worker agent became live')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-9 ZERO REGRESSION (acceptance 2): the SAME fixture WITH requiresReasoningContentOnAssistantMessages: true spawns NORMALLY (worker materialized, task delivered) — the dev-profile shape', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, 'settings.yaml'), [
+      'llm-pi-ai:',
+      '  providers:',
+      '    opencode-zen:',
+      '      api: openai-completions',
+      '      requiresReasoningContentOnAssistantMessages: true',
+      '      models:',
+      '        - id: deepseek-v4-flash',
+      '          reasoningEfforts: { off: null, minimal: minimal, low: low, medium: medium, high: high, max: max }'
+    ].join('\n'), 'utf8')
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const { result, worker } = await f3Spawn({ agents, root }, headCtx, key, head, { role: 'researcher', task: 'flag present — spawn normal' })
+      assert.ok(agents.createCalls.some((c) => String(c.sessionId) === result.sessionId), 'the worker IS materialized when the flag is present')
+      await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'worker woken by the task')
+      assert.match(worker.inboxMessages.at(-1).content[0].text, /flag present — spawn normal/, 'the task is delivered (the dispatch is unchanged)')
+      // Legacy parity: dept_post_create (R6) with the flag present creates
+      // NORMALLY too — the flag unblocks every seam, the legacy stays legacy.
+      const legacy = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'legacy-worker', role: 'rank-and-file researcher', firstMessage: 'flag present — legacy normal' }, { agent: head, signal: new AbortController().signal })
+      assert.match(legacy.sessionId, /^worker-legacy-worker-[0-9a-f-]+$/, 'the legacy seam materializes a worker when the flag is present')
+      assert.ok(agents.createCalls.some((c) => String(c.sessionId) === legacy.sessionId), 'the legacy worker IS materialized too (zero regression for the R6 path)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-9 PASSTHROUGH (acceptance 3): a fixture with reasoning OFF (model efforts only off) spawns NORMALLY without the flag — the guard is not a blocker', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, 'settings.yaml'), [
+      'llm-pi-ai:',
+      '  providers:',
+      '    opencode-zen:',
+      '      models:',
+      '        - id: deepseek-v4-flash',
+      '          reasoningEfforts: { off: null }'
+    ].join('\n'), 'utf8')
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const { result } = await f3Spawn({ agents, root }, headCtx, key, head, { role: 'researcher', task: 'reasoning off — passthrough' })
+      assert.ok(agents.createCalls.some((c) => String(c.sessionId) === result.sessionId), 'a reasoning-off profile spawns normally without the flag')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-9 PASSTHROUGH (acceptance 4): settings.yaml ABSENT / MALFORMED → dispatch is NOT blocked (the reader degrades to {} and the guard passes conservatively)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Absent settings.yaml — the pre-fb-9 state of EVERY existing spawn test.
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const { result } = await f3Spawn({ agents, root }, headCtx, key, head, { role: 'researcher', task: 'absent settings — passthrough' })
+      assert.ok(agents.createCalls.some((c) => String(c.sessionId) === result.sessionId), 'absent settings.yaml → spawn normal (zero regression)')
+    } finally {
+      await dispose()
+    }
+  })
+  await withTempStateDir(async (stateDir) => {
+    // Malformed settings.yaml (unparseable → the parser degrades to {}).
+    await writeFile(path.join(stateDir, 'settings.yaml'), 'not: [valid\n  :\n', 'utf8')
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const { result } = await f3Spawn({ agents, root }, headCtx, key, head, { role: 'researcher', task: 'malformed settings — passthrough' })
+      assert.ok(agents.createCalls.some((c) => String(c.sessionId) === result.sessionId), 'malformed settings.yaml → spawn normal (the reader degrades)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-9 BOOT-ASSERT (acceptance 5): a boot against a fixture WITHOUT the flag (reasoning on) emits ONE drift post-error row (the synthetic preflight post) and stays NON-FATAL — heads still materialize, the W6 daemon surfaces the finding', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The drift fixture is written BEFORE boot — the boot .then block
+    // pre-flights the ACTIVE worker route and flags the drift even though
+    // nobody dispatches.
+    await writeFile(path.join(stateDir, 'settings.yaml'), [
+      'llm-pi-ai:',
+      '  providers:',
+      '    opencode-zen:',
+      '      api: openai-completions',
+      '      models:',
+      '        - id: deepseek-v4-flash',
+      '          reasoningEfforts: { off: null, low: low, max: max }'
+    ].join('\n'), 'utf8')
+    const env = await bootPlugin(stateDir)
+    try {
+      await waitFor(() => readPostErrorsFile(stateDir).some((r) => r.postId === REASONING_CONTENT_PREFLIGHT_POST_ID), 5000, 'the boot-assert drift row is written')
+      const rows = readPostErrorsFile(stateDir).filter((r) => r.postId === REASONING_CONTENT_PREFLIGHT_POST_ID)
+      assert.equal(rows.length, 1, 'EXACTLY ONE drift row at boot')
+      assert.match(rows[0].error, /preflight: provider «opencode-zen» has reasoning enabled but missing requiresReasoningContentOnAssistantMessages=true/, 'the row carries the preflight reason')
+      const findings = scanPostErrorFindings(stateDir, Date.now())
+      assert.ok(findings.some((f) => f.postId === REASONING_CONTENT_PREFLIGHT_POST_ID), 'the drift row is a post-error finding the W6 daemon surfaces')
+      // NON-FATAL: the boot completes and the head still materializes.
+      await waitForHeadMaterialized(env.agents)
+      assert.ok(env.agents.store.has('head-research-head'), 'the boot-assert is non-fatal — the head materializes')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('fb-9 BOOT-ASSERT zero-regression: a boot against a HEALTHY fixture (flag present) or NO settings.yaml writes NO drift row', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, 'settings.yaml'), [
+      'llm-pi-ai:',
+      '  providers:',
+      '    opencode-zen:',
+      '      requiresReasoningContentOnAssistantMessages: true',
+      '      models:',
+      '        - id: deepseek-v4-flash',
+      '          reasoningEfforts: { off: null, max: max }'
+    ].join('\n'), 'utf8')
+    const env = await bootPlugin(stateDir)
+    try {
+      await waitForHeadMaterialized(env.agents)
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      assert.equal(readPostErrorsFile(stateDir).filter((r) => r.postId === REASONING_CONTENT_PREFLIGHT_POST_ID).length, 0, 'flag present → NO drift row at boot')
+    } finally {
+      await env.dispose()
+    }
+  })
+  await withTempStateDir(async (stateDir) => {
+    // No settings.yaml at all (the hermetic default) → no drift row.
+    const env = await bootPlugin(stateDir)
+    try {
+      await waitForHeadMaterialized(env.agents)
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      assert.equal(readPostErrorsFile(stateDir).filter((r) => r.postId === REASONING_CONTENT_PREFLIGHT_POST_ID).length, 0, 'absent settings.yaml → NO drift row at boot')
     } finally {
       await env.dispose()
     }

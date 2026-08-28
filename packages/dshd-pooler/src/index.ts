@@ -13,6 +13,17 @@
 // surface is fs-pure and re-usable; the bundle consumes them through the
 // drop-in bridge `src/core/pooler.ts` (`export * from 'dshd-pooler'`).
 //
+// fb-9 (QH MEDIA — the 400 `reasoning_content must be passed back` class): the
+// settings reader is ALSO the surface for the DISPATCH PRE-FLIGHT — the parser
+// additionally resolves, per provider, the reasoning surface
+// (`reasoningEffort` scalar, the union of the model-level `reasoningEfforts`
+// map KEYS) and the openai-completions reasoning-content echo flag
+// (`requiresReasoningContentOnAssistantMessages`), and the package owns the
+// PURE guard (`resolveReasoningContentPreflight`) the bundle wires BEFORE any
+// worker materialization. Additive only: absent keys stay absent (the pre-fb-9
+// `{baseURL?, maxRetries?}` surface is byte-identical for profiles without the
+// new keys).
+//
 // The helpers are pure fs modules (NO cordis dependencies — just `node:fs` +
 // `node:path`), same shape as dshd-jobs/dshd-feedback: the ONLY impure surface
 // is the `readFileSync` inside readLlmPiAiProviderSettings — the settings.yaml
@@ -158,27 +169,88 @@ function unquoteYamlScalar(value: string): string {
   return v
 }
 
-/** FIX-2 — parse a minimal `settings.yaml` surface for the pi-ai provider
- * profiles: `llm-pi-ai.providers.<provider>.baseURL` / `.maxRetries`. This is a
- * bounded, DEPENDENCY-FREE line scan (the plugin loads in hermetic/minimal
- * profiles with no yaml package), so a parse failure or a non-matching structure
- * degrades to an empty map → the drift half of fix-2 is a NO-OP (the
- * missing-adapter half still fires). Never throws. */
-export function parseLlmPiAiProviderSettings(text: string): Record<string, { baseURL?: string; maxRetries?: number }> {
-  const out: Record<string, { baseURL?: string; maxRetries?: number }> = {}
+/** fb-9 — one `llm-pi-ai.providers.<p>` profile as the reader resolves it. The
+ * pre-fb-9 surface (baseURL/maxRetries) is unchanged; the fb-9 fields are set
+ * ONLY when the settings declare them (absent ≠ empty, so the pre-fb-9
+ * `{baseURL?, maxRetries?}` deep-equal assertions stay green). */
+export interface LlmPiAiProviderSettings {
+  baseURL?: string
+  maxRetries?: number
+  /** fb-9: a provider-level reasoning-effort scalar. 'off' → reasoning
+   * disabled; any other value → enabled. Absent → no provider-level pin. */
+  reasoningEffort?: string
+  /** fb-9: the UNION of the provider's model-level `reasoningEfforts` map KEYS
+   * (e.g. ['off','low','high','max']). All-'off' → reasoning disabled; any
+   * non-off key → enabled; absent → the profile declares NO reasoning surface
+   * (no signal — the conservative guard passes). */
+  reasoningEfforts?: string[]
+  /** fb-9: the openai-completions reasoning-content echo flag — the 400
+   * `reasoning_content must be passed back` guard. Set only when the key is
+   * present (true | false). */
+  requiresReasoningContentOnAssistantMessages?: boolean
+}
+
+/** fb-9 — the synthetic postId under which the boot-assert writes ONE drift
+ * post-error row when the ACTIVE worker route has reasoning enabled but its
+ * provider profile lacks `requiresReasoningContentOnAssistantMessages: true`.
+ * A NON-post id (never minted by the registry) — the W6 daemon surfaces it as
+ * a post-error finding (drift detection even when nobody dispatches). */
+export const REASONING_CONTENT_PREFLIGHT_POST_ID = 'preflight-reasoning-content'
+
+/** Collect the keys of a (possibly multi-line) `reasoningEfforts` map into the
+ * current provider's union. `text` is the raw map content (inline braces, or
+ * the accumulated brace block) — every `key:` token is a map key. */
+function collectReasoningEffortKeys(current: LlmPiAiProviderSettings | undefined, text: string): void {
+  if (current === undefined) return
+  const keys: string[] = []
+  for (const m of text.matchAll(/([A-Za-z0-9_.-]+)\s*:/g)) keys.push(m[1])
+  if (keys.length === 0) return
+  const seen = new Set(current.reasoningEfforts ?? [])
+  for (const k of keys) {
+    if (seen.has(k)) continue
+    seen.add(k)
+    current.reasoningEfforts = [...(current.reasoningEfforts ?? []), k]
+  }
+}
+
+/** FIX-2 + fb-9 — parse a minimal `settings.yaml` surface for the pi-ai
+ * provider profiles: `llm-pi-ai.providers.<provider>.baseURL` / `.maxRetries`
+ * (FIX-2) plus the fb-9 reasoning surface per provider
+ * (`reasoningEffort` scalar, `requiresReasoningContentOnAssistantMessages`
+ * flag, and the union of the model-level `reasoningEfforts` map keys — inline
+ * `{ ... }` or a multi-line brace block). This is a bounded, DEPENDENCY-FREE
+ * line scan (the plugin loads in hermetic/minimal profiles with no yaml
+ * package), so a parse failure or a non-matching structure degrades to an
+ * empty map → the drift half of fix-2 is a NO-OP and the fb-9 guard passes
+ * (conservative). Never throws. */
+export function parseLlmPiAiProviderSettings(text: string): Record<string, LlmPiAiProviderSettings> {
+  const out: Record<string, LlmPiAiProviderSettings> = {}
   const indentOf = (value: string): number => {
     const m = /^\s*/.exec(value)
     return m ? m[0].length : 0
   }
-  let mode: 'none' | 'llm-pi-ai' | 'providers' = 'none'
+  let mode: 'none' | 'llm-pi-ai' | 'providers' | 'models' = 'none'
   let providersIndent = -1
   let providerIndent = -1
-  let current: { baseURL?: string; maxRetries?: number } | undefined
+  let current: LlmPiAiProviderSettings | undefined
+  let modelsIndent = -1
+  let modelIndent = -1
+  /** fb-9: a multi-line `reasoningEfforts: { ... }` brace block being
+   * accumulated ('' = awaiting the opening '{'). */
+  let braceAcc: string | undefined
   for (const raw of text.split('\n')) {
     const line = raw.replace(/\r$/, '')
     const trimmed = line.trim()
     if (trimmed === '' || trimmed.startsWith('#') || trimmed === '---') continue
     const indent = indentOf(line)
+    if (braceAcc !== undefined) {
+      braceAcc += '\n' + trimmed
+      if (trimmed.includes('}')) {
+        collectReasoningEffortKeys(current, braceAcc)
+        braceAcc = undefined
+      }
+      continue
+    }
     if (mode === 'none') {
       if (indent === 0 && /^llm-pi-ai\s*:/.test(trimmed)) mode = 'llm-pi-ai'
       continue
@@ -191,21 +263,51 @@ export function parseLlmPiAiProviderSettings(text: string): Record<string, { bas
       }
       continue
     }
+    if (mode === 'models') {
+      if (indent <= modelsIndent) {
+        /* the models block ended — process this line as a provider-surface line */
+        mode = 'providers'
+      } else {
+        const listMatch = /^-\s+(.+)$/.exec(trimmed)
+        if (listMatch && (modelIndent < 0 || indent === modelIndent)) {
+          modelIndent = indent
+          continue /* a model list item — its reasoningEfforts feed the provider union */
+        }
+        const effortsMatch = /^reasoningEfforts\s*:\s*(.*)$/.exec(trimmed)
+        if (effortsMatch) {
+          const rest = (effortsMatch[1] ?? '').trim()
+          if (rest !== '') {
+            collectReasoningEffortKeys(current, rest)
+          } else {
+            braceAcc = '' /* multi-line brace block follows */
+          }
+        }
+        continue
+      }
+    }
     /* mode === 'providers' */
     if (indent <= providersIndent) {
       mode = 'none'
       current = undefined
+      modelIndent = -1
       continue
     }
     const isProviderKey = /^[A-Za-z0-9_.-]+\s*:\s*$/.test(trimmed)
     if (isProviderKey && (current === undefined || indent === providerIndent)) {
       const name = trimmed.replace(/:\s*$/, '').trim()
-      current = { baseURL: undefined, maxRetries: undefined }
+      current = {}
       out[name] = current
       providerIndent = indent
+      modelIndent = -1
       continue
     }
     if (current === undefined) continue
+    if (/^models\s*:\s*$/.test(trimmed)) {
+      mode = 'models'
+      modelsIndent = indent
+      modelIndent = -1
+      continue
+    }
     const baseMatch = /^baseURL\s*:\s*(.+)$/i.exec(trimmed)
     if (baseMatch) {
       current.baseURL = unquoteYamlScalar(baseMatch[1])
@@ -215,15 +317,61 @@ export function parseLlmPiAiProviderSettings(text: string): Record<string, { bas
     if (retryMatch) {
       const parsed = Number(unquoteYamlScalar(retryMatch[1]))
       current.maxRetries = Number.isFinite(parsed) ? parsed : undefined
+      continue
+    }
+    /* fb-9: provider-level reasoning pins — anchored so the PLURAL map key
+     * (`reasoningEfforts:` — handled in the models mode above) never matches. */
+    const effortMatch = /^reasoningEffort(?!s)\s*:\s*(.+)$/i.exec(trimmed)
+    if (effortMatch) {
+      current.reasoningEffort = unquoteYamlScalar(effortMatch[1])
+      continue
+    }
+    const flagMatch = /^requiresReasoningContentOnAssistantMessages\s*:\s*(.+)$/i.exec(trimmed)
+    if (flagMatch) {
+      current.requiresReasoningContentOnAssistantMessages = unquoteYamlScalar(flagMatch[1]).toLowerCase() === 'true'
     }
   }
   return out
 }
 
-/** FIX-2 — read the pi-ai provider endpoint surface from `<stateDir>/settings.yaml`
- * (best-effort: absent/unreadable/malformed → {}, never throws). The plugin's own
- * stateDir is the DSH runtime state dir that carries settings.yaml. */
-export function readLlmPiAiProviderSettings(stateDir: string): Record<string, { baseURL?: string; maxRetries?: number }> {
+/** fb-9 (QH MEDIA — the class 400 `reasoning_content must be passed back` that
+ * burned a whole mission): the DISPATCH PRE-FLIGHT for ONE provider route. The
+ * active worker route (WORKER_AGENT_OPTIONS.provider) runs the
+ * openai-completions API WITH reasoning → the profile MUST declare
+ * `requiresReasoningContentOnAssistantMessages: true` for that provider, else
+ * the first assistant turn 400s mid-mission (the reactive fix exists in
+ * settings.yaml; this guard stops the dispatch BEFORE the cost). CONSERVATIVE
+ * — the pre-flight is a GUARD, never a blocker: only a provider the profile
+ * POSITIVELY declares reasoning-enabled AND that lacks the flag is BLOCKED;
+ * flag present / reasoning off / profile absent-or-unreadable → pass. Pure. */
+export function resolveReasoningContentPreflight(
+  provider: string,
+  settings: Record<string, LlmPiAiProviderSettings>,
+  settingsLabel?: string
+): { ok: true } | { ok: false; reason: string } {
+  const profile = settings[provider]
+  if (profile === undefined) return { ok: true } /* the profile is absent/unreadable — pass */
+  const providerEffort = (profile.reasoningEffort ?? '').trim()
+  const efforts = profile.reasoningEfforts ?? []
+  // Reasoning is ENABLED only on a POSITIVE signal: a provider-level
+  // reasoningEffort != off, or ≥1 model declaring a non-off reasoningEffort. No
+  // signal (neither declared) → NOT enabled → pass (guard, not blocker).
+  const reasoningEnabled = providerEffort !== ''
+    ? providerEffort !== 'off'
+    : efforts.some((e) => e !== 'off')
+  if (!reasoningEnabled) return { ok: true } /* reasoning off / no signal — pass */
+  if (profile.requiresReasoningContentOnAssistantMessages === true) return { ok: true } /* the flag is set — pass */
+  const label = settingsLabel !== undefined && settingsLabel !== '' ? settingsLabel : 'unknown-profile'
+  return {
+    ok: false,
+    reason: `preflight: provider «${provider}» has reasoning enabled but missing requiresReasoningContentOnAssistantMessages=true (settings ${label}) — configure the flag before dispatching`
+  }
+}
+
+/** FIX-2 — read the pi-ai provider surface from `<stateDir>/settings.yaml`
+ * (best-effort: absent/unreadable/malformed → {}, never throws). The plugin's
+ * own stateDir is the DSH runtime state dir that carries settings.yaml. */
+export function readLlmPiAiProviderSettings(stateDir: string): Record<string, LlmPiAiProviderSettings> {
   try {
     const text = readFileSync(path.join(stateDir, 'settings.yaml'), 'utf8')
     return parseLlmPiAiProviderSettings(text)
