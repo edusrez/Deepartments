@@ -474,6 +474,38 @@ latest status `'terminal'`, so `needsRedelivery` is `false` on every subsequent
 boot — the noise stops after one boot. An already-`'terminal'` row stays
 terminal across restarts.
 
+**In-session settlement (same semantics, earlier than boot).** The boot-pass
+settle runs ONLY at boot, so a member that RETIRES in-session leaves its pending
+`'prepared'`/`'failed'` rows parked (still `needsRedelivery`) until the next
+boot — the gap class m-243/m-356 for a HOST session retired by the dept_sleep
+ROTATION (spec 002 S3/S7), which used to stay `'prepared'` with no terminal for
+the whole remaining session. Two in-session mirrors settle the SAME dead-member
+pairs AT RETIRE TIME, with the boot driver's semantics EXACTLY (latestPerKey
+dedupe + `needsRedelivery` + a SINGLE `markDelivery 'terminal'` row per pair,
+never a fresh `'prepared'`/`'failed'` row, strictly scoped to the retiring
+member; a pair already `delivered`/`resumed`/`self`/`terminal` and any other
+recipient's rows are untouched):
+
+- **Retiring WORKER** — `settleRetiredPostDeliveries` (src/invoke.ts), run by
+  the shared retirePost seam right after the durable retire mark (fb-7-ish).
+- **Retiring HOST at rotation** — `settleRetiredHostDeliveries`
+  (packages/dshd-core/src/lifecycle.ts), run by the lifecycle `sleepHost`
+  RIGHT AFTER the rotation commits its hosts.json retire (spec 002 S3/S7) and
+  BEFORE the sleep turn concludes; scoped to the retired member's ids — the
+  durable host member id `host-<oldSessionId>` (the id the sidecar rows carry)
+  plus the raw retired `sessionId` (what the boot's dead-recipient resolution
+  settles the same way) — NEVER the new rotated entry's ids, so the fresh host
+  and the exactly-one-live chain are untouched (PR-2, m-243/m-356).
+
+Both are non-fatal by design (a failure warns only — the retire/rotation already
+committed) and the BOOT PASS REMAINS THE CRASH FALLBACK, untouched: after a
+crash between the durable retire/rotation mark and the in-session settle it
+re-settles the same pairs idempotently on the next boot (a `'terminal'` pair is
+a no-op there). The health daemon therefore NEVER re-alerts a member that was
+settled in-session: `scanDeliveryFindings` (§5.2c) filters on `status ===
+'failed'`, terminal rows are never anomalies, and the retired member is excluded
+anyway (C6/Bug-A).
+
 **Consequences for the health daemon.** `scanDeliveryFindings` (§5.2c) filters on
 `status === 'failed'`, so a `'terminal'` row is never an anomaly. The daemon
 therefore stops re-alerting a settled dead-recipient pair; the OLD pre-settle
