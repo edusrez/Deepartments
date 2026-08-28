@@ -25,6 +25,7 @@ import {
   ROTATION_SCHEMA_VERSION,
   buildRotationSeed,
   buildRotationSeedMessage,
+  buildHeadRotationSeed,
   rekeyJournal,
   hostsRotationRecords,
   validateHostsRotationFile,
@@ -135,6 +136,61 @@ test('U2 T1: buildRotationSeedMessage frames the journal as a plugin/notice cont
   assert.equal(msg.source.plugin, 'deepartments')
   assert.equal(msg.source.form, 'notice')
   assert.ok(typeof msg.source.summary === 'string' && msg.source.summary.length > 0)
+})
+
+test('M-A: buildHeadRotationSeed mints the HEAD-ROTATION seed — raw journal VERBATIM (NO re-key: the head author is its stable postId), the DEPARTMENT title pin, contiguous seqs, cold-bootable via Session.fromRestore', () => {
+  const headJournal = [
+    '---',
+    'author: internal-programming-head',
+    'timestamp: 2026-08-28T08:00:00.000Z',
+    'wake_counter: 3',
+    '---',
+    '',
+    'IPD-HEAD-MEMORY: the rotation must carry this exact text into the fresh session.',
+    ''
+  ].join('\n')
+  const seed = buildHeadRotationSeed(headJournal, { now: 1787000000000, title: 'Internal Programming Head' })
+
+  // Exact event types + contiguous seq 0..k (the Session ctor contract).
+  assert.deepEqual(seed.map((ev) => ev.type), ['permission/preset', 'sandbox/mode', 'approval/policy', 'user/message', 'session/title'])
+  seed.forEach((ev, i) => assert.equal(ev.seq, i, `seq ${ev.seq} contiguous at index ${i}`))
+  assert.ok(seed.every((ev) => ev.time === 1787000000000), 'seed times pinned by the clock seam')
+
+  // NO RE-KEY: the journal node is the RAW head journal (author unaffected) —
+  // the head's member id is the STABLE postId, unlike the host's host-<id>.
+  const journalEvent = seed[3]
+  assert.equal(journalEvent.surfaceOp, 'append', 'journal node stays append-origin')
+  assert.equal(journalEvent.data.content[0].text, headJournal, 'the head journal is seeded VERBATIM (byte-identical, no re-key)')
+  assert.match(journalEvent.data.content[0].text, /^author: internal-programming-head$/m, 'head author untouched (NO host re-key)')
+  assert.equal(journalEvent.data.source.kind, 'plugin')
+  assert.equal(journalEvent.data.source.form, 'notice')
+
+  // DEPARTMENT TITLE PIN: a user-source session/title in the exact rename()
+  // shape (the host seed's "Asistente" default must NOT leak into a head seed).
+  const titleEvent = seed[4]
+  assert.equal(titleEvent.type, 'session/title')
+  assert.equal(titleEvent.data.title, 'Internal Programming Head')
+  assert.deepEqual(titleEvent.data.messageSeqs, [])
+  assert.deepEqual(titleEvent.data.source, { kind: 'user' })
+  assert.equal(titleEvent.surfaceOp, undefined, 'title pin is a log-only event (no surface entry)')
+
+  // T1 cold-boot proof (the resume ctor): fromRestore accepts the exact list
+  // and folds the single journal node as the first-turn surface.
+  const restored = Session.fromRestore(SessionId('session-head-rot'), seed, {
+    version: 0,
+    id: 'session-head-rot',
+    createdAt: 1787000000000,
+    cwd: '/root'
+  })
+  assert.equal(restored.seq, seed.length + 1, 'fresh session continues appending after the seed (+ end-seed marker)')
+  assert.equal(restored.surface.nodes.length, 1, 'the journal node is the only surface node')
+  const derived = restored.deriveMessages()
+  assert.equal(derived[0].content[0].text, headJournal, 'the wake surface node is the raw head journal')
+  assert.ok(!restored.events.some((ev) => ev.type === 'turn/start'), 'seeded session stays blank (no turn/start)')
+  // The DEFAULT host title stays untouched for the plain host seed (zero
+  // regression on the parametrization).
+  const hostDefault = buildRotationSeed(headJournal, { now: 1787000000000 })
+  assert.equal(hostDefault[4].data.title, 'Asistente', 'plain buildRotationSeed default remains the host title')
 })
 
 test('U2 T3: rekeyJournal rewrites ONLY the frontmatter author (room + every other byte untouched) and throws without an author line', () => {

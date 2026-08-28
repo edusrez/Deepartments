@@ -132,6 +132,17 @@ export interface HealthConfig {
    * write; the watchdog never writes it). All numeric knobs are optional —
    * absent/invalid → the code defaults below. */
   poolerCapacityEnabled?: boolean
+  /** DISPATCH-HARDENING (QH «429-primer-call», 2026-08-28) — the DISPATCH
+   * pre-check gate (default ON; an explicit `false` restores the
+   * pre-check-less dispatch). When ON, the worker/head dispatch seams
+   * (dept_worker_spawn / dept_job_run / dept_post_create / the bus-wake
+   * materialization) reject LOUDLY and EARLY when the pooler snapshot
+   * certifies that NO workspace can serve the spawn's first call (zero usable
+   * keys, every usable key at/above `highPercent`, or a last 429 usage-limit
+   * rotation to no key). Reads the SAME `<DSH_HOME>/keyPooler-state.json`
+   * SOLO-LECTURA; absent/stale → passthrough (the pre-check is a warning,
+   * never a blocker — unknown ≠ exhausted). */
+  poolerDispatchEnabled?: boolean
   /** M1 — ≤ this many USABLE keys (the pooler's own eligibility:
    * !invalid && blockedUntil<=now && cooldownUntil<=now) → a
    * `pooler-capacity:warning` finding (default 2). */
@@ -214,6 +225,36 @@ export interface PostsRetentionConfig {
 }
 
 /**
+ * B5-GHOST (dispatch-hardening, QH «429-primer-call» AFTER-half, 2026-08-28) —
+ * the live-post-without-usable-session reconcile knobs. Optional; defaults are
+ * CODE-level (enabled true, warnAfterTicks 2, retireAfterTicks 8 — CONSERVATIVE:
+ * the FIRST observation of a sessionless live post NEVER auto-retires; a
+ * `ghost-suspect` MARKER appears only after `warnAfterTicks` CONSECUTIVE boot
+ * censuses without a usable session, and the auto-retire fires only once the
+ * marker PERSISTS > `retireAfterTicks` more censuses). An ABSENT section (or
+ * absent key) falls through to the code defaults — the `health`/`quality`
+ * compose-untouched contract. An explicit `enabled: false` disables the pass.
+ * A post whose session becomes usable again at any census is CLEARED (an
+ * intermittent session never accumulates) — zero false positives by design.
+ */
+export interface GhostSuspectConfig {
+  /** When explicitly false, the boot ghost-suspect census pass does NOT run
+   * (a sessionless live post is left alone — the pre-b5-ghost behavior).
+   * Absent → enabled (default true). */
+  enabled?: boolean
+  /** N = the marker threshold: consecutive census misses BEFORE the
+   * `ghost-suspect` marker appears (default 2 — a single miss is never a
+   * marker: the first observation could be a between-materializations
+   * transient). Must be a positive number; invalid/absent → 2. */
+  warnAfterTicks?: number
+  /** M = the retire threshold: how MANY MORE consecutive misses (beyond the
+   * marker) before the auto-retire — the marker must PERSIST > M ticks
+   * (default 8 — conservative: a ghost lingers as a WARN for 8+ census ticks
+   * first). Must be a positive number; invalid/absent → 8. */
+  retireAfterTicks?: number
+}
+
+/**
  * One configured event_stream monitor of the deepartments plugin. The `query`
  * is the NL intent Parallel runs (settings.query); `processor`/`frequency`
  * mirror POST /v1/monitors (defaults `base`/`1d`). The whole array is read
@@ -249,6 +290,53 @@ export interface ParallelConfig {
   /** Max concurrent LIVE worker-researchers per monitor (the storm guard). */
   maxConsecutiveSpawns?: number
   monitors?: ParallelMonitorConfig[]
+}
+
+/**
+ * PACING (owner m-PACING, 2026-08-28 — pacing/coste, MEDIUM): the peak/valley
+ * FRANJA monitor config. The org lives in BURST mode around the owner's
+ * off-peak/peak pricing boundary; the goal is a GATE that reduces 429s and
+ * cost (NEW host→department dispatches pause inside the peak). The PURE UTC
+ * formula lives in dshd-core src/pacing.ts and MIRRORS the dsh-key-pooler
+ * peak definition (SEPARATE repository, crossed by comment BOTH ways):
+ * PEAK ⇔ weekday(UTC) ∈ Mon-Fri ∧ UTC hour ∈ {1,2,3,6,7,8,9}, with an edge
+ * buffer (default 30 min) on BOTH boundaries (request start/finish bias).
+ * Optional; defaults are CODE-LEVEL (`enabled` true, `weekday` [1..5],
+ * `hours` {1,2,3,6,7,8,9}, `peakBufferMs` 1800000). An ABSENT section (or an
+ * absent key) keeps the code defaults so the config composes untouched (the
+ * health/quality section contract); an explicit `enabled:false` restores the
+ * pre-pacing behavior (no franja section in the wake pack, no transition
+ * notices to the host). UPCOMING CHANGES (documented): any retune of the
+ * windows MUST be mirrored in dsh-key-pooler (`fallback.peakWindows` /
+ * `peakBufferMs`) — the two repos declare the SAME boundary and must stay in
+ * sync (the hourly model here is mathematically equivalent to the pooler's
+ * day-ranges: {1,2,3,6,7,8,9} ≡ 01:00-04:00 ∪ 06:00-10:00 with the same
+ * buffer).
+ */
+export interface PacingWindowHoursConfig {
+  /** Weekdays in peak, 1=Monday .. 7=Sunday (UTC). Default [1,2,3,4,5]. */
+  weekday?: number[]
+  /** UTC hours in peak. Default [1,2,3,6,7,8,9]. */
+  hours?: number[]
+}
+
+/** PACING — the `org.pacing.*` runtime shape (see the PacingWindowHoursConfig
+ * comment): `enabled` + the peak window (weekdays × hours) + the edge buffer.
+ * Mirrored structurally in dshd-core (PacingConfigLike — the wake-pack
+ * assembly + the system-health daemon read it from the shared config source),
+ * so the schema and the runtime shape always agree. */
+export interface PacingConfig {
+  /** When explicitly false the franja monitor is OFF — no `## Pacing (franja)`
+   * section in the wake pack and NO transition notices to the host (the
+   * pre-pacing / R6-legacy behavior). Absent → enabled (default true). */
+  enabled?: boolean
+  /** The peak window: weekdays × hours (UTC). Absent → the code defaults
+   * ([1..5] × {1,2,3,6,7,8,9}). */
+  peakWindows?: PacingWindowHoursConfig
+  /** Edge buffer (ms) around BOTH window boundaries (request start/finish
+   * bias). Default 1800000 = 30 min (the dsh-key-pooler peakBufferMs default).
+   * Must be a non-negative number; invalid/absent → the code default. */
+  peakBufferMs?: number
 }
 
 /** Plugin config: workspace state dir + the department (agent) catalog. */
@@ -306,6 +394,21 @@ export interface Config {
      * untouched. Mirrors the `health`/`quality` pattern.
      */
     postsRetention?: PostsRetentionConfig
+    /**
+     * B5-GHOST (dispatch-hardening) — the live-post-without-usable-session
+     * reconcile knobs (warnAfterTicks/retireAfterTicks/enabled). Optional;
+     * defaults are CODE-level (enabled true, 2/8 — conservative). Mirrors the
+     * postsRetention compose-untouched contract.
+     */
+    ghostSuspect?: GhostSuspectConfig
+    /**
+     * PACING (owner m-PACING, 2026-08-28) — the peak/valley FRANJA monitor
+     * (see PacingConfig). Optional; defaults are CODE-LEVEL (enabled true,
+     * weekday [1..5], hours {1,2,3,6,7,8,9} UTC, peakBufferMs 1800000) — an
+     * ABSENT section or absent key composes untouched, exactly the
+     * health/quality contract.
+     */
+    pacing?: PacingConfig
   }
   /**
    * Parallel Web Systems event_stream monitor config (W3b parallel-monitor).
@@ -397,7 +500,37 @@ export const Config: z<any, any> = z.object({
       maxRetiredKept: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
       archiveFile: z.string(),
       enabled: z.boolean()
-    }).default(void 0 as unknown as { maxRetiredKept: number; archiveFile: string; enabled: boolean })
+    }).default(void 0 as unknown as { maxRetiredKept: number; archiveFile: string; enabled: boolean }),
+    // B5-GHOST (dispatch-hardening, QH 2026-08-28) — mirrors Config.org.
+    // ghostSuspect. `default(void 0)` so an ABSENT section or absent key falls
+    // through to the CODE defaults (enabled true, warnAfterTicks 2,
+    // retireAfterTicks 8 — conservative) — exactly the health/quality
+    // section's contract; an explicit `{ enabled: false }` disables the pass.
+    ghostSuspect: z.object({
+      enabled: z.boolean(),
+      warnAfterTicks: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+      retireAfterTicks: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+    }).default(void 0 as unknown as { enabled: boolean; warnAfterTicks: number; retireAfterTicks: number }),
+    // PACING (owner m-PACING, 2026-08-28) — mirrors Config.org.pacing.
+    // `default(void 0)` so an ABSENT section or absent key falls through to the
+    // CODE defaults (enabled true, weekday [1..5], hours {1,2,3,6,7,8,9} UTC,
+    // peakBufferMs 1800000 = 30 min) — exactly the health/quality section's
+    // contract; an explicit `{ enabled: false }` still disables the pacing.
+    // The nested peakWindows/peakBufferMs get `default(void 0)` TOO so an
+    // absent sub-key stays ABSENT (a `pacing: { enabled: false }` config
+    // normalizes to exactly `{ enabled: false }` — the health/quality shape).
+    pacing: z.object({
+      enabled: z.boolean(),
+      peakWindows: z.object({
+        weekday: z.array(z.number().step(1).min(1).max(7)),
+        hours: z.array(z.number().step(1).min(0).max(23))
+      }).default(void 0 as unknown as { weekday: number[]; hours: number[] }),
+      peakBufferMs: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(void 0 as never)
+    }).default(void 0 as unknown as {
+      enabled: boolean
+      peakWindows: { weekday: number[]; hours: number[] }
+      peakBufferMs: number
+    })
   }).required(),
   // W3b parallel-monitor (Parallel event_stream). Mirrors the runtime
   // ParallelConfig/ParallelMonitorConfig declared here in org.ts: `monitors` defaults
@@ -452,6 +585,7 @@ export const Config: z<any, any> = z.object({
     // M1 — the pooler-capacity + qi-silence watchdog knobs (all `default(void 0)`
     // → absent = code defaults, the existing health-section contract).
     poolerCapacityEnabled: z.boolean(),
+    poolerDispatchEnabled: z.boolean(),
     warningUsableKeys: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
     criticalUsableKeys: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
     blockedKeysInWindow: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
@@ -464,7 +598,13 @@ export const Config: z<any, any> = z.object({
     // M4 — the system-idle watchdog knobs (default(void 0) → absent = code
     // defaults: enabled on, idleWindowMs 900000 = 15 min — the section contract).
     systemIdleEnabled: z.boolean(),
-    idleWindowMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+    idleWindowMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    // M-A — the context-threshold watchdog knobs (default(void 0) → absent =
+    // code defaults: enabled on, threshold 0.5 = 50%, poll 60000 = 1 min — the
+    // section contract; the fraction is validated in (0,1) like highPercent).
+    contextThresholdEnabled: z.boolean(),
+    contextThreshold: z.number().min(0).max(1),
+    contextThresholdPollMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
   }).default(void 0 as unknown as {
     enabled: boolean
     intervalMs: number
@@ -475,6 +615,7 @@ export const Config: z<any, any> = z.object({
     heartbeatEnabled: boolean
     waitThresholdMs: number
     poolerCapacityEnabled: boolean
+    poolerDispatchEnabled: boolean
     warningUsableKeys: number
     criticalUsableKeys: number
     blockedKeysInWindow: number
@@ -486,6 +627,9 @@ export const Config: z<any, any> = z.object({
     qiSilenceMinRetiresInWindow: number
     systemIdleEnabled: boolean
     idleWindowMs: number
+    contextThresholdEnabled: boolean
+    contextThreshold: number
+    contextThresholdPollMs: number
   }),
   // QD (spec 007 §4.1, D-Q2). Mirrors the runtime QualityConfig in src/invoke.ts:
   // `default(void 0)` so an ABSENT section or absent key falls through to the

@@ -75,6 +75,12 @@ forwards it.
    **delta since last run** (count and the new failed messageIds / new
    postIds) is what you report, not the all-time total. On the first run (no
    ledger) note the baseline all-time counts and mark the delta as N/A.
+   **Capture anchor (citas):** whenever the digest CITIES a post-errors count,
+   include the capture clock — the post-errors file's read `updatedAt` (or the
+   capture window, e.g. "since <last-run ts>") — so the reader always knows the
+   COUNTING window the number is anchored to (post-errors rows are bounded by
+   the 2h HEALTH_ERROR_WINDOW_MS + the 500-row cap; archive evidence lives in
+   `post-errors-archive.jsonl`).
 5. **Plugin/DSH versions vs published.** Use the `version-watch` npm/GitHub
    conventions (see
    `docs/departments/internal-programming/jobs/version-watch.md`): the repo's

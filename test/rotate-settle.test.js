@@ -515,6 +515,14 @@ test('PR-2 settle helper (pure): latestPerKey semantics — settles ONLY the lat
     const oldHostId = 'host-s-retired'
     const rawOldSessionId = 's-retired'
     const liveHostId = 'host-s-live'
+    // The ALTO-1 rebind guard cross-checks the CURRENT records: seed the
+    // message records the settle pairs genuinely belong to (m-1/m-2 → the
+    // retired host, m-4 → the raw retired session id).
+    await seedMessageRecords(stateDir, [
+      { id: 'm-1', seq: 1, ts: now, from: 'research-head', to: [oldHostId], text: 'crash mid-fan-out', kind: 'agent' },
+      { id: 'm-2', seq: 2, ts: now, from: 'research-head', to: [oldHostId], text: 'rejected', kind: 'agent' },
+      { id: 'm-4', seq: 4, ts: now, from: 'research-head', to: [rawOldSessionId], text: 'raw session address', kind: 'agent' }
+    ])
     await seedDeliveryRows(stateDir, [
       { messageId: 'm-1', recipientId: oldHostId, status: 'prepared', ts: now },
       { messageId: 'm-2', recipientId: oldHostId, status: 'prepared', ts: now },
@@ -669,6 +677,10 @@ test('PR-2 legacy-path guard (pure): the settle is scoped to the ROTATED host id
   await withTempStateDir(async (stateDir) => {
     const now = Date.now()
     const oldHostId = 'host-s-inplace'
+    // ALTO-1 rebind guard: the settled pair must be a CURRENT record delivery.
+    await seedMessageRecords(stateDir, [
+      { id: 'm-1', seq: 1, ts: now, from: 'research-head', to: [oldHostId], text: 't', kind: 'agent' }
+    ])
     await seedDeliveryRows(stateDir, [
       { messageId: 'm-1', recipientId: oldHostId, status: 'prepared', ts: now }
     ])
@@ -681,5 +693,50 @@ test('PR-2 legacy-path guard (pure): the settle is scoped to the ROTATED host id
     const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
     assert.deepEqual(rows.filter((r) => r.messageId === 'm-1' && r.recipientId === oldHostId).map((r) => r.status), ['prepared', 'terminal'], 'the re-run adds NO extra terminal row (idempotent — the ready-to-write-ahead is latestPerKey)')
     assert.equal(rows.filter((r) => r.status === 'terminal').length, 1, 'exactly one terminal row remains after the re-run')
+  })
+})
+
+test('PR-2 settle ALTO-1 rebind guard (the m-728 case): a STALE sidecar row under a REBOUND id — the CURRENT record never addressed the retired recipient — is NEVER settled (no phantom terminal attached to the current record); a pair whose current record genuinely addresses the retired recipient still settles', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    const oldHostId = 'host-s-retired'
+    // The m-728 shape (host-rotation audit 2026-08-28): the CURRENT m-728 is a
+    // DIFFERENT message (internal-programming-head → alt-head) — the sidecar
+    // holds a PRE-fix STALE row under m-728 for the retired host (the OLD
+    // epoch's m-728, trimmed/renumbered away, is gone). The stale row must
+    // NEVER settle: settling it would attach a phantom 'terminal' (and, before
+    // the fix, a poisoned attribution) to the CURRENT m-728 — the WRONG record.
+    await seedMessageRecords(stateDir, [
+      { id: 'm-728', seq: 0, ts: now, from: 'internal-programming-head', to: ['alt-head'], text: 'fb-9', kind: 'agent' },
+      { id: 'm-1', seq: 1, ts: now, from: 'research-head', to: [oldHostId], text: 'genuine pending delivery', kind: 'agent' }
+    ])
+    await seedDeliveryRows(stateDir, [
+      { messageId: 'm-728', recipientId: oldHostId, status: 'prepared', ts: now },
+      { messageId: 'm-1', recipientId: oldHostId, status: 'prepared', ts: now }
+    ])
+    const settled = []
+    await settleRetiredHostDeliveries(stateDir, { info: (message) => settled.push(message), warn: () => {} }, [oldHostId])
+    // The stale rebind-id pair is left EXACTLY as it was — NOT settled.
+    assert.equal(await deliveryStatus(stateDir, 'm-728', oldHostId), 'prepared', 'the stale row under the REBOUND id is NEVER settled (the current m-728 record never sent to the retired host)')
+    assert.equal(await deliveryStatus(stateDir, 'm-1', oldHostId), 'terminal', 'the genuine pair (the current record addresses the retired host) settles as before')
+    assert.equal(settled.length, 1, 'exactly ONE settle info line — the genuine pair only')
+    const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+    assert.equal(rows.filter((r) => r.status === 'terminal').length, 1, 'exactly ONE terminal row in the whole sidecar (never a phantom terminal for the current m-728)')
+    // The SAME sidecar after a compaction pass (the ALTO-1 same-pass remap) has
+    // the stale row PRUNED, so the settle's cross-check has nothing left to
+    // reject: re-run over the remapped sidecar stays idempotent.
+    await seedDeliveryRows(stateDir, [{ messageId: 'm-728', recipientId: oldHostId, status: 'prepared', ts: now }])
+    await settleRetiredHostDeliveries(stateDir, { info: () => {}, warn: () => {} }, [oldHostId])
+    assert.equal(await deliveryStatus(stateDir, 'm-728', oldHostId), 'prepared', 'the stale row is again never settled')
+  })
+  // ENOENT tolerance: a fresh stateDir with no messages.jsonl AND a sidecar →
+  // the conservative empty record map settles nothing, silently.
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    await seedDeliveryRows(stateDir, [
+      { messageId: 'm-9', recipientId: 'host-s-retired', status: 'prepared', ts: now }
+    ])
+    await settleRetiredHostDeliveries(stateDir, { info: () => {}, warn: () => {} }, ['host-s-retired'])
+    assert.equal(await deliveryStatus(stateDir, 'm-9', 'host-s-retired'), 'prepared', 'no message records → nothing settles (conservative — the boot pass re-evaluates)')
   })
 })

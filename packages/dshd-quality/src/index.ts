@@ -177,6 +177,13 @@ export type QualityInspectDirectiveSurface =
   | { kind: 'worker-retired'; workerPostId: string; sessionId: string; archived: boolean; deliverable?: 'none' | 'report' }
   | { kind: 'head-slept'; headPostId: string; sessionId: string; sleepEpoch: number }
   | { kind: 'host-rotated'; oldSessionId: string; newSessionId: string; oldHostId: string; newHostId: string; sleepEpoch: number; archiveOk?: boolean }
+  // M-A (2026-08-28): the HEAD-ROTATION mirror — `dept_head_rotate` (the
+  // host-plane context-refresh tool) emits this on the `host-rotated` pattern
+  // (spec 007 §6.3, D-Q3): an ACTIVE head session rotation is inspected at
+  // 100%. The QH's OWN rotation is NOT excluded (the 'head-slept' anti-loop
+  // exclusion is sleep-specific — a rotation is a one-shot instruction, it
+  // cannot loop).
+  | { kind: 'head-rotated'; headPostId: string; oldSessionId: string; newSessionId: string; archiveOk?: boolean; reason?: string }
   | { kind: 'post-error'; postId: string; messageId: string; error: string }
 
 /** The human-readable directive frame for a surface (pure — testable). */
@@ -208,6 +215,8 @@ export function qualityInspectDirectiveText(surface: QualityInspectDirectiveSurf
       return `Quality inspect: head slept (post ${surface.headPostId}, session ${surface.sessionId}, sleepEpoch ${surface.sleepEpoch})`
     case 'host-rotated':
       return `Quality inspect: host rotated (old session ${surface.oldSessionId} → new session ${surface.newSessionId}, host ${surface.oldHostId} → ${surface.newHostId}, sleepEpoch ${surface.sleepEpoch}, archiveOk ${surface.archiveOk ?? false})`
+    case 'head-rotated':
+      return `Quality inspect: head rotated (post ${surface.headPostId}, old session ${surface.oldSessionId} → new session ${surface.newSessionId}, archiveOk ${surface.archiveOk ?? false}${surface.reason === undefined ? '' : `, reason ${surface.reason}`})`
     case 'post-error':
       return `Quality inspect: post-error (post ${surface.postId}, message ${surface.messageId}, error ${surface.error})`
   }

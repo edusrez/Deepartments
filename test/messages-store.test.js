@@ -13,6 +13,7 @@ import {
   COMPACTION_BYTE_THRESHOLD,
   COMPACTION_LINE_THRESHOLD,
   MessagesStore,
+  compactionIdMap,
   compactDeliveryRows,
   compactMessages,
   deliveryStatus,
@@ -20,7 +21,9 @@ import {
   loadMessageRecords,
   markDelivery,
   needsRedelivery,
+  parseDeliveryRows,
   parseMessageRecords,
+  remapDeliveryRows,
   resolveDeliveriesPath,
   resolveMessagesPath,
   shouldCompact
@@ -406,4 +409,105 @@ test('sidecar compaction (pure): keeps only the latest row per (messageId, recip
     ['m-0|b|prepared|3', 'm-0|a|resumed|4', 'm-1|a|prepared|6'],
     'latest row per key, in original order'
   )
+})
+
+// --- ALTO-1 (QD audit 2026-08-28 F1): the id-STABLE sidecar contract -----------
+
+test('ALTO-1 compactionIdMap + remapDeliveryRows (pure): surviving ids remapped through the old→new map, TRIMMED-records rows PRUNED, order preserved; a keep-all map prunes nothing', () => {
+  const records = [
+    wireRecord(0, { text: 'kept-a' }), // kept → m-0
+    wireRecord(1, { from: 'spook', to: ['ghost'], text: 'ghost-a' }), // trimmed
+    wireRecord(2, { to: ['asistente', 'ghost'], text: 'kept-b' }), // kept → m-1
+    wireRecord(3, { from: 'spook', to: ['ghost'], text: 'ghost-b' }) // trimmed
+  ]
+  const members = new Set(['asistente', 'research-head'])
+  const keepFn = (r) => members.has(r.from) || r.to.some((entry) => members.has(entry))
+  const map = compactionIdMap(records, keepFn)
+  assert.deepEqual([...map.entries()], [['m-0', 'm-0'], ['m-2', 'm-1']], 'the map covers ONLY the kept records, old id → new id')
+
+  const rows = [
+    { messageId: 'm-0', recipientId: 'a', status: 'prepared', ts: 1 },
+    { messageId: 'm-1', recipientId: 'b', status: 'delivered', ts: 2 }, // trimmed → PRUNED
+    { messageId: 'm-2', recipientId: 'c', status: 'failed', ts: 3 },
+    { messageId: 'm-3', recipientId: 'd', status: 'prepared', ts: 4 }, // trimmed → PRUNED
+    { messageId: 'm-0', recipientId: 'a', status: 'delivered', ts: 5 }
+  ]
+  const remapped = remapDeliveryRows(rows, map)
+  assert.deepEqual(
+    remapped.map((r) => `${r.messageId}|${r.recipientId}|${r.status}`),
+    ['m-0|a|prepared', 'm-1|c|failed', 'm-0|a|delivered'],
+    'surviving ids remapped (old m-2 → NEW m-1), trimmed-records rows pruned, original order preserved'
+  )
+  // Keep-all map (no registries — the defensive keep-rule): every id maps onto
+  // itself → no row is pruned and ids are unchanged (compaction never wipes the trace).
+  const keepAll = new Map([['m-0', 'm-0'], ['m-1', 'm-1'], ['m-2', 'm-2'], ['m-3', 'm-3']])
+  assert.deepEqual(remapDeliveryRows(rows, keepAll), rows, 'keep-all: nothing pruned, ids unchanged')
+  // An empty map (nothing kept) prunes everything.
+  assert.deepEqual(remapDeliveryRows(rows, new Map()), [], 'an empty map prunes every row')
+})
+
+test('ALTO-1 boot compaction: the SAME pass remaps/prunes deliveries.jsonl — after the pass EVERY sidecar row references the CURRENT record that actually addressed the recipient (a recycled id NEVER collides with an old row), with a deliveries.jsonl.bak backup', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, 'posts.json'), JSON.stringify({ 'research-head': {}, 'programming-head': {} }), 'utf8')
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      host: { hostId: 'host', sessionId: 'host-1' }
+    }), 'utf8')
+
+    const filePath = resolveMessagesPath(stateDir)
+    const bigText = 'x'.repeat(25000) // 12 records × ~25 KiB ≈ 300 KiB > 256 KiB → byte threshold
+    const records = []
+    for (let i = 0; i < 12; i++) {
+      // The seq-7 record is a GHOST (trimmed): the old id m-7 is REBOUND to the
+      // record that keeps index 7 (the old m-8) — the exact contamination shape
+      // of the m-728 audit case (a stale row under m-7 would collide with the
+      // CURRENT m-7, a different record).
+      if (i === 7) records.push(wireRecord(i, { from: 'spook', to: ['ghost'], text: `ghost-${i}` }))
+      else records.push(wireRecord(i, { text: `${bigText}-${i}` }))
+    }
+    await writeFile(filePath, jsonl(records), 'utf8')
+    // Pre-compaction sidecar (the contaminated shape): a row for a KEPT record
+    // under its OLD id (m-2 → remapped), a row for the TRIMMED record (m-7
+    // ghost → must be PRUNED — the NEW m-7 addresses 'asistente', NOT the
+    // ghost), and a row for a never-existed id (m-999 → pruned).
+    await writeFile(resolveDeliveriesPath(stateDir), jsonl([
+      { messageId: 'm-2', recipientId: RECIPIENT, status: 'prepared', ts: 1 },
+      { messageId: 'm-7', recipientId: 'ghost', status: 'delivered', ts: 2 },
+      { messageId: 'm-999', recipientId: RECIPIENT, status: 'prepared', ts: 3 }
+    ]), 'utf8')
+
+    const store = await MessagesStore.open(stateDir)
+    assert.equal(store.size, 11, 'one ghost record trimmed (the 12th)')
+
+    const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+    assert.deepEqual(
+      rows.map((r) => `${r.messageId}|${r.recipientId}|${r.status}`),
+      ['m-2|asistente|prepared'],
+      'the SAME pass kept the surviving row (remapped to its NEW id) and PRUNED the trimmed + never-existed rows'
+    )
+    // THE INVARIANT (the rebind no longer contaminates): every surviving row's
+    // messageId resolves to a CURRENT record AND that record really addressed
+    // the row's recipient — no old row can collide under a recycled messageId
+    // (the m-728-class correlation stays truthful for every consumer).
+    for (const row of rows) {
+      const record = store.get(row.messageId)
+      assert.ok(record !== undefined, `row ${row.messageId} → ${row.recipientId} resolves to a CURRENT record`)
+      assert.ok(record.to.includes(row.recipientId), `the current ${row.messageId} record really addressed ${row.recipientId} (no recycled-id collision)`)
+    }
+    // The pre-remap sidecar is backed up (evidence, like messages.jsonl.bak).
+    const bakRows = parseDeliveryRows(await readFile(`${resolveDeliveriesPath(stateDir)}.bak`, 'utf8'))
+    assert.equal(bakRows.length, 3, 'deliveries.jsonl.bak holds the pre-remap sidecar (all 3 contaminated rows)')
+    // The boot driver semantics: a sidecar that needed NO change is left
+    // untouched — a compaction whose keep-rule keeps everything (or whose rows
+    // all survive with ids unchanged) performs NO sidecar rewrite.
+    await withTempStateDir(async (stateDir2) => {
+      await writeFile(path.join(stateDir2, 'posts.json'), JSON.stringify({ 'research-head': {} }), 'utf8')
+      const small = [wireRecord(0, { text: 'y'.repeat(300000) })] // > 256 KiB → compacts; the single record is kept (from a live member)
+      await writeFile(resolveMessagesPath(stateDir2), jsonl(small), 'utf8')
+      const cleanRows = [{ messageId: 'm-0', recipientId: RECIPIENT, status: 'delivered', ts: 1 }]
+      await writeFile(resolveDeliveriesPath(stateDir2), jsonl(cleanRows), 'utf8')
+      await MessagesStore.open(stateDir2)
+      const after = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir2), 'utf8'))
+      assert.deepEqual(after, cleanRows, 'a sidecar that needs NO remap/prune is left byte-identical (no gratuitous rewrite)')
+    })
+  })
 })

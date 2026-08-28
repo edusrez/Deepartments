@@ -18,7 +18,11 @@
 // additionally resolves, per provider, the reasoning surface
 // (`reasoningEffort` scalar, the union of the model-level `reasoningEfforts`
 // map KEYS) and the openai-completions reasoning-content echo flag
-// (`requiresReasoningContentOnAssistantMessages`), and the package owns the
+// (`requiresReasoningContentOnAssistantMessages` — resolved ONLY from the
+// provider's `compat:` block, the schema-correct compatProfile path
+// dsh-llm-pi-ai actually reads; a provider-level key is a DEAD path the adapter
+// ignores, and the reader deliberately does NOT resolve it so the pre-flight
+// fails loudly instead of passing with green false), and the package owns the
 // PURE guard (`resolveReasoningContentPreflight`) the bundle wires BEFORE any
 // worker materialization. Additive only: absent keys stay absent (the pre-fb-9
 // `{baseURL?, maxRetries?}` surface is byte-identical for profiles without the
@@ -185,14 +189,21 @@ export interface LlmPiAiProviderSettings {
    * (no signal — the conservative guard passes). */
   reasoningEfforts?: string[]
   /** fb-9: the openai-completions reasoning-content echo flag — the 400
-   * `reasoning_content must be passed back` guard. Set only when the key is
-   * present (true | false). */
+   * `reasoning_content must be passed back` guard. Resolved ONLY from the
+   * provider's `compat:` block (the adapter's compatProfile schema at
+   * `providers.<id>.compat.requiresReasoningContentOnAssistantMessages` — the
+   * path dsh-llm-pi-ai resolveProfiles actually reads); a provider-TOP-LEVEL
+   * key is a DEAD path and stays undefined, so the preflight DETECTS the
+   * misconfiguration (the m-603 green-false case) instead of passing. Set only
+   * when the key is present in compat (true | false). */
   requiresReasoningContentOnAssistantMessages?: boolean
 }
 
 /** fb-9 — the synthetic postId under which the boot-assert writes ONE drift
  * post-error row when the ACTIVE worker route has reasoning enabled but its
- * provider profile lacks `requiresReasoningContentOnAssistantMessages: true`.
+ * provider profile lacks `compat.requiresReasoningContentOnAssistantMessages: true`
+ * (the schema-correct nested path — a provider-level flag is dead and is
+ * detected as missing, never a green false).
  * A NON-post id (never minted by the registry) — the W6 daemon surfaces it as
  * a post-error finding (drift detection even when nobody dispatches). */
 export const REASONING_CONTENT_PREFLIGHT_POST_ID = 'preflight-reasoning-content'
@@ -217,8 +228,12 @@ function collectReasoningEffortKeys(current: LlmPiAiProviderSettings | undefined
  * provider profiles: `llm-pi-ai.providers.<provider>.baseURL` / `.maxRetries`
  * (FIX-2) plus the fb-9 reasoning surface per provider
  * (`reasoningEffort` scalar, `requiresReasoningContentOnAssistantMessages`
- * flag, and the union of the model-level `reasoningEfforts` map keys — inline
- * `{ ... }` or a multi-line brace block). This is a bounded, DEPENDENCY-FREE
+ * flag — resolved ONLY from the provider's `compat:` block, the
+ * schema-correct compatProfile path the adapter reads (a provider-TOP-LEVEL
+ * flag is a DEAD key and is NOT resolved, so the pre-flight detects the
+ * m-603 green-false case) — and the union of the model-level
+ * `reasoningEfforts` map keys — inline `{ ... }` or a multi-line brace
+ * block). This is a bounded, DEPENDENCY-FREE
  * line scan (the plugin loads in hermetic/minimal profiles with no yaml
  * package), so a parse failure or a non-matching structure degrades to an
  * empty map → the drift half of fix-2 is a NO-OP and the fb-9 guard passes
@@ -229,12 +244,15 @@ export function parseLlmPiAiProviderSettings(text: string): Record<string, LlmPi
     const m = /^\s*/.exec(value)
     return m ? m[0].length : 0
   }
-  let mode: 'none' | 'llm-pi-ai' | 'providers' | 'models' = 'none'
+  let mode: 'none' | 'llm-pi-ai' | 'providers' | 'models' | 'compat' = 'none'
   let providersIndent = -1
   let providerIndent = -1
   let current: LlmPiAiProviderSettings | undefined
   let modelsIndent = -1
   let modelIndent = -1
+  /** fb-9: the indent of the provider-level `compat:` key — the compat block
+   * extends while lines stay MORE indented than it. */
+  let compatIndent = -1
   /** fb-9: a multi-line `reasoningEfforts: { ... }` brace block being
    * accumulated ('' = awaiting the opening '{'). */
   let braceAcc: string | undefined
@@ -285,11 +303,30 @@ export function parseLlmPiAiProviderSettings(text: string): Record<string, LlmPi
         continue
       }
     }
+    if (mode === 'compat') {
+      if (indent <= compatIndent) {
+        /* the compat block ended — process this line as a provider-surface line */
+        mode = 'providers'
+      } else {
+        /* fb-9 REALIGNMENT: the reasoning-content echo flag is ONLY valid inside
+         * the provider's `compat:` block (the compatProfile schema the adapter
+         * resolves — dsh-llm-pi-ai resolveProfiles reads `source.compat`, NEVER
+         * a provider-level key). A flag written OUTSIDE compat is the DEAD path
+         * that produced the m-603 green false: it never reaches pi-ai, so the
+         * reader does NOT resolve it here either. */
+        const compatFlagMatch = /^requiresReasoningContentOnAssistantMessages\s*:\s*(.+)$/i.exec(trimmed)
+        if (compatFlagMatch && current !== undefined) {
+          current.requiresReasoningContentOnAssistantMessages = unquoteYamlScalar(compatFlagMatch[1]).toLowerCase() === 'true'
+        }
+        continue
+      }
+    }
     /* mode === 'providers' */
     if (indent <= providersIndent) {
       mode = 'none'
       current = undefined
       modelIndent = -1
+      compatIndent = -1
       continue
     }
     const isProviderKey = /^[A-Za-z0-9_.-]+\s*:\s*$/.test(trimmed)
@@ -299,6 +336,7 @@ export function parseLlmPiAiProviderSettings(text: string): Record<string, LlmPi
       out[name] = current
       providerIndent = indent
       modelIndent = -1
+      compatIndent = -1
       continue
     }
     if (current === undefined) continue
@@ -306,6 +344,13 @@ export function parseLlmPiAiProviderSettings(text: string): Record<string, LlmPi
       mode = 'models'
       modelsIndent = indent
       modelIndent = -1
+      continue
+    }
+    /* fb-9: the provider-level `compat:` key (the compatProfile block — the
+     * schema-correct HOME of requiresReasoningContentOnAssistantMessages). */
+    if (/^compat\s*:\s*$/.test(trimmed)) {
+      mode = 'compat'
+      compatIndent = indent
       continue
     }
     const baseMatch = /^baseURL\s*:\s*(.+)$/i.exec(trimmed)
@@ -320,15 +365,15 @@ export function parseLlmPiAiProviderSettings(text: string): Record<string, LlmPi
       continue
     }
     /* fb-9: provider-level reasoning pins — anchored so the PLURAL map key
-     * (`reasoningEfforts:` — handled in the models mode above) never matches. */
+     * (`reasoningEfforts:` — handled in the models mode above) never matches.
+     * NOTE: `requiresReasoningContentOnAssistantMessages` is deliberately NOT
+     * read at this level — a provider-top-level flag is the DEAD path the
+     * adapter ignores (it only reads the `compat:` block), and resolving it
+     * here would keep the fb-9 pre-flight passing with GREEN FALSE. */
     const effortMatch = /^reasoningEffort(?!s)\s*:\s*(.+)$/i.exec(trimmed)
     if (effortMatch) {
       current.reasoningEffort = unquoteYamlScalar(effortMatch[1])
       continue
-    }
-    const flagMatch = /^requiresReasoningContentOnAssistantMessages\s*:\s*(.+)$/i.exec(trimmed)
-    if (flagMatch) {
-      current.requiresReasoningContentOnAssistantMessages = unquoteYamlScalar(flagMatch[1]).toLowerCase() === 'true'
     }
   }
   return out
@@ -338,7 +383,10 @@ export function parseLlmPiAiProviderSettings(text: string): Record<string, LlmPi
  * burned a whole mission): the DISPATCH PRE-FLIGHT for ONE provider route. The
  * active worker route (WORKER_AGENT_OPTIONS.provider) runs the
  * openai-completions API WITH reasoning → the profile MUST declare
- * `requiresReasoningContentOnAssistantMessages: true` for that provider, else
+ * `compat.requiresReasoningContentOnAssistantMessages: true` for that provider
+ * (the schema-correct nested path the adapter reads; a provider-TOP-LEVEL flag
+ * is DEAD and is NOT seen here — so a settings with only the dead key is
+ * DETECTED as missing, never a green false), else
  * the first assistant turn 400s mid-mission (the reactive fix exists in
  * settings.yaml; this guard stops the dispatch BEFORE the cost). CONSERVATIVE
  * — the pre-flight is a GUARD, never a blocker: only a provider the profile
@@ -364,7 +412,7 @@ export function resolveReasoningContentPreflight(
   const label = settingsLabel !== undefined && settingsLabel !== '' ? settingsLabel : 'unknown-profile'
   return {
     ok: false,
-    reason: `preflight: provider «${provider}» has reasoning enabled but missing requiresReasoningContentOnAssistantMessages=true (settings ${label}) — configure the flag before dispatching`
+    reason: `preflight: provider «${provider}» has reasoning enabled but missing compat.requiresReasoningContentOnAssistantMessages=true (settings ${label}) — configure the flag in the provider's compat: block (a provider-level key is not read by pi-ai) before dispatching`
   }
 }
 

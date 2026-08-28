@@ -93,6 +93,45 @@ inspected at 100% by the Quality Department. (Legacy entries carrying a
 legacy path, R6.) This mirrors the worker ephemeral rule (a worker is retired by
 its head); only the host sleeps.
 
+## Head rotation (context refresh — `dept_head_rotate`)
+
+A head whose context window is nearly exhausted does NOT sleep and is NOT
+retired — it is **ROTATED** (micro-decision owner 2026-08-28, M-A): an ACTIVE
+session refresh with journal, host-plane tool `dept_head_rotate {postId,
+reason?}`, visible to the Asistente only.
+
+**When to use it:** a context-threshold crossing (a head ≥ 50% of its context
+window — the M-A monitor alerts on it) or on direct instruction. The QH is the
+typical first target (over-threshold); the QH is NOT excluded — a rotation by
+instruction is a one-shot event, the old anti-loop exclusion was sleep-specific.
+
+**The host's routine (window permitting):**
+1. Confirm the head is IDLE (`dept_who`) — a RUNNING head is rejected loudly
+   (rotate in a free window, never mid-turn).
+2. If the head is operative, ask it for `dept_memo_write` FIRST (send_message)
+   so the rotation seeds the freshest memo.
+3. Call `dept_head_rotate {postId, reason}`. The tool: bounded-disposes the old
+   live handle → server-side archives the old session → FRESH-MINTS a new
+   session (`head-<postId>-<uuid>`) seeded with the head's LAST durable journal
+   (the journal author is the stable postId — NO re-key) + the department title
+   pin → mirrors `Quality inspect: head rotated …` to quality-head (100%
+   mandate). No `sleepEpoch` is set (rotation ≠ sleep); the entry records
+   `previousChildId` + `rotated`.
+4. **Critical-unblock rule:** the rotation ALWAYS uses the last durable journal
+   and NEVER delays for a fresh memo — a context-blocked head (the QH) may not
+   be able to run `dept_memo_write`. The result surfaces
+   `journal.stale` ("memo no actualizado — journal previo") when the seeded
+   journal predates the freshness window; request the refresh at the first
+   opportunity, never to unblock.
+5. **No immediate wake:** the fresh head lands LIVE but BOOT-QUIET (its first
+   turn starts on the NEXT message/daemon wake — the journal is already in its
+   context as the seed + the wake pack is injected at pre-step). Greet it with
+   the substantive message right after (the "resume" handoff); it re-orients
+   from the seeded journal in its first turn (M-B hook).
+6. A head with NO durable journal at all fails loudly — request a
+   `dept_memo_write` first. Workers and unconfigured posts are rejected loudly;
+   a head can never rotate (host-plane ACL).
+
 ## Key principles
 
 - **Asistente = interface/coordinator.** It translates the owner's vision into
@@ -586,6 +625,40 @@ channel peerDependencies with CLI pin) live in AGENTS.md and the
   structure, tier) → `ask_user_question` BEFORE dispatching. Present options;
   the owner decides. No silent defaults.
 
+## Pacing (peak/valley franja)
+
+The org runs in BURST mode around the owner's off-peak/peak pricing boundary
+(PACING, owner m-PACING 2026-08-28 — the gate that reduces 429s and cost; the
+pure UTC formula MIRRORS the dsh-key-pooler peak definition, crossed by
+comment in both repos). **The CURRENT franja is a pack fact — read it, never
+guess it**: the wake pack carries the ONE stable section `## Pacing (franja)`
+(`Franja: PEAK [01:00-10:00] UTC — hasta 10:30 UTC` / `Franja: VALLE …`; the
+«hasta» is when the CURRENT franja ends — the next transition). The system
+health daemon notifies the host ONCE per transition (durable bus + interrupt):
+entering PEAK → «pausa de nuevos despachos»; entering VALLE → «reanuda;
+despachos diferidos: N».
+
+**The dispatch discipline (binding for the host and every head):**
+- **In PEAK, do NOT launch NEW dispatches to departments.** A dispatch that is
+  already in flight (a worker mid-turn, an assigned mission) CONTINUES — only
+  the NEW dispatches pause. The host does not open new missions until the
+  VALLE notice (or the franja line says VALLE).
+- **There is NO separate deferred-dispatch queue.** The deferred work IS the
+  pending items of the WORK-REGISTER (`docs/WORK-REGISTER.md`) — the single
+  existing queue. In PEAK, work items accumulate there exactly as they do
+  today; the VALLE notice's «despachos diferidos: N» is that pending count
+  when legible (best-effort).
+- **The VALLE notice is the resume trigger**: on «reanuda» (or a VALLE franja
+  line at wake), the host re-opens the dispatch pipeline from the
+  WORK-REGISTER pending items (highest-priority first, the normal policy).
+- **Heads** see the franja in their wake surface (the pack section + the
+  on-demand `dept_wake_snapshot`) and follow the same discipline for THEIR new
+  worker dispatches (a head defers a new worker spawn while its own franja
+  line says PEAK; requests already assigned keep running).
+- Knobs: `org.pacing.*` in `cordis.patch.yml` (`enabled` / `peakWindows`
+  weekday+hours UTC / `peakBufferMs` 30-min edge buffer). `enabled: false`
+  restores the pre-pacing behavior (no franja section, no transition notices).
+
 ## Wake routine (injected wake)
 
 Start-of-session: the Deepartments wake pack is ALREADY injected as part of
@@ -647,9 +720,12 @@ first, tool calls only for live needs, and the owner's answer gates all work):
    speak; exploration follows the owner's answer, never precedes it.
 1. **Read the injected pack** — identity, journal path + body (re-confirm the
    frontmatter: author/room/board_cursor + wake counter/current_step when
-   present), message delta TOC, condensed roster, git bearings, system state, and
-   the skill body are all already in your first context. Never act before
-   reading the journal (anti-memory-theater); do NOT re-fetch any pack section.
+   present), message delta TOC, condensed roster, git bearings, system state,
+   and the skill body are all already in your first context. Also read the
+   `## Pacing (franja)` section (PEAK/VALLE + «hasta HH:MM UTC») — if the line
+   says PEAK, do NOT launch NEW dispatches to departments (see the Pacing
+   section); never guess the franja. Never act before reading the journal
+   (anti-memory-theater); do NOT re-fetch any pack section.
 2. **Live needs only** — call `dept_who` when true session liveness matters
    (the pack's registry flags are NOT liveness); `agent_messages` for the full
    text of messages beyond the pack's delta; `send_message` to write;

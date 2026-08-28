@@ -80,7 +80,12 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './core/session-cleanup.js'
-import { runHostRotation, ASISTENTE_SESSION_TITLE, isArchivedSession } from './core/session-rotation.js'
+
+/** Module-level promisified execFile (dept_exec's runDeptExec/runDeptZstdRead
+ * use it; the apply-scope `execFileP` below is the same binding for legacy
+ * code). */
+const execFileP = promisify(execFileCb)
+import { runHostRotation, ASISTENTE_SESSION_TITLE, isArchivedSession, buildHeadRotationSeed } from './core/session-rotation.js'
 import type { RotationPersistenceLike, WorkspaceRegistryLike } from './core/session-rotation.js'
 import { createLifecycleService, buildSleepJournalMessage, shouldClearCleanupPending } from './core/lifecycle.js'
 import type { LifecycleService } from './core/lifecycle.js'
@@ -90,6 +95,7 @@ import {
   markDelivery,
   parseDeliveryRows,
   parseMessageRecords,
+  loadMessageRecords,
   resolveDeliveriesPath,
   resolveMessagesPath,
   DeliveryRedeliverer,
@@ -180,7 +186,11 @@ import {
   analyzeDurablePostsRegistry,
   reconcileDurablePostsRegistry,
   listActiveMembers,
-  pickLiveHostEntry
+  pickLiveHostEntry,
+  GHOST_SUSPECT_STATE_FILE,
+  readGhostSuspectLedger,
+  writeGhostSuspectLedger,
+  stepGhostSuspectCensus
 } from './core/registry.js'
 import type {
   PostEntry,
@@ -208,7 +218,11 @@ export {
   analyzeDurablePostsRegistry,
   reconcileDurablePostsRegistry,
   listActiveMembers,
-  pickLiveHostEntry
+  pickLiveHostEntry,
+  GHOST_SUSPECT_STATE_FILE,
+  readGhostSuspectLedger,
+  writeGhostSuspectLedger,
+  stepGhostSuspectCensus
 } from './core/registry.js'
 export type {
   PostEntry,
@@ -410,7 +424,11 @@ import {
   auditPresetText,
   appendConfigPresetMarker,
   readHealthHeartbeatFile,
-  POOLER_STATE_FILE
+  POOLER_STATE_FILE,
+  resolvePoolerDispatchBlock,
+  POOLER_CAPACITY_DEFAULT_HIGH_PERCENT,
+  POOLER_CAPACITY_DEFAULT_STATE_STALE_MS,
+  resolvePositiveKnob
 } from './core/health.js'
 import type {
   PostActivityInput,
@@ -418,7 +436,8 @@ import type {
   HostWaitPostInput,
   HeartbeatRow,
   InterruptedPostInput,
-  PostErrorEntry
+  PostErrorEntry,
+  SessionContextInput
 } from './core/health.js'
 export * from './core/health.js'
 // dshd-quality phase: the QD (spec 007) probability gate + config-resolution +
@@ -734,6 +753,25 @@ interface AgentLike {
   whenIdle(): Promise<void>
 }
 
+/** M-A — structural view of the harness `sessionProjections` service surface
+ * the context-monitor wiring reads (dsh-session-projection
+ * `SessionProjectionRegistry.snapshot(session)` — the eager-driven per-session
+ * projection read: one consistent cut over every client-visible unit, O(1)
+ * fold over the in-memory log, zero I/O/LLM/red; the data the token-meter
+ * already folded). The bundle reads the SNAPSHOT WIRE VIEW (the COMMON API
+ * across dsh-session-projection versions — the older 0.1.0-rc.7 has
+ * `snapshot` but no `stateOf`; the harness 0.1.1-rc.2 has both), whose
+ * `values.contextPressure` already carries the token-meter wire view
+ * `{ contextWindow?, pressureTokens?, projectedTokens? }` (projectedTokens =
+ * max(0, pressureTokens + surfaceTokens − sampledSurfaceTokens) — the scan
+ * accepts it directly, falling back to the raw-state formula). The service is
+ * resolved OPTIONALLY via `ctx.get('sessionProjections')` (absent in
+ * minimal/hermetic compositions → `buildSessionContexts` returns undefined →
+ * the context-threshold scan is a no-op, the hostRunning-absent pattern). */
+interface SessionProjectionsLike {
+  snapshot(session: unknown): { asOfSeq?: number; values?: Record<string, unknown> }
+}
+
 /** Structural view of the `AgentHandle` returned by `ctx.agents.create/resume`
  * (rc.8 dsh-agent types/index.d.ts:155-158). `dispose()` is the sleep teardown
  * capability; it is held ONLY by the plugin owner, never by the head agent. */
@@ -782,6 +820,12 @@ interface AgentsLike {
   roots(): AgentLike[]
   create(options: {
     sessionId: string
+    /** M-A: the optional initial replay/fork history (the harness
+     * `CreateAgentOptions.seed` — dsh-agent types/index.d.ts:94) passed to
+     * `sessions.prepare(id, { seed, meta })`. A HEAD-ROTATION fresh-mint seeds
+     * the head's journal this way (buildHeadRotationSeed); the legacy
+     * F8 slept-head wake passes none (session stays empty — zero regression). */
+    seed?: readonly unknown[]
     meta?: Record<string, unknown>
     agentOptions?: AgentOptionsLike
     setup?: (agentCtx: Context) => unknown
@@ -914,6 +958,39 @@ export function readPresenceStateFile(stateDir: string): PresenceState {
 export async function writePresenceStateFile(stateDir: string, state: PresenceState): Promise<void> {
   await mkdir(path.dirname(path.join(stateDir, 'presence.json')), { recursive: true })
   await writeFile(path.join(stateDir, 'presence.json'), JSON.stringify(state), 'utf8')
+}
+
+// ---------------------------------------------------------------------------
+// M-A — `dept_head_rotate` journal-status helper (PURE).
+// ---------------------------------------------------------------------------
+// The host-plane HEAD-ROTATION tool (the active context-refresh of a
+// configured department head — micro-decision owner 2026-08-28, map
+// reports/explore-deep/2026-08-28-ma-context-monitor-map.md §3) ALWAYS seeds
+// the fresh session with the head's LAST DURABLE JOURNAL and NEVER delays the
+// rotation for a fresh memo (the critical-unblock rule: a context-over-threshold
+// head — e.g. the QH — may not be able to run dept_memo_write at all, so a
+// rotation that waited on a memo could never unblock it). The host's workflow
+// asks for `dept_memo_write` BEFORE rotating when the head is operative and the
+// window permits; the STALE marker below tells the host when the seeded journal
+// predates the freshness window, so it can request a refresh at the first
+// opportunity without blocking the unblock.
+/** The freshness window for a rotation journal: `timestamp:` older than this →
+ * `headRotationJournalStatus` reports `stale:true` (a "memo no actualizado —
+ * journal previo" notice rides the tool result + the QD mirror). */
+export const HEAD_ROTATE_JOURNAL_STALE_MS = 30 * 60 * 1000
+
+/** M-A — the rotation journal status (PURE, exported for direct tests): parse
+ * the journal's frontmatter `timestamp:` line (the dept_memo_write convention)
+ * and compute the stale marker against `nowMs`. Returns `timestamp` (the raw
+ * frontmatter value) when parseable; ABSENT/unparseable → `stale:true`
+ * (a journal with no verifiable timestamp is conservatively "previous"). */
+export function headRotationJournalStatus(journalText: string, nowMs: number): { timestamp?: string; stale: boolean } {
+  const match = journalText.match(/^timestamp:\s*(.+?)\s*$/m)
+  const raw = match?.[1]
+  if (raw === undefined || raw === '') return { stale: true }
+  const parsed = Date.parse(raw)
+  if (Number.isNaN(parsed)) return { stale: true }
+  return { timestamp: raw, stale: nowMs - parsed > HEAD_ROTATE_JOURNAL_STALE_MS }
 }
 
 // ---------------------------------------------------------------------------
@@ -1309,6 +1386,122 @@ export function deptExecDenyReason(command: string, cwd: string, allowedRoots: r
     }
   }
   return undefined
+}
+
+// ---------------------------------------------------------------------------
+// dept_zstd_read (E2 — session .zstd reading without dept_exec, QH 2026-08-28):
+// the READ-ONLY zstd-decode tool for department posts whose role DECLARES
+// `dept_exec` (the same allowExec gate — the tool rides the dept_exec role
+// allow-list registered on the post's OWN layer). It decodes ONE
+// `.zstd`-compressed file (e.g. a raw `.jsonl.zstd` session artifact) via
+// `zstd -dc` Node-side (child_process.execFile — NO user shell), SÓLO
+// LECTURA, with the SAME scope policy as dept_exec: the resolved path must be
+// inside the allowed roots, the `/dev` sinks + the stable profile protection
+// apply, and the output is BOUNDED (a line cap + a chunk cap — never hangs on
+// / buffers a huge session). The deny guard below is the PURE module helper
+// (unit-testable like deptExecDenyReason); the tool runs realpath + the
+// bZstdRead bounded decode around it. The tool exists because a .zstd session
+// read via `dept_exec` burns a full shell command + a full bash exec per read
+// (the QD/IPD dept_exec volume class); a scoped streaming decode covers
+// 60-95% of those reads WITHOUT shell.
+// ---------------------------------------------------------------------------
+
+/** The dept_zstd_read line cap for a single call (bounded output — a session
+ * log read is a WINDOW, never the whole artifact). */
+export const DEPT_ZSTD_READ_MAX_LINES = 500
+/** The per-line length cap (a single over-long JSONL line is truncated with a
+ * marker — a corrupt/single-line giant artifact cannot blow the render). */
+export const DEPT_ZSTD_READ_MAX_LINE_CHARS = 4000
+/** execFile timeout for ONE zstd -dc decode (a stuck/deadlocked zstd is
+ * killed — never hangs the tool). */
+export const DEPT_ZSTD_READ_TIMEOUT_MS = 30000
+/** The decompressed-BYTES cap for one call (bounded decode — `zstd -dc` output
+ * beyond this is truncated; a multi-GB session artifact does NOT (a) hang the
+ * tool nor (b) buffer unbounded memory). */
+export const DEPT_ZSTD_READ_MAX_CHARS = 4 * 1024 * 1024
+
+/** The PURE dept_zstd_read scope guard. `resolvedPath` must already be
+ * realpath-resolved (the tool resolves it before calling) and `allowedRoots`
+ * realpath-resolved (the same deptExecAllowedRoots set). Returns an
+ * out-of-scope deny reason when the path must NOT be read, or `undefined` when
+ * the read may proceed. Checks, mirroring dept_exec §5: (1) the resolved path
+ * is inside an allowed root; (2) the stable profile is protected (a
+ * `/opt/dsh/.dsh…` path → protected deny, UNLESS a MISSION-LEVEL owner grant
+ * named the stable home). No command tokens exist here (a path is not a
+ * command) — the path containment + stable checks are the full scope policy. */
+export function deptZstdReadDenyReason(resolvedPath: string, allowedRoots: readonly string[]): string | undefined {
+  const roots = allowedRoots.filter((r) => typeof r === 'string' && r !== '')
+  const stableHomeGranted = isStableHomeGranted(roots)
+  // (1) the stable profile is protected — the boundary-aware token (a whole
+  // path component; `/opt/dsh/.dsh-dev` is NOT stable). Checked FIRST (before
+  // containment — exactly like dept_exec's token loop, where the stable token
+  // beats the containment reason for a stable path): a stable-home path is
+  // DENIED with the explicit protected reason. Bypassed ONLY when a
+  // MISSION-LEVEL owner grant named the stable home.
+  if (isStablePath(resolvedPath) && !stableHomeGranted) {
+    return 'OUT_OF_SCOPE / DENIED — the stable profile is protected — requires explicit owner approval via the Asistente'
+  }
+  // (2) the resolved path must be inside an allowed root (realpath equality —
+  // a `..`-escape/symlink resolves to its target BEFORE the guard runs).
+  if (!roots.some((root) => isPathInside(resolvedPath, root))) {
+    return `OUT_OF_SCOPE / DENIED — path "${resolvedPath}" is not inside a scoped dept_exec root (escalate via the Asistente / owner approval)`
+  }
+  return undefined
+}
+
+/** Decode ONE zstd-compressed file through `zstd -dc` (Node-side
+ * child_process.execFile — no user shell, sanitized env) with a bounded
+ * output: only the requested line WINDOW [offset, offset+lines) is returned,
+ * each line truncated to DEPT_ZSTD_READ_MAX_LINE_CHARS, the whole decompressed
+ * output capped at DEPT_ZSTD_READ_MAX_CHARS, and the decode killed on
+ * DEPT_ZSTD_READ_TIMEOUT_MS. Returns {ok, lines, truncated, totalLines,
+ * error?} — a decode failure is a normal ok:false result, never a throw (the
+ * caller decides the surface). */
+export async function runDeptZstdRead(
+  path: string,
+  offset: number,
+  lines: number
+): Promise<{ ok: boolean; lines: string[]; truncated: boolean; totalLines: number; error?: string }> {
+  const env: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+    HOME: process.env.HOME ?? '/root',
+    LANG: process.env.LANG ?? 'C'
+  }
+  try {
+    const { stdout } = await execFileP('zstd', ['-dc', path], {
+      timeout: DEPT_ZSTD_READ_TIMEOUT_MS,
+      maxBuffer: DEPT_ZSTD_READ_MAX_CHARS + 1024,
+      env
+    })
+    const text = String(stdout ?? '')
+    const allLines = text.split('\n')
+    // A session artifact's final newline produces a trailing EMPTY element —
+    // drop exactly one (the artifact terminator), never a mid-text blank.
+    if (allLines.length > 0 && allLines[allLines.length - 1] === '') allLines.pop()
+    // The requested window, capped to the line bound.
+    const wanted = allLines.slice(offset, offset + lines)
+    const truncated = allLines.length > offset + lines
+    return {
+      ok: true,
+      lines: wanted.map((line) => (line.length > DEPT_ZSTD_READ_MAX_LINE_CHARS ? `${line.slice(0, DEPT_ZSTD_READ_MAX_LINE_CHARS)}… [line truncated]` : line)),
+      truncated,
+      totalLines: allLines.length
+    }
+  } catch (error: unknown) {
+    const e = error as { code?: unknown; stderr?: unknown; killed?: boolean; message?: string }
+    const stderr = typeof e.stderr === 'string' && e.stderr !== '' ? e.stderr.trim() : undefined
+    return {
+      ok: false,
+      lines: [],
+      truncated: false,
+      totalLines: 0,
+      error: stderr !== undefined && stderr !== ''
+        ? stderr
+        : e.killed === true
+          ? `zstd decode timed out after ${DEPT_ZSTD_READ_TIMEOUT_MS}ms (or the decompressed output exceeded the ${DEPT_ZSTD_READ_MAX_CHARS}-char cap)`
+          : String(e?.message ?? error)
+    }
+  }
 }
 
 // (cron scheduler engine MOVED to packages/dshd-jobs — see the dshd-jobs phase
@@ -1908,7 +2101,7 @@ const DENIED_POST_TOOLS: ReadonlySet<string> = new Set(['subagent', 'subagent_fo
 export const OWN_LAYER_POST_TOOLS: ReadonlySet<string> = new Set([
   'send_message', 'agent_messages', 'dept_who', 'dept_memo_write',
   'dept_post_create', 'dept_post_retire', 'dept_worker_spawn', 'dept_worker_retire',
-  'dept_job_list', 'dept_job_run', 'dept_monitor_list', 'dept_exec',
+  'dept_job_list', 'dept_job_run', 'dept_monitor_list', 'dept_exec', 'dept_zstd_read',
   'dept_feedback', 'dept_feedback_list', 'dept_feedback_update',
   'secretary'
 ])
@@ -3357,7 +3550,6 @@ export function applyInvoke(ctx: Context, config: Config) {
   // deferred sleep surface replace + the W8-d heartbeat assembly). Only the
   // W8-d heartbeat assembly (the health section) remains here — it is injected
   // into the service as a closure-bound dep.
-  const execFileP = promisify(execFileCb)
 
   /** W8-d PART A — compute the `## System heartbeat:` snapshot at assembly time
    * (live reads; buildHeartbeatSection is the pure renderer). Reads the SAME
@@ -3481,6 +3673,13 @@ export function applyInvoke(ctx: Context, config: Config) {
       messagesStoreReady: () => messagesStoreReady,
       stateDir: stateDir,
       repoRoot,
+      // PACING (owner m-PACING, 2026-08-28): the org.pacing.* franja config for
+      // the wake-pack `## Pacing (franja)` section (the minimal-composition
+      // fallback of the SHARED CONFIG SOURCE — the dshd-core lazy service
+      // reads org.org.pacing; here the bundle passes its own org.pacing).
+      // Absent config → the code defaults (enabled ON); enabled:false → the
+      // section is omitted (the pre-pacing pack).
+      pacing: org.pacing,
       logger: ctx.logger
     })
   })()
@@ -3554,7 +3753,10 @@ export function applyInvoke(ctx: Context, config: Config) {
    * every spawn/job worker materializes with) is PRE-FLIGHTED against the
    * <stateDir>/settings.yaml profile BEFORE any worker materialization. A
    * provider the profile positively declares reasoning-enabled whose profile
-   * lacks `requiresReasoningContentOnAssistantMessages: true` → a CLEAR EARLY
+   * lacks `compat.requiresReasoningContentOnAssistantMessages: true` (the
+   * schema-correct nested path the adapter reads — a provider-TOP-LEVEL flag
+   * is the DEAD key that produced the m-603 GREEN FALSE and is NOT resolved
+   * by the reader) → a CLEAR EARLY
    * error (the expensive 400 never happens mid-mission). CONSERVATIVE guard:
    * flag present / reasoning off / profile absent-or-unreadable → undefined
    * (passthrough — the pre-flight is a guard, never a blocker). The decision
@@ -3566,6 +3768,40 @@ export function applyInvoke(ctx: Context, config: Config) {
     const settings = readLlmPiAiProviderSettings(stateDir)
     const verdict = resolveReasoningContentPreflight(provider, settings, stateDir)
     return verdict.ok ? undefined : verdict.reason
+  }
+
+  /** DISPATCH-HARDENING (QH — the «429-primer-call» class, 2026-08-28): the
+   * POOLER-CAPACITY DISPATCH PRE-CHECK (the BEFORE half — the AFTER half is
+   * the b5-ghost live-post guard). The SAME dispatch seam as fb-9 (the 3+1:
+   * runJobForDepartment / spawnWorkerForDepartment / dept_post_create / the
+   * materializePost resume seam) READS the pooler's own
+   * `keyPooler-state.json` SOLO-LECTURA (the same reader the M1 watchdog uses;
+   * the path is `health.poolerStateFilePath` when set, else
+   * `<DSH_HOME>/keyPooler-state.json` — the M1 wiring) and, when the snapshot
+   * CERTAINS that no workspace can serve the spawn's FIRST call (zero usable
+   * keys, every usable key at/above `health.highPercent`, or a last 429
+   * usage-limit rotation to no key — the 503 prelude), returns the CLEAR EARLY
+   * error the dispatch seam throws BEFORE any materialization — the expensive
+   * primer-call 429/503 (a freshly spawned worker dying on its very first LLM
+   * turn) never happens. CONSERVATIVE — a warning, never a blocker: absent /
+   * unreadable / STALE state → undefined (passthrough, unknown ≠ exhausted);
+   * the `health.poolerDispatchEnabled: false` knob restores the pre-check-less
+   * dispatch (the M1 poolerCapacityEnabled pattern). */
+  const workerPoolerDispatchBlockError = (): string | undefined => {
+    if (config.health?.poolerDispatchEnabled === false) return undefined
+    const poolerStatePath = config.health?.poolerStateFilePath !== undefined && config.health.poolerStateFilePath.trim() !== ''
+      ? config.health.poolerStateFilePath
+      : path.join(dshHome(), POOLER_STATE_FILE)
+    const block = resolvePoolerDispatchBlock(
+      poolerStatePath,
+      Date.now(),
+      {
+        highPercent: resolvePositiveKnob(config.health?.highPercent, POOLER_CAPACITY_DEFAULT_HIGH_PERCENT),
+        stateStaleMs: resolvePositiveKnob(config.health?.stateStaleMs, POOLER_CAPACITY_DEFAULT_STATE_STALE_MS)
+      },
+      ctx.logger
+    )
+    return block === undefined ? undefined : block.reason
   }
 
   /** Run ONE department job — the dept_worker_spawn contract (dept_job_run's
@@ -3585,9 +3821,18 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (agents === void 0) throw new Error('[deepartments] dept_job_run requires the agents service')
     // 0. fb-9 pre-flight (BEFORE anything — never a mid-mission 400): reject
     // the dispatch LOUDLY when the active worker route's profile has reasoning
-    // enabled but lacks requiresReasoningContentOnAssistantMessages=true.
+    // enabled but lacks compat.requiresReasoningContentOnAssistantMessages=true
+    // (the schema-correct nested path; a provider-level key is dead and is
+    // detected as missing, never a green false).
     const preflightError = workerReasoningContentPreflightError()
     if (preflightError !== undefined) throw new Error(`[deepartments] ${preflightError}`)
+    // 0b. DISPATCH-HARDENING (QH «429-primer-call»): the pooler-capacity
+    // pre-check — reject LOUDLY and EARLY (BEFORE the definition read, the
+    // role validation, the idempotency pass, ANY agents.create — nothing is
+    // registered) when the pooler snapshot certifies no workspace can serve
+    // the job worker's first call.
+    const poolerDispatchBlock = workerPoolerDispatchBlockError()
+    if (poolerDispatchBlock !== undefined) throw new Error(`[deepartments] ${poolerDispatchBlock}`)
     // 1. Read + parse the definition FIRST (loud: missing/broken → fail).
     const definition = await readJobDefinitionFile(repoRoot, department, jobId)
     // 2. Role validation against the department role template tree.
@@ -3664,11 +3909,17 @@ export function applyInvoke(ctx: Context, config: Config) {
     if (agents === void 0) throw new Error('[deepartments] dept_worker_spawn requires the agents service')
     // 0. fb-9 pre-flight (BEFORE any materialization — never a mid-mission 400):
     // the active worker route's profile must carry
-    // requiresReasoningContentOnAssistantMessages=true when reasoning is
+    // compat.requiresReasoningContentOnAssistantMessages=true when reasoning is
     // enabled, else the dispatch is rejected with a CLEAR EARLY error (the
     // expensive 400 that burned the fb-9 mission can never happen again).
     const preflightError = workerReasoningContentPreflightError()
     if (preflightError !== undefined) throw new Error(`[deepartments] ${preflightError}`)
+    // 0b. DISPATCH-HARDENING (QH «429-primer-call»): the pooler-capacity
+    // pre-check — reject LOUDLY and EARLY (BEFORE the role read, the slug
+    // dedup, ANY agents.create — nothing is registered) when the pooler
+    // snapshot certifies no workspace can serve the worker's first call.
+    const poolerDispatchBlock = workerPoolerDispatchBlockError()
+    if (poolerDispatchBlock !== undefined) throw new Error(`[deepartments] ${poolerDispatchBlock}`)
     const role = String(opts.role ?? '').trim()
     if (role === '') throw new Error('[deepartments] dept_worker_spawn: `role` is required (a role template name, e.g. "researcher")')
     // Role template is resolved BEFORE any create: a missing/malformed role file
@@ -4215,6 +4466,70 @@ export function applyInvoke(ctx: Context, config: Config) {
           return runDeptExec(command, resolvedCwd)
         }
       })))
+
+      // --- E2 (QH 2026-08-28): dept_zstd_read — the READ-ONLY .zstd session
+      // reader for department posts. Registered on the post's OWN layer in the
+      // SAME `allowExec` gate as dept_exec (a role that declares `dept_exec`
+      // also gets dept_zstd_read; a post that does not declare it never sees
+      // either; the host / a config head never gets it). Decodes ONE
+      // .zstd-compressed file via `zstd -dc` Node-side (child_process.execFile
+      // — no user shell), SÓLO LECTURA, scoped to the SAME allowed roots as
+      // dept_exec (a path outside the roots → DENIED before any decode), with
+      // a BOUNDED output (a line window + a per-line cap + a decode timeout —
+      // a huge session never hangs or buffers unbounded). Args {path,
+      // offset?, lines?}: offset = the first line index (0-based) of the
+      // window, lines = the max lines to return (default 100, cap 500).
+      disposers.push(agentCtx.tools.register(defineTool({
+        name: 'dept_zstd_read',
+        description: 'Read a WINDOW of a .zstd-compressed file (e.g. a raw .jsonl.zstd session artifact) WITHOUT a shell: decodes the file via `zstd -dc` Node-side (child_process.execFile, no user shell), SÓLO LECTURA (never writes). Scoped to the SAME allowed roots as dept_exec (the resolved `path` must be inside a scoped root; the stable profile `/opt/dsh/.dsh` is protected unless a mission grant names it — a path outside the roots is DENIED before any decode). Args {path, offset?, lines?}: `offset` (default 0) is the 0-based first line of the window; `lines` (default 100, cap 500) is the max lines to return. Output is BOUNDED: a line window + a 4000-char per-line cap + a 30 s decode timeout + a ~4 MB decompressed-output cap — a huge session never hangs the tool or buffers unbounded memory. Returns {ok, lines, truncated, totalLines}: the decoded line window. For a department WORKER whose role template declares dept_exec (IPD builder/reviewer/explore-deep + quality-inspector); never exposed to the host or a config head.',
+        parameters: {
+          path: { type: 'string', required: true, description: 'The absolute path of the .zstd-compressed file to read (must resolve inside a scoped dept_exec root).' },
+          offset: { type: 'number', description: 'The 0-based first line index of the window (default 0).' },
+          lines: { type: 'number', description: 'The max lines to return (default 100, capped at 500).' }
+        },
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              ok: { type: 'boolean', required: true },
+              lines: { type: 'array', required: true, items: { type: 'string' } },
+              truncated: { type: 'boolean', required: true },
+              totalLines: { type: 'number', required: true },
+              error: { type: 'string' }
+            }
+          },
+          render: (_args, value) => {
+            if (value.ok === false) return [{ type: 'text', text: `dept_zstd_read failed: ${value.error ?? 'unknown error'}` } as const]
+            const cap = 8000
+            const joined = value.lines.join('\n')
+            const body = joined.length > cap ? `${joined.slice(0, cap)}\n… [truncated ${joined.length} chars]` : joined
+            return [{ type: 'text', text: `dept_zstd_read: ${value.lines.length} of ${value.totalLines} line(s)${value.truncated ? ' (window truncated)' : ''}\n\`\`\`\n${body}\n\`\`\`` } as const]
+          }
+        },
+        async execute(args, exec): Promise<{ ok: boolean; lines: string[]; truncated: boolean; totalLines: number; error?: string }> {
+          const agent = exec.agent
+          if (!agent) throw new Error('dept_zstd_read requires a calling agent (exec.agent was undefined)')
+          const postId = postIdForChild(agent.id as string)
+          if (postId === void 0) throw new Error('[deepartments] dept_zstd_read is for a department MEMBER (a registered head or worker), not the host')
+          const pathRaw = String(args.path ?? '').trim()
+          if (pathRaw === '') throw new Error('[deepartments] dept_zstd_read: `path` is required')
+          const offsetRaw = Number(args.offset ?? 0)
+          const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? Math.trunc(offsetRaw) : 0
+          const linesRaw = Number(args.lines ?? 100)
+          const lines = Math.min(Math.max(Number.isFinite(linesRaw) && linesRaw > 0 ? Math.trunc(linesRaw) : 100, 1), DEPT_ZSTD_READ_MAX_LINES)
+          const callerEntry = byPost.get(postId)
+          const department = callerEntry === void 0 ? undefined : departmentForEntry(callerEntry)
+          const allowedRoots = await deptExecAllowedRoots(department)
+          // The scope guard runs BEFORE any decode — a denied path is a clean
+          // error and zstd is never invoked (realpath collapses `..`/symlinks
+          // FIRST, exactly like dept_exec's canonicalization).
+          const resolvedPath = await realpath(pathRaw).catch(() => pathRaw)
+          const deny = deptZstdReadDenyReason(resolvedPath, allowedRoots)
+          if (deny !== void 0) throw new Error(`[deepartments] dept_zstd_read: ${deny}`)
+          return runDeptZstdRead(resolvedPath, offset, lines)
+        }
+      })))
     }
 
 
@@ -4285,11 +4600,18 @@ export function applyInvoke(ctx: Context, config: Config) {
           const deptCwd = await resolveDepartmentWorkspaceCwd(department)
           // fb-9: the legacy dept_post_create path shares the SAME DISPATCH
           // pre-flight as the two spawn engines — a reasoning-enabled provider
-          // without requiresReasoningContentOnAssistantMessages=true rejects
+          // without compat.requiresReasoningContentOnAssistantMessages=true
+          // rejects
           // HERE, BEFORE any agents.create (never a mid-mission 400; nothing
           // is registered).
           const preflightError = workerReasoningContentPreflightError()
           if (preflightError !== undefined) throw new Error(`[deepartments] ${preflightError}`)
+          // DISPATCH-HARDENING (QH «429-primer-call»): the pooler-capacity
+          // pre-check on the LEGACY seam too — the SAME early rejection, BEFORE
+          // any agents.create (nothing is registered); an at-quota pool never
+          // spawns a worker whose first call would 429/503.
+          const poolerDispatchBlock = workerPoolerDispatchBlockError()
+          if (poolerDispatchBlock !== undefined) throw new Error(`[deepartments] ${poolerDispatchBlock}`)
           const handle = await agents.create({
             sessionId: String(SessionId(sessionId)),
             meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
@@ -5214,6 +5536,22 @@ export function applyInvoke(ctx: Context, config: Config) {
    * re-settles on the next boot. */
   const settleRetiredPostDeliveries = async (retiredPostId: string): Promise<void> => {
     try {
+      // ALTO-1 (m-728 rebind guard): the settle is keyed (messageId,
+      // recipientId), but a PRE-fix sidecar may hold a STALE row whose id was
+      // REBOUND by a newer compaction to a DIFFERENT record. Guard (the boot
+      // driver's own rebind rule): settle ONLY a pair whose CURRENT record
+      // exists AND actually addresses the recipient — anything else is a stale
+      // row (its record trimmed, or the current record never sent to this
+      // recipient) and is skipped, so the settle NEVER settles the wrong
+      // record. An unreadable messages file → the empty map → nothing settles
+      // (conservative; the boot pass re-evaluates).
+      let recordsById = new Map<string, MessageRecord>()
+      try {
+        const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+        recordsById = new Map(records.map((record) => [record.id, record]))
+      } catch {
+        recordsById = new Map()
+      }
       let text: string
       try {
         text = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
@@ -5226,6 +5564,8 @@ export function applyInvoke(ctx: Context, config: Config) {
       for (const row of latestPerKey.values()) {
         if (row.recipientId !== retiredPostId) continue
         if (!needsRedelivery(row.status)) continue
+        const record = recordsById.get(row.messageId)
+        if (record === void 0 || !record.to.includes(row.recipientId)) continue
         await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal')
         ctx.logger.info(`[deepartments] retire settle: ${row.messageId} → ${row.recipientId} (was ${row.status}) → 'terminal' — post retired in-session, settled once (no boot needed)`)
       }
@@ -6160,7 +6500,9 @@ export function applyInvoke(ctx: Context, config: Config) {
    * dispatches): at boot, pre-flight the ACTIVE worker route
    * (WORKER_AGENT_OPTIONS.provider) against the stateDir settings.yaml. A
    * provider profile with reasoning enabled that lacks
-   * requiresReasoningContentOnAssistantMessages=true → a warn + ONE drift
+   * compat.requiresReasoningContentOnAssistantMessages=true (the schema-correct
+   * nested path — a provider-level flag is dead and is detected as missing)
+   * → a warn + ONE drift
    * post-error row (the synthetic REASONING_CONTENT_PREFLIGHT_POST_ID post —
    * the W6 daemon surfaces it as a post-error finding, so the drift is visible
    * from the break, no spawn needed). Never throws; an absent/unreadable
@@ -6268,6 +6610,111 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] durable-registry validation failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** B5-GHOST (QH — dispatch-hardening, the AFTER half of the «429-primer-call»
+   * class; 2026-08-28): the boot pass that classifies a catalog-LIVE post
+   * WITHOUT a usable session (offline/muerto — e.g. the explore-deep-9 class: a
+   * worker that burned its first call and whose session died with it) as a
+   * RETIRE-CANDIDATE via the CENSUS LEDGER heuristic — NEVER on the first
+   * observation (false-positive risk: a live post "solo entre
+   * materializaciones" has a resumable durable session and is NOT a ghost).
+   * Each BOOT is ONE census tick:
+   *   - a post whose session is usable NOW (live in the agents registry, OR a
+   *     durable session present AND not B5-unusable) is CLEARED — the ledger
+   *     entry drops, the consecutive-miss chain breaks (an INTERMITTENT
+   *     session never accumulates → never retired);
+   *   - a post WITHOUT a usable session accumulates `misses`; after
+   *     `org.ghostSuspect.warnAfterTicks` (default 2) CONSECUTIVE misses the
+   *     `ghost-suspect` MARKER appears (WARN — the post is a retire-candidate,
+   *     still NOT auto-retired: the first observations could be transients);
+   *   - the AUTO-RETIRE fires ONLY when the marker persists > M ticks
+   *     (`org.ghostSuspect.retireAfterTicks`, default 8 — conservative)
+   *     — the retire-candidate class of the triage (explore-deep-9) is covered
+   *     with ZERO false positives.
+   * The ledger is durable (`<stateDir>/ghost-suspect-state.json`). NEVER
+   * throws / never touches a configured head (only `provider:'worker'` posts) /
+   * `org.ghostSuspect.enabled === false` → the pass is skipped (pre-b5-ghost
+   * behavior). This is NOT the existing done-gone reconcile: it is a SEPARATE
+   * pass with the marker heuristics, so the durable-registry reconcile's
+   * conservative flag/warn-only semantics stay UNCHANGED. */
+  const GHOST_SUSPECT_DEFAULT_WARN_TICKS = 2
+  const GHOST_SUSPECT_DEFAULT_RETIRE_TICKS = 8
+  const runGhostSuspectReconcile = async (): Promise<void> => {
+    try {
+      const ghostSuspectConfig = (org as { ghostSuspect?: { enabled?: boolean; warnAfterTicks?: number; retireAfterTicks?: number } }).ghostSuspect
+      if (ghostSuspectConfig?.enabled === false) return
+      const warnAfterTicks = ghostSuspectConfig?.warnAfterTicks !== undefined && Number.isFinite(ghostSuspectConfig.warnAfterTicks) && ghostSuspectConfig.warnAfterTicks > 0
+        ? Math.trunc(ghostSuspectConfig.warnAfterTicks)
+        : GHOST_SUSPECT_DEFAULT_WARN_TICKS
+      const retireAfterTicks = ghostSuspectConfig?.retireAfterTicks !== undefined && Number.isFinite(ghostSuspectConfig.retireAfterTicks) && ghostSuspectConfig.retireAfterTicks > 0
+        ? Math.trunc(ghostSuspectConfig.retireAfterTicks)
+        : GHOST_SUSPECT_DEFAULT_RETIRE_TICKS
+      const persistence = ctx.get('sessionPersistence') as { readRaw?: (id: SessionId, signal?: AbortSignal) => Promise<{ content: string } | undefined> } | undefined
+      // The conservative session-presence resolver: ONLY a positively confirmed
+      // absent durable session (readRaw → undefined) counts as lacking a
+      // resumable session; unable-to-determine → present (usable).
+      const durableSessionPresent = async (sessionId: string): Promise<boolean> => {
+        if (persistence === undefined || typeof persistence.readRaw !== 'function') return true
+        try {
+          return (await persistence.readRaw(SessionId(sessionId))) !== undefined
+        } catch {
+          return true
+        }
+      }
+      // The B5 VARIANT-2 ghost (a durable session present but with NO usable
+      // AgentOptions — the builder-87 class): the unusable-options marker with
+      // a session id matching the CURRENT durable session id.
+      const isB5Unusable = (sessionId: string, postId: string): boolean => {
+        const marks = readUnusableSessionsMark(stateDir)
+        const mark = marks[postId]
+        return mark !== undefined && mark.sessionId === sessionId
+      }
+      const previous = readGhostSuspectLedger(stateDir)
+      const rows: Array<{ postId: string; sessionId: string; usable: boolean }> = []
+      for (const [postId, entry] of byPost) {
+        if (entry.provider !== 'worker' || entry.retired === true) continue
+        const liveNow = agents !== void 0 && agents.get(String(SessionId(entry.sessionId))) !== undefined
+        const durablePresent = await durableSessionPresent(entry.sessionId)
+        const unusable = isB5Unusable(entry.sessionId, postId)
+        rows.push({ postId, sessionId: entry.sessionId, usable: liveNow || (durablePresent && !unusable) })
+      }
+      const nowMs = Date.now()
+      const verdict = stepGhostSuspectCensus(rows, previous, nowMs, { warnAfterTicks, retireAfterTicks })
+      // WARN per newly-marked ghost-suspect (retire-candidate, NOT auto-retired
+      // yet — the marker must persist > M ticks first).
+      for (const postId of verdict.newlyMarked) {
+        const entry = byPost.get(postId)
+        ctx.logger.warn(`[deepartments] b5-ghost: post "${postId}" (${entry?.provider ?? 'worker'}) has had NO usable session for ${warnAfterTicks} consecutive census ticks — marked ghost-suspect; NOT auto-retired yet (conservative); will auto-retire after ${retireAfterTicks} more census ticks without a usable session`)
+      }
+      // AUTO-RETIRE the markers that persisted > N + M ticks — the ONLY
+      // auto-retire branch of the heuristic. The caller id is the post's
+      // manager head session (retirePost's "only my workers" scope passes: the
+      // manager IS the worker's head), or a synthetic non-post id when the
+      // manager is gone (a host-like caller — the retire is a system action).
+      for (const postId of verdict.retireCandidates) {
+        const entry = byPost.get(postId)
+        if (entry === void 0 || entry.retired === true || entry.provider !== 'worker') continue
+        try {
+          await retirePost(postId, entry.managerId !== void 0 ? byPost.get(entry.managerId)?.sessionId ?? 'deepartments-b5-ghost' : 'deepartments-b5-ghost')
+          ctx.logger.warn(`[deepartments] b5-ghost: auto-retired worker "${postId}" (ghost-suspect marker persisted > ${warnAfterTicks + retireAfterTicks} census ticks without a usable session)`)
+          // The retired ghost's ledger entry is PRUNED from the NEXT ledger
+          // (a retired post is no longer a census subject — the entry must not
+          // linger for a future boot to re-read).
+          delete verdict.ledger[postId]
+        } catch (retireError: unknown) {
+          ctx.logger.warn(`[deepartments] b5-ghost: auto-retire of "${postId}" failed (non-fatal): ${retireError instanceof Error ? retireError.message : String(retireError)}`)
+        }
+      }
+      for (const postId of verdict.cleared) {
+        if (byPost.get(postId)?.retired !== true) {
+          ctx.logger.info(`[deepartments] b5-ghost: post "${postId}" has a usable session again — ghost-suspect marker cleared (intermittent session, never retired)`)
+        }
+      }
+      await writeGhostSuspectLedger(stateDir, verdict.ledger)
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] b5-ghost reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -6474,6 +6921,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     void runDurableRegistryReconciliation()
     void runHalfSleptHeadReconcile()
     void runRetiredWorkerResidueReconcile()
+    void runGhostSuspectReconcile()
   })
 
   // ---------------------------------------------------------------------------
@@ -6530,6 +6978,90 @@ export function applyInvoke(ctx: Context, config: Config) {
   }
 
   /**
+   * M-A (2026-08-28) — the SINGLE fresh-mint point for a department HEAD: the
+   * F8 fresh-mint body of materializePost (extracted VERBATIM) + the journal
+   * seed of the head-rotation path. One helper, three callers:
+   *   - the F8 slept-head wake (materializePost — `seed` absent → the fresh
+   *     session stays EMPTY, EXACTLY the pre-extraction behavior, zero
+   *     regression);
+   *   - the archived-session rotation of a live head (the archive-leak flip —
+   *     same caller shape, see rotateArchivedHeadSessionId);
+   *   - the M-A host-plane `dept_head_rotate` tool (`seed` = the head's LAST
+   *     durable journal via buildHeadRotationSeed — the session is minted with
+   *     the journal as its continuation context).
+   * The head keeps its identity (postId); only the underlying session
+   * (context) is fresh: this registers the new entry (new sessionId,
+   * previousChildId = the old session, sleepEpoch cleared — a rotation is NOT
+   * sleep —, `rotated: true` marker), CREATES the new durable session, records
+   * the handle + progress baseline, fire-and-forgets the workspace attach and
+   * pins the department sidebar title. Returns the LIVE fresh target (throws
+   * when the head cannot be materialized — the caller maps it to 'failed').
+   */
+  const freshMintHead = async (
+    entry: PostEntry,
+    dept: DepartmentConfig | undefined,
+    opts: { seed?: readonly unknown[]; source?: string } = {}
+  ): Promise<AgentLike> => {
+    if (agents === void 0) throw new Error('[deepartments] head fresh-mint requires the agents service')
+    const previousSession = entry.sessionId
+    const freshSessionId = String(SessionId(`${HEAD_SESSION_PREFIX}${entry.postId}-${randomUUID()}`))
+    const coordinator = coordinatorForPost(entry.postId)
+    // Drop the OLD session's reverse index BEFORE registering the fresh one
+    // (registerEntry re-keys byChild by the new sessionId; without the delete
+    // the old id would linger as a dead mapping).
+    byChild.delete(previousSession)
+    // Fix (head-sleep worker drain): the in-flight ledger is the sleep→boot
+    // handoff; once the head is materialized (woken) its agent handles its own
+    // workers, so clear the snapshot on the fresh incarnation. M-A: `rotated`
+    // marks the rotation event (a rotation is NOT sleep — sleepEpoch stays
+    // cleared).
+    registerEntry({ ...entry, sessionId: freshSessionId, previousChildId: previousSession, sleepEpoch: undefined, inflightWorkers: undefined, rotated: true })
+    const role = coordinator?.role ?? entry.role ?? 'department worker'
+    const headPreset = entry.agentPreset ?? PRESET_ID
+    // F10 (spec 004 §9.1): the materialized head carries its department's
+    // architecture section (if any).
+    const setup = headSetup(entry.postId, entry.roomId, role, headPreset, dept)
+    const agentOptions = resolveMaterializeAgentOptions(coordinator?.agentOptions)
+    // F5: the fresh incarnation lands in its department workspace (config
+    // workspacePath); a department-less/legacy head falls back to the root.
+    const deptCwd = await resolveDepartmentWorkspaceCwd(dept)
+    const handle = await agents.create({
+      sessionId: freshSessionId,
+      // M-A: the seed is the OPTIONAL journal continuation of a head rotation
+      // (buildHeadRotationSeed → the harness CreateAgentOptions.seed →
+      // sessions.prepare(id, {seed, meta})); the F8 wake passes none (the
+      // pre-extraction empty-session create, byte-identical).
+      ...(opts.seed !== undefined ? { seed: opts.seed } : {}),
+      meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: headPreset },
+      agentOptions,
+      setup
+    })
+    if (handle !== void 0) byHeadHandle.set(freshSessionId, handle)
+    const freshTarget = agents.get(freshSessionId)
+    if (freshTarget === void 0) throw new Error(`[deepartments] head "${entry.postId}" could not be materialized (fresh rotation) for bus delivery`)
+    markHeadProgress(freshSessionId, freshTarget)
+    const source = opts.source ?? 'bus-deliver'
+    void attachHeadSession(freshSessionId, source)
+    // F8 (acceptance b): pin the head sidebar title on the FRESH session — the
+    // old (archived) session is gone, so the fresh one MUST carry the pinned
+    // department title or the row would fall back to the raw id. (A seeded
+    // rotation already carries the title in the seed's `session/title` event —
+    // pinSessionTitle's never-double-pin guard turns the runtime pin into a
+    // no-op 'already-pinned'.)
+    const titleSession = ctx.sessions.get(SessionId(freshSessionId))
+    if (titleSession !== void 0) {
+      const title = coordinator?.sessionTitle || HEAD_DEFAULT_SESSION_TITLE
+      const titlePin = pinSessionTitle(titleSession, title)
+      if (titlePin === 'pinned') {
+        ctx.logger.info(`[deepartments] ${source}: pinned fresh head title "${title}" (${freshSessionId})`)
+      } else if (titlePin === 'failed') {
+        ctx.logger.warn(`[deepartments] ${source}: fresh head title pin failed for ${freshSessionId} (non-fatal — materialization continues)`)
+      }
+    }
+    return freshTarget
+  }
+
+  /**
    * The SHARED post-materialization core of the wakePost seam (spec §4.3 step 2
    * — "EXACTLY wakePost"): respawn-from-sleep (dispose stale handle, clear
    * sleepEpoch, keep previousChildId), resume→create fallback with the post's
@@ -6540,6 +7072,29 @@ export function applyInvoke(ctx: Context, config: Config) {
    */
   const materializePost = async (entry: PostEntry): Promise<{ target: AgentLike; resumed: boolean }> => {
     if (agents === void 0) throw new Error('[deepartments] bus delivery requires the agents service')
+    // fb-9 RESUME SEAM (coverage-map §4-3): the SAME dispatch pre-flight as the
+    // spawn engines, at the SINGLE choke point of the bus-wake materialization —
+    // ONE call here covers EVERY agents.resume/agents.create below (the
+    // sleep-respawn head create :6601, the archived-rotation head create :6666,
+    // the shared cold-resume :6691 and its create-fallback :6694) with no
+    // duplication. The mid-turn continuation 400 (the q-i-20 class) is NOT this
+    // seam, but the RESUME class (fb-6: a cold-resumed worker re-plays the
+    // tool-call history through the same openai-completions API) gets the same
+    // fail-EARLY: a worker route whose profile has reasoning enabled but lacks
+    // compat.requiresReasoningContentOnAssistantMessages=true never resumes into
+    // its expensive first 400 — the wake fails loudly with the preflight error
+    // instead (the delivery is mapped to 'failed' by busDeliverToPost).
+    const preflightError = workerReasoningContentPreflightError()
+    if (preflightError !== undefined) throw new Error(`[deepartments] ${preflightError}`)
+    // DISPATCH-HARDENING (QH «429-primer-call»): the pooler-capacity
+    // pre-check on the RESUME seam (the +1 of the fb-9 3+1) — a cold-resumed
+    // / slept-respawned post wakes into ITS first call immediately; when the
+    // pooler snapshot certifies no workspace can serve it, the wake fails
+    // LOUDLY and EARLY (the delivery is mapped to 'failed' by busDeliverToPost,
+    // exactly like the preflight error above) instead of burning the first
+    // LLM turn on a 429/503.
+    const poolerDispatchBlock = workerPoolerDispatchBlockError()
+    if (poolerDispatchBlock !== undefined) throw new Error(`[deepartments] ${poolerDispatchBlock}`)
     const isWorker = entry.provider === 'worker'
     const coordinator = coordinatorForPost(entry.postId)
     let resumed = false
@@ -6563,46 +7118,12 @@ export function applyInvoke(ctx: Context, config: Config) {
       // head keeps its identity (postId), journal and messages (archive ≠
       // delete); only the underlying session (context) is fresh. A disposable
       // WORKER keeps the legacy cold-resume of the SAME session — worker retire
-      // is the separate archive path.
+      // is the separate archive path. M-A: the F8 fresh-mint body now lives in
+      // the SHARED `freshMintHead` helper (the single fresh-mint point also
+      // used by the host-plane dept_head_rotate tool); no seed is passed, so
+      // the wake session stays EMPTY exactly like the pre-extraction create.
       if (!isWorker) {
-        const freshSessionId = String(SessionId(`${HEAD_SESSION_PREFIX}${entry.postId}-${randomUUID()}`))
-        // Fix (head-sleep worker drain): the in-flight ledger is the sleep→boot
-        // handoff; once the head is materialized (woken) its agent handles its
-        // own workers, so clear the snapshot on the fresh incarnation.
-        registerEntry({ ...entry, sessionId: freshSessionId, previousChildId: previousSession, sleepEpoch: undefined, inflightWorkers: undefined })
-        const role = coordinator?.role ?? entry.role ?? 'department worker'
-        const headPreset = entry.agentPreset ?? PRESET_ID
-        // F10 (spec 004 §9.1): the materialized head carries its department's
-        // architecture section (if any).
-        const setup = headSetup(entry.postId, entry.roomId, role, headPreset, departmentForEntry(entry))
-        const agentOptions = resolveMaterializeAgentOptions(coordinator?.agentOptions)
-        // F5: the fresh incarnation lands in its department workspace (config
-        // workspacePath); a department-less/legacy head falls back to the root.
-        const deptCwd = await resolveDepartmentWorkspaceCwd(departmentForEntry(entry))
-        const handle = await agents.create({
-          sessionId: freshSessionId,
-          meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: headPreset },
-          agentOptions,
-          setup
-        })
-        if (handle !== void 0) byHeadHandle.set(freshSessionId, handle)
-        const freshTarget = agents.get(freshSessionId)
-        if (freshTarget === void 0) throw new Error(`[deepartments] head "${entry.postId}" could not be materialized (fresh rotation) for bus delivery`)
-        markHeadProgress(freshSessionId, freshTarget)
-        void attachHeadSession(freshSessionId, 'bus-deliver')
-        // F8 (acceptance b): pin the head sidebar title on the FRESH session —
-        // the old (archived) session is gone, so the fresh one MUST carry the
-        // pinned department title or the row would fall back to the raw id.
-        const titleSession = ctx.sessions.get(SessionId(freshSessionId))
-        if (titleSession !== void 0) {
-          const title = coordinator?.sessionTitle || HEAD_DEFAULT_SESSION_TITLE
-          const titlePin = pinSessionTitle(titleSession, title)
-          if (titlePin === 'pinned') {
-            ctx.logger.info(`[deepartments] dept_sleep rotation: pinned fresh head title "${title}" (${freshSessionId})`)
-          } else if (titlePin === 'failed') {
-            ctx.logger.warn(`[deepartments] dept_sleep rotation: fresh head title pin failed for ${freshSessionId} (non-fatal — materialization continues)`)
-          }
-        }
+        const freshTarget = await freshMintHead(entry, departmentForEntry(entry))
         return { target: freshTarget, resumed: true }
       }
       // Worker respawn: record the previous incarnation + clear the sleep flag,
@@ -7260,11 +7781,16 @@ export function applyInvoke(ctx: Context, config: Config) {
   /** The bus catalog-route resolver (spec §4.2 route 2): resolve a recipient
    * against the DURABLE catalog — posts.json (head/worker) then non-retired
    * hosts.json — PLUS the Issue-1 (owner m-331) host-family re-route: a
-   * `host-…` address that resolves to a RETIRED / UNRESOLVABLE host entry is
-   * re-resolved DURABLE-FIRST to the CURRENT LIVE host
-   * (pickLiveHostEntry from a FRESH hosts.json read). host-session-<uuid> means
-   * "the Asistente" (role), so this re-route honors the sender's intent; W7 (a
-   * retired host is terminal) is NOT revoked, it stays for NON-host-family ids.
+   * `host-…` address that resolves to a RETIRED / UNRESOLVABLE KNOWN host entry
+   * is re-resolved DURABLE-FIRST to the CURRENT LIVE host
+   * (pickLiveHostEntry from a FRESH hosts.json read) ONLY when the address is a
+   * REAL host id in hosts.json. ALTO-2 (m-891): a `host-*` id ABSENT from
+   * hosts.json — a typo / never-registered uuid — resolves UNKNOWN → the
+   * delivery engine settles 'failed' per-recipient (the ghost-delivery fix);
+   * `host-session-<uuid>` means "the Asistente" (role) ONLY for a genuinely
+   * registered (live or retired) host id, so the m-331 re-route still honors
+   * the sender's intent for real hosts; W7 (a retired host is terminal) is NOT
+   * revoked, it stays for NON-host-family ids.
    * This resolver returns the candidate entry WITHOUT applying the ACL / retired
    * gates — the DELIVERY ENGINE (./core/delivery.js) owns those (the defensive
    * gate, step (c)). `{ kind: 'unknown' }` = no catalog member / not re-routable
@@ -7276,8 +7802,25 @@ export function applyInvoke(ctx: Context, config: Config) {
     const hostEntry = hosts.get(recipientId)
     if (hostEntry !== void 0 && hostEntry.retired !== true) return { kind: 'host', entry: hostEntry }
     if (recipientId.startsWith(HOST_ID_PREFIX)) {
-      const { live } = pickLiveHostEntry(readDurableHostEntries(stateDir) ?? hosts.values())
-      if (live !== void 0) return { kind: 'reroute', entry: live as HostEntry }
+      // ALTO-2 (m-891, QD audit 2026-08-28 F2 — ghost delivery): the Issue-1
+      // host-family re-route fires ONLY for a `host-…` address that is a KNOWN
+      // host id in the durable hosts.json — a LIVE entry matched above, or a
+      // RETIRED real entry (the m-331 role-intent re-route: `host-session-<uuid>`
+      // means "the Asistente", so a REAL formerly-valid host id is re-routed to
+      // the current live host). A `host-*` id ABSENT from hosts.json — a typo /
+      // never-registered uuid (m-891 sent to '…ea3232b' vs the real '…ea32b') —
+      // is NOT the Asistente's address: it resolves UNKNOWN, so the delivery
+      // engine settles 'failed' per-recipient exactly like an unknown post — NO
+      // prepared→delivered ghost, no silent content loss. The m-380 thread (an
+      // unknown non-host session id → failed) is the same 'unknown' path,
+      // untouched.
+      const durableHosts = readDurableHostEntries(stateDir)
+      const registry = durableHosts ?? [...hosts.values()]
+      const known = registry.some((host) => host.hostId === recipientId)
+      if (known) {
+        const { live } = pickLiveHostEntry(registry)
+        if (live !== void 0) return { kind: 'reroute', entry: live as HostEntry }
+      }
     }
     return { kind: 'unknown' }
   }
@@ -7693,7 +8236,7 @@ export function applyInvoke(ctx: Context, config: Config) {
    * a same-layer duplicate throws, there is no replace). */
   const sendMessageTool = defineTool({
     name: 'send_message',
-    description: 'Send a message to one or more background agents and/or organization members, delivering it as the recipient\'s next turn and ALWAYS waking the recipient (including a dormant/host target). Recipients are resolved per id: (1) your direct continuable background children are delivered natively (parent→child followup, never catalog-validated); (2) everything else is resolved against the organization catalog (department heads/workers + the Asistente host) and delivered through the durable message store — the record is persisted BEFORE any delivery and delivery state is tracked in a write-ahead sidecar, so a crash re-delivers idempotently. Unknown ids are reported per-recipient as failed (one typo does not kill a multi-recipient send). A self-addressed recipient (your own id) is held ("self" — persisted, never woken). W9-b `interrupt: true` (optional, default false): a recipient LIVE mid-turn has its CURRENT turn ABORTED (reason "interrupted", pending work preserved) and the message is the FIRST item of its next turn — the harness abort/stop API (Agent.cancel with keepInbox) is the seam; default false keeps QUEUE semantics (zero regression). DEPARTMENT MESSAGING ACL (spec 004 §5.6): the Asistente (host) may send to everyone; a department head may send to any head (incl. the Asistente) and to the agents of its OWN department; a WORKER may send ONLY to the agents of its own department (incl. its head) — a worker CANNOT write to the host, to other heads, or to other departments (everything goes via its own head). A forbidden recipient is reported per-recipient as `failed:acl:<ground>` and is NOT persisted/delivered (the message is not sent to it; route it via the recipient\'s department head). Max 20 recipients (fan-out cap).',
+    description: 'Send a message to one or more background agents and/or organization members, delivering it as the recipient\'s next turn and ALWAYS waking the recipient (including a dormant/host target). Recipients are resolved per id: (1) your direct continuable background children are delivered natively (parent→child followup, never catalog-validated); (2) everything else is resolved against the organization catalog (department heads/workers + the Asistente host) and delivered through the durable message store — the record is persisted BEFORE any delivery and delivery state is tracked in a write-ahead sidecar, so a crash re-delivers idempotently. A `host-session-*` address is validated against hosts.json (non-retired); a typo/never-registered host id fails per-recipient like any unknown id. Unknown ids are reported per-recipient as failed (one typo does not kill a multi-recipient send). A self-addressed recipient (your own id) is held ("self" — persisted, never woken). W9-b `interrupt: true` (optional, default false): a recipient LIVE mid-turn has its CURRENT turn ABORTED (reason "interrupted", pending work preserved) and the message is the FIRST item of its next turn — the harness abort/stop API (Agent.cancel with keepInbox) is the seam; default false keeps QUEUE semantics (zero regression). DEPARTMENT MESSAGING ACL (spec 004 §5.6): the Asistente (host) may send to everyone; a department head may send to any head (incl. the Asistente) and to the agents of its OWN department; a WORKER may send ONLY to the agents of its own department (incl. its head) — a worker CANNOT write to the host, to other heads, or to other departments (everything goes via its own head). A forbidden recipient is reported per-recipient as `failed:acl:<ground>` and is NOT persisted/delivered (the message is not sent to it; route it via the recipient\'s department head). Max 20 recipients (fan-out cap).',
     parameters: {
       to: {
         type: 'array',
@@ -8263,6 +8806,131 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }))
 
+  // --- M-A: dept_head_rotate (HOST plane) — the ACTIVE CONTEXT REFRESH of a
+  // configured department head -----------------------------------------------
+  // The rotation = a session refresh WITH JOURNAL (micro-decision owner
+  // 2026-08-28, map reports/explore-deep/2026-08-28-ma-context-monitor-map.md
+  // §3): bounded-dispose the old live handle → server-side archive the old
+  // session (S2.5) → FRESH-MINT a NEW session SEEDED with the head's LAST
+  // DURABLE journal (buildHeadRotationSeed — NO re-key: the head's journal
+  // author is its STABLE postId) + the department title pin → mirror the event
+  // to the QD ('head-rotated', the host-rotated pattern — inspected at 100%;
+  // the QH's own rotation is NOT excluded: the old 'head-slept' exclusion was
+  // the SLEEP anti-loop, a one-shot instruction rotation cannot loop).
+  // NOT sleep (no sleepEpoch is set) and NOT retire (the postId stays live):
+  // a rotation only refreshes the underlying session/context. The fresh head
+  // lands LIVE but BOOT-QUIET — NO immediate wake (deliberate: heads are
+  // addressed-driven; the host greets the fresh head with its substantive
+  // message right after, and that next message / the next daemon wake starts
+  // its first turn with the journal already in the seed + the wake pack
+  // injected at pre-step). Scope: host-only (a head cannot rotate), configured
+  // heads only (a worker / unconfigured post rejects loudly), idle only (a
+  // RUNNING head is rotated in a free window, never mid-turn).
+  const globalHeadRotate = ctx.tools.register(defineTool({
+    name: 'dept_head_rotate',
+    description: 'Rotate a CONFIGURED department head (HOST plane, Asistente only): an ACTIVE context refresh — the head\'s durable session is fresh-minted (NEW session id) seeded with its LAST durable journal, the old session is archived server-side, and the department title stays pinned; the postId/identity, journal and messages are untouched (archive ≠ delete) and NO sleepEpoch is set (a rotation is NOT sleep). The fresh head lands LIVE but BOOT-QUIET: its first turn starts on the NEXT message/daemon wake (the journal is already in its context as the seed). Use it on CONTEXT-THRESHOLD crossing (>= 50% of the window, e.g. the QH) or on instruction; confirm the head is IDLE first (dept_who) — a running head is rejected loudly. The LAST durable journal is ALWAYS used and the rotation NEVER delays for a fresh memo (the critical-unblock rule — a context-blocked head may not run dept_memo_write): ask the head for dept_memo_write BEFORE rotating when it is operative and the window permits, and watch the returned `journal.stale` marker ("memo no actualizado — journal previo"). Emits a Quality-inspect directive to quality-head (100% mandate).',
+    parameters: {
+      postId: { type: 'string', required: true, description: 'The CONFIGURED department head postId to rotate (e.g. "quality-head", "internal-programming-head"). A worker or an unconfigured post is rejected loudly.' },
+      reason: { type: 'string', description: 'Optional reason for the rotation (recorded in the log + the QD mirror).' }
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          postId: { type: 'string', required: true },
+          sessionId: { type: 'string', required: true },
+          previousSessionId: { type: 'string', required: true },
+          archived: { type: 'boolean', required: true },
+          journal: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              path: { type: 'string', required: true },
+              timestamp: { type: 'string' },
+              stale: { type: 'boolean', required: true }
+            }
+          },
+          reason: { type: 'string' }
+        }
+      },
+      render: (_args, value) => [{ type: 'text', text: `rotated ${value.postId}: ${value.previousSessionId} → ${value.sessionId} (archived ${value.archived}); journal ${value.journal.path}${value.journal.stale ? ' STALE — memo no actualizado, journal previo' : ' (fresh)'}${value.reason !== undefined ? `; reason: ${value.reason}` : ''}` } as const]
+    },
+    async execute(args, exec): Promise<{ postId: string; sessionId: string; previousSessionId: string; archived: boolean; journal: { path: string; timestamp?: string; stale: boolean }; reason?: string }> {
+      const agent = exec.agent
+      if (!agent) throw new Error('dept_head_rotate requires a calling agent (exec.agent was undefined)')
+      // ACL (map §3): HOST-plane — only the Asistente itself (no registered
+      // post) rotates heads; a department head can never rotate (it routes the
+      // need to its own head, which escalates to the host).
+      if (postIdForChild(agent.id as string) !== undefined) {
+        throw new Error('[deepartments] dept_head_rotate is HOST-plane (the Asistente only): a department head cannot rotate heads — ask the host via your head')
+      }
+      const entry = byPost.get(args.postId)
+      if (entry === void 0) throw new Error(`[deepartments] dept_head_rotate: "${args.postId}" is not a registered post`)
+      // Scope: a WORKER is never rotatable (its lifecycle is create → retire).
+      if (entry.provider === 'worker') {
+        throw new Error(`[deepartments] dept_head_rotate: "${args.postId}" is a WORKER, not a head — workers are NOT rotatable (retire them with dept_worker_retire / dept_post_retire)`)
+      }
+      // Scope: only CONFIGURED heads (a coordinator row). The QH is rotatable —
+      // it is the FIRST to rotate in the critical unblock (the old QH exclusion
+      // was the dept_sleep anti-loop; a one-shot instruction rotation cannot loop).
+      const coordinator = coordinatorForPost(args.postId)
+      if (coordinator === void 0) {
+        throw new Error(`[deepartments] dept_head_rotate: "${args.postId}" is not a CONFIGURED department head (no coordinator row in the org config)`)
+      }
+      const sessionId = String(SessionId(entry.sessionId))
+      // Free-window rule (map §3 step 2): a RUNNING head is never rotated
+      // mid-turn — the host schedules the rotation when the head is idle.
+      const live = agents?.get(sessionId)
+      if (live !== undefined && live.status === 'running') {
+        throw new Error(`[deepartments] dept_head_rotate: "${args.postId}" is RUNNING (state ${live.status}) — rotate only in a free window (head idle; re-check dept_who)`)
+      }
+      // Journal — CRITICAL-UNBLOCK RULE: always use the LAST durable journal,
+      // never delay for a fresh memo (a context-over-threshold head — the QH
+      // — may be unable to run dept_memo_write; the rotation must still go
+      // through). A MISSING journal fails loud (the dept_sleep precedent:
+      // a rotation without continuity would lose the head's memory).
+      const journal = await readJournal(args.postId)
+      if (journal === void 0 || journal.trim() === '') {
+        throw new Error(`[deepartments] dept_head_rotate: no durable journal for "${args.postId}" (${journalPathFor(args.postId)}) — request a dept_memo_write first, then rotate`)
+      }
+      const journalStatus = headRotationJournalStatus(journal, Date.now())
+      // Bounded dispose of the old live handle (a zombie detach self-heals; the
+      // fresh mint uses a NEW session id, no collision).
+      if (!(await joinHeadDisposeOnce(sessionId))) {
+        ctx.logger.warn(`[deepartments] dept_head_rotate: dispose join for "${args.postId}" timed out after ${disposeJoinTimeoutMs()}ms — proceeding with the fresh mint (zombie detach; new session id, no collision)`)
+      }
+      // Server-side archive of the OLD session (S2.5 semantics — the sidebar
+      // row hides; the journal + messages stay intact). Non-fatal.
+      const archived = await archivePostSessionOnSleep(sessionId)
+      // FRESH-MINT: NEW session + LAST journal as the seed + department title pin.
+      const dept = departmentForEntry(entry)
+      const title = coordinator.sessionTitle || HEAD_DEFAULT_SESSION_TITLE
+      const seed = buildHeadRotationSeed(journal, { title, now: Date.now() })
+      const fresh = await freshMintHead(entry, dept, { seed, source: 'dept_head_rotate' })
+      // QD mirror (spec 007 §6.3, D-Q3 — the host-rotated pattern): a head
+      // rotation is inspected at 100%. Non-fatal (the emitter wraps itself).
+      await maybeEmitQualityInspectDirective({
+        kind: 'head-rotated',
+        headPostId: args.postId,
+        oldSessionId: sessionId,
+        newSessionId: String(fresh.id),
+        archiveOk: archived,
+        ...(args.reason !== undefined ? { reason: args.reason } : {})
+      })
+      ctx.logger.info(`[deepartments] dept_head_rotate: "${args.postId}" rotated ${sessionId} → ${String(fresh.id)} (${args.reason ?? 'no reason given'}); journal ${journalStatus.stale ? 'STALE — memo no actualizado, journal previo' : 'fresh'} seeded; fresh head live BOOT-QUIET (first turn on the next message/daemon wake)`)
+      return {
+        postId: args.postId,
+        sessionId: String(fresh.id),
+        previousSessionId: sessionId,
+        archived,
+        journal: { path: journalPathFor(args.postId), ...(journalStatus.timestamp !== undefined ? { timestamp: journalStatus.timestamp } : {}), stale: journalStatus.stale },
+        ...(args.reason !== undefined ? { reason: args.reason } : {})
+      }
+    }
+  }))
+
   // --- dshd-feedback tools (host plane): the host may emit feedback + list +
   // update the backlog. Registered globally (the host is every agent's top of
   // the reporting chain — D6); the QH-authority is enforced in `execute`.
@@ -8279,6 +8947,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     globalMemo()
     globalSleep()
     globalSleepAll()
+    globalHeadRotate()
   }, 'deepartments: host-plane tools')
 
   // --- W1 agenda scheduler daemon (spec 004 §5.7) ---------------------------
@@ -8562,6 +9231,66 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
       return false
     }
+    // M-A — the context-pressure inputs the context-threshold scan reads: the
+    // token-meter's `contextPressure` projection, read LIVE in-process via the
+    // sessionProjections service (`snapshot(session).values.contextPressure` —
+    // the eager-driven, zero-I/O wire view; the durable
+    // session_projcache.json is only its cross-process mirror). One
+    // SessionContextInput row per NON-RETIRED post + the LIVE (non-retired)
+    // host's OWN row (hostId, no postId — the M4 host-not-a-pseudo-post rule).
+    // Resolved FRESH per tick (never frozen at boot), so the monitor judges the
+    // CURRENT window usage of every live agent. When the sessionProjections
+    // service is ABSENT (a headless/minimal profile) → undefined → the scan is
+    // a NO-OP (unknown context pressure never fabricates an alert; the
+    // hostRunning-absent pattern). Never throws (a missing registry degrades to
+    // empty rows — the scan is a no-op).
+    // M-A — the context-pressure inputs the context-threshold scan reads: the
+    // token-meter's `contextPressure` projection, read LIVE in-process via the
+    // sessionProjections service (`snapshot(session).values.contextPressure` —
+    // the eager-driven, zero-I/O, VERSION-AGNOSTIC wire view; the durable
+    // session_projcache.json is only its cross-process mirror). One
+    // SessionContextInput row per NON-RETIRED post + the LIVE (non-retired)
+    // host's OWN row (hostId, no postId — the M4 host-not-a-pseudo-post rule).
+    // Resolved FRESH per tick (never frozen at boot), so the monitor judges the
+    // CURRENT window usage of every live agent. When the sessionProjections
+    // service is ABSENT (a headless/minimal profile) → undefined → the scan is
+    // a NO-OP (unknown context pressure never fabricates an alert; the
+    // hostRunning-absent pattern). Never throws (a missing registry degrades to
+    // empty rows — the scan is a no-op).
+    const sessionProjections = ctx.get('sessionProjections') as SessionProjectionsLike | undefined
+    const buildSessionContexts = (): SessionContextInput[] | undefined => {
+      if (sessionProjections === undefined) return undefined
+      const rowOf = (session: unknown, id: { postId?: string; hostId?: string }): SessionContextInput | undefined => {
+        const snap = sessionProjections.snapshot(session)
+        const view = snap?.values?.contextPressure
+        if (view === undefined || typeof view !== 'object') return undefined
+        const v = view as { contextWindow?: unknown; pressureTokens?: unknown; projectedTokens?: unknown }
+        return {
+          ...id,
+          ...(typeof v.contextWindow === 'number' && Number.isFinite(v.contextWindow) ? { contextWindow: v.contextWindow } : {}),
+          ...(typeof v.pressureTokens === 'number' && Number.isFinite(v.pressureTokens) ? { pressureTokens: v.pressureTokens } : {}),
+          ...(typeof v.projectedTokens === 'number' && Number.isFinite(v.projectedTokens) ? { projectedTokens: v.projectedTokens } : {})
+        }
+      }
+      const out: SessionContextInput[] = []
+      for (const [postId, entry] of byPost) {
+        if (entry.retired === true) continue
+        const live = agents?.get(entry.sessionId)
+        if (live?.session === undefined) continue
+        const row = rowOf(live.session, { postId })
+        if (row !== undefined) out.push(row)
+      }
+      // The HOST row: the LIVE (non-retired) host's own context pressure.
+      for (const entry of hosts.values()) {
+        if (entry.retired === true) continue
+        const live = agents?.get(entry.sessionId)
+        if (live?.session === undefined) continue
+        const row = rowOf(live.session, { hostId: entry.hostId })
+        if (row !== undefined) out.push(row)
+        break
+      }
+      return out
+    }
     // W8-d PART B — the host-sender-aware inputs the CONDITIONAL system-wait scan
     // reads: the post's session event log + the ts of messages ADDRESSED to it
     // that the LIVE host sent (from the delivery sidecar + message records).
@@ -8608,6 +9337,10 @@ export function applyInvoke(ctx: Context, config: Config) {
           // M4: the host's live running signal (absent agents registry →
           // undefined → the system-idle scan is a no-op).
           hostRunning: buildHostRunning(),
+          // M-A: the context-pressure rows for the context-threshold watchdog
+          // (absent sessionProjections service → undefined → the scan is a
+          // no-op — unknown context pressure never fabricates an alert).
+          sessionContexts: buildSessionContexts(),
           // W8-d: the host-sender-aware inputs for the conditional system-wait
           // scan — resolved lazily per tick.
           hostWaits: buildHostWaits(),
@@ -8649,6 +9382,10 @@ export function applyInvoke(ctx: Context, config: Config) {
               ctx.logger.warn(`[deepartments] system-health: host alert delivery failed: ${error instanceof Error ? error.message : String(error)}`)
             }
           },
+          // PACING (owner m-PACING, 2026-08-28): the repo WORK-REGISTER path —
+          // read at a VALLE transition for the «reanuda; despachos diferidos:
+          // N» count (best-effort; unreadable → the notice omits the count).
+          workRegisterPath: path.join(repoRoot, 'docs', 'WORK-REGISTER.md'),
           logger: ctx.logger
         })
       }

@@ -149,15 +149,16 @@ export function buildRotationSeedMessage(reKeyedJournal: string) {
 
 /**
  * §3.2 — the rotation seed: permission/sandbox/approval setup events + the
- * LAST append-origin RE-KEYED journal node + the pinned HOST title
- * (`session/title` "Asistente", U4), renumbered 0..k (the exact
- * minimal-artifact event-list shape planMinimalArtifact produces and
- * Session.fromRestore proves cold-bootable). The Session constructor validates
- * contiguous-from-0 seqs, so nothing here may renumber independently. The
- * setup values mirror what the harness stamps on fresh sessions (the host runs
- * danger-full-access; overridable for tests).
+ * LAST append-origin RE-KEYED journal node + the pinned session title
+ * (`session/title` — "Asistente" by default (U4), the caller's chosen title
+ * for a HEAD rotation (M-A)), renumbered 0..k (the exact minimal-artifact
+ * event-list shape planMinimalArtifact produces and Session.fromRestore proves
+ * cold-bootable). The Session constructor validates contiguous-from-0 seqs, so
+ * nothing here may renumber independently. The setup values mirror what the
+ * harness stamps on fresh sessions (the host runs danger-full-access;
+ * overridable for tests).
  */
-export function buildRotationSeed(reKeyedJournal: string, opts: { preset?: string; sandbox?: string; policy?: string; now?: number } = {}): RotationSeedEvent[] {
+export function buildRotationSeed(reKeyedJournal: string, opts: { preset?: string; sandbox?: string; policy?: string; now?: number; title?: string } = {}): RotationSeedEvent[] {
   const now = opts.now ?? Date.now()
   const message = buildRotationSeedMessage(reKeyedJournal)
   return [
@@ -165,15 +166,36 @@ export function buildRotationSeed(reKeyedJournal: string, opts: { preset?: strin
     { type: 'sandbox/mode', seq: 1, time: now, data: { mode: opts.sandbox ?? 'danger-full-access' } },
     { type: 'approval/policy', seq: 2, time: now, data: { policy: opts.policy ?? 'never' } },
     { type: 'user/message', seq: 3, time: now, data: message as unknown as Record<string, unknown>, surfaceOp: 'append' },
-    // U4 — the HOST-SESSION TITLE PIN: a user-source `session/title` event in
-    // the exact rename() shape (dsh-session-title lib/index.js ~242). The
-    // title projection folds last-wins over the log and a user-source pin
-    // supersedes automatic LLM/fallback titles, so the rotated session
-    // displays "Asistente" from its first materialization — durable in the
-    // cold seed, no synthetic turn events (blank rows keep the client-side
-    // "New Session" label until the first turn).
-    { type: 'session/title', seq: 4, time: now, data: { title: ASISTENTE_SESSION_TITLE, messageSeqs: [], source: { kind: 'user' } } }
+    // U4 — the SESSION TITLE PIN: a user-source `session/title` event in the
+    // exact rename() shape (dsh-session-title lib/index.js ~242). The title
+    // projection folds last-wins over the log and a user-source pin supersedes
+    // automatic LLM/fallback titles, so the rotated session displays the
+    // pinned title from its first materialization — durable in the seed, no
+    // synthetic turn events (blank rows keep the client-side "New Session"
+    // label until the first turn). Default: the HOST "Asistente" title (U4);
+    // a HEAD rotation passes its DEPARTMENT title (see buildHeadRotationSeed).
+    { type: 'session/title', seq: 4, time: now, data: { title: opts.title ?? ASISTENTE_SESSION_TITLE, messageSeqs: [], source: { kind: 'user' } } }
   ]
+}
+
+/**
+ * M-A — the HEAD-ROTATION seed: the same minimal-artifact seed shape as
+ * `buildRotationSeed` but for a FRESH-MINTED department head session. TWO
+ * deliberate differences from the host path (micro-decision owner, map
+ * reports/explore-deep/2026-08-28-ma-context-monitor-map.md §3):
+ *   1. NO RE-KEY — the HEAD's durable journal `journals/<postId>.md` carries
+ *      `author: <postId>` (the stable member address), NOT `host-<sessionId>`,
+ *      so the journal text is seeded VERBATIM (`rekeyJournal` is host-only).
+ *   2. TITLE PIN = the department's head title — the caller resolves
+ *      `coordinator.sessionTitle || HEAD_DEFAULT_SESSION_TITLE` (`title` is
+ *      REQUIRED — the head row must never fall back to the raw id).
+ * The seed is passed to `agents.create({sessionId, seed, …})` (the harness
+ * `CreateAgentOptions.seed` → `sessions.prepare(id, {seed, meta})` boundary —
+ * dsh-agent types/index.d.ts:94, dsh-session lib:1648-1669), so the fresh
+ * head's FIRST turn already carries the journal as its continuation context.
+ */
+export function buildHeadRotationSeed(journal: string, opts: { preset?: string; sandbox?: string; policy?: string; now?: number; title: string }): RotationSeedEvent[] {
+  return buildRotationSeed(journal, { preset: opts.preset, sandbox: opts.sandbox, policy: opts.policy, now: opts.now, title: opts.title })
 }
 
 /**

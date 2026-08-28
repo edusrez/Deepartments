@@ -38,6 +38,12 @@ import { createUserMessage, boundContextSummary, type MessageSource } from '@dee
 import type { PostEntry, HostEntry } from './registry.js'
 import { listActiveMembers } from './registry.js'
 import type { MessageRecord } from './messages.js'
+// PACING (owner m-PACING, 2026-08-28): the peak/valley FRANJA domain — the
+// wake-pack assembly renders the ONE stable `## Pacing (franja)` section from
+// the pure pacing module (isPeakAt / pacingStateAt / formatFranjaLine). Same
+// package import, no cycle.
+import { pacingStateAt, pacingWindowFromConfig, formatFranjaLine } from './pacing.js'
+import type { PacingConfigLike } from './pacing.js'
 // D3 consolidation (subagent/gui/pooler phase): the transient-subagent role
 // type's SINGLE SOURCE OF TRUTH is now THIS package's ./role-orient.js (the
 // `deepartments.subagentRoles` service, promoted from the bundle's
@@ -445,6 +451,16 @@ export interface WakePackParts {
    * throw) — and `health.heartbeatEnabled === false` explicitly omits it. The
    * section passes through `sanitizePromptLiterals` at the wake-pack seam. */
   heartbeat?: string
+  /** PACING (owner m-PACING, 2026-08-28) — the ONE stable
+   * `## Pacing (franja)` section BODY (the `Franja: PEAK [..] UTC — hasta
+   * HH:MM UTC` / `Franja: VALLE …` line), computed by the assembly at pack
+   * time from `deps.pacing` + the clock (pacingNow — the injectable test
+   * clock via DEEPARTMENTS_TEST_NOW). Present in EVERY host wake pack AND every
+   * lean on-demand snapshot (dept_wake_snapshot — the HEADS' wake surface) when
+   * pacing is enabled (default ON; `org.pacing.enabled === false` → OMITTED,
+   * the pre-pacing pack). Undefined/empty → the section is OMITTED (never a
+   * throw). */
+  pacing?: string
 }
 
 /** Compose the Deepartments context pack as a string, sections 1-10 in order.
@@ -519,6 +535,17 @@ export function buildWakePack(parts: WakePackParts): string {
   // the section is OMITTED (R6); the lean on-demand snapshot also omits it.
   if (parts.departmentsDirectory !== undefined && parts.departmentsDirectory.trim() !== '') {
     sections.push(`## Departments directory\n${parts.departmentsDirectory}`)
+  }
+
+  // 5c — PACING (owner m-PACING, 2026-08-28): the peak/valley FRANJA section —
+  // the ONE stable line telling the host/head the CURRENT franja + until when it
+  // lasts («Franja: PEAK [01:00-10:00] UTC — hasta 10:30 UTC» / «VALLE…»).
+  // Present when the assembly supplies the body (default ON); absent/empty (or
+  // `org.pacing.enabled === false` at the assembly) → OMITTED (the pre-pacing
+  // pack — R6-legacy behavior). PURE — the section body is provided by the
+  // caller, never computed here.
+  if (parts.pacing !== undefined && parts.pacing.trim() !== '') {
+    sections.push(`## Pacing (franja)\n${parts.pacing}`)
   }
 
   // 6 — git bearings
@@ -661,6 +688,12 @@ export interface WakePackDeps {
   stateDir: string
   /** The repo root (git / ROADMAP / skill reads). */
   repoRoot: string
+  /** PACING (owner m-PACING, 2026-08-28) — the `org.pacing.*` franja config
+   * (structural PacingConfigLike; absent → the code defaults, enabled ON). The
+   * assembly renders the `## Pacing (franja)` section in EVERY wake pack and
+   * lean snapshot from it; `enabled === false` omits the section (the
+   * pre-pacing pack). */
+  pacing?: PacingConfigLike
   /** The cordis logger (degrade warnings). */
   logger: { warn(message: string): void }
 }
@@ -827,6 +860,28 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
     }
   }
 
+  /** PACING (owner m-PACING, 2026-08-28) — the injectable assembly clock (the
+   * SAME DEEPARTMENTS_TEST_NOW test-only override the bundle's stuckNow uses:
+   * hermetic tests fix the franja deterministically; production reads the real
+   * wall clock). */
+  const pacingNow = (): number => {
+    const raw = process.env.DEEPARTMENTS_TEST_NOW
+    if (raw === undefined) return Date.now()
+    const override = Number(raw)
+    return Number.isFinite(override) ? override : Date.now()
+  }
+
+  /** The ONE stable franja line (`Franja: PEAK [..] UTC — hasta HH:MM UTC` /
+   * `Franja: VALLE …`) computed at pack time from `deps.pacing` + the clock.
+   * Enabled by default (absent config = ON — the org lives in burst mode); an
+   * explicit `org.pacing.enabled === false` returns undefined → the section is
+   * OMITTED (the pre-pacing pack). Never throws (the pacing module is pure). */
+  const pacingLine = (): string | undefined => {
+    if (deps.pacing !== undefined && deps.pacing.enabled === false) return undefined
+    const state = pacingStateAt(new Date(pacingNow()), pacingWindowFromConfig(deps.pacing))
+    return formatFranjaLine(state)
+  }
+
   /** Assemble the FULL wake context pack (sections 1-10) for the host wake
    * injection: identity + KPI + current owner-presence state + pre-resolved
    * journal path + live message delta + roster + git + system state + ROADMAP
@@ -870,6 +925,8 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
       skillBody,
       ownerPresence,
       heartbeat: deps.assembleHeartbeat(memberId),
+      // PACING — the franja line (section 5c) in EVERY host wake pack.
+      pacing: pacingLine(),
       includeGuidance: true
     })
   }
@@ -878,7 +935,10 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
    * message delta, condensed roster) via the SAME pure `buildWakePack`
    * builder. Used by `dept_wake_snapshot` for live freshness mid-session. It
    * intentionally does NOT carry the owner-presence line (that is baked into
-   * the host wake pack injection only; the snapshot is for on-demand reads). */
+   * the host wake pack injection only; the snapshot is for on-demand reads).
+   * PACING (owner m-PACING, 2026-08-28): the snapshot DOES carry the franja
+   * line — the heads' wake surface (dept_wake_snapshot is registered for every
+   * agent) needs the CURRENT franja to follow the pacing dispatch discipline. */
   const assembleWakeSnapshot = async (memberId: string): Promise<string> => {
     const messageDelta = await readWakeMessageDelta(memberId)
     return buildWakePack({
@@ -886,6 +946,7 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
       role: 'host',
       messageDelta,
       roster: buildCondensedRoster(),
+      pacing: pacingLine(),
       includeGuidance: false
     })
   }

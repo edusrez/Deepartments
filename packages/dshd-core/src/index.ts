@@ -52,6 +52,11 @@ export * from './lifecycle.js'
 export * from './session-rotation.js'
 export * from './session-cleanup.js'
 export * from './role-orient.js'
+// PACING (owner m-PACING, 2026-08-28): the peak/valley FRANJA domain — the
+// pure UTC window machinery (isPeakAt / pacingStateAt / formatFranjaLine) +
+// the structural PacingConfigLike mirror. Consumed by the wake-pack assembly
+// (this package), the system-health daemon (dshd-health) and the bundle.
+export * from './pacing.js'
 
 // ---------------------------------------------------------------------------
 // FASE 2.5 BATCH B — the dshd-core Cordis plugin surface.
@@ -120,6 +125,17 @@ export interface OrgConfig {
     maxRetiredKept?: number
     archiveFile?: string
     enabled?: boolean
+  }
+  /** PACING (owner m-PACING, 2026-08-28) — the peak/valley FRANJA monitor
+   * config (`org.pacing.*`, mirrors the bundle's org.ts `PacingConfig`).
+   * Optional — absent keys fall through to the CODE defaults (enabled on,
+   * Mon-Fri hours {1,2,3,6,7,8,9} UTC, 30-min edge buffer), delivered VERBATIM
+   * via `deepartments.org` so the dshd-core OWNED wake-pack assembly and the
+   * bundle agree on the SAME shared source. */
+  pacing?: {
+    enabled?: boolean
+    peakWindows?: { weekday?: number[]; hours?: number[] }
+    peakBufferMs?: number
   }
 }
 
@@ -391,6 +407,12 @@ function buildWakePackLazy(ctx: Context, binder: Binder): WakePackService {
     messagesStoreReady: bound.messagesStoreReady!,
     stateDir,
     repoRoot: bound.repoRoot!,
+    // PACING — the franja config from the SHARED CONFIG SOURCE (`deepartments.org`
+    // → the dshd-core org.pacing row): the wake-pack assembly renders the ONE
+    // `## Pacing (franja)` section from it (default ON; an explicit
+    // `pacing.enabled === false` → the section is omitted, the pre-pacing pack).
+    // Absent config → the code defaults (the same defaults the daemon uses).
+    pacing: org.org.pacing,
     logger: ctx.logger
   })
 }

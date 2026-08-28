@@ -53,7 +53,7 @@
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 import { readFileSync, openSync, fstatSync, readSync, closeSync } from 'node:fs'
-import { mkdir, readFile, writeFile, rename, appendFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, rename, appendFile, copyFile } from 'node:fs/promises'
 import path from 'node:path'
 import {
   parseDeliveryRows,
@@ -66,6 +66,13 @@ import {
   BOUND_TEMPLATE_VARS
 } from 'dshd-core'
 import { QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from 'dshd-quality'
+// PACING (owner m-PACING, 2026-08-28) — the peak/valley FRANJA domain: the
+// pure UTC window machinery the transition monitor runs on EVERY tick
+// (isPeakAt / pacingStateAt / pacingWindowFromConfig / countPendingWorkRegister
+// + the structural PacingConfigLike mirror). Same workspace dependency as the
+// registry readers above — no cycle.
+import { isPeakAt, pacingStateAt, pacingWindowFromConfig, countPendingWorkRegister } from 'dshd-core'
+import type { PacingConfigLike, PacingState } from 'dshd-core'
 import type { DeliveryRow, HostEntryLike } from 'dshd-core'
 
 /** The semantic interrupt cancel-cause: a `hook` cause whose `reason` carries
@@ -113,9 +120,47 @@ export interface PostErrorEntry {
 export const POST_ERRORS_FILE = 'post-errors.jsonl'
 /** The bounded record cap of post-errors.jsonl (the oldest lines are trimmed). */
 export const POST_ERRORS_MAX_LINES = 500
+/** The forensia archive of the C9 discard: `<stateDir>/post-errors-archive.jsonl`
+ * — append-only (the durable evidence store; a row the HEALTH_ERROR_WINDOW_MS
+ * window drops from the LIVE file is ARCHIVED here first, never deleted). */
+export const POST_ERRORS_ARCHIVE_FILE = 'post-errors-archive.jsonl'
+/** The LARGE record cap of the post-errors archive (the rotation trigger). The
+ * feedback.jsonl/messages pattern: the live file is tightly bounded (500 rows,
+ * 2h window), the archive is the durable evidence with a large cap + an R6
+ * backup on rotation (the full pre-rotation archive survives in a
+ * `post-errors-archive.jsonl.bak-<ts>-rotate` copy — reversible, never delete
+ * evidence). */
+export const POST_ERRORS_ARCHIVE_MAX_LINES = 50_000
 /** The bounded record cap of health-alerts.jsonl (the oldest audit lines are
  * trimmed on append, mirroring POST_ERRORS_MAX_LINES — C4). */
 export const HEALTH_ALERTS_MAX_LINES = 500
+
+/** Pure row-mapping of post-error JSONL lines (the reader-side validation is the
+ * single source of truth for the row shape: a line without a numeric `ts` or a
+ * string `postId` is dropped, mirroring the append-side C9 filter). */
+function parsePostErrorLines(lines: readonly string[]): PostErrorEntry[] {
+  const out: PostErrorEntry[] = []
+  for (const line of lines) {
+    if (line.trim() === '') continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line)
+    } catch {
+      continue
+    }
+    const entry = parsed as Record<string, unknown>
+    if (typeof entry.ts !== 'number' || typeof entry.postId !== 'string') continue
+    out.push({
+      ts: entry.ts,
+      postId: entry.postId,
+      ...(typeof entry.messageId === 'string' ? { messageId: entry.messageId } : {}),
+      error: typeof entry.error === 'string' ? entry.error : '',
+      ...(typeof entry.jobId === 'string' ? { jobId: entry.jobId } : {}),
+      ...(typeof entry.reason === 'string' ? { reason: entry.reason } : {})
+    })
+  }
+  return out
+}
 
 /** Read `<stateDir>/post-errors.jsonl` → the bounded post-error rows, in file
  * order. Absent / unreadable / malformed → [] (never throws); a malformed line
@@ -127,27 +172,23 @@ export function readPostErrorsFile(stateDir: string): PostErrorEntry[] {
     // window is exactly the most-recent POST_ERRORS_MAX_LINES content rows (a
     // trailing '\n' would otherwise shift the slice by one).
     const lines = text.split('\n').filter((line) => line.trim() !== '').slice(-POST_ERRORS_MAX_LINES)
-    const out: PostErrorEntry[] = []
-    for (const line of lines) {
-      if (line.trim() === '') continue
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(line)
-      } catch {
-        continue
-      }
-      const entry = parsed as Record<string, unknown>
-      if (typeof entry.ts !== 'number' || typeof entry.postId !== 'string') continue
-      out.push({
-        ts: entry.ts,
-        postId: entry.postId,
-        ...(typeof entry.messageId === 'string' ? { messageId: entry.messageId } : {}),
-        error: typeof entry.error === 'string' ? entry.error : '',
-        ...(typeof entry.jobId === 'string' ? { jobId: entry.jobId } : {}),
-        ...(typeof entry.reason === 'string' ? { reason: entry.reason } : {})
-      })
-    }
-    return out
+    return parsePostErrorLines(lines)
+  } catch {
+    return []
+  }
+}
+
+/** Read `<stateDir>/post-errors-archive.jsonl` → the ARCHIVED post-error rows
+ * (the append-only forensia archive the C9 discard fills — see
+ * `archivePostErrorLines`), in file order (oldest first). Absent / unreadable /
+ * malformed → [] (never throws); a malformed line is dropped, mirroring
+ * `readPostErrorsFile`. Sliced to the archive cap so an oversized raw-written
+ * archive still reads bounded (the rotation keeps it ≤ the cap anyway). */
+export function readPostErrorsArchiveFile(stateDir: string): PostErrorEntry[] {
+  try {
+    const text = readFileSync(path.join(stateDir, POST_ERRORS_ARCHIVE_FILE), 'utf8')
+    const lines = text.split('\n').filter((line) => line.trim() !== '').slice(-POST_ERRORS_ARCHIVE_MAX_LINES)
+    return parsePostErrorLines(lines)
   } catch {
     return []
   }
@@ -159,6 +200,10 @@ export function readPostErrorsFile(stateDir: string): PostErrorEntry[] {
  * (`scanPostErrorFindings`), so a row the scan can never alert is pure hygiene
  * to drop), and the file stays capped to the most-recent POST_ERRORS_MAX_LINES
  * surviving rows (read + append + window-discard + slice-most-recent on write).
+ * ARCHIVE-ON-DISCARD (forensia): BEFORE the C9 discard drops an expired row
+ * from the live file, the row is appended to the durable archive
+ * `<stateDir>/post-errors-archive.jsonl` (see `archivePostErrorLines`) — the
+ * evidence NEVER vanishes, the live file keeps its tight bounding (C9 intact).
  * `nowMs` is injectable (default Date.now()) so tests are deterministic; every
  * production call-site ends a fresh `ts` nearby `now`, so nothing observable
  * changes there. mkdir -p the dir first; a malformed/nonexistent file degrades
@@ -179,18 +224,63 @@ export async function appendPostError(stateDir: string, entry: PostErrorEntry, n
   // line that fails to parse (e.g. a crash-mid-append partial) is KEPT (the
   // read side drops it anyway), and a row without a numeric ts is KEPT too (the
   // reader-side validation is the single source of truth for the row shape).
-  const inWindow = lines.filter((line) => {
+  // ARCHIVE-ON-DISCARD: the rows the window filter EXPIRES are archived (never
+  // deleted) before they leave the live file; the fresh rows go through the
+  // unchanged cap-slice.
+  const inWindow: string[] = []
+  const expired: string[] = []
+  for (const line of lines) {
     let parsed: unknown
     try {
       parsed = JSON.parse(line)
     } catch {
-      return true
+      inWindow.push(line)
+      continue
     }
     const row = parsed as { ts?: unknown }
-    return typeof row.ts !== 'number' || nowMs - row.ts <= HEALTH_ERROR_WINDOW_MS
-  })
+    if (typeof row.ts !== 'number' || nowMs - row.ts <= HEALTH_ERROR_WINDOW_MS) inWindow.push(line)
+    else expired.push(line)
+  }
+  if (expired.length > 0) await archivePostErrorLines(stateDir, expired, nowMs)
   const bounded = inWindow.slice(-POST_ERRORS_MAX_LINES)
   await writeFile(filePath, bounded.join('\n') + '\n', 'utf8')
+}
+
+/** Append the C9-expired rows to the durable evidence archive
+ * `<stateDir>/post-errors-archive.jsonl` — append-only, the forensia half of
+ * the discard: evidence is ARCHIVED, never deleted. R6 rotation when the
+ * archive grows past POST_ERRORS_ARCHIVE_MAX_LINES: FIRST a FULL pre-rotation
+ * backup (`post-errors-archive.jsonl.bak-<ts>-rotate` — the whole archive,
+ * new batch included, survives byte-for-byte → reversible), THEN the archive is
+ * rewritten holding the newest POST_ERRORS_ARCHIVE_MAX_LINES rows. The new
+ * batch lands FIRST (a failed rotation aborts the trim, never the batch — an
+ * over-cap archive stays intact until a backup succeeds). Best-effort (never
+ * throws): a persist failure degrades silently — the live C9 append must still
+ * land. */
+async function archivePostErrorLines(stateDir: string, lines: readonly string[], nowMs: number): Promise<void> {
+  const archivePath = path.join(stateDir, POST_ERRORS_ARCHIVE_FILE)
+  await mkdir(path.dirname(archivePath), { recursive: true })
+  try {
+    const existing: string[] = []
+    try {
+      const text = await readFile(archivePath, 'utf8')
+      existing.push(...text.split('\n').filter((line) => line.trim() !== ''))
+    } catch {
+      /* ENOENT or unreadable → a cold archive; existing stays [] */
+    }
+    const merged = [...existing, ...lines]
+    await appendFile(archivePath, lines.join('\n') + '\n', 'utf8')
+    if (merged.length > POST_ERRORS_ARCHIVE_MAX_LINES) {
+      const backupPath = path.join(stateDir, `post-errors-archive.jsonl.bak-${nowMs}-rotate`)
+      await copyFile(archivePath, backupPath)
+      const kept = merged.slice(-POST_ERRORS_ARCHIVE_MAX_LINES)
+      await writeFile(archivePath, kept.join('\n') + '\n', 'utf8')
+    }
+  } catch {
+    /* a failed archive is a silent best-effort (never throws — the live C9
+       append still lands); a failed BACKUP aborts the trim, so the over-cap
+       archive stays intact: evidence is never truncated without a backup */
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -330,12 +420,19 @@ export interface HealthFinding {
    * the anti-hang guarantee over the worker-retire trigger) and M4 adds
    * `system-idle` (the GLOBAL-quiet watchdog: zero catalog agents running for
    * >= `idleWindowMs` while SOME post still has pending work — the
-   * 'the system stopped and the expected continuation never arrived' alarm). */
-  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle'
+   * 'the system stopped and the expected continuation never arrived' alarm).
+    * M-A adds `context-threshold` (the context-pressure monitor: a post OR the
+    * host using more than `contextThreshold` of its session context window —
+    * a live agent on track to run out of context; the dedupe KEY is per-BAND
+    * `context-threshold:<agentId>:b<floor(pct*10)>`). */
+  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold'
   /** The dedupe key (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS). */
   key: string
-  /** The postId (post-error / stalled-post). */
+  /** The postId (post-error / stalled-post / context-threshold post row). */
   postId?: string
+  /** The hostId (the context-threshold HOST row — the live host's own context
+   * pressure; a host row has NO postId — the M4 host-not-a-pseudo-post rule). */
+  hostId?: string
   /** The messageId (delivery-failed) — the bus record that failed delivery. */
   messageId?: string
   /** The most-recent row ts of the group (ms epoch). */
@@ -1607,6 +1704,15 @@ export interface HealthConfigLike {
      * `deps.poolerStatePath`, override `health.poolerStateFilePath`) SOLO-LECTURA:
      * the pooler owns every write, the watchdog never writes it. */
     poolerCapacityEnabled?: boolean
+    /** DISPATCH-HARDENING (QH «429-primer-call», 2026-08-28) — the DISPATCH
+     * pre-check gate (default ON; explicit false restores the pre-check-less
+     * dispatch). When ON, the worker/head dispatch seams reject LOUDLY and
+     * EARLY when the pooler snapshot certifies NO workspace can serve the
+     * spawn's first call (zero usable keys, every usable key at/above
+     * `highPercent`, or a last 429 rotation to no key). Reads the SAME
+     * `<dshHome>/keyPooler-state.json` SOLO-LECTURA; absent/stale → passthrough
+     * (conservative — the pre-check is a warning, never a blocker). */
+    poolerDispatchEnabled?: boolean
     /** M1 — ≤ this many USABLE keys (same eligibility the pooler uses:
      * `!invalid && blockedUntil<=now && cooldownUntil<=now`) → a
      * `pooler-capacity:warning` finding (default 2). */
@@ -1655,6 +1761,30 @@ export interface HealthConfigLike {
      * than the 30-min per-message system-wait threshold because global quiet is
      * graver than one per-message wait). */
     idleWindowMs?: number
+    /** M-A — the context-threshold watchdog gate (default ON; explicit false
+     * disables the context-pressure monitor). */
+    contextThresholdEnabled?: boolean
+    /** M-A — the session-context window-usage FRACTION that alerts: a post or
+     * the host using MORE than this of its contextWindow (projected tokens /
+     * window) → a `context-threshold` finding + host ALERT (default 0.5 = the
+     * 50% trigger). A fraction in (0,1); absent/invalid → 0.5. */
+    contextThreshold?: number
+    /** M-A — the context-threshold scan cadence in ms (default 60000 = the
+     * per-minute WAIT pattern): the scan runs at most once per
+     * `contextThresholdPollMs` bucket (the first tick of a bucket; a faster
+     * `health.intervalMs` re-fire inside the SAME bucket skips the scan).
+     * Absent/invalid → 60000. */
+    contextThresholdPollMs?: number
+  }
+  /** PACING (owner m-PACING, 2026-08-28) — the top-level `org.pacing.*`
+   * franja config the transition monitor reads (the bundle passes its whole
+   * Config cast structurally; `config.org.pacing` mirrors the bundle org.ts
+   * PacingConfig → the dshd-core PacingConfigLike). ABSENT → the code defaults
+   * (enabled ON, weekday [1..5], hours {1,2,3,6,7,8,9} UTC, peakBufferMs
+   * 1800000 = 30 min); an explicit `org.pacing.enabled === false` restores the
+   * pre-pacing behavior (no transition monitor, no notices). */
+  org?: {
+    pacing?: PacingConfigLike
   }
 }
 
@@ -1721,10 +1851,28 @@ export interface HealthDaemonDeps {
    * unknown liveness never fabricates a global-quiet ALERT; the
    * `poolerStatePath`-absent pattern). */
   hostRunning?: boolean
+  /** M-A — the per-agent session-context rows the context-threshold scan reads:
+   * one row per non-retired post + the live host's OWN row (hostId, no
+   * postId — the M4 host-not-a-pseudo-post rule), with the token-meter
+   * `contextPressure` projection numbers (contextWindow / pressureTokens /
+   * surfaceTokens / sampledSurfaceTokens) resolved LIVE by the bundle from the
+   * in-process `ctx.sessionProjections` service (`stateOf(session,
+   * 'contextPressure')` — the eager-driven, zero-I/O projection; the durable
+   * session_projcache.json is only its cross-process mirror). ABSENT
+   * (undefined) → the context-threshold scan is a NO-OP (a wiring that cannot
+   * resolve the projection registry can never certify window usage; unknown
+   * pressure never fabricates an alert — the hostRunning/poolerStatePath-
+   * absent pattern). CONSUMED ONE — the tick materializes it once. */
+  sessionContexts?: Iterable<SessionContextInput>
   /** Deliver the framed ALERT bus message to the host (production:
    * messagesStoreReady.append + busDeliverToHost; tests: a recording stub).
    * NEVER throws. */
   notifyHost(hostEntry: HostEntryLike, alertFrame: string): Promise<void>
+  /** PACING (owner m-PACING, 2026-08-28) — the absolute path of the repo's
+   * WORK-REGISTER.md (docs/WORK-REGISTER.md in the bundle wiring), read ONLY
+   * at a VALLE transition for the «reanuda; despachos diferidos: N» count.
+   * ABSENT (or unreadable) → the notice omits the count (never throws). */
+  workRegisterPath?: string
   /** Optional warn-capable logger (absent dep → the warn is dropped). */
   logger?: { warn(message: string): void; info(message: string): void }
 }
@@ -2165,6 +2313,94 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
   return []
 }
 
+/** DISPATCH-HARDENING (QH — the «429-primer-call» class; 2026-08-28) — the
+ * POOLER-CAPACITY DISPATCH PRE-CHECK (the BEFORE half; the AFTER half is the
+ * b5-ghost live-post guard). The worker/head dispatch seams (runJobForDepartment
+ * / spawnWorkerForDepartment / dept_post_create / the materializePost resume
+ * seam — the SAME 3+1 seams as the fb-9 reasoning-content pre-flight) reject
+ * the dispatch LOUDLY and EARLY when the pooler snapshot certifies that NO
+ * workspace can serve the spawn's FIRST call — the class where a freshly
+ * spawned worker's very first LLM turn would 429/503 (burning the
+ * materialization). READS the pooler's OWN `keyPooler-state.json` SOLO-LECTURA
+ * (the pooler owns every write; this check never writes it) — the same reader
+ * the M1 watchdog uses. CONSERVATIVE — the pre-check is a warning, never a
+ * blocker: absent / unreadable / STALE state → passthrough (unknown ≠
+ * exhausted — a quiet-but-healthy grid looks stale by design, the M1 rule);
+ * only the CERTAIN exhaustion branches block (zero usable keys, EVERY usable
+ * key at/above the highPercent quota — the «AGOTADOS (percent>=umbral)» pooler
+ * criterion — or the last rotation was a 429 usage-limit to NO key, the 503
+ * prelude). An explicit `health.poolerDispatchEnabled: false` knob restores
+ * the pre-check-less dispatch (the M1 `poolerCapacityEnabled` pattern). */
+export interface PoolerDispatchBlockResult {
+  /** The CLEAR EARLY error for the dispatch seam — names the at-quota
+   * workspaces + the «dispatch delayed; retry when a fresh key resolves»
+   * guidance. */
+  reason: string
+}
+
+/** Resolve the pooler-capacity dispatch pre-check for ONE dispatch: read the
+ * pooler snapshot and return a block verdict ONLY on the CERTAIN exhaustion
+ * branches, or `undefined` (passthrough — the dispatch proceeds) otherwise.
+ * Never throws. `knobs.highPercent` (default 90) is the at-quota usage
+ * threshold; `knobs.stateStaleMs` (default 10 min = the M1 default) is the
+ * freshness window — STALE state is UNKNOWN → passthrough + a logger warn
+ * naming the age (the M1 dead-man's-switch rule: the pooler writes the file
+ * only on health changes, so a quiet grid looks stale by design; the CERTAIN
+ * branches below never rely on freshness). */
+export function resolvePoolerDispatchBlock(
+  statePath: string,
+  nowMs: number,
+  knobs: { highPercent: number; stateStaleMs: number },
+  logger?: { warn(message: string): void }
+): PoolerDispatchBlockResult | undefined {
+  const state = readPoolerStateFile(statePath)
+  if (state === undefined) return undefined
+  const updatedMs = state.updatedAt !== undefined ? Date.parse(state.updatedAt) : Number.NaN
+  if (!Number.isFinite(updatedMs) || nowMs - updatedMs > knobs.stateStaleMs) {
+    const ageMin = Number.isFinite(updatedMs) ? Math.round((nowMs - updatedMs) / 60000) : Number.NaN
+    logger?.warn(Number.isFinite(ageMin)
+      ? `pooler state unknown/stale (age ${ageMin} min) — dispatch pre-check passes conservatively (unknown ≠ exhausted)`
+      : `pooler state unknown/stale (unparseable updatedAt) — dispatch pre-check passes conservatively (unknown ≠ exhausted)`)
+    return undefined
+  }
+  const keys = Object.values(state.keys ?? {})
+  const usable = keys.filter((k) => !k.invalid && (Number(k.blockedUntil) || 0) <= nowMs && (Number(k.cooldownUntil) || 0) <= nowMs)
+  // The workspace(s) the at-quota keys belong to (the pooler's `workspace`
+  // field, e.g. wrk_…/ws6; a key without one falls back to its id).
+  const workspaceNames = (list: PoolerKeyStateLike[]): Set<string> =>
+    new Set(list.map((k) => String(k.workspace ?? k.id ?? '').trim()).filter((w) => w !== ''))
+  const atQuotaReason = (blocked: PoolerKeyStateLike[], total: number, cause: string): string => {
+    const names = workspaceNames(blocked)
+    const head = [...names].slice(0, 3).join(',')
+    const ws = names.size > 3 ? `${head},… (${names.size} at quota)` : head
+    return `pool: workspace${names.size === 1 ? '' : 's'} ${ws === '' ? '(all)' : ws} at quota (${cause}; ${blocked.length}/${total} keys) — dispatch delayed; retry when a fresh key resolves`
+  }
+  // (1) ZERO usable keys — every workspace is blocked/cooldown/invalid; the
+  // FIRST call of the spawn would find NO usable key (the 503
+  // KeyPoolerExhausted / 429-primer-call class). CERTAIN → block.
+  if (usable.length === 0) {
+    return { reason: atQuotaReason(keys, keys.length, '0 usable keys — all blocked/cooldown/invalid') }
+  }
+  // (2) EVERY usable key is at/above the highPercent usage quota (the
+  // x-ratelimit leading indicator — the pooler's own highPercent criterion).
+  // The pool can still serve, but every workspace is HOT: the first call may
+  // 429 on the rate-limit headroom. CERTAIN-enough → block.
+  const hot = usable.filter((k) => typeof k.lastUsage?.percent === 'number' && (k.lastUsage?.percent ?? 0) >= knobs.highPercent)
+  if (hot.length > 0 && hot.length === usable.length) {
+    return { reason: atQuotaReason(hot, keys.length, `usage percent >= ${knobs.highPercent}% on every usable key`) }
+  }
+  // (3) The 429-usage-limit rotation to NO key (the M1 CRITICAL branch — the
+  // pool rotated a key OUT and NO other key was eligible): the pool is one
+  // request away from the 503 KeyPoolerExhausted — blocking the dispatch NOW
+  // avoids the primer-call 429/503 (the M1 "alert BEFORE paralysis" intent,
+  // applied to the dispatch). CERTAIN → block.
+  const rotation = state.lastRotation ?? undefined
+  if (rotation !== undefined && rotation.to === null && (rotation.reason ?? '').includes('429')) {
+    return { reason: `pool: last rotation 429 usage-limit → no key (to:null; 503 prelude) — dispatch delayed; retry when a fresh key resolves (${usable.length}/${keys.length} usable)` }
+  }
+  return undefined
+}
+
 /** The qi-silence ledger: `postId → firstSeenRetiredMs` — when the watchdog
  * FIRST observed the post as retired+worker in the catalog (posts.json has no
  * retiredAt, so the ledger IS the retirement timestamp; the turn-errors-state
@@ -2514,6 +2750,134 @@ export function scanSystemIdle(input: SystemIdleScanInput): SystemIdleScanResult
   return { findings, ledger, changed, quietWithoutPending: false }
 }
 
+// M-A — the context-threshold watchdog (owner request directa 2026-08-28,
+// mission M-A MONITOR de contexto — the 50% trigger): a post OR the host uses
+// MORE than `contextThreshold` (default 0.5) of its session context window →
+// a `context-threshold` finding + host ALERT through the EXISTING
+// findings→dedupe→notifyHost flow. The percent comes from the token-meter's
+// `contextPressure` projection (contextWindow / pressureTokens /
+// surfaceTokens / sampledSurfaceTokens), read by the bundle live in-process
+// via `ctx.sessionProjections.snapshot(session).values.contextPressure` (the
+// eager-driven, zero-I/O WIRE VIEW — the version-agnostic common surface of
+// dsh-session-projection) and passed as the structural dep
+// `deps.sessionContexts` (the package stays MODO LIB, no harness import).
+// DEDUPE BY BAND (mission decision — no ledger of its own): the finding key
+// is `context-threshold:<agentId>:b<floor(pct*10)>`, so the SHARED
+// health-alerts ledger gives exactly the wanted cadence —
+//   * a BAND CROSSING (52% → 61%) is a NEW key → an IMMEDIATE re-alert (the
+//     mission's «re-alerta cuando cruza cada 10% más») even inside the 30-min
+//     window of the previous band;
+//   * a PERSISTENT band re-alerts every HEALTH_DEDUPE_WINDOW_MS (30 min) while
+//     the condition still holds (the qi-silence/M4 «nunca one-shot» precedent);
+//   * the shared 2h defensive prune is safe: band keys are per-agent bands,
+//     a ≥2h-old key is already immune to the 30-min window.
+// KINDS/KEYS DISJOINT from M4/system-idle and M1/pooler-capacity/qi-silence —
+// the same tick composes all of them (system-idle says «nadie corre»;
+// context-threshold says «alguien se está quedando sin contexto»). The scan
+// NEVER reads settings.yaml (`contextWindow` is carried per-request by the
+// projection) and NEVER fabricates a false positive: a row WITHOUT a resolved
+// `contextWindow` (a session that never emitted a request/context — inactive)
+// is SKIPPED (0% safe). `deps.sessionContexts` ABSENT → the tick no-ops the
+// whole scan (the hostRunning/poolerStatePath-absent pattern).
+// ---------------------------------------------------------------------------
+
+/** M-A — the default context threshold: the 50% window-usage trigger. */
+export const CONTEXT_THRESHOLD_DEFAULT = 0.5
+/** M-A — the default scan cadence (per-minute — the WAIT per-minute gate
+ * pattern); a sub-minute daemon tick re-fires inside the same bucket and skips
+ * the scan. */
+export const CONTEXT_THRESHOLD_DEFAULT_POLL_MS = 60_000
+
+/** M-A — ONE session-context input row: the token-meter `contextPressure`
+ * projection numbers for one agent (a post or the host). All numeric fields
+ * are OPTIONAL — a row with a missing/invalid `contextWindow` is skipped by
+ * the scan (never a false positive), a row with no numbers at all is a no-op. */
+export interface SessionContextInput {
+  /** The catalog postId (a post row). EXACTLY ONE of postId/hostId is set. */
+  postId?: string
+  /** The hostId (the live host's OWN row — no postId; the M4
+   * host-not-a-pseudo-post rule). */
+  hostId?: string
+  /** The session contextWindow (the denominator, carried by the projection
+   * from the last request/context — never read from settings.yaml here). */
+  contextWindow?: number
+  /** The provider pressure tokens (the numerator base). */
+  pressureTokens?: number
+  /** The surface tokens (added to the numerator). */
+  surfaceTokens?: number
+  /** The sampled surface tokens (subtracted from the numerator). */
+  sampledSurfaceTokens?: number
+  /** The token-meter WIRE-VIEW projected numerator
+   * (`max(0, pressureTokens + surfaceTokens − sampledSurfaceTokens)`): the
+   * bundle reads the version-agnostic `snapshot()` wire view, which already
+   * publishes this. Absent → the scan derives it from the raw fields (a
+   * raw-state wiring fallback). */
+  projectedTokens?: number
+}
+
+/** M-A — the context-threshold scan inputs. */
+export interface ContextThresholdScanInput {
+  /** The per-agent context rows (ALREADY materialized by the tick — zero new
+   * I/O). */
+  rows: readonly SessionContextInput[]
+  /** The resolved threshold fraction (knob `contextThreshold` or the 0.5 code
+   * default). */
+  threshold: number
+  /** The clock (ms epoch) — stamped into the finding ts. */
+  nowMs: number
+}
+
+/** M-A — build the per-BAND dedupe key: `context-threshold:<agentId>:b<band>`
+ * (band = floor(pct*10): 52% → b5, 61% → b6). A band crossing is a NEW key →
+ * an immediate re-alert; a persistent band re-alerts at the shared 30-min
+ * cadence — the mission's dedupe-by-band decision, no ledger of its own. */
+export function contextThresholdKey(agentId: string, band: number): string {
+  return `context-threshold:${agentId}:b${band}`
+}
+
+/** M-A — scan the context-pressure threshold (PURE, NEVER throws). For every
+ * row with a viable `contextWindow`: project the used tokens — the wire-view
+ * `projectedTokens` when present (the bundle's snapshot wiring already
+ * publishes it), else `max(0, pressureTokens + surfaceTokens −
+ * sampledSurfaceTokens)` when `pressureTokens` is present (the raw-state
+ * formula), else the surface-only heuristic fallback (a pre-first-request
+ * session — conservative, never over-counts) — and alert when
+ * `pct = projected / window` EXCEEDS `input.threshold`. Each finding carries
+ * the per-(agent,band) dedupe key and an informative error line
+ * (`<agent> <pct>% (<proj>/<win>) — cruce b<band>`) so every 30-min re-alert
+ * of a persistent band stays readable. */
+export function scanContextThreshold(input: ContextThresholdScanInput): HealthFinding[] {
+  const findings: HealthFinding[] = []
+  for (const row of input.rows) {
+    const agentId = row.postId ?? row.hostId
+    if (agentId === undefined || agentId === '') continue
+    // No viable denominator → skip (a session without any request/context is
+    // inactive — 0% safe; never a false positive).
+    if (typeof row.contextWindow !== 'number' || !Number.isFinite(row.contextWindow) || row.contextWindow <= 0) continue
+    let projected: number
+    if (typeof row.projectedTokens === 'number' && Number.isFinite(row.projectedTokens)) {
+      projected = Math.max(0, row.projectedTokens)
+    } else if (typeof row.pressureTokens === 'number' && Number.isFinite(row.pressureTokens)) {
+      const surface = typeof row.surfaceTokens === 'number' && Number.isFinite(row.surfaceTokens) ? row.surfaceTokens : 0
+      const sampled = typeof row.sampledSurfaceTokens === 'number' && Number.isFinite(row.sampledSurfaceTokens) ? row.sampledSurfaceTokens : 0
+      projected = Math.max(0, row.pressureTokens + surface - sampled)
+    } else {
+      projected = typeof row.surfaceTokens === 'number' && Number.isFinite(row.surfaceTokens) ? row.surfaceTokens : 0
+    }
+    const pct = projected / row.contextWindow
+    if (pct <= input.threshold) continue
+    const band = Math.floor(pct * 10)
+    findings.push({
+      kind: 'context-threshold',
+      key: contextThresholdKey(agentId, band),
+      ...(row.postId !== undefined ? { postId: row.postId } : { hostId: row.hostId }),
+      ts: input.nowMs,
+      error: `${agentId} ${Math.round(pct * 100)}% (${projected}/${row.contextWindow}) — cruce b${band}`
+    })
+  }
+  return findings
+}
+
 /** Build the framed host ALERT text — `[From deepartments] System-health ALERT:
  * <grouped findings>`. Each finding is a one-line bullet. The config-preset and
  * stalled-post bullets describe their anomaly verbally (never the literal
@@ -2547,9 +2911,108 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     if (finding.kind === 'system-idle') {
       return `- system-idle: ${finding.error ?? `${finding.count ?? 0} pendiente(s) sin agente running — posible espera que nunca llegó`}`
     }
+    // M-A — the context-threshold branch (NEVER let it reach the stale-post
+    // fallback). The owner-facing wording is the finding's own line (agent +
+    // percent + tokens/window + the band crossed — the error carries the FULL
+    // line so every 30-min per-band re-alert stays informative).
+    if (finding.kind === 'context-threshold') {
+      return `- context-threshold: ${finding.error ?? `${finding.postId ?? finding.hostId} context window usage above the threshold`}`
+    }
     return `- stalled-post: ${finding.postId} (${finding.count ?? 1} pending message(s), ${finding.error ?? 'no session activity'})`
   })
   return `[From deepartments] System-health ALERT:\n${lines.join('\n')}`
+}
+
+// ---------------------------------------------------------------------------
+// PACING — the peak/valley FRANJA transition monitor (owner m-PACING,
+// 2026-08-28, pacing/coste MEDIUM — the gate that reduces 429s and cost).
+//
+// The org lives in BURST mode around the owner's off-peak/peak pricing
+// boundary; the FRANJA state is a pure UTC clock fact (dshd-core src/pacing.ts
+// — the MIRROR of the dsh-key-pooler peak definition, crossed by comment).
+// The daemon computes the current franja on EVERY tick and, on a TRANSITION,
+// delivers EXACTLY ONE durable bus notice to the host:
+//   - ENTERING PEAK (valle → peak)  → «pausa de nuevos despachos» (new
+//     host→department dispatches pause; in-flight continues);
+//   - ENTERING VALLE (peak → valle) → «reanuda; despachos diferidos: N» (the N
+//     is the WORK-REGISTER pending queue count when legible — the deferred
+//     dispatches ARE the pending WORK-REGISTER items, there is NO new data
+//     queue; unreadable → the count is omitted).
+//
+// CHANNEL (no-perdible): the notice rides the SAME notifyHost seam as the
+// health ALERTs — the bundle wiring store.append()s a DURABLE bus record and
+// busDeliverToHost(..., { interrupt: true }) PREEMPTS a busy host turn (C8 —
+// the delivery goes DIRECT, never through the delivery engine, so no
+// 'prepared'/'failed' row can ever re-alert it).
+//
+// DETECTION + DEDUPE:
+//   - the PREVIOUS franja is the DURABLE `<stateDir>/pacing-state.json`
+//     baseline (survives restarts — the qi-silence/sidecar precedent);
+//   - the EMISSION dedupe rides the SHARED health-alerts-state.json ledger
+//     (key 'pacing-transition' → lastEmittedAtMs — a re-emission inside
+//     HEALTH_DEDUPE_WINDOW_MS is impossible even when a crash loses the
+//     baseline write between emit and persist);
+//   - FIRST BOOT (no baseline): the current franja is RECORDED, NOTHING is
+//     emitted — a boot mid-peak cannot know when the entry transition
+//     happened (the window may be long past) and the wake pack already carries
+//     the CURRENT franja (the pack injection covers the state; documented
+//     decision — the only "boot in peak" notices that CAN exist are fast
+//     restarts, and the durable baseline + ledger dedupe still block any
+//     duplicate);
+//   - NO live host → the notice is SKIPPED and the baseline is NOT advanced
+//     (it retries on a later tick — the no-perdible contract).
+// KNOB: `org.pacing.enabled === false` → the monitor is a NO-OP (the
+// pre-pacing / R6-legacy behavior — no watches, no notices).
+// ---------------------------------------------------------------------------
+
+/** The pacing durable baseline file (the PREVIOUS franja; survives restarts —
+ * a SEPARATE file like system-idle-state.json — the shared ledgers here hold
+ * timestamps, not values). */
+export const PACING_STATE_FILE = 'pacing-state.json'
+/** The pacing emission Dedupe key in the SHARED health-alerts ledger (≤1
+ * 'pacing-transition' delivery inside HEALTH_DEDUPE_WINDOW_MS — the exact
+ * invariant of every other key in that ledger). */
+export const PACING_TRANSITION_KEY = 'pacing-transition'
+
+/** The pacing durable baseline: the franja observed at the last transition
+ * (or first boot) + when it was recorded. */
+export interface PacingDurableState {
+  franja: 'peak' | 'valle'
+  /** The ms epoch when the baseline was recorded. */
+  at: number
+}
+
+/** Read `<stateDir>/pacing-state.json` → the durable baseline. Absent /
+ * unreadable / malformed → undefined (the first-boot case; never throws). */
+export function readPacingState(stateDir: string): PacingDurableState | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, PACING_STATE_FILE), 'utf8')) as Record<string, unknown>
+    if (parsed.franja !== 'peak' && parsed.franja !== 'valle') return undefined
+    if (typeof parsed.at !== 'number' || !Number.isFinite(parsed.at)) return undefined
+    return { franja: parsed.franja, at: parsed.at }
+  } catch {
+    return undefined
+  }
+}
+
+/** Write `<stateDir>/pacing-state.json` (mkdir -p the dir, then the file). */
+export async function writePacingState(stateDir: string, state: PacingDurableState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, PACING_STATE_FILE)), { recursive: true })
+  await writeFile(path.join(stateDir, PACING_STATE_FILE), JSON.stringify(state), 'utf8')
+}
+
+/** Build the pacing transition bus notice (the PEAK pause / VALLE resume frame
+ * delivered to the host — the same `[From deepartments] …` frame convention as
+ * the system-wait wake). `deferredCount` is the WORK-REGISTER pending count for
+ * the VALLE notice; UNDEFINED → the count is OMITTED (the register was not
+ * legible). PURE. */
+export function buildPacingTransitionFrame(state: PacingState, deferredCount?: number): string {
+  const span = `[${state.span}] UTC`
+  if (state.peak) {
+    return `[From deepartments] Pacing PEAK: pausa de nuevos despachos a departamentos (los in-flight continúan); franja PEAK ${span} — hasta ${state.untilHhMm} UTC`
+  }
+  const count = deferredCount === undefined ? '' : `; despachos diferidos: ${deferredCount} (cola del WORK-REGISTER)`
+  return `[From deepartments] Pacing VALLE: reanuda los despachos a departamentos${count}; franja VALLE — próximo PEAK hasta ${state.untilHhMm} UTC`
 }
 
 /** ONE system-health tick: (1) write the heartbeat; (2) W8-c turn-failure
@@ -2559,7 +3022,11 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
  * `deps.poolerStatePath` is injected; qi-silence: the retirement/directive
  * silence guarantee) + the M4 system-idle watchdog (GLOBAL quiet: zero agents
  * running >= `idleWindowMs` with pending work — runs only when the bundle
- * resolved `deps.hostRunning`; expected quiet → warn-only) for anomalies
+ * resolved `deps.hostRunning`; expected quiet → warn-only) + the M-A
+ * context-threshold watchdog (context-pressure: a post or the host over
+ * `contextThreshold` of its window — runs only when the bundle resolved
+ * `deps.sessionContexts` from the in-process sessionProjections service; the
+ * per-`contextThresholdPollMs` bucket gate; dedupe by band) for anomalies
  * inside HEALTH_ERROR_WINDOW_MS; (4) dedupe
  * per key inside
  * HEALTH_DEDUPE_WINDOW_MS (persisted to health-alerts-state.json so the ≤1
@@ -2570,7 +3037,9 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
  * `staleLiveMinutes`, `presetAuditEnabled` — and the M1 watchdog knobs
  * (`poolerCapacityEnabled` + the pooler thresholds / `qiSilenceEnabled` +
  * `qiSilenceWindowMinutes` + `qiSilenceMinRetiresInWindow`) + the M4 knob
- * (`systemIdleEnabled` + `idleWindowMs`). NEVER throws
+ * (`systemIdleEnabled` + `idleWindowMs`) + the M-A knob
+ * (`contextThresholdEnabled` + `contextThreshold` + `contextThresholdPollMs`).
+ * NEVER throws
  * (every internal
  * failure is a warn). If no host is registered the anomaly is NOT deduped (it
  * retries — a real deployment without a reachable host must not silently
@@ -2665,6 +3134,23 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // 15-min code default via the shared resolvePositiveKnob pattern).
     const systemIdleEnabled = health?.systemIdleEnabled !== false
     const systemIdleWindowMs = resolvePositiveKnob(health?.idleWindowMs, SYSTEM_IDLE_DEFAULT_WINDOW_MS)
+    // M-A — the context-threshold watchdog knobs: `contextThresholdEnabled`
+    // gate (default ON) + `contextThreshold` (the window-usage fraction that
+    // alerts; absent/invalid → the 0.5 code default — an explicit knob always
+    // wins, a broken one never throws) + `contextThresholdPollMs` (the scan
+    // cadence; absent/invalid → the 60 s code default via resolvePositiveKnob).
+    // The per-poll BUCKET gate derives from the pre-overwrite heartbeat (read
+    // above): currentContextBucket = floor(nowMs/pollMs),
+    // prevContextBucket = floor(prevTick.ts/pollMs) — the scan runs only when
+    // they DIFFER (the FIRST tick of a bucket; prevTick undefined → runs).
+    const contextThresholdEnabled = health?.contextThresholdEnabled !== false
+    const contextThreshold =
+      typeof health?.contextThreshold === 'number' && Number.isFinite(health.contextThreshold) && health.contextThreshold > 0 && health.contextThreshold < 1
+        ? health.contextThreshold
+        : CONTEXT_THRESHOLD_DEFAULT
+    const contextThresholdPollMs = resolvePositiveKnob(health?.contextThresholdPollMs, CONTEXT_THRESHOLD_DEFAULT_POLL_MS)
+    const currentContextBucket = Math.floor(nowMs / contextThresholdPollMs)
+    const prevContextBucket = prevTick !== undefined ? Math.floor(prevTick.ts / contextThresholdPollMs) : undefined
     const posts = [...(deps.posts ?? [])]
     // Bug (delivery-failed re-alert loop): the set of RETIRED member ids — the
     // union of the retired HOST ids (already computed above) and the RETIRED
@@ -2760,6 +3246,27 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         deps.logger?.warn(`[deepartments] system-health: system-idle scan failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    // M-A — the context-threshold watchdog (the context-pressure monitor).
+    // Gate: enabled AND `deps.sessionContexts` RESOLVED (the bundle builds the
+    // rows from the in-process `ctx.sessionProjections` token-meter projection;
+    // ABSENT → the scan is a NO-OP — unknown context pressure never fabricates
+    // an alert; the hostRunning/poolerStatePath-absent pattern) AND the
+    // per-poll bucket turned (the WAIT per-minute precedent generalized: the
+    // FIRST tick of a `contextThresholdPollMs` bucket runs the scan, a re-fire
+    // inside the SAME bucket skips it). Zero I/O (the projections are
+    // materialized in-process); the findings join the shared array — kinds/keys
+    // DISJOINT from system-idle/qi-silence/pooler-capacity
+    // (`context-threshold:<agentId>:b<band>`), so the same tick composes them
+    // without collision; the shared 30-min dedupe gives the re-alert cadence
+    // per band, no ledger of its own.
+    let contextFindings: HealthFinding[] = []
+    if (contextThresholdEnabled && deps.sessionContexts !== undefined && currentContextBucket !== prevContextBucket) {
+      try {
+        contextFindings = scanContextThreshold({ rows: [...(deps.sessionContexts ?? [])], threshold: contextThreshold, nowMs })
+      } catch (error: unknown) {
+        deps.logger?.warn(`[deepartments] system-health: context-threshold scan failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     // 3. scan.
     const findings = [
       ...scanPostErrorFindings(deps.stateDir, nowMs, retiredHostIds),
@@ -2768,7 +3275,8 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       ...(staleLiveWatchdogEnabled ? scanStalledPosts(posts, nowMs, staleLiveMinutes) : []),
       ...poolerFindings,
       ...qiFindings,
-      ...systemIdleFindings
+      ...systemIdleFindings,
+      ...contextFindings
     ]
     // W8-d PART B/C — the system-heartbeat knobs: `heartbeatEnabled` (default
     // on) gates the CONDITIONAL-WAKE path; `waitThresholdMs` is resolved with
@@ -2872,8 +3380,67 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         }
       }
     }
-    // Persist the merged ledger once if the ALERT or CONDITIONAL-WAKE path
-    // advanced any key.
+    // PACING — the peak/valley FRANJA transition monitor (owner m-PACING,
+    // 2026-08-28): compute the CURRENT franja every tick (a pure UTC
+    // check — the mini scan "cuando cambia"); on a CHANGE vs the durable
+    // baseline, deliver EXACTLY ONE durable bus notice to the host (the
+    // notifyHost seam — see the block comment above the helpers). First boot
+    // records the baseline and emits NOTHING (documented); no live host →
+    // skipped AND the baseline NOT advanced (retries — the no-perdible
+    // contract); the emission dedupe key 'pacing-transition' rides the SHARED
+    // health-alerts ledger (≤1 inside HEALTH_DEDUPE_WINDOW_MS — a crash that
+    // loses the baseline write can never double-notify the same transition).
+    if (deps.config?.org?.pacing?.enabled !== false) {
+      try {
+        const pacingWindow = pacingWindowFromConfig(deps.config?.org?.pacing)
+        const franja: 'peak' | 'valle' = isPeakAt(new Date(nowMs), pacingWindow) ? 'peak' : 'valle'
+        const prev = readPacingState(deps.stateDir)
+        if (prev === undefined) {
+          // FIRST BOOT: baseline only, no notice (documented decision — see
+          // the block comment; the wake pack carries the current franja).
+          await writePacingState(deps.stateDir, { franja, at: nowMs })
+        } else if (prev.franja !== franja) {
+          const lastEmitted = state[PACING_TRANSITION_KEY]
+          const deduped = lastEmitted !== undefined && nowMs - lastEmitted <= HEALTH_DEDUPE_WINDOW_MS
+          if (deduped) {
+            // Already notified inside the 30-min window (e.g. a baseline write
+            // lost to a crash): advance the baseline quietly — never re-send.
+            await writePacingState(deps.stateDir, { franja, at: nowMs })
+          } else {
+            const { live } = pickLiveHost()
+            if (live === undefined) {
+              deps.logger?.warn('[deepartments] system-health: pacing transition detected but no live host to notify — skip (retries on the next tick)')
+            } else {
+              const pacingState = pacingStateAt(new Date(nowMs), pacingWindow)
+              // The VALLE notice's N: the WORK-REGISTER pending queue when
+              // legible (best-effort; unreadable → the count is omitted).
+              let deferredCount: number | undefined
+              if (franja === 'valle' && deps.workRegisterPath !== undefined) {
+                try {
+                  deferredCount = countPendingWorkRegister(readFileSync(deps.workRegisterPath, 'utf8'))
+                } catch {
+                  deferredCount = undefined
+                }
+              }
+              try {
+                await deps.notifyHost(live, buildPacingTransitionFrame(pacingState, deferredCount))
+                nextState[PACING_TRANSITION_KEY] = nowMs
+                stateChanged = true
+                await writePacingState(deps.stateDir, { franja, at: nowMs })
+              } catch (error: unknown) {
+                // The bundle notifyHost never throws (it catches internally);
+                // a stub that does must NOT advance the baseline (retry).
+                deps.logger?.warn(`[deepartments] system-health: pacing transition delivery failed: ${error instanceof Error ? error.message : String(error)}`)
+              }
+            }
+          }
+        }
+      } catch (error: unknown) {
+        deps.logger?.warn(`[deepartments] system-health: pacing transition scan failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    // Persist the merged ledger once if the ALERT, CONDITIONAL-WAKE or PACING
+    // path advanced any key.
     if (stateChanged) {
       // Defensive 2h prune (Bug C): drop delivered-identity entries that aged out
       // of the anomaly window so the shared ledger never grows unbounded. Every

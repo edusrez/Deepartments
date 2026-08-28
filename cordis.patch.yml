@@ -106,6 +106,29 @@
           # (llm-pi-ai.providers.opencode-zen.baseURL). Absent/undefined → NO
           # exemption (every local/proxy baseURL stays a drift).
           poolerBaseURL: http://127.0.0.1:4097/v1
+          # PACING (owner m-PACING, 2026-08-28 — pacing/coste MEDIUM): the
+          # peak/valley FRANJA monitor. The org lives in BURST mode around the
+          # owner's off-peak/peak pricing boundary; in PEAK the NEW host →
+          # department dispatches pause (in-flight continues; the deferred queue
+          # IS the WORK-REGISTER pending items — NO new data queue) and the host
+          # is notified ONCE per transition (durable bus + interrupt). The PURE
+          # UTC formula MIRRORS dsh-key-pooler (SEPARATE repo, crossed by
+          # comment): PEAK ⇔ weekday(UTC) Mon-Fri ∧ UTC hour ∈ {1,2,3,6,7,8,9},
+          # edge buffer 30 min on both boundaries (request start/finish bias).
+          # Explicit defaults below (CODE-DEFAULT-CAPABLE): ABSENT keys → the
+          # same code defaults; `enabled: false` restores the pre-pacing
+          # behavior (no franja section in the wake pack, no notices).
+          # UPCOMING CHANGES (documented): any retune of the window MUST be
+          # mirrored in dsh-key-pooler (fallback.peakWindows/peakBufferMs) — the
+          # two repos declare the SAME boundary and must stay in sync
+          # (hours {1,2,3,6,7,8,9} ≡ 01:00-04:00 ∪ 06:00-10:00 with the same
+          # buffer; an owner adjust of the burst window lands in BOTH).
+          pacing:
+            enabled: true
+            peakWindows:
+              weekday: [1, 2, 3, 4, 5]
+              hours: [1, 2, 3, 6, 7, 8, 9]
+            peakBufferMs: 1800000
         # Quality Department runtime block (D-Q2, spec 007 §4.1): the worker-
         # archive inspection dice probability. CODE-DEFAULT-CAPABLE — ABSENT →
         # the code default 0.25; present → that value (the D-Q3 head/host 100%

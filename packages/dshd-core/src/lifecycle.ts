@@ -24,8 +24,8 @@ import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 // (DeliveryRedeliverer.run) and the retirePost in-session settle consume
 // (latestPerKey dedupe + needsRedelivery + markDelivery 'terminal'; see
 // settleRetiredHostDeliveries below).
-import { parseDeliveryRows, needsRedelivery, markDelivery, resolveDeliveriesPath } from './messages.js'
-import type { DeliveryRow } from './messages.js'
+import { parseDeliveryRows, needsRedelivery, markDelivery, resolveDeliveriesPath, loadMessageRecords, resolveMessagesPath } from './messages.js'
+import type { DeliveryRow, MessageRecord } from './messages.js'
 import type { PostEntry, HostEntry } from './registry.js'
 import type {
   RotationPersistenceLike,
@@ -111,6 +111,17 @@ export function journalPathFor(stateDir: string, memberId: string): string {
  * session id, exactly the two addresses the boot's dead-recipient resolution
  * would settle; the NEW rotated entry's ids are never passed, so the fresh host
  * is never touched).
+ * ALTO-1 (the m-728 rebind guard, QD audit 2026-08-28 F1): `messageId` is only
+ * a STABLE sidecar key once the compaction pass keeps it truthful (see
+ * `compactMessagesFile` + `remapDeliveryRows`). For a PRE-fix sidecar — with
+ * stale rows whose id was REBOUND by a newer compaction to a DIFFERENT record —
+ * settling such a row would settle the WRONG record's delivery pair. Guard:
+ * settle ONLY a pair whose CURRENT record exists AND actually addresses the
+ * recipient (`record.to` includes it) — the boot driver's own rebind rule. A
+ * stale row (its record trimmed, or the current record never addressed this
+ * recipient) is SKIPPED — never settled, never driving a phantom terminal. An
+ * unreadable messages file degrades to the empty map → nothing settles (the
+ * conservative choice: the boot pass re-evaluates at the next boot).
  * Non-fatal by design: a sidecar read/mark failure only warns — the rotation
  * already committed and the boot pass re-settles on the next boot.
  */
@@ -120,6 +131,17 @@ export async function settleRetiredHostDeliveries(
   retiredRecipientIds: readonly string[]
 ): Promise<void> {
   try {
+    // ALTO-1 rebind guard: the current record map (id → record) the settle
+    // cross-checks every candidate pair against. Best-effort: an unreadable
+    // messages file → empty map → nothing settles (conservative). The sidecar
+    // is only truth alongside the CURRENT records — never alone.
+    let recordsById = new Map<string, MessageRecord>()
+    try {
+      const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+      recordsById = new Map(records.map((record) => [record.id, record]))
+    } catch {
+      recordsById = new Map()
+    }
     let text: string
     try {
       text = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
@@ -132,6 +154,11 @@ export async function settleRetiredHostDeliveries(
     for (const row of latestPerKey.values()) {
       if (!retiredRecipientIds.includes(row.recipientId)) continue
       if (!needsRedelivery(row.status)) continue
+      // ALTO-1: a stale/rebound row — the CURRENT record for `row.messageId`
+      // does not exist (trimmed) or does not address this recipient — must
+      // NEVER settle the current record's pairs (the m-728 case). Skip it.
+      const record = recordsById.get(row.messageId)
+      if (record === void 0 || !record.to.includes(row.recipientId)) continue
       await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal')
       logger.info?.(`[deepartments] rotation settle: ${row.messageId} → ${row.recipientId} (was ${row.status}) → 'terminal' — host session retired in-session (rotation), settled once (no boot needed)`)
     }

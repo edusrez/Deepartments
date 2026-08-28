@@ -31,12 +31,33 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
 import { RegistryStore } from '../lib/invoke.js'
+import { headRotationJournalStatus, HEAD_ROTATE_JOURNAL_STALE_MS } from '../lib/invoke.js'
 import { readLlmPiAiProviderSettings, resolveReasoningContentPreflight, REASONING_CONTENT_PREFLIGHT_POST_ID } from '../lib/invoke.js'
+// DISPATCH-HARDENING + E2-ZSTD (2026-08-28): the pooler-capacity dispatch
+// pre-check (resolvePoolerDispatchBlock), the b5-ghost census ledger
+// (stepGhostSuspectCensus + the ledger IO) and the dept_zstd_read tool
+// surface (the pure deny guard + the bounded zstd decode + the caps).
+import {
+  resolvePoolerDispatchBlock,
+  POOLER_CAPACITY_DEFAULT_HIGH_PERCENT,
+  POOLER_CAPACITY_DEFAULT_STATE_STALE_MS,
+  resolvePositiveKnob,
+  GHOST_SUSPECT_STATE_FILE,
+  readGhostSuspectLedger,
+  writeGhostSuspectLedger,
+  stepGhostSuspectCensus,
+  deptZstdReadDenyReason,
+  runDeptZstdRead,
+  DEPT_ZSTD_READ_MAX_LINES,
+  DEPT_ZSTD_READ_MAX_LINE_CHARS,
+  DEPT_ZSTD_READ_TIMEOUT_MS,
+  DEPT_ZSTD_READ_MAX_CHARS
+} from '../lib/invoke.js'
 import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply, SECRETARY_PERSONA, SECRETARY_TOOL_FILTER, SECRETARY_TOOL_NAME, SECRETARY_PROVIDER, SECRETARY_MAX_DEPTH } from '../lib/subagent.js'
 import { HEAD_BASE_TOOLS, OWN_LAYER_POST_TOOLS } from '../lib/invoke.js'
@@ -175,7 +196,13 @@ async function materializeStubAgent(agents, sessionId, options) {
         parentSession,
         delegationDepth: options.meta?.delegationDepth
       },
-      events: []
+      // M-A: a seeded create (the dept_head_rotate fresh-mint passes the
+      // journal seed — buildHeadRotationSeed) materializes those events into
+      // the fresh session, mimicking the real factory's
+      // sessions.prepare(id, {seed, meta}) boundary (the synchronous
+      // snapshots/validation are the dshd-core unit tests' job; here the
+      // events must simply be observable in the fresh session).
+      events: [...(Array.isArray(options.seed) ? options.seed : [])]
     },
     inboxMessages: [],
     ctx: undefined,
@@ -492,12 +519,23 @@ class StubPersistence extends Service {
 // `{ rawPersistence: true }`.
 class StubPersistenceWithRaw extends StubPersistence {
   artifact = undefined
+  artifactById = new Map()
 
   setRawArtifact(content) {
     this.artifact = content
   }
 
+  /** B5-ghost: set a PER-SESSION raw artifact (a durable session present for
+   * EXACTLY that id) — the conservative readonly resolver can then certify
+   * usable vs definitively-gone per post, without a global artifact leaking to
+   * every other session. */
+  setRawArtifactFor(id, content) {
+    this.artifactById.set(String(id), content)
+  }
+
   async readRaw(id) {
+    const byId = this.artifactById.get(String(id))
+    if (byId !== undefined) return { meta: { id }, filename: 'session.jsonl', content: byId }
     if (this.artifact === undefined) return undefined
     return { meta: { id }, filename: 'session.jsonl', content: this.artifact }
   }
@@ -811,10 +849,19 @@ async function bootPlugin(stateDir, opts = {}) {
   // Batch S1 live-fix: a boot opt swaps in the real-API-shaped persistence
   // (readRaw present) so the real-capture tests exercise the bound call shape;
   // the default stays readRaw-less so the harness keeps degrading to the stub.
+  // B5-ghost: `opts.rawArtifacts` ({ sessionId → content }) pre-seeds
+  // PER-SESSION raw artifacts at construction — BEFORE any boot pass reads them
+  // (a deterministic durable-present signal for exactly those sessions).
   // Fix wake-12: a boot opt mounts a root-carrying persistence so the boot
   // web-UI cleanup hook can resolve the sessions root (restart tests).
   const persistence = opts.rawPersistence === true
-    ? new StubPersistenceWithRaw(root)
+    ? (() => {
+        const p = new StubPersistenceWithRaw(root)
+        if (opts.rawArtifacts !== undefined) {
+          for (const [id, content] of Object.entries(opts.rawArtifacts)) p.setRawArtifactFor(String(id), content)
+        }
+        return p
+      })()
     : opts.persistenceRoot !== undefined
       ? new StubPersistenceWithRoot(root, opts.persistenceRoot)
       : opts.persistenceRootOnly !== undefined
@@ -10359,6 +10406,115 @@ test('B2 dept_exec guard (fb-10, QH): URL-LIKE ARITHMETIC tokens are NOT paths �
   assert.equal(deptExecDenyReason('cat /home/esuarez/projects/deepartments/v1/bin/run.sh', '/srv/dept-ws', roots), undefined, 'a multi-segment real path under a root stays allowed')
 })
 
+// ===========================================================================
+// E2-ZSTD (QH 2026-08-28): dept_zstd_read — the READ-ONLY .zstd session reader
+// for department posts (registered on the SAME `allowExec` gate as dept_exec,
+// so the roles that declare dept_exec — IPD builder/reviewer/explore-deep +
+// quality-inspector — also get it). The deny guard + the bounded decode are
+// PURE (unit-tested); the real-Loader test verifies the tool through a
+// dept_exec-declaring worker (no dept_exec call needed for a .zstd read).
+// ===========================================================================
+
+test('E2 dept_zstd_read (pure): deptZstdReadDenyReason — a path inside an allowed root passes; outside the roots / the protected stable profile are DENIED; a mission grant un-protects the stable home for the named root', () => {
+  const roots = ['/srv/dept-ws', '/opt/dsh/.dsh-dev']
+  assert.equal(deptZstdReadDenyReason('/srv/dept-ws/archive/session.jsonl.zstd', roots), undefined, 'a path inside an allowed root passes')
+  assert.equal(deptZstdReadDenyReason('/srv/dept-ws', roots), undefined, 'the root itself passes')
+  assert.match(deptZstdReadDenyReason('/etc/passwd', roots), /OUT_OF_SCOPE \/ DENIED — path "\/etc\/passwd" is not inside a scoped dept_exec root/, 'a path outside the roots is denied')
+  assert.match(deptZstdReadDenyReason('/opt/dsh/.dsh/settings.yaml', roots), /the stable profile is protected/, 'the stable home is protected-denied WITHOUT a grant')
+  assert.equal(deptZstdReadDenyReason('/opt/dsh/.dsh-dev/sessions/x.jsonl.zstd', roots), undefined, 'the DEV home is allowed (not stable)')
+  const grantRoots = [...roots, '/opt/dsh/.dsh']
+  assert.equal(deptZstdReadDenyReason('/opt/dsh/.dsh/sessions/x.jsonl.zstd', grantRoots), undefined, 'a mission grant naming the stable home allows it')
+  assert.match(deptZstdReadDenyReason('/etc/passwd', grantRoots), /not inside a scoped dept_exec root/, 'an out-of-root path is STILL denied even with the grant')
+})
+
+test('E2 dept_zstd_read (pure): runDeptZstdRead decodes a real .zstd file through `zstd -dc` with the bounded line WINDOW (offset/lines), the per-line cap and the line cap; a decode failure is an ok:false result, never a throw', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const dataPath = path.join(stateDir, 'session.jsonl.zstd')
+    await writeFile(dataPath, Buffer.concat([
+      await compressZstdFrame('{ "type": "session", "seq": 0 }\n'),
+      await compressZstdFrame([1, 2, 3, 4, 5].map((n) => `{ "type": "turn", "seq": ${n} }`).join('\n') + '\n')
+    ]))
+    // Full decode → the whole artifact (header frame + event frame).
+    const all = await runDeptZstdRead(dataPath, 0, 100)
+    assert.equal(all.ok, true, 'a real .zstd fixture decodes')
+    assert.equal(all.lines.length, 6, 'all 6 lines of the fixture decode (header + 5 events)')
+    assert.match(all.lines[0], /"type": "session"/, 'the header frame line decodes first')
+    assert.equal(all.truncated, false, 'a small fixture is not truncated')
+    // A WINDOW: offset 2, lines 2 → exactly the third + fourth lines.
+    const window = await runDeptZstdRead(dataPath, 2, 2)
+    assert.equal(window.ok, true, 'the offset/lines window decodes')
+    assert.deepEqual(window.lines, ['{ "type": "turn", "seq": 2 }', '{ "type": "turn", "seq": 3 }'], 'the window [offset, offset+lines) is returned')
+    // The line cap: requested lines beyond the cap are clamped to
+    // DEPT_ZSTD_READ_MAX_LINES (never a giant output).
+    const capped = await runDeptZstdRead(dataPath, 0, 99999)
+    assert.equal(capped.lines.length, 6, 'a huge lines request returns only the existing (bounded) content')
+    // A decode failure (corrupt zstd, or a non-zstd file) → ok:false with the
+    // stderr surfaced (never a throw).
+    await writeFile(path.join(stateDir, 'garbage.bin'), 'not zstd at all', 'utf8')
+    const failed = await runDeptZstdRead(path.join(stateDir, 'garbage.bin'), 0, 10)
+    assert.equal(failed.ok, false, 'a non-zstd file → ok:false (never a throw)')
+    assert.ok((failed.error ?? '').length > 0, 'the decode failure carries the stderr/detail')
+    // An absent file → ok:false (never a throw).
+    const missing = await runDeptZstdRead(path.join(stateDir, 'nope.zstd'), 0, 10)
+    assert.equal(missing.ok, false, 'an absent file → ok:false')
+  })
+})
+
+test('E2 dept_zstd_read (real Loader): a worker whose role DECLARES dept_exec owns dept_zstd_read on its OWN layer — it reads a .zstd session fixture WITHOUT dept_exec (no shell); a role without dept_exec never sees the tool; the host plane has NO dept_zstd_read; a path outside the allowed roots is DENIED', async () => {
+  const restore = await snapshotRoleTemplate(EXEC_ROLE)
+  try {
+    await writeFile(EXEC_ROLE_PATH, EXEC_ROLE_FRONTMATTER, 'utf8')
+    await withTempStateDir(async (stateDir) => {
+      // A real .zstd session fixture under the temp stateDir (an allowed root —
+      // the worker's department workspace resolves to stateDir in this harness).
+      const artifactPath = path.join(stateDir, 'session.jsonl.zstd')
+      await writeFile(artifactPath, Buffer.concat([
+        await compressZstdFrame('{ "type": "session", "version": 0 }\n'),
+        await compressZstdFrame('{ "type": "turn/start", "seq": 1 }\n{ "type": "turn/end", "seq": 2 }\n')
+      ]))
+      const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+      try {
+        const signal = new AbortController().signal
+        const { worker, ctx: workerCtx, key: workerKey } = await f3Spawn({ agents, root }, headCtx, key, head, { role: EXEC_ROLE, task: 'read a zstd session' })
+        // The role declares dept_exec → the worker OWNS dept_zstd_read too
+        // (the SAME allowExec gate — no shell needed for a .zstd read).
+        const zread = workerCtx.tools.get('dept_zstd_read', workerKey)
+        assert.ok(zread, 'dept_zstd_read is installed for a role whose template declares dept_exec')
+        assert.equal(root.tools.get('dept_zstd_read'), undefined, 'the host plane has NO dept_zstd_read (never global)')
+        assert.equal(root.tools.get('dept_zstd_read'), undefined, 'a config head never gets it via HEAD_BASE_TOOLS (no allowExec)')
+
+        // The tool reads the .zstd fixture WITHOUT dept_exec — the text comes out.
+        const read = await zread.execute({ path: artifactPath }, { agent: worker, signal })
+        assert.equal(read.ok, true, 'the .zstd fixture decodes through the tool')
+        assert.match(read.lines[0], /"type": "session"/, 'the session header line is surfaced')
+        assert.equal(read.lines.length, 3, 'the whole fixture (3 lines) is returned by default')
+        // A window read (offset/lines) works through the tool too.
+        const window = await zread.execute({ path: artifactPath, offset: 1, lines: 1 }, { agent: worker, signal })
+        assert.deepEqual(window.lines, ['{ "type": "turn/start", "seq": 1 }'], 'the offset/lines window through the real tool')
+
+        // Out-of-roots path → the scope guard DENIES before any zstd decode.
+        await assert.rejects(
+          () => zread.execute({ path: '/etc/hostname' }, { agent: worker, signal }),
+          /OUT_OF_SCOPE \/ DENIED — path "\/etc\/hostname" is not inside a scoped dept_exec root/,
+          'a path outside the allowed roots is denied (the scope guard runs BEFORE the decode)'
+        )
+
+        // A worker whose role does NOT declare dept_exec never sees the tool.
+        const { result: researcher, ctx: researcherCtx, key: researcherKey } = await f3Spawn({ agents, root }, headCtx, key, head, { role: 'researcher', task: 'plain researcher' })
+        void researcher
+        assert.equal(researcherCtx.tools.get('dept_zstd_read', researcherKey), undefined, 'a role without dept_exec does not inherit dept_zstd_read')
+
+        // The head (manager, HEAD_BASE_TOOLS — no dept_exec) never sees it either.
+        assert.equal(headCtx.tools.get('dept_zstd_read', key), undefined, 'a config head has NO dept_zstd_read')
+      } finally {
+        await dispose()
+      }
+    })
+  } finally {
+    await restore()
+  }
+})
+
 test('B2 calendar attribution (real Loader): dept_calendar_add stamps departmentId; list with NO filter returns the FULL shared agenda; list with departmentId returns only that department; a legacy entry without departmentId is NOT matched by a filter', async () => {
   await withTempStateDir(async (stateDir) => {
     const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { org: TWO_DEPT_ORG })
@@ -10512,6 +10668,70 @@ test('C9 appendPostError: rows OLDER than HEALTH_ERROR_WINDOW_MS are discarded A
     assert.equal(bounded.length, POST_ERRORS_MAX_LINES, '600 fresh rows + 1 append → the file stays bounded to 500')
     assert.equal(bounded[0].postId, 'bulk-101', 'the oldest 101 fresh rows are trimmed by the cap (601 lines → the newest 500)')
     assert.equal(bounded.at(-1).postId, 'new-last', 'the appended fresh row is the newest (line 500)')
+  })
+})
+
+test('QH appendPostError ARCHIVE-ON-DISCARD: an expired row is NOT lost — it lands in post-errors-archive.jsonl (append-only, no overwrite) while the live file loses it (C9 bounding intact); a fresh row is never archived', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const NOW = 1_900_000_000_000 // fixed deterministic clock
+    // (1) A stale row appended onto an EMPTY live file is ARCHIVED, not vanished.
+    await appendPostError(stateDir, { ts: NOW - HEALTH_ERROR_WINDOW_MS - 60_000, postId: 'stale-one', error: 'e1' }, NOW)
+    assert.deepEqual(readPostErrorsFile(stateDir), [], 'the live file stays bounded (C9): the expired row is discarded at append')
+    assert.deepEqual(readPostErrorsArchiveFile(stateDir).map((r) => r.postId), ['stale-one'], 'the expired row is ARCHIVED (forensia — the evidence never disappears)')
+    // A fresh row lands live and is NOT archived.
+    await appendPostError(stateDir, { ts: NOW - 60_000, postId: 'fresh-one', error: 'e2' }, NOW)
+    assert.equal(readPostErrorsFile(stateDir).length, 1, 'a fresh row lands in the live file')
+    assert.equal(readPostErrorsArchiveFile(stateDir).length, 1, 'a fresh row is NOT archived (the archive holds only the C9-expired rows)')
+    // (2) A second expired batch APPENDS (the archive is append-only — no overwrite).
+    await appendPostError(stateDir, { ts: NOW - HEALTH_ERROR_WINDOW_MS - 30_000, postId: 'stale-two', error: 'e3' }, NOW)
+    assert.deepEqual(readPostErrorsArchiveFile(stateDir).map((r) => r.postId), ['stale-one', 'stale-two'], 'the archive APPENDS in order (no overwrite): both expired rows survive')
+    assert.deepEqual(readPostErrorsFile(stateDir).map((r) => r.postId), ['fresh-one'], 'the live file keeps only the fresh rows')
+    // A stale PRE-EXISTING live row (raw-seeded) is pruned AND archived when a fresh append lands.
+    await writeFile(path.join(stateDir, POST_ERRORS_FILE), JSON.stringify({ ts: NOW - 60_000, postId: 'fresh-one', error: 'e2' }) + '\n' + JSON.stringify({ ts: NOW - HEALTH_ERROR_WINDOW_MS - 10_000, postId: 'stale-three', error: 'e5' }) + '\n', 'utf8')
+    await appendPostError(stateDir, { ts: NOW - 30_000, postId: 'fresh-two', error: 'e4' }, NOW)
+    assert.deepEqual(readPostErrorsFile(stateDir).map((r) => r.postId), ['fresh-one', 'fresh-two'], 'a stale pre-existing row is pruned; fresh rows survive in file order')
+    assert.deepEqual(readPostErrorsArchiveFile(stateDir).map((r) => r.postId), ['stale-one', 'stale-two', 'stale-three'], 'the stale pre-existing row joins the archive (append-only)')
+  })
+})
+
+test('QH post-errors archive R6 ROTATION: past POST_ERRORS_ARCHIVE_MAX_LINES the archive is backed up WHOLE (reversible — evidence never deleted) and rotated to the newest N rows', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const NOW = 1_900_000_000_000 // fixed deterministic clock
+    // Seed the archive AT the large cap (raw rows), then one more expired append
+    // crosses it → the rotation triggers on the REAL append path.
+    const seedRows = Array.from({ length: POST_ERRORS_ARCHIVE_MAX_LINES }, (_, i) => ({ ts: NOW - HEALTH_ERROR_WINDOW_MS - 600_000 - i, postId: `arch-${i}`, error: `a${i}` }))
+    const archivePath = path.join(stateDir, POST_ERRORS_ARCHIVE_FILE)
+    await mkdir(path.dirname(archivePath), { recursive: true })
+    await writeFile(archivePath, seedRows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8')
+    await appendPostError(stateDir, { ts: NOW - HEALTH_ERROR_WINDOW_MS - 60_000, postId: 'stale-new', error: 'new' }, NOW)
+    // The archive is re-bounded to the large cap (rotation): the new batch is
+    // in, the OLDEST seeded row rolled out of the live archive (into the backup).
+    const archived = readPostErrorsArchiveFile(stateDir)
+    assert.equal(archived.length, POST_ERRORS_ARCHIVE_MAX_LINES, 'the archive is re-bounded to POST_ERRORS_ARCHIVE_MAX_LINES after rotation')
+    assert.equal(archived[0].postId, 'arch-1', 'the oldest seeded row rolled out of the live archive (arch-0 → backup)')
+    assert.equal(archived.at(-1).postId, 'stale-new', 'the newest expired row is in the rotated archive')
+    // The R6 backup holds the FULL pre-rotation archive (evidence never deleted).
+    const backups = (await readdir(stateDir)).filter((n) => n.startsWith('post-errors-archive.jsonl.bak-') && n.endsWith('-rotate'))
+    assert.equal(backups.length, 1, 'ONE rotation backup was written (post-errors-archive.jsonl.bak-<ts>-rotate)')
+    const backupRows = (await readFile(path.join(stateDir, backups[0]), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    assert.equal(backupRows.length, POST_ERRORS_ARCHIVE_MAX_LINES + 1, 'the backup preserves the WHOLE archive (all seed rows + the new batch)')
+    assert.equal(backupRows[0].postId, 'arch-0', 'the very oldest archived row survives in the backup (evidence never deleted)')
+    assert.equal(backupRows.at(-1).postId, 'stale-new', 'the new batch is inside the backup too (the backup is the full pre-rotation snapshot)')
+  })
+})
+
+test('QH appendPostErrorDeduped ARCHIVE (nowMs re-sent): a fresh deduped append that prunes an expired PRE-EXISTING live row archives it — idem appendPostError', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_900_000_000_000 // fixed deterministic clock
+    const key = 'record:post-error:p-x:session-not-found'
+    // A stale pre-existing live row (raw-seeded, e.g. a legacy write) expires
+    // the 2h window at the deduped append; the recording nowMs doubles as the
+    // window clock (C9) so the fresh row itself is never expired at append.
+    await writeFile(path.join(stateDir, POST_ERRORS_FILE), JSON.stringify({ ts: T0 - HEALTH_ERROR_WINDOW_MS - 60_000, postId: 'p-stale', error: 'old' }) + '\n', 'utf8')
+    const appended = await appendPostErrorDeduped(stateDir, { ts: T0, postId: 'p-x', messageId: 'm-1', error: 'session "s" not found' }, key, T0)
+    assert.equal(appended, true, 'the deduped fresh append lands')
+    assert.deepEqual(readPostErrorsFile(stateDir).map((r) => r.postId), ['p-x'], 'the live file lost the expired pre-existing row (C9 intact)')
+    assert.deepEqual(readPostErrorsArchiveFile(stateDir).map((r) => r.postId), ['p-stale'], 'the expired pre-existing row is ARCHIVED by the deduped append path (idem appendPostError); the fresh deduped row is never archived')
   })
 })
 
@@ -10845,6 +11065,81 @@ test('M1 scanPoolerCapacity: staleness is UNKNOWN → NO finding + a logger warn
     assert.equal(scanPoolerCapacity(p, T0, knobs)[0].key, POOLER_CAPACITY_KEY_CRITICAL, 'a FRESH pool with zero keys is exhausted → critical (the certain usable-count branch)')
     // ABSENT file → no-op.
     assert.deepEqual(scanPoolerCapacity(path.join(stateDir, 'missing.json'), T0, knobs), [], 'an absent state file → no finding (no-op)')
+  })
+})
+
+// ===========================================================================
+// DISPATCH-HARDENING (QH «429-primer-call», 2026-08-28) — Part A (a): the
+// POOLER-CAPACITY DISPATCH PRE-CHECK (the BEFORE half). resolvePoolerDispatchBlock
+// is the PURE decision (absent/stale → passthrough; zero usable keys / every
+// usable key at/above highPercent / a last 429-rotation-to-no-key → the CLEAR
+// EARLY block); the real-Loader acceptance tests below drive the same 3+1
+// seams as fb-9 (dept_worker_spawn / dept_job_run / dept_post_create / the
+// bus-wake materializePost) against a fixture pool state.
+// ===========================================================================
+
+test('DISPATCH-HARDENING (pure): resolvePoolerDispatchBlock — a fresh snapshot with ZERO usable keys blocks with the CLEAR honest «pool: workspace … at quota — dispatch delayed; retry when a fresh key resolves»; absent/stale → passthrough; a healthy pool → passthrough', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_234_567_890_000
+    const knobs = { highPercent: POOLER_CAPACITY_DEFAULT_HIGH_PERCENT, stateStaleMs: POOLER_CAPACITY_DEFAULT_STATE_STALE_MS }
+    const fresh = (keys, lastRotation = null) => JSON.stringify({ updatedAt: new Date(T0 - 60_000).toISOString(), keys, lastRotation })
+    const p = path.join(stateDir, 'pool.json')
+    // (1) ZERO usable keys (all blocked in the future / invalid) → the honest
+    // early block naming the at-quota workspaces + the retry guidance.
+    await writeFile(p, fresh({
+      'k1': { id: 'k1', workspace: 'wrk-a', invalid: false, blockedUntil: T0 + 3600_000, cooldownUntil: 0 },
+      'k2': { id: 'k2', workspace: 'wrk-b', invalid: false, blockedUntil: T0 + 3600_000, cooldownUntil: 0 },
+      'k3': { id: 'k3', workspace: 'wrk-b', invalid: true, blockedUntil: 0, cooldownUntil: 0 }
+    }), 'utf8')
+    const blocked = resolvePoolerDispatchBlock(p, T0, knobs)
+    assert.ok(blocked !== undefined, 'an all-blocked pool blocks the dispatch')
+    assert.match(blocked.reason, /^pool: workspaces wrk-a,wrk-b at quota \(0 usable keys — all blocked\/cooldown\/invalid; 3\/3 keys\) — dispatch delayed; retry when a fresh key resolves$/, 'the EXACT honest message: workspaces + cause + the retry guidance')
+    // (2) EVERY usable key at/above highPercent (the «percent>=umbral» pooler
+    // criterion) → block (the pool can serve, but every workspace is HOT).
+    await writeFile(p, fresh({
+      'k1': { id: 'k1', workspace: 'wrk-a', invalid: false, blockedUntil: 0, cooldownUntil: 0, lastUsage: { status: 'ok', percent: 95 } },
+      'k2': { id: 'k2', workspace: 'wrk-b', invalid: false, blockedUntil: 0, cooldownUntil: 0, lastUsage: { status: 'ok', percent: 98 } }
+    }), 'utf8')
+    const hot = resolvePoolerDispatchBlock(p, T0, knobs)
+    assert.ok(hot !== undefined, 'every usable key at/above the quota → block')
+    assert.match(hot.reason, /usage percent >= 90% on every usable key/, 'the hot branch names the percent threshold')
+    assert.match(hot.reason, /dispatch delayed; retry when a fresh key resolves/, 'the hot branch carries the same retry guidance')
+    // (3) The 429-usage-limit rotation to NO key (the 503 prelude) → block even
+    // with usable keys left (the M1 critical branch applied to the dispatch).
+    await writeFile(p, fresh({
+      'k1': { id: 'k1', workspace: 'wrk-a', invalid: false, blockedUntil: 0, cooldownUntil: 0 }
+    }, { from: 'k1', to: null, reason: '429 usage-limit', at: new Date(T0 - 60_000).toISOString() }), 'utf8')
+    const rot = resolvePoolerDispatchBlock(p, T0, knobs)
+    assert.ok(rot !== undefined, 'the 429-to-null rotation prelude blocks the dispatch')
+    assert.match(rot.reason, /last rotation 429 usage-limit → no key \(to:null; 503 prelude\)/, 'the rotation branch names the 503 prelude')
+    // (4) A healthy pool (usable keys under the threshold, rotation to a key) →
+    // passthrough.
+    await writeFile(p, fresh({
+      'k1': { id: 'k1', workspace: 'wrk-a', invalid: false, blockedUntil: 0, cooldownUntil: 0, lastUsage: { status: 'ok', percent: 12 } }
+    }, { from: 'k1', to: 'k2', reason: '429 usage-limit', at: new Date(T0 - 60_000).toISOString() }), 'utf8')
+    assert.equal(resolvePoolerDispatchBlock(p, T0, knobs), undefined, 'a healthy pool → passthrough (the pre-check is a warning, never a blocker)')
+    // (5) The highPercent knob raises the bar: with highPercent 96, the 95%
+    // key is NOT hot → passthrough.
+    await writeFile(p, fresh({
+      'k1': { id: 'k1', workspace: 'wrk-a', invalid: false, blockedUntil: 0, cooldownUntil: 0, lastUsage: { status: 'ok', percent: 95 } }
+    }), 'utf8')
+    assert.equal(resolvePoolerDispatchBlock(p, T0, { ...knobs, highPercent: 96 }), undefined, 'the highPercent knob raises the block bar')
+    // (6) ABSENT file → passthrough (conservative — no state, no verdict).
+    assert.equal(resolvePoolerDispatchBlock(path.join(stateDir, 'missing.json'), T0, knobs), undefined, 'an absent pooler state file → passthrough')
+    // (7) STALE snapshot (older than stateStaleMs) → passthrough + a warn naming
+    // the age (unknown ≠ exhausted — the M1 dead-man's-switch rule).
+    await writeFile(p, JSON.stringify({ updatedAt: new Date(T0 - 11 * 60_000).toISOString(), keys: {
+      'k1': { id: 'k1', workspace: 'wrk-a', invalid: false, blockedUntil: T0 + 3600_000, cooldownUntil: 0 }
+    }, lastRotation: null }), 'utf8')
+    const warns = []
+    assert.equal(resolvePoolerDispatchBlock(p, T0, knobs, { warn: (m) => warns.push(m) }), undefined, 'a stale snapshot → passthrough (stale = unknown, not exhausted)')
+    assert.equal(warns.length, 1, 'staleness emits ONE warn')
+    assert.match(warns[0], /pooler state unknown\/stale \(age 11 min\) — dispatch pre-check passes conservatively/, 'the stale warn names the age')
+    // (8) An unparseable updatedAt → passthrough + warn too.
+    await writeFile(p, JSON.stringify({ updatedAt: 'not-a-date', keys: {}, lastRotation: null }), 'utf8')
+    const warns2 = []
+    assert.equal(resolvePoolerDispatchBlock(p, T0, knobs, { warn: (m) => warns2.push(m) }), undefined, 'an unparseable updatedAt → passthrough')
+    assert.match(warns2[0], /unparseable updatedAt/, 'the unparseable warn flavor')
   })
 })
 
@@ -11515,6 +11810,318 @@ test('M4 system-idle SMOKE (acceptance — real daemon): bootPlugin with health 
       }, 5000, 'the audit row is appended')
       const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
       assert.equal(audit.at(-1).findings.some((f) => f.kind === 'system-idle'), true, 'the audit last row records the system-idle finding')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+// --- M-A (owner request directa 2026-08-28, mission M-A MONITOR de contexto) --
+// The context-threshold watchdog: a post OR the host using MORE than
+// `contextThreshold` (default 0.5 = 50%) of its session context window →
+// finding kind `context-threshold` + host ALERT through the existing
+// findings→dedupe→notifyHost flow. The percent comes from the token-meter
+// `contextPressure` projection (contextWindow/pressureTokens/surfaceTokens/
+// sampledSurfaceTokens), read LIVE in-process by the bundle
+// (`ctx.sessionProjections.stateOf(session,'contextPressure')`) and passed as
+// the structural dep `deps.sessionContexts`. DEDUPE BY BAND (mission decision
+// — NO ledger of its own): key `context-threshold:<agentId>:b<band>`
+// (band=floor(pct*10)) → a band CROSSING (52%→61%) is a NEW key = an IMMEDIATE
+// re-alert even inside the 30-min window; a PERSISTENT band re-alerts every
+// HEALTH_DEDUPE_WINDOW_MS. `deps.sessionContexts` ABSENT → the scan is a
+// no-op (unknown context pressure never fabricates an alert). A row WITHOUT a
+// resolved `contextWindow` (an inactive session) is skipped (0% safe).
+// `contextThresholdPollMs` gates the scan to the first tick of each bucket
+// (the WAIT per-minute pattern generalized to an arbitrary cadence).
+
+test('M-A scanContextThreshold: rows ABOVE the 50% threshold → a context-threshold finding with the per-BAND key + error (percent/tokens/window/band); BELOW → nothing; a row WITHOUT a resolved contextWindow is SKIPPED (never a false positive); the surface-only numerator fallback; the wire-view projectedTokens is the preferred numerator', () => {
+  const T0 = new Date(2026, 7, 28, 10, 0, 0).getTime()
+  const findings = scanContextThreshold({
+    rows: [
+      { postId: 'research-head', contextWindow: 1_000_000, pressureTokens: 520_000, surfaceTokens: 0, sampledSurfaceTokens: 0 }, // 52% → b5
+      { hostId: 'host-asst', contextWindow: 1_048_576, pressureTokens: 640_000, surfaceTokens: 10_000, sampledSurfaceTokens: 25 }, // ~62% → b6
+      { postId: 'builder-low', contextWindow: 1_000_000, pressureTokens: 300_000 }, // 30% → nothing
+      { postId: 'builder-nocontext' }, // no contextWindow → skip
+      { postId: 'builder-surface', contextWindow: 1_000_000, surfaceTokens: 550_000 }, // surface-only fallback → 55%
+      { postId: 'builder-projected', contextWindow: 1_000_000, projectedTokens: 640_000 } // the wire-view numerator → 64%
+    ],
+    threshold: CONTEXT_THRESHOLD_DEFAULT,
+    nowMs: T0
+  })
+  assert.equal(findings.length, 4, '4 of 6 rows exceed the 50% threshold')
+  const post = findings.find((f) => f.postId === 'research-head')
+  assert.equal(post.kind, 'context-threshold')
+  assert.equal(post.key, 'context-threshold:research-head:b5', '52% → band floor(5.2)=5 → key b5')
+  assert.equal(post.error, 'research-head 52% (520000/1000000) — cruce b5', 'the error carries percent/tokens/window/band')
+  const host = findings.find((f) => f.hostId === 'host-asst')
+  assert.equal(host.key, 'context-threshold:host-asst:b6', '~62% → band 6 (the host row uses hostId in the key, no postId)')
+  const surface = findings.find((f) => f.postId === 'builder-surface')
+  assert.equal(surface.key, 'context-threshold:builder-surface:b5', 'the surface-only fallback numerator (550000/1000000 → 55%) still bands')
+  const projected = findings.find((f) => f.postId === 'builder-projected')
+  assert.equal(projected.key, 'context-threshold:builder-projected:b6', 'the wire-view projectedTokens is the preferred numerator (640000/1000000 → 64% → b6)')
+  assert.equal(findings.some((f) => f.postId === 'builder-low'), false, '30% ≤ 50% → no finding')
+  assert.equal(findings.some((f) => f.postId === 'builder-nocontext'), false, 'no contextWindow → skipped (an inactive session is 0% safe)')
+})
+
+test('M-A runHealthDaemonTick: a post row ABOVE the 50% threshold → the context-threshold finding + host ALERT (frame bullet + band key); the audit row records it', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 28, 10, 30, 0).getTime()
+    const alerts = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-ma1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      sessionContexts: [
+        { postId: 'research-head', contextWindow: 1_000_000, pressureTokens: 520_000, surfaceTokens: 0, sampledSurfaceTokens: 0 },
+        { postId: 'builder-idle', contextWindow: 1_000_000, pressureTokens: 100_000 }
+      ],
+      config: { health: {} },
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts.length, 1, 'one alert for the single above-threshold row')
+    assert.match(alerts[0].frame, /^\[From deepartments\] System-health ALERT:/, 'the alert frame is the system-health frame')
+    assert.match(alerts[0].frame, /- context-threshold: research-head 52% \(520000\/1000000\) — cruce b5/, 'the FRAME bullet is the context-threshold line (never the stalled-post fallback)')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state['context-threshold:research-head:b5'], T0, 'the per-BAND dedupe key advances in the SHARED ledger')
+    assert.equal(state['context-threshold:builder-idle:b1'], undefined, '10% never alerts / no key')
+    const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    assert.equal(audit.at(-1).findings[0].kind, 'context-threshold', 'the audit row records the context-threshold finding')
+    assert.equal(audit.at(-1).dedupeKeys.includes('context-threshold:research-head:b5'), true, 'the audit row records the per-band dedupe key')
+  })
+})
+
+test('M-A BAND CROSSING: 52% (b5) then 61% (b6) on consecutive ticks → TWO alerts — the second is IMMEDIATE (a crossing band is a NET-NEW key, never swallowed by the first band\'s 30-min dedupe)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 28, 11, 0, 0).getTime()
+    const alerts = []
+    const tick = (nowMs, pct) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-mab',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      sessionContexts: [{ postId: 'research-head', contextWindow: 1_000_000, pressureTokens: Math.round(pct * 1_000_000), surfaceTokens: 0, sampledSurfaceTokens: 0 }],
+      config: { health: {} },
+      notifyHost: async () => { alerts.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    await tick(T0, 0.52)
+    assert.equal(alerts.length, 1, '52% alerts (band b5)')
+    await tick(T0 + 60_000, 0.61)
+    assert.equal(alerts.length, 2, '61% → a NEW band (b6): the crossing re-alerts IMMEDIATELY despite the 30-min dedupe of b5')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state['context-threshold:research-head:b5'], T0, 'b5 key advanced at the first alert')
+    assert.equal(state['context-threshold:research-head:b6'], T0 + 60_000, 'b6 key advanced at the crossing')
+  })
+})
+
+test('M-A PERSISTENT BAND: the SAME band keeps alerting every HEALTH_DEDUPE_WINDOW_MS while the condition persists (never a one-shot) and is SILENT inside the window', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 28, 12, 0, 0).getTime()
+    const alerts = []
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-mad',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      sessionContexts: [{ postId: 'research-head', contextWindow: 1_000_000, pressureTokens: 620_000 }], // 62% → band b6
+      config: { health: {} },
+      notifyHost: async () => { alerts.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    await tick(T0)
+    assert.equal(alerts.length, 1, '62% alerts at T0 (band b6)')
+    await tick(T0 + 5 * 60_000)
+    assert.equal(alerts.length, 1, '5 min later the SAME band is SILENT (inside the 30-min dedupe window)')
+    await tick(T0 + 35 * 60_000)
+    assert.equal(alerts.length, 2, '35 min later the SAME persistent band RE-ALERTS (the guarantee is never a one-shot)')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state['context-threshold:research-head:b6'], T0 + 35 * 60_000, 'the re-alert advanced the SAME band key at the new ts')
+  })
+})
+
+test('M-A the contextThreshold knob: 0.8 → a 55% usage NEVER alerts (the explicit knob wins); the HOST row (hostId, NO postId — the M4 host-not-a-pseudo-post rule) rides the SAME alert path with its hostId in the frame', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 28, 13, 0, 0).getTime()
+    const alertsA = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-mak1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      sessionContexts: [{ postId: 'research-head', contextWindow: 1_000_000, pressureTokens: 550_000 }],
+      config: { health: { contextThreshold: 0.8 } },
+      notifyHost: async () => { alertsA.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alertsA.length, 0, '55% against the explicit 0.8 knob → NO alert')
+    // The HOST row: hostId present, postId absent, at 82% → the same alert path.
+    const alertsB = []
+    await runHealthDaemonTick({
+      now: () => T0 + 60_000,
+      stateDir,
+      bootId: 'boot-mak2',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      sessionContexts: [{ hostId: 'host-asst', contextWindow: 1_048_576, pressureTokens: 860_000 }], // 82%
+      notifyHost: async (hostEntry, frame) => { alertsB.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alertsB.length, 1, 'the HOST row alerts through the same path')
+    assert.match(alertsB[0].frame, /- context-threshold: host-asst 82% \(860000\/1048576\) — cruce b8/, 'the host row renders its hostId in the frame bullet')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state['context-threshold:host-asst:b8'], T0 + 60_000, 'the host row advances its own band key')
+  })
+})
+
+test('M-A contextThresholdPollMs: a FAST tick (20 ms) with a 5-min poll → the scan runs ONCE per bucket — a BAND CROSSING inside the SAME bucket is NOT seen (the scan is skipped), the next bucket re-arms and alerts it (the WAIT per-minute gate generalized)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 28, 14, 0, 0).getTime()
+    const pollMs = 5 * 60_000
+    const alerts = []
+    const tick = (nowMs, pressureTokens) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-map',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      sessionContexts: [{ postId: 'research-head', contextWindow: 1_000_000, pressureTokens, surfaceTokens: 0, sampledSurfaceTokens: 0 }],
+      config: { health: { contextThresholdPollMs: pollMs } },
+      notifyHost: async () => { alerts.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    // Bucket A: the FIRST tick runs the scan → 52% (b5) alerts.
+    await tick(T0, 520_000)
+    assert.equal(alerts.length, 1, 'the first tick of the bucket runs the scan → b5 alert')
+    // A re-fire 20 ms later INSIDE the same bucket, now at 61%: the scan is
+    // SKIPPED by the poll gate (a 5-min poll despite the 20-ms interval) → the
+    // b5→b6 crossing is NOT seen yet (the immediate band-crossing re-alert
+    // never fires because the scan did not run).
+    await tick(T0 + 20, 610_000)
+    assert.equal(alerts.length, 1, 'a sub-poll re-fire inside the SAME bucket skips the scan — the 61% crossing is NOT alertable yet')
+    // The first tick of the NEXT bucket re-arms the poll → the 61% (b6) alerts.
+    await tick(T0 + pollMs, 610_000)
+    assert.equal(alerts.length, 2, 'the NEXT bucket re-arms the scan → the b6 crossing alerts')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state['context-threshold:research-head:b5'], T0, 'b5 key advanced at the first tick')
+    assert.equal(state['context-threshold:research-head:b6'], T0 + pollMs, 'b6 key advanced at the next-bucket tick')
+  })
+})
+
+test('M-A deps.sessionContexts ABSENT → the scan is a NO-OP (no alert, no warn — unknown context pressure never fabricates an alert); contextThresholdEnabled:false suppresses the scan even with the dep present', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 28, 15, 0, 0).getTime()
+    const alerts = []
+    const warns = []
+    // No sessionContexts dep at all.
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-max1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      notifyHost: async () => { alerts.push(1) },
+      logger: { warn: (m) => warns.push(m), info: () => {} }
+    })
+    assert.equal(alerts.length, 0, 'absent sessionContexts dep → the context scan is a no-op (no fabricated alert)')
+    assert.equal(warns.length, 0, 'absent dep → no context warn either (the scan did not run)')
+    // Disabled knob with the dep PRESENT and way above the threshold.
+    const alertsB = []
+    await runHealthDaemonTick({
+      now: () => T0 + 60_000,
+      stateDir,
+      bootId: 'boot-max2',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      sessionContexts: [{ postId: 'research-head', contextWindow: 1_000_000, pressureTokens: 900_000 }],
+      config: { health: { contextThresholdEnabled: false } },
+      notifyHost: async () => { alertsB.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alertsB.length, 0, 'contextThresholdEnabled:false suppresses the scan even at 90%')
+  })
+})
+
+test('M-A no-collision: M1 pooler-capacity + qi-silence + M4 system-idle + M-A context-threshold ALL fire in the SAME tick → ONE alert frame with FOUR distinct bullets (kinds/keys disjoint); every dedupe key advances; the audit row records all four', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 28, 16, 0, 0).getTime()
+    // pooler fixture: 0 usable keys → critical.
+    const snap = {
+      updatedAt: new Date(T0 - 60_000).toISOString(),
+      keys: { 'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: true, blockedUntil: 0, cooldownUntil: 0 } },
+      lastRotation: null
+    }
+    const poolerPath = path.join(stateDir, POOLER_STATE_FILE)
+    await writeFile(poolerPath, JSON.stringify(snap), 'utf8')
+    // qi-silence: ARMED ledger (census marker present) + ONE post-census
+    // retired worker (not yet in the ledger) → 1 in-window ≥ min 1 with zero
+    // directives → finding.
+    await writeFile(path.join(stateDir, QI_SILENCE_STATE_FILE), JSON.stringify({ [QI_SILENCE_CENSUS_KEY]: T0 - 10 * 60_000 }), 'utf8')
+    // system-idle: quiet ≥ 60s with pending work.
+    await writeFile(path.join(stateDir, SYSTEM_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: T0 - 60_000 }), 'utf8')
+    const alerts = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-man',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      poolerStatePath: poolerPath,
+      posts: [
+        { postId: 'builder-retired', retired: true, provider: 'worker' },
+        { postId: 'builder-wait', inboxTs: [T0 - 30_000] }
+      ],
+      hostRunning: false,
+      sessionContexts: [{ postId: 'research-head', contextWindow: 1_000_000, pressureTokens: 620_000 }],
+      config: { health: { idleWindowMs: 60_000, qiSilenceMinRetiresInWindow: 1 } },
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts.length, 1, 'all four kinds alert in ONE grouped frame (the same tick composes them)')
+    assert.match(alerts[0].frame, /- pooler-capacity critical:/, 'the M1 pooler bullet')
+    assert.match(alerts[0].frame, /- qi-silence:/, 'the M1 qi-silence bullet')
+    assert.match(alerts[0].frame, /- system-idle:/, 'the M4 system-idle bullet')
+    assert.match(alerts[0].frame, /- context-threshold: research-head 62% \(620000\/1000000\) — cruce b6/, 'the M-A context bullet (kinds DISJOINT, never the stalled-post fallback)')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state[POOLER_CAPACITY_KEY_CRITICAL], T0, 'the pooler dedupe key advances')
+    assert.equal(state[QI_SILENCE_KEY], T0, 'the qi-silence dedupe key advances')
+    assert.equal(state[SYSTEM_IDLE_KEY], T0, 'the system-idle dedupe key advances')
+    assert.equal(state['context-threshold:research-head:b6'], T0, 'the context band dedupe key advances')
+    const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    const kinds = audit.at(-1).findings.map((f) => f.kind).sort()
+    assert.deepEqual(kinds, ['context-threshold', 'pooler-capacity', 'qi-silence', 'system-idle'], 'the audit row records ALL FOUR distinct kinds')
+  })
+})
+
+test('M-A SMOKE (acceptance — real daemon): bootPlugin with health {intervalMs: 50, contextThresholdPollMs: 50} + the token-meter `contextPressure` projection fixture (high window usage) → the REAL daemon alerts the host with the context-threshold frame; the audit row records the finding (the LIVE profile data — host at 59.8% — validates the same algorithm)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootPlugin(stateDir, { health: { intervalMs: 50, contextThresholdPollMs: 50, contextThreshold: 0.5 } })
+    try {
+      // Load the M-A fixture plugin (registers the token-meter `contextPressure`
+      // unit — the hermetic boot composes dsh-session-projection but NOT
+      // dsh-token-meter; the production dsh-web-app profile registers the real
+      // unit). The loader.await() is re-entrant: the new entry applies inside a
+      // proper fiber, so the registration is a real cordis effect.
+      env.root.loader.create({ id: 'ma-contextpressure-unit', name: './fixtures/ma-contextpressure-unit.js' })
+      await env.root.loader.await()
+      await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'head materialized at boot')
+      const host = env.agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      // Self-register the live host (the ALERT recipient must be a durable
+      // hosts.json entry for pickLiveHost — dept_who ensures it).
+      await env.root.tools.get('dept_who').execute({}, { agent: host, signal })
+      await waitFor(() => {
+        const frames = host.inboxMessages.map((m) => m.content[0]?.text ?? '')
+        return frames.some((t) => t.includes('System-health ALERT') && t.includes('context-threshold'))
+      }, 5000, 'the real context-threshold daemon alerts the host')
+      const frame = host.inboxMessages.find((m) => m.content[0]?.text.includes('context-threshold')).content[0].text
+      assert.match(frame, /- context-threshold: (research-head|host-)/, 'the REAL alert frame carries the context-threshold line')
+      await waitFor(async () => {
+        try {
+          const audit = await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')
+          return audit.trim().length > 0
+        } catch {
+          return false
+        }
+      }, 5000, 'the audit row is appended')
+      const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      assert.equal(audit.at(-1).findings.some((f) => f.kind === 'context-threshold'), true, 'the audit last row records the context-threshold finding')
     } finally {
       await env.dispose()
     }
@@ -12544,26 +13151,38 @@ test('FIX-2 (QD NO_ADAPTER alerting): a boot where the configured provider IS re
 // ---------------------------------------------------------------------------
 // fb-9 (QH MEDIA) — reasoning-content DISPATCH PRE-FLIGHT + boot-assert. The
 // class 400 `reasoning_content must be passed back` burned a whole mission
-// (570s/~55k tokens, 0 deliverable); the REACTIVE fix is settings.yaml:20
-// (requiresReasoningContentOnAssistantMessages: true on the opencode-zen
-// profile). This batch proves the PRE-FLIGHT: a profile with reasoning enabled
+// (570s/~55k tokens, 0 deliverable); the REACTIVE fix is the settings flag
+// requiresReasoningContentOnAssistantMessages: true in the provider's `compat:`
+// block (the schema-correct path the adapter reads — a provider-TOP-LEVEL flag
+// is the DEAD key that produced the m-603 GREEN FALSE). This batch proves the
+// PRE-FLIGHT: a profile with reasoning enabled
 // but WITHOUT the flag REJECTS dept_worker_spawn / dept_job_run BEFORE any
 // agents.create (the expensive mid-mission 400 can never happen again); with
-// the flag / reasoning off / absent-or-unreadable settings → passthrough
-// (zero regression); the boot-assert flags the drift at boot, NON-fatal.
+// the compat flag / reasoning off / absent-or-unreadable settings → passthrough
+// (zero regression); a settings with ONLY the dead top-level flag is now
+// DETECTED (green false → hard reject + boot drift row); the boot-assert flags
+// the drift at boot, NON-fatal; the bus-wake RESUME seam (materializePost)
+// fails EARLY too.
+// The WIRE half (acceptance 8, below) proves the PROTOCOL-level effect the
+// guard only gates: with the flag in compat: the request serializer echoes
+// `reasoning_content: ""` on EVERY replayed assistant message (0 missing in
+// the upstream body), while a DEAD provider-top-level scalar or an absent
+// flag leave the payload in the pre-400 shape the dispatch guard now rejects.
 // The settings fixtures are written into the temp stateDir (the SAME
 // <stateDir>/settings.yaml the dshd-pooler reader + the boot check consume).
 // ---------------------------------------------------------------------------
 
-test('fb-9 PRE-FLIGHT (pure): parseLlmPiAiProviderSettings resolves the reasoning surface — provider-level reasoningEffort, requiresReasoningContentOnAssistantMessages, and the model-level reasoningEfforts key union (inline braces + multi-line brace block)', () => {
-  // (a) A dev-like profile: flag present + models with a multi-line brace block.
+test('fb-9 PRE-FLIGHT (pure): parseLlmPiAiProviderSettings resolves the reasoning surface — provider-level reasoningEffort, the model-level reasoningEfforts key union (inline braces + multi-line brace block), and requiresReasoningContentOnAssistantMessages ONLY from the provider compat: block (a provider-top-level flag is a DEAD key → undefined)', () => {
+  // (a) A dev-like profile: the flag INSIDE `compat:` (the schema-correct
+  // compatProfile path the adapter reads) + models with a multi-line brace block.
   const full = parseLlmPiAiProviderSettings([
     'llm-pi-ai:',
     '  providers:',
     '    opencode-zen:',
     '      api: openai-completions',
     '      baseURL: http://127.0.0.1:4097/v1',
-    '      requiresReasoningContentOnAssistantMessages: true',
+    '      compat:',
+    '        requiresReasoningContentOnAssistantMessages: true',
     '      models:',
     '        - id: deepseek-v4-flash',
     '          name: DeepSeek V4 Flash',
@@ -12578,8 +13197,25 @@ test('fb-9 PRE-FLIGHT (pure): parseLlmPiAiProviderSettings resolves the reasonin
     '          reasoningEfforts: { off: null, minimal: minimal, max: max }'
   ].join('\n'))
   assert.equal(full['opencode-zen'].baseURL, 'http://127.0.0.1:4097/v1', 'baseURL preserved')
-  assert.equal(full['opencode-zen'].requiresReasoningContentOnAssistantMessages, true, 'the flag is resolved')
+  assert.equal(full['opencode-zen'].requiresReasoningContentOnAssistantMessages, true, 'the flag is resolved from the provider compat: block (the schema-correct path)')
   assert.deepEqual(full['opencode-zen'].reasoningEfforts, ['off', 'low', 'high', 'max', 'minimal'], 'the model-level reasoningEfforts keys UNION (multi-line + inline brace forms)')
+  // (a2) FB-9 REALIGNMENT (the m-603 GREEN FALSE root cause): a flag written at
+  // provider TOP-LEVEL (the DEAD path — dsh-llm-pi-ai resolveProfiles only reads
+  // `source.compat`, NEVER a provider-level key) is NOT resolved → undefined, so
+  // the pre-flight DETECTS the misconfiguration instead of passing.
+  const dead = parseLlmPiAiProviderSettings([
+    'llm-pi-ai:',
+    '  providers:',
+    '    opencode-zen:',
+    '      api: openai-completions',
+    '      baseURL: http://127.0.0.1:4097/v1',
+    '      requiresReasoningContentOnAssistantMessages: true',
+    '      models:',
+    '        - id: deepseek-v4-flash',
+    '          reasoningEfforts: { off: null, low: low, high: high, max: max }'
+  ].join('\n'))
+  assert.equal(dead['opencode-zen'].requiresReasoningContentOnAssistantMessages, undefined, 'a provider-TOP-LEVEL flag is the DEAD path the adapter ignores → the reader does NOT resolve it (green-false case now DETECTED)')
+  assert.deepEqual(dead['opencode-zen'].reasoningEfforts, ['off', 'low', 'high', 'max'], 'the dead flag does not disturb the rest of the surface (efforts still resolve)')
   // (b) Reasoning OFF: model-level efforts only off (no flag needed).
   const off = parseLlmPiAiProviderSettings([
     'llm-pi-ai:',
@@ -12592,6 +13228,28 @@ test('fb-9 PRE-FLIGHT (pure): parseLlmPiAiProviderSettings resolves the reasonin
   ].join('\n'))
   assert.deepEqual(off['opencode-zen'].reasoningEfforts, ['off'], 'off-only efforts resolved')
   assert.equal(off['opencode-zen'].requiresReasoningContentOnAssistantMessages, undefined, 'no flag key → undefined (never a false literal)')
+  // (b2) An absent compat: block with NO flag anywhere → undefined (absent ≠ false).
+  const noCompat = parseLlmPiAiProviderSettings([
+    'llm-pi-ai:',
+    '  providers:',
+    '    opencode-zen:',
+    '      models:',
+    '        - id: deepseek-v4-flash',
+    '          reasoningEfforts: { off: null, max: max }'
+  ].join('\n'))
+  assert.equal(noCompat['opencode-zen'].requiresReasoningContentOnAssistantMessages, undefined, 'no compat: block → the flag stays undefined')
+  // (b3) A compat: block WITHOUT the flag → undefined (absent ≠ false).
+  const compatNoFlag = parseLlmPiAiProviderSettings([
+    'llm-pi-ai:',
+    '  providers:',
+    '    opencode-zen:',
+    '      compat:',
+    '        supportsStore: true',
+    '      models:',
+    '        - id: deepseek-v4-flash',
+    '          reasoningEfforts: { off: null, max: max }'
+  ].join('\n'))
+  assert.equal(compatNoFlag['opencode-zen'].requiresReasoningContentOnAssistantMessages, undefined, 'a compat: block without the flag keeps it undefined')
   // (c) A provider-level reasoningEffort scalar — the PLURAL map key must NOT
   // collide with the SINGULAR scalar.
   const scalar = parseLlmPiAiProviderSettings([
@@ -12631,10 +13289,10 @@ test('fb-9 PRE-FLIGHT (pure): resolveReasoningContentPreflight blocks ONLY a pro
   // blocks).
   assert.deepEqual(resolveReasoningContentPreflight('opencode-zen', { 'opencode-zen': { baseURL: 'http://127.0.0.1:4097/v1' } }), { ok: true }, 'no reasoning signal → passthrough')
   // (f) THE BLOCK: reasoning enabled (model efforts non-off) + flag missing →
-  // the EXACT early error.
+  // the EXACT early error (naming the schema-correct `compat.` path).
   const verdict = resolveReasoningContentPreflight('opencode-zen', { 'opencode-zen': { reasoningEfforts: ['off', 'low', 'max'] } }, label)
   assert.equal(verdict.ok, false, 'reasoning enabled without the flag → BLOCKED')
-  assert.equal(verdict.reason, 'preflight: provider «opencode-zen» has reasoning enabled but missing requiresReasoningContentOnAssistantMessages=true (settings /state/example) — configure the flag before dispatching', 'the EXACT preflight message (provider, flag, settings label, remediation)')
+  assert.equal(verdict.reason, 'preflight: provider «opencode-zen» has reasoning enabled but missing compat.requiresReasoningContentOnAssistantMessages=true (settings /state/example) — configure the flag in the provider\'s compat: block (a provider-level key is not read by pi-ai) before dispatching', 'the EXACT preflight message (provider, schema-correct compat. path, settings label, remediation)')
   // (g) A provider-level scalar non-off without the flag → blocked too.
   const scalar = resolveReasoningContentPreflight('opencode-zen', { 'opencode-zen': { reasoningEffort: 'max' } }, label)
   assert.equal(scalar.ok, false, 'provider reasoningEffort max without the flag → BLOCKED')
@@ -12662,7 +13320,7 @@ test('fb-9 DISPATCH PRE-FLIGHT (acceptance 1): a fixture settings.yaml with reas
       const signal = new AbortController().signal
       await assert.rejects(
         () => headCtx.tools.get('dept_worker_spawn', key).execute({ role: 'researcher', task: 'fb-9 blocked spawn' }, { agent: head, signal }),
-        /preflight: provider «opencode-zen» has reasoning enabled but missing requiresReasoningContentOnAssistantMessages=true \(settings .*\) — configure the flag before dispatching/,
+        /preflight: provider «opencode-zen» has reasoning enabled but missing compat\.requiresReasoningContentOnAssistantMessages=true \(settings .*\) — configure the flag in the provider's compat: block/,
         'dept_worker_spawn rejects with the CLEAR EARLY preflight error'
       )
       // BEFORE materializing: NO ctx.agents.create for a worker session and NO
@@ -12692,7 +13350,7 @@ test('fb-9 DISPATCH PRE-FLIGHT (acceptance 1 — dept_job_run): the SAME fixture
       const signal = new AbortController().signal
       await assert.rejects(
         () => headCtx.tools.get('dept_job_run', key).execute({ jobId: 'monitor-dsh-updates' }, { agent: head, signal }),
-        /preflight: provider «opencode-zen» has reasoning enabled but missing requiresReasoningContentOnAssistantMessages=true/,
+        /preflight: provider «opencode-zen» has reasoning enabled but missing compat\.requiresReasoningContentOnAssistantMessages=true/,
         'dept_job_run rejects with the SAME preflight error (runJobForDepartment — the shared job engine)'
       )
       assert.equal(agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-')), false, 'no job worker was created (the rejection precedes agents.create)')
@@ -12721,7 +13379,7 @@ test('fb-9 DISPATCH PRE-FLIGHT (acceptance 1 — dept_post_create): the SAME fix
       const signal = new AbortController().signal
       await assert.rejects(
         () => headCtx.tools.get('dept_post_create', key).execute({ postId: 'legacy-worker', role: 'rank-and-file researcher', firstMessage: 'fb-9 blocked legacy create' }, { agent: head, signal }),
-        /preflight: provider «opencode-zen» has reasoning enabled but missing requiresReasoningContentOnAssistantMessages=true \(settings .*\) — configure the flag before dispatching/,
+        /preflight: provider «opencode-zen» has reasoning enabled but missing compat\.requiresReasoningContentOnAssistantMessages=true \(settings .*\) — configure the flag in the provider's compat: block/,
         'dept_post_create rejects with the SAME CLEAR EARLY preflight error (the legacy seam is guarded too)'
       )
       // BEFORE materializing: NO ctx.agents.create for a worker session and NO
@@ -12736,29 +13394,64 @@ test('fb-9 DISPATCH PRE-FLIGHT (acceptance 1 — dept_post_create): the SAME fix
   })
 })
 
-test('fb-9 ZERO REGRESSION (acceptance 2): the SAME fixture WITH requiresReasoningContentOnAssistantMessages: true spawns NORMALLY (worker materialized, task delivered) — the dev-profile shape', async () => {
+test('fb-9 ZERO REGRESSION (acceptance 2): the SAME fixture WITH the flag in the provider compat: block spawns NORMALLY (worker materialized, task delivered) — the schema-correct dev-profile shape', async () => {
   await withTempStateDir(async (stateDir) => {
     await writeFile(path.join(stateDir, 'settings.yaml'), [
       'llm-pi-ai:',
       '  providers:',
       '    opencode-zen:',
       '      api: openai-completions',
-      '      requiresReasoningContentOnAssistantMessages: true',
+      '      compat:',
+      '        requiresReasoningContentOnAssistantMessages: true',
       '      models:',
       '        - id: deepseek-v4-flash',
       '          reasoningEfforts: { off: null, minimal: minimal, low: low, medium: medium, high: high, max: max }'
     ].join('\n'), 'utf8')
     const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
     try {
-      const { result, worker } = await f3Spawn({ agents, root }, headCtx, key, head, { role: 'researcher', task: 'flag present — spawn normal' })
-      assert.ok(agents.createCalls.some((c) => String(c.sessionId) === result.sessionId), 'the worker IS materialized when the flag is present')
+      const { result, worker } = await f3Spawn({ agents, root }, headCtx, key, head, { role: 'researcher', task: 'compat flag present — spawn normal' })
+      assert.ok(agents.createCalls.some((c) => String(c.sessionId) === result.sessionId), 'the worker IS materialized when the compat flag is present')
       await waitFor(() => worker.inboxMessages.length >= 1, 5000, 'worker woken by the task')
-      assert.match(worker.inboxMessages.at(-1).content[0].text, /flag present — spawn normal/, 'the task is delivered (the dispatch is unchanged)')
-      // Legacy parity: dept_post_create (R6) with the flag present creates
+      assert.match(worker.inboxMessages.at(-1).content[0].text, /compat flag present — spawn normal/, 'the task is delivered (the dispatch is unchanged)')
+      // Legacy parity: dept_post_create (R6) with the compat flag present creates
       // NORMALLY too — the flag unblocks every seam, the legacy stays legacy.
-      const legacy = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'legacy-worker', role: 'rank-and-file researcher', firstMessage: 'flag present — legacy normal' }, { agent: head, signal: new AbortController().signal })
-      assert.match(legacy.sessionId, /^worker-legacy-worker-[0-9a-f-]+$/, 'the legacy seam materializes a worker when the flag is present')
+      const legacy = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'legacy-worker', role: 'rank-and-file researcher', firstMessage: 'compat flag present — legacy normal' }, { agent: head, signal: new AbortController().signal })
+      assert.match(legacy.sessionId, /^worker-legacy-worker-[0-9a-f-]+$/, 'the legacy seam materializes a worker when the compat flag is present')
       assert.ok(agents.createCalls.some((c) => String(c.sessionId) === legacy.sessionId), 'the legacy worker IS materialized too (zero regression for the R6 path)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-9 GREEN-FALSE FLIP (acceptance 2b — the m-603 DEAD path): a fixture with ONLY the provider-TOP-LEVEL requiresReasoningContentOnAssistantMessages: true (the dead key the adapter never reads) is now DETECTED — dept_worker_spawn REJECTS with the CLEAR EARLY error, nothing is created', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The m-603 incident shape: the flag written at provider TOP-LEVEL (NOT in
+    // the compat: block). The reader resolves it as ABSENT → the pre-flight
+    // rejects — the GREEN FALSE (the old reader passed this exact settings with
+    // {ok:true}) is impossible again.
+    await writeFile(path.join(stateDir, 'settings.yaml'), [
+      'llm-pi-ai:',
+      '  providers:',
+      '    opencode-zen:',
+      '      api: openai-completions',
+      '      baseURL: http://127.0.0.1:4097/v1',
+      '      requiresReasoningContentOnAssistantMessages: true',
+      '      models:',
+      '        - id: deepseek-v4-flash',
+      '          reasoningEfforts: { off: null, minimal: minimal, low: low, medium: medium, high: high, max: max }'
+    ].join('\n'), 'utf8')
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      await assert.rejects(
+        () => headCtx.tools.get('dept_worker_spawn', key).execute({ role: 'researcher', task: 'fb-9 dead-key blocked spawn' }, { agent: head, signal }),
+        /preflight: provider «opencode-zen» has reasoning enabled but missing compat\.requiresReasoningContentOnAssistantMessages=true \(settings .*\) — configure the flag in the provider's compat: block/,
+        'a settings with ONLY the dead top-level flag is DETECTED and the dispatch REJECTS with the schema-correct remediation'
+      )
+      assert.equal(agents.createCalls.filter((c) => String(c.sessionId).startsWith('worker-')).length, 0, 'no worker agent was created (the rejection fires BEFORE agents.create — the green false is gone)')
+      const posts = await readPosts(stateDir)
+      assert.equal(Object.values(posts).some((p) => p.provider === 'worker'), false, 'no durable worker post was registered')
     } finally {
       await dispose()
     }
@@ -12828,7 +13521,7 @@ test('fb-9 BOOT-ASSERT (acceptance 5): a boot against a fixture WITHOUT the flag
       await waitFor(() => readPostErrorsFile(stateDir).some((r) => r.postId === REASONING_CONTENT_PREFLIGHT_POST_ID), 5000, 'the boot-assert drift row is written')
       const rows = readPostErrorsFile(stateDir).filter((r) => r.postId === REASONING_CONTENT_PREFLIGHT_POST_ID)
       assert.equal(rows.length, 1, 'EXACTLY ONE drift row at boot')
-      assert.match(rows[0].error, /preflight: provider «opencode-zen» has reasoning enabled but missing requiresReasoningContentOnAssistantMessages=true/, 'the row carries the preflight reason')
+      assert.match(rows[0].error, /preflight: provider «opencode-zen» has reasoning enabled but missing compat\.requiresReasoningContentOnAssistantMessages=true/, 'the row carries the preflight reason (naming the schema-correct compat. path)')
       const findings = scanPostErrorFindings(stateDir, Date.now())
       assert.ok(findings.some((f) => f.postId === REASONING_CONTENT_PREFLIGHT_POST_ID), 'the drift row is a post-error finding the W6 daemon surfaces')
       // NON-FATAL: the boot completes and the head still materializes.
@@ -12840,13 +13533,14 @@ test('fb-9 BOOT-ASSERT (acceptance 5): a boot against a fixture WITHOUT the flag
   })
 })
 
-test('fb-9 BOOT-ASSERT zero-regression: a boot against a HEALTHY fixture (flag present) or NO settings.yaml writes NO drift row', async () => {
+test('fb-9 BOOT-ASSERT zero-regression: a boot against a HEALTHY fixture (compat flag present) or NO settings.yaml writes NO drift row', async () => {
   await withTempStateDir(async (stateDir) => {
     await writeFile(path.join(stateDir, 'settings.yaml'), [
       'llm-pi-ai:',
       '  providers:',
       '    opencode-zen:',
-      '      requiresReasoningContentOnAssistantMessages: true',
+      '      compat:',
+      '        requiresReasoningContentOnAssistantMessages: true',
       '      models:',
       '        - id: deepseek-v4-flash',
       '          reasoningEfforts: { off: null, max: max }'
@@ -12855,7 +13549,7 @@ test('fb-9 BOOT-ASSERT zero-regression: a boot against a HEALTHY fixture (flag p
     try {
       await waitForHeadMaterialized(env.agents)
       await new Promise((resolve) => setTimeout(resolve, 150))
-      assert.equal(readPostErrorsFile(stateDir).filter((r) => r.postId === REASONING_CONTENT_PREFLIGHT_POST_ID).length, 0, 'flag present → NO drift row at boot')
+      assert.equal(readPostErrorsFile(stateDir).filter((r) => r.postId === REASONING_CONTENT_PREFLIGHT_POST_ID).length, 0, 'compat flag present → NO drift row at boot')
     } finally {
       await env.dispose()
     }
@@ -12871,6 +13565,464 @@ test('fb-9 BOOT-ASSERT zero-regression: a boot against a HEALTHY fixture (flag p
       await env.dispose()
     }
   })
+})
+
+test('fb-9 BOOT-ASSERT GREEN-FALSE FLIP (acceptance 5c — the m-603 DEAD path): a boot against a fixture with ONLY the provider-TOP-LEVEL flag (the dead key) writes EXACTLY ONE drift row — the misconfiguration is DETECTED from the break, never a silent healthy boot', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The m-603 incident shape written BEFORE boot: the flag at provider
+    // TOP-LEVEL (NOT in compat:). The reader resolves it as ABSENT → the
+    // boot-assert flags the drift — the old boot-assert (which read the dead
+    // key and reported {ok:true}) is no longer a green false.
+    await writeFile(path.join(stateDir, 'settings.yaml'), [
+      'llm-pi-ai:',
+      '  providers:',
+      '    opencode-zen:',
+      '      api: openai-completions',
+      '      baseURL: http://127.0.0.1:4097/v1',
+      '      requiresReasoningContentOnAssistantMessages: true',
+      '      models:',
+      '        - id: deepseek-v4-flash',
+      '          reasoningEfforts: { off: null, low: low, max: max }'
+    ].join('\n'), 'utf8')
+    const env = await bootPlugin(stateDir)
+    try {
+      await waitFor(() => readPostErrorsFile(stateDir).some((r) => r.postId === REASONING_CONTENT_PREFLIGHT_POST_ID), 5000, 'the boot-assert drift row is written for the DEAD top-level flag')
+      const rows = readPostErrorsFile(stateDir).filter((r) => r.postId === REASONING_CONTENT_PREFLIGHT_POST_ID)
+      assert.equal(rows.length, 1, 'EXACTLY ONE drift row (a top-level-only flag is a real misconfiguration, not a healthy profile)')
+      assert.match(rows[0].error, /missing compat\.requiresReasoningContentOnAssistantMessages=true/, 'the drift row names the schema-correct location (the operator must move the flag INTO compat:)')
+      // NON-FATAL: the boot still completes (the boot-assert never blocks).
+      await waitForHeadMaterialized(env.agents)
+      assert.ok(env.agents.store.has('head-research-head'), 'the boot-assert is non-fatal even for the dead-key drift')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('fb-9 RESUME SEAM (acceptance 6 — materializePost, coverage-map §4-3): a dormant WORKER whose profile carries ONLY the dead provider-TOP-LEVEL flag FAILS ITS BUS WAKE with the preflight error — NO agents.resume/create for its session (fail-early on the resume class, never a 400 after a cold-resume)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The m-603 dead shape written BEFORE boot: flag at provider TOP-LEVEL only.
+    await writeFile(path.join(stateDir, 'settings.yaml'), [
+      'llm-pi-ai:',
+      '  providers:',
+      '    opencode-zen:',
+      '      api: openai-completions',
+      '      baseURL: http://127.0.0.1:4097/v1',
+      '      requiresReasoningContentOnAssistantMessages: true',
+      '      models:',
+      '        - id: deepseek-v4-flash',
+      '          reasoningEfforts: { off: null, low: low, max: max }'
+    ].join('\n'), 'utf8')
+    const postId = 'researcher-alpha'
+    await seedPost(stateDir, { postId, sessionId: 'worker-researcher-alpha', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'rank-and-file researcher' })
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const r = await root.tools.get('send_message').execute({ to: [postId], text: 'wake the worker under the dead top-level flag' }, { agent: host, signal })
+      assert.equal(r.delivered[postId], 'failed', 'the bus wake FAILS (the materializePost pre-flight rejects the resume class)')
+      assert.equal(agents.resumeCalls.some((c) => String(c.resumeSessionId) === 'worker-researcher-alpha'), false, 'NO agents.resume ran for the worker (the guard fires BEFORE the resume)')
+      assert.equal(agents.createCalls.some((c) => String(c.sessionId) === 'worker-researcher-alpha'), false, 'NO create fallback ran either (the resume path is never entered)')
+      assert.equal(agents.store.has('worker-researcher-alpha'), false, 'the worker is NOT live')
+      const rows = readPostErrorsFile(stateDir).filter((r0) => r0.postId === postId)
+      assert.ok(rows.some((r0) => /preflight: provider «opencode-zen» has reasoning enabled but missing compat\.requiresReasoningContentOnAssistantMessages=true/.test(r0.error)), 'the delivery failure is recorded durably with the preflight reason (the operator sees WHY the wake failed)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-9 RESUME SEAM zero-regression (acceptance 7 — materializePost): a dormant WORKER whose profile carries the flag in the provider compat: block wakes NORMALLY — cold-resume under its own session, delivery reported as resumed (the resume class is unchanged for a healthy profile)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The schema-correct dev shape written BEFORE boot: flag inside compat:.
+    await writeFile(path.join(stateDir, 'settings.yaml'), [
+      'llm-pi-ai:',
+      '  providers:',
+      '    opencode-zen:',
+      '      api: openai-completions',
+      '      compat:',
+      '        requiresReasoningContentOnAssistantMessages: true',
+      '      models:',
+      '        - id: deepseek-v4-flash',
+      '          reasoningEfforts: { off: null, low: low, max: max }'
+    ].join('\n'), 'utf8')
+    const postId = 'researcher-alpha'
+    await seedPost(stateDir, { postId, sessionId: 'worker-researcher-alpha', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'rank-and-file researcher' })
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const r = await root.tools.get('send_message').execute({ to: [postId], text: 'wake the worker under the compat flag' }, { agent: host, signal })
+      assert.equal(r.delivered[postId], 'resumed', 'the bus wake materializes the worker (bus delivery reports the resume)')
+      assert.ok(agents.resumeCalls.some((c) => String(c.resumeSessionId) === 'worker-researcher-alpha'), 'the worker was cold-RESUMED under its own session (the healthy resume path is unchanged)')
+      assert.ok(agents.store.has('worker-researcher-alpha'), 'the worker is live after the wake')
+      assert.equal(readPostErrorsFile(stateDir).filter((r0) => r0.postId === REASONING_CONTENT_PREFLIGHT_POST_ID).length, 0, 'no boot drift row (the compat flag is the healthy dev-profile shape)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// ===========================================================================
+// DISPATCH-HARDENING (QH «429-primer-call», 2026-08-28) — Part A (a) REAL
+// LOADER acceptances: the pooler-capacity PRE-CHECK on the SAME 3+1 seams as
+// fb-9 (dept_worker_spawn / dept_job_run / dept_post_create / the materialize
+// bus wake) — a fixture pool state with ALL keys exhausted rejects the spawn
+// LOUDLY and EARLY (no agent created, no durable post: the expensive
+// primer-call 429/503 never happens), while a healthy pool / absent state /
+// the `poolerDispatchEnabled: false` knob stay passthrough.
+// ===========================================================================
+
+/** Write a FRESH pooler snapshot to a fixture path. `keys` maps keyId →
+ * {workspace, invalid?, blockedUntil?, cooldownUntil?, lastUsage?}. */
+async function writePoolerFixture(stateDir, keys, { fresh = true, lastRotation = null, updatedAtMs = Date.now() } = {}) {
+  const p = path.join(stateDir, POOLER_STATE_FILE)
+  await writeFile(p, JSON.stringify({
+    updatedAt: fresh ? new Date(updatedAtMs).toISOString() : new Date(updatedAtMs - 11 * 60_000).toISOString(),
+    keys,
+    lastRotation
+  }, null, 2), 'utf8')
+  return p
+}
+
+test('DISPATCH-HARDENING (acceptance 1 — dept_worker_spawn): a fixture pool state with ALL keys exhausted REJECTS dept_worker_spawn with the CLEAR EARLY «pool: workspace … at quota — dispatch delayed» error BEFORE any materialization (no agents.create, no durable post)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writePoolerFixture(stateDir, {
+      'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: Date.now() + 3600_000, cooldownUntil: 0 },
+      'oc-7': { id: 'oc-7', workspace: 'ws7', invalid: false, blockedUntil: Date.now() + 3600_000, cooldownUntil: 0 },
+      'oc-8': { id: 'oc-8', workspace: 'ws8', invalid: true, blockedUntil: 0, cooldownUntil: 0 }
+    })
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { health: { poolerStateFilePath: path.join(stateDir, POOLER_STATE_FILE), poolerDispatchEnabled: true } })
+    try {
+      const signal = new AbortController().signal
+      await assert.rejects(
+        () => headCtx.tools.get('dept_worker_spawn', key).execute({ role: 'researcher', task: 'blocked by an at-quota pool' }, { agent: head, signal }),
+        /pool: workspaces ws6,ws7,ws8 at quota \(0 usable keys — all blocked\/cooldown\/invalid; 3\/3 keys\) — dispatch delayed; retry when a fresh key resolves/,
+        'dept_worker_spawn rejects with the CLEAR EARLY pool-quota error'
+      )
+      // BEFORE materializing: NO ctx.agents.create for a worker session and NO
+      // durable worker post — the pre-check fires before any create.
+      assert.equal(agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-')), false, 'no worker agent was created (the pre-check fires BEFORE agents.create)')
+      const posts = await readPosts(stateDir)
+      assert.equal(Object.values(posts).some((p0) => p0.provider === 'worker'), false, 'no durable worker post was registered')
+      assert.ok(agents.store.has('head-research-head'), 'the head stays materialized (the guard only blocks dispatch)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('DISPATCH-HARDENING (acceptance 1 — dept_job_run): the SAME exhausted-pool fixture rejects dept_job_run LOUDLY before any materialization (no agents.create) — the SHARED runJobForDepartment engine is guarded', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writePoolerFixture(stateDir, {
+      'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: Date.now() + 3600_000, cooldownUntil: 0 }
+    })
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { health: { poolerStateFilePath: path.join(stateDir, POOLER_STATE_FILE), poolerDispatchEnabled: true } })
+    try {
+      const signal = new AbortController().signal
+      await assert.rejects(
+        () => headCtx.tools.get('dept_job_run', key).execute({ jobId: 'monitor-dsh-updates' }, { agent: head, signal }),
+        /pool: workspace ws6 at quota \(0 usable keys — all blocked\/cooldown\/invalid; 1\/1 keys\) — dispatch delayed; retry when a fresh key resolves/,
+        'dept_job_run rejects with the SAME pool-quota error (runJobForDepartment — the shared job engine)'
+      )
+      assert.equal(agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-')), false, 'no job worker was created (the rejection precedes agents.create)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('DISPATCH-HARDENING (acceptance 1 — dept_post_create): the SAME exhausted-pool fixture ALSO rejects the LEGACY create seam (R6 dept_post_create) LOUDLY before any materialization — no agents.create, no durable post (the THIRD seam is covered)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writePoolerFixture(stateDir, {
+      'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: Date.now() + 3600_000, cooldownUntil: 0 }
+    })
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { health: { poolerStateFilePath: path.join(stateDir, POOLER_STATE_FILE), poolerDispatchEnabled: true } })
+    try {
+      const signal = new AbortController().signal
+      await assert.rejects(
+        () => headCtx.tools.get('dept_post_create', key).execute({ postId: 'legacy-worker', role: 'rank-and-file researcher', firstMessage: 'blocked legacy create' }, { agent: head, signal }),
+        /pool: workspace ws6 at quota \(0 usable keys — all blocked\/cooldown\/invalid; 1\/1 keys\) — dispatch delayed; retry when a fresh key resolves/,
+        'dept_post_create rejects with the SAME CLEAR EARLY pool-quota error (the legacy seam is guarded too)'
+      )
+      assert.equal(agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-')), false, 'no worker agent was created via the legacy path (the pre-check fires BEFORE agents.create)')
+      const posts = await readPosts(stateDir)
+      assert.equal(Object.values(posts).some((p0) => p0.provider === 'worker'), false, 'no durable worker post was registered by the legacy path')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('DISPATCH-HARDENING (acceptance 2 — the RESUME seam + the healthy/passthrough matrix): a dormant worker\u2019s bus wake FAILS early against an exhausted pool; a HEALTHY pool spawns NORMALLY; an ABSENT state file (the hermetic default) and the `poolerDispatchEnabled:false` knob stay passthrough', async () => {
+  // (a) RESUME seam: a dormant worker's bus wake against the exhausted pool is
+  // mapped to 'failed' by the delivery (materializePost throws the pool block
+  // BEFORE any agents.resume/create — the first-call 429/503 never happens).
+  await withTempStateDir(async (stateDir) => {
+    await writePoolerFixture(stateDir, {
+      'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: Date.now() + 3600_000, cooldownUntil: 0 }
+    })
+    await seedPost(stateDir, { postId: 'researcher-alpha', sessionId: 'worker-researcher-alpha', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher' })
+    const { root, agents, dispose } = await bootPlugin(stateDir, { health: { poolerStateFilePath: path.join(stateDir, POOLER_STATE_FILE), poolerDispatchEnabled: true } })
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const r = await root.tools.get('send_message').execute({ to: ['researcher-alpha'], text: 'wake under an exhausted pool' }, { agent: host, signal })
+      assert.equal(r.delivered['researcher-alpha'], 'failed', 'the bus wake against an exhausted pool is mapped to failed (fail-early on the resume class)')
+      assert.equal(agents.resumeCalls.some((c) => String(c.resumeSessionId) === 'worker-researcher-alpha'), false, 'no resume was attempted (the pool pre-check fires BEFORE agents.resume)')
+    } finally {
+      await dispose()
+    }
+  })
+  // (b) HEALTHY pool (one usable key under the quota) → spawn NORMAL (zero
+  // regression for a healthy pooler).
+  await withTempStateDir(async (stateDir) => {
+    await writePoolerFixture(stateDir, {
+      'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: 0, cooldownUntil: 0, lastUsage: { status: 'ok', percent: 25 } }
+    })
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { health: { poolerStateFilePath: path.join(stateDir, POOLER_STATE_FILE), poolerDispatchEnabled: true } })
+    try {
+      const { result } = await f3Spawn({ agents, root }, headCtx, key, head, { role: 'researcher', task: 'healthy pool — spawn normal' })
+      assert.ok(agents.createCalls.some((c) => String(c.sessionId) === result.sessionId), 'a healthy pool spawns the worker normally')
+    } finally {
+      await dispose()
+    }
+  })
+  // (c) ABSENT pooler state file (the hermetic default — the path resolves to
+  // ~/.dsh/keyPooler-state.json which does not exist here) → passthrough.
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const { result } = await f3Spawn({ agents, root }, headCtx, key, head, { role: 'researcher', task: 'absent pool state — passthrough' })
+      assert.ok(agents.createCalls.some((c) => String(c.sessionId) === result.sessionId), 'absent pooler state → spawn normal (zero regression)')
+    } finally {
+      await dispose()
+    }
+  })
+  // (d) The `poolerDispatchEnabled: false` knob: even an EXHAUSTED fixture
+  // restores the pre-check-less dispatch (the M1 poolerCapacityEnabled pattern).
+  await withTempStateDir(async (stateDir) => {
+    await writePoolerFixture(stateDir, {
+      'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: Date.now() + 3600_000, cooldownUntil: 0 }
+    })
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { health: { poolerStateFilePath: path.join(stateDir, POOLER_STATE_FILE), poolerDispatchEnabled: false } })
+    try {
+      const { result } = await f3Spawn({ agents, root }, headCtx, key, head, { role: 'researcher', task: 'dispatch pre-check disabled — spawn normal' })
+      assert.ok(agents.createCalls.some((c) => String(c.sessionId) === result.sessionId), 'poolerDispatchEnabled:false → the exhausted fixture does NOT block (explicit opt-out)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- fb-9 WIRE (m-603) — acceptance 8: the protocol-level half of the fix ----
+// The dispatch pre-flight above proves WHO is allowed to dispatch; it does NOT
+// prove WHAT the serializer puts on the wire — and the wire is where the class
+// 400 `reasoning_content must be passed back` actually happened: pi-ai's
+// convertMessages echoes `reasoning_content: ""` onto every replayed assistant
+// message ONLY when the resolved compat carries the flag AND the model has
+// reasoning AND the message has no reasoning_content of its own
+// (openai-completions.js:924-928). Acceptance: with the flag in the provider's
+// compat: block, a replayed assistant tool-call turn (no thinking in the
+// original message) reaches the upstream body WITH the echoed field (0
+// assistant messages without it); with ONLY the DEAD provider-top-level scalar
+// the payload carries NO field (the green-false shape the preflight above now
+// rejects); with the flag absent → the legacy pre-fb-9 wire.
+//
+// MECHANISM NOTE (a vs b): a full Loader boot with the REAL dsh-llm-pi-ai plus
+// a stub upstream capturing the payload is NOT composable in the hermetic
+// suite — the real pi-ai adapter (@deepseek-ai/dsh-llm-pi-ai +
+// @earendil-works/pi-ai) is NOT a dependency of this repo, it ships only in
+// the global harness install, and the suite is deliberately LLM-free (AGENTS.md
+// Rule 5; no agent-loop/llm wire precedents in test/ — every boot uses stub
+// providers). The exact seam IS injectable instead: the :924-928 gate is a pure
+// function of (compat, model, message), so a FAITHFUL serializer surrogate
+// (every branch below anchored to the installed real code, the gate VERBATIM),
+// driven by the REAL reader resolution of the SAME settings fixtures the
+// dispatch tests use, proves the wire effect structurally. Verified against the
+// real installed code: openai-completions.js:802-807 (user branch), :836-885
+// (assistant init/content), :886-908 (tool_calls map), :929-940 (skip-empty),
+// :942-966 (toolResult branch), :1188-1216 (getCompat merge, the flag resolved
+// model.compat-over-detection), :1143/:1155 (the detection base for the flag is
+// deepseek-only); dsh-llm-pi-ai lib/index.js:537-560 (model.reasoning from
+// non-off reasoningEfforts) and :579-598 (resolveModelCompat reads ONLY compat
+// blocks — a provider-level flag never reaches the model).
+/** The multi-turn replayed history the 400 class burned on: a cold-resume turn
+ * whose prior assistant turn made a tool-call WITHOUT carrying reasoning (the
+ * reasoning lived in the ORIGINAL request, never in the replayed message).
+ * pi-ai internal message format — the content-block shape convertMessages
+ * consumes (openai-completions.js:70-78: type text/thinking/toolCall). */
+const WIRE_HISTORY = [
+  { role: 'user', content: 'Run the wire check on the opencode-zen route' },
+  { role: 'assistant', content: [{ type: 'toolCall', id: 'call_1', name: 'run_check', arguments: { input: 'wire' } }] },
+  { role: 'toolResult', content: [{ type: 'text', text: 'ok' }], toolCallId: 'call_1' },
+  { role: 'user', content: 'Now summarize the result' }
+]
+
+/** The pi-ai compat merge the wire gate reads — mirror of getCompat
+ * (openai-completions.js:1188-1216) for the THREE fields the fixture surface
+ * touches: the watched flag (model.compat wins over detection, :1201-1202) and
+ * the two opencode-zen detected defaults the branches read
+ * (requiresAssistantAfterToolResult=false :1153, requiresToolResultName=false
+ * :1152). The detection base for the flag is deepseek-only (:1143/:1155) — the
+ * opencode-zen worker route is not deepseek, so its detected base is false. */
+function fb9WireResolveCompat(model) {
+  const detectedFlag = model.provider === 'deepseek' || String(model.baseURL ?? '').includes('deepseek.com')
+  return {
+    requiresAssistantAfterToolResult: false,
+    requiresToolResultName: false,
+    requiresReasoningContentOnAssistantMessages: model.compat?.requiresReasoningContentOnAssistantMessages ?? detectedFlag
+  }
+}
+
+/** The request-payload serializer surrogate — mirror of pi-ai convertMessages
+ * (openai-completions.js:758-966) for the WIRE_HISTORY surface: user string
+ * content (:802-807), the assistant tool-call branch (:834-941) with the
+ * :924-928 reasoning-content echo gate VERBATIM, and the text toolResult
+ * branch (:942-966). Branch points the fixture does not exercise (thinking
+ * signatures :868-875, grammar tool input :889-899, reasoning_details
+ * :909-922, images :818-825) are intentionally absent — the replayed
+ * assistant has NO thinking block, which is exactly the class that 400'd. */
+function fb9WireSerializePayload(model, history) {
+  const compat = fb9WireResolveCompat(model)
+  const params = []
+  for (const msg of history) {
+    if (msg.role === 'user') {
+      // :802-807 — the fixture surface uses string content only.
+      params.push({ role: 'user', content: msg.content })
+    } else if (msg.role === 'assistant') {
+      // :836-841 — requiresAssistantAfterToolResult is false here, so the
+      // assistant content starts null.
+      const assistantMsg = { role: 'assistant', content: compat.requiresAssistantAfterToolResult ? '' : null }
+      const assistantText = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('')
+      if (assistantText.length > 0) assistantMsg.content = assistantText // :878-885
+      const toolCalls = msg.content.filter((b) => b.type === 'toolCall')
+      if (toolCalls.length > 0) {
+        // :886-908 — the standard (non-grammar) tool_calls map; arguments are
+        // the block's object JSON-stringified.
+        assistantMsg.tool_calls = toolCalls.map((tc) => ({
+          id: tc.id,
+          type: 'function',
+          function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
+        }))
+      }
+      // THE GATE — VERBATIM from openai-completions.js:924-928.
+      if (compat.requiresReasoningContentOnAssistantMessages &&
+          model.reasoning &&
+          assistantMsg.reasoning_content === undefined) {
+        assistantMsg.reasoning_content = ""
+      }
+      // :929-940 — skip assistant messages with no content and no tool calls.
+      const content = assistantMsg.content
+      const hasContent = content !== null &&
+        content !== undefined &&
+        (typeof content === 'string' ? content.length > 0 : content.length > 0)
+      if (!hasContent && !assistantMsg.tool_calls) continue
+      params.push(assistantMsg)
+    } else if (msg.role === 'toolResult') {
+      // :942-966 — the text-only toolResult branch.
+      const textResult = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n')
+      const toolResultMsg = { role: 'tool', content: textResult, tool_call_id: msg.toolCallId }
+      if (compat.requiresToolResultName && msg.toolName) toolResultMsg.name = msg.toolName
+      params.push(toolResultMsg)
+    }
+  }
+  return params
+}
+
+/** The materialized model the serializer sees — mirror of the dsh-llm-pi-ai
+ * catalog build (resolveRouteModels lib/index.js:630-658): the opencode-zen
+ * openai-completions worker route; `reasoning: true` (resolveModelReasoning
+ * :537-560 — the profile's non-off reasoningEfforts); `compat` carrying ONLY
+ * the flag the REAL reader resolved from the compat: block — resolveModelCompat
+ * (:579-598) reads entry.compat/route compat exclusively, so a
+ * provider-top-level flag never lands here (an empty compat resolves to
+ * NOTHING, :593). */
+function fb9WireModel(parsed) {
+  const model = {
+    provider: 'opencode-zen',
+    baseURL: 'http://127.0.0.1:4097/v1',
+    api: 'openai-completions',
+    reasoning: true
+  }
+  if (parsed.requiresReasoningContentOnAssistantMessages !== undefined) {
+    model.compat = { requiresReasoningContentOnAssistantMessages: parsed.requiresReasoningContentOnAssistantMessages }
+  }
+  return model
+}
+
+test('fb-9 WIRE (acceptance 8 — the protocol-level half): the serialized upstream body echoes `reasoning_content: ""` on EVERY replayed assistant message ONLY when the profile carries compat.requiresReasoningContentOnAssistantMessages=true — the compat: fixture yields 0 assistant messages without the field; the DEAD provider-top-level scalar and the ABSENT flag both leave the payload in the pre-400 wire shape, which the preflight above rejects', () => {
+  // (a) COMPAT PRESENT — the schema-correct dev shape (the flag the living
+  // profile settings.yaml carries): the wire carries the echoed field.
+  const compatParsed = parseLlmPiAiProviderSettings([
+    'llm-pi-ai:',
+    '  providers:',
+    '    opencode-zen:',
+    '      api: openai-completions',
+    '      baseURL: http://127.0.0.1:4097/v1',
+    '      compat:',
+    '        requiresReasoningContentOnAssistantMessages: true',
+    '      models:',
+    '        - id: deepseek-v4-flash',
+    '          reasoningEfforts: { off: null, low: low, max: max }'
+  ].join('\n'))
+  assert.equal(compatParsed['opencode-zen'].requiresReasoningContentOnAssistantMessages, true, 'the reader resolves the flag from the compat: block (the path the adapter reads)')
+  assert.deepEqual(resolveReasoningContentPreflight('opencode-zen', compatParsed, '/state/example'), { ok: true }, 'with the flag the dispatch pre-flight passes — the gate is armed, not blocked')
+  const compatPayload = fb9WireSerializePayload(fb9WireModel(compatParsed['opencode-zen']), WIRE_HISTORY)
+  const compatAssistants = compatPayload.filter((m) => m.role === 'assistant')
+  assert.equal(compatAssistants.length, 1, 'the replayed assistant tool-call turn survives serialization into the upstream body')
+  assert.equal(compatAssistants.filter((a) => !('reasoning_content' in a)).length, 0, '0 assistant messages in the payload lack reasoning_content (the echo gate armed EVERY replayed assistant)')
+  assert.deepEqual(compatPayload, [
+    { role: 'user', content: 'Run the wire check on the opencode-zen route' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'run_check', arguments: '{"input":"wire"}' } }], reasoning_content: '' },
+    { role: 'tool', content: 'ok', tool_call_id: 'call_1' },
+    { role: 'user', content: 'Now summarize the result' }
+  ], 'the EXACT serialized multi-turn body: the replayed assistant carries `reasoning_content: ""` (the empty string the 400 class demands), the tool-call replay and the tool result are intact')
+  // (b) DEAD SCALAR — ONLY the provider-TOP-LEVEL flag (the m-603 green-false
+  // shape): the reader does NOT resolve it, the preflight REJECTS the fixture,
+  // and the wire carries NO field — the 400 class is structurally reachable.
+  const deadParsed = parseLlmPiAiProviderSettings([
+    'llm-pi-ai:',
+    '  providers:',
+    '    opencode-zen:',
+    '      api: openai-completions',
+    '      baseURL: http://127.0.0.1:4097/v1',
+    '      requiresReasoningContentOnAssistantMessages: true',
+    '      models:',
+    '        - id: deepseek-v4-flash',
+    '          reasoningEfforts: { off: null, low: low, max: max }'
+  ].join('\n'))
+  assert.equal(deadParsed['opencode-zen'].requiresReasoningContentOnAssistantMessages, undefined, 'the provider-TOP-LEVEL scalar is the DEAD key the reader refuses to resolve (the adapter never reads it)')
+  const deadVerdict = resolveReasoningContentPreflight('opencode-zen', deadParsed, '/state/example')
+  assert.equal(deadVerdict.ok, false, 'the preflight REJECTS the dead-scalar fixture (green false is now detected, never a silent pass)')
+  assert.match(deadVerdict.reason, /missing compat\.requiresReasoningContentOnAssistantMessages=true \(settings \/state\/example\) — configure the flag in the provider's compat: block/, 'the rejection names the schema-correct compat. path')
+  const deadPayload = fb9WireSerializePayload(fb9WireModel(deadParsed['opencode-zen']), WIRE_HISTORY)
+  const deadAssistants = deadPayload.filter((m) => m.role === 'assistant')
+  assert.equal(deadAssistants.filter((a) => !('reasoning_content' in a)).length, 1, 'N>0 assistant messages in the payload lack reasoning_content (a top-level flag changes NOTHING on the wire — the exact payload that would 400)')
+  assert.deepEqual(deadPayload, [
+    { role: 'user', content: 'Run the wire check on the opencode-zen route' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'run_check', arguments: '{"input":"wire"}' } }] },
+    { role: 'tool', content: 'ok', tool_call_id: 'call_1' },
+    { role: 'user', content: 'Now summarize the result' }
+  ], 'the dead-scalar wire is byte-identical to the pre-fb-9 shape: NO reasoning_content anywhere')
+  // (c) ABSENT — no flag anywhere: legacy wire (the field only ever appears via
+  // the compat: flag), and the reasoning-enabled profile is still blocked
+  // upstream of dispatch.
+  const absentParsed = parseLlmPiAiProviderSettings([
+    'llm-pi-ai:',
+    '  providers:',
+    '    opencode-zen:',
+    '      api: openai-completions',
+    '      baseURL: http://127.0.0.1:4097/v1',
+    '      models:',
+    '        - id: deepseek-v4-flash',
+    '          reasoningEfforts: { off: null, low: low, max: max }'
+  ].join('\n'))
+  assert.equal(absentParsed['opencode-zen'].requiresReasoningContentOnAssistantMessages, undefined, 'no flag key → undefined (absent never fabricates the flag)')
+  assert.equal(resolveReasoningContentPreflight('opencode-zen', absentParsed, '/state/example').ok, false, 'a reasoning-enabled profile WITHOUT the flag is blocked at dispatch (the pre-fb-9 class cannot reach the wire anymore)')
+  const absentPayload = fb9WireSerializePayload(fb9WireModel(absentParsed['opencode-zen']), WIRE_HISTORY)
+  assert.equal(absentPayload.filter((m) => m.role === 'assistant').filter((a) => !('reasoning_content' in a)).length, 1, 'legacy wire: the replayed assistant keeps its pre-fb-9 shape — and ONLY the compat: flag (case a) ever adds the echoed field')
+  assert.deepEqual(deadPayload, absentPayload, 'the DEAD-scalar and ABSENT fixtures produce the SAME wire payload — the reader→wire chain proves the flag is read exclusively from compat:')
 })
 
 test('W8-c PART 5 shared snapshot primitives (pure, exported): buildPostSnapshot computes lastActivityTs + pendingCount + oldestPendingTs from a session log + an inbox; computeInboxTsByPost maps the delivery sidecar to per-post inbox ts', async () => {
@@ -16656,6 +17808,395 @@ test('QD worker-retire dice instrumentation (QH [HIGH] 2026-08-28 — qi-silence
       }
     } finally {
       await env.dispose()
+    }
+  })
+})
+
+// ===========================================================================
+// M-A (2026-08-28, owner ALTA) — dept_head_rotate (host plane) + freshMintHead:
+// the ACTIVE CONTEXT-REFRESH of a configured department head (NOT the retired
+// head sleep — no sleepEpoch; NOT retire — the postId stays live). Hermetic
+// real-Loader (the bootPlugin harness). Map:
+// reports/explore-deep/2026-08-28-ma-context-monitor-map.md §3.
+// Decision under test: NO immediate wake — the fresh head lands LIVE but
+// BOOT-QUIET (inbox empty); the NEXT message/daemon wake starts its first turn
+// (the journal is already in the fresh session as the seed). The journal used
+// is ALWAYS the LAST durable one (the critical-unblock rule — never delay a
+// rotation for a fresh memo); a STALE journal is reported with the
+// "memo no actualizado — journal previo" marker.
+// ===========================================================================
+
+/** Seed a journal with an EXPLICIT frontmatter `timestamp:` (an old timestamp
+ * drives the stale marker deterministically — seedJournal always stamps NOW). */
+async function seedJournalAt(stateDir, postId, summary, timestamp) {
+  const journalPath = path.join(stateDir, 'journals', `${postId}.md`)
+  await mkdir(path.dirname(journalPath), { recursive: true })
+  const content = [
+    '---',
+    `author: ${postId}`,
+    `timestamp: ${timestamp}`,
+    'wake_counter: 1',
+    'board_cursor: none',
+    'decisions: []',
+    'constraints: []',
+    'open_items: []',
+    '---',
+    '',
+    summary,
+    ''
+  ].join('\n')
+  await writeFile(journalPath, content, 'utf8')
+  return journalPath
+}
+
+test('M-A dept_head_rotate (1+2): rotating an IDLE configured head mints a FRESH live session (new sessionId, previousChildId, rotated marker, NO sleepEpoch) seeded with the journal + department title pin, archives the OLD session server-side, mirrors head-rotated to the QD ×1 — and the fresh head stays BOOT-QUIET (no immediate wake): the NEXT send_message delivers to the FRESH session and starts its first turn', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    await seedJournal(stateDir, postId, 'ROTATE-SEED: carried verbatim into the fresh session.')
+    // bootWithQD (research + quality departments): the QD MIRROR needs a real
+    // quality-head target to receive the head-rotated directive.
+    const env = await bootWithQD(stateDir)
+    const oldSessionId = 'head-research-head'
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      const result = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'M-A hermetic test' }, { agent: host, signal })
+      assert.equal(result.postId, postId)
+      assert.equal(result.previousSessionId, oldSessionId, 'the old session is recorded as the previous incarnation')
+      assert.notEqual(result.sessionId, oldSessionId)
+      assert.match(result.sessionId, /^head-research-head-[0-9a-f-]+$/, 'fresh session minted under head-<postId>-<uuid>')
+      assert.equal(result.archived, true, 'the old session was archived server-side (S2.5 semantics)')
+      assert.equal(result.journal.stale, false, 'a just-written journal is not stale')
+      assert.match(result.journal.path, new RegExp(`journals/${postId}\\.md$`))
+      assert.equal(result.reason, 'M-A hermetic test')
+
+      // Durable entry: fresh sessionId + previousChildId + rotated marker; a
+      // rotation is NOT sleep (no sleepEpoch) and NOT retire (entry still live).
+      const posts = await readPosts(stateDir)
+      assert.equal(posts[postId].sessionId, result.sessionId, 'durable entry points at the FRESH session')
+      assert.equal(posts[postId].previousChildId, oldSessionId, 'previousChildId = the old session')
+      assert.equal(posts[postId].rotated, true, 'the rotation is marked on the entry')
+      assert.equal(posts[postId].sleepEpoch, undefined, 'rotation sets NO sleepEpoch (active refresh, not sleep)')
+      assert.equal(posts[postId].retired, undefined, 'rotation is NOT retire')
+
+      // Workspace: old archived (sidebar row hidden), fresh attached.
+      assert.ok(env.workspaceRegistry.archived.includes(oldSessionId), 'old session in the archived set')
+      assert.ok(env.workspaceRegistry.attachCalls.includes(result.sessionId), 'fresh session workspace-attached')
+
+      // Fresh head: LIVE + idle + journal-seeded + NO inbox (boot-quiet).
+      const fresh = env.agents.store.get(result.sessionId)
+      assert.ok(fresh, 'fresh head materialized live by the rotation')
+      assert.equal(fresh.status, 'idle', 'fresh head is idle (boot-quiet)')
+      const seedEvals = fresh.session.events.filter((ev) => ev.type === 'user/message')
+      assert.equal(seedEvals.length, 1, 'exactly ONE seeded journal node')
+      assert.match(seedEvals[0].data.content[0].text, /ROTATE-SEED/, 'the seed is the head\'s durable journal (verbatim)')
+      const titleEvent = fresh.session.events.find((ev) => ev.type === 'session/title')
+      assert.equal(titleEvent?.data?.title, 'Research Head', 'the department title rides the seed (sessionTitle fallback)')
+
+      // QD mirror ×1 (the host-rotated pattern: 'head rotated' directive).
+      const dirs = await qualityDirectives(stateDir)
+      const rotated = dirs.filter((d) => /head rotated/.test(d.text))
+      assert.equal(rotated.length, 1, 'exactly ONE head-rotated directive')
+      assert.match(rotated[0].text, new RegExp(`post ${postId}, old session ${oldSessionId} → new session ${result.sessionId}`))
+
+      // NO immediate wake: the next delivery is a LIVE followup on the FRESH
+      // session (delivered, no create/resume) and starts its first turn.
+      const createCount = env.agents.createCalls.length
+      const r = await env.root.tools.get('send_message').execute({ to: [postId], text: 'resume work now' }, { agent: host, signal })
+      assert.equal(r.delivered[postId], 'delivered', 'delivery to the rotated head is a LIVE followup (no materialization)')
+      assert.equal(env.agents.createCalls.length, createCount, 'no extra create on the next delivery (fresh head already live)')
+      await waitFor(() => fresh.inboxMessages.length >= 1, 5000, 'the NEXT message starts the fresh head\'s first turn (no immediate wake)')
+      assert.equal(env.agents.store.has(oldSessionId), false, 'the OLD session handle is disposed (bounded join)')
+      assert.equal(env.agents.store.get(result.sessionId), fresh, 'the fresh session stays the live incarnation')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('M-A dept_head_rotate (6): the QH critical-unblock — an IDLE over-threshold head rotated WITHOUT a fresh memo uses the LAST durable journal (stale marker + "memo no actualizado" render notice), the fresh QH starts with the PREVIOUS journal as its seed, and the QH is NOT excluded from the rotation mandate', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The critical case: the QH is context-BLOCKED (over threshold), so it
+    // CANNOT run a fresh dept_memo_write — the durable journal is OLD.
+    await seedJournalAt(stateDir, 'quality-head', 'PREVIOUS-JOURNAL: the QH was blocked; this last durable memo must carry over.', '2020-01-01T00:00:00.000Z')
+    const env = await bootWithQD(stateDir)
+    const oldSessionId = 'head-quality-head'
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      const result = await env.root.tools.get('dept_head_rotate').execute({ postId: 'quality-head', reason: 'QH over-threshold' }, { agent: host, signal })
+      assert.equal(result.previousSessionId, oldSessionId)
+      assert.equal(result.journal.stale, true, 'the OLD journal is reported stale (memo no actualizado — journal previo)')
+      assert.equal(result.journal.timestamp, '2020-01-01T00:00:00.000Z', 'the stale journal\'s recorded timestamp is surfaced')
+      // The rotation still COMMITTED (the critical-unblock rule: never delay
+      // for a memo) and the fresh QH carries the PREVIOUS journal as its seed.
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['quality-head'].sessionId, result.sessionId)
+      assert.equal(posts['quality-head'].previousChildId, oldSessionId)
+      assert.equal(posts['quality-head'].rotated, true)
+      assert.equal(posts['quality-head'].sleepEpoch, undefined, 'the QH rotation is NOT sleep')
+      const freshQH = env.agents.store.get(result.sessionId)
+      assert.ok(freshQH, 'the fresh QH is live')
+      const seeded = freshQH.session.events.find((ev) => ev.type === 'user/message')
+      assert.match(seeded?.data?.content?.[0]?.text ?? '', /PREVIOUS-JOURNAL/, 'the fresh QH starts with the LAST durable journal as its continuation context')
+      // The QH is NOT excluded from the rotation mandate: its OWN rotation
+      // still mirrors the head-rotated directive to quality-head (the post IS
+      // quality-head — one-shot instruction, the sleep anti-loop is irrelevant).
+      const dirs = await qualityDirectives(stateDir)
+      assert.equal(dirs.filter((d) => /head rotated.*quality-head/.test(d.text)).length, 1, 'the QH\'s own rotation is mirrored (no anti-loop exclusion for rotations)')
+      // The mirror delivery wakes the FRESH QH (live followup — the directive
+      // is its first inbox item; the substantive mission message follows).
+      await waitFor(() => freshQH.inboxMessages.length >= 1, 5000, 'the head-rotated directive reaches the FRESH QH (live followup)')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('M-A dept_head_rotate validation: a RUNNING head is rejected loudly (free-window rule); a WORKER is not rotatable; an UNKNOWN post and an UNCONFIGURED registered head are rejected loudly; a head caller is refused (host-plane ACL)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await seedJournal(stateDir, 'research-head', 'ACL-SEED.')
+    await seedPost(stateDir, { postId: 'legacy-head', sessionId: 'head-legacy-head', roomId: 'board', agentPreset: 'deepartments-head' })
+    await seedPost(stateDir, { postId: 'builder-x', sessionId: 'worker-builder-x-1', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', managerId: 'research-head' })
+    const env = await bootPlugin(stateDir)
+    await waitForHeadMaterialized(env.agents)
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      const rotate = env.root.tools.get('dept_head_rotate')
+      // (a) RUNNING head → free-window rejection.
+      const head = env.agents.store.get('head-research-head')
+      head.status = 'running'
+      await assert.rejects(rotate.execute({ postId: 'research-head' }, { agent: host, signal }), /RUNNING/, 'a running head is never rotated mid-turn')
+      head.status = 'idle'
+      // (b) WORKER → not rotatable.
+      await assert.rejects(rotate.execute({ postId: 'builder-x' }, { agent: host, signal }), /is a WORKER, not a head/, 'a worker is rejected with the clear not-rotatable error')
+      // (c) UNKNOWN post → not a registered post.
+      await assert.rejects(rotate.execute({ postId: 'who-even-is-this' }, { agent: host, signal }), /is not a registered post/, 'an unknown postId is rejected loudly')
+      // (d) UNCONFIGURED registered head (a durable entry with NO coordinator
+      // row) → not a CONFIGURED department head.
+      await assert.rejects(rotate.execute({ postId: 'legacy-head' }, { agent: host, signal }), /not a CONFIGURED department head/, 'a registered-but-unconfigured head is rejected (scope: configured heads only)')
+      // (e) HOST-plane ACL: a head caller (exec.agent = a registered post
+      // session) is refused — a head cannot rotate.
+      await assert.rejects(rotate.execute({ postId: 'research-head' }, { agent: head, signal }), /HOST-plane/, 'a head caller is refused (the host only rotates)')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('M-A freshMintHead zero-regression (5): the F8 slept-head wake uses the SAME helper with NO seed — the fresh wake session stays EMPTY (pre-extraction behavior), and the entry registers the previousChildId + rotated marker', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    await seedJournal(stateDir, postId, 'F8-SLEEP-SEED: the slept-head wake does NOT seed (empty session).')
+    // A SLEPT head (sleepEpoch set + archived old session, the F8 wake shape).
+    await seedPost(stateDir, { postId, sessionId: `head-${postId}`, roomId: 'board', agentPreset: 'deepartments-head', sleepEpoch: 123, previousChildId: 'head-research-head-prev' })
+    const env = await bootPlugin(stateDir)
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      // The bus wake of the slept head runs materializePost's F8 branch → the
+      // extracted freshMintHead (NO seed).
+      const r = await env.root.tools.get('send_message').execute({ to: [postId], text: 'wake the slept head' }, { agent: host, signal })
+      assert.equal(r.delivered[postId], 'resumed', 'the slept-head wake reports resumed (fresh mint)')
+      await waitFor(() => env.agents.createCalls.length >= 1, 5000, 'fresh head session created on the F8 wake')
+      const createCall = env.agents.createCalls.at(-1)
+      assert.notEqual(String(createCall.sessionId), `head-${postId}`, 'the wake NEVER resumes/creates the archived old id')
+      assert.equal(createCall.seed, undefined, 'the F8 wake passes NO seed (empty session — exact pre-extraction behavior)')
+      const fresh = env.agents.store.get(String(createCall.sessionId))
+      assert.ok(fresh, 'the F8 fresh head is live')
+      assert.equal(fresh.session.events.filter((ev) => ev.type === 'user/message').length, 0, 'no journal seed on the F8 wake (unchanged)')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts[postId].sessionId, String(createCall.sessionId))
+      assert.equal(posts[postId].previousChildId, `head-${postId}`, 'the F8 wake records the previous incarnation')
+      assert.equal(posts[postId].rotated, true, 'the fresh-mint marks the rotation on the entry (shared helper)')
+      assert.equal(posts[postId].sleepEpoch, undefined, 'sleepEpoch cleared after the wake (unchanged)')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('M-A headRotationJournalStatus (pure): a fresh timestamp is not stale; an OLD timestamp crosses the window → stale; an absent/unparseable timestamp is conservatively stale', () => {
+  const fresh = `---\nauthor: research-head\ntimestamp: ${new Date().toISOString()}\n---\n\nbody\n`
+  assert.equal(headRotationJournalStatus(fresh, Date.now()).stale, false, 'a just-written journal is fresh')
+  assert.ok(typeof headRotationJournalStatus(fresh, Date.now()).timestamp === 'string', 'the timestamp is surfaced')
+  const old = headRotationJournalStatus('---\nauthor: research-head\ntimestamp: 2020-01-01T00:00:00.000Z\n---\n\nbody\n', Date.now())
+  assert.equal(old.stale, true, 'a journal years old is stale (memo no actualizado — journal previo)')
+  assert.equal(old.timestamp, '2020-01-01T00:00:00.000Z')
+  assert.equal(headRotationJournalStatus('---\nauthor: research-head\n---\n\nbody\n', Date.now()).stale, true, 'a journal WITHOUT a timestamp is conservatively stale')
+  assert.equal(headRotationJournalStatus('no frontmatter at all', Date.now()).stale, true, 'an unparseable journal is conservatively stale')
+  const boundary = headRotationJournalStatus(`---\ntimestamp: ${new Date(Date.now() - 31 * 60 * 1000).toISOString()}\n---\n`, Date.now())
+  assert.equal(boundary.stale, true, '~31 min crosses the 30-min window')
+})
+
+// ===========================================================================
+// B5-GHOST (QH «429-primer-call» AFTER-half, 2026-08-28): the live-post-
+// WITHOUT-usable-session census heuristic. stepGhostSuspectCensus is the PURE
+// ladder (marker after N consecutive misses, auto-retire only when the marker
+// persists > M more ticks, clear on ANY usable census — an intermittent
+// session never accumulates); the real-Loader tests drive the BOOT census pass
+// (each boot = ONE tick) against seeded live workers + the durable ledger.
+// ===========================================================================
+
+test('B5-GHOST (pure): stepGhostSuspectCensus — a usable census CLEARS the post; N consecutive unusable censuses → the ghost-suspect MARKER (warn-only, NOT retired); the marker persisting > M more ticks → retireCandidates; an INTERMITTENT session (usable between misses) NEVER accumulates; ledger entries of posts that left the census are pruned', async () => {
+  const T0 = 1_234_567_890_000
+  const knobs = { warnAfterTicks: 2, retireAfterTicks: 3 }
+  const row = (postId, usable) => ({ postId, sessionId: `worker-${postId}`, usable })
+  // (1) A usable census → the ledger entry is dropped (cleared), never counted.
+  let r1 = stepGhostSuspectCensus([row('alpha', true)], {}, T0, knobs)
+  assert.deepEqual(r1.ledger, {}, 'a usable census leaves NO ledger entry (the post is fine)')
+  assert.deepEqual(r1.cleared, [], 'nothing to clear on the first usable census')
+  // (2) The marker ladder: misses accumulate while unusable; the marker appears
+  // at warnAfterTicks and is NOT an auto-retire yet; the retire fires only when
+  // misses > warnAfterTicks + retireAfterTicks.
+  let ledger = {}
+  const labels = []
+  for (let tick = 1; tick <= 6; tick++) {
+    const verdict = stepGhostSuspectCensus([row('alpha', false)], ledger, T0 + tick, knobs)
+    ledger = verdict.ledger
+    if (verdict.newlyMarked.length > 0) labels.push(`marked@${tick}`)
+    if (verdict.retireCandidates.length > 0) labels.push(`retire@${tick}`)
+  }
+  assert.deepEqual(labels, ['marked@2', 'retire@6'], 'the EXACT ladder: marker at census 2 (warnAfterTicks), retire at census 6 (misses 6 > 2 + 3)')
+  assert.equal(ledger.alpha.misses, 6, 'the ledger counts consecutive misses')
+  assert.ok(ledger.alpha.markedAt !== undefined, 'the marker is durable (markedAt)')
+  // (3) A usable census after a marker → CLEARED (the chain breaks; a recovered
+  // post is never retired).
+  const ghost = stepGhostSuspectCensus([row('alpha', true)], ledger, T0 + 7, knobs)
+  assert.deepEqual(ghost.ledger, {}, 'a usable census clears the accumulated marker')
+  assert.deepEqual(ghost.cleared, ['alpha'], 'the recovered post is reported cleared')
+  // (4) INTERMITTENT: unusable, usable, unusable, usable → NEVER marked (each
+  // usable census resets; the accumulate-and-clear chain never crosses N).
+  let inter = {}
+  for (const usable of [false, true, false, true, false, true]) {
+    const verdict = stepGhostSuspectCensus([row('beta', usable)], inter, T0 + 10, knobs)
+    inter = verdict.ledger
+  }
+  assert.deepEqual(inter, {}, 'an intermittent session NEVER accumulates a marker')
+  // (5) Posts that left the census (retired/unregistered) are pruned — a marked
+  // ghost that was retired elsewhere resolves silently (no linger, no re-trigger).
+  const withOld = stepGhostSuspectCensus([row('gamma', false)], {
+    gamma: { misses: 9, markedAt: T0, lastMissAt: T0 },
+    gone: { misses: 5, markedAt: T0, lastMissAt: T0 }
+  }, T0 + 20, knobs)
+  assert.ok(withOld.ledger.gamma !== undefined, 'the still-census ghost keeps its chain')
+  assert.equal(withOld.ledger.gone, undefined, 'a post no longer in the census is PRUNED from the ledger')
+  // (6) The knobs forbid a degenerate zero threshold (the code floors at 1).
+  const floor = stepGhostSuspectCensus([row('delta', false)], {}, T0, { warnAfterTicks: 0, retireAfterTicks: 0 })
+  assert.equal(floor.ledger.delta.misses, 1, 'a zero warnAfterTicks floors to 1 (miss 1 accumulates)')
+  assert.deepEqual(floor.newlyMarked, [], 'a single miss is never a marker even at the floored threshold')
+})
+
+test('B5-GHOST (durable ledger IO): writeGhostSuspectLedger persists the ledger to <stateDir>/ghost-suspect-state.json and readGhostSuspectLedger restores it; absent/unreadable/malformed → {} (never throws)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    assert.deepEqual(readGhostSuspectLedger(stateDir), {}, 'an absent ledger file → {} (the census starts clean)')
+    const ledger = {
+      'ghost-a': { misses: 3, markedAt: 1234, lastMissAt: 5678 },
+      'ghost-b': { misses: 1, lastMissAt: 2 }
+    }
+    await writeGhostSuspectLedger(stateDir, ledger)
+    assert.deepEqual(readGhostSuspectLedger(stateDir), ledger, 'the ledger round-trips through the durable file')
+    // Malformed file → {} (never throws — a torn write degrades to a clean start).
+    await writeFile(path.join(stateDir, GHOST_SUSPECT_STATE_FILE), 'not: [json', 'utf8')
+    assert.deepEqual(readGhostSuspectLedger(stateDir), {}, 'a malformed ledger file → {} (never throws)')
+  })
+})
+
+test('B5-GHOST (real Loader, boot census): a live WORKER whose durable session is DEFINITIVELY gone with a PRE-EXISTING marker persisted beyond N + M ticks is AUTO-RETIRED at boot (marker → retire ladder, the only auto-retire branch); a live worker with a usable durable session is NEVER touched (zero regression — a post between materializations is not a ghost)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // 'ghost-marker' — a live worker with NO durable session (rawPersistence
+    // readRaw → undefined) whose durable ledger ALREADY crossed the retire
+    // threshold (the marker persisted > warnAfterTicks + retireAfterTicks).
+    await seedPost(stateDir, { postId: 'ghost-marker', sessionId: 'worker-ghost-marker-aaaaaaaa', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', managerId: 'research-head', departmentId: 'research' })
+    // 'live-worker' — a live worker whose durable session IS present (usable:
+    // the artifact exists → readRaw resolves → resumable, NOT a ghost).
+    await seedPost(stateDir, { postId: 'live-worker', sessionId: 'worker-live-worker-bbbbbbbb', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', managerId: 'research-head', departmentId: 'research' })
+    // Pre-seed the ledger: ghost-marker marked with misses already beyond
+    // warn(2) + retire(3) = 5 (the marker persisted > M ticks); live-worker
+    // marked too (it must be CLEARED by the usable census — a false-positive
+    // recovery regression).
+    await writeGhostSuspectLedger(stateDir, {
+      'ghost-marker': { misses: 6, markedAt: Date.now() - 86400_000, lastMissAt: Date.now() - 86400_000 },
+      'live-worker': { misses: 6, markedAt: Date.now() - 86400_000, lastMissAt: Date.now() - 86400_000 }
+    })
+    const { agents, dispose } = await bootPlugin(stateDir, {
+      rawPersistence: true,
+      rawArtifacts: { 'worker-live-worker-bbbbbbbb': 'resumable-session-content' },
+      org: { ...TEST_ORG, ghostSuspect: { warnAfterTicks: 2, retireAfterTicks: 3 } }
+    })
+    try {
+      // The durable session of 'live-worker' is in the stub's raw artifact (a
+      // resumable durable session = usable) → its marker is CLEARED even as a
+      // pre-mark, and the post is never retired (zero false positive).
+      void agents
+      // The census settle: the auto-retire + the clearing happen in the boot
+      // pass (fire-and-forget); converge on the durable ledger + posts.json.
+      await waitFor(async () => {
+        const posts = await readPosts(stateDir)
+        return posts['ghost-marker']?.retired === true
+      }, 5000, 'the marked-and-persisted ghost is auto-retired at boot')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['ghost-marker'].retired, true, 'ghost-marker (marker persisted > N + M ticks) is AUTO-RETIRED')
+      assert.equal(posts['live-worker']?.retired, undefined, 'live-worker (durable session present = usable) is NEVER retired (zero false positives)')
+      const ledger = readGhostSuspectLedger(stateDir)
+      assert.equal(ledger['ghost-marker'], undefined, 'the retired ghost\u2019s ledger entry is pruned')
+      assert.equal(ledger['live-worker'], undefined, 'the usable worker\u2019s marker was CLEARED (a recovered post is not a ghost)')
+      assert.ok(agents.store.has('head-research-head'), 'the configured head is untouched')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('B5-GHOST (real Loader, single census): a live worker whose durable session is gone with a ledger of ONE prior miss (the previous census) is NOT auto-retired on this census — the SECOND consecutive miss flags the ghost-suspect MARKER (warn-only, still NOT retired: the marker must persist > M ticks first)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await seedPost(stateDir, { postId: 'ghost-fresh', sessionId: 'worker-ghost-fresh-cccccccc', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', managerId: 'research-head', departmentId: 'research' })
+    // Simulate the PREVIOUS census (boot #1): the ledger already holds ONE
+    // consecutive miss (the first observation — never auto-retired, never
+    // marked). The boot census below is the second observation.
+    await writeGhostSuspectLedger(stateDir, { 'ghost-fresh': { misses: 1, lastMissAt: Date.now() - 86400_000 } })
+    const { dispose } = await bootPlugin(stateDir, { rawPersistence: true, org: { ...TEST_ORG, ghostSuspect: { warnAfterTicks: 2, retireAfterTicks: 3 } } })
+    try {
+      await waitFor(() => readGhostSuspectLedger(stateDir)['ghost-fresh']?.markedAt !== undefined, 5000, 'the boot census marked the ghost-suspect')
+      const ledger = readGhostSuspectLedger(stateDir)
+      assert.equal(ledger['ghost-fresh'].misses, 2, 'the census extended the consecutive-miss chain to 2')
+      assert.ok(ledger['ghost-fresh'].markedAt !== undefined, 'the ghost-suspect MARKER appeared at warnAfterTicks (2) consecutive misses')
+      assert.equal(await readPosts(stateDir).then((posts) => posts['ghost-fresh']?.retired), undefined, 'marked but NOT auto-retired (conservative — the marker must persist > M more ticks first)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('B5-GHOST zero regression: a worker with a USABLE session (a resumable durable session present — the between-materializations class) is USABLE at the census — its marker is CLEARED, never a ghost; and a `org.ghostSuspect.enabled: false` config skips the pass entirely (no ledger, no retire)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // (a) A worker with a mistaken pre-seeded marker whose durable session IS
+    // present (resumable — a post entre materializaciones) → usable → cleared
+    // (the durable-session-present signal: a resumable post is never a ghost).
+    await seedPost(stateDir, { postId: 'live-now', sessionId: 'worker-live-now-dddddddd', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', managerId: 'research-head', departmentId: 'research' })
+    await writeGhostSuspectLedger(stateDir, { 'live-now': { misses: 9, markedAt: Date.now() - 86400_000, lastMissAt: Date.now() - 86400_000 } })
+    const { dispose } = await bootPlugin(stateDir, { rawPersistence: true, rawArtifacts: { 'worker-live-now-dddddddd': 'resumable' }, org: { ...TEST_ORG, ghostSuspect: { warnAfterTicks: 2, retireAfterTicks: 3 } } })
+    try {
+      await waitFor(() => readGhostSuspectLedger(stateDir)['live-now'] === undefined, 5000, 'the usable worker\u2019s ledger entry was cleared by the census')
+      assert.equal(await readPosts(stateDir).then((posts) => posts['live-now']?.retired), undefined, 'the usable worker is never retired')
+    } finally {
+      await dispose()
+    }
+  })
+  await withTempStateDir(async (stateDir) => {
+    // (b) `org.ghostSuspect.enabled: false` → NO census pass: the worker\u2019s
+    // (already-crossed) marker is untouched and the post is never retired (the
+    // pre-b5-ghost behavior).
+    await seedPost(stateDir, { postId: 'ghost-disabled', sessionId: 'worker-ghost-disabled-eeeeeeee', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', managerId: 'research-head', departmentId: 'research' })
+    await writeGhostSuspectLedger(stateDir, { 'ghost-disabled': { misses: 9, markedAt: Date.now() - 86400_000, lastMissAt: Date.now() - 86400_000 } })
+    const { dispose } = await bootPlugin(stateDir, { rawPersistence: true, org: { ...TEST_ORG, ghostSuspect: { enabled: false } } })
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      assert.equal(await readPosts(stateDir).then((posts) => posts['ghost-disabled']?.retired), undefined, 'enabled:false → the pass does NOT auto-retire')
+      assert.ok(readGhostSuspectLedger(stateDir)['ghost-disabled'] !== undefined, 'enabled:false → the ledger is left untouched (the pass never ran)')
+    } finally {
+      await dispose()
     }
   })
 })

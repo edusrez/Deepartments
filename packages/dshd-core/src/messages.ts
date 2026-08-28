@@ -83,6 +83,19 @@
 // `compactDeliveryRows` keeps only the latest row per key for the sidecar's own
 // boot compaction (spec §4.4 builder-verify point).
 //
+// THE ID-STABLE CONTRACT (ALTO-1 — QD audit 2026-08-28, F1): `messageId` in
+// deliveries.jsonl is a STABLE key — it ALWAYS denotes the CURRENT record in
+// messages.jsonl. Guaranteed by the compaction pass: `compactMessagesFile`
+// remaps/prunes the sidecar IN THE SAME PASS it rewrites the message file
+// (`remapDeliveryRows` through the run's old→new id map — surviving ids are
+// remapped, a row whose record was TRIMMED is dropped, because keeping it
+// under a re-used id would contaminate every correlation by messageId and
+// every (messageId, recipientId) settle). Consumers — the boot re-delivery
+// driver, the PR-2 settles (lifecycle.ts / invoke.ts), the W6 health scan, the
+// health alerts — read the STABLE key and additionally cross-check the current
+// record (a row whose id has no record, or whose record never addressed the
+// recipient, is a stale pre-fix row → never driven, never settled).
+//
 // NO export default (pitfall 0001 — breaks `inject`).
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -247,6 +260,30 @@ export function shouldCompact(records: readonly MessageRecord[], text: string): 
 }
 
 /**
+ * Pure old→new id map of ONE compaction run (spec §3.2 + the ALTO-1 id-STABLE
+ * contract): for every KEPT record, the old `m-<seq>` id → the NEW
+ * `m-<index>` id (0..N-1 in original file order). This single table is what
+ * the compaction applies to every consumer that references record ids — a kept
+ * record's `threadId` (`compactMessages`) and, IN THE SAME PASS, the delivery
+ * sidecar rows (`remapDeliveryRows` via `compactMessagesFile`) — so after a
+ * pass no id-based reference can point at a different record.
+ */
+export function compactionIdMap(
+  records: readonly MessageRecord[],
+  keepFn: (record: MessageRecord) => boolean
+): Map<string, string> {
+  const oldToNew = new Map<string, string>()
+  let index = 0
+  for (const record of records) {
+    if (keepFn(record)) {
+      oldToNew.set(record.id, `m-${index}`)
+      index++
+    }
+  }
+  return oldToNew
+}
+
+/**
  * Pure compaction: keep the records `keepFn` admits, renumber seq 0..N-1 in
  * ORIGINAL file order (deterministic), re-id `m-<newSeq>`, and remap every
  * kept record's `threadId` through the old→new id map: a threadId targeting a
@@ -257,10 +294,9 @@ export function compactMessages(
   records: readonly MessageRecord[],
   keepFn: (record: MessageRecord) => boolean
 ): MessageRecord[] {
+  const oldToNew = compactionIdMap(records, keepFn)
   const kept: MessageRecord[] = []
   for (const record of records) if (keepFn(record)) kept.push(record)
-  const oldToNew = new Map<string, string>()
-  kept.forEach((record, index) => oldToNew.set(record.id, `m-${index}`))
   return kept.map((record, index) => {
     const next: MessageRecord = {
       id: `m-${index}`,
@@ -312,24 +348,84 @@ async function absorbRegistry(filePath: string, ids: Set<string>, skipRetired: b
 }
 
 /**
- * Compaction driver (spec §3.2): apply the keep-rule, rewrite the message file
+ * Pure delivery-sidecar remap/prune of ONE compaction run (ALTO-1 — the
+ * id-STABLE contract, spec §4.4): remap every row's `messageId` through the
+ * run's old→new map (`compactionIdMap`), preserving file order, and DROP every
+ * row whose `messageId` is ABSENT from the map — its record was TRIMMED by the
+ * compaction, so its delivery trace is stale: keeping it under a RE-USED id
+ * would make the row collide with the current record's rows (the
+ * pre-fix production sidecar: 89.8% of 1901 rows referenced a renumbered id).
+ * A keep-all run (no registry — the defensive keep-rule) maps every id onto
+ * itself, so no row is pruned and ids are unchanged.
+ */
+export function remapDeliveryRows(
+  rows: readonly DeliveryRow[],
+  oldToNew: ReadonlyMap<string, string>
+): DeliveryRow[] {
+  const result: DeliveryRow[] = []
+  for (const row of rows) {
+    const nextId = oldToNew.get(row.messageId)
+    if (nextId === undefined) continue // the record was trimmed → prune its trace
+    result.push(nextId === row.messageId ? row : { ...row, messageId: nextId })
+  }
+  return result
+}
+
+/**
+ * The SAME-PASS sidecar rewrite (ALTO-1): after the message file is
+ * compacted+renumbered, the sibling `<stateDir>/deliveries.jsonl` is rewritten
+ * with `remapDeliveryRows` — surviving ids remapped to their NEW id, trimmed
+ * records' rows pruned — so the sidecar NEVER holds a row under a recycled id
+ * (the id-STABLE contract; every consumer's messageId correlation stays
+ * truthful). Backup-first, exactly like the message file: the pre-remap sidecar
+ * is copied to `deliveries.jsonl.bak` BEFORE the rewrite (a failed backup
+ * leaves the original intact and throws — the message file rewrite already
+ * happened by then, but the sidecar was NOT touched, so the boot re-delivery
+ * pass simply skips the stale rows as settled no-ops). A missing sidecar is a
+ * clean no-op (nothing was ever delivered). A sidecar whose rows need NO change
+ * is left untouched (no gratuitous rewrite — the file is only rewritten when a
+ * remap or prune actually happened).
+ */
+async function remapDeliveriesSidecar(dir: string, oldToNew: ReadonlyMap<string, string>): Promise<void> {
+  const deliveriesPath = path.join(dir, DELIVERIES_FILE)
+  let text: string
+  try {
+    text = await readFile(deliveriesPath, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return // nothing ever delivered
+    throw error
+  }
+  const remapped = remapDeliveryRows(parseDeliveryRows(text), oldToNew)
+  const nextText = remapped.map((row) => JSON.stringify(row)).join('\n') + '\n'
+  if (nextText === text) return // no remap, no prune → leave the sidecar untouched
+  await writeFile(`${deliveriesPath}.bak`, text, 'utf8')
+  await writeFile(deliveriesPath, nextText, 'utf8')
+}
+
+/**
+ * Compaction driver (spec §3.2 + ALTO-1): apply the keep-rule, rewrite the message file
  * renumbered+re-id'd, with ONE pre-compaction backup copy (`messages.jsonl.bak`
- * — the spec's builder recommendation for the message store). Boot-only (see
- * header semantics): a mid-process compact cannot reseed the in-memory index.
- * The backup is written FIRST and strictly: if it fails the original file is
- * still intact (nothing has been rewritten yet) and the call throws. Returns
- * the record count before → after (for logging).
+ * — the spec's builder recommendation for the message store), and — IN THE
+ * SAME PASS — remap/prune the delivery sidecar (`deliveries.jsonl` in the same
+ * directory) through the run's old→new map (`remapDeliveryRows`), so a
+ * `messageId` in the sidecar always denotes the CURRENT record (the id-STABLE
+ * contract). Boot-only (see header semantics): a mid-process compact cannot
+ * reseed the in-memory index. The backup is written FIRST and strictly: if it
+ * fails the original file is still intact (nothing has been rewritten yet) and
+ * the call throws. Returns the record count before → after (for logging).
  */
 export async function compactMessagesFile(
   filePath: string,
   records: readonly MessageRecord[],
   keepFn: (record: MessageRecord) => boolean
 ): Promise<{ before: number; after: number }> {
+  const oldToNew = compactionIdMap(records, keepFn)
   const compacted = compactMessages(records, keepFn)
   const raw = await readFile(filePath, 'utf8') // the file exists (it was just parsed); fail loud otherwise
   await writeFile(`${filePath}.bak`, raw, 'utf8')
   const text = compacted.map((record) => JSON.stringify(record)).join('\n') + '\n'
   await writeFile(filePath, text, 'utf8')
+  await remapDeliveriesSidecar(path.dirname(filePath), oldToNew)
   return { before: records.length, after: compacted.length }
 }
 

@@ -19,7 +19,7 @@
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 import { readFileSync, existsSync } from 'node:fs'
-import { copyFile, writeFile, rename, readFile, appendFile } from 'node:fs/promises'
+import { copyFile, writeFile, rename, readFile, appendFile, mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { ROTATION_SCHEMA_VERSION, validateHostsRotationFile } from './session-rotation.js'
@@ -127,6 +127,12 @@ export interface PostEntry {
   /** Batch G: the sessionId of the PREVIOUS incarnation (recording where a slept
    * head's old live session went), kept so trace stays honest. Absent = first. */
   previousChildId?: string
+  /** M-A (dept_head_rotate, 2026-08-28): set when the head was ROTATED — its
+   * durable session was fresh-minted (NEW sessionId + previousChildId) as an
+   * ACTIVE CONTEXT REFRESH (NOT sleep — no sleepEpoch is set). Marks the
+   * rotation event on the entry so the durable lineage distinguishes a
+   * rotation from a legacy slept-head wake. Absent = never rotated. */
+  rotated?: boolean
   /** Fix (head-sleep worker drain): the durable list of the head's IN-FLIGHT
    * workers recorded at dept_sleep, so the sleep is handed off through the SAME
    * persistPosts write with a durable "n workers in flight" ledger. The boot
@@ -151,6 +157,8 @@ export interface PostEntryPersisted {
   sleepEpoch?: number
   boundarySeq?: number
   previousChildId?: string
+  /** M-A — the rotation marker (see PostEntry.rotated). Persisted only when set. */
+  rotated?: boolean
   inflightWorkers?: string[]
 }
 
@@ -823,6 +831,172 @@ export async function reconcileDurablePostsRegistry(
   return { workerRetireCandidates: result.workerRetireCandidates, workersRetired, headStaleCandidates: result.headStaleCandidates, changed, prunedPostIds }
 }
 
+/** B5-GHOST (QH — dispatch-hardening, 2026-08-28): the AFTER half of the
+ * «429-primer-call» class — a catalog-LIVE post (the durable posts.json entry
+ * is non-retired, so it still shows in the roster) whose session is NO LONGER
+ * USABLE (offline/muerto: the durable session is definitively gone, or the B5
+ * VARIANT-2 ghost — a durable session present but with no usable
+ * AgentOptions). A post "solo entre materializaciones" (a live post whose
+ * session exists but is merely not materialized right now) is NOT a ghost: its
+ * durable session is resumable → USABLE. THE HEURISTIC IS THE CENSUS LEDGER:
+ * the first observation NEVER auto-retires (false-positive risk); a
+ * `ghost-suspect` MARKER appears only after `warnAfterTicks` CONSECUTIVE
+ * census ticks without a usable session, and auto-retire happens ONLY when the
+ * marker persists > `retireAfterTicks` MORE ticks (conservative defaults). A
+ * post whose session becomes usable again at ANY census is CLEARED (consecutive
+ * misses reset) — an intermittent session NEVER accumulates a marker.
+ * The census runs at BOOT (each boot = ONE tick), seeded with the durable
+ * ledger `<stateDir>/ghost-suspect-state.json`. */
+export const GHOST_SUSPECT_STATE_FILE = 'ghost-suspect-state.json'
+
+/** One ledger entry: the CONSECUTIVE census misses + the marker epoch. The
+ * entry IS the `ghost-suspect` marker once `markedAt` is set. */
+export interface GhostSuspectLedgerEntry {
+  /** Consecutive census ticks whose census found the post WITHOUT a usable
+   * session. Any census finding the session usable RESETS this (the entry is
+   * dropped entirely — a recovered/intermittent post never accumulates). */
+  misses: number
+  /** Epoch-ms when the marker first appeared (misses crossed
+   * `warnAfterTicks`). Absent = no marker yet (warn-only pending). */
+  markedAt?: number
+  /** Epoch-ms of the LAST census that counted a miss. */
+  lastMissAt: number
+}
+
+/** The durable ledger: `postId → GhostSuspectLedgerEntry`. */
+export type GhostSuspectLedger = Record<string, GhostSuspectLedgerEntry>
+
+/** One census row: a catalog-LIVE worker the census judges. */
+export interface GhostSuspectCensusRow {
+  postId: string
+  sessionId: string
+  /** Whether the post currently HAS a usable session (live in the agents
+   * registry, or a durable session present + not B5-unusable). A conservative
+   * resolver (unable to determine) MUST return true — a post whose session is
+   * merely unverifiable is NEVER treated as a ghost (m-119 conservatism). */
+  usable: boolean
+}
+
+/** The b5-ghost config knobs (code defaults when absent — conservative). */
+export interface GhostSuspectCensusKnobs {
+  /** The marker threshold: N = consecutive census misses before the
+   * `ghost-suspect` MARKER appears (default 2 — a single miss is never a
+   * marker: the first observation could be a between-materializations
+   * transient). */
+  warnAfterTicks: number
+  /** The retire threshold: M = how many MORE consecutive misses (beyond the
+   * marker) before the post is AUTO-RETIRED — the marker must PERSIST > M
+   * ticks (default 8 — conservative; a ghost lingers as a WARN for 8+ census
+   * ticks before the auto-retire). `misses > warnAfterTicks + retireAfterTicks`
+   * triggers the retire. */
+  retireAfterTicks: number
+}
+
+/** The b5-ghost census verdict for ONE census pass. */
+export interface GhostSuspectCensusResult {
+  /** The NEXT ledger (persisted by the caller). */
+  ledger: GhostSuspectLedger
+  /** Posts whose marker appeared THIS census (crossed `warnAfterTicks`) —
+   * the caller WARNS for each (ghost-suspect, NOT auto-retired yet). */
+  newlyMarked: string[]
+  /** Posts whose marker persisted > N + M ticks — the caller AUTO-RETIRES
+   * each (the ONLY auto-retire branch of the heuristic). */
+  retireCandidates: string[]
+  /** Posts whose session became usable again THIS census (the ledger entry
+   * was dropped — a recovered/intermittent post, never retired). */
+  cleared: string[]
+}
+
+/** Read `<stateDir>/ghost-suspect-state.json` → the ledger. Absent /
+ * unreadable / malformed → {} (never throws — the census starts clean). */
+export function readGhostSuspectLedger(stateDir: string): GhostSuspectLedger {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, GHOST_SUSPECT_STATE_FILE), 'utf8')) as Record<string, unknown>
+    const ledger: GhostSuspectLedger = {}
+    for (const [postId, raw] of Object.entries(parsed)) {
+      if (raw === null || typeof raw !== 'object') continue
+      const e = raw as Record<string, unknown>
+      const misses = typeof e.misses === 'number' && Number.isFinite(e.misses) ? e.misses : 0
+      const lastMissAt = typeof e.lastMissAt === 'number' && Number.isFinite(e.lastMissAt) ? e.lastMissAt : 0
+      const entry: GhostSuspectLedgerEntry = { misses: Math.max(0, misses), lastMissAt }
+      if (typeof e.markedAt === 'number' && Number.isFinite(e.markedAt)) entry.markedAt = e.markedAt
+      ledger[postId] = entry
+    }
+    return ledger
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/ghost-suspect-state.json` (mkdir -p the dir, then the
+ * file). NEVER throws. */
+export async function writeGhostSuspectLedger(stateDir: string, ledger: GhostSuspectLedger): Promise<void> {
+  try {
+    await mkdir(path.dirname(path.join(stateDir, GHOST_SUSPECT_STATE_FILE)), { recursive: true })
+    await writeFile(path.join(stateDir, GHOST_SUSPECT_STATE_FILE), JSON.stringify(ledger), 'utf8')
+  } catch {
+    /* non-fatal — the in-memory ledger still drives THIS pass; the next boot re-seeds */
+  }
+}
+
+/** B5-GHOST — the PURE census step. Given the census rows + the PREVIOUS
+ * ledger + nowMs + the knobs, computes the NEXT ledger + the verdicts. Rules:
+ *  - usable row → the ledger entry is DROPPED (cleared — a session recovered;
+ *    the consecutive-miss chain is broken: an intermittent session NEVER
+ *    accumulates toward a marker);
+ *  - unusable row → misses = prev.misses + 1; when misses >= warnAfterTicks the
+ *    marker appears (markedAt = nowMs, first crossing → newlyMarked);
+ *  - when the marker exists AND misses > warnAfterTicks + retireAfterTicks →
+ *    retireCandidates (the ONLY auto-retire branch — the marker persisted > M
+ *    ticks);
+ *  - ledger entries for posts NOT in this census (retired / unregistered) are
+ *    PRUNED (a retired post's marker must not linger).
+ * Pure, never throws — deterministic for the tests (a fixture of N censuses
+ * drives the marker → retire ladder exactly). */
+export function stepGhostSuspectCensus(
+  rows: readonly GhostSuspectCensusRow[],
+  previous: GhostSuspectLedger,
+  nowMs: number,
+  knobs: GhostSuspectCensusKnobs
+): GhostSuspectCensusResult {
+  const ledger: GhostSuspectLedger = {}
+  const seen = new Set<string>()
+  const newlyMarked: string[] = []
+  const retireCandidates: string[] = []
+  const cleared: string[] = []
+  const warnAfterTicks = Math.max(1, Math.trunc(knobs.warnAfterTicks) || 2)
+  const retireAfterTicks = Math.max(1, Math.trunc(knobs.retireAfterTicks) || 8)
+  for (const row of rows) {
+    seen.add(row.postId)
+    const prev = previous[row.postId]
+    if (row.usable === true) {
+      if (prev !== undefined) cleared.push(row.postId)
+      // usable → entry dropped: no ledger row at all
+      continue
+    }
+    // unusable: extend the consecutive-miss chain.
+    const misses = (prev?.misses ?? 0) + 1
+    const markedAt = prev?.markedAt !== undefined ? prev.markedAt : misses >= warnAfterTicks ? nowMs : undefined
+    if (markedAt !== undefined && prev?.markedAt === undefined) newlyMarked.push(row.postId)
+    if (markedAt !== undefined && misses > warnAfterTicks + retireAfterTicks) retireCandidates.push(row.postId)
+    const entry: GhostSuspectLedgerEntry = { misses, lastMissAt: nowMs }
+    if (markedAt !== undefined) entry.markedAt = markedAt
+    ledger[row.postId] = entry
+  }
+  // Prune ledger entries whose post left the census (retired/unregistered).
+  for (const postId of Object.keys(previous)) {
+    if (!seen.has(postId)) {
+      const entry = previous[postId]
+      if (entry !== undefined && entry.markedAt !== undefined) {
+        // A marked ghost that left the census is a RESOLVED case (retired
+        // elsewhere, e.g. by its head) — the marker is retired with it.
+        cleared.push(postId)
+      }
+    }
+  }
+  return { ledger, newlyMarked, retireCandidates, cleared }
+}
+
 /** Result of the deterministic live-host selection (U3 fix, spec 002 §6.1). */
 export interface PickLiveHostResult {
   /** The selected live entry, or undefined when NO live entry exists. */
@@ -1030,6 +1204,7 @@ export class RegistryStore {
         ...(entry.sleepEpoch !== void 0 ? { sleepEpoch: entry.sleepEpoch } : {}),
         ...(entry.boundarySeq !== void 0 ? { boundarySeq: entry.boundarySeq } : {}),
         ...(entry.previousChildId !== void 0 ? { previousChildId: entry.previousChildId } : {}),
+        ...(entry.rotated === true ? { rotated: true } : {}),
         ...(Array.isArray(entry.inflightWorkers) && entry.inflightWorkers.length > 0 ? { inflightWorkers: entry.inflightWorkers } : {})
       }
     }
@@ -1162,6 +1337,7 @@ export class RegistryStore {
         const sleepEpoch = typeof entry.sleepEpoch === 'number' ? entry.sleepEpoch : undefined
         const boundarySeq = typeof entry.boundarySeq === 'number' ? entry.boundarySeq : undefined
         const previousChildId = typeof entry.previousChildId === 'string' ? entry.previousChildId : undefined
+        const rotated = entry.rotated === true
         const provider = entry.provider === 'worker' ? 'worker' as const : undefined
         const role = typeof entry.role === 'string' ? entry.role : undefined
         const departmentId = typeof entry.departmentId === 'string' ? entry.departmentId : undefined
@@ -1190,6 +1366,7 @@ export class RegistryStore {
           ...(sleepEpoch !== void 0 ? { sleepEpoch } : {}),
           ...(boundarySeq !== void 0 ? { boundarySeq } : {}),
           ...(previousChildId !== void 0 ? { previousChildId } : {}),
+          ...(rotated ? { rotated: true } : {}),
           ...(inflightWorkers !== void 0 && inflightWorkers.length > 0 ? { inflightWorkers } : {})
         })
         this.byChild.set(sessionId, postId)

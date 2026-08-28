@@ -10,7 +10,10 @@
 // compiles to `lib/core/messages.js`).
 //
 // The bridge re-exports the value + type surface unchanged (the on-disk
-// messages.jsonl / deliveries.jsonl format is byte-identical — R6).
+// messages.jsonl / deliveries.jsonl format is byte-identical — R6). ALTO-1
+// (QD audit 2026-08-28 F1): the compaction id + sidecar remap pair
+// (`compactionIdMap` / `remapDeliveryRows`) is part of the public surface —
+// the id-STABLE sidecar contract consumers rely on (tests import them here).
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 export {
@@ -24,9 +27,11 @@ export {
   COMPACTION_LINE_THRESHOLD,
   COMPACTION_BYTE_THRESHOLD,
   shouldCompact,
+  compactionIdMap,
   compactMessages,
   loadMemberIds,
   compactMessagesFile,
+  remapDeliveryRows,
   MessagesStore,
   parseDeliveryRows,
   markDelivery,

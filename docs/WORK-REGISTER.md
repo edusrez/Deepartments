@@ -15,14 +15,35 @@
   builder-4 — kind `system-idle` en dshd-health (scan + ledger propio
   system-idle-state.json + frame) + knobs `systemIdleEnabled`/`idleWindowMs`
   900000 en org.ts + dep `hostRunning` en el wiring + 8 tests M4 — pendiente
-  commit del Asistente**) · **M2.3** secretary en heads (3
+  commit del Asistente**) · **M-A MONITOR de contexto** (owner, alta — scan/
+  kind `context-threshold` en dshd-health con umbral 50% (knob
+  `contextThreshold` 0.5) + dedupe por BANDA `context-threshold:<id>:bN` (cruce
+  de banda → alerta inmediata; banda persistente → re-alerta 30 min por la
+  dedupe shared, sin ledger propio) + poll `contextThresholdPollMs` 60000
+  (patrón per-minute) + dep opcional `sessionContexts` construida por el bundle
+  leyendo `ctx.sessionProjections.snapshot(session).values.contextPressure` (la
+  vista wire, versión-agnóstica RC.7/RC.2) + knobs org.ts + 9 tests incl. smoke
+  real → frame al host — **IMPLEMENTADO 2026-08-28 por builder-27, pendiente
+  commit del Asistente**; la rotación-por-umbral para heads es la SEGUNDA
+  misión M-A (tool dept_head_rotate — aterrizada en el worktree pendiente de
+  commit) · **M2.3** secretary en heads (3
   smokes fallidos M2/M2.1/M2.2; instrumentación en vivo del standing pedida al
   IPD — **residual M2 documentado tal cual**: handle residente + smoke live
   heads pendientes del deploy del subagent/secretary) · seguimiento log-sweep
   del QD (objetivos nuevos → misiones) · **PR-1 docs/ledger ATERRIZADO
   2026-08-28** (este landing) · **dsh-vanilla** = unidad DEcommissioned
   conocida (el job system-health-report la trata **warn-NO-escalate**; el
-  Asistente verificó **is-enabled = disabled** en el unit, 2026-08-28).
+  Asistente verificó **is-enabled = disabled** en el unit, 2026-08-28) ·
+  **PACING peak/valle** (owner, MEDIUM — pacing/coste: el gate reduce el 429
+  y el coste; la org ya vive en modo ráfaga; **IMPLEMENTADO 2026-08-28 por
+  builder-28 — módulo puro pacing.ts en dshd-core (fórmula UTC espejo del
+  dsh-key-pooler, ref-cruzada por comentario) + knobs `org.pacing.*` (enabled/
+  peakWindows weekday×hours/peakBufferMs 1800000) + sección `## Pacing
+  (franja)` en el wake pack (host + lean snapshot) + avisos de transición del
+  daemon (canal notifyHost durable + dedupe key `pacing-transition` en el
+  health-alerts ledger + baseline durable pacing-state.json; primer arranque
+  = solo baseline, sin aviso — documentado) + política en skill/WORK-REGISTER
+  — pendiente commit del Asistente**).
 
 ## 2. DAG técnico — CERRADO (referencia)
 
@@ -93,3 +114,42 @@ M3 (f159eda). Fase modular 0.2.x (siguiente, solo BACKLOG/owner — §3/§5).
 
 Flujos head↔head operativos (m-422): IPD→RD, QD→RD, RD proactivo (tech-watch +
 análisis de fallos). M3 los institucionaliza en docs/skill.
+
+## 7. PACING — política operativa (peak/valle)
+
+> Disciplina operativa de la franja (owner m-PACING, 2026-08-28 — pacing/coste;
+> espejo de la sección "Pacing (peak/valley franja)" del skill
+> deepartments-workflow + de la doc de `org.pacing.*` en cordis.patch.yml).
+> La franja es un HECHO UTC puro (fórmula espejo del dsh-key-pooler marcada por
+> comentario en ambos repos): **PEAK ⇔ weekday(UTC) Mon-Fri ∧ hora-UTC ∈
+> {1,2,3,6,7,8,9}**, con buffer de bordes 30 min por defecto (bias de
+> inicio/fin del request).
+
+- **En PEAK los NUEVOS despachos del host a departamentos NO se lanzan**; los
+  in-flight continúan (un worker a mitad de misión, una misión ya asignada —
+  nunca se aborta). El host no abre misiones nuevas hasta el aviso de VALLE.
+- **NO hay cola de diferidos nueva**: la cola de diferidos = los PENDIENTES del
+  WORK-REGISTER (esta misma cola, la única fuente de verdad). En PEAK los ítems
+  se acumulan exactamente como hoy; NADA se mueve a otra estructura.
+- **El aviso de VALLE es el trigger de reanudación**: el daemon notifica al
+  host una vez por transición (canal durable + interrupt — como el alert de
+  salud): entrando PEAK → «pausa de nuevos despachos»; entrando VALLE →
+  «reanuda; despachos diferidos: N» (N = pendientes legibles de este
+  WORK-REGISTER; si no legible, sin conteo). En «reanuda» el host reabre el
+  pipeline desde los pendientes (prioridad normal).
+- **Los heads ven la franja en su wake** (sección `## Pacing (franja)` del pack
+  y en `dept_wake_snapshot`) y siguen la misma disciplina para SUS nuevos
+  despachos de workers (difieren un spawn nuevo en PEAK; lo ya asignado
+  corre).
+- **Primer arranque del daemon**: solo registra la franja actual, NO avisa
+  (ventana de entrada ya pasada; el pack lleva la franja actual — decisión
+  documentada en dshd-health). Dedupe: una vez por transición (key
+  `pacing-transition` en el shared ledger; baseline durable pacing-state.json).
+- **Knobs**: `org.pacing.*` en cordis.patch.yml — `enabled` (default true;
+  `false` = comportamiento legacy: sin sección en el pack, sin avisos),
+  `peakWindows.weekday` [1..5], `peakWindows.hours` [1,2,3,6,7,8,9],
+  `peakBufferMs` 1800000. **PRÓXIMOS CAMBIOS (documentados)**: cualquier
+  retune de la ventana se coordina y se espeja en dsh-key-pooler
+  (`fallback.peakWindows`/`peakBufferMs`) — ambos repos declaran el MISMO
+  límite (horas {1,2,3,6,7,8,9} ≡ 01:00-04:00 ∪ 06:00-10:00 con el mismo
+  buffer) y deben mantenerse en sync.
