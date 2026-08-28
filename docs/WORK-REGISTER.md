@@ -26,13 +26,19 @@ M3 (f159eda).
 
 ## 3. PENDIENTE-OWNER (decisiones)
 
-- D5 (formalizar 3 plugins ocultos / re-exposición subagent — REVISAR alcance
-  tras M2: el seam cambió a secretary) · apiKey DeepSeek (diferida) · publish vs
-  link-only · stable 3080 upgrade (dshmarket 1.21.2→1.33.0; constraint
-  no-tocar-stable) · tool goal a retirar · oc-5 WIP absorbido en 3d55bbf
-  (¿commit aparte? nota QD) · E1 opcionales RD (seam tools: extend quirúrgico /
-  acotar write a reportDir) · web_search en scope secretary (smoke del deploy lo
-  decide; fuera del allow por diseño).
+- D5 → BACKLOG fase modularización 0.2.x (formalizar 3 superficies Cordis del
+  bundle: patch-row / subagent-subpath (secretary) / client-inject; R6 no
+  borrar) · apiKey DeepSeek → RESUELTO 08-28 (key platform existente = FALLBACK
+  del pooler; alta/top-up a validar con owner — consola dio 403 en research RD)
+  · publish vs link-only → DECIDIDO 08-28: publish 0.1.x (próxima ventana
+  release; owner delega al host) · stable 3080 upgrade → NO TOCAR (owner 08-28)
+  · tool goal → RETIRADO 2026-08-28 (fila fuera del preset durable dev; efecto
+  runtime en ventana de deploy; nota R6 en preset) · keys Go adicionales
+  (PENDIENTE-OWNER compra: RD 7-8 keys flash = $70-80/mes, NO malgasto; 1-2 keys
+  insuficientes solas) · oc-5 WIP absorbido en 3d55bbf (¿commit aparte? nota QD)
+  · E1 opcionales RD (seam tools: extend quirúrgico / acotar write a reportDir)
+  · web_search en scope secretary (smoke del deploy lo decide; fuera del allow
+  por diseño).
 
 ## 4. CAPACIDAD
 

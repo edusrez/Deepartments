@@ -38,7 +38,10 @@ weekly/Asistente-facing report.
    Filter `status: 'failed'` and diff against the previous digest: the
    delivery-failure delta. NOTE (forensics gap): after the 26ac649 renumber,
    sidecar rows may carry pre-renumber ids that do not resolve to
-   messages.jsonl (epoch-map them; flag unresolvable rows).
+   messages.jsonl (epoch-map them; flag unresolvable rows). Also note:
+   `prepared` rows WITHOUT a terminal row that target RETIRED hosts/sessions
+   (class documented from m-243/m-356) — report recurrence but do NOT re-file
+   as new PRs (already an IPD hygiene line).
 3. The **archived session logs** (the retire/sleep/rotation artifacts under
    stateDir: `journals/sessions/*.md`, `journals/archive/`,
    `sessions/*.jsonl.zstd`) — look for a stale/leaked row, a post-error pattern,
@@ -61,8 +64,17 @@ Produce the digest sections:
   (a reconcile/auto-run failure footprint).
 - **Delivery-failure delta** — the `status: 'failed'` delivery delta since the
   last run (`deliveries.jsonl`), with id-resolution caveat.
+- **WATCH CLASSES (post-barrido 2026-08-27)** — track recurrence of two
+  low-severity state classes with no owner yet: (i) `config-preset "model"
+  unbound` — `config-presets.jsonl` markers / health-alerts `config-preset`
+  frames (last observed 08-25, auto-resolved; report if it recurs — it is NOT
+  yet a registered class on its own); (ii) identical `lastRun-ms` for 2+ jobs
+  in `job-runs-state.json` (scheduler scribe anomaly; first seen
+  1787821214777 on daily-ai-news + monitor-dsh-updates). Report ONLY new
+  recurrence; no re-filing as PRs.
 - **Prior inspection results** — what the recent inspector reports found, and
-  whether any signal is repeating.
+  whether any signal is repeating (incl. the worker-retired ANALYZE
+  opportunities that remain undirected).
 
 ## Report
 
