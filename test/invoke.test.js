@@ -38,7 +38,9 @@ import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSessio
 import { RegistryStore } from '../lib/invoke.js'
 import { readLlmPiAiProviderSettings } from '../lib/invoke.js'
 import { Config as configSchema } from '../lib/org.js'
-import { apply as subagentForkApply } from '../lib/subagent.js'
+import { apply as subagentForkApply, SECRETARY_PERSONA, SECRETARY_TOOL_FILTER, SECRETARY_TOOL_NAME, SECRETARY_PROVIDER, SECRETARY_MAX_DEPTH } from '../lib/subagent.js'
+import { HEAD_BASE_TOOLS, OWN_LAYER_POST_TOOLS } from '../lib/invoke.js'
+import { TOOLSET_AUDIT_FILE, TOOLSET_AUDIT_MAX_LINES, TOOLSET_AUDIT_FLAG_ENV } from '../lib/toolset-audit.js'
 import {
   HEAD_PRESET_BASE_ID,
   headPresetIdFor,
@@ -50,6 +52,14 @@ import {
 } from '../lib/head-presets.js'
 
 // --- test organization (mirrors cordis.patch.yml, with a stub LLM route) -----
+
+// M2.3: the hermetic suite runs with the toolset-audit channel DISABLED (the
+// map's DEEPARTMENTS_TOOLSET_AUDIT default-1 flag is turned off here — a
+// diagnostics-only file has no place in every hermetic temp stateDir). The
+// M2.3 resume test below MERELY RESTORES it ('1') for its own fixture and
+// restores the prior value after, so the channel's 4-waypoint coverage is
+// verifiable exactly there.
+process.env[TOOLSET_AUDIT_FLAG_ENV] = '0'
 
 const TEST_ORG = {
   departments: [
@@ -5765,6 +5775,309 @@ test('M2.2 live-case (REAL agent-presets, NO subagents service): a PRE-EXISTING 
         const headIndex2 = agents.childAgents.findIndex((a) => a === head2)
         assert.ok(headIndex2 >= 0, 'the resumed agent context resolves')
         assert.ok(agents.childContexts[headIndex2].ctx.tools.get('secretary', agents.childContexts[headIndex2].key) !== undefined, 'the RESUMED department head SEES its personal secretary over the real per-head standing with NO subagents service (M2.2 live case)')
+      } finally {
+        loaderFiber.dispose()
+      }
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
+test('M2.3 fila==constante: the exported SECRETARY_* contract (the shared factory source) matches the tool-secretary preset row THE HOST mounts, so the standing row and the head OWN LAYER can never diverge (fila==constante)', async () => {
+  // The preset row (presets/deepartments-head/agent.cordis.yml) is the HOST's
+  // standing source: provider spawn + toolName secretary + the folded persona +
+  // toolFilter allow/deny + provider-managed. The exported SECRETARY_* constants
+  // are the OWN-LAYER source (src/subagent.ts secretaryConfig — the SAME
+  // factory the row's apply() consumes). This assert locks the mirror.
+  const baseComposition = await readFile(path.join(REPO_ROOT, 'presets', 'deepartments-head', 'agent.cordis.yml'), 'utf8')
+  assert.ok(baseComposition.includes('- id: tool-secretary'), 'the preset row exists (the shared contract has a HOME)')
+  assert.ok(baseComposition.includes(`    provider: ${SECRETARY_PROVIDER}`), 'fila==constante: row provider === SECRETARY_PROVIDER')
+  assert.ok(baseComposition.includes(`    toolName: ${SECRETARY_TOOL_NAME}`), 'fila==constante: row toolName === SECRETARY_TOOL_NAME')
+  // The persona is a FOLDED `>-` YAML block: the raw file text has line breaks
+  // + indentation, so fold it the way YAML does (each continuation line joined
+  // with a single space, trimmed) and compare the FOLDED value to the constant.
+  const personaAnchor = 'persona: >-'
+  const personaIdx = baseComposition.indexOf(personaAnchor)
+  assert.ok(personaIdx >= 0, 'the row carries the folded persona block')
+  const personaBlock = baseComposition.slice(personaIdx + personaAnchor.length)
+  const personaLines = personaBlock.split('\n').slice(1)
+  const folded = []
+  for (const line of personaLines) {
+    if (line.trim() === '' || line.trim().startsWith('toolFilter:')) break
+    folded.push(line.trim())
+  }
+  assert.equal(folded.join(' '), SECRETARY_PERSONA, 'fila==constante: the FOLDED row persona === SECRETARY_PERSONA (the M2 deploy-journal test asserts the child receives this verbatim)')
+  assert.ok(baseComposition.includes(`      allow: [${SECRETARY_TOOL_FILTER.allow.join(', ')}]`), 'fila==constante: row toolFilter.allow === SECRETARY_TOOL_FILTER.allow')
+  assert.ok(baseComposition.includes(`      deny: [${SECRETARY_TOOL_FILTER.deny.join(', ')}]`), 'fila==constante: row toolFilter.deny === SECRETARY_TOOL_FILTER.deny')
+  assert.ok(baseComposition.includes(`    maxDepth: ${SECRETARY_MAX_DEPTH}`), 'fila==constante: row maxDepth === SECRETARY_MAX_DEPTH')
+})
+
+test('M2.3 live-case (REAL agent-presets, NO subagents service, per-head preset AUTHORED WITHOUT the tool-secretary row): a durable head resumed 1st AND 2nd sees `secretary` BY ITS OWN LAYER (the M2.3 own-scope registration in installHeadBoardTools — immune to the standing mask); executing it fails loud with the absent-service error; a WORKER never sees it (manager gate); the tool-list movement is structural (HEAD_BASE_TOOLS lacks it / OWN_LAYER_POST_TOOLS carries it); the audit channel writes the 4 waypoint marks', async () => {
+  const dshHome = await mkdtemp(path.join(tmpdir(), 'dsh-home-m23-'))
+  const prev = process.env.DSH_HOME
+  const prevAudit = process.env[TOOLSET_AUDIT_FLAG_ENV]
+  const cleanup = async () => {
+    if (prev === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = prev
+    if (prevAudit === undefined) delete process.env[TOOLSET_AUDIT_FLAG_ENV]
+    else process.env[TOOLSET_AUDIT_FLAG_ENV] = prevAudit
+    await rm(dshHome, { recursive: true, force: true })
+  }
+  process.env.DSH_HOME = dshHome
+  // Re-enable the toolset-audit channel for THIS fixture (the hermetic suite
+  // default is '0' — see the module-top flag below): the M2.3 waypoints must be
+  // verifiable in exactly one place, the resume test.
+  process.env[TOOLSET_AUDIT_FLAG_ENV] = '1'
+  await withTempStateDir(async (stateDir) => {
+    try {
+      // Same hermetic resolve hook as the M2.1/M2.2 tests — the per-head preset
+      // and the standing-mount + postSetup probe/restrict + own-layer install +
+      // durable resume are all REAL; only the environment rows are stubbed.
+      const m23RepoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+      const m23HookDir = await mkdtemp(path.join(dshHome, 'm23-hook-'))
+      const m23StubPath = path.join(m23HookDir, 'env-row-stub.mjs')
+      await writeFile(m23StubPath, "export const name = 'm23-env-row-stub'; export function apply() {}\n", 'utf8')
+      const m23HookPath = path.join(m23HookDir, 'resolve-hook.mjs')
+      await writeFile(m23HookPath, `
+        import { pathToFileURL } from 'node:url'
+        import path from 'node:path'
+        const repoRoot = ${JSON.stringify(m23RepoRoot)}
+        const stubUrl = ${JSON.stringify(pathToFileURL(m23StubPath).href)}
+        export async function resolve(specifier, context, nextResolve) {
+          if (specifier === 'dsh-deepartments') return { url: pathToFileURL(path.join(repoRoot, 'lib', 'index.js')).href, shortCircuit: true }
+          if (specifier === 'dsh-deepartments/subagent') return { url: pathToFileURL(path.join(repoRoot, 'lib', 'subagent.js')).href, shortCircuit: true }
+          if (specifier === 'dsh-deepartments/package.json') return { url: pathToFileURL(path.join(repoRoot, 'package.json')).href, shortCircuit: true }
+          if (specifier === '@deepseek-ai/dsh-persona' || specifier === '@deepseek-ai/dsh-agent-instructions'
+            || specifier === '@deepseek-ai/dsh-tool-fs' || specifier === '@deepseek-ai/dsh-tool-fs-search') {
+            return { url: stubUrl, shortCircuit: true }
+          }
+          return nextResolve(specifier, context)
+        }
+      `.trim() + '\n', 'utf8')
+      register(pathToFileURL(m23HookPath).href)
+
+      // Structural M2.3 asserts HERE (before the harness): the secretaries of
+      // the list movement — `secretary` is NO LONGER an inherited allow-list
+      // name (HEAD_BASE_TOOLS) and IS an own-layer name (OWN_LAYER_POST_TOOLS).
+      // Naming a scope-local name in restrict() would THROW and degrade to the
+      // all-masking allow:[] — the movement is the coherence condition.
+      assert.ok(!HEAD_BASE_TOOLS.includes('secretary'), 'M2.3: HEAD_BASE_TOOLS no longer carries `secretary` (the inherited allow-list must not name a scope-local tool)')
+      assert.ok(OWN_LAYER_POST_TOOLS.has('secretary'), 'M2.3: OWN_LAYER_POST_TOOLS carries `secretary` (the own-layer is its single source of visibility)')
+
+      // A PRE-EXISTING durable HEAD post (created BEFORE the M2.3 deploy):
+      // NOT configured (zero-departments org), so materialization is driven
+      // below via the wake, deterministic after loader.await.
+      await seedPost(stateDir, {
+        postId: 'quality-head',
+        sessionId: 'head-quality-head',
+        roomId: 'board',
+        agentPreset: headPresetIdFor('quality')
+      })
+      // CONTROL head (map §4.1): per-head preset WITH the tool-secretary row —
+      // the no-regression case: it must STILL see its secretary (own layer + the
+      // inherited row coexist, no double-binding break), AND its standing apply
+      // is the one that fires the WP4 apply-standing audit mark (the row-less
+      // quality head never applies the subagent plugin).
+      await seedPost(stateDir, {
+        postId: 'research-head',
+        sessionId: 'head-research-head',
+        roomId: 'board',
+        agentPreset: headPresetIdFor('research')
+      })
+      // Durable worker for the "worker never sees secretary" assert — seeded
+      // BEFORE boot so the in-memory catalog (loaded from posts.json) knows it.
+      await seedPost(stateDir, {
+        postId: 'builder-audit',
+        sessionId: 'worker-builder-audit',
+        roomId: 'board',
+        agentPreset: 'deepartments-worker',
+        provider: 'worker',
+        role: 'builder'
+      })
+
+      // THE M2.3 DISCRIMINATOR: author the REAL per-head preset WITHOUT the
+      // tool-secretary row — build the composition from the base and STRIP the
+      // delegation row (simulates the live broken-standing case: the head
+      // preset file that does NOT contribute the secretary by inheritance).
+      const baseComposition = await readFile(path.join(m23RepoRoot, 'presets', 'deepartments-head', 'agent.cordis.yml'), 'utf8')
+      assert.ok(baseComposition.includes('- id: tool-secretary'), 'the base composition DOES carry the tool-secretary row (control: the strip below removes exactly that)')
+      // Strip the row block (it is the LAST section of the file): cut from the
+      // `- id: tool-secretary` marker to EOF. The delegation banner/comments
+      // above it stay (comments never mount anything; the ROW is what's gone).
+      const strippedRowComposition = baseComposition.slice(0, baseComposition.indexOf('- id: tool-secretary'))
+      assert.ok(!strippedRowComposition.includes('- id: tool-secretary') && !strippedRowComposition.includes('toolName: secretary'), 'the M2.3 per-head composition has the tool-secretary ROW STRIPPED (the own-layer carries the secretary, not the standing)')
+      const perHeadPresetId = headPresetIdFor('quality')
+      const perHeadPresetDir = path.join(dshHome, '.agent-presets', perHeadPresetId)
+      await mkdir(perHeadPresetDir, { recursive: true })
+      await writeFile(path.join(perHeadPresetDir, 'agent.cordis.yml'), buildHeadPresetComposition(strippedRowComposition, 'Quality Head', 'Quality'), 'utf8')
+      await writeFile(path.join(perHeadPresetDir, 'preset.yml'), buildHeadPresetMetadata('Quality Head - Deepartments'), 'utf8')
+
+      // The CONTROL per-head preset (deepartments-head-research) KEEPS the
+      // tool-secretary row (the map §4.1 optional control — the no-regression
+      // case AND the source of the WP4 apply-standing mark).
+      const ctrlPerHeadPresetId = headPresetIdFor('research')
+      const ctrlPerHeadPresetDir = path.join(dshHome, '.agent-presets', ctrlPerHeadPresetId)
+      await mkdir(ctrlPerHeadPresetDir, { recursive: true })
+      await writeFile(path.join(ctrlPerHeadPresetDir, 'agent.cordis.yml'), buildHeadPresetComposition(baseComposition, 'Research Head', 'Research'), 'utf8')
+      await writeFile(path.join(ctrlPerHeadPresetDir, 'preset.yml'), buildHeadPresetMetadata('Research Head - Deepartments'), 'utf8')
+
+      // The worker wake below ALSO needs its preset resolvable (the harness
+      // profile ships only the per-head preset): copy the REAL generic worker
+      // preset into the temp user preset root so the worker's standing mount is
+      // a REAL agent-presets mount (workerSetup → postSetup manager:false).
+      const workerPresetSrcDir = path.join(m23RepoRoot, 'presets', 'deepartments-worker')
+      const workerPresetDstDir = path.join(dshHome, '.agent-presets', 'deepartments-worker')
+      await mkdir(workerPresetDstDir, { recursive: true })
+      await copyFile(path.join(workerPresetSrcDir, 'agent.cordis.yml'), path.join(workerPresetDstDir, 'agent.cordis.yml'))
+      await copyFile(path.join(workerPresetSrcDir, 'preset.yml'), path.join(workerPresetDstDir, 'preset.yml'))
+
+      // Boot the REAL Loader + the REAL @deepseek-ai/dsh-agent-presets service
+      // (temp DSH_HOME) in TWO stages (the M2.1 pattern). THE M2.3
+      // DISCRIMINATOR: SubagentRuntime is NOT mounted anywhere in this
+      // composition — no `root.plugin(SubagentRuntime)`, no subagents loader
+      // entry — so the head chain (and the standing it mounts) has NO
+      // subagents service at all.
+      const root = new Context()
+      const loaderFiber = await root.plugin(Loader, { baseUrl: new URL('.', import.meta.url).href })
+      const loader = root.loader
+      // Provide `deepartments.org` on the ROOT (exactly what dshd-core provides
+      // in the full composition — the SAME stateDir/org the bundle config
+      // carries, so behavior-neutral). The subagent plugin's standing ctx
+      // resolves it via the scope chain, so the WP4 apply-standing waypoint can
+      // write to the fixture audit channel (<stateDir>/toolset-audit.jsonl).
+      root.provide('deepartments.org', { stateDir, org: { departments: [] } })
+      loader.create({ id: 'sessions', name: '@deepseek-ai/dsh-session' })
+      loader.create({ id: 'projections', name: '@deepseek-ai/dsh-session-projection' })
+      loader.create({ id: 'systemPrompt', name: '@deepseek-ai/dsh-system-prompt' })
+      loader.create({ id: 'tools', name: '@deepseek-ai/dsh-tools' })
+      loader.create({ id: 'agentPresets', name: '@deepseek-ai/dsh-agent-presets', config: { default: 'deepartments-head', roots: [] } })
+      await loader.await()
+      const agents = new StubAgents(root)
+      const persistence = new StubPersistence(root)
+      // Stage 2: the bundle — its agentPresets capture is now DEFINED.
+      loader.create({
+        id: 'deepartments',
+        name: '../lib/index.js',
+        config: { stateDir, org: { departments: [] } }
+      })
+      await loader.await()
+      agents.scopeAnchor = loader.resolve('tools').fiber?.ctx ?? root
+      // The hermetic harness registers no native tools, so stub the GLOBAL
+      // capability tools on the global plane exactly like bootPlugin does (the
+      // head's probe/restrict then sees them as real inherited globals).
+      for (const name of F10_GLOBAL_TOOLS) {
+        if (root.tools.get(name) === undefined) root.tools.register(stubGlobalTool(name))
+      }
+      try {
+        assert.equal(agents.store.has('head-quality-head'), false, 'no head is materialized at boot (the durable ghost stays dormant)')
+        // The per-head preset files were authored directly above — the wake's
+        // mount resolves them through the REAL dsh-agent-presets discovery.
+        await access(path.join(dshHome, '.agent-presets', perHeadPresetId, 'agent.cordis.yml'))
+        const signal = new AbortController().signal
+
+        // FIRST materialization of the pre-existing durable head: the bus wake
+        // RESUMES it through headSetup — postSetup mounts the REAL PER-HEAD
+        // preset standing (WITHOUT the tool-secretary row) and probes
+        // HEAD_BASE_TOOLS (secretary NOT in it — the movement). The own-layer
+        // install (installHeadBoardTools — manager-gated) THEN registers the
+        // shared `createSecretaryTool` factory, so the head sees its secretary
+        // BY OWN LAYER even though the standing contributed nothing.
+        const r1 = await root.tools.get('send_message').execute(
+          { to: ['quality-head'], text: 'wake' },
+          { agent: { id: 'host-any', session: { header: {} } }, signal }
+        )
+        assert.equal(r1.delivered['quality-head'], 'resumed', 'the bus wake materializes the durable head (resume path, not a rotation)')
+        await waitFor(() => agents.store.has('head-quality-head'), 5000, 'the durable head session is live after the wake')
+        const head1 = agents.store.get('head-quality-head')
+        const headIndex1 = agents.childAgents.findIndex((a) => a === head1)
+        assert.ok(headIndex1 >= 0, 'the materialized head context resolves')
+        const headCtx1 = agents.childContexts[headIndex1].ctx
+        const headKey1 = agents.childContexts[headIndex1].key
+        // THE M2.3 DISCRIMINATOR: the per-head preset was authored WITHOUT the
+        // tool-secretary row (the standing contributes no secretary), yet the
+        // head SEES the tool — registered on its OWN layer by installHeadBoardTools.
+        assert.ok(headCtx1.tools.get('secretary', headKey1) !== undefined, 'the materialized head sees its secretary BY OWN LAYER even though the per-head preset has NO tool-secretary row (M2.3 own-scope registration — immune to the standing mask)')
+
+        // Execute WITHOUT the service → the clear fail-loud absent-service error
+        // (the own-layer registration shares the standing row's M2.2 execute).
+        await assert.rejects(
+          headCtx1.tools.get('secretary', headKey1).execute(
+            { description: 'read my journal', prompt: 'Read the journal and summarise the open items.' },
+            { agent: head1, signal }
+          ),
+          /subagents service absent in this session/,
+          'executing secretary in a head chain WITHOUT the subagents service fails loud with the clear absent-service error'
+        )
+
+        // SECOND materialization of the SAME durable session — the own-layer
+        // registration re-runs identically on the FRESH agentCtx (idempotent:
+        // a new ctx per materialization, no same-layer duplicate).
+        agents.store.delete('head-quality-head')
+        const r2 = await root.tools.get('send_message').execute(
+          { to: ['quality-head'], text: 'wake again' },
+          { agent: { id: 'host-any', session: { header: {} } }, signal }
+        )
+        assert.equal(r2.delivered['quality-head'], 'resumed', 'the second bus wake RESUMES the durable head session again (not a rotation)')
+        await waitFor(() => agents.store.has('head-quality-head'), 5000, 'the durable head session is live again')
+        const head2 = agents.store.get('head-quality-head')
+        const headIndex2 = agents.childAgents.findIndex((a) => a === head2)
+        assert.ok(headIndex2 >= 0, 'the resumed agent context resolves')
+        assert.ok(agents.childContexts[headIndex2].ctx.tools.get('secretary', agents.childContexts[headIndex2].key) !== undefined, 'the RESUMED department head SEES its personal secretary BY OWN LAYER over the row-less per-head standing (M2.3 own-scope — second materialization, idempotent)')
+
+        // CONTROL (map §4.1 — the no-regression case AND the WP4 source): wake
+        // the durable research-head whose per-head preset KEEPS the tool-secretary
+        // row. It must STILL see its secretary (the own layer + the inherited row
+        // coexist without a double-binding break), and its standing's subagent
+        // row apply is the one that writes the apply-standing audit mark.
+        const rc = await root.tools.get('send_message').execute(
+          { to: ['research-head'], text: 'wake' },
+          { agent: { id: 'host-any', session: { header: {} } }, signal }
+        )
+        assert.equal(rc.delivered['research-head'], 'resumed', 'the control head (with-row preset) materializes on wake')
+        await waitFor(() => agents.store.has('head-research-head'), 5000, 'the control head session is live')
+        const ctrlHead = agents.store.get('head-research-head')
+        const ctrlIndex = agents.childAgents.findIndex((a) => a === ctrlHead)
+        assert.ok(ctrlIndex >= 0, 'the control head context resolves')
+        assert.ok(agents.childContexts[ctrlIndex].ctx.tools.get('secretary', agents.childContexts[ctrlIndex].key) !== undefined, 'the WITH-ROW control head still sees its secretary (the own layer registers the SAME factory — no double-binding regression)')
+
+        // WORKER: a manager:false post NEVER carries the secretary — the own-layer
+        // registration is manager-gated (installHeadBoardTools `if (manager)`),
+        // so a worker's own layer has only the bus/lifecycle tools. Wake the
+        // durable worker seeded pre-boot and assert the tool is absent.
+        const rw = await root.tools.get('send_message').execute(
+          { to: ['builder-audit'], text: 'wake' },
+          { agent: { id: 'host-any', session: { header: {} } }, signal }
+        )
+        assert.equal(rw.delivered['builder-audit'], 'resumed', 'the worker post materializes on wake')
+        await waitFor(() => agents.store.has('worker-builder-audit'), 5000, 'the worker session is live after the wake')
+        const worker = agents.store.get('worker-builder-audit')
+        const workerIndex = agents.childAgents.findIndex((a) => a === worker)
+        assert.ok(workerIndex >= 0, 'the worker context resolves')
+        assert.equal(agents.childContexts[workerIndex].ctx.tools.get('secretary', agents.childContexts[workerIndex].key), undefined, 'a WORKER NEVER sees the secretary (the own-layer registration is manager-gated — heads only)')
+
+        // THE AUDIT CHANNEL: the M2.3 waypoints wrote the 4 marks into the
+        // fixture stateDir (the resume test is the one hermetic place the
+        // channel is enabled). Each materialization emitted post-mount → probe →
+        // toolset-final; the standing apply-standing marks come from subagent.ts.
+        const auditPath = path.join(stateDir, TOOLSET_AUDIT_FILE)
+        const auditText = await readFile(auditPath, 'utf8')
+        const auditLines = auditText.split('\n').filter((line) => line.trim() !== '')
+        assert.ok(auditLines.length > 0, 'the toolset-audit.jsonl channel wrote lines to the fixture stateDir')
+        const marks = auditLines.map((line) => JSON.parse(line).wp)
+        assert.ok(marks.includes('post-mount'), 'WP1 (post-mount waypoint) wrote a mark: secretary visible right after mount')
+        assert.ok(marks.includes('probe'), 'WP2 (probe waypoint) wrote a mark: the inherited allow-list build')
+        assert.ok(marks.includes('toolset-final'), 'WP3 (toolset-final waypoint) wrote a mark: N visible after the own-layer install')
+        assert.ok(marks.includes('apply-standing'), 'WP4 (apply-standing waypoint) wrote a mark: subagents/provider presence at standing apply')
+        // The quality-head probe line proves the structural movement AT RUNTIME:
+        // the allow-list has NO secretary (the probe skipped the own-layer name)
+        // while the toolset-final line shows secretary=yes (own-layer visible).
+        const qualityProbe = auditLines.map((line) => JSON.parse(line)).find((l) => l.wp === 'probe' && l.postId === 'quality-head')
+        assert.ok(qualityProbe !== void 0, 'a probe line for quality-head was written')
+        assert.ok(!String(qualityProbe.allow).includes('secretary'), 'the probe allow-list for quality-head has NO secretary (the movement made the allow-list secretary-free — granted only via the own layer)')
+        const qualityFinal = auditLines.map((line) => JSON.parse(line)).find((l) => l.wp === 'toolset-final' && l.postId === 'quality-head')
+        assert.ok(qualityFinal !== void 0, 'a toolset-final line for quality-head was written')
+        assert.equal(qualityFinal.secretary, 'yes', 'the toolset-final audit sees secretary=yes for the head (the own-layer carried it AFTER the restrict)')
       } finally {
         loaderFiber.dispose()
       }

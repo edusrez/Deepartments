@@ -22,6 +22,9 @@ import type { AssembleContext } from '@deepseek-ai/dsh-system-prompt'
 // minimal composition where dshd-core is absent).
 import { rememberRole, forgetRole } from './role-orient.js'
 import type { SubagentRolesService } from './role-orient.js'
+// M2.3: the guaranteed diagnostics channel for the standing apply waypoint
+// (the deepartments warns never reach stdout — the M2.2 finding).
+import { appendToolsetAudit, auditStateDir } from './toolset-audit.js'
 
 export const name = 'deepartments-subagent'
 // M2.2 (deploy fix, 2026-08-28): `subagents` is NO LONGER a hard inject. The
@@ -105,63 +108,79 @@ function providerWording(inheritsConversation: boolean) {
 /** The fixed always-background suffix appended to every tool description. */
 const ALWAYS_BACKGROUND_SUFFIX = ' This tool ALWAYS runs in the background: it immediately returns a durable subagent id and never blocks you. When the run settles, the runtime sends you a notice containing its outcome and any final assistant message; `send_message` starts a later turn in the same child conversation.'
 
-export function apply(ctx: Context, config: Config) {
-  if (config.maxDepth !== 'provider-managed' && config.maxDepth !== void 0) assertSubagentMaxDepth(config.maxDepth)
-  if (config.toolFilter !== void 0 && config.toolFilter.allow === void 0 && config.toolFilter.deny === void 0) throw new Error('deepartments-subagent: `toolFilter` is configured but names neither `allow` nor `deny` — remove the key or fill the filter')
+// M2.3 (owner decision 2026-08-28) — the SECRETARY DEPLOYMENT CONTRACT as ONE
+// exported source of truth. The `tool-secretary` preset row
+// (presets/deepartments-head/agent.cordis.yml) and the head OWN-LAYER
+// registration (src/invoke.ts installHeadBoardTools) both build the SAME tool
+// through the shared `createSecretaryTool` factory, so person/toolFilter/wording
+// can never diverge between the host plane (standing row) and a department head
+// (own layer — the M2.3 registry that makes the tool immune to the standing
+// mask). The preset row mirrors these literal values; test M2.3 asserts
+// fila==constante to lock the mirror.
+
+/** The ONE secretary tool name (the single toolName, host + head). */
+export const SECRETARY_TOOL_NAME = 'secretary'
+/** The ONE secretary provider (the shipped head rows are `spawn`; the provider
+ * is resolved at EXECUTE time — M2.1/M2.2 lazy, never at registration). */
+export const SECRETARY_PROVIDER = 'spawn'
+/** The ONE secretary persona (a personal NON-CODE READ-ONLY secretary) —
+ * mirrors the `tool-secretary` row's folded `persona` verbatim. */
+export const SECRETARY_PERSONA =
+  'You are a personal NON-CODE secretary in the Deepartments organization (DeepSeek Harness): you READ files, reports and journals, SEARCH (glob/grep) and SUMMARISE for the agent that deployed you. You never edit, write, run commands, or deploy anything. Focus on journals, reports and files the deployer points you at. Internal code work and deep code analysis belong to the Internal Programming Department — never attempt them; state the limitation instead. Report your result concisely to the agent that deployed you.'
+/** The ONE secretary child toolFilter: the allow whitelist is the minimal
+ * inherited read-only surface; deny names only tools the child INHERITS and
+ * must never expose (write + secretary itself — a secretary never deploys
+ * another secretary). Mirrors the preset row's `toolFilter` verbatim. */
+export const SECRETARY_TOOL_FILTER: { allow: string[]; deny: string[] } = {
+  allow: ['read', 'glob', 'grep'],
+  deny: ['write', SECRETARY_TOOL_NAME]
+}
+/** The ONE secretary maxDepth (provider-managed — the child recursion budget
+ * is the provider's; no mount-time capability requirement). */
+export const SECRETARY_MAX_DEPTH: 'provider-managed' = 'provider-managed'
+
+/** The deployment config for the OWN-LAYER secretary (the head registration):
+ * every field from the SECRETARY_* contract — the SAME values the preset row
+ * mirrors, so the own layer and the standing row cannot drift. */
+export function secretaryConfig(): Config {
+  return {
+    provider: SECRETARY_PROVIDER,
+    toolName: SECRETARY_TOOL_NAME,
+    persona: SECRETARY_PERSONA,
+    toolFilter: SECRETARY_TOOL_FILTER,
+    maxDepth: SECRETARY_MAX_DEPTH
+  }
+}
+
+/** Build the ONE secretary delegation tool definition (the M2 contract tool
+ * body — M2.3 shared factory). `apply()` registers it for the standing row and
+ * `installHeadBoardTools` (invoke.ts, manager-gated) registers the SAME body on
+ * the head's OWN layer, so host plane and head own layer share ONE
+ * definition of the persona/toolFilter/wording. The execute is the M2.2 lazy
+ * path: `ctx.get('subagents')` at CALL time, failing loud with a clear
+ * absent-service error when the chain lacks the service (a department head). */
+export function createSecretaryTool(ctx: Context, config: Config): ReturnType<typeof defineTool> {
   const toolName = config.toolName ?? 'subagent'
-  // D3: WRITE the dispatch-time role through the core service
-  // (`deepartments.subagentRoles` — ONE per-process store in dshd-core) so the
-  // wakepack pre-step reader can never split onto a second registry. When the
-  // service is unreachable (a minimal composition / a plugin ctx without the
-  // dshd-core row), fall back to the drop-in compat functions the role-orient
-  // bridge re-exports — they run the SAME service semantics over the SAME
-  // store (R6, behavior-neutral).
+  // D3: dispatch-time role write through the core service (or the drop-in
+  // compat fallback) — the execute's remember closure, resolved ONCE here so a
+  // single definition carries it (role-orient is a pure bridge). The matching
+  // `forget` lives in `apply()` (the subagent/end eviction handler) — the same
+  // store, so a child the execute remembered is evicted when it settles.
   const roles = ctx.get('deepartments.subagentRoles') as SubagentRolesService | undefined
   const remember = roles === undefined
     ? rememberRole
     : (childSessionId: string, role: unknown) => roles.set(childSessionId, role)
-  const forget = roles === undefined
-    ? forgetRole
-    : (childSessionId: string) => roles.delete(childSessionId)
-  // M2.1 (deploy fix, 2026-08-28): the delegation tool is registered
-  // UNCONDITIONALLY at apply time. Pre-M2.1 the registration was gated on the
-  // subagent provider being resolvable at apply (sync mount) or on a later
-  // `subagent/provider-added` event — a standing preset mount that applied the
-  // row while the provider was absent left the tool missing at the postSetup
-  // probe's FIRST read (invoke.ts HEAD_BASE_TOOLS allow-list), and the
-  // restrict({allow}) then masked the inherited contribution PERMANENTLY for
-  // that incarnation (the M2.1 deploy finding: a rematerialized department head
-  // never saw its own `secretary`, while the host — whose provider is already
-  // hot at composition time — did). The fix: the row ALWAYS leaves the tool
-  // bound under `toolName` in the standing mount, so the probe always finds it
-  // and the allow-list keeps it; the provider is resolved at EXECUTE time
-  // (startContinuable by name — expectProvider fails loud on a missing
-  // provider), never at registration. Plugin semantics are unchanged: always-
-  // async continuable dispatch, agentOptions heredity, dispatch-time role
-  // registry + eviction, and the system-prompt section. The provider-dependent
-  // facts still validated at registration are: (a) the maxDepth depthLimit
-  // capability — checked synchronously when the provider is present at apply,
-  // else when it registers later (provider-added, same fail-loud throw); and
-  // (b) the inheritsParentContext wording — taken from the present provider,
-  // or the fresh-spawn wording while it is absent (the shipped head rows are
-  // `spawn`; the host's fork row mounts with its provider already present, so
-  // the fallback never mislabels a fork).
-  // M2.2 (deploy fix continuation): resolve the subagents service OPTIONALLY.
-  // When the service is absent from this chain (a department head — the host
-  // composition hosts it, a head chain does not), `present` stays undefined and
-  // the tool is registered UNCONDITIONALLY anyway (the M2.1 principle extended
-  // to the SERVICE); the provider and the service are both resolved at EXECUTE
-  // time with fail-loud errors, never at registration. The read goes through
-  // `ctx.get` — a bare `ctx.subagents` property read on an undeclared missing
-  // service would THROW (cordis inline-inject guard), which is exactly the
-  // hard dependency this fix removes.
+  // The provider presence is resolved OPTIONALLY at build time for the wording
+  // ONLY (M2.1/M2.2: registration is provider-independent; the provider is
+  // resolved at EXECUTE time). maxDepth capability is validated for a provider
+  // already present (fail-loud, same contract as apply).
   const subagents = ctx.get('subagents') as SubagentRuntime | undefined
   const present = subagents === void 0 ? void 0 : subagents.getProvider(config.provider)
   if (present !== void 0 && typeof config.maxDepth === 'number' && !present.capabilities.depthLimit) {
     throw new Error(`deepartments-subagent: provider "${present.name}" cannot enforce maxDepth (no depthLimit capability) — set maxDepth: 'provider-managed' to leave the recursion budget to the provider`)
   }
   const wording = providerWording(present?.inheritsParentContext === true)
-  ctx.tools.register(defineTool({
+  return defineTool({
       name: toolName,
       description: wording.description + ALWAYS_BACKGROUND_SUFFIX,
       parameters: {
@@ -256,7 +275,20 @@ export function apply(ctx: Context, config: Config) {
           subagentId: child.childId as string
         }
       }
-    }))
+    })
+}
+
+export function apply(ctx: Context, config: Config) {
+  if (config.maxDepth !== 'provider-managed' && config.maxDepth !== void 0) assertSubagentMaxDepth(config.maxDepth)
+  if (config.toolFilter !== void 0 && config.toolFilter.allow === void 0 && config.toolFilter.deny === void 0) throw new Error('deepartments-subagent: `toolFilter` is configured but names neither `allow` nor `deny` — remove the key or fill the filter')
+  const toolName = config.toolName ?? 'subagent'
+  // M2.3 (shared factory): the tool BODY is built by `createSecretaryTool` (the
+  // ONE definition the standing row AND the head own-layer register — see
+  // src/invoke.ts installHeadBoardTools). `apply()` consumes the factory and
+  // keeps only the standing-specific wiring: the provider-added capability
+  // check, the dispatch-role eviction, the M2.3 apply-standing waypoint and the
+  // standing system-prompt section.
+  ctx.tools.register(createSecretaryTool(ctx, config))
   ctx.on('subagent/provider-added', (provider) => {
     if (provider.name !== config.provider) return
     // A provider surfacing after apply is validated here (the pre-M2.1
@@ -275,13 +307,29 @@ export function apply(ctx: Context, config: Config) {
   // malformed-payload branch). Registered ONCE here at module scope inside
   // `apply` — NOT on any provider-mount path, which would double-register for
   // the two mounted providers. The payload's `id` is the child session id —
-  // the exact key `rememberRole` wrote. Guard on `typeof id === 'string'` and
-  // never throw: an unexpected payload shape is a silent no-op (a malformed
-  // edge must not break settlement teardown).
+  // the exact key the factory's `rememberRole` wrote. Guard on `typeof id ===
+  // 'string'` and never throw: an unexpected payload shape is a silent no-op (a
+  // malformed edge must not break settlement teardown). The roles store is the
+  // same resolution the factory performed for its execute closures (both read
+  // the SAME `deepartments.subagentRoles` service / compat fallback).
+  const roles = ctx.get('deepartments.subagentRoles') as SubagentRolesService | undefined
+  const forget = roles === undefined
+    ? forgetRole
+    : (childSessionId: string) => roles.delete(childSessionId)
   ctx.on('subagent/end', (payload) => {
     const id = (payload as { id?: unknown } | undefined)?.id
     if (typeof id === 'string') forget(id)
   })
+  // M2.3 WP4 (apply-standing waypoint): ONE info/audit line per standing apply
+  // — whether this standing's apply saw the subagents SERVICE and the named
+  // PROVIDER (the service/provider facts a head's secretary chain depends on).
+  // Written to the GUARANTEED audit channel `<stateDir>/toolset-audit.jsonl`
+  // (the deepartments warns never reach stdout — the M2.2 finding) in addition
+  // to the logger, and it REPLACES/extends the pre-M2.3 "provider not
+  // registered yet" info below with the same presence signal.
+  const subagents = ctx.get('subagents') as SubagentRuntime | undefined
+  const present = subagents === void 0 ? void 0 : subagents.getProvider(config.provider)
+  appendToolsetAudit(auditStateDir(ctx), { wp: 'apply-standing', tool: toolName, subagents: subagents === void 0 ? 'absent' : 'present', provider: present?.name ?? 'absent' })
   if (present === void 0) {
     ctx.logger.info(`subagent provider "${config.provider}" not registered yet; the "${toolName}" tool is bound anyway and resolves the provider at execute time`)
   }

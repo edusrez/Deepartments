@@ -146,6 +146,15 @@ import { roleForSession, buildSubagentOrientation } from './role-orient.js'
 // type — the dispatch-time transient-subagent role registry, promoted from the
 // bundle module-global Map into dshd-core (see the wake-pack wiring below).
 import type { SubagentRolesService } from './role-orient.js'
+// M2.3 (own-scope secretary): the SHARED secretary factory + deployment
+// contract — the ONE source of person/toolFilter/wording the head OWN-LAYER
+// registration uses; the preset row's apply() consumes the SAME factory, so
+// the host standing row and the head own layer can never diverge.
+import { createSecretaryTool, secretaryConfig } from './subagent.js'
+// M2.3: the guaranteed toolset-derivation diagnostics channel
+// (`<stateDir>/toolset-audit.jsonl` — the deepartments warns never reach the
+// harness stdout, the M2.2 finding).
+import { appendToolsetAudit } from './toolset-audit.js'
 // FASE 2 step (a): the durable registry store (hosts/posts catalog) is carved
 // out of this monolith into ./core/registry.js — the SINGLE source of the
 // catalog. Everything registry-related below (mintWorkerSessionId, the durable
@@ -1774,6 +1783,56 @@ interface WorkspaceEntityMembershipLike {
 // Service (called from src/index.ts).
 // ---------------------------------------------------------------------------
 
+/** The GLOBAL tools every department HEAD inherits from the host surface
+ * (spec 004 §7.1 / F10): read, write, glob, grep + the research web tools.
+ * M2.3 (owner decision 2026-08-28): `secretary` is DELIBERATELY NOT here
+ * anymore — a head's personal NON-CODE READ-ONLY secretary (the
+ * `tool-secretary` row of the deepartments-head preset for the HOST; the OWN
+ * layer for a head) is registered SCOPED on the head's own layer by
+ * `installHeadBoardTools` (AFTER the restrict — immune to the standing mask,
+ * the M2.2 live anomaly), so the inherited allow-list must NOT carry the name:
+ * naming a scope-local name in restrict() would THROW and fall back to the
+ * all-masking `allow: []`. The probe therefore never looks for it; a head
+ * chain WITHOUT a standing row still sees its own secretary by the own-layer
+ * registration. The own-layer board + department-lifecycle tools
+ * (send_message/agent_messages/dept_who/dept_memo_write +
+ * dept_worker_spawn/retire, dept_post_create/retire, secretary) are all
+ * SCOPED-registered and ALWAYS visible (exempt from the restrict mask), so
+ * only these GLOBAL capability tools need naming in the allow list. */
+export const HEAD_BASE_TOOLS: readonly string[] = ['read', 'write', 'glob', 'grep', 'web_search', 'web_fetch']
+/** Security posture (spec 004 §7.1; OWNER DECISION 2026-08-23): `edit` is NOT
+ * a hard deny — it flows through the role's allow-list like any other tool,
+ * so only a role whose template DECLARES it inherits it (the organizer
+ * template declares `edit` → it inherits it; researcher/reviewer templates do
+ * not declare it → they never see it). What stays HARD-DENIED for every
+ * department post is the Asistente's subagent coordination machinery
+ * (`subagent`/`subagent_fork`/`workflow`/`ralph`) and the reserved `run_code`
+ * transport — a post is a ROOT worker/coordinator and never spawns or
+ * coordinates anyone else. A template that DECLARES a denied name is DROPPED
+ * with a warning — never a hard failure (the deploy must not fail on a bad
+ * frontmatter tool name). */
+const DENIED_POST_TOOLS: ReadonlySet<string> = new Set(['subagent', 'subagent_fork', 'workflow', 'ralph', 'run_code'])
+/** The post's OWN-LAYER board + department-lifecycle tools, registered SCOPED
+ * to the post agent by `installHeadBoardTools`: send_message/agent_messages/
+ * dept_who/dept_memo_write + the department-lifecycle create/retire/spawn/
+ * retire/job tools + (M2.3) `secretary`. (LOTE A, 2026-08-27: dept_sleep is NO
+ * LONGER in the own layer — head/worker sleep retired; it is hosts-only, spec
+ * 002.)
+ * The role templates ALSO DECLARE the bus tools (e.g. researcher.md declares
+ * send_message/agent_messages/dept_who/dept_memo_write), so when the
+ * allow-list is probed against the AGENT scope (see postSetup) these names are
+ * "found" (own-layer is visible) — but naming a scope-local name in
+ * restrict() THROWS (M2.3: exactly the reason `secretary` MOVED here from
+ * HEAD_BASE_TOOLS). They are explicitly EXCLUDED here (they are exempt from
+ * the restrict mask and never belong in the allow list). */
+export const OWN_LAYER_POST_TOOLS: ReadonlySet<string> = new Set([
+  'send_message', 'agent_messages', 'dept_who', 'dept_memo_write',
+  'dept_post_create', 'dept_post_retire', 'dept_worker_spawn', 'dept_worker_retire',
+  'dept_job_list', 'dept_job_run', 'dept_monitor_list', 'dept_exec',
+  'dept_feedback', 'dept_feedback_list', 'dept_feedback_update',
+  'secretary'
+])
+
 export function applyInvoke(ctx: Context, config: Config) {
   // --- optional continuation services (resolved, not injected: the plugin
   // must load in minimal compositions — the board core keeps working, the
@@ -2626,6 +2685,17 @@ export function applyInvoke(ctx: Context, config: Config) {
       const composition = buildHeadPresetComposition(baseComposition, headName, department.name)
       await writePresetFile(path.join(dstDir, 'agent.cordis.yml'), composition, presetId)
       await writePresetFile(path.join(dstDir, 'preset.yml'), buildHeadPresetMetadata(headPresetNameFor(coordinator)), presetId)
+      // M2.3 WP1a (preset-materialize waypoint): did the per-head preset FILE
+      // carry the tool-secretary row? Reports the standing's contribution
+      // source — a head equipped by the OWN layer (M2.3) is intentionally
+      // row-independent, so this line only diagnoses the STANDING side of the
+      // chain. Written to the guaranteed audit channel (the deepartments warns
+      // never reach the harness stdout).
+      appendToolsetAudit(stateDir, {
+        wp: 'preset-materialize',
+        presetId,
+        toolSecretary: composition.includes('- id: tool-secretary') ? 'yes' : 'no'
+      })
       ctx.logger.info(`[deepartments] per-head preset "${presetId}" materialized at ${dstDir}`)
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] per-head preset "${presetId}" materialization skipped: ${error instanceof Error ? error.message : String(error)}`)
@@ -4503,6 +4573,25 @@ export function applyInvoke(ctx: Context, config: Config) {
           }
         }
       })))
+      // M2.3: the head's personal SECRETARY registered on the OWN layer —
+      // HERE, in installHeadBoardTools, which postSetup runs AFTER the restrict
+      // (order: mount → probe → restrict → own-layer), so the registration is
+      // IMMUNE to the standing mask (the M2.2 live anomaly: with M2.1+M2.2 and
+      // the row PRESENT, the inherited derivation still failed to surface the
+      // tool in the QH session — the own-layer registration makes the head's
+      // visibility unconditional). Manager-gated: a WORKER never carries the
+      // secretary (its own layer registers only the bus/lifecycle tools).
+      // The body is the SHARED factory (src/subagent.ts `createSecretaryTool` —
+      // the SAME body the preset row's `apply()` registers), so the host
+      // standing row and the head own layer share ONE definition of
+      // person/toolFilter/wording. Idempotent across materializations: every
+      // create/COLD-resume has a FRESH agentCtx, the registration sits in this
+      // agent's OWN layer (the standing row binds the STANDING ctx — another
+      // layer, no same-layer duplicate), and the ctx.effect disposer in
+      // postSetup unwinds it with the agent. The execute is the M2.2 lazy path
+      // (ctx.get('subagents') at call time → the clear absent-service error in
+      // a head chain).
+      disposers.push(agentCtx.tools.register(createSecretaryTool(agentCtx, secretaryConfig())))
     }
 
     return { dispose: () => { for (const d of disposers) d() } }
@@ -4619,53 +4708,6 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
 
-  /** The GLOBAL tools every department HEAD inherits from the host surface
-   * (spec 004 §7.1 / F10): read, write, glob, grep + the research web tools.
-   * M2 (owner decision 2026-08-28): `secretary` is ALSO named — a head's
-   * personal NON-CODE READ-ONLY secretary (the `tool-secretary` row of the
-   * deepartments-head preset) is contributed as an INHERITED (standing-mount)
-   * tool, and the restrict allow-list is exactly what keeps an inherited
-   * contribution visible; without the name the head would never see its own
-   * secretary. The probe drops it softly (warn) if the preset row is absent
-   * or fails to mount — board-only degradation, never a failed spawn.
-   * The head's own-layer board + department-lifecycle tools
-   * (send_message/agent_messages/dept_who/dept_memo_write +
-   * dept_worker_spawn/retire, dept_post_create/retire) are SCOPED-registered
-   * and ALWAYS visible (exempt from the restrict mask — naming a scope-local
-   * name in restrict() would THROW), so only these GLOBAL capability tools need
-   * naming in the allow list. */
-  const HEAD_BASE_TOOLS: readonly string[] = ['read', 'write', 'glob', 'grep', 'web_search', 'web_fetch', 'secretary']
-  /** Security posture (spec 004 §7.1; OWNER DECISION 2026-08-23): `edit` is NOT
-   * a hard deny — it flows through the role's allow-list like any other tool,
-   * so only a role whose template DECLARES it inherits it (the organizer
-   * template declares `edit` → it inherits it; researcher/reviewer templates do
-   * not declare it → they never see it). What stays HARD-DENIED for every
-   * department post is the Asistente's subagent coordination machinery
-   * (`subagent`/`subagent_fork`/`workflow`/`ralph`) and the reserved `run_code`
-   * transport — a post is a ROOT worker/coordinator and never spawns or
-   * coordinates anyone else. A template that DECLARES a denied name is DROPPED
-   * with a warning — never a hard failure (the deploy must not fail on a bad
-   * frontmatter tool name). */
-  const DENIED_POST_TOOLS: ReadonlySet<string> = new Set(['subagent', 'subagent_fork', 'workflow', 'ralph', 'run_code'])
-  /** The post's OWN-LAYER board + department-lifecycle tools, registered SCOPED
-   * to the post agent by `installHeadBoardTools` (`src/invoke.ts:3089-3794`,
-   * `:5130,:5230,:5314`): send_message/agent_messages/dept_who/dept_memo_write
-   * + the department-lifecycle create/retire/spawn/retire/job tools. (LOTE A,
-   * 2026-08-27: dept_sleep is NO LONGER in the own layer — head/worker sleep
-   * retired; it is hosts-only, spec 002.)
-   * The role templates ALSO DECLARE the bus tools (e.g. researcher.md declares
-   * send_message/agent_messages/dept_who/dept_memo_write), so when the
-   * allow-list is probed against the AGENT scope (see postSetup) these names are
-   * "found" (own-layer is visible) — but naming a scope-local name in
-   * restrict() THROWS. They are explicitly EXCLUDED here (they are exempt from
-   * the restrict mask and never belong in the allow list). */
-  const OWN_LAYER_POST_TOOLS: ReadonlySet<string> = new Set([
-    'send_message', 'agent_messages', 'dept_who', 'dept_memo_write',
-    'dept_post_create', 'dept_post_retire', 'dept_worker_spawn', 'dept_worker_retire',
-    'dept_job_list', 'dept_job_run', 'dept_monitor_list', 'dept_exec',
-    'dept_feedback', 'dept_feedback_list', 'dept_feedback_update'
-  ])
-
   /** Build the `setup(agentCtx)` for one post (head OR worker): mount the post's
    * dedicated preset and register its board toolset + role, scoped to the post
    * agent. Runs pre-publication on the fresh agent's scoped context
@@ -4703,6 +4745,21 @@ export function applyInvoke(ctx: Context, config: Config) {
           ctx.logger.warn(`[deepartments] ${kind} "${postId}" preset mount failed (board tools still installed): ${error instanceof Error ? error.message : String(error)}`)
         }
       }
+      // M2.3 WP1b (post-mount waypoint): did the standing leave the secretary
+      // bound on the agent scope RIGHT AFTER the mount? Separates
+      // row-absent from apply-failed — with the own-layer registration this is
+      // the STANDING chain's contribution only (a head's visibility no longer
+      // depends on it). Written to the guaranteed audit channel
+      // `<stateDir>/toolset-audit.jsonl` — the deepartments warns never reach
+      // the harness stdout (M2.2 finding).
+      appendToolsetAudit(stateDir, {
+        wp: 'post-mount',
+        postId,
+        kind,
+        presetId,
+        ts: Date.now(),
+        secretary: agentCtx.tools.get('secretary', scopeOf(agentCtx)) === void 0 ? 'no' : 'yes'
+      })
       // (0) Tool restriction: a root agent has no startContinuable toolFilter,
       // so we mask the GLOBAL host-plane tools to `allowList` (rc.8 dsh-tools
       // restrict — index.d.ts:611 "A restriction filters what a scope
@@ -4753,6 +4810,29 @@ export function applyInvoke(ctx: Context, config: Config) {
         }
         allowList.push(name)
       }
+      // M2.3 WP2 (probe waypoint): the consolidated probe line — the inherited
+      // allow-list as BUILT + whether 'secretary' is in it. POST-MOVE the
+      // secretary lives in OWN_LAYER_POST_TOOLS, so the probe skips it here and
+      // the status is 'dropped(own-layer)' (by design — it is registered on the
+      // own layer AFTER the restrict, see installHeadBoardTools); a
+      // 'dropped(not-visible)' would mean a future reordering ran the own-layer
+      // registration BEFORE the probe, and 'found' would mean the name leaked
+      // back into HEAD_BASE_TOOLS (the M2.3 coherence condition).
+      appendToolsetAudit(stateDir, {
+        wp: 'probe',
+        postId,
+        kind,
+        allow: allowList.join(','),
+        secretary: DENIED_POST_TOOLS.has('secretary')
+          ? 'dropped(denied)'
+          : OWN_LAYER_POST_TOOLS.has('secretary')
+            ? 'dropped(own-layer)'
+            : allowList.includes('secretary')
+              ? 'found'
+              : agentCtx.tools.get('secretary', agentScope) === void 0
+                ? 'dropped(not-visible)'
+                : 'found'
+      })
       let restrictOwn: () => void
       try {
         restrictOwn = agentCtx.tools.restrict({ allow: allowList })
@@ -4767,6 +4847,26 @@ export function applyInvoke(ctx: Context, config: Config) {
       // never declares it; HEAD_BASE_TOOLS does not carry it), so a post that
       // does not declare the tool never sees it and the host never gets it.
       const tools = installHeadBoardTools(agentCtx, opts.manager, { allowExec: declared.includes('dept_exec') })
+      // M2.3 WP3 (toolset-final waypoint): enumerate the candidate toolset on
+      // the AGENT scope AFTER the own-layer install (the proxy of the real
+      // "attach" — the point the toolset derivation is fully done): how many
+      // candidate names are visible + the key ones (secretary, send_message,
+      // dept_who, dept_memo_write). `secretary=yes` here proves the OWN layer
+      // carried it (post-restrict); `secretary=no` with the own-layer
+      // registration present would expose a registration-order regression.
+      {
+        const candidates = [...new Set([...HEAD_BASE_TOOLS, ...OWN_LAYER_POST_TOOLS, 'dept_calendar_add', 'dept_calendar_list', 'dept_calendar_remove', 'dept_feedback', 'dept_feedback_list', 'dept_feedback_update'])]
+        const visible = candidates.filter((name) => agentCtx.tools.get(name, agentScope) !== void 0)
+        appendToolsetAudit(stateDir, {
+          wp: 'toolset-final',
+          postId,
+          kind,
+          count: visible.length,
+          secretary: visible.includes('secretary') ? 'yes' : 'no',
+          send_message: visible.includes('send_message') ? 'yes' : 'no',
+          names: visible.join(',')
+        })
+      }
       // (c) Persona = the role (a head's role or a worker's role), NOT a mission.
       // F3: the ROLE PERSONA delta (+ the task) rides the same section seam.
       // F10: `department` feeds the architecture section (spec 004 §9.1).
