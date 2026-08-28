@@ -70,7 +70,7 @@ import { readFileSync, existsSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { execFile as execFileCb } from 'node:child_process'
+import { execFile as execFileCb, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
@@ -1412,13 +1412,20 @@ export const DEPT_ZSTD_READ_MAX_LINES = 500
 /** The per-line length cap (a single over-long JSONL line is truncated with a
  * marker — a corrupt/single-line giant artifact cannot blow the render). */
 export const DEPT_ZSTD_READ_MAX_LINE_CHARS = 4000
-/** execFile timeout for ONE zstd -dc decode (a stuck/deadlocked zstd is
- * killed — never hangs the tool). */
+/** Decode timeout for ONE zstd -dc run (a stuck/deadlocked zstd is killed —
+ * never hangs the tool). */
 export const DEPT_ZSTD_READ_TIMEOUT_MS = 30000
-/** The decompressed-BYTES cap for one call (bounded decode — `zstd -dc` output
- * beyond this is truncated; a multi-GB session artifact does NOT (a) hang the
- * tool nor (b) buffer unbounded memory). */
-export const DEPT_ZSTD_READ_MAX_CHARS = 4 * 1024 * 1024
+/** The decompressed-BYTES budget for one call (fb-19, QH backlog: a >4MB
+ * session — the b29 archive itself was 4.54MB — previously blew the execFile
+ * `maxBuffer` with a RAW 'stdout maxBuffer length exceeded' error). The decode
+ * is now STREAMED (`zstd -dc` via spawn — no full-buffered decode): bytes are
+ * counted on the fly and a session beyond this budget is aborted with a CLEAR
+ * error («session exceeds the zstd-read budget — use dept_exec for full
+ * streaming»), never a raw maxBuffer exception. 32MB covers the real session
+ * class (~4-5MB) with headroom while keeping one call bounded. The name keeps
+ * the legacy CHARS spelling (R6 — exported + imported by tests; it is a BYTE
+ * budget). */
+export const DEPT_ZSTD_READ_MAX_CHARS = 32 * 1024 * 1024
 
 /** The PURE dept_zstd_read scope guard. `resolvedPath` must already be
  * realpath-resolved (the tool resolves it before calling) and `allowedRoots`
@@ -1450,13 +1457,19 @@ export function deptZstdReadDenyReason(resolvedPath: string, allowedRoots: reado
 }
 
 /** Decode ONE zstd-compressed file through `zstd -dc` (Node-side
- * child_process.execFile — no user shell, sanitized env) with a bounded
- * output: only the requested line WINDOW [offset, offset+lines) is returned,
- * each line truncated to DEPT_ZSTD_READ_MAX_LINE_CHARS, the whole decompressed
- * output capped at DEPT_ZSTD_READ_MAX_CHARS, and the decode killed on
- * DEPT_ZSTD_READ_TIMEOUT_MS. Returns {ok, lines, truncated, totalLines,
- * error?} — a decode failure is a normal ok:false result, never a throw (the
- * caller decides the surface). */
+ * child_process.spawn — no user shell, sanitized env) with a STREAMED, bounded
+ * output (fb-19): stdout chunks are parsed ON THE FLY — complete
+ * newline-bounded lines are counted and only the requested line WINDOW
+ * [offset, offset+lines) is retained in memory, each line truncated to
+ * DEPT_ZSTD_READ_MAX_LINE_CHARS. ZERO full-decode buffering: the total decoded
+ * bytes are counted as chunks arrive and a session beyond
+ * DEPT_ZSTD_READ_MAX_CHARS is aborted (decode killed) with a CLEAR budget error
+ * — a >4MB session (the b29 4.54MB class) streams fine, and a huge one never
+ * surfaces the raw execFile 'stdout maxBuffer length exceeded' exception nor
+ * buffers unbounded memory. The decode is killed on DEPT_ZSTD_READ_TIMEOUT_MS.
+ * Returns {ok, lines, truncated, totalLines, error?} — a decode failure /
+ * budget breach is a normal ok:false result, never a throw (the caller decides
+ * the surface). */
 export async function runDeptZstdRead(
   path: string,
   offset: number,
@@ -1467,41 +1480,109 @@ export async function runDeptZstdRead(
     HOME: process.env.HOME ?? '/root',
     LANG: process.env.LANG ?? 'C'
   }
-  try {
-    const { stdout } = await execFileP('zstd', ['-dc', path], {
-      timeout: DEPT_ZSTD_READ_TIMEOUT_MS,
-      maxBuffer: DEPT_ZSTD_READ_MAX_CHARS + 1024,
-      env
+  return new Promise((resolve) => {
+    const child = spawn('zstd', ['-dc', path], { env })
+    // `carry` holds the INCOMPLETE tail of the current line (the bytes after
+    // the last 0x0A) — the cut is BYTE-level, so a multi-byte UTF-8 codepoint
+    // is never split across chunk boundaries and the tail decodes cleanly when
+    // the next chunk (or the final carry) is parsed.
+    let carry: Buffer = Buffer.alloc(0)
+    let totalBytes = 0
+    let lineCount = 0
+    let stderrOut = ''
+    let settled = false
+    const wanted: string[] = []
+    const windowEnd = offset + lines
+    const settle = (result: { ok: boolean; lines: string[]; truncated: boolean; totalLines: number; error?: string }): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      // never leave a decoding child behind (budget breach / timeout / failure)
+      if (child.exitCode === null && !child.killed) child.kill()
+      resolve(result)
+    }
+    const timer = setTimeout(() => {
+      child.kill()
+      settle({
+        ok: false,
+        lines: [],
+        truncated: false,
+        totalLines: 0,
+        error: `zstd decode timed out after ${DEPT_ZSTD_READ_TIMEOUT_MS}ms`
+      })
+    }, DEPT_ZSTD_READ_TIMEOUT_MS)
+    // Count one complete line; retain it only when it falls inside the window.
+    const pushLine = (lineBytes: Buffer): void => {
+      const idx = lineCount++
+      if (idx >= offset && wanted.length < lines) {
+        const line = lineBytes.toString('utf8')
+        wanted.push(line.length > DEPT_ZSTD_READ_MAX_LINE_CHARS ? `${line.slice(0, DEPT_ZSTD_READ_MAX_LINE_CHARS)}… [line truncated]` : line)
+      }
+    }
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (settled) return
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      totalBytes += buf.length
+      // The budget is checked BEFORE any parse — an over-budget session is
+      // aborted with the CLEAR error, never a raw maxBuffer exception.
+      if (totalBytes > DEPT_ZSTD_READ_MAX_CHARS) {
+        settle({
+          ok: false,
+          lines: [],
+          truncated: false,
+          totalLines: 0,
+          error: `session exceeds the zstd-read budget (${DEPT_ZSTD_READ_MAX_CHARS} decompressed bytes) — use dept_exec for full streaming`
+        })
+        return
+      }
+      const merged = carry.length > 0 ? Buffer.concat([carry, buf]) : buf
+      const lastNl = merged.lastIndexOf(0x0A)
+      carry = lastNl === -1 ? merged : Buffer.from(merged.subarray(lastNl + 1))
+      if (lastNl === -1) return
+      const complete = merged.subarray(0, lastNl)
+      let start = 0
+      for (let i = 0; i <= complete.length; i++) {
+        if (i === complete.length || complete[i] === 0x0A) {
+          pushLine(complete.subarray(start, i))
+          start = i + 1
+        }
+      }
     })
-    const text = String(stdout ?? '')
-    const allLines = text.split('\n')
-    // A session artifact's final newline produces a trailing EMPTY element —
-    // drop exactly one (the artifact terminator), never a mid-text blank.
-    if (allLines.length > 0 && allLines[allLines.length - 1] === '') allLines.pop()
-    // The requested window, capped to the line bound.
-    const wanted = allLines.slice(offset, offset + lines)
-    const truncated = allLines.length > offset + lines
-    return {
-      ok: true,
-      lines: wanted.map((line) => (line.length > DEPT_ZSTD_READ_MAX_LINE_CHARS ? `${line.slice(0, DEPT_ZSTD_READ_MAX_LINE_CHARS)}… [line truncated]` : line)),
-      truncated,
-      totalLines: allLines.length
-    }
-  } catch (error: unknown) {
-    const e = error as { code?: unknown; stderr?: unknown; killed?: boolean; message?: string }
-    const stderr = typeof e.stderr === 'string' && e.stderr !== '' ? e.stderr.trim() : undefined
-    return {
-      ok: false,
-      lines: [],
-      truncated: false,
-      totalLines: 0,
-      error: stderr !== undefined && stderr !== ''
-        ? stderr
-        : e.killed === true
-          ? `zstd decode timed out after ${DEPT_ZSTD_READ_TIMEOUT_MS}ms (or the decompressed output exceeded the ${DEPT_ZSTD_READ_MAX_CHARS}-char cap)`
-          : String(e?.message ?? error)
-    }
-  }
+    child.stderr.on('data', (chunk: Buffer) => {
+      if (settled) return
+      stderrOut += chunk.toString('utf8')
+    })
+    child.on('error', (err: unknown) => {
+      settle({
+        ok: false,
+        lines: [],
+        truncated: false,
+        totalLines: 0,
+        error: `zstd -dc failed to start: ${err instanceof Error ? err.message : String(err)}`
+      })
+    })
+    // 'close' fires after the stdio streams drained — the final, authoritative
+    // completion point (settles AFTER the timeout/budget/error paths guard).
+    child.on('close', (code: number | null) => {
+      if (settled) return
+      if (code !== 0) {
+        const stderrDetail = stderrOut.trim()
+        settle({
+          ok: false,
+          lines: [],
+          truncated: false,
+          totalLines: 0,
+          error: stderrDetail !== '' ? stderrDetail : `zstd -dc exited with code ${code}`
+        })
+        return
+      }
+      // Success: a final line WITHOUT a trailing newline is a real line (a
+      // session ending in 0x0A leaves an EMPTY carry → not counted, exactly
+      // like the legacy split+pop of the artifact terminator).
+      if (carry.length > 0) pushLine(carry)
+      settle({ ok: true, lines: wanted, truncated: lineCount > windowEnd, totalLines: lineCount })
+    })
+  })
 }
 
 // (cron scheduler engine MOVED to packages/dshd-jobs — see the dshd-jobs phase
@@ -4238,11 +4319,19 @@ export function applyInvoke(ctx: Context, config: Config) {
     // globals anyway so this own layer is the ONLY visible toolset.
     for (const tool of busTools) disposers.push(agentCtx.tools.register(tool))
 
-    // dshd-feedback phase (universal, ACL-free write): register the 3 feedback
-    // tools on EVERY post's OWN layer (head AND worker — any agent may emit
-    // feedback; the QH-authority of `dept_feedback_update` + the head-only
-    // `dept_feedback_list` are enforced in `execute`, not at registration).
-    for (const tool of feedbackTools) disposers.push(agentCtx.tools.register(tool))
+    // dshd-feedback phase (universal, ACL-free write): the EMIT tool
+    // (`dept_feedback`) registers on EVERY post's OWN layer (head AND worker —
+    // any agent may emit feedback). fb-18 (QH backlog): `dept_feedback_list` +
+    // `dept_feedback_update` register ONLY in a HEAD's own layer (manager:true)
+    // — a worker NEVER sees them, so the worker-DENIED ACL becomes a STRUCTURAL
+    // absence (the tool is simply not in the worker toolset) instead of a
+    // runtime `execute` reject; the QH-authority checks stay in `execute` as
+    // defense-in-depth for the host plane / any legacy registration. The host
+    // plane registers all three globally (see below).
+    for (const tool of feedbackEmitTools) disposers.push(agentCtx.tools.register(tool))
+    if (manager) {
+      for (const tool of feedbackHeadTools) disposers.push(agentCtx.tools.register(tool))
+    }
 
     // --- W1 (spec 004 §5.7 + ROADMAP W1): calendar tools — dept_calendar_add /
     // dept_calendar_list / dept_calendar_remove. Registered on EVERY post's OWN
@@ -4472,16 +4561,18 @@ export function applyInvoke(ctx: Context, config: Config) {
       // SAME `allowExec` gate as dept_exec (a role that declares `dept_exec`
       // also gets dept_zstd_read; a post that does not declare it never sees
       // either; the host / a config head never gets it). Decodes ONE
-      // .zstd-compressed file via `zstd -dc` Node-side (child_process.execFile
-      // — no user shell), SÓLO LECTURA, scoped to the SAME allowed roots as
+      // .zstd-compressed file via `zstd -dc` Node-side (child_process.spawn —
+      // no user shell), SÓLO LECTURA, scoped to the SAME allowed roots as
       // dept_exec (a path outside the roots → DENIED before any decode), with
-      // a BOUNDED output (a line window + a per-line cap + a decode timeout —
-      // a huge session never hangs or buffers unbounded). Args {path,
-      // offset?, lines?}: offset = the first line index (0-based) of the
-      // window, lines = the max lines to return (default 100, cap 500).
+      // a BOUNDED + STREAMED output (fb-19: lines parsed on the fly — no
+      // full-buffered decode, so a >4MB session streams fine; a 32 MB
+      // decompressed budget aborts with a CLEAR error; a huge session never
+      // hangs or buffers unbounded). Args {path, offset?, lines?}: offset =
+      // the first line index (0-based) of the window, lines = the max lines to
+      // return (default 100, cap 500).
       disposers.push(agentCtx.tools.register(defineTool({
         name: 'dept_zstd_read',
-        description: 'Read a WINDOW of a .zstd-compressed file (e.g. a raw .jsonl.zstd session artifact) WITHOUT a shell: decodes the file via `zstd -dc` Node-side (child_process.execFile, no user shell), SÓLO LECTURA (never writes). Scoped to the SAME allowed roots as dept_exec (the resolved `path` must be inside a scoped root; the stable profile `/opt/dsh/.dsh` is protected unless a mission grant names it — a path outside the roots is DENIED before any decode). Args {path, offset?, lines?}: `offset` (default 0) is the 0-based first line of the window; `lines` (default 100, cap 500) is the max lines to return. Output is BOUNDED: a line window + a 4000-char per-line cap + a 30 s decode timeout + a ~4 MB decompressed-output cap — a huge session never hangs the tool or buffers unbounded memory. Returns {ok, lines, truncated, totalLines}: the decoded line window. For a department WORKER whose role template declares dept_exec (IPD builder/reviewer/explore-deep + quality-inspector); never exposed to the host or a config head.',
+        description: 'Read a WINDOW of a .zstd-compressed file (e.g. a raw .jsonl.zstd session artifact) WITHOUT a shell: decodes the file via `zstd -dc` Node-side (child_process.spawn, no user shell), SÓLO LECTURA (never writes). Scoped to the SAME allowed roots as dept_exec (the resolved `path` must be inside a scoped root; the stable profile `/opt/dsh/.dsh` is protected unless a mission grant names it — a path outside the roots is DENIED before any decode). Args {path, offset?, lines?}: `offset` (default 0) is the 0-based first line of the window; `lines` (default 100, cap 500) is the max lines to return. Output is BOUNDED and STREAMED (fb-19): lines are parsed on the fly (no full-buffered decode), a 4000-char per-line cap + a 30 s decode timeout apply, and a session beyond the 32 MB decompressed budget is aborted with the CLEAR error «session exceeds the zstd-read budget — use dept_exec for full streaming» (never a raw maxBuffer exception). Returns {ok, lines, truncated, totalLines}: the decoded line window. For a department WORKER whose role template declares dept_exec (IPD builder/reviewer/explore-deep + quality-inspector); never exposed to the host or a config head.',
         parameters: {
           path: { type: 'string', required: true, description: 'The absolute path of the .zstd-compressed file to read (must resolve inside a scoped dept_exec root).' },
           offset: { type: 'number', description: 'The 0-based first line index of the window (default 0).' },
@@ -8113,11 +8204,13 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   })
 
-  /** `dept_feedback_list` — surfacing (read-only). Available to heads (incl.
-   * quality-head) and the host; a WORKER caller is rejected in `execute`. */
+  /** `dept_feedback_list` — surfacing (read-only). fb-18 (QH backlog): the tool
+   * registers ONLY in a HEAD's own layer + the host plane — a WORKER never sees
+   * it (structural absence); the execute-side worker reject below stays as
+   * defense-in-depth (a legacy/hosted copy called with a worker agent). */
   const feedbackListTool = defineTool({
     name: 'dept_feedback_list',
-    description: 'Surface the durable feedback backlog (read-only). Lists the LIVE feedback records (latest tail per id), optionally filtered by `estado`/`severidad`/`tipo`/`emisor`, sorted severity desc then createdAt asc, paged (default 20, cap 100) with an exclusive `cursor` id (the previous page\'s last id). Available to department heads (incl. quality-head) and the host — a WORKER is rejected. Returns {total, items, remaining, cursor?}.',
+    description: 'Surface the durable feedback backlog (read-only). Lists the LIVE feedback records (latest tail per id), optionally filtered by `estado`/`severidad`/`tipo`/`emisor`, sorted severity desc then createdAt asc, paged (default 20, cap 100) with an exclusive `cursor` id (the previous page\'s last id). Available to department heads (incl. quality-head) and the host — a WORKER never sees the tool (it is not in the worker toolset, fb-18). Returns {total, items, remaining, cursor?}.',
     parameters: {
       estado: { type: 'string', description: 'Filter by estado: "abierto" | "en-estudio" | "resuelto" | "descartado".' },
       severidad: { type: 'string', description: 'Filter by severidad: "critico" | "alto" | "medio" | "bajo".' },
@@ -8217,7 +8310,8 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   })
 
-  const feedbackTools: readonly ReturnType<typeof defineTool>[] = [feedbackTool, feedbackListTool, feedbackUpdateTool]
+  const feedbackEmitTools: readonly ReturnType<typeof defineTool>[] = [feedbackTool]
+  const feedbackHeadTools: readonly ReturnType<typeof defineTool>[] = [feedbackListTool, feedbackUpdateTool]
 
   /** Shared render for a single FeedbackRecord (create/update). */
   function feedbackRecordRender(_args: unknown, value: FeedbackRecord) {

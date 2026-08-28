@@ -10460,6 +10460,46 @@ test('E2 dept_zstd_read (pure): runDeptZstdRead decodes a real .zstd file throug
   })
 })
 
+test('E2 dept_zstd_read (pure, fb-19): a >4MB decoded session (the b29 4.54MB class) STREAMS with the line window — NO execFile maxBuffer failure; totalLines exact, per-line cap applies, offset/lines window works', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const dataPath = path.join(stateDir, 'big-session.jsonl.zstd')
+    // ~200 lines × ~25 KB ≈ 5 MB decoded — well past the OLD 4MB maxBuffer cap
+    // (the b29 archive was 4.54MB), far under the 32MB budget; the payload is
+    // highly compressible so the .zstd fixture stays tiny.
+    const bigLines = []
+    for (let i = 0; i < 200; i++) bigLines.push(`{ "type": "turn", "seq": ${i}, "payload": "${'x'.repeat(25000)}" }`)
+    await writeFile(dataPath, await compressZstdFrame(bigLines.join('\n') + '\n'))
+    const all = await runDeptZstdRead(dataPath, 0, 500)
+    assert.equal(all.ok, true, 'a >4MB decoded session STREAMS OK — no raw stdout maxBuffer error (fb-19)')
+    assert.equal(all.totalLines, 200, 'all 200 lines are counted (exact totalLines)')
+    assert.equal(all.lines.length, 200, 'the window returns all lines (under the 500 line cap)')
+    assert.equal(all.truncated, false, 'the window covers the whole session (nothing cut)')
+    assert.match(all.lines[0], /"seq": 0/, 'the first line decodes')
+    assert.match(all.lines[0], /\[line truncated\]/, 'a >4000-char line is truncated with the marker')
+    assert.match(all.lines[199], /"seq": 199/, 'the last line decodes')
+    // An offset/lines WINDOW into the big session works too (the window is
+    // retained, the rest streamed past without buffering).
+    const window = await runDeptZstdRead(dataPath, 5, 2)
+    assert.equal(window.ok, true, 'the window into the big session decodes')
+    assert.deepEqual(window.lines, all.lines.slice(5, 7), 'the window matches the same lines of the full read')
+  })
+})
+
+test('E2 dept_zstd_read (pure, fb-19): a session beyond the 32MB decode budget is aborted with the CLEAR budget error — NEVER a raw maxBuffer exception', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const dataPath = path.join(stateDir, 'giant-session.jsonl.zstd')
+    // ~34000 lines × ~1 KB ≈ 33 MB decoded — over the 32MB budget; highly
+    // compressible, so the fixture is small on disk.
+    const giantLines = []
+    const payload = `{"type":"turn","p":"${'x'.repeat(1024)}"}`
+    for (let i = 0; i < 34000; i++) giantLines.push(payload)
+    await writeFile(dataPath, await compressZstdFrame(giantLines.join('\n') + '\n'))
+    const result = await runDeptZstdRead(dataPath, 0, 500)
+    assert.equal(result.ok, false, 'a session over the budget → ok:false (never a throw)')
+    assert.match(result.error ?? '', /exceeds the zstd-read budget .*use dept_exec for full streaming/, 'the CLEAR budget error, never the raw stdout maxBuffer message')
+  })
+})
+
 test('E2 dept_zstd_read (real Loader): a worker whose role DECLARES dept_exec owns dept_zstd_read on its OWN layer — it reads a .zstd session fixture WITHOUT dept_exec (no shell); a role without dept_exec never sees the tool; the host plane has NO dept_zstd_read; a path outside the allowed roots is DENIED', async () => {
   const restore = await snapshotRoleTemplate(EXEC_ROLE)
   try {
@@ -15769,7 +15809,7 @@ async function lastFeedbackNotification(stateDir) {
   return notifs[notifs.length - 1]
 }
 
-test('dshd-feedback: the 3 tools register on EVERY post own layer (head AND worker) and the host plane', async () => {
+test('dshd-feedback: head + host own the 3 feedback tools; a WORKER owns ONLY the universal emit (fb-18 — dept_feedback_list/update are head-only, structurally absent for workers)', async () => {
   await withTempStateDir(async (stateDir) => {
     const env = await bootWithQD(stateDir)
     try {
@@ -15782,13 +15822,14 @@ test('dshd-feedback: the 3 tools register on EVERY post own layer (head AND work
       assert.ok(env.root.tools.get('dept_feedback'), 'dept_feedback registered globally (host plane)')
       assert.ok(env.root.tools.get('dept_feedback_list'), 'dept_feedback_list registered globally')
       assert.ok(env.root.tools.get('dept_feedback_update'), 'dept_feedback_update registered globally')
-      // A worker created by the head also has the tools (universal write; the
-      // QH-authority of update + the head-only list are enforced in execute).
+      // fb-18: a worker created by the head owns ONLY the universal emit —
+      // dept_feedback_list/update are STRUCTURALLY ABSENT from the worker
+      // toolset (the worker-DENIED ACL is toolset-level, not a runtime reject).
       const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'researcher-alpha', role: 'rank-and-file researcher' }, { agent: head, signal })
       const { ctx: workerCtx, key: workerKey } = childContextFor(env.agents, created.sessionId)
-      for (const name of ['dept_feedback', 'dept_feedback_list', 'dept_feedback_update']) {
-        assert.ok(workerCtx.tools.get(name, workerKey), `a WORKER has ${name} (owned by its own layer)`)
-      }
+      assert.ok(workerCtx.tools.get('dept_feedback', workerKey), 'a WORKER owns the universal dept_feedback emit')
+      assert.equal(workerCtx.tools.get('dept_feedback_list', workerKey), undefined, 'a WORKER NEVER sees dept_feedback_list (fb-18 structural absence)')
+      assert.equal(workerCtx.tools.get('dept_feedback_update', workerKey), undefined, 'a WORKER NEVER sees dept_feedback_update (fb-18 structural absence)')
     } finally {
       await env.dispose()
     }
@@ -15871,7 +15912,7 @@ test('dshd-feedback severity gating: critico → always-wake (delivered/resumed,
   })
 })
 
-test('dshd-feedback_update: QH-only terminal transition (cerrado_por), head-only en-estudio, reopen only en-estudio→abierto & only QH, never from terminal; a worker is rejected', async () => {
+test('dshd-feedback_update: QH-only terminal transition (cerrado_por), head-only en-estudio, reopen only en-estudio→abierto & only QH, never from terminal; a worker owns only the emit (fb-18)', async () => {
   await withTempStateDir(async (stateDir) => {
     const env = await bootWithQD(stateDir)
     try {
@@ -15914,18 +15955,17 @@ test('dshd-feedback_update: QH-only terminal transition (cerrado_por), head-only
       const reopened = await qhCtx.tools.get('dept_feedback_update', qhKey).execute({ id: second.id, estado: 'abierto' }, { agent: qh, signal })
       assert.equal(reopened.estado, 'abierto')
 
-      // A WORKER caller is rejected for list + update.
+      // fb-18: a WORKER's toolset has NO list/update — the worker-DENIED ACL is
+      // STRUCTURAL (the tools are simply absent from the worker own layer, not
+      // an execute reject); the universal emit is the ONLY feedback tool a
+      // worker owns.
       const created = await headCtx.tools.get('dept_post_create', key).execute({ postId: 'fb-worker', role: 'rank-and-file researcher' }, { agent: head, signal })
       const { ctx: workerCtx, key: workerKey } = childContextFor(env.agents, created.sessionId)
       const worker = env.agents.store.get(created.sessionId)
-      await assert.rejects(
-        () => workerCtx.tools.get('dept_feedback_list', workerKey).execute({}, { agent: worker, signal }),
-        /read-only for department HEADS/, 'a worker cannot call dept_feedback_list'
-      )
-      await assert.rejects(
-        () => workerCtx.tools.get('dept_feedback_update', workerKey).execute({ id: 'fb-0', estado: 'en-estudio' }, { agent: worker, signal }),
-        /for department HEADS/, 'a worker cannot call dept_feedback_update'
-      )
+      void worker
+      assert.ok(workerCtx.tools.get('dept_feedback', workerKey), 'a worker still owns the universal dept_feedback emit')
+      assert.equal(workerCtx.tools.get('dept_feedback_list', workerKey), undefined, 'a worker toolset has NO dept_feedback_list (fb-18)')
+      assert.equal(workerCtx.tools.get('dept_feedback_update', workerKey), undefined, 'a worker toolset has NO dept_feedback_update (fb-18)')
     } finally {
       await env.dispose()
     }
