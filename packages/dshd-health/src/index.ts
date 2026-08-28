@@ -322,10 +322,13 @@ export interface HealthFinding {
    * `waitThresholdMs` — the conditional wake; NOT part of the System-health
    * ALERT frame, it rides `buildSystemWaitFrame`). M1 adds `pooler-capacity`
    * (the key-pooler capacity watchdog: usable-key count / blocks / 429-rotation
-   * / stale state, warning|critical via the dedupe key) and `qi-silence` (a
+   * / stale state, warning|critical via the dedupe key), `qi-silence` (a
    * rate-aware silence of quality-inspect directives over worker retirements —
-   * the anti-hang guarantee over the worker-retire trigger). */
-  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence'
+   * the anti-hang guarantee over the worker-retire trigger) and M4 adds
+   * `system-idle` (the GLOBAL-quiet watchdog: zero catalog agents running for
+   * >= `idleWindowMs` while SOME post still has pending work — the
+   * 'the system stopped and the expected continuation never arrived' alarm). */
+  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle'
   /** The dedupe key (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS). */
   key: string
   /** The postId (post-error / stalled-post). */
@@ -1640,6 +1643,15 @@ export interface HealthConfigLike {
      * symptom), p<=0 → never (by-design silence). An explicit value overrides
      * the rate-aware formula. */
     qiSilenceMinRetiresInWindow?: number
+    /** M4 — the system-idle watchdog gate (default ON; explicit false disables
+     * the system-idle scan — the global-quiet detector). */
+    systemIdleEnabled?: boolean
+    /** M4 — the GLOBAL-quiet window in ms: the catalog has ZERO agents running
+     * for >= this long while SOME non-retired post still holds pending work →
+     * a `system-idle` finding + host ALERT (default 900000 = 15 min — shorter
+     * than the 30-min per-message system-wait threshold because global quiet is
+     * graver than one per-message wait). */
+    idleWindowMs?: number
   }
 }
 
@@ -1697,6 +1709,15 @@ export interface HealthDaemonDeps {
    * qi-silence watchdog derives its rate-aware minimum on it. Absent →
    * 0.25 (the code default). */
   qiDirectiveRate?: number
+  /** M4 — the HOST agent's live running signal: whether the LIVE (non-retired)
+   * host's session is CURRENTLY mid-turn (`agents.get(SessionId(hostEntry.sessionId))
+   * ?.status === 'running'` — the SAME expression the bundle's buildCatalogRows
+   * uses for the host row; absent `agents` registry → false). ABSENT (undefined)
+   * → the system-idle scan is a NO-OP (a wiring that cannot resolve the host's
+   * live status can never certify zero-running — the conservative direction:
+   * unknown liveness never fabricates a global-quiet ALERT; the
+   * `poolerStatePath`-absent pattern). */
+  hostRunning?: boolean
   /** Deliver the framed ALERT bus message to the host (production:
    * messagesStoreReady.append + busDeliverToHost; tests: a recording stub).
    * NEVER throws. */
@@ -2318,6 +2339,178 @@ export function scanQiSilence(input: QiSilenceScanInput): QiSilenceScanResult {
   return { findings, ledger, changed }
 }
 
+// ---------------------------------------------------------------------------
+// M4 — the system-idle watchdog (owner request directa 2026-08-27): GLOBAL
+// quiet. EVERY existing detector is per-message / per-post (W8-d system-wait
+// covers a host-sent expectation to ONE post; W8-c stalled covers ONE post's
+// staleness; qi-silence covers ONE retired-worker→directive guarantee) — NONE
+// of them can see "the WHOLE catalog has been running ZERO agents for N minutes
+// while some post STILL has pending work". That is the M4 gap: a stopped
+// dispatch pipeline (a head/worker that terminated without re-dispatching, an
+// interrupted turn nobody resumed, a message that never materialized its
+// recipient) leaves the system QUIET with work pending and NO per-message
+// window open — W8-d returns 0 finds, nobody alerts. The scan ALERTS iff ALL
+// three hold:
+//   1. [zero running] — no non-retired post reports `running:true` (the same
+//      per-post signal the stale-live watchdog uses — Bug B: a mid-turn is
+//      healthy progress, NEVER quiet) AND `deps.hostRunning !== true` (the
+//      host's mid-turn signal, resolved by the bundle with the buildCatalogRows
+//      expression);
+//   2. [pending work] — some non-retired post has `pendingCount > 0`
+//      (buildPostSnapshot over the ALREADY-materialized deps.posts — zero new
+//      I/O) OR an INTERRUPTED turn (scanInterruptedTurn over deps.posts[].events
+//      — the W8-h 'stopped without re-dispatch' class). Quality-inspect
+//      directives fall in pendingCount (quality-head is a post with an inbox);
+//      agenda/calendar is EXCLUDED (fired:false is transient — the scheduler
+//      resolves it in <30 s and must never silence or trigger an alarm);
+//   3. [quiet >= idleWindowMs] — since `firstQuietTs` (the LEDGER — kept in the
+//      SEPARATE system-idle-state.json: the shared health-alerts ledger's
+//      defensive 2h prune would drop a long first-quiet (the qi-silence-state
+//      precedent)).
+// Without pending work → expected quiet → WARN-only (logger, no finding, no
+// dedupe). The ALERT rides the existing findings→dedupe→notifyHost flow (key
+// `system-idle` — re-alerts every HEALTH_DEDUPE_WINDOW_MS while the condition
+// persists, never a one-shot). The ALERT NEVER goes through deliverDaemonNotice
+// (the B4 gate excludes health ALERTs — the daemon wiring delivers DIRECT).
+// The host (Asistente) IS the alert channel: there is no direct owner channel
+// in the harness — the host surfaces the ALERT to the owner at its next wake.
+// ---------------------------------------------------------------------------
+
+/** M4 — the default global-quiet window (15 min — shorter than the 30-min
+ * per-message system-wait threshold: global quiet is graver than one
+ * per-message wait, and 15 min sits well above the daemon interval + typical
+ * turn cycles without waiting half an hour to learn of a paralysis). */
+export const SYSTEM_IDLE_DEFAULT_WINDOW_MS = 900000
+/** The system-idle ledger file — a SEPARATE file (the shared health-alerts
+ * ledger's defensive 2h prune would drop a long firstQuietTs; precedent
+ * qi-silence-state.json / interrupt-state.json). */
+export const SYSTEM_IDLE_STATE_FILE = 'system-idle-state.json'
+/** The system-idle dedupe key (ONE key in the shared health-alerts ledger —
+ * re-alerts only after the 30-min dedupe window and only while the quiet-with-
+ * pending condition STILL holds — the qi-silence cadence precedent). */
+export const SYSTEM_IDLE_KEY = 'system-idle'
+
+/** The system-idle ledger: `firstQuietTs` = the ts (ms epoch) of the FIRST tick
+ * that observed the catalog with ZERO agents running. The quiet duration is
+ * `nowMs - firstQuietTs`; the entry is REPLACED on the next tick where ANY
+ * agent runs (the quiet epoch is broken → the entry is deleted, the window
+ * restarts when quiet returns). Persisted only when it changes (the
+ * turn-errors pattern). */
+export interface SystemIdleState {
+  firstQuietTs?: number
+}
+
+/** Read `<stateDir>/system-idle-state.json` → `{ firstQuietTs? }`. Absent /
+ * unreadable / malformed → {} (never throws). */
+export function readSystemIdleState(stateDir: string): SystemIdleState {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, SYSTEM_IDLE_STATE_FILE), 'utf8')) as Record<string, unknown>
+    const out: SystemIdleState = {}
+    if (typeof parsed.firstQuietTs === 'number' && Number.isFinite(parsed.firstQuietTs)) out.firstQuietTs = parsed.firstQuietTs
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/system-idle-state.json` (mkdir -p the dir, then the file). */
+export async function writeSystemIdleState(stateDir: string, state: SystemIdleState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, SYSTEM_IDLE_STATE_FILE)), { recursive: true })
+  await writeFile(path.join(stateDir, SYSTEM_IDLE_STATE_FILE), JSON.stringify(state), 'utf8')
+}
+
+/** The system-idle scan inputs: the catalog posts (ALREADY materialized by the
+ * tick — zero new I/O), the host's running signal, the clock, the resolved
+ * window (knob `idleWindowMs` or the 15-min code default) and the current
+ * ledger. */
+export interface SystemIdleScanInput {
+  posts: readonly PostActivityInput[]
+  /** The host's live running signal (true/false — the tick only RUNS the scan
+   * when the bundle resolved it; absent here is treated as not-running by the
+   * pure scan — see the deps contract for the tick-level no-op gate). */
+  hostRunning?: boolean
+  nowMs: number
+  idleWindowMs: number
+  /** The CURRENT ledger (read by the tick; mutated → the returned next ledger). */
+  ledger: SystemIdleState
+}
+
+/** The system-idle scan result: the findings (≤1 per tick, key `system-idle`),
+ * the NEXT ledger, whether the ledger CHANGED (the tick persists only then) and
+ * the warn-only flag (quiet >= window with NO pending work — expected quiet: no
+ * finding, the tick logs a warn). */
+export interface SystemIdleScanResult {
+  findings: HealthFinding[]
+  ledger: SystemIdleState
+  changed: boolean
+  /** True when the quiet window COMPLETED (>= idleWindowMs) with ZERO pending
+   * work — expected quiet → the tick warns (logger) and emits no finding. */
+  quietWithoutPending: boolean
+}
+
+/** M4 — scan the GLOBAL-quiet condition (PURE, NEVER throws). Running = any
+ * non-retired post with `running:true` OR `hostRunning === true` (the Bug B
+ * rule: a mid-turn is healthy progress, never quiet). While ANY agent runs the
+ * quiet epoch is BROKEN (the ledger's firstQuietTs is deleted — the window
+ * restarts when quiet returns). While NOTHING runs: (a) the first quiet tick
+ * stamps firstQuietTs = nowMs; (b) once `nowMs - firstQuietTs >= idleWindowMs`
+ * the pending census decides: pending work (a post with pendingCount > 0 or an
+ * interrupted turn — scanInterruptedTurn over its events) → the `system-idle`
+ * finding (key SYSTEM_IDLE_KEY — the shared dedupe gives the 30-min re-alert
+ * cadence while the condition persists); NO pending work → quietWithoutPending
+ * (the tick warns, no finding). Retired/sleeping posts are excluded from BOTH
+ * running and pending (terminal / drains at its next wake — the stalled/wait
+ * criterion). */
+export function scanSystemIdle(input: SystemIdleScanInput): SystemIdleScanResult {
+  const ledger = { ...input.ledger }
+  let changed = false
+  const anyRunning = input.hostRunning === true || input.posts.some((p) => p.retired !== true && p.running === true)
+  if (anyRunning) {
+    if (ledger.firstQuietTs !== undefined) {
+      delete ledger.firstQuietTs
+      changed = true
+    }
+    return { findings: [], ledger, changed, quietWithoutPending: false }
+  }
+  // Quiet epoch: stamp the first quiet tick, then measure the quiet duration.
+  const firstQuietTs = ledger.firstQuietTs ?? input.nowMs
+  if (ledger.firstQuietTs === undefined) {
+    ledger.firstQuietTs = input.nowMs
+    changed = true
+  }
+  const quietMs = input.nowMs - firstQuietTs
+  if (quietMs < input.idleWindowMs) {
+    return { findings: [], ledger, changed, quietWithoutPending: false }
+  }
+  // The window COMPLETED → the pending census decides finding vs warn-only.
+  // Pending = a non-retired post with pendingCount > 0 (buildPostSnapshot — the
+  // same no-I/O primitive the stalled/wait scans use) OR an INTERRUPTED turn
+  // (W8-h 'stopped without re-dispatch' — the class no per-message window
+  // covers). Quality-inspect directives fall in pendingCount (quality-head is a
+  // post with an inbox); agenda/calendar is NOT a pending signal (transient).
+  const pendingPosts: { postId: string; pendingCount: number }[] = []
+  for (const post of input.posts) {
+    if (post.retired === true) continue
+    const snap = buildPostSnapshot(post)
+    const interrupted = scanInterruptedTurn(post.events ?? [], '', post.postId) !== undefined
+    if (snap.pendingCount > 0 || interrupted) {
+      pendingPosts.push({ postId: post.postId, pendingCount: snap.pendingCount + (interrupted ? 1 : 0) })
+    }
+  }
+  if (pendingPosts.length === 0) {
+    return { findings: [], ledger, changed, quietWithoutPending: true }
+  }
+  const minutes = Math.round(quietMs / 60000)
+  const findings: HealthFinding[] = [{
+    kind: 'system-idle',
+    key: SYSTEM_IDLE_KEY,
+    ts: input.nowMs,
+    count: pendingPosts.length,
+    error: `${pendingPosts.length} pendiente(s) sin agente running durante ${input.idleWindowMs} ms — posible espera que nunca llegó (idle since ${firstQuietTs}, ${minutes} min)`
+  }]
+  return { findings, ledger, changed, quietWithoutPending: false }
+}
+
 /** Build the framed host ALERT text — `[From deepartments] System-health ALERT:
  * <grouped findings>`. Each finding is a one-line bullet. The config-preset and
  * stalled-post bullets describe their anomaly verbally (never the literal
@@ -2343,6 +2536,14 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     if (finding.kind === 'qi-silence') {
       return `- qi-silence: ${finding.error ?? `worker retirements with no quality-inspect directive (${finding.count ?? 0})`}`
     }
+    // M4 — the system-idle branch (NEVER let it reach the stale-post fallback).
+    // The owner-facing wording is the mission's own («<n> pendiente(s) sin
+    // agente running durante <idleWindowMs> ms — posible espera que nunca
+    // llegó»): the finding error carries the full line (count, window, the
+    // quiet since ts + minutes — so every 30-min re-alert stays informative).
+    if (finding.kind === 'system-idle') {
+      return `- system-idle: ${finding.error ?? `${finding.count ?? 0} pendiente(s) sin agente running — posible espera que nunca llegó`}`
+    }
     return `- stalled-post: ${finding.postId} (${finding.count ?? 1} pending message(s), ${finding.error ?? 'no session activity'})`
   })
   return `[From deepartments] System-health ALERT:\n${lines.join('\n')}`
@@ -2353,7 +2554,10 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
  * post-errors + delivery-failed + config-preset + stalled-post + the M1
  * watchdogs (pooler-capacity: the key-pooler state file when
  * `deps.poolerStatePath` is injected; qi-silence: the retirement/directive
- * silence guarantee) for anomalies inside HEALTH_ERROR_WINDOW_MS; (4) dedupe
+ * silence guarantee) + the M4 system-idle watchdog (GLOBAL quiet: zero agents
+ * running >= `idleWindowMs` with pending work — runs only when the bundle
+ * resolved `deps.hostRunning`; expected quiet → warn-only) for anomalies
+ * inside HEALTH_ERROR_WINDOW_MS; (4) dedupe
  * per key inside
  * HEALTH_DEDUPE_WINDOW_MS (persisted to health-alerts-state.json so the ≤1
  * alert per key per 30min invariant survives restarts); (5) resolve the live
@@ -2362,7 +2566,8 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
  * (default-on): `turnErrorCaptureEnabled`, `staleLiveWatchdogEnabled` +
  * `staleLiveMinutes`, `presetAuditEnabled` — and the M1 watchdog knobs
  * (`poolerCapacityEnabled` + the pooler thresholds / `qiSilenceEnabled` +
- * `qiSilenceWindowMinutes` + `qiSilenceMinRetiresInWindow`). NEVER throws
+ * `qiSilenceWindowMinutes` + `qiSilenceMinRetiresInWindow`) + the M4 knob
+ * (`systemIdleEnabled` + `idleWindowMs`). NEVER throws
  * (every internal
  * failure is a warn). If no host is registered the anomaly is NOT deduped (it
  * retries — a real deployment without a reachable host must not silently
@@ -2452,6 +2657,11 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       typeof health?.qiSilenceMinRetiresInWindow === 'number' && Number.isFinite(health.qiSilenceMinRetiresInWindow) && health.qiSilenceMinRetiresInWindow >= 1
         ? Math.floor(health.qiSilenceMinRetiresInWindow)
         : qiSilenceMinRetiresForRate(qiDirectiveRate, QI_SILENCE_DEFAULT_FALSE_POSITIVE_TOLERANCE)
+    // M4 — the system-idle watchdog knobs: `systemIdleEnabled` gate (default
+    // ON) + `idleWindowMs` (the global-quiet window; absent/invalid → the
+    // 15-min code default via the shared resolvePositiveKnob pattern).
+    const systemIdleEnabled = health?.systemIdleEnabled !== false
+    const systemIdleWindowMs = resolvePositiveKnob(health?.idleWindowMs, SYSTEM_IDLE_DEFAULT_WINDOW_MS)
     const posts = [...(deps.posts ?? [])]
     // Bug (delivery-failed re-alert loop): the set of RETIRED member ids — the
     // union of the retired HOST ids (already computed above) and the RETIRED
@@ -2517,6 +2727,36 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     const poolerFindings = poolerCapacityEnabled && deps.poolerStatePath !== undefined
       ? scanPoolerCapacity(deps.poolerStatePath, nowMs, poolerKnobs, deps.logger)
       : []
+    // M4 — the system-idle watchdog (the GLOBAL-quiet scan). Gate: enabled AND
+    // `deps.hostRunning` RESOLVED (the bundle computes it from the live agents
+    // registry; ABSENT → the scan is a NO-OP — without the host's liveness the
+    // zero-running premise cannot be certified and the watchdog never
+    // fabricates an alert; the poolerStatePath-absent pattern). Its own ledger
+    // system-idle-state.json (firstQuietTs) persists ONLY on change; the
+    // shared health-alerts ledger never holds the quiet window (its 2h prune
+    // would drop it). Expected quiet (window done, NO pending work) → a warn,
+    // no finding, no dedupe — the mission's warn-only contract.
+    let systemIdleFindings: HealthFinding[] = []
+    if (systemIdleEnabled && deps.hostRunning !== undefined) {
+      try {
+        const idleLedger = readSystemIdleState(deps.stateDir)
+        const idleScan = scanSystemIdle({
+          posts,
+          hostRunning: deps.hostRunning,
+          nowMs,
+          idleWindowMs: systemIdleWindowMs,
+          ledger: idleLedger
+        })
+        systemIdleFindings = idleScan.findings
+        if (idleScan.changed) await writeSystemIdleState(deps.stateDir, idleScan.ledger)
+        if (idleScan.quietWithoutPending) {
+          const minutes = Math.round(systemIdleWindowMs / 60000)
+          deps.logger?.warn(`[deepartments] system-health: system idle ${minutes} min with zero pending work — expected quiet, no alert`)
+        }
+      } catch (error: unknown) {
+        deps.logger?.warn(`[deepartments] system-health: system-idle scan failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     // 3. scan.
     const findings = [
       ...scanPostErrorFindings(deps.stateDir, nowMs, retiredHostIds),
@@ -2524,7 +2764,8 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       ...(presetAuditEnabled ? scanConfigPresetFindings(deps.stateDir, nowMs) : []),
       ...(staleLiveWatchdogEnabled ? scanStalledPosts(posts, nowMs, staleLiveMinutes) : []),
       ...poolerFindings,
-      ...qiFindings
+      ...qiFindings,
+      ...systemIdleFindings
     ]
     // W8-d PART B/C — the system-heartbeat knobs: `heartbeatEnabled` (default
     // on) gates the CONDITIONAL-WAKE path; `waitThresholdMs` is resolved with

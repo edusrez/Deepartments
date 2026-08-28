@@ -31,7 +31,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
@@ -10544,6 +10544,276 @@ test('M1.1 scanQiSilence: the retirement DELTA — after the census, 12 NEW reti
   })
 })
 
+// --- M4 (owner request directa 2026-08-27) — the system-idle watchdog --------
+// GLOBAL quiet: zero catalog agents running >= idleWindowMs (default 15 min)
+// WITH pending work (pendingCount > 0 OR an interrupted turn) → finding
+// `system-idle` + host ALERT through the existing findings→dedupe→notifyHost
+// flow (key `system-idle` — the shared 30-min dedupe re-alerts while the
+// paralysis persists, never a one-shot; the qi-silence cadence precedent).
+// The quiet ledger lives in its OWN system-idle-state.json (firstQuietTs — the
+// shared health-alerts ledger's 2h prune would drop a long first-quiet).
+// `deps.hostRunning` ABSENT → the scan is a NO-OP (unknown host liveness never
+// fabricates an alert). Expected quiet (window done, NO pending) → warn-only.
+
+test('M4 system-idle: GLOBAL quiet ≥ idleWindowMs WITH pending work (a pending inbox message + an INTERRUPTED turn — the W8-h class) → the `system-idle` finding + host ALERT, frame «<n> pendiente(s) sin agente running durante <idleWindowMs> ms — posible espera que nunca llegó»; the dedupe key advances + the audit row records it', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 27, 22, 0, 0).getTime()
+    // Seed the quiet epoch: the previous tick already observed the LAST running
+    // agent at T0-1min (the watchdog MEASURES the quiet duration from the
+    // ledger — the ledger is OURS, never time-pruned by the shared 2h prune).
+    await writeFile(path.join(stateDir, SYSTEM_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: T0 - 60_000 }), 'utf8')
+    const alerts = []
+    const posts = [
+      // A post with 1 pending inbox message and NO session activity (never
+      // answered — buildPostSnapshot: no events → every addressed message is
+      // unprocessed). Inbox ts 30s ago → NOT stale (the stalled watchdog's
+      // 10-min stale bound is untouched by this fixture).
+      { postId: 'builder-wait', inboxTs: [T0 - 30_000] },
+      // A post with an INTERRUPTED turn (an open turn with no turn/end — the
+      // 'stopped without re-dispatch' class) and ZERO pending count.
+      { postId: 'builder-cut', events: [{ type: 'turn/start', time: T0 - 120_000, data: { turn: 4 } }] }
+    ]
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-m4',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts,
+      hostRunning: false,
+      config: { health: { idleWindowMs: 60_000 } },
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts.length, 1, 'quiet ≥ idleWindowMs with pending work → the host is alerted ONCE')
+    assert.match(alerts[0].frame, /^- system-idle: 2 pendiente\(s\) sin agente running durante 60000 ms — posible espera que nunca llegó \(idle since \d+, 1 min\)$/m, 'the frame names count/window/the quiet since (the owner-facing wording)')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state[SYSTEM_IDLE_KEY], T0, 'the system-idle dedupe key is advanced in the SHARED health-alerts ledger')
+    const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    assert.equal(audit.at(-1).findings[0].kind, 'system-idle', 'the audit row records the system-idle finding')
+    assert.equal(audit.at(-1).dedupeKeys.includes(SYSTEM_IDLE_KEY), true, 'the audit row records the system-idle dedupe key')
+  })
+})
+
+test('M4 system-idle: quiet ≥ idleWindowMs with NO pending work → warn-only — a logger warn, NO finding, NO alert, NO dedupe advance (expected quiet is healthy)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 27, 22, 30, 0).getTime()
+    await writeFile(path.join(stateDir, SYSTEM_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: T0 - 60_000 }), 'utf8')
+    const alerts = []
+    const warns = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-m4w',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      // A post that finished its last turn cleanly and has NOTHING pending.
+      posts: [{ postId: 'builder-idle', events: [{ type: 'turn/end', time: T0 - 120_000, data: { reason: { kind: 'clean' } } }] }],
+      hostRunning: false,
+      config: { health: { idleWindowMs: 60_000 } },
+      notifyHost: async () => { alerts.push(1) },
+      logger: { warn: (m) => warns.push(m), info: () => {} }
+    })
+    assert.equal(alerts.length, 0, 'no pending work → no alert, no finding')
+    assert.match(warns.join('\n'), /system idle 1 min with zero pending work/, 'the tick WARNS the expected-quiet case (the warn-only contract)')
+    assert.equal(readHealthAlertsState(stateDir)[SYSTEM_IDLE_KEY], undefined, 'no dedupe key advanced (there was no finding)')
+  })
+})
+
+test('M4 system-idle: ANY agent running — a post mid-turn (running:true) OR the host mid-turn (hostRunning:true) — BREAKS the quiet epoch: no finding even with pending work (Bug B: a running turn is healthy progress, NEVER quiet); the ledger firstQuietTs is cleared and the window restarts', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 27, 23, 0, 0).getTime()
+    // (a) a POST is running (the pending message exists but the post is mid-turn).
+    await writeFile(path.join(stateDir, SYSTEM_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: T0 - 60_000 }), 'utf8')
+    const alertsA = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-m4a',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [{ postId: 'builder-busy', running: true, inboxTs: [T0 - 30_000] }],
+      hostRunning: false,
+      config: { health: { idleWindowMs: 60_000 } },
+      notifyHost: async () => { alertsA.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alertsA.length, 0, 'a running post → NOT quiet → no finding despite pending work')
+    assert.equal(readSystemIdleState(stateDir).firstQuietTs, undefined, 'the running observation CLEARS the ledger firstQuietTs (the quiet epoch is broken)')
+    // (b) the HOST is running (the same pending message, hostRunning:true).
+    const alertsB = []
+    await runHealthDaemonTick({
+      now: () => T0 + 60_000,
+      stateDir,
+      bootId: 'boot-m4b',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [{ postId: 'builder-wait2', inboxTs: [T0 - 30_000] }],
+      hostRunning: true,
+      config: { health: { idleWindowMs: 60_000 } },
+      notifyHost: async () => { alertsB.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alertsB.length, 0, 'a running host → NOT quiet → no finding despite pending work')
+    assert.equal(readSystemIdleState(stateDir).firstQuietTs, undefined, 'the host-running observation keeps the ledger clear')
+  })
+})
+
+test('M4 system-idle: the idleWindowMs knob is CONFIGURABLE — a small window alerts on a short quiet; ABSENT/invalid → the 15-min code default (SYSTEM_IDLE_DEFAULT_WINDOW_MS = 900000), so a 1-min quiet NEVER alerts (the resolvePositiveKnob fallback pattern)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 28, 0, 0, 0).getTime()
+    // (a) a small knob: quiet 5s, window 5s → alert.
+    await writeFile(path.join(stateDir, SYSTEM_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: T0 - 5000 }), 'utf8')
+    const alertsA = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-m4t',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [{ postId: 'builder-w', inboxTs: [T0 - 4000] }],
+      hostRunning: false,
+      config: { health: { idleWindowMs: 5000 } },
+      notifyHost: async () => { alertsA.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alertsA.length, 1, 'a 5s quiet against the 5s knob → alert (the knob is honored)')
+    assert.equal(SYSTEM_IDLE_DEFAULT_WINDOW_MS, 900000, 'the code default is 15 min')
+    // (b) absent knob → 900000: the SAME 5s quiet against the default → NO alert.
+    const alertsB = []
+    await runHealthDaemonTick({
+      now: () => T0 + 10_000,
+      stateDir,
+      bootId: 'boot-m4t2',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [{ postId: 'builder-w', inboxTs: [T0 - 4000] }],
+      hostRunning: false,
+      notifyHost: async () => { alertsB.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alertsB.length, 0, '5s quiet ≪ the 15-min default → NO alert')
+  })
+})
+
+test('M4 system-idle DEDUPE: inside the 30-min health dedupe the SAME quiet-with-pending condition does NOT re-alert; AFTER HEALTH_DEDUPE_WINDOW_MS with the condition STILL holding → RE-ALERT (the paralysis persists → never a one-shot; the qi-silence re-alert precedent)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 28, 1, 0, 0).getTime()
+    await writeFile(path.join(stateDir, SYSTEM_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: T0 - 60_000 }), 'utf8')
+    const alerts = []
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-m4d',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [{ postId: 'builder-wait', inboxTs: [T0 - 30_000] }],
+      hostRunning: false,
+      config: { health: { idleWindowMs: 60_000 } },
+      notifyHost: async () => { alerts.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'the first window completion alerts')
+    await tick(T0 + 5 * 60_000)
+    assert.equal(alerts.length, 1, 'a tick INSIDE the 30-min dedupe window does NOT re-alert')
+    await tick(T0 + 31 * 60_000)
+    assert.equal(alerts.length, 2, '31 min later the SAME condition RE-ALERTS (the lack of any running agent persisted — the guarantee is never a one-shot)')
+  })
+})
+
+test('M4 system-idle: the quiet ledger is SEPARATE — system-idle-state.json composes with qi-silence-state.json in the SAME stateDir (no collision); firstQuietTs PERSISTS between ticks and a later running observation RESETS it (the window restarts)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 28, 2, 0, 0).getTime()
+    // Seed the qi-silence ledger FIRST — the two files must coexist untouched.
+    // The seeded retired+worker post stays in the CATALOG of every tick below,
+    // so the qi-silence scan's catalog-prune keeps it (its own rules — never
+    // clobbered by the system-idle file).
+    const qiLedger = { [QI_SILENCE_CENSUS_KEY]: T0 - 10 * 60_000, 'builder-retired': T0 - 5 * 60_000 }
+    await writeFile(path.join(stateDir, QI_SILENCE_STATE_FILE), JSON.stringify(qiLedger), 'utf8')
+    const alerts = []
+    const run = (nowMs, posts) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-m4l',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [...posts, { postId: 'builder-retired', retired: true, provider: 'worker' }],
+      hostRunning: false,
+      config: { health: { idleWindowMs: 60_000 } },
+      notifyHost: async () => { alerts.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    // Tick 1: quiet 1 min < window → no alert; the ledger stamps firstQuietTs.
+    await run(T0, [{ postId: 'builder-wait', inboxTs: [T0 - 30_000] }])
+    assert.equal(alerts.length, 0, 'quiet inside the window → no alert yet')
+    assert.equal(readSystemIdleState(stateDir).firstQuietTs, T0, 'firstQuietTs is stamped on the first quiet tick and PERSISTS')
+    const qiAfter = JSON.parse(await readFile(path.join(stateDir, QI_SILENCE_STATE_FILE), 'utf8'))
+    assert.deepEqual(qiAfter, qiLedger, 'the qi-silence-state.json content is UNTOUCHED (the files do not collide)')
+    // Tick 2: a running post → the quiet epoch is RESET (firstQuietTs cleared).
+    await run(T0 + 60_000, [{ postId: 'builder-busy', running: true, inboxTs: [T0 - 30_000] }])
+    assert.equal(readSystemIdleState(stateDir).firstQuietTs, undefined, 'a running observation clears firstQuietTs')
+    // Tick 3: quiet again → the window RESTARTS from the new stamp.
+    await run(T0 + 120_000, [{ postId: 'builder-wait', inboxTs: [T0 - 30_000] }])
+    assert.equal(readSystemIdleState(stateDir).firstQuietTs, T0 + 120_000, 'the next quiet tick re-stamps firstQuietTs at the NEW quiet start')
+    assert.equal(alerts.length, 0, 'the restarted window (0 min quiet against the 1-min knob) never alerts')
+  })
+})
+
+test('M4 system-idle: deps.hostRunning ABSENT (undefined — a wiring that cannot resolve the host liveness) → the scan is a NO-OP: no alert even with a 2h quiet + pending, NO warn, and its OWN ledger is NEVER touched (the conservative unknown-liveness gate)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 28, 3, 0, 0).getTime()
+    // A 2h-old firstQuietTs: HAD the scan run, quiet ≥ 15 min + pending → ALERT.
+    // The ledger is pre-seeded so its state is observable before/after.
+    const seeded = JSON.stringify({ firstQuietTs: T0 - 2 * 60 * 60 * 1000 })
+    await writeFile(path.join(stateDir, SYSTEM_IDLE_STATE_FILE), seeded, 'utf8')
+    const alerts = []
+    const warns = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-m4x',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [{ postId: 'builder-wait', inboxTs: [T0 - 30_000] }],
+      // NOTE: NO hostRunning dep (absent) and NO idleWindowMs knob.
+      notifyHost: async () => { alerts.push(1) },
+      logger: { warn: (m) => warns.push(m), info: () => {} }
+    })
+    assert.equal(alerts.length, 0, 'hostRunning undefined → the scan is a no-op → no alert despite a 2h quiet with pending')
+    assert.equal(warns.length, 0, 'hostRunning undefined → no warn either (the scan did not run)')
+    assert.equal(await readFile(path.join(stateDir, SYSTEM_IDLE_STATE_FILE), 'utf8'), seeded, 'the pre-seeded ledger is byte-UNTOUCHED (the scan never read/wrote its own state)')
+  })
+})
+
+test('M4 system-idle SMOKE (acceptance — real daemon): bootPlugin with health {intervalMs: 50, idleWindowMs: 50} + a pending host-sent message + NO agent running → the REAL daemon alerts the host with the system-idle frame; the audit row records the finding', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootPlugin(stateDir, { health: { intervalMs: 50, idleWindowMs: 50 } })
+    try {
+      await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'head materialized at boot')
+      const host = env.agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      // Self-register the live host (B3 gap fix — the ALERT recipient must be a
+      // durable hosts.json entry for pickLiveHost; dept_who ensures it).
+      await env.root.tools.get('dept_who').execute({}, { agent: host, signal })
+      // A pending host-sent message to the (idle, awake) head — delivered, and
+      // the head never answers it within the test → pendingCount 1.
+      const send = env.root.tools.get('send_message')
+      const result = await send.execute({ to: ['research-head'], text: 'M4 smoke — stay pending so the system-idle watchdog sees unfinished work' }, { agent: host, signal })
+      assert.equal(result.delivered['research-head'], 'delivered', 'the pending message seeds the head inbox')
+      // The real daemon (ticking every 50 ms): zero running, quiet ≥ 50 ms,
+      // pending → ALERT. Deterministic: the window (50 ms) is far below the
+      // waitFor, so any tick after the deliver sees the condition satisfied.
+      await waitFor(() => host.inboxMessages.some((m) => m.content[0]?.text.includes('System-health ALERT') && m.content[0].text.includes('system-idle')), 5000, 'the real system-idle daemon alerts the host')
+      const frame = host.inboxMessages.find((m) => m.content[0]?.text.includes('system-idle')).content[0].text
+      assert.match(frame, /pendiente\(s\) sin agente running durante 50 ms — posible espera que nunca llegó/, 'the REAL alert frame carries the owner-facing system-idle line')
+      await waitFor(async () => {
+        try {
+          const audit = await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')
+          return audit.trim().length > 0
+        } catch {
+          return false
+        }
+      }, 5000, 'the audit row is appended')
+      const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      assert.equal(audit.at(-1).findings.some((f) => f.kind === 'system-idle'), true, 'the audit last row records the system-idle finding')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
 test('W6 bus delivery FAILING materialization records a post-error line (real Loader — a dual resume+create failure reaches the catch block)', async () => {
   await withTempStateDir(async (stateDir) => {
     await seedPost(stateDir, { postId: 'ghost-head', sessionId: 'head-ghost-head', roomId: 'board', agentPreset: 'deepartments-head' })
@@ -13696,7 +13966,16 @@ test('O2 (QD compromiso — ANALYZE m-598): the worker-retired directive carries
         await appendPostError(stateDir, { ts: Date.now() - 60_000, postId: lastPostId, error: '400 reasoning_content (previous turn)' }, Date.now())
         await last.ctx.tools.get('send_message', last.key).execute({ to: ['research-head'], text: 'report: recovered and sent' }, { agent: last.worker, signal })
         await waitFor(async () => (await readPosts(stateDir))[lastPostId]?.retired === true, 5000, 'the recovered worker is auto-retired at delivery (Fix B)')
-        await new Promise((r) => setTimeout(r, 100))
+        // O2 DE-FLAKE (fb-8 residual): the retired flag commit and the QD
+        // directive APPEND are SEPARATE durable writes — the retire seam commits
+        // the post flag and only then appends the worker-retired directive record
+        // to messages.jsonl addressed to quality-head. The old fixed
+        // setTimeout(100) settled that append with a wall-clock guess and raced
+        // it under load (the O3/O2 suite class); the assert then found NO
+        // directive for the worker (or the previous one). Barrier = the state the
+        // assert needs: waitFor the directive record itself (waitFor-on-state,
+        // never a fixed setTimeout — the C12 de-flake pattern).
+        await waitFor(async () => (await qualityDirectives(stateDir)).some(workerRetiredDirectiveFor(lastPostId)), 5000, 'the recovered worker worker-retired directive was emitted (O2 c)')
         dirs = await qualityDirectives(stateDir)
         const lastDir = dirs.find(workerRetiredDirectiveFor(lastPostId))
         assert.ok(lastDir, 'the recovered worker retire emits a worker-retired directive')

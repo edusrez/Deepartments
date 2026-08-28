@@ -460,7 +460,11 @@ export const Config: z<any, any> = z.object({
     poolerStateFilePath: z.string(),
     qiSilenceEnabled: z.boolean(),
     qiSilenceWindowMinutes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
-    qiSilenceMinRetiresInWindow: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+    qiSilenceMinRetiresInWindow: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    // M4 — the system-idle watchdog knobs (default(void 0) → absent = code
+    // defaults: enabled on, idleWindowMs 900000 = 15 min — the section contract).
+    systemIdleEnabled: z.boolean(),
+    idleWindowMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
   }).default(void 0 as unknown as {
     enabled: boolean
     intervalMs: number
@@ -480,6 +484,8 @@ export const Config: z<any, any> = z.object({
     qiSilenceEnabled: boolean
     qiSilenceWindowMinutes: number
     qiSilenceMinRetiresInWindow: number
+    systemIdleEnabled: boolean
+    idleWindowMs: number
   }),
   // QD (spec 007 §4.1, D-Q2). Mirrors the runtime QualityConfig in src/invoke.ts:
   // `default(void 0)` so an ABSENT section or absent key falls through to the

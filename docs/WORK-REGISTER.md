@@ -9,7 +9,11 @@
 ## 1. IPD — cola activa
 
 - **M4** watchdog de inactividad del sistema (owner, alta — si 15-30 min sin
-  agente running con pendientes → alerta) · **M2.3** secretary en heads (3
+  agente running con pendientes → alerta; **IMPLEMENTADO 2026-08-27 por
+  builder-4 — kind `system-idle` en dshd-health (scan + ledger propio
+  system-idle-state.json + frame) + knobs `systemIdleEnabled`/`idleWindowMs`
+  900000 en org.ts + dep `hostRunning` en el wiring + 8 tests M4 — pendiente
+  commit del Asistente**) · **M2.3** secretary en heads (3
   smokes fallidos M2/M2.1/M2.2; instrumentación en vivo del standing pedida al
   IPD) · seguimiento log-sweep del QD (objetivos nuevos → misiones).
 

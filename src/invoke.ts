@@ -8042,6 +8042,21 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
       return out
     }
+    // M4 — the HOST agent's live running signal for the system-idle watchdog:
+    // whether the LIVE (non-retired) host's session is CURRENTLY mid-turn — the
+    // SAME expression buildCatalogRows uses for the host row (:1942). Resolved
+    // FRESH per tick against the live agents registry; when the registry is
+    // ABSENT (a headless/minimal profile) the signal is UNDEFINED → the
+    // system-idle scan is a NO-OP (the conservative direction: unknown host
+    // liveness never fabricates a global-quiet ALERT).
+    const buildHostRunning = (): boolean | undefined => {
+      if (agents === void 0) return undefined
+      for (const entry of hosts.values()) {
+        if (entry.retired === true) continue
+        if (agents.get(SessionId(entry.sessionId))?.status === 'running') return true
+      }
+      return false
+    }
     // W8-d PART B — the host-sender-aware inputs the CONDITIONAL system-wait scan
     // reads: the post's session event log + the ts of messages ADDRESSED to it
     // that the LIVE host sent (from the delivery sidecar + message records).
@@ -8085,6 +8100,9 @@ export function applyInvoke(ctx: Context, config: Config) {
           // W8-c: the catalog-post inputs (activity + inbox) for the turn-error
           // + stale-live safeguards — resolved lazily per tick.
           posts: buildHealthPosts(),
+          // M4: the host's live running signal (absent agents registry →
+          // undefined → the system-idle scan is a no-op).
+          hostRunning: buildHostRunning(),
           // W8-d: the host-sender-aware inputs for the conditional system-wait
           // scan — resolved lazily per tick.
           hostWaits: buildHostWaits(),
