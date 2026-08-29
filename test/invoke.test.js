@@ -36,7 +36,7 @@ import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
 import { RegistryStore } from '../lib/invoke.js'
-import { headRotationJournalStatus, HEAD_ROTATE_JOURNAL_STALE_MS } from '../lib/invoke.js'
+import { headRotationJournalStatus, HEAD_ROTATE_JOURNAL_STALE_MS, verifyRotateReason, resolveSessionProjCachePath, REASON_VERIFY_TOLERANCE } from '../lib/invoke.js'
 import { readLlmPiAiProviderSettings, resolveReasoningContentPreflight, REASONING_CONTENT_PREFLIGHT_POST_ID } from '../lib/invoke.js'
 // DISPATCH-HARDENING + E2-ZSTD (2026-08-28): the pooler-capacity dispatch
 // pre-check (resolvePoolerDispatchBlock), the b5-ghost census ledger
@@ -12247,7 +12247,9 @@ test('W8-c PART 1 turn-failure capture: a live post session whose turn/end ends 
       { type: 'assistant/message', time: T0 - 40_000, data: { message: { content: '…' } } },
       { type: 'turn/end', time: T0 - 30_000, data: { turn: 1, reason: { kind: 'error', message: 'malformed template reference' } } }
     ]
-    const posts = [{ postId: 'worker-a', retired: false, events, inboxTs: [] }]
+    // fb-25 (b): the post snapshot carries its LIVE sessionId → the capture
+    // threads the SESSION PROVENANCE (sessionId + turn) into the post-error row.
+    const posts = [{ postId: 'worker-a', sessionId: 'session-worker-a-1', retired: false, events, inboxTs: [] }]
     const tick = (nowMs) => runHealthDaemonTick({
       now: () => nowMs,
       stateDir,
@@ -12263,13 +12265,71 @@ test('W8-c PART 1 turn-failure capture: a live post session whose turn/end ends 
     assert.equal(errors.length, 1, 'one post-error row recorded for the turn error')
     assert.equal(errors[0].postId, 'worker-a', 'the row carries the postId')
     assert.match(errors[0].error, /malformed template reference/, 'the row carries the turn/end error message')
+    assert.equal(errors[0].sessionId, 'session-worker-a-1', 'fb-25 (b): the row carries the SESSION the failed turn belonged to')
+    assert.equal(errors[0].turn, 1, 'fb-25 (b): the row carries the failed TURN number')
     assert.equal(alerts.length, 1, 'the daemon ALERTED the host')
     assert.match(alerts[0].frame, /post-error: worker-a/, 'the alert names the failed post')
+    assert.match(alerts[0].frame, /\[session session-worker-a-1 turn 1 \(\d{2}:\d{2}Z\)\]/, 'fb-25 (b): the alert frame shows the SESSION PROVENANCE — the host sees the error belonged to that (possibly archived) session')
     assert.equal(warns.length, 0, 'a fully-resolvable capture+alert emits no warns')
     // Tick 2 (the SAME turn, inside the fresh-window) → NO double row, NO re-alert.
     await tick(T0 + 5000)
     assert.equal(readPostErrorsFile(stateDir).length, 1, 'the same turn is NOT double-captured')
     assert.equal(alerts.length, 1, 'a second tick does NOT re-alert (capture+alert dedupe)')
+  })
+})
+
+test('fb-25 (b) post-error PROVENANCE: scanPostErrorFindings carries rows[0] sessionId/turn into the finding and buildHealthAlertFrame renders `[session <id> turn <n> (HH:MMZ)]` — the host sees the error belongs to the ARCHIVED session; LEGACY rows without provenance render the current frame (R6), and the group identity/grouping never changes', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 28, 15, 0, 0).getTime()
+    // The m-1109 shape: rows of the ARCHIVED 50ee8585 session (turn 166/167),
+    // now carrying the provenance the W8-c capture writes.
+    const oldSession = 'head-quality-head-50ee8585-492e-4d35-8ac5-947cec4d7dbc'
+    await appendPostError(stateDir, { ts: T0 - 120_000, postId: 'quality-head', error: '400: ... 789959 tokens from the input messages ...', sessionId: oldSession, turn: 166 }, T0)
+    await appendPostError(stateDir, { ts: T0 - 60_000, postId: 'quality-head', error: '400: ... 790202 tokens ...', sessionId: oldSession, turn: 167 }, T0)
+    const findings = scanPostErrorFindings(stateDir, T0)
+    assert.equal(findings.length, 1, 'the two rows STILL group into ONE (postId,class) finding — grouping unchanged')
+    assert.equal(findings[0].kind, 'post-error')
+    assert.equal(findings[0].key, 'post-error:quality-head', 'the legacy per-post dedupe key is unchanged (identity never touched)')
+    assert.equal(findings[0].sessionId, oldSession, 'rows[0] sessionId rides the finding')
+    assert.equal(findings[0].turn, 166, 'rows[0] turn rides the finding')
+    const frame = buildHealthAlertFrame(findings)
+    assert.match(frame, /- post-error: quality-head \(2 in window\): 400: ... 789959 tokens from the input messages ... \[session head-quality-head-50ee8585-492e-4d35-8ac5-947cec4d7dbc turn 166 \(\d{2}:\d{2}Z\)\]/, 'the frame shows the ARCHIVED-session provenance — the host cannot attribute the error to the fresh session')
+    // LEGACY rows without provenance → the CURRENT frame (no bracket, no field).
+    await rm(path.join(stateDir, POST_ERRORS_FILE), { force: true })
+    await appendPostError(stateDir, { ts: T0 - 60_000, postId: 'worker-a', error: 'legacy error text' }, T0)
+    const legacy = scanPostErrorFindings(stateDir, T0)
+    assert.equal(legacy.length, 1)
+    assert.equal(legacy[0].sessionId, undefined, 'no provenance on legacy rows (the field is omitted)')
+    assert.equal(legacy[0].turn, undefined)
+    const legacyFrame = buildHealthAlertFrame(legacy)
+    assert.ok(!legacyFrame.includes('[session'), 'a legacy row renders the CURRENT frame (no provenance bracket)')
+    assert.match(legacyFrame, /- post-error: worker-a \(1 in window\): legacy error text/, 'the legacy frame text is byte-intact (R6)')
+  })
+})
+
+test('fb-25 REGRESIÓN 3 (IPH m-1194 — the head\'s OWN live case): internal-programming-head with MIXED-class rows (2× 400 from the PREVIOUS session a30b6627 + 1 interrupted-restart) → ONE post-error finding count 3 (the mixed grouping is NOT redesigned — the dedupe/identity never changes), whose frame shows the OLD-session provenance; and the m-1194 mirror reason (~787k) is stamped UNVERIFIED against the old session\'s real projection (~2xx-3xxk)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 28, 21, 20, 0).getTime()
+    // The m-1194 shape (head datapoint 2026-08-28): the two 400 rows are from
+    // the PRE-mint session a30b6627 (ts 1787947530025 / 1787947800102), the
+    // interrupted-restart row is the third — ALL alive in the 2h window.
+    const errSession = 'head-internal-programming-head-a30b6627-c1e7-4d2f-b3a8-6f4d2e0a9b3c'
+    await appendPostError(stateDir, { ts: T0 - 120_000, postId: 'internal-programming-head', error: '400: ... 787606 tokens from the input messages ...', sessionId: errSession, turn: 212 }, T0)
+    await appendPostError(stateDir, { ts: T0 - 90_000, postId: 'internal-programming-head', error: '400: ... 787897 tokens ...', sessionId: errSession, turn: 213 }, T0)
+    await appendPostError(stateDir, { ts: T0 - 30_000, postId: 'internal-programming-head', error: 'interrupted-post: interrupted turn 1 (no turn/end — stopped by a restart)' }, T0)
+    const findings = scanPostErrorFindings(stateDir, T0)
+    assert.equal(findings.length, 1, 'the 3 rows (2× 400 + interrupted, all class-undefined) group into ONE (postId) finding — the mixed grouping is PRESERVED (point 6: not redesigned)')
+    assert.equal(findings[0].count, 3, 'count 3 — exactly the m-1194 alert shape')
+    assert.equal(findings[0].sessionId, errSession, 'rows[0] (the oldest 400) carries the OLD-session provenance — the host sees the alert re-emits the PREVIOUS session\'s errors')
+    const frame = buildHealthAlertFrame(findings)
+    assert.match(frame, /- post-error: internal-programming-head \(3 in window\): 400: ... 787606 tokens from the input messages ... \[session head-internal-programming-head-a30b6627-c1e7-4d2f-b3a8-6f4d2e0a9b3c turn 212 \(\d{2}:\d{2}Z\)\]/, 'the frame shows the ARCHIVED a30b6627 session provenance (the m-1193 re-alert can never be attributed to the fresh session)')
+    // (a) the MIRROR stamp for m-1194: the rotate old session (57bed534) really
+    // projected ~2xx-3xxk, never 787k → the reason would be stamped UNVERIFIED.
+    const rotateOld = 'head-internal-programming-head-57bed534-8f4a-4b2c-9d1e-3c5a7b0d2e1f'
+    await seedProjCache(stateDir, { [rotateOld]: 318_000 })
+    const projCachePath = resolveSessionProjCachePath(stateDir, path.join(stateDir, 'sessions'))
+    assert.equal(verifyRotateReason('context-threshold — IPH sesión live 57bed534 a 787k (400 real del request actual)', rotateOld, projCachePath), 'unverified', 'the m-1194 reason (~787k) against the old session ≈318k → UNVERIFIED — this mirror would have carried [reason unverified vs archive]')
+    assert.equal(verifyRotateReason('context-threshold — IPH sesión live 57bed534 a ~318k', rotateOld, projCachePath), 'verified', 'a reason citing the old session\'s real figure verifies')
   })
 })
 
@@ -16029,6 +16089,14 @@ test('QD probability gate: worker default 0.25 + clamp; worker uses injected rng
   assert.match(noneText, /ANALYZE the retired agent:/, 'the none label still carries the ANALYZE mission (LOTE B kept)')
   assert.match(qualityInspectDirectiveText({ kind: 'head-slept', headPostId: 'research-head', sessionId: 'head-research-head', sleepEpoch: 123 }), /head slept.*sleepEpoch 123/)
   assert.match(qualityInspectDirectiveText({ kind: 'post-error', postId: 'ghost-head', messageId: 'm-1', error: 'boom' }), /post-error.*post ghost-head.*error boom/)
+  // fb-25 (a): the head-rotated frame carries the reason + the VERIFICATION
+  // appendix — the QH/inspector sees the reason's figure was checked against
+  // the old session's archive ('verified' / 'unverified vs archive' /
+  // 'unverifiable'); a surface WITHOUT the stamp renders NO appendix (R6).
+  assert.match(qualityInspectDirectiveText({ kind: 'head-rotated', headPostId: 'quality-head', oldSessionId: 's-old', newSessionId: 's-new', reason: 'muro ~789k', reasonVerified: 'unverified' }), /head rotated.*reason muro ~789k \[reason unverified vs archive\]/, 'an unverified reason is labeled for the inspector')
+  assert.match(qualityInspectDirectiveText({ kind: 'head-rotated', headPostId: 'quality-head', oldSessionId: 's-old', newSessionId: 's-new', reason: 'COMPLETED a ~190k', reasonVerified: 'verified' }), /\[reason verified\]/, 'a verified reason carries the verified appendix')
+  assert.match(qualityInspectDirectiveText({ kind: 'head-rotated', headPostId: 'quality-head', oldSessionId: 's-old', newSessionId: 's-new', reason: 'sin mirror', reasonVerified: 'unavailable' }), /\[reason unverifiable\]/, 'an unavailable datum is labeled unverifiable')
+  assert.ok(!qualityInspectDirectiveText({ kind: 'head-rotated', headPostId: 'quality-head', oldSessionId: 's-old', newSessionId: 's-new', reason: 'legacy surface' }).includes('[reason'), 'a surface WITHOUT reasonVerified renders NO appendix (legacy frame intact)')
 })
 
 test('QD anti-loop QH exclusion (owner m-178/m-182): the QD head (quality-head) OWN head decision is gated by the worker dice; every OTHER head + host stays structural-true', () => {
@@ -17889,6 +17957,34 @@ async function seedJournalAt(stateDir, postId, summary, timestamp) {
   return journalPath
 }
 
+/** fb-25 (a) — seed a durable session_projcache.json mirror (the token-meter's
+ * cross-process file) at the SAME path the tool wiring resolves (via
+ * persistence.root = <stateDir>/sessions → <stateDir>/storages), with one row
+ * per (sessionId → projected tokens). The fixture computes contextPressure so
+ * max(0, pressure+surface−sampled) = projected EXACTLY, and mirrors the same
+ * figure as the last-turn cacheReadTokens — the two reference formulas the
+ * cross-check uses converge on the fixture, like the real completed sessions
+ * (7ab757b3 190,213 / 6686fc52 217,140). */
+async function seedProjCache(stateDir, rowsBySession) {
+  const projCachePath = resolveSessionProjCachePath(stateDir, path.join(stateDir, 'sessions'))
+  await mkdir(path.dirname(projCachePath), { recursive: true })
+  const sessions = {}
+  for (const [sessionId, projected] of Object.entries(rowsBySession)) {
+    const surface = Math.round(projected * 0.6)
+    const sampled = Math.round(projected * 0.5)
+    const pressure = projected - surface + sampled
+    sessions[sessionId] = {
+      identity: { createdAt: Date.now() },
+      rows: {
+        sessionStats: { ver: 1, seq: 1, val: { turns: 14, steps: 68, lastTurn: 14, openStep: null } },
+        tokenUsage: { ver: 1, seq: 1, val: { last: { turn: 14, step: 1, buckets: { cacheReadTokens: projected, uncachedInputTokens: 0, outputTokens: 0, cacheWriteTokens: 0 } } } },
+        contextPressure: { ver: 4, seq: 1, val: { surfaceTokens: surface, contextWindow: 1048576, pressureTokens: pressure, sampledSurfaceTokens: sampled } }
+      }
+    }
+  }
+  await writeFile(projCachePath, JSON.stringify({ unit: { name: 'session_projcache', version: 3 }, global: null, tables: { sessions } }), 'utf8')
+}
+
 test('M-A dept_head_rotate (1+2): rotating an IDLE configured head mints a FRESH live session (new sessionId, previousChildId, rotated marker, NO sleepEpoch) seeded with the journal + department title pin, archives the OLD session server-side, mirrors head-rotated to the QD ×1 — and the fresh head stays BOOT-QUIET (no immediate wake): the NEXT send_message delivers to the FRESH session and starts its first turn', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
@@ -17909,6 +18005,10 @@ test('M-A dept_head_rotate (1+2): rotating an IDLE configured head mints a FRESH
       assert.equal(result.journal.stale, false, 'a just-written journal is not stale')
       assert.match(result.journal.path, new RegExp(`journals/${postId}\\.md$`))
       assert.equal(result.reason, 'M-A hermetic test')
+      // fb-25 (a): the hermetic env has NO session_projcache mirror → the reason
+      // cross-check degrades to 'unavailable' (nothing to verify) — and the
+      // stamp rides the tool result (the host sees it) + the mirror frame.
+      assert.equal(result.reasonVerified, 'unavailable', 'no projcache mirror → reasonVerified degrades to unavailable (never blocks)')
 
       // Durable entry: fresh sessionId + previousChildId + rotated marker; a
       // rotation is NOT sleep (no sleepEpoch) and NOT retire (entry still live).
@@ -17938,6 +18038,10 @@ test('M-A dept_head_rotate (1+2): rotating an IDLE configured head mints a FRESH
       const rotated = dirs.filter((d) => /head rotated/.test(d.text))
       assert.equal(rotated.length, 1, 'exactly ONE head-rotated directive')
       assert.match(rotated[0].text, new RegExp(`post ${postId}, old session ${oldSessionId} → new session ${result.sessionId}`))
+      // fb-25 (a): the mirror carries the reasonVerified stamp as a CLEAR
+      // appendix — with no datum the QH sees '[reason unverifiable]', never a
+      // silently-passed reason.
+      assert.match(rotated[0].text, /\[reason unverifiable\]/, 'the unverifiable reason is labeled in the mirror frame')
 
       // NO immediate wake: the next delivery is a LIVE followup on the FRESH
       // session (delivered, no create/resume) and starts its first turn.
@@ -17948,6 +18052,54 @@ test('M-A dept_head_rotate (1+2): rotating an IDLE configured head mints a FRESH
       await waitFor(() => fresh.inboxMessages.length >= 1, 5000, 'the NEXT message starts the fresh head\'s first turn (no immediate wake)')
       assert.equal(env.agents.store.has(oldSessionId), false, 'the OLD session handle is disposed (bounded join)')
       assert.equal(env.agents.store.get(result.sessionId), fresh, 'the fresh session stays the live incarnation')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('fb-25 dept_head_rotate CROSS-CHECK (a): a reason citing a FALSE figure (789k vs the old session\'s real ≈190k projection) → reasonVerified "unverified" AND the rotate COMPLETES (the stamp NEVER blocks — the critical-unblock rule); a reason citing the REAL figure → "verified"; the mirror frame carries the clear appendix in both cases', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    await seedJournal(stateDir, postId, 'ROTATE-SEED: carried verbatim into the fresh session.')
+    // The OLD session's durable projection mirror: head-research-head really
+    // ended COMPLETED at ≈190,213 (the 7ab757b3 evidence shape).
+    await seedProjCache(stateDir, { 'head-research-head': 190_213 })
+    // persistenceRoot inside the stateDir → the wiring resolves the mirror at
+    // <stateDir>/storages/session_projcache.json (the SAME helper the tests use).
+    const env = await bootWithQD(stateDir, { persistenceRoot: path.join(stateDir, 'sessions') })
+    const oldSessionId = 'head-research-head'
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      // (1) FALSE figure — the m-1110/m-1162 shape (~789k against a session that
+      // NEVER exceeded ~190k): 'unverified', and the rotation STILL commits
+      // (fresh session + archive — never blocked by an unverified reason).
+      const r1 = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'context-threshold — QH fresco volvió a superar el muro (~789k input; sus turnos de verificación leyeron grandes archives en contexto)' }, { agent: host, signal })
+      assert.equal(r1.reasonVerified, 'unverified', '789k vs the 190,213 projection → the stamp is UNVERIFIED (the reason cites another session\'s numbers)')
+      assert.equal(r1.previousSessionId, oldSessionId)
+      assert.notEqual(r1.sessionId, oldSessionId, 'the rotate COMPLETED (fresh session minted despite the unverified reason — NEVER blocks)')
+      assert.equal(r1.archived, true, 'the archive still commits alongside the unverified stamp')
+      let dirs = await qualityDirectives(stateDir)
+      let rotated = dirs.filter((d) => /head rotated/.test(d.text))
+      assert.equal(rotated.length, 1, 'exactly ONE head-rotated directive so far')
+      assert.match(rotated[0].text, /\[reason unverified vs archive\]/, 'the mirror frame labels the unverified reason — the QH/inspector sees the figure was NOT corroborated')
+      // (2) TRUE figure — the fresh session (now the old for the SECOND rotate)
+      // gets its projection row; a reason citing the REAL figure → 'verified'.
+      await seedProjCache(stateDir, { 'head-research-head': 190_213, [r1.sessionId]: 190_213 })
+      const r2 = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'refresco de sesión; la sesión anterior terminó COMPLETED a ~190k tokens (18%)' }, { agent: host, signal })
+      assert.equal(r2.reasonVerified, 'verified', 'a reason citing the real projected figure (~190k vs 190,213) is stamped VERIFIED')
+      assert.notEqual(r2.sessionId, r1.sessionId, 'the second rotate also commits')
+      dirs = await qualityDirectives(stateDir)
+      rotated = dirs.filter((d) => /head rotated/.test(d.text))
+      assert.equal(rotated.length, 2, 'two head-rotated directives')
+      assert.match(rotated[1].text, /\[reason verified\]/, 'the verified mirror frame carries the verified appendix')
+      // (3) NO reason — nothing to verify → 'unavailable' (mission: a reason
+      // absent → unverifiable), the rotate still commits.
+      const r3 = await env.root.tools.get('dept_head_rotate').execute({ postId }, { agent: host, signal })
+      assert.equal(r3.reasonVerified, 'unavailable', 'a rotation with NO reason → unavailable (nothing to verify)')
+      assert.equal(r3.reason, undefined, 'no reason on the result')
+      assert.notEqual(r3.sessionId, r2.sessionId, 'the no-reason rotate also commits')
     } finally {
       await env.dispose()
     }
@@ -17966,6 +18118,10 @@ test('M-A dept_head_rotate (6): the QH critical-unblock — an IDLE over-thresho
       const signal = new AbortController().signal
       const result = await env.root.tools.get('dept_head_rotate').execute({ postId: 'quality-head', reason: 'QH over-threshold' }, { agent: host, signal })
       assert.equal(result.previousSessionId, oldSessionId)
+      // fb-25 (a): the critical-unblock QH rotate runs in the hermetic env with
+      // NO projcache mirror → the stamp degrades to 'unavailable' AND the
+      // rotation still COMMITS (an unavailable datum NEVER blocks).
+      assert.equal(result.reasonVerified, 'unavailable', 'the unblock rotation commits with an unavailable reason stamp (no mirror in the hermetic env)')
       assert.equal(result.journal.stale, true, 'the OLD journal is reported stale (memo no actualizado — journal previo)')
       assert.equal(result.journal.timestamp, '2020-01-01T00:00:00.000Z', 'the stale journal\'s recorded timestamp is surfaced')
       // The rotation still COMMITTED (the critical-unblock rule: never delay

@@ -109,6 +109,16 @@ export interface PostErrorEntry {
   messageId?: string
   /** The captured error message. */
   error: string
+  /** fb-25 (b) — the SESSION PROVENANCE of the failed turn (when known): the
+   * session id whose event log carried the turn/end error. The turn-error
+   * capture attaches it from the post's live session at capture time, so the
+   * post-error scan/alert can show "this error belongs to the ARCHIVED
+   * session <id>", never implying the FRESH session failed. Absent (legacy /
+   * non-turn-capture rows) → omitted (R6 — the {ts,postId,error} shape never
+   * changes). */
+  sessionId?: string
+  /** fb-25 (b) — the TURN NUMBER of the failed turn/end event (when known). */
+  turn?: number
   /** W8-c scheduler-visibility: the jobId whose agenda auto-run did not fire
    * (when the row is a scheduler no-fire). */
   jobId?: string
@@ -155,6 +165,8 @@ function parsePostErrorLines(lines: readonly string[]): PostErrorEntry[] {
       postId: entry.postId,
       ...(typeof entry.messageId === 'string' ? { messageId: entry.messageId } : {}),
       error: typeof entry.error === 'string' ? entry.error : '',
+      ...(typeof entry.sessionId === 'string' ? { sessionId: entry.sessionId } : {}),
+      ...(typeof entry.turn === 'number' && Number.isFinite(entry.turn) ? { turn: entry.turn } : {}),
       ...(typeof entry.jobId === 'string' ? { jobId: entry.jobId } : {}),
       ...(typeof entry.reason === 'string' ? { reason: entry.reason } : {})
     })
@@ -442,6 +454,15 @@ export interface HealthFinding {
   error?: string
   /** The grouped row count (post-error / stalled-post / config-preset). */
   count?: number
+  /** fb-25 (b) — the SESSION PROVENANCE of the post-error group's rows[0] (the
+   * row whose `error` text + `count` the alert shows), when the row carried it
+   * (the turn-error capture writes sessionId+turn). The host alert frame uses
+   * it to show "this error is from the ARCHIVED session <id> turn <n>" —
+   * pointing at the FRESH session is impossible once the provenance exists. */
+  sessionId?: string
+  /** fb-25 (b) — the turn number of the post-error group's rows[0] (when the
+   * row carried it). */
+  turn?: number
 }
 
 /** One alert audit line appended to `<stateDir>/health-alerts.jsonl`. */
@@ -750,6 +771,12 @@ export interface HealthSessionEvent {
 /** One catalog post's snapshot inputs for the health safeguards. */
 export interface PostActivityInput {
   postId: string
+  /** fb-25 (b) — the post's LIVE session id at scan time (whose event log
+   * `events` belongs to). The turn-error capture threads it into the
+   * post-error row so the alert carries the SESSION PROVENANCE ("session <id>
+   * turn <n>"). Absent (legacy callers / unknown) → omitted — the capture
+   * row degrades to the legacy {ts,postId,error} shape (R6). */
+  sessionId?: string
   /** True when the post is a retired/removed member — a retired post is never a
    * stale-live or turn-error signal. Absent/false = a live catalog member. */
   retired?: boolean
@@ -1012,6 +1039,16 @@ export interface TurnErrorCapture {
   error: string
   /** The turn/end event ts (ms epoch). */
   ts: number
+  /** fb-25 (b) — the TURN NUMBER of the captured turn/end event (the turn that
+   * errored; when the event data carries it). The provenance the post-error
+   * row/alert shows ("session <id> turn <n>"). */
+  turn?: number
+  /** fb-25 (b) — the SESSION whose event log carried the turn/end error. The
+   * scan itself cannot read it (the harness events carry {turn, reason} only —
+   * dsh-agent-loop lib/index.js:592), so the caller threads it in (the post's
+   * live sessionId at scan time). Absent → omitted (R6 — capture without
+   * provenance degrades to the legacy shape, never breaks). */
+  sessionId?: string
   /** A stable dedupe key for the captured (postId, turn) pair — a turn that
    * already produced a post-error row is never double-captured. */
   key: string
@@ -1027,7 +1064,7 @@ export interface TurnErrorCapture {
  * plugin already reads the live agents' `session.events` (the real session log
  * the harness maintains) in the daemon tick, so the cleanest available
  * observation point is a bounded per-tick tail-scan there. */
-export function scanTurnErrorCaptures(events: readonly HealthSessionEvent[], postId: string): TurnErrorCapture | undefined {
+export function scanTurnErrorCaptures(events: readonly HealthSessionEvent[], postId: string, sessionId?: string): TurnErrorCapture | undefined {
   const tail = events.slice(-TURN_ERROR_CAPTURE_MAX_TAIL)
   for (let i = tail.length - 1; i >= 0; i--) {
     const event = tail[i]
@@ -1062,6 +1099,8 @@ export function scanTurnErrorCaptures(events: readonly HealthSessionEvent[], pos
       postId,
       error: message,
       ts,
+      ...(typeof turn === 'number' && Number.isFinite(turn) ? { turn } : {}),
+      ...(typeof sessionId === 'string' && sessionId !== '' ? { sessionId } : {}),
       key: `${postId}:turn-error:${typeof turn === 'number' ? String(turn) : '?'}:${ts}`
     }
   }
@@ -1910,7 +1949,12 @@ export function scanPostErrorFindings(stateDir: string, nowMs: number, retiredHo
       postId,
       ts: rows.reduce((max, row) => Math.max(max, row.ts), 0),
       error: rows[0].error,
-      count: rows.length
+      count: rows.length,
+      // fb-25 (b): the PROVENANCE of rows[0] (the row whose error text the alert
+      // shows) rides ONLY when the row carried it — additive, the legacy
+      // postId-only grouping/identity never changes (R6).
+      ...(typeof rows[0].sessionId === 'string' && rows[0].sessionId !== '' ? { sessionId: rows[0].sessionId } : {}),
+      ...(typeof rows[0].turn === 'number' && Number.isFinite(rows[0].turn) ? { turn: rows[0].turn } : {})
     })
   }
   return findings
@@ -2886,7 +2930,19 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
   const lines = findings.map((finding) => {
     if (finding.kind === 'post-error') {
       const detail = finding.error !== undefined && finding.error !== '' ? `: ${finding.error}` : ''
-      return `- post-error: ${finding.postId} (${finding.count ?? 1} in window)${detail}`
+      // fb-25 (b): the SESSION PROVENANCE — when the finding's rows[0] carried
+      // sessionId/turn, the frame appends `[session <id> turn <n> (HH:MMZ)]` so
+      // the host sees the error belongs to an ARCHIVED session (never the fresh
+      // one). Legacy rows WITHOUT provenance render the current text (R6).
+      // The time label derives from the finding ts (the group's most-recent row
+      // ts, UTC HH:MM).
+      const provenance: string[] = []
+      if (finding.sessionId !== undefined) provenance.push(`session ${finding.sessionId}`)
+      if (finding.turn !== undefined) provenance.push(`turn ${finding.turn}`)
+      const provenanceLabel = provenance.length === 0
+        ? ''
+        : ` [${provenance.join(' ')} (${new Date(finding.ts).toISOString().slice(11, 16)}Z)]`
+      return `- post-error: ${finding.postId} (${finding.count ?? 1} in window)${detail}${provenanceLabel}`
     }
     if (finding.kind === 'delivery-failed') {
       return `- delivery-failed: ${finding.messageId}`
@@ -3170,14 +3226,24 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         let changed = false
         for (const post of posts) {
           if (post.retired === true) continue
-          const capture = scanTurnErrorCaptures(post.events ?? [], post.postId)
+          const capture = scanTurnErrorCaptures(post.events ?? [], post.postId, post.sessionId)
           if (capture === undefined) continue
           // A turn already captured (and still fresh) is not re-recorded.
           const lastCaptured = captureState[capture.key]
           if (lastCaptured !== undefined && nowMs - lastCaptured < TURN_ERROR_FRESH_WINDOW_MS) continue
           // Only a FRESH error (<= the turn-error window) is recorded now.
           if (nowMs - capture.ts > TURN_ERROR_FRESH_WINDOW_MS) continue
-          await appendPostError(deps.stateDir, { ts: capture.ts, postId: capture.postId, error: capture.error }, nowMs)
+          // fb-25 (b): the row carries the SESSION PROVENANCE (sessionId+turn
+          // when the capture knew them) so the alert names the ARCHIVED session,
+          // never the fresh one — additive (R6: a capture without provenance
+          // writes the legacy {ts,postId,error} row).
+          await appendPostError(deps.stateDir, {
+            ts: capture.ts,
+            postId: capture.postId,
+            error: capture.error,
+            ...(capture.sessionId !== undefined ? { sessionId: capture.sessionId } : {}),
+            ...(capture.turn !== undefined ? { turn: capture.turn } : {})
+          }, nowMs)
           captureState[capture.key] = nowMs
           changed = true
         }

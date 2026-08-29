@@ -994,6 +994,140 @@ export function headRotationJournalStatus(journalText: string, nowMs: number): {
 }
 
 // ---------------------------------------------------------------------------
+// fb-25 (a) — the REASON CROSS-CHECK (QD ALTO, map
+// reports/explore-deep/2026-08-28-fb25-head-rotated-reason-map.md): the reason
+// a head rotation carries to the QD mirror is the CALLER's free text (copied
+// VERBATIM, never recalculated from the archive — map §1) and once a FALSE
+// figure propagates it is internalized by the QH/inspectors AND the host's
+// greeting to the fresh head (map §4 — the m-1110/m-1111 case: ~789k cited for
+// a session that ended COMPLETED at ≈190k). The emit now contrasts the figure
+// the reason cites against the OLD session's REAL usage — the durable
+// `session_projcache.json` row (the token-meter's cross-process mirror, the
+// SAME data the context-threshold monitor reads live) — and stamps the mirror
+// `reasonVerified`. NEVER BLOCKS: any failure/absence → 'unavailable' and the
+// rotation proceeds (the critical-unblock rule; the archive is cosmetic).
+// ---------------------------------------------------------------------------
+
+/** The verification stamp of a rotation reason: 'verified' (the cited figure
+ * matches the old session's projected/used tokens within tolerance),
+ * 'unverified' (a figure EXISTS but does NOT match — the reason cites another
+ * session's numbers or an impossible state), 'unavailable' (no datum: reason
+ * without a figure, absent/unreadable mirror, session not projected, a
+ * degenerate row — conservatively nothing to verify). */
+export type ReasonVerificationStamp = 'verified' | 'unverified' | 'unavailable'
+
+/** The relative tolerance for a 'verified' verdict (the reason figure vs the
+ * old session's real usage — mission guidance: ±10-15%). */
+export const REASON_VERIFY_TOLERANCE = 0.15
+
+/** The tolerantly-parseable token figure of a rotation reason: an optional
+ * `~`, a 1-7 digit number (thousands separators `.`/`,` accepted), an optional
+ * `k`/`K` suffix ("~789k", "789,959", "1.048.576"). Sub-thousand matches
+ * (turn counts, percentages, MB sizes) are noise and filtered out. */
+const REASON_TOKEN_FIGURE_RE = /~?\s*(\d{1,3}(?:[.,]\d{3})+|\d+)\s*([kK])?/g
+
+/** Extract the FIRST token-scale figure (≥1000 after a `k` normalization) a
+ * rotation reason cites — the leading claimed usage figure. Returns undefined
+ * when the reason carries no token-scale number. */
+function extractRotateReasonTokenFigure(reason: string): number | undefined {
+  for (const match of reason.matchAll(REASON_TOKEN_FIGURE_RE)) {
+    const raw = match[1].replace(/[.,]/g, '')
+    let value = Number(raw)
+    if (!Number.isFinite(value)) continue
+    if (match[2] !== undefined) value *= 1000
+    if (value < 1000) continue
+    return value
+  }
+  return undefined
+}
+
+/** The projected/used tokens of one session row in the parsed projcache —
+ * PRIMARY: the monitor's own projected formula on the FINAL `contextPressure`
+ * (max(0, pressureTokens + surfaceTokens − sampledSurfaceTokens) — the number
+ * a context-threshold finding would cite; evidence fb-25 map §6:
+ * 7ab757b3 190,213 = max(0,190180+137931−137898); 6686fc52 ≈ 217,140);
+ * FALLBACK: the token-meter's LAST-turn `cacheReadTokens`
+ * (tokenUsage.last.buckets) — the raw usage mirror; for a completed turn it
+ * converges with the projection (189,952 ≈ 190,213 / 216,832 ≈ 217,140), and
+ * it covers a row whose projection fields are absent. Degenerate (≤0 / absent)
+ * → undefined ('unavailable' — the final row of an ERROR-ended session has the
+ * pressure reset, so no corroborating datum exists). */
+function projectedUsageForSession(projCache: unknown, sessionId: string): number | undefined {
+  const tables = (projCache as { tables?: { sessions?: Record<string, unknown> } } | undefined)?.tables
+  const sessions = tables?.sessions
+  if (sessions === undefined || typeof sessions !== 'object') return undefined
+  let row: unknown = (sessions as Record<string, unknown>)[sessionId]
+  if (row === undefined) {
+    // Tolerant fallback: a key CONTAINING the session id (a prefix/short form).
+    for (const [key, value] of Object.entries(sessions)) {
+      if (key.includes(sessionId)) {
+        row = value
+        break
+      }
+    }
+  }
+  if (row === undefined || typeof row !== 'object') return undefined
+  const rows = (row as { rows?: Record<string, unknown> }).rows
+  if (rows === undefined || typeof rows !== 'object') return undefined
+  const cpVal = (rows.contextPressure as { val?: Record<string, unknown> } | undefined)?.val
+  if (cpVal !== undefined && typeof cpVal === 'object') {
+    const pressure = finiteNumber(cpVal.pressureTokens)
+    const surface = finiteNumber(cpVal.surfaceTokens)
+    const sampled = finiteNumber(cpVal.sampledSurfaceTokens)
+    if (pressure !== undefined && surface !== undefined && sampled !== undefined) {
+      return Math.max(0, pressure + surface - sampled)
+    }
+  }
+  const buckets = (rows.tokenUsage as { val?: { last?: { buckets?: Record<string, unknown> } } } | undefined)?.val?.last?.buckets
+  const cacheRead = buckets === undefined ? undefined : finiteNumber(buckets.cacheReadTokens)
+  if (cacheRead !== undefined) return cacheRead
+  return undefined
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/** fb-25 (a) — resolve the DURABLE session-projection mirror path
+ * (`<stateHome>/storages/session_projcache.json`) the SAME way the web-UI
+ * sleep-cleanup wiring resolves it (:2730 — persistence.root sessions root →
+ * state home → storages). Exported so the tool wiring and the tests share ONE
+ * resolution (no tested/production drift). */
+export function resolveSessionProjCachePath(stateDir: string, persistenceRoot?: string): string {
+  const sessionsRoot = typeof persistenceRoot === 'string' && persistenceRoot !== ''
+    ? persistenceRoot
+    : path.join(stateDir, '..', 'sessions')
+  return path.join(path.dirname(sessionsRoot), 'storages', 'session_projcache.json')
+}
+
+/** fb-25 (a) — PURE cross-check of a rotation reason against the OLD session's
+ * real usage (PURE = never throws; EVERY failure/absence degrades to
+ * 'unavailable' — the rotate NEVER blocks on the stamp, map §1 critical-unblock
+ * rule). A reason with NO figure, a missing/unreadable/malformed mirror
+ * (`projCachePath` absent or unreadable), an unprojected session row, or a
+ * degenerate (≤0) usage datum → 'unavailable'; a figure matching the old
+ * session's projected/used tokens within ±REASON_VERIFY_TOLERANCE → 'verified';
+ * any other figure (a different session's numbers, an impossible state) →
+ * 'unverified'. */
+export function verifyRotateReason(reason: unknown, oldSessionId: string, projCachePath?: string): ReasonVerificationStamp {
+  if (typeof reason !== 'string' || reason.trim() === '') return 'unavailable'
+  if (typeof oldSessionId !== 'string' || oldSessionId === '') return 'unavailable'
+  if (typeof projCachePath !== 'string' || projCachePath === '') return 'unavailable'
+  let reference: number | undefined
+  try {
+    const parsed = JSON.parse(readFileSync(projCachePath, 'utf8')) as unknown
+    reference = projectedUsageForSession(parsed, oldSessionId)
+  } catch {
+    return 'unavailable'
+  }
+  if (!(reference !== undefined && reference > 0)) return 'unavailable'
+  const figure = extractRotateReasonTokenFigure(reason)
+  if (figure === undefined) return 'unavailable'
+  const ratio = Math.abs(figure - reference) / reference
+  return ratio <= REASON_VERIFY_TOLERANCE ? 'verified' : 'unverified'
+}
+
+// ---------------------------------------------------------------------------
 // W1 (spec 004 §5.7 + ROADMAP W1 — "Runtime + jobs + UI panel"): the runtime
 // calendar + scheduler. The PURE persistence + cron half is exported (like the
 // presence helpers) so the dispatch/scheduler tests exercise the SAME helpers
@@ -8946,12 +9080,15 @@ export function applyInvoke(ctx: Context, config: Config) {
               stale: { type: 'boolean', required: true }
             }
           },
-          reason: { type: 'string' }
+          reason: { type: 'string' },
+          // fb-25 (a): the reason CROSS-CHECK stamp ('verified' | 'unverified' |
+          // 'unavailable') — the reason figure vs the OLD session's real usage.
+          reasonVerified: { type: 'string' }
         }
       },
-      render: (_args, value) => [{ type: 'text', text: `rotated ${value.postId}: ${value.previousSessionId} → ${value.sessionId} (archived ${value.archived}); journal ${value.journal.path}${value.journal.stale ? ' STALE — memo no actualizado, journal previo' : ' (fresh)'}${value.reason !== undefined ? `; reason: ${value.reason}` : ''}` } as const]
+      render: (_args, value) => [{ type: 'text', text: `rotated ${value.postId}: ${value.previousSessionId} → ${value.sessionId} (archived ${value.archived}); journal ${value.journal.path}${value.journal.stale ? ' STALE — memo no actualizado, journal previo' : ' (fresh)'}${value.reason !== undefined ? `; reason: ${value.reason}` : ''}${value.reasonVerified !== undefined ? `; reason verified: ${value.reasonVerified}` : ''}` } as const]
     },
-    async execute(args, exec): Promise<{ postId: string; sessionId: string; previousSessionId: string; archived: boolean; journal: { path: string; timestamp?: string; stale: boolean }; reason?: string }> {
+    async execute(args, exec): Promise<{ postId: string; sessionId: string; previousSessionId: string; archived: boolean; journal: { path: string; timestamp?: string; stale: boolean }; reason?: string; reasonVerified: ReasonVerificationStamp }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_head_rotate requires a calling agent (exec.agent was undefined)')
       // ACL (map §3): HOST-plane — only the Asistente itself (no registered
@@ -9003,6 +9140,17 @@ export function applyInvoke(ctx: Context, config: Config) {
       const title = coordinator.sessionTitle || HEAD_DEFAULT_SESSION_TITLE
       const seed = buildHeadRotationSeed(journal, { title, now: Date.now() })
       const fresh = await freshMintHead(entry, dept, { seed, source: 'dept_head_rotate' })
+      // fb-25 (a): the reason CROSS-CHECK — the figure the caller's reason cites
+      // is contrasted against the OLD session's REAL usage (the durable
+      // session_projcache.json row of the token-meter, resolved like the web-UI
+      // cleanup wiring). NEVER BLOCKS: any failure/absence → 'unavailable' and
+      // the rotation proceeds (critical-unblock rule — the archive/mirror is
+      // cosmetic and never a requirement); a missing reason → 'unavailable'
+      // (nothing to verify). The stamp rides the mirror AND the tool result so
+      // the QH/inspectors and the host see an unverified figure as such.
+      const persistence = ctx.get('sessionPersistence') as { root?: string } | undefined
+      const projCachePath = resolveSessionProjCachePath(stateDir, persistence?.root)
+      const reasonVerified = verifyRotateReason(args.reason, sessionId, projCachePath)
       // QD mirror (spec 007 §6.3, D-Q3 — the host-rotated pattern): a head
       // rotation is inspected at 100%. Non-fatal (the emitter wraps itself).
       await maybeEmitQualityInspectDirective({
@@ -9011,15 +9159,17 @@ export function applyInvoke(ctx: Context, config: Config) {
         oldSessionId: sessionId,
         newSessionId: String(fresh.id),
         archiveOk: archived,
+        reasonVerified,
         ...(args.reason !== undefined ? { reason: args.reason } : {})
       })
-      ctx.logger.info(`[deepartments] dept_head_rotate: "${args.postId}" rotated ${sessionId} → ${String(fresh.id)} (${args.reason ?? 'no reason given'}); journal ${journalStatus.stale ? 'STALE — memo no actualizado, journal previo' : 'fresh'} seeded; fresh head live BOOT-QUIET (first turn on the next message/daemon wake)`)
+      ctx.logger.info(`[deepartments] dept_head_rotate: "${args.postId}" rotated ${sessionId} → ${String(fresh.id)} (${args.reason ?? 'no reason given'}, reason verified ${reasonVerified}); journal ${journalStatus.stale ? 'STALE — memo no actualizado, journal previo' : 'fresh'} seeded; fresh head live BOOT-QUIET (first turn on the next message/daemon wake)`)
       return {
         postId: args.postId,
         sessionId: String(fresh.id),
         previousSessionId: sessionId,
         archived,
         journal: { path: journalPathFor(args.postId), ...(journalStatus.timestamp !== undefined ? { timestamp: journalStatus.timestamp } : {}), stale: journalStatus.stale },
+        reasonVerified,
         ...(args.reason !== undefined ? { reason: args.reason } : {})
       }
     }
@@ -9287,6 +9437,10 @@ export function applyInvoke(ctx: Context, config: Config) {
         const live = agents?.get(entry.sessionId)
         out.push({
           postId,
+          // fb-25 (b): the post's LIVE session id — the SESSION PROVENANCE the
+          // W8-c turn-error capture attaches to a post-error row (the alert
+          // then names the ARCHIVED session the error belongs to).
+          sessionId: entry.sessionId,
           retired: entry.retired === true,
           // Bug B: the LIVE agent's status — a genuinely-running turn is NOT
           // stalled (a long in-flight model call is healthy progress). The

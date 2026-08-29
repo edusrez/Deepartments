@@ -183,7 +183,7 @@ export type QualityInspectDirectiveSurface =
   // 100%. The QH's OWN rotation is NOT excluded (the 'head-slept' anti-loop
   // exclusion is sleep-specific — a rotation is a one-shot instruction, it
   // cannot loop).
-  | { kind: 'head-rotated'; headPostId: string; oldSessionId: string; newSessionId: string; archiveOk?: boolean; reason?: string }
+  | { kind: 'head-rotated'; headPostId: string; oldSessionId: string; newSessionId: string; archiveOk?: boolean; reason?: string; reasonVerified?: 'verified' | 'unverified' | 'unavailable' }
   | { kind: 'post-error'; postId: string; messageId: string; error: string }
 
 /** The human-readable directive frame for a surface (pure — testable). */
@@ -215,8 +215,21 @@ export function qualityInspectDirectiveText(surface: QualityInspectDirectiveSurf
       return `Quality inspect: head slept (post ${surface.headPostId}, session ${surface.sessionId}, sleepEpoch ${surface.sleepEpoch})`
     case 'host-rotated':
       return `Quality inspect: host rotated (old session ${surface.oldSessionId} → new session ${surface.newSessionId}, host ${surface.oldHostId} → ${surface.newHostId}, sleepEpoch ${surface.sleepEpoch}, archiveOk ${surface.archiveOk ?? false})`
-    case 'head-rotated':
-      return `Quality inspect: head rotated (post ${surface.headPostId}, old session ${surface.oldSessionId} → new session ${surface.newSessionId}, archiveOk ${surface.archiveOk ?? false}${surface.reason === undefined ? '' : `, reason ${surface.reason}`})`
+    case 'head-rotated': {
+      // fb-25 (a): the reason CROSS-CHECK stamp — `reasonVerified` (computed in
+      // the emit against the old session's durable token-meter projection) is a
+      // CLEAR appendix so the QH/inspector never takes an unverified figure for
+      // the session's real usage. Absent (legacy surface/emitter) → NO appendix
+      // (R6 — the existing frame never changes).
+      const verifyLabel = surface.reasonVerified === undefined
+        ? ''
+        : surface.reasonVerified === 'verified'
+          ? ' [reason verified]'
+          : surface.reasonVerified === 'unverified'
+            ? ' [reason unverified vs archive]'
+            : ' [reason unverifiable]'
+      return `Quality inspect: head rotated (post ${surface.headPostId}, old session ${surface.oldSessionId} → new session ${surface.newSessionId}, archiveOk ${surface.archiveOk ?? false}${surface.reason === undefined ? '' : `, reason ${surface.reason}`}${verifyLabel})`
+    }
     case 'post-error':
       return `Quality inspect: post-error (post ${surface.postId}, message ${surface.messageId}, error ${surface.error})`
   }

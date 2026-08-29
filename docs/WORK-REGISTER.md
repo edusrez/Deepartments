@@ -7,6 +7,7 @@
 > cerrado, decisiones pendientes del owner, capacidad, backlog y sinergias.
 > **LANDING 2026-08-28 (PR-1, docs/ledger pasada C3 del QD + ANEXO owner 8
 > ítems)** — PENDIENTE-OWNER al día, adicionales QD/owner aterrizados.
+> **LANDING 2026-08-28 (2ª pasada)** — riesgo condicional RAG-stable (§3) + filas backlog rag_index/tsc-drift + lección fb-20 aterrizados.
 
 ## 1. IPD — cola activa
 
@@ -63,7 +64,17 @@ M3 (f159eda). Fase modular 0.2.x (siguiente, solo BACKLOG/owner — §3/§5).
   DECIDIDO 08-28, **PENDIENTE DE EJECUCIÓN**: publish dsh-deepartments 0.1.x en
   la próxima ventana release (owner delega al host; **con la feature
   pacing/coste** — coordinar con la ventana) · stable 3080 upgrade → NO TOCAR
-  (owner 08-28) · **METR → nada** (cubierto por el tech-watch del RD, sin
+  (owner 08-28) · **RIESGO CONDICIONAL RAG-STABLE (decisión (b) aceptada
+  2026-08-28)** — el perfil ESTABLE /opt/dsh/.dsh monta el plugin
+  dsh-tool-web-enhanced ANTIGUO (pre-denylist/excludePaths); RagEngine.
+  ensureIndex hace AUTO-INDEX en cada boot (única ruta de ingesta, clase fb-15:
+  claves API vivas en claro en el índice). Si el stable arranca, un re-index no
+  intencionado puede re-ingerir secretos. **Decisión: RIESGO ACEPTADO +
+  documentado** (el stable NO se re-bootea; vigilancia), con la guarda
+  **SENTINEL-PENDIENTE**: cuando/si se toque /opt/dsh/.dsh → (i) desactivar el
+  auto-index del RAG (config/sentinel) O (ii) actualizar su plugin a
+  0.4.0-rc.1+denylist ANTES del primer boot. NO se toca /opt/dsh/.dsh en esta
+  misión · **METR → nada** (cubierto por el tech-watch del RD, sin
   acción IPD) · tool goal → RETIRADO 2026-08-28 (fila fuera del preset durable
   dev; efecto runtime en ventana de deploy; nota R6 en preset) · keys Go
   adicionales (PENDIENTE-OWNER compra: RD 7-8 keys flash = $70-80/mes, NO
@@ -108,7 +119,23 @@ M3 (f159eda). Fase modular 0.2.x (siguiente, solo BACKLOG/owner — §3/§5).
   @Remote, telemetría del adaptador DeepSeek, trap ERESOLVE con peers
   ensanchados `|| ^0.1.2-0` antes de mover el host) · dshmarket dev actualizado
   **1.33.0 → 1.35.0** (08-28; dev current, exact pin; stable sigue NO-TOCAR) ·
-  B6/B7 (revisar obsoletas con A+B).
+  B6/B7 (revisar obsoletas con A+B) · **rag_index 300s timeout
+  (dsh-tool-web-enhanced)**: la tool `{}`,`{timeoutMs:300000}` indexa TODAS las
+  databases; revisar el cap / configurabilidad — ref
+  reports/explore-deep/2026-08-28-rag-secret-exclusion-map.md ·
+  **tsc-drift dsh-tool-web-enhanced**: drift build src/lib pre-existente
+  (WebSearchArgs/Config — revisar en la fase E1/0.2.x; ref
+  reports/builder/2026-08-28-rag-rebuild-unique-fix.md:159) · **lección fb-20
+  (proceso, NO código)**: builders concurrentes en la MISMA zona de edits
+  colisionan (caso b29/b30 dshd-health) → serializar por zona o asignar zonas
+  disjuntas — anotado 2026-08-28. · **fb-27 (QD, ALTO/mejora, 2026-08-29)**:
+  sin notificación automática del turn/end-error al head ni re-despacho — caso
+  real builder-4: stream-idle 300s + 4× 502 ETIMEDOUT → 502 21:50:14Z tras
+  completar TODO el trabajo; el cierre quedó 8h14m pendiente hasta un wake
+  manual. Candidato a implementar: notificar turn/end-error al head con
+  sessionId+turn — HABILITADO por la proveniencia (b) del fb-25 (recién
+  aterrizada); el re-despacho queda como consideración de diseño; verificación
+  del QD al aterrizar — ref dshd-health (dominio runtime).
 
 ## 6. SINERGIA
 
