@@ -1,0 +1,15 @@
+# dshd-gui configuration layer — top-level YAML array of patch entries.
+# P1 (MODULARIZACIÓN, 2026-08-29): the package is now ALSO a real Cordis PLUGIN
+# (name/inject/apply in lib/index.js) providing the `deepartments.gui` service
+# (the /deepartments channel the bundle mounts inline; the closure-bound
+# DeepartmentsEndpointDeps — buildAgentRows/pickLiveHostEntry + the live maps —
+# inject via the FASE 2.6 binder `gui` bucket, DECOUPLING).
+# The row is intentionally MINIMAL — the endpoint wiring is NOT config: it is
+# closure-bound to the bundle's applyInvoke state and arrives via the binder.
+# The client surface (`dsh.client` metadata) is already owned by this package
+# (D5); the `deepartments-client` identity/row stays metadata-driven (R6).
+# Plain scalars only — no !!js outside the runtime config engine.
+- insert:
+    - id: dshd-gui
+      name: dshd-gui
+      config: {}

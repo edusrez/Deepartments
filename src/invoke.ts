@@ -439,6 +439,18 @@ import type {
   PostErrorEntry,
   SessionContextInput
 } from './core/health.js'
+// P1 (MODULARIZACIÓN, 2026-08-29): the six plugin packages now export their
+// Cordis plugin surface (name/inject/apply) from their MAIN entries (the
+// dshd-core/dshd-webfetch pattern). The drop-in superset star-exports below
+// (lib/invoke.js stays a drop-in superset for tests/consumers) would therefore
+// collide on those THREE names — TS2308 — so they are re-exported EXPLICITLY
+// here (an explicit declaration takes precedence over every star export and
+// resolves the ambiguity). These exports are PLUGIN-METADATA NOISE: the bundle
+// plugin identity comes from src/index.ts (name='deepartments', apply =
+// applyInvoke wrapper); nothing imports name/inject/apply from lib/invoke.js
+// (verified). This is a MODULE-SCOPE superset fix — applyInvoke is untouched
+// (the DECOUPLING hito owns the rewire).
+export { name, inject, apply } from './core/health.js'
 export * from './core/health.js'
 // dshd-quality phase: the QD (spec 007) probability gate + config-resolution +
 // QUALITY INSPECT directive text live in the dshd-quality package

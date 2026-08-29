@@ -15,6 +15,10 @@
 // dshd-feedback: the BUNDLE wires the tools + the daemon on top. dshd-jobs is a
 // LIBRARY, NOT a Cordis plugin: it does not compose a service nor define a tool
 // (that is a later split phase).
+// [P1 — 2026-08-29]: that "later split phase" starts HERE: the package now ALSO
+// exposes a thin Cordis plugin surface (name/inject/apply, bottom of this file)
+// providing the `deepartments.jobs` service. The bundle's inline scheduler stays
+// (R6) until the DECOUPLING hito rewires it to the composed service.
 //
 // SPLIT BOUNDARY (what MOVED vs what STAYED in the bundle — documented so a
 // future reader knows the seam):
@@ -594,4 +598,109 @@ export async function runAgendaSchedulerTick(deps: AgendaSchedulerDeps): Promise
   } catch (error: unknown) {
     deps.logger?.warn(`[deepartments] scheduler tick failed: ${error instanceof Error ? error.message : String(error)}`)
   }
+}
+
+// ---------------------------------------------------------------------------
+// P1 (MODULARIZACIÓN, 2026-08-29) — the dshd-jobs Cordis PLUGIN surface.
+// Thin name/inject/apply (the dshd-core/dshd-webfetch pattern): the package
+// now ALSO composes as a real plugin row (cordis.patch.yml) and provides
+// `deepartments.jobs` — the scheduler tick the bundle wires INLINE today
+// (invoke.ts `runAgendaSchedulerTick` inside the agenda daemon). The tick is
+// LAZY (runs on FIRST service use, never at apply time — an apply is
+// side-effect free); deps are INJECTED via the FASE 2.6 seam, never imported
+// from the bundle:
+//   - departments / stateDir ← `ctx.get('deepartments.org')` (the SHARED
+//     source; `headForDepartment` derives the configured coordinator postId),
+//   - `repoRoot` ← the `jobs.repoRoot` bucket, then the EXISTING
+//     `binder.wakepack.repoRoot` bucket (registered by the composed bundle),
+//   - the closure-bound hooks (runJob / notifyHead / departmentForEntry /
+//     departmentForJob / onAutoRunSkip) ← the `jobs` binder bucket (the
+//     DECOUPLING bundle registers its live closures there).
+// A required closure missing at USE FAILS LOUD (R1), never a silently-unbound
+// tick. The cron/calendar machinery exports (the drop-in bridge superset) stay
+// intact. Nothing is removed (R6).
+//
+// NO export default (pitfall 0001 — breaks `inject`).
+import type { Context } from '@deepseek-ai/cordis'
+
+/** The FASE 2.6 binder bucket for the jobs service (STRUCTURAL — read from
+ * `ctx.get('deepartments.binder')` widened; filled by the DECOUPLING bundle). */
+export interface JobsBinderDeps {
+  /** The shared dept_job_run engine: fires ONE department job under the head
+   * (idempotent; false = skipped). REQUIRED at use. */
+  runJob?: AgendaSchedulerDeps['runJob']
+  /** Deliver a simple agenda NOTICE to a head (never throws). REQUIRED at use. */
+  notifyHead?: AgendaSchedulerDeps['notifyHead']
+  /** Which department OWNS a calendar entry (its `createdBy` post). REQUIRED at
+   * use (the tick contract). */
+  departmentForEntry?: AgendaSchedulerDeps['departmentForEntry']
+  /** Which department owns a jobId (scans the jobDirs). REQUIRED at use (the
+   * tick contract). */
+  departmentForJob?: AgendaSchedulerDeps['departmentForJob']
+  /** W8-c scheduler-visibility: the auto-run no-fire sink (optional — the tick
+   * drops the finding when absent). */
+  onAutoRunSkip?: AgendaSchedulerDeps['onAutoRunSkip']
+  /** The bundle's repoRoot (registers the same value the `wakepack` bucket
+   * carries; absent → the wakepack bucket). */
+  repoRoot?: string
+}
+
+/** The `deepartments.jobs` service surface — the scheduler tick the bundle
+ * wires inline today. */
+export interface JobsSurface {
+  /** ONE scheduler tick bound to the shared org config + the binder-injected
+   * closures: (a) fires due cron jobs, (b) fires due calendar entries. NEVER
+   * throws (every internal failure is a warn — the tick contract); a MISSING
+   * INJECTED DEP at use FAILS LOUD (R1). */
+  runSchedulerTick(opts?: { now?: () => number }): Promise<void>
+}
+
+/** The dshd-jobs plugin config (minimal — departments/stateDir/repoRoot
+ * resolve from the shared sources; nothing is mirrored here). */
+export interface JobsConfig {
+  /** Optional default department list (absent → `deepartments.org.departments`). */
+  departments?: JobsDepartment[]
+}
+
+export const name = 'dshd-jobs'
+// Resolve everything via `ctx.get` at USE (inject EMPTY) so the plugin stays
+// loadable in minimal compositions (the dshd-core discipline).
+export const inject: string[] = []
+
+export function apply(ctx: Context, config: JobsConfig = {}) {
+  // Derived service: the tick itself is the surface; deps resolve per run.
+  ctx.provide('deepartments.jobs', {
+    runSchedulerTick: async (opts: { now?: () => number } = {}): Promise<void> => {
+      const org = ctx.get('deepartments.org') as { stateDir?: string; org?: { departments?: JobsDepartment[] } } | undefined
+      if (org?.stateDir === undefined) {
+        throw new Error('[deepartments] jobs scheduler tick: ctx.get("deepartments.org") is undefined — dshd-core is not composed (register the core plugin + provide deepartments.org)')
+      }
+      const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
+      const all = binder?.get() ?? {}
+      const bound = all as JobsBinderDeps & { wakepack?: { repoRoot?: string } }
+      const required: Array<keyof JobsBinderDeps> = ['runJob', 'notifyHead', 'departmentForEntry', 'departmentForJob']
+      const missing = required.filter((key) => bound[key] === undefined)
+      if (missing.length > 0) {
+        throw new Error(`[deepartments] jobs scheduler tick: required binder bucket dep(s) missing: ${missing.join(', ')} — the DECOUPLING bundle must call ctx.get('deepartments.binder').register({ jobs: { runJob, notifyHead, ... } })`)
+      }
+      const repoRoot = bound.repoRoot ?? bound.wakepack?.repoRoot
+      if (repoRoot === undefined) {
+        throw new Error('[deepartments] jobs scheduler tick: no repoRoot — the bundle must register ctx.get("deepartments.binder").register({ wakepack: { repoRoot } }) (FASE 2.6-C, composed today) or the jobs bucket')
+      }
+      await runAgendaSchedulerTick({
+        now: opts.now ?? (() => Date.now()),
+        departments: config.departments ?? org.org?.departments ?? [],
+        repoRoot,
+        calendarStateDir: org.stateDir,
+        jobRunsStateDir: org.stateDir,
+        headForDepartment: (department) => department.coordinator?.postId,
+        runJob: bound.runJob!,
+        notifyHead: bound.notifyHead!,
+        departmentForEntry: bound.departmentForEntry!,
+        departmentForJob: bound.departmentForJob!,
+        onAutoRunSkip: bound.onAutoRunSkip,
+        logger: ctx.logger
+      })
+    }
+  })
 }

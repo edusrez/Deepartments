@@ -1,0 +1,18 @@
+# dshd-health configuration layer — top-level YAML array of patch entries.
+# P1 (MODULARIZACIÓN, 2026-08-29): the package is now ALSO a real Cordis PLUGIN
+# (name/inject/apply in lib/index.js) providing the `deepartments.health` service
+# (the system-health daemon tick the bundle wires inline; the closure-bound scan
+# inputs inject via the FASE 2.6 binder `health` bucket — DECOUPLING — while the
+# ALERT delivery resolves from the EXISTING composed buckets
+# wakepack.messagesStoreReady + deliver.deliverHost, so the alert path is
+# functional when composed).
+# The row is intentionally MINIMAL — the org stateDir resolves from
+# `deepartments.org` (one truth); the W8-c `health` knobs are code-defaulted
+# (absent keys → the same defaults the bundle falls back to); the `health` keys
+# may be set HERE when a deployment wants per-safeguard knobs WITHOUT touching
+# the deepartments row (still one runtime value via this row — no mirror).
+# Plain scalars only — no !!js outside the runtime config engine.
+- insert:
+    - id: dshd-health
+      name: dshd-health
+      config: {}

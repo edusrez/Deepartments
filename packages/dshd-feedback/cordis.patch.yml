@@ -1,0 +1,12 @@
+# dshd-feedback configuration layer — top-level YAML array of patch entries.
+# P1 (MODULARIZACIÓN, 2026-08-29): the package is now ALSO a real Cordis PLUGIN
+# (name/inject/apply in lib/index.js) providing the `deepartments.feedback`
+# service (the opened FeedbackStore the bundle used to construct inline). The
+# row below is intentionally MINIMAL — the org stateDir resolves from the
+# dshd-core shared source (`deepartments.org`), never mirrored here (one truth,
+# the dump contract: postsRetention/pacing/quality stay core/bundle-only).
+# Plain scalars only — no !!js outside the runtime config engine.
+- insert:
+    - id: dshd-feedback
+      name: dshd-feedback
+      config: {}

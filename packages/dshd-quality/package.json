@@ -1,7 +1,7 @@
 {
   "name": "dshd-quality",
   "version": "0.1.0-rc.1",
-  "description": "Deepartments Quality-Department (QD, spec 007) probability gate (the dshd-quality phase of the modular Cordis split): the PURE QD dice — QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY (D-Q2 worker-retire sample 0.25), the QUALITY_INSPECT_ENV_VAR env override (numeric [0,1], worker/QH probability path only), the structural 100% head/host mandate (D-Q3) with the quality-head anti-loop exclusion (D-Q2 dice for the QH's own sleep), resolveQualityWorkerInspectProbability config resolution, and the QUALITY INSPECT directive surface + text — extracted verbatim from the dsh-deepartments bundle (extraction map 2026-08-27-health-quality-extraction-map.md §2). A PURE LIBRARY package (NO cordis plugin, NO tool, NO patch): the bundle consumes it through the drop-in bridge src/core/quality.ts; the ONLY impurity is the process.env read inside the internal parseQualityInspectEnvOverride. NO dependencies (leaf package — the gate is pure: Math + process.env only). The directive EMITTER (maybeEmitQualityInspectDirective — the store.append + busDeliverToPost closure), the per-apply config resolution and every gate call-site STAY in the bundle and call the gate through the bridge.",
+  "description": "Deepartments Quality-Department (QD, spec 007) probability gate (the dshd-quality phase of the modular Cordis split): the PURE QD dice — QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY (D-Q2 worker-retire sample 0.25), the QUALITY_INSPECT_ENV_VAR env override (numeric [0,1], worker/QH probability path only), the structural 100% head/host mandate (D-Q3) with the quality-head anti-loop exclusion (D-Q2 dice for the QH's own sleep), resolveQualityWorkerInspectProbability config resolution, and the QUALITY INSPECT directive surface + text — extracted verbatim from the dsh-deepartments bundle (extraction map 2026-08-27-health-quality-extraction-map.md §2). P1 (modularization, 2026-08-29): the package is NOW ALSO a Cordis PLUGIN (thin name/inject/apply + its own cordis.patch.yml row) providing the `deepartments.quality` service — the gate + the directive EMITTER (deps injected via the FASE 2.6 binder: deliver.deliverPost + wakepack.messagesStoreReady, composed today); the bundle's own inline emitter STAYS (R6) until the DECOUPLING hito. NO dependencies (leaf package — the gate is pure: Math + process.env only).",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -10,12 +10,22 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib"
+    "lib",
+    "cordis.patch.yml"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "scripts": {
     "build": "tsc"
   },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
   "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
   },

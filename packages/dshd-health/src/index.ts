@@ -1,8 +1,11 @@
 // dshd-health — the Deepartments system-health DOMAIN (the dshd-health phase
 // of the modular Cordis split). A PURE LIBRARY package (NO cordis plugin, NO
-// tool, NO patch — the owner-confirmed MODO LIB, precedent 0f792cd): it owns
-// the W6 system-health machinery extracted VERBATIM from the bundle
-// (src/invoke.ts, extraction map
+// tool, NO patch — the owner-confirmed MODO LIB, precedent 0f792cd — superseded
+// for the PLUGIN surface by P1, 2026-08-29: the bottom of this file adds a thin
+// name/inject/apply + the `deepartments.health` service; the scan/tick surface
+// stays MODO LIB, the daemon EFFECT is now ALSO exposed with binder-injected
+// deps): it owns the W6 system-health machinery extracted VERBATIM from the
+// bundle (src/invoke.ts, extraction map
 // 2026-08-27-health-quality-extraction-map.md):
 //   - the POST-ERROR capture (readPostErrorsFile/appendPostError, C9 window)
 //     + the durable UNUSABLE-SESSION markers (B5, all 5 symbols),
@@ -3521,4 +3524,172 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
   } catch (error: unknown) {
     deps.logger?.warn(`[deepartments] system-health tick failed: ${error instanceof Error ? error.message : String(error)}`)
   }
+}
+
+// ---------------------------------------------------------------------------
+// P1 (MODULARIZACIÓN, 2026-08-29) — the dshd-health Cordis PLUGIN surface.
+// Thin name/inject/apply (the dshd-core/dshd-webfetch pattern): the package
+// now ALSO composes as a real plugin row (cordis.patch.yml) and provides
+// `deepartments.health` — the system-health daemon TICK the bundle wires
+// INLINE today (invoke.ts: the setInterval + the ONE per-daemon
+// createDeliveryRowsTailReader + the notifyHost ALERT closure). The service is
+// LAZY (the tick runs on FIRST service use, never at apply time — an apply is
+// side-effect free); deps are INJECTED via the FASE 2.6 seam, never imported
+// from the bundle:
+//   - stateDir ← `ctx.get('deepartments.org')` (the SHARED CONFIG SOURCE),
+//   - hosts ← `ctx.get('deepartments.catalog')` (the shared registry),
+//   - notifyHost ← the `health.notifyHost` bucket (DECOUPLING) OR the EXISTING
+//     composed buckets (`binder.wakepack.messagesStoreReady` + the
+//     `binder.deliver.deliverHost` closure — the SAME closures the bundle's own
+//     daemon uses; the interrupt:true W9-b ALERT contract is mirrored), so the
+//     alert path is FUNCTIONAL today without the bundle's literals,
+//   - bootId / config / the closure-bound scan inputs (posts / hostWaits /
+//     sessionContexts / hostRunning / poolerStatePath / workRegisterPath /
+//     qiDirectiveRate) ← the `health` binder bucket (DECOUPLING); absent →
+//     the tick's own no-op/degrade contracts (a missing `health` bucket makes
+//     the W8-c/M1/M-A scans no-ops, NEVER false alerts).
+// A required dep missing at USE FAILS LOUD (R1), never a silently-unbound tick
+// (the explicit `runDaemonTick(deps?)` arg merges OVER the binder, so a
+// DECOUPLING caller can also inject the closure-bound inputs per call). The
+// scan/tick exports (the drop-in bridge superset) stay intact. Nothing is
+// removed (R6).
+//
+// NO export default (pitfall 0001 — breaks `inject`).
+import { randomUUID } from 'node:crypto'
+import type { Context } from '@deepseek-ai/cordis'
+
+/** A structurally-typed message-record append input (the MessagesStore surface
+ * the daemon alert path needs — the package never imports dshd-core for it). */
+export interface HealthStoreAppendInput {
+  from: string
+  to: string[]
+  text: string
+  kind: string
+}
+
+/** A minimal structural view of the appended record. */
+export interface HealthStoreAppendResult {
+  id: string
+}
+
+/** The FASE 2.6 binder bucket for the health service (STRUCTURAL — read from
+ * `ctx.get('deepartments.binder')` widened; filled by the DECOUPLING bundle
+ * with the closure-bound scan inputs that only applyInvoke state can build). */
+export interface HealthBinderDeps {
+  /** The bundle's per-process boot id (invoke.ts `healthBootId`). Absent → a
+   * per-build randomUUID (the heartbeat bootId is informational). */
+  bootId?: string
+  /** The bundle's plugin Config `health` slice (the W8-c per-safeguard knobs
+   * + `health.enabled`/`intervalMs`). Absent → the code defaults. */
+  config?: HealthConfigLike
+  /** W8-c — the catalog-post inputs (activity + inbox) for the turn-error +
+   * stale-live safeguards. Absent → the safeguards are no-ops (tick contract). */
+  posts?: HealthDaemonDeps['posts']
+  /** W8-d PART B — the host-sender-aware inputs for the conditional system-wait
+   * scan. Absent → the WAIT scan is a no-op. */
+  hostWaits?: HealthDaemonDeps['hostWaits']
+  /** M-A — the session-context-pressure rows for the context-threshold
+   * watchdog. Absent → the scan is a no-op. */
+  sessionContexts?: HealthDaemonDeps['sessionContexts']
+  /** M4 — the host's live running signal. Absent → the system-idle scan is a
+   * no-op (unknown liveness never fabricates an alert). */
+  hostRunning?: HealthDaemonDeps['hostRunning']
+  /** The framed ALERT delivery (the bundle's own closure). Absent → the
+   * service builds one from the EXISTING composed buckets (wakepack
+   * messagesStoreReady + deliver.deliverHost, interrupt:true). */
+  notifyHost?: HealthDaemonDeps['notifyHost']
+  /** M1 — the pooler state file path. Absent → the pooler-capacity scan is a
+   * no-op. */
+  poolerStatePath?: string
+  /** PACING — the repo WORK-REGISTER path. Absent → the notice omits the
+   * deferred count. */
+  workRegisterPath?: string
+  /** M1 — the shared worker-inspect dice probability p. Absent → 0.25 (the
+   * code default). */
+  qiDirectiveRate?: number
+}
+
+/** The `deepartments.health` service surface — the daemon tick the bundle
+ * wires inline today. */
+export interface HealthSurface {
+  /** Run ONE system-health daemon tick with the composed deps. The explicit
+   * `deps` arg merges OVER the binder bucket (a DECOUPLING daemon injects the
+   * closure-bound inputs per call). NEVER throws (the tick contract); a MISSING
+   * INJECTED DEP at use FAILS LOUD (R1). */
+  runDaemonTick(deps?: Partial<HealthDaemonDeps>): Promise<void>
+}
+
+/** The dshd-health plugin config (minimal — stateDir/org resolve from the
+ * shared `deepartments.org` source; only the W8-c `health` knobs mirror the
+ * bundle's row when a deployment sets them, absent → code defaults). */
+export interface HealthConfig {
+  health?: HealthConfigLike['health']
+}
+
+export const name = 'dshd-health'
+// Resolve everything via `ctx.get` at USE (inject EMPTY) so the plugin stays
+// loadable in minimal compositions (the dshd-core discipline).
+export const inject: string[] = []
+
+export function apply(ctx: Context, config: HealthConfig = {}) {
+  // Derived service: the tick itself is the surface; deps resolve per run.
+  ctx.provide('deepartments.health', {
+    runDaemonTick: async (explicit: Partial<HealthDaemonDeps> = {}): Promise<void> => {
+      const org = ctx.get('deepartments.org') as { stateDir?: string } | undefined
+      if (org?.stateDir === undefined) {
+        throw new Error('[deepartments] health daemon tick: ctx.get("deepartments.org") is undefined — dshd-core is not composed (register the core plugin + provide deepartments.org)')
+      }
+      const catalog = ctx.get('deepartments.catalog') as { hosts?: Map<string, HostEntryLike> } | undefined
+      if (catalog?.hosts === undefined) {
+        throw new Error('[deepartments] health daemon tick: ctx.get("deepartments.catalog") is undefined — dshd-core is not composed (register the core plugin + provide deepartments.catalog)')
+      }
+      const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
+      const all = binder?.get() ?? {}
+      const bound = all as HealthBinderDeps & {
+        deliver?: { deliverHost?: (host: { hostId: string }, framed: string, record: HealthStoreAppendResult, callerSessionId?: string, opts?: { interrupt?: boolean }) => Promise<unknown> }
+        wakepack?: { messagesStoreReady?: () => Promise<{ append(input: HealthStoreAppendInput): Promise<HealthStoreAppendResult> }> }
+      }
+      // FASE 2.6 injection: the ALERT delivery resolves from the bucket first,
+      // then from the EXISTING composed buckets (FASE 2.6-C registers them).
+      let notifyHost = bound.notifyHost ?? explicit.notifyHost
+      if (notifyHost === undefined) {
+        const storeReady = bound.wakepack?.messagesStoreReady ?? (() => {
+          const bus = ctx.get('deepartments.bus') as { storeReady?: Promise<{ append(input: HealthStoreAppendInput): Promise<HealthStoreAppendResult> }> } | undefined
+          if (bus?.storeReady === undefined) {
+            throw new Error('[deepartments] health daemon tick: no message-store closure — the bundle must register ctx.get("deepartments.binder").register({ wakepack: { messagesStoreReady } }) (composed today) or provide deepartments.bus')
+          }
+          return bus.storeReady
+        })
+        const deliverHost = bound.deliver?.deliverHost
+        if (deliverHost === undefined) {
+          throw new Error('[deepartments] health daemon tick: no ALERT delivery closure — the bundle must register ctx.get("deepartments.binder").register({ deliver: { deliverHost } }) (FASE 2.6-C, composed today) or the health bucket')
+        }
+        notifyHost = async (hostEntry: HostEntryLike, alertFrame: string): Promise<void> => {
+          try {
+            const store = await storeReady()
+            const record = await store.append({ from: 'deepartments', to: [hostEntry.hostId], text: alertFrame, kind: 'agent' })
+            await deliverHost(hostEntry as { hostId: string }, alertFrame, record, void 0, { interrupt: true })
+          } catch (error: unknown) {
+            ctx.logger.warn(`[deepartments] system-health: host alert delivery failed: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+      }
+      await runHealthDaemonTick({
+        now: explicit.now ?? (() => Date.now()),
+        stateDir: org.stateDir,
+        bootId: bound.bootId ?? explicit.bootId ?? randomUUID(),
+        config: { health: config.health ?? bound.config?.health ?? explicit.config?.health ?? {} } as HealthConfigLike,
+        hosts: explicit.hosts ?? [...catalog.hosts.values()],
+        posts: explicit.posts ?? bound.posts,
+        hostWaits: explicit.hostWaits ?? bound.hostWaits,
+        sessionContexts: explicit.sessionContexts ?? bound.sessionContexts,
+        hostRunning: explicit.hostRunning ?? bound.hostRunning,
+        poolerStatePath: explicit.poolerStatePath ?? bound.poolerStatePath,
+        qiDirectiveRate: explicit.qiDirectiveRate ?? bound.qiDirectiveRate,
+        notifyHost,
+        workRegisterPath: explicit.workRegisterPath ?? bound.workRegisterPath,
+        logger: ctx.logger
+      })
+    }
+  })
 }

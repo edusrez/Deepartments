@@ -35,6 +35,38 @@ of the research — so no builder needs to re-research.)
 
 ## Current status
 
+- **2026-08-29** — **HITO P1 de la MODULARIZACIÓN REAL — worktree (builder-9,
+  pendiente commit del Asistente tras reviewer PASS)**: los 6 packages-LIB
+  (dshd-feedback/gui/health/jobs/pooler/quality) llegan a superficie plugin
+  Cordis REAL (patrón name/inject/apply de dshd-core/dshd-webfetch) — sin
+  tocar applyInvoke ni los 20 bridges same-module (eso es el hito DECOUPLING).
+  (a) CADA package: fila cordis.patch.yml propia + servicio `deepartments.*`
+  con las deps INYECTADAS vía el Binder FASE 2.6 (`deepartments.org` = shared
+  config source + `deepartments.binder` buckets; dep ausente al USE →
+  FAIL-LOUD R1): feedback = el store (self-open desde stateDir, bucket
+  `feedback.store` para el store ya-abierto del bundle) · quality = gate +
+  directive EMITTER funcional HOY vía los buckets existentes
+  (deliver.deliverPost + wakepack.messagesStoreReady + catalog) · jobs =
+  scheduler tick (bucket `jobs`: runJob/notifyHead/departmentFor*) · pooler =
+  boot check (bucket `pooler`: configuredProviders/appendPostError; retry
+  window por su propia config, defaults de código) · health = daemon tick
+  (ALERT delivery funcional HOY vía deliverHost + store; scans closure-bound
+  vía bucket `health`) · gui = dispatcher/handler bound (bucket
+  `gui.endpointDeps`). (b) **peers** en package.json de los 6 (+cordis; el
+  grafo entre packages dshd-gui→dshd-jobs, dshd-health→dshd-core+dshd-quality
+  — el flag del audit — deps workspace conservadas, R6) + metadatos
+  `dsh.bundle.patch`/files para el formato plugin. (c) **composición dev**:
+  las 6 capas `# == dshd-*` compuestas en el perfil dev (deepartments-dev),
+  dump-config con las secciones dshd-core/deepartments BYTE-IDÉNTICAS al
+  baseline (postsRetention core-only, pacing/quality bundle-only,
+  poolerBaseURL espejo). (d) **bundle componible en MODO MÍNIMO** (set mínimo
+  de filas: los 8 packages + deepartments — verificado en perfil temporal) y
+  **plugin add OK** (flujo `dsh plugin add` + reconcile + dump-config,
+  scopeteado en perfil temporal del dev HOME). Ladder: suite **619/597/0/22
+  EXACTA** (0 skips nuevos), builds raíz + 8 packages + client exit 0, git
+  diff --check limpio, P1 smoke (aplica los 6 plugins + verifica los servicios)
+  PASS, stable /opt/dsh/.dsh NO tocado.
+
 - **2026-08-29** — **HITO D5 de la MODULARIZACIÓN REAL — worktree (builder-8,
   pendiente commit del Asistente tras reviewer PASS)**: las 3 superficies
   casi-formales del bundle + fold de flags baratos. (a) **patch-row

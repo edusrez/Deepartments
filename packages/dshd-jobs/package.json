@@ -1,7 +1,7 @@
 {
   "name": "dshd-jobs",
   "version": "0.1.0-rc.1",
-  "description": "Deepartments agenda/jobs engine: the pure cron scheduler (parseCronSchedule/cronMatches/nextCronFire/cronIsDue), the job-definition reader (parseJobDefFrontmatter/jobDirFor/readJobDefinitionFile/readAgendaJobs), the calendar + job-runs state store helpers (read/write calendar.json + job-runs-state.json) and the pure scheduler tick runAgendaSchedulerTick — extracted for the dshd-jobs phase of the modular Cordis split. A pure library package (NO cordis plugin, NO tool, NO patch): the bundle consumes it through the drop-in bridge src/core/jobs.ts.",
+  "description": "Deepartments agenda/jobs engine: the pure cron scheduler (parseCronSchedule/cronMatches/nextCronFire/cronIsDue), the job-definition reader (parseJobDefFrontmatter/jobDirFor/readJobDefinitionFile/readAgendaJobs), the calendar + job-runs state store helpers (read/write calendar.json + job-runs-state.json) and the pure scheduler tick runAgendaSchedulerTick — extracted for the dshd-jobs phase of the modular Cordis split. P1 (modularization, 2026-08-29): the package is NOW ALSO a Cordis PLUGIN (thin name/inject/apply + its own cordis.patch.yml row) providing the `deepartments.jobs` service (the scheduler tick; the runJob/notifyHead closures inject via the FASE 2.6 binder `jobs` bucket — DECOUPLING); the bundle still consumes it through the drop-in bridge src/core/jobs.ts.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -10,12 +10,22 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib"
+    "lib",
+    "cordis.patch.yml"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "scripts": {
     "build": "tsc"
   },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
   "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
   },

@@ -12,6 +12,11 @@
 // These were MOVED verbatim from the bundle (src/invoke.ts) so the helper
 // surface is fs-pure and re-usable; the bundle consumes them through the
 // drop-in bridge `src/core/pooler.ts` (`export * from 'dshd-pooler'`).
+// [P1 — 2026-08-29]: the package now ALSO exposes a thin Cordis plugin surface
+// (name/inject/apply, bottom of this file) providing the `deepartments.pooler`
+// service (the provider-adapter boot check with binder-injected deps). The
+// bundle's inline runProviderAdapterBootCheck stays (R6) until the DECOUPLING
+// hito rewires it to the composed service.
 //
 // fb-9 (QH MEDIA — the 400 `reasoning_content must be passed back` class): the
 // settings reader is ALSO the surface for the DISPATCH PRE-FLIGHT — the parser
@@ -426,4 +431,144 @@ export function readLlmPiAiProviderSettings(stateDir: string): Record<string, Ll
   } catch {
     return {}
   }
+}
+
+// ---------------------------------------------------------------------------
+// P1 (MODULARIZACIÓN, 2026-08-29) — the dshd-pooler Cordis PLUGIN surface.
+// Thin name/inject/apply (the dshd-core/dshd-webfetch pattern): the package
+// now ALSO composes as a real plugin row (cordis.patch.yml) and provides
+// `deepartments.pooler` — the provider-adapter BOOT CHECK the bundle runs
+// INLINE today (invoke.ts `runProviderAdapterBootCheck`). The check is LAZY
+// (runs on FIRST service use, never at apply time); deps are INJECTED via the
+// FASE 2.6 seam, never imported from the bundle:
+//   - stateDir + org (departments / poolerBaseURL) ← `deepartments.org`,
+//   - the harness `llm` service ← `ctx.get('llm')` (optional — absent →
+//     skipped with a warn, exactly like the bundle),
+//   - the configured providers + the post-error append ← the `pooler` binder
+//     bucket (the host/worker agentOptions are bundle constants; DECOUPLING
+//     registers them here). The configured-provider set DEGRADES to the
+//     org.departments coordinators when the bucket is absent; the append is
+//     REQUIRED only when a finding materializes (FAIL LOUD R1, never a
+//     silently-unbound alert path).
+// The retry window honors the plugin's OWN `health.providerAdapterRetry*`
+// config keys (absent → the CODE defaults PROVIDER_ADAPTER_RETRY_WINDOW_MS /
+// PROVIDER_ADAPTER_RETRY_MS — the same values the bundle falls back to when
+// its config.health lacks them). Nothing is removed (R6).
+//
+// NO export default (pitfall 0001 — breaks `inject`).
+import type { Context } from '@deepseek-ai/cordis'
+
+/** A minimal structural view of the post-error row the append writes. */
+export interface PoolerPostErrorEntry {
+  ts: number
+  postId: string
+  error: string
+}
+
+/** The FASE 2.6 binder bucket for the pooler service (STRUCTURAL — read from
+ * `ctx.get('deepartments.binder')` widened; filled by the DECOUPLING bundle). */
+export interface PoolerBinderDeps {
+  /** The bundle's configured provider ids (worker + host agentOptions providers
+   * PLUS every department coordinator's provider — the host/worker constants
+   * are bundle-owned and cannot be derived by this package). */
+  configuredProviders?: string[]
+  /** The bundle-owned post-error append (`appendPostError(stateDir, entry)`,
+   * writes `<stateDir>/post-errors.jsonl` so the health daemon alerts). */
+  appendPostError?: (stateDir: string, entry: PoolerPostErrorEntry) => Promise<void>
+}
+
+/** The `deepartments.pooler` service surface — the boot check the bundle runs
+ * inline today. */
+export interface PoolerSurface {
+  /** The provider-adapter boot check (bounded retry + NO_ADAPTER/endpoint
+   * alert). NEVER throws — every failure folds to a warn (the bundle contract);
+   * a MISSING INJECTED DEP on the alert path FAILS LOUD (R1). */
+  runProviderAdapterBootCheck(): Promise<void>
+}
+
+/** The dshd-pooler plugin config (minimal — org/stateDir resolve from the
+ * shared `deepartments.org` source; only the retry-window knobs are read here,
+ * absent → code defaults). */
+export interface PoolerConfig {
+  health?: {
+    /** `health.enabled === false` skips the check entirely (the same gate the
+     * bundle's inline boot check honors). Absent → enabled (code default). */
+    enabled?: boolean
+    providerAdapterRetryWindowMs?: number
+    providerAdapterRetryMs?: number
+  }
+}
+
+export const name = 'dshd-pooler'
+// Resolve everything via `ctx.get` at USE (inject EMPTY) so the plugin stays
+// loadable in minimal compositions (the dshd-core discipline).
+export const inject: string[] = []
+
+export function apply(ctx: Context, config: PoolerConfig = {}) {
+  // Derived service: the check itself is the surface; it resolves deps on
+  // every run (never cached — the llm registry is live across the boot).
+  ctx.provide('deepartments.pooler', {
+    runProviderAdapterBootCheck: async (): Promise<void> => {
+      if (config.health?.enabled === false) return
+      try {
+        const org = ctx.get('deepartments.org') as { stateDir?: string; org?: { departments?: Array<{ coordinator?: { agentOptions?: { provider?: string }; provider?: string } }>; poolerBaseURL?: string } } | undefined
+        if (org?.stateDir === undefined) {
+          ctx.logger.warn('[deepartments] provider-adapter boot check skipped — the shared deepartments.org service is absent (dshd-core not composed)')
+          return
+        }
+        const stateDir = org.stateDir
+        const llm = ctx.get('llm', false) as { listProviders?: () => Array<{ id: string; name: string }> } | undefined
+        if (llm === undefined || typeof llm.listProviders !== 'function') {
+          ctx.logger.warn('[deepartments] provider-adapter boot check skipped — the "llm" service is absent (headless/minimal profile)')
+          return
+        }
+        const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
+        const bound = (binder?.get() ?? {}) as PoolerBinderDeps
+        const configuredProviders = new Set<string>(bound.configuredProviders ?? [])
+        for (const department of org.org?.departments ?? []) {
+          const c = department.coordinator
+          if (c?.agentOptions?.provider) configuredProviders.add(c.agentOptions.provider)
+          else if (c?.provider) configuredProviders.add(c.provider)
+        }
+        const configuredProviderList = [...configuredProviders]
+        if (configuredProviderList.length === 0) return
+
+        // Bounded retry window (mirrors the bundle's discipline): the provider(s)
+        // may legitimately still be REGISTERING (async ctx.llm.registerAdapter).
+        const retryHealthCfg = config.health ?? {}
+        const retryWindowMs = typeof retryHealthCfg.providerAdapterRetryWindowMs === 'number' && retryHealthCfg.providerAdapterRetryWindowMs > 0
+          ? retryHealthCfg.providerAdapterRetryWindowMs
+          : PROVIDER_ADAPTER_RETRY_WINDOW_MS
+        const retryMs = typeof retryHealthCfg.providerAdapterRetryMs === 'number' && retryHealthCfg.providerAdapterRetryMs > 0
+          ? retryHealthCfg.providerAdapterRetryMs
+          : PROVIDER_ADAPTER_RETRY_MS
+        const deadline = Date.now() + retryWindowMs
+        for (;;) {
+          const registeredProviders = (llm.listProviders() ?? [])
+          const providerSettings = readLlmPiAiProviderSettings(stateDir)
+          const findings = resolveProviderAdapterBootFindings({
+            configuredProviders: configuredProviderList,
+            registeredProviders,
+            providerSettings,
+            poolerBaseURL: org.org?.poolerBaseURL
+          })
+          if (findings.length === 0) return
+          if (Date.now() >= deadline) {
+            for (const finding of findings) {
+              const appendPostError = bound.appendPostError
+              if (appendPostError === undefined) {
+                throw new Error('[deepartments] provider-adapter boot check: no post-error append closure — the bundle must register ctx.get("deepartments.binder").register({ pooler: { appendPostError } }) (DECOUPLING)')
+              }
+              await appendPostError(stateDir, { ts: Date.now(), postId: finding.postId, error: finding.error })
+            }
+            ctx.logger.warn(`[deepartments] provider-adapter boot check: ${findings.length} finding(s) → ${findings.map((f) => f.error).join('; ')}`)
+            return
+          }
+          await new Promise((resolve) => setTimeout(resolve, retryMs))
+        }
+      } catch (error: unknown) {
+        ctx.logger.warn(`[deepartments] provider-adapter boot check failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+  })
 }

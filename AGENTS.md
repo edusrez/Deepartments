@@ -42,6 +42,21 @@ are organized*. Context: [docs/IDEA.md](docs/IDEA.md) (the idea),
   repo-tracked here at `.dsh/skills/deepartments-workflow/SKILL.md`, and the
   dev + stable agent presets symlink their skills dirs to this repo copy
   (legacy preset backups: `deepartments-workflow.bak-20260816/`).
+- `packages/dshd-*` — the modular split (FASE 2.x): `dshd-core` (kernel) +
+  `dshd-webfetch` are the original Cordis PLUGINs; P1 (2026-08-29) made the
+  remaining **6** (`dshd-feedback`, `dshd-gui`, `dshd-health`, `dshd-jobs`,
+  `dshd-pooler`, `dshd-quality`) real plugins TOO — each with its own
+  `cordis.patch.yml` row (`dsh.bundle.patch` in its package.json) and a thin
+  `name`/`inject`/`apply` surface providing a `deepartments.*` service
+  (`feedback` store · `quality` emitter · `jobs` scheduler tick · `pooler`
+  boot check · `health` daemon tick · `gui` channel dispatcher). DEP
+  INJECTION CONVENTION (FASE 2.6): an apply NEVER imports bundle internals —
+  it reads `ctx.get('deepartments.org')` (the shared config source) and
+  `ctx.get('deepartments.binder')` (`register`/`get` buckets) at FIRST USE
+  (lazy facades — an apply is side-effect free), and a required dep missing
+  at use FAILS LOUD (R1). The bundle's own inline wiring for these 6 stays
+  (R6, bridges untouched) until the DECOUPLING hito rewires it to the
+  composed services.
 
 ## TIERED verification
 

@@ -1,9 +1,12 @@
 // dshd-quality — the Deepartments Quality-Department (QD, spec 007) probability
 // gate (the dshd-quality phase of the modular Cordis split). A PURE LIBRARY
 // package (NO cordis plugin, NO tool, NO patch — the owner-confirmed MODO LIB,
-// precedent 0f792cd / packages/dshd-pooler): it owns the QD gate machinery
-// extracted VERBATIM from the bundle (src/invoke.ts, extraction map
-// 2026-08-27-health-quality-extraction-map.md §2):
+// precedent 0f792cd / packages/dshd-pooler — superseded for the PLUGIN surface
+// by P1, 2026-08-29: the bottom of this file adds a thin name/inject/apply +
+// the `deepartments.quality` service; the pure gate stays MODO LIB, the
+// directive EMITTER effect is now ALSO exposed with binder-injected deps): it
+// owns the QD gate machinery extracted VERBATIM from the bundle (src/invoke.ts,
+// extraction map 2026-08-27-health-quality-extraction-map.md §2):
 //   - QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY (the D-Q2 worker-retire dice
 //     default 0.25) + the QUALITY_INSPECT_ENV_VAR env override (a numeric
 //     [0,1] string — overrides ONLY the probability path: the worker dice and
@@ -233,4 +236,154 @@ export function qualityInspectDirectiveText(surface: QualityInspectDirectiveSurf
     case 'post-error':
       return `Quality inspect: post-error (post ${surface.postId}, message ${surface.messageId}, error ${surface.error})`
   }
+}
+
+// ---------------------------------------------------------------------------
+// P1 (MODULARIZACIÓN, 2026-08-29) — the dshd-quality Cordis PLUGIN surface.
+// Thin name/inject/apply (the dshd-core/dshd-webfetch pattern): the package
+// now ALSO composes as a real plugin row (cordis.patch.yml) and provides
+// `deepartments.quality` — the service the bundle wires INLINE today
+// (maybeEmitQualityInspectDirective + the gate). The directive EMITTER is
+// LAZY (built on FIRST use; an apply is side-effect free) and its deps are
+// INJECTED via the FASE 2.6 seam, never imported from the bundle:
+//   - the framed post delivery ← `deepartments.binder` bucket `deliver.deliverPost`
+//     (ALREADY registered by the composed bundle — FASE 2.6-C) or the explicit
+//     `quality.deliverPost` bucket (DECOUPLING),
+//   - the message store ← `binder.wakepack.messagesStoreReady` (registered
+//     today) or `deepartments.bus.storeReady` or the explicit `quality` bucket,
+//   - the target head entry ← `ctx.get('deepartments.catalog').byPost` (the
+//     shared registry),
+//   - the QH-self-sleep dice p ← `quality.workerInspectProbability` (bundle-only
+//     knob, 0.25 in the dev row = the code default) with the env override.
+// A required closure missing at USE FAILS LOUD (R1), never a silently-unbound
+// emitter. The gate/text exports (the drop-in bridge superset) stay intact.
+//
+// NO export default (pitfall 0001 — breaks `inject`).
+import type { Context } from '@deepseek-ai/cordis'
+
+/** A structurally-typed message-record append input (the MessagesStore surface
+ * the emitter needs — the package never imports dshd-core for it). */
+export interface QualityStoreAppendInput {
+  from: string
+  to: string[]
+  text: string
+  kind: string
+}
+
+/** A minimal structural view of the emitted record (id is all the framing
+ * delivery touches). */
+export interface QualityStoreAppendResult {
+  id: string
+}
+
+/** A minimal structural view of the target post entry (the quality-head catalog
+ * entry the framed delivery receives). */
+export interface QualityPostEntryLike {
+  postId?: string
+  sessionId?: string
+}
+
+/** The FASE 2.6 binder bucket for the quality emitter (STRUCTURAL — read from
+ * `ctx.get('deepartments.binder')` widened; the bucket is a convenience for
+ * DECOUPLING to pass the bundle's OWN literal closures + the bundle-only
+ * probe probability knob). */
+export interface QualityBinderDeps {
+  /** The bundle's resolved worker dice probability (`quality.workerInspectProbability`,
+   * bundle-only per the dump contract — the dev row 0.25 == the code default).
+   * Absent → the code default / env override (resolveQualityWorkerInspectProbability). */
+  workerInspectProbability?: number
+  /** Explicit message-store closure (DECOUPLING). Absent → the EXISTING
+   * `binder.wakepack.messagesStoreReady` bucket, then `deepartments.bus`. */
+  messagesStoreReady?: () => Promise<{
+    append(input: QualityStoreAppendInput): Promise<QualityStoreAppendResult>
+  }>
+  /** Explicit framed post delivery (DECOUPLING). Absent → the EXISTING
+   * `binder.deliver.deliverPost` bucket. */
+  deliverPost?: (post: QualityPostEntryLike, framed: string, record: QualityStoreAppendResult, callerSessionId?: string) => Promise<unknown>
+}
+
+/** The `deepartments.quality` service surface — the QD gate + directive EMITTER
+ * the bundle wires inline today. */
+export interface QualitySurface {
+  /** The QD directive emitter (the effect): gate → resolve quality-head →
+   * append the directive record → deliver it framed. NEVER throws (the
+   * delivery failure is a warn, exactly like the bundle's inline emitter); a
+   * MISSING INJECTED DEP at use FAILS LOUD (R1) BEFORE the guarded emit. */
+  maybeEmitQualityInspectDirective(surface: QualityInspectDirectiveSurface): Promise<void>
+  /** The pure decision gate (service completeness; kind in, boolean out). */
+  decide(kind: QualityInspectKind, deps?: QualityInspectDecisionDeps): boolean
+}
+
+/** The dshd-quality plugin config (minimal — the bundle-only `quality` block is
+ * NOT mirrored here per the dump contract; the probe probability resolves from
+ * the binder bucket / code default / env). */
+export interface QualityConfig {
+  /** Optional explicit probe probability override (the plugin row usually
+   * omits it — the bundle-only knob stays in the deepartments row). */
+  workerInspectProbability?: number
+}
+
+export const name = 'dshd-quality'
+// Resolve everything via `ctx.get` at USE (inject EMPTY) so the plugin stays
+// loadable in minimal compositions (the dshd-core discipline).
+export const inject: string[] = []
+
+export function apply(ctx: Context, config: QualityConfig = {}) {
+  // Lazy on-first-use facade (derived service contract: never built at apply).
+  let cache: QualitySurface | undefined
+  const build = (): QualitySurface => {
+    // FASE 2.6 injection seam: read the binder BEFORE any emit (FAIL LOUD on a
+    // missing closure — R1; the composed bundle already registers the deliver
+    // + wakepack buckets, so this resolves today).
+    const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
+    const all = binder?.get() ?? {}
+    const bound = all as {
+      quality?: QualityBinderDeps
+      deliver?: { deliverPost?: QualityBinderDeps['deliverPost'] }
+      wakepack?: { messagesStoreReady?: QualityBinderDeps['messagesStoreReady'] }
+    }
+    const explicitDeliver: QualityBinderDeps['deliverPost'] = bound.quality?.deliverPost
+    const explicitStore: QualityBinderDeps['messagesStoreReady'] = bound.quality?.messagesStoreReady
+    const deliverPost = explicitDeliver ?? bound.deliver?.deliverPost
+    if (deliverPost === undefined) {
+      throw new Error('[deepartments] quality lazy build: no framed-delivery closure — the bundle must register ctx.get("deepartments.binder").register({ deliver: { deliverPost } }) (FASE 2.6-C, composed today) or the DECOUPLING quality bucket')
+    }
+    const messagesStoreReady = explicitStore ?? bound.wakepack?.messagesStoreReady ?? (() => {
+      const bus = ctx.get('deepartments.bus') as { storeReady?: Promise<{ append(input: QualityStoreAppendInput): Promise<QualityStoreAppendResult> }> } | undefined
+      if (bus?.storeReady === undefined) {
+        throw new Error('[deepartments] quality lazy build: no message-store closure — the bundle must register ctx.get("deepartments.binder").register({ wakepack: { messagesStoreReady } }) (composed today) or provide deepartments.bus')
+      }
+      return bus.storeReady
+    })
+    const workerInspectProbability = config.workerInspectProbability ?? bound.quality?.workerInspectProbability
+    const catalog = ctx.get('deepartments.catalog') as { byPost?: Map<string, QualityPostEntryLike> } | undefined
+    const resolveQualityHeadEntry = (): QualityPostEntryLike | undefined => catalog?.byPost?.get('quality-head')
+    const emitter = async (surface: QualityInspectDirectiveSurface): Promise<void> => {
+      try {
+        // QD anti-loop (owner m-178/m-182): the QH's own sleep is gated by the
+        // SAME worker dice — faithfully mirroring the bundle's inline emitter
+        // (invoke.ts maybeEmitQualityInspectDirective). The ENV override applies
+        // inside the pure gate (parseQualityInspectEnvOverride).
+        if (surface.kind === 'head-slept' && !qualityInspectDecision('head', { headPostId: surface.headPostId, rng: Math.random, workerInspectProbability })) {
+          return
+        }
+        const qualityHead = resolveQualityHeadEntry()
+        if (qualityHead === undefined) return
+        const text = qualityInspectDirectiveText(surface)
+        const store = await messagesStoreReady()
+        const record = await store.append({ from: 'deepartments', to: ['quality-head'], text, kind: 'agent' })
+        await deliverPost(qualityHead, `[From deepartments → quality-head]: ${text}`, record, void 0)
+      } catch (error: unknown) {
+        ctx.logger.warn(`[deepartments] quality-inspect directive to "quality-head" failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    return {
+      maybeEmitQualityInspectDirective: emitter,
+      decide: (kind, deps = {}) => qualityInspectDecision(kind, { ...deps, ...(workerInspectProbability !== undefined ? { workerInspectProbability } : {}) })
+    }
+  }
+  ctx.provide('deepartments.quality', {
+    maybeEmitQualityInspectDirective: (surface: QualityInspectDirectiveSurface): Promise<void> => (cache ??= build()).maybeEmitQualityInspectDirective(surface),
+    decide: (kind: QualityInspectKind, deps?: QualityInspectDecisionDeps): boolean => (cache ??= build()).decide(kind, deps)
+  })
 }

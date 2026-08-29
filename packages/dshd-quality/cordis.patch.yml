@@ -1,0 +1,16 @@
+# dshd-quality configuration layer — top-level YAML array of patch entries.
+# P1 (MODULARIZACIÓN, 2026-08-29): the package is now ALSO a real Cordis PLUGIN
+# (name/inject/apply in lib/index.js) providing the `deepartments.quality`
+# service (the QD gate + the directive EMITTER the bundle used to wire inline;
+# the emitter's delivery/store closures inject via the FASE 2.6 binder — the
+# composed bundle already registers deliver.deliverPost + wakepack.messagesStoreReady,
+# so the emitter is functional when composed).
+# The row is intentionally MINIMAL — the probe probability is a BUNDLE-ONLY knob
+# (`quality.workerInspectProbability` in the deepartments row, 0.25 in dev == the
+# code default; the dump contract keeps it out of the core row AND here). The
+# stateDir/org resolve from `deepartments.org`, never mirrored (one truth).
+# Plain scalars only — no !!js outside the runtime config engine.
+- insert:
+    - id: dshd-quality
+      name: dshd-quality
+      config: {}

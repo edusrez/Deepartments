@@ -15,6 +15,10 @@
 // compose a service nor define a tool (that is a later split phase); the bundle
 // consumes it through the drop-in bridge `src/core/feedback.ts`
 // (`export * from 'dshd-feedback'`).
+// [P1 — 2026-08-29]: that "later split phase" starts HERE: the package now ALSO
+// exposes a thin Cordis plugin surface (name/inject/apply, bottom of this file)
+// providing the `deepartments.feedback` service. The bundle's inline use stays
+// (R6) until the DECOUPLING hito rewires it to the composed service.
 //
 // Wire format: one JSON record per line (JSONL), append-only. Each state
 // transition (and each new feedback record) is a FULL new line; the LIVE view
@@ -487,4 +491,76 @@ export class FeedbackStore {
 function normalizeLimit(limit: number | undefined): number {
   if (limit === undefined || !Number.isInteger(limit) || limit <= 0) return 20
   return Math.min(limit, 100)
+}
+
+// ---------------------------------------------------------------------------
+// P1 (MODULARIZACIÓN, 2026-08-29) — the dshd-feedback Cordis PLUGIN surface.
+// Thin name/inject/apply (the dshd-core/dshd-webfetch pattern): the package
+// now ALSO composes as a real plugin row (cordis.patch.yml) and provides
+// `deepartments.feedback` — the opened feedback store the bundle formerly
+// constructed INLINE per apply (invoke.ts `FeedbackStore.open`). The store is
+// LAZY (built on FIRST service use, never at apply time — an apply must be
+// side-effect free); deps are injected via the FASE 2.6 seam, never imported
+// from the bundle: stateDir comes from `ctx.get('deepartments.org')` (the
+// dshd-core SHARED CONFIG SOURCE) and — once the DECOUPLING hito lands — the
+// bundle's ALREADY-OPENED per-apply instance arrives through the
+// `deepartments.binder` bucket (`feedback.store`); until then the service
+// opens its own store from the shared stateDir (same files, same semantics —
+// the bundle's inline store remains the live one, R6). A required dep missing
+// at USE FAILS LOUD (R1), never a silently-unbound surface. Nothing is removed:
+// the existing exports (the drop-in bridge superset) stay intact.
+//
+// NO export default (pitfall 0001 — breaks `inject`).
+import type { Context } from '@deepseek-ai/cordis'
+
+/** The FASE 2.6 binder bucket for the feedback service (STRUCTURAL — read from
+ * `ctx.get('deepartments.binder')` widened; dshd-core's BinderDeps carries the
+ * core buckets, this one is filled by the DECOUPLING bundle). */
+export interface FeedbackBinderDeps {
+  /** The bundle's ALREADY-OPENED per-apply feedback store (DECOUPLING). Absent
+   * → the service opens its own from the shared org stateDir. */
+  store?: FeedbackStore
+}
+
+/** The `deepartments.feedback` service surface — the opened store the bundle's
+ * `dept_feedback*` tools own (the "service provided inline today"). */
+export interface FeedbackSurface {
+  /** The opened FeedbackStore (load + prune-to-cap + live-by-id index). */
+  storeReady: Promise<FeedbackStore>
+}
+
+/** The dshd-feedback plugin config (minimal — the org stateDir is NOT copied
+ * here: it resolves from the shared `deepartments.org` source, one truth). */
+export interface FeedbackConfig {
+  /** Optional open options for the lazily-opened store (liveCap / logger).
+   * Absent → the defaults (DEFAULT_LIVE_CAP, no logger). */
+  open?: FeedbackOpenOptions
+}
+
+export const name = 'dshd-feedback'
+// Resolve everything via `ctx.get` at USE (inject EMPTY) so the plugin stays
+// loadable in minimal compositions (the dshd-core discipline).
+export const inject: string[] = []
+
+export function apply(ctx: Context, config: FeedbackConfig = {}) {
+  // Lazy on-first-use facade (the derived service contract: never built at
+  // apply time — an apply registers the seam, the build happens on demand).
+  let cache: FeedbackSurface | undefined
+  const build = (): FeedbackSurface => {
+    const org = ctx.get('deepartments.org') as { stateDir?: string } | undefined
+    if (org?.stateDir === undefined) {
+      throw new Error('[deepartments] feedback lazy build: ctx.get("deepartments.org") is undefined — dshd-core is not composed (register the core plugin + provide deepartments.org)')
+    }
+    // FASE 2.6 injection: the DECOUPLING bundle's already-open store wins when
+    // registered via the binder; otherwise open from the shared stateDir.
+    const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
+    const bound = (binder?.get() ?? {}) as FeedbackBinderDeps
+    const storeReady = bound.store !== undefined
+      ? Promise.resolve(bound.store)
+      : FeedbackStore.open(org.stateDir, config.open)
+    return { storeReady }
+  }
+  ctx.provide('deepartments.feedback', {
+    get storeReady(): Promise<FeedbackStore> { return (cache ??= build()).storeReady }
+  })
 }

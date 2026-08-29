@@ -1,0 +1,13 @@
+# dshd-jobs configuration layer — top-level YAML array of patch entries.
+# P1 (MODULARIZACIÓN, 2026-08-29): the package is now ALSO a real Cordis PLUGIN
+# (name/inject/apply in lib/index.js) providing the `deepartments.jobs` service
+# (the scheduler tick the bundle wires inline; the closure-bound runJob/
+# notifyHead hooks inject via the FASE 2.6 binder `jobs` bucket — DECOUPLING).
+# The row is intentionally MINIMAL — the org departments + stateDir resolve from
+# `deepartments.org` (one truth), the repoRoot from the binder `wakepack`
+# bucket (composed today); nothing is mirrored here.
+# Plain scalars only — no !!js outside the runtime config engine.
+- insert:
+    - id: dshd-jobs
+      name: dshd-jobs
+      config: {}

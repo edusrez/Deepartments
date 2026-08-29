@@ -135,6 +135,9 @@ importers:
 
   packages/dshd-feedback:
     devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
@@ -148,6 +151,9 @@ importers:
         specifier: workspace:*
         version: link:../dshd-jobs
     devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
       '@deepseek-ai/dsh-client-connection':
         specifier: 0.1.0-rc.7
         version: 0.1.0-rc.7(18ff0c05ab41670b8daa2e2e166479db)
@@ -179,6 +185,9 @@ importers:
         specifier: workspace:*
         version: link:../dshd-quality
     devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
@@ -188,6 +197,9 @@ importers:
 
   packages/dshd-jobs:
     devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
@@ -197,6 +209,9 @@ importers:
 
   packages/dshd-pooler:
     devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
@@ -206,6 +221,9 @@ importers:
 
   packages/dshd-quality:
     devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1

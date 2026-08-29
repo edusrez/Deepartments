@@ -1,0 +1,14 @@
+# dshd-pooler configuration layer — top-level YAML array of patch entries.
+# P1 (MODULARIZACIÓN, 2026-08-29): the package is now ALSO a real Cordis PLUGIN
+# (name/inject/apply in lib/index.js) providing the `deepartments.pooler`
+# service (the provider-adapter boot check the bundle runs inline; the
+# configured-provider list + post-error append inject via the FASE 2.6 binder
+# `pooler` bucket — DECOUPLING; the retry window honors the `health` keys below,
+# absent → the code defaults PROVIDER_ADAPTER_RETRY_WINDOW_MS / RETRY_MS).
+# The row is intentionally MINIMAL — the org (departments/poolerBaseURL) +
+# stateDir resolve from `deepartments.org` (one truth); nothing else mirrored.
+# Plain scalars only — no !!js outside the runtime config engine.
+- insert:
+    - id: dshd-pooler
+      name: dshd-pooler
+      config: {}

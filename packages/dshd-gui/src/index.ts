@@ -36,6 +36,12 @@
 // the pure computation moves). The deps interface below is the ONLY injected
 // seam: the bundle's closure provides the live values; the tests construct
 // them directly.
+// [P1 — 2026-08-29]: the package now ALSO exposes a thin Cordis plugin surface
+// (name/inject/apply, bottom of this file) providing the `deepartments.gui`
+// service (dispatcher + route handler BOUND to the endpointDeps injected via
+// the FASE 2.6 binder `gui` bucket — the DECOUPLING bundle registers its live
+// wiring there). The bundle's own mount effect stays (R6) until DECOUPLING
+// rewires it to the composed service.
 //
 // dshd-gui deps-injection design (what the bundle's closure provides that the
 // OLD module imported directly):
@@ -656,4 +662,88 @@ export async function handleDeepartmentsRequest(
       error: { code: 'internal', message: String(error), details: {} }
     })
   }
+}
+
+// ---------------------------------------------------------------------------
+// P1 (MODULARIZACIÓN, 2026-08-29) — the dshd-gui Cordis PLUGIN surface.
+// Thin name/inject/apply (the dshd-core/dshd-webfetch pattern): the package
+// now ALSO composes as a real plugin row (cordis.patch.yml) and provides
+// `deepartments.gui` — the `/deepartments` channel the bundle mounts INLINE
+// today (invoke.ts: the `ctx.inject(['webServer', ...])` mount effect wiring
+// `dispatchDeepartmentsEndpoint`/`handleDeepartmentsRequest` to the live
+// registries). The service is LAZY (built on FIRST use, never at apply time);
+// deps are INJECTED via the FASE 2.6 seam, never imported from the bundle:
+//   - `DeepartmentsEndpointDeps` (the closure-bound wiring: buildAgentRows /
+//     pickLiveHostEntry + the live maps + the session/presence hooks) ← the
+//     `gui.endpointDeps` binder bucket (the DECOUPLING bundle registers its
+//     live wiring there; the package can NOT derive buildAgentRows itself —
+//     it is bundle-owned src/agents.ts),
+//   - the harness `webServer`/`webRuntime`/`connection` services stay resolved
+//     by the DECOUPLING mount (the package keeps the PURE dispatcher + handler,
+//     the bind-to-webServer effect is the bundle's seam); the service binds the
+//     INJECTED deps so a mount only passes req/res/endpoint/trustedHosts.
+// A required dep missing at USE FAILS LOUD (R1), never a silently-unbound
+// channel. The channel exports (the drop-in bridge superset) stay intact.
+// Nothing is removed (R6).
+//
+// NO export default (pitfall 0001 — breaks `inject`).
+import type { Context } from '@deepseek-ai/cordis'
+
+/** The FASE 2.6 binder bucket for the gui service (STRUCTURAL — read from
+ * `ctx.get('deepartments.binder')` widened; filled by the DECOUPLING bundle
+ * with the live endpoint wiring). */
+export interface GuiBinderDeps {
+  /** The bundle-owned endpoint wiring (buildAgentRows + pickLiveHostEntry +
+   * the live byPost/hosts maps + the session/presence hooks + org
+   * departments). REQUIRED at use for dispatch. */
+  endpointDeps?: DeepartmentsEndpointDeps
+}
+
+/** The `deepartments.gui` service surface — the channel the bundle wires
+ * inline today, with the endpoint deps INJECTED (binder) instead of imported. */
+export interface GuiSurface {
+  /** Dispatch ONE `/deepartments` endpoint with the binder-injected endpoint
+   * deps (the pure dispatcher, bundle-free). FAILS LOUD (R1) when the
+   * `gui.endpointDeps` bucket is not registered. */
+  dispatch(endpoint: string, payload: unknown): Promise<DeepartmentsDispatchResult>
+  /** The thin node:http route handler bound to the injected endpoint deps (a
+   * DECOUPLING mount only wires req/res/endpoint/trustedHosts). FAILS LOUD
+   * (R1) when the `gui.endpointDeps` bucket is not registered. */
+  handleRequest(req: unknown, res: unknown, endpoint: string, trustedHosts: string[]): Promise<void>
+}
+
+/** The dshd-gui plugin config (minimal — the channel is config-less; the
+ * endpoint wiring arrives via the binder). */
+export interface GuiConfig {
+  /** Optional endpoint-deps override injected directly (a DECOUPLING caller
+   * may pass the wiring here instead of the binder, keeping the row empty). */
+  endpointDeps?: DeepartmentsEndpointDeps
+}
+
+export const name = 'dshd-gui'
+// Resolve everything via `ctx.get` at USE (inject EMPTY) so the plugin stays
+// loadable in minimal compositions (the dshd-core discipline; the webServer
+// bind stays the DECOUPLING mount's seam, exactly like the bundle's own
+// ctx.inject mount).
+export const inject: string[] = []
+
+export function apply(ctx: Context, config: GuiConfig = {}) {
+  // Lazy on-first-use surface (derived service contract: never built at apply).
+  let cache: GuiSurface | undefined
+  const build = (): GuiSurface => {
+    const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
+    const bound = (binder?.get() ?? {}) as GuiBinderDeps
+    const endpointDeps = config.endpointDeps ?? bound.endpointDeps
+    if (endpointDeps === undefined) {
+      throw new Error('[deepartments] gui lazy build: no endpointDeps — the DECOUPLING bundle must call ctx.get("deepartments.binder").register({ gui: { endpointDeps } }) (the package cannot derive the bundle-owned buildAgentRows/pickLiveHostEntry wiring)')
+    }
+    return {
+      dispatch: (endpoint, payload) => dispatchDeepartmentsEndpoint(endpoint, payload, endpointDeps),
+      handleRequest: (req, res, endpoint, trustedHosts) => handleDeepartmentsRequest(req, res, endpoint, trustedHosts, endpointDeps)
+    }
+  }
+  ctx.provide('deepartments.gui', {
+    dispatch: (endpoint: string, payload: unknown): Promise<DeepartmentsDispatchResult> => (cache ??= build()).dispatch(endpoint, payload),
+    handleRequest: (req: unknown, res: unknown, endpoint: string, trustedHosts: string[]): Promise<void> => (cache ??= build()).handleRequest(req, res, endpoint, trustedHosts)
+  })
 }

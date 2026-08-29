@@ -71,7 +71,26 @@ M3 (f159eda). Fase modular 0.2.x (siguiente, solo BACKLOG/owner — §3/§5).
   scripts/mirror-client.mjs; raíz tsdown.config.ts + normalize-client-banner
   duplicados FOLDED) · (4) flag stale «dshd-core NOT composed today» corregido
   (sí se compone; compose-first en los perfiles dev). R6 intacto (stable
-  /opt/dsh/.dsh NO tocado) · apiKey DeepSeek →
+  /opt/dsh/.dsh NO tocado) · **P1 → IMPLEMENTADO 2026-08-29 por builder-9
+  (pendiente commit del Asistente tras reviewer PASS; ver
+  .dsh/reports/ipd/2026-08-29-modularization-p1.md)**: plugin-izar los 6
+  packages-LIB (feedback/gui/health/jobs/pooler/quality) hasta superficie
+  Cordis REAL — (1) CADA uno con name/inject/apply + fila cordis.patch.yml
+  propia + servicio `deepartments.*` (feedback store / quality emitter / jobs
+  scheduler tick / pooler boot check / health daemon tick / gui channel) con
+  las deps INYECTADAS vía el Binder FASE 2.6 (deepartments.org + deepartments.
+  binder; las 6 capas compuestas en el perfil dev; dep ausente al USE →
+  FAIL-LOUD R1, nunca silencioso) — SEMÁNTICA de los bridges same-module
+  SUSTITUIDA por composición SIN retirar los 20 bridges (eso es el hito
+  DECOUPLING) ni tocar applyInvoke · (2) peers en package.json (cordis +
+  dshd-gui→dshd-jobs, dshd-health→dshd-core/dshd-quality — el flag del audit;
+  deps workspace conservadas R6) · (3) dump-config perfil dev: 6 capas nuevas
+  `# == dshd-*` compuestas con secciones core/deepartments BYTE-IDÉNTICAS
+  (postsRetention core-only, pacing/quality bundle-only, poolerBaseURL espejo)
+  · (4) bundle componible en MODO MÍNIMO (8 packages + deepartments, verificado
+  en perfil temporal) · (5) plugin add OK (scopeteado en perfil temporal del
+  dev HOME) — suite 619/597/0/22 EXACTA, builds raíz+8+client exit 0, git diff
+  --check limpio · apiKey DeepSeek →
   RESUELTO 08-28 (key platform existente = FALLBACK del pooler; alta/top-up a
   validar con owner — consola dio 403 en research RD) · publish vs link-only →
   DECIDIDO 08-28, **PENDIENTE DE EJECUCIÓN**: publish dsh-deepartments 0.1.x en

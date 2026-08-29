@@ -1,7 +1,7 @@
 {
   "name": "dshd-health",
   "version": "0.1.0-rc.1",
-  "description": "Deepartments system-health domain (the dshd-health phase of the modular Cordis split): the W6 post-error capture + unusable-session markers, heartbeat/alerts ledger + audit, W8-i error class, M3 interrupt back-off + materialization quarantine, the W8-c safeguards (turn-error capture, stale-live watchdog, preset audit), the W8-d system heartbeat (wait scan, inbox reader, heartbeat section), the W8-h interrupted-post reconciliation, and the C6 delivery-row tail-reader factory + scans + the pure health daemon tick — extracted verbatim from the dsh-deepartments bundle. A pure library package (NO cordis plugin, NO tool, NO patch): the bundle consumes it through the drop-in bridge src/core/health.ts; the ONLY state is the per-process byte-offset cursor inside each createDeliveryRowsTailReader closure (created by the bundle wiring once per daemon — C6 twin-safe), everything else is stateless (ledgers on-disk). Depends on dshd-core (workspace:*) for messages/registry/wakepack machinery; the tick's config is a structural HealthConfigLike (no back-dependency on the bundle's org.ts).",
+  "description": "Deepartments system-health domain (the dshd-health phase of the modular Cordis split): the W6 post-error capture + unusable-session markers, heartbeat/alerts ledger + audit, W8-i error class, M3 interrupt back-off + materialization quarantine, the W8-c safeguards (turn-error capture, stale-live watchdog, preset audit), the W8-d system heartbeat (wait scan, inbox reader, heartbeat section), the W8-h interrupted-post reconciliation, and the C6 delivery-row tail-reader factory + scans + the pure health daemon tick — extracted verbatim from the dsh-deepartments bundle. P1 (modularization, 2026-08-29): the package is NOW ALSO a Cordis PLUGIN (thin name/inject/apply + its own cordis.patch.yml row) providing the `deepartments.health` service (the daemon tick; the ALERT delivery resolves from the EXISTING binder buckets wakepack.messagesStoreReady + deliver.deliverHost, the closure-bound scan inputs arrive via the `health` bucket — DECOUPLING); the bundle still consumes it through the drop-in bridge src/core/health.ts. The ONLY state is the per-process byte-offset cursor inside each createDeliveryRowsTailReader closure (created by the bundle wiring once per daemon — C6 twin-safe), everything else is stateless (ledgers on-disk). Depends on dshd-core (workspace:*) for messages/registry/wakepack machinery; the tick's config is a structural HealthConfigLike (no back-dependency on the bundle's org.ts).",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -10,8 +10,14 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib"
+    "lib",
+    "cordis.patch.yml"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "scripts": {
     "build": "tsc"
   },
@@ -19,7 +25,13 @@
     "dshd-core": "workspace:*",
     "dshd-quality": "workspace:*"
   },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "dshd-core": "^0.1.0-rc.1",
+    "dshd-quality": "^0.1.0-rc.1"
+  },
   "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
   },

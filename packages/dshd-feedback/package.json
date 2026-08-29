@@ -1,7 +1,7 @@
 {
   "name": "dshd-feedback",
   "version": "0.1.0-rc.1",
-  "description": "Deepartments universal feedback store (FeedbackStore + state machine) for the quality department — a pure library package extracted for the dshd-feedback phase of the modular Cordis split. Owns the durable append-only <stateDir>/feedback.jsonl backlog + feedback-archive.jsonl (non-destructive prune).",
+  "description": "Deepartments universal feedback store (FeedbackStore + state machine) for the quality department — a pure library package extracted for the dshd-feedback phase of the modular Cordis split. Owns the durable append-only <stateDir>/feedback.jsonl backlog + feedback-archive.jsonl (non-destructive prune). P1 (modularization, 2026-08-29): the package is NOW ALSO a Cordis PLUGIN (thin name/inject/apply + its own cordis.patch.yml row) providing the `deepartments.feedback` service (the opened store) — the bundle still consumes it through the drop-in bridge src/core/feedback.ts (the DECOUPLING hito rewires it to the composed service).",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -10,12 +10,22 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib"
+    "lib",
+    "cordis.patch.yml"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "scripts": {
     "build": "tsc"
   },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
   "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
   },
