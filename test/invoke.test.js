@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 import { access, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { register } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -7909,26 +7910,89 @@ const F10_ARCHITECTURE_PATH = path.join(F10_REPO_ROOT, 'presets', 'departments',
  * global plane BEFORE boot, exactly as the host profile composes them). */
 const F10_GLOBAL_TOOLS = ['web_search', 'web_fetch', 'read', 'write', 'glob', 'grep', 'edit']
 
+/** Pristine content of ONE repo preset file FROM GIT HEAD (fb-33): returns the
+ * exact HEAD bytes of a tracked file, `{ kind: 'absent' }` for a path NOT in
+ * HEAD (its pristine worktree state is absence — e.g. the untracked execbuilder
+ * fixture), or `undefined` when git itself is unavailable (non-git checkout) —
+ * the fallback then keeps the pre-fb-33 worktree-snapshot semantics so the
+ * tests still pass on a plain checkout. The snapshot is NEVER taken from the
+ * worktree file: an interrupted run may have already corrupted that file (the
+ * fb-33 pattern — the old snapshot captured the corruption AS the "original",
+ * so the finally-restore "repaired" the corruption back into the worktree). A
+ * git-HEAD snapshot can never be the corruption, so the restore ALWAYS returns
+ * the file to its HEAD state. */
+function gitHeadPresetContent(relPath) {
+  try {
+    const out = execFileSync('git', ['-C', F10_REPO_ROOT, 'show', `HEAD:${relPath}`], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] })
+    return { kind: 'content', data: out }
+  } catch (err) {
+    const stderr = String(err?.stderr ?? err?.message ?? '')
+    if (/does not exist in 'HEAD'|path '.*' does not exist/.test(stderr)) return { kind: 'absent' }
+    return undefined
+  }
+}
+
 /** Snapshot the department ARCHITECTURE.md (its content, or absence) BEFORE an
  * injection fixture writes/removes the REAL preset file, so running the tests
  * never destroys a pre-existing ARCHITECTURE.md. Returns a restore() that
- * rewrites the original content if it existed, or removes the file if it was
- * absent — the exact pre-test state is restored in every case. */
+ * rewrites the ORIGINAL HEAD content if the file is tracked, or removes the
+ * file when HEAD does not carry it — the exact pre-test state is restored in
+ * every case. fb-33: the snapshot is taken from GIT HEAD (gitHeadPresetContent),
+ * never from the worktree file — a file ALREADY corrupted by an interrupted
+ * run is HEALED to HEAD on restore instead of being "repaired" with its own
+ * corruption. */
 async function snapshotArchitectureFile() {
+  const relPath = 'presets/departments/research/ARCHITECTURE.md'
+  const head = gitHeadPresetContent(relPath)
+  if (head !== undefined) {
+    // Pristine = git HEAD: tracked file → its exact bytes; absent in HEAD →
+    // the file must not exist in the worktree after the test (fb-33 heal).
+    return async function restoreArchitectureFile() {
+      if (head.kind === 'content') await writeFile(F10_ARCHITECTURE_PATH, head.data, 'utf8')
+      else await rm(F10_ARCHITECTURE_PATH, { force: true })
+    }
+  }
+  // Fallback (no git, e.g. a plain checkout): snapshot the CURRENT worktree
+  // file BEFORE any fixture write (pre-fb-33 semantics) and restore exactly it.
   let content = null
   try {
     content = await readFile(F10_ARCHITECTURE_PATH, 'utf8')
   } catch (err) {
-    if ((err)?.code !== 'ENOENT') throw err
+    if (err?.code !== 'ENOENT') throw err
   }
   return async function restoreArchitectureFile() {
-    if (content === null) {
-      await rm(F10_ARCHITECTURE_PATH, { force: true })
-    } else {
-      await writeFile(F10_ARCHITECTURE_PATH, content, 'utf8')
-    }
+    if (content === null) await rm(F10_ARCHITECTURE_PATH, { force: true })
+    else await writeFile(F10_ARCHITECTURE_PATH, content, 'utf8')
   }
 }
+
+test('fb-33 (crash-safety): the preset-fixture snapshot is git-HEAD-based — a worktree ARCHITECTURE.md ALREADY corrupted by an interrupted run (byte-different from HEAD) is HEALED to its exact HEAD bytes on restore, NEVER "repaired" with its own corruption; the untracked execbuilder fixture resolves to absence', async () => {
+  // The fb-33 precondition: an interrupted run left the REAL preset file
+  // corrupted in the worktree (differs from HEAD). The snapshot must NOT capture
+  // this corruption — it must capture the git-HEAD bytes, so the restore returns
+  // the file to its HEAD state (the old worktree snapshot would have snapshotted
+  // the already-corrupted file and RE-WRITTEN the corruption on "restore").
+  const head = gitHeadPresetContent('presets/departments/research/ARCHITECTURE.md')
+  assert.notEqual(head, undefined, 'git HEAD resolves the tracked ARCHITECTURE.md (the crash-safe path is active)')
+  assert.equal(head.kind, 'content', 'ARCHITECTURE.md is tracked at HEAD')
+  const corrupt = '# fb-33 CORRUPTED BY AN INTERRUPTED RUN\n## Department architecture\n'
+  await writeFile(F10_ARCHITECTURE_PATH, corrupt, 'utf8')
+  const restore = await snapshotArchitectureFile()
+  try {
+    await restore()
+    const healed = await readFile(F10_ARCHITECTURE_PATH, 'utf8')
+    assert.equal(healed, head.data, 'the restore heals the corrupted worktree file to the EXACT git-HEAD bytes')
+    assert.notEqual(healed, corrupt, 'the corruption is NOT what comes back (the old worktree snapshot would have re-persisted it)')
+  } finally {
+    // Absolute finally: even a mid-test failure returns the REAL file to HEAD.
+    await restore()
+    assert.equal(await readFile(F10_ARCHITECTURE_PATH, 'utf8'), head.data, 'the file is byte-identical to HEAD after the absolute finally')
+  }
+  // The untracked execbuilder role fixture: its pristine HEAD state is ABSENCE
+  // (the file is a test-only fixture, never part of the repo tree).
+  const execHead = gitHeadPresetContent('presets/departments/research/execbuilder.md')
+  assert.equal(execHead.kind, 'absent', 'the untracked execbuilder fixture resolves to kind:"absent" at HEAD (restore removes it, never leaves it behind)')
+})
 
 /** Read ONE systemPrompt section by name for a post's scoped context. */
 async function findPromptSection(ctx, key, sectionName, useScope) {
@@ -10079,9 +10143,21 @@ const EXEC_ROLE_PATH = path.join(F10_REPO_ROOT, 'presets', 'departments', 'resea
 const EXEC_ROLE_FRONTMATTER = `---\nid: ${EXEC_ROLE}\ntitle: Exec builder\ntools:\n  - dept_exec\n---\n\nYou are an exec builder worker.\n`
 
 /** Snapshot a role template under presets/departments/research/<role>.md (its
- * content, or absence) so a fixture write/remove restores the exact state. */
+ * content, or absence) so a fixture write/remove restores the exact state.
+ * fb-33: the snapshot is taken from GIT HEAD — the untracked execbuilder.md
+ * restores to ABSENCE (its pristine HEAD state), a tracked role restores to
+ * its exact HEAD bytes — never from the worktree file, so an interrupted-run
+ * corruption is HEALED, not "repaired" with itself. */
 async function snapshotRoleTemplate(role) {
   const p = path.join(F10_REPO_ROOT, 'presets', 'departments', 'research', `${role}.md`)
+  const head = gitHeadPresetContent(`presets/departments/research/${role}.md`)
+  if (head !== undefined) {
+    return async function restoreRoleTemplate() {
+      if (head.kind === 'content') await writeFile(p, head.data, 'utf8')
+      else await rm(p, { force: true })
+    }
+  }
+  // Fallback (no git): snapshot the CURRENT worktree file BEFORE any write.
   let content = null
   try {
     content = await readFile(p, 'utf8')
