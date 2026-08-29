@@ -135,7 +135,13 @@ M3 (f159eda). Fase modular 0.2.x (siguiente, solo BACKLOG/owner — §3/§5).
   manual. Candidato a implementar: notificar turn/end-error al head con
   sessionId+turn — HABILITADO por la proveniencia (b) del fb-25 (recién
   aterrizada); el re-despacho queda como consideración de diseño; verificación
-  del QD al aterrizar — ref dshd-health (dominio runtime).
+  del QD al aterrizar — ref dshd-health (dominio runtime). · **fb-28 (QD,
+  MEDIO, 2026-08-29)**: «colisión de ruta de reporte al reusar un postId» —
+  caso builder-5: slug reutilizado tras un retire → su ruta de reporte
+  colisionó con la del worker ANTERIOR; filed por el QD con naming D-Q6. A
+  revisar al implementar: la derivación del reportDir por postId/slug en el
+  respawn de un slug retirado, para evitar colisiones (p.ej. sufijar por
+  sesión o limpiar/archivar el reporte previo).
 
 ## 6. SINERGIA
 
