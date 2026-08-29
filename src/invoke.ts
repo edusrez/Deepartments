@@ -300,6 +300,7 @@ import {
   schedulerAutoRunKey
 } from './core/jobs.js'
 import type { CalendarEntry, CalendarState } from './core/jobs.js'
+import type { SchedulerAutoRunFinding } from './core/jobs.js'
 export {
   parseCronSchedule,
   cronMatches,
@@ -8917,6 +8918,226 @@ export function applyInvoke(ctx: Context, config: Config) {
   // sets / registries the tools and daemons read. Guarded: `binder` is
   // undefined in a minimal composition (dshd-core absent), making this a
   // behavior-neutral NO-OP for the bundle-alone suite.
+  //
+  // DECOUPLING PASO 1 (gui → dshd-gui): the RPC channel the bundle mounts
+  // inline below now feeds the `gui` Binder buckET instead of the direct
+  // closure: the endpointDeps wiring (the DEEPARTMENTS endpoint deps: the live
+  // registries + the bundle-owned pure deps buildAgentRows/pickLiveHostEntry +
+  // the presence/journal hooks) is REGISTERED here so the composed dshd-gui
+  // plugin's `deepartments.gui` SERVICE (lazy, fail-loud R1 when the bucket is
+  // absent) provides the channel surface; the bundle's webServer MOUNT effect
+  // below consumes that service. The construction is closure-bound to the apply
+  // fiber (byPost/hosts/agents/presence), exactly like the other buckets.
+  const guiEndpointDeps: DeepartmentsEndpointDeps = {
+    departments: org.departments,
+    // dshd-gui phase: the deps interface is owned by the dshd-gui package (its
+    // structural EndpointPostEntryLike mirror is the cast target — the live
+    // registry type is the bundle's richer PostEntry).
+    byPost: byPost as unknown as Map<string, EndpointPostEntryLike>,
+    // U3 fix (reviewer 2026-08-22): `Map.values()` returns a SINGLE-USE
+    // iterator, and the deps object is shared for the process lifetime. The
+    // host/status builder iterates `deps.hosts` up to 3× (pick, candidates
+    // spread, retired loop) and agents/list iterates it again, so a bare
+    // `hosts.values()` was exhausted by the FIRST call (retired degraded to
+    // []) and every later call saw zero hosts. Re-iterable wire: EVERY
+    // `[Symbol.iterator]` call returns a FRESH iterator over the live content.
+    hosts: { [Symbol.iterator]: (): Iterator<HostEntryLike> => hosts.values() as Iterator<HostEntryLike> },
+    sessionLive: (sid) => agents !== void 0 && agents.get(SessionId(sid)) !== undefined,
+    sessionRunning: (sid) => agents !== void 0 && agents.get(SessionId(sid))?.status === 'running',
+    // dshd-gui phase: the two bundle-owned PURE deps the dispatcher's
+    // agents/list + host/status branches need — injected here exactly like the
+    // sessionLive/unread signals (the package has no bundle import).
+    buildAgentRows,
+    pickLiveHostEntry,
+    // U3: the live host's journal wake_counter for the `host/status` payload.
+    // Best-effort and NEVER throwing — an unreadable journal simply omits the
+    // field (the payload contract stays minimal and stable).
+    loadHostWakeCounter: async (hostId) => {
+      try {
+        const text = await readFile(journalPathFor(hostId), 'utf8')
+        const counterMatch = text.match(/^wake_counter:\s*(\d+)/m)
+        return counterMatch !== null ? Number(counterMatch[1]) : undefined
+      } catch {
+        return undefined
+      }
+    },
+    // U3 fix: ambiguity warn for live-host selection (post-mortem finding #2).
+    logger: ctx.logger,
+    // Feature A — owner-presence read/write + host-change notify. The read
+    // refreshes the synchronous cache (so a `presence/get` reflects the
+    // current file AND keeps the guard/pre-step cache current); the write
+    // persists atomically via the wrapping savePresence (never throws — an
+    // RPC never fails on a persist error). The notify is the fire-and-forget
+    // HOST followup (A3/A4), fired by the dispatch only on a real CHANGE.
+    presenceState: async () => {
+      refreshPresence()
+      return { present: presenceCache.present, ...(presenceCache.updatedAt === undefined ? {} : { updatedAt: presenceCache.updatedAt }) }
+    },
+    savePresenceState: async (state) => savePresence(state),
+    notifyPresenceChange: (present) => notifyHostPresence(present),
+    // W1 — `agenda/list`: read the jobs from the repo tree (default jobDir
+    // resolution via the apply scope repoRoot) and the runtime calendar from
+    // the shared stateDir. The clock picks the live next-due snapshot.
+    repoRoot,
+    calendarStateDir: stateDir,
+    now: () => Date.now()
+  }
+
+  // DECOUPLING PASO 1 (daemons → dshd-jobs / dshd-health): the scheduler +
+  // system-health tick CLOSURES the daemon effects consume are HOISTED to the
+  // apply scope so they can be registered in the `jobs`/`health` Binder
+  // buckets (the composed services read them at use; fail-loud R1 when the
+  // bucket is absent — the contract lock). The daemon effects below resolve
+  // the composed SERVICE and call it per interval, falling back to the SAME
+  // closures inline when the service is absent (minimal composition / bundle-
+  // alone suite — R6 behavior-neutral). All deps these closures capture
+  // (byPost, hosts, org, messagesStoreReady, busDeliverToPost/Host,
+  // runJobForDepartment, captureSchedulerAutoRunFailure, deliverDaemonNotice,
+  // the health builders) are defined by this point.
+  const schedulerHeadForDepartment = (department: DepartmentConfig): string | undefined => department.coordinator?.postId
+  const schedulerRunJob = async (department: DepartmentConfig, headPostId: string, jobId: string): Promise<boolean> => {
+    const headEntry = byPost.get(headPostId)
+    if (headEntry === void 0) {
+      await captureSchedulerAutoRunFailure({ stateDir: stateDir, now: () => Date.now(), jobId, reason: 'no head', error: 'no head' })
+      return false
+    }
+    try {
+      await runJobForDepartment(department, headEntry, jobId, { callerSessionId: headEntry.sessionId })
+      return true
+    } catch (error: unknown) {
+      const errorText = error instanceof Error ? error.message : String(error)
+      const reason = /job already running/.test(errorText) ? 'idempotency-skip' : errorText
+      await captureSchedulerAutoRunFailure({ stateDir: stateDir, now: () => Date.now(), jobId, reason, error: errorText })
+      ctx.logger.warn(`[deepartments] scheduler: job "${jobId}" could not run (${errorText}) — skip`)
+      return false
+    }
+  }
+  const schedulerOnAutoRunSkip = async (finding: SchedulerAutoRunFinding): Promise<void> => {
+    if (finding.reason !== 'no head') return
+    await captureSchedulerAutoRunFailure({ stateDir: stateDir, now: () => Date.now(), jobId: finding.jobId, reason: 'no head', error: 'no head' })
+  }
+  const schedulerNotifyHead = async (headPostId: string, message: string): Promise<void> => {
+    try {
+      const headEntry = byPost.get(headPostId)
+      if (headEntry === void 0) return
+      const store = await messagesStoreReady
+      const record = await store.append({ from: 'deepartments', to: [headPostId], text: `Agenda notice: ${message}`, kind: 'agent' })
+      const outcome = await deliverDaemonNotice(headEntry, record, `[From deepartments → ${headPostId}]: Agenda notice: ${message}`, busDeliverToPost)
+      if (outcome === 'queued') ctx.logger.info(`[deepartments] scheduler: agenda notice to "${headPostId}" queued (head is dormant — no wake)`)
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] scheduler: agenda notice to "${headPostId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  const schedulerDepartmentForEntry = (entry: { createdBy?: string }): DepartmentConfig | undefined => {
+    const creator = byPost.get(entry.createdBy ?? '')
+    return creator === void 0 ? undefined : departmentForEntry(creator)
+  }
+  const schedulerDepartmentForJob = (jobId: string): DepartmentConfig | undefined => {
+    for (const department of org.departments) {
+      const jobDir = jobDirFor(repoRoot, department)
+      if (existsSync(path.join(jobDir, `${jobId}.md`))) return department
+    }
+    return undefined
+  }
+  // W6 system-health: the per-tick LIVE input BUILDERS (catalog posts, host
+  // running signal, session-context rows, host-wait rows) + the ALERT delivery
+  // closure + the per-daemon C6 tail reader — hoisted so the `health` bucket
+  // carries them (the composed dshd-health service runs the SAME tick with the
+  // SAME inputs). The builders read the LIVE registries per call (fresh per
+  // tick); the notifyHost is the C8 direct ALERT seam (store.append +
+  // busDeliverToHost, interrupt:true — never a delivery-engine row).
+  const buildHealthPosts = (): PostActivityInput[] => {
+    const { inboxTsByPost } = readInboxByPost(stateDir, '', Date.now(), HEALTH_ERROR_WINDOW_MS)
+    const out: PostActivityInput[] = []
+    for (const [postId, entry] of byPost) {
+      const live = agents?.get(entry.sessionId)
+      out.push({
+        postId,
+        sessionId: entry.sessionId,
+        retired: entry.retired === true,
+        running: live !== undefined && live.status === 'running',
+        events: (live?.session?.events ?? []) as HealthSessionEvent[],
+        inboxTs: inboxTsByPost.get(postId) ?? [],
+        sleeping: entry.sleepEpoch !== void 0,
+        provider: entry.provider,
+        ...(agents !== void 0 ? { hasLiveHandle: live !== undefined } : {})
+      })
+    }
+    return out
+  }
+  const buildHostRunning = (): boolean | undefined => {
+    if (agents === void 0) return undefined
+    for (const entry of hosts.values()) {
+      if (entry.retired === true) continue
+      if (agents.get(SessionId(entry.sessionId))?.status === 'running') return true
+    }
+    return false
+  }
+  const healthSessionProjections = ctx.get('sessionProjections') as SessionProjectionsLike | undefined
+  const buildSessionContexts = (): SessionContextInput[] | undefined => {
+    if (healthSessionProjections === undefined) return undefined
+    const rowOf = (session: unknown, id: { postId?: string; hostId?: string }): SessionContextInput | undefined => {
+      const snap = healthSessionProjections.snapshot(session)
+      const view = snap?.values?.contextPressure
+      if (view === undefined || typeof view !== 'object') return undefined
+      const v = view as { contextWindow?: unknown; pressureTokens?: unknown; projectedTokens?: unknown }
+      return {
+        ...id,
+        ...(typeof v.contextWindow === 'number' && Number.isFinite(v.contextWindow) ? { contextWindow: v.contextWindow } : {}),
+        ...(typeof v.pressureTokens === 'number' && Number.isFinite(v.pressureTokens) ? { pressureTokens: v.pressureTokens } : {}),
+        ...(typeof v.projectedTokens === 'number' && Number.isFinite(v.projectedTokens) ? { projectedTokens: v.projectedTokens } : {})
+      }
+    }
+    const out: SessionContextInput[] = []
+    for (const [postId, entry] of byPost) {
+      if (entry.retired === true) continue
+      const live = agents?.get(entry.sessionId)
+      if (live?.session === undefined) continue
+      const row = rowOf(live.session, { postId })
+      if (row !== undefined) out.push(row)
+    }
+    for (const entry of hosts.values()) {
+      if (entry.retired === true) continue
+      const live = agents?.get(entry.sessionId)
+      if (live?.session === undefined) continue
+      const row = rowOf(live.session, { hostId: entry.hostId })
+      if (row !== undefined) out.push(row)
+      break
+    }
+    return out
+  }
+  const buildHostWaits = (): HostWaitPostInput[] => {
+    const { live } = pickLiveHostEntry(hosts.values())
+    if (live === undefined) return []
+    const nowMs = Date.now()
+    const { hostRowsByPost } = readInboxByPost(stateDir, live.hostId, nowMs, HEALTH_ERROR_WINDOW_MS)
+    const out: HostWaitPostInput[] = []
+    for (const [postId, entry] of byPost) {
+      const liveAgent = agents?.get(entry.sessionId)
+      out.push({
+        postId,
+        retired: entry.retired === true,
+        events: (liveAgent?.session?.events ?? []) as HealthSessionEvent[],
+        hostMessages: hostRowsByPost.get(postId) ?? [],
+        sleeping: entry.sleepEpoch !== void 0
+      })
+    }
+    return out
+  }
+  const healthNotifyHost = async (hostEntry: HostEntryLike, alertFrame: string): Promise<void> => {
+    try {
+      const store = await messagesStoreReady
+      const record = await store.append({ from: 'deepartments', to: [hostEntry.hostId], text: alertFrame, kind: 'agent' })
+      await busDeliverToHost(hostEntry as HostEntry, alertFrame, record, void 0, { interrupt: true })
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] system-health: host alert delivery failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  const healthPoolerStatePath = config.health?.poolerStateFilePath !== undefined && config.health.poolerStateFilePath.trim() !== ''
+    ? config.health.poolerStateFilePath
+    : path.join(dshHome(), POOLER_STATE_FILE)
+  const healthBootId = randomUUID()
+
   const binder = ctx.get('deepartments.binder') as Binder | undefined
   binder?.register({
     bus: { redeliver: { recipientAlive: recipientCatalogAlive, resolveCallerSessionId: resolveCallerSessionIdForRedeliver, deliver: deliverBusRecordForRedeliver } },
@@ -8955,7 +9176,63 @@ export function applyInvoke(ctx: Context, config: Config) {
       deferredSleepReplace,
       wakePackInjected
     },
-    redeliver: { recipientAlive: recipientCatalogAlive, resolveCallerSessionId: resolveCallerSessionIdForRedeliver, deliver: deliverBusRecordForRedeliver }
+    redeliver: { recipientAlive: recipientCatalogAlive, resolveCallerSessionId: resolveCallerSessionIdForRedeliver, deliver: deliverBusRecordForRedeliver },
+    // DECOUPLING PASO 1 — the gui channel bucket: the composed dshd-gui plugin
+    // (deepartments.gui service) reads this on FIRST use to dispatch the
+    // /deepartments endpoints. Absent in a minimal composition (dshd-gui not
+    // composed) → the bundle's webServer mount below falls back to the direct
+    // in-bundle handler (R6, behavior-neutral).
+    gui: { endpointDeps: guiEndpointDeps },
+    // DECOUPLING PASO 1 — the pooler bucket: the composed dshd-pooler plugin
+    // (deepartments.pooler service) reads the CONFIGURED provider set (the
+    // worker/host agent-option routes are bundle constants the package cannot
+    // derive) + the post-error append closure. The bundle's OWN inline boot
+    // check (runProviderAdapterBootCheck, tools zone) is untouched (R6) — this
+    // bucket only serves the composed SERVICE.
+    pooler: {
+      configuredProviders: [
+        ...(WORKER_AGENT_OPTIONS.provider !== undefined ? [WORKER_AGENT_OPTIONS.provider] : []),
+        ...(HOST_AGENT_OPTIONS.provider !== undefined ? [HOST_AGENT_OPTIONS.provider] : []),
+        ...(org.departments ?? []).flatMap((department) => {
+          const c = department.coordinator
+          if (c?.agentOptions?.provider !== undefined) return [c.agentOptions.provider]
+          return c?.provider !== undefined ? [c.provider] : []
+        })
+      ],
+      appendPostError
+    },
+    // DECOUPLING PASO 1 — the jobs bucket: the composed dshd-jobs plugin
+    // (deepartments.jobs service) reads the closure-bound scheduler deps on
+    // runSchedulerTick (REQUIRED at use: runJob/notifyHead/departmentForEntry/
+    // departmentForJob; onAutoRunSkip + repoRoot optional) — the SAME closures
+    // the (hermetic) inline fallback uses, so the composed daemon behaves
+    // identically. The dshd-jobs service derives org.departments + stateDir
+    // from `deepartments.org` (the shared source — identical values).
+    jobs: {
+      runJob: schedulerRunJob,
+      notifyHead: schedulerNotifyHead,
+      departmentForEntry: schedulerDepartmentForEntry,
+      departmentForJob: schedulerDepartmentForJob,
+      onAutoRunSkip: schedulerOnAutoRunSkip,
+      repoRoot
+    },
+    // DECOUPLING PASO 1 — the health bucket: the composed dshd-health plugin
+    // (deepartments.health service) reads its STATIC per-process deps from here
+    // (bootId/config/notifyHost/poolerStatePath/qiDirectiveRate/workRegisterPath)
+    // and receives the PER-TICK live inputs (now/hosts/posts/hostWaits/
+    // sessionContexts/hostRunning/deliveryRowsReader) EXPLICITLY per
+    // runDaemonTick call — exactly the fields the inline daemon passed to
+    // runHealthDaemonTick (verified by test/binder-contract.test.js).
+    health: {
+      bootId: healthBootId,
+      // The plugin Config (the dshd-health service reads `.health` knobs from
+      // it — HealthConfigLike-structural; the health bucket types it unknown).
+      config,
+      notifyHost: healthNotifyHost,
+      poolerStatePath: healthPoolerStatePath,
+      qiDirectiveRate: qualityWorkerInspectProbability,
+      workRegisterPath: path.join(repoRoot, 'docs', 'WORK-REGISTER.md')
+    }
   })
 
 
@@ -9215,89 +9492,36 @@ export function applyInvoke(ctx: Context, config: Config) {
   // effect (AGENTS.md rule 4): the interval is cleared on dispose. NEVER throws
   // — the pure tick folds every internal failure to a warn.
   const AGENDA_SCHEDULER_INTERVAL_MS = 30 * 1000
+  // DECOUPLING PASO 1 (daemons → dshd-jobs): the composed dshd-jobs plugin
+  // provides `deepartments.jobs` — the bundle INVOKES THE SERVICE per tick
+  // (the `jobs` binder bucket above carries the closure-bound deps the service
+  // reads; a missing bucket at use fails loud R1 — the contract lock). In a
+  // MINIMAL composition (dshd-jobs absent, e.g. the bundle-alone suite) the
+  // bundle keeps the in-bundle tick with the SAME hoisted closures — R6
+  // behavior-neutral (verified by the dshd-jobs daemon production closure test).
+  const jobsService = ctx.get('deepartments.jobs') as
+    | { runSchedulerTick(opts?: { now?: () => number }): Promise<void> }
+    | undefined
   ctx.effect(() => {
     const tick = (): void => {
-      void runAgendaSchedulerTick({
-        now: () => Date.now(),
-        departments: org.departments,
-        repoRoot,
-        calendarStateDir: stateDir,
-        jobRunsStateDir: stateDir,
-        // Resolve the department's registered head postId (sin head → the tick
-        // skips + warns). A configured head derives it from config.coordinator;
-        // a department with no coordinator/head is unresolved.
-        headForDepartment: (department) => department.coordinator?.postId,
-        // The SHARED dept_job_run engine. Resolves false ("skip") when the job
-        // is already running (idempotency) or any non-fatal error; the tick
-        // only advances the ledger on a true (fired) result. W8-c scheduler
-        // visibility: each no-fire is ALSO recorded into post-errors.jsonl
-        // (postId 'scheduler', message = the jobId + the cause) so the health
-        // daemon ALERTS the host — (a) a thrown run is captured with the thrown
-        // error, (b) an unresolved head post is 'no head', (c) an idempotency
-        // skip is 'idempotency-skip'. The tick folds them into a false return
-        // (so it cannot distinguish them), hence they are recorded HERE.
-        runJob: async (department, headPostId, jobId): Promise<boolean> => {
-          const headEntry = byPost.get(headPostId)
-          if (headEntry === void 0) {
-            await captureSchedulerAutoRunFailure({ stateDir: stateDir, now: () => Date.now(), jobId, reason: 'no head', error: 'no head' })
-            return false
-          }
-          try {
-            await runJobForDepartment(department, headEntry, jobId, { callerSessionId: headEntry.sessionId })
-            return true
-          } catch (error: unknown) {
-            const errorText = error instanceof Error ? error.message : String(error)
-            const reason = /job already running/.test(errorText) ? 'idempotency-skip' : errorText
-            await captureSchedulerAutoRunFailure({ stateDir: stateDir, now: () => Date.now(), jobId, reason, error: errorText })
-            ctx.logger.warn(`[deepartments] scheduler: job "${jobId}" could not run (${errorText}) — skip`)
-            return false
-          }
-        },
-        // W8-c scheduler visibility: the pure tick surfaces the cron
-        // no-head skip (a department with NO registered head) through this
-        // hook. The (a) runJob-throw and (c) returns-false cases are recorded
-        // by runJob directly (the closure folds them into a false return, so
-        // the tick cannot distinguish them) — only the tick-level 'no head'
-        // flows through here, so the same no-fire is never double-recorded.
-        onAutoRunSkip: async (finding) => {
-          if (finding.reason !== 'no head') return
-          await captureSchedulerAutoRunFailure({ stateDir: stateDir, now: () => Date.now(), jobId: finding.jobId, reason: 'no head', error: 'no head' })
-        },
-        // A plain (non-job) calendar entry notice: deliver a bus message to the
-        // owning head. The scheduler is NOT a catalog member, so the bus ACL
-        // would conservatively deny it — deliver via the post-delivery seam
-        // directly (a plugin-daemon system notice, framed `[From deepartments]`).
-        notifyHead: async (headPostId, message): Promise<void> => {
-          try {
-            const headEntry = byPost.get(headPostId)
-            if (headEntry === void 0) return
-            const store = await messagesStoreReady
-            const record = await store.append({ from: 'deepartments', to: [headPostId], text: `Agenda notice: ${message}`, kind: 'agent' })
-            // B4 daemon re-wake gate: a DORMANT head (sleepEpoch set) is NOT
-            // re-woken by a routine calendar notice — the record is already
-            // appended durably (above), so deliverDaemonNotice returns 'queued'
-            // and the notice drains at the head's next real wake. The ALWAYS-WAKE
-            // default is preserved for non-dormant heads; the health ALERT (a
-            // separate notifyHost) is NEVER gated.
-            const outcome = await deliverDaemonNotice(headEntry, record, `[From deepartments → ${headPostId}]: Agenda notice: ${message}`, busDeliverToPost)
-            if (outcome === 'queued') ctx.logger.info(`[deepartments] scheduler: agenda notice to "${headPostId}" queued (head is dormant — no wake)`)
-          } catch (error: unknown) {
-            ctx.logger.warn(`[deepartments] scheduler: agenda notice to "${headPostId}" failed: ${error instanceof Error ? error.message : String(error)}`)
-          }
-        },
-        departmentForEntry: (entry) => {
-          const creator = byPost.get(entry.createdBy ?? '')
-          return creator === void 0 ? undefined : departmentForEntry(creator)
-        },
-        departmentForJob: (jobId) => {
-          for (const department of org.departments) {
-            const jobDir = jobDirFor(repoRoot, department)
-            if (existsSync(path.join(jobDir, `${jobId}.md`))) return department
-          }
-          return undefined
-        },
-        logger: ctx.logger
-      })
+      if (jobsService !== undefined) {
+        void jobsService.runSchedulerTick({ now: () => Date.now() })
+      } else {
+        void runAgendaSchedulerTick({
+          now: () => Date.now(),
+          departments: org.departments,
+          repoRoot,
+          calendarStateDir: stateDir,
+          jobRunsStateDir: stateDir,
+          headForDepartment: schedulerHeadForDepartment,
+          runJob: schedulerRunJob,
+          onAutoRunSkip: schedulerOnAutoRunSkip,
+          notifyHead: schedulerNotifyHead,
+          departmentForEntry: schedulerDepartmentForEntry,
+          departmentForJob: schedulerDepartmentForJob,
+          logger: ctx.logger
+        })
+      }
     }
     const interval = setInterval(tick, AGENDA_SCHEDULER_INTERVAL_MS)
     return () => { clearInterval(interval) }
@@ -9424,158 +9648,36 @@ export function applyInvoke(ctx: Context, config: Config) {
   // interval is cleared on dispose. `health.enabled === false` → the daemon is
   // NOT registered (no heartbeat, no alerts) with a one-shot info log; absent
   // `health` → enabled (code default). The bootId is generated ONCE per plugin
-  // apply (a per-process id stamped into the heartbeat).
+  // apply (a per-process id stamped into the heartbeat; hoisted at the register
+  // site — the `health` Binder bucket carries it).
   const healthConfig = config.health
   const healthEnabled = healthConfig?.enabled !== false
   const healthIntervalMs = healthConfig?.intervalMs ?? 60_000
-  const healthBootId = randomUUID()
   if (!healthEnabled) {
     ctx.logger.info('[deepartments] system-health: health.enabled === false — daemon disabled (no heartbeat, no alerts)')
   } else {
-    // W8-c PART 1/2 — the catalog-post inputs the turn-error + stale-live
-    // safeguards scan: the live agent's session event log (the real session log
-    // the harness maintains) + the post's addressed-message ts list (from the
-    // delivery sidecar resolved to the message-records ts). Resolved FRESH per
-    // tick (never frozen at boot), so a post that wakes/stalls mid-process is
-    // judged against its CURRENT activity. Never throws (a missing/malformed
-    // registry or store degrades to empty inputs — the scan is a no-op).
-    const buildHealthPosts = (): PostActivityInput[] => {
-      // `readInboxByPost` (W8-d) reads the delivery sidecar + messages.jsonl ONCE
-      // and resolves the per-post inbox ts for both the W8-c safeguards and the
-      // W8-d host-wait scan (hostId '' → no host rows, only the general inbox).
-      const { inboxTsByPost } = readInboxByPost(stateDir, '', Date.now(), HEALTH_ERROR_WINDOW_MS)
-      const out: PostActivityInput[] = []
-      for (const [postId, entry] of byPost) {
-        const live = agents?.get(entry.sessionId)
-        out.push({
-          postId,
-          // fb-25 (b): the post's LIVE session id — the SESSION PROVENANCE the
-          // W8-c turn-error capture attaches to a post-error row (the alert
-          // then names the ARCHIVED session the error belongs to).
-          sessionId: entry.sessionId,
-          retired: entry.retired === true,
-          // Bug B: the LIVE agent's status — a genuinely-running turn is NOT
-          // stalled (a long in-flight model call is healthy progress). The
-          // harness agent.status === 'running' is the disambiguator (events alone
-          // cannot distinguish a healthy running turn from an interrupted one).
-          running: live !== undefined && live.status === 'running',
-          events: (live?.session?.events ?? []) as HealthSessionEvent[],
-          inboxTs: inboxTsByPost.get(postId) ?? [],
-          // Dormant-exclusion (owner m-169/m-174): a sleepEpoch-set post is
-          // deliberately asleep — never a stalled finding (see scanStalledPosts).
-          sleeping: entry.sleepEpoch !== void 0,
-          // m-228 — the orphaned-worker signal: the worker marker + whether a
-          // LIVE AgentHandle exists (scanStalledPosts uses both to exclude an
-          // orphaned worker whose retire step was cut by a restart). When the
-          // `agents` registry is ABSENT (a headless/minimal profile) liveness is
-          // UNKNOWABLE, so the field is OMITTED (undefined) — the orphan
-          // exclusion is conservative and never fires on an unknown liveness.
-          provider: entry.provider,
-          ...(agents !== void 0 ? { hasLiveHandle: live !== undefined } : {})
-        })
-      }
-      return out
-    }
-    // M4 — the HOST agent's live running signal for the system-idle watchdog:
-    // whether the LIVE (non-retired) host's session is CURRENTLY mid-turn — the
-    // SAME expression buildCatalogRows uses for the host row (:1942). Resolved
-    // FRESH per tick against the live agents registry; when the registry is
-    // ABSENT (a headless/minimal profile) the signal is UNDEFINED → the
-    // system-idle scan is a NO-OP (the conservative direction: unknown host
-    // liveness never fabricates a global-quiet ALERT).
-    const buildHostRunning = (): boolean | undefined => {
-      if (agents === void 0) return undefined
-      for (const entry of hosts.values()) {
-        if (entry.retired === true) continue
-        if (agents.get(SessionId(entry.sessionId))?.status === 'running') return true
-      }
-      return false
-    }
-    // M-A — the context-pressure inputs the context-threshold scan reads: the
-    // token-meter's `contextPressure` projection, read LIVE in-process via the
-    // sessionProjections service (`snapshot(session).values.contextPressure` —
-    // the eager-driven, zero-I/O wire view; the durable
-    // session_projcache.json is only its cross-process mirror). One
-    // SessionContextInput row per NON-RETIRED post + the LIVE (non-retired)
-    // host's OWN row (hostId, no postId — the M4 host-not-a-pseudo-post rule).
-    // Resolved FRESH per tick (never frozen at boot), so the monitor judges the
-    // CURRENT window usage of every live agent. When the sessionProjections
-    // service is ABSENT (a headless/minimal profile) → undefined → the scan is
-    // a NO-OP (unknown context pressure never fabricates an alert; the
-    // hostRunning-absent pattern). Never throws (a missing registry degrades to
-    // empty rows — the scan is a no-op).
-    // M-A — the context-pressure inputs the context-threshold scan reads: the
-    // token-meter's `contextPressure` projection, read LIVE in-process via the
-    // sessionProjections service (`snapshot(session).values.contextPressure` —
-    // the eager-driven, zero-I/O, VERSION-AGNOSTIC wire view; the durable
-    // session_projcache.json is only its cross-process mirror). One
-    // SessionContextInput row per NON-RETIRED post + the LIVE (non-retired)
-    // host's OWN row (hostId, no postId — the M4 host-not-a-pseudo-post rule).
-    // Resolved FRESH per tick (never frozen at boot), so the monitor judges the
-    // CURRENT window usage of every live agent. When the sessionProjections
-    // service is ABSENT (a headless/minimal profile) → undefined → the scan is
-    // a NO-OP (unknown context pressure never fabricates an alert; the
-    // hostRunning-absent pattern). Never throws (a missing registry degrades to
-    // empty rows — the scan is a no-op).
-    const sessionProjections = ctx.get('sessionProjections') as SessionProjectionsLike | undefined
-    const buildSessionContexts = (): SessionContextInput[] | undefined => {
-      if (sessionProjections === undefined) return undefined
-      const rowOf = (session: unknown, id: { postId?: string; hostId?: string }): SessionContextInput | undefined => {
-        const snap = sessionProjections.snapshot(session)
-        const view = snap?.values?.contextPressure
-        if (view === undefined || typeof view !== 'object') return undefined
-        const v = view as { contextWindow?: unknown; pressureTokens?: unknown; projectedTokens?: unknown }
-        return {
-          ...id,
-          ...(typeof v.contextWindow === 'number' && Number.isFinite(v.contextWindow) ? { contextWindow: v.contextWindow } : {}),
-          ...(typeof v.pressureTokens === 'number' && Number.isFinite(v.pressureTokens) ? { pressureTokens: v.pressureTokens } : {}),
-          ...(typeof v.projectedTokens === 'number' && Number.isFinite(v.projectedTokens) ? { projectedTokens: v.projectedTokens } : {})
-        }
-      }
-      const out: SessionContextInput[] = []
-      for (const [postId, entry] of byPost) {
-        if (entry.retired === true) continue
-        const live = agents?.get(entry.sessionId)
-        if (live?.session === undefined) continue
-        const row = rowOf(live.session, { postId })
-        if (row !== undefined) out.push(row)
-      }
-      // The HOST row: the LIVE (non-retired) host's own context pressure.
-      for (const entry of hosts.values()) {
-        if (entry.retired === true) continue
-        const live = agents?.get(entry.sessionId)
-        if (live?.session === undefined) continue
-        const row = rowOf(live.session, { hostId: entry.hostId })
-        if (row !== undefined) out.push(row)
-        break
-      }
-      return out
-    }
-    // W8-d PART B — the host-sender-aware inputs the CONDITIONAL system-wait scan
-    // reads: the post's session event log + the ts of messages ADDRESSED to it
-    // that the LIVE host sent (from the delivery sidecar + message records).
-    // Resolved FRESH per tick against the LIVE host (pickLiveHostEntry), so the
-    // WAIT condition judges the CURRENT active Asistente. Never throws.
-    const buildHostWaits = (): HostWaitPostInput[] => {
-      const { live } = pickLiveHostEntry(hosts.values())
-      if (live === undefined) return []
-      const nowMs = Date.now()
-      const { hostRowsByPost } = readInboxByPost(stateDir, live.hostId, nowMs, HEALTH_ERROR_WINDOW_MS)
-      const out: HostWaitPostInput[] = []
-      for (const [postId, entry] of byPost) {
-        const liveAgent = agents?.get(entry.sessionId)
-        out.push({
-          postId,
-          retired: entry.retired === true,
-          events: (liveAgent?.session?.events ?? []) as HealthSessionEvent[],
-          hostMessages: hostRowsByPost.get(postId) ?? [],
-          // Dormant-exclusion (owner m-169/m-174): a sleepEpoch-set post is
-          // deliberately asleep — never a system-wait finding (see scanHostWaits).
-          sleeping: entry.sleepEpoch !== void 0
-        })
-      }
-      return out
-    }
+    // DECOUPLING PASO 1 (daemons → dshd-health): the composed dshd-health
+    // plugin provides `deepartments.health` — the bundle INVOKES THE SERVICE
+    // per tick, passing the PER-TICK live inputs EXPLICITLY (now/hosts/posts/
+    // hostWaits/sessionContexts/hostRunning/deliveryRowsReader — the FRESH
+    // per-tick computations the builders above produce) while the STATIC
+    // per-process deps come from the `health` Binder bucket (bootId/config/
+    // notifyHost/poolerStatePath/qiDirectiveRate/workRegisterPath — registered
+    // at the register site above). The builders/notifyHost are HOISTED there,
+    // so the SAME closures serve the (hermetic) inline fallback below — R6
+    // behavior-neutral (the bundle-alone suite) and the composed service path
+    // (the dev profile) run the IDENTICAL tick computation.
+    const healthService = ctx.get('deepartments.health') as
+      | { runDaemonTick(deps: {
+          now?: () => number
+          hosts?: Iterable<HostEntry>
+          posts?: Iterable<PostActivityInput>
+          hostRunning?: boolean
+          sessionContexts?: Iterable<SessionContextInput>
+          hostWaits?: Iterable<HostWaitPostInput>
+          deliveryRowsReader?: unknown
+        }): Promise<void> }
+      | undefined
     ctx.effect(() => {
       // C6: ONE tail reader per daemon — its byte-offset cursor survives ticks
       // (created here, outside the per-tick deps object), so a 60 s tick parses
@@ -9584,70 +9686,80 @@ export function applyInvoke(ctx: Context, config: Config) {
       // filter pipeline is unchanged → same findings, same alerts.
       const deliveryRowsTailReader = createDeliveryRowsTailReader()
       const tick = (): void => {
-        void runHealthDaemonTick({
-          now: () => Date.now(),
-          stateDir: stateDir,
-          bootId: healthBootId,
-          config,
-          // A FRESH single-use iterator per tick (Map.values() is single-use).
-          hosts: hosts.values(),
-          // W8-c: the catalog-post inputs (activity + inbox) for the turn-error
-          // + stale-live safeguards — resolved lazily per tick.
-          posts: buildHealthPosts(),
-          // M4: the host's live running signal (absent agents registry →
-          // undefined → the system-idle scan is a no-op).
-          hostRunning: buildHostRunning(),
-          // M-A: the context-pressure rows for the context-threshold watchdog
-          // (absent sessionProjections service → undefined → the scan is a
-          // no-op — unknown context pressure never fabricates an alert).
-          sessionContexts: buildSessionContexts(),
-          // W8-d: the host-sender-aware inputs for the conditional system-wait
-          // scan — resolved lazily per tick.
-          hostWaits: buildHostWaits(),
-          // C6: the bounded tail reader (absent → the legacy full read).
-          deliveryRowsReader: deliveryRowsTailReader,
-          // M1 (a) — the pooler-capacity watchdog READS the pooler's OWN state
-          // file (join(DSH_HOME||cwd,'keyPooler-state.json') — dshHome() at
-          // :2542), SOLO-LECTURA (the pooler owns every write; the watchdog
-          // never writes it). The `health.poolerStateFilePath` knob overrides
-          // the path; absent dep → the scan is a no-op (hermetic tick tests).
-          poolerStatePath: config.health?.poolerStateFilePath !== undefined && config.health.poolerStateFilePath.trim() !== ''
-            ? config.health.poolerStateFilePath
-            : path.join(dshHome(), POOLER_STATE_FILE),
-          // M1 (b) — the qi-silence watchdog shares the SAME worker-inspect dice
-          // p as the directive EMITTER (single source of truth, resolved at
-          // :1819) so its rate-aware minimum (P(0|p) ≤ 5% → ceil(ln(.05)/ln(1-p)))
-          // tracks the real trigger probability; absent dep → 0.25 code default.
-          qiDirectiveRate: qualityWorkerInspectProbability,
-          // The daemon is NOT a catalog member, so the bus ACL would deny it —
-          // deliver the alert via the HOST delivery seam directly, framing it
-          // `[From deepartments] System-health ALERT:` (exactly like the other
-          // daemons' notify hooks). The host entry is the LIVE Asistente entry
-          // resolved per tick (setInterval re-evaluates, so the boot race where
-          // the hosts registry is still empty cannot permanently disable it).
-          // C8 (structural-loop invariant): the ALERT is delivered DIRECT here
-          // (store.append + busDeliverToHost) — it NEVER goes through the
-          // delivery engine, so NO 'prepared'/'failed' delivery row is ever
-          // written for an ALERT → scanDeliveryFindings can never re-alert an
-          // ALERT (the alert→delivery-failed→alert loop is impossible).
-          notifyHost: async (hostEntry, alertFrame): Promise<void> => {
-            try {
-              const store = await messagesStoreReady
-              const record = await store.append({ from: 'deepartments', to: [hostEntry.hostId], text: alertFrame, kind: 'agent' })
-              // W9-b: a System-health ALERT (and the system-wait wake) must
-              // PREEMPT a busy host turn, not queue behind it — deliver with
-              // `interrupt: true` (abort the current turn, reason 'interrupted').
-              await busDeliverToHost(hostEntry as HostEntry, alertFrame, record, void 0, { interrupt: true })
-            } catch (error: unknown) {
-              ctx.logger.warn(`[deepartments] system-health: host alert delivery failed: ${error instanceof Error ? error.message : String(error)}`)
-            }
-          },
-          // PACING (owner m-PACING, 2026-08-28): the repo WORK-REGISTER path —
-          // read at a VALLE transition for the «reanuda; despachos diferidos:
-          // N» count (best-effort; unreadable → the notice omits the count).
-          workRegisterPath: path.join(repoRoot, 'docs', 'WORK-REGISTER.md'),
-          logger: ctx.logger
-        })
+        if (healthService !== undefined) {
+          void healthService.runDaemonTick({
+            now: () => Date.now(),
+            // A FRESH single-use iterator per tick (Map.values() is single-use).
+            hosts: hosts.values(),
+            // W8-c: the catalog-post inputs (activity + inbox) for the turn-error
+            // + stale-live safeguards — resolved lazily per tick.
+            posts: buildHealthPosts(),
+            // M4: the host's live running signal (absent agents registry →
+            // undefined → the system-idle scan is a no-op).
+            hostRunning: buildHostRunning(),
+            // M-A: the context-pressure rows for the context-threshold watchdog
+            // (absent sessionProjections service → undefined → the scan is a
+            // no-op — unknown context pressure never fabricates an alert).
+            sessionContexts: buildSessionContexts(),
+            // W8-d: the host-sender-aware inputs for the conditional system-wait
+            // scan — resolved lazily per tick.
+            hostWaits: buildHostWaits(),
+            // C6: the bounded tail reader (absent → the legacy full read).
+            deliveryRowsReader: deliveryRowsTailReader
+          })
+        } else {
+          void runHealthDaemonTick({
+            now: () => Date.now(),
+            stateDir: stateDir,
+            bootId: healthBootId,
+            config,
+            // A FRESH single-use iterator per tick (Map.values() is single-use).
+            hosts: hosts.values(),
+            // W8-c: the catalog-post inputs (activity + inbox) for the turn-error
+            // + stale-live safeguards — resolved lazily per tick.
+            posts: buildHealthPosts(),
+            // M4: the host's live running signal (absent agents registry →
+            // undefined → the system-idle scan is a no-op).
+            hostRunning: buildHostRunning(),
+            // M-A: the context-pressure rows for the context-threshold watchdog
+            // (absent sessionProjections service → undefined → the scan is a
+            // no-op — unknown context pressure never fabricates an alert).
+            sessionContexts: buildSessionContexts(),
+            // W8-d: the host-sender-aware inputs for the conditional system-wait
+            // scan — resolved lazily per tick.
+            hostWaits: buildHostWaits(),
+            // C6: the bounded tail reader (absent → the legacy full read).
+            deliveryRowsReader: deliveryRowsTailReader,
+            // M1 (a) — the pooler-capacity watchdog READS the pooler's OWN state
+            // file (join(DSH_HOME||cwd,'keyPooler-state.json') — dshHome() at
+            // :2542), SOLO-LECTURA (the pooler owns every write; the watchdog
+            // never writes it). The `health.poolerStateFilePath` knob overrides
+            // the path; absent dep → the scan is a no-op (hermetic tick tests).
+            poolerStatePath: healthPoolerStatePath,
+            // M1 (b) — the qi-silence watchdog shares the SAME worker-inspect dice
+            // p as the directive EMITTER (single source of truth, resolved at
+            // :1819) so its rate-aware minimum (P(0|p) ≤ 5% → ceil(ln(.05)/ln(1-p)))
+            // tracks the real trigger probability; absent dep → 0.25 code default.
+            qiDirectiveRate: qualityWorkerInspectProbability,
+            // The daemon is NOT a catalog member, so the bus ACL would deny it —
+            // deliver the alert via the HOST delivery seam directly, framing it
+            // `[From deepartments] System-health ALERT:` (exactly like the other
+            // daemons' notify hooks). The host entry is the LIVE Asistente entry
+            // resolved per tick (setInterval re-evaluates, so the boot race where
+            // the hosts registry is still empty cannot permanently disable it).
+            // C8 (structural-loop invariant): the ALERT is delivered DIRECT here
+            // (store.append + busDeliverToHost) — it NEVER goes through the
+            // delivery engine, so NO 'prepared'/'failed' delivery row is ever
+            // written for an ALERT → scanDeliveryFindings can never re-alert an
+            // ALERT (the alert→delivery-failed→alert loop is impossible).
+            notifyHost: healthNotifyHost,
+            // PACING (owner m-PACING, 2026-08-28): the repo WORK-REGISTER path —
+            // read at a VALLE transition for the «reanuda; despachos diferidos:
+            // N» count (best-effort; unreadable → the notice omits the count).
+            workRegisterPath: path.join(repoRoot, 'docs', 'WORK-REGISTER.md'),
+            logger: ctx.logger
+          })
+        }
       }
       const interval = setInterval(tick, healthIntervalMs)
       return () => { clearInterval(interval) }
@@ -9659,10 +9771,15 @@ export function applyInvoke(ctx: Context, config: Config) {
   // host-rotation lifecycle signal (`host/status`, spec 002 §6.1) to the client
   // over the `/deepartments` channel (trusted-host authority). The pure
   // computation lives in dispatchDeepartmentsEndpoint (exported, unit-tested
-  // in test/rpc-channel.test.js); this effect only wires it to the live
-  // registries + the board read model and mounts the HTTP routes. (U1: the
-  // persistent UI config surface the channel once also served is removed with
-  // the sidebar.)
+  // in test/rpc-channel.test.js); this effect wires it to the live registries
+  // and mounts the HTTP routes. (U1: the persistent UI config surface the
+  // channel once also served is removed with the sidebar.)
+  // DECOUPLING PASO 1: the channel SURFACE is now consumed from the composed
+  // dshd-gui plugin's `deepartments.gui` SERVICE (the `gui.endpointDeps`
+  // binder bucket registered above) — the bundle no longer dispatches through
+  // the inline closure; the mount only binds webServer + trustedHosts and calls
+  // the service (fail-loud R1 when the bucket is missing; direct in-bundle
+  // fallback when the plugin row is absent — R6, behavior-neutral).
   //
   // rc.8 TRANSPORT FIX: `ctx.connection.rpc.handle('/deepartments', ...)` did NOT
   // mount an HTTP route in rc.8 — dsh-client-connection registers ONLY the `/api`
@@ -9733,64 +9850,18 @@ export function applyInvoke(ctx: Context, config: Config) {
     console.log(
       `[deepartments] /deepartments channel mounted; trustedHosts=${JSON.stringify(trustedHosts)}; routes: agents/list, host/status, presence/get, presence/set, agenda/list`
     )
-    const endpointDeps: DeepartmentsEndpointDeps = {
-      departments: org.departments,
-      // dshd-gui phase: the deps interface is now owned by the dshd-gui package
-      // (its structural EndpointPostEntryLike mirror is the cast target — the
-      // live registry type is the bundle's richer PostEntry).
-      byPost: byPost as unknown as Map<string, EndpointPostEntryLike>,
-      // U3 fix (reviewer 2026-08-22): `Map.values()` returns a SINGLE-USE
-      // iterator, and `endpointDeps` is shared for the process lifetime. The
-      // new buildHostStatusPayload iterates `deps.hosts` up to 3× (pick,
-      // candidates spread, retired loop) and agents/list iterates it again, so
-      // a bare `hosts.values()` was exhausted by the FIRST call (retired
-      // degraded to []) and every later call saw zero hosts (hostSessionId →
-      // null — the client watcher's rotation signal died after the first poll).
-      // Re-iterable wire: EVERY `[Symbol.iterator]` call returns a FRESH
-      // iterator over the live Map content. Fixing this inside
-      // buildHostStatusPayload alone could not cure the cross-request
-      // exhaustion of a shared one-shot iterator.
-      hosts: { [Symbol.iterator]: (): Iterator<HostEntryLike> => hosts.values() as Iterator<HostEntryLike> },
-      sessionLive: (sid) => agents !== void 0 && agents.get(SessionId(sid)) !== undefined,
-      sessionRunning: (sid) => agents !== void 0 && agents.get(SessionId(sid))?.status === 'running',
-      // dshd-gui phase: the two bundle-owned PURE deps the dispatcher's
-      // agents/list + host/status branches need — injected here exactly like
-      // the sessionLive/unread signals (the package has no bundle import).
-      buildAgentRows,
-      pickLiveHostEntry,
-      // U3: the live host's journal wake_counter for the `host/status` payload.
-      // Best-effort and NEVER throwing — an unreadable journal simply omits the
-      // field (the payload contract stays minimal and stable).
-      loadHostWakeCounter: async (hostId) => {
-        try {
-          const text = await readFile(journalPathFor(hostId), 'utf8')
-          const counterMatch = text.match(/^wake_counter:\s*(\d+)/m)
-          return counterMatch !== null ? Number(counterMatch[1]) : undefined
-        } catch {
-          return undefined
-        }
-      },
-      // U3 fix: ambiguity warn for live-host selection (post-mortem finding #2).
-      logger: ctx.logger,
-      // Feature A — owner-presence read/write + host-change notify. The read
-      // refreshes the synchronous cache (so a `presence/get` reflects the
-      // current file AND keeps the guard/pre-step cache current); the write
-      // persists atomically via the wrapping savePresence (never throws — an
-      // RPC never fails on a persist error). The notify is the fire-and-forget
-      // HOST followup (A3/A4), fired by the dispatch only on a real CHANGE.
-      presenceState: async () => {
-        refreshPresence()
-        return { present: presenceCache.present, ...(presenceCache.updatedAt === undefined ? {} : { updatedAt: presenceCache.updatedAt }) }
-      },
-      savePresenceState: async (state) => savePresence(state),
-      notifyPresenceChange: (present) => notifyHostPresence(present),
-      // W1 — `agenda/list`: read the jobs from the repo tree (default jobDir
-      // resolution via the apply scope repoRoot) and the runtime calendar from
-      // the shared stateDir. The clock picks the live next-due snapshot.
-      repoRoot,
-      calendarStateDir: stateDir,
-      now: () => Date.now()
-    }
+    // DECOUPLING PASO 1 — the RPC channel surface is CONSUMED from the composed
+    // dshd-gui plugin's `deepartments.gui` SERVICE (which dispatches with the
+    // `gui.endpointDeps` binder bucket REGISTERED above — the same wiring this
+    // effect used to build inline), instead of the direct in-bundle handler:
+    //   - dshd-gui composed → the service provides the channel (fail-loud R1 at
+    //     first use if the gui bucket is missing — the contract lock),
+    //   - dshd-gui ABSENT (a minimal composition with webServer) → the bundle
+    //     keeps serving the channel directly with the SAME registered deps
+    //     (R6, behavior-neutral — the dispatch semantics are unchanged).
+    const guiService = ctx.get('deepartments.gui') as
+      | { handleRequest(req: unknown, res: unknown, endpoint: string, trustedHosts: string[]): Promise<void> }
+      | undefined
     // Register each client path as a `kind:'exact'` POST route. `webServer.register`
     // returns a disposer; the effect folds them into one reversible registration
     // (AGENTS.md: every registration is a reversible effect).
@@ -9804,7 +9875,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     ].map(({ path, endpoint }) => ({
       kind: 'exact' as const,
       path,
-      handler: (req: unknown, res: unknown) => handleDeepartmentsRequest(req, res, endpoint, trustedHosts, endpointDeps)
+      handler: (req: unknown, res: unknown) =>
+        guiService !== undefined
+          ? guiService.handleRequest(req, res, endpoint, trustedHosts)
+          : handleDeepartmentsRequest(req, res, endpoint, trustedHosts, guiEndpointDeps)
     }))
     hostCtx.effect(() => {
       const disposers = routes.map((route) => webServer.register(route))

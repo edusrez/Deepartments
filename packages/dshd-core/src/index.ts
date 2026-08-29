@@ -236,6 +236,41 @@ export interface BinderDeps {
   /** bucket-(c) for the `deepartments.bus` re-delivery driver, as a top-level
    * partial (mirrors `bus.redeliver`; a convenience for a single register). */
   redeliver?: Partial<DeliveryRedelivererDeps>
+  // DECOUPLING (PASO 1 — the 4 P1 plugin buckets). The bundle registers its
+  // closure-bound zone deps here so the P1 services (deepartments.gui /
+  // deepartments.jobs / deepartments.health / deepartments.pooler) can build
+  // ON FIRST USE (fail-loud R1 when a required dep is missing). STRUCTURAL
+  // (unknown-typed values): the packages widen their own *BinderDeps on read —
+  // the contract is frozen by test/binder-contract.test.js, not by core types.
+  /** bucket for `deepartments.gui` (the /deepartments RPC channel deps). */
+  gui?: { endpointDeps?: unknown }
+  /** bucket for `deepartments.jobs` (the agenda scheduler tick closures). */
+  jobs?: {
+    runJob?: unknown
+    notifyHead?: unknown
+    departmentForEntry?: unknown
+    departmentForJob?: unknown
+    onAutoRunSkip?: unknown
+    repoRoot?: string
+  }
+  /** bucket for `deepartments.health` (the system-health daemon tick deps). */
+  health?: {
+    bootId?: string
+    config?: unknown
+    posts?: unknown
+    hostWaits?: unknown
+    sessionContexts?: unknown
+    hostRunning?: unknown
+    notifyHost?: unknown
+    poolerStatePath?: string
+    workRegisterPath?: string
+    qiDirectiveRate?: number
+  }
+  /** bucket for `deepartments.pooler` (the provider-adapter boot check deps). */
+  pooler?: {
+    configuredProviders?: string[]
+    appendPostError?: unknown
+  }
 }
 
 /** The mutable late-binding seam (a Cordis SERVICE) the bundle fills after its
@@ -252,12 +287,27 @@ export interface Binder {
 class MutableBinder implements Binder {
   private deps: BinderDeps = {}
   register(deps: BinderDeps): void {
+    // Per-bucket merge: an ABSENT incoming bucket leaves the accumulated one
+    // untouched (and an absent bucket that was never registered stays ABSENT —
+    // `undefined`, so the fail-loud R1 consumers see their bucket missing
+    // instead of a present-but-empty `{}`). `mergeBuckets` below preserves the
+    // undefined-vs-defined distinction precisely for the DECOUPLING zones.
+    const mergeBuckets = <T extends Record<string, unknown>>(prev: T | undefined, next: T | undefined): T | undefined =>
+      prev === undefined && next === undefined ? undefined : { ...(prev ?? {}), ...(next ?? {}) } as T
     this.deps = {
       bus: { ...this.deps.bus, ...deps.bus },
       deliver: { ...this.deps.deliver, ...deps.deliver },
       wakepack: { ...this.deps.wakepack, ...deps.wakepack },
       lifecycle: { ...this.deps.lifecycle, ...deps.lifecycle },
-      redeliver: { ...this.deps.redeliver, ...deps.redeliver }
+      redeliver: { ...this.deps.redeliver, ...deps.redeliver },
+      // DECOUPLING (PASO 1): the 4 P1 plugin buckets merge like the baseline
+      // ones (register is callable multiple times — partial accumulation), but
+      // an NEVER-REGISTERED zone bucket stays `undefined` (the smoke-boot +
+      // binder-contract locks rely on the absent → fail-loud contract).
+      gui: mergeBuckets(this.deps.gui, deps.gui),
+      jobs: mergeBuckets(this.deps.jobs, deps.jobs),
+      health: mergeBuckets(this.deps.health, deps.health),
+      pooler: mergeBuckets(this.deps.pooler, deps.pooler)
     }
   }
   get(): BinderDeps {

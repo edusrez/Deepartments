@@ -3645,7 +3645,17 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
       }
       const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
       const all = binder?.get() ?? {}
-      const bound = all as HealthBinderDeps & {
+      // DECOUPLING PASO 1: read the HEALTH bucket BY NAME (`binder.get().health`)
+      // — the DECOUPLING bundle fills `{ health: { bootId, config, ... } }`
+      // (nested per the contract lock); the P1 read path widened the WHOLE deps
+      // object to this interface, which could never see the nested bucket (0
+      // consumers until now — the first USE is this fill). The cross-bucket
+      // FALLBACKS (deliver.deliverHost + wakepack.messagesStoreReady) read the
+      // composed buckets at their OWN names, unchanged (FASE 2.6-C). The C6
+      // deliveryRowsReader is ALSO read from the health bucket (registered by
+      // the DECOUPLING daemon wiring; absent → the legacy full read).
+      const bound = (all as { health?: HealthBinderDeps & { deliveryRowsReader?: DeliveryRowsReader } }).health ?? {}
+      const composed = all as {
         deliver?: { deliverHost?: (host: { hostId: string }, framed: string, record: HealthStoreAppendResult, callerSessionId?: string, opts?: { interrupt?: boolean }) => Promise<unknown> }
         wakepack?: { messagesStoreReady?: () => Promise<{ append(input: HealthStoreAppendInput): Promise<HealthStoreAppendResult> }> }
       }
@@ -3653,14 +3663,14 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
       // then from the EXISTING composed buckets (FASE 2.6-C registers them).
       let notifyHost = bound.notifyHost ?? explicit.notifyHost
       if (notifyHost === undefined) {
-        const storeReady = bound.wakepack?.messagesStoreReady ?? (() => {
+        const storeReady = composed.wakepack?.messagesStoreReady ?? (() => {
           const bus = ctx.get('deepartments.bus') as { storeReady?: Promise<{ append(input: HealthStoreAppendInput): Promise<HealthStoreAppendResult> }> } | undefined
           if (bus?.storeReady === undefined) {
             throw new Error('[deepartments] health daemon tick: no message-store closure — the bundle must register ctx.get("deepartments.binder").register({ wakepack: { messagesStoreReady } }) (composed today) or provide deepartments.bus')
           }
           return bus.storeReady
         })
-        const deliverHost = bound.deliver?.deliverHost
+        const deliverHost = composed.deliver?.deliverHost
         if (deliverHost === undefined) {
           throw new Error('[deepartments] health daemon tick: no ALERT delivery closure — the bundle must register ctx.get("deepartments.binder").register({ deliver: { deliverHost } }) (FASE 2.6-C, composed today) or the health bucket')
         }
@@ -3684,6 +3694,11 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
         hostWaits: explicit.hostWaits ?? bound.hostWaits,
         sessionContexts: explicit.sessionContexts ?? bound.sessionContexts,
         hostRunning: explicit.hostRunning ?? bound.hostRunning,
+        // DECOUPLING PASO 1: the composed daemon's C6 bounded tail reader flows
+        // through the EXPLICIT per-tick deps (created once per daemon by the
+        // bundle wiring, exactly like the inline path) — absent → the legacy
+        // full-file read (identical findings, more I/O), the tick contract.
+        deliveryRowsReader: explicit.deliveryRowsReader ?? bound.deliveryRowsReader,
         poolerStatePath: explicit.poolerStatePath ?? bound.poolerStatePath,
         qiDirectiveRate: explicit.qiDirectiveRate ?? bound.qiDirectiveRate,
         notifyHost,

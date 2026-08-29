@@ -677,13 +677,20 @@ export function apply(ctx: Context, config: JobsConfig = {}) {
       }
       const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
       const all = binder?.get() ?? {}
-      const bound = all as JobsBinderDeps & { wakepack?: { repoRoot?: string } }
+      // DECOUPLING PASO 1: read the JOBS bucket BY NAME (`binder.get().jobs`)
+      // — the DECOUPLING bundle fills `{ jobs: { runJob, ... } }` (nested per
+      // the contract lock); the P1 read path widened the WHOLE deps object to
+      // this interface, which could never see the nested bucket (0 consumers
+      // until now — the first USE is this fill). The wakepack.repoRoot
+      // FALLBACK reads the composed bucket at its OWN name, unchanged.
+      const whole = all as { jobs?: JobsBinderDeps; wakepack?: { repoRoot?: string } }
+      const bound = whole.jobs ?? {}
       const required: Array<keyof JobsBinderDeps> = ['runJob', 'notifyHead', 'departmentForEntry', 'departmentForJob']
       const missing = required.filter((key) => bound[key] === undefined)
       if (missing.length > 0) {
         throw new Error(`[deepartments] jobs scheduler tick: required binder bucket dep(s) missing: ${missing.join(', ')} — the DECOUPLING bundle must call ctx.get('deepartments.binder').register({ jobs: { runJob, notifyHead, ... } })`)
       }
-      const repoRoot = bound.repoRoot ?? bound.wakepack?.repoRoot
+      const repoRoot = bound.repoRoot ?? whole.wakepack?.repoRoot
       if (repoRoot === undefined) {
         throw new Error('[deepartments] jobs scheduler tick: no repoRoot — the bundle must register ctx.get("deepartments.binder").register({ wakepack: { repoRoot } }) (FASE 2.6-C, composed today) or the jobs bucket')
       }

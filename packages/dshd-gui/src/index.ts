@@ -732,7 +732,12 @@ export function apply(ctx: Context, config: GuiConfig = {}) {
   let cache: GuiSurface | undefined
   const build = (): GuiSurface => {
     const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
-    const bound = (binder?.get() ?? {}) as GuiBinderDeps
+    // DECOUPLING PASO 1: read the GUI bucket BY NAME (`binder.get().gui`) —
+    // the DECOUPLING bundle fills `{ gui: { endpointDeps } }` (nested per the
+    // contract lock); the P1 read path widened the WHOLE deps object to this
+    // interface, which could never see the nested bucket (0 consumers until
+    // now — the first USE is this fill).
+    const bound = ((binder?.get() ?? {}) as { gui?: GuiBinderDeps }).gui ?? {}
     const endpointDeps = config.endpointDeps ?? bound.endpointDeps
     if (endpointDeps === undefined) {
       throw new Error('[deepartments] gui lazy build: no endpointDeps — the DECOUPLING bundle must call ctx.get("deepartments.binder").register({ gui: { endpointDeps } }) (the package cannot derive the bundle-owned buildAgentRows/pickLiveHostEntry wiring)')

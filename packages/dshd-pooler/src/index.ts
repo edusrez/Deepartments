@@ -523,7 +523,13 @@ export function apply(ctx: Context, config: PoolerConfig = {}) {
           return
         }
         const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
-        const bound = (binder?.get() ?? {}) as PoolerBinderDeps
+        // DECOUPLING PASO 1: read the POOLER bucket BY NAME (`binder.get().pooler`)
+        // — the DECOUPLING bundle fills `{ pooler: { configuredProviders,
+        // appendPostError } }` (nested per the contract lock); the P1 read path
+        // widened the WHOLE deps object to this interface, which could never see
+        // the nested bucket (0 consumers until now). The org.departments
+        // coordinator fallback below is unchanged.
+        const bound = ((binder?.get() ?? {}) as { pooler?: PoolerBinderDeps }).pooler ?? {}
         const configuredProviders = new Set<string>(bound.configuredProviders ?? [])
         for (const department of org.org?.departments ?? []) {
           const c = department.coordinator
