@@ -117,6 +117,12 @@ const ALWAYS_BACKGROUND_SUFFIX = ' This tool ALWAYS runs in the background: it i
 // (own layer — the M2.3 registry that makes the tool immune to the standing
 // mask). The preset row mirrors these literal values; test M2.3 asserts
 // fila==constante to lock the mirror.
+// D5 (modularization, 2026-08-29): this plugin surface (`deepartments-subagent`,
+// subpath `./subagent`) is a FORMAL surface of the bundle — the ONE formal
+// Cordis row is the `tool-secretary` row of the deepartments-head preset (see
+// its SURFACE-FORMAL comment); the headless dev profile's tool-subagent-test/
+// -fork rows mount the SAME plugin `dsh-deepartments/subagent` as the retained
+// dev twin (R6: nothing retired). Nothing here is 'temporal/smoke' anymore.
 
 /** The ONE secretary tool name (the single toolName, host + head). */
 export const SECRETARY_TOOL_NAME = 'secretary'

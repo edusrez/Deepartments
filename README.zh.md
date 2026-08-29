@@ -40,7 +40,7 @@ verification）。
 
 ```sh
 pnpm build         # `tsc` —— 将 src/ 编译到 lib/
-pnpm build:client  # `tsdown && node scripts/normalize-client-banner.mjs` —— 打包客户端插件 + 规范化 banner
+pnpm build:client  # dshd-gui 拥有客户端构建 —— `pnpm --filter dshd-gui run build:client && node scripts/mirror-client.mjs` —— 在包内打包客户端插件，再字节级镜像到 ./client（bundle 的 R6 镜像）
 pnpm test          # `node --test` —— 运行单元测试
 ```
 

@@ -1,6 +1,9 @@
 // dshd-gui — the `/deepartments` RPC channel (server half) + the client plugin
 // source (src/client/, built separately to client/client.js by the package's
-// own build:client — tsdown + scripts/normalize-client-banner.mjs). This
+// own build:client — tsdown + scripts/normalize-client-banner.mjs — the D5
+// single build/normalize source of the `deepartments-client` surface; the
+// bundle's root ./client is its byte-identical mirror via
+// scripts/mirror-client.mjs, R6). This
 // package OWNS the PURE server-half surface that was MOVED verbatim from the
 // bundle (src/invoke.ts, the dshd-gui phase of the modular Cordis split):
 //

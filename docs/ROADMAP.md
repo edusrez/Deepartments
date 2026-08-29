@@ -35,6 +35,30 @@ of the research — so no builder needs to re-research.)
 
 ## Current status
 
+- **2026-08-29** — **HITO D5 de la MODULARIZACIÓN REAL — worktree (builder-8,
+  pendiente commit del Asistente tras reviewer PASS)**: las 3 superficies
+  casi-formales del bundle + fold de flags baratos. (a) **patch-row
+  deepartments**: fila formal verificada (cordis.patch.yml:3-5) y **doble
+  fuente de verdad de org resuelta SIN cambio de comportamiento (R6)** —
+  dshd-core = SHARED CONFIG SOURCE, org del bundle = FALLBACK MIRROR
+  (one-sided keys documentadas: postsRetention core-only, pacing/quality
+  bundle-only) + **parity test nuevo** test/org-config-parity.test.js que fija
+  stateDir/departments/poolerBaseURL idénticos. (b) **deepartments-subagent →
+  secretary**: `tool-secretary` PROMOVIDO a fila Cordis formal ÚNICA del repo
+  (presets/deepartments-head/agent.cordis.yml — SURFACE-FORMAL comment + nota
+  en subagent.ts), matiz *TEMPORARY smoke patch* del twin headless retirado
+  (perfil dev; R6 nada retirado, la tool sigue cargable vía
+  dsh-deepartments/subagent). (c) **deepartments-client**: dshd-gui = OWNER
+  de la superficie (build/normalize ÚNICO en el package; el ./client del
+  bundle se PRESERVA como espejo byte-idéntico vía scripts/mirror-client.mjs;
+  root tsdown.config.ts + scripts/normalize-client-banner.mjs FOLDED);
+  README.en/zh + client-watcher header + desc dshd-gui alineados. (d) **flag
+  stale**: comentario «dshd-core NOT composed today» corregido (sí se compone
+  — compose-first en dsh.profile.bundles de los perfiles dev). Ladder: builds
+  exit 0, suite completa verde (sin skips nuevos), git diff --check limpio,
+  dump-config capa `# == dsh-deepartments` INTACTA (sin capas nuevas), stable
+  /opt/dsh/.dsh NO tocado.
+
 - **2026-08-16** — phases 0 and 1 complete; phase 2 ready to start; task 1
   (seed the repo) in progress.
 - **2026-08-16** — tasks 1, 2 and 3 complete (dev topology: isolated DSH_HOME

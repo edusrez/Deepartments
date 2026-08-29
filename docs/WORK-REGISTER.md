@@ -56,9 +56,22 @@ M3 (f159eda). Fase modular 0.2.x (siguiente, solo BACKLOG/owner — §3/§5).
 
 ## 3. PENDIENTE-OWNER (decisiones)
 
-- D5 → BACKLOG fase modularización 0.2.x: formalizar las 3 superficies del
-  bundle como **filas Cordis dshd-\*** (deepartments patch-row · subagent-
-  subpath → secretary · client inject; R6 no retirar) · apiKey DeepSeek →
+- **D5 → IMPLEMENTADO 2026-08-29 por builder-8 (pendiente commit del Asistente;
+  ver .dsh/reports/ipd/2026-08-29-modularization-d5.md)**: formalizar las 3
+  superficies del bundle + fold de flags baratos — (1) patch-row deepartments:
+  fila formal verificada (cordis.patch.yml:3-5) + doble fuente de verdad de org
+  resuelta SIN cambio de comportamiento (dshd-core = SHARED SOURCE, bundle =
+  FALLBACK MIRROR; parity test test/org-config-parity.test.js fija stateDir /
+  departments / poolerBaseURL + one-sided keys documentadas) · (2) subagent-
+  subpath → secretary: tool-secretary PROMOVIDO a fila Cordis formal ÚNICA en
+  el repo (presets/deepartments-head/agent.cordis.yml; matiz temporal/smoke del
+  twin headless retirado del perfil dev, R6 nada retirado) · (3) client inject:
+  dshd-gui = OWNER de la superficie deepartments-client (build/normalize ÚNICO;
+  el ./client del bundle se PRESERVA como espejo byte-idéntico via
+  scripts/mirror-client.mjs; raíz tsdown.config.ts + normalize-client-banner
+  duplicados FOLDED) · (4) flag stale «dshd-core NOT composed today» corregido
+  (sí se compone; compose-first en los perfiles dev). R6 intacto (stable
+  /opt/dsh/.dsh NO tocado) · apiKey DeepSeek →
   RESUELTO 08-28 (key platform existente = FALLBACK del pooler; alta/top-up a
   validar con owner — consola dio 403 en research RD) · publish vs link-only →
   DECIDIDO 08-28, **PENDIENTE DE EJECUCIÓN**: publish dsh-deepartments 0.1.x en

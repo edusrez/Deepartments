@@ -32,7 +32,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "build:client": "tsdown && node scripts/normalize-client-banner.mjs",
+    "build:client": "pnpm --filter dshd-gui run build:client && node scripts/mirror-client.mjs",
     "test": "node --test"
   },
   "peerDependencies": {

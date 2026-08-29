@@ -2,10 +2,13 @@
 //
 // The watcher lives in packages/dshd-gui/src/client/index.tsx (moved from
 // src/client/ in the dshd-gui phase), which compiles ONLY through the
-// browser bundle pipeline (tsdown → client/client.js, wrapped in the
-// `window.__ModuleLoader__.load` envelope by scripts/normalize-client-banner.mjs)
-// — it is not part of the server lib/ the other suites import. This test
-// evaluates the REAL compiled envelope (client/client.js; regenerate with
+// browser bundle pipeline (dshd-gui's own `pnpm --filter dshd-gui run
+// build:client`: package tsdown → packages/dshd-gui/client/client.js, wrapped
+// in the `window.__ModuleLoader__.load` envelope by the package's
+// scripts/normalize-client-banner.mjs, then mirrored byte-identical to the
+// root ./client/client.js by scripts/mirror-client.mjs — D5 single build
+// source) — it is not part of the server lib/ the other suites import. This
+// test evaluates the REAL compiled envelope (client/client.js; regenerate with
 // `pnpm build:client` after touching the client source) with a stubbed loader,
 // reaches the exported pure decision functions (`shouldOpenHostSession`,
 // `shouldRefreshForHost`) and drives the real `apply`/poll pipeline with a

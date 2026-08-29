@@ -142,6 +142,15 @@
 
 # ── delegation (M2, owner decision 2026-08-28) ────────────────────────────────
 
+# D5 (modularization, 2026-08-29) — SURFACE-FORMAL row: `tool-secretary` below
+# is THE single formal Cordis row of the `deepartments-subagent` (secretary)
+# plugin surface in this repo (the headless dev profile's `tool-subagent-test`/
+# `-fork` rows mount the SAME plugin `dsh-deepartments/subagent` as the dev
+# twin and are kept per R6 — nothing retired; the tool stays loadable via
+# `dsh-deepartments/subagent`). This row must remain the ONE formal declaration
+# of the secretary: any change to the secretary surface edits THIS row (and the
+# M2.3 fila==constante test locks it), never a second repo row.
+#
 # The ONE delegation row a department head carries: a personal NON-CODE
 # READ-ONLY secretary — the same plugin (`dsh-deepartments/subagent`) the host
 # mounts, renamed `secretary`. The child JOINS this head's preset (persona +

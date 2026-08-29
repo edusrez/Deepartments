@@ -11,6 +11,20 @@
         # research department). Rooms were removed; agents message each other
         # directly via send_message. Departments are defined HERE, never
         # created by agents.
+        # D5 (modularization, 2026-08-29) — SINGLE-SOURCE-OF-TRUTH CONTRACT of
+        # the org fallback (R6 behavior-neutral): the org data below is the
+        # BUNDLE FALLBACK MIRROR of the dshd-core row (packages/dshd-core/
+        # cordis.patch.yml — the SHARED CONFIG SOURCE and the ONE truth). The
+        # bundle reads `deepartments.org` first and falls back to this block
+        # ONLY in minimal/hermetic compositions (dshd-core absent). The MIRROR
+        # keys `stateDir` / `org.departments` / `org.poolerBaseURL` MUST stay
+        # equal to the dshd-core row — test/org-config-parity.test.js locks the
+        # parity (never silent drift). One-sided keys are INTENTIONAL:
+        # `org.pacing` (below) + `quality` are bundle-side knobs with code
+        # defaults (the core row never carries them); `org.postsRetention` is
+        # core-only (this fallback leaves it absent on purpose — pruning OFF in
+        # a minimal composition). Do NOT copy pacing/quality into the core row
+        # or postsRetention into this row.
         # workspacePath (optional, F5): the department's OWN sidebar workspace.
         # The plugin autogenerates it at runtime — mkdir -p the directory, then
         # registers it (idempotent workspaceRegistry.create, title = the

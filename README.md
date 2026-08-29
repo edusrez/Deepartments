@@ -61,7 +61,7 @@ and services to the runtime. Development uses the isolated profile
 
 ```sh
 pnpm build         # `tsc` — compile src/ to lib/
-pnpm build:client  # `tsdown && node scripts/normalize-client-banner.mjs` — bundle the client plugin + normalize the banner
+pnpm build:client  # dshd-gui owns the client build — `pnpm --filter dshd-gui run build:client && node scripts/mirror-client.mjs` — bundle the client plugin in the package, then mirror it byte-identical to ./client (the bundle's R6 mirror)
 pnpm test          # `node --test` — run the unit tests
 ```
 

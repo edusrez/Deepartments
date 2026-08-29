@@ -4,18 +4,32 @@
 # SERVICES for the dsh-deepartments bundle to consume via ctx.get. The plugin
 # row below registers dshd-core with its core config (stateDir + the org
 # mirror + core constants) so it composes.
-# FASE 2.6 BATCH A (config relocation): the org configuration (departments,
-# execRoots, missionExecRoots, poolerBaseURL) + stateDir are declared HERE —
-# dshd-core is the SHARED CONFIG SOURCE. The bundle (dsh-deepartments) consumes
-# them via `ctx.get('deepartments.org')` (falling back to its own patch row in
-# minimal/hermetic compositions), and dshd-core builds its ACL lens from its
-# OWN `org.departments` mirror. NOTE: the CLI composes ONLY the
+# FASE 2.6 BATCH A (config relocation) + D5 (modularization, 2026-08-29): the
+# org configuration (departments, execRoots, missionExecRoots, poolerBaseURL)
+# + stateDir are declared HERE — dshd-core is the SHARED CONFIG SOURCE. The
+# bundle (dsh-deepartments) consumes them via `ctx.get('deepartments.org')`
+# (falling back to its own patch row in minimal/hermetic compositions), and
+# dshd-core builds its ACL lens from its OWN `org.departments` mirror.
+# D5 SINGLE-SOURCE-OF-TRUTH CONTRACT (R6 behavior-neutral): the dshd-core row
+# is the ONE source of truth for the org fallback — the bundle's own
+# `deepartments` row (root cordis.patch.yml) is its MIRROR for minimal/
+# hermetic compositions and MUST stay on the shared keys (`stateDir`,
+# `org.departments`, `org.poolerBaseURL`); test/org-config-parity.test.js
+# locks the mirror (parity = test failure, never silent drift). One-sided
+# keys are INTENTIONAL and NOT mirrored: `org.postsRetention` lives ONLY here
+# (core row — the bundle's fallback leaves it absent so hermetic pruning stays
+# OFF); `org.pacing` + `quality` live ONLY in the bundle row (they are
+# bundle-side knobs with code defaults — the core row never carries them).
+# NOTE: the CLI composes ONLY the
 # `dsh.profile.bundles` layers (in order); being a `dependencies` of
-# dsh-deepartments does NOT add a bundle layer, so dshd-core is NOT composed
-# today. To compose it, dshd-core MUST be added to the profile's
+# dsh-deepartments does NOT add a bundle layer. D5 (modularization,
+# 2026-08-29): dshd-core IS composed today — the dev profiles
+# (deepartments-dev / deepartments-dev-headless) carry dshd-core in
 # `dsh.profile.bundles` IMMEDIATELY BEFORE dsh-deepartments (compose-first,
-# Asistente checkpoint) — then `--dump-config` shows `# == dshd-core` before
-# `# == dsh-deepartments`.
+# Asistente checkpoint), exactly as this note previously prescribed;
+# `--dump-config` shows `# == dshd-core` before `# == dsh-deepartments`.
+# A minimal/hermetic composition WITHOUT dshd-core still loads the bundle
+# (the in-bundle fallback keeps working, R6).
 # Plain scalars only — no !!js outside the runtime config engine.
 - insert:
     - id: dshd-core
