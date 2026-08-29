@@ -1,6 +1,6 @@
 {
   "name": "dsh-deepartments",
-  "version": "0.1.0-rc.1",
+  "version": "0.1.0",
   "description": "Agentic organization layer for DeepSeek Harness (DSH): departments, sleeping posts, witnesses, activations, governance.",
   "type": "module",
   "main": "lib/index.js",

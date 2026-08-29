@@ -1,7 +1,7 @@
 {
   "name": "dshd-gui",
   "version": "0.1.0-rc.1",
-  "description": "Deepartments GUI/`/deepartments` RPC channel: the PURE server-half dispatcher (dispatchDeepartmentsEndpoint + the 6 endpoints agents/list, host/status, presence/get, presence/set, agenda/list), the client-request envelope validator (parseClientEnvelope), the authority/trust fence (isLoopbackHostname/parseAuthority/isTrustedAuthority/isTrustedHostFact), the thin node:http route handler (handleDeepartmentsRequest) and the client plugin source (src/client/, built to client/client.js via tsdown + the normalize-client-banner envelope) — extracted for the dshd-gui phase of the modular Cordis split. D5 (modularization, 2026-08-29): dshd-gui is the OWNER of the `deepartments-client` surface — the client build/normalize source lives HERE (tsdown.config.ts + scripts/normalize-client-banner.mjs, the single source-of-truth build), and the bundle's ./client is a byte-identical R6 mirror (root build:client = `pnpm --filter dshd-gui run build:client && node scripts/mirror-client.mjs`). P1 (modularization, 2026-08-29): the package is NOW ALSO a Cordis PLUGIN (thin name/inject/apply + its own cordis.patch.yml row) providing the `deepartments.gui` service (the /deepartments channel dispatcher/handler with the closure-bound DeepartmentsEndpointDeps injected via the FASE 2.6 binder `gui` bucket — DECOUPLING); the bundle keeps the webServer mount effect + the endpointDeps wiring closure (they bind the live apply-fiber registries) and still consumes this package through the drop-in bridge src/core/gui.ts. The client inject metadata (dsh.client) mirrors the bundle's so a deployment resolves the SAME client entry.",
+  "description": "Deepartments GUI/`/deepartments` RPC channel: the PURE server-half dispatcher (dispatchDeepartmentsEndpoint + the 6 endpoints agents/list, host/status, presence/get, presence/set, agenda/list), the client-request envelope validator (parseClientEnvelope), the authority/trust fence (isLoopbackHostname/parseAuthority/isTrustedAuthority/isTrustedHostFact), the thin node:http route handler (handleDeepartmentsRequest) and the client plugin source (src/client/, built to client/client.js via tsdown + the normalize-client-banner envelope) — extracted for the dshd-gui phase of the modular Cordis split. D5 (modularization, 2026-08-29): dshd-gui is the OWNER of the `deepartments-client` surface — the client build/normalize source lives HERE (tsdown.config.ts + scripts/normalize-client-banner.mjs, the single source-of-truth build), and the bundle's ./client is a byte-identical R6 mirror (root build:client = `pnpm --filter dshd-gui run build:client && node scripts/mirror-client.mjs`). P1 (modularization, 2026-08-29): the package is NOW ALSO a Cordis PLUGIN (thin name/inject/apply + its own cordis.patch.yml row) providing the `deepartments.gui` service (the /deepartments channel dispatcher/handler with the closure-bound DeepartmentsEndpointDeps injected via the FASE 2.6 binder `gui` bucket — DECOUPLING); the bundle keeps the webServer mount effect + the endpointDeps wiring closure (they bind the live apply-fiber registries) and still consumes this package through the drop-in bridge src/core/gui.ts. CLIENT-ROW RULE (fix 2026-08-29): the client-modules host keys each graph row by the LOADER ENTRY name and a bundle must register that exact id via __ModuleLoader__.load, so the dsh.client row must belong to the dsh-deepartments BUNDLE entry (entry name == the bundle's registered module id `dsh-deepartments` — the deepartments-client identity, R6); THIS package is the client BUILD/normalize owner only and must NOT declare dsh.client — its own loader entry name `dshd-gui` could never be satisfied by a bundle registering `dsh-deepartments` (client boot fails: `loaded without registering` → Failed to load plugins).",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -18,13 +18,6 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "inject": [
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-connection"
-      ],
-      "platform": "web"
     }
   },
   "scripts": {

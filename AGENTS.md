@@ -25,8 +25,10 @@ are organized*. Context: [docs/IDEA.md](docs/IDEA.md) (the idea),
 
 ## Structure
 
-- `package.json` — name `dsh-deepartments`, version `0.1.0-rc.1`, `type:
-  module`, `main: lib/index.js`, `dsh.bundle` (patch → `cordis.patch.yml`),
+- `package.json` — name `dsh-deepartments`, version `0.1.0` (first stable,
+  released 2026-08-29; the 8 `packages/dshd-*` remain `0.1.0-rc.1`, their
+  inter-peer graph `^0.1.0-rc.1` internally consistent), `type: module`,
+  `main: lib/index.js`, `dsh.bundle` (patch → `cordis.patch.yml`),
   `peerDependencies` on the rc channel (`^0.1.0-rc.x`; a `^0.0.1` does not
   match rc).
 - `cordis.patch.yml` — the configuration layer: top-level YAML array of

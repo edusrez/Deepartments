@@ -37,6 +37,14 @@
  * dshd-gui run build:client && node scripts/mirror-client.mjs` — R6
  * preserve-the-mirror). The wire contract and the module surface are
  * unchanged.
+ *
+ * CLIENT-ROW RULE (fix 2026-08-29): the module id registered by this envelope
+ * is `dsh-deepartments` (the deepartments-client identity), and the
+ * client-modules host keys each graph row by the LOADER ENTRY name — a bundle
+ * must register the exact row id. The `dsh.client` row therefore belongs to
+ * the dsh-deepartments BUNDLE entry; dshd-gui (entry name `dshd-gui`) must
+ * NOT declare `dsh.client`, or the GUI boot fails with
+ * `loaded without registering` (Failed to load plugins).
  */
 
 import { useEffect, useState, type CSSProperties } from "react";

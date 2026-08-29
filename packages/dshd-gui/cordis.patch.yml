@@ -6,8 +6,14 @@
 # inject via the FASE 2.6 binder `gui` bucket, DECOUPLING).
 # The row is intentionally MINIMAL — the endpoint wiring is NOT config: it is
 # closure-bound to the bundle's applyInvoke state and arrives via the binder.
-# The client surface (`dsh.client` metadata) is already owned by this package
-# (D5); the `deepartments-client` identity/row stays metadata-driven (R6).
+# CLIENT-ROW RULE (fix 2026-08-29): this package is the client BUILD owner (D5)
+# but MUST NOT declare `dsh.client` — a client graph row is keyed by the LOADER
+# ENTRY name and this bundle registers the module id "dsh-deepartments" (the
+# deepartments-client identity), so a dsh.client declaration here would create a
+# row "dshd-gui" that can never be satisfied ("loaded without registering" →
+# GUI boot FAIL). The `dsh.client` metadata + row stay on the dsh-deepartments
+# BUNDLE entry (R6: identity/row metadata-driven, root ./client mirror
+# byte-identical).
 # Plain scalars only — no !!js outside the runtime config engine.
 - insert:
     - id: dshd-gui

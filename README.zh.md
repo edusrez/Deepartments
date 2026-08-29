@@ -12,7 +12,7 @@ Deepartments 是**面向 DeepSeek Harness (DSH) 的智能体（agent）化组织
 ## 状态
 
 - **第 2 阶段（MVP）开发中** —— 参见 [docs/ROADMAP.md](docs/ROADMAP.md)。
-- **版本：** `0.1.0-rc.1`（包 `dsh-deepartments`）。
+- **版本：** `0.1.0`（包 `dsh-deepartments`，首个稳定版）。
 - **许可证：** MIT。
 - **文档：** [docs/IDEA.md](docs/IDEA.md)（理念）·
   [docs/concept.md](docs/concept.md)（决策与映射）·

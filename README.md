@@ -32,7 +32,7 @@ witness, an activation, a governance policy is).
 ## Status
 
 - **Phase 2 (MVP) in development** — see [docs/ROADMAP.md](docs/ROADMAP.md).
-- **Version:** `0.1.0-rc.1` (package `dsh-deepartments`).
+- **Version:** `0.1.0` (package `dsh-deepartments`, first stable release).
 - **License:** MIT.
 - **Documentation:** [docs/IDEA.md](docs/IDEA.md) (the idea) ·
   [docs/concept.md](docs/concept.md) (decisions and mapping) ·

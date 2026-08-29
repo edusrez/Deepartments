@@ -93,9 +93,10 @@ M3 (f159eda). Fase modular 0.2.x (siguiente, solo BACKLOG/owner — §3/§5).
   --check limpio · apiKey DeepSeek →
   RESUELTO 08-28 (key platform existente = FALLBACK del pooler; alta/top-up a
   validar con owner — consola dio 403 en research RD) · publish vs link-only →
-  DECIDIDO 08-28, **PENDIENTE DE EJECUCIÓN**: publish dsh-deepartments 0.1.x en
-  la próxima ventana release (owner delega al host; **con la feature
-  pacing/coste** — coordinar con la ventana) · stable 3080 upgrade → NO TOCAR
+  DECIDIDO 08-28 — **EN EJECUCIÓN 08-29**: publish dsh-deepartments **0.1.0**
+  (primera estable post-P1; decisiones de registry en el reporte
+  .dsh/reports/ipd/2026-08-29-release-0.1.x.md; owner delega al host; **con la
+  feature pacing/coste** — coordinar con la ventana) · stable 3080 upgrade → NO TOCAR
   (owner 08-28) · **RIESGO CONDICIONAL RAG-STABLE (decisión (b) aceptada
   2026-08-28)** — el perfil ESTABLE /opt/dsh/.dsh monta el plugin
   dsh-tool-web-enhanced ANTIGUO (pre-denylist/excludePaths); RagEngine.

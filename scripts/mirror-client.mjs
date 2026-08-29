@@ -7,7 +7,12 @@
  * packages/dshd-gui/client/client.js from src/client/index.tsx). The root
  * `./client` of the bundle is PRESERVED as a byte-identical MIRROR (R6):
  * the deployed artifact served at /plugins/dsh-deepartments/client.js and
- * declared by exports "./client" + the `dsh.client` inject metadata.
+ * declared by exports "./client" + the `dsh.client` inject metadata — the
+ * BUNDLE row only. CLIENT-ROW RULE (fix 2026-08-29): a client graph row is
+ * keyed by the loader ENTRY name and this bundle registers
+ * "dsh-deepartments", so dshd-gui (entry name "dshd-gui") must NOT declare
+ * `dsh.client` — a row by that name could never be satisfied (GUI boot
+ * FAIL). dshd-gui stays the build owner; dsh-deepartments keeps the row.
  *
  * This script copies the package-built client/client.js onto the root
  * client/client.js and verifies the mirror is byte-identical (a copy is
