@@ -1,15 +1,15 @@
 // dsh-deepartments — TOOLS-FACTORY test (HITO 3 DECOUPLING, SUB-PASO 4,
-// SUB-BATCHES 1-2 of 4: the dept_exec/zstd runners + the agent toolset
+// SUB-BATCHES 1-3 of 4: the dept_exec/zstd runners + the agent toolset
 // REGISTRY (installHeadBoardTools) + the persona/architecture prompt sections
 // + postSetup/headSetup/workerSetup + the head-dispose/retire helpers as an
-// orchestration factory). Locks the SUB-BATCH 1-2 artifacts + wiring:
-//   - the ARTIFACT: the first cuts of the tools zone of applyInvoke
+// orchestration factory). Locks the SUB-BATCH 1-3 artifacts + wiring:
+//   - the ARTIFACT: the cuts of the tools zone of applyInvoke
 //     (src/invoke.ts CUT1 3977-4898 = 922 LOCs, CUT2 4061-4672 = pre-SB1
-//     4900-5511 = 612 LOCs) were hoisted VERBATIM into
-//     src/core/orchestration/tools.ts and are invoked by the bundle at the SAME
-//     fiber position (createToolsOrchestration → ToolsSurface, MOVEMENT-ONLY —
-//     byte-identical to HEAD; invoke.ts = minimal hunks: deps + invocation +
-//     destructure).
+//     4900-5511 = 612 LOCs, CUT3 4099-5371 = 1273 LOCs incl. the BOOT
+//     WIRING) were hoisted VERBATIM into src/core/orchestration/tools.ts and
+//     are invoked by the bundle at the SAME fiber position
+//     (createToolsOrchestration → ToolsSurface, MOVEMENT-ONLY — byte-identical
+//     to HEAD; invoke.ts = minimal hunks: deps + invocation + destructure).
 //   - the COMPOSITION: the factory consumes the SPAWN surface members by
 //     reference + the workspace/retire/delivery seams + the tool ARRAYS LATE
 //     (getters over the apply-scope bindings, dereferenced only at CALL time —
@@ -29,6 +29,10 @@
 //     ARCHITECTURE sections land on the materialized head through the factory
 //     closures (the real presets/departments/internal-programming/
 //     ARCHITECTURE.md is templated by renderDepartmentTemplate).
+//     SUB-BATCH 3 additionally proves the CUT3 boot machinery (the embedded
+//     BOOT WIRING drives ensureAllHeads → ensureHead + the CUT3 head-preset
+//     materialization + the workspace-cwd resolution through the composed
+//     bundle — the factory-local closures run on the REAL materialized head).
 // Hermetic: temp stateDir; dispose clears effects.
 import { Context, Service } from '@deepseek-ai/cordis'
 import { Loader } from '@deepseek-ai/cordis-plugin-loader'
@@ -151,7 +155,7 @@ const DEPARTMENT = {
   coordinator: { postId: 'internal-programming-head' }
 }
 
-test('tools-factory: the TOOLS ZONE CUTS 1+2 were hoisted VERBATIM into the orchestration factory (the artifact + the movement lock)', () => {
+test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the orchestration factory (the artifact + the movement lock)', () => {
   const factory = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'tools.ts'), 'utf8')
   const invoke = readFileSync(path.join(REPO_ROOT, 'src', 'invoke.ts'), 'utf8')
   // The artifact: the factory module exports the typed orchestration surface.
@@ -181,6 +185,20 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2 were hoisted VERBATIM into the orch
   assert.ok(!/const captureRetiredPostTurnError = /.test(invoke), 'captureRetiredPostTurnError is no longer inline in invoke.ts')
   assert.ok(!/const settleRetiredPostDeliveries = /.test(invoke), 'settleRetiredPostDeliveries is no longer inline in invoke.ts')
   assert.ok(!/const predictRetiredWorkerDeliverable = /.test(invoke), 'predictRetiredWorkerDeliverable is no longer inline in invoke.ts')
+  // ... and NO LONGER defines the CUT-3 zone closures inline either (SUB-BATCH
+  // 3: the workspace/ensureHead/retire/boot-check closures + the BOOT WIRING
+  // moved — including the ghost census machinery the B5-GHOST flake uses).
+  for (const name of [
+    'retirePost', 'archiveWorkerSession', 'archivePostSessionOnSleep', 'departmentWorkspacePath',
+    'ensureDepartmentWorkspace', 'resolveDepartmentWorkspaceCwd', 'resolveWorkspaceRootPath',
+    'attachHeadSession', 'rotateArchivedHeadSessionId', 'ensureHead', 'makeEntry', 'ensureAllHeads',
+    'headEventCount', 'markHeadProgress', 'isHeadStuck', 'runPresetAudit',
+    'runInterruptedPostReconciliation', 'runProviderAdapterBootCheck', 'runReasoningContentBootAssert',
+    'runDurableRegistryReconciliation', 'runGhostSuspectReconcile', 'runHalfSleptHeadReconcile',
+    'runRetiredWorkerResidueReconcile'
+  ]) {
+    assert.ok(!new RegExp(`const ${name} = `).test(invoke), `${name} is no longer inline in invoke.ts (CUT3 moved)`)
+  }
   // The CUT-1 closures moved verbatim into the factory (the registry + the
   // runners).
   assert.ok(/const installHeadBoardTools = /.test(factory), 'installHeadBoardTools moved verbatim into the factory (the registry)')
@@ -200,31 +218,58 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2 were hoisted VERBATIM into the orch
   assert.ok(/const disposeHeadHandleOnce = /.test(factory), 'disposeHeadHandleOnce moved verbatim (the deduped dispose)')
   assert.ok(/const disposeJoinTimeoutMs = /.test(factory), 'disposeJoinTimeoutMs moved verbatim (the bounded join window)')
   assert.ok(/const joinHeadDisposeOnce = /.test(factory), 'joinHeadDisposeOnce moved verbatim (the bounded join)')
-  assert.ok(/const captureRetiredPostTurnError = /.test(factory), 'captureRetiredPostTurnError moved verbatim (the retire turn-error capture)')
-  assert.ok(/const settleRetiredPostDeliveries = /.test(factory), 'settleRetiredPostDeliveries moved verbatim (the retire settle)')
-  assert.ok(/const predictRetiredWorkerDeliverable = /.test(factory), 'predictRetiredWorkerDeliverable moved verbatim (the O2 deliverable predictor)')
+  assert.ok(/const captureRetiredPostTurnError = /.test(factory), 'captureRetiredPostTurnError moved verbatim — now a FACTORY-INTERNAL helper (retirePost consumes the local directly, no surface member)')
+  assert.ok(/const settleRetiredPostDeliveries = /.test(factory), 'settleRetiredPostDeliveries moved verbatim (the retire settle, factory-internal)')
+  assert.ok(/const predictRetiredWorkerDeliverable = /.test(factory), 'predictRetiredWorkerDeliverable moved verbatim (the O2 deliverable predictor, factory-internal)')
+  // The CUT-3 closures moved verbatim into the factory (SUB-BATCH 3: the
+  // retire/archive + workspace/ensureHead + the boot checks/reconciles).
+  assert.ok(/const retirePost = async \(postId: string, callerAgentId: string\)/.test(factory), 'retirePost moved verbatim (the F1 retire seam — FACTORY-LOCAL now)')
+  assert.ok(/const archiveWorkerSession = async/.test(factory), 'archiveWorkerSession moved verbatim (the durable-session archiver)')
+  assert.ok(/const archivePostSessionOnSleep = async/.test(factory), 'archivePostSessionOnSleep moved verbatim (the sleep-archive)')
+  assert.ok(/const ensureDepartmentWorkspace = async/.test(factory), 'ensureDepartmentWorkspace moved verbatim (the workspace ensure)')
+  assert.ok(/const resolveDepartmentWorkspaceCwd = async/.test(factory), 'resolveDepartmentWorkspaceCwd moved verbatim (the dept workspace cwd — FACTORY-LOCAL now)')
+  assert.ok(/const resolveWorkspaceRootPath = async/.test(factory), 'resolveWorkspaceRootPath moved verbatim (the shared root — FACTORY-LOCAL now)')
+  assert.ok(/const attachHeadSession = async/.test(factory), 'attachHeadSession moved verbatim (the sidebar attach)')
+  assert.ok(/const rotateArchivedHeadSessionId = async/.test(factory), 'rotateArchivedHeadSessionId moved verbatim (the archive-leak rotation)')
+  assert.ok(/const ensureHead = async \(department: DepartmentConfig, roomId: string\)/.test(factory), 'ensureHead moved verbatim (the head materialization)')
+  assert.ok(/const ensureAllHeads = async/.test(factory), 'ensureAllHeads moved verbatim (the boot head-driving)')
+  assert.ok(/const runGhostSuspectReconcile = async/.test(factory), 'runGhostSuspectReconcile moved verbatim (the B5-GHOST census)')
+  assert.ok(/const runProviderAdapterBootCheck = async/.test(factory), 'runProviderAdapterBootCheck moved verbatim (the NO_ADAPTER boot check)')
+  assert.ok(/const runRetiredWorkerResidueReconcile = async/.test(factory), 'runRetiredWorkerResidueReconcile moved verbatim (the Dx1 residue pass)')
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface
   // destructure feeds the SAME names the downstream apply uses — SUB-BATCH 2
-  // adds the 9 new members (workerSetup / headSetup / dispose* / retire*).
+  // adds the 9 new members (workerSetup / headSetup / dispose* / retire*);
+  // SUB-BATCH 3 adds the 8 CUT3 members the delivery factory + lifecycle
+  // consume (the retire helpers left the destructure — retirePost now consumes
+  // the factory-locals internally).
   assert.ok(/ctx\.get\('deepartments\.tools'\) as ToolsSurface \| undefined\) \?\? createToolsOrchestration\(/.test(invoke), 'the bundle invokes the tools service service-first with the inline R6 fallback')
-  assert.ok(/const \{[\s\S]*?installHeadBoardTools,[\s\S]*?workerSetup,[\s\S]*?headSetup,[\s\S]*?disposeHeadHandle,[\s\S]*?disposeHeadHandleOnce,[\s\S]*?disposeJoinTimeoutMs,[\s\S]*?joinHeadDisposeOnce,[\s\S]*?captureRetiredPostTurnError,[\s\S]*?settleRetiredPostDeliveries,[\s\S]*?predictRetiredWorkerDeliverable[\s\S]*?\} = toolsSurface/.test(invoke), 'the bundle destructures the full ToolsSurface at the same fiber position')
+  assert.ok(/const \{[\s\S]*?installHeadBoardTools,[\s\S]*?workerSetup,[\s\S]*?headSetup,[\s\S]*?disposeHeadHandle,[\s\S]*?disposeHeadHandleOnce,[\s\S]*?disposeJoinTimeoutMs,[\s\S]*?joinHeadDisposeOnce,[\s\S]*?resolveDepartmentWorkspaceCwd,[\s\S]*?resolveWorkspaceRootPath,[\s\S]*?rotateArchivedHeadSessionId,[\s\S]*?retirePost,[\s\S]*?isHeadStuck,[\s\S]*?markHeadProgress,[\s\S]*?attachHeadSession,[\s\S]*?archivePostSessionOnSleep[\s\S]*?\} = toolsSurface/.test(invoke), 'the bundle destructures the full ToolsSurface at the same fiber position (15 members — CUT3 members in, retire helpers out)')
+  assert.ok(!/const \{[\s\S]*?captureRetiredPostTurnError,[\s\S]*?settleRetiredPostDeliveries,[\s\S]*?predictRetiredWorkerDeliverable[\s\S]*?\} = toolsSurface/.test(invoke), 'the retire helpers NO LONGER appear in the toolsSurface destructure (factory-internal now)')
   // The new CUT-2 deps are passed by reference (agentPresets/disposingHeads/
   // PRESET_ID + the module-scope tool-allowance sets of invoke.ts).
   for (const dep of ['agentPresets,', 'disposingHeads,', 'PRESET_ID,', 'HEAD_BASE_TOOLS,', 'DENIED_POST_TOOLS,', 'OWN_LAYER_POST_TOOLS,']) {
     assert.ok(invoke.includes(dep), `the invocation passes ${dep.replace(',', '')} by reference`)
   }
+  // The CUT-3 deps are passed by reference (all defined BEFORE the factory
+  // position or module-scope of invoke.ts — registry, hosts, the workspace
+  // materialization closures, the boot promises).
+  for (const dep of ['registry,', 'qualityWorkerInspectProbability,', 'headProgress,', 'hosts,', 'HOST_ATTACH_REPAIR_TIMEOUT_MS,', 'HOST_ATTACH_REPAIR_RETRY_MS,', 'HOST_AGENT_OPTIONS,', 'materializePreset,', 'materializeHeadPreset,', 'dshHome,', 'registryLoaded,', 'hostsLoaded,', 'stuckNow,', 'STUCK_HEAD_MS,', 'HEAD_DEFAULT_SESSION_TITLE,']) {
+    assert.ok(invoke.includes(dep), `the invocation passes ${dep.replace(',', '')} by reference (CUT3 direct dep)`)
+  }
   // The compiled bundle still exports the SAME superset (the export-parity lock
   // stays intact by construction); the factory compiled into lib/ contains the
-  // registry + the runners + the CUT-2 closures.
+  // registry + the runners + the CUT-2 closures + the CUT-3 closures.
   const lib = readFileSync(path.join(REPO_ROOT, 'lib', 'core', 'orchestration', 'tools.js'), 'utf8')
   assert.ok(lib.includes('createToolsOrchestration'), 'the compiled factory exists in lib/')
   assert.ok(lib.includes('installHeadBoardTools'), 'the compiled factory carries the registry closure')
   assert.ok(lib.includes('installRoleSection'), 'the compiled factory carries the role-persona closure')
   assert.ok(lib.includes('workerSetup'), 'the compiled factory carries the worker-setup closure')
+  assert.ok(lib.includes('const retirePost = async'), 'the compiled factory carries the retire closure')
+  assert.ok(lib.includes('const ensureHead = async'), 'the compiled factory carries the ensureHead closure')
 })
 
-test('tools-factory (composed boot): the registry wiring is intact — the runner gates + the late-seam accessors exist, workerSetup is a factory-local (no late seam), the buckets stay untouched, NO deepartments.tools provided (P1)', async () => {
+test('tools-factory (composed boot): the registry wiring is intact — the runner gates + the late-seam accessors exist, workerSetup + the CUT3 retire/workspace closures are factory-locals (no late seams), the buckets stay untouched, NO deepartments.tools provided (P1)', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-tools-factory-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] } })
@@ -247,26 +292,41 @@ test('tools-factory (composed boot): the registry wiring is intact — the runne
       assert.equal(ctx.get('deepartments.tools'), undefined, 'deepartments.tools is NOT provided (P1 — provide deferred to hito 4)')
       const factory = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'tools.ts'), 'utf8')
       // The still-LATE seams keep their TDZ-safe rebinds: the tool arrays as
-      // delegating iterables, the store as a thenable, the workspace/retire
-      // seams as thunk arrows.
+      // delegating iterables, the store as a thenable, the delivery seams as
+      // thunk arrows / a delegating driver object.
       assert.ok(/\[Symbol\.iterator\]: \(\) => late\.busTools/.test(factory), 'the busTools late seam delegates at iteration time (TDZ-safe)')
       assert.ok(/const messagesStoreReady = \{/.test(factory), 'the delivery store LATE seam is bound as a delegating thenable (messagesStoreReady)')
-      assert.ok(/const resolveDepartmentWorkspaceCwd: ToolsFactoryDeps\['late'\]\['resolveDepartmentWorkspaceCwd'\] = \(\.\.\.args\) => late\.resolveDepartmentWorkspaceCwd\(\.\.\.args\)/.test(factory), 'the workspace LATE seam is a thunk arrow of the exact signature')
+      assert.ok(/const maybeEmitQualityInspectDirective: ToolsFactoryDeps\['late'\]\['maybeEmitQualityInspectDirective'\] = \(surface\) => late\.maybeEmitQualityInspectDirective\(surface\)/.test(factory), 'the maybeEmitQualityInspectDirective LATE seam is a thunk arrow of the exact signature (the delivery emitter retirePost uses at retire time)')
+      assert.ok(/const redeliverPendingDeliveries: ToolsFactoryDeps\['late'\]\['redeliverPendingDeliveries'\] = \{ run: \(\) => late\.redeliverPendingDeliveries\.run\(\) \}/.test(factory), 'the redeliverPendingDeliveries LATE seam is a delegating driver object (the boot wiring calls .run())')
       // SUB-BATCH 2: workerSetup is NO LONGER a late seam — CUT2 defines it as
       // a factory-local (the registry's reference resolves to the local const,
       // the invocation no longer passes `late.workerSetup`).
       assert.ok(!/const workerSetup: ToolsFactoryDeps\['late'\]\['workerSetup'\]/.test(factory), 'workerSetup is no longer rebound as a late seam in the factory')
       assert.ok(/const workerSetup = \(postId: string, roomId: string, role: string, extra/.test(factory), 'workerSetup is now a factory-local const (CUT2)')
       assert.ok(!/get workerSetup\(\) \{ return workerSetup \}/.test(factory), 'the factory does not re-expose a workerSetup late getter')
+      // SUB-BATCH 3: the workspace/retire/archive seams are NO LONGER late —
+      // CUT3 defines them as factory-locals (resolveDepartmentWorkspaceCwd /
+      // resolveWorkspaceRootPath / retirePost / archiveWorkerSession).
+      assert.ok(!/const resolveDepartmentWorkspaceCwd: ToolsFactoryDeps\['late'\]/.test(factory), 'resolveDepartmentWorkspaceCwd is no longer rebound as a late seam in the factory')
+      assert.ok(!/const resolveWorkspaceRootPath: ToolsFactoryDeps\['late'\]/.test(factory), 'resolveWorkspaceRootPath is no longer rebound as a late seam in the factory')
+      assert.ok(!/const retirePost: ToolsFactoryDeps\['late'\]/.test(factory), 'retirePost is no longer rebound as a late seam in the factory')
+      assert.ok(!/const archiveWorkerSession: ToolsFactoryDeps\['late'\]/.test(factory), 'archiveWorkerSession is no longer rebound as a late seam in the factory')
+      assert.ok(/const resolveDepartmentWorkspaceCwd = async \(department: DepartmentConfig \| undefined\): Promise<string> =>/.test(factory), 'resolveDepartmentWorkspaceCwd is now a factory-local const (CUT3)')
+      assert.ok(/const resolveWorkspaceRootPath = async \(\): Promise<string> =>/.test(factory), 'resolveWorkspaceRootPath is now a factory-local const (CUT3)')
+      assert.ok(/const retirePost = async \(postId: string, callerAgentId: string\): Promise<\{ postId: string; retired: true \}> =>/.test(factory), 'retirePost is now a factory-local const (CUT3)')
       const invoke = readFileSync(path.join(REPO_ROOT, 'src', 'invoke.ts'), 'utf8')
-      // The TOOLS invocation's `late` object no longer carries workerSetup (the
-      // SPAWN invocation still does — that one consumes the surface member).
-      // Scope the check to the tools invocation block only (from
-      // createToolsOrchestration to the destructure).
+      // The TOOLS invocation's `late` object no longer carries workerSetup or
+      // the 4 CUT3 seams (the workspace/retire/archive getters are GONE), and
+      // carries the 2 NEW delivery late seams.
       const toolsInvocation = invoke.slice(invoke.indexOf('createToolsOrchestration(ctx, {'), invoke.indexOf('} = toolsSurface'))
       assert.ok(!/get workerSetup\(\) \{ return workerSetup \}/.test(toolsInvocation), 'the TOOLS invocation late object no longer carries workerSetup')
-      assert.ok(/get resolveDepartmentWorkspaceCwd\(\) \{ return resolveDepartmentWorkspaceCwd \}/.test(toolsInvocation), 'the TOOLS invocation keeps the workspace late getter')
-      assert.ok(/workerSetup,[\s\S]*?headSetup,[\s\S]*?disposeHeadHandle,[\s\S]*?disposeHeadHandleOnce,[\s\S]*?disposeJoinTimeoutMs,[\s\S]*?joinHeadDisposeOnce,[\s\S]*?captureRetiredPostTurnError,[\s\S]*?settleRetiredPostDeliveries,[\s\S]*?predictRetiredWorkerDeliverable[\s\S]*?\} = toolsSurface/.test(invoke), 'the destructure carries the 9 CUT-2 members (the retirePost/CUT3 consumers stay bound)')
+      assert.ok(!/get resolveDepartmentWorkspaceCwd\(\) \{/.test(toolsInvocation), 'the TOOLS invocation late object no longer carries the resolveDepartmentWorkspaceCwd getter (CUT3 factory-local)')
+      assert.ok(!/get resolveWorkspaceRootPath\(\) \{/.test(toolsInvocation), 'the TOOLS invocation late object no longer carries the resolveWorkspaceRootPath getter (CUT3 factory-local)')
+      assert.ok(!/get retirePost\(\) \{ return retirePost \}/.test(toolsInvocation), 'the TOOLS invocation late object no longer carries the retirePost getter (CUT3 factory-local)')
+      assert.ok(!/get archiveWorkerSession\(\) \{ return archiveWorkerSession \}/.test(toolsInvocation), 'the TOOLS invocation late object no longer carries the archiveWorkerSession getter (CUT3 factory-local)')
+      assert.ok(/get maybeEmitQualityInspectDirective\(\) \{ return maybeEmitQualityInspectDirective \}/.test(toolsInvocation), 'the TOOLS invocation late object carries the NEW maybeEmitQualityInspectDirective getter')
+      assert.ok(/get redeliverPendingDeliveries\(\) \{ return redeliverPendingDeliveries \}/.test(toolsInvocation), 'the TOOLS invocation late object carries the NEW redeliverPendingDeliveries getter')
+      assert.ok(/workerSetup,[\s\S]*?headSetup,[\s\S]*?disposeHeadHandle,[\s\S]*?disposeHeadHandleOnce,[\s\S]*?disposeJoinTimeoutMs,[\s\S]*?joinHeadDisposeOnce,[\s\S]*?resolveDepartmentWorkspaceCwd,[\s\S]*?resolveWorkspaceRootPath,[\s\S]*?rotateArchivedHeadSessionId,[\s\S]*?retirePost,[\s\S]*?isHeadStuck,[\s\S]*?markHeadProgress,[\s\S]*?attachHeadSession,[\s\S]*?archivePostSessionOnSleep[\s\S]*?\} = toolsSurface/.test(invoke), 'the destructure carries the 15 surface members (the CUT3 members the delivery factory consumes are bound)')
     } finally {
       dispose()
     }
@@ -275,7 +335,7 @@ test('tools-factory (composed boot): the registry wiring is intact — the runne
   }
 })
 
-test('tools-factory (E2 con Loader real): ONE real worker materialization through the composed machinery — the REAL builder role template (declares dept_exec) installs the registry on the post own-layer: calendar + dept_exec + dept_zstd_read visible, manager-only lifecycle tools absent (structural gate) + the CUT-2 PERSONA/ARCHITECTURE sections land on the head through the factory closures', async () => {
+test('tools-factory (E2 con Loader real): ONE real worker materialization through the composed machinery — the REAL builder role template (declares dept_exec) installs the registry on the post own-layer: calendar + dept_exec + dept_zstd_read visible, manager-only lifecycle tools absent (structural gate) + the CUT-2 PERSONA/ARCHITECTURE sections land on the head through the factory closures + the CUT-3 workspace/ensureHead machinery (head preset + workspace-cwd resolution) runs through the composed bundle from the embedded BOOT WIRING', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-tools-factory-'))
   try {
     const { pluginCtx, agentsStub, dispose } = await smokeBoot(stateDir, {
@@ -294,16 +354,29 @@ test('tools-factory (E2 con Loader real): ONE real worker materialization throug
       assert.ok(roleText.includes('- dept_exec'), 'the real builder role declares dept_exec (the allowExec gate)')
 
       // Drive the REAL materialization path of the composed bundle: the head
-      // own-layer setup runs at boot (ensureHead → headSetup/postSetup → the
-      // factory's installRoleSection + installHeadBoardTools). Find the head's
-      // real child context.
+      // own-layer setup runs at boot (the EMBEDDED BOOT WIRING — CUT3's
+      // `Promise.all([registryLoaded, hostsLoaded]).then(ensureAllHeads → ensureHead)`
+      // inside the factory — drives headSetup/postSetup → the factory's
+      // installRoleSection + installHeadBoardTools). Find the head's real child
+      // context.
       let headChild
       for (let i = 0; i < 100; i++) {
         headChild = agentsStub.childContexts.find((c) => c.agent.id.includes('head-internal-programming-head'))
         if (headChild !== undefined) break
         await new Promise((r) => setTimeout(r, 25))
       }
-      assert.ok(headChild !== undefined, 'the composed boot materialized the head through the bundle (agents.create ran with the headSetup/postSetup closure)')
+      assert.ok(headChild !== undefined, 'the embedded CUT3 boot wiring materialized the head through the bundle (agents.create ran with the ensureHead/headSetup/postSetup closure — the CUT3 machine)')
+
+      // CUT-3 workspace/ensureHead machinery through the composed bundle: the
+      // agents.create carried the per-head preset (headPresetIdFor → the
+      // materializeHeadPreset'd per-head agentPreset) and the workspace CWD
+      // (resolveDepartmentWorkspaceCwd → '' for a department without
+      // workspacePath → resolveWorkspaceRootPath → the repoRoot floor, because
+      // this composition has NO workspaceRegistry service).
+      const headCreate = agentsStub.createCalls.find((c) => String(c.sessionId).includes('head-internal-programming-head'))
+      assert.ok(headCreate !== undefined, 'the head create call was recorded')
+      assert.equal(headCreate.meta?.agentPreset, 'deepartments-head-internal-programming', 'the head create carried the per-head preset id (headPresetIdFor — the CUT3 ensureHead machinery)')
+      assert.equal(headCreate.meta?.cwd, REPO_ROOT, 'the head create carried the resolved workspace root cwd (resolveDepartmentWorkspaceCwd/resolveWorkspaceRootPath — the CUT3 machinery, repoRoot floor with no workspaceRegistry service)')
 
       // The head own-layer carries the registry: the manager (head) sees the
       // calendar tools + the department-lifecycle tools; the secretary registers
