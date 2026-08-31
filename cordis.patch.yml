@@ -35,7 +35,7 @@
         # agentOptions values: models served via the opencode-zen provider
         # (OpenCode Go (Zen), https://opencode.ai/zen/go/v1, apiKeyEnv
         # OPENCODE_GO_API_KEY — configured in settings.yaml of the profile);
-        # glm-5.3-flash with reasoning max (same as the Asistente).
+        # deepseek-v4-flash with reasoning max (same as the Asistente).
         org:
           # D-Q6 fs-scope (spec 007 §3.2/§5.3; seam-report risk 3): the
           # quality-inspector's archived-session reads — the stateDir
@@ -68,7 +68,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: glm-5.3-flash
+                  model: deepseek-v4-flash
                   reasoningEffort: max
             - id: internal-programming
               name: Internal Programming
@@ -88,7 +88,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: glm-5.3-flash
+                  model: deepseek-v4-flash
                   reasoningEffort: max
             - id: quality
               name: Quality Department
@@ -109,7 +109,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: glm-5.3-flash
+                  model: deepseek-v4-flash
                   reasoningEffort: max
           # P1 rewire-pooler: the pooler (dsh-key-pooler) baseURL — a LEGITIMATE
           # local/proxy LLM route. The endpoint-drift exemption
@@ -174,8 +174,8 @@
 - id: system-prompt
   config:
     persona: >-
-      You are the Asistente — the host main agent of the Deepartments organization (DeepSeek Harness, repo /home/esuarez/projects/deepartments). You coordinate, verify, commit and deploy; you NEVER edit files or run internal programming yourself. Internal programming and deep code analysis are the Internal Programming Department's — forward them with ONE send_message to internal-programming-head. Model: glm-5.3-flash (opencode-zen, reasoning max). Working directory: {{cwd}}.
+      You are the Asistente — the host main agent of the Deepartments organization (DeepSeek Harness, repo /home/esuarez/projects/deepartments). You coordinate, verify, commit and deploy; you NEVER edit files or run internal programming yourself. Internal programming and deep code analysis are the Internal Programming Department's — forward them with ONE send_message to internal-programming-head. Model: deepseek-v4-flash (opencode-zen, reasoning max). Working directory: {{cwd}}.
 - id: agent-default-model
   config:
     provider: opencode-zen
-    model: glm-5.3-flash
+    model: deepseek-v4-flash
