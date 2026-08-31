@@ -35,7 +35,7 @@
         # agentOptions values: models served via the opencode-zen provider
         # (OpenCode Go (Zen), https://opencode.ai/zen/go/v1, apiKeyEnv
         # OPENCODE_GO_API_KEY — configured in settings.yaml of the profile);
-        # deepseek-v4-flash-vision-exp with reasoning max (same as the Asistente).
+        # glm-5.3-flash with reasoning max (same as the Asistente).
         org:
           # D-Q6 fs-scope (spec 007 §3.2/§5.3; seam-report risk 3): the
           # quality-inspector's archived-session reads — the stateDir

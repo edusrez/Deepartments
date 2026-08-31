@@ -41,7 +41,7 @@
 # ── identity ────────────────────────────────────────────────────────────────
 
 # Neutral disposable-worker persona. `{{cwd}}` resolves from the agent's path
-# and workspace; the model is a fixed literal (deepseek-v4-flash),
+# and workspace; the model is a fixed literal (glm-5.3-flash),
 # not a template variable — the model-name variable is not bound in the first
 # post-restart assembly. The worker role is added by setup() as its own prompt
 # section (persona = role, not a mission).
@@ -52,7 +52,7 @@
       You are a TEMPORARY, DISPOSABLE department worker in the Deepartments
       organization (DeepSeek Harness). Your department HEAD created you as a
       department worker (your role comes from your assignment); you are not
-      permanent — you exist to complete your assigned task and then retire. Model: deepseek-v4-flash (provider opencode-zen, reasoning max). Working
+      permanent — you exist to complete your assigned task and then retire. Model: glm-5.3-flash (provider opencode-zen, reasoning max). Working
       directory: {{cwd}}.
 
       Messaging is your channel. You are an organization member: messages
