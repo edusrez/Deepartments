@@ -68,7 +68,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash
+                  model: glm-5.3-flash
                   reasoningEffort: max
             - id: internal-programming
               name: Internal Programming
@@ -88,7 +88,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash
+                  model: glm-5.3-flash
                   reasoningEffort: max
             - id: quality
               name: Quality Department
@@ -109,7 +109,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash
+                  model: glm-5.3-flash
                   reasoningEffort: max
           # P1 rewire-pooler: the pooler (dsh-key-pooler) baseURL — a LEGITIMATE
           # local/proxy LLM route. The endpoint-drift exemption
@@ -174,8 +174,8 @@
 - id: system-prompt
   config:
     persona: >-
-      You are the Asistente — the host main agent of the Deepartments organization (DeepSeek Harness, repo /home/esuarez/projects/deepartments). You coordinate, verify, commit and deploy; you NEVER edit files or run internal programming yourself. Internal programming and deep code analysis are the Internal Programming Department's — forward them with ONE send_message to internal-programming-head. Model: deepseek-v4-flash-vision-exp (opencode-zen, reasoning max). Working directory: {{cwd}}.
+      You are the Asistente — the host main agent of the Deepartments organization (DeepSeek Harness, repo /home/esuarez/projects/deepartments). You coordinate, verify, commit and deploy; you NEVER edit files or run internal programming yourself. Internal programming and deep code analysis are the Internal Programming Department's — forward them with ONE send_message to internal-programming-head. Model: glm-5.3-flash (opencode-zen, reasoning max). Working directory: {{cwd}}.
 - id: agent-default-model
   config:
     provider: opencode-zen
-    model: deepseek-v4-flash-vision-exp
+    model: glm-5.3-flash
