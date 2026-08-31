@@ -62,13 +62,15 @@ const REQUIRED_ZONE_FIELDS = {
 }
 
 /** Extract the TOP-LEVEL bucket keys of the bundle's `binder?.register({...})`
- * call in src/invoke.ts (the FASE 2.6-C late-binding seam, :8921). Returns the
- * list of registered bucket names. */
+ * call. SUB-BATCH 4 (tools CUT4): the call MOVED with the zone VERBATIM into
+ * src/core/orchestration/tools.ts (the tools factory — the SAME fiber
+ * position, the same buckets); the static source target follows the movement.
+ * Returns the list of registered bucket names. */
 function extractRegisterBucketKeys() {
-  const src = readFileSync(path.join(REPO_ROOT, 'src', 'invoke.ts'), 'utf8')
+  const src = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'tools.ts'), 'utf8')
   const marker = 'binder?.register({'
   const start = src.indexOf(marker)
-  assert.ok(start !== -1, 'the bundle binder.register call exists in invoke.ts')
+  assert.ok(start !== -1, 'the bundle binder.register call exists in the tools factory (moved VERBATIM with the CUT4 zone)')
   // Brace-scan the object literal (it spans many lines; nested braces inside
   // the bucket objects are balanced by this scan). depth starts at 1: the
   // register call's OWN open brace is the last char of the marker.
@@ -170,7 +172,7 @@ test('binder-contract: IF a zone bucket is registered, it carries ONLY fields th
     // single combined object today — the fields of a zone bucket are the
     // top-level keys nested under the bucket). The tokenizer extracts the
     // object literal once; bucket field lines are 8-space indented under it.
-    const src = readFileSync(path.join(REPO_ROOT, 'src', 'invoke.ts'), 'utf8')
+    const src = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'tools.ts'), 'utf8')
     const marker = 'binder?.register({'
     const start = src.indexOf(marker)
     let depth = 1

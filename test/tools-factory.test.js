@@ -37,6 +37,7 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -236,6 +237,48 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
   assert.ok(/const runGhostSuspectReconcile = async/.test(factory), 'runGhostSuspectReconcile moved verbatim (the B5-GHOST census)')
   assert.ok(/const runProviderAdapterBootCheck = async/.test(factory), 'runProviderAdapterBootCheck moved verbatim (the NO_ADAPTER boot check)')
   assert.ok(/const runRetiredWorkerResidueReconcile = async/.test(factory), 'runRetiredWorkerResidueReconcile moved verbatim (the Dx1 residue pass)')
+  // ... and NO LONGER defines the CUT-4 zone closures inline either (SUB-BATCH
+  // 4 — THE LAST: the bus/feedback TOOL DEFINITIONS + the host own-layer/
+  // global registrations + the redeliver driver + guiEndpointDeps + the Binder
+  // buckets + the scheduler/health builders + the 9 global host-plane tools
+  // moved).
+  for (const name of ['feedbackTool', 'feedbackListTool', 'feedbackUpdateTool', 'sendMessageTool', 'agentMessagesTool', 'deptWhoTool']) {
+    assert.ok(!new RegExp(`const ${name} = `).test(invoke), `${name} is no longer inline in invoke.ts (CUT4 moved)`)
+  }
+  assert.ok(!/const feedbackEmitTools:/.test(invoke), 'feedbackEmitTools is no longer inline in invoke.ts (CUT4 moved)')
+  assert.ok(!/const feedbackHeadTools:/.test(invoke), 'feedbackHeadTools is no longer inline in invoke.ts (CUT4 moved)')
+  assert.ok(!/const busTools:/.test(invoke), 'busTools is no longer inline in invoke.ts (CUT4 moved)')
+  assert.ok(!/const redeliverPendingDeliveries = /.test(invoke), 'redeliverPendingDeliveries is no longer inline in invoke.ts (CUT4 moved)')
+  assert.ok(!/const guiEndpointDeps:/.test(invoke), 'guiEndpointDeps is no longer inline in invoke.ts (CUT4 moved)')
+  assert.ok(!/const schedulerRunJob = /.test(invoke), 'the scheduler/health builders are no longer inline in invoke.ts (CUT4 moved)')
+  assert.ok(!/const buildHealthPosts = /.test(invoke), 'buildHealthPosts is no longer inline in invoke.ts (CUT4 moved)')
+  assert.ok(!/binder\?\.register\(/.test(invoke), 'the binder.register call is no longer inline in invoke.ts (CUT4 moved)')
+  for (const name of ['globalWakeSnapshot', 'globalRetire', 'globalMemo', 'globalSleep', 'globalSleepAll', 'globalHeadRotate', 'globalFeedback', 'globalFeedbackList', 'globalFeedbackUpdate']) {
+    assert.ok(!new RegExp(`const ${name} = `).test(invoke), `${name} is no longer inline in invoke.ts (CUT4 moved)`)
+  }
+  // The CUT-4 closures moved verbatim into the factory (SUB-BATCH 4: the
+  // bus/feedback tools + the arrays + the driver + the buckets + the globals).
+  assert.ok(/const feedbackTool = defineTool/.test(factory), 'feedbackTool moved verbatim into the factory (the universal feedback emitter)')
+  assert.ok(/const sendMessageTool = defineTool/.test(factory), 'sendMessageTool moved verbatim (the bus send tool)')
+  assert.ok(/const feedbackEmitTools: readonly ReturnType<typeof defineTool>\[\] = \[feedbackTool\]/.test(factory), 'feedbackEmitTools moved verbatim (the emit array — now a FACTORY-LOCAL const)')
+  assert.ok(/const feedbackHeadTools: readonly ReturnType<typeof defineTool>\[\] = \[feedbackListTool, feedbackUpdateTool\]/.test(factory), 'feedbackHeadTools moved verbatim (the head array — FACTORY-LOCAL)')
+  assert.ok(/const busTools: readonly ReturnType<typeof defineTool>\[\] = \[sendMessageTool, agentMessagesTool, deptWhoTool\]/.test(factory), 'busTools moved verbatim (the bus array — FACTORY-LOCAL)')
+  assert.ok(/const redeliverPendingDeliveries =/.test(factory), 'redeliverPendingDeliveries moved verbatim (the boot re-delivery driver — FACTORY-LOCAL now)')
+  assert.ok(/const guiEndpointDeps: DeepartmentsEndpointDeps = \{/.test(factory), 'guiEndpointDeps moved verbatim (the RPC endpoint deps)')
+  assert.ok(/binder\?\.register\(\{/.test(factory), 'the binder.register call moved verbatim into the factory (the CUT4 Binder buckets)')
+  assert.ok(/const globalWakeSnapshot = ctx\.tools\.register/.test(factory), 'globalWakeSnapshot moved verbatim (the 9-global host-plane registration block)')
+  assert.ok(/const globalHeadRotate = ctx\.tools\.register/.test(factory), 'globalHeadRotate moved verbatim (the head-rotation tool)')
+  assert.ok(/, 'deepartments: host-plane tools'\)/.test(factory), 'the host-plane tools disposal ctx.effect moved verbatim (the CUT4 zone closing)')
+  // The embedded zone is BYTE-IDENTICAL to HEAD (applyInvoke 4246-5476, 1231
+  // LOCs — md5 stamp fe319e0f…; the MOVEMENT-ONLY contract).
+  {
+    const first = factory.indexOf('  // --- messaging bus TOOL DEFINITIONS (ONE body per tool; registered in the')
+    const last = factory.indexOf("  }, 'deepartments: host-plane tools')")
+    assert.ok(first !== -1 && last !== -1 && last > first, 'the factory embeds the CUT4 zone (banner → host-plane effect close)')
+    const zoneText = factory.slice(first, last + "  }, 'deepartments: host-plane tools')".length) + '\n'
+    const md5 = createHash('md5').update(zoneText, 'utf8').digest('hex')
+    assert.equal(md5, 'fe319e0f4f0c145081e1e46bf0e9d7b3', 'the embedded CUT4 zone is byte-identical to HEAD applyInvoke 4246-5476 (md5 fe319e0f…)')
+  }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface
   // destructure feeds the SAME names the downstream apply uses — SUB-BATCH 2
@@ -244,7 +287,7 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
   // consume (the retire helpers left the destructure — retirePost now consumes
   // the factory-locals internally).
   assert.ok(/ctx\.get\('deepartments\.tools'\) as ToolsSurface \| undefined\) \?\? createToolsOrchestration\(/.test(invoke), 'the bundle invokes the tools service service-first with the inline R6 fallback')
-  assert.ok(/const \{[\s\S]*?installHeadBoardTools,[\s\S]*?workerSetup,[\s\S]*?headSetup,[\s\S]*?disposeHeadHandle,[\s\S]*?disposeHeadHandleOnce,[\s\S]*?disposeJoinTimeoutMs,[\s\S]*?joinHeadDisposeOnce,[\s\S]*?resolveDepartmentWorkspaceCwd,[\s\S]*?resolveWorkspaceRootPath,[\s\S]*?rotateArchivedHeadSessionId,[\s\S]*?retirePost,[\s\S]*?isHeadStuck,[\s\S]*?markHeadProgress,[\s\S]*?attachHeadSession,[\s\S]*?archivePostSessionOnSleep[\s\S]*?\} = toolsSurface/.test(invoke), 'the bundle destructures the full ToolsSurface at the same fiber position (15 members — CUT3 members in, retire helpers out)')
+  assert.ok(/const \{[\s\S]*?installHeadBoardTools,[\s\S]*?workerSetup,[\s\S]*?headSetup,[\s\S]*?disposeHeadHandle,[\s\S]*?disposeHeadHandleOnce,[\s\S]*?disposeJoinTimeoutMs,[\s\S]*?joinHeadDisposeOnce,[\s\S]*?resolveDepartmentWorkspaceCwd,[\s\S]*?resolveWorkspaceRootPath,[\s\S]*?rotateArchivedHeadSessionId,[\s\S]*?retirePost,[\s\S]*?isHeadStuck,[\s\S]*?markHeadProgress,[\s\S]*?attachHeadSession,[\s\S]*?archivePostSessionOnSleep[\s\S]*?schedulerHeadForDepartment,[\s\S]*?schedulerRunJob,[\s\S]*?schedulerOnAutoRunSkip,[\s\S]*?schedulerNotifyHead,[\s\S]*?schedulerDepartmentForEntry,[\s\S]*?schedulerDepartmentForJob,[\s\S]*?buildHealthPosts,[\s\S]*?buildHostRunning,[\s\S]*?buildSessionContexts,[\s\S]*?buildHostWaits,[\s\S]*?healthNotifyHost,[\s\S]*?healthPoolerStatePath,[\s\S]*?healthBootId,[\s\S]*?guiEndpointDeps[\s\S]*?\} = toolsSurface/.test(invoke), 'the bundle destructures the full ToolsSurface at the same fiber position (29 members — the 15 CUT1-3 + the 14 CUT4: scheduler/health builders + guiEndpointDeps)')
   assert.ok(!/const \{[\s\S]*?captureRetiredPostTurnError,[\s\S]*?settleRetiredPostDeliveries,[\s\S]*?predictRetiredWorkerDeliverable[\s\S]*?\} = toolsSurface/.test(invoke), 'the retire helpers NO LONGER appear in the toolsSurface destructure (factory-internal now)')
   // The new CUT-2 deps are passed by reference (agentPresets/disposingHeads/
   // PRESET_ID + the module-scope tool-allowance sets of invoke.ts).
@@ -257,9 +300,17 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
   for (const dep of ['registry,', 'qualityWorkerInspectProbability,', 'headProgress,', 'hosts,', 'HOST_ATTACH_REPAIR_TIMEOUT_MS,', 'HOST_ATTACH_REPAIR_RETRY_MS,', 'HOST_AGENT_OPTIONS,', 'materializePreset,', 'materializeHeadPreset,', 'dshHome,', 'registryLoaded,', 'hostsLoaded,', 'stuckNow,', 'STUCK_HEAD_MS,', 'HEAD_DEFAULT_SESSION_TITLE,']) {
     assert.ok(invoke.includes(dep), `the invocation passes ${dep.replace(',', '')} by reference (CUT3 direct dep)`)
   }
+  // The CUT-4 deps are passed by reference (SUB-BATCH 4 — the 27 new direct
+  // deps, all defined BEFORE the factory position or module-scope of
+  // invoke.ts: the host-plane tool builders + the bus/wakepack/registry/
+  // lifecycle closures + the module-scope pure helpers).
+  for (const dep of ['sleepTool,', 'subagents,', 'wakePackService,', 'hostIdForSession,', 'readJournal,', 'journalPathFor,', 'refreshPresence,', 'savePresence,', 'notifyHostPresence,', 'presenceCache,', 'assembleHeartbeat,', 'roleForSessionLive,', 'headRotationJournalStatus,', 'verifyRotateReason,', 'resolveSessionProjCachePath,', 'deliverDaemonNotice,', 'captureSchedulerAutoRunFailure,', 'buildCatalogRows,', 'wakePackInjected,', 'deferredSleepReplace,', 'computeHostSleepSurfacePlan,', 'readPresenceStateFile,', 'ensureHost,', 'writeJournal,', 'bumpHostSleepCounter,', 'bumpPostSleepCounter,']) {
+    assert.ok(invoke.includes(dep), `the invocation passes ${dep.replace(',', '')} by reference (CUT4 direct dep)`)
+  }
   // The compiled bundle still exports the SAME superset (the export-parity lock
   // stays intact by construction); the factory compiled into lib/ contains the
-  // registry + the runners + the CUT-2 closures + the CUT-3 closures.
+  // registry + the runners + the CUT-2 closures + the CUT-3 closures + the
+  // CUT-4 closures (SUB-BATCH 4).
   const lib = readFileSync(path.join(REPO_ROOT, 'lib', 'core', 'orchestration', 'tools.js'), 'utf8')
   assert.ok(lib.includes('createToolsOrchestration'), 'the compiled factory exists in lib/')
   assert.ok(lib.includes('installHeadBoardTools'), 'the compiled factory carries the registry closure')
@@ -267,16 +318,21 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
   assert.ok(lib.includes('workerSetup'), 'the compiled factory carries the worker-setup closure')
   assert.ok(lib.includes('const retirePost = async'), 'the compiled factory carries the retire closure')
   assert.ok(lib.includes('const ensureHead = async'), 'the compiled factory carries the ensureHead closure')
+  assert.ok(lib.includes('const feedbackTool = defineTool'), 'the compiled factory carries the feedback tool (CUT4)')
+  assert.ok(lib.includes('const sendMessageTool = defineTool'), 'the compiled factory carries the send_message tool (CUT4)')
+  assert.ok(lib.includes('globalWakeSnapshot'), 'the compiled factory carries the 9-global host-plane registrations (CUT4)')
 })
 
-test('tools-factory (composed boot): the registry wiring is intact — the runner gates + the late-seam accessors exist, workerSetup + the CUT3 retire/workspace closures are factory-locals (no late seams), the buckets stay untouched, NO deepartments.tools provided (P1)', async () => {
+test('tools-factory (composed boot): the registry wiring is intact — the runner gates + the late-seam accessors exist, workerSetup + the CUT3 retire/workspace closures + the CUT4 tool arrays/driver are factory-locals (no late seams), the 9 Binder buckets (5 baseline + 4 zone) register from the factory, NO deepartments.tools provided (P1)', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-tools-factory-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] } })
     try {
       const ctx = pluginCtx()
       // The composition is intact: the 5 baseline buckets + the 4 zone buckets
-      // are still registered (PASO 1 / sub-pasos 2-3 untouched).
+      // are still registered — SUB-BATCH 4 moved the `binder?.register` call
+      // VERBATIM into the factory (the same 9 buckets, the same fiber
+      // position); the binder-contract lock verifies the static target.
       const binder = ctx.get('deepartments.binder')
       assert.ok(binder !== undefined, 'deepartments.binder resolves')
       const buckets = binder.get()
@@ -291,13 +347,25 @@ test('tools-factory (composed boot): the registry wiring is intact — the runne
       // the fallback (smoke-boot service set intacto).
       assert.equal(ctx.get('deepartments.tools'), undefined, 'deepartments.tools is NOT provided (P1 — provide deferred to hito 4)')
       const factory = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'tools.ts'), 'utf8')
-      // The still-LATE seams keep their TDZ-safe rebinds: the tool arrays as
-      // delegating iterables, the store as a thenable, the delivery seams as
-      // thunk arrows / a delegating driver object.
-      assert.ok(/\[Symbol\.iterator\]: \(\) => late\.busTools/.test(factory), 'the busTools late seam delegates at iteration time (TDZ-safe)')
+      // The still-LATE seams keep their TDZ-safe rebinds: the delivery
+      // surface's bus/ACL/catalog/delivery/feedback/mint/wake members as thunk
+      // arrows + delegating THENABLES (messagesStoreReady / feedbackStoreReady)
+      // + a delegating `delivery` object; `messageStoreDir` is a non-late
+      // factory-local == stateDir (the delivery factory defines it identically).
+      assert.ok(/const messageStoreDir = stateDir/.test(factory), 'messageStoreDir is the factory-local == stateDir (the delivery factory defines it identically — the redeliverDeps build-time deref)')
       assert.ok(/const messagesStoreReady = \{/.test(factory), 'the delivery store LATE seam is bound as a delegating thenable (messagesStoreReady)')
+      assert.ok(/const feedbackStoreReady: ToolsFactoryDeps\['late'\]\['feedbackStoreReady'\] = \{/.test(factory), 'the feedback store LATE seam is bound as a delegating thenable (feedbackStoreReady — CUT4)')
+      assert.ok(/const delivery: ToolsFactoryDeps\['late'\]\['delivery'\] = \{[\s\S]*?deliverOrQueue: \(\.\.\.args\) => late\.delivery\.deliverOrQueue\(\.\.\.args\)/.test(factory), 'the delivery-engine LATE seam is a delegating object (deliverOrQueue — CUT4)')
+      assert.ok(/const busMemberIdFor: ToolsFactoryDeps\['late'\]\['busMemberIdFor'\] = \(agentId\) => late\.busMemberIdFor\(agentId\)/.test(factory), 'the busMemberIdFor LATE seam is a thunk arrow of the exact signature (CUT4)')
+      assert.ok(/const busDeliverToPost: ToolsFactoryDeps\['late'\]\['busDeliverToPost'\] = \(\.\.\.args\) => late\.busDeliverToPost\(\.\.\.args\)/.test(factory), 'the busDeliverToPost LATE seam is a thunk arrow (CUT4)')
+      assert.ok(/const freshMintHead: ToolsFactoryDeps\['late'\]\['freshMintHead'\] = \(\.\.\.args\) => late\.freshMintHead\(\.\.\.args\)/.test(factory), 'the freshMintHead LATE seam is a thunk arrow (the head-rotate mint — CUT4)')
       assert.ok(/const maybeEmitQualityInspectDirective: ToolsFactoryDeps\['late'\]\['maybeEmitQualityInspectDirective'\] = \(surface\) => late\.maybeEmitQualityInspectDirective\(surface\)/.test(factory), 'the maybeEmitQualityInspectDirective LATE seam is a thunk arrow of the exact signature (the delivery emitter retirePost uses at retire time)')
-      assert.ok(/const redeliverPendingDeliveries: ToolsFactoryDeps\['late'\]\['redeliverPendingDeliveries'\] = \{ run: \(\) => late\.redeliverPendingDeliveries\.run\(\) \}/.test(factory), 'the redeliverPendingDeliveries LATE seam is a delegating driver object (the boot wiring calls .run())')
+      // SUB-BATCH 4: the tool arrays + the boot driver are NO LONGER late seams
+      // — CUT4 defines them as factory-locals (the CUT1 registry's for..of
+      // loops + the CUT3 boot wiring resolve the SAME local consts at call
+      // time); the factory has NO iterable-rebind / driver-delegate for them.
+      assert.ok(!/\[Symbol\.iterator\]: \(\) => late\.busTools/.test(factory), 'the busTools iterable rebind is GONE — busTools is now a CUT4 factory-local const')
+      assert.ok(!/const redeliverPendingDeliveries: ToolsFactoryDeps\['late'\]/.test(factory), 'the redeliverPendingDeliveries late SEAM is GONE — the CUT4 zone defines the driver as a factory-local')
       // SUB-BATCH 2: workerSetup is NO LONGER a late seam — CUT2 defines it as
       // a factory-local (the registry's reference resolves to the local const,
       // the invocation no longer passes `late.workerSetup`).
@@ -324,9 +392,28 @@ test('tools-factory (composed boot): the registry wiring is intact — the runne
       assert.ok(!/get resolveWorkspaceRootPath\(\) \{/.test(toolsInvocation), 'the TOOLS invocation late object no longer carries the resolveWorkspaceRootPath getter (CUT3 factory-local)')
       assert.ok(!/get retirePost\(\) \{ return retirePost \}/.test(toolsInvocation), 'the TOOLS invocation late object no longer carries the retirePost getter (CUT3 factory-local)')
       assert.ok(!/get archiveWorkerSession\(\) \{ return archiveWorkerSession \}/.test(toolsInvocation), 'the TOOLS invocation late object no longer carries the archiveWorkerSession getter (CUT3 factory-local)')
-      assert.ok(/get maybeEmitQualityInspectDirective\(\) \{ return maybeEmitQualityInspectDirective \}/.test(toolsInvocation), 'the TOOLS invocation late object carries the NEW maybeEmitQualityInspectDirective getter')
-      assert.ok(/get redeliverPendingDeliveries\(\) \{ return redeliverPendingDeliveries \}/.test(toolsInvocation), 'the TOOLS invocation late object carries the NEW redeliverPendingDeliveries getter')
-      assert.ok(/workerSetup,[\s\S]*?headSetup,[\s\S]*?disposeHeadHandle,[\s\S]*?disposeHeadHandleOnce,[\s\S]*?disposeJoinTimeoutMs,[\s\S]*?joinHeadDisposeOnce,[\s\S]*?resolveDepartmentWorkspaceCwd,[\s\S]*?resolveWorkspaceRootPath,[\s\S]*?rotateArchivedHeadSessionId,[\s\S]*?retirePost,[\s\S]*?isHeadStuck,[\s\S]*?markHeadProgress,[\s\S]*?attachHeadSession,[\s\S]*?archivePostSessionOnSleep[\s\S]*?\} = toolsSurface/.test(invoke), 'the destructure carries the 15 surface members (the CUT3 members the delivery factory consumes are bound)')
+      assert.ok(/get maybeEmitQualityInspectDirective\(\) \{ return maybeEmitQualityInspectDirective \}/.test(toolsInvocation), 'the TOOLS invocation late object carries the maybeEmitQualityInspectDirective getter')
+      assert.ok(!/get redeliverPendingDeliveries\(\) \{ return redeliverPendingDeliveries \}/.test(toolsInvocation), 'the TOOLS invocation late object NO LONGER carries the redeliverPendingDeliveries getter (CUT4 factory-local)')
+      assert.ok(!/get busTools\(\)/.test(toolsInvocation), 'the TOOLS invocation late object NO LONGER carries the busTools getter (CUT4 factory-local)')
+      assert.ok(!/get feedbackEmitTools\(\)/.test(toolsInvocation), 'the TOOLS invocation late object NO LONGER carries the feedbackEmitTools getter (CUT4 factory-local)')
+      assert.ok(!/get feedbackHeadTools\(\)/.test(toolsInvocation), 'the TOOLS invocation late object NO LONGER carries the feedbackHeadTools getter (CUT4 factory-local)')
+      for (const seam of ['busMemberIdFor', 'feedbackStoreReady', 'resolveQualityHeadEntry', 'feedbackForwarderFor', 'feedbackDeliveryOptions', 'busProfileFor', 'aclDenyGround', 'resolveBusCatalogRoute', 'delivery', 'isDormantRecipient', 'busEnsureHostForCaller', 'assertBusFanOut', 'busDeliverToPost', 'busDeliverToHost', 'resolveBusChild', 'deliverBusChild', 'freshMintHead', 'enqueueHostWake']) {
+        assert.ok(new RegExp(`get ${seam}\\(\\) \\{ return deliverySurface\\.${seam} \\}`).test(toolsInvocation), `the TOOLS invocation late object carries the NEW ${seam} getter (CUT4 delivery-surface seam)`)
+      }
+      // The invocation late object carries EXACTLY the 21 TDZ-safe seams (the
+      // 3 kept delivery seams + the 18 CUT4 delivery-surface seams — the 4
+      // factory-local seams are gone).
+      const lateStart = toolsInvocation.indexOf('late: {')
+      let lateDepth = 1
+      let k = lateStart + 'late: {'.length
+      for (; k < toolsInvocation.length && lateDepth > 0; k++) {
+        if (toolsInvocation[k] === '{') lateDepth++
+        else if (toolsInvocation[k] === '}') lateDepth--
+      }
+      const lateBody = toolsInvocation.slice(lateStart, k)
+      const getterCount = (lateBody.match(/get [A-Za-z_$][\w$]*\(\) \{ return/g) ?? []).length
+      assert.equal(getterCount, 21, `the TOOLS invocation late object carries exactly 21 getters (found ${getterCount})`)
+      assert.ok(/workerSetup,[\s\S]*?headSetup,[\s\S]*?disposeHeadHandle,[\s\S]*?disposeHeadHandleOnce,[\s\S]*?disposeJoinTimeoutMs,[\s\S]*?joinHeadDisposeOnce,[\s\S]*?resolveDepartmentWorkspaceCwd,[\s\S]*?resolveWorkspaceRootPath,[\s\S]*?rotateArchivedHeadSessionId,[\s\S]*?retirePost,[\s\S]*?isHeadStuck,[\s\S]*?markHeadProgress,[\s\S]*?attachHeadSession,[\s\S]*?archivePostSessionOnSleep[\s\S]*?schedulerHeadForDepartment,[\s\S]*?schedulerRunJob,[\s\S]*?buildHealthPosts,[\s\S]*?healthBootId,[\s\S]*?guiEndpointDeps[\s\S]*?\} = toolsSurface/.test(invoke), 'the destructure carries the 29 surface members (the 15 CUT1-3 + the 14 CUT4: scheduler/health builders + guiEndpointDeps)')
     } finally {
       dispose()
     }
@@ -423,6 +510,35 @@ test('tools-factory (E2 con Loader real): ONE real worker materialization throug
       assert.ok(archSection !== undefined, 'the head systemPrompt carries the deepartments:head:architecture section (buildArchitectureSection ran from the factory)')
       assert.match(archSection.text, /^## Department architecture/m, 'the architecture section opens with the "## Department architecture" heading')
       assert.match(archSection.text, /Internal Programming Department/, 'the REAL ARCHITECTURE.md was templated into the section (renderDepartmentTemplate over the real repo file)')
+
+      // SUB-BATCH 4 E2 — the CUT4 machine runs through the composed bundle:
+      // (1) the head own-layer carries the CUT4 feedback tool (the registry
+      // iterates the FACTORY-LOCAL feedbackEmitTools array) AND a REAL execute
+      // of the CUT4 `dept_who` closure runs through the bundle's own seams
+      // (busEnsureHostForCaller + buildCatalogRows + the live stub agents —
+      // each is the factory's real closure, NOT tautological);
+      assert.ok(headToolsGet('dept_feedback') !== void 0, 'the head own-layer carries dept_feedback (the FACTORY-LOCAL feedbackEmitTools array iterated at materialization)')
+      const whoTool = headChild.ctx.tools.get('dept_who', headChild.key)
+      assert.ok(whoTool !== void 0, 'the head own-layer carries dept_who (the FACTORY-LOCAL busTools array iterated at materialization)')
+      const whoResult = await whoTool.execute({}, { agent: headChild.agent })
+      assert.ok(typeof whoResult === 'object' && whoResult !== null, 'dept_who executed through the composed bundle returns a payload')
+      const whoText = whoResult.snapshot ?? (whoResult.text ?? JSON.stringify(whoResult))
+      assert.match(String(whoText), /internal-programming-head/, 'the dept_who real execute resolves the head identity (busEnsureHostForCaller + buildCatalogRows from the factory)')
+      // (2) a REAL `dept_feedback` execute appends a durable record to the
+      // REAL FeedbackStore at <stateDir>/feedback.jsonl — the CUT4 emitter runs
+      // through the composed bundle's late seams (feedbackStoreReady thenable →
+      // the real opened store + busMemberIdFor/finalizer renders).
+      const fbTool = headChild.ctx.tools.get('dept_feedback', headChild.key)
+      const fbResult = await fbTool.execute(
+        { tipo: 'mejora', severidad: 'bajo', resumen: 'tools-factory SB4 E2: CUT4 feedback real execute' },
+        { agent: headChild.agent }
+      )
+      assert.ok(typeof fbResult === 'object' && fbResult !== null && typeof fbResult.id === 'string', 'dept_feedback executed through the composed bundle returns the created FeedbackRecord (id included)')
+      const fbFile = path.join(stateDir, 'feedback.jsonl')
+      assert.ok(existsSync(fbFile), 'the REAL FeedbackStore wrote <stateDir>/feedback.jsonl (feedbackStoreReady late thenable → the real opened store)')
+      const fbContent = readFileSync(fbFile, 'utf8')
+      assert.match(fbContent, /tools-factory SB4 E2: CUT4 feedback real execute/, 'the durable feedback record carries the real resumen')
+      assert.match(fbContent, /internal-programming-head/, 'the durable feedback record carries the real emisor (busMemberIdFor resolved the head postId)')
     } finally {
       dispose()
     }
