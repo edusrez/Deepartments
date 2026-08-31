@@ -16754,7 +16754,7 @@ test('HOST-SIDE FIRST-WAKE FIX config guard: the bundled patch overrides the COR
   assert.ok(sp.block.includes('persona:'), 'the system-prompt row carries a persona')
   assert.ok(!sp.block.includes('{{model}}'), 'the system-prompt persona does NOT reference the unbound {{model}} variable')
   assert.ok(!sp.block.includes('{ {model}}'), 'the system-prompt persona does NOT reference the broken-brace { {model}} rendering')
-  assert.ok(sp.block.includes('deepseek-v4-flash-vision-exp'), 'the system-prompt persona names the literal model')
+  assert.ok(sp.block.includes('deepseek-v4-flash'), 'the system-prompt persona names the literal model')
   assert.ok(sp.block.includes('{{cwd}}'), 'the system-prompt persona references the bound working-directory var {{cwd}}')
 
   // (b) The default model MUST be pinned explicitly (provider + model both set),
@@ -16762,7 +16762,7 @@ test('HOST-SIDE FIRST-WAKE FIX config guard: the bundled patch overrides the COR
   // settings document loads (a base default behind a loaded-but-empty settings
   // section would otherwise be emptied).
   assert.ok(adm.block.includes('provider: opencode-zen'), 'the agent-default-model row pins provider opencode-zen')
-  assert.ok(adm.block.includes('model: deepseek-v4-flash-vision-exp'), 'the agent-default-model row pins model deepseek-v4-flash-vision-exp')
+  assert.ok(adm.block.includes('model: deepseek-v4-flash'), 'the agent-default-model row pins model deepseek-v4-flash')
 })
 
 test('HOST-SIDE FIRST-WAKE FIX real-Loader regression: the plugin materializes its own heads/workers with a MODEL-BOUND session (provider + model never empty) — the plugin side must never regress to an unbound model', async () => {
