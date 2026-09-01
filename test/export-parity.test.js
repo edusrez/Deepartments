@@ -62,7 +62,7 @@ const REPO_ROOT = path.resolve(fileURLToPath(new URL('../', import.meta.url)))
 // / TURN_END_NOTIFY_STATE_FILE from dshd-health — the LANE 2 head-notification
 // watchdog) — an INTENTIONAL, verified surface extension that bumps the frozen
 // count.
-const FROZEN_IMPORT_STATEMENT_COUNTS = [183, 5, 5, 1, 5, 3, 14, 2]
+const FROZEN_IMPORT_STATEMENT_COUNTS = [185, 5, 5, 1, 5, 3, 14, 2]
 
 /** Parse `test/invoke.test.js` and return the 8 import statements that import
  * from '../lib/invoke.js' as arrays of imported symbol names (aliases resolved
@@ -84,19 +84,19 @@ function extractInvokeImports() {
   return statements
 }
 
-test('export-parity: test/invoke.test.js imports EXACTLY 8 statements / 218 symbols from ../lib/invoke.js (the frozen pre-decoupling surface; M-5+M-6+M-7+fb-43+hardening-401+LANE-2 bumped the health statement)', () => {
+test('export-parity: test/invoke.test.js imports EXACTLY 8 statements / 220 symbols from ../lib/invoke.js (the frozen pre-decoupling surface; M-5+M-6+M-7+fb-43+hardening-401+LANE-2+fb-30 bumped the health statement)', () => {
   const statements = extractInvokeImports()
   assert.equal(statements.length, 8, 'exactly 8 import statements from ../lib/invoke.js')
   const counts = statements.map((names) => names.length)
-  assert.deepEqual(counts, FROZEN_IMPORT_STATEMENT_COUNTS, 'the per-statement symbol counts are frozen (183+5+5+1+5+3+14+2 = 218)')
+  assert.deepEqual(counts, FROZEN_IMPORT_STATEMENT_COUNTS, 'the per-statement symbol counts are frozen (185+5+5+1+5+3+14+2 = 220)')
   const total = counts.reduce((a, b) => a + b, 0)
-  assert.equal(total, 218, '218 named symbols total (the audit-verified import surface)')
+  assert.equal(total, 220, '220 named symbols total (the audit-verified import surface)')
 })
 
-test('export-parity: lib/invoke.js exports EVERY one of the 218 imported symbols (the drop-in superset invariant)', async () => {
+test('export-parity: lib/invoke.js exports EVERY one of the 220 imported symbols (the drop-in superset invariant)', async () => {
   const statements = extractInvokeImports()
   const required = [...new Set(statements.flat())]
-  assert.equal(required.length, 218, '218 distinct imported symbols')
+  assert.equal(required.length, 220, '220 distinct imported symbols')
   // Load the COMPILED superset (lib/invoke.js — the exact module the tests import).
   const require = createRequire(import.meta.url)
   const invoke = require(path.join(REPO_ROOT, 'lib', 'invoke.js'))
@@ -139,5 +139,9 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // readTurnEndNotifyState / writeTurnEndNotifyState /
   // TURN_END_NOTIFY_STATE_FILE from dshd-health) — an INTENTIONAL, verified
   // surface extension that bumps the frozen count.
-  assert.equal(names.length, 298, `lib/invoke.js export count frozen at 298 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
+  // LANE 4 (fb-30, 2026-09-01) added the TWO boot CATCH-UP exports
+  // (scanHealthCatchup / HEALTH_CATCHUP_WINDOW_MS from dshd-health — the
+  // bounded BOOT catch-up over the durable event ledgers) — an INTENTIONAL,
+  // verified surface extension that bumps the frozen count.
+  assert.equal(names.length, 300, `lib/invoke.js export count frozen at 300 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })

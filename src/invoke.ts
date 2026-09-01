@@ -3312,6 +3312,16 @@ export function applyInvoke(ctx: Context, config: Config) {
       // re-reading the whole (unbounded-between-boots) sidecar. The scanner's
       // filter pipeline is unchanged → same findings, same alerts.
       const deliveryRowsTailReader = createDeliveryRowsTailReader()
+      // W6-boot de-flake (LANE 4, 2026-09-01): the tick is fire-and-forget, so
+      // clearInterval on dispose stops FUTURE ticks but an IN-FLIGHT async tick
+      // keeps writing into stateDir AFTER dispose resolves — a consumer that
+      // rm -rf's the stateDir right after `await dispose()` (the test teardown
+      // harness) races that last write → ENOTEMPTY (the W6 boot / Bug A SOURCE
+      // GATE / M-6 smoke flake class). The disposer now DRAINS every in-flight
+      // tick before returning: disposing the daemon is an ORDERED shutdown —
+      // no stateDir write can land after dispose resolves (the tick never
+      // throws, so the drain is bounded and inert).
+      let inFlight: Promise<void> | undefined
       const tick = (): void => {
         // M-7 — the mission-queue rows: the SAME catalog-post inputs the W8-c
         // safeguards scan (buildHealthPosts — the EXISTING per-tick source),
@@ -3322,8 +3332,9 @@ export function applyInvoke(ctx: Context, config: Config) {
         // double buildHealthPosts I/O per tick).
         const healthPosts = buildHealthPosts()
         const missionQueue = healthPosts.filter((p) => p.retired !== true && p.provider !== 'worker')
+        let pending: Promise<unknown>
         if (healthService !== undefined) {
-          void healthService.runDaemonTick({
+          pending = healthService.runDaemonTick({
             now: () => Date.now(),
             // A FRESH single-use iterator per tick (Map.values() is single-use).
             hosts: hosts.values(),
@@ -3357,7 +3368,7 @@ export function applyInvoke(ctx: Context, config: Config) {
             notifyHead: healthNotifyHead
           })
         } else {
-          void runHealthDaemonTick({
+          pending = runHealthDaemonTick({
             now: () => Date.now(),
             stateDir: stateDir,
             bootId: healthBootId,
@@ -3425,9 +3436,22 @@ export function applyInvoke(ctx: Context, config: Config) {
             logger: ctx.logger
           })
         }
+        // Chain the in-flight run for the ordered dispose drain: an overlapping
+        // tick (a slow run vs a fast interval) is ALSO awaited — allSettled
+        // never rejects, so a tick failure can never wedge the shutdown.
+        inFlight = Promise.allSettled(inFlight !== undefined ? [inFlight, pending] : [pending]).then(() => undefined)
       }
       const interval = setInterval(tick, healthIntervalMs)
-      return () => { clearInterval(interval) }
+      return async () => {
+        clearInterval(interval)
+        if (inFlight !== undefined) {
+          try {
+            await inFlight
+          } catch {
+            /* the tick contract never rejects — the drain is inert */
+          }
+        }
+      }
     }, 'deepartments: system-health daemon')
   }
 

@@ -32,7 +32,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey, scanMainRed, MAIN_RED_DEFAULT_POLL_MS, MAIN_RED_KEY_PREFIX, mainRedKey, MAIN_RED_STATE_FILE, readMainRedState, writeMainRedState, MAIN_RED_DEFAULT_LOCKS, buildMainRedState, scanMissionQueue, MISSION_QUEUE_DEFAULT_LIMIT, MISSION_QUEUE_DEFAULT_PERSIST_MS, MISSION_QUEUE_KEY_PREFIX, missionQueueKey, MISSION_QUEUE_STATE_FILE, readMissionQueueState, writeMissionQueueState, RESTART_REGISTRY_FILE, RESTART_REGISTRY_SEED_ROWS, readRestartRegistry, seedRestartRegistry, reconcileRestartRegistry, buildRestartDigest, CAPACITY_GATE_STATE_FILE, CAPACITY_GATE_TRANSITION_KEY, capacityGateDedupeKey, readCapacityGateState, writeCapacityGateState, buildCapacityGateFrame, turnErrorNotifyClass, buildTurnErrorNotifyFrame, readTurnEndNotifyState, writeTurnEndNotifyState, TURN_END_NOTIFY_STATE_FILE } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, scanHealthCatchup, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_CATCHUP_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey, scanMainRed, MAIN_RED_DEFAULT_POLL_MS, MAIN_RED_KEY_PREFIX, mainRedKey, MAIN_RED_STATE_FILE, readMainRedState, writeMainRedState, MAIN_RED_DEFAULT_LOCKS, buildMainRedState, scanMissionQueue, MISSION_QUEUE_DEFAULT_LIMIT, MISSION_QUEUE_DEFAULT_PERSIST_MS, MISSION_QUEUE_KEY_PREFIX, missionQueueKey, MISSION_QUEUE_STATE_FILE, readMissionQueueState, writeMissionQueueState, RESTART_REGISTRY_FILE, RESTART_REGISTRY_SEED_ROWS, readRestartRegistry, seedRestartRegistry, reconcileRestartRegistry, buildRestartDigest, CAPACITY_GATE_STATE_FILE, CAPACITY_GATE_TRANSITION_KEY, capacityGateDedupeKey, readCapacityGateState, writeCapacityGateState, buildCapacityGateFrame, turnErrorNotifyClass, buildTurnErrorNotifyFrame, readTurnEndNotifyState, writeTurnEndNotifyState, TURN_END_NOTIFY_STATE_FILE } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
@@ -1010,7 +1010,27 @@ async function withTempStateDir(fn) {
   try {
     return await fn(stateDir)
   } finally {
-    await rm(stateDir, { recursive: true, force: true })
+    // W6-boot / Bug-A SOURCE GATE / M-6-SMOKE de-flake (LANE 4, 2026-09-01):
+    // the REAL daemons (system-health with a test interval like 50 ms, the
+    // agenda scheduler, the parallel monitors) tick FIRE-AND-FORGET, so
+    // `await dispose()` (clearInterval) stops FUTURE ticks but an IN-FLIGHT
+    // async tick can still be writing into stateDir while this recursive rm
+    // runs → ENOTEMPTY (the flake class observed 4/8 in builder runs;
+    // standalone always green). The rm is retried with a BOUNDED deterministic
+    // poll (<= 2 s) so the teardown WAITS OUT the in-flight writes instead of
+    // racing them. 0 assertion change — only the teardown timing becomes
+    // deterministic; a genuine persistent ENOTEMPTY still fails loudly past
+    // the deadline (never swallowed).
+    const deadline = Date.now() + 2000
+    for (;;) {
+      try {
+        await rm(stateDir, { recursive: true, force: true })
+        return
+      } catch (error) {
+        if (Date.now() >= deadline) throw error
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+    }
   }
 }
 
@@ -19895,5 +19915,135 @@ test('fb-28 (report-run token, format regression): the token directive is ADDED 
     } finally {
       await dispose()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// fb-30 CATCH-UP (LANE 4, 2026-09-01) — the bounded BOOT catch-up pass over the
+// DURABLE event ledgers (the §3b quiet-band blind-window recovery: events that
+// entered a freshness window [turn-error 10 min / scan 2 h] during a capture
+// gap with a LIVE heartbeat and were never alerted). At the daemon's FIRST tick
+// (a new boot — the on-disk heartbeat carries a PREVIOUS boot's bootId, or is
+// absent), rows OLDER than the live 2 h anomaly window but WITHIN the bounded
+// 24 h look-back (`HEALTH_CATCHUP_WINDOW_MS`) are caught up ONCE: the findings
+// ride the EXISTING findings→dedupe→notifyHost→audit path with their LIVE
+// identity keys (the SHARED health-alerts ledger never duplicates a live alert
+// — the windows are disjoint — and never re-alerts an already-alerted identity)
+// and carry the `catchup: true` marker → their OWN `CATCH-UP` frame bullet.
+// Knob: `health.catchupEnabled` (default ON) + `health.catchupWindowMs`
+// (default 24 h). The WIDENED boot turn-error capture (the fresh-window bound
+// widened to the look-back) records a gap turn-error into post-errors.jsonl
+// (C9-archived) so the post-error catch-up scan can group it.
+// ---------------------------------------------------------------------------
+
+test('fb-30 CATCH-UP (PURE): scanHealthCatchup groups OLD durable rows (post-errors + the C9 archive + failed deliveries) INSIDE the bounded 24h look-back but OUTSIDE the live 2h window → catch-up findings with the SAME identity keys as the live scans + the catchup marker + count + provenance; a FRESH row (inside 2h) is NEVER a catch-up finding (the live scan owns it — disjoint windows, no live duplication by construction); a row OLDER than the bounded look-back → nothing; a RETIRED host\'s legacy row → skipped (Bug A parity)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 16, 0, 0).getTime()
+    assert.equal(HEALTH_CATCHUP_WINDOW_MS, 24 * 60 * 60 * 1000, 'the bounded look-back code default is 24 h')
+    // (a) an OLD post-error (3 h — outside the live 2 h window, inside the 24 h
+    // look-back) with a STABLE class (the identity key the live scan uses).
+    await appendPostError(stateDir, { ts: T0 - 3 * 3600_000, postId: 'quality-head', error: 'session "s-old" not found' }, T0)
+    // appendPostError's C9 discard ARCHIVES the >2h row → the live file is
+    // empty and the forensia archive holds it (the durable evidence home the
+    // catch-up reads — §3b mechanism 2).
+    assert.equal(readPostErrorsFile(stateDir).length, 0, 'appendPostError C9 discards the old row from the LIVE file')
+    assert.equal(readPostErrorsArchiveFile(stateDir).length, 1, 'the old row is durably ARCHIVED')
+    // (b) an OLD failed delivery row (3 h) — the §3b mechanism-3 ledger.
+    await seedDeliveryRows(stateDir, [{ messageId: 'm-old', recipientId: 'research-head', status: 'failed', ts: T0 - 3 * 3600_000 }])
+    // (c) a FRESH post-error (1 min — the LIVE scan\'s row, never a catch-up one).
+    await appendPostError(stateDir, { ts: T0 - 60_000, postId: 'research-head', error: 'boom' }, T0)
+    const findings = scanHealthCatchup(stateDir, T0, HEALTH_CATCHUP_WINDOW_MS)
+    assert.equal(findings.length, 2, 'the OLD post-error + OLD delivery-failed are caught up; the FRESH row is NOT (disjoint windows)')
+    const pe = findings.find((f) => f.kind === 'post-error')
+    assert.equal(pe.postId, 'quality-head', 'the catch-up post-error names the post')
+    assert.equal(pe.key, 'post-error:quality-head:session-not-found', 'the catch-up finding carries the SAME identity key the live scan uses (shared-ledger dedupe)')
+    assert.equal(pe.catchup, true, 'the catch-up marker rides the post-error finding')
+    assert.equal(pe.count, 1, 'the grouped count')
+    assert.match(pe.error, /session "s-old" not found/, 'the finding carries the error text')
+    const df = findings.find((f) => f.kind === 'delivery-failed')
+    assert.equal(df.messageId, 'm-old', 'the catch-up delivery-failed names the messageId')
+    assert.equal(df.key, 'delivery-failed:m-old', 'the LIVE delivery-failed identity key')
+    assert.equal(df.catchup, true, 'the catch-up marker rides the delivery finding')
+    assert.ok(!findings.some((f) => f.postId === 'research-head'), 'a FRESH (in-2h) row is NEVER a catch-up finding')
+    // (d) the bounded window: a row OLDER than the look-back is never caught up.
+    await appendPostError(stateDir, { ts: T0 - 5 * 3600_000, postId: 'old-post', error: 'ancient' }, T0)
+    const bounded = scanHealthCatchup(stateDir, T0, 4 * 3600_000)
+    assert.equal(bounded.length, 2, 'a 4 h look-back still catches the 3 h rows (quality-head + m-old)')
+    assert.equal(bounded.filter((f) => f.postId === 'old-post').length, 0, 'a row OLDER than the bounded look-back is never caught up (bounded by design)')
+    // (e) Bug A parity: a RETIRED host\'s legacy row is never a catch-up finding.
+    const withRetired = scanHealthCatchup(stateDir, T0, HEALTH_CATCHUP_WINDOW_MS, new Set(['quality-head']))
+    assert.equal(withRetired.filter((f) => f.postId === 'quality-head').length, 0, 'a RETIRED host\'s legacy row is never a catch-up finding (Bug A)')
+    assert.equal(withRetired.filter((f) => f.kind === 'delivery-failed').length, 1, 'the non-retired delivery finding is unaffected')
+  })
+})
+
+test('fb-30 CATCH-UP (tick): the FIRST tick of a NEW boot (no heartbeat → cold boot) with an OLD unalerted post-error row → the daemon ALERTS the host with the CATCH-UP frame + advances the SAME identity key in the SHARED ledger + appends the audit row; a re-tick of the SAME boot NEVER re-runs the catch-up; a NEW boot whose identity was ALREADY alerted (the shared ledger still holds it) → NO re-alert (nunca re-alertar lo ya alertado)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 18, 0, 0).getTime()
+    const alerts = []
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const run = (nowMs, bootId) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId,
+      hosts,
+      notifyHost: async (hostEntry, frame) => { alerts.push(frame) },
+      logger: { warn: () => {} }
+    })
+    // An OLD post-error (3 h) with a STABLE class — archived at append.
+    await appendPostError(stateDir, { ts: T0 - 3 * 3600_000, postId: 'research-head', error: 'session "s-gap" not found' }, T0)
+    // (a) the NEW-boot tick → the catch-up ALERTS it.
+    await run(T0, 'boot-cu-1')
+    assert.equal(alerts.length, 1, 'the boot tick ALERTS the caught-up old error')
+    assert.match(alerts[0], /^\[From deepartments\] System-health ALERT:/, 'the catch-up rides the system-health alert seam')
+    assert.match(alerts[0], /- CATCH-UP post-error: research-head \(1 in window\): session "s-gap" not found/, 'the FRAME is the catch-up bullet (frame propio) — never the live bullet')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state['post-error:research-head:session-not-found'], T0, 'the catch-up advances the SAME shared-ledger identity a live post-error alert would')
+    const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    assert.equal(audit.at(-1).findings.some((f) => f.kind === 'post-error' && f.catchup === true && f.postId === 'research-head'), true, 'the audit row records the catch-up finding with the marker')
+    // (b) a re-tick of the SAME boot → the catch-up NEVER re-runs (the row is
+    // still durable, but the pass is boot-only).
+    await run(T0 + 60_000, 'boot-cu-1')
+    assert.equal(alerts.length, 1, 'a NON-boot re-tick never re-runs the catch-up')
+    // (c) a NEW boot (new bootId) where the identity is ALREADY in the shared
+    // ledger (the previous boot alerted it) → NO re-alert (nunca re-alertar lo
+    // ya alertado — the first-tick ledger read happens before the 2h prune).
+    await run(T0 + 120_000, 'boot-cu-2')
+    assert.equal(alerts.length, 1, 'an identity already alerted by a previous boot is NEVER re-alerted by the catch-up (shared-ledger dedupe)')
+  })
+})
+
+test('fb-30 CATCH-UP (gate + non-boot + WIDENED capture): health.catchupEnabled:false → the boot pass NEVER runs (an OLD durable row stays silent); a NON-BOOT tick (the SAME bootId — the heartbeat already carries it) NEVER runs the catch-up even with the knob default-on; the WIDENED boot capture records + ALERTS an OLD (>10 min, within the look-back) turn-error — the §3b 10-min freshness blind spot closed — with the CATCH-UP frame + the fb-25 session/turn provenance', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 19, 30, 0).getTime()
+    const alerts = []
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const run = (cfg, posts, bootId) => runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId,
+      config: cfg,
+      hosts,
+      posts,
+      notifyHost: async (hostEntry, frame) => { alerts.push(frame) },
+      logger: { warn: () => {} }
+    })
+    // (a) knob OFF at boot → an OLD durable row produces NOTHING.
+    await appendPostError(stateDir, { ts: T0 - 3 * 3600_000, postId: 'worker-a', error: 'quiet row' }, T0)
+    await run({ stateDir, org: { departments: [] }, health: { catchupEnabled: false } }, [], 'boot-off')
+    assert.equal(alerts.length, 0, 'catchupEnabled:false → the boot catch-up is a no-op (the old row stays silent)')
+    // (b) a NON-boot tick (the heartbeat written by (a) carries THIS bootId) NEVER runs the catch-up even with the knob default-on.
+    await run({ stateDir, org: { departments: [] } }, [], 'boot-off')
+    assert.equal(alerts.length, 0, 'a NON-boot tick never runs the catch-up (boot-only) regardless of the knob')
+    // (c) a NEW boot (new bootId) with an OLD gap turn-error (> 10 min, within
+    // the look-back) in a post\'s event log → the WIDENED capture records it
+    // (C9-archived) and the catch-up ALERTS it with the CATCH-UP frame.
+    const oldTurn = [{ postId: 'worker-b', retired: false, sessionId: 'sess-b', events: [{ type: 'turn/end', time: T0 - 3 * 3600_000, data: { turn: 7, reason: { kind: 'error', message: 'gap turn error' } } }], inboxTs: [] }]
+    await run({ stateDir, org: { departments: [] } }, oldTurn, 'boot-new')
+    assert.equal(alerts.length, 1, 'the OLD gap turn-error is caught up at the NEW boot (the 10-min freshness blind spot closed)')
+    assert.match(alerts[0], /- CATCH-UP post-error: worker-b \(1 in window\): gap turn error/, 'the CATCH-UP frame names the gap turn-error')
+    assert.match(alerts[0], /\[session sess-b turn 7 \(\d{2}:\d{2}Z\)\]/, 'the gap row carries the fb-25 session+turn provenance')
+    assert.equal(readPostErrorsFile(stateDir).length, 0, 'the live file never holds the >2h gap row (C9 discard)')
+    assert.ok(readPostErrorsArchiveFile(stateDir).some((r) => r.postId === 'worker-b' && r.error === 'gap turn error'), 'the gap turn-error is durably ARCHIVED (the evidence home the catch-up scan reads)')
   })
 })

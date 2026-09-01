@@ -636,6 +636,15 @@ export interface HealthFinding {
   /** fb-25 (b) — the turn number of the post-error group's rows[0] (when the
    * row carried it). */
   turn?: number
+  /** fb-30 — the BOOT CATCH-UP marker: true ONLY on findings produced by the
+   * boot catch-up pass (durable rows OUTSIDE the live 2 h window, WITHIN the
+   * bounded 24 h look-back — the quiet-band recovery). The kind/key are the
+   * SAME as the live scan's (the shared health-alerts ledger applies verbatim:
+   * a catch-up finding never duplicates a live alert — the windows are
+   * disjoint — and never re-alerts an already-alerted identity); the marker
+   * only changes the FRAME (the bullet renders a `CATCH-UP` prefix — the host
+   * sees the alert is a missed-window recovery, not a fresh anomaly). */
+  catchup?: boolean
 }
 
 /** One alert audit line appended to `<stateDir>/health-alerts.jsonl`. */
@@ -669,6 +678,16 @@ export async function appendHealthAlertAudit(stateDir: string, entry: HealthAler
 export const HEALTH_ERROR_WINDOW_MS = 2 * 60 * 60 * 1000
 /** Alert dedupe window: ≤1 alert per key inside this window. */
 export const HEALTH_DEDUPE_WINDOW_MS = 30 * 60 * 1000
+/** fb-30 CATCH-UP (LANE 4, 2026-09-01) — the BOUNDED BOOT look-back window
+ * (24 h default): at the daemon's FIRST tick (a new boot), durable event rows
+ * (post-errors + the C9 archive + failed deliveries) that are OLDER than the
+ * live 2 h anomaly window but WITHIN this look-back are caught up ONCE (their
+ * own CATCH-UP frame) — the quiet-band blind-window recovery (§3b of the VALLE
+ * lane-A report: events that entered a freshness window [turn-error 10 min /
+ * scan 2 h] during a capture gap with a LIVE heartbeat and were never
+ * alerted). Rows BEYOND the look-back stay silent by design (the bound is
+ * intentional — the harness never re-alerts ancient history). */
+export const HEALTH_CATCHUP_WINDOW_MS = 24 * 60 * 60 * 1000
 
 /** Bug C — the stable ERROR-IDENTITY token of a post-error finding. A stable
  * FNV-1a hash (hex) of the error message maps the SAME error string to the SAME
@@ -2145,6 +2164,21 @@ export interface HealthConfigLike {
      * Default 60000 = one poll tick at the default 60 s health interval.
      * Absent/invalid → 60000. */
     missionQueuePersistMs?: number
+    /** fb-30 — the BOOT CATCH-UP gate (default ON; an explicit false disables
+     * the boot catch-up pass — the daemon boot never re-scans the old durable
+     * windows). Runs ONLY on the FIRST tick of a NEW daemon process (the
+     * per-process bootId differs from the on-disk heartbeat's — the same id
+     * the fb-43 restart-registry reconcile REUSES); a re-tick of the SAME
+     * boot never re-runs it. Never touches the scheduler/dispatch; finds ride
+     * the EXISTING findings→dedupe→notifyHost→audit path (the shared
+     * health-alerts ledger). */
+    catchupEnabled?: boolean
+    /** fb-30 — the bounded BOOT catch-up look-back window in ms (default 24 h):
+     * durable post-error / delivery-failed rows OLDER than the live 2 h anomaly
+     * window but WITHIN this look-back are caught up ONCE at boot (their own
+     * CATCH-UP frame); rows beyond the look-back stay silent by design.
+     * Absent/invalid → 86400000 (24 h). */
+    catchupWindowMs?: number
   }
   /** PACING (owner m-PACING, 2026-08-28) — the top-level `org.pacing.*`
    * franja config the transition monitor reads (the bundle passes its whole
@@ -2454,6 +2488,98 @@ export function scanDeliveryFindings(
       messageId,
       ts: row.ts,
       count: 1
+    })
+  }
+  return findings
+}
+
+/** fb-30 CATCH-UP (LANE 4, 2026-09-01) — the BOUNDED BOOT scan over the
+ * DURABLE event ledgers for events that fell OUTSIDE the LIVE anomaly window
+ * and were never alerted (the quiet-band blind spots documented in §3b of the
+ * VALLE lane-A report: a capture gap with a LIVE heartbeat — a turn-error /
+ * post-error / failed delivery entered a freshness window [turn-error 10 min,
+ * scan 2 h] and NO tick observed it, so it was permanently invisible to the
+ * snapshot scanner). Runs ONLY at the daemon's FIRST tick (a new boot —
+ * `isBootTick` in runHealthDaemonTick), bounded by `windowMs` (default
+ * HEALTH_CATCHUP_WINDOW_MS = 24 h):
+ *
+ *   - SOURCES (the durable ledgers §3b identifies): post-errors.jsonl + the C9
+ *     forensia archive post-errors-archive.jsonl (an appendPostError C9
+ *     discard archives every row older than the 2 h anomaly window — the
+ *     archive therefore holds EXACTLY the rows the live scan can never alert)
+ *     + deliveries.jsonl `failed` rows.
+ *   - WINDOW: `nowMs - row.ts > HEALTH_ERROR_WINDOW_MS` (strictly OUTSIDE the
+ *     live 2 h scan — the live scan owns the fresh rows; the windows are
+ *     DISJOINT, so a catch-up finding can never duplicate a live alert by
+ *     construction) AND `nowMs - row.ts <= windowMs` (inside the bounded
+ *     look-back; older rows stay silent by design).
+ *   - GROUPING: identical to the live scans (per (postId, class) /
+ *     per messageId) with the LIVE identity keys — the SHARED health-alerts
+ *     ledger dedupes them verbatim: an identity already alerted by a previous
+ *     boot (its ledger entry is still on disk at the new boot's FIRST tick —
+ *     the first-tick ledger read happens BEFORE the defensive 2 h prune) is
+ *     NEVER re-alerted (nunca re-alertar lo ya alertado).
+ *   - MARKER: every catch-up finding carries `catchup: true` (additive) →
+ *     buildHealthAlertFrame renders the CATCH-UP bullet (frame propio).
+ *   - Bug A parity: the `retiredHostIds` / `retiredMemberIds` sets are
+ *     threaded in — a terminal member's legacy rows never re-alert (the live
+ *     scan rules). PURE besides the reads; never throws (the readers degrade
+ *     to [] like the live scanners). */
+export function scanHealthCatchup(
+  stateDir: string,
+  nowMs: number,
+  windowMs: number = HEALTH_CATCHUP_WINDOW_MS,
+  retiredHostIds?: ReadonlySet<string>,
+  retiredMemberIds?: ReadonlySet<string>
+): HealthFinding[] {
+  const findings: HealthFinding[] = []
+  // (1) post-errors + the C9 archive: exactly the rows STRICTLY older than the
+  // live window and within the bounded look-back.
+  const oldPostErrors = [...readPostErrorsFile(stateDir), ...readPostErrorsArchiveFile(stateDir)]
+    .filter((row) => nowMs - row.ts > HEALTH_ERROR_WINDOW_MS && nowMs - row.ts <= windowMs)
+  const postErrors = retiredHostIds === undefined ? oldPostErrors : oldPostErrors.filter((row) => !retiredHostIds.has(row.postId))
+  const byGroup = new Map<string, PostErrorEntry[]>()
+  for (const row of postErrors) {
+    const cls = postErrorClass(row.error)
+    const groupKey = cls === undefined ? row.postId : `${row.postId}\u0000${cls}`
+    const list = byGroup.get(groupKey) ?? []
+    list.push(row)
+    byGroup.set(groupKey, list)
+  }
+  for (const [groupKey, rows] of byGroup) {
+    const split = groupKey.indexOf('\u0000')
+    const postId = split === -1 ? groupKey : groupKey.slice(0, split)
+    const cls = split === -1 ? undefined : groupKey.slice(split + 1)
+    findings.push({
+      kind: 'post-error',
+      key: cls === undefined ? `post-error:${postId}` : `post-error:${postId}:${cls}`,
+      postId,
+      ts: rows.reduce((max, row) => Math.max(max, row.ts), 0),
+      error: rows[0].error,
+      count: rows.length,
+      catchup: true,
+      // fb-25 (b): the provenance of rows[0] rides the finding (additive, the
+      // live-scan rule) so the CATCH-UP bullet shows the archived-session
+      // provenance the same way.
+      ...(typeof rows[0].sessionId === 'string' && rows[0].sessionId !== '' ? { sessionId: rows[0].sessionId } : {}),
+      ...(typeof rows[0].turn === 'number' && Number.isFinite(rows[0].turn) ? { turn: rows[0].turn } : {})
+    })
+  }
+  // (2) delivery-failed rows: the same window rule (the live scan's
+  // whitelist filter — only 'failed' is ever an anomaly).
+  const oldDeliveries = readDeliveryRowsFull(stateDir)
+    .filter((row) => row.status === 'failed' && nowMs - row.ts > HEALTH_ERROR_WINDOW_MS && nowMs - row.ts <= windowMs)
+  const deliveries = retiredMemberIds === undefined ? oldDeliveries : oldDeliveries.filter((row) => !retiredMemberIds.has(row.recipientId))
+  const byMessage = new Map<string, DeliveryRow>()
+  for (const row of deliveries) byMessage.set(row.messageId, row) // last-wins
+  for (const [messageId, row] of byMessage) {
+    findings.push({
+      kind: 'delivery-failed',
+      key: `delivery-failed:${messageId}`,
+      messageId,
+      ts: row.ts,
+      count: 1,
+      catchup: true
     })
   }
   return findings
@@ -3860,6 +3986,11 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
   const lines = findings.map((finding) => {
     if (finding.kind === 'post-error') {
       const detail = finding.error !== undefined && finding.error !== '' ? `: ${finding.error}` : ''
+      // fb-30 — the CATCH-UP bullet prefix (frame propio): a boot catch-up
+      // finding renders its line with the marker so the host distinguishes a
+      // missed-window recovery from a fresh anomaly; the LIVE bullets are
+      // byte-intact (the marker is additive, R6).
+      const prefix = finding.catchup === true ? 'CATCH-UP ' : ''
       // fb-25 (b): the SESSION PROVENANCE — when the finding's rows[0] carried
       // sessionId/turn, the frame appends `[session <id> turn <n> (HH:MMZ)]` so
       // the host sees the error belongs to an ARCHIVED session (never the fresh
@@ -3872,10 +4003,12 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
       const provenanceLabel = provenance.length === 0
         ? ''
         : ` [${provenance.join(' ')} (${new Date(finding.ts).toISOString().slice(11, 16)}Z)]`
-      return `- post-error: ${finding.postId} (${finding.count ?? 1} in window)${detail}${provenanceLabel}`
+      return `- ${prefix}post-error: ${finding.postId} (${finding.count ?? 1} in window)${detail}${provenanceLabel}`
     }
     if (finding.kind === 'delivery-failed') {
-      return `- delivery-failed: ${finding.messageId}`
+      // fb-30 — the CATCH-UP bullet prefix (frame propio, the post-error rule).
+      const prefix = finding.catchup === true ? 'CATCH-UP ' : ''
+      return `- ${prefix}delivery-failed: ${finding.messageId}`
     }
     if (finding.kind === 'config-preset') {
       return `- config-preset: unbound template reference(s) in preset text${finding.error !== undefined && finding.error !== '' ? `: ${finding.error}` : ''}`
@@ -4181,6 +4314,14 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     const prevTick = readHealthHeartbeatFile(deps.stateDir)
     const currentMinute = Math.floor(nowMs / 60_000)
     const prevMinute = prevTick !== undefined ? Math.floor(prevTick.ts / 60_000) : undefined
+    // fb-30 — the BOOT marker: the FIRST tick of a NEW daemon process. The
+    // on-disk heartbeat precedes the current boot (written by a PREVIOUS boot
+    // — a crash-restart leaves it behind) or is absent (a cold start); its
+    // bootId is the SAME per-process id the fb-43 restart-registry reconcile
+    // REUSES — never duplicated. The CATCH-UP pass runs ONLY here (a re-tick
+    // of the same boot never re-runs it; the shared-ledger dedupe blocks a
+    // re-alert across boots).
+    const isBootTick = prevTick === undefined || (prevTick.bootId ?? '') !== deps.bootId
     // 1. heartbeat (always — even with no anomalies).
     await writeHealthHeartbeatFile(deps.stateDir, { ts: nowMs, bootId: deps.bootId })
     // fb-43 — the restart-registry reconcile (right after the heartbeat — the
@@ -4280,6 +4421,12 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     const missionQueueEnabled = health?.missionQueueEnabled !== false
     const missionQueueLimit = resolvePositiveKnob(health?.missionQueueLimit, MISSION_QUEUE_DEFAULT_LIMIT)
     const missionQueuePersistMs = resolvePositiveKnob(health?.missionQueuePersistMs, MISSION_QUEUE_DEFAULT_PERSIST_MS)
+    // fb-30 — the BOOT CATCH-UP knobs: `catchupEnabled` gate (default ON; an
+    // explicit false restores the pre-fb-30 daemon — a boot never re-scans the
+    // old durable windows) + `catchupWindowMs` (the bounded look-back; absent/
+    // invalid → the 24 h code default via resolvePositiveKnob).
+    const catchupEnabled = health?.catchupEnabled !== false
+    const catchupWindowMs = resolvePositiveKnob(health?.catchupWindowMs, HEALTH_CATCHUP_WINDOW_MS)
     // The per-poll BUCKET gate (the M-A per-poll precedent): the main-red scan
     // runs at most once per `mainRedPollMs` bucket — the FIRST tick of a bucket
     // (prevTick undefined → runs); a faster `health.intervalMs` re-fire inside
@@ -4327,6 +4474,41 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
           }, nowMs)
           captureState[capture.key] = nowMs
           changed = true
+        }
+        // fb-30 CATCH-UP (BOOT only) — the WIDENED turn-error capture: a
+        // turn/end error that happened DURING a capture gap (OLDER than the
+        // 10-min freshness window, WITHIN the bounded look-back) was NEVER
+        // recorded by the live capture above (the §3b mechanism-1 blind spot:
+        // an error observed late is treated as stale). At boot ONLY the
+        // freshness bound is widened to the catch-up window so the error is
+        // recorded into post-errors.jsonl — the SAME appendPostError, whose C9
+        // discard ARCHIVES the old row into post-errors-archive.jsonl (the
+        // durable evidence home scanHealthCatchup reads) — and then grouped by
+        // the post-error catch-up scan of the SAME tick. The turn-errors-state
+        // dedupe (the key embeds the turn ts) prevents a re-record across
+        // boots; a fresh turn the live capture recorded THIS tick is skipped
+        // (lastCaptured within the window). Runs only when the capture gate is
+        // ON (consistent with the live capture) + the catch-up gate is ON +
+        // this is a boot tick.
+        if (catchupEnabled && isBootTick) {
+          for (const post of posts) {
+            if (post.retired === true) continue
+            const capture = scanTurnErrorCaptures(post.events ?? [], post.postId, post.sessionId)
+            if (capture === undefined) continue
+            // Only a BOUNDED-old error (within the look-back) is caught up.
+            if (nowMs - capture.ts > catchupWindowMs) continue
+            const lastCaptured = captureState[capture.key]
+            if (lastCaptured !== undefined && nowMs - lastCaptured < catchupWindowMs) continue
+            await appendPostError(deps.stateDir, {
+              ts: capture.ts,
+              postId: capture.postId,
+              error: capture.error,
+              ...(capture.sessionId !== undefined ? { sessionId: capture.sessionId } : {}),
+              ...(capture.turn !== undefined ? { turn: capture.turn } : {})
+            }, nowMs)
+            captureState[capture.key] = nowMs
+            changed = true
+          }
         }
         if (changed) await writeTurnErrorsState(deps.stateDir, captureState)
       } catch (error: unknown) {
@@ -4546,6 +4728,15 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     const findings = [
       ...scanPostErrorFindings(deps.stateDir, nowMs, retiredHostIds),
       ...scanDeliveryFindings(deps.stateDir, nowMs, retiredMemberIds, deps.deliveryRowsReader),
+      // fb-30 CATCH-UP (BOOT only): the bounded pass over the DURABLE event
+      // ledgers — rows OUTSIDE the live 2 h window, WITHIN the look-back, that
+      // were never alerted (the quiet-band blind spots) — the findings ride
+      // the EXISTING dedupe/alert/audit path below with their LIVE identity
+      // keys (the shared ledger never duplicates a live alert, never re-alerts
+      // an already-alerted identity); the `catchup: true` marker renders their
+      // own CATCH-UP frame bullet. The widened boot capture above recorded any
+      // gap turn-error FIRST, so its archived row is grouped here.
+      ...(catchupEnabled && isBootTick ? scanHealthCatchup(deps.stateDir, nowMs, catchupWindowMs, retiredHostIds, retiredMemberIds) : []),
       ...(presetAuditEnabled ? scanConfigPresetFindings(deps.stateDir, nowMs) : []),
       ...(staleLiveWatchdogEnabled ? scanStalledPosts(posts, nowMs, staleLiveMinutes) : []),
       ...poolerFindings,

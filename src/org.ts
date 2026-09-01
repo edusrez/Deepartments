@@ -250,6 +250,16 @@ export interface HealthConfig {
    * for >= this long before it alerts (a transient spike never does).
    * Absent/invalid → the 60000 code default. */
   missionQueuePersistMs?: number
+  /** fb-30 — the BOOT CATCH-UP gate (default ON; explicit `false` disables the
+   * boot catch-up pass — the daemon boot never re-scans the old durable
+   * windows). Runs ONLY on the FIRST tick of a NEW daemon process. Absent → on. */
+  catchupEnabled?: boolean
+  /** fb-30 — the bounded BOOT catch-up look-back window in ms (default
+   * 86400000 = 24 h): durable post-error / delivery-failed rows OLDER than the
+   * live 2 h anomaly window but within this look-back are caught up ONCE at
+   * boot (their own CATCH-UP frame); rows beyond the look-back stay silent by
+   * design. Absent/invalid → the 24 h code default. */
+  catchupWindowMs?: number
 }
 
 /**
@@ -698,7 +708,12 @@ export const Config: z<any, any> = z.object({
     // = one poll tick — the section contract).
     missionQueueEnabled: z.boolean(),
     missionQueueLimit: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
-    missionQueuePersistMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+    missionQueuePersistMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    // fb-30 — the BOOT CATCH-UP knobs (default(void 0) → absent = code
+    // defaults: enabled on, catchupWindowMs 86400000 = 24 h — the section
+    // contract).
+    catchupEnabled: z.boolean(),
+    catchupWindowMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
   }).default(void 0 as unknown as {
     enabled: boolean
     intervalMs: number
@@ -735,6 +750,8 @@ export const Config: z<any, any> = z.object({
     missionQueueEnabled: boolean
     missionQueueLimit: number
     missionQueuePersistMs: number
+    catchupEnabled: boolean
+    catchupWindowMs: number
   }),
   // QD (spec 007 §4.1, D-Q2). Mirrors the runtime QualityConfig in src/invoke.ts:
   // `default(void 0)` so an ABSENT section or absent key falls through to the
