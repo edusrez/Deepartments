@@ -122,6 +122,13 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   muestras del QD); candidatos: (a) tope de profundidad (no muestrear inspector
   cuyo padre inmediato fue QD) o (b) muestreo dirigido a workers NO-QD tras N
   niveles. Post-DAG (junto a mejoras de sistema; diseño de pipeline calidad).
+- **PROCESO CONSOLIDADO (QD 09-01, confirmado ×2 en job workers del research:
+  deepseek-dsh-news-3 + ai-industry-news-4) — propagar jobId/contexto de ronda
+  al mensaje del worker en rounds monitor-driven** (sin ello la MEMO NORM no se
+  activa — el worker no sabe que es job worker y razona «Finish — ephemeral»).
+  Routing: research/IPD (construcción del mensaje del monitor/job runner).
+  + **convención fecha UTC** (frontmatter/nombres en UTC, no local — patrón
+  +1 día ×2 hoy). Post-B (o que el research-head lo tome si lo ve claro).
 - **fb-2/fb-3 QD — AGENDADAS** (render dept_sleep en sleep EXITOSO + latencia
   noWake a cabezas dormidas — cola QD, sin ejecutar).
 - **F3 — barrido sesiones worker huérfanas** (Dx1 F3; backlog 0.2.x) ·
