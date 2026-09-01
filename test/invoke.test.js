@@ -6515,16 +6515,13 @@ test('M2.4 live-case (audit-as-oracle): the toolset-audit CHANNEL is the assert 
   })
 })
 
-test('Batch W4 pure: buildWakePack composes all sections in order (identity, owner presence, journal path, delta TOC, roster, departments directory, git, system, ROADMAP tail, skill body, guidance)', async () => {
+test('Batch W4 pure: buildWakePack composes all sections in order (identity, owner presence, journal path, delta TOC, roster, git, system, ROADMAP tail, skill body, guidance)', async () => {
   const pack = buildWakePack({
     memberId: 'host-session-abc',
     role: 'host',
     journalPath: '/state/journals/host-session-abc.md',
     messageDelta: '- m-4 | sender-1 → host-session-abc | preview text',
     roster: '- research-head (deepartments-head)',
-    // E2 — DIRECTORIO de departamentos (assembled by the assembly from
-    // config.org.departments; the pure builder just renders what it is given).
-    departmentsDirectory: '- Research (research-head): investigación web-first de la org. Pídelo con un RESEARCH REQUEST (send_message a research-head).\n- Cualquier head puede pedir los servicios de otro departamento por send_message a su head (ACL head↔head); un worker nunca cruza departamentos — pide a su propio head, que retransmite.',
     git: 'status: clean working tree\nlast 2 commits:\n  abc123 feat(x)\n  def456 fix(y)',
     systemState: '- DSH dev home: /opt/dsh/.dsh-dev',
     roadmapTail: '- **2026-08-20** — W3 committed.',
@@ -6540,15 +6537,14 @@ test('Batch W4 pure: buildWakePack composes all sections in order (identity, own
   assert.match(pack, /pack-v1: present/, 'pack carries the deterministic `pack-v1: present` sentinel in section 1')
   assert.match(pack, /- kpi: wake_counter 3; top open item: finish W4/, 'pack section 1 carries the wake_counter + top open-item KPI line')
 
-  // Every section header present, in order 1-10 (5b = the directory, between
-  // the roster and git bearings).
+  // Every section header present, in order (1-10 — NO 5b directory: it is
+  // DEDUPED, the host receives it inside the embedded skill body, section 9).
   const headers = [
     '## Deepartments wake pack',
     '## Owner presence: present',
     '## Journal (long-term memory)',
     '## Message delta (received)',
     '## Condensed roster',
-    '## Departments directory',
     '## Git bearings',
     '## System state',
     '## ROADMAP current status (tail)',
@@ -6563,10 +6559,10 @@ test('Batch W4 pure: buildWakePack composes all sections in order (identity, own
     lastIdx = idx
   }
 
-  // The directory body is caller-provided verbatim (the pure builder never
-  // hardcodes the org chart — the assembly passes the config-derived slice).
-  assert.match(pack, /- Research \(research-head\): investigación web-first de la org/, 'directory assembles the department line verbatim')
-  assert.match(pack, /ACL head↔head/, 'directory carries the org-wide ACL note (head ↔ head; a worker never crosses)')
+  // E2 DIRECTORIO — DEDUPED (fb-47 #4): the pack NO LONGER renders the directory
+  // (the host receives it inside the embedded skill body). The directory stays a
+  // SKILL mirror for non-pack readers (department workers).
+  assert.ok(!pack.includes('## Departments directory'), 'E2: the host wake pack NO LONGER renders a standalone 5b departments-directory section (dedupe — the skill body carries it)')
 
   assert.match(pack, /Pre-resolved journal path: `\/state\/journals\/host-session-abc\.md`/, 'journal path is pre-resolved')
   assert.match(pack, /- m-4 \| sender-1 → host-session-abc \| preview text/, 'message delta TOC included')
@@ -6655,10 +6651,10 @@ test('E2 DIRECTORIO: buildDepartmentsDirectory assembles ONE line per configured
   assert.equal(buildDepartmentsDirectory([]), '', 'no departments → empty directory → section absent')
 })
 
-test('E2 DIRECTORIO (real Loader): a config whose org.departments carry purpose/services injects the directory between roster and git bearings in the HOST pack (the assembly passes the config slice; the pack never hardcodes the org chart), and a legacy config gets NO 5b section', async () => {
+test('E2 DIRECTORIO (real Loader, fb-47 #4 dedupe): the HOST pack NO LONGER renders a standalone 5b departments-directory section — the directory lives ONLY in the embedded skill mirror (the same text the non-pack workers read); a config with purpose/services is still consumed for the skill-mirror staleness (asserted separately)', async () => {
   await withTempStateDir(async (stateDir) => {
     // Three departments WITH the E2 fields (the current cordis.patch.yml
-    // reality) — the config is the single source; the pack assembles from it.
+    // reality) — the config is the single source for the skill mirror.
     const directoryOrg = {
       departments: [
         { id: 'research', name: 'Research Department', purpose: 'investigación web-first de la org', services: 'RESEARCH REQUEST (send_message a research-head)', coordinator: { postId: 'research-head', role: 'Research department head', provider: 'deepseek-official', agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' } } },
@@ -6679,42 +6675,42 @@ test('E2 DIRECTORIO (real Loader): a config whose org.departments carry purpose/
       const decision = await runPreStep(pluginCtx, host, claimed, signal)
       assert.equal(decision.kind, 'enter', 'host pre-step decision is enter')
       const packText = decision.messages[decision.messages.length - 1].content[0].text
-      // The directory section sits BETWEEN the roster and git bearings (5b).
+      // NO standalone 5b section: the directory must NOT appear between roster
+      // and git bearings (it was deduped — the host reads it inside the embedded
+      // skill body, section 9).
       const rosterIdx = packText.indexOf('## Condensed roster')
-      const directoryIdx = packText.indexOf('## Departments directory')
       const gitIdx = packText.indexOf('## Git bearings')
-      assert.ok(rosterIdx !== -1 && directoryIdx !== -1 && gitIdx !== -1, 'roster + directory + git sections present')
-      assert.ok(rosterIdx < directoryIdx && directoryIdx < gitIdx, 'E2: the directory section renders right after the roster, before git bearings')
-      assert.match(packText, /- Research Department \(research-head\): investigación web-first de la org\. Pídelo con un RESEARCH REQUEST \(send_message a research-head\)\./, 'host pack directory: research line with the correct head id')
-      assert.match(packText, /- Internal Programming \(internal-programming-head\): todo el trabajo de código interno\. Pídelo con un PROGRAMMING REQUEST \(send_message a internal-programming-head\)\./, 'host pack directory: IPD line with the correct head id')
-      assert.match(packText, /- Quality Department \(quality-head\): inspecciona el runtime de la org\. Pídelo con un QUALITY REQUEST \(send_message a quality-head\)\./, 'host pack directory: QD line with the correct head id')
-      assert.ok(packText.includes(`- ${DIRECTORY_ACL_NOTE}`), 'host pack directory: the org-wide ACL note closes it')
+      assert.ok(rosterIdx !== -1 && gitIdx !== -1, 'roster + git sections present')
+      const between = packText.slice(rosterIdx, gitIdx)
+      assert.ok(!between.includes('## Departments directory'), 'E2 (fb-47 #4): the filled-config host pack NO LONGER renders a standalone 5b departments-directory section (dedupe — the skill body carries it)')
     } finally {
       await dispose()
     }
   })
 
-  // R6 (real Loader): a legacy config (departments WITHOUT purpose/services —
-  // the pre-E2 shape) renders NO 5b directory section in the injected pack.
+  // The directory info still reaches the host THROUGH the embedded full skill
+  // body (section 9 — the skill mirror the non-pack workers also read), so a
+  // filled config still surfaces the directory to the host exactly once.
   await withTempStateDir(async (stateDir) => {
-    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir) // TEST_ORG: no purpose/services
+    const directoryOrg = {
+      departments: [
+        { id: 'research', name: 'Research Department', purpose: 'investigación web-first de la org', services: 'RESEARCH REQUEST (send_message a research-head)', coordinator: { postId: 'research-head', role: 'Research department head', provider: 'deepseek-official', agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' } } }
+      ]
+    }
+    const { root, agents, pluginCtx, dispose } = await bootPlugin(stateDir, { org: directoryOrg })
     try {
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
       await waitFor(() => agents.store.has('head-research-head'), 5000, 'head created at boot')
       await root.tools.get('dept_who').execute({}, { agent: host, signal })
-
       const claimed = preStepClaimed('wake up')
       const decision = await runPreStep(pluginCtx, host, claimed, signal)
       const packText = decision.messages[decision.messages.length - 1].content[0].text
-      // The directory must NOT appear between roster and git (no 5b section for
-      // a legacy config). The host pack embeds the full skill body (section 9),
-      // which ALSO carries the directory MIRROR — so assert on the 5b POSITION,
-      // not on the string alone.
-      const rosterIdx = packText.indexOf('## Condensed roster')
-      const gitIdx = packText.indexOf('## Git bearings')
-      const between = packText.slice(rosterIdx, gitIdx)
-      assert.ok(!between.includes('## Departments directory'), 'R6: legacy config (no purpose/services) → NO 5b directory section between roster and git')
+      // Exactly ONE directory occurrence in the whole pack — the skill mirror
+      // (embedded in section 9), never the standalone 5b.
+      const occurrences = packText.split('## Departments directory').length - 1
+      assert.equal(occurrences, 1, 'E2 (fb-47 #4): the directory appears EXACTLY ONCE in the host pack (the embedded skill mirror), never as a second standalone 5b section')
+      assert.match(packText, /- Research Department \(research-head\): investigación web-first de la org\. Pídelo con un RESEARCH REQUEST \(send_message a research-head\)\./, 'the skill mirror carries the research directory line with the correct head id')
     } finally {
       await dispose()
     }
@@ -6734,6 +6730,31 @@ test('E2 DIRECTORIO + staleness (b): the deepartments-workflow SKILL.md (the mir
   assert.match(skill, /ACL head↔head/, 'mirror: the org-wide ACL note')
   // staleness (a) — the QD dice text is 25% (the F-HIGH knob reality), NOT 10%.
   assert.match(skill, /retire sampled at probability 0\.25/, 'staleness (a): the skill says the QD worker-retire dice is 0.25 (the F-HIGH reality)')
+  // staleness (c) — BYTE-NORMALIZED EQUALITY (fb-47 #4): the skill mirror equals
+  // what the PURE config-driven builder would render for the 3 configured
+  // departments, normalized by collapsing ALL whitespace (the ONLY drift is the
+  // 1-byte YAML `>-` folding space — `dsh-deepartments/ plugins` vs the
+  // hand-written `/plugins` in the mirror — which whitespace normalization
+  // absorbs). This locks the mirror to the config as the single source, so a
+  // real textual drift (beyond that 1 folding space) fails loudly.
+  const mirrorBody = (() => {
+    const skillLines = skill.split('\n')
+    const hdr = skillLines.findIndex((l) => l.trim() === '## Departments directory')
+    if (hdr === -1) return ''
+    const out = []
+    for (let i = hdr + 1; i < skillLines.length && !/^##\s/.test(skillLines[i]); i++) {
+      const t = skillLines[i].trim()
+      if (t.startsWith('- ')) out.push(t)
+    }
+    return out.join('\n')
+  })()
+  const expected = buildDepartmentsDirectory([
+    { name: 'Research Department', coordinator: { postId: 'research-head' }, purpose: 'investigación web-first de la org — evidencia actual/community/security (research-on-demand + tech-watch biweekly; roles researcher/analyst/reviewer/organizer)', services: 'RESEARCH REQUEST (send_message a research-head) — devuelve informe + resumen 3-5 bullets' },
+    { name: 'Internal Programming', coordinator: { postId: 'internal-programming-head' }, purpose: 'todo el trabajo de código interno de DSH/dsh-deepartments/ plugins — planificación, implementación (builder), análisis profundo (explore-deep), revisión (reviewer), jobs semanales (weekly-repo-health, version-watch); DAG/cola IPD', services: 'PROGRAMMING REQUEST (send_message a internal-programming-head)' },
+    { name: 'Quality Department', coordinator: { postId: 'quality-head' }, purpose: 'inspecciona el runtime de la propia org (eventos de archivo 25%/100%, post-errors, digest diario quality-daily); SOLO reporta, nunca arregla (los fixes van al IPD vía PROGRAMMING REQUEST)', services: 'QUALITY REQUEST (send_message a quality-head)' }
+  ])
+  const norm = (s) => s.replace(/\s+/g, '')
+  assert.equal(norm(mirrorBody), norm(expected), 'staleness (c): the skill directory mirror is BYTE-NORMALIZED EQUAL to the config-derived buildDepartmentsDirectory render (single source; the only tolerated diff is the YAML `>-` folding space)')
 })
 
 test('E2 R6 schema: org.departments[].purpose/services are OPTIONAL — a legacy department (pre-E2 shape) parses and defaults to empty; a filled department keeps its texts (the config always composes, R6)', () => {

@@ -414,13 +414,6 @@ export interface WakePackParts {
   messageDelta: string
   /** Condensed roster (registry flags only — NEVER live session liveness). */
   roster: string
-  /** E2 — the `## Departments directory` section BODY (one line per configured
-   * department + the ACL note), assembled by the caller from
-   * `config.org.departments[]` via `buildDepartmentsDirectory`. Undefined/'' →
-   * the section is OMITTED (a legacy config without purpose/services, or no
-   * departments at all, gets no directory — R6; the lean on-demand snapshot
-   * does NOT carry it either). */
-  departmentsDirectory?: string
   /** Git bearings (section 6; wake injection only). */
   git?: string
   /** System state (section 7; wake injection only). */
@@ -526,16 +519,6 @@ export function buildWakePack(parts: WakePackParts): string {
 
   // 5 — condensed roster (always rendered)
   sections.push(`## Condensed roster\n${parts.roster}`)
-
-  // 5b — E2 DIRECTORIO de departamentos: the compact cross-department
-  // directory, assembled from config.org.departments[] (buildDepartmentsDirectory
-  // is pure — the assembly supplies the slice; the org chart is NEVER hardcoded
-  // here). Present only when a non-empty body is supplied: a legacy config
-  // without purpose/services (or no departments at all) → no directory info →
-  // the section is OMITTED (R6); the lean on-demand snapshot also omits it.
-  if (parts.departmentsDirectory !== undefined && parts.departmentsDirectory.trim() !== '') {
-    sections.push(`## Departments directory\n${parts.departmentsDirectory}`)
-  }
 
   // 5c — PACING (owner m-PACING, 2026-08-28): the peak/valley FRANJA section —
   // the ONE stable line telling the host/head the CURRENT franja + until when it
@@ -828,31 +811,68 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
     }
   }
 
-  /** The 2-3 NEWEST bullets from the ROADMAP "Current status" section (the
-   * newest entries sit at its tail). Missing/unreadable ROADMAP → graceful
-   * marker. */
+  /** The 2-3 NEWEST bullets from the ROADMAP "Current status" section, CONDENSED
+   * to a compact per-day summary (the newest entries sit at its tail). Missing/
+   * unreadable ROADMAP → graceful marker.
+   *
+   * CONDENSATION (fb-47 #3): instead of injecting the full bullet text (each is
+   * a long `- **<date>** — <title> (a)(b)(c)…` entry, multiple KB), each newest
+   * bullet is reduced to `date + fb-ids + lane/priority/DAG flags + title` and a
+   * pointer to docs/WORK-REGISTER.md (the single pending queue). The fb-ids and
+   * the dispatch priority/lane are NEVER dropped (they are the unique current-
+   * state context not duplicated in reports/journals); long prose, commit
+   * hashes (already in git) and sub-item detail are pruned. Cap ~600-800 ch per
+   * bullet. */
   const readWakeRoadmapTail = async (count = 3): Promise<string> => {
     try {
       const text = await readFile(path.join(deps.repoRoot, 'docs', 'ROADMAP.md'), 'utf8')
       const lines = text.split('\n')
       const start = lines.findIndex((l) => l.startsWith('## Current status'))
       if (start === -1) return '(ROADMAP "Current status" section not found)'
-      const entries: string[][] = []
-      let current: string[] | undefined
+      const entries: string[] = []
+      let current: string | undefined
+      // Collect complete bullets (each `- ` line + its wrapped continuation lines).
       for (let i = start + 1; i < lines.length; i++) {
         const line = lines[i]
         if (line.startsWith('## ')) break
         if (/^\s*- /.test(line)) {
-          current = [line]
-          entries.push(current)
+          if (current !== undefined) entries.push(current)
+          current = line
         } else if (current !== undefined && line.trim() !== '') {
-          current.push(line)
+          current += ' ' + line.trim()
         }
       }
+      if (current !== undefined) entries.push(current)
       const newest = entries.slice(-count)
       if (newest.length === 0) return '(ROADMAP "Current status" has no bullets)'
       const folded = newest
-        .map((entry) => `- ${entry.join(' ').replace(/\s+/g, ' ').trim().replace(/^-\s*/, '')}`)
+        .map((entry) => {
+          // The date is the leading `**YYYY-MM-DD(→DD)?**`.
+          const dateMatch = /^-\s*\*\*(.+?)\*\*/.exec(entry)
+          const date = dateMatch ? dateMatch[1].trim() : '?'
+          const rest = entry.slice(dateMatch ? dateMatch[0].length : 0)
+          // The short title: the emphasized segment right after the dash.
+          const titleMatch = /—\s*\*\*(.+?)\*\*/.exec(entry) || /—\s*([^–(]{0,90})/.exec(entry)
+          const title = (titleMatch ? titleMatch[1] : '').trim().replace(/[–—-]\s*$/, '').trim()
+          // Unique identifiers + dispatch flags — NEVER dropped.
+          const fbIds = [...new Set((entry.match(/fb-\d+/g) ?? []))].join(' ').trim()
+          const mIds = [...new Set((entry.match(/\bm-\d+\b/g) ?? []))].join(' ').trim()
+          const flags: string[] = []
+          if (/\bLANE [A-Z]\b/i.test(entry)) flags.push('lane')
+          if (/\bDAG\b/i.test(entry)) flags.push('DAG')
+          if (/\bBACKLOG\b/i.test(entry)) flags.push('backlog')
+          if (/\bBLOQUE\b/.test(entry)) flags.push('bloque')
+          if (/\bPRIORIDAD|priority|PENDIENTE-OWNER|PENDIENTE\b/i.test(entry)) flags.push('priority')
+          const idBits = [fbIds && `fb:${fbIds}`, mIds && `m:${mIds}`, flags.join('/') && `[${flags.join('/')}]`]
+            .filter(Boolean)
+            .join(' ')
+          const summary = title ? `${title}` : rest.slice(0, 80)
+          // Compose under the char cap (~600-800 ch); WORK-REGISTER pointer.
+          let out = `- **${date}** — ${summary}`
+          if (idBits) out += ` — ${idBits}`
+          if (out.length > 780) out = out.slice(0, 777).trimEnd() + '…'
+          return `${out} (detalle: docs/WORK-REGISTER.md)`
+        })
         .join('\n')
       return folded
     } catch {
@@ -914,11 +934,14 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
       journalPath,
       messageDelta,
       roster: buildCondensedRoster(),
-      // E2 — the DIRECTORIO de departamentos: assembled from the deps-provided
-      // config.org.departments[] slice (the pack NEVER hardcodes the org chart;
-      // add/remove a department = edit the config). Empty result → the section
-      // is omitted by the pure builder (legacy config / no departments → R6).
-      departmentsDirectory: buildDepartmentsDirectory(deps.departments ?? []),
+      // E2 DIRECTORIO — DEDUPED (fb-47 #4): the pack NO LONGER renders the
+      // `## Departments directory` section (section 5b). The host already
+      // receives the directory INSIDE the embedded skill body (section 9 — the
+      // skill's `## Departments directory` mirror); rendering it a second time
+      // duplicated ~1,804 B/wake. The skill mirror stays for non-pack readers
+      // (department workers) and the staleness test keeps it byte-synced with
+      // the config (`buildDepartmentsDirectory` — the pure helper used to
+      // VALIDATE the mirror, not to render the pack).
       git,
       systemState: buildWakeSystemState(),
       roadmapTail,

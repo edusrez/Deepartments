@@ -442,12 +442,11 @@ function buildWakePackLazy(ctx: Context, binder: Binder): WakePackService {
     persistHosts: () => catalog.persistHosts(),
     roleForSession: bound.roleForSession!,
     buildSubagentOrientation: bound.buildSubagentOrientation!,
-    // E2 — the DIRECTORIO section is assembled from the SHARED CONFIG SOURCE
-    // (`deepartments.org` → the dshd-core org.departments row): the pack never
-    // hardcodes the org chart; add/remove a department = edit the config. The
-    // departments slice carries name + coordinator.postId + purpose/services
-    // (the two E2 descriptor fields, optional — a legacy config composes and
-    // the directory section renders only what carries purpose/services, R6).
+    // E2 — the DIRECTORIO de departamentos: the config slice is passed to the
+    // wake-pack service so the SKILL-MIRROR staleness validation has the
+    // single source (fb-47 #4: the pack no longer renders a standalone 5b
+    // section — the host receives the directory inside the embedded skill
+    // body; the slice remains available for the byte-normalized mirror check).
     departments: org.org.departments,
     computeHostSleepSurfacePlan: bound.computeHostSleepSurfacePlan!,
     buildSleepJournalMessage,

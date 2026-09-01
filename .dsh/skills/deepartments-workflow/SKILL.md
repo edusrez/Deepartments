@@ -23,10 +23,7 @@ Department (QD)".
 | **Internal Programming Head** (`internal-programming-head`) | `send_message` | deepseek-v4-flash | DELEGATING head of the Internal Programming Department; ephemeral workers builder/reviewer/explore-deep/organizer. Owns all internal programming work — see "Programming requests → Internal Programming Department (IPD)" |
 | **Quality Head** (`quality-head`) | `send_message` | deepseek-v4-flash | DELEGATING head of the Quality Department; ephemeral-per-round worker quality-inspector. Inspects the org's own runtime (archive events sampled/100%, post-errors, daily digest) — see "Quality requests → Quality Department (QD)" |
 | **Secretary** (HOST + HEADS) | `secretary` (`dsh-deepartments/subagent`, HOST's tool row / heads' `tool-secretary`) | inherits the parent (host vision-exp; a head flash) | UNIFIED transient role (M2, owner 2026-08-28): ONE personal NON-CODE READ-ONLY helper that reads journals/files/reports, searches (glob/grep) and summarises for its deployer; never edits/writes/runs commands (code → IPD). It is a transient subagent child (followups via `send_message` to the child id), NOT a department worker |
-| **builder** (R6-deprecated) | `secretary` | inherits parent | DEPRECATED transient role (M2): `normalizeRole` maps it to the secretary contract. EMERGENCY fallback + non-code atomic edits are now READ-ONLY — code changes go via the IPD. Kept for vocabulary/record (R6) |
-| **reviewer** (R6-deprecated) | `secretary` | inherits parent | DEPRECATED transient role (M2): maps to the secretary contract. Read-only review/verdict work is now the secretary's read+summarise |
-| **scribe** (R6-deprecated) | `secretary` | inherits parent | DEPRECATED transient role (M2): maps to the secretary contract — the secretary NEVER writes files; doc drafting that needs writes is department-owned work |
-| **explore** (RETIRED from host dispatch) | — | — | Deep code analysis that feeds an internal change is the IPD's `explore-deep` worker (presets/departments/internal-programming/explore-deep.md) — deployed ONLY by the Internal Programming Head via a PROGRAMMING REQUEST; the Asistente does NOT dispatch analysis subagents. (Deprecated transient role: see "Explore (code analysis)" below.) |
+| Pre-M2 transient roles (builder/reviewer/scribe/researcher, R6-DEPRECATED; explore, RETIRED) | `secretary` (explore→`generic`) | — | All map to the secretary contract via `normalizeRole` (explore→generic); kept for vocabulary/record — see "Secretary" + "Explore (code analysis)" below. The department workers (builder/reviewer/explore-deep) are the real paths |
 
 The Asistente's transient delegation (`secretary` / the context-inheriting fork
 variant of the same tool) is the **personal NON-CODE read-only helper** path
@@ -209,39 +206,14 @@ worker (those are root agents via `dept_worker_spawn`).
   deployer (it does not write report files). Follow-ups continue the same child
   conversation via `send_message` to the child id.
 
-### Builder (default tier) — R6-DEPRECATED (unified into Secretary, M2)
+### Builder / Reviewer — R6-DEPRECATED (unified into Secretary, M2)
 
-> R6 (M2, owner 2026-08-28): the transient `builder` role maps to the unified
-> `secretary` contract — a dispatched `role: builder` child is now READ-ONLY
-> (the injected contract is the secretary's). Template kept verbatim for the
-> record; code/edits are NEVER dispatched here — they go to the IPD.
-
-Dispatched via `secretary` (model inherits parent; `role: builder` R6-maps) —
-historically the default for atomic edits with a clear spec.
-
-> Your role contract (builder — now the secretary contract) is injected by
-> Deepartments — follow it.
-> - **Objective**: <one atomic task>.
-> - **Files in scope**: <only these — do not touch others>.
-> - **Spec / acceptance**: <what "done" means>.
-> - **Verification**: <exact command — run EXACTLY, iterate minimally until
->   green; after 2 retries STOP and report>.
-> - **Report**: `.dsh/reports/builder/<YYYY-MM-DD>-<task-slug>.md` (frontmatter
->   convention below) + a concise Summary/Changes/Verification/Risks back to the
->   Asistente.
-
-### Builder — hard/architectural tasks (R6-DEPRECATED, unified into Secretary)
-
-> R6 (M2): same deprecation — no tiered models remain; the transient surface is
-> the single read-only secretary. Internal code work → IPD (PROGRAMMING
-> REQUEST), never a transient dispatch.
-
-### Reviewer (read-only) — R6-DEPRECATED (unified into Secretary, M2)
-
-> R6 (M2, owner 2026-08-28): the transient `reviewer` role maps to the unified
-> `secretary` contract (read-only verdict/summary work). Template kept verbatim
-> for the record; the department reviewer WORKER (presets/departments/
-> internal-programming/reviewer.md) remains the normal independent-review path.
+> R6 (M2): the transient pre-M2 roles `builder` and `reviewer` map to the unified
+> read-only `secretary` contract (`normalizeRole`). **Code/edits / independent
+> review NEVER run as transient dispatches — they go to the IPD** (PROGRAMMING
+> REQUEST; the department `builder`/`reviewer` WORKERS in
+> presets/departments/internal-programming are the normal path). No tiered models
+> remain; the transient surface is the single read-only secretary.
 
 ### Research requests → Research Department (RD)
 
@@ -461,13 +433,8 @@ abort is only for a time-sensitive, must-surface-now notice.
 ### Scribe (documentation) — R6-DEPRECATED (unified into Secretary, M2)
 
 > R6 (M2): the transient `scribe` role maps to the secretary contract — the
-> secretary NEVER writes report files (read-only). Template kept verbatim for
-> the record; doc drafting that needs writes is department-owned work.
-
-> Your role contract (scribe) is injected by Deepartments — follow it.
-> - **Draft to** `.dsh/reports/scribe/<YYYY-MM-DD>-<topic>.md` ONLY.
-> - **Return**: a 3-line summary — what you drafted, where, which proposals need
->   a decision.
+> secretary NEVER writes report files (read-only). Doc drafting that needs
+> writes is department-owned work.
 
 ### Explore (code analysis) — GATED (IPD only)
 
@@ -479,11 +446,10 @@ the IPD head deploys its `explore-deep` worker, which reports to
 `.dsh/reports/explore-deep/<YYYY-MM-DD>-<task-slug>.md` (department workspace
 `reports/explore-deep/`).
 
-DEPRECATED (transient host role, kept verbatim for the record — R6): the old
-transient `explore` template was "Your role contract (explore) is injected by
-Deepartments — follow it. Question: <trace the flow from X to Y …>; Report:
-write to .dsh/reports/explore-deep/<YYYY-MM-DD>-<task-slug>.md; return a concise
-flow/architecture summary + key files (file:line) back to the Asistente."
+DEPRECATED (transient host role, R6): the old transient `explore` maps to
+`generic` — deep code analysis is the IPD's `explore-deep` worker, deployed ONLY
+by the Internal Programming Head; the Asistente does NOT dispatch analysis
+subagents.
 
 ## Agenda & department jobs
 
@@ -575,6 +541,22 @@ reports with grep/glob over `.dsh/reports/`. Include the paths of relevant
 reports (≤3 per category) in dispatch prompts — e.g. when re-dispatching a
 builder after a reviewer FAIL, the prompt MUST include the reviewer report
 path.
+
+## MEMO NORM (dept_memo_write + memory-steward)
+
+**Every agent — host, head and worker — persists its durable state with
+`dept_memo_write`** (the journal is the ONLY durable memory after sleep/rotation
+or worker retire). At the end of a turn/round: `dept_memo_write` with the
+decisions taken, constraints, open_items (in priority order) and any
+`PENDIENTE-OWNER` items, plus a short summary of where you are.
+
+**Memory-steward pattern (fb-47d, §2.8): when the memo must summarise lots of
+reports/bulk, delegate the reading to your `secretary` (`tool-secretary` for
+heads) for a COMPACT briefing and write the memo from it** — the secretary reads
+the journal + relevant reports and returns open_items (in order), decisions,
+constraints, PENDIENTE-OWNER. The memo is the only durable memory after a
+rotation/retire, so the briefing MUST preserve open_items/constraints (never
+omit them). This is POST-go-ahead only: never before the wake permission gate.
 
 ## Verification ladder (from the repo's AGENTS.md)
 
@@ -695,27 +677,11 @@ until the human answers. Then pick the highest-priority unfinished open item
 from the journal and present the concise plan to the owner; ask the human only
 on divergence.
 
-The canonical routine text (injected verbatim as wake-pack section 9 guidance
-and mirrored here — the boot-time wording the model follows on every wake):
-
-> Start-of-session: your Deepartments context injection already carries identity,
-> the pre-resolved journal path + journal body, the message delta TOC (your
-> latest-received messages, newest-first), the condensed roster, git bearings,
-> system state, and the full deepartments-workflow skill.
-> Read it — do not re-fetch what the pack provides. Only call messaging tools for
-> LIVE needs the pack cannot cache: true session liveness (dept_who), full text of
-> messages beyond the pack's delta (agent_messages), writes (send_message), or
-> dept_sleep.
-> REPLY FIRST: your first output of the wake turn is the owner-facing message —
-> greeting + a <=5-line top-item plan + the explicit ask "what do you want this
-> session?" — before ANY tool call (the only exception: the fail-loud health check
-> when the pack itself is stale/ambiguous, which still surfaces the situation to
-> the owner before working). The plan is PROPOSED, not authorized: do NOT dispatch
-> subagents, explore the codebase, or start the item until the human answers; to
-> ground the plan, at most 1–2 reads of a journal-referenced report and zero
-> src/checkout exploration or bash before go-ahead. Then pick the highest-priority
-> unfinished open item, present a concise plan, and WAIT for the owner's answer
-> before working. Full sequence: skill deepartments-workflow ("Wake routine").
+The canonical routine text is injected verbatim as wake-pack section 10
+guidance (`HOST_WAKE_ROUTINE_TEXT` — the boot-time wording the model follows on
+every wake). It is NOT re-embedded here; the checklist below is the compact
+re-statement the non-pack reader (or an on-demand read) follows, and the
+canonical wording always arrives with the pack for a hydrated wake.
 
 ### Wake-routine checklist (pack-read + minimal calls)
 
@@ -752,6 +718,12 @@ first, tool calls only for live needs, and the owner's answer gates all work):
    or start the item until the human answers. The order is reply → plan → gate
    → (go-ahead) → explore → work; ask the human only on divergence (ambiguous
    priority, lost state, novel decision).
+5. **POST-go-ahead (only after the human answers — never before the gate)**:
+   once work/grounding is authorized, delegate BULK reads to your personal
+   `secretary` (`tool-secretary` for heads) instead of reading inline — a
+   secretary searches past reports (`grep`/`glob` over `.dsh/reports/`) and
+   summarises for you, keeping your context lean (the grounding cap). Search
+   previous reports for the same task before re-dispatching.
 
 Never pre-load:
 - `AGENTS.md` / `docs/ROADMAP.md`: read the "Current status" TAIL only (newest

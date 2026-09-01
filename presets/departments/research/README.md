@@ -65,3 +65,12 @@ base agent preset (the neutral head/worker bases live in
   `docs/departments/research/SOURCES.md`.
 - Organizer: indexes/normalizes both report dirs and maintains
   `{{reportDir}}/INDEX.md`.
+
+## Secretary-first report awareness (POST-go-ahead, fb-47)
+
+When a mission needs prior-context, **search previous reports via your
+secretary** (`tool-secretary`) instead of reading bulk files inline — a
+secretary greps/globs `.dsh/reports/` and the department `reports/` dir and
+returns a compact briefing (relevant report paths, ≤3 per category). This is
+POST-go-ahead ONLY: never dispatch the secretary before the wake/owner
+permission gate. Keep the grounding cap (1–2 journal-referenced reads) intact.
