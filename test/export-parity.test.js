@@ -42,7 +42,15 @@ const REPO_ROOT = path.resolve(fileURLToPath(new URL('../', import.meta.url)))
 // MAIN_RED_DEFAULT_LOCKS from dshd-health + buildMainRedState from the bundle
 // — the M-6 tests import them) — an INTENTIONAL, verified surface extension
 // (the post-commit re-verification watchdog) that bumps the frozen count.
-const FROZEN_IMPORT_STATEMENT_COUNTS = [158, 5, 5, 1, 5, 3, 14, 2]
+// M-7 + fb-43 (VALLE lane A, 2026-09-01) extended it again with the FOURTEEN
+// new exports (scanMissionQueue / MISSION_QUEUE_DEFAULT_LIMIT /
+// MISSION_QUEUE_DEFAULT_PERSIST_MS / MISSION_QUEUE_KEY_PREFIX / missionQueueKey
+// / MISSION_QUEUE_STATE_FILE / readMissionQueueState / writeMissionQueueState
+// from dshd-health — the M-7 mission-queue watchdog — + RESTART_REGISTRY_FILE /
+// RESTART_REGISTRY_SEED_ROWS / readRestartRegistry / seedRestartRegistry /
+// reconcileRestartRegistry / buildRestartDigest — the fb-43 restart-registry)
+// — INTENTIONAL, verified surface extensions that bump the frozen count.
+const FROZEN_IMPORT_STATEMENT_COUNTS = [172, 5, 5, 1, 5, 3, 14, 2]
 
 /** Parse `test/invoke.test.js` and return the 8 import statements that import
  * from '../lib/invoke.js' as arrays of imported symbol names (aliases resolved
@@ -64,19 +72,19 @@ function extractInvokeImports() {
   return statements
 }
 
-test('export-parity: test/invoke.test.js imports EXACTLY 8 statements / 193 symbols from ../lib/invoke.js (the frozen pre-decoupling surface; M-5+M-6 bumped the health statement)', () => {
+test('export-parity: test/invoke.test.js imports EXACTLY 8 statements / 207 symbols from ../lib/invoke.js (the frozen pre-decoupling surface; M-5+M-6+M-7+fb-43 bumped the health statement)', () => {
   const statements = extractInvokeImports()
   assert.equal(statements.length, 8, 'exactly 8 import statements from ../lib/invoke.js')
   const counts = statements.map((names) => names.length)
-  assert.deepEqual(counts, FROZEN_IMPORT_STATEMENT_COUNTS, 'the per-statement symbol counts are frozen (158+5+5+1+5+3+14+2 = 193)')
+  assert.deepEqual(counts, FROZEN_IMPORT_STATEMENT_COUNTS, 'the per-statement symbol counts are frozen (172+5+5+1+5+3+14+2 = 207)')
   const total = counts.reduce((a, b) => a + b, 0)
-  assert.equal(total, 193, '193 named symbols total (the audit-verified import surface)')
+  assert.equal(total, 207, '207 named symbols total (the audit-verified import surface)')
 })
 
-test('export-parity: lib/invoke.js exports EVERY one of the 193 imported symbols (the drop-in superset invariant)', async () => {
+test('export-parity: lib/invoke.js exports EVERY one of the 207 imported symbols (the drop-in superset invariant)', async () => {
   const statements = extractInvokeImports()
   const required = [...new Set(statements.flat())]
-  assert.equal(required.length, 193, '193 distinct imported symbols')
+  assert.equal(required.length, 207, '207 distinct imported symbols')
   // Load the COMPILED superset (lib/invoke.js — the exact module the tests import).
   const require = createRequire(import.meta.url)
   const invoke = require(path.join(REPO_ROOT, 'lib', 'invoke.js'))
@@ -100,5 +108,13 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // MAIN_RED_DEFAULT_LOCKS from dshd-health + the bundle's buildMainRedState)
   // — the post-commit re-verification watchdog, an INTENTIONAL, verified
   // surface extension that bumps the frozen count.
-  assert.equal(names.length, 273, `lib/invoke.js export count frozen at 273 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
+  // M-7 + fb-43 (VALLE lane A, 2026-09-01) added the FOURTEEN new exports
+  // (scanMissionQueue / MISSION_QUEUE_DEFAULT_LIMIT /
+  // MISSION_QUEUE_DEFAULT_PERSIST_MS / MISSION_QUEUE_KEY_PREFIX / missionQueueKey
+  // / MISSION_QUEUE_STATE_FILE / readMissionQueueState / writeMissionQueueState
+  // — the M-7 mission-queue watchdog — + RESTART_REGISTRY_FILE /
+  // RESTART_REGISTRY_SEED_ROWS / readRestartRegistry / seedRestartRegistry /
+  // reconcileRestartRegistry / buildRestartDigest — the fb-43 restart-registry)
+  // — INTENTIONAL, verified surface extensions that bump the frozen count.
+  assert.equal(names.length, 287, `lib/invoke.js export count frozen at 287 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })

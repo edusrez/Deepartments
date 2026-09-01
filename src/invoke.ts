@@ -442,7 +442,8 @@ import type {
   SessionContextInput,
   MissionActivityInput,
   MainRedRuntime,
-  MainRedLockResult
+  MainRedLockResult,
+  MissionQueueInput
 } from './core/health.js'
 // P1 (MODULARIZACIÓN, 2026-08-29): the six plugin packages now export their
 // Cordis plugin surface (name/inject/apply) from their MAIN entries (the
@@ -3292,6 +3293,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           sessionContexts?: Iterable<SessionContextInput>
           missionActivity?: Iterable<MissionActivityInput>
           mainRed?: MainRedRuntime
+          missionQueue?: Iterable<MissionQueueInput>
           hostWaits?: Iterable<HostWaitPostInput>
           deliveryRowsReader?: unknown
         }): Promise<void> }
@@ -3304,6 +3306,15 @@ export function applyInvoke(ctx: Context, config: Config) {
       // filter pipeline is unchanged → same findings, same alerts.
       const deliveryRowsTailReader = createDeliveryRowsTailReader()
       const tick = (): void => {
+        // M-7 — the mission-queue rows: the SAME catalog-post inputs the W8-c
+        // safeguards scan (buildHealthPosts — the EXISTING per-tick source),
+        // materialized ONCE per tick and filtered to non-retired HEADS (the
+        // mission-queue watchdog thresholds buildPostSnapshot's pendingCount on
+        // heads only — a worker's queue is never a mission backlog). The SAME
+        // materialized array feeds BOTH `posts` and `missionQueue` (zero
+        // double buildHealthPosts I/O per tick).
+        const healthPosts = buildHealthPosts()
+        const missionQueue = healthPosts.filter((p) => p.retired !== true && p.provider !== 'worker')
         if (healthService !== undefined) {
           void healthService.runDaemonTick({
             now: () => Date.now(),
@@ -3311,7 +3322,7 @@ export function applyInvoke(ctx: Context, config: Config) {
             hosts: hosts.values(),
             // W8-c: the catalog-post inputs (activity + inbox) for the turn-error
             // + stale-live safeguards — resolved lazily per tick.
-            posts: buildHealthPosts(),
+            posts: healthPosts,
             // M4: the host's live running signal (absent agents registry →
             // undefined → the system-idle scan is a no-op).
             hostRunning: buildHostRunning(),
@@ -3324,6 +3335,7 @@ export function applyInvoke(ctx: Context, config: Config) {
             // undefined → the scan is a no-op — unknown delivery state never
             // fabricates an alert).
             missionActivity: buildMissionActivity({ stateDir, byPost, hosts: hosts.values(), agents }),
+            missionQueue,
             // M-6: the main-red watchdog runtime (buildMainRedState over the
             // repo root — knob `mainRedRepoRoot` ?? REPO_ROOT; a non-git
             // composition → undefined → the scan is a no-op — unknown main
@@ -3345,7 +3357,7 @@ export function applyInvoke(ctx: Context, config: Config) {
             hosts: hosts.values(),
             // W8-c: the catalog-post inputs (activity + inbox) for the turn-error
             // + stale-live safeguards — resolved lazily per tick.
-            posts: buildHealthPosts(),
+            posts: healthPosts,
             // M4: the host's live running signal (absent agents registry →
             // undefined → the system-idle scan is a no-op).
             hostRunning: buildHostRunning(),
@@ -3358,6 +3370,7 @@ export function applyInvoke(ctx: Context, config: Config) {
             // undefined → the scan is a no-op — unknown delivery state never
             // fabricates an alert).
             missionActivity: buildMissionActivity({ stateDir, byPost, hosts: hosts.values(), agents }),
+            missionQueue,
             // M-6: the main-red watchdog runtime (buildMainRedState over the
             // repo root — knob `mainRedRepoRoot` ?? REPO_ROOT; a non-git
             // composition → undefined → the scan is a no-op — unknown main

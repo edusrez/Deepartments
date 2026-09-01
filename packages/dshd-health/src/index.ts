@@ -396,6 +396,153 @@ export async function writeHealthHeartbeatFile(stateDir: string, heartbeat: Heal
   await writeFile(path.join(stateDir, 'health-heartbeat.json'), JSON.stringify(heartbeat), 'utf8')
 }
 
+// ---------------------------------------------------------------------------
+// fb-43 (2026-09-01) — the RESTART-REGISTRY: the durable, append-only audit of
+// every daemon boot (the memory-closing line for the department heads — the
+// documented historical restarts no longer live only in the heads' memory).
+// `<stateDir>/restart-registry.jsonl` holds one row per daemon BOOT
+// `{ bootId, ts, cause }`:
+//   - SEED (one-time): when the file is ABSENT (the registry's first start) it
+//     is created with a provenance header comment + the FOUR documented
+//     historical restart rows (seen 08-31/09-01 — the flota switch to glm at
+//     08-31T22:31Z, the reversal to deepseek-v4-flash at 08-31T22:50Z, the
+//     09-01T05:23:31Z UNKNOWN (investigation pending), and the version-watch
+//     smart_restart canary reload at 09-01T06:08:57Z). A file that ALREADY
+//     exists is NEVER re-seeded.
+//   - APPEND (every new boot): the daemon (tick) compares the CURRENT
+//     `bootId` (the EXISTING per-process boot id the bundle already stamps into
+//     the heartbeat — REUSED, never duplicated) against the LAST row's bootId
+//     (or the seed rows on the registry's first run); a NEW bootId → ONE row
+//     `{ bootId, ts: nowMs, cause: 'unknown' }` (the cause is attributed
+//     later/documentally; the runtime can only know the boot happened). A
+//     same-boot re-tick sees the last row's bootId === the current → no append
+//     (idempotent per boot).
+// READ + DIGEST: `readRestartRegistry` parses the rows (comment lines are
+// skipped — the post-errors reader pattern) and `buildRestartDigest` renders
+// the last N restarts with their cause (for the pulse digest + debug). All
+// helpers NEVER throw (a missing/malformed file degrades to [] / a no-op).
+// ---------------------------------------------------------------------------
+
+/** fb-43 — the restart-registry filename: `<stateDir>/restart-registry.jsonl`. */
+export const RESTART_REGISTRY_FILE = 'restart-registry.jsonl'
+
+/** fb-43 — ONE durable restart-registry row: a daemon boot (or a documented
+ * historical restart). */
+export interface RestartRegistryRow {
+  /** The boot's id (the daemon's per-process bootId; the SEED rows carry
+   * synthetic `seed-<n>` ids — the historical boots' real ids are unknown). */
+  bootId: string
+  /** The boot/restart moment (ms epoch). */
+  ts: number
+  /** The cause ('unknown' for a runtime-detected new boot; the documented
+   * attribution for a seed row: 'switch flota glm' / 'reversión flota
+   * deepseek-v4-flash' / 'DESCONOCIDA (pendiente investigación)' / 'reload
+   * version-watch smart_restart canary'). */
+  cause: string
+}
+
+/** fb-43 — the ONE-TIME historical seed: the 4 documented restarts the
+ * registry closes from the heads' memory (ts ISO 2026-08-31/09-01, see the
+ * block comment above for the attributions). */
+export const RESTART_REGISTRY_SEED_ROWS: readonly RestartRegistryRow[] = [
+  { bootId: 'seed-1', ts: Date.UTC(2026, 7, 31, 22, 31, 0), cause: 'switch flota glm' },
+  { bootId: 'seed-2', ts: Date.UTC(2026, 7, 31, 22, 50, 0), cause: 'reversión flota deepseek-v4-flash' },
+  { bootId: 'seed-3', ts: Date.UTC(2026, 8, 1, 5, 23, 31), cause: 'DESCONOCIDA (pendiente investigación)' },
+  { bootId: 'seed-4', ts: Date.UTC(2026, 8, 1, 6, 8, 57), cause: 'reload version-watch smart_restart canary' }
+]
+
+/** The provenance header line the seed writes above the 4 historical rows. */
+const RESTART_REGISTRY_SEED_HEADER =
+  '# restart-registry (fb-43, 2026-09-01): append-only daemon-boot audit {bootId, ts, cause}. ' +
+  'Seeded ONCE with the 4 documented historical restarts; every later new boot appends cause=\'unknown\' until attributed.'
+
+/** Pure row-mapping of restart-registry JSONL lines (a non-JSON line — the
+ * header comment or a crash-mid-append partial — is DROPPED, the
+ * parsePostErrorLines pattern; a row without a string bootId / numeric ts is
+ * dropped too). */
+function parseRestartRegistryLines(lines: readonly string[]): RestartRegistryRow[] {
+  const out: RestartRegistryRow[] = []
+  for (const line of lines) {
+    if (line.trim() === '') continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line)
+    } catch {
+      continue
+    }
+    const row = parsed as Record<string, unknown>
+    if (typeof row.bootId !== 'string' || typeof row.ts !== 'number' || !Number.isFinite(row.ts)) continue
+    out.push({
+      bootId: row.bootId,
+      ts: row.ts,
+      cause: typeof row.cause === 'string' ? row.cause : 'unknown'
+    })
+  }
+  return out
+}
+
+/** fb-43 — read `<stateDir>/restart-registry.jsonl` → the boot rows, in file
+ * order (oldest first), the header comment skipped. Absent / unreadable /
+ * malformed → [] (never throws). */
+export function readRestartRegistry(stateDir: string): RestartRegistryRow[] {
+  try {
+    const text = readFileSync(path.join(stateDir, RESTART_REGISTRY_FILE), 'utf8')
+    return parseRestartRegistryLines(text.split('\n'))
+  } catch {
+    return []
+  }
+}
+
+/** fb-43 — write the restart-registry SEED (the provenance header + the 4
+ * documented historical rows) when the file is ABSENT (mkdir -p the dir
+ * first). A file that already exists is NEVER re-seeded (the seed is the
+ * registry's one-time historical birth, not a per-boot reset). Never throws
+ * (a persist failure degrades silently — the audit is best-effort). */
+export async function seedRestartRegistry(stateDir: string): Promise<void> {
+  const filePath = path.join(stateDir, RESTART_REGISTRY_FILE)
+  try {
+    await readFile(filePath, 'utf8')
+    return // the file already exists → NO re-seed (the one-time seed contract)
+  } catch {
+    /* ENOENT → the first start: seed below */
+  }
+  try {
+    await mkdir(path.dirname(filePath), { recursive: true })
+    const lines = [RESTART_REGISTRY_SEED_HEADER, ...RESTART_REGISTRY_SEED_ROWS.map((row) => JSON.stringify(row))]
+    await writeFile(filePath, lines.join('\n') + '\n', 'utf8')
+  } catch {
+    /* never throws — a failed seed degrades to a silent no-op */
+  }
+}
+
+/** fb-43 — reconcile ONE daemon tick against the registry: seed-if-absent,
+ * then append `{ bootId, ts: nowMs, cause: 'unknown' }` ONLY when the current
+ * bootId is NOT the last row's (a NEW daemon boot — the bootId is the EXISTING
+ * per-process boot id the bundle stamps into the heartbeat; REUSED, never
+ * duplicated). A same-boot re-tick is a no-op (idempotent per boot). Never
+ * throws. */
+export async function reconcileRestartRegistry(stateDir: string, bootId: string, nowMs: number): Promise<void> {
+  try {
+    await seedRestartRegistry(stateDir)
+    const rows = readRestartRegistry(stateDir)
+    const last = rows[rows.length - 1]
+    if (last !== undefined && last.bootId === bootId) return
+    await mkdir(path.dirname(path.join(stateDir, RESTART_REGISTRY_FILE)), { recursive: true })
+    await appendFile(path.join(stateDir, RESTART_REGISTRY_FILE), JSON.stringify({ bootId, ts: nowMs, cause: 'unknown' }) + '\n', 'utf8')
+  } catch {
+    /* never throws — the audit append is best-effort (the tick contract) */
+  }
+}
+
+/** fb-43 — render the digest of the LAST N restarts with their cause (for the
+ * pulse digest + debug). PURE — the caller reads the rows once and slices.
+ * Empty → a single '(no restart-registry rows)' line. */
+export function buildRestartDigest(rows: readonly RestartRegistryRow[], n: number): string {
+  const last = rows.slice(-Math.max(1, Math.floor(n)))
+  if (last.length === 0) return '(no restart-registry rows)'
+  return last.map((row) => `- restart ${new Date(row.ts).toISOString()} (boot ${row.bootId}) cause=${row.cause}`).join('\n')
+}
+
 /** The dedupe ledger of the health daemon: key → lastAlertedAtMs. The key is the
  * per-anomaly dedupe key (`post-error:<postId>` / `delivery-failed:<messageId>`). */
 export type HealthAlertsState = Record<string, number>
@@ -454,8 +601,16 @@ export interface HealthFinding {
     * adopted lesson after the boot-factory anchor left the suite red on main
     * since f28c719 undetected for hours); the dedupe KEY is per-sha
     * `main-red:<sha>`, re-alerting every HEALTH_DEDUPE_WINDOW_MS while the
-    * broken commit stays at HEAD). */
-  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red'
+    * broken commit stays at HEAD). M-7 adds `mission-queue` (Fase 4 — the
+     * head-mission QUEUE watchdog: a non-retired HEAD post whose PENDING
+     * (undrained) message count — the buildPostSnapshot pendingCount — is
+     * >= `missionQueueLimit` (default 5) SUSTAINED for >= `missionQueuePersistMs`
+     * (default 60000 = one poll tick — a transient spike never alerts) → the
+     * «cola de misiones <postId>: <n> pendientes sin drenar — posible backlog»
+     * alarm; the dedupe KEY is per-post `mission-queue:<postId>` in the SHARED
+     * ledger, re-alerting every HEALTH_DEDUPE_WINDOW_MS while the backlog
+     * persists). */
+  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red' | 'mission-queue'
   /** The dedupe key (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS). */
   key: string
   /** The postId (post-error / stalled-post / context-threshold post row). */
@@ -1856,6 +2011,21 @@ export interface HealthConfigLike {
      * packaged deployment where the repo lives elsewhere, and for the SMOKE
      * fixture). Absent → REPO_ROOT. */
     mainRedRepoRoot?: string
+    /** M-7 — the mission-queue watchdog gate (default ON; explicit false
+     * disables the head mission-backlog scan). */
+    missionQueueEnabled?: boolean
+    /** M-7 — the pendingCount THRESHOLD: a non-retired HEAD post whose PENDING
+     * (undrained) addressed messages — the buildPostSnapshot pendingCount —
+     * are >= this count → a `mission-queue` finding + host ALERT (default 5).
+     * Absent/invalid → 5. */
+    missionQueueLimit?: number
+    /** M-7 — the PERSISTENCE window in ms: the over-limit queue must HOLD for
+     * >= this long before it alerts (a transient spike — one tick over the
+     * limit — NEVER does; the M4 firstQuietTs sustained-condition precedent:
+     * the M-7 ledger records the firstSeen of the sustained over-limit queue).
+     * Default 60000 = one poll tick at the default 60 s health interval.
+     * Absent/invalid → 60000. */
+    missionQueuePersistMs?: number
   }
   /** PACING (owner m-PACING, 2026-08-28) — the top-level `org.pacing.*`
    * franja config the transition monitor reads (the bundle passes its whole
@@ -1956,6 +2126,17 @@ export interface HealthDaemonDeps {
    * delivered-but-unstarted ALERT — the hostRunning/sessionContexts-absent
    * pattern). CONSUMED ONE — the tick materializes it once. */
   missionActivity?: Iterable<MissionActivityInput>
+  /** M-7 — the per-HEAD-post mission-queue input rows the mission-queue scan
+   * reads: ONE row per non-retired HEAD post (postId + the SAME activity
+   * inputs buildPostSnapshot consumes — events + inboxTs — so the pendingCount
+   * the scan thresholds is the EXACT W8-c/M4 primitive, no duplication).
+   * Computed by the bundle from `buildHealthPosts` (the EXISTING per-tick
+   * catalog source, materialized ONCE, filtered to `provider !== 'worker'`).
+   * ABSENT (undefined) → the mission-queue scan is a NO-OP (a wiring that
+   * cannot resolve the per-head queue never fabricates a backlog ALERT — the
+   * hostRunning/missionActivity-absent pattern). CONSUMED ONE — the tick
+   * materializes it once. */
+  missionQueue?: Iterable<MissionQueueInput>
   /** M-6 — the main-red watchdog runtime: the bundle's `buildMainRedState`
    * over `repoRoot` (knob `mainRedRepoRoot` ?? REPO_ROOT) — the git-HEAD
    * reader (`readHeadSha()` = git rev-parse HEAD) + the fast-lock runner
@@ -3317,6 +3498,191 @@ export function scanMainRed(input: MainRedScanInput): MainRedScanResult {
   }
 }
 
+// ---------------------------------------------------------------------------
+// M-7 (FASE 4 VALLE lane A, 2026-09-01, owner gap «cola de misiones por head
+// con umbral de pendingCount») — the MISSION-QUEUE watchdog: a non-retired
+// HEAD post whose PENDING (undrained) addressed-message count — the
+// buildPostSnapshot pendingCount, the SAME primitive the W8-c stale-live /
+// W8-d wait / M4 system-idle scans consume (REUSED, never duplicated) — is
+// >= `missionQueueLimit` (default 5) SUSTAINED for >= `missionQueuePersistMs`
+// (default 60000 = one poll tick at the default health interval) → a
+// `mission-queue` finding + host ALERT through the existing
+// findings→dedupe→notifyHost flow: a head with N missions heaped in its
+// inbox undrained = the «posible backlog» condition (Fase 4 auto-
+// observación).
+//
+// ANTI-TRANSIENT (the «ventana de persistencia mínima»): the scan never
+// alerts on a one-tick spike. Its OWN ledger `mission-queue-state.json`
+// (`{ [postId]: firstSeenMs }`) records the FIRST tick where a head's queue
+// crossed the limit; the finding is emitted ONLY once `nowMs - firstSeenMs
+// >= persistMs` (the M4 firstQuietTs precedent, generalized per-post); the
+// next tick where the queue drops BELOW the limit DELETES the entry (the
+// spike cleared → the window restarts clean). The ledger persists ONLY on
+// change (the turn-errors/system-idle pattern).
+//
+// DEDUPE/RE-ALERT: the finding key `mission-queue:<postId>` rides the SHARED
+// health-alerts-state.json ledger — a persistent backlog re-alerts every
+// HEALTH_DEDUPE_WINDOW_MS (30 min) while it stays undrained (never a
+// one-shot), a sub-threshold tick never alerts. Kinds/keys DISJOINT from
+// every other scan (mission-stalled says «a mission was delivered but never
+// started»; mission-queue says «a head has N+ undrained missions heaped»).
+// The dep `deps.missionQueue` ABSENT (undefined — a wiring that cannot
+// resolve the per-head queue) → the scan is a NO-OP (the
+// hostRunning/missionActivity-absent pattern: unknown queues never fabricate
+// a backlog ALERT). PURE — NEVER throws.
+// ---------------------------------------------------------------------------
+
+/** M-7 — the default mission-queue threshold: a HEAD post with >= 5 PENDING
+ * (undrained) addressed messages is a mission backlog candidate. */
+export const MISSION_QUEUE_DEFAULT_LIMIT = 5
+
+/** M-7 — the default persistence window (1 min = ONE poll tick at the default
+ * 60 s health interval): the over-limit queue must hold for >= this long
+ * before it alerts (a transient spike — a burst the head is about to drain —
+ * never does). */
+export const MISSION_QUEUE_DEFAULT_PERSIST_MS = 60_000
+
+/** M-7 — the mission-queue dedupe key prefix (`mission-queue:<postId>` — the
+ * SHARED health-alerts ledger gives the 30-min re-alert cadence while the
+ * backlog persists; per-post keys, never per-message). */
+export const MISSION_QUEUE_KEY_PREFIX = 'mission-queue:'
+
+/** M-7 — build the per-post dedupe key. */
+export function missionQueueKey(postId: string): string {
+  return `${MISSION_QUEUE_KEY_PREFIX}${postId}`
+}
+
+/** M-7 — the mission-queue LEDGER file — a SEPARATE file (the shared
+ * health-alerts ledger's defensive 2h prune would drop a long firstSeen; the
+ * system-idle-state.json precedent): `{ [postId]: firstSeenMs }`. */
+export const MISSION_QUEUE_STATE_FILE = 'mission-queue-state.json'
+
+/** M-7 — the mission-queue ledger: postId → the firstSeenMs of the SUSTAINED
+ * over-limit queue (the anti-transient memory; deleted when the queue drops
+ * below `missionQueueLimit`). */
+export type MissionQueueState = Record<string, number>
+
+/** Read `<stateDir>/mission-queue-state.json` → `{ [postId]: firstSeenMs }`.
+ * Absent / unreadable / malformed → {} (never throws). */
+export function readMissionQueueState(stateDir: string): MissionQueueState {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, MISSION_QUEUE_STATE_FILE), 'utf8')) as Record<string, unknown>
+    const out: MissionQueueState = {}
+    for (const [postId, value] of Object.entries(parsed)) {
+      if (typeof value === 'number' && Number.isFinite(value)) out[postId] = value
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/mission-queue-state.json` (mkdir -p the dir, then the
+ * file). */
+export async function writeMissionQueueState(stateDir: string, state: MissionQueueState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, MISSION_QUEUE_STATE_FILE)), { recursive: true })
+  await writeFile(path.join(stateDir, MISSION_QUEUE_STATE_FILE), JSON.stringify(state), 'utf8')
+}
+
+/** M-7 — ONE head post's mission-queue input row: the SAME activity inputs
+ * buildPostSnapshot consumes (events + inboxTs → pendingCount) + the head
+ * discriminator. STRUCTURAL — only the fields the scan reads are declared
+ * (the bundle materializes the rows from the EXISTING buildHealthPosts
+ * output, filtered to non-retired HEADS). */
+export interface MissionQueueInput {
+  postId: string
+  /** True when the post is a retired member — a retired head is never a
+   * mission-queue signal (its rows terminal-settle, W7-A). */
+  retired?: boolean
+  /** The post's provider marker: 'worker' for a disposable worker (NEVER a
+   * mission-queue signal — only heads hold mission queues); ABSENT for a
+   * configured head (and any non-worker post). */
+  provider?: string
+  /** The post's session event log (the buildPostSnapshot lastActivityTs term —
+   * a turning head DRAINS its queue; absent/empty → no activity signal). */
+  events?: readonly HealthSessionEvent[]
+  /** The ts of messages ADDRESSED to the post (its inbox — the pendingCount
+   * numerator). */
+  inboxTs?: readonly number[]
+}
+
+/** M-7 — the mission-queue scan inputs (the rows are ALREADY materialized by
+ * the tick — zero new I/O in the scan). */
+export interface MissionQueueScanInput {
+  rows: readonly MissionQueueInput[]
+  /** The resolved pendingCount threshold (knob `missionQueueLimit` or the 5
+   * code default). */
+  limit: number
+  /** The resolved persistence window (knob `missionQueuePersistMs` or the
+   * 60000 code default): the over-limit queue must hold >= this long before
+   * the finding emits. */
+  persistMs: number
+  /** The clock (ms epoch) — stamped into the finding ts + the sustained
+   * window. */
+  nowMs: number
+  /** The CURRENT ledger (read by the tick; mutated → the returned next
+   * ledger). */
+  ledger: MissionQueueState
+}
+
+/** M-7 — the mission-queue scan result: the findings + the NEXT ledger +
+ * whether the ledger CHANGED (the tick persists only then). */
+export interface MissionQueueScanResult {
+  findings: HealthFinding[]
+  ledger: MissionQueueState
+  changed: boolean
+}
+
+/** M-7 — scan the head mission-backlog condition (PURE, NEVER throws). For
+ * every row: a RETIRED post or a WORKER is skipped (never a mission-queue
+ * signal); the queue's pendingCount is the SHARED buildPostSnapshot
+ * computation (REUSED — no duplicated pending logic); a queue BELOW the limit
+ * clears the ledger entry (the spike broke / the head drained → the window
+ * restarts clean); an over-limit queue records its firstSeen (first crossing
+ * tick) and emits the `mission-queue` finding ONLY once the SUSTAINED window
+ * `nowMs - firstSeenMs >= persistMs` completed (a transient spike never
+ * alerts). The finding: key `mission-queue:<postId>` (the SHARED ledger gives
+ * the 30-min re-alert cadence while the backlog persists), the owner-facing
+ * line «cola de misiones <postId>: <n> pendientes sin drenar — posible
+ * backlog». */
+export function scanMissionQueue(input: MissionQueueScanInput): MissionQueueScanResult {
+  const ledger = { ...input.ledger }
+  let changed = false
+  const findings: HealthFinding[] = []
+  for (const row of input.rows) {
+    if (row.retired === true) continue
+    // HEADS ONLY — a disposable worker's queue is never a mission backlog
+    // (the bundle filters it too; this is the scan's own guard).
+    if (row.provider === 'worker') continue
+    const snap = buildPostSnapshot(row)
+    if (snap.pendingCount < input.limit) {
+      // Below the limit: the backlog cleared → forget the sustained window.
+      if (ledger[row.postId] !== undefined) {
+        delete ledger[row.postId]
+        changed = true
+      }
+      continue
+    }
+    // Over the limit: record the first sustained crossing, then wait for the
+    // persistence window (a one-tick spike never alerts).
+    if (ledger[row.postId] === undefined) {
+      ledger[row.postId] = input.nowMs
+      changed = true
+    }
+    const firstSeen = ledger[row.postId]
+    if (input.nowMs - firstSeen < input.persistMs) continue
+    findings.push({
+      kind: 'mission-queue',
+      key: missionQueueKey(row.postId),
+      postId: row.postId,
+      ts: snap.oldestPendingTs ?? input.nowMs,
+      count: snap.pendingCount,
+      error: `cola de misiones ${row.postId}: ${snap.pendingCount} pendientes sin drenar — posible backlog`
+    })
+  }
+  return { findings, ledger, changed }
+}
+
 /** Build the framed host ALERT text — `[From deepartments] System-health ALERT:
  * <grouped findings>`. Each finding is a one-line bullet. The config-preset and
  * stalled-post bullets describe their anomaly verbally (never the literal
@@ -3382,6 +3748,14 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     // 30-min re-alert stays informative).
     if (finding.kind === 'main-red') {
       return `- main-red: ${finding.error ?? 'main rojo post-commit <sha> — lock <X> falló (detectado en <?> min)'}`
+    }
+    // M-7 — the mission-queue branch (NEVER let it reach the stale-post
+    // fallback). The owner-facing wording is the finding's own line (cola de
+    // misiones <postId>: <n> pendientes sin drenar — posible backlog: the
+    // error carries the FULL line so every 30-min re-alert stays
+    // informative).
+    if (finding.kind === 'mission-queue') {
+      return `- mission-queue: ${finding.error ?? `cola de misiones ${finding.postId ?? ''}: ${finding.count ?? 0} pendientes sin drenar — posible backlog`}`
     }
     return `- stalled-post: ${finding.postId} (${finding.count ?? 1} pending message(s), ${finding.error ?? 'no session activity'})`
   })
@@ -3557,6 +3931,17 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     const prevMinute = prevTick !== undefined ? Math.floor(prevTick.ts / 60_000) : undefined
     // 1. heartbeat (always — even with no anomalies).
     await writeHealthHeartbeatFile(deps.stateDir, { ts: nowMs, bootId: deps.bootId })
+    // fb-43 — the restart-registry reconcile (right after the heartbeat — the
+    // boot-identity bookkeeping): seed-once-if-absent (the 4 documented
+    // historical restarts) + append `{ bootId, ts, cause:'unknown' }` when the
+    // current bootId is a NEW boot (the last row's bootId differs — the bootId
+    // is the SAME per-process id the heartbeat stamps above; REUSED, never
+    // duplicated). Idempotent per boot; never throws.
+    try {
+      await reconcileRestartRegistry(deps.stateDir, deps.bootId, nowMs)
+    } catch (error: unknown) {
+      deps.logger?.warn(`[deepartments] system-health: restart-registry reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
     // W8-c per-safeguard knobs (default-on).
     const health = deps.config?.health
     const turnErrorCaptureEnabled = health?.turnErrorCaptureEnabled !== false
@@ -3632,6 +4017,14 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       Array.isArray(health?.mainRedLocks) && health.mainRedLocks.every((p) => typeof p === 'string' && p !== '')
         ? health.mainRedLocks
         : MAIN_RED_DEFAULT_LOCKS
+    // M-7 — the mission-queue watchdog knobs: `missionQueueEnabled` gate
+    // (default ON) + `missionQueueLimit` (the pendingCount threshold; absent/
+    // invalid → the 5 code default via resolvePositiveKnob) +
+    // `missionQueuePersistMs` (the anti-transient persistence window; absent/
+    // invalid → the 60000 one-poll-tick code default via resolvePositiveKnob).
+    const missionQueueEnabled = health?.missionQueueEnabled !== false
+    const missionQueueLimit = resolvePositiveKnob(health?.missionQueueLimit, MISSION_QUEUE_DEFAULT_LIMIT)
+    const missionQueuePersistMs = resolvePositiveKnob(health?.missionQueuePersistMs, MISSION_QUEUE_DEFAULT_PERSIST_MS)
     // The per-poll BUCKET gate (the M-A per-poll precedent): the main-red scan
     // runs at most once per `mainRedPollMs` bucket — the FIRST tick of a bucket
     // (prevTick undefined → runs); a faster `health.intervalMs` re-fire inside
@@ -3825,6 +4218,37 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         deps.logger?.warn(`[deepartments] system-health: main-red scan failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    // M-7 — the mission-queue watchdog (the head mission-backlog scan). Gate:
+    // enabled AND `deps.missionQueue` RESOLVED (the bundle builds the rows
+    // from the EXISTING buildHealthPosts output, filtered to non-retired
+    // HEADS — the SAME catalog source the W8-c safeguards consume, materialized
+    // ONCE; ABSENT → the scan is a NO-OP — a wiring that cannot resolve the
+    // per-head queue never fabricates a backlog alert; the
+    // missionActivity/hostRunning-absent pattern). Its OWN ledger
+    // mission-queue-state.json (firstSeen per sustained over-limit queue)
+    // persists ONLY on change (the system-idle pattern); the SHARED
+    // health-alerts ledger (per-post keys `mission-queue:<postId>`) gives the
+    // 30-min re-alert cadence while the backlog persists. Zero new I/O (the
+    // rows are materialized by the bundle). The anti-transient persistence
+    // window (a spike shorter than `missionQueuePersistMs` never alerts) is
+    // the M4 firstQuietTs sustained-condition precedent.
+    let missionQueueFindings: HealthFinding[] = []
+    if (missionQueueEnabled && deps.missionQueue !== undefined) {
+      try {
+        const mqLedger = readMissionQueueState(deps.stateDir)
+        const mqScan = scanMissionQueue({
+          rows: [...(deps.missionQueue ?? [])],
+          limit: missionQueueLimit,
+          persistMs: missionQueuePersistMs,
+          nowMs,
+          ledger: mqLedger
+        })
+        missionQueueFindings = mqScan.findings
+        if (mqScan.changed) await writeMissionQueueState(deps.stateDir, mqScan.ledger)
+      } catch (error: unknown) {
+        deps.logger?.warn(`[deepartments] system-health: mission-queue scan failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     // 3. scan.
     const findings = [
       ...scanPostErrorFindings(deps.stateDir, nowMs, retiredHostIds),
@@ -3836,6 +4260,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       ...systemIdleFindings,
       ...contextFindings,
       ...missionFindings,
+      ...missionQueueFindings,
       ...mainRedFindings
     ]
     // W8-d PART B/C — the system-heartbeat knobs: `heartbeatEnabled` (default
@@ -4092,6 +4517,10 @@ export interface HealthBinderDeps {
   /** M-6 — the main-red watchdog runtime (buildMainRedState over repoRoot —
    * git HEAD reader + fast-lock runner). Absent → the scan is a no-op. */
   mainRed?: HealthDaemonDeps['mainRed']
+  /** M-7 — the mission-queue rows (per non-retired HEAD post: the SAME
+   * activity inputs buildPostSnapshot consumes — events + inboxTs) for the
+   * mission-queue backlog watchdog. Absent → the scan is a no-op. */
+  missionQueue?: HealthDaemonDeps['missionQueue']
   /** The framed ALERT delivery (the bundle's own closure). Absent → the
    * service builds one from the EXISTING composed buckets (wakepack
    * messagesStoreReady + deliver.deliverHost, interrupt:true). */
@@ -4194,6 +4623,7 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
         hostRunning: explicit.hostRunning ?? bound.hostRunning,
         missionActivity: explicit.missionActivity ?? bound.missionActivity,
         mainRed: explicit.mainRed ?? bound.mainRed,
+        missionQueue: explicit.missionQueue ?? bound.missionQueue,
         // DECOUPLING PASO 1: the composed daemon's C6 bounded tail reader flows
         // through the EXPLICIT per-tick deps (created once per daemon by the
         // bundle wiring, exactly like the inline path) — absent → the legacy

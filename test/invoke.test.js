@@ -32,7 +32,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey, scanMainRed, MAIN_RED_DEFAULT_POLL_MS, MAIN_RED_KEY_PREFIX, mainRedKey, MAIN_RED_STATE_FILE, readMainRedState, writeMainRedState, MAIN_RED_DEFAULT_LOCKS, buildMainRedState } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey, scanMainRed, MAIN_RED_DEFAULT_POLL_MS, MAIN_RED_KEY_PREFIX, mainRedKey, MAIN_RED_STATE_FILE, readMainRedState, writeMainRedState, MAIN_RED_DEFAULT_LOCKS, buildMainRedState, scanMissionQueue, MISSION_QUEUE_DEFAULT_LIMIT, MISSION_QUEUE_DEFAULT_PERSIST_MS, MISSION_QUEUE_KEY_PREFIX, missionQueueKey, MISSION_QUEUE_STATE_FILE, readMissionQueueState, writeMissionQueueState, RESTART_REGISTRY_FILE, RESTART_REGISTRY_SEED_ROWS, readRestartRegistry, seedRestartRegistry, reconcileRestartRegistry, buildRestartDigest } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
@@ -12814,6 +12814,373 @@ test('M-6 SMOKE (acceptance — real daemon): bootPlugin with health {intervalMs
       await env.dispose()
     }
   })
+})
+
+// --- M-7 (FASE 4 VALLE lane A, 2026-09-01, owner «cola de misiones por head
+// con umbral de pendingCount») — the mission-queue watchdog ------------------
+// A non-retired HEAD post whose PENDING (undrained) addressed-message count
+// (the buildPostSnapshot pendingCount — the SAME primitive the W8-c/W8-d/M4
+// scans consume, REUSED) is >= `missionQueueLimit` (default 5) SUSTAINED for
+// >= `missionQueuePersistMs` (default 60000 = one poll tick) → finding
+// `mission-queue` + host ALERT through the existing findings→dedupe→notifyHost
+// flow. ANTI-TRANSIENT: the OWN ledger mission-queue-state.json
+// (`{ [postId]: firstSeenMs }` — the M4 firstQuietTs precedent, generalized
+// per post) records the first sustained crossing; the finding emits ONLY after
+// the persistence window (a one-tick spike never alerts); a queue below the
+// limit CLEARS the entry (the window restarts clean). DEDUPE: key
+// `mission-queue:<postId>` in the SHARED health-alerts ledger (the 30-min
+// re-alert cadence while the backlog persists). `deps.missionQueue` ABSENT →
+// the scan is a NO-OP (unknown queues never fabricate a backlog alert).
+
+/** The M-7 SMOKE org: TWO configured heads (the real daemon alerts for BOTH
+ * when their pending mission queues cross the limit). */
+const TWO_HEAD_ORG = {
+  departments: [
+    {
+      id: 'research',
+      name: 'Research',
+      coordinator: {
+        postId: 'research-head',
+        role: 'Research department head',
+        provider: 'deepseek-official',
+        agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' }
+      }
+    },
+    {
+      id: 'quality',
+      name: 'Quality',
+      coordinator: {
+        postId: 'quality-head',
+        role: 'Quality department head',
+        provider: 'deepseek-official',
+        agentOptions: { provider: 'stub-coord', model: 'deepseek-v4-flash' }
+      }
+    }
+  ]
+}
+
+test('M-7 scanMissionQueue (PURE): an over-limit queue SUSTAINED >= persistMs → the mission-queue finding with the per-post key + the owner-facing line; the FIRST crossing only records firstSeen (never alerts — the anti-transient window); BELOW the limit → nothing (+ the ledger clears); a WORKER → excluded; a RETIRED head → excluded', () => {
+  const T0 = new Date(2026, 8, 1, 14, 0, 0).getTime()
+  const inbox = (n) => Array.from({ length: n }, (_, i) => T0 - 10 * 60_000 + i * 1000)
+  assert.equal(MISSION_QUEUE_KEY_PREFIX, 'mission-queue:', 'the dedupe key prefix')
+  assert.equal(MISSION_QUEUE_DEFAULT_LIMIT, 5, 'the code default threshold is 5')
+  assert.equal(MISSION_QUEUE_DEFAULT_PERSIST_MS, 60_000, 'the code default persist window is one poll tick (60 s)')
+  // (a) the FIRST crossing: over limit but INSIDE the persist window → no
+  // finding; the ledger records the firstSeen per over-limit post.
+  const first = scanMissionQueue({
+    rows: [
+      { postId: 'research-head', events: [], inboxTs: inbox(6) }, // 6 >= 5, first seen now
+      { postId: 'quality-head', events: [], inboxTs: inbox(2) }, // below the limit
+      { postId: 'worker-scan', provider: 'worker', events: [], inboxTs: inbox(6) }, // a worker — NEVER a mission queue
+      { postId: 'head-retired', retired: true, events: [], inboxTs: inbox(6) } // a retired head — terminal
+    ],
+    limit: MISSION_QUEUE_DEFAULT_LIMIT,
+    persistMs: MISSION_QUEUE_DEFAULT_PERSIST_MS,
+    nowMs: T0,
+    ledger: {}
+  })
+  assert.equal(first.findings.length, 0, 'the FIRST sustained crossing never alerts (anti-transient)')
+  assert.equal(first.changed, true, 'the ledger changed (firstSeen recorded)')
+  assert.equal(first.ledger['research-head'], T0, 'the ledger records the firstSeen of the over-limit queue')
+  assert.equal(first.ledger['quality-head'], undefined, 'a below-limit queue records nothing')
+  assert.equal(first.ledger['worker-scan'], undefined, 'a WORKER records nothing (heads only)')
+  assert.equal(first.ledger['head-retired'], undefined, 'a RETIRED head records nothing')
+  // (b) a re-scan INSIDE the persist window (firstSeen kept) → still nothing.
+  const inside = scanMissionQueue({
+    rows: [{ postId: 'research-head', events: [], inboxTs: inbox(6) }],
+    limit: MISSION_QUEUE_DEFAULT_LIMIT,
+    persistMs: MISSION_QUEUE_DEFAULT_PERSIST_MS,
+    nowMs: T0 + 30_000,
+    ledger: { 'research-head': T0 }
+  })
+  assert.equal(inside.findings.length, 0, '30 s into the 60 s window → still no alert')
+  assert.equal(inside.changed, false, 'the ledger is unchanged while the queue sustains')
+  // (c) AFTER the persist window → the finding (key + count + owner line).
+  const second = scanMissionQueue({
+    rows: [{ postId: 'research-head', events: [], inboxTs: inbox(6) }],
+    limit: MISSION_QUEUE_DEFAULT_LIMIT,
+    persistMs: MISSION_QUEUE_DEFAULT_PERSIST_MS,
+    nowMs: T0 + 60_000,
+    ledger: { 'research-head': T0 }
+  })
+  assert.equal(second.findings.length, 1, 'after the persist window the sustained backlog alerts')
+  const finding = second.findings[0]
+  assert.equal(finding.kind, 'mission-queue')
+  assert.equal(finding.key, missionQueueKey('research-head'), 'the per-post dedupe key mission-queue:<postId>')
+  assert.equal(finding.postId, 'research-head')
+  assert.equal(finding.count, 6, 'the finding carries the pendingCount')
+  assert.match(finding.error, /^cola de misiones research-head: 6 pendientes sin drenar — posible backlog$/, 'the owner-facing line')
+  // (d) the queue DRAINED below the limit → the ledger clears (a later spike
+  // is a FRESH sustained epoch, never a stale re-alert).
+  const cleared = scanMissionQueue({
+    rows: [{ postId: 'research-head', events: [], inboxTs: inbox(1) }],
+    limit: MISSION_QUEUE_DEFAULT_LIMIT,
+    persistMs: MISSION_QUEUE_DEFAULT_PERSIST_MS,
+    nowMs: T0 + 90_000,
+    ledger: { 'research-head': T0 }
+  })
+  assert.equal(cleared.findings.length, 0, 'below the limit → nothing')
+  assert.equal(cleared.changed, true, 'the ledger changed (the entry cleared)')
+  assert.equal(cleared.ledger['research-head'], undefined, 'a drained queue forgets the sustained window')
+})
+
+test('M-7 runHealthDaemonTick: a HEAD with a SUSTAINED over-limit queue → the mission-queue finding + host ALERT (frame bullet «cola de misiones <postId>: <n> pendientes sin drenar»), the per-post dedupe key advances in the SHARED ledger, the audit row records it; a below-limit head → nothing', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 14, 30, 0).getTime()
+    assert.equal(MISSION_QUEUE_STATE_FILE, 'mission-queue-state.json', 'the own ledger file name')
+    // Pre-seed the mission-queue ledger: research-head crossed the limit 10 min
+    // ago (the SUSTAINED condition — real upstream ticks recorded the
+    // firstSeen); quality-head is below the limit.
+    await writeMissionQueueState(stateDir, { 'research-head': T0 - 10 * 60_000 })
+    const alerts = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-m7-1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      missionQueue: [
+        { postId: 'research-head', events: [], inboxTs: [T0 - 60_000, T0 - 59_000, T0 - 58_000, T0 - 57_000, T0 - 56_000, T0 - 55_000] }, // 6 >= 5, sustained
+        { postId: 'quality-head', events: [], inboxTs: [T0 - 30_000, T0 - 29_000] } // 2 < 5
+      ],
+      config: { health: {} },
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts.length, 1, 'one alert for the single sustained over-limit head')
+    assert.match(alerts[0].frame, /^\[From deepartments\] System-health ALERT:/, 'the alert frame is the system-health frame')
+    assert.match(alerts[0].frame, /- mission-queue: cola de misiones research-head: 6 pendientes sin drenar — posible backlog/, 'the FRAME bullet is the mission-queue line (never the stalled-post fallback)')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state[missionQueueKey('research-head')], T0, 'the per-post dedupe key advances in the SHARED ledger')
+    assert.equal(state[missionQueueKey('quality-head')], undefined, 'a below-limit head never alerts / no key')
+    const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    assert.equal(audit.at(-1).findings[0].kind, 'mission-queue', 'the audit row records the mission-queue finding')
+    assert.equal(audit.at(-1).dedupeKeys.includes(missionQueueKey('research-head')), true, 'the audit row records the per-post dedupe key')
+    // The OWN ledger survived the tick (the sustained firstSeen kept — the
+    // backlog persists, the re-alert cadence owns the rest).
+    const mqLedger = readMissionQueueState(stateDir)
+    assert.equal(mqLedger['research-head'], T0 - 10 * 60_000, 'the sustained firstSeen survives the alerting tick')
+  })
+})
+
+test('M-7 DEDUPE: the FIRST crossing records firstSeen only (anti-transient); the SECOND tick (persist window done) alerts; a tick INSIDE the 30-min health dedupe does NOT re-alert; AFTER HEALTH_DEDUPE_WINDOW_MS with the backlog STILL undrained → RE-ALERT (never a one-shot; the M-A per-band re-alert precedent)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 15, 0, 0).getTime()
+    const alerts = []
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-m7d',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      missionQueue: [{ postId: 'research-head', events: [], inboxTs: Array.from({ length: 6 }, (_, i) => T0 - 60_000 + i * 1000) }],
+      config: { health: {} },
+      notifyHost: async () => { alerts.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    await tick(T0)
+    assert.equal(alerts.length, 0, 'first crossing → the ledger records firstSeen only (a transient spike never alerts)')
+    await tick(T0 + 60_000)
+    assert.equal(alerts.length, 1, 'after the persist window the sustained backlog alerts')
+    await tick(T0 + 5 * 60_000)
+    assert.equal(alerts.length, 1, 'a tick INSIDE the 30-min dedupe window does NOT re-alert')
+    // The re-alert needs the elapsed time since the LAST alert (T0 + 60 s) to
+    // EXCEED the 30-min dedupe window → 32 min after T0 = 31 min since the
+    // alert → re-alert.
+    await tick(T0 + 32 * 60_000)
+    assert.equal(alerts.length, 2, '31 min after the alert the SAME undrained backlog RE-ALERTS (the guarantee is never a one-shot)')
+  })
+})
+
+test('M-7 the missionQueueLimit + missionQueuePersistMs knobs: a SMALL limit + a SHORT persist window alert on a SMALL sustained queue; ABSENT/invalid → the 5/60000 code defaults (a 2-message queue NEVER alerts against the default limit)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 16, 0, 0).getTime()
+    await writeMissionQueueState(stateDir, { 'quality-head': T0 - 10_000 }) // sustained 10 s
+    // (a) a small limit + a short persist: 2 pending >= limit 2, sustained
+    // 10 s >= persist 5 s → alert.
+    const alertsA = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-m7k1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      missionQueue: [{ postId: 'quality-head', events: [], inboxTs: [T0 - 5000, T0 - 4000] }],
+      config: { health: { missionQueueLimit: 2, missionQueuePersistMs: 5000 } },
+      notifyHost: async () => { alertsA.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alertsA.length, 1, 'a 2-pending queue against the limit-2 knob + 5 s persist → alert (the knobs are honored)')
+    // (b) ABSENT knobs → 5/60000 defaults: the SAME 2-pending queue against
+    // the default limit 5 → NO alert (and the ledger entry clears).
+    const alertsB = []
+    await runHealthDaemonTick({
+      now: () => T0 + 60_000,
+      stateDir,
+      bootId: 'boot-m7k2',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      missionQueue: [{ postId: 'quality-head', events: [], inboxTs: [T0 + 50_000, T0 + 51_000] }],
+      config: { health: {} },
+      notifyHost: async () => { alertsB.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alertsB.length, 0, '2 pending ≪ the 5 default limit → NO alert')
+    assert.equal(readMissionQueueState(stateDir)['quality-head'], undefined, 'the below-limit tick cleared the stale sustained entry')
+  })
+})
+
+test('M-7 the missionQueueEnabled gate: explicit false → the scan is SKIPPED (no alert even with a sustained over-limit queue); the dep absent → the scan is a NO-OP (no alert, no warn — unknown queues never fabricate a backlog alert)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 17, 0, 0).getTime()
+    await writeMissionQueueState(stateDir, { 'research-head': T0 - 10 * 60_000 })
+    // (a) gate OFF with the dep PRESENT and a 10-min-sustained over-limit queue.
+    const alertsA = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-m7g1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      missionQueue: [{ postId: 'research-head', events: [], inboxTs: Array.from({ length: 6 }, (_, i) => T0 - 60_000 + i * 1000) }],
+      config: { health: { missionQueueEnabled: false } },
+      notifyHost: async () => { alertsA.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alertsA.length, 0, 'missionQueueEnabled:false suppresses the scan even at 10 min sustained')
+    // (b) missionQueue dep ABSENT (a wiring that cannot resolve the seam).
+    const alertsB = []
+    const warns = []
+    await runHealthDaemonTick({
+      now: () => T0 + 60_000,
+      stateDir,
+      bootId: 'boot-m7g2',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      notifyHost: async () => { alertsB.push(1) },
+      logger: { warn: (m) => warns.push(m), info: () => {} }
+    })
+    assert.equal(alertsB.length, 0, 'missionQueue undefined → the scan is a no-op → no alert')
+    assert.equal(warns.length, 0, 'missionQueue undefined → no warn either (the scan did not run)')
+  })
+})
+
+test('M-7 SMOKE (acceptance — real daemon): bootPlugin with health {intervalMs: 50, missionQueueLimit: 2, missionQueuePersistMs: 50} + TWO head posts (research + quality) whose pending missions are fabricated by host sends the heads never process → the REAL daemon alerts the host with BOTH mission-queue lines; the audit row records the findings', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootPlugin(stateDir, {
+      health: { intervalMs: 50, missionQueueLimit: 2, missionQueuePersistMs: 50 },
+      org: TWO_HEAD_ORG
+    })
+    try {
+      await waitFor(() => env.agents.store.has('head-research-head') && env.agents.store.has('head-quality-head'), 5000, 'both heads materialized at boot')
+      const host = env.agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      // Self-register the live host (the ALERT recipient must be a durable
+      // hosts.json entry for pickLiveHost).
+      await env.root.tools.get('dept_who').execute({}, { agent: host, signal })
+      const send = env.root.tools.get('send_message')
+      for (const to of ['research-head', 'quality-head']) {
+        const r1 = await send.execute({ to: [to], text: `M-7 smoke — pending mission 1 for ${to}` }, { agent: host, signal })
+        assert.equal(r1.delivered[to], 'delivered', `the first mission message is delivered to ${to}`)
+        const r2 = await send.execute({ to: [to], text: `M-7 smoke — pending mission 2 for ${to}` }, { agent: host, signal })
+        assert.equal(r2.delivered[to], 'delivered', `the second mission message is delivered to ${to}`)
+      }
+      // The REAL daemon (ticking every 50 ms): the FIRST tick records the
+      // firstSeen, the NEXT tick crosses the 50-ms persist window → EACH
+      // head's queue alerts (the heads never drain within the test). Each of
+      // the 2 sent missions materializes 2 delivery rows (prepared +
+      // delivered) → the pendingCount per head is 4. The two heads may alert
+      // in ONE frame or in TWO (the sends are sequential) — wait for BOTH
+      // lines across the inbox, then assert each frame bullet.
+      await waitFor(() => host.inboxMessages.some((m) => m.content[0]?.text.includes('cola de misiones research-head')), 5000, 'the real mission-queue daemon alerts for research-head')
+      await waitFor(() => host.inboxMessages.some((m) => m.content[0]?.text.includes('cola de misiones quality-head')), 5000, 'the real mission-queue daemon alerts for quality-head')
+      const researchFrame = host.inboxMessages.find((m) => m.content[0]?.text.includes('cola de misiones research-head')).content[0].text
+      const qualityFrame = host.inboxMessages.find((m) => m.content[0]?.text.includes('cola de misiones quality-head')).content[0].text
+      assert.match(researchFrame, /- mission-queue: cola de misiones research-head: 4 pendientes sin drenar — posible backlog/, 'the REAL alert carries the research-head mission-queue line')
+      assert.match(qualityFrame, /- mission-queue: cola de misiones quality-head: 4 pendientes sin drenar — posible backlog/, 'the REAL alert carries the quality-head mission-queue line')
+      await waitFor(async () => {
+        try {
+          const auditText = await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')
+          return auditText.trim().length > 0
+        } catch {
+          return false
+        }
+      }, 5000, 'the audit row is appended')
+      const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      assert.equal(audit.some((row) => row.findings.some((f) => f.kind === 'mission-queue')), true, 'an audit row records the mission-queue finding')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+// --- fb-43 (2026-09-01) — the restart-registry ---------------------------------
+// The durable append-only daemon-boot audit (`<stateDir>/restart-registry.jsonl`):
+// the ONE-TIME SEED writes the provenance header + the 4 documented historical
+// restarts when the file is ABSENT (the memory-closing line for the heads — the
+// documented attributions no longer live only in the heads' memory); an existing
+// file is NEVER re-seeded. Every NEW daemon boot appends ONE row
+// `{ bootId, ts, cause: 'unknown' }` — the bootId is the EXISTING per-process id
+// the heartbeat stamps (REUSED, never duplicated); a same-boot re-tick appends
+// nothing (idempotent per boot). `buildRestartDigest` renders the last N rows
+// with their cause (the pulse digest + debug utility). All helpers NEVER throw.
+
+test('fb-43 restart-registry SEED: a missing file → the provenance header + the 4 documented historical rows (the memory-closing line); an EXISTING file → NEVER re-seeded (the one-time seed contract)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    assert.equal(RESTART_REGISTRY_SEED_ROWS.length, 4, 'the documented historical seed has exactly 4 rows')
+    await seedRestartRegistry(stateDir)
+    const text = await readFile(path.join(stateDir, RESTART_REGISTRY_FILE), 'utf8')
+    const lines = text.trim().split('\n')
+    assert.equal(lines.length, 5, 'the header comment + the 4 historical rows')
+    assert.match(lines[0], /^# restart-registry \(fb-43/, 'the first line is the provenance header comment')
+    assert.equal(RESTART_REGISTRY_FILE, 'restart-registry.jsonl', 'the registry file name')
+    const rows = readRestartRegistry(stateDir)
+    assert.equal(rows.length, 4, '4 parsed historical rows (the header is NOT a row)')
+    assert.deepEqual(rows.map((r) => r.cause), ['switch flota glm', 'reversión flota deepseek-v4-flash', 'DESCONOCIDA (pendiente investigación)', 'reload version-watch smart_restart canary'], 'the 4 documented attributions in order')
+    assert.equal(rows[0].ts, Date.UTC(2026, 7, 31, 22, 31, 0), 'row 1 ts = 08-31T22:31Z (switch flota glm)')
+    assert.equal(rows[1].ts, Date.UTC(2026, 7, 31, 22, 50, 0), 'row 2 ts = 08-31T22:50Z (reversión flota deepseek-v4-flash)')
+    assert.equal(rows[2].ts, Date.UTC(2026, 8, 1, 5, 23, 31), 'row 3 ts = 09-01T05:23:31Z (DESCONOCIDA — pendiente investigación)')
+    assert.equal(rows[3].ts, Date.UTC(2026, 8, 1, 6, 8, 57), 'row 4 ts = 09-01T06:08:57Z (reload version-watch smart_restart canary)')
+    // NO re-seed: a second seed call leaves the file byte-identical.
+    await seedRestartRegistry(stateDir)
+    const text2 = await readFile(path.join(stateDir, RESTART_REGISTRY_FILE), 'utf8')
+    assert.equal(text2, text, 'an existing file is NEVER re-seeded')
+  })
+})
+
+test('fb-43 reconcileRestartRegistry: a NEW bootId appends ONE row with cause=\'unknown\' (ts = the reconcile clock); the SAME bootId re-tick appends NOTHING (idempotent per boot); a fresh stateDir first SEEDS then appends the current boot', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 7, 0, 0).getTime()
+    await reconcileRestartRegistry(stateDir, 'boot-a', T0)
+    let rows = readRestartRegistry(stateDir)
+    assert.equal(rows.length, 5, 'the first reconcile = the seed (4 historical) + the current boot')
+    assert.equal(rows[4].bootId, 'boot-a', 'the LAST row is the current boot')
+    assert.equal(rows[4].cause, 'unknown', 'a runtime-detected new boot has cause unknown')
+    assert.equal(rows[4].ts, T0, 'the row ts is the reconcile clock')
+    // Same-boot re-tick → no append.
+    await reconcileRestartRegistry(stateDir, 'boot-a', T0 + 60_000)
+    rows = readRestartRegistry(stateDir)
+    assert.equal(rows.length, 5, 'a same-boot re-tick appends NOTHING (idempotent per boot)')
+    // A NEW boot → exactly ONE more row.
+    await reconcileRestartRegistry(stateDir, 'boot-b', T0 + 2 * 60_000)
+    rows = readRestartRegistry(stateDir)
+    assert.equal(rows.length, 6, 'a NEW boot id appends ONE row')
+    assert.equal(rows[5].bootId, 'boot-b', 'the new boot row')
+    assert.equal(rows[5].cause, 'unknown', 'the new boot has cause unknown')
+    assert.equal(rows[5].ts, T0 + 2 * 60_000, 'the new boot row ts is its reconcile clock')
+  })
+})
+
+test('fb-43 buildRestartDigest: renders the LAST N restarts with their cause (the pulse digest + debug utility); an empty registry → the no-rows line', () => {
+  const T0 = Date.UTC(2026, 8, 1, 7, 0, 0)
+  const rows = [
+    { bootId: 'b1', ts: T0, cause: 'unknown' },
+    { bootId: 'b2', ts: T0 + 60_000, cause: 'unknown' },
+    { bootId: 'b3', ts: T0 + 120_000, cause: 'switch flota glm' }
+  ]
+  const digest = buildRestartDigest(rows, 2)
+  const lines = digest.split('\n')
+  assert.equal(lines.length, 2, 'exactly the LAST 2 rows')
+  assert.match(lines[0], /^- restart /, 'each line is a restart bullet')
+  assert.match(lines[0], /boot b2/, 'the digest keeps the bootId')
+  assert.match(lines[0], /cause=unknown/, 'the digest keeps the cause')
+  assert.match(lines[1], /cause=switch flota glm/, 'the digest keeps a documented cause')
+  assert.match(lines[1], /2026-09-01T07:02:00\.000Z/, 'the digest renders the ISO ts')
+  assert.equal(buildRestartDigest([], 5), '(no restart-registry rows)', 'an empty registry degrades to the no-rows line')
 })
 
 test('W6 bus delivery FAILING materialization records a post-error line (real Loader — a dual resume+create failure reaches the catch block)', async () => {

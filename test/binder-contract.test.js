@@ -53,9 +53,11 @@ const ZONE_BUCKET_CONTRACTS = {
   // merge). M-5 (2026-08-31) added missionActivity (the delivered-but-unstarted
   // mission watchdog dep); M-6 (2026-08-31) added mainRed (the post-commit
   // re-verification watchdog dep: buildMainRedState over the repoRoot — git
-  // HEAD reader + fast-lock runner) — INTENTIONAL verified extensions of the
-  // contract.
-  health: ['bootId', 'config', 'posts', 'hostWaits', 'sessionContexts', 'hostRunning', 'missionActivity', 'mainRed', 'notifyHost', 'poolerStatePath', 'workRegisterPath', 'qiDirectiveRate'],
+  // HEAD reader + fast-lock runner); M-7 (VALLE lane A, 2026-09-01) added
+  // missionQueue (the head mission-queue backlog watchdog dep — the per-head
+  // pendingCount rows, materialized from the EXISTING buildHealthPosts output)
+  // — INTENTIONAL verified extensions of the contract.
+  health: ['bootId', 'config', 'posts', 'hostWaits', 'sessionContexts', 'hostRunning', 'missionActivity', 'mainRed', 'missionQueue', 'notifyHost', 'poolerStatePath', 'workRegisterPath', 'qiDirectiveRate'],
   pooler: ['configuredProviders', 'appendPostError']
 }
 // The REQUIRED-at-use fields per zone bucket (a matching slack is the package's

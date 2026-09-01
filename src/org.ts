@@ -220,6 +220,20 @@ export interface HealthConfig {
    * deployment where the repo lives elsewhere, and for the SMOKE fixture).
    * Absent → REPO_ROOT. */
   mainRedRepoRoot?: string
+  /** M-7 — the MISSION-QUEUE watchdog gate (default ON; explicit `false`
+   * disables the head mission-backlog scan). Absent → on. */
+  missionQueueEnabled?: boolean
+  /** M-7 — the pendingCount THRESHOLD (default 5): a non-retired HEAD post
+   * whose PENDING (undrained) addressed messages — the buildPostSnapshot
+   * pendingCount — are >= this count → `mission-queue` finding + host ALERT
+   * («cola de misiones <postId>: <n> pendientes sin drenar — posible
+   * backlog»). Absent/invalid → the 5 code default. */
+  missionQueueLimit?: number
+  /** M-7 — the anti-transient PERSISTENCE window in ms (default 60000 = one
+   * poll tick at the default 60 s interval): the over-limit queue must HOLD
+   * for >= this long before it alerts (a transient spike never does).
+   * Absent/invalid → the 60000 code default. */
+  missionQueuePersistMs?: number
 }
 
 /**
@@ -658,7 +672,13 @@ export const Config: z<any, any> = z.object({
     mainRedEnabled: z.boolean(),
     mainRedPollMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
     mainRedLocks: z.array(z.string()).default(void 0 as never),
-    mainRedRepoRoot: z.string().default(void 0 as never)
+    mainRedRepoRoot: z.string().default(void 0 as never),
+    // M-7 — the mission-queue watchdog knobs (default(void 0) → absent = code
+    // defaults: enabled on, missionQueueLimit 5, missionQueuePersistMs 60000
+    // = one poll tick — the section contract).
+    missionQueueEnabled: z.boolean(),
+    missionQueueLimit: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    missionQueuePersistMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
   }).default(void 0 as unknown as {
     enabled: boolean
     intervalMs: number
@@ -690,6 +710,9 @@ export const Config: z<any, any> = z.object({
     mainRedPollMs: number
     mainRedLocks: string[]
     mainRedRepoRoot: string
+    missionQueueEnabled: boolean
+    missionQueueLimit: number
+    missionQueuePersistMs: number
   }),
   // QD (spec 007 §4.1, D-Q2). Mirrors the runtime QualityConfig in src/invoke.ts:
   // `default(void 0)` so an ABSENT section or absent key falls through to the
