@@ -29,10 +29,14 @@ const REPO_ROOT = path.resolve(fileURLToPath(new URL('../', import.meta.url)))
 // The FROZEN pre-decoupling import surface (verified 2026-08-29, the
 // release-0.1.0 baseline): the 8 import statements in test/invoke.test.js that
 // import from '../lib/invoke.js' and their EXACT per-statement symbol counts.
-// (146+5+5+1+5+3+14+2 = 181.) The DECOUPLING hito MUST NOT touch these imports
+// (149+5+5+1+5+3+14+2 = 184.) The DECOUPLING hito MUST NOT touch these imports
 // (shim compat) — a changed count/statement means the migration started
-// migrating tests, which is hito 4's job and breaks this lock.
-const FROZEN_IMPORT_STATEMENT_COUNTS = [146, 5, 5, 1, 5, 3, 14, 2]
+// migrating tests, which is hito 4's job and breaks this lock. M-5 (2026-08-31)
+// extended the FIRST statement (the health surface) with the three new
+// mission-stalled watchdog exports (scanMissionStalled /
+// MISSION_STALL_DEFAULT_MS / missionStallKey — the M-5 tests import them) —
+// an INTENTIONAL, verified surface extension that bumps the frozen count.
+const FROZEN_IMPORT_STATEMENT_COUNTS = [149, 5, 5, 1, 5, 3, 14, 2]
 
 /** Parse `test/invoke.test.js` and return the 8 import statements that import
  * from '../lib/invoke.js' as arrays of imported symbol names (aliases resolved
@@ -54,19 +58,19 @@ function extractInvokeImports() {
   return statements
 }
 
-test('export-parity: test/invoke.test.js imports EXACTLY 8 statements / 181 symbols from ../lib/invoke.js (the frozen pre-decoupling surface)', () => {
+test('export-parity: test/invoke.test.js imports EXACTLY 8 statements / 184 symbols from ../lib/invoke.js (the frozen pre-decoupling surface; M-5 bumped the health statement)', () => {
   const statements = extractInvokeImports()
   assert.equal(statements.length, 8, 'exactly 8 import statements from ../lib/invoke.js')
   const counts = statements.map((names) => names.length)
-  assert.deepEqual(counts, FROZEN_IMPORT_STATEMENT_COUNTS, 'the per-statement symbol counts are frozen (146+5+5+1+5+3+14+2 = 181)')
+  assert.deepEqual(counts, FROZEN_IMPORT_STATEMENT_COUNTS, 'the per-statement symbol counts are frozen (149+5+5+1+5+3+14+2 = 184)')
   const total = counts.reduce((a, b) => a + b, 0)
-  assert.equal(total, 181, '181 named symbols total (the audit-verified pre-decoupling import surface)')
+  assert.equal(total, 184, '184 named symbols total (the audit-verified import surface)')
 })
 
-test('export-parity: lib/invoke.js exports EVERY one of the 181 imported symbols (the drop-in superset invariant)', async () => {
+test('export-parity: lib/invoke.js exports EVERY one of the 184 imported symbols (the drop-in superset invariant)', async () => {
   const statements = extractInvokeImports()
   const required = [...new Set(statements.flat())]
-  assert.equal(required.length, 181, '181 distinct imported symbols')
+  assert.equal(required.length, 184, '184 distinct imported symbols')
   // Load the COMPILED superset (lib/invoke.js — the exact module the tests import).
   const require = createRequire(import.meta.url)
   const invoke = require(path.join(REPO_ROOT, 'lib', 'invoke.js'))
@@ -79,6 +83,10 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   const invoke = require(path.join(REPO_ROOT, 'lib', 'invoke.js'))
   const names = Object.keys(invoke).sort()
   // The pre-decoupling verified count (2026-08-29, release 0.1.0 baseline):
-  // 259 named exports (the 181 test-imported symbols are a strict subset).
-  assert.equal(names.length, 259, `lib/invoke.js export count frozen at 259 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
+  // 259 named exports (the 184 test-imported symbols are a strict subset).
+  // M-5 (2026-08-31) added the FIVE mission-stalled watchdog exports
+  // (scanMissionStalled / MISSION_STALL_DEFAULT_MS / MISSION_STALL_KEY_PREFIX /
+  // missionStallKey from dshd-health + the bundle's buildMissionActivity) —
+  // an INTENTIONAL, verified surface extension that bumps the frozen count.
+  assert.equal(names.length, 264, `lib/invoke.js export count frozen at 264 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })

@@ -32,7 +32,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
@@ -12238,6 +12238,207 @@ test('M-A SMOKE (acceptance — real daemon): bootPlugin with health {intervalMs
       }, 5000, 'the audit row is appended')
       const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
       assert.equal(audit.at(-1).findings.some((f) => f.kind === 'context-threshold'), true, 'the audit last row records the context-threshold finding')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+// --- M-5 (FASE 4 kickoff 2026-08-31, owner gap «misión entregada a un head
+// pero NO INICIADA») — the mission-stalled watchdog --------------------------
+// A HEAD post with a HOST→head mission delivery (mission message the host
+// handed it — the buildMissionActivity seam: the LAST delivery row per
+// head post, statuses prepared/delivered/resumed/failed) that was NEVER
+// processed (no turn/session write AFTER the delivery ts) for >=
+// `missionStallMs` (default 600000 = 10 min) → finding `mission-stalled` +
+// host ALERT through the existing findings→dedupe→notifyHost flow. DEDUPE:
+// key `mission-stall:<postId>:<messageId>` in the SHARED health-alerts-state
+// ledger (the 30-min re-alert cadence while the mission persists). The quiet
+// window is ABSOLUTE from the DELIVERY ts (a per-row fact — NO ledger of its
+// own, unlike M4's firstQuietTs). `deps.missionActivity` ABSENT → the scan
+// is a NO-OP (unknown delivery state never fabricates an alert).
+
+test('M-5 scanMissionStalled (PURE): a delivered-and-unstarted mission older than stallMs → the mission-stalled finding with the per-mission key + the owner-facing line; NO mission → nothing; a mission PROCESSED after delivery (lastActivityTs > delivery ts) → nothing; a delivery younger than the window → nothing; a retired post → nothing', () => {
+  const T0 = new Date(2026, 7, 31, 9, 0, 0).getTime()
+  const findings = scanMissionStalled({
+    rows: [
+      // A host→head mission delivered 12 min ago, NO session activity after
+      // the delivery ts (lastActivityTs undefined → never processed).
+      { postId: 'research-head', mission: { messageId: 'm-500', ts: T0 - 12 * 60_000 } },
+      // A mission delivered 5 min ago — inside the 10-min default window.
+      { postId: 'research-head', mission: { messageId: 'm-501', ts: T0 - 5 * 60_000 } },
+      // A mission delivered 20 min ago with a session write AFTER the delivery
+      // ts (a turn started) → PROCESSED → never stalled.
+      { postId: 'research-head', mission: { messageId: 'm-502', ts: T0 - 20 * 60_000 }, lastActivityTs: T0 - 15 * 60_000 },
+      // No mission (no host→head delivery for this post) → no input.
+      { postId: 'research-head' },
+      // A retired post with a 12-min-old mission → never a mission-stall.
+      { postId: 'builder-retired', retired: true, mission: { messageId: 'm-503', ts: T0 - 12 * 60_000 } }
+    ],
+    stallMs: MISSION_STALL_DEFAULT_MS,
+    nowMs: T0
+  })
+  assert.equal(findings.length, 1, 'exactly ONE stall: the 12-min-old unprocessed mission')
+  const stalled = findings[0]
+  assert.equal(stalled.kind, 'mission-stalled')
+  assert.equal(stalled.key, missionStallKey('research-head', 'm-500'), 'the per-mission dedupe key mission-stall:<postId>:<messageId>')
+  assert.equal(stalled.postId, 'research-head')
+  assert.equal(stalled.messageId, 'm-500')
+  assert.equal(stalled.ts, T0 - 12 * 60_000, 'the finding ts is the DELIVERY ts (the absolute quiet anchor)')
+  assert.match(stalled.error, /^misión m-500 entregada a research-head hace 12 min sin inicio — posible cola stale$/, 'the owner-facing line: misión <id> entregada a <head> hace N min sin inicio — posible cola stale')
+  assert.equal(MISSION_STALL_DEFAULT_MS, 600000, 'the code default is 10 min')
+})
+
+test('M-5 runHealthDaemonTick: a delivered-but-unstarted mission → the mission-stalled finding + host ALERT (frame bullet «misión <id> entregada a <head> hace N min sin inicio»), the per-mission dedupe key advances in the SHARED ledger, the audit row records it', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 31, 9, 30, 0).getTime()
+    const alerts = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-m5-1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      missionActivity: [
+        { postId: 'research-head', mission: { messageId: 'm-510', ts: T0 - 12 * 60_000 } },
+        { postId: 'research-head', mission: { messageId: 'm-511', ts: T0 - 3 * 60_000 } },
+        { postId: 'research-head', mission: { messageId: 'm-512', ts: T0 - 12 * 60_000 }, lastActivityTs: T0 - 6 * 60_000 }
+      ],
+      config: { health: {} },
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts.length, 1, 'one alert for the single stalled mission')
+    assert.match(alerts[0].frame, /^\[From deepartments\] System-health ALERT:/, 'the alert frame is the system-health frame')
+    assert.match(alerts[0].frame, /- mission-stalled: misión m-510 entregada a research-head hace 12 min sin inicio — posible cola stale/, 'the FRAME bullet is the mission-stalled line (never the stalled-post fallback)')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state[missionStallKey('research-head', 'm-510')], T0, 'the per-mission dedupe key advances in the SHARED ledger')
+    assert.equal(state[missionStallKey('research-head', 'm-511')], undefined, 'a 3-min-old mission inside the window never alerts / no key')
+    assert.equal(state[missionStallKey('research-head', 'm-512')], undefined, 'a PROCESSED mission never alerts / no key')
+    const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    assert.equal(audit.at(-1).findings[0].kind, 'mission-stalled', 'the audit row records the mission-stalled finding')
+    assert.equal(audit.at(-1).dedupeKeys.includes(missionStallKey('research-head', 'm-510')), true, 'the audit row records the per-mission dedupe key')
+  })
+})
+
+test('M-5 the missionStallMs knob: a small window alerts on a SHORT quiet; ABSENT/invalid → the 10-min code default (MISSION_STALL_DEFAULT_MS = 600000), so a 1-min quiet NEVER alerts (the resolvePositiveKnob fallback pattern)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 31, 10, 0, 0).getTime()
+    // (a) a small knob: mission delivered 5s ago, window 5s → alert.
+    const alertsA = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-m5t1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      missionActivity: [{ postId: 'research-head', mission: { messageId: 'm-520', ts: T0 - 5000 } }],
+      config: { health: { missionStallMs: 5000 } },
+      notifyHost: async () => { alertsA.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alertsA.length, 1, 'a 5s-old mission against the 5s knob → alert (the knob is honored)')
+    // (b) absent knob → 600000: the SAME 5s quiet against the default → NO alert.
+    const alertsB = []
+    await runHealthDaemonTick({
+      now: () => T0 + 10_000,
+      stateDir,
+      bootId: 'boot-m5t2',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      missionActivity: [{ postId: 'research-head', mission: { messageId: 'm-520', ts: T0 - 4000 } }],
+      notifyHost: async () => { alertsB.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alertsB.length, 0, '5s quiet ≪ the 10-min default → NO alert')
+  })
+})
+
+test('M-5 DEDUPE: inside the 30-min health dedupe the SAME unprocessed mission does NOT re-alert; AFTER HEALTH_DEDUPE_WINDOW_MS with the mission STILL unprocessed → RE-ALERT (the mission persists → never a one-shot; the M-A per-band re-alert precedent)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 31, 11, 0, 0).getTime()
+    const alerts = []
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-m5d',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      // The SAME mission, delivered 12 min before T0, NEVER processed.
+      missionActivity: [{ postId: 'research-head', mission: { messageId: 'm-530', ts: T0 - 12 * 60_000 } }],
+      config: { health: {} },
+      notifyHost: async () => { alerts.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'the first window completion alerts')
+    await tick(T0 + 5 * 60_000)
+    assert.equal(alerts.length, 1, 'a tick INSIDE the 30-min dedupe window does NOT re-alert')
+    await tick(T0 + 31 * 60_000)
+    assert.equal(alerts.length, 2, '31 min later the SAME unprocessed mission RE-ALERTS (the guarantee is never a one-shot)')
+  })
+})
+
+test('M-5 the missionStallEnabled gate: explicit false → the scan is SKIPPED (no alert even with a 2h-old unprocessed mission); the dep absent → the scan is a NO-OP (no alert, no warn — unknown delivery state never fabricates a stalled-mission alert)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 31, 12, 0, 0).getTime()
+    // (a) gate OFF with the dep PRESENT and a 2h-old unprocessed mission.
+    const alertsA = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-m5g1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      missionActivity: [{ postId: 'research-head', mission: { messageId: 'm-540', ts: T0 - 2 * 60 * 60 * 1000 } }],
+      config: { health: { missionStallEnabled: false } },
+      notifyHost: async () => { alertsA.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alertsA.length, 0, 'missionStallEnabled:false suppresses the scan even at 2h')
+    // (b) missionActivity dep ABSENT (a wiring that cannot resolve the seam).
+    const alertsB = []
+    const warns = []
+    await runHealthDaemonTick({
+      now: () => T0 + 60_000,
+      stateDir,
+      bootId: 'boot-m5g2',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      notifyHost: async () => { alertsB.push(1) },
+      logger: { warn: (m) => warns.push(m), info: () => {} }
+    })
+    assert.equal(alertsB.length, 0, 'missionActivity undefined → the scan is a no-op → no alert')
+    assert.equal(warns.length, 0, 'missionActivity undefined → no warn either (the scan did not run)')
+  })
+})
+
+test('M-5 SMOKE (acceptance — real daemon): bootPlugin with health {intervalMs: 50, missionStallMs: 50} + a host→head mission message DELIVERED but never processed → the REAL daemon alerts the host with the mission-stalled frame; the audit row records the finding', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootPlugin(stateDir, { health: { intervalMs: 50, missionStallMs: 50 } })
+    try {
+      await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'head materialized at boot')
+      const host = env.agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      // Self-register the live host (the ALERT recipient + the mission SENDER
+      // must be a durable hosts.json entry for pickLiveHost + buildMissionActivity).
+      await env.root.tools.get('dept_who').execute({}, { agent: host, signal })
+      // Deliver a mission to the (idle, awake) head — the head never starts a
+      // turn within the test → the mission stays unprocessed.
+      const send = env.root.tools.get('send_message')
+      const result = await send.execute({ to: ['research-head'], text: 'M-5 smoke — a mission delivered to the head that never starts' }, { agent: host, signal })
+      assert.equal(result.delivered['research-head'], 'delivered', 'the mission message is delivered to the head')
+      // The REAL daemon (ticking every 50 ms): the delivered-unstarted mission
+      // whose delivery row is >= 50 ms old → ALERT. Deterministic: the window
+      // (50 ms) is far below the waitFor, so any tick after the deliver sees
+      // the condition satisfied.
+      await waitFor(() => host.inboxMessages.some((m) => m.content[0]?.text.includes('System-health ALERT') && m.content[0].text.includes('mission-stalled')), 5000, 'the real mission-stalled daemon alerts the host')
+      const frame = host.inboxMessages.find((m) => m.content[0]?.text.includes('mission-stalled')).content[0].text
+      assert.match(frame, /- mission-stalled: misión m-\d+ entregada a research-head hace 0 min sin inicio — posible cola stale/, 'the REAL alert frame carries the owner-facing mission-stalled line')
+      await waitFor(async () => {
+        try {
+          const auditText = await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')
+          return auditText.trim().length > 0
+        } catch {
+          return false
+        }
+      }, 5000, 'the audit row is appended')
+      const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      assert.equal(audit.at(-1).findings.some((f) => f.kind === 'mission-stalled'), true, 'the audit last row records the mission-stalled finding')
     } finally {
       await env.dispose()
     }

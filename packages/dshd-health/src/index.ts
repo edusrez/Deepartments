@@ -439,8 +439,14 @@ export interface HealthFinding {
     * M-A adds `context-threshold` (the context-pressure monitor: a post OR the
     * host using more than `contextThreshold` of its session context window —
     * a live agent on track to run out of context; the dedupe KEY is per-BAND
-    * `context-threshold:<agentId>:b<floor(pct*10)>`). */
-  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold'
+    * `context-threshold:<agentId>:b<floor(pct*10)>`). M-5 adds
+    * `mission-stalled` (a HEAD post whose host→head mission DELIVERY — a
+    * mission message the HOST handed to it — was never PROCESSED within
+    * `missionStallMs` (default 600000 = 10 min): the «misión entregada a un
+    * head pero NO INICIADA» alarm (the owner's gap); the dedupe KEY is
+    * per-mission `mission-stall:<postId>:<messageId>`, re-alerting every
+    * HEALTH_DEDUPE_WINDOW_MS while the mission stays unprocessed). */
+  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled'
   /** The dedupe key (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS). */
   key: string
   /** The postId (post-error / stalled-post / context-threshold post row). */
@@ -1817,6 +1823,14 @@ export interface HealthConfigLike {
      * `health.intervalMs` re-fire inside the SAME bucket skips the scan).
      * Absent/invalid → 60000. */
     contextThresholdPollMs?: number
+    /** M-5 — the mission-stalled watchdog gate (default ON; explicit false
+     * disables the delivered-but-unstarted-mission scan). */
+    missionStallEnabled?: boolean
+    /** M-5 — the mission-stall window in ms: a HEAD post with a host→head
+     * mission DELIVERY at least this old and NO turn/session write after the
+     * delivery ts → a `mission-stalled` finding + host ALERT (default 600000
+     * = 10 min). Absent/invalid → 600000. */
+    missionStallMs?: number
   }
   /** PACING (owner m-PACING, 2026-08-28) — the top-level `org.pacing.*`
    * franja config the transition monitor reads (the bundle passes its whole
@@ -1906,6 +1920,17 @@ export interface HealthDaemonDeps {
    * pressure never fabricates an alert — the hostRunning/poolerStatePath-
    * absent pattern). CONSUMED ONE — the tick materializes it once. */
   sessionContexts?: Iterable<SessionContextInput>
+  /** M-5 — the per-HEAD-post mission-activity rows the mission-stalled scan
+   * reads: one row per non-retired HEAD post with the LAST host→head mission
+   * DELIVERY row (messageId + delivery-row ts) + the post's last session
+   * activity ts — computed by the bundle's `buildMissionActivity` from the
+   * message store (messages.jsonl + deliveries.jsonl), the catalog
+   * (non-retired posts) and the session-event primitive (buildPostSnapshot).
+   * ABSENT (undefined) → the mission-stalled scan is a NO-OP (a wiring that
+   * cannot resolve the mission-delivery seam never fabricates a
+   * delivered-but-unstarted ALERT — the hostRunning/sessionContexts-absent
+   * pattern). CONSUMED ONE — the tick materializes it once. */
+  missionActivity?: Iterable<MissionActivityInput>
   /** Deliver the framed ALERT bus message to the host (production:
    * messagesStoreReady.append + busDeliverToHost; tests: a recording stub).
    * NEVER throws. */
@@ -2925,6 +2950,115 @@ export function scanContextThreshold(input: ContextThresholdScanInput): HealthFi
   return findings
 }
 
+// ---------------------------------------------------------------------------
+// M-5 (FASE 4 kickoff 2026-08-31, owner gap «misión entregada a un head pero
+// NO INICIADA») — the mission-stalled watchdog: a HEAD post whose HOST→head
+// mission delivery (a mission message the host handed the head through the bus
+// — the delivery-row seam) was NEVER PROCESSED within `missionStallMs`
+// (default 600000 = 10 min) after the DELIVERY ts. "No procesada" = a
+// host→head delivery row with NO turn/session write AFTER the delivery ts (a
+// turn started / session write after the ts proves the mission was picked up —
+// the buildPostSnapshot lastActivityTs primitive). DEDUPE: key
+// `mission-stall:<postId>:<messageId>` in the SHARED health-alerts-state.json
+// ledger — a persistent unprocessed mission re-alerts every
+// HEALTH_DEDUPE_WINDOW_MS (30 min) while it stays stalled (the M-A per-band
+// shared-ledger precedent). The quiet window is ABSOLUTE from the DELIVERY ts
+// (a per-row fact, never accumulated) → NO ledger of its own is needed (the
+// system-idle firstQuietTs pattern is NOT applicable: M-5 has no epoch to
+// accumulate, every tick recomputes `nowMs - deliveryTs` from the same row).
+// The dep `deps.missionActivity` ABSENT (undefined — a wiring that cannot
+// resolve the mission-delivery seam) → the scan is a NO-OP (the hostRunning/
+// sessionContexts-absent pattern: unknown delivery state never fabricates a
+// stalled-mission ALERT). PURE — NEVER throws. Kinds/keys DISJOINT from every
+// other scan: the same tick composes mission-stalled with system-idle /
+// context-threshold / qi-silence / pooler-capacity (mission-stalled says "a
+// mission was handed over but never started"; system-idle says "nobody is
+// running at all" — different conditions, different keys).
+// ---------------------------------------------------------------------------
+
+/** M-5 — the default mission-stall window (10 min): a delivered-but-unstarted
+ * mission alerts once this much time passed since its DELIVERY row ts. */
+export const MISSION_STALL_DEFAULT_MS = 600000
+
+/** M-5 — the mission-stalled dedupe key prefix (`mission-stall:<postId>:
+ * <messageId>` — the SHARED health-alerts ledger gives the 30-min re-alert
+ * cadence while the mission persists; per-mission keys, never per-post). */
+export const MISSION_STALL_KEY_PREFIX = 'mission-stall:'
+
+/** M-5 — build the per-mission dedupe key. */
+export function missionStallKey(postId: string, messageId: string): string {
+  return `${MISSION_STALL_KEY_PREFIX}${postId}:${messageId}`
+}
+
+/** M-5 — ONE head post's mission-activity input row: the LAST host→head
+ * mission DELIVERY row (messageId + the DELIVERY-row ts — the ABSOLUTE quiet
+ * anchor) + the post's last session-activity ts. STRUCTURAL — only the fields
+ * the scan reads are declared (the bundle's buildMissionActivity computes
+ * them from the message store + the catalog + the session-event primitive). */
+export interface MissionActivityInput {
+  postId: string
+  /** True when the post is a retired member — a retired post is never a
+   * stalled-mission signal (its rows terminal-settle, W7-A). */
+  retired?: boolean
+  /** The LAST host→head mission DELIVERY row: messageId + the DELIVERY-row ts
+   * (ms epoch). ABSENT → no mission was delivered to this post (no input).
+   * The delivery statuses that count are the host-handoff consummated classes
+   * (delivered/prepared/resumed — the addressed-inbox trio) AND failed (a
+   * mission attempt the delivery engine has not settled — still
+   * delivered-but-unstarted from the head's viewpoint); self/terminal rows
+   * are NEVER a mission (self = the post addressed itself; terminal = a
+   * settled death-mark). */
+  mission?: { messageId: string; ts: number }
+  /** The post's LAST session-activity ts (the buildPostSnapshot lastActivityTs
+   * — a session write/turn AFTER the mission's delivery ts proves the mission
+   * was PROCESSED; absent → no session activity at all). */
+  lastActivityTs?: number
+}
+
+/** M-5 — the mission-stalled scan inputs (the rows are ALREADY materialized by
+ * the tick — zero new I/O in the scan). */
+export interface MissionStallScanInput {
+  rows: readonly MissionActivityInput[]
+  /** The resolved stall window (knob `missionStallMs` or the 600000 default). */
+  stallMs: number
+  /** The clock (ms epoch) — stamped into the finding ts. */
+  nowMs: number
+}
+
+/** M-5 — scan the delivered-but-unstarted mission condition (PURE, NEVER
+ * throws). For every row with a mission delivery: a RETIRED post is skipped
+ * (terminal); a post whose last session activity is AFTER the delivery ts is
+ * PROCESSED (a turn started / a session write landed after the hand-off — the
+ * mission is NOT stalled, the Bug-B "a running turn is healthy progress"
+ * rule); a delivery younger than `stallMs` is not stalled yet; the rest →
+ * the `mission-stalled` finding with the per-mission dedupe key + the
+ * owner-facing line «misión <id> entregada a <head> hace N min sin inicio —
+ * posible cola stale». */
+export function scanMissionStalled(input: MissionStallScanInput): HealthFinding[] {
+  const findings: HealthFinding[] = []
+  for (const row of input.rows) {
+    if (row.retired === true) continue
+    const mission = row.mission
+    if (mission === undefined) continue
+    // Processed? A session write AFTER the delivery ts proves the mission was
+    // picked up — a started turn is healthy progress, NEVER stalled.
+    if (row.lastActivityTs !== undefined && row.lastActivityTs > mission.ts) continue
+    // The quiet window is ABSOLUTE from the DELIVERY ts.
+    const quietMs = input.nowMs - mission.ts
+    if (quietMs < input.stallMs) continue
+    const minutes = Math.round(quietMs / 60000)
+    findings.push({
+      kind: 'mission-stalled',
+      key: missionStallKey(row.postId, mission.messageId),
+      postId: row.postId,
+      messageId: mission.messageId,
+      ts: mission.ts,
+      error: `misión ${mission.messageId} entregada a ${row.postId} hace ${minutes} min sin inicio — posible cola stale`
+    })
+  }
+  return findings
+}
+
 /** Build the framed host ALERT text — `[From deepartments] System-health ALERT:
  * <grouped findings>`. Each finding is a one-line bullet. The config-preset and
  * stalled-post bullets describe their anomaly verbally (never the literal
@@ -2976,6 +3110,13 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     // line so every 30-min per-band re-alert stays informative).
     if (finding.kind === 'context-threshold') {
       return `- context-threshold: ${finding.error ?? `${finding.postId ?? finding.hostId} context window usage above the threshold`}`
+    }
+    // M-5 — the mission-stalled branch (NEVER let it reach the stale-post
+    // fallback). The owner-facing wording is the mission's own line (misión
+    // <id> entregada a <head> hace N min sin inicio — posible cola stale: the
+    // error carries the FULL line so every 30-min re-alert stays informative).
+    if (finding.kind === 'mission-stalled') {
+      return `- mission-stalled: ${finding.error ?? `misión ${finding.messageId ?? ''} entregada a ${finding.postId ?? ''} sin inicio — posible cola stale`}`
     }
     return `- stalled-post: ${finding.postId} (${finding.count ?? 1} pending message(s), ${finding.error ?? 'no session activity'})`
   })
@@ -3208,6 +3349,13 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         ? health.contextThreshold
         : CONTEXT_THRESHOLD_DEFAULT
     const contextThresholdPollMs = resolvePositiveKnob(health?.contextThresholdPollMs, CONTEXT_THRESHOLD_DEFAULT_POLL_MS)
+    // M-5 — the mission-stalled watchdog knobs: `missionStallEnabled` gate
+    // (default ON) + `missionStallMs` (the delivered-but-unstarted window;
+    // absent/invalid → the 10-min code default via resolvePositiveKnob). The
+    // quiet window is ABSOLUTE from the mission's DELIVERY ts (a per-row
+    // fact — no epoch ledger needed, unlike M4's firstQuietTs).
+    const missionStallEnabled = health?.missionStallEnabled !== false
+    const missionStallMs = resolvePositiveKnob(health?.missionStallMs, MISSION_STALL_DEFAULT_MS)
     const currentContextBucket = Math.floor(nowMs / contextThresholdPollMs)
     const prevContextBucket = prevTick !== undefined ? Math.floor(prevTick.ts / contextThresholdPollMs) : undefined
     const posts = [...(deps.posts ?? [])]
@@ -3336,6 +3484,24 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         deps.logger?.warn(`[deepartments] system-health: context-threshold scan failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    // M-5 — the mission-stalled watchdog (the delivered-but-unstarted-mission
+    // scan). Gate: enabled AND `deps.missionActivity` RESOLVED (the bundle
+    // builds the rows from the message store + the catalog + the session
+    // activity primitive; ABSENT → the scan is a NO-OP — a wiring that cannot
+    // resolve the mission-delivery seam never fabricates a stalled-mission
+    // alert; the hostRunning/sessionContexts-absent pattern). The quiet window
+    // is ABSOLUTE from each mission's DELIVERY ts → NO ledger of its own; the
+    // SHARED health-alerts ledger (per-mission keys `mission-stall:<postId>:
+    // <messageId>`) gives the 30-min re-alert cadence while the mission
+    // persists. Zero new I/O (the rows are materialized by the bundle).
+    let missionFindings: HealthFinding[] = []
+    if (missionStallEnabled && deps.missionActivity !== undefined) {
+      try {
+        missionFindings = scanMissionStalled({ rows: [...(deps.missionActivity)], stallMs: missionStallMs, nowMs })
+      } catch (error: unknown) {
+        deps.logger?.warn(`[deepartments] system-health: mission-stalled scan failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     // 3. scan.
     const findings = [
       ...scanPostErrorFindings(deps.stateDir, nowMs, retiredHostIds),
@@ -3345,7 +3511,8 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       ...poolerFindings,
       ...qiFindings,
       ...systemIdleFindings,
-      ...contextFindings
+      ...contextFindings,
+      ...missionFindings
     ]
     // W8-d PART B/C — the system-heartbeat knobs: `heartbeatEnabled` (default
     // on) gates the CONDITIONAL-WAKE path; `waitThresholdMs` is resolved with
@@ -3594,6 +3761,10 @@ export interface HealthBinderDeps {
   /** M4 — the host's live running signal. Absent → the system-idle scan is a
    * no-op (unknown liveness never fabricates an alert). */
   hostRunning?: HealthDaemonDeps['hostRunning']
+  /** M-5 — the mission-activity rows (per non-retired HEAD post: the LAST
+   * host→head mission delivery + last session activity) for the
+   * mission-stalled watchdog. Absent → the scan is a no-op. */
+  missionActivity?: HealthDaemonDeps['missionActivity']
   /** The framed ALERT delivery (the bundle's own closure). Absent → the
    * service builds one from the EXISTING composed buckets (wakepack
    * messagesStoreReady + deliver.deliverHost, interrupt:true). */
@@ -3694,6 +3865,7 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
         hostWaits: explicit.hostWaits ?? bound.hostWaits,
         sessionContexts: explicit.sessionContexts ?? bound.sessionContexts,
         hostRunning: explicit.hostRunning ?? bound.hostRunning,
+        missionActivity: explicit.missionActivity ?? bound.missionActivity,
         // DECOUPLING PASO 1: the composed daemon's C6 bounded tail reader flows
         // through the EXPLICIT per-tick deps (created once per daemon by the
         // bundle wiring, exactly like the inline path) — absent → the legacy

@@ -392,6 +392,7 @@ import {
   runHealthDaemonTick,
   createDeliveryRowsTailReader,
   readInboxByPost,
+  readDeliveryRowsFull,
   HEALTH_ERROR_WINDOW_MS,
   HEALTH_DEDUPE_WINDOW_MS,
   buildPostSnapshot,
@@ -438,7 +439,8 @@ import type {
   HeartbeatRow,
   InterruptedPostInput,
   PostErrorEntry,
-  SessionContextInput
+  SessionContextInput,
+  MissionActivityInput
 } from './core/health.js'
 // P1 (MODULARIZACIÓN, 2026-08-29): the six plugin packages now export their
 // Cordis plugin surface (name/inject/apply) from their MAIN entries (the
@@ -2342,6 +2344,106 @@ import { createToolsOrchestration, type ToolsSurface } from './core/orchestratio
 import { createPresetsOrchestration, type PresetsSurface, type PresetsFactoryDeps } from './core/orchestration/presets.js'
 import { createBootOrchestration, type BootSurface, type BootFactoryDeps } from './core/orchestration/boot.js'
 
+// ---------------------------------------------------------------------------
+// M-5 (FASE 4 kickoff 2026-08-31, owner gap «misión entregada a un head pero
+// NO INICIADA») — buildMissionActivity: the BUNDLE-side builder of the
+// `missionActivity` health-daemon dep (one row per non-retired HEAD post with
+// a HOST→head mission delivery). The seam (d): the message store's DELIVERY
+// state (deliveries.jsonl rows — the LAST host→head delivery row per post,
+// statuses delivered/prepared/resumed/failed = the host hand-offs entrusted to
+// the head's inbox; the missive's «delivered/prepared/pending/failed» maps onto
+// the store's exact union — 'pending' is the 'prepared' write-ahead row, and
+// 'resumed' counts as a delivered-equivalent re-delivery; 'self'/'terminal'
+// NEVER count: self = the post addressed itself, terminal = a settled
+// death-mark) + the messages.jsonl `from` attribution (the mission sender) +
+// the CATALOG (non-retired posts; HEADS only — `provider === 'worker'` rows
+// are disposable workers, never mission recipients) + the post's last SESSION
+// activity (buildPostSnapshot lastActivityTs — the same no-I/O primitive the
+// stall/wait scans use; "No procesada" = a host→head delivery row with NO
+// turn/session-write AFTER the delivery ts). NOT resolvable (no live host / no
+// message store / hermetic composition) → undefined → the tick no-ops the scan
+// (the hostRunning/sessionContexts-absent pattern: unknown delivery state never
+// fabricates a stalled-mission ALERT). PER-TICK cost: the bundle calls this
+// once per daemon tick (like buildHealthPosts); the FULL store read is the
+// readInboxByPost precedent (the C6 tail reader is owned by the delivery-failed
+// scan inside the tick, never shared).
+// ---------------------------------------------------------------------------
+
+/** M-5 — the inputs `buildMissionActivity` needs (structural so a hermetic
+ * test or a DECOUPLING caller drives it with fixtures). */
+export interface MissionActivityBuildInput {
+  stateDir: string
+  /** The catalog posts (Map values — fresh per call; non-retired HEADS are the
+   * mission recipients). */
+  byPost: ReadonlyMap<string, PostEntry>
+  /** The hosts registry (iterable — pickLiveHostEntry resolves the LIVE host,
+   * the mission SENDER; absent live host → undefined → no-op). */
+  hosts: Iterable<HostEntryLike>
+  /** The agents registry (absent in a composition WITHOUT a live agents
+   * service → the session-activity term degrades to undefined, never a
+   * throw — the buildPostSnapshot empty-events contract). The events are
+   * structurally `unknown[]` (the AgentLike.session.events shape) — cast to
+   * HealthSessionEvent[] inside per the buildHealthPosts pattern. */
+  agents?: { get(sessionId: string): { session?: { events?: readonly unknown[] } } | undefined } | undefined
+}
+
+/** M-5 — build the per-head-post mission-activity rows the mission-stalled
+ * scan reads (see the block comment above for the seam/status mapping).
+ * PURE-ISH: reads the message store from `stateDir` (never throws — a store
+ * failure degrades to no missions, never a crash); returns undefined only when
+ * the mission-sender seam is unresolvable (NO live host — a wiring without the
+ * host can never attribute a host→head mission). */
+export function buildMissionActivity(input: MissionActivityBuildInput): MissionActivityInput[] | undefined {
+  // The mission SENDER is the LIVE host (the Asistente). No live host → no
+  // host→head mission can be attributed → undefined → the scan no-ops.
+  const { live } = pickLiveHostEntry(input.hosts)
+  if (live === undefined) return undefined
+  // deliveries.jsonl — the delivery-state seam (never throws: readDeliveryRowsFull
+  // degrades an absent/unreadable sidecar to []).
+  const deliveryRows = readDeliveryRowsFull(input.stateDir)
+  // messages.jsonl — the `from` attribution (the mission SENDER must be the
+  // live host). Unreadable → empty map → no mission matches → no rows (the
+  // scan no-ops; never a fabricated alert).
+  let messageFrom = new Map<string, string>()
+  try {
+    for (const record of parseMessageRecords(readFileSync(resolveMessagesPath(input.stateDir), 'utf8'))) {
+      messageFrom.set(record.id, record.from)
+    }
+  } catch {
+    messageFrom = new Map()
+  }
+  const out: MissionActivityInput[] = []
+  for (const [postId, entry] of input.byPost) {
+    if (entry.retired === true) continue
+    // HEADS only — a disposable worker (`provider === 'worker'`) is never a
+    // mission recipient (the catalog kind derivation).
+    if (entry.provider === 'worker') continue
+    // The LAST host→head mission delivery row (max ts): recipient = this post,
+    // status in the mission-consummated set (prepared/delivered/resumed/failed
+    // — the missive's «delivered/prepared/pending/failed»; 'pending' is the
+    // 'prepared' write-ahead, 'resumed' the delivered-equivalent re-delivery;
+    // self/terminal are never a mission), sender = the live host.
+    let last: { messageId: string; ts: number } | undefined
+    for (const row of deliveryRows) {
+      if (row.recipientId !== postId) continue
+      if (row.status !== 'prepared' && row.status !== 'delivered' && row.status !== 'resumed' && row.status !== 'failed') continue
+      if (messageFrom.get(row.messageId) !== live.hostId) continue
+      if (last === undefined || row.ts > last.ts) last = { messageId: row.messageId, ts: row.ts }
+    }
+    if (last === undefined) continue
+    // The post's last session activity — buildPostSnapshot (the same no-I/O
+    // primitive the stall/wait scans use; empty event log → undefined).
+    const events = (input.agents?.get(entry.sessionId)?.session?.events ?? []) as readonly HealthSessionEvent[]
+    const snap = buildPostSnapshot({ postId, events })
+    out.push({
+      postId,
+      mission: last,
+      ...(snap.lastActivityTs !== undefined ? { lastActivityTs: snap.lastActivityTs } : {})
+    })
+  }
+  return out
+}
+
 export function applyInvoke(ctx: Context, config: Config) {
   // ---------------------------------------------------------------------------
   // DECOUPLING ZONA 7 — BOOT ORCHESTRATION FACTORY (the BOOT zone, 678 LOCs of
@@ -3109,6 +3211,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           posts?: Iterable<PostActivityInput>
           hostRunning?: boolean
           sessionContexts?: Iterable<SessionContextInput>
+          missionActivity?: Iterable<MissionActivityInput>
           hostWaits?: Iterable<HostWaitPostInput>
           deliveryRowsReader?: unknown
         }): Promise<void> }
@@ -3136,6 +3239,11 @@ export function applyInvoke(ctx: Context, config: Config) {
             // (absent sessionProjections service → undefined → the scan is a
             // no-op — unknown context pressure never fabricates an alert).
             sessionContexts: buildSessionContexts(),
+            // M-5: the per-head-post mission-activity rows for the
+            // mission-stalled watchdog (no live host / no message store →
+            // undefined → the scan is a no-op — unknown delivery state never
+            // fabricates an alert).
+            missionActivity: buildMissionActivity({ stateDir, byPost, hosts: hosts.values(), agents }),
             // W8-d: the host-sender-aware inputs for the conditional system-wait
             // scan — resolved lazily per tick.
             hostWaits: buildHostWaits(),
@@ -3160,6 +3268,11 @@ export function applyInvoke(ctx: Context, config: Config) {
             // (absent sessionProjections service → undefined → the scan is a
             // no-op — unknown context pressure never fabricates an alert).
             sessionContexts: buildSessionContexts(),
+            // M-5: the per-head-post mission-activity rows for the
+            // mission-stalled watchdog (no live host / no message store →
+            // undefined → the scan is a no-op — unknown delivery state never
+            // fabricates an alert).
+            missionActivity: buildMissionActivity({ stateDir, byPost, hosts: hosts.values(), agents }),
             // W8-d: the host-sender-aware inputs for the conditional system-wait
             // scan — resolved lazily per tick.
             hostWaits: buildHostWaits(),

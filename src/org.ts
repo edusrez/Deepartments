@@ -178,6 +178,32 @@ export interface HealthConfig {
    * = the shared worker-inspect dice (`quality.workerInspectProbability`;
    * p=0.25 → 11, p=1 → 1, p≤0 → never alerts). An explicit value overrides. */
   qiSilenceMinRetiresInWindow?: number
+  /** M4 — the system-idle watchdog gate (default ON; explicit `false` disables
+   * the global-quiet scan). Absent → on (code default). */
+  systemIdleEnabled?: boolean
+  /** M4 — the GLOBAL-quiet window in ms (default 900000 = 15 min): zero
+   * catalog agents running while SOME post still has pending work →
+   * `system-idle` finding + host ALERT. Absent/invalid → the code default. */
+  idleWindowMs?: number
+  /** M-A — the context-threshold watchdog gate (default ON; explicit `false`
+   * disables the context-pressure monitor). Absent → on. */
+  contextThresholdEnabled?: boolean
+  /** M-A — the window-usage fraction that alerts (default 0.5 = 50%): a post
+   * or the host using more than this of its context window →
+   * `context-threshold` finding + host ALERT. In (0,1); absent/invalid → 0.5. */
+  contextThreshold?: number
+  /** M-A — the context-threshold scan cadence in ms (default 60000 = 1 min).
+   * Absent/invalid → the code default. */
+  contextThresholdPollMs?: number
+  /** M-5 — the MISSION-STALLED watchdog gate (default ON; explicit `false`
+   * disables the delivered-but-unstarted-mission scan). Absent → on. */
+  missionStallEnabled?: boolean
+  /** M-5 — the mission-stall window in ms (default 600000 = 10 min): a HEAD
+   * post with a host→head mission DELIVERY at least this old and NO
+   * turn/session write after the delivery ts → `mission-stalled` finding +
+   * host ALERT («misión entregada a un head pero NO INICIADA» — the owner's
+   * gap). Absent/invalid → the code default. */
+  missionStallMs?: number
 }
 
 /**
@@ -604,7 +630,12 @@ export const Config: z<any, any> = z.object({
     // section contract; the fraction is validated in (0,1) like highPercent).
     contextThresholdEnabled: z.boolean(),
     contextThreshold: z.number().min(0).max(1),
-    contextThresholdPollMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+    contextThresholdPollMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    // M-5 — the mission-stalled watchdog knobs (default(void 0) → absent =
+    // code defaults: enabled on, missionStallMs 600000 = 10 min — the section
+    // contract).
+    missionStallEnabled: z.boolean(),
+    missionStallMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
   }).default(void 0 as unknown as {
     enabled: boolean
     intervalMs: number
@@ -630,6 +661,8 @@ export const Config: z<any, any> = z.object({
     contextThresholdEnabled: boolean
     contextThreshold: number
     contextThresholdPollMs: number
+    missionStallEnabled: boolean
+    missionStallMs: number
   }),
   // QD (spec 007 §4.1, D-Q2). Mirrors the runtime QualityConfig in src/invoke.ts:
   // `default(void 0)` so an ABSENT section or absent key falls through to the
