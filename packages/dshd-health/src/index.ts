@@ -5426,7 +5426,51 @@ export const name = 'dshd-health'
 // loadable in minimal compositions (the dshd-core discipline).
 export const inject: string[] = []
 
+/** LANE 0.2.1 (1B) — a minimal per-apply mutable deps holder (register/get/
+ * clear + an EPOCH counter for cache invalidation), mirroring the dshd-core
+ * MutableBinder contract so the DECOUPLING bundle FILLS it via `register` (the
+ * bundle owns the fill; P1 "the bundle consumes, never provides" intact) and
+ * the P6 unload effect RELEASES it via `clear`. AGENTS.md rule 4: per-apply
+ * instance provided as a service (no module-global mutable state). */
+export interface DepsHolder<T> {
+  register(deps: Partial<T>): void
+  get(): T
+  clear(): void
+  getEpoch(): number
+}
+
+/** Create a per-apply mutable deps holder (see `DepsHolder`). */
+export function createDepsHolder<T>(): DepsHolder<T> {
+  let deps = {} as T
+  let epoch = 0
+  return {
+    register(partial) { deps = { ...deps, ...partial } },
+    get() { return deps },
+    clear() { deps = {} as T; epoch++ },
+    getEpoch() { return epoch }
+  }
+}
+
 export function apply(ctx: Context, config: HealthConfig = {}) {
+  // LANE 0.2.1 (1B/1C — binder → Service, P6): the per-process STATIC deps
+  // arrive via the PER-PACKAGE deps holder (`deepartments.healthDeps` —
+  // provided HERE; the DECOUPLING bundle WRITES it via register — P1 intact).
+  // 1C: ONLY the shared quality dice (qiDirectiveRate — the policy this lane
+  // does NOT touch; gap 2 moves it to a policy service) stays bound through
+  // the holder. EVERY other bind is ELIMINATED and derived:
+  //   - the W8-c knobs (`config`) → the package row (`config.health`) + code
+  //     defaults (the profile rows are empty today → the same defaults),
+  //   - `notifyHost` → the composed bus+deliver fallback (the EXISTING
+  //     FASE 2.6-C fallback, promoted to PRIMARY: store.append +
+  //     deliverHost(..., { interrupt: true }) — the C8 direct ALERT seam,
+  //     never the delivery engine),
+  //   - `bootId` → a per-apply randomUUID (the heartbeat bootId is
+  //     informational; the same fallback cadence as the bundle's),
+  //   - `poolerStatePath` / `workRegisterPath` → the EXPLICIT per-tick deps
+  //     (the bundle daemon wiring passes them, exactly like the inline path).
+  const bootId = randomUUID()
+  const depsHolder = createDepsHolder<HealthBinderDeps>()
+  ctx.provide('deepartments.healthDeps', depsHolder)
   // Derived service: the tick itself is the surface; deps resolve per run.
   ctx.provide('deepartments.health', {
     runDaemonTick: async (explicit: Partial<HealthDaemonDeps> = {}): Promise<void> => {
@@ -5438,26 +5482,18 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
       if (catalog?.hosts === undefined) {
         throw new Error('[deepartments] health daemon tick: ctx.get("deepartments.catalog") is undefined — dshd-core is not composed (register the core plugin + provide deepartments.catalog)')
       }
-      const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
-      const all = binder?.get() ?? {}
-      // DECOUPLING PASO 1: read the HEALTH bucket BY NAME (`binder.get().health`)
-      // — the DECOUPLING bundle fills `{ health: { bootId, config, ... } }`
-      // (nested per the contract lock); the P1 read path widened the WHOLE deps
-      // object to this interface, which could never see the nested bucket (0
-      // consumers until now — the first USE is this fill). The cross-bucket
-      // FALLBACKS (deliver.deliverHost + wakepack.messagesStoreReady) read the
-      // composed buckets at their OWN names, unchanged (FASE 2.6-C). The C6
-      // deliveryRowsReader is ALSO read from the health bucket (registered by
-      // the DECOUPLING daemon wiring; absent → the legacy full read).
-      const bound = (all as { health?: HealthBinderDeps & { deliveryRowsReader?: DeliveryRowsReader } }).health ?? {}
-      const composed = all as {
-        deliver?: { deliverHost?: (host: { hostId: string }, framed: string, record: HealthStoreAppendResult, callerSessionId?: string, opts?: { interrupt?: boolean }) => Promise<unknown> }
-        wakepack?: { messagesStoreReady?: () => Promise<{ append(input: HealthStoreAppendInput): Promise<HealthStoreAppendResult> }> }
-      }
-      // FASE 2.6 injection: the ALERT delivery resolves from the bucket first,
-      // then from the EXISTING composed buckets (FASE 2.6-C registers them).
-      let notifyHost = bound.notifyHost ?? explicit.notifyHost
+      // 1C — the ALERT delivery: the composed bus+deliver fallback is now the
+      // PRIMARY (the bundle closure it used to shadow is gone). The ALERT
+      // path stays the C8 direct seam (store.append + deliverHost with
+      // interrupt:true — never a delivery-engine row); a missing seam
+      // POST-DISPOSE fails loud (R1), never stale closure execution.
+      let notifyHost = explicit.notifyHost
       if (notifyHost === undefined) {
+        const all = (ctx.get('deepartments.binder') as { get(): unknown } | undefined)?.get() ?? {}
+        const composed = all as {
+          deliver?: { deliverHost?: (host: { hostId: string }, framed: string, record: HealthStoreAppendResult, callerSessionId?: string, opts?: { interrupt?: boolean }) => Promise<unknown> }
+          wakepack?: { messagesStoreReady?: () => Promise<{ append(input: HealthStoreAppendInput): Promise<HealthStoreAppendResult> }> }
+        }
         const storeReady = composed.wakepack?.messagesStoreReady ?? (() => {
           const bus = ctx.get('deepartments.bus') as { storeReady?: Promise<{ append(input: HealthStoreAppendInput): Promise<HealthStoreAppendResult> }> } | undefined
           if (bus?.storeReady === undefined) {
@@ -5467,7 +5503,7 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
         })
         const deliverHost = composed.deliver?.deliverHost
         if (deliverHost === undefined) {
-          throw new Error('[deepartments] health daemon tick: no ALERT delivery closure — the bundle must register ctx.get("deepartments.binder").register({ deliver: { deliverHost } }) (FASE 2.6-C, composed today) or the health bucket')
+          throw new Error('[deepartments] health daemon tick: no ALERT delivery closure — the bundle must register ctx.get("deepartments.binder").register({ deliver: { deliverHost } }) (FASE 2.6-C, composed today)')
         }
         notifyHost = async (hostEntry: HostEntryLike, alertFrame: string): Promise<void> => {
           try {
@@ -5482,31 +5518,30 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
       await runHealthDaemonTick({
         now: explicit.now ?? (() => Date.now()),
         stateDir: org.stateDir,
-        bootId: bound.bootId ?? explicit.bootId ?? randomUUID(),
-        config: { health: config.health ?? bound.config?.health ?? explicit.config?.health ?? {} } as HealthConfigLike,
+        bootId: explicit.bootId ?? bootId,
+        config: { health: config.health ?? explicit.config?.health ?? {} } as HealthConfigLike,
         hosts: explicit.hosts ?? [...catalog.hosts.values()],
-        posts: explicit.posts ?? bound.posts,
-        hostWaits: explicit.hostWaits ?? bound.hostWaits,
-        sessionContexts: explicit.sessionContexts ?? bound.sessionContexts,
-        hostRunning: explicit.hostRunning ?? bound.hostRunning,
-        missionActivity: explicit.missionActivity ?? bound.missionActivity,
-        mainRed: explicit.mainRed ?? bound.mainRed,
-        missionQueue: explicit.missionQueue ?? bound.missionQueue,
-        // DECOUPLING PASO 1: the composed daemon's C6 bounded tail reader flows
-        // through the EXPLICIT per-tick deps (created once per daemon by the
-        // bundle wiring, exactly like the inline path) — absent → the legacy
-        // full-file read (identical findings, more I/O), the tick contract.
-        deliveryRowsReader: explicit.deliveryRowsReader ?? bound.deliveryRowsReader,
-        poolerStatePath: explicit.poolerStatePath ?? bound.poolerStatePath,
-        qiDirectiveRate: explicit.qiDirectiveRate ?? bound.qiDirectiveRate,
+        posts: explicit.posts,
+        hostWaits: explicit.hostWaits,
+        sessionContexts: explicit.sessionContexts,
+        hostRunning: explicit.hostRunning,
+        missionActivity: explicit.missionActivity,
+        mainRed: explicit.mainRed,
+        missionQueue: explicit.missionQueue,
+        // LANE 0.2.1 (1C): the C6 bounded tail reader + the static paths flow
+        // through the EXPLICIT per-tick deps (the composed daemon wiring
+        // passes them, exactly like the inline path) — absent → the legacy
+        // no-op/scan-gate behavior, the tick contract.
+        deliveryRowsReader: explicit.deliveryRowsReader,
+        poolerStatePath: explicit.poolerStatePath,
+        qiDirectiveRate: explicit.qiDirectiveRate ?? depsHolder.get().qiDirectiveRate,
         notifyHost,
         // LANE 2 (fb-27): the turn/end-error HEAD notification closure flows
-        // through the EXPLICIT per-tick deps (the bundle's `healthNotifyHead` —
-        // the widened-cast `deliveryRowsReader` pattern; the `notifyHead` is NOT
-        // added to HealthBinderDeps, keeping the binder-contract intact). Absent
-        // → the turn-end-notify block is a conservative no-op (tick contract).
+        // through the EXPLICIT per-tick deps (the bundle's `healthNotifyHead`).
+        // Absent → the turn-end-notify block is a conservative no-op (tick
+        // contract).
         notifyHead: explicit.notifyHead,
-        workRegisterPath: explicit.workRegisterPath ?? bound.workRegisterPath,
+        workRegisterPath: explicit.workRegisterPath,
         logger: ctx.logger
       })
     }

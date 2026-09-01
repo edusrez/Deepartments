@@ -208,6 +208,10 @@ importers:
         version: 5.9.3
 
   packages/dshd-pooler:
+    dependencies:
+      dshd-health:
+        specifier: workspace:*
+        version: link:../dshd-health
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1

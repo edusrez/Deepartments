@@ -4953,6 +4953,65 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     }
   }
 
+  // LANE 0.2.1 (1B/1C — binder → Service, P6 disposability, gap 1): the four
+  // zone dep sets now flow into PER-PACKAGE deps holders — deepartments.healthDeps /
+  // jobsDeps / poolerDeps / guiDeps, PROVIDED by dshd-health / dshd-jobs /
+  // dshd-pooler / dshd-gui (the "one plugin provides its deps" pattern) and
+  // FILLED here by the bundle via `register` (the bundle still fills, the
+  // packages only expose the holder — 0 ctx.provide preserved, P1). 1C:
+  //   - health binds ONLY qiDirectiveRate (the shared quality dice the lane
+  //     does NOT touch; gap 2 makes it a policy service) — the rest is
+  //     derivable: config → the package row, notifyHost → the composed
+  //     bus+deliver fallback, bootId → the package randomUUID, the paths → the
+  //     daemon wiring passes them explicitly (invoke.ts);
+  //   - the pooler bind is FULLY ELIMINATED (configuredProviders is 100%
+  //     org-derivable — the coordinators carry the SAME opencode-zen provider
+  //     as the WORKER/HOST_AGENT_OPTIONS constants — + appendPostError is
+  //     imported by the package directly from dshd-health) → poolerDeps stays
+  //     unfilled (the holder is the uniform 1B surface; nothing to relocate).
+  // The legacy zone buckets the (FROZEN CUT-4) register above still writes are
+  // R6-compat dead weight the packages no longer read (gap 2 dismantles the
+  // register with the applyInvoke factory split; the md5 lock stays intact).
+  const depsHealth = ctx.get('deepartments.healthDeps') as { register(deps: { qiDirectiveRate?: number }): void; clear(): void } | undefined
+  const depsJobs = ctx.get('deepartments.jobsDeps') as {
+    register(deps: { runJob?: unknown; notifyHead?: unknown; departmentForEntry?: unknown; departmentForJob?: unknown; onAutoRunSkip?: unknown; repoRoot?: string }): void
+    clear(): void
+  } | undefined
+  const depsPooler = ctx.get('deepartments.poolerDeps') as { register(deps: unknown): void; clear(): void } | undefined
+  const depsGui = ctx.get('deepartments.guiDeps') as { register(deps: { endpointDeps?: unknown }): void; clear(): void } | undefined
+  // The fills (SAME closures the register above uses — the packages read the
+  // IDENTICAL live values through their holders; the compose-first rows make
+  // each holder resolvable exactly when the closure-bound state is ready).
+  depsHealth?.register({ qiDirectiveRate: qualityWorkerInspectProbability })
+  depsJobs?.register({
+    runJob: schedulerRunJob,
+    notifyHead: schedulerNotifyHead,
+    departmentForEntry: schedulerDepartmentForEntry,
+    departmentForJob: schedulerDepartmentForJob,
+    onAutoRunSkip: schedulerOnAutoRunSkip,
+    repoRoot
+  })
+  depsGui?.register({ endpointDeps: guiEndpointDeps })
+  // depsPooler: INTENTIONALLY unfilled (1C — fully derivable, see above; the
+  // holder still exists for the uniform 1B surface + is cleared on unload).
+  // P6 — the SAME unload effect RELEASES the binder buckets + the 4 holders:
+  // Cordis runs the disposers in REVERSE registration order, and the daemon
+  // effects (agenda/parallel/health) register AFTER this factory returns, so
+  // they are disposed FIRST (intervals cleared + the health drain resolved)
+  // and the dep seams are released only after no in-flight tick can touch
+  // them. Post-unload, every zone reader + lazy shell (dshd-core epoch) REBUILDS
+  // over the emptied holder/binder and FAILS LOUD (R1) — never stale closure
+  // execution of the unmounted apply. (Defined OUTSIDE the frozen CUT-4 zone so
+  // the tools-factory byte-identical md5 lock is untouched — the healthNotifyHead
+  // pattern of tools.ts:4934.)
+  ctx.effect(() => () => {
+    binder?.clear()
+    depsHealth?.clear()
+    depsJobs?.clear()
+    depsPooler?.clear()
+    depsGui?.clear()
+  }, 'deepartments: binder buckets + deps holders released on unload (P6 — no stale closures post-unmount)')
+
 // =========================================================================
   // SURFACE RETURN — the members the rest of applyInvoke consumes at the SAME
   // positions as before the extraction. SUB-BATCH 1 exposes the registry

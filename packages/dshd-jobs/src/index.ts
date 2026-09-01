@@ -667,7 +667,40 @@ export const name = 'dshd-jobs'
 // loadable in minimal compositions (the dshd-core discipline).
 export const inject: string[] = []
 
+/** LANE 0.2.1 (1B) — a minimal per-apply mutable deps holder (register/get/
+ * clear + an EPOCH counter for cache invalidation), mirroring the dshd-core
+ * MutableBinder contract so the DECOUPLING bundle FILLS it via `register` (the
+ * bundle owns the fill; P1 "the bundle consumes, never provides" intact) and
+ * the P6 unload effect RELEASES it via `clear`. AGENTS.md rule 4: per-apply
+ * instance provided as a service (no module-global mutable state). */
+export interface DepsHolder<T> {
+  register(deps: Partial<T>): void
+  get(): T
+  clear(): void
+  getEpoch(): number
+}
+
+/** Create a per-apply mutable deps holder (see `DepsHolder`). */
+export function createDepsHolder<T>(): DepsHolder<T> {
+  let deps = {} as T
+  let epoch = 0
+  return {
+    register(partial) { deps = { ...deps, ...partial } },
+    get() { return deps },
+    clear() { deps = {} as T; epoch++ },
+    getEpoch() { return epoch }
+  }
+}
+
 export function apply(ctx: Context, config: JobsConfig = {}) {
+  // LANE 0.2.1 (1B): the scheduler deps arrive via the PER-PACKAGE deps holder
+  // (`deepartments.jobsDeps` — provided HERE; the DECOUPLING bundle WRITES it
+  // via register — the bundle still fills, the package only exposes the holder,
+  // P1 intact). The jobs bind RELOCATES (gap 2 keeps it; the spawn Service is
+  // the next lane), so the fail-loud R1 contract is unchanged — a cleared/
+  // unfilled holder fails loud at use, never stale scheduler closure execution.
+  const depsHolder = createDepsHolder<JobsBinderDeps>()
+  ctx.provide('deepartments.jobsDeps', depsHolder)
   // Derived service: the tick itself is the surface; deps resolve per run.
   ctx.provide('deepartments.jobs', {
     runSchedulerTick: async (opts: { now?: () => number } = {}): Promise<void> => {
@@ -675,24 +708,19 @@ export function apply(ctx: Context, config: JobsConfig = {}) {
       if (org?.stateDir === undefined) {
         throw new Error('[deepartments] jobs scheduler tick: ctx.get("deepartments.org") is undefined — dshd-core is not composed (register the core plugin + provide deepartments.org)')
       }
-      const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
-      const all = binder?.get() ?? {}
-      // DECOUPLING PASO 1: read the JOBS bucket BY NAME (`binder.get().jobs`)
-      // — the DECOUPLING bundle fills `{ jobs: { runJob, ... } }` (nested per
-      // the contract lock); the P1 read path widened the WHOLE deps object to
-      // this interface, which could never see the nested bucket (0 consumers
-      // until now — the first USE is this fill). The wakepack.repoRoot
-      // FALLBACK reads the composed bucket at its OWN name, unchanged.
-      const whole = all as { jobs?: JobsBinderDeps; wakepack?: { repoRoot?: string } }
-      const bound = whole.jobs ?? {}
+      const bound = depsHolder.get()
       const required: Array<keyof JobsBinderDeps> = ['runJob', 'notifyHead', 'departmentForEntry', 'departmentForJob']
       const missing = required.filter((key) => bound[key] === undefined)
       if (missing.length > 0) {
-        throw new Error(`[deepartments] jobs scheduler tick: required binder bucket dep(s) missing: ${missing.join(', ')} — the DECOUPLING bundle must call ctx.get('deepartments.binder').register({ jobs: { runJob, notifyHead, ... } })`)
+        throw new Error(`[deepartments] jobs scheduler tick: required deps-holder dep(s) missing: ${missing.join(', ')} — the DECOUPLING bundle must call ctx.get('deepartments.jobsDeps').register({ runJob, notifyHead, ... })`)
       }
-      const repoRoot = bound.repoRoot ?? whole.wakepack?.repoRoot
+      // The repoRoot fallback keeps reading the composed `wakepack` Binder
+      // bucket (the FASE 2.6-C seam, still filled by the frozen register) —
+      // R6 until the register is dismantled in gap 2.
+      const binderWakepackRepoRoot = ((ctx.get('deepartments.binder') as { get(): unknown } | undefined)?.get() as { wakepack?: { repoRoot?: string } } | undefined)?.wakepack?.repoRoot
+      const repoRoot = bound.repoRoot ?? binderWakepackRepoRoot
       if (repoRoot === undefined) {
-        throw new Error('[deepartments] jobs scheduler tick: no repoRoot — the bundle must register ctx.get("deepartments.binder").register({ wakepack: { repoRoot } }) (FASE 2.6-C, composed today) or the jobs bucket')
+        throw new Error('[deepartments] jobs scheduler tick: no repoRoot — the bundle must register ctx.get("deepartments.jobsDeps").register({ repoRoot }) (LANE 0.2.1, composed today) or the wakepack bucket (FASE 2.6-C)')
       }
       await runAgendaSchedulerTick({
         now: opts.now ?? (() => Date.now()),

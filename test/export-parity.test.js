@@ -158,5 +158,10 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // readWorkRegisterIdleState / writeWorkRegisterIdleState from dshd-health
   // — the docs-level WORK-REGISTER stall watchdog) — an INTENTIONAL, verified
   // surface extension that bumps the frozen count.
-  assert.equal(names.length, 309, `lib/invoke.js export count frozen at 309 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
+  // LANE 0.2.1 (2026-09-01, binder → Service, gap 1) added ONE export
+  // (createDepsHolder from dshd-health — the 1B per-package mutable deps
+  // holder factory the package provides as `deepartments.healthDeps`; the star
+  // re-export bridge src/core/health.ts carries it into the surface) — an
+  // INTENTIONAL, verified surface extension that bumps the frozen count.
+  assert.equal(names.length, 310, `lib/invoke.js export count frozen at 310 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })

@@ -727,28 +727,66 @@ export const name = 'dshd-gui'
 // ctx.inject mount).
 export const inject: string[] = []
 
+/** LANE 0.2.1 (1B) — a minimal per-apply mutable deps holder (register/get/
+ * clear + an EPOCH counter for cache invalidation), mirroring the dshd-core
+ * MutableBinder contract so the DECOUPLING bundle FILLS it via `register` (the
+ * bundle owns the fill; P1 "the bundle consumes, never provides" intact) and
+ * the P6 unload effect RELEASES it via `clear`. AGENTS.md rule 4: per-apply
+ * instance provided as a service (no module-global mutable state). */
+export interface DepsHolder<T> {
+  register(deps: Partial<T>): void
+  get(): T
+  clear(): void
+  getEpoch(): number
+}
+
+/** Create a per-apply mutable deps holder (see `DepsHolder`). */
+export function createDepsHolder<T>(): DepsHolder<T> {
+  let deps = {} as T
+  let epoch = 0
+  return {
+    register(partial) { deps = { ...deps, ...partial } },
+    get() { return deps },
+    clear() { deps = {} as T; epoch++ },
+    getEpoch() { return epoch }
+  }
+}
+
 export function apply(ctx: Context, config: GuiConfig = {}) {
+  // LANE 0.2.1 (1B): the endpoint wiring arrives via the PER-PACKAGE deps
+  // holder (`deepartments.guiDeps` — provided HERE; the DECOUPLING bundle
+  // WRITES it via register — the bundle still fills, the package only exposes
+  // the holder, 0 ctx.provide in the bundle). The holder carries the epoch
+  // counter: the on-first-use CACHE invalidates when the holder is CLEARED
+  // (the bundle unload effect) so a post-dispose dispatch REBUILDS and fails
+  // loud R1 — never answers stale endpoint wiring from the unmounted bundle
+  // (P6 — the epoch contract of the dshd-core lazy shells, applied here).
+  const depsHolder = createDepsHolder<GuiBinderDeps>()
+  ctx.provide('deepartments.guiDeps', depsHolder)
   // Lazy on-first-use surface (derived service contract: never built at apply).
   let cache: GuiSurface | undefined
+  let cacheEpoch = -1
   const build = (): GuiSurface => {
-    const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
-    // DECOUPLING PASO 1: read the GUI bucket BY NAME (`binder.get().gui`) —
-    // the DECOUPLING bundle fills `{ gui: { endpointDeps } }` (nested per the
-    // contract lock); the P1 read path widened the WHOLE deps object to this
-    // interface, which could never see the nested bucket (0 consumers until
-    // now — the first USE is this fill).
-    const bound = ((binder?.get() ?? {}) as { gui?: GuiBinderDeps }).gui ?? {}
+    const bound = depsHolder.get()
     const endpointDeps = config.endpointDeps ?? bound.endpointDeps
     if (endpointDeps === undefined) {
-      throw new Error('[deepartments] gui lazy build: no endpointDeps — the DECOUPLING bundle must call ctx.get("deepartments.binder").register({ gui: { endpointDeps } }) (the package cannot derive the bundle-owned buildAgentRows/pickLiveHostEntry wiring)')
+      throw new Error('[deepartments] gui lazy build: no endpointDeps — the DECOUPLING bundle must call ctx.get("deepartments.guiDeps").register({ endpointDeps }) (the package cannot derive the bundle-owned buildAgentRows/pickLiveHostEntry wiring)')
     }
     return {
       dispatch: (endpoint, payload) => dispatchDeepartmentsEndpoint(endpoint, payload, endpointDeps),
       handleRequest: (req, res, endpoint, trustedHosts) => handleDeepartmentsRequest(req, res, endpoint, trustedHosts, endpointDeps)
     }
   }
+  const ensure = (): GuiSurface => {
+    const epoch = depsHolder.getEpoch()
+    if (cache === undefined || cacheEpoch !== epoch) {
+      cache = build()
+      cacheEpoch = epoch
+    }
+    return cache
+  }
   ctx.provide('deepartments.gui', {
-    dispatch: (endpoint: string, payload: unknown): Promise<DeepartmentsDispatchResult> => (cache ??= build()).dispatch(endpoint, payload),
-    handleRequest: (req: unknown, res: unknown, endpoint: string, trustedHosts: string[]): Promise<void> => (cache ??= build()).handleRequest(req, res, endpoint, trustedHosts)
+    dispatch: (endpoint: string, payload: unknown): Promise<DeepartmentsDispatchResult> => ensure().dispatch(endpoint, payload),
+    handleRequest: (req: unknown, res: unknown, endpoint: string, trustedHosts: string[]): Promise<void> => ensure().handleRequest(req, res, endpoint, trustedHosts)
   })
 }

@@ -276,16 +276,29 @@ export interface BinderDeps {
 /** The mutable late-binding seam (a Cordis SERVICE) the bundle fills after its
  * own state is ready. `register` MERGES per-bucket (partial deps accumulate, so
  * the bundle may fill one service at a time); `get` returns the accumulated
- * deps the lazy builders read. */
+ * deps the lazy builders read. LANE 0.2.1 (P6 disposability): `clear` empties
+ * every bucket and bumps the internal EPOCH (`getEpoch`) — the bundle's unload
+ * effect calls it, so the lazy shells (which cache their built service) detect
+ * the change and REBUILD on the next access: a rebuild over an emptied binder
+ * FAILS LOUD (R1) — never stale closure execution of a dead apply. */
 export interface Binder {
   register(deps: BinderDeps): void
   get(): BinderDeps
+  /** Empty every bucket (the zone buckets return to `undefined` — the
+   * never-registered state — so the fail-loud R1 consumers see them missing) +
+   * bump the epoch the lazy shells cache against. Reversible (AGENTS.md rule
+   * 4): the bundle registers a clear-on-unload effect next to its register. */
+  clear(): void
+  /** The mutation epoch: starts at 0 and increments on EVERY `clear`. A lazy
+   * facade that built its service under epoch N rebuilds when it sees N+1. */
+  getEpoch(): number
 }
 
 /** Mutable per-apply binder (AGENTS.md rule 4 — no module-global mutable state;
  * the instance lives on the apply fiber and is exposed as a service). */
 class MutableBinder implements Binder {
   private deps: BinderDeps = {}
+  private epoch = 0
   register(deps: BinderDeps): void {
     // Per-bucket merge: an ABSENT incoming bucket leaves the accumulated one
     // untouched (and an absent bucket that was never registered stays ABSENT —
@@ -313,6 +326,13 @@ class MutableBinder implements Binder {
   get(): BinderDeps {
     return this.deps
   }
+  clear(): void {
+    this.deps = {}
+    this.epoch++
+  }
+  getEpoch(): number {
+    return this.epoch
+  }
 }
 
 /** Wrap a lazy-built `LifecycleService` in an on-first-use facade: the real
@@ -320,10 +340,22 @@ class MutableBinder implements Binder {
  * the bundle can `binder.register(...)` its bucket-(c) deps before the first
  * lifecycle tool call. A build that throws (a missing bucket-(c) dep, R1)
  * propagates at the FIRST use and is retried on the next access once the binder
- * is populated. */
-function lazyLifecycle(build: () => LifecycleService): LifecycleService {
+ * is populated. LANE 0.2.1 (P6 disposability): the facade caches the built
+ * service together with the binder EPOCH it was built under — when the binder
+ * is cleared (the bundle unload effect), the next access REBUILDS instead of
+ * serving the cached service (whose closures belong to the dead apply): the
+ * rebuild over the emptied binder FAILS LOUD (R1) — never stale execution. */
+function lazyLifecycle(binder: Binder, build: () => LifecycleService): LifecycleService {
   let cache: LifecycleService | undefined
-  const ensure = (): LifecycleService => (cache ??= build())
+  let cacheEpoch = -1
+  const ensure = (): LifecycleService => {
+    const epoch = binder.getEpoch()
+    if (cache === undefined || cacheEpoch !== epoch) {
+      cache = build()
+      cacheEpoch = epoch
+    }
+    return cache
+  }
   return {
     get memoWrite() { return ensure().memoWrite },
     get sleepMember() { return ensure().sleepMember },
@@ -333,10 +365,18 @@ function lazyLifecycle(build: () => LifecycleService): LifecycleService {
 }
 
 /** Wrap a lazy-built `WakePackService` in an on-first-use facade (same lazy
- * contract as `lazyLifecycle`). */
-function lazyWakePack(build: () => WakePackService): WakePackService {
+ * contract as `lazyLifecycle`, incl. the epoch invalidation of the cache). */
+function lazyWakePack(binder: Binder, build: () => WakePackService): WakePackService {
   let cache: WakePackService | undefined
-  const ensure = (): WakePackService => (cache ??= build())
+  let cacheEpoch = -1
+  const ensure = (): WakePackService => {
+    const epoch = binder.getEpoch()
+    if (cache === undefined || cacheEpoch !== epoch) {
+      cache = build()
+      cacheEpoch = epoch
+    }
+    return cache
+  }
   return {
     get assembleWakePack() { return ensure().assembleWakePack },
     get assembleWakeSnapshot() { return ensure().assembleWakeSnapshot },
@@ -499,11 +539,20 @@ export interface BusSurface {
 }
 
 /** Wrap a lazy-built `BusSurface` in an on-first-use facade (same lazy contract
- * as `lazyLifecycle`). The store + markDelivery need only bucket-(a); the
- * bucket-(c) check for `redeliver` runs inside the returned function (on use). */
-function lazyBus(build: () => BusSurface): BusSurface {
+ * as `lazyLifecycle`, incl. the epoch invalidation of the cache). The store +
+ * markDelivery need only bucket-(a); the bucket-(c) check for `redeliver` runs
+ * inside the returned function (on use). */
+function lazyBus(binder: Binder, build: () => BusSurface): BusSurface {
   let cache: BusSurface | undefined
-  const ensure = (): BusSurface => (cache ??= build())
+  let cacheEpoch = -1
+  const ensure = (): BusSurface => {
+    const epoch = binder.getEpoch()
+    if (cache === undefined || cacheEpoch !== epoch) {
+      cache = build()
+      cacheEpoch = epoch
+    }
+    return cache
+  }
   return {
     get storeReady() { return ensure().storeReady },
     get markDelivery() { return ensure().markDelivery },
@@ -550,11 +599,19 @@ function buildBusLazy(ctx: Context, binder: Binder): BusSurface {
 }
 
 /** Wrap a lazy-built `DeliveryEngine` in an on-first-use facade (same lazy
- * contract as `lazyLifecycle`; the bundle consumes `deepartments.deliver` as a
- * `DeliveryEngine`). */
-function lazyDeliver(build: () => DeliveryEngine): DeliveryEngine {
+ * contract as `lazyLifecycle`, incl. the epoch invalidation of the cache; the
+ * bundle consumes `deepartments.deliver` as a `DeliveryEngine`). */
+function lazyDeliver(binder: Binder, build: () => DeliveryEngine): DeliveryEngine {
   let cache: DeliveryEngine | undefined
-  const ensure = (): DeliveryEngine => (cache ??= build())
+  let cacheEpoch = -1
+  const ensure = (): DeliveryEngine => {
+    const epoch = binder.getEpoch()
+    if (cache === undefined || cacheEpoch !== epoch) {
+      cache = build()
+      cacheEpoch = epoch
+    }
+    return cache
+  }
   return {
     get deliverOrQueue() { return ensure().deliverOrQueue }
   }
@@ -657,8 +714,8 @@ export function apply(ctx: Context, config: CoreConfig) {
   // LifecycleCtx.deptGet); bucket (c) comes from binder.get(). A required
   // bucket-(c) dep missing at build time FAILS LOUD (R1 — never silently
   // unbound). ---
-  ctx.provide('deepartments.lifecycle', lazyLifecycle(() => buildLifecycleLazy(ctx, binder)))
-  ctx.provide('deepartments.wakepack', lazyWakePack(() => buildWakePackLazy(ctx, binder)))
+  ctx.provide('deepartments.lifecycle', lazyLifecycle(binder, () => buildLifecycleLazy(ctx, binder)))
+  ctx.provide('deepartments.wakepack', lazyWakePack(binder, () => buildWakePackLazy(ctx, binder)))
 
   // --- deepartments.bus / deepartments.deliver (FASE 2.6-B-2): LAZY SERVICE
   // SHELLS built ON FIRST USE (never at apply time), so the bundle can
@@ -666,6 +723,6 @@ export function apply(ctx: Context, config: CoreConfig) {
   // internally (org stateDir + sidecar marks + harness subagents); bucket (c)
   // comes from binder.get().bus / .redeliver / .deliver. A required bucket-(c)
   // dep missing at use FAILS LOUD (R1 — never silently unbound). ---
-  ctx.provide('deepartments.bus', lazyBus(() => buildBusLazy(ctx, binder)))
-  ctx.provide('deepartments.deliver', lazyDeliver(() => buildDeliverLazy(ctx, binder)))
+  ctx.provide('deepartments.bus', lazyBus(binder, () => buildBusLazy(ctx, binder)))
+  ctx.provide('deepartments.deliver', lazyDeliver(binder, () => buildDeliverLazy(ctx, binder)))
 }

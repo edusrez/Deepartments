@@ -55,6 +55,14 @@
 // NO export default (pitfall 0001 — breaks `inject`).
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
+// LANE 0.2.1 (1C — pooler bucket ELIMINADO): the POST-ERROR APPEND is the
+// dshd-health domain writer (`appendPostError`, packages/dshd-health/src/
+// index.ts:227 — the module the bundle bridge src/core/health.ts re-exports).
+// The package imports it DIRECTLY (cross-package import, declaration in
+// package.json `dependencies`), so the DECOUPLING bundle no longer binds an
+// `appendPostError` closure for the pooler — one of the two pooler deps the
+// bucket used to carry.
+import { appendPostError } from 'dshd-health'
 
 /** FIX-2 (QD NO_ADAPTER alerting) — the synthetic postId under which a BOOT
  * provider-adapter-registration/endpoint finding is written. It is a NON-post
@@ -504,7 +512,41 @@ export const name = 'dshd-pooler'
 // loadable in minimal compositions (the dshd-core discipline).
 export const inject: string[] = []
 
+/** LANE 0.2.1 (1B) — a minimal per-apply mutable deps holder (register/get/
+ * clear + an EPOCH counter for cache invalidation), mirroring the dshd-core
+ * MutableBinder contract so the DECOUPLING bundle CAN fill it via `register`
+ * (P1 intact — the bundle consumes, never provides) and the P6 unload effect
+ * RELEASES it via `clear`. AGENTS.md rule 4: per-apply instance provided as a
+ * service (no module-global mutable state). NOTE (1C): the pooler deps are
+ * FULLY DERIVABLE this lane (configuredProviders from org.departments alone +
+ * appendPostError imported directly) — the holder is provided for SURFACE
+ * UNIFORMITY (the standardized per-package deps-holder pattern of 1B) and the
+ * bundle fills it with NOTHING (no bind left to relocate; documented). */
+export interface DepsHolder<T> {
+  register(deps: Partial<T>): void
+  get(): T
+  clear(): void
+  getEpoch(): number
+}
+
+/** Create a per-apply mutable deps holder (see `DepsHolder`). */
+export function createDepsHolder<T>(): DepsHolder<T> {
+  let deps = {} as T
+  let epoch = 0
+  return {
+    register(partial) { deps = { ...deps, ...partial } },
+    get() { return deps },
+    clear() { deps = {} as T; epoch++ },
+    getEpoch() { return epoch }
+  }
+}
+
 export function apply(ctx: Context, config: PoolerConfig = {}) {
+  // LANE 0.2.1 (1B): the per-package deps holder (see the interface comment —
+  // provided for the uniform 1B surface; 1C leaves it UNFILLED: everything the
+  // `pooler` bucket used to carry is now derivable/imported by THIS package).
+  const depsHolder = createDepsHolder<PoolerBinderDeps>()
+  ctx.provide('deepartments.poolerDeps', depsHolder)
   // Derived service: the check itself is the surface; it resolves deps on
   // every run (never cached — the llm registry is live across the boot).
   ctx.provide('deepartments.pooler', {
@@ -522,15 +564,17 @@ export function apply(ctx: Context, config: PoolerConfig = {}) {
           ctx.logger.warn('[deepartments] provider-adapter boot check skipped — the "llm" service is absent (headless/minimal profile)')
           return
         }
-        const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
-        // DECOUPLING PASO 1: read the POOLER bucket BY NAME (`binder.get().pooler`)
-        // — the DECOUPLING bundle fills `{ pooler: { configuredProviders,
-        // appendPostError } }` (nested per the contract lock); the P1 read path
-        // widened the WHOLE deps object to this interface, which could never see
-        // the nested bucket (0 consumers until now). The org.departments
-        // coordinator fallback below is unchanged.
-        const bound = ((binder?.get() ?? {}) as { pooler?: PoolerBinderDeps }).pooler ?? {}
-        const configuredProviders = new Set<string>(bound.configuredProviders ?? [])
+        // LANE 0.2.1 (1C — pooler bucket ELIMINADO): the configured provider
+        // set is derived FROM ORG ALONE. The `pooler` bucket used to merge the
+        // bundle constants WORKER_AGENT_OPTIONS/HOST_AGENT_OPTIONS.provider
+        // ('opencode-zen') — EVIDENCE they are redundant: every coordinator of
+        // the dev org config carries `provider: opencode-zen` (cordis.patch.yml
+        // + the dshd-core row), so the bucket's union contributed NO element
+        // the org derivation does not already produce. A hermetic composition
+        // with NO coordinators yields an empty set → the old bucket would have
+        // checked 'opencode-zen' with an absent llm → warn+skip; the new path
+        // returns early — a skip vs a warn-skip, behavior-neutral (documented).
+        const configuredProviders = new Set<string>()
         for (const department of org.org?.departments ?? []) {
           const c = department.coordinator
           if (c?.agentOptions?.provider) configuredProviders.add(c.agentOptions.provider)
@@ -561,10 +605,8 @@ export function apply(ctx: Context, config: PoolerConfig = {}) {
           if (findings.length === 0) return
           if (Date.now() >= deadline) {
             for (const finding of findings) {
-              const appendPostError = bound.appendPostError
-              if (appendPostError === undefined) {
-                throw new Error('[deepartments] provider-adapter boot check: no post-error append closure — the bundle must register ctx.get("deepartments.binder").register({ pooler: { appendPostError } }) (DECOUPLING)')
-              }
+              // 1C: the POST-ERROR APPEND is the DIRECT dshd-health import —
+              // never a missing closure (the old binder fail-loud is gone).
               await appendPostError(stateDir, { ts: Date.now(), postId: finding.postId, error: finding.error })
             }
             ctx.logger.warn(`[deepartments] provider-adapter boot check: ${findings.length} finding(s) → ${findings.map((f) => f.error).join('; ')}`)

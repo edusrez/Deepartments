@@ -3299,6 +3299,11 @@ export function applyInvoke(ctx: Context, config: Config) {
           missionQueue?: Iterable<MissionQueueInput>
           hostWaits?: Iterable<HostWaitPostInput>
           deliveryRowsReader?: unknown
+          // LANE 0.2.1 (1C — health bucket ELIMINADO): the static per-process
+          // paths the `health` Binder bucket used to carry now flow EXPLICITLY
+          // per tick (the package derives the rest itself).
+          poolerStatePath?: string
+          workRegisterPath?: string
           // LANE 2 (fb-27): the turn/end-error HEAD notification closure
           // (widened cast — the `deliveryRowsReader` pattern; NOT added to
           // HealthBinderDeps, keeping the binder-contract intact).
@@ -3364,6 +3369,17 @@ export function applyInvoke(ctx: Context, config: Config) {
             hostWaits: buildHostWaits(),
             // C6: the bounded tail reader (absent → the legacy full read).
             deliveryRowsReader: deliveryRowsTailReader,
+            // LANE 0.2.1 (1C — health bucket ELIMINADO): the STATIC per-process
+            // paths + the bind that used to flow through the `health` Binder
+            // bucket now pass EXPLICITLY like the inline fallback below (3409/
+            // 3439-3441) — the package derives the REST itself (kbobs → its own
+            // config row, notifyHost → the composed bus+deliver fallback,
+            // bootId → its per-apply randomUUID; qiDirectiveRate → the
+            // deepartments.healthDeps holder, untouched this lane).
+            poolerStatePath: healthPoolerStatePath,
+            workRegisterPath: healthConfig?.workRegisterPath !== undefined && healthConfig.workRegisterPath.trim() !== ''
+              ? healthConfig.workRegisterPath
+              : path.join(repoRoot, 'docs', 'WORK-REGISTER.md'),
             // LANE 2 (fb-27): the turn/end-error HEAD notification closure.
             notifyHead: healthNotifyHead
           })
