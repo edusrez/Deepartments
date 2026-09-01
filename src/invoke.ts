@@ -2919,6 +2919,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     buildSessionContexts,
     buildHostWaits,
     healthNotifyHost,
+    healthNotifyHead,
     healthPoolerStatePath,
     healthBootId,
     guiEndpointDeps
@@ -3298,6 +3299,10 @@ export function applyInvoke(ctx: Context, config: Config) {
           missionQueue?: Iterable<MissionQueueInput>
           hostWaits?: Iterable<HostWaitPostInput>
           deliveryRowsReader?: unknown
+          // LANE 2 (fb-27): the turn/end-error HEAD notification closure
+          // (widened cast — the `deliveryRowsReader` pattern; NOT added to
+          // HealthBinderDeps, keeping the binder-contract intact).
+          notifyHead?: unknown
         }): Promise<void> }
       | undefined
     ctx.effect(() => {
@@ -3347,7 +3352,9 @@ export function applyInvoke(ctx: Context, config: Config) {
             // scan — resolved lazily per tick.
             hostWaits: buildHostWaits(),
             // C6: the bounded tail reader (absent → the legacy full read).
-            deliveryRowsReader: deliveryRowsTailReader
+            deliveryRowsReader: deliveryRowsTailReader,
+            // LANE 2 (fb-27): the turn/end-error HEAD notification closure.
+            notifyHead: healthNotifyHead
           })
         } else {
           void runHealthDaemonTick({
@@ -3406,6 +3413,11 @@ export function applyInvoke(ctx: Context, config: Config) {
             // written for an ALERT → scanDeliveryFindings can never re-alert an
             // ALERT (the alert→delivery-failed→alert loop is impossible).
             notifyHost: healthNotifyHost,
+            // LANE 2 (fb-27): the turn/end-error HEAD notification closure
+            // (delivers `[From deepartments] Turn-error <cls> …` to the post's
+            // own head via store.append + busDeliverToPost — the daemon→head
+            // pattern, direct like the notifyHost ALERT).
+            notifyHead: healthNotifyHead,
             // PACING (owner m-PACING, 2026-08-28): the repo WORK-REGISTER path —
             // read at a VALLE transition for the «reanuda; despachos diferidos:
             // N» count (best-effort; unreadable → the notice omits the count).

@@ -32,7 +32,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey, scanMainRed, MAIN_RED_DEFAULT_POLL_MS, MAIN_RED_KEY_PREFIX, mainRedKey, MAIN_RED_STATE_FILE, readMainRedState, writeMainRedState, MAIN_RED_DEFAULT_LOCKS, buildMainRedState, scanMissionQueue, MISSION_QUEUE_DEFAULT_LIMIT, MISSION_QUEUE_DEFAULT_PERSIST_MS, MISSION_QUEUE_KEY_PREFIX, missionQueueKey, MISSION_QUEUE_STATE_FILE, readMissionQueueState, writeMissionQueueState, RESTART_REGISTRY_FILE, RESTART_REGISTRY_SEED_ROWS, readRestartRegistry, seedRestartRegistry, reconcileRestartRegistry, buildRestartDigest, CAPACITY_GATE_STATE_FILE, CAPACITY_GATE_TRANSITION_KEY, capacityGateDedupeKey, readCapacityGateState, writeCapacityGateState, buildCapacityGateFrame } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey, scanMainRed, MAIN_RED_DEFAULT_POLL_MS, MAIN_RED_KEY_PREFIX, mainRedKey, MAIN_RED_STATE_FILE, readMainRedState, writeMainRedState, MAIN_RED_DEFAULT_LOCKS, buildMainRedState, scanMissionQueue, MISSION_QUEUE_DEFAULT_LIMIT, MISSION_QUEUE_DEFAULT_PERSIST_MS, MISSION_QUEUE_KEY_PREFIX, missionQueueKey, MISSION_QUEUE_STATE_FILE, readMissionQueueState, writeMissionQueueState, RESTART_REGISTRY_FILE, RESTART_REGISTRY_SEED_ROWS, readRestartRegistry, seedRestartRegistry, reconcileRestartRegistry, buildRestartDigest, CAPACITY_GATE_STATE_FILE, CAPACITY_GATE_TRANSITION_KEY, capacityGateDedupeKey, readCapacityGateState, writeCapacityGateState, buildCapacityGateFrame, turnErrorNotifyClass, buildTurnErrorNotifyFrame, readTurnEndNotifyState, writeTurnEndNotifyState, TURN_END_NOTIFY_STATE_FILE } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
@@ -14218,6 +14218,133 @@ test('W8-c PART 4 config knobs: an individual safeguard enabled:false → that s
     await tick({ stateDir, org: { departments: [] }, health: { turnErrorCaptureEnabled: false } }, turnErr)
     assert.equal(alerts.length, 0, 'turn-error off → NO alert')
     assert.deepEqual(readPostErrorsFile(stateDir), [], 'turn-error off → NO post-error row recorded')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// LANE 2 (fb-27, QD ALTO/mejora, 2026-09-01) — TURN/END-ERROR HEAD NOTIFICATION.
+// The health daemon notifies the POST'S OWN HEAD of a FRESH turn/end error with
+// the session+turn provenance, deduped by post+turn via its own ledger
+// (turn-end-notify-state.json), independent of the capture gate (the notify
+// fires even when the post-error capture is off). Gateable; the notifyHead dep
+// absent → conservative no-op; only a capture with BOTH sessionId AND turn is
+// notified (fb-25).
+// ---------------------------------------------------------------------------
+
+test('LANE 2 (fb-27): a FRESH turn/end ERROR on a live post → the head notification fires ONCE with the session+turn provenance (the frame names post/session/turn/class + UTC time); a capture WITHOUT a sessionId or turn is NOT notified (fb-25)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 9, 30, 0).getTime()
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const notified = []
+    const tick = (posts) => runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-lane2-1',
+      config: { stateDir, org: { departments: [] } },
+      hosts,
+      posts,
+      notifyHost: async () => {},
+      notifyHead: async (postId, frame) => { notified.push({ postId, frame }) },
+      logger: { warn: () => {} }
+    })
+    // (a) a provider-class error (OpenAI/upstream) WITH sessionId+turn → notified.
+    const providerErr = [{ postId: 'worker-p', retired: false, sessionId: 'sess-9', events: [{ type: 'turn/end', time: T0 - 30_000, data: { turn: 3, reason: { kind: 'error', error: { message: 'provider "openai" refused the model request' } } } }], inboxTs: [] }]
+    await tick(providerErr)
+    assert.equal(notified.length, 1, 'a provider-class error with sessionId+turn is notified once')
+    assert.equal(notified[0].postId, 'worker-p', 'the notification is addressed to the errored post (the head is resolved by the bundle closure)')
+    assert.match(notified[0].frame, /^\[From deepartments\] Turn-error provider: post worker-p session sess-9 turn 3 \(\d{2}:\d{2}Z\) — provider "openai" refused the model request/, 'the frame is the buildTurnErrorNotifyFrame text with post+session+turn+class+UTC time')
+    assert.equal(readTurnEndNotifyState(stateDir)['worker-p:3'], T0, 'the post+turn notification is recorded in turn-end-notify-state.json')
+    // (b) a capture WITHOUT a sessionId → NOT notified (fb-25 mandatory provenance).
+    const noSession = [{ postId: 'worker-q', retired: false, events: [{ type: 'turn/end', time: T0 - 30_000, data: { turn: 1, reason: { kind: 'error', error: { message: 'provider "openai" refused the model request' } } } }], inboxTs: [] }]
+    const before = notified.length
+    await tick(noSession)
+    assert.equal(notified.length, before, 'a capture WITHOUT a sessionId is NOT notified (fb-25)')
+    assert.equal(readTurnEndNotifyState(stateDir)['worker-q:1'], undefined, 'a no-session capture writes NO notify ledger entry')
+    // (c) a capture WITHOUT a turn → NOT notified.
+    const noTurn = [{ postId: 'worker-r', retired: false, sessionId: 'sess-r', events: [{ type: 'turn/end', time: T0 - 30_000, data: { reason: { kind: 'error', error: { message: 'provider "openai" refused the model request' } } } }], inboxTs: [] }]
+    const before2 = notified.length
+    await tick(noTurn)
+    assert.equal(notified.length, before2, 'a capture WITHOUT a turn is NOT notified (fb-25)')
+  })
+})
+
+test('LANE 2 (fb-27): a NORMAL (non-error) turn/end → NO head notification (a clean completion is not a false alarm)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 9, 30, 0).getTime()
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const notified = []
+    const tick = (posts) => runHealthDaemonTick({
+      now: () => T0, stateDir, bootId: 'boot-lane2-2', config: { stateDir, org: { departments: [] } },
+      hosts, posts, notifyHost: async () => {},
+      notifyHead: async (postId, frame) => { notified.push({ postId, frame }) },
+      logger: { warn: () => {} }
+    })
+    const benign = [{ postId: 'worker-n', retired: false, sessionId: 'sess-n', events: [{ type: 'turn/end', time: T0 - 30_000, data: { turn: 1, reason: { kind: 'ok' } } }], inboxTs: [] }]
+    await tick(benign)
+    assert.equal(notified.length, 0, 'a NORMAL turn/end is NOT notified')
+    assert.deepEqual(readTurnEndNotifyState(stateDir), {}, 'a clean turn writes NO notify ledger entry')
+  })
+})
+
+test('LANE 2 (fb-27): the notifyHead dep ABSENT → conservative no-op (a fresh turn-error is NOT notified and the tick never throws); the CONFIG class (no provider) is never notified even WITH the dep', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 9, 30, 0).getTime()
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    // (a) NO notifyHead dep → the tick must not throw and must write NO ledger.
+    const providerErr = [{ postId: 'worker-p', retired: false, sessionId: 'sess-9', events: [{ type: 'turn/end', time: T0 - 30_000, data: { turn: 3, reason: { kind: 'error', error: { message: 'provider "openai" refused the model request' } } } }], inboxTs: [] }]
+    await runHealthDaemonTick({
+      now: () => T0, stateDir, bootId: 'boot-lane2-3', config: { stateDir, org: { departments: [] } },
+      hosts, posts: providerErr, notifyHost: async () => {}, logger: { warn: () => {} }
+    })
+    assert.deepEqual(readTurnEndNotifyState(stateDir), {}, 'the notifyHead-absent tick is a conservative no-op (no ledger)')
+    // (b) the CONFIG class (no provider) is NOT notified even WITH the dep.
+    const configErr = [{ postId: 'worker-c', retired: false, sessionId: 'sess-c', events: [{ type: 'turn/end', time: T0 - 30_000, data: { turn: 1, reason: { kind: 'error', error: { message: 'no provider registered for model "x"' } } } }], inboxTs: [] }]
+    const withDep = []
+    await runHealthDaemonTick({
+      now: () => T0, stateDir, bootId: 'boot-lane2-3b', config: { stateDir, org: { departments: [] } },
+      hosts, posts: configErr, notifyHost: async () => {},
+      notifyHead: async (postId, frame) => { withDep.push({ postId, frame }) }, logger: { warn: () => {} }
+    })
+    assert.equal(withDep.length, 0, 'a CONFIG-class error (no provider) is NOT notified')
+    assert.equal(readTurnEndNotifyState(stateDir)['worker-c:1'], undefined, 'a CONFIG-class error writes NO notify ledger entry')
+  })
+})
+
+test('LANE 2 (fb-27): dedupe by post+turn — the SAME errored turn is notified ONCE, not twice (a second tick inside the fresh window does NOT re-notify); a DIFFERENT turn of the same post IS notified', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 9, 30, 0).getTime()
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const notified = []
+    const tick = (posts) => runHealthDaemonTick({
+      now: () => T0, stateDir, bootId: 'boot-lane2-4', config: { stateDir, org: { departments: [] } },
+      hosts, posts, notifyHost: async () => {},
+      notifyHead: async (postId, frame) => { notified.push({ postId, frame }) }, logger: { warn: () => {} }
+    })
+    const providerErr = [{ postId: 'worker-p', retired: false, sessionId: 'sess-9', events: [{ type: 'turn/end', time: T0 - 30_000, data: { turn: 3, reason: { kind: 'error', error: { message: 'provider "openai" refused the model request' } } } }], inboxTs: [] }]
+    await tick(providerErr)
+    assert.equal(notified.length, 1, 'the FIRST tick notifies once')
+    await tick(providerErr)
+    assert.equal(notified.length, 1, 'a SECOND tick inside the fresh window does NOT re-notify the same post+turn')
+    const turn4 = [{ postId: 'worker-p', retired: false, sessionId: 'sess-9', events: [{ type: 'turn/end', time: T0 - 60_000, data: { turn: 4, reason: { kind: 'error', error: { message: 'provider "openai" refused the model request' } } } }], inboxTs: [] }]
+    await tick(turn4)
+    assert.equal(notified.length, 2, 'a DIFFERENT turn of the same post IS notified (dedupe is per post+turn)')
+  })
+})
+
+test('LANE 2 (fb-27): the gate OFF (turnEndErrorNotifyEnabled:false) → a notifiable turn-error is NOT notified (nothing fires, no ledger)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 9, 30, 0).getTime()
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const notified = []
+    const tick = (posts) => runHealthDaemonTick({
+      now: () => T0, stateDir, bootId: 'boot-lane2-5', config: { stateDir, org: { departments: [] }, health: { turnEndErrorNotifyEnabled: false } },
+      hosts, posts, notifyHost: async () => {},
+      notifyHead: async (postId, frame) => { notified.push({ postId, frame }) }, logger: { warn: () => {} }
+    })
+    const providerErr = [{ postId: 'worker-p', retired: false, sessionId: 'sess-9', events: [{ type: 'turn/end', time: T0 - 30_000, data: { turn: 3, reason: { kind: 'error', error: { message: 'provider "openai" refused the model request' } } } }], inboxTs: [] }]
+    await tick(providerErr)
+    assert.equal(notified.length, 0, 'the gate off → NO head notification')
+    assert.deepEqual(readTurnEndNotifyState(stateDir), {}, 'the gate off → NO notify ledger entry')
   })
 })
 

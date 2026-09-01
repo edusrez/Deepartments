@@ -658,6 +658,10 @@ export interface ToolsSurface {
   buildSessionContexts: () => SessionContextInput[] | undefined
   buildHostWaits: () => HostWaitPostInput[]
   healthNotifyHost: (hostEntry: HostEntryLike, alertFrame: string) => Promise<void>
+  /** LANE 2 (fb-27) — the turn/end-error HEAD NOTIFICATION closure (the daemon
+   * tick's `notifyHead` dep): deliver the framed `[From deepartments] Turn-error
+   * <cls> …` to the post's OWN head (store.append + busDeliverToPost). */
+  healthNotifyHead: (postId: string, frame: string) => Promise<void>
   healthPoolerStatePath: string
   healthBootId: string
   /** The DEEPARTMENTS RPC-channel endpoint deps (the webServer mount's
@@ -4903,6 +4907,35 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     globalHeadRotate()
   }, 'deepartments: host-plane tools')
 
+  // LANE 2 (fb-27, QD ALTO/mejora) — the turn/end-ERROR HEAD NOTIFICATION
+  // closure the health daemon tick's `notifyHead` dep calls. Resolves the POST'S
+  // OWN HEAD (a worker's creator `managerId`, or its department coordinator)
+  // and delivers `[From deepartments] Turn-error <cls> …` to it via
+  // store.append + busDeliverToPost — the daemon→head pattern (delivery.ts:1171),
+  // NOT deliverDaemonNotice (which respects sleepEpoch='queued' and belongs to
+  // the scheduler/parallel paths). An unresolved head → conservative no-op
+  // (never fabricated). NEVER throws. (Defined OUTSIDE the frozen CUT-4 zone so
+  // the tools-factory byte-identical md5 lock is untouched.)
+  const healthNotifyHead = async (postId: string, frame: string): Promise<void> => {
+    try {
+      const entry = byPost.get(postId)
+      if (entry === void 0) return
+      let headId = entry.managerId
+      if (headId === void 0 || headId === '' || !byPost.has(headId)) {
+        const department = departmentForEntry(entry)
+        headId = department?.coordinator?.postId
+      }
+      if (headId === void 0 || headId === '' || !byPost.has(headId)) return
+      const headEntry = byPost.get(headId)
+      if (headEntry === void 0) return
+      const store = await messagesStoreReady
+      const record = await store.append({ from: 'deepartments', to: [headId], text: frame, kind: 'agent' })
+      await busDeliverToPost(headEntry, frame, record, void 0)
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] system-health: turn-error head notification for "${postId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
 // =========================================================================
   // SURFACE RETURN — the members the rest of applyInvoke consumes at the SAME
   // positions as before the extraction. SUB-BATCH 1 exposes the registry
@@ -4939,6 +4972,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     buildSessionContexts,
     buildHostWaits,
     healthNotifyHost,
+    healthNotifyHead,
     healthPoolerStatePath,
     healthBootId,
     guiEndpointDeps

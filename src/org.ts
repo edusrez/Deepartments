@@ -93,6 +93,12 @@ export interface HealthConfig {
    * an error is NOT recorded into post-errors.jsonl (no turn-error alert class).
    * Absent → enabled (default true). */
   turnErrorCaptureEnabled?: boolean
+  /** LANE 2 (fb-27, QD ALTO/mejora) — when explicitly false, a FRESH turn/end
+   * error in a live post's session log is NOT notified to the post's OWN head
+   * (no head turn-error notification; INDEPENDENT of `turnErrorCaptureEnabled` —
+   * the head is alarmed even when the capture into post-errors.jsonl is off).
+   * Absent → enabled (default true). */
+  turnEndErrorNotifyEnabled?: boolean
   /** W8-c PART 2 — when explicitly false, the stale-live watchdog is NOT run (a
    * catalog-live post with pending addressed messages and no session writes for
    * `staleLiveMinutes` is NOT flagged/alerts). Absent → enabled (default true). */
@@ -643,6 +649,9 @@ export const Config: z<any, any> = z.object({
     enabled: z.boolean(),
     intervalMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
     turnErrorCaptureEnabled: z.boolean(),
+    // LANE 2 (fb-27) — the turn-end head-notify gate (default(void 0) → absent =
+    // code default-on, the same section contract).
+    turnEndErrorNotifyEnabled: z.boolean(),
     staleLiveWatchdogEnabled: z.boolean(),
     staleLiveMinutes: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
     presetAuditEnabled: z.boolean(),
@@ -694,6 +703,7 @@ export const Config: z<any, any> = z.object({
     enabled: boolean
     intervalMs: number
     turnErrorCaptureEnabled: boolean
+    turnEndErrorNotifyEnabled: boolean
     staleLiveWatchdogEnabled: boolean
     staleLiveMinutes: number
     presetAuditEnabled: boolean

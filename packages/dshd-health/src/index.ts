@@ -1307,6 +1307,104 @@ export async function writeTurnErrorsState(stateDir: string, state: TurnErrorsSt
   await writeFile(path.join(stateDir, TURN_ERRORS_STATE_FILE), JSON.stringify(state), 'utf8')
 }
 
+// ---------------------------------------------------------------------------
+// LANE 2 (fb-27, QD ALTO/mejora, 2026-09-01) — TURN/END-ERROR HEAD NOTIFICATION.
+// A FRESH turn/end ERROR in a live post's session event log is notified to the
+// POST'S OWN HEAD (its creator `managerId`, or its department coordinator)
+// with the session+turn provenance, deduped via its OWN ledger
+// `turn-end-notify-state.json` keyed `postId:turn` (INDEPENDENT of the capture
+// ledger — a head is alarmed even when `turnErrorCaptureEnabled` is off; the
+// capture records into post-errors.jsonl, the notification pages the head).
+// The classification is PURE (turnErrorNotifyClass); the frame is PURE
+// (buildTurnErrorNotifyFrame); the notify block lives in the daemon tick
+// (right after the capture block) and DELIVERS via the `notifyHead` dep — the
+// bundle's `healthNotifyHead` closure (store.append + busDeliverToPost, the
+// daemon→head pattern) — NOT `deliverDaemonNotice` (which respects
+// sleepEpoch='queued' and belongs to the scheduler/parallel paths).
+// ---------------------------------------------------------------------------
+
+/** LANE 2 — the turn/end-error NOTIFICATION class. `turnErrorNotifyClass`
+ * returns one of the NOTIFIED classes, or `undefined` (the CONFIG class and any
+ * unclassifiable error are NEVER notified — the conservative direction: a head
+ * is only paged for a recognized actionable turn/end failure). */
+export type TurnErrorNotifyClass =
+  | 'config'
+  | 'stream-idle'
+  | 'http-5xx'
+  | '429'
+  | '40x'
+  | 'provider'
+  | 'rate-limit'
+
+/** PURE — classify a turn/end-error message for HEAD NOTIFICATION. The CONFIG
+ * class (no adapter / no provider / no model / malformed — a
+ * wiring/dependency fault, not a turn outage to page the head about) and any
+ * unclassifiable error return `undefined` → NOT notified. The recognized
+ * classes (stream-idle / http-5xx / 429 / 40x / provider / rate-limit) are
+ * matched with a DETERMINISTIC precedence: config excluded first, then the
+ * specific code/symptom classes (stream-idle, http 5xx, 429, other 4xx,
+ * rate-limit) before the GENERIC provider/upstream/model class. Pure, never
+ * throws (a non-string input degrades to undefined). */
+export function turnErrorNotifyClass(error: unknown): Exclude<TurnErrorNotifyClass, 'config'> | undefined {
+  const message = typeof error === 'string' ? error : (error instanceof Error ? error.message : String(error ?? ''))
+  // CONFIG class — NEVER notified (a no-adapter/no-provider/no-model/malformed
+  // error is a configuration/dependency fault, not a turn outage to page for).
+  if (/no adapter|adapter.*(not found|missing|unregistered)|unknown adapter|no provider|provider.*(missing|not found|unregistered)|unknown provider|no model|model.*(missing|not found)|malformed|invalid config|not configured|misconfig/i.test(message)) return undefined
+  // stream-idle — a turn that received NO tokens within the stream idle window.
+  if (/stream.?idle|idle timeout|stream.*(empty|closed|timed? ?out|disconnect)|no (tokens?|chunks?|response|output) received|stream.*no output/i.test(message)) return 'stream-idle'
+  // http-5xx — an upstream server-class failure (502/503/504/bad-gateway/...).
+  if (/\b(50[0-9]|51[0-9]|52[0-9])\b|bad gateway|service unavailable|internal server error|upstream.*(error|fail)|gateway timeout|server error|5\d\d/i.test(message)) return 'http-5xx'
+  // 429 — the explicit HTTP 429 too-many-requests class (rate-limited).
+  if (/\b429\b|too many requests?/i.test(message)) return '429'
+  // 40x — any other HTTP client-class failure (400/401/403/404/422/...).
+  if (/\b(400|401|402|403|404|405|406|408|409|413|415|422|429)\b|client error|unauthorized|forbidden|not found|invalid request|bad request|auth(entication|orization).*(failed|error)|4\d\d/i.test(message)) return '40x'
+  // rate-limit — a provider-level quota/rate-limit symptom NOT carrying the 429 code.
+  if (/quota|rate.?limit|usage.?limit|go.?usage.?limit|resource.*exhausted|request.*limit|throttl|rate limited|limit exceeded|exceeded.*(quota|limit)|insufficient.*(quota|balance|credit)/i.test(message)) return 'rate-limit'
+  // provider — a GENERIC provider/upstream/model API failure not matched above.
+  if (/provider|upstream|llm|openai|anthropic|azure|vertex|gemini|cohere|mistral|api error|model/i.test(message)) return 'provider'
+  return undefined
+}
+
+/** PURE — build the turn/end-error HEAD-NOTIFICATION frame (the daemon→head
+ * bus message text): `[From deepartments] Turn-error <cls>: post <postId>
+ * session <sessionId> turn <turn> (<HH:MMZ>) — <error>`. The HH:MMZ is the
+ * capture ts rendered in UTC (zero-padded). Pure, never throws (a missing
+ * field degrades to '?'). */
+export function buildTurnErrorNotifyFrame(capture: TurnErrorCapture, cls: string): string {
+  const d = new Date(capture.ts)
+  const hh = String(d.getUTCHours()).padStart(2, '0')
+  const mm = String(d.getUTCMinutes()).padStart(2, '0')
+  return `[From deepartments] Turn-error ${cls}: post ${capture.postId} session ${capture.sessionId ?? '?'} turn ${capture.turn ?? '?'} (${hh}:${mm}Z) — ${capture.error}`
+}
+
+/** LANE 2 — the dedupe ledger of turn/end-error HEAD NOTIFICATION:
+ * `postId:turn` → lastNotifiedAtMs. INDEPENDENT of the capture ledger — a
+ * post+turn is notified at most once per window even when the capture is off. */
+export type TurnEndNotifyState = Record<string, number>
+
+export const TURN_END_NOTIFY_STATE_FILE = 'turn-end-notify-state.json'
+
+/** Read `<stateDir>/turn-end-notify-state.json` → `{ [postId:turn]:
+ * lastNotifiedAtMs }`. Absent / unreadable / malformed → {} (never throws). */
+export function readTurnEndNotifyState(stateDir: string): TurnEndNotifyState {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, TURN_END_NOTIFY_STATE_FILE), 'utf8')) as Record<string, unknown>
+    const out: TurnEndNotifyState = {}
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === 'number' && Number.isFinite(value)) out[key] = value
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/turn-end-notify-state.json` (mkdir -p the dir, then the file). */
+export async function writeTurnEndNotifyState(stateDir: string, state: TurnEndNotifyState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, TURN_END_NOTIFY_STATE_FILE)), { recursive: true })
+  await writeFile(path.join(stateDir, TURN_END_NOTIFY_STATE_FILE), JSON.stringify(state), 'utf8')
+}
+
 /** W8-c PART 3 — the config-preset finding markers file. */
 export const CONFIG_PRESETS_FILE = 'config-presets.jsonl'
 
@@ -1899,6 +1997,17 @@ export interface HealthConfigLike {
   health?: {
     /** W8-c PART 1 — turn-error capture (default ON; an explicit false disables). */
     turnErrorCaptureEnabled?: boolean
+    /** LANE 2 (fb-27, QD ALTO/mejora) — turn/end-ERROR HEAD NOTIFICATION
+     * (default ON; an explicit false disables — no head notification is
+     * emitted). A FRESH turn/end error in a live post's session event log is
+     * notified to the POST'S OWN HEAD (its creator `managerId`, or its
+     * department coordinator) with the session+turn provenance, deduped via its
+     * OWN ledger `turn-end-notify-state.json` keyed `postId:turn` — INDEPENDENT
+     * of `turnErrorCaptureEnabled` (which records into post-errors.jsonl), so a
+     * head is alarmed even when the capture is off. Only a capture with BOTH a
+     * sessionId AND a turn is notified (fb-25 mandatory provenance); the
+     * `notifyHead` dep absent → conservative no-op (R6). */
+    turnEndErrorNotifyEnabled?: boolean
     /** W8-c PART 2 — stale-live watchdog (default ON; explicit false disables). */
     staleLiveWatchdogEnabled?: boolean
     /** W8-c PART 2 — the staleness threshold in minutes (default 10). */
@@ -2160,6 +2269,14 @@ export interface HealthDaemonDeps {
    * messagesStoreReady.append + busDeliverToHost; tests: a recording stub).
    * NEVER throws. */
   notifyHost(hostEntry: HostEntryLike, alertFrame: string): Promise<void>
+  /** LANE 2 (fb-27) — deliver the framed turn/end-error NOTIFICATION to the
+   * POST'S OWN HEAD (production: the bundle's `healthNotifyHead` closure —
+   * resolves the head via the post's creator `managerId` / department
+   * coordinator and store.append + busDeliverToPost, the daemon→head pattern;
+   * hermetic tests: a recording stub). ABSENT (undefined) → the turn-end-notify
+   * block is a CONSERVATIVE NO-OP (the legacy behavior, R6 — an unresolved
+   * wiring never fabricates a head notification). NEVER throws. */
+  notifyHead?: (postId: string, frame: string) => Promise<void>
   /** PACING (owner m-PACING, 2026-08-28) — the absolute path of the repo's
    * WORK-REGISTER.md (docs/WORK-REGISTER.md in the bundle wiring), read ONLY
    * at a VALLE transition for the «reanuda; despachos diferidos: N» count.
@@ -4080,6 +4197,9 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // W8-c per-safeguard knobs (default-on).
     const health = deps.config?.health
     const turnErrorCaptureEnabled = health?.turnErrorCaptureEnabled !== false
+    // LANE 2 (fb-27) — the turn/end-error HEAD-NOTIFICATION gate (default ON;
+    // an explicit false disables; INDEPENDENT of the capture gate).
+    const turnEndErrorNotifyEnabled = health?.turnEndErrorNotifyEnabled !== false
     const staleLiveWatchdogEnabled = health?.staleLiveWatchdogEnabled !== false
     const presetAuditEnabled = health?.presetAuditEnabled !== false
     const staleLiveMinutes =
@@ -4211,6 +4331,44 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         if (changed) await writeTurnErrorsState(deps.stateDir, captureState)
       } catch (error: unknown) {
         deps.logger?.warn(`[deepartments] system-health: turn-error capture failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    // LANE 2 (fb-27) — TURN/END-ERROR HEAD NOTIFICATION: a FRESH turn/end
+    // ERROR in a live post's session event log is notified to the POST'S OWN
+    // HEAD (via the `notifyHead` dep — the bundle's `healthNotifyHead` closure:
+    // store.append + busDeliverToPost, the daemon→head pattern; NEVER
+    // `deliverDaemonNotice` — that respects sleepEpoch='queued' and belongs to
+    // the scheduler/parallel paths). Deduped via its OWN ledger
+    // `turn-end-notify-state.json` keyed `postId:turn` — INDEPENDENT of the
+    // capture ledger, so a head is alarmed even when `turnErrorCaptureEnabled`
+    // is off. Only a capture with BOTH sessionId AND turn is notified (fb-25
+    // mandatory provenance); the `notifyHead` dep ABSENT → conservative no-op;
+    // the gate off → nothing. NEVER throws.
+    if (turnEndErrorNotifyEnabled && deps.notifyHead !== undefined) {
+      try {
+        const notifyState = readTurnEndNotifyState(deps.stateDir)
+        let changed = false
+        for (const post of posts) {
+          if (post.retired === true) continue
+          const capture = scanTurnErrorCaptures(post.events ?? [], post.postId, post.sessionId)
+          if (capture === undefined) continue
+          // Only a capture with BOTH sessionId AND turn is notified (fb-25).
+          if (capture.sessionId === undefined || capture.turn === undefined) continue
+          const cls = turnErrorNotifyClass(capture.error)
+          if (cls === undefined) continue
+          // A post+turn already notified (and still fresh) is not re-notified.
+          const lastNotified = notifyState[`${capture.postId}:${capture.turn}`]
+          if (lastNotified !== undefined && nowMs - lastNotified < TURN_ERROR_FRESH_WINDOW_MS) continue
+          // Only a FRESH error (<= the turn-error window) is notified now.
+          if (nowMs - capture.ts > TURN_ERROR_FRESH_WINDOW_MS) continue
+          const frame = buildTurnErrorNotifyFrame(capture, cls)
+          await deps.notifyHead(capture.postId, frame)
+          notifyState[`${capture.postId}:${capture.turn}`] = nowMs
+          changed = true
+        }
+        if (changed) await writeTurnEndNotifyState(deps.stateDir, notifyState)
+      } catch (error: unknown) {
+        deps.logger?.warn(`[deepartments] system-health: turn-end head-notify failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     // M1 (b) — the qi-silence watchdog: maintain the retirement ledger
@@ -4832,6 +4990,12 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
         poolerStatePath: explicit.poolerStatePath ?? bound.poolerStatePath,
         qiDirectiveRate: explicit.qiDirectiveRate ?? bound.qiDirectiveRate,
         notifyHost,
+        // LANE 2 (fb-27): the turn/end-error HEAD notification closure flows
+        // through the EXPLICIT per-tick deps (the bundle's `healthNotifyHead` —
+        // the widened-cast `deliveryRowsReader` pattern; the `notifyHead` is NOT
+        // added to HealthBinderDeps, keeping the binder-contract intact). Absent
+        // → the turn-end-notify block is a conservative no-op (tick contract).
+        notifyHead: explicit.notifyHead,
         workRegisterPath: explicit.workRegisterPath ?? bound.workRegisterPath,
         logger: ctx.logger
       })
