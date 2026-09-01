@@ -113,6 +113,12 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   sistema totalmente modular, gap assessment de nuestro estado); el exit-
   criterion de la misión será la definición del RD; tras ella: fase 0.2.x
   (applyInvoke residual, bridges, provide hito 4).
+- **CANDIDATO runtime/IPD (proceso, QD observación 09-01) — anclaje del muestreo
+  D-Q2**: la cadena recursiva se autogenera (cada inspector retirado cae en el
+  sample 25% de otro inspector QD — 5 curas hoy, 0.25^k decae pero autoconsume
+  muestras del QD); candidatos: (a) tope de profundidad (no muestrear inspector
+  cuyo padre inmediato fue QD) o (b) muestreo dirigido a workers NO-QD tras N
+  niveles. Post-DAG (junto a mejoras de sistema; diseño de pipeline calidad).
 - **fb-2/fb-3 QD — AGENDADAS** (render dept_sleep en sleep EXITOSO + latencia
   noWake a cabezas dormidas — cola QD, sin ejecutar).
 - **F3 — barrido sesiones worker huérfanas** (Dx1 F3; backlog 0.2.x) ·
