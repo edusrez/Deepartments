@@ -111,11 +111,14 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   **P1-P8 ACEPTADO** (definición RD reports/researcher/2026-09-01-cordis-total-
   modularity.md) + **AMPLIACIÓN owner: CADA DEPARTAMENTO = plugin propio
   (dshd-<dept>)** — departamentos como unidades composables/desechables
-  (autoescalable/mejorable). Gap hoy ~2-3/8. Receta 0.2.x → 6-7/8 (binder→
-  Service · applyInvoke→fábricas+políticas · colapsar doble-mirror +
-  normalizar híbridos) → IPD vía programming request tras el DAG actual/
-  bloque B (disciplina no saturar); dept-as-plugin = siguiente nivel
-  (post-6/7-8). Exit-criterion = P1-P8 medibles + P7 a nivel departamento.
+  (autoescalable/mejorable). **TERMÓMETRO: 09-01 lane 0.2.1 (0dbf... — 81ef5cd):
+  P6 NO→SÍ-PARCIAL (~3-4/8 global; tester P6 6 tests + R1 exacto; P1 intacto;
+  P3/P4/P8 mejoran)**. Receta 0.2.x: 0.2.1 ✓ (81ef5cd) → 0.2.2 (applyInvoke→
+  fábricas-Services + políticas P4 — briefing del IPD) → 0.2.3 (colapsar
+  doble-mirror + híbridos; incl. R4 provider→org config, IQ: jobs→spawn-
+  Service, gui split, R5 qiDirectiveRate política, register legacy eliminado)
+  → 6-7/8 → dept-as-plugin (cierre post-6-7-8). Exit-criterion = P1-P8 medibles
+  + P7 a nivel departamento.
 - **CANDIDATO runtime/IPD (proceso, QD observación 09-01) — anclaje del muestreo
   D-Q2**: la cadena recursiva se autogenera (cada inspector retirado cae en el
   sample 25% de otro inspector QD — 5 curas hoy, 0.25^k decae pero autoconsume
