@@ -19794,3 +19794,106 @@ test('B5-GHOST zero regression: a worker with a USABLE session (a resumable dura
     }
   })
 })
+
+// --- fb-28 (QD MEDIO, WORK-REGISTER §5 / D-Q6): REPORT-RUN TOKEN per spawn ---
+// The worker derives its report path from `{{reportDir}}/<role>/<YYYY-MM-DD>-<slug>.md`.
+// When the SAME slug (postId) is reused across deployments (retire → respawn, a
+// re-deployed/resumed session, or the same task/analysis slug run twice — the
+// q-i-13/q-i-33 builder-5 collision), the previous deployment's report would be
+// OVERWRITTEN on the same date. The fix injects a UNIQUE per-spawn
+// REPORT-RUN TOKEN (minted in spawn.ts, threaded workerSetup → postSetup →
+// installRoleSection) so the worker ALWAYS names its report
+// `<YYYY-MM-DD>-<slug>-<token>.md` — paths are disjoint between ANY two
+// deployments, closing fb-28 without touching the report-convention presets.
+
+/** Extract the fb-28 report-run token from a spawned worker's role section, or
+ * undefined when absent. Returns { token, roleText } when the directive landed. */
+async function fb28WorkerToken(worker) {
+  const section = await findPromptSection(worker.ctx, worker.key, `deepartments:worker:role:${worker.result.workerId}`, true)
+  if (section === void 0) return undefined
+  const roleText = section.text
+  const m = /REPORT-RUN TOKEN \(fb-28\): your unique run token is "([0-9a-f]{8})"/.exec(roleText)
+  return m === null ? { token: undefined, roleText } : { token: m[1], roleText }
+}
+
+test('fb-28 (report-run token, spawn normal): a freshly spawned worker receives a UNIQUE REPORT-RUN TOKEN in its role section and its report path directive carries `<date>-<slug>-<token>.md` (collision-free by construction over the bare `<slug>` convention)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const worker = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'report token probe' })
+      const got = await fb28WorkerToken(worker)
+      assert.ok(got !== undefined, 'the worker role section surfaced (findPromptSection)')
+      assert.ok(got.token !== undefined, `the worker role section carries a REPORT-RUN TOKEN (got ${JSON.stringify(got.token)})`)
+      assert.match(got.token, /^[0-9a-f]{8}$/, 'the token is an 8-char hex per-spawn value')
+      // The report-path directive is explicit + uses the token (the worker names
+      // its file `<date>-<slug>-<token>.md`, never the bare `<slug>`).
+      assert.match(got.roleText, new RegExp(`ALWAYS name your report file as \`<YYYY-MM-DD>-<slug>-${got.token}\\.md\``), 'the directive names the token-suffixed report path')
+      assert.match(got.roleText, /can never overwrite a previous deployment/, 'the directive states the collision-free guarantee')
+      // The standard worker framing is INTACT (the directive is ADDED, never a
+      // substitution) — the format regression guard.
+      assert.match(got.roleText, /BOOT-QUIET/, 'the worker framing still directs boot-quiet')
+      assert.match(got.roleText, /dept_worker_retire/, 'the worker framing still names dept_worker_retire')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-28 (report-run token, postId reuse after retire): TWO DEployments of the SAME slug mint DIFFERENT report-run tokens → their report paths `<date>-<slug>-<token>.md` are DISJOINT (the previous deployment\u2019s report is never overwritten)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const signal = new AbortController().signal
+      // First deployment of the researcher slug.
+      const w1 = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'first deployment' })
+      const t1 = await fb28WorkerToken(w1)
+      assert.ok(t1.token !== undefined, 'first deployment received a token')
+      // Retire it (the slug goes retired in byPost — the reuse precondition).
+      const retireTool = headCtx.tools.get('dept_worker_retire', key)
+      assert.ok(retireTool, 'dept_worker_retire installed in the head own layer')
+      await retireTool.execute({ workerId: w1.result.workerId }, { agent: head, signal })
+      // Second deployment of the SAME slug base (respawn after retire).
+      const w2 = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'second deployment' })
+      const t2 = await fb28WorkerToken(w2)
+      assert.ok(t2.token !== undefined, 'second deployment received a token')
+      // The tokens DIFFER → the two report paths `<date>-<slug>-<token>.md` are
+      // ALWAYS disjoint even when the base slug + date coincide (the exact
+      // overwrite precondition of WORK-REGISTER §5 / D-Q6).
+      assert.notEqual(t2.token, t1.token, 'a reused slug gets a DIFFERENT report-run token per deployment')
+      // Concrete disjointness: both directives point at token-distinct paths.
+      assert.notEqual(
+        `<YYYY-MM-DD>-<slug>-${t1.token}.md`,
+        `<YYYY-MM-DD>-<slug>-${t2.token}.md`,
+        'the two report path templates differ by the token (disjoint filenames)'
+      )
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-28 (report-run token, format regression): the token directive is ADDED to the worker role section with the report convention intact (no bare-`<slug>` collision, no preset change), the directive appears once, and a PERMANENT HEAD carries NO report-run token', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+    try {
+      const worker = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'format regression' })
+      const got = await fb28WorkerToken(worker)
+      assert.ok(got !== undefined && got.token !== undefined, 'the worker role section carries exactly one REPORT-RUN TOKEN')
+      const occurrences = got.roleText.split('REPORT-RUN TOKEN (fb-28)').length - 1
+      assert.equal(occurrences, 1, 'the REPORT-RUN TOKEN directive appears exactly once in the worker role section')
+      // The directive references the BASE convention verbatim (the suffix is an
+      // ADDITION, the base `<YYYY-MM-DD>-<slug>.md` wording is intact) — the
+      // format regression guard that no other part of the framing was disturbed.
+      assert.match(got.roleText, /<YYYY-MM-DD>-<slug>\.md/, 'the base report convention wording is preserved verbatim in the directive')
+      assert.match(got.roleText, /the token appended to the base/, 'the directive frames the suffix as appended to the base convention')
+      // A HEAD (permanent, same post across rotations) must carry NO token — the
+      // token is per-DEDLOYMENT for disposable workers only.
+      const headSection = await findPromptSection(head.ctx, key, 'deepartments:head:role:research-head', true)
+      if (headSection !== void 0) {
+        assert.doesNotMatch(headSection.text, /REPORT-RUN TOKEN/, 'a permanent head carries NO report-run token directive')
+      }
+    } finally {
+      await dispose()
+    }
+  })
+})

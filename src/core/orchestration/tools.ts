@@ -1306,7 +1306,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           // department-aware setup (architecture section), and NO role tools
           // (pre-F10 behavior: board-only, `allow: []`).
           const department = departmentForPost(headId)
-          const setup = workerSetup(args.postId, headEntry.roomId, args.role, { department })
+          const setup = workerSetup(args.postId, headEntry.roomId, args.role, { department, reportRunToken: randomUUID().slice(0, 8) })
           // F5 (spec 004 §6.2 L1): the worker of a department WITH a configured
           // workspacePath is created under that path (its OWN sidebar folder,
           // ensured first); otherwise the shared workspace root (the
@@ -1823,14 +1823,27 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     return `## Department architecture\n\n${rendered}`
   }
 
-  const installRoleSection = (agentCtx: Context, role: string, postId: string, isWorker: boolean, extra?: { persona?: string; taskText?: string }, department?: DepartmentConfig): void => {
+  const installRoleSection = (agentCtx: Context, role: string, postId: string, isWorker: boolean, extra?: { persona?: string; taskText?: string; reportRunToken?: string }, department?: DepartmentConfig): void => {
     const sp = agentCtx.get('systemPrompt')
     if (sp === void 0 || typeof (sp as { section?: unknown }).section !== 'function') return
+    // fb-28 (QD MEDIO — WORK-REGISTER §5, naming D-Q6): a per-deployment REPORT
+    // RUN TOKEN, minted uniquely by the spawn engines (spawn.ts) and injected
+    // here so EVERY report path a worker writes is `<…>-<slug>-<token>.md` (the
+    // DIRECT technical guarantee the path carries the unique token). A postId
+    // reused across deployments (retire → respawn, a re-materialized/resumed
+    // session, a job-worker round) then always produces DISJOINT report paths —
+    // the previous deployment's report can never be overwritten. Code-only: the
+    // report-convention presets (ARCHITECTURE.md / <role>.md) stay untouched
+    // (their `<YYYY-MM-DD>-<slug>.md` remains the base; this directive makes the
+    // token the authoritative suffix for every concrete report this worker
+    // writes). Heads (permanent, same post) get no token.
+    const reportRunToken = isWorker ? (extra?.reportRunToken ?? '') : ''
     sp.section({
       name: `deepartments:${isWorker ? 'worker' : 'head'}:role:${postId}`,
       order: 1,
       text: isWorker
-        ? `You are "${postId}", a ${role || 'rank-and-file researcher'} DISPOSABLE department worker of Deepartments (DeepSeek Harness). Your department HEAD created you as a temporary worker agent; you do not edit the repository, run builders, or spawn other agents. Read your messages with agent_messages, send with send_message, orient with dept_who, and persist your findings/memory with dept_memo_write. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives. Work the task your department head assigns you; when you are DONE, write dept_memo_write to save your results, then report to your head and end your turn (head/worker sleep is retired — you never dept_sleep; only the Asistente/host rotates its own session, spec 002). You are DISPOSABLE: your head retires you with dept_worker_retire when you are finished. fb-29 TOOLSET HONESTY: verify your toolset at boot — read/write/glob/grep (plus dept_exec when your role declares it) must be present; if ANY of them is missing, report it to your head BEFORE fabricating anything (never operate with a silently reduced toolset).`
+        ? (`You are "${postId}", a ${role || 'rank-and-file researcher'} DISPOSABLE department worker of Deepartments (DeepSeek Harness). Your department HEAD created you as a temporary worker agent; you do not edit the repository, run builders, or spawn other agents. Read your messages with agent_messages, send with send_message, orient with dept_who, and persist your findings/memory with dept_memo_write. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives. Work the task your department head assigns you; when you are DONE, write dept_memo_write to save your results, then report to your head and end your turn (head/worker sleep is retired — you never dept_sleep; only the Asistente/host rotates its own session, spec 002). You are DISPOSABLE: your head retires you with dept_worker_retire when you are finished. fb-29 TOOLSET HONESTY: verify your toolset at boot — read/write/glob/grep (plus dept_exec when your role declares it) must be present; if ANY of them is missing, report it to your head BEFORE fabricating anything (never operate with a silently reduced toolset).`
+          + (reportRunToken === '' ? '' : ` REPORT-RUN TOKEN (fb-28): your unique run token is "${reportRunToken}". ALWAYS name your report file as \`<YYYY-MM-DD>-<slug>-${reportRunToken}.md\` (the token appended to the base \`<YYYY-MM-DD>-<slug>.md\` convention) — this guarantees your report can never overwrite a previous deployment's report of the same postId. Use the SAME token for any other per-run artifact you write.`))
         : `You are "${postId}", the ${role || 'department head'}. You are a permanent, first-class agent: you do not edit the repository, run builders, or spawn other agents. Your world is the messaging bus — read with agent_messages, send with send_message, orient with dept_who, and persist memory with dept_memo_write. You are permanent: you stay idle|running (head sleep is retired — only the Asistente/host keeps dept_sleep session rotation, spec 002). You may create and retire DISPOSABLE WORKERS of your department with dept_worker_spawn and dept_worker_retire (the department-scoped worker tools — the legacy dept_post_create/dept_post_retire still exist as the raw machinery). BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives; you never proactively send.`
     })
     // F3 (spec §7.4): the ROLE PERSONA — the role template's body (+ the task)
@@ -1901,7 +1914,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    * instance) and live (scopeOf → undefined → `agentCtx.agent`). */
   const agentScopeOf = (agentCtx: Context): object | undefined => scopeOf(agentCtx) ?? (agentCtx as unknown as { agent?: object }).agent
 
-  const postSetup = (postId: string, roomId: string, role: string, opts: { preset: string; manager: boolean; persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig }): ((agentCtx: Context) => unknown) => {
+  const postSetup = (postId: string, roomId: string, role: string, opts: { preset: string; manager: boolean; persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig; reportRunToken?: string }): ((agentCtx: Context) => unknown) => {
     const presetId = opts.preset
     const kind = opts.manager ? 'head' : 'worker'
     // F10 (spec 004 §7.1): the role template's frontmatter `tools` (a worker)
@@ -2084,7 +2097,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // (c) Persona = the role (a head's role or a worker's role), NOT a mission.
       // F3: the ROLE PERSONA delta (+ the task) rides the same section seam.
       // F10: `department` feeds the architecture section (spec 004 §9.1).
-      installRoleSection(agentCtx, role, postId, opts.manager === false, { persona: opts.persona, taskText: opts.taskText }, opts.department)
+      installRoleSection(agentCtx, role, postId, opts.manager === false, { persona: opts.persona, taskText: opts.taskText, reportRunToken: opts.reportRunToken }, opts.department)
       // Ensure the agent-scoped registrations unwind with the agent.
       agentCtx.effect(() => () => { tools.dispose(); restrictOwn() }, `deepartments: ${kind} board tools (${postId})`)
     }
@@ -2101,11 +2114,15 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    * persona + the spawned task (spec §7.4 — persona delta + assignment).
    * F10: `extra.tools` carries the role template's frontmatter `tools` (the
    * real inherited allow-list); `extra.department` feeds the architecture
-   * section.
+   * section. fb-28: `extra.reportRunToken` (a per-spawn UNIQUE short token
+   * minted by the spawn engines, spawn.ts) is threaded into the worker's role
+   * section so its report filename ALWAYS carries `<slug>-<token>` — a reused
+   * postId (retire → respawn, resumed session) can NEVER overwrite the previous
+   * deployment's report (the report-path collision of WORK-REGISTER §5 / fb-28).
    * Absent (legacy dept_post_create) → the framing role section only, NO role
    * tools (pre-F10 behavior: board-only, `allow: []`). */
-  const workerSetup = (postId: string, roomId: string, role: string, extra?: { persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig }): ((agentCtx: Context) => unknown) =>
-    postSetup(postId, roomId, role, { preset: WORKER_PRESET_ID, manager: false, persona: extra?.persona, taskText: extra?.taskText, tools: extra?.tools, department: extra?.department })
+  const workerSetup = (postId: string, roomId: string, role: string, extra?: { persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig; reportRunToken?: string }): ((agentCtx: Context) => unknown) =>
+    postSetup(postId, roomId, role, { preset: WORKER_PRESET_ID, manager: false, persona: extra?.persona, taskText: extra?.taskText, tools: extra?.tools, department: extra?.department, reportRunToken: extra?.reportRunToken })
 
   /** Dispose one head's live AgentHandle (its only teardown capability; the
    * bare `agents.get(id)` returns no dispose — rc.8 index.d.ts:349 vs 155-158).

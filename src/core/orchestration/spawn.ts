@@ -33,6 +33,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { readFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 
 import { mintWorkerSessionId, workerSessionId } from '../registry.js'
@@ -147,7 +148,7 @@ export interface SpawnFactoryDeps {
    * so the TDZ is never entered at construction). */
   late: {
     /** The agent own-layer setup builder (from the agent zone). */
-    workerSetup: (postId: string, roomId: string, role: string, extra?: { persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig }) => (agentCtx: Context) => unknown
+    workerSetup: (postId: string, roomId: string, role: string, extra?: { persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig; reportRunToken?: string }) => (agentCtx: Context) => unknown
     /** F5: the fresh incarnation's department workspace cwd. */
     resolveDepartmentWorkspaceCwd: (department: DepartmentConfig | undefined) => Promise<string>
     /** The shared workspace root fallback cwd. */
@@ -435,7 +436,17 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     const sessionId = SessionId(mintWorkerSessionId(postId))
     if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_job_run: a live agent already exists for session "${sessionId}"`)
     const title = definition.meta.title.trim() !== '' ? definition.meta.title : defaultWorkerTitle(definition.meta.role, definition.body, jobId, postId)
-    const setup = workerSetup(postId, headEntry.roomId, definition.meta.role, { persona: template.persona, taskText: sanitizePromptLiterals(definition.body), tools: template.tools, department })
+    // fb-28 (QD MEDIO — WORK-REGISTER §5): per-spawn REPORT RUN TOKEN. A worker
+    // derives its report path from `{{reportDir}}/<role>/<date>-<slug>.md` — when
+    // the same postId (slug) is reused across deployments (retire → respawn, a
+    // re-materialized/resumed session, or a job worker round), the previous
+    // deployment's report would be OVERWRITTEN on the same date. Every spawn
+    // mints a UNIQUE token and injects it (via workerSetup → installRoleSection)
+    // so the worker's report filename ALWAYS carries `<slug>-<token>` — paths are
+    // disjoint between ANY two deployments of the same slug, closing fb-28 in
+    // every reuse case without touching the report convention presets.
+    const reportRunToken = randomUUID().slice(0, 8)
+    const setup = workerSetup(postId, headEntry.roomId, definition.meta.role, { persona: template.persona, taskText: sanitizePromptLiterals(definition.body), tools: template.tools, department, reportRunToken })
     const deptCwd = await resolveDepartmentWorkspaceCwd(department)
     const handle = await agents.create({
       sessionId: String(SessionId(sessionId)),
@@ -530,7 +541,13 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     const sessionId = SessionId(mintWorkerSessionId(postId))
     if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_worker_spawn: a live agent already exists for session "${sessionId}"`)
     const title = (opts.title ?? '').trim() !== '' ? (opts.title as string) : defaultWorkerTitle(role, opts.task, opts.jobId, postId)
-    const setup = workerSetup(postId, headEntry.roomId, role, { persona: template.persona, taskText: opts.task === undefined ? undefined : sanitizePromptLiterals(opts.task), tools: template.tools, department })
+    // fb-28 (QD MEDIO — WORK-REGISTER §5): per-spawn REPORT RUN TOKEN (see the
+    // SAME mint in runJobForDepartment). The token makes the worker's report
+    // path `<date>-<slug>-<token>.md` — ALWAYS disjoint between deployments of
+    // the same slug, so a retired-then-respawned postId can never overwrite the
+    // previous deployment's report.
+    const reportRunToken = randomUUID().slice(0, 8)
+    const setup = workerSetup(postId, headEntry.roomId, role, { persona: template.persona, taskText: opts.task === undefined ? undefined : sanitizePromptLiterals(opts.task), tools: template.tools, department, reportRunToken })
     // F5 (spec 004 §6.2 L1): the worker lands in its department workspace.
     const deptCwd = await resolveDepartmentWorkspaceCwd(department)
     const handle = await agents.create({
