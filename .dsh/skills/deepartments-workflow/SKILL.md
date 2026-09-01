@@ -659,6 +659,17 @@ despachos diferidos: N».
   weekday+hours UTC / `peakBufferMs` 30-min edge buffer). `enabled: false`
   restores the pre-pacing behavior (no franja section, no transition notices).
 
+**CONTINUATION NORM (fb-46, 2026-09-01 — QD verdict, host protocol; 0 code):**
+never stay static while there is work to do. When a block CLOSES (all lanes
+landed, verified and committed), the host re-explores the WORK-REGISTER and
+CONTINUES with the NON-gated items (highest-priority first) — only items that
+are genuinely owner-gated wait for the owner. VALLE is a DRAINAGE window, not a
+stop; PEAK is the only intentional pause. If a non-gated item DEPENDS on a
+gated one (DAG), waiting is allowed but must be justified EXPLICITLY (the
+dependency named, the wait visible). Backed structurally by the
+`work-register-idle` watchdog (IPD lane): franja VALLE ∧ pending work > 0 ∧ 0
+agents running ∧ quiet ≥ 15 min → alert to the host to re-dispatch.
+
 ## Wake routine (injected wake)
 
 Start-of-session: the Deepartments wake pack is ALREADY injected as part of
