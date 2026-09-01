@@ -16,3 +16,7 @@ packages/dshd-gui/client/
 
 # Local convenience: pnpm release-age exclusion (never committed)
 pnpm-workspace.yaml
+
+# test-run artifacts (git hygiene, 09-01)
+.run-*.log
+.run-*.summary

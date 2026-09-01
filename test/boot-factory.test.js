@@ -216,16 +216,11 @@ test('boot-factory: the BOOT ZONE (config source + registry + catalog + lifecycl
     assert.equal(zoneText.split('\n').length - 1, 677, 'the embedded boot zone is exactly 677 content LOCs (of the 678-LOC region 2344-3021 — the applyInvoke opener line 2344 stays in invoke.ts as the coordinator-block opener)')
     const md5 = createHash('md5').update(zoneText, 'utf8').digest('hex')
     assert.equal(md5, '82761e5d46541d675185ed6d2b27a6a3', 'the embedded boot zone is byte-identical to HEAD applyInvoke 2345-3021 (md5 82761e5d… — no D1)')
-    // The region anchor: HEAD applyInvoke 2344-3021 = 678 lines, the FIRST line
-    // stays in invoke.ts as the coordinator-block opener (byte-identical).
-    const headInvoke = execFileSync('git', ['show', 'HEAD:src/invoke.ts'], { cwd: REPO_ROOT, encoding: 'utf8' }).split('\n')
-    headInvoke.pop()
-    assert.equal(headInvoke.length, 3913, 'HEAD invoke.ts = 3913 lines (region anchor)')
-    const zone = headInvoke.slice(2343, 3021)
-    assert.equal(zone.length, 678, 'HEAD zone 2344-3021 = 678 LOCs')
-    assert.equal(zone[0], 'export function applyInvoke(ctx: Context, config: Config) {', 'the zone region starts with the applyInvoke opener (stays in invoke.ts)')
-    assert.ok(zone[zone.length - 1].includes('(messages-store.ts + deliverBusRecord) is the only emit/delivery path.'), 'the zone region ends with the B3 cutover note')
-    assert.equal(createHash('md5').update(zone.slice(1).join('\n') + '\n', 'utf8').digest('hex'), md5, 'HEAD first line (the opener) + the 677 moved lines = the embedded zone byte-identical')
+    // The md5 stamp above is the movement identity: md5 of applyInvoke 2345-3021
+    // of HEAD b9e51c2 (pre-cut, 3913-line blob; the opener line 2344 stays in
+    // invoke.ts as the coordinator-block opener). The 2344-3021 region no longer
+    // exists in HEAD f28c719+ (post-cut, 3324 lines) — provenance is held by the
+    // FIXED stamp (presets-factory pattern), never by a live git region anchor.
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.boot' → the factory), the 5 direct deps by
