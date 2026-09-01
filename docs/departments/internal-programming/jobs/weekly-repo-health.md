@@ -80,3 +80,12 @@ report path, open questions. You report only to your head (ACL).
   the three repos in scope).
 - Never commit — commits are the Asistente's job.
 - Reference prior report paths you build on (≤ 3 per category).
+
+## MEMO NORM (F3)
+
+At the end of EVERY round, write `dept_memo_write` with the job's accumulated
+state (results, decisions, anomalies, follow-up queue) so the next round picks
+up where this one left off. Rounds are ephemeral — each round materializes a
+FRESH worker with no carried state — and stale journals are the anti-pattern to
+avoid (version-watch/monitor-dsh-updates stale since 2026-08-24): the memo is
+the required continuity mechanism between rounds.

@@ -128,3 +128,12 @@ Asistente. You report only to your head (ACL).
 - Read-only for the repos and the state dirs; no code edits, no commits.
 - Every claim cited (URL + date for versions/endpoints). A source unreachable →
   record its CURRENT state, never guess.
+
+## MEMO NORM (F3)
+
+At the end of EVERY round, write `dept_memo_write` with the job's accumulated
+state (results, decisions, anomalies, follow-up queue) so the next round picks
+up where this one left off. Rounds are ephemeral — each round materializes a
+FRESH worker with no carried state — and stale journals are the anti-pattern to
+avoid (version-watch/monitor-dsh-updates stale since 2026-08-24): the memo is
+the required continuity mechanism between rounds.
