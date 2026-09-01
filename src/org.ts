@@ -260,6 +260,24 @@ export interface HealthConfig {
    * boot (their own CATCH-UP frame); rows beyond the look-back stay silent by
    * design. Absent/invalid → the 24 h code default. */
   catchupWindowMs?: number
+  /** LANE 5 (fb-46, QUALITY REQUEST QH 2026-09-01) — the work-register-idle
+   * watchdog gate (default ON; explicit `false` disables the docs-level
+   * WORK-REGISTER stall scan). The WORK-REGISTER is the org's SINGLE pending
+   * queue; the watchdog alerts the host (never dispatches) when franja VALLE ∧
+   * the register holds NON-gated pending items ∧ 0 agents running ∧ quiet ≥
+   * `workRegisterIdleQuietMs`. Absent → on. */
+  workRegisterIdleEnabled?: boolean
+  /** LANE 5 (fb-46) — the WORK-REGISTER-idle VALLE-quiet window in ms (default
+   * 900000 = 15 min): the stall condition must hold for >= this long before
+   * the `work-register-idle` finding + host ALERT (own ledger
+   * work-register-idle-state.json firstQuietTs — the M4 sustained-condition
+   * precedent). Absent/invalid → the 15-min code default. */
+  workRegisterIdleQuietMs?: number
+  /** LANE 5 (fb-46) — the absolute path of the WORK-REGISTER (docs/WORK-REGISTER.md)
+   * the work-register-idle watchdog READS (SOLO-LECTURA — IPD/host own every
+   * write); absent → the repo default. Override for a packaged deployment or a
+   * hermetic/smoke fixture (the poolerStateFilePath pattern). */
+  workRegisterPath?: string
 }
 
 /**
@@ -713,7 +731,15 @@ export const Config: z<any, any> = z.object({
     // defaults: enabled on, catchupWindowMs 86400000 = 24 h — the section
     // contract).
     catchupEnabled: z.boolean(),
-    catchupWindowMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+    catchupWindowMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    // LANE 5 (fb-46) — the work-register-idle watchdog knobs (default(void 0)
+    // → absent = code defaults: enabled on, workRegisterIdleQuietMs 900000 =
+    // 15 min — the section contract).
+    workRegisterIdleEnabled: z.boolean(),
+    workRegisterIdleQuietMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    // LANE 5 (fb-46) — the WORK-REGISTER path override (default(void 0) →
+    // absent = the repo default docs/WORK-REGISTER.md).
+    workRegisterPath: z.string().default(void 0 as never)
   }).default(void 0 as unknown as {
     enabled: boolean
     intervalMs: number
@@ -752,6 +778,9 @@ export const Config: z<any, any> = z.object({
     missionQueuePersistMs: number
     catchupEnabled: boolean
     catchupWindowMs: number
+    workRegisterIdleEnabled: boolean
+    workRegisterIdleQuietMs: number
+    workRegisterPath: string
   }),
   // QD (spec 007 §4.1, D-Q2). Mirrors the runtime QualityConfig in src/invoke.ts:
   // `default(void 0)` so an ABSENT section or absent key falls through to the

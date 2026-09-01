@@ -3432,7 +3432,13 @@ export function applyInvoke(ctx: Context, config: Config) {
             // PACING (owner m-PACING, 2026-08-28): the repo WORK-REGISTER path —
             // read at a VALLE transition for the «reanuda; despachos diferidos:
             // N» count (best-effort; unreadable → the notice omits the count).
-            workRegisterPath: path.join(repoRoot, 'docs', 'WORK-REGISTER.md'),
+            // LANE 5 (fb-46): the work-register-idle watchdog reads the SAME
+            // register — the `health.workRegisterPath` override (default the
+            // repo docs/WORK-REGISTER.md; a packaged deployment or a hermetic/
+            // smoke fixture points elsewhere — the poolerStateFilePath pattern).
+            workRegisterPath: healthConfig?.workRegisterPath !== undefined && healthConfig.workRegisterPath.trim() !== ''
+              ? healthConfig.workRegisterPath
+              : path.join(repoRoot, 'docs', 'WORK-REGISTER.md'),
             logger: ctx.logger
           })
         }

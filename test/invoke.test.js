@@ -32,7 +32,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, scanHealthCatchup, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_CATCHUP_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey, scanMainRed, MAIN_RED_DEFAULT_POLL_MS, MAIN_RED_KEY_PREFIX, mainRedKey, MAIN_RED_STATE_FILE, readMainRedState, writeMainRedState, MAIN_RED_DEFAULT_LOCKS, buildMainRedState, scanMissionQueue, MISSION_QUEUE_DEFAULT_LIMIT, MISSION_QUEUE_DEFAULT_PERSIST_MS, MISSION_QUEUE_KEY_PREFIX, missionQueueKey, MISSION_QUEUE_STATE_FILE, readMissionQueueState, writeMissionQueueState, RESTART_REGISTRY_FILE, RESTART_REGISTRY_SEED_ROWS, readRestartRegistry, seedRestartRegistry, reconcileRestartRegistry, buildRestartDigest, CAPACITY_GATE_STATE_FILE, CAPACITY_GATE_TRANSITION_KEY, capacityGateDedupeKey, readCapacityGateState, writeCapacityGateState, buildCapacityGateFrame, turnErrorNotifyClass, buildTurnErrorNotifyFrame, readTurnEndNotifyState, writeTurnEndNotifyState, TURN_END_NOTIFY_STATE_FILE } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, scanHealthCatchup, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_CATCHUP_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey, scanMainRed, MAIN_RED_DEFAULT_POLL_MS, MAIN_RED_KEY_PREFIX, mainRedKey, MAIN_RED_STATE_FILE, readMainRedState, writeMainRedState, MAIN_RED_DEFAULT_LOCKS, buildMainRedState, scanMissionQueue, MISSION_QUEUE_DEFAULT_LIMIT, MISSION_QUEUE_DEFAULT_PERSIST_MS, MISSION_QUEUE_KEY_PREFIX, missionQueueKey, MISSION_QUEUE_STATE_FILE, readMissionQueueState, writeMissionQueueState, RESTART_REGISTRY_FILE, RESTART_REGISTRY_SEED_ROWS, readRestartRegistry, seedRestartRegistry, reconcileRestartRegistry, buildRestartDigest, CAPACITY_GATE_STATE_FILE, CAPACITY_GATE_TRANSITION_KEY, capacityGateDedupeKey, readCapacityGateState, writeCapacityGateState, buildCapacityGateFrame, turnErrorNotifyClass, buildTurnErrorNotifyFrame, readTurnEndNotifyState, writeTurnEndNotifyState, TURN_END_NOTIFY_STATE_FILE, scanWorkRegisterIdle, parseWorkRegisterItems, WORK_REGISTER_IDLE_KEY, WORK_REGISTER_IDLE_STATE_FILE, WORK_REGISTER_IDLE_DEFAULT_QUIET_MS, WORK_REGISTER_IDLE_GATED_SECTION_RE, WORK_REGISTER_IDLE_MAX_LISTED, readWorkRegisterIdleState, writeWorkRegisterIdleState } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
@@ -13378,6 +13378,361 @@ test('M-7 SMOKE (acceptance — real daemon): bootPlugin with health {intervalMs
       }, 5000, 'the audit row is appended')
       const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
       assert.equal(audit.some((row) => row.findings.some((f) => f.kind === 'mission-queue')), true, 'an audit row records the mission-queue finding')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+// --- LANE 5 (fb-46, QUALITY REQUEST QH 2026-09-01) — the work-register-idle ---
+// watchdog --------------------------------------------------------------
+// The WORK-REGISTER (docs/WORK-REGISTER.md) is the org's SINGLE pending-work
+// queue and NO existing watchdog reads it at the DOCS level (M4 system-idle
+// sees only the MESSAGE-level pendingCount — a register item that never became
+// a message is invisible to it; the stagnation audit §4a: the org was STATIC in
+// VALLE with a despatchable queue and 0 health-alerts). This watchdog ALERTS
+// the HOST (never dispatches — the host decides/re-dispatches) iff ALL hold:
+//   VALLE (isPeakAt == false) ∧ WORK-REGISTER pending (countPendingWorkRegister
+//   > 0 — REUSED dshd-core utility) ∧ ≥1 NON-GATED item (the §3 PENDIENTE-OWNER
+//   section is GATED — owner-pending decisions wait on the owner BY DESIGN and
+//   never trigger the alarm) ∧ 0 agents running (M4 pattern) ∧ quiet ≥
+//   quietWindow (own ledger firstQuietTs — the M4 system-idle mold). Key
+//   `work-register-idle` in the SHARED health-alerts ledger (30-min re-alert
+//   while the condition persists). `deps.workRegisterPath` ABSENT → no-op.
+// ---------------------------------------------------------------------------
+
+/** A register fixture in the REAL register's §-shape (the parser must classify
+ * §1/§4/§5 as NON-gated and §3 PENDIENTE-OWNER as GATED; the §2 CERRADO
+ * reference section is skipped). */
+const WRI_REGISTER_FIXTURE = [
+  '## 1. IPD — cola activa (DAG seriado)',
+  '',
+  '- **LANE 3 — fb-28 (QD, MEDIO)** [en cola]',
+  '- **LANE 4 — de-flake W6/BugA** [en cola]',
+  '',
+  '## 2. DAG técnico — CERRADO (referencia)',
+  '',
+  '- **PASO 9** — cerrado, referencia',
+  '',
+  '## 3. PENDIENTE-OWNER (decisiones — estado al 09-01)',
+  '',
+  '- **top-up ws10/oc-6 → NO por ahora (owner 09-01)**',
+  '- **stable 3080 → NO TOCAR (owner 09-01)**',
+  '',
+  '## 4. CAPACIDAD (al 09-01)',
+  '',
+  '- **Pool: oc-11 monthly** sane',
+  '',
+  '## 5. BACKLOG',
+  '',
+  '- ~~flake 1b.1~~ ~~m-64~~ — DONE',
+  '- **fb-2/fb-3 QD — AGENDADAS**'
+].join('\n')
+
+test('LANE 5 parseWorkRegisterItems (PURE): the register census classifies NON-gated (§1/§4/§5) vs GATED (§3 PENDIENTE-OWNER) items; the §2 CERRADO reference section + the strikethrough-DONE line are excluded; the census equals the REUSED countPendingWorkRegister semantics', () => {
+  const items = parseWorkRegisterItems(WRI_REGISTER_FIXTURE)
+  assert.equal(WORK_REGISTER_IDLE_GATED_SECTION_RE.test('## 3. PENDIENTE-OWNER (decisiones — estado al 09-01)'), true, 'the §3 heading matches the gated-section marker')
+  assert.equal(WORK_REGISTER_IDLE_GATED_SECTION_RE.test('## 1. IPD — cola activa'), false, 'a NON-gated heading does NOT match')
+  assert.equal(items.length, 6, '6 pending items across the open sections (2 §1 LANE + 2 §3 owner + 1 §4 + 1 §5 — the §2 CERRADO section and the strikethrough-DONE line are excluded)')
+  const gated = items.filter((i) => i.gated === true)
+  const nonGated = items.filter((i) => i.gated !== true)
+  assert.equal(gated.length, 2, 'exactly the 2 §3 PENDIENTE-OWNER items are GATED')
+  assert.equal(nonGated.length, 4, 'the §1 LANE 3/LANE 4 + §4 Pool + §5 fb-2/fb-3 items are NON-gated (4)')
+  assert.deepEqual(nonGated.map((i) => i.section), ['1. IPD — cola activa (DAG seriado)', '1. IPD — cola activa (DAG seriado)', '4. CAPACIDAD (al 09-01)', '5. BACKLOG'], 'the NON-gated items carry their source section headings')
+  // The byte-consistent TOTAL (the parser is the count utility's same split +
+  // marker semantics; the §3 items count toward the TOTAL but never alert).
+  assert.equal(items.length, 6, 'the census length matches the countPendingWorkRegister legible count (verified against the dshd-core utility in the scan tests)')
+})
+
+test('LANE 5 scanWorkRegisterIdle (PURE): VALLE + pending non-gated register items + quiet ≥ window + 0 agents → the work-register-idle finding with the NON-gated key/count/line; §3-only (no non-gated) → NOTHING (quietWithoutPending — owner-gated waits BY DESIGN); below the window → nothing (epoch stamps)', () => {
+  const T0 = new Date(2026, 7, 29, 8, 0, 0).getTime() // Saturday 08:00 UTC → VALLE (default pacing: Mon-Fri)
+  // (a) THE full condition → the finding.
+  const full = scanWorkRegisterIdle({
+    registerText: WRI_REGISTER_FIXTURE,
+    valley: true,
+    hostRunning: false,
+    posts: [],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: { firstQuietTs: T0 - 60_000 }
+  })
+  assert.equal(full.findings.length, 1, 'the full condition → ONE work-register-idle finding')
+  const finding = full.findings[0]
+  assert.equal(finding.kind, 'work-register-idle')
+  assert.equal(finding.key, WORK_REGISTER_IDLE_KEY, 'the dedupe key is work-register-idle (the SHARED 30-min re-alert ledger)')
+  assert.equal(finding.count, 4, 'the finding carries the NON-gated count (4 — the §3 gated items never count)')
+  assert.match(finding.error, /^WORK-REGISTER con 4 item\(s\) NO-gateado\(s\) sin despachar en VALLE/, 'the owner-facing line names the non-gated census')
+  assert.match(finding.error, /LANE 3 — fb-28/, 'the frame lists the NON-gated items')
+  assert.ok(!finding.error.includes('top-up ws10'), 'the GATED §3 item is NEVER listed (owner-pending waits BY DESIGN)')
+  // (b) §3-only: pending count > 0 but ZERO non-gated → nothing.
+  const gatedOnly = scanWorkRegisterIdle({
+    registerText: '## 3. PENDIENTE-OWNER (decisiones)\n\n- **top-up ws10 → NO por ahora**\n- **stable 3080 → NO TOCAR**',
+    valley: true,
+    hostRunning: false,
+    posts: [],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: { firstQuietTs: T0 - 60_000 }
+  })
+  assert.equal(gatedOnly.findings.length, 0, 'a §3-only register (no non-gated despatchable items) NEVER alerts')
+  assert.equal(gatedOnly.quietWithoutPending, true, 'the §3-only case is the warn-only expected-quiet outcome')
+  // (c) below the window: the epoch stamps but never alerts.
+  const early = scanWorkRegisterIdle({
+    registerText: WRI_REGISTER_FIXTURE,
+    valley: true,
+    hostRunning: false,
+    posts: [],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: {}
+  })
+  assert.equal(early.findings.length, 0, 'quiet < window → nothing')
+  assert.equal(early.ledger.firstQuietTs, T0, 'the first quiet-VALLE tick stamps firstQuietTs')
+})
+
+test('LANE 5 scanWorkRegisterIdle (PURE, negative legs): PEAK (valley:false) and an AGENT RUNNING (a running post OR the host) BREAK the quiet epoch (firstQuietTs cleared — the window restarts); a NOT-legible register (no ## headings) → nothing', () => {
+  const T0 = new Date(2026, 7, 24, 8, 0, 0).getTime() // Monday 08:00 UTC → PEAK (default pacing)
+  // (a) PEAK: an intentional dispatch pause → the epoch breaks, no finding.
+  const peak = scanWorkRegisterIdle({
+    registerText: WRI_REGISTER_FIXTURE,
+    valley: false,
+    hostRunning: false,
+    posts: [],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: { firstQuietTs: T0 - 120_000 }
+  })
+  assert.equal(peak.findings.length, 0, 'PEAK → nothing (the franja is part of the sustained condition)')
+  assert.equal(peak.ledger.firstQuietTs, undefined, 'a PEAK breaks the quiet-VALLE epoch (firstQuietTs cleared)')
+  // (b) a running post (Bug B: a mid-turn is healthy progress, NEVER quiet).
+  const postRunning = scanWorkRegisterIdle({
+    registerText: WRI_REGISTER_FIXTURE,
+    valley: true,
+    hostRunning: false,
+    posts: [{ postId: 'builder-busy', running: true }],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: { firstQuietTs: T0 - 120_000 }
+  })
+  assert.equal(postRunning.findings.length, 0, 'a running post → NOT quiet → no finding despite pending register work')
+  assert.equal(postRunning.ledger.firstQuietTs, undefined, 'the running observation clears the epoch')
+  // (c) the HOST running.
+  const hostRunning = scanWorkRegisterIdle({
+    registerText: WRI_REGISTER_FIXTURE,
+    valley: true,
+    hostRunning: true,
+    posts: [],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: { firstQuietTs: T0 - 120_000 }
+  })
+  assert.equal(hostRunning.findings.length, 0, 'a running host → NOT quiet → no finding despite pending register work')
+  // (d) not-legible register (no ## sections → the reused count returns undefined).
+  const notLegible = scanWorkRegisterIdle({
+    registerText: '# no section headings\n- **X** pendiente',
+    valley: true,
+    hostRunning: false,
+    posts: [],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: { firstQuietTs: T0 - 120_000 }
+  })
+  assert.equal(notLegible.findings.length, 0, 'a not-register-shaped doc → no census → no finding (conservative)')
+  assert.equal(notLegible.quietWithoutPending, true, 'the not-legible case is expected-quiet warn-only')
+})
+
+test('LANE 5 runHealthDaemonTick: VALLE (Saturday 08:00 UTC) + a temp WORK-REGISTER with §1/§3/§4/§5 + quiet ≥ window + 0 agents → the host ALERT frame lists the NON-gated items; the work-register-idle dedupe key advances in the SHARED ledger + the audit row records it', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 29, 8, 0, 0).getTime() // Saturday → VALLE
+    // Seed the quiet epoch (the previous tick already saw the full quiet-VALLE).
+    await writeFile(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: T0 - 60_000 }), 'utf8')
+    // The temp WORK-REGISTER the tick reads (workRegisterPath is a deps knob).
+    await writeFile(path.join(stateDir, 'WORK-REGISTER.md'), WRI_REGISTER_FIXTURE, 'utf8')
+    const alerts = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-lane5-1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [],
+      hostRunning: false,
+      // VALLE: the default pacing window (Mon-Fri) → Saturday is VALLE.
+      config: { health: { workRegisterIdleQuietMs: 60_000 }, org: { pacing: {} } },
+      workRegisterPath: path.join(stateDir, 'WORK-REGISTER.md'),
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts.length, 1, 'the full work-register-idle condition alerts the host ONCE')
+    assert.match(alerts[0].frame, /^\[From deepartments\] System-health ALERT:/, 'the alert rides the standard system-health frame')
+    assert.match(alerts[0].frame, /- work-register-idle: WORK-REGISTER con 4 item\(s\) NO-gateado\(s\) sin despachar en VALLE/, 'the FRAME bullet is the work-register-idle line (never the stalled-post fallback)')
+    assert.match(alerts[0].frame, /LANE 3 — fb-28/, 'the frame lists the NON-gated §1 items')
+    assert.match(alerts[0].frame, /fb-2\/fb-3 QD/, 'the frame lists the NON-gated §5 backlog item')
+    assert.ok(!alerts[0].frame.includes('top-up ws10'), 'the GATED §3 item is never in the frame')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state[WORK_REGISTER_IDLE_KEY], T0, 'the work-register-idle dedupe key advances in the SHARED health-alerts ledger')
+    const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    assert.equal(audit.at(-1).findings[0].kind, 'work-register-idle', 'the audit row records the work-register-idle finding')
+    assert.equal(audit.at(-1).dedupeKeys.includes(WORK_REGISTER_IDLE_KEY), true, 'the audit row records the work-register-idle dedupe key')
+    // The OWN ledger survived (the quiet epoch persists — the re-alert owns the rest).
+    const wrLedger = readWorkRegisterIdleState(stateDir)
+    assert.equal(wrLedger.firstQuietTs, T0 - 60_000, 'the sustained firstQuietTs survives the alerting tick')
+  })
+})
+
+test('LANE 5 runHealthDaemonTick negatives: §3-only register → nothing; PEAK (Monday 08:00 UTC) → nothing; an agent running (hostRunning:true) → nothing; quiet < window → nothing (firstQuietTs stamped only)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const SAT = new Date(2026, 7, 29, 8, 0, 0).getTime()
+    const MON = new Date(2026, 7, 24, 8, 0, 0).getTime()
+    const tick = async (nowMs, opts = {}) => {
+      const alerts = []
+      const warns = []
+      await runHealthDaemonTick({
+        now: () => nowMs,
+        stateDir,
+        bootId: 'boot-lane5-neg',
+        hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+        posts: opts.posts ?? [],
+        hostRunning: opts.hostRunning ?? false,
+        config: { health: { workRegisterIdleQuietMs: 60_000 }, org: { pacing: {} } },
+        workRegisterPath: opts.registerPath ?? path.join(stateDir, 'WORK-REGISTER.md'),
+        notifyHost: async () => { alerts.push(1) },
+        logger: { warn: (m) => warns.push(m), info: () => {} }
+      })
+      return { alerts, warns }
+    }
+    // (a) §3-only register (pending > 0, ZERO non-gated) → nothing.
+    await writeFile(path.join(stateDir, 'WORK-REGISTER.md'), '## 3. PENDIENTE-OWNER (decisiones)\n\n- **top-up ws10 → NO por ahora**\n- **stable 3080 → NO TOCAR**', 'utf8')
+    await writeFile(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: SAT - 60_000 }), 'utf8')
+    const gatedOnly = await tick(SAT)
+    assert.equal(gatedOnly.alerts.length, 0, 'a §3-only register → no alert (owner-gated waits BY DESIGN)')
+    assert.ok(gatedOnly.warns.some((m) => m.includes('zero NON-gated pending items')), 'the §3-only case WARNS (expected-quiet contract)')
+    // (b) PEAK: Monday 08:00 UTC with the default Mon-Fri window.
+    await writeFile(path.join(stateDir, 'WORK-REGISTER.md'), WRI_REGISTER_FIXTURE, 'utf8')
+    await writeFile(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: MON - 60_000 }), 'utf8')
+    const peak = await tick(MON)
+    assert.equal(peak.alerts.length, 0, 'PEAK → nothing (the intentional dispatch pause is expected quiet)')
+    assert.equal(readWorkRegisterIdleState(stateDir).firstQuietTs, undefined, 'the PEAK tick cleared the quiet-VALLE epoch')
+    // (c) the HOST running mid-turn (Bug B).
+    await writeFile(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: SAT - 60_000 }), 'utf8')
+    const running = await tick(SAT, { hostRunning: true })
+    assert.equal(running.alerts.length, 0, 'a running host → no alert despite pending register work')
+    // (d) quiet < window: a fresh ledger never alerts — it stamps firstQuietTs.
+    await writeFile(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), JSON.stringify({}), 'utf8')
+    const early = await tick(SAT)
+    assert.equal(early.alerts.length, 0, 'quiet < window → no alert')
+    assert.equal(readWorkRegisterIdleState(stateDir).firstQuietTs, SAT, 'the first quiet-VALLE tick stamps firstQuietTs')
+  })
+})
+
+test('LANE 5 DEDUPE: inside the 30-min health dedupe the SAME work-register-idle condition does NOT re-alert; AFTER HEALTH_DEDUPE_WINDOW_MS with the condition STILL holding → RE-ALERT (the register stall persists → never a one-shot)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 29, 8, 0, 0).getTime() // Saturday → VALLE
+    await writeFile(path.join(stateDir, 'WORK-REGISTER.md'), WRI_REGISTER_FIXTURE, 'utf8')
+    await writeFile(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: T0 - 60_000 }), 'utf8')
+    const alerts = []
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-lane5-d',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [],
+      hostRunning: false,
+      config: { health: { workRegisterIdleQuietMs: 60_000 }, org: { pacing: {} } },
+      workRegisterPath: path.join(stateDir, 'WORK-REGISTER.md'),
+      notifyHost: async () => { alerts.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'the first window completion alerts')
+    await tick(T0 + 5 * 60_000)
+    assert.equal(alerts.length, 1, 'a tick INSIDE the 30-min dedupe window does NOT re-alert')
+    await tick(T0 + 31 * 60_000)
+    assert.equal(alerts.length, 2, '31 min later the SAME undrained register RE-ALERTS (the guarantee is never a one-shot)')
+  })
+})
+
+test('LANE 5 the workRegisterIdleEnabled gate + the workRegisterPath dep: explicit false → the scan is SKIPPED (no alert even with the full condition); the dep absent → the scan is a NO-OP (no alert, no warn, own ledger untouched — a wiring without the register seam never fabricates a register-stall alert)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 29, 8, 0, 0).getTime() // Saturday → VALLE
+    await writeFile(path.join(stateDir, 'WORK-REGISTER.md'), WRI_REGISTER_FIXTURE, 'utf8')
+    await writeFile(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: T0 - 60_000 }), 'utf8')
+    // (a) gate OFF with the dep PRESENT and the full condition.
+    const alertsA = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-lane5-g1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [],
+      hostRunning: false,
+      config: { health: { workRegisterIdleEnabled: false, workRegisterIdleQuietMs: 60_000 }, org: { pacing: {} } },
+      workRegisterPath: path.join(stateDir, 'WORK-REGISTER.md'),
+      notifyHost: async () => { alertsA.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alertsA.length, 0, 'workRegisterIdleEnabled:false suppresses the scan even at 15+ min of quiet VALLE with pending non-gated work')
+    // (b) workRegisterPath ABSENT → the scan is a NO-OP, its own ledger byte-UNTOUCHED.
+    const seeded = JSON.stringify({ firstQuietTs: T0 - 2 * 60 * 60 * 1000 })
+    await writeFile(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), seeded, 'utf8')
+    const alertsB = []
+    const warnsB = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-lane5-g2',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [],
+      hostRunning: false,
+      config: { health: { workRegisterIdleQuietMs: 60_000 }, org: { pacing: {} } },
+      notifyHost: async () => { alertsB.push(1) },
+      logger: { warn: (m) => warnsB.push(m), info: () => {} }
+    })
+    assert.equal(alertsB.length, 0, 'workRegisterPath undefined → the scan is a no-op → no alert despite a 2h quiet with pending non-gated work')
+    assert.equal(warnsB.length, 0, 'workRegisterPath undefined → no warn either (the scan did not run)')
+    assert.equal(await readFile(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), 'utf8'), seeded, 'the pre-seeded own ledger is byte-UNTOUCHED (the scan never read/wrote its own state)')
+  })
+})
+
+test('LANE 5 SMOKE (acceptance — real daemon): bootPlugin with health {intervalMs: 50, workRegisterIdleQuietMs: 50, workRegisterPath: <temp register fixture>} + a config org whose pacing window EXCLUDES the current UTC weekday (franja VALLE guaranteed) + a temp WORK-REGISTER with §1 (non-gated) + §3 (gated) + NO agent running → the REAL daemon alerts the host with the work-register-idle frame listing the NON-gated §1 items; the audit row records the finding', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const registerPath = path.join(stateDir, 'WR-smoke.md')
+    await writeFile(registerPath, WRI_REGISTER_FIXTURE, 'utf8')
+    // Force VALLE regardless of the wall clock: a peak window whose weekday is
+    // the NEXT UTC weekday (never today — the weekday filter short-circuits
+    // before any hour/buffer check, so isPeakAt(now) === false ALWAYS).
+    const todayUtcDow = new Date().getUTCDay() === 0 ? 7 : new Date().getUTCDay()
+    const nextDow = todayUtcDow === 7 ? 1 : todayUtcDow + 1
+    const env = await bootPlugin(stateDir, {
+      health: { intervalMs: 50, workRegisterIdleQuietMs: 50, workRegisterPath: registerPath },
+      org: { ...TEST_ORG, pacing: { peakWindows: { weekday: [nextDow], hours: [1] } } }
+    })
+    try {
+      await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'head materialized at boot')
+      const host = env.agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      // Self-register the live host (the ALERT recipient must be a durable
+      // hosts.json entry for pickLiveHost).
+      await env.root.tools.get('dept_who').execute({}, { agent: host, signal })
+      // The REAL daemon (ticking every 50 ms): VALLE (the nextDow window) ∧ the
+      // temp register holds NON-gated §1 items ∧ 0 agents running ∧ quiet ≥
+      // 50 ms → the work-register-idle ALERT. Deterministic: the window (50 ms)
+      // is far below the waitFor, so any tick after the first quiet-VALLE stamp
+      // sees the condition satisfied.
+      await waitFor(() => host.inboxMessages.some((m) => m.content[0]?.text.includes('System-health ALERT') && m.content[0].text.includes('work-register-idle')), 5000, 'the real work-register-idle daemon alerts the host')
+      const frame = host.inboxMessages.find((m) => m.content[0]?.text.includes('work-register-idle')).content[0].text
+      assert.match(frame, /WORK-REGISTER con \d+ item\(s\) NO-gateado\(s\) sin despachar en VALLE/, 'the REAL alert frame carries the work-register-idle line')
+      assert.match(frame, /LANE 3 — fb-28/, 'the REAL alert lists the NON-gated §1 item')
+      assert.ok(!frame.includes('top-up ws10'), 'the REAL alert never lists the GATED §3 item (owner-pending waits BY DESIGN)')
+      await waitFor(async () => {
+        try {
+          const auditText = await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')
+          return auditText.trim().length > 0
+        } catch {
+          return false
+        }
+      }, 5000, 'the audit row is appended')
+      const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      assert.equal(audit.at(-1).findings.some((f) => f.kind === 'work-register-idle'), true, 'the audit last row records the work-register-idle finding')
     } finally {
       await env.dispose()
     }

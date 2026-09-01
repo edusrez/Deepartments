@@ -609,8 +609,19 @@ export interface HealthFinding {
      * «cola de misiones <postId>: <n> pendientes sin drenar — posible backlog»
      * alarm; the dedupe KEY is per-post `mission-queue:<postId>` in the SHARED
      * ledger, re-alerting every HEALTH_DEDUPE_WINDOW_MS while the backlog
-     * persists). */
-  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red' | 'mission-queue'
+     * persists). LANE 5 adds `work-register-idle` (fb-46 — the docs-level
+     * WORK-REGISTER watchdog: the register is the org's SINGLE pending-work
+     * queue and NO watchdog reads it at the DOCS level — M4 system-idle only
+     * sees the MESSAGE-level pendingCount. CONDITION: franja VALLE
+     * (isPeakAt == false) ∧ countPendingWorkRegister > 0 ∧ ≥1 NON-GATED
+     * (despatchable) item ∧ 0 agents running ∧ quiet ≥ `workRegisterIdleQuietMs`
+     * → the «WORK-REGISTER con trabajo NO-gateado sin despachar» alarm; the
+     * OWNER-GATED §3 PENDIENTE-OWNER section NEVER triggers it (an
+     * owner-pending decision waits for the owner BY DESIGN — the frame lists
+     * the NON-gated items and the dedupe KEY is `work-register-idle` in the
+     * SHARED ledger, re-alerting every HEALTH_DEDUPE_WINDOW_MS while the
+     * condition persists). */
+  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red' | 'mission-queue' | 'work-register-idle'
   /** The dedupe key (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS). */
   key: string
   /** The postId (post-error / stalled-post / context-threshold post row). */
@@ -2179,6 +2190,16 @@ export interface HealthConfigLike {
      * CATCH-UP frame); rows beyond the look-back stay silent by design.
      * Absent/invalid → 86400000 (24 h). */
     catchupWindowMs?: number
+    /** LANE 5 (fb-46) — the work-register-idle watchdog gate (default ON; an
+     * explicit false disables the WORK-REGISTER docs-level stall scan). */
+    workRegisterIdleEnabled?: boolean
+    /** LANE 5 (fb-46) — the WORK-REGISTER-idle VALLE-quiet window in ms (default
+     * 900000 = 15 min): the franja VALLE ∧ WORK-REGISTER has NON-gated pending
+     * items ∧ ZERO agents running must hold for >= this long before the
+     * `work-register-idle` finding + host ALERT (the M4 firstQuietTs
+     * sustained-condition precedent, own ledger work-register-idle-state.json).
+     * Absent/invalid → 900000. */
+    workRegisterIdleQuietMs?: number
   }
   /** PACING (owner m-PACING, 2026-08-28) — the top-level `org.pacing.*`
    * franja config the transition monitor reads (the bundle passes its whole
@@ -3978,6 +3999,240 @@ export function scanMissionQueue(input: MissionQueueScanInput): MissionQueueScan
   return { findings, ledger, changed }
 }
 
+// ---------------------------------------------------------------------------
+// LANE 5 — the work-register-idle watchdog (fb-46, QUALITY REQUEST QH,
+// 2026-09-01 — the reviewer mission «watchdog work-register-idle»). The
+// WORK-REGISTER (docs/WORK-REGISTER.md) is the org's SINGLE pending-work queue
+// (the «cola de diferidos» — §7 of the register itself) and NO existing
+// watchdog reads it at the DOCS level: M4 system-idle sees only the
+// MESSAGE-level pendingCount (a register item that never became a message is
+// invisible to it) — the stagnation audit found the org STATIC in VALLE with a
+// despatchable queue (~12 h of risk) while zero health-alerts fired. This
+// watchdog ALERTS the HOST (never dispatches — the host decides/re-dispatches)
+// iff ALL hold:
+//   1. [VALLE] — `isPeakAt(now, pacingWindow) == false` (the dshd-core pacing
+//      epoch; PEAK is the INTENTIONAL dispatch pause — a queue accumulating in
+//      PEAK is expected, NEVER an idle alarm);
+//   2. [pending WORK-REGISTER] — `countPendingWorkRegister(registerText) > 0`
+//      (the REUSED dshd-core count utility — same section-split + bold-marker
+//      semantics, single source of truth) AND at least ONE NON-GATED
+//      (despatchable) item exists: the §3 PENDIENTE-OWNER section is GATED —
+//      an owner-pending decision waits for the owner BY DESIGN and never
+//      triggers the alarm (a §3-only register is 0 frames);
+//   3. [0 agents running] — `hostRunning !== true` AND no non-retired post
+//      reports `running:true` (the M4 Bug B rule: a mid-turn is progress);
+//   4. [quiet >= quietWindow] — since `firstQuietTs` (the OWN ledger — a
+//      SEPARATE file like system-idle-state.json: the shared health-alerts
+//      ledger's defensive 2h prune would drop a long first-quiet). ANY running
+//      agent OR a PEAK franja BREAKS the epoch (the window restarts when the
+//      full condition returns).
+// The ALERT rides the EXISTING findings→dedupe→notifyHost flow (key
+// `work-register-idle` — re-alerts every HEALTH_DEDUPE_WINDOW_MS while the
+// condition persists, never a one-shot) and NEVER goes through
+// deliverDaemonNotice (the B4 gate — the daemon wiring delivers DIRECT). The
+// frame lists the NON-GATED items (the despatchable queue — the §3 gated items
+// are never listed). The watchdog NEVER dispatches: it only alerts.
+// ---------------------------------------------------------------------------
+
+/** The work-register-idle dedupe key (ONE key in the SHARED health-alerts
+ * ledger — the 30-min re-alert cadence while the condition persists). */
+export const WORK_REGISTER_IDLE_KEY = 'work-register-idle'
+
+/** The work-register-idle ledger file — a SEPARATE file (the shared
+ * health-alerts ledger's 2h prune would drop a long firstQuietTs; the
+ * system-idle-state.json precedent): `{ firstQuietTs }`. */
+export const WORK_REGISTER_IDLE_STATE_FILE = 'work-register-idle-state.json'
+
+/** LANE 5 — the default VALLE-quiet window (15 min — the mission's quietWindow;
+ * shorter than the 30-min dedupe so the FIRST alert lands when the quiet
+ * completes (15 min) and the re-alert cadence owns the rest). */
+export const WORK_REGISTER_IDLE_DEFAULT_QUIET_MS = 900000
+
+/** The OWNER-GATED section marker: a `## ` heading carrying this class (the §3
+ * PENDIENTE-OWNER / owner-decision section of the register) marks every item
+ * under it as GATED — an owner-pending decision waits for the owner BY DESIGN
+ * and NEVER triggers the work-register-idle alarm (the «PENDIENTE-OWNER»
+ * literal is the register's stable §3 heading, verified 2026-09-01). */
+export const WORK_REGISTER_IDLE_GATED_SECTION_RE = /PENDIENTE-OWNER/i
+
+/** The frame-list bound: at most this many NON-gated item labels render in the
+ * ALERT bullet (the count + «… y N más» carry the rest). */
+export const WORK_REGISTER_IDLE_MAX_LISTED = 8
+
+/** ONE parsed WORK-REGISTER item: the `**…**`-bolded label under an open `## `
+ * section, with its GATE classification (the §3 PENDIENTE-OWNER class = gated). */
+export interface WorkRegisterItem {
+  /** The `## ` section heading the item lives under (its gate class source). */
+  section: string
+  /** True when the item sits under an OWNER-GATED section (the §3
+   * PENDIENTE-OWNER class — waits on the owner; NEVER despatchable). */
+  gated: boolean
+  /** The bold-marked item label (`**…**` text with the asterisks stripped). */
+  label: string
+}
+
+/** LANE 5 — parse the WORK-REGISTER into its item census with the GATED vs
+ * NON-gated classification. REUSES the exact `countPendingWorkRegister`
+ * semantics (the same `## ` section split, the same CERRADO/closed reference
+ * section skip, the same `**…**` bold-marker extraction skipping the
+ * DONE/CERRADO/RESUELTO/RETIRADO status tags) so the TOTAL agrees with the
+ * existing dshd-core utility byte-for-byte, and ADDS the gate class: a section
+ * whose heading matches WORK_REGISTER_IDLE_GATED_SECTION_RE (the §3
+ * PENDIENTE-OWNER class) is GATED; every other open section's items are
+ * NON-gated (despatchable — the §1/§4/§5 classes; a closed/reference section
+ * contributes nothing). PURE — NEVER throws (not a register-shaped doc → []). */
+export function parseWorkRegisterItems(text: string): WorkRegisterItem[] {
+  const sections = text.split(/^##\s+/m)
+  if (sections.length <= 1) return []
+  const out: WorkRegisterItem[] = []
+  for (let i = 1; i < sections.length; i++) {
+    const lines = sections[i].split('\n')
+    const heading = (lines[0] ?? '').trim()
+    if (/CERRADO|closed/i.test(heading)) continue
+    const gated = WORK_REGISTER_IDLE_GATED_SECTION_RE.test(heading)
+    const body = lines.slice(1).join('\n')
+    const markers = body.match(/\*\*([^*]+)\*\*/g)
+    if (markers === null) continue
+    for (const marker of markers) {
+      if (/\b(DONE|CERRADO|RESUELTO|RETIRADO)\b/i.test(marker)) continue
+      out.push({ section: heading, gated, label: marker.slice(2, -2) })
+    }
+  }
+  return out
+}
+
+/** The work-register-idle ledger: `firstQuietTs` = the ts (ms epoch) of the
+ * FIRST tick that observed the full quiet-VALLE state (0 agents running in a
+ * VALLE franja). The quiet duration is `nowMs - firstQuietTs`; the entry is
+ * REPLACED when ANY agent runs OR the franja leaves VALLE (the epoch is broken
+ * → the window restarts when the full condition returns). Persisted only when
+ * it changes (the turn-errors/system-idle pattern). */
+export interface WorkRegisterIdleState {
+  firstQuietTs?: number
+}
+
+/** Read `<stateDir>/work-register-idle-state.json` → `{ firstQuietTs? }`.
+ * Absent / unreadable / malformed → {} (never throws). */
+export function readWorkRegisterIdleState(stateDir: string): WorkRegisterIdleState {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), 'utf8')) as Record<string, unknown>
+    const out: WorkRegisterIdleState = {}
+    if (typeof parsed.firstQuietTs === 'number' && Number.isFinite(parsed.firstQuietTs)) out.firstQuietTs = parsed.firstQuietTs
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/work-register-idle-state.json` (mkdir -p the dir, then the
+ * file). */
+export async function writeWorkRegisterIdleState(stateDir: string, state: WorkRegisterIdleState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE)), { recursive: true })
+  await writeFile(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), JSON.stringify(state), 'utf8')
+}
+
+/** The work-register-idle scan inputs: the register TEXT (read by the tick from
+ * `deps.workRegisterPath` — the scan itself is PURE, zero I/O), the franja
+ * valley flag (computed by the tick with the REUSED dshd-core pacing — the
+ * `isPeakAt == false` leg), the host's running signal, the catalog posts, the
+ * clock, the resolved quiet window (knob `workRegisterIdleQuietMs` or the
+ * 15-min code default) and the current ledger. */
+export interface WorkRegisterIdleScanInput {
+  /** The WORK-REGISTER markdown text (the tick reads `deps.workRegisterPath`;
+   * unreadable/absent → '' → the pending-census legs fail → conservative no-op). */
+  registerText: string
+  /** True when the current franja is VALLE (isPeakAt == false — the tick
+   * computes it with the REUSED dshd-core pacing window). PEAK → the epoch is
+   * broken (an intentional pause never accumulates idle time). */
+  valley: boolean
+  /** The host's live running signal (true → not quiet — the M4 Bug B rule). */
+  hostRunning?: boolean
+  /** The catalog posts (a non-retired post with running:true → not quiet). */
+  posts: readonly PostActivityInput[]
+  /** The clock (ms epoch). */
+  nowMs: number
+  /** The resolved quiet window (knob or default). */
+  quietWindowMs: number
+  /** The CURRENT ledger (read by the tick; mutated → the returned next ledger). */
+  ledger: WorkRegisterIdleState
+}
+
+/** The work-register-idle scan result: the findings (≤1 per tick, key
+ * WORK_REGISTER_IDLE_KEY), the NEXT ledger, whether the ledger CHANGED (the
+ * tick persists only then) and the warn-only flag (window done with ZERO
+ * NON-gated pending items — expected quiet: no finding, the tick warns). */
+export interface WorkRegisterIdleScanResult {
+  findings: HealthFinding[]
+  ledger: WorkRegisterIdleState
+  changed: boolean
+  /** True when the quiet window COMPLETED with ZERO NON-gated pending items —
+   * expected quiet (either no register work at all, or a §3-only register whose
+   * gated items wait on the owner BY DESIGN) → warn-only, no finding. */
+  quietWithoutPending: boolean
+}
+
+/** LANE 5 — scan the WORK-REGISTER-idle condition (PURE, NEVER throws). The
+ * quiet epoch is BROKEN (firstQuietTs deleted) when ANY agent runs
+ * (hostRunning===true or a non-retired post running:true — M4 Bug B) OR the
+ * franja is PEAK (an intentional dispatch pause never accumulates idle time);
+ * while the full quiet-VALLE state holds: (a) the first quiet tick stamps
+ * firstQuietTs; (b) once `nowMs - firstQuietTs >= quietWindowMs` the pending
+ * census decides: pending NON-gated register items → the `work-register-idle`
+ * finding (key WORK_REGISTER_IDLE_KEY — the SHARED dedupe gives the 30-min
+ * re-alert cadence while the condition persists; the frame lists the NON-gated
+ * items); NO NON-gated pending (a §3-only register or an empty one) →
+ * quietWithoutPending (the tick warns, no finding). The total-pending leg
+ * REUSES `countPendingWorkRegister` (the dshd-core utility — byte-consistent
+ * with the parsed census by construction). */
+export function scanWorkRegisterIdle(input: WorkRegisterIdleScanInput): WorkRegisterIdleScanResult {
+  const ledger = { ...input.ledger }
+  let changed = false
+  const anyRunning = input.hostRunning === true || input.posts.some((p) => p.retired !== true && p.running === true)
+  if (anyRunning || !input.valley) {
+    // The quiet-VALLE epoch is broken: an agent is mid-turn (progress, NEVER
+    // quiet) OR the franja left VALLE (a PEAK is the intentional pause — the
+    // window must restart when VALLE returns).
+    if (ledger.firstQuietTs !== undefined) {
+      delete ledger.firstQuietTs
+      changed = true
+    }
+    return { findings: [], ledger, changed, quietWithoutPending: false }
+  }
+  // Quiet-VALLE epoch: stamp the first quiet tick, then measure the duration.
+  const firstQuietTs = ledger.firstQuietTs ?? input.nowMs
+  if (ledger.firstQuietTs === undefined) {
+    ledger.firstQuietTs = input.nowMs
+    changed = true
+  }
+  const quietMs = input.nowMs - firstQuietTs
+  if (quietMs < input.quietWindowMs) {
+    return { findings: [], ledger, changed, quietWithoutPending: false }
+  }
+  // The window COMPLETED → the WORK-REGISTER census decides. The total-pending
+  // leg REUSES the existing count utility; the item census separates GATED
+  // (§3 PENDIENTE-OWNER — waits on the owner BY DESIGN) from NON-gated.
+  const totalPending = countPendingWorkRegister(input.registerText)
+  const items = parseWorkRegisterItems(input.registerText)
+  const nonGated = items.filter((item) => item.gated !== true)
+  if (totalPending === undefined || totalPending <= 0 || nonGated.length === 0) {
+    return { findings: [], ledger, changed, quietWithoutPending: true }
+  }
+  const minutes = Math.round(quietMs / 60000)
+  // The frame's item list: the NON-gated labels, bounded (a huge register must
+  // not produce an unbounded ALERT frame) — the count carries the full census.
+  const listLabels = nonGated.map((item) => item.label)
+  const listText = listLabels.slice(0, WORK_REGISTER_IDLE_MAX_LISTED).join('; ') +
+    (listLabels.length > WORK_REGISTER_IDLE_MAX_LISTED ? `; … y ${listLabels.length - WORK_REGISTER_IDLE_MAX_LISTED} más` : '')
+  const findings: HealthFinding[] = [{
+    kind: 'work-register-idle',
+    key: WORK_REGISTER_IDLE_KEY,
+    ts: input.nowMs,
+    count: nonGated.length,
+    error: `WORK-REGISTER con ${nonGated.length} item(s) NO-gateado(s) sin despachar en VALLE (quiet ≥ ${input.quietWindowMs} ms, 0 agentes): ${listText}`
+  }]
+  return { findings, ledger, changed, quietWithoutPending: false }
+}
+
 /** Build the framed host ALERT text — `[From deepartments] System-health ALERT:
  * <grouped findings>`. Each finding is a one-line bullet. The config-preset and
  * stalled-post bullets describe their anomaly verbally (never the literal
@@ -4058,6 +4313,15 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     // informative).
     if (finding.kind === 'mission-queue') {
       return `- mission-queue: ${finding.error ?? `cola de misiones ${finding.postId ?? ''}: ${finding.count ?? 0} pendientes sin drenar — posible backlog`}`
+    }
+    // LANE 5 — the work-register-idle branch (NEVER let it reach the stale-post
+    // fallback). The owner-facing wording is the finding's own line (the
+    // WORK-REGISTER has N NON-gated despatchable items sitting in VALLE with
+    // zero agents — possible stagnation: the error carries the FULL line
+    // including the NON-gated item labels, so every 30-min re-alert stays
+    // informative and the host sees WHAT to re-dispatch).
+    if (finding.kind === 'work-register-idle') {
+      return `- work-register-idle: ${finding.error ?? `WORK-REGISTER con ${finding.count ?? 0} item(s) NO-gateado(s) sin despachar en VALLE — posible espera que nunca llegó`}`
     }
     return `- stalled-post: ${finding.postId} (${finding.count ?? 1} pending message(s), ${finding.error ?? 'no session activity'})`
   })
@@ -4427,6 +4691,12 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // invalid → the 24 h code default via resolvePositiveKnob).
     const catchupEnabled = health?.catchupEnabled !== false
     const catchupWindowMs = resolvePositiveKnob(health?.catchupWindowMs, HEALTH_CATCHUP_WINDOW_MS)
+    // LANE 5 (fb-46) — the work-register-idle watchdog knobs:
+    // `workRegisterIdleEnabled` gate (default ON) + `workRegisterIdleQuietMs`
+    // (the VALLE-quiet window; absent/invalid → the 15-min code default via
+    // resolvePositiveKnob).
+    const workRegisterIdleEnabled = health?.workRegisterIdleEnabled !== false
+    const workRegisterIdleQuietMs = resolvePositiveKnob(health?.workRegisterIdleQuietMs, WORK_REGISTER_IDLE_DEFAULT_QUIET_MS)
     // The per-poll BUCKET gate (the M-A per-poll precedent): the main-red scan
     // runs at most once per `mainRedPollMs` bucket — the FIRST tick of a bucket
     // (prevTick undefined → runs); a faster `health.intervalMs` re-fire inside
@@ -4724,6 +4994,54 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         deps.logger?.warn(`[deepartments] system-health: mission-queue scan failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    // LANE 5 (fb-46) — the work-register-idle watchdog (the docs-level
+    // WORK-REGISTER stall scan). Gate: enabled AND `deps.workRegisterPath`
+    // RESOLVED (the bundle injects it — docs/WORK-REGISTER.md; ABSENT → the
+    // scan is a NO-OP: a wiring without the register seam never fabricates a
+    // register-stall alert; the poolerStatePath-absent pattern) AND
+    // `deps.hostRunning` RESOLVED (the M4 pattern: without the host's liveness
+    // the zero-running premise cannot be certified). Its OWN ledger
+    // work-register-idle-state.json (firstQuietTs) persists ONLY on change;
+    // the SHARED health-alerts ledger (key `work-register-idle`) gives the
+    // 30-min re-alert cadence while the condition persists. Expected quiet
+    // (window done, NO NON-gated pending — a §3-only register or an empty one)
+    // → a warn, no finding, no dedupe.
+    let workRegisterIdleFindings: HealthFinding[] = []
+    if (workRegisterIdleEnabled && deps.workRegisterPath !== undefined && deps.hostRunning !== undefined) {
+      try {
+        // The franja VALLE leg REUSES the dshd-core pacing (isPeakAt == false
+        // — the same window the transition monitor uses).
+        const pacingWindow = pacingWindowFromConfig(deps.config?.org?.pacing)
+        const valley = !isPeakAt(new Date(nowMs), pacingWindow)
+        // The register is read SOLO-LECTURA (best-effort — the watchdog NEVER
+        // writes it; an unreadable/absent register degrades to '' → the census
+        // legs fail → conservative no-op).
+        let registerText = ''
+        try {
+          registerText = readFileSync(deps.workRegisterPath, 'utf8')
+        } catch {
+          registerText = ''
+        }
+        const wrLedger = readWorkRegisterIdleState(deps.stateDir)
+        const wrScan = scanWorkRegisterIdle({
+          registerText,
+          valley,
+          hostRunning: deps.hostRunning,
+          posts,
+          nowMs,
+          quietWindowMs: workRegisterIdleQuietMs,
+          ledger: wrLedger
+        })
+        workRegisterIdleFindings = wrScan.findings
+        if (wrScan.changed) await writeWorkRegisterIdleState(deps.stateDir, wrScan.ledger)
+        if (wrScan.quietWithoutPending) {
+          const minutes = Math.round(workRegisterIdleQuietMs / 60000)
+          deps.logger?.warn(`[deepartments] system-health: work-register idle ${minutes} min in VALLE with zero NON-gated pending items — expected quiet (or owner-gated §3 only), no alert`)
+        }
+      } catch (error: unknown) {
+        deps.logger?.warn(`[deepartments] system-health: work-register-idle scan failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     // 3. scan.
     const findings = [
       ...scanPostErrorFindings(deps.stateDir, nowMs, retiredHostIds),
@@ -4745,6 +5063,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       ...contextFindings,
       ...missionFindings,
       ...missionQueueFindings,
+      ...workRegisterIdleFindings,
       ...mainRedFindings
     ]
     // W8-d PART B/C — the system-heartbeat knobs: `heartbeatEnabled` (default
