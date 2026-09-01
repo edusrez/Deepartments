@@ -8070,6 +8070,80 @@ test('F10 (spec 004 §7.1): a worker with NO declared role tools (legacy dept_po
   })
 })
 
+// fb-29 (ARCHITECTURE HONESTY — the 2026-08-31 empty-scope incident): a
+// dept_worker_spawn whose role template resolves an EMPTY/ABSENT frontmatter
+// `tools` scope must FAIL LOUDLY before any materialization — never silently
+// spawn a messaging-only worker (the F10 allow-list degrades to `allow: []`
+// without any error). The fixture uses the established preset-fixture
+// discipline (snapshotRoleTemplate — git-HEAD based, restores to absence).
+const FB29_EMPTY_ROLE = 'fb29-emptyscope'
+const FB29_EMPTY_ROLE_PATH = path.join(F10_REPO_ROOT, 'presets', 'departments', 'research', `${FB29_EMPTY_ROLE}.md`)
+/** Variant A: NO `tools:` key at all (readRoleTemplate resolves `tools` as absent). */
+const FB29_EMPTY_FRONTMATTER_ABSENT = `---\nid: ${FB29_EMPTY_ROLE}\ntitle: Empty scope\n---\n\nYou are an empty-scope worker.\n`
+/** Variant B: `tools:` with an EMPTY list (readRoleTemplate resolves `tools` as []). */
+const FB29_EMPTY_FRONTMATTER_EMPTYLIST = `---\nid: ${FB29_EMPTY_ROLE}\ntitle: Empty scope\ntools:\n---\n\nYou are an empty-scope worker.\n`
+
+test('fb-29 (ARCHITECTURE HONESTY): dept_worker_spawn with a role template whose frontmatter `tools` is ABSENT or an EMPTY LIST fails LOUDLY BEFORE any materialization — the error names role + template path + cause, no agent is created, no durable entry is registered, no first bus message (an empty tool scope must never silently spawn a messaging-only worker)', async () => {
+  const restore = await snapshotRoleTemplate(FB29_EMPTY_ROLE)
+  try {
+    for (const [variant, frontmatter] of [
+      ['absent', FB29_EMPTY_FRONTMATTER_ABSENT],
+      ['empty-list', FB29_EMPTY_FRONTMATTER_EMPTYLIST]
+    ]) {
+      await writeFile(FB29_EMPTY_ROLE_PATH, frontmatter, 'utf8')
+      await withTempStateDir(async (stateDir) => {
+        const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { globalTools: F10_GLOBAL_TOOLS })
+        try {
+          const before = agents.store.size
+          const createCallsBefore = agents.createCalls.length
+          await assert.rejects(
+            () => headCtx.tools.get('dept_worker_spawn', key).execute({ role: FB29_EMPTY_ROLE, task: 'never materializes' }, { agent: head, signal: new AbortController().signal }),
+            new RegExp(`the template .*presets/departments/research/fb29-emptyscope\\.md.*declares frontmatter \`tools\` ${variant === 'absent' ? 'absent' : 'an empty list'}.*worker does not materialize`),
+            `the EMPTY-${variant} tool scope rejects the spawn loudly (role + template path + cause named)`
+          )
+          // The guard is BEFORE slug-dedup/create/register/deliver: nothing was
+          // materialized — no new agent, no create call, no durable worker entry.
+          assert.equal(agents.store.size, before, `no worker agent was created for the ${variant} empty scope`)
+          assert.equal(agents.createCalls.length, createCallsBefore, `no ctx.agents.create ran for the ${variant} empty scope`)
+          const posts = await readPosts(stateDir)
+          assert.equal(Object.values(posts).some((e) => e.provider === 'worker' && e.role === FB29_EMPTY_ROLE), false, `no durable worker entry was registered for the ${variant} empty scope`)
+        } finally {
+          await dispose()
+        }
+      })
+    }
+  } finally {
+    await restore()
+  }
+})
+
+test('fb-29 REGRESSION: a NORMAL role-template spawn (non-empty `tools`) still materializes the worker with its FULL toolset — the empty-scope guard is strictly additive, happy spawns untouched (capability tools inherited through the restrict allow-list, bus/ciclo own-layer tools visible, role gates unchanged)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { globalTools: F10_GLOBAL_TOOLS })
+    try {
+      const researcher = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'fb-29 regression' })
+      const r = researcher.result
+      assert.equal(r.workerId.length > 0, true, 'the normal spawn succeeded (worker materialized)')
+      // The researcher role template declares web_search/web_fetch/read/write/
+      // glob/grep + the bus tools → the FULL inherited + own-layer toolset lands
+      // exactly as before the guard (0 regression of the happy path).
+      for (const name of ['web_search', 'web_fetch', 'read', 'write', 'glob', 'grep']) {
+        assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher worker "${r.workerId}" still inherits ${name} (0 regression)`)
+      }
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write']) {
+        assert.ok(researcher.ctx.tools.get(name, researcher.key), `researcher worker still sees the bus/ciclo tool ${name} (0 regression)`)
+      }
+      // The role-gated boundaries are unchanged: researcher does NOT declare
+      // `edit`/`dept_exec` → it has neither; a worker never sees the lifecycle tools.
+      assert.equal(researcher.ctx.tools.get('edit', researcher.key), undefined, 'researcher still has NO edit (role-gated, unchanged)')
+      assert.equal(researcher.ctx.tools.get('dept_exec', researcher.key), undefined, 'researcher still has NO dept_exec (not declared, unchanged)')
+      assert.equal(researcher.ctx.tools.get('dept_worker_spawn', researcher.key), undefined, 'worker still has NO dept_worker_spawn (unchanged)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('F10 (spec 004 §7.1): a department HEAD inherits the head base tools (read/write/glob/grep/web_search/web_fetch) + its own-layer board/lifecycle tools, and never edit', async () => {
   await withTempStateDir(async (stateDir) => {
     const { agents, root, head, headCtx, key, workspaceRegistry, dispose } = await bootWithHead(stateDir, { globalTools: F10_GLOBAL_TOOLS })

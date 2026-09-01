@@ -355,6 +355,30 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     return block === undefined ? undefined : block.reason
   }
 
+  /** fb-29 (ARCHITECTURE HONESTY — the 2026-08-31 empty-scope incident): a
+   * worker role MUST resolve a NON-EMPTY tool scope before ANY materialization.
+   * The worker's allow-scope derives from the role template's frontmatter
+   * `tools` (F10 — postSetup builds the restrict allow-list from it); a
+   * template with `tools` ABSENT or EMPTY makes the spawned worker
+   * messaging-only (own-layer board tools only: no read/write/edit/glob/grep,
+   * no dept_exec) WITHOUT any loud error — the F10 path degrades silently to
+   * `restrict({allow: []})`. An interrupted spawn then leaves a durable worker
+   * entry that cannot do its role's work (and a later re-materialization
+   * re-derives the same empty scope). REFUSING is the honest choice — retry is
+   * POINTLESS here (the template is a static repo file; re-resolving it
+   * returns the SAME empty scope, so a retry can never succeed without an
+   * external template fix): the spawn fails LOUDLY naming the role, the
+   * template path and the cause, BEFORE any agents.create / registerEntry /
+   * delivery — nothing is registered, nothing is materialized, and the head
+   * sees the exact file to fix. */
+  const assertWorkerToolScope = (role: string, template: RoleTemplate): void => {
+    if (template.tools !== void 0 && template.tools.length > 0) return
+    const cause = template.tools === void 0 ? 'absent' : 'an empty list'
+    throw new Error(
+      `[deepartments] dept_worker_spawn: role "${role}" has an EMPTY tool scope — the template ${template.path} declares frontmatter \`tools\` ${cause}; a worker spawned from it would be messaging-only (no read/write/edit/glob/grep/dept_exec) and silently operate mermado. Fix the template's \`tools\` list — the worker does not materialize.`
+    )
+  }
+
   /** Run ONE department job — the dept_worker_spawn contract (dept_job_run's
    * body, minus the exec.agent derivation): read the definition, validate the
    * role, enforce the already-running idempotency, materialize the worker root
@@ -397,6 +421,9 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     // engine is untouched): resolve the role template, slug-dedup, materialize,
     // pin the HUMAN title, deliver the JOB BODY as the first bus message.
     const template = await readRoleTemplate(department.id, definition.meta.role)
+    // fb-29: a job role whose template resolves an EMPTY tool scope must never
+    // materialize a messaging-only job worker — fail loudly BEFORE any create.
+    assertWorkerToolScope(definition.meta.role, template)
     const postId = dedupedWorkerSlug(jobId)
     const sessionId = SessionId(mintWorkerSessionId(postId))
     if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_job_run: a live agent already exists for session "${sessionId}"`)
@@ -476,6 +503,16 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     // Role template is resolved BEFORE any create: a missing/malformed role file
     // fails the spawn loudly (never a persona-less worker).
     const template = await readRoleTemplate(department.id, role)
+    // fb-29 (ARCHITECTURE HONESTY): a role template that resolves an EMPTY tool
+    // scope (frontmatter `tools` absent or as an empty list) would silently
+    // spawn a messaging-only worker (no read/write/edit/glob/grep/dept_exec —
+    // the F10 allow-list degrades to `allow: []` without any error). Refuse
+    // LOUDLY here — BEFORE the slug dedup, the create, the registration, the
+    // delivery — so nothing is ever materialized mermado (the interrupted-spawn
+    // incident of 2026-08-31 materialized exactly such a worker and it could
+    // not do its role's work). Retry is pointless: the template is a static
+    // file, re-resolving it returns the SAME empty scope.
+    assertWorkerToolScope(role, template)
     // Slug dedup (spec §5.2): base = jobId ?? role; -2/-3… on collision —
     // INCLUDING RETIRED slugs (F1 keeps retired entries in byPost).
     const postId = dedupedWorkerSlug(opts.jobId ?? role)
