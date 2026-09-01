@@ -107,12 +107,15 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   watch-class · fb-43 ✓ (0dbf645) · fb-44 filed (researcher sin edit —
   candidato preset) · fb-45/46/47/48 prácticas/normas QD+host (ver ROADMAP
   09-01) — pendiente de cierre formal por el QD cuando verifiquen/aterricen.
-- **MISIÓN TOTAL MODULARITY per Cordis (owner 09-01)** — visión de fondo
-  (crecimiento/mantenimiento escalables): DEFINICIÓN DE DONE necesaria → RD
-  research m-1847 (en vuelo: qué es Cordis, cómo lo usa DSH, propiedades de un
-  sistema totalmente modular, gap assessment de nuestro estado); el exit-
-  criterion de la misión será la definición del RD; tras ella: fase 0.2.x
-  (applyInvoke residual, bridges, provide hito 4).
+- **MISIÓN TOTAL MODULARITY per Cordis (owner 09-01; **RATIFICADA**)**: north-star
+  **P1-P8 ACEPTADO** (definición RD reports/researcher/2026-09-01-cordis-total-
+  modularity.md) + **AMPLIACIÓN owner: CADA DEPARTAMENTO = plugin propio
+  (dshd-<dept>)** — departamentos como unidades composables/desechables
+  (autoescalable/mejorable). Gap hoy ~2-3/8. Receta 0.2.x → 6-7/8 (binder→
+  Service · applyInvoke→fábricas+políticas · colapsar doble-mirror +
+  normalizar híbridos) → IPD vía programming request tras el DAG actual/
+  bloque B (disciplina no saturar); dept-as-plugin = siguiente nivel
+  (post-6/7-8). Exit-criterion = P1-P8 medibles + P7 a nivel departamento.
 - **CANDIDATO runtime/IPD (proceso, QD observación 09-01) — anclaje del muestreo
   D-Q2**: la cadena recursiva se autogenera (cada inspector retirado cae en el
   sample 25% de otro inspector QD — 5 curas hoy, 0.25^k decae pero autoconsume
