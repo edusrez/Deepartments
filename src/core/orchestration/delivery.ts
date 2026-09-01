@@ -197,6 +197,15 @@ export interface DeliveryFactoryDeps {
   headSetup: (postId: string, roomId: string, role: string, presetId?: string, department?: DepartmentConfig) => (agentCtx: Context) => unknown
   /** The worker own-layer setup builder (materialization). */
   workerSetup: (postId: string, roomId: string, role: string, extra?: { persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig }) => (agentCtx: Context) => unknown
+  /** VALLE lane B (fb-29 structural fix) — the COLD re-materialization tools
+   * reader (exposed by the spawn orchestration surface, resolveRoleTemplate):
+   * re-resolves a worker's role-template tools at the materialize seam so a
+   * restarted worker is NEVER re-created with an empty tool-scope (the original
+   * fb-29 bug). Returns the template (with its `tools`) when the role has a
+   * template FILE (a role-template worker); undefined when NO template file
+   * exists (a LEGACY dept_post_create free-form-role worker — board-only by
+   * design, never failed). */
+  resolveRoleTemplate: (departmentId: string, role: string) => Promise<{ id: string; title: string; tools?: string[]; persona: string; path: string } | undefined>
   /** Resolve the duplicate-safe materialization AgentOptions (coordinator →
    * WORKER_AGENT_OPTIONS fallback). */
   resolveMaterializeAgentOptions: (candidate: AgentOptionsLike | undefined) => AgentOptionsLike
@@ -354,6 +363,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     headSetup,
     workerSetup,
     resolveMaterializeAgentOptions,
+    resolveRoleTemplate,
     resolveDepartmentWorkspaceCwd,
     resolveWorkspaceRootPath,
     rotateArchivedHeadSessionId,
@@ -532,6 +542,43 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     return freshTarget
   }
 
+  /** VALLE lane B (fb-29 structural fix) — resolve the toolset the COLD
+   * re-materialization seam hands to workerSetup, so a restarted worker is
+   * NEVER re-created with an empty tool-scope (the fb-29 bug: the COLD path
+   * built the setup WITHOUT `tools`, unlike the warm spawn engines that pass
+   * `template.tools`). Resolution order:
+   *  (B) fast-path — the entry's own durable `tools` (the spawn wrote it; the
+   *      belt-and-suspenders cache), else
+   *  (A) primary — re-resolve the role template via the spawn-surface reader
+   *      (covers LEGACY entries WITHOUT the durable field; single source of
+   *      truth = the role template file, exactly like the warm path), then
+   *  (fb-29 guard) a ROLE-TEMPLATE worker whose template EXISTS but resolves an
+   *      EMPTY tool-scope FAILS LOUDLY — never materialize a messaging-only
+   *      worker in silence (the original fb-29 invariant; a legacy
+   *      dept_post_create free-form-role worker with NO template file is the
+   *      board-only BY-DESIGN class and is returned unchanged, no tools).
+   * Returns `string[]` (the non-empty allow-list to apply) or `undefined`
+   * (legacy board-only class — no tools to restore). */
+  const resolveMaterializeWorkerTools = async (entry: PostEntry, role: string, dept: DepartmentConfig | undefined): Promise<string[] | undefined> => {
+    // (B) the durable fast-path — the entry itself carries an explicit allow-list.
+    if (Array.isArray(entry.tools) && entry.tools.length > 0) return [...entry.tools]
+    // (A) primary — re-resolve the role template (covers legacy without the field).
+    if (dept !== void 0) {
+      const template = await resolveRoleTemplate(dept.id, role)
+      if (template !== void 0) {
+        if (Array.isArray(template.tools) && template.tools.length > 0) return [...template.tools]
+        // fb-29 guard — an EXISTING role template that resolves EMPTY tools.
+        throw new Error(`[deepartments] cold re-materialization of worker "${entry.postId}" (role "${role}", dept "${dept.id}") refused: the role template presets/departments/${dept.id}/${role}.md resolves an EMPTY tool scope — refusing to materialize a messaging-only worker (fb-29 invariant). Fix the template \`tools\` allow-list or the entry's durable tools.`)
+      }
+      // template === undefined: a role with NO template FILE = the legacy
+      // dept_post_create board-only class (messaging-only BY DESIGN — never
+      // failed); fall through to the no-tools return.
+    }
+    // A department-less legacy worker (no resolvable template tree) or a
+    // board-only dept_post_create worker → no role tools to restore.
+    return undefined
+  }
+
   /**
    * The SHARED post-materialization core of the wakePost seam (spec §4.3 step 2
    * — "EXACTLY wakePost"): respawn-from-sleep (dispose stale handle, clear
@@ -613,8 +660,15 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       // architecture section (a worker by its durable departmentId, a head by
       // config; a department-less/legacy entry → omitted cleanly).
       const dept = departmentForEntry(entry)
+      // VALLE lane B (fb-29 structural fix): the COLD re-spawn hands the worker
+      // its role template's TOOLS (B durable fast-path → A re-resolution → the
+      // fb-29 loud guard) — never a silently messaging-only re-materialization
+      // (the original fb-29 bug: this seam built the setup WITHOUT tools, unlike
+      // the warm spawn engines). A legacy board-only worker resolves `undefined`
+      // → the pre-fix no-tools setup byte-identical.
+      const workerTools = isWorker ? await resolveMaterializeWorkerTools(entry, role, dept) : undefined
       const setup = isWorker
-        ? workerSetup(entry.postId, entry.roomId, role, { department: dept })
+        ? workerSetup(entry.postId, entry.roomId, role, { department: dept, ...(workerTools !== undefined ? { tools: workerTools } : {}) })
         : headSetup(entry.postId, entry.roomId, role, headPreset, dept)
       const agentOptions = resolveMaterializeAgentOptions(coordinator?.agentOptions)
       const preset: string = isWorker ? WORKER_PRESET_ID : headPreset

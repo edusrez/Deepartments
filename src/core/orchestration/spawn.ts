@@ -188,6 +188,13 @@ export interface SpawnSurface {
   workerReasoningContentPreflightError: () => string | undefined
   /** The pooler-capacity dispatch pre-check (429-primer-call guard). */
   workerPoolerDispatchBlockError: () => string | undefined
+  /** VALLE lane B (fb-29 structural fix) — the COLD re-materialization tools
+   * reader: re-resolves a worker's role-template tools at the materialize seam
+   * (returns the template with its `tools` when the role has a template FILE;
+   * undefined for a legacy free-form role with NO template — board-only by
+   * design). Consumed by the delivery factory (materializePost) so a restarted
+   * role-template worker is never silently messaging-only. */
+  resolveRoleTemplate: (departmentId: string, role: string) => Promise<{ id: string; title: string; tools?: string[]; persona: string; path: string } | undefined>
 }
 
 /** Disposer closure per tool the head own-layer registers. The moved zone
@@ -445,7 +452,11 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
       role: definition.meta.role,
       managerId: headEntry.postId,
       departmentId: department.id,
-      jobId
+      jobId,
+      // VALLE lane B (fb-29 structural fix): thread the role template's tools
+      // into the DURABLE entry (B — the cold re-materialization fast-path; the
+      // A re-resolution at the seam covers legacy entries WITHOUT this field).
+      ...(Array.isArray(template.tools) && template.tools.length > 0 ? { tools: template.tools } : {})
     })
     byHeadHandle.set(String(SessionId(sessionId)), handle)
     const titleSession = ctx.sessions.get(sessionId)
@@ -537,7 +548,12 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
       role,
       managerId: headEntry.postId,
       departmentId: department.id,
-      ...(opts.jobId !== void 0 ? { jobId: opts.jobId } : {})
+      ...(opts.jobId !== void 0 ? { jobId: opts.jobId } : {}),
+      // VALLE lane B (fb-29 structural fix): the durable entry carries the role
+      // template's tools (B — the cold re-materialization fast-path; the A
+      // re-resolution at the seam covers entry WITHOUT this field). Non-empty by
+      // construction here (assertWorkerToolScope ran above).
+      ...(Array.isArray(template.tools) && template.tools.length > 0 ? { tools: template.tools } : {})
     })
     byHeadHandle.set(String(SessionId(sessionId)), handle)
     // F3 pin (spec §5.2): human-readable sidebar row — the owner's manual rename
@@ -636,6 +652,28 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     return { id: declaredId, title, tools, persona: parsed.body, path: filePath }
   }
 
+  /** VALLE lane B (fb-29 structural fix) — the readRoleTemplate variant the
+   * COLD re-materialization seam (materializePost) consumes: re-resolve a
+   * worker's role-template tools WITHOUT throwing when the template FILE does
+   * not exist. A role with a template file resolves to its full shape (the
+   * delivery seam re-reads `tools` so a restarted worker is never
+   * messaging-only); a role that is a LEGACY dept_post_create free-form role
+   * (no template file — board-only/messaging-only BY DESIGN, tools.ts:1300)
+   * returns `undefined`. A template that EXISTS but is malformed / id-mismatched
+   * still throws loudly (a role-template worker is never silently demoted). The
+   * cold seam distinguishes: template EXISTS with empty tools → the fb-29 guard
+   * refuses (loud); no template → legacy class (no failure). */
+  const resolveRoleTemplate = async (departmentId: string, role: string): Promise<RoleTemplate | undefined> => {
+    try {
+      return await readRoleTemplate(departmentId, role)
+    } catch (error: unknown) {
+      // A MISSING template file is the legacy free-form-role class (dept_post_create),
+      // never an error — the role simply has no template to resolve tools from.
+      if (error instanceof Error && error.message.includes('has no template at')) return undefined
+      throw error
+    }
+  }
+
   /** The mission headline of a deployed worker's default sidebar title (owner
    * decision 2026-08-23 "siempre Rol: Misión"): the FIRST line of the task
    * text, cut to ~`MISSION_MAX` chars (a truncation ellipsis when it exceeds),
@@ -725,6 +763,7 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     departmentJobExists,
     defaultWorkerTitle,
     workerReasoningContentPreflightError,
-    workerPoolerDispatchBlockError
+    workerPoolerDispatchBlockError,
+    resolveRoleTemplate
   }
 }

@@ -140,6 +140,14 @@ export interface PostEntry {
    * Only set on a slept HEAD; cleared on respawn. Absent = never slept with
    * in-flight workers. */
   inflightWorkers?: string[]
+  /** VALLE lane B (fb-29 structural fix): a WORKER's role-template `tools`
+   * allow-list, threaded into the durable entry at spawn (dept_worker_spawn /
+   * dept_job_run — the warm paths pass `template.tools` to workerSetup; the
+   * durable copy is the COLD re-materialization fast-path). Absent on a head,
+   * on a legacy worker (pre-VALLE-B entries — the delivery seam re-resolves the
+   * role template instead) and on the legacy dept_post_create board-only class
+   * (no role template — messaging-only by design). */
+  tools?: string[]
 }
 
 /** The DURABLE shape persisted to posts.json. */
@@ -160,6 +168,10 @@ export interface PostEntryPersisted {
   /** M-A — the rotation marker (see PostEntry.rotated). Persisted only when set. */
   rotated?: boolean
   inflightWorkers?: string[]
+  /** VALLE lane B (fb-29 structural fix) — a worker's role-template `tools`
+   * allow-list (see PostEntry.tools). Persisted only when set (absent = legacy/
+   * pre-VALLE-B or the board-only dept_post_create class). */
+  tools?: string[]
 }
 
 /** One durable host registry entry (hostId → host session in a room). */
@@ -1205,7 +1217,8 @@ export class RegistryStore {
         ...(entry.boundarySeq !== void 0 ? { boundarySeq: entry.boundarySeq } : {}),
         ...(entry.previousChildId !== void 0 ? { previousChildId: entry.previousChildId } : {}),
         ...(entry.rotated === true ? { rotated: true } : {}),
-        ...(Array.isArray(entry.inflightWorkers) && entry.inflightWorkers.length > 0 ? { inflightWorkers: entry.inflightWorkers } : {})
+        ...(Array.isArray(entry.inflightWorkers) && entry.inflightWorkers.length > 0 ? { inflightWorkers: entry.inflightWorkers } : {}),
+        ...(Array.isArray(entry.tools) && entry.tools.length > 0 ? { tools: entry.tools } : {})
       }
     }
     return writeFile(this.postsPath, JSON.stringify(data, null, 2), 'utf8').catch(
@@ -1347,6 +1360,13 @@ export class RegistryStore {
         const inflightWorkers = Array.isArray(entry.inflightWorkers)
           ? entry.inflightWorkers.filter((w): w is string => typeof w === 'string')
           : undefined
+        // VALLE lane B (fb-29 structural fix): the worker's durable role-template
+        // `tools` allow-list survives the RESTART (design B — the cold
+        // re-materialization fast-path), so it is restored into the in-memory
+        // entry exactly like the other durable worker fields.
+        const tools = Array.isArray(entry.tools)
+          ? entry.tools.filter((t): t is string => typeof t === 'string')
+          : undefined
         // Populate the in-memory catalog DIRECTLY (mirroring `loadHosts`) instead
         // of `registerEntry`, which fired a fire-and-forget `persistPosts()` PER
         // ENTRY — an unawaited, non-atomic write storm that raced the boot
@@ -1367,7 +1387,8 @@ export class RegistryStore {
           ...(boundarySeq !== void 0 ? { boundarySeq } : {}),
           ...(previousChildId !== void 0 ? { previousChildId } : {}),
           ...(rotated ? { rotated: true } : {}),
-          ...(inflightWorkers !== void 0 && inflightWorkers.length > 0 ? { inflightWorkers } : {})
+          ...(inflightWorkers !== void 0 && inflightWorkers.length > 0 ? { inflightWorkers } : {}),
+          ...(tools !== void 0 && tools.length > 0 ? { tools } : {})
         })
         this.byChild.set(sessionId, postId)
       } else {

@@ -1028,7 +1028,7 @@ async function waitForHeadMaterialized(agents) {
   await waitFor(() => agents.store.has('head-research-head'), 5000, 'head materialized at boot')
 }
 
-async function seedPost(stateDir, { postId, sessionId = `head-${postId}`, roomId, agentPreset = 'deepartments-head', provider, role, departmentId, managerId, jobId, retired, sleepEpoch, previousChildId, inflightWorkers }) {
+async function seedPost(stateDir, { postId, sessionId = `head-${postId}`, roomId, agentPreset = 'deepartments-head', provider, role, departmentId, managerId, jobId, retired, sleepEpoch, previousChildId, inflightWorkers, tools }) {
   const postsPath = path.join(stateDir, 'posts.json')
   let existing = {}
   try {
@@ -1052,6 +1052,9 @@ async function seedPost(stateDir, { postId, sessionId = `head-${postId}`, roomId
   if (previousChildId !== undefined) entry.previousChildId = previousChildId
   // Fix (head-sleep worker drain): seed the durable in-flight worker ledger.
   if (inflightWorkers !== undefined) entry.inflightWorkers = inflightWorkers
+  // VALLE lane B (fb-29 structural fix): the worker's durable role-template
+  // `tools` allow-list (the design-B cold re-materialization fast-path).
+  if (tools !== undefined) entry.tools = tools
   existing[postId] = entry
   await writeFile(postsPath, JSON.stringify(existing, null, 2), 'utf8')
   postAdoption.set(sessionId, '')
@@ -8142,6 +8145,127 @@ test('fb-29 REGRESSION: a NORMAL role-template spawn (non-empty `tools`) still m
       await dispose()
     }
   })
+})
+
+test('VALLE lane B (fb-29 structural fix — design A PRIMARY): a role-template WORKER cold-re-materialized after a restart gets its FULL role TOOLS — a legacy durable entry WITHOUT the `tools` field re-resolves the role template at the materialize seam (never the messaging-only re-spawn the fb-29 bug produced)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The DURABLE worker registry of a PREVIOUS run (post-restart this is the
+    // legacy posts.json shape: provider/role/departmentId only — NO `tools`).
+    const sessionId = 'worker-researcher-valle-a-aaaaaaaa'
+    await seedPost(stateDir, { postId: 'researcher-valle-a', sessionId, roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', departmentId: 'research', managerId: 'research-head' })
+    const { root, agents, dispose } = await bootPlugin(stateDir, { globalTools: F10_GLOBAL_TOOLS })
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const r = await root.tools.get('send_message').execute({ to: ['researcher-valle-a'], text: 'wake after restart' }, { agent: host, signal })
+      assert.equal(r.delivered['researcher-valle-a'], 'resumed', 'the legacy-entry worker cold-resumes (bus delivery reported resumed)')
+      await waitFor(() => agents.store.has(sessionId), 5000, 'the worker is live after the cold resume')
+      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, sessionId)
+      // The researcher role template declares the full capability allow-list —
+      // the A re-resolution re-reads it at the seam and hands it to postSetup,
+      // so the toolset is NON-EMPTY (NOT the fb-29 messaging-only worker).
+      for (const name of ['web_search', 'web_fetch', 'read', 'write', 'glob', 'grep']) {
+        assert.ok(workerCtx.tools.get(name, workerKey), `cold re-spawned researcher worker still has ${name} (the fb-29 structural fix — never messaging-only)`)
+      }
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write']) {
+        assert.ok(workerCtx.tools.get(name, workerKey), `cold re-spawned worker still sees the bus/ciclo tool ${name}`)
+      }
+      // Role-gated boundaries unchanged: researcher does NOT declare edit/dept_exec.
+      assert.equal(workerCtx.tools.get('edit', workerKey), undefined, 'researcher still has NO edit after the cold re-spawn')
+      assert.equal(workerCtx.tools.get('dept_exec', workerKey), undefined, 'researcher still has NO dept_exec after the cold re-spawn')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('VALLE lane B (fb-29 structural fix — design B fast-path): a worker whose DURABLE entry carries the `tools` allow-list (spawn-threaded) cold-re-materializes with EXACTLY those tools — no template re-read needed, still never messaging-only', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The B shape: the post-VALLE-B spawn wrote template.tools into posts.json.
+    const sessionId = 'worker-researcher-valle-b-bbbbbbbb'
+    await seedPost(stateDir, { postId: 'researcher-valle-b', sessionId, roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', departmentId: 'research', managerId: 'research-head', tools: ['web_search', 'read', 'write', 'glob', 'grep'] })
+    const { root, agents, dispose } = await bootPlugin(stateDir, { globalTools: F10_GLOBAL_TOOLS })
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const r = await root.tools.get('send_message').execute({ to: ['researcher-valle-b'], text: 'wake after restart (durable tools)' }, { agent: host, signal })
+      assert.equal(r.delivered['researcher-valle-b'], 'resumed', 'the durable-tools worker cold-resumes')
+      await waitFor(() => agents.store.has(sessionId), 5000, 'the worker is live after the cold resume')
+      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, sessionId)
+      // The entry's OWN allow-list wins (B — no template dependence): the
+      // declared tools are inherited; a name NOT in the durable list stays out.
+      for (const name of ['web_search', 'read', 'write', 'glob', 'grep']) {
+        assert.ok(workerCtx.tools.get(name, workerKey), `cold re-spawned worker carries the durable tool ${name} (B fast-path)`)
+      }
+      assert.equal(workerCtx.tools.get('web_fetch', workerKey), undefined, 'web_fetch is NOT in the durable allow-list → absent (the entry list is authoritative, not the template)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// VALLE lane B — the LEGACY board-only class + the fb-29 loud guard. A legacy
+// dept_post_create worker (FREE-FORM role with NO template file) keeps its
+// board-only/messaging-only BY-DESIGN toolset (never a failure — the documented
+// legacy residue); a ROLE-TEMPLATE worker whose template EXISTS but resolves an
+// EMPTY tool-scope FAILS the cold re-spawn loudly (the original fb-29 invariant
+// — never a silently messaging-only worker). The guard role is written under
+// the RESEARCH department tree (the fixture discipline: snapshot + restore).
+const VALLEB_GUARD_ROLE = 'valleb-coldguard'
+const VALLEB_GUARD_ROLE_PATH = path.join(F10_REPO_ROOT, 'presets', 'departments', 'research', `${VALLEB_GUARD_ROLE}.md`)
+const VALLEB_GUARD_FRONTMATTER = `---\nid: ${VALLEB_GUARD_ROLE}\ntitle: Empty scope (VALLE B guard)\ntools:\n---\n\nYou are an empty-scope guard worker.\n`
+
+test('VALLE lane B (fb-29 structural fix): a legacy dept_post_create worker (free-form role, NO template file) cold-re-materializes UNCHANGED — board-only BY DESIGN, never a failure; and a ROLE-TEMPLATE worker whose template EXISTS with an EMPTY tool-scope FAILS the cold re-spawn LOUDLY (never a silent messaging-only worker — the fb-29 invariant)', async () => {
+  // (1) the LEGACY class: free-form role 'legacy worker A' with the research
+  // department (the role has NO template file → the A reader returns undefined
+  // → no tools → the pre-fix board-only setup byte-identical).
+  await withTempStateDir(async (stateDir) => {
+    const sessionId = 'worker-legacy-valle-cccccccc'
+    await seedPost(stateDir, { postId: 'legacy-valle', sessionId, roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'legacy worker A', departmentId: 'research', managerId: 'research-head' })
+    const { root, agents, dispose } = await bootPlugin(stateDir, { globalTools: F10_GLOBAL_TOOLS })
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const r = await root.tools.get('send_message').execute({ to: ['legacy-valle'], text: 'wake the legacy worker' }, { agent: host, signal })
+      assert.equal(r.delivered['legacy-valle'], 'resumed', 'a legacy board-only worker still cold-resumes (no failure — documented legacy residue)')
+      await waitFor(() => agents.store.has(sessionId), 5000, 'the legacy worker is live')
+      const { ctx: workerCtx, key: workerKey } = childContextFor(agents, sessionId)
+      // Board-only BY DESIGN: no capability tools, only the bus/ciclo own-layer.
+      assert.equal(workerCtx.tools.get('web_search', workerKey), undefined, 'legacy board-only worker still has NO web_search (messaging-only by design, unchanged)')
+      for (const name of ['send_message', 'agent_messages', 'dept_who', 'dept_memo_write']) {
+        assert.ok(workerCtx.tools.get(name, workerKey), `legacy board-only worker still sees the bus/ciclo tool ${name}`)
+      }
+    } finally {
+      await dispose()
+    }
+  })
+  // (2) the fb-29 GUARD: a role-template worker whose template EXISTS but has
+  // an EMPTY tools list must NOT be silently re-materialized messaging-only —
+  // the cold re-spawn fails loudly (the delivery maps to 'failed' + a durable
+  // post-error row naming role/entry/cause).
+  const restore = await snapshotRoleTemplate(VALLEB_GUARD_ROLE)
+  try {
+    await writeFile(VALLEB_GUARD_ROLE_PATH, VALLEB_GUARD_FRONTMATTER, 'utf8')
+    await withTempStateDir(async (stateDir) => {
+      const sessionId = 'worker-valle-guard-dddddddd'
+      await seedPost(stateDir, { postId: 'valle-guard', sessionId, roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: VALLEB_GUARD_ROLE, departmentId: 'research', managerId: 'research-head' })
+      const { root, agents, dispose } = await bootPlugin(stateDir, { globalTools: F10_GLOBAL_TOOLS })
+      try {
+        const host = agents.put(fakeParentAgent())
+        const signal = new AbortController().signal
+        const r = await root.tools.get('send_message').execute({ to: ['valle-guard'], text: 'wake the empty-scope worker' }, { agent: host, signal })
+        assert.equal(r.delivered['valle-guard'], 'failed', 'the empty-scope role-template worker FAILS the cold re-spawn loudly (fb-29 guard)')
+        assert.equal(agents.resumeCalls.some((c) => String(c.resumeSessionId) === sessionId), false, 'NO agents.resume ran (the guard fires BEFORE any materialization)')
+        assert.equal(agents.store.has(sessionId), false, 'the empty-scope worker is NOT materialized')
+        const rows = readPostErrorsFile(stateDir).filter((r0) => r0.postId === 'valle-guard')
+        assert.ok(rows.some((r0) => /cold re-materialization of worker "valle-guard" \(role "valleb-coldguard", dept "research"\) refused: the role template .*resolves an EMPTY tool scope/.test(r0.error)), 'the delivery failure names role + entry + cause (the fb-29 guard message) in the durable post-error row')
+      } finally {
+        await dispose()
+      }
+    })
+  } finally {
+    await restore()
+  }
 })
 
 test('F10 (spec 004 §7.1): a department HEAD inherits the head base tools (read/write/glob/grep/web_search/web_fetch) + its own-layer board/lifecycle tools, and never edit', async () => {

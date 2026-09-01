@@ -2735,7 +2735,8 @@ export function applyInvoke(ctx: Context, config: Config) {
     departmentJobExists,
     defaultWorkerTitle,
     workerReasoningContentPreflightError,
-    workerPoolerDispatchBlockError
+    workerPoolerDispatchBlockError,
+    resolveRoleTemplate
   } = spawnSurface
 
   // ---------------------------------------------------------------------------
@@ -3004,6 +3005,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     headSetup,
     workerSetup,
     resolveMaterializeAgentOptions,
+    resolveRoleTemplate,
     resolveDepartmentWorkspaceCwd,
     resolveWorkspaceRootPath,
     rotateArchivedHeadSessionId,
