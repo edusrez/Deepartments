@@ -5,181 +5,129 @@
 > Asistente; lo mantienen el **Internal Programming Department (IPD)** y el
 > **Asistente**. Es la fuente de verdad de la cola: IPD activa, DAG técnico
 > cerrado, decisiones pendientes del owner, capacidad, backlog y sinergias.
-> **LANDING 2026-08-28 (PR-1, docs/ledger pasada C3 del QD + ANEXO owner 8
-> ítems)** — PENDIENTE-OWNER al día, adicionales QD/owner aterrizados.
-> **LANDING 2026-08-28 (2ª pasada)** — riesgo condicional RAG-stable (§3) + filas backlog rag_index/tsc-drift + lección fb-20 aterrizados.
+> **LANDING 2026-09-01 (host Asistente, 2ª pasada de alineación)** — refresh
+> completo al estado REAL post-bloque VALLE: M-4/M-A/PACING/D5/P1/publish
+> commiteados y CERRADOS en su cola; bloque VALLE aterrizado (M-7 + fb-43 +
+> fb-30 investigado + pulse-digest + MEMO NORM + materializePost cold re-spawn);
+> hardening 401/fb-39 + fb-27 commiteados; fb-28 EN VUELO; backlog del día
+> (fb-46/47, GUI modo monitoreo, T1 capa 3, watchdog work-register-idle)
+> registrado; capacidad al día (owner: top-up no por ahora). Deriva detectada
+> por el propio host al comparar con el ROADMAP (lección: sincronizar el
+> register al CERRAR cada bloque — norma de continuación, fb-46).
 
-## 1. IPD — cola activa
+## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
-- **M4** watchdog de inactividad del sistema (owner, alta — si 15-30 min sin
-  agente running con pendientes → alerta; **IMPLEMENTADO 2026-08-27 por
-  builder-4 — kind `system-idle` en dshd-health (scan + ledger propio
-  system-idle-state.json + frame) + knobs `systemIdleEnabled`/`idleWindowMs`
-  900000 en org.ts + dep `hostRunning` en el wiring + 8 tests M4 — pendiente
-  commit del Asistente**) · **M-A MONITOR de contexto** (owner, alta — scan/
-  kind `context-threshold` en dshd-health con umbral 50% (knob
-  `contextThreshold` 0.5) + dedupe por BANDA `context-threshold:<id>:bN` (cruce
-  de banda → alerta inmediata; banda persistente → re-alerta 30 min por la
-  dedupe shared, sin ledger propio) + poll `contextThresholdPollMs` 60000
-  (patrón per-minute) + dep opcional `sessionContexts` construida por el bundle
-  leyendo `ctx.sessionProjections.snapshot(session).values.contextPressure` (la
-  vista wire, versión-agnóstica RC.7/RC.2) + knobs org.ts + 9 tests incl. smoke
-  real → frame al host — **IMPLEMENTADO 2026-08-28 por builder-27, pendiente
-  commit del Asistente**; la rotación-por-umbral para heads es la SEGUNDA
-  misión M-A (tool dept_head_rotate — aterrizada en el worktree pendiente de
-  commit) · **M2.3** secretary en heads (3
-  smokes fallidos M2/M2.1/M2.2; instrumentación en vivo del standing pedida al
-  IPD — **residual M2 documentado tal cual**: handle residente + smoke live
-  heads pendientes del deploy del subagent/secretary) · seguimiento log-sweep
-  del QD (objetivos nuevos → misiones) · **PR-1 docs/ledger ATERRIZADO
-  2026-08-28** (este landing) · **dsh-vanilla** = unidad DEcommissioned
-  conocida (el job system-health-report la trata **warn-NO-escalate**; el
-  Asistente verificó **is-enabled = disabled** en el unit, 2026-08-28) ·
-  **PACING peak/valle** (owner, MEDIUM — pacing/coste: el gate reduce el 429
-  y el coste; la org ya vive en modo ráfaga; **IMPLEMENTADO 2026-08-28 por
-  builder-28 — módulo puro pacing.ts en dshd-core (fórmula UTC espejo del
-  dsh-key-pooler, ref-cruzada por comentario) + knobs `org.pacing.*` (enabled/
-  peakWindows weekday×hours/peakBufferMs 1800000) + sección `## Pacing
-  (franja)` en el wake pack (host + lean snapshot) + avisos de transición del
-  daemon (canal notifyHost durable + dedupe key `pacing-transition` en el
-  health-alerts ledger + baseline durable pacing-state.json; primer arranque
-  = solo baseline, sin aviso — documentado) + política en skill/WORK-REGISTER
-  — pendiente commit del Asistente**).
+- **LANE 3 — fb-28 (QD, MEDIO)** [🔵 EN VUELO — builder desplegado]: colisión
+  de ruta de reporte al reusar postId (slug reutilizado tras retire → colisión
+  con el reporte del worker ANTERIOR; caso builder-5). Diseño: sufijar por
+  sesión con RUN-TOKEN único inyectado en el spawn (sin mutaciones de FS
+  ajenas). Al aterrizar: aviso QH (verificación + cierre fb-28).
+- **LANE 4 — de-flake W6/BugA** (frecuencia 4/8 en runs del builder; flakes
+  CONOCIDOS standalone verdes) **+ catch-up durable fb-30** (recomendación del
+  lane A: catch-up en boot vía restart-registry) [en cola, tras fb-28].
+- **POST-DAG — bloque B (2 items de owner):**
+  - **watchdog work-register-idle** (fb-46): franja VALLE ∧ trabajo pendiente
+    en el WORK-REGISTER > 0 ∧ 0 agents running ∧ quietud ≥ 15 min → alerta al
+    host para re-despacho (re-alerta 30 min; distinguir gateado vs no-gateado).
+    PROGRAMMING REQUEST ya enviado al IPH por el QH (m-1799 del QH).
+  - **mejoras de sistema (fb-47)** — 5 items (retirar R6-verbatim del skill
+    [~3 KB peso muerto real], dedupe wake routine [aparece 3×], condensar tail
+    ROADMAP del wake pack [4.3-7.3 KB], single-source directorio E2
+    pack↔skill, nudge secretary/memory-steward texto) + **T1 telemetría capa 3**
+    (lector de saldo patrón dsh-balance-meter + pooler persistir 3 ventanas).
+    Programmatic request m-1799 (QH→IPH). Invariantes de tests a preservar:
+    invoke.test.js:6704-6716 / 4166-4167. Ahorro realista ~10-12 KB/wake.
+- **LANE GUI — modo monitoreo (owner 09-01)**: composer oculto en TODAS las
+  sesiones no-host (heads/workers — moot del display Default/max en cabezas) +
+  en la sesión del host asociado al toggle Presente/Ausente. [lane pequeño,
+  disjunto (dshd-gui client-inject) — se cuela donde el IPD tenga hueco sin
+  romper la serialización; verificar viabilidad: ¿el harness expone la
+  presencia al client-inject?]
+- **CERRADOS en esta cola (no pedir de nuevo):** M4 (system-idle),
+  M-A (context-threshold + dept_head_rotate), PACING (peak/valle),
+  M-5 (misión-sin-inicio), M-6 (main-red), M-7 (mission-queue),
+  fb-43 (restart-registry), fb-39 gate (hardening 401 — 66399ad + pooler
+  7248a55), fb-27 (turn/end-error notify — 04f8c31), materializePost cold
+  re-spawn (b2ecb45), pulse-digest (c59e1ab), MEMO NORM (c59e1ab + docs RD).
 
 ## 2. DAG técnico — CERRADO (referencia)
 
-PASO 9 (c5131af) · fb-6 (32d6314) · **F-HIGH (630a59c) — CERRADO** (fuera de
-PENDIENTE-OWNER; fila solo de referencia) · fb-7 pooler (3d55bbf) ·
+PASO 9 (c5131af) · fb-6 (32d6314) · F-HIGH (630a59c) · fb-7 pooler (3d55bbf) ·
 A+B (408f1c6) · M1 (6f638d4) · M2 (274d550) · E2-IMPL (e09e687) · M1.1
-(7172b19) · M2.1 (6416a34) · M2.2 (3e47993) · C12+O2+fb-8 (d94f5ea) ·
-M3 (f159eda). Fase modular 0.2.x (siguiente, solo BACKLOG/owner — §3/§5).
+(7172b19) · M2.1 (6416a34) · M2.2 (3e47993) · C12+O2+fb-8 (d94f5ea) · M3
+(f159eda) · D5 (b239b4a) · P1 (448697b) · release 0.1.0 (efd579b) · PASO 1-3 +
+tools SB1-4 + presets SB6 + boot Z7 (decoupling HITO 3 — f28c719) · M-5
+(f3ec445) · M-6 (79da4f2) · fb-29 (4695145) · VALLE bloque A/B/C (0dbf645 /
+b2ecb45 / c59e1ab) · hardening-401 (66399ad + 7248a55) · fb-27 (04f8c31).
+Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 
-## 3. PENDIENTE-OWNER (decisiones)
+## 3. PENDIENTE-OWNER (decisiones — estado al 09-01)
 
-- **D5 → IMPLEMENTADO 2026-08-29 por builder-8 (pendiente commit del Asistente;
-  ver .dsh/reports/ipd/2026-08-29-modularization-d5.md)**: formalizar las 3
-  superficies del bundle + fold de flags baratos — (1) patch-row deepartments:
-  fila formal verificada (cordis.patch.yml:3-5) + doble fuente de verdad de org
-  resuelta SIN cambio de comportamiento (dshd-core = SHARED SOURCE, bundle =
-  FALLBACK MIRROR; parity test test/org-config-parity.test.js fija stateDir /
-  departments / poolerBaseURL + one-sided keys documentadas) · (2) subagent-
-  subpath → secretary: tool-secretary PROMOVIDO a fila Cordis formal ÚNICA en
-  el repo (presets/deepartments-head/agent.cordis.yml; matiz temporal/smoke del
-  twin headless retirado del perfil dev, R6 nada retirado) · (3) client inject:
-  dshd-gui = OWNER de la superficie deepartments-client (build/normalize ÚNICO;
-  el ./client del bundle se PRESERVA como espejo byte-idéntico via
-  scripts/mirror-client.mjs; raíz tsdown.config.ts + normalize-client-banner
-  duplicados FOLDED) · (4) flag stale «dshd-core NOT composed today» corregido
-  (sí se compone; compose-first en los perfiles dev). R6 intacto (stable
-  /opt/dsh/.dsh NO tocado) · **P1 → IMPLEMENTADO 2026-08-29 por builder-9
-  (pendiente commit del Asistente tras reviewer PASS; ver
-  .dsh/reports/ipd/2026-08-29-modularization-p1.md)**: plugin-izar los 6
-  packages-LIB (feedback/gui/health/jobs/pooler/quality) hasta superficie
-  Cordis REAL — (1) CADA uno con name/inject/apply + fila cordis.patch.yml
-  propia + servicio `deepartments.*` (feedback store / quality emitter / jobs
-  scheduler tick / pooler boot check / health daemon tick / gui channel) con
-  las deps INYECTADAS vía el Binder FASE 2.6 (deepartments.org + deepartments.
-  binder; las 6 capas compuestas en el perfil dev; dep ausente al USE →
-  FAIL-LOUD R1, nunca silencioso) — SEMÁNTICA de los bridges same-module
-  SUSTITUIDA por composición SIN retirar los 20 bridges (eso es el hito
-  DECOUPLING) ni tocar applyInvoke · (2) peers en package.json (cordis +
-  dshd-gui→dshd-jobs, dshd-health→dshd-core/dshd-quality — el flag del audit;
-  deps workspace conservadas R6) · (3) dump-config perfil dev: 6 capas nuevas
-  `# == dshd-*` compuestas con secciones core/deepartments BYTE-IDÉNTICAS
-  (postsRetention core-only, pacing/quality bundle-only, poolerBaseURL espejo)
-  · (4) bundle componible en MODO MÍNIMO (8 packages + deepartments, verificado
-  en perfil temporal) · (5) plugin add OK (scopeteado en perfil temporal del
-  dev HOME) — suite 619/597/0/22 EXACTA, builds raíz+8+client exit 0, git diff
-  --check limpio · apiKey DeepSeek →
-  RESUELTO 08-28 (key platform existente = FALLBACK del pooler; alta/top-up a
-  validar con owner — consola dio 403 en research RD) · publish vs link-only →
-  DECIDIDO 08-28 — **EN EJECUCIÓN 08-29**: publish dsh-deepartments **0.1.0**
-  (primera estable post-P1; decisiones de registry en el reporte
-  .dsh/reports/ipd/2026-08-29-release-0.1.x.md; owner delega al host; **con la
-  feature pacing/coste** — coordinar con la ventana) · stable 3080 upgrade → NO TOCAR
-  (owner 08-28) · **RIESGO CONDICIONAL RAG-STABLE (decisión (b) aceptada
-  2026-08-28)** — el perfil ESTABLE /opt/dsh/.dsh monta el plugin
-  dsh-tool-web-enhanced ANTIGUO (pre-denylist/excludePaths); RagEngine.
-  ensureIndex hace AUTO-INDEX en cada boot (única ruta de ingesta, clase fb-15:
-  claves API vivas en claro en el índice). Si el stable arranca, un re-index no
-  intencionado puede re-ingerir secretos. **Decisión: RIESGO ACEPTADO +
-  documentado** (el stable NO se re-bootea; vigilancia), con la guarda
-  **SENTINEL-PENDIENTE**: cuando/si se toque /opt/dsh/.dsh → (i) desactivar el
-  auto-index del RAG (config/sentinel) O (ii) actualizar su plugin a
-  0.4.0-rc.1+denylist ANTES del primer boot. NO se toca /opt/dsh/.dsh en esta
-  misión · **METR → nada** (cubierto por el tech-watch del RD, sin
-  acción IPD) · tool goal → RETIRADO 2026-08-28 (fila fuera del preset durable
-  dev; efecto runtime en ventana de deploy; nota R6 en preset) · keys Go
-  adicionales (PENDIENTE-OWNER compra: RD 7-8 keys flash = $70-80/mes, NO
-  malgasto; 1-2 keys insuficientes solas) · oc-5 WIP absorbido en 3d55bbf
-  (¿commit aparte? nota QD) · E1 opcionales RD (seam tools: extend quirúrgico /
-  acotar write a reportDir) · web_search en scope secretary (smoke del deploy
-  lo decide; fuera del allow por diseño) · **capacidad/DeepSeek → research RD
-  EN CURSO, recalibración ABIERTA — NO cerrar** (reports/researcher/
-  2026-08-28-deepseek-access-alternative.md + 2026-08-27-capacity-provider-
-  options.md; ver §4).
+- **glm-fallback vía OpenRouter → DESCARTADO (owner 09-01)** — la flota sigue
+  100% DS; el veredicto de fondo (ruta opencode-go es el cuello, no la key)
+  queda como conocimiento del RD (reports/researcher/2026-09-01-consolidated-
+  telemetry-glm-retest.md).
+- **top-up ws10/oc-6 → NO por ahora (owner 09-01)** — varias keys con buena
+  capacidad; se retoma cuando las keys se agoten (watch del pool).
+- **stable 3080 → NO TOCAR (owner 09-01)** — confirmado en presencia; el item
+  del RD (monitor dsh-updates) queda cerrado con ese veredicto.
+- **D-Q2 → mantener cadencia event-driven (owner 09-01)** — sin cap diario.
+- **RAG-stable SENTINEL-PENDIENTE (condicional, dormido)** — si/если se toca
+  /opt/dsh/.dsh: (i) desactivar auto-index RAG O (ii) actualizar su plugin a
+  0.4.0-rc.1+denylist ANTES del primer boot. Hoy NO se toca (constraint).
+- **keys Go adicionales (compra opcional owner: RD 7-8 keys $70-80/mes)** —
+  sin decisión; no urgente (capacidad ok por ahora).
+- **¿remoto GitHub para dsh-key-pooler?** — repo local-only (7248a55); pregunta
+  open menor al owner.
+- CERRADOS: publish 0.1.0 (efd579b) · D5 · P1 · tool-goal retirado · API key
+  DeepSeek (fallback real) · restart 05:23:31Z (owner: ignorar — watch si
+  reaparecen; restart-registry lo deja visible) · cause restarts 08-31
+  explicada (switch glm + reversión).
 
-## 4. CAPACIDAD
+## 4. CAPACIDAD (al 09-01)
 
-- oc-11 monthly 5% (sana) · oc-10 libre (16:57) · oc-6/8/9 hasta 08-31 salvo
-  top-up · **oc-12 REGISTRADA 2026-08-28 (otra cuenta opencode → cuota
-  independiente; drop-in key-pooler, sin workspace; ACTIVA tras la ventana de
-  deploy — pooler lee env al boot)** · vías RD en curso
-  (reports/researcher/2026-08-28-deepseek-access-alternative.md —
-  **recalibración ABIERTA, NO cerrar**; + reports/researcher/
-  2026-08-27-capacity-provider-options.md) · watchdogs M1 activos.
+- Pool: oc-11 monthly 5% sana · oc-12 (otra cuenta, cuota independiente)
+  ACTIVA · DS-fallback a api.deepseek.com LIVE (c4a04bc) · fall-through 401/429
+  (bb22b20) · gate poolerGateEnabled (hardening 66399ad — live tras deploy).
+- Límites conocidos: oc-10 workspace bloqueado hasta 09-07 · wrk_01KYW76T8 a
+  cero desde 08-31 (evidencia del outage 401) — owner: no urgente (top-up no
+  por ahora).
+- Watchdogs M1 activos + M-4/M-5/M-6/M-7 + context-threshold (M-A) —
+  auto-observación completa del runtime.
 
 ## 5. BACKLOG
 
-- ~~flake 1b.1 (:4686)~~ ~~m-64 intermitente~~ ~~fb-8 (flag deliverable)~~ —
-  **DONE** (de-flakeados en C12+O2, commit d94f5ea; 0 skips, cobertura
-  preservada) · **fb-2/fb-3 QD — AGENDADAS** (fb-2: render dept_sleep en sleep
-  EXITOSO; fb-3: latencia noWake de directivas a cabezas dormidas — en cola QD,
-  sin ejecutar todavía) · ~~comentario stale dshd-health:31-32~~ — **DONE
-  (PR-1)**: el header decía «the QD quality gate (Lote Q)» STAYED en
-  src/invoke.ts cuando la gate DECISION vive en dshd-quality — actualizado a
-  la realidad post-extracción (solo call-sites/emitter quedan en el bundle) ·
-  **F3 — ítem POST-SECUENCIA marcado por ownership explícito**: barrido de
-  sesiones worker huérfanas (`worker-*` sin post — Dx1 F3, deliberadamente
-  fuera del pase F2: un sweep no-post no puede distinguir un huérfano org de
-  otra sesión; backlog 0.2.x) · **O3 — firma NORMAL del retire**: el último
-  tool result de un worker retirado puede salir «tool call aborted» tras el
-  disposed (persistido+delivered ANTES, NUNCA pérdida; muestra 7/7 del QD) —
-  nota de conocimiento en docs/specs/005 §3.4 · **core DSH 0.1.2-alpha.1 —
-  WATCH ítem owner** (GitHub-only, no en npm; nota ROADMAP FUTURO del monitor:
-  modelos por departamento vía subagent selection, fold nativo vs smooth-stream
-  auto-collapse, one-time-token/Tailscale en URLs de red, ApiProxy removido →
-  @Remote, telemetría del adaptador DeepSeek, trap ERESOLVE con peers
-  ensanchados `|| ^0.1.2-0` antes de mover el host) · dshmarket dev actualizado
-  **1.33.0 → 1.35.0** (08-28; dev current, exact pin; stable sigue NO-TOCAR) ·
-  B6/B7 (revisar obsoletas con A+B) · **rag_index 300s timeout
-  (dsh-tool-web-enhanced)**: la tool `{}`,`{timeoutMs:300000}` indexa TODAS las
-  databases; revisar el cap / configurabilidad — ref
-  reports/explore-deep/2026-08-28-rag-secret-exclusion-map.md ·
-  **tsc-drift dsh-tool-web-enhanced**: drift build src/lib pre-existente
-  (WebSearchArgs/Config — revisar en la fase E1/0.2.x; ref
-  reports/builder/2026-08-28-rag-rebuild-unique-fix.md:159) · **lección fb-20
-  (proceso, NO código)**: builders concurrentes en la MISMA zona de edits
-  colisionan (caso b29/b30 dshd-health) → serializar por zona o asignar zonas
-  disjuntas — anotado 2026-08-28. · **fb-27 (QD, ALTO/mejora, 2026-08-29)**:
-  sin notificación automática del turn/end-error al head ni re-despacho — caso
-  real builder-4: stream-idle 300s + 4× 502 ETIMEDOUT → 502 21:50:14Z tras
-  completar TODO el trabajo; el cierre quedó 8h14m pendiente hasta un wake
-  manual. Candidato a implementar: notificar turn/end-error al head con
-  sessionId+turn — HABILITADO por la proveniencia (b) del fb-25 (recién
-  aterrizada); el re-despacho queda como consideración de diseño; verificación
-  del QD al aterrizar — ref dshd-health (dominio runtime). · **fb-28 (QD,
-  MEDIO, 2026-08-29)**: «colisión de ruta de reporte al reusar un postId» —
-  caso builder-5: slug reutilizado tras un retire → su ruta de reporte
-  colisionó con la del worker ANTERIOR; filed por el QD con naming D-Q6. A
-  revisar al implementar: la derivación del reportDir por postId/slug en el
-  respawn de un slug retirado, para evitar colisiones (p.ej. sufijar por
-  sesión o limpiar/archivar el reporte previo).
+- ~~flake 1b.1~~ ~~m-64~~ ~~fb-8~~ — DONE · ~~comentario stale dshd-health~~
+  DONE (PR-1) · ~~fb-25/26/27/28~~ — fb-25 (2b5a370) ✓ / fb-26 práctica ✓ /
+  fb-27 ✓ (04f8c31) / fb-28 🔵 en vuelo · ~~fb-30~~ INVESTIGADO (diseño-no-bug;
+  catch-up durable = lane 4) · ~~fb-29~~ IMPLEMENTADO (4695145 + lane B b2ecb45)
+  · ~~fb-32~~ señal consolidada (3 ANALYZEs) para refinar detector del guard
+  — candidato IPD post-DAG · ~~fb-39/40/41/42/43/44/45/46/47/48~~ — fb-39 ✓
+  (hardening) · fb-40/41 convención adoptada (verificación QD) · fb-42
+  watch-class · fb-43 ✓ (0dbf645) · fb-44 filed (researcher sin edit —
+  candidato preset) · fb-45/46/47/48 prácticas/normas QD+host (ver ROADMAP
+  09-01) — pendiente de cierre formal por el QD cuando verifiquen/aterricen.
+- **fb-2/fb-3 QD — AGENDADAS** (render dept_sleep en sleep EXITOSO + latencia
+  noWake a cabezas dormidas — cola QD, sin ejecutar).
+- **F3 — barrido sesiones worker huérfanas** (Dx1 F3; backlog 0.2.x) ·
+  **B6/B7** (revisar obsoletas con A+B) · **rag_index 300s timeout** (cap/
+  configurabilidad) · **tsc-drift dsh-tool-web-enhanced** (E1/0.2.x) ·
+  **fb-31 hygiene menor** (stale flags, doble build client) · **fb-34**
+  verified-at en reports explore-deep · **fb-37** job-def quality-daily real ·
+  **fb-24** KB dominio→mirror · **fb-26** zstd-con-cap práctica ✓ ·
+  **fb-33** tests que mutan preset reales (restore en finally) · **O3** nota
+  en spec 005 §3.4 ✓ (knowledge).
+- **core DSH 0.1.2-alpha — WATCH owner** (peers trap `^0.1.1-rc.0` en
+  dsh-deepartments/smart-restart/tool-web-enhanced → ERESOLVE si se mueve el
+  host; dshmarket 1.39.0 ya 0.1.2-ready; smooth-stream 0.4.3 aplicada a disco).
+- **Versions**: dshmarket 1.39.0 dev ✓ (live) · smooth-stream 0.4.3 a disco
+  (live-load próximo arranque) · npm dsh-deepartments 0.1.0 publicado ✓.
 
 ## 6. SINERGIA
 
 Flujos head↔head operativos (m-422): IPD→RD, QD→RD, RD proactivo (tech-watch +
-análisis de fallos). M3 los institucionaliza en docs/skill.
+análisis de fallos). M3 los institucionaliza en docs/skill. Hoy: QD→IPH
+(programmatic requests fb-46/47), IPH→QD (aviso verificación fb-27/28).
 
 ## 7. PACING — política operativa (peak/valle)
 
@@ -203,6 +151,12 @@ análisis de fallos). M3 los institucionaliza en docs/skill.
   «reanuda; despachos diferidos: N» (N = pendientes legibles de este
   WORK-REGISTER; si no legible, sin conteo). En «reanuda» el host reabre el
   pipeline desde los pendientes (prioridad normal).
+- **NORMA DE CONTINUACIÓN (fb-46, 2026-09-01 — host)** — nunca quieto con
+  trabajo por hacer: al CERRAR un bloque, re-explorar el WORK-REGISTER y
+  continuar con los items NO gateados (solo los gateados esperan al owner);
+  VALLE = ventana de drenaje (no parada); PEAK = única pausa intencional; si un
+  no-gateado depende de uno gateado → esperar justificándolo explícitamente.
+  Respaldada estructuralmente por el watchdog work-register-idle (§1).
 - **Los heads ven la franja en su wake** (sección `## Pacing (franja)` del pack
   y en `dept_wake_snapshot`) y siguen la misma disciplina para SUS nuevos
   despachos de workers (difieren un spawn nuevo en PEAK; lo ya asignado
