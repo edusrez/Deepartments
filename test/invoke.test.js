@@ -32,7 +32,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey, scanMainRed, MAIN_RED_DEFAULT_POLL_MS, MAIN_RED_KEY_PREFIX, mainRedKey, MAIN_RED_STATE_FILE, readMainRedState, writeMainRedState, MAIN_RED_DEFAULT_LOCKS, buildMainRedState, scanMissionQueue, MISSION_QUEUE_DEFAULT_LIMIT, MISSION_QUEUE_DEFAULT_PERSIST_MS, MISSION_QUEUE_KEY_PREFIX, missionQueueKey, MISSION_QUEUE_STATE_FILE, readMissionQueueState, writeMissionQueueState, RESTART_REGISTRY_FILE, RESTART_REGISTRY_SEED_ROWS, readRestartRegistry, seedRestartRegistry, reconcileRestartRegistry, buildRestartDigest } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey, scanMainRed, MAIN_RED_DEFAULT_POLL_MS, MAIN_RED_KEY_PREFIX, mainRedKey, MAIN_RED_STATE_FILE, readMainRedState, writeMainRedState, MAIN_RED_DEFAULT_LOCKS, buildMainRedState, scanMissionQueue, MISSION_QUEUE_DEFAULT_LIMIT, MISSION_QUEUE_DEFAULT_PERSIST_MS, MISSION_QUEUE_KEY_PREFIX, missionQueueKey, MISSION_QUEUE_STATE_FILE, readMissionQueueState, writeMissionQueueState, RESTART_REGISTRY_FILE, RESTART_REGISTRY_SEED_ROWS, readRestartRegistry, seedRestartRegistry, reconcileRestartRegistry, buildRestartDigest, CAPACITY_GATE_STATE_FILE, CAPACITY_GATE_TRANSITION_KEY, capacityGateDedupeKey, readCapacityGateState, writeCapacityGateState, buildCapacityGateFrame } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
@@ -11379,6 +11379,138 @@ test('M1 scanPoolerCapacity: staleness is UNKNOWN → NO finding + a logger warn
     assert.equal(scanPoolerCapacity(p, T0, knobs)[0].key, POOLER_CAPACITY_KEY_CRITICAL, 'a FRESH pool with zero keys is exhausted → critical (the certain usable-count branch)')
     // ABSENT file → no-op.
     assert.deepEqual(scanPoolerCapacity(path.join(stateDir, 'missing.json'), T0, knobs), [], 'an absent state file → no finding (no-op)')
+  })
+})
+
+test('HARDENING-401 (fb-39): scanPoolerCapacity billing-critical branch — EVERY key flagged billingBlocked → `pooler-capacity:critical` EVEN WHEN THE STATE IS STALE (the durable billing flag does not age out — the 08-31 «todas-secas» outage class); an ISOLATED billing key in a pool that can still serve → NOT critical (the mission: «todas markadas billing/limit-blocked»)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_234_567_890_000
+    const knobs = { warningUsableKeys: 2, criticalUsableKeys: 1, blockedKeysInWindow: 3, highPercent: 90, stateStaleMs: 600000 }
+    const p = path.join(stateDir, 'billing.json')
+    // (1) STALE snapshot (11 min > the 10min staleMs) with EVERY key flagged
+    // billingBlocked — the 08-31 class: the pooler stopped writing (all keys
+    // billed-out → no health changes), the snapshot aged, but the durable flag
+    // is STILL true → the gate must see the CRÍTICO class (near-permanent).
+    await writeFile(p, JSON.stringify({
+      updatedAt: new Date(T0 - 11 * 60_000).toISOString(),
+      keys: {
+        'k1': { id: 'k1', invalid: true, blockedUntil: 0, cooldownUntil: 0, errorClass: '401', billingBlocked: true },
+        'k2': { id: 'k2', invalid: true, blockedUntil: 0, cooldownUntil: 0, errorClass: '401', billingBlocked: true }
+      },
+      lastRotation: null
+    }), 'utf8')
+    const warns = []
+    const staleBilling = scanPoolerCapacity(p, T0, knobs, { warn: (m) => warns.push(m) })
+    assert.equal(staleBilling.length, 1, 'an ALL-billing-blocked STALE snapshot is still CRÍTICO (the flag does not age out)')
+    assert.equal(staleBilling[0].key, POOLER_CAPACITY_KEY_CRITICAL, 'the billing branch is CRITICAL')
+    assert.match(staleBilling[0].error, /billing\/credits block on 2\/2 keys \(401 CreditsError class\)/, 'the critical error names the billing class + the count')
+    assert.equal(warns.length, 0, 'the billing branch fires BEFORE the stale warn (never masks the near-permanent class)')
+    // (2) AN ISOLATED billing key in a 3-key pool (2 still usable) → NOT
+    // critical (the «todas markadas» condition is NOT met — the pool serves).
+    await writeFile(p, JSON.stringify({
+      updatedAt: new Date(T0 - 60_000).toISOString(),
+      keys: {
+        'k1': { id: 'k1', invalid: true, blockedUntil: 0, cooldownUntil: 0, errorClass: '401', billingBlocked: true },
+        'k2': { id: 'k2', invalid: false, blockedUntil: 0, cooldownUntil: 0 },
+        'k3': { id: 'k3', invalid: false, blockedUntil: 0, cooldownUntil: 0 }
+      },
+      lastRotation: null
+    }), 'utf8')
+    const partial = scanPoolerCapacity(p, T0, knobs)
+    assert.ok(!partial.some((f) => f.key === POOLER_CAPACITY_KEY_CRITICAL), 'an isolated billing-flagged key with usable keys left → NOT critical (the pool can still serve)')
+    assert.equal(partial[0]?.key, POOLER_CAPACITY_KEY_WARNING, 'the pool with 2 usable / 3 keys is at most a WARNING (not the billing-critical pause)')
+    // (3) A FRESH snapshot with every key billingBlocked → critical too (the
+    // fresh path exposes the same class — nothing is masked by usable counts).
+    await writeFile(p, JSON.stringify({
+      updatedAt: new Date(T0 - 60_000).toISOString(),
+      keys: {
+        'k1': { id: 'k1', invalid: true, blockedUntil: 0, cooldownUntil: 0, errorClass: '401', billingBlocked: true },
+        'k2': { id: 'k2', invalid: true, blockedUntil: 0, cooldownUntil: 0, errorClass: '401', billingBlocked: true }
+      },
+      lastRotation: null
+    }), 'utf8')
+    const freshBilling = scanPoolerCapacity(p, T0, knobs)
+    assert.equal(freshBilling[0].key, POOLER_CAPACITY_KEY_CRITICAL, 'a FRESH all-billing snapshot is CRÍTICO')
+  })
+})
+
+test('HARDENING-401 (fb-39): CAPACITY GATE transition monitor (molde franja PEAK) — first boot records the baseline SILENT; the ok→CRITICO flip emits a durable PAUSE notice (never silent); the CRITICO→ok flip emits the RESUME notice with the WORK-REGISTER deferred count; a re-tick inside the window emits NOTHING; the `poolerGateEnabled:false` knob disables the monitor', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 27, 10, 0, 0).getTime()
+    const statePath = path.join(stateDir, POOLER_STATE_FILE)
+    const writep = (keys, updatedAt) => writeFile(statePath, JSON.stringify({ updatedAt: new Date(updatedAt).toISOString(), keys, lastRotation: null }), 'utf8')
+    // A helper the tick drives with a fixture pool snapshot + a recording host.
+    const live = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const run = async (nowMs, fixture, opts = {}) => {
+      await writep(fixture.keys, fixture.updatedAt)
+      const notices = []
+      const warns = []
+      await runHealthDaemonTick({
+        now: () => nowMs,
+        stateDir,
+        bootId: 'boot-gate',
+        hosts: live,
+        poolerStatePath: statePath,
+        notifyHost: async (hostEntry, frame) => { notices.push({ hostEntry, frame }) },
+        logger: { warn: (m) => warns.push(m) },
+        ...opts.deps
+      })
+      return { notices, warns }
+    }
+    const billingKi = (id) => ({ id, invalid: true, blockedUntil: 0, cooldownUntil: 0, errorClass: '401', billingBlocked: true })
+    // A genuinely healthy pool: TWO usable keys (with criticalUsableKeys=1 a
+    // single-key pool would itself be CRÍTICO — the M1 threshold).
+    const healthy = {
+      'k1': { id: 'k1', invalid: false, blockedUntil: 0, cooldownUntil: 0, lastUsage: { status: 'ok', percent: 5 } },
+      'k2': { id: 'k2', invalid: false, blockedUntil: 0, cooldownUntil: 0, lastUsage: { status: 'ok', percent: 8 } }
+    }
+    // (1) FIRST BOOT with a HEALTHY pool: baseline recorded, NO gate notice
+    // (the pacing first-boot precedent — a healthy pool never pauses). The
+    // existing watchdog may still emit a pooler-capacity WARNING alert (the
+    // 2-usable ≤ warning-2 threshold) — the GATE notice is the 'Pool capacity'
+    // frame, which must be ABSENT here.
+    let r = await run(T0, { keys: healthy, updatedAt: T0 - 60_000 })
+    assert.deepEqual(r.notices.filter((n) => /Pool capacity/.test(n.frame)).map((n) => n.frame), [], 'first boot (healthy) emits no gate notice')
+    assert.equal(readCapacityGateState(stateDir)?.verdict, 'ok', 'the healthy baseline is recorded as OK')
+    // (2) The pool flips to ALL-billing-blocked (CRÍTICO): the ok→critical
+    // transition emits the durable PAUSE notice (never silent). Note: the SAME
+    // tick ALSO emits the System-health ALERT for the pooler-capacity finding —
+    // the gate notice is the EXTRA 'Pool capacity' frame below.
+    r = await run(T0 + 60_000, { keys: { k1: billingKi('k1'), k2: billingKi('k2') }, updatedAt: T0 + 60_000 })
+    const pause = r.notices.filter((n) => /^\[From deepartments\] Pool capacity/.test(n.frame))
+    assert.equal(pause.length, 1, 'the ok→CRITICO flip emits the PAUSE notice')
+    assert.match(pause[0].frame, /^\[From deepartments\] Pool capacity CRÍTICO: pausa de nuevos despachos a departamentos/, 'the PAUSE notice opens with the CRÍTICO pause line')
+    assert.match(pause[0].frame, /billing\/credits block on 2\/2 keys \(401 CreditsError class\)/, 'the PAUSE notice carries the billing-cause detail')
+    assert.equal(readCapacityGateState(stateDir)?.verdict, 'critical', 'the CRÍTICO baseline is recorded')
+    assert.ok(r.notices.some((n) => /System-health ALERT/.test(n.frame)), 'the SAME tick still emits the system-health ALERT for the pooler finding (the existing watchdog is intact)')
+    // (3) A re-tick still CRÍTICO inside the 30-min dedupe window → NO notice.
+    r = await run(T0 + 120_000, { keys: { k1: billingKi('k1'), k2: billingKi('k2') }, updatedAt: T0 + 120_000 })
+    assert.deepEqual(r.notices.filter((n) => /Pool capacity/.test(n.frame)).map((n) => n.frame), [], 'a persistent CRÍTICO state inside the dedupe window does NOT re-notify')
+    // (4) The pool RECOVERS (healthy keys + billing flags cleared): the
+    // critical→ok flip emits the RESUME notice with the WORK-REGISTER count.
+    const wrPath = path.join(stateDir, 'wr.md')
+    await writeFile(wrPath, '## Pendientes\n\n**item-1**\n**item-2**\n', 'utf8')
+    r = await run(T0 + 180_000, { keys: healthy, updatedAt: T0 + 180_000 }, { deps: { workRegisterPath: wrPath } })
+    const resume = r.notices.filter((n) => /Pool capacity OK/.test(n.frame))
+    assert.equal(resume.length, 1, 'the CRITICO→ok flip emits the RESUME notice')
+    assert.match(resume[0].frame, /^\[From deepartments\] Pool capacity OK: reanuda los despachos a departamentos; despachos diferidos: 2 \(cola del WORK-REGISTER\)$/, 'the RESUME notice names the deferred count from the WORK-REGISTER')
+    assert.equal(readCapacityGateState(stateDir)?.verdict, 'ok', 'the OK baseline is recorded on recovery')
+    // (5) `poolerGateEnabled:false` → the monitor is a NO-OP (no state written).
+    const gated = path.join(stateDir, 'gated')
+    // A fresh stateDir for the gated check.
+    await writeFile(statePath, JSON.stringify({ updatedAt: new Date(T0 - 60_000).toISOString(), keys: { k1: billingKi('k1'), k2: billingKi('k2') }, lastRotation: null }), 'utf8')
+    const gNotices = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-gate-off',
+      hosts: live,
+      poolerStatePath: statePath,
+      config: { health: { poolerGateEnabled: false } },
+      notifyHost: async (hostEntry, frame) => { gNotices.push(frame) },
+      logger: { warn: () => {} }
+    })
+    assert.deepEqual(gNotices.filter((n) => /Pool capacity/.test(n)), [], 'poolerGateEnabled:false → NO capacity-gate notice (the monitor is a no-op)')
   })
 })
 

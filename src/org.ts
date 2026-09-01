@@ -143,6 +143,16 @@ export interface HealthConfig {
    * SOLO-LECTURA; absent/stale → passthrough (the pre-check is a warning,
    * never a blocker — unknown ≠ exhausted). */
   poolerDispatchEnabled?: boolean
+  /** HARDENING-401 (fb-39, 2026-09-01) — the CAPACITY GATE monitor gate
+   * (default ON; an explicit `false` restores the gate-less daemon). When ON,
+   * the system-health daemon's capacity-gate TRANSITION monitor pauses new
+   * host→dept dispatches the moment the pool reaches capacity CRÍTICO (the
+   * billing/credits class — 401 CreditsError / Insufficient balance — or the
+   * CERTAIN usable=0 / 429-rotation prelude) and resumes on recovery — the
+   * «pausa de nuevos despachos» mirror of the franja PEAK pause, with a
+   * durable notice on every state flip (never silent; 0 change with a healthy
+   * pool — the verdict stays OK, no notice). */
+  poolerGateEnabled?: boolean
   /** M1 — ≤ this many USABLE keys (the pooler's own eligibility:
    * !invalid && blockedUntil<=now && cooldownUntil<=now) → a
    * `pooler-capacity:warning` finding (default 2). */
@@ -642,6 +652,7 @@ export const Config: z<any, any> = z.object({
     // → absent = code defaults, the existing health-section contract).
     poolerCapacityEnabled: z.boolean(),
     poolerDispatchEnabled: z.boolean(),
+    poolerGateEnabled: z.boolean(),
     warningUsableKeys: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
     criticalUsableKeys: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
     blockedKeysInWindow: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
@@ -690,6 +701,7 @@ export const Config: z<any, any> = z.object({
     waitThresholdMs: number
     poolerCapacityEnabled: boolean
     poolerDispatchEnabled: boolean
+    poolerGateEnabled: boolean
     warningUsableKeys: number
     criticalUsableKeys: number
     blockedKeysInWindow: number

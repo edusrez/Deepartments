@@ -1916,6 +1916,16 @@ export interface HealthConfigLike {
      * `deps.poolerStatePath`, override `health.poolerStateFilePath`) SOLO-LECTURA:
      * the pooler owns every write, the watchdog never writes it. */
     poolerCapacityEnabled?: boolean
+    /** HARDENING-401 (fb-39, 2026-09-01) — the CAPACITY GATE monitor gate
+     * (default ON; explicit false restores the gate-less daemon). When ON, the
+     * system-health daemon's capacity-gate TRANSITION monitor pauses new
+     * host→dept dispatches the moment the pool reaches capacity CRÍTICO (the
+     * billing/credits class or the CERTAIN usable=0 / 429-rotation prelude —
+     * the SAME `scanPoolerCapacity` verdict the M1 watchdog uses) and resumes
+     * on recovery — the «pausa de nuevos despachos» mirror of the franja PEAK
+     * pause, with a durable notice on every state flip (never silent). Absent
+     * → ON (0 change with a healthy pool: the verdict stays OK, no notice). */
+    poolerGateEnabled?: boolean
     /** DISPATCH-HARDENING (QH «429-primer-call», 2026-08-28) — the DISPATCH
      * pre-check gate (default ON; explicit false restores the pre-check-less
      * dispatch). When ON, the worker/head dispatch seams reject LOUDLY and
@@ -2456,6 +2466,15 @@ export interface PoolerKeyStateLike {
   lastUsage?: { status?: string; percent?: number; resetsAt?: string } | null
   lastError?: string | null
   lastCheckedAt?: number
+  /** HARDENING-401 (fb-39, 2026-09-01) — the BILLING/credits class: the pooler
+   * sets this when the key's last 401 was a billing/credits block (CreditsError
+   * / Insufficient balance — the «todas-secas» class), NOT a plain auth 401.
+   * Near-PERMANENT (a billing block does not reset with time like a quota
+   * cooldown). Absent/undefined = not billing-blocked. The pooler owns the
+   * write; this scan only reads it — the class lets the capacity gate pause
+   * new dispatches BEFORE the pool paralyzes (the 08-31 outage lesson: all
+   * jobs died 401 CreditsError with the state going stale). */
+  billingBlocked?: boolean
 }
 
 /** The last rotation record of the pooler snapshot (a 429 usage-limit rotation
@@ -2514,7 +2533,17 @@ export interface PoolerCapacityKnobs {
  *  (2) usable keys ≤ `criticalUsableKeys` (the same eligibility the pooler's
  *      scheduler uses: !invalid && blockedUntil<=now && cooldownUntil<=now) →
  *      CRITICAL;
- *  (3) STALE state (`updatedAt` missing/unparseable or older than
+ *  (3) HARDENING-401 (fb-39, 2026-09-01) — the BILLING/credits class: EVERY
+ *      configured key flagged `billingBlocked` (401 CreditsError / Insufficient
+ *      balance — the «todas-secas» class; an isolated billing-flagged key in a
+ *      pool that can still serve never pauses). Runs BEFORE the stale check
+ *      because a billing block is near-PERMANENT (it does not age out like a
+ *      quota cooldown) — a STALE snapshot that still carries the durable
+ *      billing flag on every key is still a billing-blocked pool → CRITICAL
+ *      even when the dead-man's-switch would otherwise call the state UNKNOWN
+ *      (the 08-31 outage class: every key billed-out → the pooler stops writing
+ *      → the snapshot went stale).
+ *  (4) STALE state (`updatedAt` missing/unparseable or older than
  *      `stateStaleMs`) — NOT a critical branch: the pooler writes the file
  *      ONLY on health changes, so a quiet-but-healthy grid looks stale by
  *      design → stale = UNKNOWN, and unknown ≠ exhausted. A stale snapshot →
@@ -2527,6 +2556,31 @@ export interface PoolerCapacityKnobs {
 export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: PoolerCapacityKnobs, logger?: { warn(message: string): void }): HealthFinding[] {
   const state = readPoolerStateFile(statePath)
   if (state === undefined) return []
+  const keys = Object.values(state.keys ?? {})
+  const totalCount = keys.length
+  // HARDENING-401 (fb-39, 2026-09-01) — the BILLING/credits class is
+  // near-PERMANENT: a billing block (401 CreditsError / Insufficient balance)
+  // does NOT reset with time like a quota cooldown, and the pooler clears the
+  // flag ONLY after a real successful probe. This branch runs BEFORE the stale
+  // early-return on purpose — the 08-31 outage class: every key billed-out →
+  // the pooler stops writing (writes only on health CHANGES) → the snapshot
+  // goes STALE, but the durable billing flag is STILL true. A stale snapshot
+  // that carries `billingBlocked` is still a billing-blocked pool (the flag
+  // does not age out), so the capacity gate must see the CRÍTICO class even
+  // when the dead-man's-switch would otherwise call the state UNKNOWN. The
+  // branch fires ONLY when EVERY configured key is billing-blocked (the
+  // mission's «todas markadas billing/limit-blocked» definition — an isolated
+  // billing-flagged key in a pool that can still serve never pauses).
+  const billingBlockedKeys = keys.filter((k) => k.billingBlocked === true)
+  if (billingBlockedKeys.length > 0 && billingBlockedKeys.length === totalCount) {
+    return [{
+      kind: 'pooler-capacity',
+      key: POOLER_CAPACITY_KEY_CRITICAL,
+      ts: nowMs,
+      count: keys.filter((k) => !k.invalid && (Number(k.blockedUntil) || 0) <= nowMs && (Number(k.cooldownUntil) || 0) <= nowMs).length,
+      error: `billing/credits block on ${billingBlockedKeys.length}/${totalCount} keys (401 CreditsError class) — pausa de nuevos despachos; resume al recuperar`
+    }]
+  }
   const updatedMs = state.updatedAt !== undefined ? Date.parse(state.updatedAt) : Number.NaN
   const stale = !Number.isFinite(updatedMs) || nowMs - updatedMs > knobs.stateStaleMs
   if (stale) {
@@ -2541,8 +2595,6 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
       : `pooler state unknown/stale (unparseable updatedAt) — no capacity finding`)
     return []
   }
-  const keys = Object.values(state.keys ?? {})
-  const totalCount = keys.length
   const usable = keys.filter((k) => !k.invalid && (Number(k.blockedUntil) || 0) <= nowMs && (Number(k.cooldownUntil) || 0) <= nowMs)
   const usableCount = usable.length
   const blockedCount = keys.filter((k) => (Number(k.blockedUntil) || 0) > nowMs || (Number(k.cooldownUntil) || 0) > nowMs).length
@@ -3854,6 +3906,89 @@ export function buildPacingTransitionFrame(state: PacingState, deferredCount?: n
   return `[From deepartments] Pacing VALLE: reanuda los despachos a departamentos${count}; franja VALLE — próximo PEAK hasta ${state.untilHhMm} UTC`
 }
 
+// ---------------------------------------------------------------------------
+// HARDENING-401 (fb-39, 2026-09-01) — the CAPACITY GATE (pooler capacity
+// CRÍTICO) transition monitor. MOLDE FRANJA PEAK: the same transition-monitor
+// shape as the pacing franja monitor above — compute the pool capacity verdict
+// every tick, and on a TRANSITION (ok → critical, or critical → ok) deliver
+// EXACTLY ONE durable bus notice to the host (the notifyHost seam). The gate
+// PAUSES new dispatches while the pool is CRÍTICO (billing exhausted / all
+// keys dry — the «todas-secas» class) and RESUMES on recovery. NOTICE NEVER
+// SILENT: every state flip emits a durable notice (the PAUSE names the billing
+// class; the RESUME names the WORK-REGISTER deferred count). A billing block
+// is near-PERMANENT (fb-39) so the pause only lifts when the pool RECOVERS
+// (a fresh usable key / the billing flag cleared by the pooler).
+//
+// COMPOSITION WITH THE FRANJA PEAK: in PEAK the franja monitor already pauses
+// host→dept dispatches. The capacity gate is a SEPARATE pause whose CRÍTICO
+// verdict takes PRIORITY: when BOTH are active in the same tick, the CRÍTICO
+// notice is emitted (and the PEAK notice is suppressed that tick for clarity —
+// the resume cadence is: leave CRÍTICO first, then the franja transition).
+// They share the SAME health-alerts ledger (distinct dedupe keys), so neither
+// double-notifies inside HEALTH_DEDUPE_WINDOW_MS.
+//
+// KNOB: `health.poolerGateEnabled === false` → the monitor is a NO-OP. Default
+// ON (the mission's 0-change-with-a-healthy-pool contract: with a healthy pool
+// the verdict stays OK and NO notice is ever emitted).
+// ---------------------------------------------------------------------------
+
+/** The capacity-gate durable baseline file (the PREVIOUS verdict; survives
+ * restarts like pacing-state.json). */
+export const CAPACITY_GATE_STATE_FILE = 'capacity-gate-state.json'
+/** The capacity-gate emission Dedupe key PREFIX in the SHARED health-alerts
+ * ledger — the PAUSE (critical) and RESUME (ok) use DISTINCT per-verdict keys
+ * (`capacity-gate:critical` / `capacity-gate:ok`) so a fast pause→resume cycle
+ * emits BOTH (the host must learn it can resume even shortly after a pause;
+ * each direction is ≤1 delivery inside HEALTH_DEDUPE_WINDOW_MS). */
+export const CAPACITY_GATE_TRANSITION_KEY = 'capacity-gate'
+/** The per-verdict dedupe key for a capacity-gate transition (the PAUSE names
+ * the CRÍTICO class, the RESUME the recovery — separate cadences). */
+export function capacityGateDedupeKey(verdict: 'critical' | 'ok'): string {
+  return `${CAPACITY_GATE_TRANSITION_KEY}:${verdict}`
+}
+
+/** The capacity-gate durable baseline: the verdict observed at the last
+ * transition (or first boot) + when it was recorded. */
+export interface CapacityGateDurableState {
+  verdict: 'critical' | 'ok'
+  /** The ms epoch when the baseline was recorded. */
+  at: number
+}
+
+/** Read `<stateDir>/capacity-gate-state.json` → the durable baseline. Absent /
+ * unreadable / malformed → undefined (the first-boot case; never throws). */
+export function readCapacityGateState(stateDir: string): CapacityGateDurableState | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, CAPACITY_GATE_STATE_FILE), 'utf8')) as Record<string, unknown>
+    if (parsed.verdict !== 'critical' && parsed.verdict !== 'ok') return undefined
+    if (typeof parsed.at !== 'number' || !Number.isFinite(parsed.at)) return undefined
+    return { verdict: parsed.verdict, at: parsed.at }
+  } catch {
+    return undefined
+  }
+}
+
+/** Write `<stateDir>/capacity-gate-state.json` (mkdir -p the dir, then the file). */
+export async function writeCapacityGateState(stateDir: string, state: CapacityGateDurableState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, CAPACITY_GATE_STATE_FILE)), { recursive: true })
+  await writeFile(path.join(stateDir, CAPACITY_GATE_STATE_FILE), JSON.stringify(state), 'utf8')
+}
+
+/** Build the capacity-gate transition bus notice (the CRÍTICO PAUSE / OK RESUME
+ * frame delivered to the host — the same `[From deepartments] …` convention).
+ * `verdict` is the NEW state; `detail` is the scan finding's error text for the
+ * CRÍTICO notice (the billing class / the usable count); `deferredCount` is the
+ * WORK-REGISTER pending count for the RESUME notice (UNDEFINED → omitted).
+ * PURE. */
+export function buildCapacityGateFrame(verdict: 'critical' | 'ok', detail: string | undefined, deferredCount?: number): string {
+  if (verdict === 'critical') {
+    const cause = (detail ?? '').trim() !== '' ? ` (${detail?.trim()})` : ''
+    return `[From deepartments] Pool capacity CRÍTICO: pausa de nuevos despachos a departamentos (los in-flight continúan)${cause}; se reanuda al recuperar capacidad`
+  }
+  const count = deferredCount === undefined ? '' : `; despachos diferidos: ${deferredCount} (cola del WORK-REGISTER)`
+  return `[From deepartments] Pool capacity OK: reanuda los despachos a departamentos${count}`
+}
+
 /** ONE system-health tick: (1) write the heartbeat; (2) W8-c turn-failure
  * capture (record fresh turn errors into post-errors.jsonl); (3) scan
  * post-errors + delivery-failed + config-preset + stalled-post + the M1
@@ -4422,6 +4557,71 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         }
       } catch (error: unknown) {
         deps.logger?.warn(`[deepartments] system-health: pacing transition scan failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    // CAPACITY GATE — the pooler capacity CRÍTICO transition monitor
+    // (HARDENING-401 / fb-39, 2026-09-01 — MOLDE FRANJA PEAK). Every tick the
+    // pool verdict derives from the SAME scan findings the M1 watchdog already
+    // computed this tick (`poolerFindings`, over deps.poolerStatePath +
+    // poolerKnobs): CRÍTICO when one is a `POOLER_CAPACITY_KEY_CRITICAL`
+    // finding (the billing/credits class — even on STALE state the durable
+    // billing flag still reads CRÍTICO, the 08-31 outage class; or the CERTAIN
+    // usable=0 / 429-rotation prelude), OK otherwise (a healthy/quiet/stale-
+    // UNKNOWN pool stays OK — the gate NEVER pauses on unknown). On a
+    // TRANSITION (ok → critical | critical → ok) deliver EXACTLY ONE durable
+    // bus notice to the host (never silent). First boot records the baseline,
+    // emits NOTHING (the pacing first-boot precedent); no live host → skipped
+    // AND the baseline NOT advanced (retry). Dedupe key 'capacity-gate' rides
+    // the SHARED health-alerts ledger (≤1 inside HEALTH_DEDUPE_WINDOW_MS). It
+    // runs ONLY when the pooler-capacity scan is enabled AND the state path is
+    // injected (the poolerFindings-absent pattern). KNOB:
+    // `health.poolerGateEnabled === false` → no-op (default ON).
+    if (deps.config?.health?.poolerGateEnabled !== false && poolerCapacityEnabled && deps.poolerStatePath !== undefined) {
+      try {
+        const critical = poolerFindings.some((f) => f.key === POOLER_CAPACITY_KEY_CRITICAL)
+        const verdict: 'critical' | 'ok' = critical ? 'critical' : 'ok'
+        const detail = poolerFindings.find((f) => f.key === POOLER_CAPACITY_KEY_CRITICAL)?.error
+        const prev = readCapacityGateState(deps.stateDir)
+        if (prev === undefined) {
+          // FIRST BOOT: baseline only, no notice (the pacing precedent).
+          await writeCapacityGateState(deps.stateDir, { verdict, at: nowMs })
+        } else if (prev.verdict !== verdict) {
+          const dedupeKey = capacityGateDedupeKey(verdict)
+          const lastEmitted = state[dedupeKey]
+          const deduped = lastEmitted !== undefined && nowMs - lastEmitted <= HEALTH_DEDUPE_WINDOW_MS
+          if (deduped) {
+            // Already notified this direction inside the 30-min window (e.g. a
+            // baseline write lost to a crash): advance the baseline quietly —
+            // never re-send.
+            await writeCapacityGateState(deps.stateDir, { verdict, at: nowMs })
+          } else {
+            const { live } = pickLiveHost()
+            if (live === undefined) {
+              deps.logger?.warn('[deepartments] system-health: capacity-gate transition detected but no live host to notify — skip (retries on the next tick)')
+            } else {
+              // The OK notice's N: the WORK-REGISTER pending queue when
+              // legible (best-effort; unreadable → the count is omitted).
+              let deferredCount: number | undefined
+              if (verdict === 'ok' && deps.workRegisterPath !== undefined) {
+                try {
+                  deferredCount = countPendingWorkRegister(readFileSync(deps.workRegisterPath, 'utf8'))
+                } catch {
+                  deferredCount = undefined
+                }
+              }
+              try {
+                await deps.notifyHost(live, buildCapacityGateFrame(verdict, detail, deferredCount))
+                nextState[dedupeKey] = nowMs
+                stateChanged = true
+                await writeCapacityGateState(deps.stateDir, { verdict, at: nowMs })
+              } catch (error: unknown) {
+                deps.logger?.warn(`[deepartments] system-health: capacity-gate transition delivery failed: ${error instanceof Error ? error.message : String(error)}`)
+              }
+            }
+          }
+        }
+      } catch (error: unknown) {
+        deps.logger?.warn(`[deepartments] system-health: capacity-gate transition scan failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     // Persist the merged ledger once if the ALERT, CONDITIONAL-WAKE or PACING
