@@ -70,7 +70,7 @@ import { readFileSync, existsSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { execFile as execFileCb, spawn } from 'node:child_process'
+import { execFile as execFileCb, execFileSync, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { promisify } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
@@ -440,7 +440,9 @@ import type {
   InterruptedPostInput,
   PostErrorEntry,
   SessionContextInput,
-  MissionActivityInput
+  MissionActivityInput,
+  MainRedRuntime,
+  MainRedLockResult
 } from './core/health.js'
 // P1 (MODULARIZACIÓN, 2026-08-29): the six plugin packages now export their
 // Cordis plugin surface (name/inject/apply) from their MAIN entries (the
@@ -2444,6 +2446,83 @@ export function buildMissionActivity(input: MissionActivityBuildInput): MissionA
   return out
 }
 
+// ---------------------------------------------------------------------------
+// M-6 (FASE 4 lane 1, VALLE, 2026-08-31, owner gap «main rojo post-commit») —
+// buildMainRedState: the BUNDLE-side builder of the `mainRed` health-daemon dep
+// (the post-commit re-verification watchdog). The seam (d): the dev repo root
+// (knob `health.mainRedRepoRoot` ?? REPO_ROOT — the REAL repo the host commits
+// daily) is turned into a { readHeadSha(), runLocks(paths) } runtime:
+//   - readHeadSha(): `git rev-parse HEAD` over the repo root (child_process —
+//     the light poll; the ONLY per-tick git cost, gated to mainRedPollMs),
+//   - runLocks(paths): `node --test <lock>` PER lock (a SEPARATE invocation per
+//     lock so the FAILED lock is named in the frame; result per file {file, ok};
+//     ONE single execution per new sha — the tick gates it).
+// COMPOSITION-NO-GIT (a packaged deployment whose root is NOT a git repo) →
+// undefined → the tick no-ops the scan (the hostRunning/sessionContexts-absent
+// pattern: unknown main state never fabricates a post-commit ALERT).
+// NEVER throws: a git/node failure degrades to {ok:false} / undefined, never a
+// crash. The I/O lives here (bundle-side), NEVER in the pure scan.
+// ---------------------------------------------------------------------------
+
+/** M-6 — the outcome of ONE lock invocation (the repo-relative lock path +
+ * whether `node --test` exited 0 for it). Kept structural here (the pure scan
+ * only reads `ok`). */
+export interface MainRedLockRun {
+  file: string
+  ok: boolean
+}
+
+/** M-6 — the per-lock `node --test` hard timeout (a stuck/hung lock must never
+ * wedge the whole fast-lock batch — 5 min headroom well above the ~seconds a
+ * healthy fast lock takes). */
+const MAIN_RED_LOCK_TIMEOUT_MS = 300000
+
+/** M-6 — build the main-red runtime over a repo root (the git HEAD reader +
+ * the fast-lock runner). Not a git repo (`.git` absent — a packaged
+ * deployment) → undefined → the tick no-ops the scan. NEVER throws (a git or
+ * node failure inside degrades, never throws). */
+export function buildMainRedState(repoRoot: string): MainRedRuntime | undefined {
+  let isGit = false
+  try {
+    isGit = existsSync(path.join(repoRoot, '.git'))
+  } catch {
+    isGit = false
+  }
+  if (!isGit) return undefined
+  const readHeadSha = (): string | undefined => {
+    try {
+      const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+      return /^[0-9a-f]{40}$/.test(sha) ? sha : undefined
+    } catch {
+      return undefined
+    }
+  }
+  const runLocks = async (paths: readonly string[]): Promise<readonly MainRedLockResult[]> => {
+    const results: MainRedLockResult[] = []
+    // The spawned `node --test` must run WITHOUT the harness test-context
+    // marker: NODE_TEST_CONTEXT is set by the node:test RUNNER in the parent
+    // (a hermetic suite runs the bundle in-process) and a child that inherits
+    // it is treated as a "recursive test run" — it SKIPS the file and exits 0,
+    // which would report every lock as green. The pristine env (no marker)
+    // makes the child a fresh test runner. Production has no marker → no-op.
+    const lockEnv = { ...process.env }
+    delete lockEnv.NODE_TEST_CONTEXT
+    delete lockEnv.NODE_OPTIONS
+    for (const lock of paths) {
+      try {
+        // node --test <lock> — ONE invocation per lock (the failed lock is
+        // named in the frame). The absolute path joined against the repo root.
+        execFileSync('node', ['--test', path.join(repoRoot, lock)], { cwd: repoRoot, timeout: MAIN_RED_LOCK_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'], env: lockEnv })
+        results.push({ file: lock, ok: true })
+      } catch {
+        results.push({ file: lock, ok: false })
+      }
+    }
+    return results
+  }
+  return { readHeadSha, runLocks }
+}
+
 export function applyInvoke(ctx: Context, config: Config) {
   // ---------------------------------------------------------------------------
   // DECOUPLING ZONA 7 — BOOT ORCHESTRATION FACTORY (the BOOT zone, 678 LOCs of
@@ -3212,6 +3291,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           hostRunning?: boolean
           sessionContexts?: Iterable<SessionContextInput>
           missionActivity?: Iterable<MissionActivityInput>
+          mainRed?: MainRedRuntime
           hostWaits?: Iterable<HostWaitPostInput>
           deliveryRowsReader?: unknown
         }): Promise<void> }
@@ -3244,6 +3324,11 @@ export function applyInvoke(ctx: Context, config: Config) {
             // undefined → the scan is a no-op — unknown delivery state never
             // fabricates an alert).
             missionActivity: buildMissionActivity({ stateDir, byPost, hosts: hosts.values(), agents }),
+            // M-6: the main-red watchdog runtime (buildMainRedState over the
+            // repo root — knob `mainRedRepoRoot` ?? REPO_ROOT; a non-git
+            // composition → undefined → the scan is a no-op — unknown main
+            // state never fabricates a post-commit alert).
+            mainRed: buildMainRedState(healthConfig?.mainRedRepoRoot ?? repoRoot),
             // W8-d: the host-sender-aware inputs for the conditional system-wait
             // scan — resolved lazily per tick.
             hostWaits: buildHostWaits(),
@@ -3273,6 +3358,11 @@ export function applyInvoke(ctx: Context, config: Config) {
             // undefined → the scan is a no-op — unknown delivery state never
             // fabricates an alert).
             missionActivity: buildMissionActivity({ stateDir, byPost, hosts: hosts.values(), agents }),
+            // M-6: the main-red watchdog runtime (buildMainRedState over the
+            // repo root — knob `mainRedRepoRoot` ?? REPO_ROOT; a non-git
+            // composition → undefined → the scan is a no-op — unknown main
+            // state never fabricates a post-commit alert).
+            mainRed: buildMainRedState(healthConfig?.mainRedRepoRoot ?? repoRoot),
             // W8-d: the host-sender-aware inputs for the conditional system-wait
             // scan — resolved lazily per tick.
             hostWaits: buildHostWaits(),

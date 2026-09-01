@@ -204,6 +204,22 @@ export interface HealthConfig {
    * host ALERT («misión entregada a un head pero NO INICIADA» — the owner's
    * gap). Absent/invalid → the code default. */
   missionStallMs?: number
+  /** M-6 — the MAIN-RED watchdog gate (default ON; explicit `false` disables
+   * the post-commit re-verification scan). Absent → on. */
+  mainRedEnabled?: boolean
+  /** M-6 — the main-red HEAD POLL cadence in ms (default 300000 = 5 min): a
+   * NEW commit at the dev repo HEAD is detected within minutes — the FASE 4
+   * lane-1 promise. Absent/invalid → the code default. */
+  mainRedPollMs?: number
+  /** M-6 — the FAST locks the post-commit re-verification runs (repo-relative
+   * paths). Absent → the 8-lock default (boot-factory + the 4 orchestration
+   * factories + the surface locks). An explicit non-empty array overrides. */
+  mainRedLocks?: string[]
+  /** M-6 — the repo root whose git HEAD the watchdog reads (default: the
+   * bundled REPO_ROOT — the dev repo the host commits; override for a packaged
+   * deployment where the repo lives elsewhere, and for the SMOKE fixture).
+   * Absent → REPO_ROOT. */
+  mainRedRepoRoot?: string
 }
 
 /**
@@ -635,7 +651,14 @@ export const Config: z<any, any> = z.object({
     // code defaults: enabled on, missionStallMs 600000 = 10 min — the section
     // contract).
     missionStallEnabled: z.boolean(),
-    missionStallMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+    missionStallMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    // M-6 — the main-red watchdog knobs (default(void 0) → absent = code
+    // defaults: enabled on, mainRedPollMs 300000 = 5 min, mainRedLocks the
+    // 8-lock default, mainRedRepoRoot REPO_ROOT — the section contract).
+    mainRedEnabled: z.boolean(),
+    mainRedPollMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    mainRedLocks: z.array(z.string()).default(void 0 as never),
+    mainRedRepoRoot: z.string().default(void 0 as never)
   }).default(void 0 as unknown as {
     enabled: boolean
     intervalMs: number
@@ -663,6 +686,10 @@ export const Config: z<any, any> = z.object({
     contextThresholdPollMs: number
     missionStallEnabled: boolean
     missionStallMs: number
+    mainRedEnabled: boolean
+    mainRedPollMs: number
+    mainRedLocks: string[]
+    mainRedRepoRoot: string
   }),
   // QD (spec 007 §4.1, D-Q2). Mirrors the runtime QualityConfig in src/invoke.ts:
   // `default(void 0)` so an ABSENT section or absent key falls through to the

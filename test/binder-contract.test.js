@@ -11,7 +11,7 @@
 //   - jobs.{runJob, notifyHead, departmentForEntry, departmentForJob} required
 //     + onAutoRunSkip/repoRoot optional,
 //   - health.{bootId, config, posts, hostWaits, sessionContexts, hostRunning,
-//     missionActivity, notifyHost, poolerStatePath, workRegisterPath,
+//     missionActivity, mainRed, notifyHost, poolerStatePath, workRegisterPath,
 //     qiDirectiveRate} (all optional per HealthBinderDeps — the tick degrades by
 //     scan),
 //   - pooler.{configuredProviders, appendPostError} (optional; appendPostError
@@ -46,13 +46,16 @@ const ZONE_BUCKETS = ['health', 'jobs', 'pooler', 'gui']
 const ZONE_BUCKET_CONTRACTS = {
   gui: ['endpointDeps'],
   jobs: ['runJob', 'notifyHead', 'departmentForEntry', 'departmentForJob', 'onAutoRunSkip', 'repoRoot'],
-  // NOTE: posts/hostWaits/sessionContexts/hostRunning/missionActivity are
+  // NOTE: posts/hostWaits/sessionContexts/hostRunning/missionActivity/mainRed are
   // OPTIONAL (absent → the tick degrades); notifyHost has a composed fallback
   // (wakepack + deliver buckets, FASE 2.6-C). Frozen here = the fields the
   // package SERVICE reads from its bucket (see HealthBinderDeps + the apply's
   // merge). M-5 (2026-08-31) added missionActivity (the delivered-but-unstarted
-  // mission watchdog dep) — an INTENTIONAL verified extension of the contract.
-  health: ['bootId', 'config', 'posts', 'hostWaits', 'sessionContexts', 'hostRunning', 'missionActivity', 'notifyHost', 'poolerStatePath', 'workRegisterPath', 'qiDirectiveRate'],
+  // mission watchdog dep); M-6 (2026-08-31) added mainRed (the post-commit
+  // re-verification watchdog dep: buildMainRedState over the repoRoot — git
+  // HEAD reader + fast-lock runner) — INTENTIONAL verified extensions of the
+  // contract.
+  health: ['bootId', 'config', 'posts', 'hostWaits', 'sessionContexts', 'hostRunning', 'missionActivity', 'mainRed', 'notifyHost', 'poolerStatePath', 'workRegisterPath', 'qiDirectiveRate'],
   pooler: ['configuredProviders', 'appendPostError']
 }
 // The REQUIRED-at-use fields per zone bucket (a matching slack is the package's

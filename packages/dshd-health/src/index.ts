@@ -445,8 +445,17 @@ export interface HealthFinding {
     * `missionStallMs` (default 600000 = 10 min): the «misión entregada a un
     * head pero NO INICIADA» alarm (the owner's gap); the dedupe KEY is
     * per-mission `mission-stall:<postId>:<messageId>`, re-alerting every
-    * HEALTH_DEDUPE_WINDOW_MS while the mission stays unprocessed). */
-  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled'
+    * HEALTH_DEDUPE_WINDOW_MS while the mission stays unprocessed). M-6 adds
+    * `main-red` (the post-commit re-verification watchdog: a NEW commit at the
+    * dev repo HEAD — a light git poll at `mainRedPollMs` (default 300000 =
+    * 5 min) sees `headSha ≠ last-seen` — runs ONLY the FAST locks (~seconds,
+    * NEVER the full suite) via `node --test`; a failing lock → the «main rojo
+    * post-commit <sha> — lock <X> falló (detectado en <N> min)» alarm (the
+    * adopted lesson after the boot-factory anchor left the suite red on main
+    * since f28c719 undetected for hours); the dedupe KEY is per-sha
+    * `main-red:<sha>`, re-alerting every HEALTH_DEDUPE_WINDOW_MS while the
+    * broken commit stays at HEAD). */
+  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red'
   /** The dedupe key (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS). */
   key: string
   /** The postId (post-error / stalled-post / context-threshold post row). */
@@ -1831,6 +1840,22 @@ export interface HealthConfigLike {
      * delivery ts → a `mission-stalled` finding + host ALERT (default 600000
      * = 10 min). Absent/invalid → 600000. */
     missionStallMs?: number
+    /** M-6 — the main-red watchdog gate (default ON; explicit `false`
+     * disables the post-commit re-verification scan). */
+    mainRedEnabled?: boolean
+    /** M-6 — the main-red HEAD POLL cadence in ms (default 300000 = 5 min): a
+     * NEW commit at HEAD is detected within minutes (the mission's core
+     * promise — never hours). Absent/invalid → 300000. */
+    mainRedPollMs?: number
+    /** M-6 — the FAST locks the post-commit re-verification runs (repo-relative
+     * paths). Absent → the 8-lock default (boot-factory + the 4 orchestration
+     * factories + the surface locks). An explicit non-empty array overrides. */
+    mainRedLocks?: string[]
+    /** M-6 — the repo root whose git HEAD the watchdog reads (default: the
+     * bundle's REPO_ROOT — the dev repo the host commits; override for a
+     * packaged deployment where the repo lives elsewhere, and for the SMOKE
+     * fixture). Absent → REPO_ROOT. */
+    mainRedRepoRoot?: string
   }
   /** PACING (owner m-PACING, 2026-08-28) — the top-level `org.pacing.*`
    * franja config the transition monitor reads (the bundle passes its whole
@@ -1931,6 +1956,15 @@ export interface HealthDaemonDeps {
    * delivered-but-unstarted ALERT — the hostRunning/sessionContexts-absent
    * pattern). CONSUMED ONE — the tick materializes it once. */
   missionActivity?: Iterable<MissionActivityInput>
+  /** M-6 — the main-red watchdog runtime: the bundle's `buildMainRedState`
+   * over `repoRoot` (knob `mainRedRepoRoot` ?? REPO_ROOT) — the git-HEAD
+   * reader (`readHeadSha()` = git rev-parse HEAD) + the fast-lock runner
+   * (`runLocks(paths)` = node --test per lock, one single execution per new
+   * sha). ABSENT (undefined) → the main-red scan is a NO-OP (a wiring without
+   * the repo/git seam can never certify the HEAD — unknown main state never
+   * fabricates a post-commit alert; the hostRunning/sessionContexts-absent
+   * pattern). CONSUMED ONE — the tick materializes it once per poll bucket. */
+  mainRed?: MainRedRuntime
   /** Deliver the framed ALERT bus message to the host (production:
    * messagesStoreReady.append + busDeliverToHost; tests: a recording stub).
    * NEVER throws. */
@@ -3059,6 +3093,230 @@ export function scanMissionStalled(input: MissionStallScanInput): HealthFinding[
   return findings
 }
 
+// ---------------------------------------------------------------------------
+// M-6 (FASE 4 lane 1, VALLE, 2026-08-31, owner gap «main rojo post-commit») —
+// the MAIN-RED watchdog: detect a NEW commit at the dev repo HEAD whose FAST
+// LOCKS fail, in MINUTES. The adopted lesson after the boot-factory anchor
+// (a live `git show HEAD:src/invoke.ts` region calibration) left the suite red
+// on main from f28c719 for HOURS without detection: the `node --test` FULL
+// suite never runs on every commit (it is minutes-to-hours), so the post-commit
+// re-verification runs ONLY the FAST locks (~seconds):
+//   - `test/boot-factory` + `presets-factory` + `spawn-factory` +
+//     `tools-factory` + `delivery-factory` + `export-parity` +
+//     `binder-contract` + `client-row-invariant` (the default `mainRedLocks`).
+//
+// DETECTION (the I/O lives OUTSIDE the pure scan — the missionActivity
+// pattern): the BUNDLE exposes `deps.mainRed` = buildMainRedState(repoRoot)
+// with { readHeadSha() (git rev-parse HEAD), runLocks(paths) (node --test PER
+// lock — a separate invocation per lock so the FAILED lock is named in the
+// frame; results per file {file, ok}; ONE single execution per new sha) }. The
+// TICK materializes { headSha, lastSeenSha, firstSeenMs, lockResults } and the
+// SCAN (PURE, NEVER throws) decides the finding + the NEXT durable state:
+//   - FIRST RUN (state has no lastSeenSha) → BASELINE only: record the current
+//     HEAD sha, NO lock run, NO alert — the scan NEVER alerts at boot (a boot
+//     mid-red cannot know when the commit landed; the M4/pacing first-boot
+//     precedent). The NEXT new commit is what the watchdog detects.
+//   - SAME sha at HEAD (no new commit) → NOTHING (the locks are NOT re-run — 1
+//     ejecución por sha nuevo); a remembered RED state keeps RE-EMITTING the
+//     finding (the SHARED health-alerts ledger gives the 30-min re-alert
+//     cadence while the broken commit stays at HEAD — the dedupe key
+//     `main-red:<sha>`).
+//   - NEW sha (HEAD ≠ last-seen) → the tick ran the FAST locks for this sha;
+//     a failed lock → the finding + the state advances { lastSeenSha: new,
+//     firstSeenMs: nowMs } (+ redLocks = the failed lock files); all green →
+//     the state advances SILENTLY (a green commit is the goal, never an alert).
+// The red memory (redLocks) is DURABLE in main-red-state.json (the
+// system-idle-state.json precedent — the shared ledger holds timestamps only,
+// never values, and its 2h defensive prune would drop a long red window).
+// KNOBS (`health.*`, default-on): `mainRedEnabled` (gate) + `mainRedPollMs`
+// (the light HEAD poll cadence; absent/invalid → 300000 = 5 min) +
+// `mainRedLocks` (the fast-lock paths; an explicit non-empty array overrides
+// the 8-lock default).
+// ---------------------------------------------------------------------------
+
+/** M-6 — the default main-red HEAD poll cadence (5 min: a NEW commit at HEAD
+ * is detected within minutes, never hours — the mission's core promise). */
+export const MAIN_RED_DEFAULT_POLL_MS = 300000
+
+/** M-6 — the default FAST locks (the post-commit re-verification set — the
+ * boot factory + the 4 orchestration factories + the surface locks; ~seconds
+ * each, NEVER the full suite). Repo-relative paths (joined against
+ * `mainRedRepoRoot`/REPO_ROOT by the bundle's runLocks). */
+export const MAIN_RED_DEFAULT_LOCKS = [
+  'test/boot-factory.test.js',
+  'test/presets-factory.test.js',
+  'test/spawn-factory.test.js',
+  'test/tools-factory.test.js',
+  'test/delivery-factory.test.js',
+  'test/export-parity.test.js',
+  'test/binder-contract.test.js',
+  'test/client-row-invariant.test.js'
+]
+
+/** M-6 — the main-red durable-state file — a SEPARATE file (the shared
+ * health-alerts ledger's defensive 2h prune would drop a long red window;
+ * precedent qi-silence-state.json / system-idle-state.json). */
+export const MAIN_RED_STATE_FILE = 'main-red-state.json'
+/** M-6 — the main-red dedupe key prefix (`main-red:<sha>` — the SHARED
+ * health-alerts ledger holds the timestamps; the 30-min re-alert cadence while
+ * the broken commit stays at HEAD). */
+export const MAIN_RED_KEY_PREFIX = 'main-red:'
+
+/** M-6 — build the per-sha dedupe key. */
+export function mainRedKey(sha: string): string {
+  return `${MAIN_RED_KEY_PREFIX}${sha}`
+}
+
+/** M-6 — the main-red durable state: the last-seen HEAD sha + when it was
+ * first seen (the «detectado en N min» anchor — the system-idle firstQuietTs
+ * precedent) + the REMEMBERED red locks (only while the current last-seen sha
+ * is RED — the re-alert memory WITHOUT a lock re-run). */
+export interface MainRedState {
+  /** The last git HEAD sha the watchdog saw. ABSENT → no baseline yet (the
+   * first-run case: the scan records the baseline, never alerts at boot). */
+  lastSeenSha?: string
+  /** The ms epoch when the CURRENT lastSeenSha was FIRST seen at HEAD. The
+   * re-alert frame's N minutes = round((nowMs - firstSeenMs)/60000). */
+  firstSeenMs?: number
+  /** The lock files that FAILED for the current lastSeenSha (present ONLY
+   * while the broken commit is RED — the durable re-alert memory). */
+  redLocks?: string[]
+}
+
+/** Read `<stateDir>/main-red-state.json` → `{ lastSeenSha?, firstSeenMs?,
+ * redLocks? }`. Absent / unreadable / malformed → {} (never throws). */
+export function readMainRedState(stateDir: string): MainRedState {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, MAIN_RED_STATE_FILE), 'utf8')) as Record<string, unknown>
+    const out: MainRedState = {}
+    if (typeof parsed.lastSeenSha === 'string' && parsed.lastSeenSha !== '') out.lastSeenSha = parsed.lastSeenSha
+    if (typeof parsed.firstSeenMs === 'number' && Number.isFinite(parsed.firstSeenMs)) out.firstSeenMs = parsed.firstSeenMs
+    if (Array.isArray(parsed.redLocks)) {
+      const redLocks = parsed.redLocks.filter((x): x is string => typeof x === 'string' && x !== '')
+      if (redLocks.length > 0) out.redLocks = redLocks
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/main-red-state.json` (mkdir -p the dir, then the file). */
+export async function writeMainRedState(stateDir: string, state: MainRedState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, MAIN_RED_STATE_FILE)), { recursive: true })
+  await writeFile(path.join(stateDir, MAIN_RED_STATE_FILE), JSON.stringify(state), 'utf8')
+}
+
+/** M-6 — ONE fast-lock run result: the repo-relative lock path + whether
+ * `node --test` exited 0 for it. */
+export interface MainRedLockResult {
+  file: string
+  ok: boolean
+}
+
+/** M-6 — the main-red watchdog runtime (bundle-side — `buildMainRedState`):
+ * the git-HEAD reader + the fast-lock runner over one repo root. The I/O
+ * (child_process git / node --test) lives HERE, never in the pure scan. */
+export interface MainRedRuntime {
+  /** The CURRENT git HEAD sha (git rev-parse HEAD over the repo root).
+   * Unreadable / not-a-repo → undefined (the tick then no-ops the scan). */
+  readHeadSha(): string | undefined
+  /** Run the FAST locks (node --test PER lock — a separate invocation per lock
+   * so the failed lock is named in the frame; result per file {file, ok}).
+   * NEVER throws. ONE single execution per new sha. */
+  runLocks(paths: readonly string[]): Promise<readonly MainRedLockResult[]>
+}
+
+/** M-6 — the main-red scan inputs (ALREADY materialized by the tick — zero
+ * new I/O in the scan; the missionActivity pattern). */
+export interface MainRedScanInput {
+  /** The CURRENT git HEAD sha (the bundle's readHeadSha over repoRoot). */
+  headSha: string
+  /** The durable last-seen sha (main-red-state.json; ABSENT on the first run). */
+  lastSeenSha?: string
+  /** The durable first-seen epoch of lastSeenSha (the N-minutes anchor). */
+  firstSeenMs?: number
+  /** The remembered red locks of the current lastSeenSha (state.redLocks). */
+  redLocks?: readonly string[]
+  /** The lock-run results for a NEW sha (the tick ran deps.mainRed.runLocks
+   * ONLY when headSha ≠ last-seen — 1 ejecución por sha nuevo; a same-sha tick
+   * passes an EMPTY list). */
+  lockResults: readonly MainRedLockResult[]
+  /** The clock (ms epoch) — stamped into the finding ts + the N minutes. */
+  nowMs: number
+}
+
+/** M-6 — the main-red scan result: the findings + the NEXT durable state (the
+ * tick persists only when changed). */
+export interface MainRedScanResult {
+  findings: HealthFinding[]
+  state: MainRedState
+  changed: boolean
+}
+
+/** M-6 — scan the post-commit red condition (PURE, NEVER throws):
+ *  - FIRST RUN (no lastSeenSha) → BASELINE only — record the current HEAD,
+ *    NEVER alert at boot;
+ *  - SAME sha at HEAD → a remembered RED state re-emits the finding (the
+ *    shared 30-min ledger re-alerts while the broken commit stays at HEAD); a
+ *    green state → nothing (no lock re-run — 1 ejecución por sha nuevo);
+ *  - NEW sha at HEAD → the fresh lock results decide: any failed lock → the
+ *    `main-red` finding + the state advances (redLocks remembered); all green
+ *    → the state advances SILENTLY.
+ * The finding error carries the FULL owner-facing line («main rojo post-commit
+ * <sha> — lock <X> falló (detectado en <N> min)» — N = round((nowMs -
+ * firstSeenMs)/60000)) so every 30-min re-alert stays informative. */
+export function scanMainRed(input: MainRedScanInput): MainRedScanResult {
+  // FIRST RUN — the scan NEVER alerts at boot (a boot mid-red cannot know when
+  // the commit landed; the M4/pacing first-boot precedent). Baseline only.
+  if (input.lastSeenSha === undefined) {
+    return { findings: [], state: { lastSeenSha: input.headSha, firstSeenMs: input.nowMs }, changed: true }
+  }
+  // SAME sha at HEAD — NO new commit. The locks are NOT re-run (1 ejecución
+  // por sha nuevo); a remembered RED state keeps re-emitting the finding (the
+  // shared 30-min ledger gives the re-alert cadence while it stays broken).
+  if (input.headSha === input.lastSeenSha) {
+    const red = input.redLocks ?? []
+    if (red.length === 0) {
+      return { findings: [], state: { lastSeenSha: input.lastSeenSha, firstSeenMs: input.firstSeenMs }, changed: false }
+    }
+    const minutes = Math.round((input.nowMs - (input.firstSeenMs ?? input.nowMs)) / 60000)
+    return {
+      findings: [{
+        kind: 'main-red',
+        key: mainRedKey(input.headSha),
+        ts: input.nowMs,
+        error: `main rojo post-commit ${input.headSha} — lock ${red.join(', ')} falló (detectado en ${minutes} min)`
+      }],
+      state: { lastSeenSha: input.lastSeenSha, firstSeenMs: input.firstSeenMs, redLocks: [...red] },
+      changed: false
+    }
+  }
+  // NEW commit at HEAD — the tick ran the FAST locks for THIS sha. A failed
+  // lock → the finding + the red memory; all green → the state advances
+  // silently (a green commit is the goal, never an alert).
+  const failed = input.lockResults.filter((r) => r.ok !== true).map((r) => r.file)
+  const state: MainRedState = {
+    lastSeenSha: input.headSha,
+    firstSeenMs: input.nowMs,
+    ...(failed.length > 0 ? { redLocks: failed } : {})
+  }
+  if (failed.length === 0) {
+    return { findings: [], state, changed: true }
+  }
+  const minutes = Math.round((input.nowMs - input.nowMs) / 60000)
+  return {
+    findings: [{
+      kind: 'main-red',
+      key: mainRedKey(input.headSha),
+      ts: input.nowMs,
+      error: `main rojo post-commit ${input.headSha} — lock ${failed.join(', ')} falló (detectado en ${minutes} min)`
+    }],
+    state,
+    changed: true
+  }
+}
+
 /** Build the framed host ALERT text — `[From deepartments] System-health ALERT:
  * <grouped findings>`. Each finding is a one-line bullet. The config-preset and
  * stalled-post bullets describe their anomaly verbally (never the literal
@@ -3117,6 +3375,13 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     // error carries the FULL line so every 30-min re-alert stays informative).
     if (finding.kind === 'mission-stalled') {
       return `- mission-stalled: ${finding.error ?? `misión ${finding.messageId ?? ''} entregada a ${finding.postId ?? ''} sin inicio — posible cola stale`}`
+    }
+    // M-6 — the main-red branch (NEVER let it reach the stale-post fallback).
+    // The owner-facing wording is the finding's own line (sha + the failed
+    // lock + the detection delay — the error carries the FULL line so every
+    // 30-min re-alert stays informative).
+    if (finding.kind === 'main-red') {
+      return `- main-red: ${finding.error ?? 'main rojo post-commit <sha> — lock <X> falló (detectado en <?> min)'}`
     }
     return `- stalled-post: ${finding.postId} (${finding.count ?? 1} pending message(s), ${finding.error ?? 'no session activity'})`
   })
@@ -3356,6 +3621,23 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // fact — no epoch ledger needed, unlike M4's firstQuietTs).
     const missionStallEnabled = health?.missionStallEnabled !== false
     const missionStallMs = resolvePositiveKnob(health?.missionStallMs, MISSION_STALL_DEFAULT_MS)
+    // M-6 — the main-red watchdog knobs: `mainRedEnabled` gate (default ON) +
+    // `mainRedPollMs` (the light HEAD poll cadence; absent/invalid → the 5-min
+    // code default via resolvePositiveKnob) + `mainRedLocks` (the fast-lock
+    // paths; an explicit non-empty array overrides the 8-lock default — a
+    // broken/empty array → the default, never a throw).
+    const mainRedEnabled = health?.mainRedEnabled !== false
+    const mainRedPollMs = resolvePositiveKnob(health?.mainRedPollMs, MAIN_RED_DEFAULT_POLL_MS)
+    const mainRedLocks =
+      Array.isArray(health?.mainRedLocks) && health.mainRedLocks.every((p) => typeof p === 'string' && p !== '')
+        ? health.mainRedLocks
+        : MAIN_RED_DEFAULT_LOCKS
+    // The per-poll BUCKET gate (the M-A per-poll precedent): the main-red scan
+    // runs at most once per `mainRedPollMs` bucket — the FIRST tick of a bucket
+    // (prevTick undefined → runs); a faster `health.intervalMs` re-fire inside
+    // the SAME bucket skips the scan.
+    const currentMainRedBucket = Math.floor(nowMs / mainRedPollMs)
+    const prevMainRedBucket = prevTick !== undefined ? Math.floor(prevTick.ts / mainRedPollMs) : undefined
     const currentContextBucket = Math.floor(nowMs / contextThresholdPollMs)
     const prevContextBucket = prevTick !== undefined ? Math.floor(prevTick.ts / contextThresholdPollMs) : undefined
     const posts = [...(deps.posts ?? [])]
@@ -3502,6 +3784,47 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         deps.logger?.warn(`[deepartments] system-health: mission-stalled scan failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    // M-6 — the main-red watchdog (the post-commit re-verification scan). Gate:
+    // enabled AND `deps.mainRed` RESOLVED (the bundle's buildMainRedState over
+    // repoRoot; ABSENT → the scan is a NO-OP — a wiring without the repo/git
+    // seam never fabricates a post-commit alert; the hostRunning/sessionContexts
+    // -absent pattern) AND the per-poll bucket turned (the FIRST tick of a
+    // `mainRedPollMs` bucket; a re-fire inside the SAME bucket skips it). The
+    // I/O (git HEAD + node --test per lock) lives in `deps.mainRed`, OUTSIDE
+    // the pure scan: the tick materializes { headSha, lastSeenSha, firstSeenMs,
+    // lockResults } and runs the locks ONLY on a NEW sha (1 ejecución por sha
+    // nuevo); the first run is a BASELINE (never alerts at boot). Its own
+    // durable state main-red-state.json (lastSeenSha + firstSeenMs + redLocks)
+    // persists ONLY on change (the turn-errors pattern); the SHARED
+    // health-alerts ledger never holds the red window (its 2h prune would drop
+    // a long one). The 30-min RE-ALERT cadence comes from the SHARED dedupe
+    // key `main-red:<sha>` while the broken commit stays at HEAD.
+    let mainRedFindings: HealthFinding[] = []
+    if (mainRedEnabled && deps.mainRed !== undefined && currentMainRedBucket !== prevMainRedBucket) {
+      try {
+        const mainRedState = readMainRedState(deps.stateDir)
+        const headSha = deps.mainRed.readHeadSha()
+        if (headSha !== undefined) {
+          // The fast locks run ONLY when HEAD moved to a NEW sha (never on the
+          // first run — baseline; never re-run for the same sha — 1 ejecución
+          // por sha nuevo). A same-sha / first-run tick passes NO results.
+          const isNewSha = mainRedState.lastSeenSha !== undefined && headSha !== mainRedState.lastSeenSha
+          const lockResults = isNewSha ? await deps.mainRed.runLocks(mainRedLocks) : []
+          const mainRedScan = scanMainRed({
+            headSha,
+            lastSeenSha: mainRedState.lastSeenSha,
+            firstSeenMs: mainRedState.firstSeenMs,
+            redLocks: mainRedState.redLocks,
+            lockResults: lockResults as readonly MainRedLockResult[],
+            nowMs
+          })
+          mainRedFindings = mainRedScan.findings
+          if (mainRedScan.changed) await writeMainRedState(deps.stateDir, mainRedScan.state)
+        }
+      } catch (error: unknown) {
+        deps.logger?.warn(`[deepartments] system-health: main-red scan failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     // 3. scan.
     const findings = [
       ...scanPostErrorFindings(deps.stateDir, nowMs, retiredHostIds),
@@ -3512,7 +3835,8 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       ...qiFindings,
       ...systemIdleFindings,
       ...contextFindings,
-      ...missionFindings
+      ...missionFindings,
+      ...mainRedFindings
     ]
     // W8-d PART B/C — the system-heartbeat knobs: `heartbeatEnabled` (default
     // on) gates the CONDITIONAL-WAKE path; `waitThresholdMs` is resolved with
@@ -3765,6 +4089,9 @@ export interface HealthBinderDeps {
    * host→head mission delivery + last session activity) for the
    * mission-stalled watchdog. Absent → the scan is a no-op. */
   missionActivity?: HealthDaemonDeps['missionActivity']
+  /** M-6 — the main-red watchdog runtime (buildMainRedState over repoRoot —
+   * git HEAD reader + fast-lock runner). Absent → the scan is a no-op. */
+  mainRed?: HealthDaemonDeps['mainRed']
   /** The framed ALERT delivery (the bundle's own closure). Absent → the
    * service builds one from the EXISTING composed buckets (wakepack
    * messagesStoreReady + deliver.deliverHost, interrupt:true). */
@@ -3866,6 +4193,7 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
         sessionContexts: explicit.sessionContexts ?? bound.sessionContexts,
         hostRunning: explicit.hostRunning ?? bound.hostRunning,
         missionActivity: explicit.missionActivity ?? bound.missionActivity,
+        mainRed: explicit.mainRed ?? bound.mainRed,
         // DECOUPLING PASO 1: the composed daemon's C6 bounded tail reader flows
         // through the EXPLICIT per-tick deps (created once per daemon by the
         // bundle wiring, exactly like the inline path) — absent → the legacy

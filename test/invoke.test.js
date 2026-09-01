@@ -32,7 +32,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey, scanMainRed, MAIN_RED_DEFAULT_POLL_MS, MAIN_RED_KEY_PREFIX, mainRedKey, MAIN_RED_STATE_FILE, readMainRedState, writeMainRedState, MAIN_RED_DEFAULT_LOCKS, buildMainRedState } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
@@ -12439,6 +12439,303 @@ test('M-5 SMOKE (acceptance — real daemon): bootPlugin with health {intervalMs
       }, 5000, 'the audit row is appended')
       const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
       assert.equal(audit.at(-1).findings.some((f) => f.kind === 'mission-stalled'), true, 'the audit last row records the mission-stalled finding')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+// --- M-6 (FASE 4 lane 1, 2026-08-31, owner gap «main rojo post-commit») — the
+// main-red watchdog ---------------------------------------------------------
+// A NEW commit at the dev repo HEAD (a light git poll at `mainRedPollMs`,
+// default 300000 = 5 min) runs ONLY the FAST locks (default: boot-factory +
+// presets/spawn/tools/delivery-factory + export-parity + binder-contract +
+// client-row-invariant — ~seconds, NEVER the full suite) via node --test; a
+// failing lock → finding `main-red` + host ALERT through the existing
+// findings→dedupe→notifyHost flow. DEDUPE: key `main-red:<sha>` in the SHARED
+// health-alerts-state ledger (the 30-min re-alert cadence while the broken
+// commit stays at HEAD). The red memory (redLocks) is DURABLE in
+// main-red-state.json (lastSeenSha + firstSeenMs + redLocks — the
+// system-idle-state.json precedent; the shared ledger holds timestamps only).
+// `deps.mainRed` ABSENT → the scan is a NO-OP (unknown main state never
+// fabricates a post-commit alert).
+
+test('M-6 scanMainRed (PURE): FIRST RUN → baseline only (NEVER alerts at boot); SAME sha (no new commit) → nothing (no lock re-run), but a REMEMBERED red state re-emits the finding with the growing N minutes; NEW sha + all locks green → the state advances SILENTLY; NEW sha + a failed lock → the main-red finding with the per-sha key + the owner-facing line «main rojo post-commit <sha> — lock <X> falló (detectado en 0 min)»', () => {
+  const T0 = new Date(2026, 8, 1, 9, 0, 0).getTime()
+  const shaA = 'a'.repeat(40)
+  const shaB = 'b'.repeat(40)
+  // (a) FIRST RUN — baseline only, never alerts at boot.
+  const first = scanMainRed({ headSha: shaA, lastSeenSha: undefined, firstSeenMs: undefined, redLocks: [], lockResults: [], nowMs: T0 })
+  assert.deepEqual(first.findings, [], 'first run: NO finding (baseline only — never alerts at boot)')
+  assert.equal(first.changed, true, 'first run: the baseline state is advanced')
+  assert.equal(first.state.lastSeenSha, shaA, 'first run: the baseline records the CURRENT HEAD sha')
+  assert.equal(first.state.firstSeenMs, T0, 'first run: the baseline records the first-seen epoch')
+  // (b) SAME sha at HEAD (no new commit) — no lock re-run, nothing to alert.
+  const same = scanMainRed({ headSha: shaA, lastSeenSha: shaA, firstSeenMs: T0, redLocks: [], lockResults: [], nowMs: T0 + 300_000 })
+  assert.deepEqual(same.findings, [], 'same sha: nothing (no new commit → no re-verification)')
+  assert.equal(same.changed, false, 'same sha: the durable state is untouched')
+  // (c) SAME sha with a REMEMBERED red state → the finding re-emits with the
+  // elapsed minutes (the shared 30-min ledger gives the re-alert cadence).
+  const sameRed = scanMainRed({ headSha: shaA, lastSeenSha: shaA, firstSeenMs: T0, redLocks: ['test/boot-factory.test.js'], lockResults: [], nowMs: T0 + 31 * 60_000 })
+  assert.equal(sameRed.findings.length, 1, 'a remembered RED commit re-emits the finding')
+  assert.equal(sameRed.findings[0].key, mainRedKey(shaA), 'the per-sha dedupe key main-red:<sha>')
+  assert.match(sameRed.findings[0].error, /^main rojo post-commit a+ — lock test\/boot-factory\.test\.js falló \(detectado en 31 min\)$/, 'the re-alert names the remembered lock + the elapsed minutes')
+  // (d) NEW sha + all locks green → the state advances SILENTLY (a green
+  // commit is the goal, never an alert).
+  const green = scanMainRed({ headSha: shaB, lastSeenSha: shaA, firstSeenMs: T0, redLocks: [], lockResults: [{ file: 'test/boot-factory.test.js', ok: true }], nowMs: T0 + 60_000 })
+  assert.deepEqual(green.findings, [], 'a GREEN new commit → no finding')
+  assert.equal(green.changed, true, 'a GREEN new commit still advances the state')
+  assert.equal(green.state.lastSeenSha, shaB, 'the state advances to the new sha')
+  assert.equal(green.state.redLocks, undefined, 'no red memory for a green commit')
+  // (e) NEW sha + a failed lock → the finding.
+  const red = scanMainRed({ headSha: shaB, lastSeenSha: shaA, firstSeenMs: T0, redLocks: [], lockResults: [{ file: 'test/boot-factory.test.js', ok: false }, { file: 'test/export-parity.test.js', ok: true }], nowMs: T0 + 120_000 })
+  assert.equal(red.findings.length, 1, 'a failed lock → the main-red finding')
+  assert.equal(red.findings[0].kind, 'main-red')
+  assert.equal(red.findings[0].key, mainRedKey(shaB), 'the per-sha dedupe key main-red:<sha>')
+  assert.match(red.findings[0].error, /^main rojo post-commit b+ — lock test\/boot-factory\.test\.js falló \(detectado en 0 min\)$/, 'the owner-facing line: main rojo post-commit <sha> — lock <X> falló (detectado en <N> min)')
+  assert.deepEqual(red.state.redLocks, ['test/boot-factory.test.js'], 'the red memory (failed lock files) is persisted for the re-alert')
+  assert.equal(MAIN_RED_DEFAULT_POLL_MS, 300000, 'the code default poll is 5 min')
+  assert.equal(MAIN_RED_KEY_PREFIX, 'main-red:', 'the dedupe key prefix')
+  assert.deepEqual(MAIN_RED_DEFAULT_LOCKS.length, 8, 'the default fast-lock set is the 8 fast locks (never the full suite)')
+})
+
+test('M-6 runHealthDaemonTick: a tick with a NEW sha + a failing lock → the main-red finding + host ALERT (frame bullet «main rojo post-commit <sha> — lock <X> falló…»), the per-sha dedupe key advances in the SHARED ledger, the durable state main-red-state.json records lastSeenSha+firstSeenMs+redLocks, the audit row records it; the FIRST run is a BASELINE (no alert, no lock run)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 9, 30, 0).getTime()
+    const shaA = 'a'.repeat(40)
+    const shaB = 'b'.repeat(40)
+    const alerts = []
+    let lockRuns = 0
+    // (a) FIRST run — baseline only: no alert, no lock run, state recorded.
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-m6-1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      mainRed: {
+        readHeadSha: () => shaA,
+        runLocks: async () => { lockRuns++; return [] }
+      },
+      config: { health: {} },
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(alerts.length, 0, 'the FIRST run is a baseline — never alerts at boot')
+    assert.equal(lockRuns, 0, 'the first run does NOT run the locks (baseline only)')
+    assert.equal(readMainRedState(stateDir).lastSeenSha, shaA, 'the baseline records the current HEAD sha')
+    // (b) a NEW commit at HEAD → the FAST locks run; a failure → the alert.
+    await runHealthDaemonTick({
+      now: () => T0 + 300_001,
+      stateDir,
+      bootId: 'boot-m6-1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      mainRed: {
+        readHeadSha: () => shaB,
+        runLocks: async (paths) => {
+          lockRuns++
+          assert.deepEqual(paths, MAIN_RED_DEFAULT_LOCKS, 'the default fast-lock set is passed to runLocks')
+          return paths.map((p) => ({ file: p, ok: !p.includes('boot-factory') }))
+        }
+      },
+      config: { health: {} },
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => {} }
+    })
+    assert.equal(lockRuns, 1, 'the locks run EXACTLY once per new sha')
+    assert.equal(alerts.length, 1, 'one alert for the failing lock')
+    assert.match(alerts[0].frame, /^\[From deepartments\] System-health ALERT:/, 'the alert frame is the system-health frame')
+    assert.match(alerts[0].frame, /- main-red: main rojo post-commit b{40} — lock test\/boot-factory\.test\.js falló \(detectado en 0 min\)/, 'the FRAME bullet is the main-red line (never the stale-post fallback)')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state[mainRedKey(shaB)], T0 + 300_001, 'the per-sha dedupe key advances in the SHARED ledger')
+    const mainRedState = readMainRedState(stateDir)
+    assert.equal(mainRedState.lastSeenSha, shaB, 'main-red-state.json records the new last-seen sha')
+    assert.equal(mainRedState.firstSeenMs, T0 + 300_001, 'main-red-state.json records the first-seen epoch')
+    assert.deepEqual(mainRedState.redLocks, ['test/boot-factory.test.js'], 'main-red-state.json records the failed lock files')
+    const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    assert.equal(audit.at(-1).findings[0].kind, 'main-red', 'the audit row records the main-red finding')
+    assert.equal(audit.at(-1).dedupeKeys.includes(mainRedKey(shaB)), true, 'the audit row records the per-sha dedupe key')
+  })
+})
+
+test('M-6 the mainRedPollMs BUCKET gate: a tick inside the SAME 5-min bucket does NOT re-scan (no HEAD read, no lock re-run); the FIRST tick of the next bucket re-arms the scan; the missing/invalid knob falls back to the 300000 default', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 10, 0, 0).getTime()
+    const shaA = 'a'.repeat(40)
+    const shaB = 'b'.repeat(40)
+    let headReads = 0
+    let lockRuns = 0
+    const tick = (nowMs, headSha) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-m6-b',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      // The knob ABSENT → the 300000 default. The inability to read HEAD (a
+      // transient git failure) → the scan no-ops (never fabricates an alert).
+      mainRed: {
+        readHeadSha: () => { headReads++; return headSha },
+        runLocks: async () => { lockRuns++; return [{ file: 'test/boot-factory.test.js', ok: false }] }
+      },
+      config: { health: {} },
+      notifyHost: async () => {},
+      logger: { warn: (m) => {} }
+    })
+    await tick(T0, shaA)
+    assert.equal(headReads, 1, 'the first tick of a bucket runs the HEAD read')
+    assert.equal(readMainRedState(stateDir).lastSeenSha, shaA, 'the first tick baselines')
+    await tick(T0 + 60_000, shaB)
+    assert.equal(headReads, 1, 'a tick INSIDE the same 5-min bucket does NOT re-read HEAD (the bucket gate)')
+    assert.equal(lockRuns, 0, 'no lock run inside the same bucket')
+    await tick(T0 + 300_001, shaB)
+    assert.equal(headReads, 2, 'the FIRST tick of the NEXT bucket re-arms the scan')
+    assert.equal(lockRuns, 1, 'a new-sha scan in the next bucket runs the locks')
+    assert.equal(readMainRedState(stateDir).lastSeenSha, shaB, 'the re-armed scan advances the state')
+  })
+})
+
+test('M-6 DEDUPE / RE-ALERT: the SAME broken sha at HEAD alerts once; the SAME finding inside the 30-min health dedupe does NOT re-alert even though the scan re-emits it; AFTER HEALTH_DEDUPE_WINDOW_MS with the broken commit STILL at HEAD → RE-ALERT (never a one-shot — the broken commit stays red for hours until the next commit)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 11, 0, 0).getTime()
+    const shaR = 'r'.repeat(40)
+    const alerts = []
+    // Seed the red state (a broken commit at HEAD with the failing lock
+    // remembered) — the scan re-emits while the sha stays at HEAD.
+    await writeMainRedState(stateDir, { lastSeenSha: shaR, firstSeenMs: T0, redLocks: ['test/boot-factory.test.js'] })
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-m6-d',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      mainRed: {
+        readHeadSha: () => shaR,
+        runLocks: async () => { throw new Error('the locks MUST NOT re-run for the same sha') }
+      },
+      config: { health: { mainRedPollMs: 60_000 } },
+      notifyHost: async () => { alerts.push(1) },
+      logger: { warn: (m) => {} }
+    })
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'a remembered RED sha alerts')
+    await tick(T0 + 5 * 60_000)
+    assert.equal(alerts.length, 1, 'the same finding inside the 30-min window does NOT re-alert (the scan re-emits, the ledger suppresses)')
+    await tick(T0 + 31 * 60_000)
+    assert.equal(alerts.length, 2, '31 min later the broken commit STILL at HEAD RE-ALERTS (the guarantee is never a one-shot)')
+    assert.equal(readMainRedState(stateDir).lastSeenSha, shaR, 'the red sha is still the last-seen (no new commit)')
+    assert.deepEqual(readMainRedState(stateDir).redLocks, ['test/boot-factory.test.js'], 'the red memory persists')
+  })
+})
+
+test('M-6 the mainRedEnabled gate + dep-absent no-op: explicit false → the scan is SKIPPED (no alert even with a new broken sha); the `mainRed` dep ABSENT → the scan is a NO-OP (no alert, no warn — a wiring without the repo/git seam never fabricates a post-commit alert)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 12, 0, 0).getTime()
+    const shaB = 'b'.repeat(40)
+    await writeMainRedState(stateDir, { lastSeenSha: 'a'.repeat(40), firstSeenMs: T0 })
+    // (a) gate OFF with the dep PRESENT and a new broken sha.
+    const alertsA = []
+    const warnsA = []
+    let lockRuns = 0
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-m6-g1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      mainRed: {
+        readHeadSha: () => shaB,
+        runLocks: async () => { lockRuns++; return [{ file: 'test/boot-factory.test.js', ok: false }] }
+      },
+      config: { health: { mainRedEnabled: false } },
+      notifyHost: async () => { alertsA.push(1) },
+      logger: { warn: (m) => warnsA.push(m), info: () => {} }
+    })
+    assert.equal(alertsA.length, 0, 'mainRedEnabled:false suppresses the scan even at a new broken sha')
+    assert.equal(lockRuns, 0, 'mainRedEnabled:false → no lock run either')
+    assert.equal(warnsA.length, 0, 'mainRedEnabled:false → no warn either')
+    // (b) the mainRed dep ABSENT (a wiring that cannot resolve the seam).
+    const alertsB = []
+    const warnsB = []
+    await runHealthDaemonTick({
+      now: () => T0 + 60_000,
+      stateDir,
+      bootId: 'boot-m6-g2',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      config: { health: {} },
+      notifyHost: async () => { alertsB.push(1) },
+      logger: { warn: (m) => warnsB.push(m), info: () => {} }
+    })
+    assert.equal(alertsB.length, 0, 'mainRed undefined → the scan is a no-op → no alert')
+    assert.equal(warnsB.length, 0, 'mainRed undefined → no warn either (the scan did not run)')
+  })
+})
+
+test('M-6 buildMainRedState (bundle-side): a repo WITHOUT .git → undefined (the packaged no-git composition no-ops); a REAL git fixture → readHeadSha() returns the HEAD sha and runLocks() returns a per-file {file, ok} result (a failing lock → ok:false, a passing lock → ok:true)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // (a) a non-git directory → undefined.
+    const plainDir = path.join(stateDir, 'plain')
+    await mkdir(plainDir, { recursive: true })
+    assert.equal(buildMainRedState(plainDir), undefined, 'a directory WITHOUT .git → undefined (no-op)')
+    // (b) a REAL git fixture (its own git init — the SMOKE precedent).
+    const fixture = path.join(stateDir, 'fixture')
+    await mkdir(fixture, { recursive: true })
+    const testDir = path.join(fixture, 'test')
+    await mkdir(testDir, { recursive: true })
+    await writeFile(path.join(fixture, 'README.md'), 'm6 fixture\n', 'utf8')
+    await writeFile(path.join(testDir, 'fail.test.js'), "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\ntest('M-6 fixture lock — ALWAYS FAILS', () => { assert.equal(1, 2) })\n", 'utf8')
+    await writeFile(path.join(testDir, 'pass.test.js'), "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\ntest('M-6 fixture lock — passes', () => { assert.equal(1, 1) })\n", 'utf8')
+    execFileSync('git', ['init', '-q', '-b', 'main', fixture], { stdio: ['ignore', 'pipe', 'pipe'] })
+    execFileSync('git', ['-C', fixture, 'add', '-A'], { stdio: ['ignore', 'pipe', 'pipe'] })
+    execFileSync('git', ['-C', fixture, '-c', 'user.email=m6@test', '-c', 'user.name=m6', 'commit', '-q', '-m', 'fixture init'], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const runtime = buildMainRedState(fixture)
+    assert.ok(runtime !== undefined, 'a git fixture yields the runtime')
+    const sha = runtime.readHeadSha()
+    assert.match(sha, /^[0-9a-f]{40}$/, 'readHeadSha returns the git HEAD sha')
+    const results = await runtime.runLocks(['test/fail.test.js', 'test/pass.test.js'])
+    assert.deepEqual(results, [
+      { file: 'test/fail.test.js', ok: false },
+      { file: 'test/pass.test.js', ok: true }
+    ], 'runLocks runs node --test PER lock and reports {file, ok} (the failed lock is named)')
+  })
+})
+
+test('M-6 SMOKE (acceptance — real daemon): bootPlugin with health {intervalMs: 50, mainRedPollMs: 60, mainRedRepoRoot: <temp git fixture>, mainRedLocks: [a failing lock]} + a NEW commit at the fixture HEAD → the REAL daemon runs ONLY the fast lock, detects the failure, and ALERTS the host with the main-red frame; the audit row records the finding; the first boot BASELINES (no alert)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The SMOKE fixture: a temp git repo with its own git init, holding ONE
+    // failing fast lock (the dev repo HEAD/REPO_ROOT is NEVER touched).
+    const fixture = path.join(stateDir, 'smoke-repo')
+    await mkdir(path.join(fixture, 'test'), { recursive: true })
+    await writeFile(path.join(fixture, 'README.md'), 'm6 smoke\n', 'utf8')
+    await writeFile(path.join(fixture, 'test', 'boot-factory.test.js'), "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\ntest('M-6 smoke lock — ALWAYS FAILS', () => { assert.equal(1, 2) })\n", 'utf8')
+    execFileSync('git', ['init', '-q', '-b', 'main', fixture], { stdio: ['ignore', 'pipe', 'pipe'] })
+    execFileSync('git', ['-C', fixture, 'add', '-A'], { stdio: ['ignore', 'pipe', 'pipe'] })
+    execFileSync('git', ['-C', fixture, '-c', 'user.email=m6@test', '-c', 'user.name=m6', 'commit', '-q', '-m', 'fixture init'], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const env = await bootPlugin(stateDir, { health: { intervalMs: 50, mainRedPollMs: 60, mainRedRepoRoot: fixture, mainRedLocks: ['test/boot-factory.test.js'] } })
+    try {
+      await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'head materialized at boot')
+      const host = env.agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      // Self-register the live host (the ALERT recipient — a durable hosts.json
+      // entry for pickLiveHost).
+      await env.root.tools.get('dept_who').execute({}, { agent: host, signal })
+      // Give the daemon a moment to baseline — NO main-red alert at boot.
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      assert.equal(host.inboxMessages.some((m) => m.content[0]?.text.includes('main-red')), false, 'the boot BASELINE never alerts (nunca alerta al arrancar)')
+      // A NEW commit lands at the fixture HEAD (the adopted lesson: the suite
+      // can go red on main WITHOUT the full suite detecting it — the watchdog
+      // re-verifies ONLY the fast locks post-commit).
+      await writeFile(path.join(fixture, 'README.md'), 'm6 smoke — NEW COMMIT\n', 'utf8')
+      execFileSync('git', ['-C', fixture, 'add', '-A'], { stdio: ['ignore', 'pipe', 'pipe'] })
+      execFileSync('git', ['-C', fixture, '-c', 'user.email=m6@test', '-c', 'user.name=m6', 'commit', '-q', '-m', 'new commit'], { stdio: ['ignore', 'pipe', 'pipe'] })
+      await waitFor(() => host.inboxMessages.some((m) => m.content[0]?.text.includes('System-health ALERT') && m.content[0].text.includes('main-red')), 8000, 'the real main-red daemon alerts the host after the new commit')
+      const frame = host.inboxMessages.find((m) => m.content[0]?.text.includes('main-red')).content[0].text
+      assert.match(frame, /- main-red: main rojo post-commit [0-9a-f]{40} — lock test\/boot-factory\.test\.js falló \(detectado en 0 min\)/, 'the REAL alert frame carries the owner-facing main-red line')
+      await waitFor(async () => {
+        try {
+          const auditText = await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')
+          return auditText.trim().length > 0
+        } catch {
+          return false
+        }
+      }, 5000, 'the audit row is appended')
+      const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      assert.equal(audit.at(-1).findings.some((f) => f.kind === 'main-red'), true, 'the audit last row records the main-red finding')
     } finally {
       await env.dispose()
     }
