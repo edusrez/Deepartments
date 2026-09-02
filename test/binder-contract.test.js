@@ -1,33 +1,26 @@
-// dsh-deepartments — binder-contract LOCK test (HITO 3 DECOUPLING, PASO 1 —
-// E2-parcial). Freezes the FASE 2.6 Binder bucket contracts the decoupling must
-// fill WITHOUT breaking anything.
+// dsh-deepartments — binder-contract LOCK test (LANE DI-BY-SERVICES — the
+// binder is DEAD: this lock was the FASE-2.6 register-bucket contract and is
+// now the ABSENCE + deps-holders contract). Freezes what the DI-by-services
+// lane replaced:
 //
-// TODAY (the pre-fill anchor, invoke.ts:8921-8959) the bundle registers ONLY:
-//   { bus, deliver, wakepack, lifecycle, redeliver }
-// and the four P1 plugin services (dshd-gui/dshd-jobs/dshd-health/dshd-pooler)
-// read their own bucket from the binder ON USE (fail-loud R1 when absent):
-//   - gui.endpointDeps   (DeepartmentsEndpointDeps — buildAgentRows +
-//     pickLiveHostEntry + the live maps/hooks),
-//   - jobs.{runJob, notifyHead, departmentForEntry, departmentForJob} required
-//     + onAutoRunSkip/repoRoot optional,
-//   - health.{bootId, config, posts, hostWaits, sessionContexts, hostRunning,
-//     missionActivity, mainRed, notifyHost, poolerStatePath, workRegisterPath,
-//     qiDirectiveRate} (all optional per HealthBinderDeps — the tick degrades by
-//     scan),
-//   - pooler.{configuredProviders, appendPostError} (optional; appendPostError
-//     REQUIRED only when a finding materializes).
-// This lock freezes the CONTRACT (what the packages consume) so the PASO 1
-// bucket fill can never silently break a consumer:
-//   - the bundle's register keeps the 5 baseline buckets (R6 — the anchor is a
-//     SUBSET assertion: nothing existing is removed),
-//   - each package declares the exact binder bucket fields it reads (frozen
-//     field-name lists from the package sources),
-//   - the INVARIANT check is FORWARD-looking: the bundle register may only
-//     carry fields that the consuming package's binder-dep interface declares
-//     (a field the package does not read would be dead — the fill must serve
-//     the contract, never augment it).
-// The test reads STATIC SOURCES (the bundle's invoke.ts register + the 4
-// package index.ts sources) — hermetic, no boot.
+// TODAY (post-LANE-DI-BY-SERVICES) the bundle registers NOTHING into a binder
+// (MutableBinder / deepartments.binder / BinderDeps are GONE — grep-verified
+// 0 hits) — the closure sets flow into the deps HOLDERS:
+//   - the 5 BASELINE sets → deepartments.lifecycleDeps / wakepackDeps /
+//     busDeps / deliverDeps (provided by dshd-core, filled by the bundle),
+//   - the 4 ZONE holders (healthDeps / jobsDeps / poolerDeps / guiDeps) stay
+//     as they were (LANE 0.2.1 — the P1 services' primary path).
+// This lock freezes the ABSENCE (no binder register may ever return) + the
+// HOLDER-FILL contract (the bundle's holder fills carry the closure fields the
+// consumers read):
+//   - the bundle's tools factory contains NO `binder?.register` and NO
+//     `ctx.get('deepartments.binder')`,
+//   - each package declares the exact deps it consumes (frozen field-name
+//     lists from the package sources),
+//   - the INVARIANT check is FORWARD-looking: the bundle holder fills may only
+//     carry fields that the consuming consumer's interface declares.
+// The test reads STATIC SOURCES (the bundle's tools.ts fills + the package
+// index.ts sources) — hermetic, no boot.
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
@@ -36,85 +29,47 @@ import path from 'node:path'
 
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('../', import.meta.url)))
 
-// --- the FROZEN pre-decoupling contract --------------------------------------
-// The 5 baseline buckets the bundle registers today (the anchor — R6: they
-// must NEVER disappear, whatever the decoupling adds).
-const BASELINE_BUCKETS = ['bus', 'deliver', 'wakepack', 'lifecycle', 'redeliver']
-// The 4 zone buckets PASO 1 fills, and the EXACT field names each package's
+// --- the FROZEN post-DI-by-services contract ----------------------------------
+// The 4 baseline deps holders + the fields the dshd-core lazy shells consume.
+const BASELINE_HOLDERS = {
+  lifecycleDeps: ['ensureHost', 'writeJournal', 'readJournal', 'bumpHostSleepCounter', 'bumpPostSleepCounter', 'archivePostSessionOnSleep', 'disposeHeadHandleOnce', 'maybeEmitQualityInspectDirective', 'enqueueHostWake'],
+  wakepackDeps: ['refreshPresence', 'wakePackInjected', 'deferredSleepReplace', 'roleForSession', 'buildSubagentOrientation', 'computeHostSleepSurfacePlan', 'assembleHeartbeat', 'readPresenceStateFile', 'messagesStoreReady', 'repoRoot'],
+  busDeps: ['redeliver'],
+  deliverDeps: ['resolveChild', 'deliverChild', 'resolveCatalogRoute', 'busProfileFor', 'deliverPost', 'deliverHost']
+}
+// The 4 zone holders PASO 1 fills, and the EXACT field names each package's
 // binder-dep interface declares for its bucket (the contract the fill serves).
-const ZONE_BUCKETS = ['health', 'jobs', 'pooler', 'gui']
+const ZONE_HOLDERS = ['health', 'jobs', 'pooler', 'gui']
 const ZONE_BUCKET_CONTRACTS = {
   gui: ['endpointDeps'],
-  // LANE 0.2.3b (W8-c re-plumb): +captureAutoRunFailure — the NEW holder dep
-  // the service-first tick adapter calls after a runJobForDepartment exception
-  // (the post-error row the register-era schedulerRunJob produced, re-wired to
-  // the service path; the bundle registers the captureSchedulerAutoRunFailure-
-  // backed sink — the JobsBinderDeps interface grew it, frozen here).
   jobs: ['runJob', 'notifyHead', 'departmentForEntry', 'departmentForJob', 'onAutoRunSkip', 'captureAutoRunFailure', 'repoRoot'],
-  // NOTE: posts/hostWaits/sessionContexts/hostRunning/missionActivity/mainRed are
-  // OPTIONAL (absent → the tick degrades); notifyHost has a composed fallback
-  // (wakepack + deliver buckets, FASE 2.6-C). Frozen here = the fields the
-  // package SERVICE reads from its bucket (see HealthBinderDeps + the apply's
-  // merge). M-5 (2026-08-31) added missionActivity (the delivered-but-unstarted
-  // mission watchdog dep); M-6 (2026-08-31) added mainRed (the post-commit
-  // re-verification watchdog dep: buildMainRedState over the repoRoot — git
-  // HEAD reader + fast-lock runner); M-7 (VALLE lane A, 2026-09-01) added
-  // missionQueue (the head mission-queue backlog watchdog dep — the per-head
-  // pendingCount rows, materialized from the EXISTING buildHealthPosts output)
-  // — INTENTIONAL verified extensions of the contract.
   health: ['bootId', 'config', 'posts', 'hostWaits', 'sessionContexts', 'hostRunning', 'missionActivity', 'mainRed', 'missionQueue', 'notifyHost', 'poolerStatePath', 'workRegisterPath', 'qiDirectiveRate'],
   pooler: ['configuredProviders', 'appendPostError']
 }
-// The REQUIRED-at-use fields per zone bucket (a matching slack is the package's
-// fail-loud path — the lock asserts the fill provides them so R1 never fires).
-const REQUIRED_ZONE_FIELDS = {
-  gui: ['endpointDeps'],
-  jobs: ['runJob', 'notifyHead', 'departmentForEntry', 'departmentForJob'],
-  health: [],   // all health bucket fields are optional (the tick degrades)
-  pooler: []    // both optional; appendPostError required only on a finding
-}
 
-/** Extract the TOP-LEVEL bucket keys of the `binder?.register({...})` call.
- * SUB-BATCH 4 (tools CUT4): the call MOVED with the zone VERBATIM into the
- * tools factory (the SAME fiber position, the same buckets); the static
- * source target follows the movement. LANE 0.2.2 (gap 2): the factory MOVED
- * into the dshd-orchestration package — the register lives at
- * packages/dshd-orchestration/src/tools.ts.
- * LANE 0.2.3b (register legacy elimination): the register LEFT the frozen
- * CUT-4 md5 zone and is RE-HOMED verbatim right after the zone close (before
- * the deps-holder fills) — same call, same buckets, outside the zone (the
- * tools-factory lock re-froze the zone md5; THIS lock keeps freezing the
- * bucket contract the register serves).
- * Returns the list of registered bucket names. */
-function extractRegisterBucketKeys() {
-  const src = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'tools.ts'), 'utf8')
-  const marker = 'binder?.register({'
-  const start = src.indexOf(marker)
-  assert.ok(start !== -1, 'the bundle binder.register call exists in the tools factory (moved VERBATIM with the CUT4 zone)')
-  // Brace-scan the object literal (it spans many lines; nested braces inside
-  // the bucket objects are balanced by this scan). depth starts at 1: the
-  // register call's OWN open brace is the last char of the marker.
-  let depth = 1
-  let i = start + marker.length
-  const bodyStart = i
-  for (; i < src.length; i++) {
-    const ch = src[i]
-    if (ch === '{') depth++
-    else if (ch === '}') {
-      depth--
-      if (depth === 0) break
+/** Extract the holder-register call blocks of the bundle's tools factory:
+ * returns [{ holder, body }] for each `depsX?.register({...})` fill. */
+function extractHolderFills(sourcePath) {
+  const src = readFileSync(sourcePath, 'utf8')
+  const out = []
+  const re = /(deps(Bus|Deliver|Lifecycle|Wakepack|Health|Jobs|Pooler|Gui))\?\.register\(\{/g
+  let match
+  while ((match = re.exec(src)) !== null) {
+    const holder = match[2]
+    const start = match.index + match[0].length - 1 // the register call's open brace
+    let depth = 1
+    let i = start + 1 // skip the register's OWN open brace (already counted)
+    for (; i < src.length; i++) {
+      const ch = src[i]
+      if (ch === '{') depth++
+      else if (ch === '}') {
+        depth--
+        if (depth === 0) break
+      }
     }
+    out.push({ holder, body: src.slice(start + 1, i) })
   }
-  assert.ok(i < src.length, 'the register call object literal closes')
-  const body = src.slice(bodyStart, i)
-  // Top-level keys: each line of the form `    <key>: {` at the object's own
-  // depth (4-space indented bucket declarations).
-  const keys = []
-  for (const line of body.split('\n')) {
-    const m = /^ {4}([A-Za-z_$][\w$]*):\s*\{/.exec(line)
-    if (m !== null) keys.push(m[1])
-  }
-  return keys
+  return out
 }
 
 /** Extract the property names of ONE `export interface <Name>BinderDeps {...}`
@@ -146,101 +101,87 @@ function extractBinderDepsFields(sourcePath, name) {
   return fields
 }
 
-test('binder-contract: the re-homed register keeps the 5 baseline buckets (R6 anchor — the fill the dshd-core lazy shells read; nothing existing is removed)', () => {
-  const keys = extractRegisterBucketKeys()
-  for (const bucket of BASELINE_BUCKETS) {
-    assert.ok(keys.includes(bucket), `baseline bucket "${bucket}" still registered (found: ${keys.join(', ')})`)
-  }
+test('binder-contract: the binder register is ABSENT from the bundle tools factory (0 register — MutableBinder/deepartments.binder/BinderDeps are dead)', () => {
+  const factory = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'tools.ts'), 'utf8')
+  assert.ok(!/binder\?\.register\(/.test(factory), 'no binder?.register( in the factory (the register DIED — LANE DI-BY-SERVICES)')
+  assert.ok(!/ctx\.get\('deepartments\.binder'\)/.test(factory), 'no ctx.get("deepartments.binder") in the factory (the seam is gone)')
+  const core = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-core', 'src', 'index.ts'), 'utf8')
+  assert.ok(!/MutableBinder/.test(core), 'MutableBinder is gone from dshd-core')
+  assert.ok(!/deepartments\.binder/.test(core), 'the deepartments.binder provide is gone from dshd-core')
 })
 
-test('binder-contract: the 4 P1 packages declare exactly the frozen binder bucket contracts (the fill must serve them)', () => {
-  const sources = {
-    gui: path.join(REPO_ROOT, 'packages', 'dshd-gui', 'src', 'index.ts'),
-    jobs: path.join(REPO_ROOT, 'packages', 'dshd-jobs', 'src', 'index.ts'),
-    health: path.join(REPO_ROOT, 'packages', 'dshd-health', 'src', 'index.ts'),
-    pooler: path.join(REPO_ROOT, 'packages', 'dshd-pooler', 'src', 'index.ts')
-  }
-  const iface = {
-    gui: 'GuiBinderDeps',
-    jobs: 'JobsBinderDeps',
-    health: 'HealthBinderDeps',
-    pooler: 'PoolerBinderDeps'
-  }
-  for (const zone of ZONE_BUCKETS) {
-    const fields = extractBinderDepsFields(sources[zone], iface[zone])
-    assert.deepEqual(fields, ZONE_BUCKET_CONTRACTS[zone], `${zone} bucket contract frozen (${iface[zone]} field list)`)
-  }
-})
-
-test('binder-contract: IF a zone bucket is registered, it carries ONLY fields the package interface declares (the fill never augments the contract)', () => {
-  const keys = extractRegisterBucketKeys()
-  const sources = {
-    gui: path.join(REPO_ROOT, 'packages', 'dshd-gui', 'src', 'index.ts'),
-    jobs: path.join(REPO_ROOT, 'packages', 'dshd-jobs', 'src', 'index.ts'),
-    health: path.join(REPO_ROOT, 'packages', 'dshd-health', 'src', 'index.ts'),
-    pooler: path.join(REPO_ROOT, 'packages', 'dshd-pooler', 'src', 'index.ts')
-  }
-  const iface = {
-    gui: 'GuiBinderDeps',
-    jobs: 'JobsBinderDeps',
-    health: 'HealthBinderDeps',
-    pooler: 'PoolerBinderDeps'
-  }
-  for (const zone of ZONE_BUCKETS) {
-    const declared = extractBinderDepsFields(sources[zone], iface[zone])
-    // Read the register body for THIS bucket's fields (the register call uses a
-    // single combined object today — the fields of a zone bucket are the
-    // top-level keys nested under the bucket). The tokenizer extracts the
-    // object literal once; bucket field lines are 8-space indented under it.
-    const src = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'tools.ts'), 'utf8')
-    const marker = 'binder?.register({'
-    const start = src.indexOf(marker)
-    let depth = 1
-    let i = start + marker.length
-    for (; i < src.length; i++) {
-      const ch = src[i]
-      if (ch === '{') depth++
-      else if (ch === '}') {
-        depth--
-        if (depth === 0) break
-      }
+test('binder-contract: the tools factory FILLS the 4 BASELINE deps holders with the closure fields the dshd-core lazy shells read (the DI-by-services register replacement)', () => {
+  const factory = path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'tools.ts')
+  const fills = extractHolderFills(factory)
+  const holderName = (holder) => `deepartments.${holder === 'Bus' ? 'bus' : holder === 'Deliver' ? 'deliver' : holder === 'Lifecycle' ? 'lifecycle' : 'wakepack'}Deps`
+  for (const holder of Object.keys(BASELINE_HOLDERS)) {
+    const key = holder === 'lifecycleDeps' ? 'Lifecycle' : holder === 'wakepackDeps' ? 'Wakepack' : holder === 'busDeps' ? 'Bus' : 'Deliver'
+    const fill = fills.find((f) => f.holder === key)
+    assert.ok(fill !== undefined, `the ${holderName(key)} holder has a register fill in the factory`)
+    for (const field of BASELINE_HOLDERS[holder]) {
+      assert.ok(new RegExp(`\\b${field}\\b`).test(fill.body), `${holderName(key)} carries the ${field} field (the dshd-core lazy shell reads it)`)
     }
-    const body = src.slice(start + marker.length, i)
-    // Find the `<zone>: { ... }` block inside the register and collect its keys.
-    const zoneStart = body.indexOf(`    ${zone}: {`)
-    if (zoneStart === -1) {
-      // Not registered (the pre-fill state) — the invariant is vacuous.
-      assert.ok(!keys.includes(zone), `zone bucket "${zone}" consistency`)
+  }
+})
+
+test('binder-contract: the 4 P1 packages declare exactly the frozen holder contracts (the zone fills must serve them)', () => {
+  const sources = {
+    gui: path.join(REPO_ROOT, 'packages', 'dshd-gui', 'src', 'index.ts'),
+    jobs: path.join(REPO_ROOT, 'packages', 'dshd-jobs', 'src', 'index.ts'),
+    health: path.join(REPO_ROOT, 'packages', 'dshd-health', 'src', 'index.ts'),
+    pooler: path.join(REPO_ROOT, 'packages', 'dshd-pooler', 'src', 'index.ts')
+  }
+  const iface = {
+    gui: 'GuiBinderDeps',
+    jobs: 'JobsBinderDeps',
+    health: 'HealthBinderDeps',
+    pooler: 'PoolerBinderDeps'
+  }
+  for (const zone of ZONE_HOLDERS) {
+    const fields = extractBinderDepsFields(sources[zone], iface[zone])
+    assert.deepEqual(fields, ZONE_BUCKET_CONTRACTS[zone], `${zone} holder contract frozen (${iface[zone]} field list)`)
+  }
+})
+
+test('binder-contract: IF a zone holder is filled, it carries ONLY fields the package interface declares (the fill never augments the contract)', () => {
+  const factory = path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'tools.ts')
+  const fills = extractHolderFills(factory)
+  const sources = {
+    gui: path.join(REPO_ROOT, 'packages', 'dshd-gui', 'src', 'index.ts'),
+    jobs: path.join(REPO_ROOT, 'packages', 'dshd-jobs', 'src', 'index.ts'),
+    health: path.join(REPO_ROOT, 'packages', 'dshd-health', 'src', 'index.ts'),
+    pooler: path.join(REPO_ROOT, 'packages', 'dshd-pooler', 'src', 'index.ts')
+  }
+  const iface = {
+    gui: 'GuiBinderDeps',
+    jobs: 'JobsBinderDeps',
+    health: 'HealthBinderDeps',
+    pooler: 'PoolerBinderDeps'
+  }
+  const zoneToHolder = { gui: 'Gui', jobs: 'Jobs', health: 'Health', pooler: 'Pooler' }
+  for (const zone of ZONE_HOLDERS) {
+    const declared = extractBinderDepsFields(sources[zone], iface[zone])
+    const fill = fills.find((f) => f.holder === zoneToHolder[zone])
+    if (fill === undefined) {
+      // Not filled (the pooler 1C case — intentionally unfilled) — vacuous.
       continue
     }
-    let zd = 1
-    let j = zoneStart + `    ${zone}: {`.length
-    for (; j < body.length; j++) {
-      const ch = body[j]
-      if (ch === '{') zd++
-      else if (ch === '}') {
-        zd--
-        if (zd === 0) break
-      }
-    }
-    const zoneBody = body.slice(zoneStart + `    ${zone}: {`.length, j)
-    // Collect the PROPERTY KEYS inside the zone bucket object (both the
-    // multi-line `\n      field: ...` form and the single-line inline
-    // `{ field: value }` form): every identifier immediately before a `:` that
-    // is not the bucket's own leftover prefix. The zone buckets are pure
-    // object literals of closure refs — a valid identifier before `:` is a key.
     const fields = []
-    for (const m of zoneBody.matchAll(/[A-Za-z_$][\w$]*\s*:/g)) {
-      const candidate = m[0].trim().replace(/:\s*$/, '')
-      if (!fields.includes(candidate)) fields.push(candidate)
+    // Strip COMMENT lines first — the fill bodies carry explanatory //-lines
+    // whose identifiers are NOT keys. Then capture only TOP-LEVEL keys: lines
+    // indented exactly at the object-literal level (4 spaces) that carry a
+    // `key:` (multi-line `    key: value`) or a bare shorthand identifier
+    // (`    key,`). Nested arrow-function parameters (e.g. `(finding: ...)`)
+    // and deeper indentations are NOT keys.
+    const codeBody = fill.body.split('\n').filter((l) => !/^\s*\/\//.test(l))
+    for (const line of codeBody) {
+      const m = /^ {4}([A-Za-z_$][\w$]*)\s*:/.exec(line)
+      const m2 = /^ {4}([A-Za-z_$][\w$]*),?\s*$/.exec(line)
+      const key = m ? m[1] : m2 ? m2[1] : undefined
+      if (key !== undefined && !fields.includes(key)) fields.push(key)
     }
     for (const field of fields) {
-      assert.ok(declared.includes(field), `registered "${zone}.${field}" is declared by the ${iface[zone]} interface (the fill must serve the contract)`)
-    }
-    // The REQUIRED-at-use fields must be present once the bucket is registered
-    // (otherwise the package's fail-loud R1 fires at the first use).
-    for (const required of REQUIRED_ZONE_FIELDS[zone]) {
-      assert.ok(fields.includes(required), `zone bucket "${zone}" registers the required-at-use field "${required}"`)
+      assert.ok(declared.includes(field), `filled "${zone}.${field}" is declared by the ${iface[zone]} interface (the fill must serve the contract)`)
     }
   }
 })

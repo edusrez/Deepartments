@@ -699,9 +699,10 @@ export async function handleDeepartmentsRequest(
 // NO export default (pitfall 0001 — breaks `inject`).
 import type { Context } from '@deepseek-ai/cordis'
 
-/** The FASE 2.6 binder bucket for the gui service (STRUCTURAL — read from
- * `ctx.get('deepartments.binder')` widened; filled by the DECOUPLING bundle
- * with the live endpoint wiring). */
+/** The FASE 2.6 deps-holder bucket for the gui service (STRUCTURAL — read
+ * from `ctx.get('deepartments.guiDeps')` widened; filled by the DECOUPLING
+ * bundle with the live endpoint wiring; the binder is DEAD since LANE
+ * DI-BY-SERVICES). */
 export interface GuiBinderDeps {
   /** The bundle-owned endpoint wiring (buildAgentRows + pickLiveHostEntry +
    * the live byPost/hosts maps + the session/presence hooks + org

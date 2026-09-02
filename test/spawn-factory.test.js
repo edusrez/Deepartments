@@ -158,30 +158,25 @@ test('spawn-factory: the SPAWN ZONE was hoisted VERBATIM into the orchestration 
   assert.ok(lib.includes('createSpawnOrchestration'), 'the compiled factory exists in the package lib/')
 })
 
-test('spawn-factory (composed boot): the composition is intact — jobs.runJob wired through the bundle (the re-homed register bucket), buckets untouched, deepartments.spawn provided (P1)', async () => {
+test('spawn-factory (composed boot): the composition is intact — the DI-by-services holders are FILLED, jobs runs SERVICE-FIRST through deepartments.spawn (the dead binder jobs bucket is gone), deepartments.spawn provided (P1)', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-spawn-factory-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] } })
     try {
       const ctx = pluginCtx()
-      // The composition is intact: the 5 baseline buckets + the 4 zone buckets
-      // are still registered (LANE 0.2.3b — the register RE-HOMED outside the
-      // frozen CUT-4 zone; the composed path reads the holders, the binder is
-      // the R6 fallback wire).
-      const binder = ctx.get('deepartments.binder')
-      assert.ok(binder !== undefined, 'deepartments.binder resolves')
-      const buckets = binder.get()
-      for (const bucket of ['bus', 'deliver', 'wakepack', 'lifecycle', 'redeliver']) {
-        assert.ok(buckets[bucket] !== undefined, `baseline bucket "${bucket}" registered`)
+      // The composition is intact: the binder is DEAD — the DI-by-services
+      // baseline holders carry the closure sets (LANE DI-BY-SERVICES):
+      assert.equal(ctx.get('deepartments.binder'), undefined, 'deepartments.binder is GONE (LANE DI-BY-SERVICES)')
+      for (const holder of ['lifecycleDeps', 'wakepackDeps', 'busDeps', 'deliverDeps']) {
+        const deps = ctx.get(`deepartments.${holder}`)
+        assert.ok(deps !== undefined && Object.keys(deps.get()).length > 0, `deepartments.${holder} filled (non-empty)`)
       }
-      for (const bucket of ['health', 'jobs', 'pooler', 'gui']) {
-        assert.ok(buckets[bucket] !== undefined && Object.keys(buckets[bucket]).length > 0, `${bucket} zone bucket still filled (PASO 1 untouched)`)
-      }
-      // The jobs bucket's runJob IS the bundle's scheduler seam into the
-      // factory: schedulerRunJob → runJobForDepartment (the SpawnSurface
-      // member). The composed bundle exposes it through the SAME closure the
-      // factory produced.
-      assert.equal(typeof buckets.jobs.runJob, 'function', 'jobs.runJob (schedulerRunJob → runJobForDepartment) is a function through the composed binder')
+      assert.ok(ctx.get('deepartments.jobsDeps') !== undefined, 'deepartments.jobsDeps resolves (PASO 1 untouched)')
+      // The jobs run engine resolves SERVICE-FIRST through the composed spawn
+      // service (the same closure the factory produced — jobs-spawn-regression
+      // A/B/C). The binder `jobs` bucket (register-era) is dead.
+      const spawn = ctx.get('deepartments.spawn')
+      assert.ok(spawn !== undefined && typeof spawn.runJobForDepartment === 'function', 'deepartments.spawn.runJobForDepartment is the run engine (service-first)')
       // 0 ctx.provide nuevos (P1 invariant "el bundle consume, nunca provee"):
       // the spawn service surface is NOT provided — the inline R6 factory is
       // the fallback (smoke-boot service set intacto).
@@ -232,27 +227,39 @@ test('spawn-factory (E2 con Loader real): ONE real job-run through the composed 
       const rolePath = path.join(REPO_ROOT, 'presets', 'departments', 'internal-programming', 'builder.md')
       assert.ok(existsSync(rolePath), 'the real role template exists in the repo')
 
-      // Drive the REAL scheduler seam of the composed bundle: binder.jobs.runJob
-      // = schedulerRunJob → runJobForDepartment (the SpawnSurface member the
-      // factory produced). The head is already in byPost (the durable
-      // posts.json above). The run executes the REAL end-to-end job-run:
+      // Drive the REAL scheduler seam of the composed bundle: the DI-by-
+      // services world runs jobs SERVICE-FIRST through deepartments.spawn's
+      // runJobForDepartment (the dead binder's schedulerRunJob seam is gone —
+      // jobs-spawn-regression A/B/C freeze the service-first contract). The
+      // head is already in byPost (the durable posts.json above). The run
+      // executes the REAL end-to-end job-run:
       // definition read → role validation → template resolve → slug dedup →
       // agents.create (materialize) → durable registerEntry → title pin →
       // first durable bus message (JOB BODY) → deliverBusRecord through the
       // composed engine.
-      const binder = ctx.get('deepartments.binder')
-      const buckets = binder.get()
-      const runJob = buckets.jobs.runJob
-      assert.equal(typeof runJob, 'function', 'jobs.runJob is a function')
+      const spawnSvc = ctx.get('deepartments.spawn')
+      assert.ok(spawnSvc !== undefined && typeof spawnSvc.runJobForDepartment === 'function', 'deepartments.spawn.runJobForDepartment is the run engine (service-first)')
+      // Resolve the durable head entry from the composed catalog (the registry
+      // loads posts.json ASYNC — poll until the head entry lands).
+      let headEntry
+      const catalog = ctx.get('deepartments.catalog')
+      for (let i = 0; i < 100; i++) {
+        headEntry = catalog.byPost?.get('internal-programming-head')
+        if (headEntry !== undefined) break
+        await new Promise((r) => setTimeout(r, 25))
+      }
+      assert.ok(headEntry !== undefined, 'the durable head entry resolved in the composed catalog')
+      const runJob = async (department, headPostId, job) => { await spawnSvc.runJobForDepartment(department, headEntry, job, { callerSessionId: headEntry.sessionId }); return true }
       // The bundle loads posts.json ASYNC (fire-and-forget at apply); poll the
       // scheduler seam until the head resolves (the durable registry readiness).
       let fired = false
       let lastNoFire = ''
+      let lastError = ''
       for (let i = 0; i < 100; i++) {
         try {
           fired = await runJob(DEPARTMENT, 'internal-programming-head', jobId)
           if (fired) break
-        } catch { /* transient — keep polling */ }
+        } catch (error) { lastError = error instanceof Error ? error.message : String(error) /* transient — keep polling */ }
         if (existsSync(path.join(stateDir, 'post-errors.jsonl'))) {
           lastNoFire = readFileSync(path.join(stateDir, 'post-errors.jsonl'), 'utf8')
         }
@@ -260,7 +267,7 @@ test('spawn-factory (E2 con Loader real): ONE real job-run through the composed 
       }
       // The scheduler seam records NO-FIRE reasons durably (post-errors.jsonl);
       // surface them in the assertion for a fast diagnosis.
-      assert.equal(fired, true, `the scheduler seam reports the job ran (post-errors: ${JSON.stringify(lastNoFire)})`)
+      assert.equal(fired, true, `the scheduler seam reports the job ran (post-errors: ${JSON.stringify(lastNoFire)} last-error: ${lastError})`)
 
       // Evidence 1 — the worker was spawned: the durable registry now carries a
       // worker row for the job with the REAL role and the manager head.

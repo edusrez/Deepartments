@@ -473,8 +473,9 @@ export interface PoolerPostErrorEntry {
   error: string
 }
 
-/** The FASE 2.6 binder bucket for the pooler service (STRUCTURAL — read from
- * `ctx.get('deepartments.binder')` widened; filled by the DECOUPLING bundle). */
+/** The FASE 2.6 deps-holder bucket for the pooler service (STRUCTURAL — read
+ * from `ctx.get('deepartments.poolerDeps')` widened; filled by the DECOUPLING
+ * bundle; the binder is DEAD since LANE DI-BY-SERVICES). */
 export interface PoolerBinderDeps {
   /** The bundle's configured provider ids (worker + host agentOptions providers
    * PLUS every department coordinator's provider — the host/worker constants

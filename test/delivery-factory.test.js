@@ -107,33 +107,28 @@ test('delivery-factory: the DELIVERY ZONE was hoisted VERBATIM into the orchestr
   assert.ok(lib.includes('createDeliveryOrchestration'), 'the compiled factory exists in the package lib/')
 })
 
-test('delivery-factory (composed boot): the 5 baseline buckets carry the FACTORY-PRODUCED delivery/lifecycle closures (LANE 0.2.3b — the re-homed register fills them outside the frozen zone)', async () => {
+test('delivery-factory (composed boot): the 4 BASELINE deps holders carry the FACTORY-PRODUCED delivery/lifecycle closures (LANE DI-BY-SERVICES — the holders replace the dead binder buckets)', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-delivery-factory-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir)
     try {
-      const binder = pluginCtx().get('deepartments.binder')
-      assert.ok(binder !== undefined, 'deepartments.binder resolves')
-      const buckets = binder.get()
-      // The deliver bucket (the DELIVERY ENGINE deps — the factory closures).
-      const deliver = buckets.deliver
-      assert.ok(deliver !== undefined, 'deliver bucket registered')
+      const holderGet = (name) => pluginCtx().get(name).get()
+      // The deliverDeps holder (the DELIVERY ENGINE deps — the factory closures).
+      const deliver = holderGet('deepartments.deliverDeps')
+      assert.ok(deliver !== undefined, 'deliverDeps holder resolves')
       for (const field of ['resolveChild', 'deliverChild', 'resolveCatalogRoute', 'busProfileFor', 'deliverPost', 'deliverHost']) {
-        assert.equal(typeof deliver[field], 'function', `deliver bucket carries ${field} (the factory closure)`)
+        assert.equal(typeof deliver[field], 'function', `deliverDeps carries ${field} (the factory closure)`)
       }
-      // The lifecycle bucket (sleep/wake/rotate deps — the factory closures).
-      const lifecycle = buckets.lifecycle
-      assert.ok(lifecycle !== undefined, 'lifecycle bucket registered')
+      // The lifecycleDeps holder (sleep/wake/rotate deps — the factory closures).
+      const lifecycle = holderGet('deepartments.lifecycleDeps')
+      assert.ok(lifecycle !== undefined, 'lifecycleDeps holder resolves')
       for (const field of ['ensureHost', 'writeJournal', 'readJournal', 'bumpHostSleepCounter', 'bumpPostSleepCounter', 'archivePostSessionOnSleep', 'disposeHeadHandleOnce', 'maybeEmitQualityInspectDirective', 'enqueueHostWake']) {
-        assert.equal(typeof lifecycle[field], 'function', `lifecycle bucket carries ${field} (the factory closure)`)
+        assert.equal(typeof lifecycle[field], 'function', `lifecycleDeps carries ${field} (the factory closure)`)
       }
-      // The bus + redeliver buckets (the re-delivery driver deps).
-      assert.equal(typeof buckets.bus?.redeliver, 'object', 'bus bucket carries the redeliver deps')
-      assert.equal(typeof buckets.redeliver?.recipientAlive, 'function', 'redeliver bucket carries recipientAlive')
-      // The zone buckets of PASO 1 stay untouched (still registered, non-empty).
-      for (const bucket of ['health', 'jobs', 'pooler', 'gui']) {
-        assert.ok(buckets[bucket] !== undefined && Object.keys(buckets[bucket]).length > 0, `${bucket} bucket still filled (PASO 1 untouched)`)
-      }
+      // The busDeps holder (the re-delivery driver deps).
+      const busDeps = holderGet('deepartments.busDeps')
+      assert.equal(typeof busDeps?.redeliver, 'object', 'busDeps carries the redeliver deps object')
+      assert.equal(typeof busDeps?.redeliver?.recipientAlive, 'function', 'busDeps redeliver carries recipientAlive')
     } finally {
       dispose()
     }
@@ -172,8 +167,8 @@ test('delivery-factory (composed boot): ONE bus delivery through the composed de
       const settled = rows.some((row) => row.includes(record.id) && row.includes('ghost-unknown-7f3a2'))
       assert.ok(settled, 'the pair (messageId, recipientId) was settled in the sidecar through the composed service')
       // The ACL + profile classifiers the send_message tool uses are also the
-      // factory-produced closures (binder deliver bucket = the bundle bind).
-      assert.equal(typeof binderGet(pluginCtx()).deliver.busProfileFor('host-probe'), 'object', 'busProfileFor resolves a profile for the host caller')
+      // factory-produced closures (deliverDeps holder = the bundle bind).
+      assert.equal(typeof holderGet2(pluginCtx()).busProfileFor('host-probe'), 'object', 'busProfileFor resolves a profile for the host caller')
     } finally {
       dispose()
     }
@@ -182,8 +177,8 @@ test('delivery-factory (composed boot): ONE bus delivery through the composed de
   }
 })
 
-function binderGet(pluginCtx) {
-  const binder = pluginCtx.get('deepartments.binder')
-  assert.ok(binder !== undefined, 'deepartments.binder resolves')
-  return binder.get()
+function holderGet2(pluginCtx) {
+  const holder = pluginCtx.get('deepartments.deliverDeps')
+  assert.ok(holder !== undefined, 'deepartments.deliverDeps resolves')
+  return holder.get()
 }

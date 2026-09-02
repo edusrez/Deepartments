@@ -255,7 +255,6 @@ import type {
   DeliveryEngine,
   CatalogRoute,
   AclSurface,
-  Binder,
   BusSurface
 } from './core/delivery.js'
 // dshd-feedback phase: the universal feedback store + state machine +
@@ -3107,8 +3106,10 @@ export function applyInvoke(ctx: Context, config: Config) {
   // feedbackListTool / feedbackUpdateTool / sendMessageTool /
   // agentMessagesTool / deptWhoTool / feedbackEmitTools / feedbackHeadTools /
   // busTools / recipientCatalogAlive / deliverBusRecordForRedeliver /
-  // redeliverPendingDeliveries / guiEndpointDeps / the binder?.register
-  // buckets / the 6 W1 scheduler + 7 W6 health builder closures + the 9 global
+  // redeliverPendingDeliveries / guiEndpointDeps / the late-binding register
+  // buckets (DEAD since LANE DI-BY-SERVICES — the closure sets flow into the
+  // deps holders) / the 6 W1 scheduler + 7 W6 health builder closures + the 9
+  // global
   // host-plane tool registrations + the disposal ctx.effect) was hoisted
   // VERBATIM into src/core/orchestration/tools.ts and is returned by the SAME
   // factory invoked above (same fiber position). The destructure below

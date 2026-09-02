@@ -221,15 +221,43 @@ export function buildAclSurface(catalog: RegistryStore, departments: CoreDepartm
 }
 
 // ---------------------------------------------------------------------------
-// FASE 2.6-B-1 — the LATE-BINDING seam: `deepartments.binder` + lazy service
-// shells for `deepartments.lifecycle` / `deepartments.wakepack`.
+// DI-by-services (LANE DI-BY-SERVICES, FASE 1 — the additive seam): the four
+// BASELINE deps holders (`deepartments.lifecycleDeps` / `wakepackDeps` /
+// `busDeps` / `deliverDeps`) — the binder-free per-shell DI surface the bundle
+// fills with the SAME closure set it registers into the binder (the register
+// dies in FASE 2). Pattern 1B (LANE 0.2.1, the zone holders): a minimal
+// per-apply mutable holder (register/get/clear + an EPOCH counter for cache
+// invalidation). The lazy service shells below read holder-first (FASE 1:
+// content-aware dual-read — an EMPTY holder falls back to the binder, so the
+// F1 suite stays byte-identical; FASE 2: holder-only, the binder dies).
 // ---------------------------------------------------------------------------
 
-/** Bucket-(c) deps for a FUTURE `deepartments.bus` service shell. The message
+/** The minimal per-apply mutable deps holder contract (the `DepsHolder` of
+ * dshd-health/dshd-orchestration — LANE 0.2.1 pattern 1B). */
+export interface DepsHolder<T> {
+  register(deps: Partial<T>): void
+  get(): T
+  clear(): void
+  getEpoch(): number
+}
+
+/** Create a per-apply mutable deps holder (register/get/clear + epoch). */
+export function createDepsHolder<T>(): DepsHolder<T> {
+  let deps = {} as T
+  let epoch = 0
+  return {
+    register(partial) { deps = { ...deps, ...partial } },
+    get() { return deps },
+    clear() { deps = {} as T; epoch++ },
+    getEpoch() { return epoch }
+  }
+}
+
+/** Bucket-(c) deps for the `deepartments.bus` service shell. The message
  * STORE (store + markDelivery) is bucket-(a) and is built internally by the
  * shell; the ONLY closure-bound piece is the boot re-delivery driver
  * (`DeliveryRedelivererDeps` — reads `byPost`/`hosts` and calls the live
- * `deliverBusRecord`). Declared structurally so the binder lives without a
+ * `deliverBusRecord`). Declared structurally so the holder lives without a
  * `bus.ts`-owned contract until the shell is built. */
 export interface BusBucketDeps {
   /** The closure-bound re-delivery deps (recipientAlive / getRecord /
@@ -237,140 +265,21 @@ export interface BusBucketDeps {
   redeliver?: Partial<DeliveryRedelivererDeps>
 }
 
-/** The mutable late-binding holder the BUNDLE fills with its closure-bound
- * bucket-(c) deps once `applyInvoke` state is ready. Each service takes only
- * the PARTIAL deps it needs; everything else (buckets a/b) resolves internally
- * via `ctx.get('deepartments.catalog')` / `ctx.get('deepartments.org')` / the
- * harness service keys. */
-export interface BinderDeps {
-  /** bucket-(c) for a future `deepartments.bus` shell (the re-delivery driver). */
-  bus?: Partial<BusBucketDeps>
-  /** bucket-(c) for `deepartments.deliver` (the engine + `deliverOrQueue` gate). */
-  deliver?: Partial<DeliveryEngineDeps>
-  /** bucket-(c) for `deepartments.wakepack` (the closure-bound wake helpers:
-   * presence refresh, wake-relay maps, role/orientation, heartbeat, git/ROADMAP
-   * repoRoot, live message store). */
-  wakepack?: Partial<WakePackDeps>
-  /** bucket-(c) for `deepartments.lifecycle` (the closure-bound journal I/O,
-   * teardown + QD seams, ensureHost, the deferred sleep-replace intent). */
-  lifecycle?: Partial<LifecycleCtx>
-  /** bucket-(c) for the `deepartments.bus` re-delivery driver, as a top-level
-   * partial (mirrors `bus.redeliver`; a convenience for a single register). */
-  redeliver?: Partial<DeliveryRedelivererDeps>
-  // DECOUPLING (PASO 1 — the 4 P1 plugin buckets). The bundle registers its
-  // closure-bound zone deps here so the P1 services (deepartments.gui /
-  // deepartments.jobs / deepartments.health / deepartments.pooler) can build
-  // ON FIRST USE (fail-loud R1 when a required dep is missing). STRUCTURAL
-  // (unknown-typed values): the packages widen their own *BinderDeps on read —
-  // the contract is frozen by test/binder-contract.test.js, not by core types.
-  /** bucket for `deepartments.gui` (the /deepartments RPC channel deps). */
-  gui?: { endpointDeps?: unknown }
-  /** bucket for `deepartments.jobs` (the agenda scheduler tick closures). */
-  jobs?: {
-    runJob?: unknown
-    notifyHead?: unknown
-    departmentForEntry?: unknown
-    departmentForJob?: unknown
-    onAutoRunSkip?: unknown
-    repoRoot?: string
-  }
-  /** bucket for `deepartments.health` (the system-health daemon tick deps). */
-  health?: {
-    bootId?: string
-    config?: unknown
-    posts?: unknown
-    hostWaits?: unknown
-    sessionContexts?: unknown
-    hostRunning?: unknown
-    notifyHost?: unknown
-    poolerStatePath?: string
-    workRegisterPath?: string
-    qiDirectiveRate?: number
-  }
-  /** bucket for `deepartments.pooler` (the provider-adapter boot check deps). */
-  pooler?: {
-    configuredProviders?: string[]
-    appendPostError?: unknown
-  }
-}
-
-/** The mutable late-binding seam (a Cordis SERVICE) the bundle fills after its
- * own state is ready. `register` MERGES per-bucket (partial deps accumulate, so
- * the bundle may fill one service at a time); `get` returns the accumulated
- * deps the lazy builders read. LANE 0.2.1 (P6 disposability): `clear` empties
- * every bucket and bumps the internal EPOCH (`getEpoch`) — the bundle's unload
- * effect calls it, so the lazy shells (which cache their built service) detect
- * the change and REBUILD on the next access: a rebuild over an emptied binder
- * FAILS LOUD (R1) — never stale closure execution of a dead apply. */
-export interface Binder {
-  register(deps: BinderDeps): void
-  get(): BinderDeps
-  /** Empty every bucket (the zone buckets return to `undefined` — the
-   * never-registered state — so the fail-loud R1 consumers see them missing) +
-   * bump the epoch the lazy shells cache against. Reversible (AGENTS.md rule
-   * 4): the bundle registers a clear-on-unload effect next to its register. */
-  clear(): void
-  /** The mutation epoch: starts at 0 and increments on EVERY `clear`. A lazy
-   * facade that built its service under epoch N rebuilds when it sees N+1. */
-  getEpoch(): number
-}
-
-/** Mutable per-apply binder (AGENTS.md rule 4 — no module-global mutable state;
- * the instance lives on the apply fiber and is exposed as a service). */
-class MutableBinder implements Binder {
-  private deps: BinderDeps = {}
-  private epoch = 0
-  register(deps: BinderDeps): void {
-    // Per-bucket merge: an ABSENT incoming bucket leaves the accumulated one
-    // untouched (and an absent bucket that was never registered stays ABSENT —
-    // `undefined`, so the fail-loud R1 consumers see their bucket missing
-    // instead of a present-but-empty `{}`). `mergeBuckets` below preserves the
-    // undefined-vs-defined distinction precisely for the DECOUPLING zones.
-    const mergeBuckets = <T extends Record<string, unknown>>(prev: T | undefined, next: T | undefined): T | undefined =>
-      prev === undefined && next === undefined ? undefined : { ...(prev ?? {}), ...(next ?? {}) } as T
-    this.deps = {
-      bus: { ...this.deps.bus, ...deps.bus },
-      deliver: { ...this.deps.deliver, ...deps.deliver },
-      wakepack: { ...this.deps.wakepack, ...deps.wakepack },
-      lifecycle: { ...this.deps.lifecycle, ...deps.lifecycle },
-      redeliver: { ...this.deps.redeliver, ...deps.redeliver },
-      // DECOUPLING (PASO 1): the 4 P1 plugin buckets merge like the baseline
-      // ones (register is callable multiple times — partial accumulation), but
-      // an NEVER-REGISTERED zone bucket stays `undefined` (the smoke-boot +
-      // binder-contract locks rely on the absent → fail-loud contract).
-      gui: mergeBuckets(this.deps.gui, deps.gui),
-      jobs: mergeBuckets(this.deps.jobs, deps.jobs),
-      health: mergeBuckets(this.deps.health, deps.health),
-      pooler: mergeBuckets(this.deps.pooler, deps.pooler)
-    }
-  }
-  get(): BinderDeps {
-    return this.deps
-  }
-  clear(): void {
-    this.deps = {}
-    this.epoch++
-  }
-  getEpoch(): number {
-    return this.epoch
-  }
-}
-
 /** Wrap a lazy-built `LifecycleService` in an on-first-use facade: the real
  * service is constructed on the FIRST property access, never at apply time, so
- * the bundle can `binder.register(...)` its bucket-(c) deps before the first
+ * the bundle can fill its DI-by-services deps holder before the first
  * lifecycle tool call. A build that throws (a missing bucket-(c) dep, R1)
- * propagates at the FIRST use and is retried on the next access once the binder
+ * propagates at the FIRST use and is retried on the next access once the holder
  * is populated. LANE 0.2.1 (P6 disposability): the facade caches the built
- * service together with the binder EPOCH it was built under — when the binder
+ * service together with the holder EPOCH it was built under — when the holder
  * is cleared (the bundle unload effect), the next access REBUILDS instead of
  * serving the cached service (whose closures belong to the dead apply): the
- * rebuild over the emptied binder FAILS LOUD (R1) — never stale execution. */
-function lazyLifecycle(binder: Binder, build: () => LifecycleService): LifecycleService {
+ * rebuild over the emptied holder FAILS LOUD (R1) — never stale execution. */
+function lazyLifecycle(holder: DepsHolder<Partial<LifecycleCtx>>, build: () => LifecycleService): LifecycleService {
   let cache: LifecycleService | undefined
   let cacheEpoch = -1
   const ensure = (): LifecycleService => {
-    const epoch = binder.getEpoch()
+    const epoch = holder.getEpoch()
     if (cache === undefined || cacheEpoch !== epoch) {
       cache = build()
       cacheEpoch = epoch
@@ -387,11 +296,11 @@ function lazyLifecycle(binder: Binder, build: () => LifecycleService): Lifecycle
 
 /** Wrap a lazy-built `WakePackService` in an on-first-use facade (same lazy
  * contract as `lazyLifecycle`, incl. the epoch invalidation of the cache). */
-function lazyWakePack(binder: Binder, build: () => WakePackService): WakePackService {
+function lazyWakePack(holder: DepsHolder<Partial<WakePackDeps>>, build: () => WakePackService): WakePackService {
   let cache: WakePackService | undefined
   let cacheEpoch = -1
   const ensure = (): WakePackService => {
-    const epoch = binder.getEpoch()
+    const epoch = holder.getEpoch()
     if (cache === undefined || cacheEpoch !== epoch) {
       cache = build()
       cacheEpoch = epoch
@@ -408,9 +317,10 @@ function lazyWakePack(binder: Binder, build: () => WakePackService): WakePackSer
 
 /** Build the `deepartments.lifecycle` service ON FIRST USE. Resolves buckets
  * (a)/(b) internally (catalog maps, org stateDir, harness via `deptGet`) and
- * takes bucket-(c) from `binder.get().lifecycle`. A required bucket-(c) dep
- * missing at build time FAILS LOUD (R1) — never a silently-unbound service. */
-function buildLifecycleLazy(ctx: Context, binder: Binder): LifecycleService {
+ * takes bucket-(c) from the DI-by-services HOLDER (`deepartments.lifecycleDeps`
+ * — FASE 2, holder-only). A required bucket-(c) dep missing at build time
+ * FAILS LOUD (R1) — never a silently-unbound service. */
+function buildLifecycleLazy(ctx: Context, lifecycleDeps: DepsHolder<Partial<LifecycleCtx>>): LifecycleService {
   const catalog = ctx.get('deepartments.catalog') as RegistryStore | undefined
   if (catalog === undefined) {
     throw new Error('[deepartments] lifecycle lazy build: ctx.get("deepartments.catalog") is undefined — dshd-core is not composed (register the core plugin + provide deepartments.catalog)')
@@ -420,7 +330,7 @@ function buildLifecycleLazy(ctx: Context, binder: Binder): LifecycleService {
     throw new Error('[deepartments] lifecycle lazy build: ctx.get("deepartments.org") is undefined — dshd-core is not composed (register the core plugin + provide deepartments.org)')
   }
   const stateDir = org.stateDir
-  const bound = binder.get().lifecycle ?? {}
+  const bound = lifecycleDeps.get()
   // The closure-bound bucket-(c) deps the bundle passes by reference (the rest
   // — catalog maps, stateDir, buildSleepJournalMessage, runHostRotation,
   // deptGet, logger — resolve internally from a/b).
@@ -431,7 +341,7 @@ function buildLifecycleLazy(ctx: Context, binder: Binder): LifecycleService {
   ]
   const missing = required.filter((key) => bound[key] === undefined)
   if (missing.length > 0) {
-    throw new Error(`[deepartments] lifecycle lazy build: required bucket-(c) dep(s) missing from binder.get().lifecycle: ${missing.join(', ')} — the bundle must call ctx.get('deepartments.binder').register({ lifecycle: { ... } }) after its applyInvoke state is ready`)
+    throw new Error(`[deepartments] lifecycle lazy build: required bucket-(c) dep(s) missing from deepartments.lifecycleDeps.get(): ${missing.join(', ')} — the bundle must call ctx.get('deepartments.lifecycleDeps').register({ lifecycle: { ... } }) after its applyInvoke state is ready`)
   }
   return createLifecycleService({
     byPost: catalog.byPost,
@@ -467,8 +377,9 @@ function buildLifecycleLazy(ctx: Context, binder: Binder): LifecycleService {
 }
 
 /** Build the `deepartments.wakepack` service ON FIRST USE (same late-binding
- * contract as `buildLifecycleLazy`). */
-function buildWakePackLazy(ctx: Context, binder: Binder): WakePackService {
+ * contract as `buildLifecycleLazy`; the DI-by-services holder, FASE 2 —
+ * holder-only). */
+function buildWakePackLazy(ctx: Context, wakepackDeps: DepsHolder<Partial<WakePackDeps>>): WakePackService {
   const catalog = ctx.get('deepartments.catalog') as RegistryStore | undefined
   if (catalog === undefined) {
     throw new Error('[deepartments] wakepack lazy build: ctx.get("deepartments.catalog") is undefined — dshd-core is not composed (register the core plugin + provide deepartments.catalog)')
@@ -478,7 +389,7 @@ function buildWakePackLazy(ctx: Context, binder: Binder): WakePackService {
     throw new Error('[deepartments] wakepack lazy build: ctx.get("deepartments.org") is undefined — dshd-core is not composed (register the core plugin + provide deepartments.org)')
   }
   const stateDir = org.stateDir
-  const bound = binder.get().wakepack ?? {}
+  const bound = wakepackDeps.get()
   // The closure-bound bucket-(c) deps the bundle passes by reference (the rest
   // — catalog maps, stateDir, buildSleepJournalMessage, journalPathFor, logger —
   // resolve internally from a/b).
@@ -489,7 +400,7 @@ function buildWakePackLazy(ctx: Context, binder: Binder): WakePackService {
   ]
   const missing = required.filter((key) => bound[key] === undefined)
   if (missing.length > 0) {
-    throw new Error(`[deepartments] wakepack lazy build: required bucket-(c) dep(s) missing from binder.get().wakepack: ${missing.join(', ')} — the bundle must call ctx.get('deepartments.binder').register({ wakepack: { ... } }) after its applyInvoke state is ready`)
+    throw new Error(`[deepartments] wakepack lazy build: required bucket-(c) dep(s) missing from deepartments.wakepackDeps.get(): ${missing.join(', ')} — the bundle must call ctx.get('deepartments.wakepackDeps').register({ wakepack: { ... } }) after its applyInvoke state is ready`)
   }
   return createWakePackService({
     byPost: catalog.byPost,
@@ -570,11 +481,11 @@ export interface BusSurface {
  * as `lazyLifecycle`, incl. the epoch invalidation of the cache). The store +
  * markDelivery need only bucket-(a); the bucket-(c) check for `redeliver` runs
  * inside the returned function (on use). */
-function lazyBus(binder: Binder, build: () => BusSurface): BusSurface {
+function lazyBus(holder: DepsHolder<BusBucketDeps>, build: () => BusSurface): BusSurface {
   let cache: BusSurface | undefined
   let cacheEpoch = -1
   const ensure = (): BusSurface => {
-    const epoch = binder.getEpoch()
+    const epoch = holder.getEpoch()
     if (cache === undefined || cacheEpoch !== epoch) {
       cache = build()
       cacheEpoch = epoch
@@ -590,9 +501,10 @@ function lazyBus(binder: Binder, build: () => BusSurface): BusSurface {
 
 /** Build the `deepartments.bus` service ON FIRST USE. Opens the message store
  * (bucket a) + binds the sidecar marks internally; the re-delivery driver reads
- * its closure-bound bucket-(c) deps from the binder (or the explicit `deps`
- * argument) and FAILS LOUD (R1) if a required one is missing at use. */
-function buildBusLazy(ctx: Context, binder: Binder): BusSurface {
+ * its closure-bound bucket-(c) deps from the DI-by-services HOLDER
+ * (`deepartments.busDeps`, FASE 2 — holder-only) or the explicit `deps`
+ * argument and FAILS LOUD (R1) if a required one is missing at use. */
+function buildBusLazy(ctx: Context, busDeps: DepsHolder<BusBucketDeps>): BusSurface {
   const org = ctx.get('deepartments.org') as OrgConfigSurface | undefined
   if (org === undefined) {
     throw new Error('[deepartments] bus lazy build: ctx.get("deepartments.org") is undefined — dshd-core is not composed (register the core plugin + provide deepartments.org)')
@@ -603,16 +515,17 @@ function buildBusLazy(ctx: Context, binder: Binder): BusSurface {
   const mark = (messageId: string, recipientId: string, status: DeliveryStatus): Promise<DeliveryRow> =>
     markDelivery(stateDir, messageId, recipientId, status)
   const redeliver = (depsInput?: Partial<DeliveryRedelivererDeps>): DeliveryRedeliverer => {
-    // The closure-bound bucket-(c) deps: the bundle injects them via the binder
-    // (top-level `redeliver` or `bus.redeliver`); an explicit `deps` argument
-    // overrides/completes them. The internal bucket-(a) deps (stateDir, logger,
-    // getRecord over the opened store) are always provided by the shell.
-    const binderRedeliver = { ...(binder.get().redeliver ?? {}), ...(binder.get().bus?.redeliver ?? {}) }
-    const merged: Partial<DeliveryRedelivererDeps> = { ...binderRedeliver, ...depsInput }
+    // The closure-bound bucket-(c) deps: the bundle injects them via the
+    // DI-by-services HOLDER (`deepartments.busDeps`) — the FASE-2 sole seam
+    // (the dead binder's `redeliver`/`bus.redeliver` are gone). An explicit
+    // `deps` argument overrides/completes them. The internal bucket-(a) deps
+    // (stateDir, logger, getRecord over the opened store) are always provided
+    // by the shell.
+    const merged: Partial<DeliveryRedelivererDeps> = { ...busDeps.get().redeliver, ...depsInput }
     const required: (keyof DeliveryRedelivererDeps)[] = ['recipientAlive', 'resolveCallerSessionId', 'deliver']
     const missing = required.filter((key) => merged[key] === undefined)
     if (missing.length > 0) {
-      throw new Error(`[deepartments] bus redeliver build: required bucket-(c) dep(s) missing: ${missing.join(', ')} — the bundle must call ctx.get('deepartments.binder').register({ redeliver: { ... } }) (or pass them to bus.redeliver({ ... })) after its applyInvoke state is ready`)
+      throw new Error(`[deepartments] bus redeliver build: required bucket-(c) dep(s) missing from deepartments.busDeps.get(): ${missing.join(', ')} — the bundle must call ctx.get('deepartments.busDeps').register({ redeliver: { ... } }) (or pass them to bus.redeliver({ ... })) after its applyInvoke state is ready`)
     }
     return new DeliveryRedeliverer({
       stateDir,
@@ -629,11 +542,11 @@ function buildBusLazy(ctx: Context, binder: Binder): BusSurface {
 /** Wrap a lazy-built `DeliveryEngine` in an on-first-use facade (same lazy
  * contract as `lazyLifecycle`, incl. the epoch invalidation of the cache; the
  * bundle consumes `deepartments.deliver` as a `DeliveryEngine`). */
-function lazyDeliver(binder: Binder, build: () => DeliveryEngine): DeliveryEngine {
+function lazyDeliver(holder: DepsHolder<Partial<DeliveryEngineDeps>>, build: () => DeliveryEngine): DeliveryEngine {
   let cache: DeliveryEngine | undefined
   let cacheEpoch = -1
   const ensure = (): DeliveryEngine => {
-    const epoch = binder.getEpoch()
+    const epoch = holder.getEpoch()
     if (cache === undefined || cacheEpoch !== epoch) {
       cache = build()
       cacheEpoch = epoch
@@ -648,22 +561,23 @@ function lazyDeliver(binder: Binder, build: () => DeliveryEngine): DeliveryEngin
 /** Build the `deepartments.deliver` engine ON FIRST USE. Resolves buckets (a)
  * (org stateDir + logger + markPrepared/markFinal sidecar marks) and (b)
  * (`ctx.get('subagents')`, optional) internally; takes the closure-bound
- * bucket-(c) deps from `binder.get().deliver`. A required bucket-(c) dep
- * missing at build time FAILS LOUD (R1) — never a silently-unbound engine. */
-function buildDeliverLazy(ctx: Context, binder: Binder): DeliveryEngine {
+ * bucket-(c) deps from the DI-by-services HOLDER (`deepartments.deliverDeps`,
+ * FASE 2 — holder-only). A required bucket-(c) dep missing at build time FAILS
+ * LOUD (R1) — never a silently-unbound engine. */
+function buildDeliverLazy(ctx: Context, deliverDeps: DepsHolder<Partial<DeliveryEngineDeps>>): DeliveryEngine {
   const org = ctx.get('deepartments.org') as OrgConfigSurface | undefined
   if (org === undefined) {
     throw new Error('[deepartments] deliver lazy build: ctx.get("deepartments.org") is undefined — dshd-core is not composed (register the core plugin + provide deepartments.org)')
   }
   const stateDir = org.stateDir
-  const bound = binder.get().deliver ?? {}
+  const bound = deliverDeps.get()
   // The closure-bound bucket-(c) deps the bundle passes by reference (the rest —
   // stateDir, logger, markPrepared/markFinal sidecar marks, subagents — resolve
   // internally from a/b).
   const required: (keyof DeliveryEngineDeps)[] = ['resolveChild', 'deliverChild', 'resolveCatalogRoute', 'busProfileFor', 'deliverPost', 'deliverHost']
   const missing = required.filter((key) => bound[key] === undefined)
   if (missing.length > 0) {
-    throw new Error(`[deepartments] deliver lazy build: required bucket-(c) dep(s) missing from binder.get().deliver: ${missing.join(', ')} — the bundle must call ctx.get('deepartments.binder').register({ deliver: { ... } }) after its applyInvoke state is ready`)
+    throw new Error(`[deepartments] deliver lazy build: required bucket-(c) dep(s) missing from deepartments.deliverDeps.get(): ${missing.join(', ')} — the bundle must call ctx.get('deepartments.deliverDeps').register({ deliver: { ... } }) after its applyInvoke state is ready`)
   }
   return createDeliveryEngine({
     stateDir,
@@ -728,29 +642,42 @@ export function apply(ctx: Context, config: CoreConfig) {
   // store, so R6 behavior-neutral. ---
   ctx.provide('deepartments.subagentRoles', createSubagentRolesService())
 
-  // --- deepartments.binder (FASE 2.6-B-1): the mutable LATE-BINDING seam. The
-  // bundle (in the compose-first wiring) fills this with its closure-bound
-  // bucket-(c) deps AFTER its applyInvoke state is ready; the lazy service
-  // shells below read it on first use. ---
-  const binder = new MutableBinder()
-  ctx.provide('deepartments.binder', binder)
+  // --- the mutable late-binding service seam (FASE 2.6-B-1): DIED in the DI-
+  // by-services lane (FASE 2). The department deps now flow through the
+  // per-shell deps holders directly (see below). ---
+
+  // --- DI-by-services (FASE 1+2): the four BASELINE deps holders
+  // (`deepartments.lifecycleDeps` / `wakepackDeps` / `busDeps` / `deliverDeps`),
+  // the binder-free per-shell DI surface the bundle fills with the SAME closure
+  // set it used to register into the binder (pattern 1B of LANE 0.2.1 — P1
+  // intact: PROVIDED by dshd-core, the bundle only WRITES via register, never
+  // provides). FASE 2: the register/binder are DEAD — the holders are the ONLY
+  // seam the lazy shells read. ---
+  const lifecycleDeps = createDepsHolder<Partial<LifecycleCtx>>()
+  const wakepackDeps = createDepsHolder<Partial<WakePackDeps>>()
+  const busDeps = createDepsHolder<BusBucketDeps>()
+  const deliverDeps = createDepsHolder<Partial<DeliveryEngineDeps>>()
+  ctx.provide('deepartments.lifecycleDeps', lifecycleDeps)
+  ctx.provide('deepartments.wakepackDeps', wakepackDeps)
+  ctx.provide('deepartments.busDeps', busDeps)
+  ctx.provide('deepartments.deliverDeps', deliverDeps)
 
   // --- deepartments.lifecycle / deepartments.wakepack (FASE 2.6-B-1): LAZY
   // SERVICE SHELLS built ON FIRST USE (never at apply time), so the bundle can
-  // binder.register(...) after its own state is ready. Buckets (a)/(b) resolve
+  // fill its deps holder after its own state is ready. Buckets (a)/(b) resolve
   // internally (catalog maps + stateDir via deepartments.org + harness via
-  // LifecycleCtx.deptGet); bucket (c) comes from binder.get(). A required
+  // LifecycleCtx.deptGet); bucket (c) comes from the deps holder. A required
   // bucket-(c) dep missing at build time FAILS LOUD (R1 — never silently
   // unbound). ---
-  ctx.provide('deepartments.lifecycle', lazyLifecycle(binder, () => buildLifecycleLazy(ctx, binder)))
-  ctx.provide('deepartments.wakepack', lazyWakePack(binder, () => buildWakePackLazy(ctx, binder)))
+  ctx.provide('deepartments.lifecycle', lazyLifecycle(lifecycleDeps, () => buildLifecycleLazy(ctx, lifecycleDeps)))
+  ctx.provide('deepartments.wakepack', lazyWakePack(wakepackDeps, () => buildWakePackLazy(ctx, wakepackDeps)))
 
   // --- deepartments.bus / deepartments.deliver (FASE 2.6-B-2): LAZY SERVICE
-  // SHELLS built ON FIRST USE (never at apply time), so the bundle can
-  // binder.register(...) after its own state is ready. Buckets (a)/(b) resolve
+  // SHELLS built ON FIRST USE (never at apply time), so the bundle can fill
+  // its deps holder after its own state is ready. Buckets (a)/(b) resolve
   // internally (org stateDir + sidecar marks + harness subagents); bucket (c)
-  // comes from binder.get().bus / .redeliver / .deliver. A required bucket-(c)
-  // dep missing at use FAILS LOUD (R1 — never silently unbound). ---
-  ctx.provide('deepartments.bus', lazyBus(binder, () => buildBusLazy(ctx, binder)))
-  ctx.provide('deepartments.deliver', lazyDeliver(binder, () => buildDeliverLazy(ctx, binder)))
+  // comes from the deps holder. A required bucket-(c) dep missing at use FAILS
+  // LOUD (R1 — never silently unbound). ---
+  ctx.provide('deepartments.bus', lazyBus(busDeps, () => buildBusLazy(ctx, busDeps)))
+  ctx.provide('deepartments.deliver', lazyDeliver(deliverDeps, () => buildDeliverLazy(ctx, deliverDeps)))
 }

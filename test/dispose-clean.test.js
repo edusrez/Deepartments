@@ -150,7 +150,12 @@ function captureBundleReferences(boot) {
   const pluginCtx = boot.pluginCtx()
   return {
     pluginCtx,
-    binder: pluginCtx.get('deepartments.binder'),
+    // DI-by-services (LANE DI-BY-SERVICES): the binder is DEAD — the 4
+    // BASELINE deps holders replace it as the clear-on-unload seam.
+    lifecycleDeps: pluginCtx.get('deepartments.lifecycleDeps'),
+    wakepackDeps: pluginCtx.get('deepartments.wakepackDeps'),
+    busDeps: pluginCtx.get('deepartments.busDeps'),
+    deliverDeps: pluginCtx.get('deepartments.deliverDeps'),
     lifecycle: pluginCtx.get('deepartments.lifecycle'),
     wakepack: pluginCtx.get('deepartments.wakepack'),
     bus: pluginCtx.get('deepartments.bus'),
@@ -200,29 +205,33 @@ async function hydrate(boot, refs) {
   return { agenda, health }
 }
 
-test('dispose-clean: binder buckets cleared on unload (1A clear-on-unload — post-dispose binder.get() is empty and the cached shells fail loud R1)', async () => {
+test('dispose-clean: deps holders cleared on unload (1A clear-on-unload — post-dispose every holder is empty and the cached shells fail loud R1)', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-dispose-'))
   try {
     const boot = await disposeBoot(stateDir)
     try {
       const refs = captureBundleReferences(boot)
-      assert.ok(refs.binder !== undefined, 'deepartments.binder resolves')
-      // Pre-dispose sanity: the register ran (the re-homed fill wrote the
-      // baseline bus bucket — LANE 0.2.3b).
-      assert.ok(refs.binder.get().bus !== undefined, 'pre-dispose: the bundle registered the bus bucket (sanity)')
-      await hydrate(boot, refs)
-      const preKeys = Object.keys(refs.binder.get()).sort()
-      assert.ok(preKeys.includes('bus') && preKeys.includes('health'), 'pre-dispose: the 9 buckets present (sanity)')
-      // The unload: the bundle's clear-on-unload effect releases the buckets.
-      await boot.dispose()
-      const post = refs.binder.get()
-      assert.deepEqual(Object.keys(post), [], 'binder.get() is EMPTY after the bundle unload (clear-on-unload)')
-      for (const bucket of ['bus', 'deliver', 'wakepack', 'lifecycle', 'redeliver', 'gui', 'jobs', 'health', 'pooler']) {
-        assert.equal(post[bucket], undefined, `bucket "${bucket}" is undefined post-dispose`)
+      assert.equal(refs.pluginCtx.get('deepartments.binder'), undefined, 'deepartments.binder is GONE (LANE DI-BY-SERVICES)')
+      const holderNames = ['lifecycleDeps', 'wakepackDeps', 'busDeps', 'deliverDeps']
+      for (const name of holderNames) {
+        assert.ok(refs[name] !== undefined, `deepartments.${name} resolves`)
       }
-      // The CACHED shells: the first post-dispose access REBUILDS (epoch
-      // invalidated) and FAILS LOUD (R1) — never stale closure execution.
-      assert.throws(() => { void refs.lifecycle.memoWrite }, /lazy build|missing|is undefined/, 'lifecycle post-dispose access fails loud (the rebuild reads the emptied binder)')
+      // Pre-dispose sanity: the bundle filled the holders (the DI-by-services
+      // register replacement — LANE DI-BY-SERVICES).
+      assert.ok(Object.keys(refs.busDeps.get()).length > 0, 'pre-dispose: the bundle filled the busDeps holder (sanity)')
+      await hydrate(boot, refs)
+      for (const name of holderNames) {
+        assert.ok(Object.keys(refs[name].get()).length > 0, `pre-dispose: deepartments.${name} filled (sanity)`)
+      }
+      // The unload: the bundle's clear-on-unload effect releases the holders.
+      await boot.dispose()
+      for (const name of holderNames) {
+        const post = refs[name].get()
+        assert.deepEqual(Object.keys(post), [], `deepartments.${name}.get() is EMPTY after the bundle unload (clear-on-unload)`)
+      }
+      // The CACHED shells: the first post-dispose access REBUILDS (holder
+      // epoch invalidated) and FAILS LOUD (R1) — never stale closure execution.
+      assert.throws(() => { void refs.lifecycle.memoWrite }, /lazy build|missing|is undefined/, 'lifecycle post-dispose access fails loud (the rebuild reads the emptied lifecycleDeps holder)')
       assert.throws(() => { void refs.wakepack.assembleWakePack }, /lazy build|missing|is undefined/, 'wakepack post-dispose access fails loud')
       assert.throws(() => { void refs.deliver.deliverOrQueue }, /lazy build|missing|is undefined/, 'deliver post-dispose access fails loud')
       // LANE 0.2.2 (gap 2): the orchestration factory services fail loud
@@ -240,7 +249,7 @@ test('dispose-clean: binder buckets cleared on unload (1A clear-on-unload — po
   }
 })
 
-test('dispose-clean: built lifecycle/wakepack service caches invalidated by the binder epoch (manual clear → the EXACT R1 message, no dispose needed)', async () => {
+test('dispose-clean: built lifecycle/wakepack service caches invalidated by the DEPS-HOLDER epoch (manual clear → the EXACT R1 message, no dispose needed)', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-dispose-'))
   try {
     const boot = await disposeBoot(stateDir)
@@ -248,13 +257,17 @@ test('dispose-clean: built lifecycle/wakepack service caches invalidated by the 
       const refs = captureBundleReferences(boot)
       await hydrate(boot, refs)
       // Isolate the EPOCH mechanism from the dead-ctx noise of a full dispose:
-      // a manual `binder.clear()` is exactly what the unload effect runs — the
-      // ctx is STILL ALIVE, so the rebuild reaches the required-deps check.
-      refs.binder.clear()
-      assert.throws(() => { void refs.lifecycle.memoWrite }, /required bucket-\(c\) dep\(s\) missing from binder\.get\(\)\.lifecycle/, 'lifecycle rebuild after clear fails loud with the EXACT R1 message')
-      assert.throws(() => { void refs.wakepack.assembleWakePack }, /required bucket-\(c\) dep\(s\) missing from binder\.get\(\)\.wakepack/, 'wakepack rebuild after clear fails loud with the EXACT R1 message')
-      assert.throws(() => { void refs.deliver.deliverOrQueue }, /required bucket-\(c\) dep\(s\) missing from binder\.get\(\)\.deliver/, 'deliver rebuild after clear fails loud with the EXACT R1 message')
-      assert.throws(() => refs.bus.redeliver(), /required bucket-\(c\) dep\(s\) missing/, 'bus.redeliver after clear fails loud (the driver rebuilds from the emptied binder)')
+      // a manual clear of each DEPS HOLDER is exactly what the unload effect
+      // runs — the ctx is STILL ALIVE, so the rebuild reaches the required-deps
+      // check (the DI-by-services holder epoch invalidates the lazy caches).
+      refs.lifecycleDeps.clear()
+      refs.wakepackDeps.clear()
+      refs.deliverDeps.clear()
+      refs.busDeps.clear()
+      assert.throws(() => { void refs.lifecycle.memoWrite }, /required bucket-\(c\) dep\(s\) missing from deepartments\.lifecycleDeps\.get\(\)/, 'lifecycle rebuild after clear fails loud with the EXACT R1 message')
+      assert.throws(() => { void refs.wakepack.assembleWakePack }, /required bucket-\(c\) dep\(s\) missing from deepartments\.wakepackDeps\.get\(\)/, 'wakepack rebuild after clear fails loud with the EXACT R1 message')
+      assert.throws(() => { void refs.deliver.deliverOrQueue }, /required bucket-\(c\) dep\(s\) missing from deepartments\.deliverDeps\.get\(\)/, 'deliver rebuild after clear fails loud with the EXACT R1 message')
+      assert.throws(() => refs.bus.redeliver(), /required bucket-\(c\) dep\(s\) missing from deepartments\.busDeps\.get\(\)/, 'bus.redeliver after clear fails loud (the driver rebuilds from the emptied busDeps holder)')
       // And the access NEVER returns a stale closure: re-accessing stays a fail.
       assert.throws(() => { void refs.lifecycle.memoWrite }, /required bucket-\(c\) dep\(s\) missing/, 'a SECOND lifecycle access still fails loud (no stale cache re-population)')
     } finally {

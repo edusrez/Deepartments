@@ -256,24 +256,22 @@ test('boot-factory: the BOOT ZONE (config source + registry + catalog + lifecycl
   assert.ok(lib.includes('const presenceCache'), 'the compiled factory carries the presence cache')
 })
 
-test('boot-factory (composed boot): the wiring is intact — the 5 deps pass by reference, the 3 late-seam getters exist, the 9 Binder buckets register from the bundle (LANE 0.2.3b — the re-homed register, outside the frozen zone), deepartments.boot PROVIDED by dshd-orchestration (P1 — the package provides, the bundle consumes), the factory locals stay internal', async () => {
+test('boot-factory (composed boot): the wiring is intact — the 5 deps pass by reference, the 3 late-seam getters exist, the DI-by-services BASELINE holders are FILLED + the zone holders resolve (the 9-bucket binder register is DEAD — LANE DI-BY-SERVICES), deepartments.boot PROVIDED by dshd-orchestration (P1 — the package provides, the bundle consumes), the factory locals stay internal', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-boot-factory-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] } })
     try {
       const ctx = pluginCtx()
-      // The composition is intact: the 5 baseline buckets + the 4 zone buckets
-      // are still registered (LANE 0.2.3b — the register RE-HOMED verbatim
-      // outside the frozen CUT-4 zone; the dshd-core lazy shells read the
-      // baseline buckets at use):
-      const binder = ctx.get('deepartments.binder')
-      assert.ok(binder !== undefined, 'deepartments.binder resolves')
-      const buckets = binder.get()
-      for (const bucket of ['bus', 'deliver', 'wakepack', 'lifecycle', 'redeliver']) {
-        assert.ok(buckets[bucket] !== undefined, `baseline bucket "${bucket}" registered`)
+      // The composition is intact: the binder is DEAD — the DI-by-services
+      // baseline holders carry the closure sets the register used to carry
+      // (LANE DI-BY-SERVICES — the holders replace the binder buckets):
+      assert.equal(ctx.get('deepartments.binder'), undefined, 'deepartments.binder is GONE (LANE DI-BY-SERVICES)')
+      for (const holder of ['lifecycleDeps', 'wakepackDeps', 'busDeps', 'deliverDeps']) {
+        const deps = ctx.get(`deepartments.${holder}`)
+        assert.ok(deps !== undefined && Object.keys(deps.get()).length > 0, `deepartments.${holder} filled (non-empty)`)
       }
-      for (const bucket of ['health', 'jobs', 'pooler', 'gui']) {
-        assert.ok(buckets[bucket] !== undefined && Object.keys(buckets[bucket]).length > 0, `${bucket} zone bucket still filled (PASO 1 untouched)`)
+      for (const holder of ['healthDeps', 'jobsDeps', 'poolerDeps', 'guiDeps']) {
+        assert.ok(ctx.get(`deepartments.${holder}`) !== undefined, `deepartments.${holder} resolves (PASO 1 untouched)`)
       }
       // 0 ctx.provide nuevos (P1 invariant "el bundle consume, nunca provee"):
       // LANE 0.2.2: the boot SERVICE surface IS provided by the

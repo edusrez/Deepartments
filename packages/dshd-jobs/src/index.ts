@@ -623,8 +623,9 @@ export async function runAgendaSchedulerTick(deps: AgendaSchedulerDeps): Promise
 // NO export default (pitfall 0001 — breaks `inject`).
 import type { Context } from '@deepseek-ai/cordis'
 
-/** The FASE 2.6 binder bucket for the jobs service (STRUCTURAL — read from
- * `ctx.get('deepartments.binder')` widened; filled by the DECOUPLING bundle). */
+/** The FASE 2.6 deps-holder bucket for the jobs service (STRUCTURAL — read
+ * from `ctx.get('deepartments.jobsDeps')` widened; filled by the DECOUPLING
+ * bundle; the binder is DEAD since LANE DI-BY-SERVICES). */
 export interface JobsBinderDeps {
   /** The shared dept_job_run engine: fires ONE department job under the head
    * (idempotent; false = skipped). REQUIRED at use. */
@@ -776,13 +777,14 @@ export function apply(ctx: Context, config: JobsConfig = {}) {
           : ''
         throw new Error(`[deepartments] jobs scheduler tick: required deps-holder dep(s) missing: ${missing.join(', ')}${runJobNote} — the DECOUPLING bundle must call ctx.get('deepartments.jobsDeps').register({ runJob, notifyHead, ... })`)
       }
-      // The repoRoot fallback keeps reading the composed `wakepack` Binder
-      // bucket (the FASE 2.6-C seam, still filled by the frozen register) —
-      // R6 until the register is dismantled in gap 2.
-      const binderWakepackRepoRoot = ((ctx.get('deepartments.binder') as { get(): unknown } | undefined)?.get() as { wakepack?: { repoRoot?: string } } | undefined)?.wakepack?.repoRoot
-      const repoRoot = bound.repoRoot ?? binderWakepackRepoRoot
+      // The repoRoot fallback keeps reading the composed `wakepack` deps HOLDER
+      // (the DI-by-services baseline holder — the FASE-2 re-point of the old
+      // late-binding wakepack bucket read, R6 byte-igual: the SAME
+      // closure the bundle registers).
+      const wakepackDepsRepoRoot = ((ctx.get('deepartments.wakepackDeps') as { get(): unknown } | undefined)?.get() as { repoRoot?: string } | undefined)?.repoRoot
+      const repoRoot = bound.repoRoot ?? wakepackDepsRepoRoot
       if (repoRoot === undefined) {
-        throw new Error('[deepartments] jobs scheduler tick: no repoRoot — the bundle must register ctx.get("deepartments.jobsDeps").register({ repoRoot }) (LANE 0.2.1, composed today) or the wakepack bucket (FASE 2.6-C)')
+        throw new Error('[deepartments] jobs scheduler tick: no repoRoot — the bundle must register ctx.get("deepartments.jobsDeps").register({ repoRoot }) (LANE 0.2.1, composed today) or ctx.get("deepartments.wakepackDeps").register({ wakepack: { repoRoot } }) (DI-by-services)')
       }
       await runAgendaSchedulerTick({
         now: opts.now ?? (() => Date.now()),

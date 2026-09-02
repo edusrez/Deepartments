@@ -5378,9 +5378,10 @@ export interface HealthStoreAppendResult {
   id: string
 }
 
-/** The FASE 2.6 binder bucket for the health service (STRUCTURAL — read from
- * `ctx.get('deepartments.binder')` widened; filled by the DECOUPLING bundle
- * with the closure-bound scan inputs that only applyInvoke state can build). */
+/** The FASE 2.6 deps-holder bucket for the health service (STRUCTURAL — read
+ * from `ctx.get('deepartments.healthDeps')` widened; the DECOUPLING bundle
+ * fills it with the closure-bound scan inputs only its apply state can build;
+ * the binder is DEAD since LANE DI-BY-SERVICES). */
 export interface HealthBinderDeps {
   /** The bundle's per-process boot id (invoke.ts `healthBootId`). Absent → a
    * per-build randomUUID (the heartbeat bootId is informational). */
@@ -5511,21 +5512,32 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
       // POST-DISPOSE fails loud (R1), never stale closure execution.
       let notifyHost = explicit.notifyHost
       if (notifyHost === undefined) {
-        const all = (ctx.get('deepartments.binder') as { get(): unknown } | undefined)?.get() ?? {}
-        const composed = all as {
-          deliver?: { deliverHost?: (host: { hostId: string }, framed: string, record: HealthStoreAppendResult, callerSessionId?: string, opts?: { interrupt?: boolean }) => Promise<unknown> }
-          wakepack?: { messagesStoreReady?: () => Promise<{ append(input: HealthStoreAppendInput): Promise<HealthStoreAppendResult> }> }
+        // DI-by-services (FASE 2): the ALERT delivery closures now flow through
+        // the BASELINE deps HOLDERS (`deepartments.deliverDeps` +
+        // `deepartments.wakepackDeps` — the SAME closures the bundle registers,
+        // holder-path; the dead binder's buckets are gone). Syntax identical,
+        // R6 byte-igual (the recommended FASE-2 re-point of the old
+        // late-binding seam fallback readers).
+        const deliverDeps = (ctx.get('deepartments.deliverDeps') as { get(): unknown } | undefined)?.get() ?? {}
+        const wakepackDeps = (ctx.get('deepartments.wakepackDeps') as { get(): unknown } | undefined)?.get() ?? {}
+        const composed = {
+          deliver: deliverDeps as {
+            deliverHost?: (host: { hostId: string }, framed: string, record: HealthStoreAppendResult, callerSessionId?: string, opts?: { interrupt?: boolean }) => Promise<unknown>
+          },
+          wakepack: wakepackDeps as {
+            messagesStoreReady?: () => Promise<{ append(input: HealthStoreAppendInput): Promise<HealthStoreAppendResult> }>
+          }
         }
         const storeReady = composed.wakepack?.messagesStoreReady ?? (() => {
           const bus = ctx.get('deepartments.bus') as { storeReady?: Promise<{ append(input: HealthStoreAppendInput): Promise<HealthStoreAppendResult> }> } | undefined
           if (bus?.storeReady === undefined) {
-            throw new Error('[deepartments] health daemon tick: no message-store closure — the bundle must register ctx.get("deepartments.binder").register({ wakepack: { messagesStoreReady } }) (composed today) or provide deepartments.bus')
+            throw new Error('[deepartments] health daemon tick: no message-store closure — the bundle must register ctx.get("deepartments.wakepackDeps").register({ wakepack: { messagesStoreReady } }) (composed today) or provide deepartments.bus')
           }
           return bus.storeReady
         })
         const deliverHost = composed.deliver?.deliverHost
         if (deliverHost === undefined) {
-          throw new Error('[deepartments] health daemon tick: no ALERT delivery closure — the bundle must register ctx.get("deepartments.binder").register({ deliver: { deliverHost } }) (FASE 2.6-C, composed today)')
+          throw new Error('[deepartments] health daemon tick: no ALERT delivery closure — the bundle must register ctx.get("deepartments.deliverDeps").register({ deliver: { deliverHost } }) (FASE 2.6-C, composed today)')
         }
         notifyHost = async (hostEntry: HostEntryLike, alertFrame: string): Promise<void> => {
           try {

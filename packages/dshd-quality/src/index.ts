@@ -246,11 +246,12 @@ export function qualityInspectDirectiveText(surface: QualityInspectDirectiveSurf
 // (maybeEmitQualityInspectDirective + the gate). The directive EMITTER is
 // LAZY (built on FIRST use; an apply is side-effect free) and its deps are
 // INJECTED via the FASE 2.6 seam, never imported from the bundle:
-//   - the framed post delivery ← `deepartments.binder` bucket `deliver.deliverPost`
-//     (ALREADY registered by the composed bundle — FASE 2.6-C) or the explicit
-//     `quality.deliverPost` bucket (DECOUPLING),
-//   - the message store ← `binder.wakepack.messagesStoreReady` (registered
-//     today) or `deepartments.bus.storeReady` or the explicit `quality` bucket,
+//   - the framed post delivery ← `deepartments.deliverDeps` holder
+//     `deliver.deliverPost` (FILLED by the composed bundle — FASE 2.6-C /
+//     DI-by-services) or the explicit `quality.deliverPost` bucket (DECOUPLING),
+//   - the message store ← `deepartments.wakepackDeps` holder
+//     `wakepack.messagesStoreReady` (filled today) or `deepartments.bus.storeReady`
+//     or the explicit `quality` bucket,
 //   - the target head entry ← `ctx.get('deepartments.catalog').byPost` (the
 //     shared registry),
 //   - the QH-self-sleep dice p ← `quality.workerInspectProbability` (bundle-only
@@ -283,10 +284,10 @@ export interface QualityPostEntryLike {
   sessionId?: string
 }
 
-/** The FASE 2.6 binder bucket for the quality emitter (STRUCTURAL — read from
- * `ctx.get('deepartments.binder')` widened; the bucket is a convenience for
- * DECOUPLING to pass the bundle's OWN literal closures + the bundle-only
- * probe probability knob). */
+/** The FASE 2.6 deps-holder bucket for the quality emitter (STRUCTURAL — read
+ * from `ctx.get('deepartments.deliverDeps')`/`wakepackDeps` widened; the
+ * bucket is a convenience for DECOUPLING to pass the bundle's OWN literal
+ * closures + the bundle-only probe probability knob). */
 export interface QualityBinderDeps {
   /** The bundle's resolved worker dice probability (`quality.workerInspectProbability`,
    * bundle-only per the dump contract — the dev row 0.25 == the code default).
@@ -332,30 +333,29 @@ export function apply(ctx: Context, config: QualityConfig = {}) {
   // Lazy on-first-use facade (derived service contract: never built at apply).
   let cache: QualitySurface | undefined
   const build = (): QualitySurface => {
-    // FASE 2.6 injection seam: read the binder BEFORE any emit (FAIL LOUD on a
-    // missing closure — R1; the composed bundle already registers the deliver
-    // + wakepack buckets, so this resolves today).
-    const binder = ctx.get('deepartments.binder') as { get(): unknown } | undefined
-    const all = binder?.get() ?? {}
-    const bound = all as {
-      quality?: QualityBinderDeps
-      deliver?: { deliverPost?: QualityBinderDeps['deliverPost'] }
-      wakepack?: { messagesStoreReady?: QualityBinderDeps['messagesStoreReady'] }
+    // DI-by-services (FASE 2): read the framed-delivery + message-store closures
+    // from the BASELINE deps HOLDERS (deliverDeps + wakepackDeps — the SAME
+    // closures the bundle registers, holder-path; FAIL LOUD R1 before ANY emit
+    // on a missing closure). The dead binder is gone (the old late-binding
+    // fallback reader re-pointed, R6 byte-igual).
+    const deliverDeps = (ctx.get('deepartments.deliverDeps') as { get(): unknown } | undefined)?.get() ?? {}
+    const wakepackDeps = (ctx.get('deepartments.wakepackDeps') as { get(): unknown } | undefined)?.get() ?? {}
+    const bound = {
+      deliver: deliverDeps as { deliverPost?: QualityBinderDeps['deliverPost'] },
+      wakepack: wakepackDeps as { messagesStoreReady?: QualityBinderDeps['messagesStoreReady'] }
     }
-    const explicitDeliver: QualityBinderDeps['deliverPost'] = bound.quality?.deliverPost
-    const explicitStore: QualityBinderDeps['messagesStoreReady'] = bound.quality?.messagesStoreReady
-    const deliverPost = explicitDeliver ?? bound.deliver?.deliverPost
+    const deliverPost = bound.deliver?.deliverPost
     if (deliverPost === undefined) {
-      throw new Error('[deepartments] quality lazy build: no framed-delivery closure — the bundle must register ctx.get("deepartments.binder").register({ deliver: { deliverPost } }) (FASE 2.6-C, composed today) or the DECOUPLING quality bucket')
+      throw new Error('[deepartments] quality lazy build: no framed-delivery closure — the bundle must register ctx.get("deepartments.deliverDeps").register({ deliver: { deliverPost } }) (FASE 2.6-C, composed today)')
     }
-    const messagesStoreReady = explicitStore ?? bound.wakepack?.messagesStoreReady ?? (() => {
+    const messagesStoreReady = bound.wakepack?.messagesStoreReady ?? (() => {
       const bus = ctx.get('deepartments.bus') as { storeReady?: Promise<{ append(input: QualityStoreAppendInput): Promise<QualityStoreAppendResult> }> } | undefined
       if (bus?.storeReady === undefined) {
-        throw new Error('[deepartments] quality lazy build: no message-store closure — the bundle must register ctx.get("deepartments.binder").register({ wakepack: { messagesStoreReady } }) (composed today) or provide deepartments.bus')
+        throw new Error('[deepartments] quality lazy build: no message-store closure — the bundle must register ctx.get("deepartments.wakepackDeps").register({ wakepack: { messagesStoreReady } }) (composed today) or provide deepartments.bus')
       }
       return bus.storeReady
     })
-    const workerInspectProbability = config.workerInspectProbability ?? bound.quality?.workerInspectProbability
+    const workerInspectProbability = config.workerInspectProbability
     const catalog = ctx.get('deepartments.catalog') as { byPost?: Map<string, QualityPostEntryLike> } | undefined
     const resolveQualityHeadEntry = (): QualityPostEntryLike | undefined => catalog?.byPost?.get('quality-head')
     const emitter = async (surface: QualityInspectDirectiveSurface): Promise<void> => {

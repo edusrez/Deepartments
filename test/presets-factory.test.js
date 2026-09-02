@@ -269,34 +269,33 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
   assert.ok(lib.includes('const assembleHeartbeat ='), 'the compiled factory carries the W8-d heartbeat assembly')
 })
 
-test('presets-factory (composed boot): the wiring is intact — the late-seam thenable rebind exists, the 16 deps pass by reference, the 9 Binder buckets register from the bundle (LANE 0.2.3b — the re-homed register, outside the frozen zone), deepartments.presets PROVIDED by dshd-orchestration (P1 — the package provides, the bundle consumes), the wake-pack/delivery consumers still resolve', async () => {
+test('presets-factory (composed boot): the wiring is intact — the late-seam thenable rebind exists, the 16 deps pass by reference, the DI-by-services BASELINE holders are FILLED + the zone holders resolve (the 9-bucket binder register is DEAD — LANE DI-BY-SERVICES), deepartments.presets PROVIDED by dshd-orchestration (P1 — the package provides, the bundle consumes), the wake-pack/delivery consumers still resolve', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-presets-factory-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] } })
     try {
       const ctx = pluginCtx()
-      // The composition is intact: the 5 baseline buckets + the 4 zone buckets
-      // are still registered (LANE 0.2.3b — the register RE-HOMED outside the
-      // frozen zone; the binder-contract lock stays green):
-      const binder = ctx.get('deepartments.binder')
-      assert.ok(binder !== undefined, 'deepartments.binder resolves')
-      const buckets = binder.get()
-      for (const bucket of ['bus', 'deliver', 'wakepack', 'lifecycle', 'redeliver']) {
-        assert.ok(buckets[bucket] !== undefined, `baseline bucket "${bucket}" registered`)
+      // The composition is intact: the binder is DEAD — the DI-by-services
+      // baseline holders carry the closure sets (LANE DI-BY-SERVICES — the
+      // binder-contract lock stays green on the ABSENCE):
+      assert.equal(ctx.get('deepartments.binder'), undefined, 'deepartments.binder is GONE (LANE DI-BY-SERVICES)')
+      for (const holder of ['lifecycleDeps', 'wakepackDeps', 'busDeps', 'deliverDeps']) {
+        const deps = ctx.get(`deepartments.${holder}`)
+        assert.ok(deps !== undefined && Object.keys(deps.get()).length > 0, `deepartments.${holder} filled (non-empty)`)
       }
-      for (const bucket of ['health', 'jobs', 'pooler', 'gui']) {
-        assert.ok(buckets[bucket] !== undefined && Object.keys(buckets[bucket]).length > 0, `${bucket} zone bucket still filled (PASO 1 untouched)`)
+      for (const holder of ['healthDeps', 'jobsDeps', 'poolerDeps', 'guiDeps']) {
+        assert.ok(ctx.get(`deepartments.${holder}`) !== undefined, `deepartments.${holder} resolves (PASO 1 untouched)`)
       }
       // 0 ctx.provide nuevos (P1 invariant "el bundle consume, nunca provee"):
       // LANE 0.2.2: the presets SERVICE surface IS provided by the
       // dshd-orchestration package in the dev profile.
       assert.equal(ctx.get('deepartments.presets') === undefined, false, 'deepartments.presets IS provided (LANE 0.2.2 — dshd-orchestration provides the presets service)')
-      // The wake-pack binder bucket carries assembleHeartbeat + repoRoot (the
+      // The wake-pack deps holder carries assembleHeartbeat + repoRoot (the
       // presets surface members the tools factory registered) — the composed
       // dshd-core wakepack service reads them lazily at use (buildWakePackLazy).
-      const wakepackBucket = buckets.wakepack
-      assert.equal(typeof wakepackBucket.assembleHeartbeat, 'function', 'the wakepack binder bucket carries assembleHeartbeat (the presets surface member)')
-      assert.equal(typeof wakepackBucket.repoRoot, 'string', 'the wakepack binder bucket carries repoRoot')
+      const wakepackDeps = ctx.get('deepartments.wakepackDeps').get()
+      assert.equal(typeof wakepackDeps.assembleHeartbeat, 'function', 'the wakepackDeps holder carries assembleHeartbeat (the presets surface member)')
+      assert.equal(typeof wakepackDeps.repoRoot, 'string', 'the wakepackDeps holder carries repoRoot')
       const factory = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'presets.ts'), 'utf8')
       // The LATE seam rebind: the factory binds the DeliverySurface store seam
       // as a delegating THENABLE over the `late` getter (the zone text awaits
@@ -388,8 +387,8 @@ test('presets-factory (E2 con Loader real): journal Task T1 lands a REAL journal
       // factory's assembleHeartbeat closure (registered by the tools factory) —
       // executing it runs the REAL W8-d PART A assembly against the LIVE
       // composed state (hosts/byPost/agents/stateDir).
-      const binder = ctx.get('deepartments.binder')
-      const heartbeat = binder.get().wakepack.assembleHeartbeat('host-presets-e2')
+      const wakepackDeps = ctx.get('deepartments.wakepackDeps')
+      const heartbeat = wakepackDeps.get().assembleHeartbeat('host-presets-e2')
       assert.equal(typeof heartbeat, 'string', 'assembleHeartbeat executed through the composed bundle returns the REAL heartbeat section string (W8-d PART A)')
       assert.match(heartbeat, /\- host: /, 'the REAL heartbeat section carries the host line (buildHeartbeatSection ran)')
       assert.match(heartbeat, /\- interrupted: /, 'the REAL heartbeat section carries the interrupted line (W8-h scan ran)')

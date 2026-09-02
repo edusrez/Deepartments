@@ -273,7 +273,11 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
   assert.ok(/const busTools: readonly ReturnType<typeof defineTool>\[\] = \[sendMessageTool, agentMessagesTool, deptWhoTool\]/.test(factory), 'busTools moved verbatim (the bus array — FACTORY-LOCAL)')
   assert.ok(/const redeliverPendingDeliveries =/.test(factory), 'redeliverPendingDeliveries moved verbatim (the boot re-delivery driver — FACTORY-LOCAL now)')
   assert.ok(/const guiEndpointDeps: DeepartmentsEndpointDeps = \{/.test(factory), 'guiEndpointDeps moved verbatim (the RPC endpoint deps)')
-  assert.ok(/binder\?\.register\(\{/.test(factory), 'the binder.register call moved verbatim into the factory (the CUT4 Binder buckets)')
+  assert.ok(!/binder\?\.register\(\{/.test(factory), 'the binder.register call is GONE from the factory (LANE DI-BY-SERVICES — the register died, the closure sets flow into the deps holders)')
+  assert.ok(/depsBus\?\.register\(/.test(factory), 'the DI-by-services holder fills are in the factory (busDeps)')
+  assert.ok(/depsDeliver\?\.register\(/.test(factory), 'the DI-by-services holder fills are in the factory (deliverDeps)')
+  assert.ok(/depsLifecycle\?\.register\(/.test(factory), 'the DI-by-services holder fills are in the factory (lifecycleDeps)')
+  assert.ok(/depsWakepack\?\.register\(/.test(factory), 'the DI-by-services holder fills are in the factory (wakepackDeps)')
   assert.ok(/const globalWakeSnapshot = ctx\.tools\.register/.test(factory), 'globalWakeSnapshot moved verbatim (the 9-global host-plane registration block)')
   assert.ok(/const globalHeadRotate = ctx\.tools\.register/.test(factory), 'globalHeadRotate moved verbatim (the head-rotation tool)')
   assert.ok(/, 'deepartments: host-plane tools'\)/.test(factory), 'the host-plane tools disposal ctx.effect moved verbatim (the CUT4 zone closing)')
@@ -336,24 +340,25 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
   assert.ok(lib.includes('globalWakeSnapshot'), 'the compiled factory carries the 9-global host-plane registrations (CUT4)')
 })
 
-test('tools-factory (composed boot): the registry wiring is intact — the runner gates + the late-seam accessors exist, workerSetup + the CUT3 retire/workspace closures + the CUT4 tool arrays/driver are factory-locals (no late seams), the 9 Binder buckets (5 baseline + 4 zone) register from the factory, NO deepartments.tools provided (P1)', async () => {
+test('tools-factory (composed boot): the registry wiring is intact — the runner gates + the late-seam accessors exist, workerSetup + the CUT3 retire/workspace closures + the CUT4 tool arrays/driver are factory-locals (no late seams), the 4 BASELINE deps holders are FILLED by the factory (the dead binder is gone), NO deepartments.tools provided (P1)', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-tools-factory-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] } })
     try {
       const ctx = pluginCtx()
-      // The composition is intact: the 5 baseline buckets + the 4 zone buckets
-      // are still registered — SUB-BATCH 4 moved the `binder?.register` call
-      // VERBATIM into the factory (the same 9 buckets, the same fiber
-      // position); the binder-contract lock verifies the static target.
-      const binder = ctx.get('deepartments.binder')
-      assert.ok(binder !== undefined, 'deepartments.binder resolves')
-      const buckets = binder.get()
-      for (const bucket of ['bus', 'deliver', 'wakepack', 'lifecycle', 'redeliver']) {
-        assert.ok(buckets[bucket] !== undefined, `baseline bucket "${bucket}" registered`)
+      // The composition is intact: the DI-by-services holders carry the
+      // factory's closure sets — the `binder?.register` call DIED in LANE
+      // DI-BY-SERVICES; the closure sets flow into the 4 baseline holders
+      // (the binder-contract lock verifies the ABSENCE).
+      assert.equal(ctx.get('deepartments.binder'), undefined, 'deepartments.binder is GONE (LANE DI-BY-SERVICES)')
+      for (const holder of ['lifecycleDeps', 'wakepackDeps', 'busDeps', 'deliverDeps']) {
+        const deps = ctx.get(`deepartments.${holder}`)
+        assert.ok(deps !== undefined, `deepartments.${holder} resolves`)
+        assert.ok(Object.keys(deps.get()).length > 0, `deepartments.${holder} filled (non-empty)`)
       }
-      for (const bucket of ['health', 'jobs', 'pooler', 'gui']) {
-        assert.ok(buckets[bucket] !== undefined && Object.keys(buckets[bucket]).length > 0, `${bucket} zone bucket still filled (PASO 1 untouched)`)
+      for (const holder of ['healthDeps', 'jobsDeps', 'poolerDeps', 'guiDeps']) {
+        const deps = ctx.get(`deepartments.${holder}`)
+        assert.ok(deps !== undefined, `deepartments.${holder} resolves (PASO 1 untouched)`)
       }
       // 0 ctx.provide nuevos (P1 invariant "el bundle consume, nunca provee"):
       // the tools service surface is NOT provided — the inline R6 factory is

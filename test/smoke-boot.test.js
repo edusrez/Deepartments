@@ -105,9 +105,12 @@ test('smoke-boot: the REAL dev-profile composition (dshd-core + 6 P1 + bundle) a
       // The bundle applied: the plugin ctx is resolvable and the boot line ran.
       assert.ok(pluginCtx() !== undefined, 'the deepartments plugin ctx resolves (bundle applied)')
       // Every deepartments.* service the P1 packages provide resolves at boot.
-      // LANE 0.2.2: +5 — the dshd-orchestration factory services.
+      // LANE 0.2.2: +5 — the dshd-orchestration factory services. LANE
+      // DI-BY-SERVICES: the binder is DEAD — the 4 BASELINE deps holders
+      // replace `deepartments.binder` in the roster.
       for (const service of [
-        'deepartments.org', 'deepartments.catalog', 'deepartments.binder',
+        'deepartments.org', 'deepartments.catalog',
+        'deepartments.lifecycleDeps', 'deepartments.wakepackDeps', 'deepartments.busDeps', 'deepartments.deliverDeps',
         'deepartments.feedback', 'deepartments.quality', 'deepartments.pooler',
         'deepartments.jobs', 'deepartments.health', 'deepartments.gui',
         'deepartments.boot', 'deepartments.presets', 'deepartments.spawn',
@@ -146,32 +149,38 @@ test('smoke-boot: the webServer mount registers the 6 /deepartments RPC routes (
   }
 })
 
-test('smoke-boot: the binder carries the 5 baseline buckets + the 4 zone buckets (LANE 0.2.3b — the re-homed register fills them outside the frozen CUT-4 zone; the dshd-core lazy shells read the baseline buckets at use)', async () => {
+test('smoke-boot: the 4 BASELINE deps holders carry the closure sets + the 4 zone holders are filled (LANE DI-BY-SERVICES — the binder is DEAD, the holders are the only seam; the dshd-core lazy shells read them at use)', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-smoke-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir)
     try {
-      const binder = pluginCtx().get('deepartments.binder')
-      assert.ok(binder !== undefined, 'deepartments.binder resolves')
-      const buckets = binder.get()
-      for (const bucket of ['bus', 'deliver', 'wakepack', 'lifecycle', 'redeliver']) {
-        assert.ok(buckets[bucket] !== undefined, `baseline bucket "${bucket}" registered`)
+      // The DI-by-services holders resolve + carry the registered closures.
+      const lifecycleDeps = pluginCtx().get('deepartments.lifecycleDeps')
+      const wakepackDeps = pluginCtx().get('deepartments.wakepackDeps')
+      const busDeps = pluginCtx().get('deepartments.busDeps')
+      const deliverDeps = pluginCtx().get('deepartments.deliverDeps')
+      assert.ok(lifecycleDeps !== undefined, 'deepartments.lifecycleDeps resolves')
+      assert.ok(wakepackDeps !== undefined, 'deepartments.wakepackDeps resolves')
+      assert.ok(busDeps !== undefined, 'deepartments.busDeps resolves')
+      assert.ok(deliverDeps !== undefined, 'deepartments.deliverDeps resolves')
+      for (const field of ['ensureHost', 'writeJournal', 'readJournal', 'bumpHostSleepCounter', 'bumpPostSleepCounter', 'archivePostSessionOnSleep', 'disposeHeadHandleOnce', 'maybeEmitQualityInspectDirective']) {
+        assert.equal(typeof lifecycleDeps.get()[field], 'function', `lifecycleDeps carries ${field}`)
       }
-      // The four zone buckets the DECOUPLING hito fills: the bundle REGISTERS
-      // them as part of PASO 1 (LANE 0.2.3b — the re-homed register, outside
-      // the frozen zone). This lock asserts the REGISTERED STATE — the P1
-      // services' primary path is their holders, the binder buckets are the R6
-      // fallback wire (the binder-contract test freezes the field sets).
-      for (const bucket of ['health', 'jobs', 'pooler', 'gui']) {
-        if (buckets[bucket] === undefined) {
-          // Pre-fill: the P1 service reads it at USE and fails loud (R1) —
-          // the current contract. Assert the fail-loud path is live so a
-          // regression can never silently no-op.
-          const service = pluginCtx().get(`deepartments.${bucket}`)
-          assert.ok(service !== undefined, `deepartments.${bucket} service resolves (lazy surface)`)
-        } else {
-          assert.ok(Object.keys(buckets[bucket]).length > 0, `${bucket} bucket filled (non-empty)`)
-        }
+      for (const field of ['refreshPresence', 'wakePackInjected', 'deferredSleepReplace', 'roleForSession', 'buildSubagentOrientation', 'computeHostSleepSurfacePlan', 'assembleHeartbeat', 'readPresenceStateFile', 'messagesStoreReady']) {
+        assert.notEqual(wakepackDeps.get()[field], undefined, `wakepackDeps carries ${field}`)
+      }
+      assert.equal(typeof wakepackDeps.get().assembleHeartbeat, 'function', 'wakepackDeps carries assembleHeartbeat (function)')
+      assert.equal(typeof wakepackDeps.get().messagesStoreReady, 'function', 'wakepackDeps carries messagesStoreReady (function)')
+      assert.equal(typeof wakepackDeps.get().repoRoot, 'string', 'wakepackDeps carries repoRoot')
+      assert.equal(typeof wakepackDeps.get().repoRoot, 'string', 'wakepackDeps carries repoRoot')
+      assert.equal(typeof busDeps.get().redeliver, 'object', 'busDeps carries the redeliver deps object')
+      for (const field of ['resolveChild', 'deliverChild', 'resolveCatalogRoute', 'busProfileFor', 'deliverPost', 'deliverHost']) {
+        assert.equal(typeof deliverDeps.get()[field], 'function', `deliverDeps carries ${field}`)
+      }
+      // The 4 zone holders (PASO 1) stay filled — the P1 services' primary path.
+      for (const [holder, key] of [['healthDeps', 'qiDirectiveRate'], ['jobsDeps', 'notifyHead'], ['guiDeps', 'endpointDeps']]) {
+        const deps = pluginCtx().get(`deepartments.${holder}`)
+        assert.ok(deps !== undefined && Object.keys(deps.get()).length > 0, `deepartments.${holder} filled (non-empty)`)
       }
     } finally {
       dispose()
