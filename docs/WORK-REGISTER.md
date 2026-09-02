@@ -29,19 +29,19 @@
     muerte TOTAL del binder register → holders baseline service-first (P1 0
     ctx.provide; md5 CUT-4 `5b548545` intacto; suite 724/702/0/22 EXACTA);
     dept-as-plugin DESBLOQUEADO.
-  - **fb-57 (provider-400 'function.arguments must be valid JSON', ALTO —
-    escalado al IPH, m-2204)**: ≥2 workers distintos en <24h (q-i-6 +
-    ai-industry-news-2); fix candidato: sanitizar tool-call args en el adapter
-    / autogate reintentos N=2 con respawn de sesión fresca.
-  - **F6 (ancla recursión D-Q2)**: no muestrear inspector cuyo managerId sea
-    inspector QD, o desvío a workers NO-QD pasados N niveles — fix runtime en
-    el emitter (m-2170 del QH).
+  - **F6 (ancla recursión D-Q2) — EN CURSO (opción a, builder)**: no muestrear
+    inspector cuyo managerId sea inspector QD, o desvío a workers NO-QD pasados
+    N niveles — fix runtime en el emitter (m-2170 del QH).
   - **fb-50 (calibración M-A** capacidad efectiva + completion-reserve) ·
-    **fb-51/52 (glob literal-segment false-negative + guard aritmética)**.
+    **fb-51/52 (glob literal-segment false-negative + guard aritmética)** — en
+    cola (batch tras F6).
   - **feedback-nudge (opción B**, waterfall tools/post-execute) · **GUI modo
     monitoreo (owner 09-01**: composer oculto no-host + toggle presencia —
-    verificar si el harness expone la presencia al client-inject) · **higiene
-    dir huérfano reports**.
+    verificar si el harness expone la presencia al client-inject; **scoping
+    pendiente**) · **higiene**: reports-move HECHO (09-02, copy al árbol
+    .dsh/reports) + dir huérfano reports pendiente.
+  - **fb-56 (clase interrupted-post/canary-kill — gestionada con re-drive +
+    FASE0)** · **fb-58 (prepared-stuck)** — en cola.
 - **CERRADOS en esta cola (no pedir de nuevo):** M4 (system-idle),
   M-A (context-threshold + dept_head_rotate), PACING (peak/valle),
   M-5 (misión-sin-inicio), M-6 (main-red), M-7 (mission-queue),
@@ -51,7 +51,10 @@
   **fb-28** (37e9315 + QH close), **de-flake W6/BugA + fb-30** (8dcfc47),
   **fb-46 watchdog work-register-idle** (ee0effd), **fb-47 mejoras de sistema**
   (a5a27a7), **0.2.1 P6** (81ef5cd), **0.2.2 P1+P4** (9cda995), **fb-55**
-  (5210682), **0.2.3a/b/c** (e8222af/dc9f79a/48cea9f — MISIÓN 7/8).
+  (5210682), **0.2.3a/b/c** (e8222af/dc9f79a/48cea9f — MISIÓN 7/8),
+  **fb-57 CERRADO-con-fix** (250d4d4 dsh-key-pooler — canary 09:33:59Z PASS) ·
+  **fb-59 CERRADO-con-fix** (15198b3 dsh-key-pooler — trace: bug latente del
+  pooler, NO regresión 0.2.3).
 
 ## 2. DAG técnico — CERRADO (referencia)
 
