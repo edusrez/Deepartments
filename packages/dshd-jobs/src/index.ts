@@ -640,6 +640,14 @@ export interface JobsBinderDeps {
   /** W8-c scheduler-visibility: the auto-run no-fire sink (optional — the tick
    * drops the finding when absent). */
   onAutoRunSkip?: AgendaSchedulerDeps['onAutoRunSkip']
+  /** LANE 0.2.3b (W8-c re-plumb): the runJobForDepartment-EXCEPTION capture
+   * sink — the post-error row the register-era schedulerRunJob produced. The
+   * service-first runJob adapter (deepartments.spawn) calls it after a spawn
+   * exception (reason normalized like schedulerRunJob: an 'already running'
+   * trip → 'idempotency-skip'); the bundle registers the
+   * captureSchedulerAutoRunFailure-backed sink into this holder. Absent sink
+   * (minimal composition) → the adapter stays warn-only (R6). */
+  captureAutoRunFailure?: (finding: SchedulerAutoRunFinding) => void | Promise<void>
   /** The bundle's repoRoot (registers the same value the `wakepack` bucket
    * carries; absent → the wakepack bucket). */
   repoRoot?: string
@@ -743,6 +751,14 @@ export function apply(ctx: Context, config: JobsConfig = {}) {
                 return true
               } catch (error: unknown) {
                 const errorText = error instanceof Error ? error.message : String(error)
+                // LANE 0.2.3b (W8-c re-plumb): the runJobForDepartment-EXCEPTION
+                // post-error row — the register-era schedulerRunJob produced it
+                // (reason normalized: an 'already running' trip →
+                // 'idempotency-skip'); the bundle registers the sink into the
+                // holder (captureSchedulerAutoRunFailure — post-errors.jsonl,
+                // postId 'scheduler', dedupe-keyed). Absent sink → warn-only
+                // (R6, minimal composition).
+                await bound.captureAutoRunFailure?.({ jobId, reason: normalizeSchedulerAutoRunReason(errorText), error: errorText })
                 ctx.logger.warn(`[deepartments] scheduler: job "${jobId}" could not run (${errorText}) — skip`)
                 return false
               }

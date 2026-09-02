@@ -269,15 +269,15 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
   assert.ok(lib.includes('const assembleHeartbeat ='), 'the compiled factory carries the W8-d heartbeat assembly')
 })
 
-test('presets-factory (composed boot): the wiring is intact — the late-seam thenable rebind exists, the 16 deps pass by reference, the 9 Binder buckets register from the bundle, deepartments.presets PROVIDED by dshd-orchestration (P1 — the package provides, the bundle consumes), the wake-pack/delivery consumers still resolve', async () => {
+test('presets-factory (composed boot): the wiring is intact — the late-seam thenable rebind exists, the 16 deps pass by reference, the 9 Binder buckets register from the bundle (LANE 0.2.3b — the re-homed register, outside the frozen zone), deepartments.presets PROVIDED by dshd-orchestration (P1 — the package provides, the bundle consumes), the wake-pack/delivery consumers still resolve', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-presets-factory-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] } })
     try {
       const ctx = pluginCtx()
       // The composition is intact: the 5 baseline buckets + the 4 zone buckets
-      // are still registered (the tools factory's binder.register untouched —
-      // the binder-contract lock stays green):
+      // are still registered (LANE 0.2.3b — the register RE-HOMED outside the
+      // frozen zone; the binder-contract lock stays green):
       const binder = ctx.get('deepartments.binder')
       assert.ok(binder !== undefined, 'deepartments.binder resolves')
       const buckets = binder.get()

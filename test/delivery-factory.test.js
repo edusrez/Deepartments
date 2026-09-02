@@ -107,7 +107,7 @@ test('delivery-factory: the DELIVERY ZONE was hoisted VERBATIM into the orchestr
   assert.ok(lib.includes('createDeliveryOrchestration'), 'the compiled factory exists in the package lib/')
 })
 
-test('delivery-factory (composed boot): the 5 baseline buckets carry the FACTORY-PRODUCED delivery/lifecycle closures (the sub-paso 2 fill)', async () => {
+test('delivery-factory (composed boot): the 5 baseline buckets carry the FACTORY-PRODUCED delivery/lifecycle closures (LANE 0.2.3b — the re-homed register fills them outside the frozen zone)', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-delivery-factory-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir)

@@ -4647,103 +4647,6 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     : path.join(dshHome(), POOLER_STATE_FILE)
   const healthBootId = randomUUID()
 
-  const binder = ctx.get('deepartments.binder') as Binder | undefined
-  binder?.register({
-    bus: { redeliver: { recipientAlive: recipientCatalogAlive, resolveCallerSessionId: resolveCallerSessionIdForRedeliver, deliver: deliverBusRecordForRedeliver } },
-    deliver: {
-      resolveChild: resolveBusChild,
-      deliverChild: deliverBusChild,
-      resolveCatalogRoute: resolveBusCatalogRoute,
-      busProfileFor,
-      deliverPost: busDeliverToPost,
-      deliverHost: busDeliverToHost
-    },
-    wakepack: {
-      refreshPresence,
-      wakePackInjected,
-      deferredSleepReplace,
-      roleForSession: roleForSessionLive,
-      buildSubagentOrientation,
-      computeHostSleepSurfacePlan,
-      assembleHeartbeat,
-      readPresenceStateFile,
-      messagesStoreReady: () => messagesStoreReady,
-      repoRoot
-    },
-    lifecycle: {
-      ensureHost,
-      writeJournal,
-      readJournal,
-      bumpHostSleepCounter,
-      bumpPostSleepCounter,
-      archivePostSessionOnSleep,
-      disposeHeadHandleOnce,
-      maybeEmitQualityInspectDirective,
-      // fb-11 — the ROTATION-SUCCESSOR AUTO-WAKE seam (the dshd-core lazy
-      // lifecycle reads it from this bucket; OPTIONAL there, provided here).
-      enqueueHostWake,
-      deferredSleepReplace,
-      wakePackInjected
-    },
-    redeliver: { recipientAlive: recipientCatalogAlive, resolveCallerSessionId: resolveCallerSessionIdForRedeliver, deliver: deliverBusRecordForRedeliver },
-    // DECOUPLING PASO 1 — the gui channel bucket: the composed dshd-gui plugin
-    // (deepartments.gui service) reads this on FIRST use to dispatch the
-    // /deepartments endpoints. Absent in a minimal composition (dshd-gui not
-    // composed) → the bundle's webServer mount below falls back to the direct
-    // in-bundle handler (R6, behavior-neutral).
-    gui: { endpointDeps: guiEndpointDeps },
-    // DECOUPLING PASO 1 — the pooler bucket: the composed dshd-pooler plugin
-    // (deepartments.pooler service) reads the CONFIGURED provider set (the
-    // worker/host agent-option routes are bundle constants the package cannot
-    // derive) + the post-error append closure. The bundle's OWN inline boot
-    // check (runProviderAdapterBootCheck, tools zone) is untouched (R6) — this
-    // bucket only serves the composed SERVICE.
-    pooler: {
-      configuredProviders: [
-        ...(WORKER_AGENT_OPTIONS.provider !== undefined ? [WORKER_AGENT_OPTIONS.provider] : []),
-        ...(HOST_AGENT_OPTIONS.provider !== undefined ? [HOST_AGENT_OPTIONS.provider] : []),
-        ...(org.departments ?? []).flatMap((department) => {
-          const c = department.coordinator
-          if (c?.agentOptions?.provider !== undefined) return [c.agentOptions.provider]
-          return c?.provider !== undefined ? [c.provider] : []
-        })
-      ],
-      appendPostError
-    },
-    // DECOUPLING PASO 1 — the jobs bucket: the composed dshd-jobs plugin
-    // (deepartments.jobs service) reads the closure-bound scheduler deps on
-    // runSchedulerTick (REQUIRED at use: runJob/notifyHead/departmentForEntry/
-    // departmentForJob; onAutoRunSkip + repoRoot optional) — the SAME closures
-    // the (hermetic) inline fallback uses, so the composed daemon behaves
-    // identically. The dshd-jobs service derives org.departments + stateDir
-    // from `deepartments.org` (the shared source — identical values).
-    jobs: {
-      runJob: schedulerRunJob,
-      notifyHead: schedulerNotifyHead,
-      departmentForEntry: schedulerDepartmentForEntry,
-      departmentForJob: schedulerDepartmentForJob,
-      onAutoRunSkip: schedulerOnAutoRunSkip,
-      repoRoot
-    },
-    // DECOUPLING PASO 1 — the health bucket: the composed dshd-health plugin
-    // (deepartments.health service) reads its STATIC per-process deps from here
-    // (bootId/config/notifyHost/poolerStatePath/qiDirectiveRate/workRegisterPath)
-    // and receives the PER-TICK live inputs (now/hosts/posts/hostWaits/
-    // sessionContexts/hostRunning/deliveryRowsReader) EXPLICITLY per
-    // runDaemonTick call — exactly the fields the inline daemon passed to
-    // runHealthDaemonTick (verified by test/binder-contract.test.js).
-    health: {
-      bootId: healthBootId,
-      // The plugin Config (the dshd-health service reads `.health` knobs from
-      // it — HealthConfigLike-structural; the health bucket types it unknown).
-      config,
-      notifyHost: healthNotifyHost,
-      poolerStatePath: healthPoolerStatePath,
-      qiDirectiveRate: qualityWorkerInspectProbability,
-      workRegisterPath: path.join(repoRoot, 'docs', 'WORK-REGISTER.md')
-    }
-  })
-
 
   // --- tool definitions (shared by the GLOBAL host plane and the child's OWN
   // layer so a lean toolFilter still exposes them to resident posts) ---------
@@ -4992,6 +4895,123 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     globalHeadRotate()
   }, 'deepartments: host-plane tools')
 
+  // =========================================================================
+  // LANE 0.2.3b (register legacy elimination — TOTAL MODULARITY gap 3 cierre):
+  // the CUT-4 BINDER REGISTER LEFT THE FROZEN ZONE. The legacy binder
+  // register call (the 9 buckets: bus / deliver / wakepack / lifecycle /
+  // redeliver + gui / jobs / health / pooler) was REMOVED from the frozen md5
+  // zone (the tools-factory lock RE-FREEZES with the new md5 — the delta IS
+  // this elimination) and is RE-HOMED verbatim HERE, OUTSIDE the zone, with
+  // the SAME closures, the SAME order, the SAME targets — 0 behavior change.
+  // WHY re-home instead of drop: the verified reality is that the 5 BASELINE
+  // buckets are STILL READ by the dshd-core lazy shells
+  // (deepartments.lifecycle/wakepack/bus/deliver — builder-3 probe: after
+  // binder.clear() every shell fails loud R1 "required bucket-(c) dep(s)
+  // missing") + the health/quality/feedback fallback readers, so the fill
+  // must keep flowing; the 4 ZONE buckets are unread by the P1 packages (they
+  // read their holders) but stay for the R6 fallback readers
+  // (dshd-health:5514 / dshd-quality:338 / dshd-jobs:766 — the same R6 wire).
+  // The FULL death of MutableBinder / deepartments.binder awaits the
+  // dshd-core DI-by-services lane (mirror-hybrids-r4-map §4.2).
+  const binder = ctx.get('deepartments.binder') as Binder | undefined
+  binder?.register({
+    bus: { redeliver: { recipientAlive: recipientCatalogAlive, resolveCallerSessionId: resolveCallerSessionIdForRedeliver, deliver: deliverBusRecordForRedeliver } },
+    deliver: {
+      resolveChild: resolveBusChild,
+      deliverChild: deliverBusChild,
+      resolveCatalogRoute: resolveBusCatalogRoute,
+      busProfileFor,
+      deliverPost: busDeliverToPost,
+      deliverHost: busDeliverToHost
+    },
+    wakepack: {
+      refreshPresence,
+      wakePackInjected,
+      deferredSleepReplace,
+      roleForSession: roleForSessionLive,
+      buildSubagentOrientation,
+      computeHostSleepSurfacePlan,
+      assembleHeartbeat,
+      readPresenceStateFile,
+      messagesStoreReady: () => messagesStoreReady,
+      repoRoot
+    },
+    lifecycle: {
+      ensureHost,
+      writeJournal,
+      readJournal,
+      bumpHostSleepCounter,
+      bumpPostSleepCounter,
+      archivePostSessionOnSleep,
+      disposeHeadHandleOnce,
+      maybeEmitQualityInspectDirective,
+      // fb-11 — the ROTATION-SUCCESSOR AUTO-WAKE seam (the dshd-core lazy
+      // lifecycle reads it from this bucket; OPTIONAL there, provided here).
+      enqueueHostWake,
+      deferredSleepReplace,
+      wakePackInjected
+    },
+    redeliver: { recipientAlive: recipientCatalogAlive, resolveCallerSessionId: resolveCallerSessionIdForRedeliver, deliver: deliverBusRecordForRedeliver },
+    // DECOUPLING PASO 1 — the gui channel bucket (re-homed with the register):
+    // the composed dshd-gui plugin (deepartments.gui service) reads its
+    // endpoint wiring from the `deepartments.guiDeps` HOLDER (the fill below);
+    // this binder bucket is the R6 fallback seam for minimal compositions.
+    gui: { endpointDeps: guiEndpointDeps },
+    // DECOUPLING PASO 1 — the pooler bucket: the composed dshd-pooler plugin
+    // (deepartments.pooler service) reads the CONFIGURED provider set (the
+    // worker/host agent-option routes are bundle constants the package cannot
+    // derive) + the post-error append closure. The bundle's OWN inline boot
+    // check (runProviderAdapterBootCheck, tools zone) is untouched (R6) — this
+    // bucket only serves the composed SERVICE.
+    pooler: {
+      configuredProviders: [
+        ...(WORKER_AGENT_OPTIONS.provider !== undefined ? [WORKER_AGENT_OPTIONS.provider] : []),
+        ...(HOST_AGENT_OPTIONS.provider !== undefined ? [HOST_AGENT_OPTIONS.provider] : []),
+        ...(org.departments ?? []).flatMap((department) => {
+          const c = department.coordinator
+          if (c?.agentOptions?.provider !== undefined) return [c.agentOptions.provider]
+          return c?.provider !== undefined ? [c.provider] : []
+        })
+      ],
+      appendPostError
+    },
+    // DECOUPLING PASO 1 — the jobs bucket: the composed dshd-jobs plugin
+    // (deepartments.jobs service) reads the closure-bound scheduler deps on
+    // runSchedulerTick (REQUIRED at use: runJob/notifyHead/departmentForEntry/
+    // departmentForJob; onAutoRunSkip + repoRoot optional) — the SAME closures
+    // the (hermetic) inline fallback uses, so the composed daemon behaves
+    // identically. The dshd-jobs service derives org.departments + stateDir
+    // from `deepartments.org` (the shared source — identical values). LANE
+    // 0.2.3/0.2.3b: the composed tick resolves runJob SERVICE-FIRST
+    // (deepartments.spawn) — this bucket's runJob is the R6 fallback seam.
+    jobs: {
+      runJob: schedulerRunJob,
+      notifyHead: schedulerNotifyHead,
+      departmentForEntry: schedulerDepartmentForEntry,
+      departmentForJob: schedulerDepartmentForJob,
+      onAutoRunSkip: schedulerOnAutoRunSkip,
+      repoRoot
+    },
+    // DECOUPLING PASO 1 — the health bucket: the composed dshd-health plugin
+    // (deepartments.health service) reads its STATIC per-process deps from here
+    // (bootId/config/notifyHost/poolerStatePath/qiDirectiveRate/workRegisterPath)
+    // and receives the PER-TICK live inputs (now/hosts/posts/hostWaits/
+    // sessionContexts/hostRunning/deliveryRowsReader) EXPLICITLY per
+    // runDaemonTick call — exactly the fields the inline daemon passed to
+    // runHealthDaemonTick (verified by test/binder-contract.test.js).
+    health: {
+      bootId: healthBootId,
+      // The plugin Config (the dshd-health service reads `.health` knobs from
+      // it — HealthConfigLike-structural; the health bucket types it unknown).
+      config,
+      notifyHost: healthNotifyHost,
+      poolerStatePath: healthPoolerStatePath,
+      qiDirectiveRate: qualityWorkerInspectProbability,
+      workRegisterPath: path.join(repoRoot, 'docs', 'WORK-REGISTER.md')
+    }
+  })
+  // =========================================================================
+
   // LANE 2 (fb-27, QD ALTO/mejora) — the turn/end-ERROR HEAD NOTIFICATION
   // closure the health daemon tick's `notifyHead` dep calls. Resolves the POST'S
   // OWN HEAD (a worker's creator `managerId`, or its department coordinator)
@@ -5037,19 +5057,23 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   //     as the WORKER/HOST_AGENT_OPTIONS constants — + appendPostError is
   //     imported by the package directly from dshd-health) → poolerDeps stays
   //     unfilled (the holder is the uniform 1B surface; nothing to relocate).
-  // The legacy zone buckets the (FROZEN CUT-4) register above still writes are
-  // R6-compat dead weight the packages no longer read (gap 2 dismantles the
-  // register with the applyInvoke factory split; the md5 lock stays intact).
+  // The binder buckets the RE-HOMED register above writes (LANE 0.2.3b — out
+  // of the frozen zone now) are: the 5 baseline = R6-compat LIVE wire for the
+  // dshd-core lazy shells + the health/quality/feedback fallbacks (verified —
+  // clearing the binder makes every shell fail loud R1); the 4 zone = R6
+  // fallback wire for the composed services (their primary path is the holders
+  // filled below). The fill/dismantling story is the re-home comment above.
   const depsHealth = ctx.get('deepartments.healthDeps') as { register(deps: { qiDirectiveRate?: number }): void; clear(): void } | undefined
   const depsJobs = ctx.get('deepartments.jobsDeps') as {
-    register(deps: { runJob?: unknown; notifyHead?: unknown; departmentForEntry?: unknown; departmentForJob?: unknown; onAutoRunSkip?: unknown; repoRoot?: string }): void
+    register(deps: { runJob?: unknown; notifyHead?: unknown; departmentForEntry?: unknown; departmentForJob?: unknown; onAutoRunSkip?: unknown; captureAutoRunFailure?: unknown; repoRoot?: string }): void
     clear(): void
   } | undefined
   const depsPooler = ctx.get('deepartments.poolerDeps') as { register(deps: unknown): void; clear(): void } | undefined
   const depsGui = ctx.get('deepartments.guiDeps') as { register(deps: { endpointDeps?: unknown }): void; clear(): void } | undefined
-  // The fills (SAME closures the register above uses — the packages read the
-  // IDENTICAL live values through their holders; the compose-first rows make
-  // each holder resolvable exactly when the closure-bound state is ready).
+  // The fills (the re-homed register + these holders carry the SAME closures —
+  // the packages read the IDENTICAL live values through their holders; the
+  // compose-first rows make each holder resolvable exactly when the
+  // closure-bound state is ready).
   depsHealth?.register({ qiDirectiveRate: qualityWorkerInspectProbability })
   depsJobs?.register({
     // LANE 0.2.3 (jobs→spawn-Service): `runJob` is NO LONGER registered into
@@ -5057,14 +5081,23 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     // SERVICE-FIRST via `ctx.get('deepartments.spawn')?.runJobForDepartment`
     // (this package provides the spawn service) and uses this holder's runJob
     // only as the R6 fallback in a composition where the spawn service is
-    // absent. The binder `jobs` bucket (the FROZEN CUT-4 register) still
-    // carries runJob for the legacy path (dismantled with the register in
-    // 0.2.3b).
+    // absent. The binder `jobs` bucket still carries runJob (the re-homed
+    // register above) for the same R6 fallback seam.
     notifyHead: schedulerNotifyHead,
     departmentForEntry: schedulerDepartmentForEntry,
     departmentForJob: schedulerDepartmentForJob,
     onAutoRunSkip: schedulerOnAutoRunSkip,
-    repoRoot
+    repoRoot,
+    // LANE 0.2.3b (W8-c re-plumb): the runJobForDepartment-EXCEPTION capture —
+    // the post-error row the register-era schedulerRunJob produced is re-wired
+    // to the SERVICE-FIRST path: the dshd-jobs tick adapter (deepartments.spawn
+    // runJob adapter) calls this sink after a spawn exception — the SAME
+    // captureSchedulerAutoRunFailure (post-errors.jsonl row, postId
+    // 'scheduler', dedupe-keyed the same way), bundled with the bundle's
+    // apply-fiber stateDir/now. Absent sink (minimal composition) → the adapter
+    // stays warn-only (R6).
+    captureAutoRunFailure: (finding: SchedulerAutoRunFinding) =>
+      captureSchedulerAutoRunFailure({ stateDir, now: () => Date.now(), jobId: finding.jobId, reason: finding.reason, error: finding.error })
   })
   depsGui?.register({ endpointDeps: guiEndpointDeps })
   // depsPooler: INTENTIONALLY unfilled (1C — fully derivable, see above; the

@@ -256,14 +256,16 @@ test('boot-factory: the BOOT ZONE (config source + registry + catalog + lifecycl
   assert.ok(lib.includes('const presenceCache'), 'the compiled factory carries the presence cache')
 })
 
-test('boot-factory (composed boot): the wiring is intact — the 5 deps pass by reference, the 3 late-seam getters exist, the 9 Binder buckets register from the bundle, deepartments.boot PROVIDED by dshd-orchestration (P1 — the package provides, the bundle consumes), the factory locals stay internal', async () => {
+test('boot-factory (composed boot): the wiring is intact — the 5 deps pass by reference, the 3 late-seam getters exist, the 9 Binder buckets register from the bundle (LANE 0.2.3b — the re-homed register, outside the frozen zone), deepartments.boot PROVIDED by dshd-orchestration (P1 — the package provides, the bundle consumes), the factory locals stay internal', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-boot-factory-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] } })
     try {
       const ctx = pluginCtx()
       // The composition is intact: the 5 baseline buckets + the 4 zone buckets
-      // are still registered (the tools factory's binder.register untouched):
+      // are still registered (LANE 0.2.3b — the register RE-HOMED verbatim
+      // outside the frozen CUT-4 zone; the dshd-core lazy shells read the
+      // baseline buckets at use):
       const binder = ctx.get('deepartments.binder')
       assert.ok(binder !== undefined, 'deepartments.binder resolves')
       const buckets = binder.get()

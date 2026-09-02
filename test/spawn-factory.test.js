@@ -158,14 +158,16 @@ test('spawn-factory: the SPAWN ZONE was hoisted VERBATIM into the orchestration 
   assert.ok(lib.includes('createSpawnOrchestration'), 'the compiled factory exists in the package lib/')
 })
 
-test('spawn-factory (composed boot): the composition is intact — jobs.runJob wired through the bundle, buckets untouched, NO deepartments.spawn provided (P1)', async () => {
+test('spawn-factory (composed boot): the composition is intact — jobs.runJob wired through the bundle (the re-homed register bucket), buckets untouched, deepartments.spawn provided (P1)', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-spawn-factory-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] } })
     try {
       const ctx = pluginCtx()
       // The composition is intact: the 5 baseline buckets + the 4 zone buckets
-      // are still registered (PASO 1 / sub-paso 2 untouched).
+      // are still registered (LANE 0.2.3b — the register RE-HOMED outside the
+      // frozen CUT-4 zone; the composed path reads the holders, the binder is
+      // the R6 fallback wire).
       const binder = ctx.get('deepartments.binder')
       assert.ok(binder !== undefined, 'deepartments.binder resolves')
       const buckets = binder.get()

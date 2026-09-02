@@ -27,21 +27,22 @@
 //
 // The bundle consumes this package through the drop-in bridge
 // `src/core/gui.ts` (`export * from 'dshd-gui'`). SPLIT BOUNDARY: the
-// webServer MOUNT EFFECT + the endpointDeps WIRING CLOSURE (the bundle's
-// `ctx.inject(['webServer','webRuntime','connection'], ...)` effect that binds
-// the LIVE apply-fiber registries: org.departments, byPost, hosts, the
-// sessionLive/sessionRunning signals, the presence cache wrappers, the
-// journalPathFor wake-counter reader, repoRoot/stateDir/clock) STAY in the
-// bundle (invoke.ts) — same criterion as dshd-jobs (the wiring closure stays,
-// the pure computation moves). The deps interface below is the ONLY injected
-// seam: the bundle's closure provides the live values; the tests construct
-// them directly.
-// [P1 — 2026-08-29]: the package now ALSO exposes a thin Cordis plugin surface
+// endpointDeps WIRING CLOSURE stays in the bundle (the DECOUPLING factory
+// fills the `deepartments.guiDeps` holder with the LIVE apply-fiber
+// registries: org.departments, byPost, hosts, the sessionLive/sessionRunning
+// signals, the presence cache wrappers, the journalPathFor wake-counter
+// reader, repoRoot/stateDir/clock). LANE 0.2.3b (gui-split): the webServer
+// MOUNT EFFECT (`ctx.inject(['webServer','webRuntime','connection'], ...)` +
+// the trust fence + the 6 exact routes) ALSO MOVED INTO THIS PACKAGE (see the
+// apply below) — the bundle no longer mounts the channel. The deps interface
+// below is the ONLY injected seam: the bundle's closure provides the live
+// values; the tests construct them directly.
+// [P1 — 2026-08-29]: the package ALSO exposes a thin Cordis plugin surface
 // (name/inject/apply, bottom of this file) providing the `deepartments.gui`
 // service (dispatcher + route handler BOUND to the endpointDeps injected via
-// the FASE 2.6 binder `gui` bucket — the DECOUPLING bundle registers its live
-// wiring there). The bundle's own mount effect stays (R6) until DECOUPLING
-// rewires it to the composed service.
+// the `deepartments.guiDeps` holder — the DECOUPLING bundle registers its live
+// wiring there). LANE 0.2.3b: the mount effect (R6-in-the-bundle until this
+// lane) MOVED into the apply — the package owns the channel end-to-end.
 //
 // dshd-gui deps-injection design (what the bundle's closure provides that the
 // OLD module imported directly):
@@ -93,6 +94,14 @@ export interface WebServerRouteLike {
  * (AGENTS.md rule 7; resolved via `ctx.get('webServer') ?? ctx.get('httpServer')`). */
 export interface WebServerLike {
   register(route: WebServerRouteLike): () => void
+}
+
+/** Loose structural view of the optional `connection` trusted-hosts source
+ * (dsh-client-connection HostConnectionService.trustedHosts — the fallback the
+ * mount's trust fence reads when webRuntime is absent). PRIVATE to the mount
+ * (never exported — the bundle's ConnectionLike moved here with the effect). */
+interface ConnectionLike {
+  trustedHosts?: string[]
 }
 
 /** The owner-presence state (Feature A — the "Presencia/Ausencia" toggle), the
@@ -665,23 +674,24 @@ export async function handleDeepartmentsRequest(
 }
 
 // ---------------------------------------------------------------------------
-// P1 (MODULARIZACIÓN, 2026-08-29) — the dshd-gui Cordis PLUGIN surface.
-// Thin name/inject/apply (the dshd-core/dshd-webfetch pattern): the package
-// now ALSO composes as a real plugin row (cordis.patch.yml) and provides
-// `deepartments.gui` — the `/deepartments` channel the bundle mounts INLINE
-// today (invoke.ts: the `ctx.inject(['webServer', ...])` mount effect wiring
-// `dispatchDeepartmentsEndpoint`/`handleDeepartmentsRequest` to the live
-// registries). The service is LAZY (built on FIRST use, never at apply time);
-// deps are INJECTED via the FASE 2.6 seam, never imported from the bundle:
+// P1 (MODULARIZACIÓN, 2026-08-29) + LANE 0.2.3b (gui-split) — the dshd-gui
+// Cordis PLUGIN surface. Thin name/inject/apply (the dshd-core/dshd-webfetch
+// pattern): the package composes as a real plugin row (cordis.patch.yml) and
+// provides `deepartments.gui` — the `/deepartments` channel the package owns
+// END-TO-END since the gui-split (the webServer MOUNT EFFECT + the trust fence
+// + the 6 exact routes live in this apply; the DECOUPLING bundle registers the
+// endpoint wiring into the `deepartments.guiDeps` holder). The service is
+// LAZY (built on FIRST use, never at apply time); deps are INJECTED via the
+// holder seam, never imported from the bundle:
 //   - `DeepartmentsEndpointDeps` (the closure-bound wiring: buildAgentRows /
 //     pickLiveHostEntry + the live maps + the session/presence hooks) ← the
-//     `gui.endpointDeps` binder bucket (the DECOUPLING bundle registers its
-//     live wiring there; the package can NOT derive buildAgentRows itself —
-//     it is bundle-owned src/agents.ts),
+//     `deepartments.guiDeps` HOLDER (the DECOUPLING bundle fills it with its
+//     live wiring; the package can NOT derive buildAgentRows itself — it is
+//     bundle-owned src/agents.ts),
 //   - the harness `webServer`/`webRuntime`/`connection` services stay resolved
-//     by the DECOUPLING mount (the package keeps the PURE dispatcher + handler,
-//     the bind-to-webServer effect is the bundle's seam); the service binds the
-//     INJECTED deps so a mount only passes req/res/endpoint/trustedHosts.
+//     by the LANE 0.2.3b MOUNT (the package's OWN apply effect now binds the
+//     service to webServer — the gui-split); the service binds the INJECTED
+//     deps so a mount only passes req/res/endpoint/trustedHosts.
 // A required dep missing at USE FAILS LOUD (R1), never a silently-unbound
 // channel. The channel exports (the drop-in bridge superset) stay intact.
 // Nothing is removed (R6).
@@ -788,5 +798,65 @@ export function apply(ctx: Context, config: GuiConfig = {}) {
   ctx.provide('deepartments.gui', {
     dispatch: (endpoint: string, payload: unknown): Promise<DeepartmentsDispatchResult> => ensure().dispatch(endpoint, payload),
     handleRequest: (req: unknown, res: unknown, endpoint: string, trustedHosts: string[]): Promise<void> => ensure().handleRequest(req, res, endpoint, trustedHosts)
+  })
+
+  // --- LANE 0.2.3b (gui-split — TOTAL MODULARITY gap 3 cierre): the webServer
+  // MOUNT EFFECT MOVED INTO THIS PACKAGE from the bundle (src/invoke.ts:3534-3652).
+  // The bundle no longer mounts the /deepartments channel: the mount + the
+  // trust fence + the 6 exact routes live HERE, served by THIS package's own
+  // `deepartments.gui` service (the GuiSurface built above — always resolvable
+  // in this apply; the endpointDeps arrive via the `deepartments.guiDeps`
+  // holder the DECOUPLING bundle fills, and the R1 fail-loud at first use
+  // covers an unfilled holder). The routes are the SAME 6 `kind:'exact'` paths
+  // the bundle mounted (byte-identical; the smoke-boot route lock keeps them
+  // frozen). The HEADLESS loss is DOCUMENTED with the bundle's own existing
+  // justification (moved verbatim from the mount comment):
+  //   «when absent (headless / host-less) the channel — a GUI feature — is
+  //   skipped silently, exactly like the old `connection !== void 0` gate (the
+  //   client is the only consumer)» (invoke.ts:3565-3567)
+  //   «skip silently (headless / host-less) if webServer is absent — the
+  //   channel is a GUI feature and the client is the only consumer, exactly
+  //   like the old `connection !== void 0` gate» (invoke.ts:3577-3579).
+  // In a minimal composition WITHOUT this package the /deepartments channel no
+  // longer exists (accepted design — R6; the bundle keeps no inline fallback).
+  // The TRUST fence is the bundle's: prefer the DEPLOYED web app's `webRuntime`
+  // trusted hosts (dsh-web-app resolveLanTrust), fall back to the connection
+  // channel's, then loopback-only.
+  ctx.inject(['webServer', 'webRuntime', 'connection'], (hostCtx: Context) => {
+    // Rule 7: prefer the injected webServer; fall back to the renamable
+    // httpServer when webServer is undefined (headless host); skip if neither.
+    // cordis' static Context type has no `webServer` property (services are
+    // dynamically injected), so we widen the host context structurally.
+    const host = hostCtx as Context & { webServer?: WebServerLike; webRuntime?: { trustedHosts?: string[] } }
+    const webServer = (host.webServer ?? host.get('httpServer')) as WebServerLike | undefined
+    if (webServer === void 0) return
+    const trustedHosts =
+      (host.webRuntime as { trustedHosts?: string[] } | undefined)?.trustedHosts ??
+      (hostCtx.get('connection') as ConnectionLike | undefined)?.trustedHosts ??
+      []
+    console.log(
+      `[deepartments] /deepartments channel mounted; trustedHosts=${JSON.stringify(trustedHosts)}; routes: agents/list, host/status, presence/get, presence/set, agenda/list`
+    )
+    // The channel surface is THIS package's own `deepartments.gui` service
+    // (resolved per request so the holder epoch is always honored — a
+    // post-dispose request REBUILDS and fails loud R1 over the emptied holder,
+    // never stale endpoint wiring from the unmounted bundle, P6).
+    const routes: WebServerRouteLike[] = [
+      { path: '/deepartments/agents', endpoint: 'agents' },
+      { path: '/deepartments/list', endpoint: 'list' },
+      { path: '/deepartments/host/status', endpoint: 'host/status' },
+      { path: '/deepartments/presence/get', endpoint: 'presence/get' },
+      { path: '/deepartments/presence/set', endpoint: 'presence/set' },
+      { path: '/deepartments/agenda/list', endpoint: 'agenda/list' }
+    ].map(({ path, endpoint }) => ({
+      kind: 'exact' as const,
+      path,
+      handler: (req: unknown, res: unknown) =>
+        (ctx.get('deepartments.gui') as GuiSurface).handleRequest(req, res, endpoint, trustedHosts)
+    }))
+    hostCtx.effect(() => {
+      const disposers = routes.map((route) => webServer.register(route))
+      return () => { for (const dispose of disposers) dispose() }
+    }, 'deepartments: agents/list + host/status + agenda/list RPC channel')
   })
 }

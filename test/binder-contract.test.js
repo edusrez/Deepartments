@@ -45,7 +45,12 @@ const BASELINE_BUCKETS = ['bus', 'deliver', 'wakepack', 'lifecycle', 'redeliver'
 const ZONE_BUCKETS = ['health', 'jobs', 'pooler', 'gui']
 const ZONE_BUCKET_CONTRACTS = {
   gui: ['endpointDeps'],
-  jobs: ['runJob', 'notifyHead', 'departmentForEntry', 'departmentForJob', 'onAutoRunSkip', 'repoRoot'],
+  // LANE 0.2.3b (W8-c re-plumb): +captureAutoRunFailure — the NEW holder dep
+  // the service-first tick adapter calls after a runJobForDepartment exception
+  // (the post-error row the register-era schedulerRunJob produced, re-wired to
+  // the service path; the bundle registers the captureSchedulerAutoRunFailure-
+  // backed sink — the JobsBinderDeps interface grew it, frozen here).
+  jobs: ['runJob', 'notifyHead', 'departmentForEntry', 'departmentForJob', 'onAutoRunSkip', 'captureAutoRunFailure', 'repoRoot'],
   // NOTE: posts/hostWaits/sessionContexts/hostRunning/missionActivity/mainRed are
   // OPTIONAL (absent → the tick degrades); notifyHost has a composed fallback
   // (wakepack + deliver buckets, FASE 2.6-C). Frozen here = the fields the
@@ -69,12 +74,17 @@ const REQUIRED_ZONE_FIELDS = {
   pooler: []    // both optional; appendPostError required only on a finding
 }
 
-/** Extract the TOP-LEVEL bucket keys of the bundle's `binder?.register({...})`
- * call. SUB-BATCH 4 (tools CUT4): the call MOVED with the zone VERBATIM into
- * the tools factory (the SAME fiber position, the same buckets); the static
+/** Extract the TOP-LEVEL bucket keys of the `binder?.register({...})` call.
+ * SUB-BATCH 4 (tools CUT4): the call MOVED with the zone VERBATIM into the
+ * tools factory (the SAME fiber position, the same buckets); the static
  * source target follows the movement. LANE 0.2.2 (gap 2): the factory MOVED
  * into the dshd-orchestration package — the register lives at
  * packages/dshd-orchestration/src/tools.ts.
+ * LANE 0.2.3b (register legacy elimination): the register LEFT the frozen
+ * CUT-4 md5 zone and is RE-HOMED verbatim right after the zone close (before
+ * the deps-holder fills) — same call, same buckets, outside the zone (the
+ * tools-factory lock re-froze the zone md5; THIS lock keeps freezing the
+ * bucket contract the register serves).
  * Returns the list of registered bucket names. */
 function extractRegisterBucketKeys() {
   const src = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'tools.ts'), 'utf8')
@@ -136,7 +146,7 @@ function extractBinderDepsFields(sourcePath, name) {
   return fields
 }
 
-test('binder-contract: the bundle register keeps the 5 baseline buckets (R6 anchor — nothing existing is removed)', () => {
+test('binder-contract: the re-homed register keeps the 5 baseline buckets (R6 anchor — the fill the dshd-core lazy shells read; nothing existing is removed)', () => {
   const keys = extractRegisterBucketKeys()
   for (const bucket of BASELINE_BUCKETS) {
     assert.ok(keys.includes(bucket), `baseline bucket "${bucket}" still registered (found: ${keys.join(', ')})`)

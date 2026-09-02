@@ -207,7 +207,8 @@ test('dispose-clean: binder buckets cleared on unload (1A clear-on-unload — po
     try {
       const refs = captureBundleReferences(boot)
       assert.ok(refs.binder !== undefined, 'deepartments.binder resolves')
-      // Pre-dispose sanity: the register ran (the baseline bus bucket filled).
+      // Pre-dispose sanity: the register ran (the re-homed fill wrote the
+      // baseline bus bucket — LANE 0.2.3b).
       assert.ok(refs.binder.get().bus !== undefined, 'pre-dispose: the bundle registered the bus bucket (sanity)')
       await hydrate(boot, refs)
       const preKeys = Object.keys(refs.binder.get()).sort()

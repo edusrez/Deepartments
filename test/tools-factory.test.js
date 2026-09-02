@@ -277,15 +277,20 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
   assert.ok(/const globalWakeSnapshot = ctx\.tools\.register/.test(factory), 'globalWakeSnapshot moved verbatim (the 9-global host-plane registration block)')
   assert.ok(/const globalHeadRotate = ctx\.tools\.register/.test(factory), 'globalHeadRotate moved verbatim (the head-rotation tool)')
   assert.ok(/, 'deepartments: host-plane tools'\)/.test(factory), 'the host-plane tools disposal ctx.effect moved verbatim (the CUT4 zone closing)')
-  // The embedded zone is BYTE-IDENTICAL to HEAD (applyInvoke 4246-5476, 1231
-  // LOCs — md5 stamp fe319e0f…; the MOVEMENT-ONLY contract).
+  // The embedded zone is byte-identical to HEAD applyInvoke except the LANE
+  // 0.2.3b REGISTER-LEGACY ELIMINATION — the delta IS the register block: the
+  // `const binder = ctx.get('deepartments.binder')` + the `binder?.register`
+  // 9-bucket call LEFT the frozen zone (re-homed verbatim right after the
+  // zone close, outside the md5 span — see the binder-contract lock, which
+  // keeps freezing the SAME bucket contract). Zone md5 RE-FROZE R2:
+  // fe319e0f4f0c145081e1e46bf0e9d7b3 → 5b548545a2971a76a79fab0dbff8411d.
   {
     const first = factory.indexOf('  // --- messaging bus TOOL DEFINITIONS (ONE body per tool; registered in the')
     const last = factory.indexOf("  }, 'deepartments: host-plane tools')")
     assert.ok(first !== -1 && last !== -1 && last > first, 'the factory embeds the CUT4 zone (banner → host-plane effect close)')
     const zoneText = factory.slice(first, last + "  }, 'deepartments: host-plane tools')".length) + '\n'
     const md5 = createHash('md5').update(zoneText, 'utf8').digest('hex')
-    assert.equal(md5, 'fe319e0f4f0c145081e1e46bf0e9d7b3', 'the embedded CUT4 zone is byte-identical to HEAD applyInvoke 4246-5476 (md5 fe319e0f…)')
+    assert.equal(md5, '5b548545a2971a76a79fab0dbff8411d', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze (register legacy eliminated from the zone — md5 5b548545…)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface

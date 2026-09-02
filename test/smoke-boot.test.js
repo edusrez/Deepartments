@@ -146,7 +146,7 @@ test('smoke-boot: the webServer mount registers the 6 /deepartments RPC routes (
   }
 })
 
-test('smoke-boot: the binder carries the 5 baseline buckets (pre-fill anchor; the 4 zone buckets arrive with the PASO 1 fill — services fail-loud until then)', async () => {
+test('smoke-boot: the binder carries the 5 baseline buckets + the 4 zone buckets (LANE 0.2.3b — the re-homed register fills them outside the frozen CUT-4 zone; the dshd-core lazy shells read the baseline buckets at use)', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-smoke-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir)
@@ -158,9 +158,10 @@ test('smoke-boot: the binder carries the 5 baseline buckets (pre-fill anchor; th
         assert.ok(buckets[bucket] !== undefined, `baseline bucket "${bucket}" registered`)
       }
       // The four zone buckets the DECOUPLING hito fills: the bundle REGISTERS
-      // them as part of PASO 1. This lock asserts the REGISTERED STATE — when
-      // the fill lands (sub-paso 3) these become present with the contract
-      // fields (the binder-contract test freezes the field sets).
+      // them as part of PASO 1 (LANE 0.2.3b — the re-homed register, outside
+      // the frozen zone). This lock asserts the REGISTERED STATE — the P1
+      // services' primary path is their holders, the binder buckets are the R6
+      // fallback wire (the binder-contract test freezes the field sets).
       for (const bucket of ['health', 'jobs', 'pooler', 'gui']) {
         if (buckets[bucket] === undefined) {
           // Pre-fill: the P1 service reads it at USE and fails loud (R1) —

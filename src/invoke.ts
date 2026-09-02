@@ -495,9 +495,7 @@ import type {
   DeepartmentsEndpointDeps,
   EndpointPostEntryLike,
   HostStatusPayload,
-  PresenceState,
-  WebServerRouteLike,
-  WebServerLike
+  PresenceState
 } from './core/gui.js'
 // The envelope/trust primitives are imported for the RE-EXPORT below only (the
 // route handler that used them moved to the package); explicit here so the
@@ -723,29 +721,6 @@ const stuckNow = (): number => {
 // ---------------------------------------------------------------------------
 
 
-
-/**
- * Loose structural view of `ctx.connection` — the optional Host Connection
- * service provided by the SEPARATE dsh-client-connection plugin (NOT present
- * in headless profiles). Mirroring the existing `PersistenceLike` pattern in
- * src/org.ts: we avoid a hard (peer) dependency on the client-connection
- * package by declaring only the one surface the sidebar RPC registration needs.
- */
-interface ConnectionLike {
-  rpc: {
-    handle(
-      channel: string,
-      handler: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>,
-      options: { authority: 'loopback' | 'trusted-host' }
-    ): () => Promise<void>
-  }
-  /** The deployment's trusted authorities this connection channel vets every
-   * request against (dsh-client-connection HostConnectionService.trustedHosts,
-   * seeded by `--trusted-host ...` on the systemd unit). Read here as the
-   * authoritative trusted-hosts source for the self-mounted `/deepartments`
-   * routes (see the RPC effect below). */
-  trustedHosts?: string[]
-}
 
 /** Loose structural view of a live `Agent` (the shape `ctx.agents.get(id)`
  * returns; rc.8 dsh-agent runtime-types.d.ts:60-133). Declared structurally so
@@ -3532,123 +3507,26 @@ export function applyInvoke(ctx: Context, config: Config) {
   }
 
   // --- agents/list + host/status RPC (server half, HTTP self-mount) --------
-  // Serves the department-head roster rows (`agents`/`list`) and the U3
-  // host-rotation lifecycle signal (`host/status`, spec 002 §6.1) to the client
-  // over the `/deepartments` channel (trusted-host authority). The pure
-  // computation lives in dispatchDeepartmentsEndpoint (exported, unit-tested
-  // in test/rpc-channel.test.js); this effect wires it to the live registries
-  // and mounts the HTTP routes. (U1: the persistent UI config surface the
-  // channel once also served is removed with the sidebar.)
-  // DECOUPLING PASO 1: the channel SURFACE is now consumed from the composed
-  // dshd-gui plugin's `deepartments.gui` SERVICE (the `gui.endpointDeps`
-  // binder bucket registered above) — the bundle no longer dispatches through
-  // the inline closure; the mount only binds webServer + trustedHosts and calls
-  // the service (fail-loud R1 when the bucket is missing; direct in-bundle
-  // fallback when the plugin row is absent — R6, behavior-neutral).
-  //
-  // rc.8 TRANSPORT FIX: `ctx.connection.rpc.handle('/deepartments', ...)` did NOT
-  // mount an HTTP route in rc.8 — dsh-client-connection registers ONLY the `/api`
-  // prefix + its in-memory channel SERVICE via webServer; a channel registered on
-  // `.rpc.handle` is NOT exposed as an HTTP endpoint. So a browser
-  // `POST /deepartments/agents` never reached the old handler: the POST fell
-  // through to the SPA fallback (405) and a GET returned the SPA HTML — the
-  // sidebar heads were always empty. The CONFIRMED WORKING rc.8 pattern
-  // (dshmarket) is to self-mount `kind:'exact'` routes on the live webServer
-  // (dsh-web-app resolves ctx.get('webServer'); dsh-client-connection mounts /api
-  // via ctx.webServer.register). We do the same, serving the SAME client wire
-  // contract the client already speaks:
-  //   request : POST ${origin}/deepartments/<endpoint>
-  //             body { type:'client-request', rpcId, method:<endpoint>, payload }
-  //   response: 200 JSON { type:'server-response', rpcId, result:{ok,value|error} }
-  // Trust mirrors the connection channel (loopback always; otherwise the request
-  // Host:port must be a declared trusted host). `webServer` is resolved by rule 7
-  // (`ctx.get('webServer') ?? ctx.get('httpServer')`); when absent (headless /
-  // host-less) the channel — a GUI feature — is skipped silently, exactly like
-  // the old `connection !== void 0` gate (the client is the only consumer).
-  //
-  // rc.8 INJECT FIX: the bare `ctx.get('webServer')` / `ctx.get('connection')`
-  // lookups did NOT resolve the live services in OUR plugin scope (the mount
-  // silently skipped → the deployed routes returned HTTP 405 for HTTPS and
-  // HTTP 403 for the Tailscale browser). The PROVEN pattern (dshmarket +
-  // dsh-client-connection + dsh-web-app themselves) is to DECLARE the services
-  // via `ctx.inject([...], (hostCtx) => ...)`: Cordis `inject` binds each named
-  // service into the callback's scope, so `hostCtx.webServer` / the
-  // `webRuntime` and `connection` bindings are guaranteed live here. We keep
-  // rule 7's `httpServer` fallback, and skip silently (headless / host-less)
-  // if webServer is absent — the channel is a GUI feature and the client is
-  // the only consumer, exactly like the old `connection !== void 0` gate.
-  ctx.inject(['webServer', 'webRuntime', 'connection'], (hostCtx) => {
-    // Rule 7: prefer the injected webServer; fall back to the renamable
-    // httpServer when webServer is undefined (headless host); skip if neither.
-    // cordis' static Context type has no `webServer` property (services are
-    // dynamically injected), so we widen the host context structurally — the
-    // injected `webServer` is the live service bound into this callback scope.
-    const host = hostCtx as Context & { webServer?: WebServerLike; webRuntime?: { trustedHosts?: string[] } }
-    const webServer = (host.webServer ?? host.get('httpServer')) as WebServerLike | undefined
-    if (webServer === void 0) return
-    // Trusted authorities from the DEPLOYED web app: dsh-web-app's `webRuntime`
-    // service (`resolveLanTrust` — dsh-web-app/lib/index.js:28,175) carries the
-    // REAL populated list `{ ..., trustedHosts: [...lanAddresses, ...extra] }`
-    // where `extra` is the `--trusted-host` list (e.g.
-    // `laagencia.taildb5a7a.ts.net:8445` on the systemd unit). The deployment's
-    // trusted hosts are configured on dsh-web-app, NOT dsh-client-connection, so
-    // `connection.trustedHosts` is EMPTY at runtime and the real browser host is
-    // denied (403) if we read only that — which is why we prefer `webRuntime`
-    // FIRST. We fall back to `connection.trustedHosts` (the same list the rc.8
-    // client-connection channel vets against) and to `[]` (loopback-only) when
-    // both are absent.
-    // NOTE: this Cordis build exposes NO `ctx.getConfig('...')` API (verified
-    // absent from the cordis type surface and used by no dsh plugin), so the
-    // trusted hosts are read from the live services' public, schema-backed
-    // fields rather than the getConfig('web-app') / getConfig('client-connection')
-    // fallbacks (documented deviation). Empty when the services are absent /
-    // headless.
-    // src/invoke.ts BINDS `connection` (the dsh-client-connection HostConnectionService)
-    // into this callback via the inject declaration above, so it is read here
-    // from the injected scope (`hostCtx.get('connection')`) rather than a bare
-    // `ctx.get(...)` captured outside the inject — the bare lookup stayed
-    // UNDEFINED in our scope, which is exactly why the Tailscale browser 403'd.
-    const trustedHosts =
-      (host.webRuntime as { trustedHosts?: string[] } | undefined)?.trustedHosts ??
-      (hostCtx.get('connection') as ConnectionLike | undefined)?.trustedHosts ??
-      []
-    console.log(
-      `[deepartments] /deepartments channel mounted; trustedHosts=${JSON.stringify(trustedHosts)}; routes: agents/list, host/status, presence/get, presence/set, agenda/list`
-    )
-    // DECOUPLING PASO 1 — the RPC channel surface is CONSUMED from the composed
-    // dshd-gui plugin's `deepartments.gui` SERVICE (which dispatches with the
-    // `gui.endpointDeps` binder bucket REGISTERED above — the same wiring this
-    // effect used to build inline), instead of the direct in-bundle handler:
-    //   - dshd-gui composed → the service provides the channel (fail-loud R1 at
-    //     first use if the gui bucket is missing — the contract lock),
-    //   - dshd-gui ABSENT (a minimal composition with webServer) → the bundle
-    //     keeps serving the channel directly with the SAME registered deps
-    //     (R6, behavior-neutral — the dispatch semantics are unchanged).
-    const guiService = ctx.get('deepartments.gui') as
-      | { handleRequest(req: unknown, res: unknown, endpoint: string, trustedHosts: string[]): Promise<void> }
-      | undefined
-    // Register each client path as a `kind:'exact'` POST route. `webServer.register`
-    // returns a disposer; the effect folds them into one reversible registration
-    // (AGENTS.md: every registration is a reversible effect).
-    const routes: WebServerRouteLike[] = [
-      { path: '/deepartments/agents', endpoint: 'agents' },
-      { path: '/deepartments/list', endpoint: 'list' },
-      { path: '/deepartments/host/status', endpoint: 'host/status' },
-      { path: '/deepartments/presence/get', endpoint: 'presence/get' },
-      { path: '/deepartments/presence/set', endpoint: 'presence/set' },
-      { path: '/deepartments/agenda/list', endpoint: 'agenda/list' }
-    ].map(({ path, endpoint }) => ({
-      kind: 'exact' as const,
-      path,
-      handler: (req: unknown, res: unknown) =>
-        guiService !== undefined
-          ? guiService.handleRequest(req, res, endpoint, trustedHosts)
-          : handleDeepartmentsRequest(req, res, endpoint, trustedHosts, guiEndpointDeps)
-    }))
-    hostCtx.effect(() => {
-      const disposers = routes.map((route) => webServer.register(route))
-      return () => { for (const dispose of disposers) dispose() }
-    }, 'deepartments: agents/list + host/status + agenda/list RPC channel')
-  })
+  // LANE 0.2.3b (gui-split — TOTAL MODULARITY gap 3 cierre): THE MOUNT MOVED
+  // INTO dshd-gui. The webServer MOUNT EFFECT (`ctx.inject(['webServer',
+  // 'webRuntime', 'connection'], ...)` + the trust fence + the 6 exact routes
+  // `/deepartments/agents|list|host/status|presence/get|presence/set|agenda/list`)
+  // now lives in the PACKAGE's apply (packages/dshd-gui/src/index.ts — the
+  // `deepartments.gui` service + the routes/trust-fence are package-internal);
+  // the bundle no longer mounts the channel — it consumes what dshd-gui
+  // provides (the `deepartments.guiDeps` holder fill in the tools factory +
+  // this package's service). The HEADLESS loss is DOCUMENTED with the mount's
+  // existing justification (moved with the effect):
+  //   «when absent (headless / host-less) the channel — a GUI feature — is
+  //   skipped silently, exactly like the old `connection !== void 0` gate (the
+  //   client is the only consumer)» (was invoke.ts:3565-3567)
+  //   «skip silently (headless / host-less) if webServer is absent — the
+  //   channel is a GUI feature and the client is the only consumer, exactly
+  //   like the old `connection !== void 0` gate» (was invoke.ts:3577-3579).
+  // In a minimal composition WITHOUT dshd-gui the /deepartments channel no
+  // longer exists (accepted design — R6; the bundle keeps no inline fallback).
+  // Behavior preserved: the GUI/sidebar/routes are unchanged (the same 6
+  // byte-identical paths registered by dshd-gui; the smoke-boot route lock +
+  // the post-boot client-graph canary stay green).
 
 }
