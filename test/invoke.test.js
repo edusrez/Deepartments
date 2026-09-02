@@ -10777,6 +10777,62 @@ test('B2 dept_exec guard (fb-52, QH — the guard arithmetic false positive): a 
   assert.equal(deptExecDenyReason('echo $((86400000/24)) //3600000 | cat', '/srv/dept-ws', roots), undefined, 'the fb-10 digits-only division rule still holds')
 })
 
+test('B2 dept_exec guard (fb-62, IPH — token-guard refinement): the ROOT-WIPE `rm -rf /` is denied ONLY when the destination is the COMPLETE root `/` (`rm -rf /`, `rm -rf / `, `rm -rf /;…`) — a SCOPED cleanup (`rm -rf /root/.deepartments/…/tmp/buga`, `rm -rf /home/esuarez/projects/…/tmp/x`) under an allowed root is NO LONGER over-blocked by the loose-prefix substring; an OUT-of-root real rm target and the stable home STAY denied (access preserved)', () => {
+  // Roots mirror the runtime posture: /root/.deepartments (org stateDir) and
+  // /home/esuarez/projects are allowed roots, so a cleanup UNDER one of them is
+  // a legitimate scoped operation (the exact fb-62 false-positive class).
+  const roots = ['/home/esuarez/projects', '/root/.deepartments', '/usr/lib/node_modules/@deepseek-ai/dsh', '/srv/dept-ws', '/opt/dsh/.dsh-dev']
+  // (1) the COMPLETE-root destination is STILL denied — end-of-command, a
+  // trailing space, or a shell separator right after the slashes (the wipe is
+  // the ROOT itself, not a scoped path).
+  assert.match(deptExecDenyReason('rm -rf /', '/srv/dept-ws', roots), /denied token "rm -rf \/"/, 'the exact `rm -rf /` root wipe is STILL denied')
+  assert.match(deptExecDenyReason('rm -rf / ', '/srv/dept-ws', roots), /denied token "rm -rf \/"/, '`rm -rf / ` (trailing space) is STILL denied')
+  assert.match(deptExecDenyReason('rm -rf /; echo x', '/srv/dept-ws', roots), /denied token "rm -rf \/"/, 'a root wipe chained after `;` is STILL denied')
+  assert.match(deptExecDenyReason('/usr/bin/rm -rf /', '/srv/dept-ws', roots), /denied token "rm -rf \/"/, 'a full-path `rm` of the root is STILL denied')
+  // (2) fb-62: a SCOPED cleanup under an allowed root is ALLOWED — the loose
+  // `rm -rf /` prefix no longer over-blocks the legitimate hygiene class (the
+  // real-path scope check governs the target: in-root → runs).
+  assert.equal(deptExecDenyReason('rm -rf /root/.deepartments/departments/internal-programming/tmp/buga', '/srv/dept-ws', roots), undefined, 'a scoped cleanup under the org stateDir root is allowed (fb-62)')
+  assert.equal(deptExecDenyReason('rm -rf /home/esuarez/projects/deepartments/tmp/x', '/srv/dept-ws', roots), undefined, 'a scoped cleanup under the projects root is allowed (fb-62)')
+  assert.equal(deptExecDenyReason('rm -rf /opt/dsh/.dsh-dev/scratch', '/srv/dept-ws', roots), undefined, 'a scoped cleanup under the DEV home root is allowed (not stable)')
+  // (3) ACCESS is preserved: an rm of an OUT-of-root real path is STILL denied
+  // (now by the real-path scope check, not the removed loose token) and the
+  // stable home is STILL protected-denied.
+  assert.match(deptExecDenyReason('rm -rf /etc/passwd', '/srv/dept-ws', roots), /references absolute path "\/etc\/passwd" outside a scoped dept_exec root/, 'an rm of an out-of-root real path is STILL denied')
+  assert.match(deptExecDenyReason('rm -rf /tmp/x', '/srv/dept-ws', roots), /references absolute path "\/tmp\/x"/, 'an rm of an out-of-root /tmp target is STILL denied')
+  assert.match(deptExecDenyReason('rm -rf /opt/dsh/.dsh/agent.cordis.yml', '/srv/dept-ws', roots), /the stable profile is protected/, 'an rm of the stable home is STILL protected-denied')
+  // (4) the OTHER denylist tokens are untouched by the rm-rf refinement.
+  assert.match(deptExecDenyReason('sudo rm -rf /', '/srv/dept-ws', roots), /denied token "sudo"/, 'sudo is still denied regardless of the rm-rf root form')
+  assert.match(deptExecDenyReason('reboot now', '/srv/dept-ws', roots), /denied token "reboot"/, 'reboot is still denied')
+})
+
+test('B2 dept_exec guard (fb-53, QH — the guard arithmetic false-positive family): slash-DIGIT fragments with a TRAILING separator (`/1000,` from a python `round((x)/1000, 1)` with a space) or with CLOSE-GLUE `}`/`]` (awk `{print (a)/1000,1}`, a python dict/f-string `{(a)/1000,1}`, a list `[(a)/1000,1]`) are ARITHMETIC inside -c/heredoc — NEVER paths; a real letter-bearing path outside the roots in the SAME command STAYS denied (guard regression)', () => {
+  const roots = ['/home/esuarez/projects', '/usr/lib/node_modules/@deepseek-ai/dsh', '/srv/dept-ws', '/opt/dsh/.dsh-dev']
+  // (1) the head-lane record shapes — 0 denies (python -c round, bash $(( )),
+  // heredoc with )/1000,1).
+  assert.equal(deptExecDenyReason('python3 -c \'print(round((x)/1000,1))\'', '/srv/dept-ws', roots), undefined, 'python -c round((x)/1000,1) is allowed (0 denies)')
+  assert.equal(deptExecDenyReason('echo $((a/1000))', '/srv/dept-ws', roots), undefined, 'bash $((a/1000)) arithmetic is allowed')
+  assert.equal(deptExecDenyReason('python3 <<EOF\nprint(round((x)/1000,1))\nEOF', '/srv/dept-ws', roots), undefined, 'the heredoc with )/1000,1 is allowed (0 denies)')
+  // (2) fb-53 residual: a TRAILING separator — `/1000,` tokenized when a space
+  // or `)` follows the comma (python `round(x, 1)` spacing / trailing tuple).
+  assert.equal(deptExecDenyReason('python3 -c \'print(round((x)/1000, 1))\'', '/srv/dept-ws', roots), undefined, 'a trailing-comma fragment (space after comma) is arithmetic, not a path')
+  assert.equal(deptExecDenyReason('python3 -c \'print((x)/1000,)\'', '/srv/dept-ws', roots), undefined, 'a trailing comma at token end is arithmetic')
+  // (3) fb-53 residual: CLOSE-GLUE braces/brackets glued to the numeric
+  // fragment (awk/python block, dict/f-string/list code inside -c/heredoc).
+  assert.equal(deptExecDenyReason('awk \'{print (a)/1000,1}\'', '/srv/dept-ws', roots), undefined, 'awk `…/1000,1}` close-glue is arithmetic, not a path')
+  assert.equal(deptExecDenyReason('awk \'{printf "%.3f", (a)/1000}\'', '/srv/dept-ws', roots), undefined, 'awk `…/1000}` close-glue is arithmetic, not a path')
+  assert.equal(deptExecDenyReason('python3 -c \'print(f"{(a)/1000,1}")\'', '/srv/dept-ws', roots), undefined, 'a python f-string `…/1000,1}` close-glue is arithmetic, not a path')
+  assert.equal(deptExecDenyReason('python3 -c \'d={"k":(a)/1000,1}\'', '/srv/dept-ws', roots), undefined, 'a python dict `…/1000,1}` close-glue is arithmetic, not a path')
+  assert.equal(deptExecDenyReason('python3 -c \'print([(a)/1000,1])\'', '/srv/dept-ws', roots), undefined, 'a python list `…/1000,1]` close-glue is arithmetic, not a path')
+  // (4) GUARD REGRESSION: a real letter-bearing path OUTSIDE the roots in the
+  // same command (before or after the arithmetic) STAYS denied — the numeric
+  // carve-out is surgical and does not weaken the real-path scope check.
+  assert.match(deptExecDenyReason('cat /etc/passwd; python3 -c "print((x)/1000,1)"', '/srv/dept-ws', roots), /references absolute path "\/etc\/passwd"/, 'a real out-of-root path BEFORE arithmetic is STILL denied')
+  assert.match(deptExecDenyReason('python3 -c \'print((x)/1000,1)\'; cat /etc/passwd', '/srv/dept-ws', roots), /references absolute path "\/etc\/passwd"/, 'a real out-of-root path AFTER arithmetic is STILL denied')
+  assert.match(deptExecDenyReason('cat /etc/hosts', '/srv/dept-ws', roots), /references absolute path "\/etc\/hosts"/, 'an out-of-root real path alone stays denied')
+  assert.match(deptExecDenyReason('cat /var/log/syslog', '/srv/dept-ws', roots), /references absolute path "\/var\/log\/syslog"/, 'a letter-bearing multi-segment real path stays denied')
+})
+
 // ===========================================================================
 // E2-ZSTD (QH 2026-08-28): dept_zstd_read — the READ-ONLY .zstd session reader
 // for department posts (registered on the SAME `allowExec` gate as dept_exec,

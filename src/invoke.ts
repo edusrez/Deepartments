@@ -1237,12 +1237,39 @@ export const DEPT_EXEC_DEFAULT_ROOTS: readonly string[] = [
  * `systemctl is-active <unit>` form is permitted (non-mutating confirmation)
  * and is carved out in `deptExecDenyReason` via `isReadOnlySystemctl`; every
  * MUTATING systemctl form (start/stop/restart/enable/disable/daemon-reload/
- * mask/…) is still denied there. */
+ * mask/…) is still denied there. fb-62 (IPH — token-guard refinement): the
+ * root-wipe «rm -rf /» is deliberately NOT a loose substring here EITHER — a
+ * substring match over-blocks every SCOPED cleanup (`rm -rf /root/.deepartments/
+ * …`, `rm -rf /home/esuarez/projects/…`), so the ONLY remaining deny form is
+ * the COMPLETE-root destination handled by the dedicated `isRmRfRootWipe`
+ * below (the real-path scope check in `deptExecDenyReason` governs scoped
+ * targets: in-root allowed, out-of-root / stable protected-denied). */
 export const DEPT_EXEC_DENYLIST: readonly string[] = [
   'reboot', 'shutdown', 'poweroff', 'halt', 'init 0',
-  'sudo', 'su -', 'mkfs', 'fdisk', 'parted', 'dd if=', 'rm -rf /',
+  'sudo', 'su -', 'mkfs', 'fdisk', 'parted', 'dd if=',
   'nsenter', ':(){'
 ]
+
+/** fb-62 (IPH — token-guard refinement): whether the command contains an `rm`
+ * invocation whose DESTINATION is the COMPLETE filesystem root `/` — the ONLY
+ * form the legacy loose denylist substring «rm -rf /» must still catch. The
+ * destination is the root when a word-boundary `rm` + whitespace + `-rf` +
+ * whitespace is followed by ONE-OR-MORE `/` whose word ENDS at end-of-command,
+ * whitespace or a shell boundary (`;&|()<>` + quotes/backtick) — NEVER when
+ * the `/` prefixes a longer real path (`rm -rf /etc/passwd`, `rm -rf /root/
+ * .deepartments/…`, `rm -rf /home/esuarez/projects/…`): scoped destinations
+ * are governed by the REAL-PATH scope check in `deptExecDenyReason` (an
+ * in-root cleanup is ALLOWED — that is the fb-62 false positive being fixed —
+ * while an out-of-root `/etc/passwd`/`/tmp/x`/`/var/…` target is still DENIED
+ * there, and a `/opt/dsh/.dsh` target by the stable-protected check; a `/$VAR`
+ * / `/*` / `/#` destination still reaches the path-token scan as a heuristic
+ * raw token and is DENIED out-of-root). Case-insensitive. Module-private (NOT
+ * exported — the frozen lib/invoke.js export count must not grow; the B2 tests
+ * exercise the rule through the public `deptExecDenyReason`). */
+function isRmRfRootWipe(command: string): boolean {
+  const cmd = String(command ?? '')
+  return /\brm\s+-rf\s+\/+(?=$|[\s;&|()<>'"`])/i.test(cmd)
+}
 
 /** Whether the command is the SINGLE READ-ONLY `systemctl is-active <unit>` form
  * (non-mutating confirmation). Matches EXACTLY the spec pattern
@@ -1318,15 +1345,24 @@ export function isPathInside(candidate: string, root: string): boolean {
  * (a division with a precision/rescale fragment, or a thousands-separated
  * number), NOT a path; it must not be tokenized into an out-of-scope DENIAL
  * (the QD series' first guard false positive: the real work was a python
- * heredoc, not an absolute-path reference). Multi-segment and letter-bearing
- * absolute words are STILL path words and are checked EXACTLY as before. */
+ * heredoc, not an absolute-path reference). fb-53 (2026-09-02, QH — the SAME
+ * family, residual shapes): the numeric fragment ALSO tolerates a TRAILING
+ * separator (`/1000,` before a `)`/`;`/space — a python `round((x)/1000, 1)`
+ * with a space after the comma tokenizes `/1000,`) and a trailing CLOSE-GLUE
+ * `}`/`]` (awk/python `{…(a)/1000,1}`, a dict/f-string `{(a)/1000,1}`, a list
+ * `[(a)/1000,1]` — the tokenizer's word class does not end at `}`/`]`), all
+ * still ARITHMETIC inside heredocs/-c — NEVER a path. Multi-segment and
+ * letter-bearing absolute words are STILL path words and are checked EXACTLY
+ * as before. */
 function deptExecIsPathWord(token: string): boolean {
   const rest = token.replace(/^\/+/, '')
   if (rest === '') return false
   // fb-10 (digits-only) + fb-52 (digits with a `.`/`,` separator fragment —
-  // `1000`, `1000,1`, `1000.5`, `1,000`): pure numeric words are arithmetic/
-  // units, never paths. A letter-bearing word is a real path component.
-  return !/^[0-9]+([.,][0-9]+)*$/.test(rest)
+  // `1000`, `1000,1`, `1000.5`, `1,000`) + fb-53 (a TRAILING separator and/or
+  // a closing `}`/`]` glued to the numeric fragment): pure numeric words are
+  // arithmetic/units, never paths. A letter-bearing word is a real path
+  // component (checked exactly as before).
+  return !/^[0-9]+(?:[.,][0-9]+)*[.,]?[}\]]*$/.test(rest)
 }
 
 /** fb-10 (QH): mask the `$(( ... ))` arithmetic-expansion spans of a command
@@ -1456,6 +1492,11 @@ function deptExecCanonicalToken(token: string): string {
  * carve-out); (2b) `systemctl` — ONLY the single READ-ONLY
  * `systemctl is-active <unit>` form is permitted, every MUTATING systemctl
  * form (start/stop/restart/enable/disable/daemon-reload/mask/…) is DENIED;
+ * (2c) the ROOT-WIPE `rm -rf /` — fb-62 (IPH — token-guard refinement): the
+ * deny fires ONLY when the destination is the COMPLETE root `/` (end of
+ * command / whitespace / shell boundary after the slashes — `isRmRfRootWipe`),
+ * NEVER a scoped `rm -rf <path-under-a-root>` cleanup (the real-path scope
+ * check (4) governs scoped targets: in-root ALLOWED, out-of-root DENIED);
  * (3) a boundary-aware `/opt/dsh/.dsh` token in command OR cwd → the stable
  * profile is protected (its `-dev` sibling is NOT denied), UNLESS a
  * MISSION-LEVEL owner grant (`org.missionExecRoots`/`org.execRoots`) named the
@@ -1468,7 +1509,11 @@ function deptExecCanonicalToken(token: string): string {
  * sink in the whitelist is always allowed. fb-10 (QH): the token scan masks
  * `$((...))` arithmetic internals and skips `/`+digits-only / `//`-only words
  * (division/units — e.g. `$((10-fails))/10`, `/3600000`, `//3600000` — are NOT
- * paths); real letter-bearing/multi-segment absolute words are checked exactly
+ * paths); fb-52/fb-53 (QH — the guard arithmetic false-positive family): a
+ * `/`+NUMERIC word with a `.`/`,` separator fragment — `/1000,1`, `/3.14`,
+ * `/1,000`, incl. a TRAILING separator `/1000,` and a close-glue `/1000,1}` /
+ * `/1000}` / `/1000,1]` (heredoc/-c/awk arithmetic) — is ALSO NOT a path;
+ * real letter-bearing/multi-segment absolute words are checked exactly
  * as before (access preserved, out-of-root paths still denied). */
 export function deptExecDenyReason(command: string, cwd: string, allowedRoots: readonly string[]): string | undefined {
   const cmd = String(command ?? '').trim()
@@ -1494,6 +1539,18 @@ export function deptExecDenyReason(command: string, cwd: string, allowedRoots: r
   // owns those). The denylist already ran, so a mutating token is caught above.
   if (lower.includes('systemctl') && !isReadOnlySystemctl(cmd)) {
     return 'OUT_OF_SCOPE / DENIED — command contains a denied systemctl form (only the read-only `systemctl is-active <unit>` is permitted; mutating forms are the Asistente/owner\'s)'
+  }
+  // (2c) fb-62 (IPH — token-guard refinement): the ROOT-WIPE `rm -rf /` — the
+  // legacy loose denylist substring over-blocked every SCOPED cleanup (`rm -rf
+  // /root/.deepartments/…`, `rm -rf /home/esuarez/projects/…` — in-root
+  // targets, exactly the legitimate `rm -rf <tmp>/buga` hygiene class). The
+  // deny now fires ONLY when the destination is the COMPLETE root `/` (end of
+  // command / whitespace / shell boundary after the slashes); a `/`-prefixed
+  // REAL path destination is NOT this token — it is governed by the real-path
+  // scope check (4) below (in-root ALLOWED, out-of-root DENIED) and by the
+  // stable-protected check (3) for `/opt/dsh/.dsh`.
+  if (isRmRfRootWipe(cmd)) {
+    return 'OUT_OF_SCOPE / DENIED — command contains a denied token "rm -rf /" (escalate via the Asistente / owner approval)'
   }
   // (3) the stable profile is protected — the boundary-aware token (a whole
   // path component; `/opt/dsh/.dsh-dev` is NOT stable) → explicit owner approval.
