@@ -55,11 +55,24 @@
     opción A descartada, dedup 1b) + línea inline en guard-denials dept_exec
     (:1313) y dept_zstd_read (:1381) + guía 1c en agent.cordis.yml worker/head;
     suite 732/710/0/22 (+3 tests 568/569/570); reviewer PASS 8/8; CUT-4 y zonas
-    F6/fb-53 intactas; 0 deps. · **GUI modo
-    monitoreo (owner 09-01**: composer oculto no-host + toggle presencia —
-    verificar si el harness expone la presencia al client-inject; **scoping
-    EN CURSO** → job doc) · **higiene**: reports-move HECHO (09-02, copy al
-    árbol .dsh/reports) + dir huérfano reports pendiente + limpieza .tmp-*
+    F6/fb-53 intactas; 0 deps.
+  - **GUI modo monitoreo (owner 09-01) — SCOPING CERRADO 09-02
+    (reports/explore-deep/2026-09-02-gui-monitor-scoping-e2134a39.md) +
+    OWNER-GATED (parqueado — build NO iniciado)**: el harness NO expone la
+    presencia org al client-inject (solo sesiones propias vía WS/SSE); la GUI no
+    tiene identidad de viewer (fence no-auth; session.prompt callable) →
+    «composer oculto solo-a-no-host» = upstream/auth (NO plugin-alcanzable);
+    opciones org-side recomendadas: B1 presencia org (endpoint
+    /deepartments/presence/list + tab, ~0.5-1d) + A1 modo monitoreo GLOBAL
+    (composer bloqueado server-side, ~1-2d); A2 (auth/roles) = upstream. Decisión
+    owner pendiente (canal cerrado 09-02 → §3). Job doc borrador en §7 del
+    scoping (id gui-monitor-mode).
+  - **higiene**: reports-move HECHO (09-02, copy al árbol .dsh/reports) +
+    **higiene AMPLIA EN CURSO** (lane 09-02: PENDIENTE-3 temporales 25-31 ago
+    [invoke.ts.bak, tmp-count-imports.mjs, scratch-zone7/, .scratch*/, measure/,
+    logs raíz antiguos] · PENDIENTE-4 reports/{builder,reviewer}/.scratch-m22 ·
+    PENDIENTE-5 .hyg-scratch fixtures fx1/fx2 [verificar dependencias de tests] ·
+    dir huérfano reports) + limpieza .tmp-*
     quality (builder-2 09-02: BLOQUEADA por fb-64 — corroboración EN VIVO;
     → **DECISIÓN QH 09-02**: **2 FROZEN evidencia fb-9** (`.tmp-qi20-defa5d61`
     + `.tmp-explore-deep-64ecf16d` — este último CORREGIDO por el QH: mi
@@ -69,12 +82,15 @@
     roots lo habiliten (fb-64); respetar además `.inspect/repro-reasoning.mjs`
     y `.inspect/repro-config.mjs` en cualquier higiene amplia).
   - **fb-56 (clase interrupted-post/canary-kill — gestionada con re-drive +
-    FASE0)** · **fb-58 (prepared-stuck)** — en cola.
+    FASE0)** · **fb-58 (prepared-stuck — datapoint ola 3/3 del QH 09-02:
+    confirmaciones de memo m-2518/2519/2520 prepared→nunca delivered; candidato
+    lane mirror/transporte)** — en cola.
   - **fb-61 (Bug A SOURCE GATE, test-only)** · **fb-62+fb-53 (token-guard:
     full-path + aritmética)** · **fb-63 (toolset reviewer)** · **fb-64
     (execRoots + stateDir READ-ONLY — corroborado EN VIVO por builder-2 09-02;
-    aditivo, QH sin riesgo fb-55; verificar config real)** — en cola (orden:
-    GUI monitor → higiene amplia → fb-61 → fb-62+53 → fb-63 → fb-64).
+    aditivo, QH sin riesgo fb-55; verificar config real; habilita limpieza 6
+    STALE + copia canónica 2 FROZEN)** — en cola (orden: higiene amplia →
+    fb-61 → fb-62+53 → fb-63 → fb-64; GUI monitor owner-gated parqueado).
 - **CERRADOS en esta cola (no pedir de nuevo):** M4 (system-idle),
   M-A (context-threshold + dept_head_rotate), PACING (peak/valle),
   M-5 (misión-sin-inicio), M-6 (main-red), M-7 (mission-queue),
@@ -102,6 +118,12 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 
 ## 3. PENDIENTE-OWNER (decisiones — estado al 09-02)
 
+- **GUI modo monitoreo (owner 09-01) — DECISIÓN PENDIENTE (canal cerrado 09-02,
+  owner ausente)**: scoping CERRADO (reports/explore-deep/2026-09-02-gui-monitor-
+  scoping-e2134a39.md): ¿A1+B1 org-side (modo monitoreo global + presencia org,
+  plugin-first, 0 upstream) o A2 upstream (auth/roles para no-host selectivo)?
+  Recomendación IPD: A1+B1 ahora + A2 roadmap. Job doc borrador listo (§7 del
+  scoping, id gui-monitor-mode). Parqueado hasta veredicto.
 - **port upstream fb-51 (PR deepseek-harness `packages/fs/tool-fs-search`)** —
   go-ahead del owner; safety copy del fix en tmp/port-harness-fb51-ca5df751/
   (workspace IPD, hashes verificados); acción del HOST (clone/PR/rebuild del
