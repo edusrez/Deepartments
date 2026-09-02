@@ -24,10 +24,11 @@
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
-- **POST-DAG — cola nueva (DAG del IPH tras el cierre de 0.2.x):**
-  - **DI-by-services (RESIDUAL de la misión, mapa §4.2)**: muerte TOTAL del
-    binder register → DI por servicios (el register sigue asertado en el lock
-    CUT-4 `5b548545`). Lane de decisión post-misión.
+- **POST-DAG — cola nueva (DAG del IPH):**
+  - **DI-by-services CERRADO (73f60d9, deploy canary 11:17Z — MISIÓN 8/8)**:
+    muerte TOTAL del binder register → holders baseline service-first (P1 0
+    ctx.provide; md5 CUT-4 `5b548545` intacto; suite 724/702/0/22 EXACTA);
+    dept-as-plugin DESBLOQUEADO.
   - **fb-57 (provider-400 'function.arguments must be valid JSON', ALTO —
     escalado al IPH, m-2204)**: ≥2 workers distintos en <24h (q-i-6 +
     ai-industry-news-2); fix candidato: sanitizar tool-call args en el adapter
