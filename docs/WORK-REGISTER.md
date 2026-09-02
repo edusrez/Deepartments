@@ -33,23 +33,38 @@
     no muestrear inspector cuyo managerId sea inspector QD, o desvío a workers
     NO-QD pasados N niveles — fix runtime en el emitter (m-2170 del QH).
   - **fb-60 (infra-veracidad — propagación de aserciones en withTempStateDir) —
-    EN CURSO (lane 09-02, builder)**: regresión del de-flake lane 4 (8dcfc47d)
-    — el `return` en el finally del helper PISA la excepción del try (assert.fail
-    tragado → 0-fails falso). Fix `return`→`break` + guard test de propagación
-    (invoke.test.js:1021-1033 + :1162-1182); el fix DEJA VER fallos reales antes
-    enmascarados (188 E2 count frágil del skill mirror, 373 conflation de la
-    notificación pacing en el helper del test) + el flake M-6 SMOKE (362) ahora
-    visible — suite post-fix 726/702/2/22 (dur ~45 s; 362 intermitente).
+    CERRADO (549fdfb + 6b33664; lane 09-02 builder + seguidor)**: regresión del
+    de-flake lane 4 (8dcfc47d) — el `return` en el finally del helper PISA la
+    excepción del try (assert.fail tragado → 0-fails falso). Fix
+    `return`→`break` + guard test de propagación (invoke.test.js:1021-1033 +
+    :1162-1182) + seguidor builder-23 (3/3 fixes + cosmética); el fix DEJA VER
+    fallos reales antes enmascarados (188 E2 count frágil del skill mirror, 373
+    conflation de la notificación pacing en el helper del test) + el flake M-6
+    SMOKE (362) — suite re-cerrada 726/704/0/22 5/5 (0-fails VERDADEROS); QH
+    resuelto (verificación independiente).
   - **fb-50 (calibración M-A** capacidad efectiva + completion-reserve) ·
-    **fb-51/52 (glob literal-segment false-negative + guard aritmética)** — en
-    cola (batch tras F6).
-  - **feedback-nudge (opción B**, waterfall tools/post-execute) · **GUI modo
+    **fb-51/52 (glob literal-segment false-negative + guard aritmética)** —
+    **CERRADO (batch 5ada8ac, canary 15:37:49Z PASS)**: fb-50 knob
+    `health.contextCompletionReserve` 262144 aplicado en cordis.patch.yml
+    (:125-133/:616; default 0 = legacy); fb-51 anchorGlobPattern en el archivo
+    runtime del tool (fijado sha256 02e62ca4…/d3940b54…; bundle SIN el código
+    glob — greps 0/5 chunks; port upstream → §3); fb-52 guard aritmética.
+  - **feedback-nudge (opción B**, waterfall tools/post-execute — ROADMAP 09-01,
+    próxima lane) · **GUI modo
     monitoreo (owner 09-01**: composer oculto no-host + toggle presencia —
     verificar si el harness expone la presencia al client-inject; **scoping
-    pendiente**) · **higiene**: reports-move HECHO (09-02, copy al árbol
-    .dsh/reports) + dir huérfano reports pendiente.
+    pendiente** → job doc) · **higiene**: reports-move HECHO (09-02, copy al
+    árbol .dsh/reports) + dir huérfano reports pendiente + limpieza .tmp-*
+    quality (builder-2 09-02: BLOQUEADA por fb-64 — corroboración EN VIVO;
+    7 STALE + 1 AMBIGUO qi20 a decidir).
   - **fb-56 (clase interrupted-post/canary-kill — gestionada con re-drive +
     FASE0)** · **fb-58 (prepared-stuck)** — en cola.
+  - **fb-61 (Bug A SOURCE GATE, test-only)** · **fb-62+fb-53 (token-guard:
+    full-path + aritmética)** · **fb-63 (toolset reviewer)** · **fb-64
+    (execRoots + stateDir READ-ONLY — corroborado EN VIVO por builder-2 09-02;
+    aditivo, QH sin riesgo fb-55; verificar config real)** — en cola (orden:
+    feedback-nudge → GUI monitor → higiene amplia → fb-61 → fb-62+53 → fb-63 →
+    fb-64).
 - **CERRADOS en esta cola (no pedir de nuevo):** M4 (system-idle),
   M-A (context-threshold + dept_head_rotate), PACING (peak/valle),
   M-5 (misión-sin-inicio), M-6 (main-red), M-7 (mission-queue),
@@ -75,8 +90,16 @@ tools SB1-4 + presets SB6 + boot Z7 (decoupling HITO 3 — f28c719) · M-5
 b2ecb45 / c59e1ab) · hardening-401 (66399ad + 7248a55) · fb-27 (04f8c31).
 Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 
-## 3. PENDIENTE-OWNER (decisiones — estado al 09-01)
+## 3. PENDIENTE-OWNER (decisiones — estado al 09-02)
 
+- **port upstream fb-51 (PR deepseek-harness `packages/fs/tool-fs-search`)** —
+  go-ahead del owner; safety copy del fix en tmp/port-harness-fb51-ca5df751/
+  (workspace IPD, hashes verificados); acción del HOST (clone/PR/rebuild del
+  monorepo — no construible desde los roots del lane).
+- **billing top-up CRÍTICO** — señalado por el host en el wake 09-02.
+- **:3080 + stable-update (19 releases pendientes)** — actualización estable
+  pendiente de decisión/programación (ver veredicto RD alpha.4; HOLD 0.1.1-rc.2
+  documentado en ROADMAP 09-01).
 - **glm-fallback vía OpenRouter → DESCARTADO (owner 09-01)** — la flota sigue
   100% DS; el veredicto de fondo (ruta opencode-go es el cuello, no la key)
   queda como conocimiento del RD (reports/researcher/2026-09-01-consolidated-
@@ -139,13 +162,13 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   muestras del QD); candidatos: (a) tope de profundidad (no muestrear inspector
   cuyo padre inmediato fue QD) o (b) muestreo dirigido a workers NO-QD tras N
   niveles. Post-DAG (junto a mejoras de sistema; diseño de pipeline calidad).
-- **PROCESO CONSOLIDADO (QD 09-01, confirmado ×2 en job workers del research:
+- **PROCESO CONSOLIDADO (QD 09-01, confirmado x2 en job workers del research:
   deepseek-dsh-news-3 + ai-industry-news-4) — propagar jobId/contexto de ronda
   al mensaje del worker en rounds monitor-driven** (sin ello la MEMO NORM no se
   activa — el worker no sabe que es job worker y razona «Finish — ephemeral»).
   Routing: research/IPD (construcción del mensaje del monitor/job runner).
   + **convención fecha UTC** (frontmatter/nombres en UTC, no local — patrón
-  +1 día ×2 hoy). Post-B (o que el research-head lo tome si lo ve claro).
+  +1 día x2 hoy). Post-B (o que el research-head lo tome si lo ve claro).
 - **fb-2/fb-3 QD — AGENDADAS** (render dept_sleep en sleep EXITOSO + latencia
   noWake a cabezas dormidas — cola QD, sin ejecutar).
 - **F3 — barrido sesiones worker huérfanas** (Dx1 F3; backlog 0.2.x) ·
