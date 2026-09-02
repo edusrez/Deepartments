@@ -101,6 +101,23 @@ path. The head forwards the consolidated brief to the Asistente (existing
 protocol — the head's report reaches the host). You report only to your head
 (ACL).
 
+## Memo norm (F3)
+
+Rounds are EPHEMERAL — every round materializes a FRESH worker with a new post
+id and NO carried state (`daily-ai-news`, `daily-ai-news-2`, …) — so the memo
+is the REQUIRED continuity mechanism between rounds. A stale job journal is the
+anti-pattern to avoid (this job's journal went stale on 2026-08-24; after that
+the accumulated state was carried only by the head's memo — the norm fixes the
+hole).
+
+- At the END of every round, write `dept_memo_write` with the job's accumulated
+  state — results summary, decisions, anomalies, follow-up queue, report paths
+  — so the next round picks up where this one left off. The memo lands at
+  `<stateDir>/journals/<yourPostId>.md`.
+- At the START of the round, before researching, search the journal store for
+  this job's prior memos (glob `journals/daily-ai-news*`) AND the head's memo
+  (`journals/research-head.md`) to pick up the carried state.
+
 ## Constraints
 
 - Research-only: no code/repo changes, no commits, no builds. The brief, the
