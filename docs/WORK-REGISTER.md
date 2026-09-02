@@ -49,11 +49,16 @@
     (:125-133/:616; default 0 = legacy); fb-51 anchorGlobPattern en el archivo
     runtime del tool (fijado sha256 02e62ca4…/d3940b54…; bundle SIN el código
     glob — greps 0/5 chunks; port upstream → §3); fb-52 guard aritmética.
-  - **feedback-nudge (opción B**, waterfall tools/post-execute — ROADMAP 09-01,
-    EN CURSO lane 09-02 builder-3) · **GUI modo
+  - **feedback-nudge (opción B**, waterfall tools/post-execute — ROADMAP 09-01) —
+    **CERRADO (77ca2de, canary 17:11:10Z PASS — LIVE)**: handler
+    `tools/post-execute` (tools.ts:912; solo isError → 1 nudge plugin/notice,
+    opción A descartada, dedup 1b) + línea inline en guard-denials dept_exec
+    (:1313) y dept_zstd_read (:1381) + guía 1c en agent.cordis.yml worker/head;
+    suite 732/710/0/22 (+3 tests 568/569/570); reviewer PASS 8/8; CUT-4 y zonas
+    F6/fb-53 intactas; 0 deps. · **GUI modo
     monitoreo (owner 09-01**: composer oculto no-host + toggle presencia —
     verificar si el harness expone la presencia al client-inject; **scoping
-    pendiente** → job doc) · **higiene**: reports-move HECHO (09-02, copy al
+    EN CURSO** → job doc) · **higiene**: reports-move HECHO (09-02, copy al
     árbol .dsh/reports) + dir huérfano reports pendiente + limpieza .tmp-*
     quality (builder-2 09-02: BLOQUEADA por fb-64 — corroboración EN VIVO;
     → **DECISIÓN QH 09-02**: **2 FROZEN evidencia fb-9** (`.tmp-qi20-defa5d61`
@@ -69,8 +74,7 @@
     full-path + aritmética)** · **fb-63 (toolset reviewer)** · **fb-64
     (execRoots + stateDir READ-ONLY — corroborado EN VIVO por builder-2 09-02;
     aditivo, QH sin riesgo fb-55; verificar config real)** — en cola (orden:
-    feedback-nudge → GUI monitor → higiene amplia → fb-61 → fb-62+53 → fb-63 →
-    fb-64).
+    GUI monitor → higiene amplia → fb-61 → fb-62+53 → fb-63 → fb-64).
 - **CERRADOS en esta cola (no pedir de nuevo):** M4 (system-idle),
   M-A (context-threshold + dept_head_rotate), PACING (peak/valle),
   M-5 (misión-sin-inicio), M-6 (main-red), M-7 (mission-queue),
