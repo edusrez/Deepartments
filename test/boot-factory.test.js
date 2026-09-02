@@ -68,6 +68,9 @@ async function smokeBoot(stateDir, { org = { departments: [] }, agents = false }
   for (const id of ['dshd-feedback', 'dshd-quality', 'dshd-pooler', 'dshd-jobs', 'dshd-health', 'dshd-gui']) {
     loader.create({ id, name: id, config: {} })
   }
+  // LANE 0.2.2 (gap 2): the dev-profile composition now includes the
+  // dshd-orchestration package (the 5 factory SERVICES + the deps holders).
+  loader.create({ id: 'dshd-orchestration', name: 'dshd-orchestration', config: {} })
   loader.create({ id: 'deepartments', name: '../lib/index.js', config: { stateDir, org } })
   await loader.await()
   if (agentsStub !== undefined) {
@@ -162,12 +165,17 @@ const DEPARTMENT = {
 }
 
 test('boot-factory: the BOOT ZONE (config source + registry + catalog + lifecycle tools + presence + boot hooks) was hoisted VERBATIM into the orchestration factory (the artifact + the movement lock)', () => {
-  const factory = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'boot.ts'), 'utf8')
+  const factory = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'boot.ts'), 'utf8')
+  const bridge = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'boot.ts'), 'utf8')
   const invoke = readFileSync(path.join(REPO_ROOT, 'src', 'invoke.ts'), 'utf8')
   // The artifact: the factory module exports the typed orchestration surface.
   assert.ok(factory.includes('export function createBootOrchestration('), 'factory exports createBootOrchestration')
   assert.ok(factory.includes('export interface BootFactoryDeps'), 'factory exports BootFactoryDeps')
   assert.ok(factory.includes('export interface BootSurface'), 'factory exports BootSurface')
+  // LANE 0.2.2: src/core/orchestration/boot.ts is the NOMINAL re-export bridge
+  // to dshd-orchestration (R6 drop-in superset).
+  assert.ok(bridge.includes("from 'dshd-orchestration'"), 'the bridge re-exports from dshd-orchestration')
+  assert.ok(bridge.includes('createBootOrchestration'), 'the bridge names createBootOrchestration')
   // The movement: the bundle imports the factory ...
   assert.ok(invoke.includes("from './core/orchestration/boot.js'"), 'invoke.ts imports the factory')
   // ... and NO LONGER defines the boot-zone closures inline (they live in the
@@ -226,7 +234,7 @@ test('boot-factory: the BOOT ZONE (config source + registry + catalog + lifecycl
   // (service-first 'deepartments.boot' → the factory), the 5 direct deps by
   // reference (config + 4 invoke.ts module-scope pure helpers) and the THREE
   // late-seam getters:
-  assert.ok(/ctx\.get\('deepartments\.boot'\) as BootSurface \| undefined\) \?\? createBootOrchestration\(/.test(invoke), 'the bundle invokes the boot service service-first with the inline R6 fallback')
+  assert.ok(/ctx\.get\('deepartments\.boot', false\) as BootSurface \| undefined\) \?\? createBootOrchestration\(/.test(invoke), 'the bundle invokes the boot service service-first (NON-STRICT get — the loader may apply rows concurrently; a strict get can race a sibling row mid-apply) with the inline R6 fallback')
   for (const dep of ['config,', 'readPresenceStateFile,', 'writePresenceStateFile,', 'askUserGuardReason,', 'pinHostSessionTitle,']) {
     assert.ok(invoke.includes(dep), `the invocation passes ${dep.replace(',', '')} by reference`)
   }
@@ -238,16 +246,17 @@ test('boot-factory: the BOOT ZONE (config source + registry + catalog + lifecycl
   // read the SAME bindings):
   assert.ok(/const \{[\s\S]*?subagents,[\s\S]*?agents,[\s\S]*?agentPresets,[\s\S]*?stateDir,[\s\S]*?org,[\s\S]*?registry,[\s\S]*?byPost,[\s\S]*?qualityWorkerInspectProbability,[\s\S]*?byChild,[\s\S]*?byHeadHandle,[\s\S]*?disposingHeads,[\s\S]*?headProgress,[\s\S]*?serializeHeadRecovery,[\s\S]*?wakePackInjected,[\s\S]*?deferredSleepReplace,[\s\S]*?hosts,[\s\S]*?hostForSession,[\s\S]*?buildCatalogRows,[\s\S]*?activeCatalogMembers,[\s\S]*?activeMembersSchema,[\s\S]*?renderActiveRoster,[\s\S]*?memoWriteTool,[\s\S]*?sleepTool,[\s\S]*?postRetireTool,[\s\S]*?persistHosts,[\s\S]*?ensureHost,[\s\S]*?hostIdForSession,[\s\S]*?persistPosts,[\s\S]*?registerEntry,[\s\S]*?postIdForChild,[\s\S]*?presenceCache,[\s\S]*?refreshPresence,[\s\S]*?savePresence,[\s\S]*?notifyHostPresence,[\s\S]*?registryLoaded,[\s\S]*?hostsLoaded,[\s\S]*?HOST_ATTACH_REPAIR_RETRY_MS,[\s\S]*?HOST_ATTACH_REPAIR_TIMEOUT_MS,[\s\S]*?repairHostWorkspaceAttach[\s\S]*?\} = bootSurface/.test(invoke), 'the bundle destructures the full BootSurface at the same fiber position (40 members)')
   // The compiled bundle still exports the SAME superset; the factory compiled
-  // into lib/ contains the zone closures (ZONA 7).
-  const lib = readFileSync(path.join(REPO_ROOT, 'lib', 'core', 'orchestration', 'boot.js'), 'utf8')
-  assert.ok(lib.includes('createBootOrchestration'), 'the compiled factory exists in lib/')
+  // into the PACKAGE lib contains the zone closures (ZONA 7) — the bundle lib
+  // bridge re-exports it.
+  const lib = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'lib', 'boot.js'), 'utf8')
+  assert.ok(lib.includes('createBootOrchestration'), 'the compiled factory exists in the package lib/')
   assert.ok(lib.includes('const repairHostWorkspaceAttach'), 'the compiled factory carries the host attach-repair closure')
   assert.ok(lib.includes('const buildCatalogRows'), 'the compiled factory carries the C1/C3 catalog builder')
   assert.ok(lib.includes('const memoWriteTool'), 'the compiled factory carries the R1 memo tool builder')
   assert.ok(lib.includes('const presenceCache'), 'the compiled factory carries the presence cache')
 })
 
-test('boot-factory (composed boot): the wiring is intact — the 5 deps pass by reference, the 3 late-seam getters exist, the 9 Binder buckets register from the bundle, NO deepartments.boot provided (P1), the factory locals stay internal', async () => {
+test('boot-factory (composed boot): the wiring is intact — the 5 deps pass by reference, the 3 late-seam getters exist, the 9 Binder buckets register from the bundle, deepartments.boot PROVIDED by dshd-orchestration (P1 — the package provides, the bundle consumes), the factory locals stay internal', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-boot-factory-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] } })
@@ -265,12 +274,14 @@ test('boot-factory (composed boot): the wiring is intact — the 5 deps pass by 
         assert.ok(buckets[bucket] !== undefined && Object.keys(buckets[bucket]).length > 0, `${bucket} zone bucket still filled (PASO 1 untouched)`)
       }
       // 0 ctx.provide nuevos (P1 invariant "el bundle consume, nunca provee"):
-      // the boot service surface is NOT provided — the inline R6 factory is
-      // the fallback (smoke-boot service set intacto).
-      assert.equal(ctx.get('deepartments.boot'), undefined, 'deepartments.boot is NOT provided (P1 — provide deferred to hito 4)')
+      // LANE 0.2.2: the boot SERVICE surface IS provided by the
+      // dshd-orchestration package in the dev profile (the holder filled by
+      // the bundle — the P1 invariant is now "the BUNDLE never provides; the
+      // PACKAGE does").
+      assert.equal(ctx.get('deepartments.boot') === undefined, false, 'deepartments.boot IS provided (LANE 0.2.2 — dshd-orchestration provides the boot service)')
       // The factory-locals stay internal: the SURFACE RETURN block does NOT
       // leak coreOrg/cfg/headRecoveryQueues/CatalogRow/runPendingWebUiCleanups.
-      const factory = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'boot.ts'), 'utf8')
+      const factory = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'boot.ts'), 'utf8')
       const surfaceReturn = factory.slice(factory.indexOf('SURFACE RETURN'))
       for (const local of ['coreOrg,', 'cfg,', 'headRecoveryQueues,', 'CatalogRow,', 'runPendingWebUiCleanups,']) {
         assert.ok(!surfaceReturn.includes(local), `factory-local ${local} is not a surface member`)
@@ -282,8 +293,9 @@ test('boot-factory (composed boot): the wiring is intact — the 5 deps pass by 
       assert.ok(/const lifecycle: BootFactoryDeps\['late'\]\['lifecycle'\] = \{[\s\S]*?memoWrite: \(\.\.\.args\) => late\.lifecycle\.memoWrite\(\.\.\.args\)/.test(factory), 'the factory rebinds lifecycle as a delegating local object over the late getter')
       const invoke = readFileSync(path.join(REPO_ROOT, 'src', 'invoke.ts'), 'utf8')
       // The invocation `late` carries EXACTLY 3 getters (the 3 boot-zone
-      // call-time seams).
-      const invocation = invoke.slice(invoke.indexOf('createBootOrchestration(ctx, {'), invoke.indexOf('} = bootSurface'))
+      // call-time seams). LANE 0.2.2: the deps object lives in the hoisted
+      // `bootDeps` const (registered into the holder + used as the R6 fallback).
+      const invocation = invoke.slice(invoke.indexOf('const bootDeps: BootFactoryDeps = {'), invoke.indexOf('} = bootSurface'))
       const lateStart = invocation.indexOf('late: {')
       let lateDepth = 1
       let k = lateStart + 'late: {'.length

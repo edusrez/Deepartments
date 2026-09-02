@@ -132,6 +132,9 @@ async function smokeBoot(stateDir, { org = { departments: [] }, agents = false }
   for (const id of ['dshd-feedback', 'dshd-quality', 'dshd-pooler', 'dshd-jobs', 'dshd-health', 'dshd-gui']) {
     loader.create({ id, name: id, config: {} })
   }
+  // LANE 0.2.2 (gap 2): the dev-profile composition now includes the
+  // dshd-orchestration package (the 5 factory SERVICES + the deps holders).
+  loader.create({ id: 'dshd-orchestration', name: 'dshd-orchestration', config: {} })
   loader.create({ id: 'deepartments', name: '../lib/index.js', config: { stateDir, org } })
   await loader.await()
   if (agentsStub !== undefined) {
@@ -156,12 +159,17 @@ const DEPARTMENT = {
 }
 
 test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pack W8-d) was hoisted VERBATIM into the orchestration factory (the artifact + the movement lock)', () => {
-  const factory = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'presets.ts'), 'utf8')
+  const factory = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'presets.ts'), 'utf8')
+  const bridge = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'presets.ts'), 'utf8')
   const invoke = readFileSync(path.join(REPO_ROOT, 'src', 'invoke.ts'), 'utf8')
   // The artifact: the factory module exports the typed orchestration surface.
   assert.ok(factory.includes('export function createPresetsOrchestration('), 'factory exports createPresetsOrchestration')
   assert.ok(factory.includes('export interface PresetsFactoryDeps'), 'factory exports PresetsFactoryDeps')
   assert.ok(factory.includes('export interface PresetsSurface'), 'factory exports PresetsSurface')
+  // LANE 0.2.2: src/core/orchestration/presets.ts is the NOMINAL re-export
+  // bridge to dshd-orchestration (R6 drop-in superset).
+  assert.ok(bridge.includes("from 'dshd-orchestration'"), 'the bridge re-exports from dshd-orchestration')
+  assert.ok(bridge.includes('createPresetsOrchestration'), 'the bridge names createPresetsOrchestration')
   // The movement: the bundle imports the factory ...
   assert.ok(invoke.includes("from './core/orchestration/presets.js'"), 'invoke.ts imports the factory')
   // ... and NO LONGER defines the zone closures inline (they live in the
@@ -234,7 +242,7 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.presets' → the factory) and the 16 direct
   // deps by reference + the ONE late seam getter:
-  assert.ok(/ctx\.get\('deepartments\.presets'\) as PresetsSurface \| undefined\) \?\? createPresetsOrchestration\(/.test(invoke), 'the bundle invokes the presets service service-first with the inline R6 fallback')
+  assert.ok(/ctx\.get\('deepartments\.presets', false\) as PresetsSurface \| undefined\) \?\? createPresetsOrchestration\(/.test(invoke), 'the bundle invokes the presets service service-first (NON-STRICT get — the loader may apply rows concurrently) with the inline R6 fallback')
   for (const dep of ['config,', 'stateDir,', 'org,', 'agents,', 'byPost,', 'hosts,', 'hostIdForSession,', 'refreshPresence,', 'persistHosts,', 'postIdForChild,', 'deferredSleepReplace,', 'wakePackInjected,', 'isUsableAgentOptions,', 'yamlList,', 'computeHostSleepSurfacePlan,', 'readPresenceStateFile,']) {
     assert.ok(invoke.includes(dep), `the invocation passes ${dep.replace(',', '')} by reference`)
   }
@@ -244,16 +252,16 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
   // agent/pre-step registration read the SAME bindings):
   assert.ok(/const \{[\s\S]*?HOST_AGENT_OPTIONS,[\s\S]*?PRESET_ID,[\s\S]*?WORKER_AGENT_OPTIONS,[\s\S]*?WORKER_PRESET_ID,[\s\S]*?resolveMaterializeAgentOptions,[\s\S]*?repoRoot,[\s\S]*?dshHome,[\s\S]*?materializePreset,[\s\S]*?materializeHeadPreset,[\s\S]*?journalPathFor,[\s\S]*?writeJournal,[\s\S]*?bumpHostSleepCounter,[\s\S]*?bumpPostSleepCounter,[\s\S]*?readJournal,[\s\S]*?coordinatorForPost,[\s\S]*?departmentForPost,[\s\S]*?departmentForEntry,[\s\S]*?assembleHeartbeat,[\s\S]*?roleForSessionLive,[\s\S]*?wakePackService[\s\S]*?\} = presetsSurface/.test(invoke), 'the bundle destructures the full PresetsSurface at the same fiber position (20 members)')
   // The compiled bundle still exports the SAME superset; the factory compiled
-  // into lib/ contains the zone closures (SUB-PASO 6).
-  const lib = readFileSync(path.join(REPO_ROOT, 'lib', 'core', 'orchestration', 'presets.js'), 'utf8')
-  assert.ok(lib.includes('createPresetsOrchestration'), 'the compiled factory exists in lib/')
+  // into the PACKAGE lib contains the zone closures (SUB-PASO 6).
+  const lib = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'lib', 'presets.js'), 'utf8')
+  assert.ok(lib.includes('createPresetsOrchestration'), 'the compiled factory exists in the package lib/')
   assert.ok(lib.includes('materializeHeadPreset'), 'the compiled factory carries the per-head preset materialization closure')
   assert.ok(lib.includes('const writeJournal = async'), 'the compiled factory carries the journal T1 closure')
   assert.ok(lib.includes('const wakePackService ='), 'the compiled factory carries the wake-pack construction')
   assert.ok(lib.includes('const assembleHeartbeat ='), 'the compiled factory carries the W8-d heartbeat assembly')
 })
 
-test('presets-factory (composed boot): the wiring is intact — the late-seam thenable rebind exists, the 16 deps pass by reference, the 9 Binder buckets register from the bundle, NO deepartments.presets provided (P1), the wake-pack/delivery consumers still resolve', async () => {
+test('presets-factory (composed boot): the wiring is intact — the late-seam thenable rebind exists, the 16 deps pass by reference, the 9 Binder buckets register from the bundle, deepartments.presets PROVIDED by dshd-orchestration (P1 — the package provides, the bundle consumes), the wake-pack/delivery consumers still resolve', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-presets-factory-'))
   try {
     const { pluginCtx, dispose } = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] } })
@@ -272,16 +280,16 @@ test('presets-factory (composed boot): the wiring is intact — the late-seam th
         assert.ok(buckets[bucket] !== undefined && Object.keys(buckets[bucket]).length > 0, `${bucket} zone bucket still filled (PASO 1 untouched)`)
       }
       // 0 ctx.provide nuevos (P1 invariant "el bundle consume, nunca provee"):
-      // the presets service surface is NOT provided — the inline R6 factory is
-      // the fallback (smoke-boot service set intacto).
-      assert.equal(ctx.get('deepartments.presets'), undefined, 'deepartments.presets is NOT provided (P1 — provide deferred to hito 4)')
+      // LANE 0.2.2: the presets SERVICE surface IS provided by the
+      // dshd-orchestration package in the dev profile.
+      assert.equal(ctx.get('deepartments.presets') === undefined, false, 'deepartments.presets IS provided (LANE 0.2.2 — dshd-orchestration provides the presets service)')
       // The wake-pack binder bucket carries assembleHeartbeat + repoRoot (the
       // presets surface members the tools factory registered) — the composed
       // dshd-core wakepack service reads them lazily at use (buildWakePackLazy).
       const wakepackBucket = buckets.wakepack
       assert.equal(typeof wakepackBucket.assembleHeartbeat, 'function', 'the wakepack binder bucket carries assembleHeartbeat (the presets surface member)')
       assert.equal(typeof wakepackBucket.repoRoot, 'string', 'the wakepack binder bucket carries repoRoot')
-      const factory = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'presets.ts'), 'utf8')
+      const factory = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'presets.ts'), 'utf8')
       // The LATE seam rebind: the factory binds the DeliverySurface store seam
       // as a delegating THENABLE over the `late` getter (the zone text awaits
       // `messagesStoreReady` as a value — the tools.ts:793 pattern).
@@ -289,7 +297,8 @@ test('presets-factory (composed boot): the wiring is intact — the late-seam th
       const invoke = readFileSync(path.join(REPO_ROOT, 'src', 'invoke.ts'), 'utf8')
       // The invocation `late` carries EXACTLY 1 getter (messagesStoreReady —
       // the ONLY delivery seam the presets zone dereferences at call time).
-      const invocation = invoke.slice(invoke.indexOf('createPresetsOrchestration(ctx, {'), invoke.indexOf('} = presetsSurface'))
+      // LANE 0.2.2: the deps object lives in the hoisted `presetsDeps` const.
+      const invocation = invoke.slice(invoke.indexOf('const presetsDeps: PresetsFactoryDeps = {'), invoke.indexOf('} = presetsSurface'))
       const lateStart = invocation.indexOf('late: {')
       let lateDepth = 1
       let k = lateStart + 'late: {'.length

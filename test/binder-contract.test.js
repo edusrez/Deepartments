@@ -71,11 +71,13 @@ const REQUIRED_ZONE_FIELDS = {
 
 /** Extract the TOP-LEVEL bucket keys of the bundle's `binder?.register({...})`
  * call. SUB-BATCH 4 (tools CUT4): the call MOVED with the zone VERBATIM into
- * src/core/orchestration/tools.ts (the tools factory — the SAME fiber
- * position, the same buckets); the static source target follows the movement.
+ * the tools factory (the SAME fiber position, the same buckets); the static
+ * source target follows the movement. LANE 0.2.2 (gap 2): the factory MOVED
+ * into the dshd-orchestration package — the register lives at
+ * packages/dshd-orchestration/src/tools.ts.
  * Returns the list of registered bucket names. */
 function extractRegisterBucketKeys() {
-  const src = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'tools.ts'), 'utf8')
+  const src = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'tools.ts'), 'utf8')
   const marker = 'binder?.register({'
   const start = src.indexOf(marker)
   assert.ok(start !== -1, 'the bundle binder.register call exists in the tools factory (moved VERBATIM with the CUT4 zone)')
@@ -180,7 +182,7 @@ test('binder-contract: IF a zone bucket is registered, it carries ONLY fields th
     // single combined object today — the fields of a zone bucket are the
     // top-level keys nested under the bucket). The tokenizer extracts the
     // object literal once; bucket field lines are 8-space indented under it.
-    const src = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'tools.ts'), 'utf8')
+    const src = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'tools.ts'), 'utf8')
     const marker = 'binder?.register({'
     const start = src.indexOf(marker)
     let depth = 1

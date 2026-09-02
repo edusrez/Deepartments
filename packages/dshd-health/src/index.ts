@@ -2267,6 +2267,17 @@ export interface HealthDaemonDeps {
    * qi-silence watchdog derives its rate-aware minimum on it. Absent →
    * 0.25 (the code default). */
   qiDirectiveRate?: number
+  /** LANE 0.2.2 (P4) — the SUBSTITUTABLE pacing policy (deepartments.pacing —
+   * dshd-orchestration provides the default wrapper over the pure pacing
+   * module; a policy plugin may compose its own). When present, the
+   * work-register-idle franja leg + the transition monitor resolve THROUGH the
+   * service (`pacingService.isPeakAt(now)`); absent → the pure
+   * `isPeakAt(now, pacingWindowFromConfig(config.org.pacing))` fallback (R6,
+   * byte-identical). */
+  pacingService?: {
+    isPeakAt(date: Date, options?: unknown): boolean
+    pacingStateAt(date: Date, options?: unknown): { peak: boolean; untilMs: number; untilHhMm: string; span: string }
+  }
   /** M4 — the HOST agent's live running signal: whether the LIVE (non-retired)
    * host's session is CURRENTLY mid-turn (`agents.get(SessionId(hostEntry.sessionId))
    * ?.status === 'running'` — the SAME expression the bundle's buildCatalogRows
@@ -5010,9 +5021,13 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     if (workRegisterIdleEnabled && deps.workRegisterPath !== undefined && deps.hostRunning !== undefined) {
       try {
         // The franja VALLE leg REUSES the dshd-core pacing (isPeakAt == false
-        // — the same window the transition monitor uses).
+        // — the same window the transition monitor uses). LANE 0.2.2 (P4): the
+        // leg resolves service-FIRST through the substitutable pacing policy
+        // (deepartments.pacing) when composed; the pure fallback stays R6.
         const pacingWindow = pacingWindowFromConfig(deps.config?.org?.pacing)
-        const valley = !isPeakAt(new Date(nowMs), pacingWindow)
+        const valley = deps.pacingService !== undefined
+          ? !deps.pacingService.isPeakAt(new Date(nowMs))
+          : !isPeakAt(new Date(nowMs), pacingWindow)
         // The register is read SOLO-LECTURA (best-effort — the watchdog NEVER
         // writes it; an unreadable/absent register degrades to '' → the census
         // legs fail → conservative no-op).
@@ -5181,7 +5196,12 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     if (deps.config?.org?.pacing?.enabled !== false) {
       try {
         const pacingWindow = pacingWindowFromConfig(deps.config?.org?.pacing)
-        const franja: 'peak' | 'valle' = isPeakAt(new Date(nowMs), pacingWindow) ? 'peak' : 'valle'
+        // LANE 0.2.2 (P4): the transition monitor resolves service-FIRST
+        // through the substitutable pacing policy when composed (the pure
+        // fallback stays R6).
+        const franja: 'peak' | 'valle' = deps.pacingService !== undefined
+          ? (deps.pacingService.isPeakAt(new Date(nowMs)) ? 'peak' : 'valle')
+          : (isPeakAt(new Date(nowMs), pacingWindow) ? 'peak' : 'valle')
         const prev = readPacingState(deps.stateDir)
         if (prev === undefined) {
           // FIRST BOOT: baseline only, no notice (documented decision — see
@@ -5199,7 +5219,9 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
             if (live === undefined) {
               deps.logger?.warn('[deepartments] system-health: pacing transition detected but no live host to notify — skip (retries on the next tick)')
             } else {
-              const pacingState = pacingStateAt(new Date(nowMs), pacingWindow)
+              const pacingState = deps.pacingService !== undefined
+                ? deps.pacingService.pacingStateAt(new Date(nowMs)) as unknown as { peak: boolean; untilMs: number; untilHhMm: string; span: string }
+                : pacingStateAt(new Date(nowMs), pacingWindow)
               // The VALLE notice's N: the WORK-REGISTER pending queue when
               // legible (best-effort; unreadable → the count is omitted).
               let deferredCount: number | undefined
@@ -5535,6 +5557,10 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
         deliveryRowsReader: explicit.deliveryRowsReader,
         poolerStatePath: explicit.poolerStatePath,
         qiDirectiveRate: explicit.qiDirectiveRate ?? depsHolder.get().qiDirectiveRate,
+        // LANE 0.2.2 (P4): the substitutable pacing policy — resolved PER TICK
+        // via ctx.get (a policy plugin composed by the row may be substituted
+        // at any time; the pure fallback stays the code path when absent).
+        pacingService: explicit.pacingService ?? (ctx.get('deepartments.pacing') as { isPeakAt(date: Date, options?: unknown): boolean; pacingStateAt(date: Date, options?: unknown): { peak: boolean; untilMs: number; untilHhMm: string; span: string } } | undefined),
         notifyHost,
         // LANE 2 (fb-27): the turn/end-error HEAD notification closure flows
         // through the EXPLICIT per-tick deps (the bundle's `healthNotifyHead`).

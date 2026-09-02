@@ -78,11 +78,13 @@ async function smokeBoot(stateDir, { org = { departments: [] } } = {}) {
   new StubWebServer(root)
   new StubWebRuntime(root)
   new StubConnection(root)
-  // The dev-profile composition subset (exact row order):
+  // The dev-profile composition subset (exact row order — LANE 0.2.2 adds the
+  // dshd-orchestration row BETWEEN the P1 packages and the bundle):
   loader.create({ id: 'dshd-core', name: 'dshd-core', config: { stateDir, org } })
   for (const id of ['dshd-feedback', 'dshd-quality', 'dshd-pooler', 'dshd-jobs', 'dshd-health', 'dshd-gui']) {
     loader.create({ id, name: id, config: {} })
   }
+  loader.create({ id: 'dshd-orchestration', name: 'dshd-orchestration', config: {} })
   loader.create({ id: 'deepartments', name: '../lib/index.js', config: { stateDir, org } })
   await loader.await()
   const pluginCtx = () => loader.resolve('deepartments').fiber?.ctx ?? loader.resolve('deepartments').ctx
@@ -103,10 +105,13 @@ test('smoke-boot: the REAL dev-profile composition (dshd-core + 6 P1 + bundle) a
       // The bundle applied: the plugin ctx is resolvable and the boot line ran.
       assert.ok(pluginCtx() !== undefined, 'the deepartments plugin ctx resolves (bundle applied)')
       // Every deepartments.* service the P1 packages provide resolves at boot.
+      // LANE 0.2.2: +5 — the dshd-orchestration factory services.
       for (const service of [
         'deepartments.org', 'deepartments.catalog', 'deepartments.binder',
         'deepartments.feedback', 'deepartments.quality', 'deepartments.pooler',
-        'deepartments.jobs', 'deepartments.health', 'deepartments.gui'
+        'deepartments.jobs', 'deepartments.health', 'deepartments.gui',
+        'deepartments.boot', 'deepartments.presets', 'deepartments.spawn',
+        'deepartments.tools', 'deepartments.delivery'
       ]) {
         assert.ok(pluginCtx().get(service) !== undefined, `${service} resolves`)
       }

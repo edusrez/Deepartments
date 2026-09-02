@@ -57,6 +57,7 @@ export * from './role-orient.js'
 // the structural PacingConfigLike mirror. Consumed by the wake-pack assembly
 // (this package), the system-health daemon (dshd-health) and the bundle.
 export * from './pacing.js'
+import type { PacingWindowOptions, PacingState } from './pacing.js'
 
 // ---------------------------------------------------------------------------
 // FASE 2.5 BATCH B — the dshd-core Cordis plugin surface.
@@ -501,7 +502,14 @@ function buildWakePackLazy(ctx: Context, binder: Binder): WakePackService {
     // `## Pacing (franja)` section from it (default ON; an explicit
     // `pacing.enabled === false` → the section is omitted, the pre-pacing pack).
     // Absent config → the code defaults (the same defaults the daemon uses).
+    // LANE 0.2.2 (P4): the SUBSTITUTABLE pacing policy (deepartments.pacing —
+    // the default wrapper over the pure pacing module; a policy plugin may
+    // compose its own) flows into the wake-pack service: the franja resolves
+    // service-first, the pure fallback stays R6.
     pacing: org.org.pacing,
+    pacingService: ctx.get('deepartments.pacing') as
+      | { isPeakAt(date: Date, options?: PacingWindowOptions): boolean; pacingStateAt(date: Date, options?: PacingWindowOptions): PacingState }
+      | undefined,
     logger: ctx.logger
   })
 }

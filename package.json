@@ -47,6 +47,7 @@
     "dshd-gui": "workspace:*",
     "dshd-health": "workspace:*",
     "dshd-jobs": "workspace:*",
+    "dshd-orchestration": "workspace:*",
     "dshd-pooler": "workspace:*",
     "dshd-quality": "workspace:*"
   },

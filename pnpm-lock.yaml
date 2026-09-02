@@ -23,6 +23,9 @@ importers:
       dshd-jobs:
         specifier: workspace:*
         version: link:packages/dshd-jobs
+      dshd-orchestration:
+        specifier: workspace:*
+        version: link:packages/dshd-orchestration
       dshd-pooler:
         specifier: workspace:*
         version: link:packages/dshd-pooler
@@ -200,6 +203,52 @@ importers:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
         version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+
+  packages/dshd-orchestration:
+    dependencies:
+      dshd-core:
+        specifier: workspace:*
+        version: link:../dshd-core
+      dshd-feedback:
+        specifier: workspace:*
+        version: link:../dshd-feedback
+      dshd-gui:
+        specifier: workspace:*
+        version: link:../dshd-gui
+      dshd-health:
+        specifier: workspace:*
+        version: link:../dshd-health
+      dshd-jobs:
+        specifier: workspace:*
+        version: link:../dshd-jobs
+      dshd-pooler:
+        specifier: workspace:*
+        version: link:../dshd-pooler
+      dshd-quality:
+        specifier: workspace:*
+        version: link:../dshd-quality
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-llm':
+        specifier: 0.1.0-rc.7
+        version: 0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-attachment@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-brand@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-timeout@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.7(@deepseek-ai/cordis@4.0.1)))
+      '@deepseek-ai/dsh-session':
+        specifier: 0.1.0-rc.7
+        version: 0.1.0-rc.7(1dcde9bfc9fa0140c66648fbcb67b346)
+      '@deepseek-ai/dsh-subagent':
+        specifier: 0.1.0-rc.7
+        version: 0.1.0-rc.7(17b22c2aa5d99096c13835bb226cad51)
+      '@deepseek-ai/dsh-tools':
+        specifier: 0.1.0-rc.7
+        version: 0.1.0-rc.7(38c91eb2d47c5b4ba2c8ead86dfcb4aa)
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1

@@ -1,0 +1,26 @@
+# dshd-orchestration — the apply-orchestration plugin row (LANE 0.2.2, gap 2 of
+# the NORTH total-modularity mission). This package owns the 5 orchestration
+# FACTORIES that the bundle's applyInvoke USED to coordinate inline (the closure
+# zones of boot/presets/spawn/tools/delivery, ~9.7k LOCs) — they MOVED here as
+# the code body of the 5 LAZY services deepartments.boot/.presets/.spawn/
+# .tools/.delivery (on-first-use with epoch invalidation over the deps holders)
+# so the bundle's applyInvoke is reduced to pure GLUE (service-first
+# consumption + holder fills + the daemon effects). The bundle remains a PURE
+# CONSUMER + holder WRITER (0 ctx.provide in src) — this package is the
+# PROVIDER. Row ordering contract: this row composes BETWEEN dshd-core and
+# dsh-deepartments (the dev profile: dshd-core → dshd-orchestration →
+# dsh-deepartments; dshd-core composing FIRST is not required by this package —
+# every service resolves via ctx.get at USE — but the config source
+# deepartments.org must exist for the factories that read it).
+#
+# A minimal/hermetic composition WITHOUT this package still loads the bundle:
+# the factory code remains reachable through the nominal re-export bridges
+# src/core/orchestration/<x>.ts (re-export from 'dshd-orchestration'), so the
+# inline R6 fallbacks of the bundle keep executing the SAME closures
+# (behavior-neutral, hermetic preserved).
+#
+# Plain scalars only — no !!js outside the runtime config engine.
+- insert:
+    - id: dshd-orchestration
+      name: dshd-orchestration
+      config: {}

@@ -65,6 +65,9 @@ async function smokeBoot(stateDir, { org = { departments: [] } } = {}) {
   for (const id of ['dshd-feedback', 'dshd-quality', 'dshd-pooler', 'dshd-jobs', 'dshd-health', 'dshd-gui']) {
     loader.create({ id, name: id, config: {} })
   }
+  // LANE 0.2.2 (gap 2): the dev-profile composition now includes the
+  // dshd-orchestration package (the 5 factory SERVICES + the deps holders).
+  loader.create({ id: 'dshd-orchestration', name: 'dshd-orchestration', config: {} })
   loader.create({ id: 'deepartments', name: '../lib/index.js', config: { stateDir, org } })
   await loader.await()
   const pluginCtx = () => loader.resolve('deepartments').fiber?.ctx ?? loader.resolve('deepartments').ctx
@@ -78,13 +81,18 @@ async function smokeBoot(stateDir, { org = { departments: [] } } = {}) {
 }
 
 test('delivery-factory: the DELIVERY ZONE was hoisted VERBATIM into the orchestration factory (the artifact + the movement lock)', () => {
-  const factory = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'delivery.ts'), 'utf8')
+  const factory = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'delivery.ts'), 'utf8')
+  const bridge = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'delivery.ts'), 'utf8')
   const invoke = readFileSync(path.join(REPO_ROOT, 'src', 'invoke.ts'), 'utf8')
   // The artifact: the factory module exports the typed orchestration surface.
   assert.ok(factory.includes('export function createDeliveryOrchestration('), 'factory exports createDeliveryOrchestration')
   assert.ok(factory.includes('export interface DeliveryFactoryDeps'), 'factory exports DeliveryFactoryDeps')
   assert.ok(factory.includes('export interface DeliverySurface'), 'factory exports DeliverySurface')
-  // The movement: the bundle imports the factory ...
+  // LANE 0.2.2: src/core/orchestration/delivery.ts is the NOMINAL re-export
+  // bridge to dshd-orchestration (R6 drop-in superset).
+  assert.ok(bridge.includes("from 'dshd-orchestration'"), 'the bridge re-exports from dshd-orchestration')
+  assert.ok(bridge.includes('createDeliveryOrchestration'), 'the bridge names createDeliveryOrchestration')
+  // The movement: the bundle imports the factory (bridge) ...
   assert.ok(invoke.includes("from './core/orchestration/delivery.js'"), 'invoke.ts imports the factory')
   // ... and NO LONGER defines the zone closures inline (they live in the factory).
   assert.ok(!/const busDeliverToPost = async/.test(invoke), 'busDeliverToPost is no longer inline in invoke.ts')
@@ -93,9 +101,10 @@ test('delivery-factory: the DELIVERY ZONE was hoisted VERBATIM into the orchestr
   assert.ok(/const busDeliverToPost = async/.test(factory), 'busDeliverToPost moved verbatim into the factory')
   assert.ok(/const maybeEmitQualityInspectDirective = async/.test(factory), 'the QD emitter moved verbatim into the factory')
   // The compiled bundle still exports the SAME superset (no new top-level export
-  // leaked from the factory — the export-parity lock stays intact by construction).
-  const lib = readFileSync(path.join(REPO_ROOT, 'lib', 'core', 'orchestration', 'delivery.js'), 'utf8')
-  assert.ok(lib.includes('createDeliveryOrchestration'), 'the compiled factory exists in lib/')
+  // leaked from the factory — the export-parity lock stays intact by construction);
+  // the factory compiles into the PACKAGE lib.
+  const lib = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'lib', 'delivery.js'), 'utf8')
+  assert.ok(lib.includes('createDeliveryOrchestration'), 'the compiled factory exists in the package lib/')
 })
 
 test('delivery-factory (composed boot): the 5 baseline buckets carry the FACTORY-PRODUCED delivery/lifecycle closures (the sub-paso 2 fill)', async () => {

@@ -129,6 +129,9 @@ async function smokeBoot(stateDir, { org = { departments: [] }, agents = false }
   for (const id of ['dshd-feedback', 'dshd-quality', 'dshd-pooler', 'dshd-jobs', 'dshd-health', 'dshd-gui']) {
     loader.create({ id, name: id, config: {} })
   }
+  // LANE 0.2.2 (gap 2): the dev-profile composition now includes the
+  // dshd-orchestration package (the 5 factory SERVICES + the deps holders).
+  loader.create({ id: 'dshd-orchestration', name: 'dshd-orchestration', config: {} })
   loader.create({ id: 'deepartments', name: '../lib/index.js', config: { stateDir, org } })
   await loader.await()
   // The scope anchor for the stub child contexts is the TOOLS fiber ctx (the
@@ -157,12 +160,17 @@ const DEPARTMENT = {
 }
 
 test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the orchestration factory (the artifact + the movement lock)', () => {
-  const factory = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'tools.ts'), 'utf8')
+  const factory = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'tools.ts'), 'utf8')
+  const bridge = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'tools.ts'), 'utf8')
   const invoke = readFileSync(path.join(REPO_ROOT, 'src', 'invoke.ts'), 'utf8')
   // The artifact: the factory module exports the typed orchestration surface.
   assert.ok(factory.includes('export function createToolsOrchestration('), 'factory exports createToolsOrchestration')
   assert.ok(factory.includes('export interface ToolsFactoryDeps'), 'factory exports ToolsFactoryDeps')
   assert.ok(factory.includes('export interface ToolsSurface'), 'factory exports ToolsSurface')
+  // LANE 0.2.2: src/core/orchestration/tools.ts is the NOMINAL re-export
+  // bridge to dshd-orchestration (R6 drop-in superset).
+  assert.ok(bridge.includes("from 'dshd-orchestration'"), 'the bridge re-exports from dshd-orchestration')
+  assert.ok(bridge.includes('createToolsOrchestration'), 'the bridge names createToolsOrchestration')
   // The movement: the bundle imports the factory ...
   assert.ok(invoke.includes("from './core/orchestration/tools.js'"), 'invoke.ts imports the factory')
   // ... and NO LONGER defines the CUT-1 zone closures inline (they live in the
@@ -286,7 +294,7 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
   // SUB-BATCH 3 adds the 8 CUT3 members the delivery factory + lifecycle
   // consume (the retire helpers left the destructure — retirePost now consumes
   // the factory-locals internally).
-  assert.ok(/ctx\.get\('deepartments\.tools'\) as ToolsSurface \| undefined\) \?\? createToolsOrchestration\(/.test(invoke), 'the bundle invokes the tools service service-first with the inline R6 fallback')
+  assert.ok(/ctx\.get\('deepartments\.tools', false\) as ToolsSurface \| undefined\) \?\? createToolsOrchestration\(/.test(invoke), 'the bundle invokes the tools service service-first (NON-STRICT get — the loader may apply rows concurrently) with the inline R6 fallback')
   assert.ok(/const \{[\s\S]*?installHeadBoardTools,[\s\S]*?workerSetup,[\s\S]*?headSetup,[\s\S]*?disposeHeadHandle,[\s\S]*?disposeHeadHandleOnce,[\s\S]*?disposeJoinTimeoutMs,[\s\S]*?joinHeadDisposeOnce,[\s\S]*?resolveDepartmentWorkspaceCwd,[\s\S]*?resolveWorkspaceRootPath,[\s\S]*?rotateArchivedHeadSessionId,[\s\S]*?retirePost,[\s\S]*?isHeadStuck,[\s\S]*?markHeadProgress,[\s\S]*?attachHeadSession,[\s\S]*?archivePostSessionOnSleep[\s\S]*?schedulerHeadForDepartment,[\s\S]*?schedulerRunJob,[\s\S]*?schedulerOnAutoRunSkip,[\s\S]*?schedulerNotifyHead,[\s\S]*?schedulerDepartmentForEntry,[\s\S]*?schedulerDepartmentForJob,[\s\S]*?buildHealthPosts,[\s\S]*?buildHostRunning,[\s\S]*?buildSessionContexts,[\s\S]*?buildHostWaits,[\s\S]*?healthNotifyHost,[\s\S]*?healthPoolerStatePath,[\s\S]*?healthBootId,[\s\S]*?guiEndpointDeps[\s\S]*?\} = toolsSurface/.test(invoke), 'the bundle destructures the full ToolsSurface at the same fiber position (29 members — the 15 CUT1-3 + the 14 CUT4: scheduler/health builders + guiEndpointDeps)')
   assert.ok(!/const \{[\s\S]*?captureRetiredPostTurnError,[\s\S]*?settleRetiredPostDeliveries,[\s\S]*?predictRetiredWorkerDeliverable[\s\S]*?\} = toolsSurface/.test(invoke), 'the retire helpers NO LONGER appear in the toolsSurface destructure (factory-internal now)')
   // The new CUT-2 deps are passed by reference (agentPresets/disposingHeads/
@@ -308,11 +316,11 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     assert.ok(invoke.includes(dep), `the invocation passes ${dep.replace(',', '')} by reference (CUT4 direct dep)`)
   }
   // The compiled bundle still exports the SAME superset (the export-parity lock
-  // stays intact by construction); the factory compiled into lib/ contains the
-  // registry + the runners + the CUT-2 closures + the CUT-3 closures + the
-  // CUT-4 closures (SUB-BATCH 4).
-  const lib = readFileSync(path.join(REPO_ROOT, 'lib', 'core', 'orchestration', 'tools.js'), 'utf8')
-  assert.ok(lib.includes('createToolsOrchestration'), 'the compiled factory exists in lib/')
+  // stays intact by construction); the factory compiled into the PACKAGE lib
+  // contains the registry + the runners + the CUT-2 closures + the CUT-3
+  // closures + the CUT-4 closures (SUB-BATCH 4).
+  const lib = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'lib', 'tools.js'), 'utf8')
+  assert.ok(lib.includes('createToolsOrchestration'), 'the compiled factory exists in the package lib/')
   assert.ok(lib.includes('installHeadBoardTools'), 'the compiled factory carries the registry closure')
   assert.ok(lib.includes('installRoleSection'), 'the compiled factory carries the role-persona closure')
   assert.ok(lib.includes('workerSetup'), 'the compiled factory carries the worker-setup closure')
@@ -345,8 +353,8 @@ test('tools-factory (composed boot): the registry wiring is intact — the runne
       // 0 ctx.provide nuevos (P1 invariant "el bundle consume, nunca provee"):
       // the tools service surface is NOT provided — the inline R6 factory is
       // the fallback (smoke-boot service set intacto).
-      assert.equal(ctx.get('deepartments.tools'), undefined, 'deepartments.tools is NOT provided (P1 — provide deferred to hito 4)')
-      const factory = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'tools.ts'), 'utf8')
+      assert.equal(ctx.get('deepartments.tools') === undefined, false, 'deepartments.tools IS provided (LANE 0.2.2 — dshd-orchestration provides the tools service)')
+      const factory = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'tools.ts'), 'utf8')
       // The still-LATE seams keep their TDZ-safe rebinds: the delivery
       // surface's bus/ACL/catalog/delivery/feedback/mint/wake members as thunk
       // arrows + delegating THENABLES (messagesStoreReady / feedbackStoreReady)
@@ -386,7 +394,7 @@ test('tools-factory (composed boot): the registry wiring is intact — the runne
       // The TOOLS invocation's `late` object no longer carries workerSetup or
       // the 4 CUT3 seams (the workspace/retire/archive getters are GONE), and
       // carries the 2 NEW delivery late seams.
-      const toolsInvocation = invoke.slice(invoke.indexOf('createToolsOrchestration(ctx, {'), invoke.indexOf('} = toolsSurface'))
+      const toolsInvocation = invoke.slice(invoke.indexOf('const toolsDeps: ToolsFactoryDeps = {'), invoke.indexOf('} = toolsSurface'))
       assert.ok(!/get workerSetup\(\) \{ return workerSetup \}/.test(toolsInvocation), 'the TOOLS invocation late object no longer carries workerSetup')
       assert.ok(!/get resolveDepartmentWorkspaceCwd\(\) \{/.test(toolsInvocation), 'the TOOLS invocation late object no longer carries the resolveDepartmentWorkspaceCwd getter (CUT3 factory-local)')
       assert.ok(!/get resolveWorkspaceRootPath\(\) \{/.test(toolsInvocation), 'the TOOLS invocation late object no longer carries the resolveWorkspaceRootPath getter (CUT3 factory-local)')

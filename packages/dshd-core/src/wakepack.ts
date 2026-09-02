@@ -677,6 +677,16 @@ export interface WakePackDeps {
    * lean snapshot from it; `enabled === false` omits the section (the
    * pre-pacing pack). */
   pacing?: PacingConfigLike
+  /** LANE 0.2.2 (P4) — the SUBSTITUTABLE pacing policy (deepartments.pacing —
+   * dshd-orchestration provides the default wrapper over the pure pacing
+   * module; a policy plugin may compose its own). When present, the franja
+   * line resolves THROUGH the service (the same isPeakAt/pacingStateAt the
+   * health daemon consumes — one policy, every consumer); absent → the pure
+   * `pacingStateAt(now, window)` fallback (R6, byte-identical). */
+  pacingService?: {
+    isPeakAt(date: Date, options?: import('./pacing.js').PacingWindowOptions): boolean
+    pacingStateAt(date: Date, options?: import('./pacing.js').PacingWindowOptions): import('./pacing.js').PacingState
+  }
   /** The cordis logger (degrade warnings). */
   logger: { warn(message: string): void }
 }
@@ -898,7 +908,12 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
    * OMITTED (the pre-pacing pack). Never throws (the pacing module is pure). */
   const pacingLine = (): string | undefined => {
     if (deps.pacing !== undefined && deps.pacing.enabled === false) return undefined
-    const state = pacingStateAt(new Date(pacingNow()), pacingWindowFromConfig(deps.pacing))
+    // LANE 0.2.2 (P4): the franja resolves THROUGH the substitutable pacing
+    // policy when composed (service-first); absent → the pure module fallback
+    // (R6, byte-identical).
+    const state = deps.pacingService !== undefined
+      ? deps.pacingService.pacingStateAt(new Date(pacingNow()))
+      : pacingStateAt(new Date(pacingNow()), pacingWindowFromConfig(deps.pacing))
     return formatFranjaLine(state)
   }
 

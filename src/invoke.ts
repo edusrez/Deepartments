@@ -2341,9 +2341,9 @@ export const OWN_LAYER_POST_TOOLS: ReadonlySet<string> = new Set([
 
 // DECOUPLING SUB-PASO 2 — the DELIVERY ORCHESTRATION FACTORY (the hoisted
 // delivery/ACL/QD/lifecycle/engine zone, invoked at the SAME fiber position).
-import { createDeliveryOrchestration } from './core/orchestration/delivery.js'
-import { createSpawnOrchestration, type SpawnSurface, type HeadToolDisposers } from './core/orchestration/spawn.js'
-import { createToolsOrchestration, type ToolsSurface } from './core/orchestration/tools.js'
+import { createDeliveryOrchestration, type DeliverySurface, type DeliveryFactoryDeps } from './core/orchestration/delivery.js'
+import { createSpawnOrchestration, type SpawnSurface, type HeadToolDisposers, type SpawnFactoryDeps } from './core/orchestration/spawn.js'
+import { createToolsOrchestration, type ToolsSurface, type ToolsFactoryDeps } from './core/orchestration/tools.js'
 import { createPresetsOrchestration, type PresetsSurface, type PresetsFactoryDeps } from './core/orchestration/presets.js'
 import { createBootOrchestration, type BootSurface, type BootFactoryDeps } from './core/orchestration/boot.js'
 
@@ -2548,7 +2548,12 @@ export function applyInvoke(ctx: Context, config: Config) {
   // R6 fallback (the factory) — MOVEMENT-ONLY: the same closures, the same
   // order, 0 behavior change.
   // ---------------------------------------------------------------------------
-  const bootSurface: BootSurface = (ctx.get('deepartments.boot') as BootSurface | undefined) ?? createBootOrchestration(ctx, {
+  // LANE 0.2.2 (gap 2) — DI glue: the boot deps object is BUILT, REGISTERED
+  // into the dshd-orchestration deps holder (deepartments.bootDeps — the
+  // composed package rebuilds the SAME factory on first use) AND consumed
+  // service-first with the inline R6 fallback (the SAME object, byte-identical
+  // behavior in a minimal/hermetic composition without the package).
+  const bootDeps: BootFactoryDeps = {
     config,
     // invoke.ts module-scope pure helpers (not importable without a cycle — by
     // reference).
@@ -2556,6 +2561,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     writePresenceStateFile,
     askUserGuardReason,
     pinHostSessionTitle,
+    // LANE 0.2.2 (gap 2) — the bundle-local agent-state aggregate helper
+    // (src/agents.js, injected by reference — the moved factory receives it as
+    // a dep; "functions, never imports").
+    computeDeptWhoState,
     late: {
       // The PresetsSurface `coordinatorForPost` (built at the presets factory
       // position, AFTER this factory — buildCatalogRows dereferences it only
@@ -2570,7 +2579,13 @@ export function applyInvoke(ctx: Context, config: Config) {
       // post-boot): getter over the apply-scope binding.
       get retirePost() { return retirePost }
     }
-  })
+  }
+  // NON-STRICT get (ctx.get(name, false)): the loader applies rows
+  // concurrently, and a strict get (provider fiber-state gate) can return
+  // undefined for a SIBLING row mid-apply — the register must ALWAYS land into
+  // the holder (composed) or no-op (hermetic), never silently skip.
+  ctx.get('deepartments.bootDeps', false)?.register(bootDeps)
+  const bootSurface: BootSurface = (ctx.get('deepartments.boot', false) as BootSurface | undefined) ?? createBootOrchestration(ctx, bootDeps)
   const {
     subagents,
     agents,
@@ -2630,7 +2645,10 @@ export function applyInvoke(ctx: Context, config: Config) {
   // service-first with the inline R6 fallback (the factory) — MOVEMENT-ONLY: the
   // same closures, the same order, 0 behavior change.
   // ---------------------------------------------------------------------------
-  const presetsSurface: PresetsSurface = (ctx.get('deepartments.presets') as PresetsSurface | undefined) ?? createPresetsOrchestration(ctx, {
+  // LANE 0.2.2 (gap 2) — DI glue: the presets deps object is BUILT, REGISTERED
+  // (deepartments.presetsDeps) AND consumed service-first with the inline R6
+  // fallback (the same object — behavior-neutral in a minimal composition).
+  const presetsDeps: PresetsFactoryDeps = {
     config,
     stateDir,
     org,
@@ -2649,6 +2667,16 @@ export function applyInvoke(ctx: Context, config: Config) {
     yamlList,
     computeHostSleepSurfacePlan,
     readPresenceStateFile,
+    // LANE 0.2.2 (gap 2) — the bundle-local pure helpers (src/head-presets.ts
+    // + src/toolset-audit.ts — injected by reference, "functions, never
+    // imports").
+    HEAD_PRESET_BASE_ID,
+    headPresetIdFor,
+    headPresetNameCore,
+    headPresetNameFor,
+    buildHeadPresetComposition,
+    buildHeadPresetMetadata,
+    appendToolsetAudit,
     late: {
       // The DeliverySurface's boot-opened message store promise (built at the
       // delivery factory position, AFTER this factory): getter over the
@@ -2657,7 +2685,9 @@ export function applyInvoke(ctx: Context, config: Config) {
       // delegating THENABLE over this seam.
       get messagesStoreReady() { return deliverySurface.messagesStoreReady }
     }
-  })
+  }
+  ctx.get('deepartments.presetsDeps', false)?.register(presetsDeps)
+  const presetsSurface: PresetsSurface = (ctx.get('deepartments.presets', false) as PresetsSurface | undefined) ?? createPresetsOrchestration(ctx, presetsDeps)
   const {
     HOST_AGENT_OPTIONS,
     PRESET_ID,
@@ -2701,7 +2731,10 @@ export function applyInvoke(ctx: Context, config: Config) {
   // .spawn' service is consumed service-first with the inline R6 fallback (the
   // factory) — MOVEMENT-ONLY: same closures, same order, 0 behavior change.
   // ---------------------------------------------------------------------------
-  const spawnSurface: SpawnSurface = (ctx.get('deepartments.spawn') as SpawnSurface | undefined) ?? createSpawnOrchestration(ctx, {
+  // LANE 0.2.2 (gap 2) — DI glue: the spawn deps object is BUILT, REGISTERED
+  // (deepartments.spawnDeps) AND consumed service-first with the inline R6
+  // fallback (the same object — behavior-neutral in a minimal composition).
+  const spawnDeps: SpawnFactoryDeps = {
     stateDir,
     repoRoot,
     config,
@@ -2726,7 +2759,9 @@ export function applyInvoke(ctx: Context, config: Config) {
       get deliverBusRecord() { return deliverySurface.deliverBusRecord },
       get messagesStoreReady() { return deliverySurface.messagesStoreReady }
     }
-  })
+  }
+  ctx.get('deepartments.spawnDeps', false)?.register(spawnDeps)
+  const spawnSurface: SpawnSurface = (ctx.get('deepartments.spawn', false) as SpawnSurface | undefined) ?? createSpawnOrchestration(ctx, spawnDeps)
   const {
     runJobForDepartment,
     spawnWorkerForDepartment,
@@ -2758,7 +2793,10 @@ export function applyInvoke(ctx: Context, config: Config) {
   // fallback (the factory) — MOVEMENT-ONLY: same closures, same order, 0
   // behavior change. The zone continues to grow in sub-batches 2-4.
   // ---------------------------------------------------------------------------
-  const toolsSurface: ToolsSurface = (ctx.get('deepartments.tools') as ToolsSurface | undefined) ?? createToolsOrchestration(ctx, {
+  // LANE 0.2.2 (gap 2) — DI glue: the tools deps object is BUILT, REGISTERED
+  // (deepartments.toolsDeps) AND consumed service-first with the inline R6
+  // fallback (the same object — behavior-neutral in a minimal composition).
+  const toolsDeps: ToolsFactoryDeps = {
     config,
     org,
     stateDir,
@@ -2795,6 +2833,13 @@ export function applyInvoke(ctx: Context, config: Config) {
     deptZstdReadDenyReason,
     resolveParallelMonitorConfig,
     readParallelMonitorsState,
+    // LANE 0.2.2 (gap 2) — the bundle-local pure VALUES the factory zones call
+    // (injected by reference, "functions, never imports"):
+    appendToolsetAudit,
+    headPresetIdFor,
+    createSecretaryTool,
+    secretaryConfig,
+    buildAgentRows,
     spawn: {
       runJobForDepartment,
       spawnWorkerForDepartment,
@@ -2891,7 +2936,9 @@ export function applyInvoke(ctx: Context, config: Config) {
       get freshMintHead() { return deliverySurface.freshMintHead },
       get enqueueHostWake() { return deliverySurface.enqueueHostWake }
     }
-  })
+  }
+  ctx.get('deepartments.toolsDeps', false)?.register(toolsDeps)
+  const toolsSurface: ToolsSurface = (ctx.get('deepartments.tools', false) as ToolsSurface | undefined) ?? createToolsOrchestration(ctx, toolsDeps)
   const {
     installHeadBoardTools,
     workerSetup,
@@ -2987,7 +3034,12 @@ export function applyInvoke(ctx: Context, config: Config) {
   // positions (tools, daemons, redeliver driver, bind register). MOVEMENT-ONLY:
   // the same closures, the same order, 0 behavior change.
   // ---------------------------------------------------------------------------
-  const deliverySurface = createDeliveryOrchestration(ctx, {
+  // LANE 0.2.2 (gap 2) — DI glue: the delivery deps object is BUILT,
+  // REGISTERED (deepartments.deliveryDeps) AND consumed service-first with the
+  // inline R6 fallback (the same object — behavior-neutral in a minimal
+  // composition). DELIVERY gains the service-first form it lacked (0.2.1 left
+  // it the only DIRECT factory call — gap 2 makes it uniform with the other 4).
+  const deliveryDeps: DeliveryFactoryDeps = {
     stateDir,
     agents,
     subagents,
@@ -3042,7 +3094,9 @@ export function applyInvoke(ctx: Context, config: Config) {
     HOST_AGENT_OPTIONS,
     HEAD_DEFAULT_SESSION_TITLE,
     STUCK_HEAD_MS
-  })
+  }
+  ctx.get('deepartments.deliveryDeps', false)?.register(deliveryDeps)
+  const deliverySurface = (ctx.get('deepartments.delivery', false) as DeliverySurface | undefined) ?? createDeliveryOrchestration(ctx, deliveryDeps)
   const {
     messageStoreDir,
     messagesStoreReady,
@@ -3336,7 +3390,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         // materialized array feeds BOTH `posts` and `missionQueue` (zero
         // double buildHealthPosts I/O per tick).
         const healthPosts = buildHealthPosts()
-        const missionQueue = healthPosts.filter((p) => p.retired !== true && p.provider !== 'worker')
+        const missionQueue = healthPosts.filter((p: PostActivityInput) => p.retired !== true && p.provider !== 'worker')
         let pending: Promise<unknown>
         if (healthService !== undefined) {
           pending = healthService.runDaemonTick({

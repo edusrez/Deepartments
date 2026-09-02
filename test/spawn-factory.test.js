@@ -96,6 +96,12 @@ async function smokeBoot(stateDir, { org = { departments: [] }, agents = false }
   for (const id of ['dshd-feedback', 'dshd-quality', 'dshd-pooler', 'dshd-jobs', 'dshd-health', 'dshd-gui']) {
     loader.create({ id, name: id, config: {} })
   }
+  // LANE 0.2.2 (gap 2): the dev-profile composition now includes the
+  // dshd-orchestration package (the 5 factory SERVICES + the deps holders) —
+  // the bundle's applyInvoke consumes them service-first with the inline R6
+  // fallback (the fallback still runs the SAME package factories via the
+  // nominal bridges when this row is absent — hermetic preserved).
+  loader.create({ id: 'dshd-orchestration', name: 'dshd-orchestration', config: {} })
   loader.create({ id: 'deepartments', name: '../lib/index.js', config: { stateDir, org } })
   await loader.await()
   const pluginCtx = () => loader.resolve('deepartments').fiber?.ctx ?? loader.resolve('deepartments').ctx
@@ -117,13 +123,19 @@ const DEPARTMENT = {
 }
 
 test('spawn-factory: the SPAWN ZONE was hoisted VERBATIM into the orchestration factory (the artifact + the movement lock)', () => {
-  const factory = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'spawn.ts'), 'utf8')
+  const factory = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'spawn.ts'), 'utf8')
+  const bridge = readFileSync(path.join(REPO_ROOT, 'src', 'core', 'orchestration', 'spawn.ts'), 'utf8')
   const invoke = readFileSync(path.join(REPO_ROOT, 'src', 'invoke.ts'), 'utf8')
   // The artifact: the factory module exports the typed orchestration surface.
   assert.ok(factory.includes('export function createSpawnOrchestration('), 'factory exports createSpawnOrchestration')
   assert.ok(factory.includes('export interface SpawnFactoryDeps'), 'factory exports SpawnFactoryDeps')
   assert.ok(factory.includes('export interface SpawnSurface'), 'factory exports SpawnSurface')
-  // The movement: the bundle imports the factory ...
+  // LANE 0.2.2: src/core/orchestration/spawn.ts is the NOMINAL re-export
+  // bridge to dshd-orchestration (the compiled surface stays a drop-in
+  // superset — R6).
+  assert.ok(bridge.includes("from 'dshd-orchestration'"), 'the bridge re-exports from dshd-orchestration')
+  assert.ok(bridge.includes('createSpawnOrchestration'), 'the bridge names createSpawnOrchestration')
+  // The movement: the bundle imports the factory (bridge) ...
   assert.ok(invoke.includes("from './core/orchestration/spawn.js'"), 'invoke.ts imports the factory')
   // ... and NO LONGER defines the zone closures inline (they live in the factory).
   assert.ok(!/const runJobForDepartment = async/.test(invoke), 'runJobForDepartment is no longer inline in invoke.ts')
@@ -135,14 +147,15 @@ test('spawn-factory: the SPAWN ZONE was hoisted VERBATIM into the orchestration 
   assert.ok(/const departmentJobExists = async/.test(factory), 'the calendar job-exists helper moved verbatim (departmentJobExists)')
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.spawn' → the factory) and the SpawnSurface
-  // destructure feeds the SAME names the downstream apply uses.
-  assert.ok(/ctx\.get\('deepartments\.spawn'\) as SpawnSurface \| undefined\) \?\? createSpawnOrchestration\(/.test(invoke), 'the bundle invokes the spawn service service-first with the inline R6 fallback')
+  // destructure feeds the SAME names the downstream apply uses. LANE 0.2.2:
+  // the deps object is hoisted to `spawnDeps` + registered into the holder.
+  assert.ok(/ctx\.get\('deepartments\.spawn', false\) as SpawnSurface \| undefined\) \?\? createSpawnOrchestration\(/.test(invoke), 'the bundle invokes the spawn service service-first (NON-STRICT get — the loader may apply rows concurrently) with the inline R6 fallback')
   assert.ok(/const \{\n    runJobForDepartment,\n    spawnWorkerForDepartment,\n    readCalendar,/.test(invoke), 'the bundle destructures the SpawnSurface at the same fiber position')
   // The compiled bundle still exports the SAME superset (no new top-level export
   // leaked — the export-parity lock stays intact by construction); the factory
-  // compiled into lib/ contains the zone.
-  const lib = readFileSync(path.join(REPO_ROOT, 'lib', 'core', 'orchestration', 'spawn.js'), 'utf8')
-  assert.ok(lib.includes('createSpawnOrchestration'), 'the compiled factory exists in lib/')
+  // compiles into the PACKAGE lib, the bundle lib bridge re-exports it.
+  const lib = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'lib', 'spawn.js'), 'utf8')
+  assert.ok(lib.includes('createSpawnOrchestration'), 'the compiled factory exists in the package lib/')
 })
 
 test('spawn-factory (composed boot): the composition is intact — jobs.runJob wired through the bundle, buckets untouched, NO deepartments.spawn provided (P1)', async () => {
@@ -170,7 +183,7 @@ test('spawn-factory (composed boot): the composition is intact — jobs.runJob w
       // 0 ctx.provide nuevos (P1 invariant "el bundle consume, nunca provee"):
       // the spawn service surface is NOT provided — the inline R6 factory is
       // the fallback (smoke-boot service set intacto).
-      assert.equal(ctx.get('deepartments.spawn'), undefined, 'deepartments.spawn is NOT provided (P1 — provide deferred to hito 4)')
+      assert.equal(ctx.get('deepartments.spawn') === undefined, false, 'deepartments.spawn IS provided (LANE 0.2.2 — the dshd-orchestration package provides the spawn service in the dev profile)')
     } finally {
       dispose()
     }

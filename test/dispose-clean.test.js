@@ -88,6 +88,9 @@ async function disposeBoot(stateDir) {
   for (const id of ['dshd-feedback', 'dshd-quality', 'dshd-pooler', 'dshd-jobs', 'dshd-health', 'dshd-gui']) {
     loader.create({ id, name: id, config: {} })
   }
+  // LANE 0.2.2 (gap 2): the dev profile now includes dshd-orchestration (the 5
+  // factory services + holders) — the P6 unload must release THOSE holders too.
+  loader.create({ id: 'dshd-orchestration', name: 'dshd-orchestration', config: {} })
   loader.create({ id: 'deepartments', name: '../lib/index.js', config: { stateDir, org: { departments: [] } } })
   const setCalls = []
   const clearCalls = []
@@ -154,7 +157,13 @@ function captureBundleReferences(boot) {
     deliver: pluginCtx.get('deepartments.deliver'),
     jobs: pluginCtx.get('deepartments.jobs'),
     health: pluginCtx.get('deepartments.health'),
-    gui: pluginCtx.get('deepartments.gui')
+    gui: pluginCtx.get('deepartments.gui'),
+    // LANE 0.2.2 (gap 2): the dshd-orchestration factory services (the lazy
+    // surface PROXY — hydrating a member builds the cached factory; a
+    // post-dispose member access MUST fail loud R1 via the EMPTY holder after
+    // the package's unload effect clears it).
+    bootSurface: pluginCtx.get('deepartments.boot'),
+    spawnSurface: pluginCtx.get('deepartments.spawn')
   }
 }
 
@@ -180,6 +189,11 @@ async function hydrate(boot, refs) {
   await refs.health.runDaemonTick({ now: () => Date.now(), hosts: [], posts: [], hostWaits: [], sessionContexts: [], hostRunning: false })
   const dispatch = await refs.gui.dispatch('agents', { sessionId: 'host-x' })
   assert.equal(dispatch.ok, true, 'gui dispatch ok at hydration (builder + cache live)')
+  // LANE 0.2.2: hydrate the orchestration factory services (a member get of the
+  // lazy surface proxy builds the cached factory — post-dispose it must fail
+  // loud over the emptied holder).
+  void refs.bootSurface.memoWriteTool
+  void refs.spawnSurface.runJobForDepartment
   agenda.fn()
   health.fn()
   await settle()
@@ -210,6 +224,12 @@ test('dispose-clean: binder buckets cleared on unload (1A clear-on-unload — po
       assert.throws(() => { void refs.lifecycle.memoWrite }, /lazy build|missing|is undefined/, 'lifecycle post-dispose access fails loud (the rebuild reads the emptied binder)')
       assert.throws(() => { void refs.wakepack.assembleWakePack }, /lazy build|missing|is undefined/, 'wakepack post-dispose access fails loud')
       assert.throws(() => { void refs.deliver.deliverOrQueue }, /lazy build|missing|is undefined/, 'deliver post-dispose access fails loud')
+      // LANE 0.2.2 (gap 2): the orchestration factory services fail loud
+      // post-dispose — the unload effect cleared their deps holders (epoch++ →
+      // the lazy surface cache invalidates → the rebuild over the EMPTY holder
+      // throws the R1 empty-holder error).
+      assert.throws(() => { void refs.bootSurface.memoWriteTool }, /boot lazy build|holder is EMPTY|missing|is undefined/, 'boot surface post-dispose access fails loud (the empty bootDeps holder)')
+      assert.throws(() => { void refs.spawnSurface.runJobForDepartment }, /spawn lazy build|holder is EMPTY|missing|is undefined/, 'spawn surface post-dispose access fails loud (the empty spawnDeps holder)')
     } finally {
       await boot.disposeRaw().catch(() => {})
       boot.restoreGlobals()
