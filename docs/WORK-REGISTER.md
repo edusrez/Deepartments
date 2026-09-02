@@ -50,13 +50,19 @@
     runtime del tool (fijado sha256 02e62ca4…/d3940b54…; bundle SIN el código
     glob — greps 0/5 chunks; port upstream → §3); fb-52 guard aritmética.
   - **feedback-nudge (opción B**, waterfall tools/post-execute — ROADMAP 09-01,
-    próxima lane) · **GUI modo
+    EN CURSO lane 09-02 builder-3) · **GUI modo
     monitoreo (owner 09-01**: composer oculto no-host + toggle presencia —
     verificar si el harness expone la presencia al client-inject; **scoping
     pendiente** → job doc) · **higiene**: reports-move HECHO (09-02, copy al
     árbol .dsh/reports) + dir huérfano reports pendiente + limpieza .tmp-*
     quality (builder-2 09-02: BLOQUEADA por fb-64 — corroboración EN VIVO;
-    7 STALE + 1 AMBIGUO qi20 a decidir).
+    → **DECISIÓN QH 09-02**: **2 FROZEN evidencia fb-9** (`.tmp-qi20-defa5d61`
+    + `.tmp-explore-deep-64ecf16d` — este último CORREGIDO por el QH: mi
+    builder-2 lo marcó STALE, es AMBIGUO/evidencia) + **6 STALE autorizados**
+    (reviewer-session, reviewer-164, reviewer-349, qi8-610f,
+    explore-deep-session, explore-deep-tools) → limpiar SOLO esos 6 cuando los
+    roots lo habiliten (fb-64); respetar además `.inspect/repro-reasoning.mjs`
+    y `.inspect/repro-config.mjs` en cualquier higiene amplia).
   - **fb-56 (clase interrupted-post/canary-kill — gestionada con re-drive +
     FASE0)** · **fb-58 (prepared-stuck)** — en cola.
   - **fb-61 (Bug A SOURCE GATE, test-only)** · **fb-62+fb-53 (token-guard:
