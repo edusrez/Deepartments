@@ -1018,14 +1018,19 @@ async function withTempStateDir(fn) {
     // runs → ENOTEMPTY (the flake class observed 4/8 in builder runs;
     // standalone always green). The rm is retried with a BOUNDED deterministic
     // poll (<= 2 s) so the teardown WAITS OUT the in-flight writes instead of
-    // racing them. 0 assertion change — only the teardown timing becomes
-    // deterministic; a genuine persistent ENOTEMPTY still fails loudly past
-    // the deadline (never swallowed).
+    // racing them. fb-60 (2026-09-02): the loop exits with `break` and the
+    // finally NEVER `return`s — a `return` inside a finally REPLACES the try's
+    // pending completion, so a thrown assertion from `await fn(stateDir)`
+    // would be SWALLOWED (false-green wrapped tests, bogus 0-fails). `break`
+    // lets the finally complete NORMALLY: the try's exception (or its return
+    // value) propagates; the teardown still runs on every path and a genuine
+    // persistent ENOTEMPTY still fails loudly past the deadline (never
+    // swallowed).
     const deadline = Date.now() + 2000
     for (;;) {
       try {
         await rm(stateDir, { recursive: true, force: true })
-        return
+        break
       } catch (error) {
         if (Date.now() >= deadline) throw error
         await new Promise((resolve) => setTimeout(resolve, 25))
@@ -1153,6 +1158,28 @@ async function readHosts(stateDir) {
 }
 
 // --- tests ---------------------------------------------------------------------
+
+// fb-60 anti-regression guard (2026-09-02): the lane-4 de-flake teardown
+// originally exited with `return` INSIDE the finally, which REPLACES the try's
+// pending completion — a thrown assertion (assert.fail) inside ANY wrapped
+// test body was swallowed and the test went green (false 0-fails reports).
+// The finally must never discard the try's exception: the wrapped rejection
+// must propagate AND the teardown must still run on the failure path. Without
+// the fb-60 fix this test FAILS (the promise resolves instead of rejecting).
+test('withTempStateDir: a wrapped fn rejection PROPAGATES to the caller (fb-60 guard — the finally must not swallow it)', async () => {
+  let stateDirSeen
+  await assert.rejects(
+    withTempStateDir(async (stateDir) => {
+      stateDirSeen = stateDir
+      throw new Error('fb-60: assertion failure must propagate')
+    }),
+    /fb-60: assertion failure must propagate/,
+    'the wrapped fn rejection must reach the caller, not be swallowed by the finally'
+  )
+  assert.ok(stateDirSeen, 'the wrapped fn ran with the temp stateDir')
+  // Teardown ALWAYS runs — even on the failure path the temp dir is removed:
+  await assert.rejects(access(stateDirSeen), { code: 'ENOENT' }, 'teardown removed the temp stateDir after the rejection')
+})
 
 test('B3 gap fix: dept_who from the HOST in a profile with NO hosts.json self-registers the host (one row, you:true) — host auto-registration no longer depends on board tools', async () => {
   await withTempStateDir(async (stateDir) => {

@@ -29,9 +29,17 @@
     muerte TOTAL del binder register → holders baseline service-first (P1 0
     ctx.provide; md5 CUT-4 `5b548545` intacto; suite 724/702/0/22 EXACTA);
     dept-as-plugin DESBLOQUEADO.
-  - **F6 (ancla recursión D-Q2) — EN CURSO (opción a, builder)**: no muestrear
-    inspector cuyo managerId sea inspector QD, o desvío a workers NO-QD pasados
-    N niveles — fix runtime en el emitter (m-2170 del QH).
+  - **F6 (ancla recursión D-Q2) — CERRADO-con-fix (006919c, canary 12:32:33Z)**:
+    no muestrear inspector cuyo managerId sea inspector QD, o desvío a workers
+    NO-QD pasados N niveles — fix runtime en el emitter (m-2170 del QH).
+  - **fb-60 (infra-veracidad — propagación de aserciones en withTempStateDir) —
+    EN CURSO (lane 09-02, builder)**: regresión del de-flake lane 4 (8dcfc47d)
+    — el `return` en el finally del helper PISA la excepción del try (assert.fail
+    tragado → 0-fails falso). Fix `return`→`break` + guard test de propagación
+    (invoke.test.js:1021-1033 + :1157); el fix DEJA VER fallos reales antes
+    enmascarados (188 E2 count frágil del skill mirror, 373 conflation de la
+    notificación pacing en el helper del test) + el flake M-6 SMOKE (362) ahora
+    visible — suite post-fix 726/702/2/22 (dur ~45 s; 362 intermitente).
   - **fb-50 (calibración M-A** capacidad efectiva + completion-reserve) ·
     **fb-51/52 (glob literal-segment false-negative + guard aritmética)** — en
     cola (batch tras F6).
