@@ -163,5 +163,11 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // holder factory the package provides as `deepartments.healthDeps`; the star
   // re-export bridge src/core/health.ts carries it into the surface) — an
   // INTENTIONAL, verified surface extension that bumps the frozen count.
-  assert.equal(names.length, 310, `lib/invoke.js export count frozen at 310 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
+  // fb-50 batch (2026-09-02, M-A completion-reserve calibration) added ONE
+  // export (CONTEXT_COMPLETION_RESERVE_DEFAULT from dshd-health — the code
+  // default of the `health.contextCompletionReserve` knob; the star re-export
+  // bridge carries it into the surface like its M-A siblings
+  // CONTEXT_THRESHOLD_DEFAULT / CONTEXT_THRESHOLD_DEFAULT_POLL_MS) — an
+  // INTENTIONAL, verified surface extension that bumps the frozen count.
+  assert.equal(names.length, 311, `lib/invoke.js export count frozen at 311 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })

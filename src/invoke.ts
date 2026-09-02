@@ -1312,12 +1312,21 @@ export function isPathInside(candidate: string, root: string): boolean {
  * digit-only form) or that is all `/` with NO name at all (a `//` between two
  * numbers in a `5 // 2`-style expression) is ARITHMETIC/units (division), not
  * a filesystem path — real paths carry a name component (letters/guiones).
- * Multi-segment and letter-bearing absolute words are STILL path words and are
- * checked EXACTLY as before. */
+ * fb-52 (2026-09-02, QH filed as fb-53 — the guard arithmetic false positive):
+ * a `/`-leading NUMERIC FRAGMENT WITH A SEPARATOR — `/1000,1` from a python
+ * `round((dead-start)/1000,1)` heredoc, `/3.14`, `/1,000` — is ALSO arithmetic
+ * (a division with a precision/rescale fragment, or a thousands-separated
+ * number), NOT a path; it must not be tokenized into an out-of-scope DENIAL
+ * (the QD series' first guard false positive: the real work was a python
+ * heredoc, not an absolute-path reference). Multi-segment and letter-bearing
+ * absolute words are STILL path words and are checked EXACTLY as before. */
 function deptExecIsPathWord(token: string): boolean {
   const rest = token.replace(/^\/+/, '')
   if (rest === '') return false
-  return !/^[0-9]+$/.test(rest)
+  // fb-10 (digits-only) + fb-52 (digits with a `.`/`,` separator fragment —
+  // `1000`, `1000,1`, `1000.5`, `1,000`): pure numeric words are arithmetic/
+  // units, never paths. A letter-bearing word is a real path component.
+  return !/^[0-9]+([.,][0-9]+)*$/.test(rest)
 }
 
 /** fb-10 (QH): mask the `$(( ... ))` arithmetic-expansion spans of a command

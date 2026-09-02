@@ -2136,6 +2136,14 @@ export interface HealthConfigLike {
      * `health.intervalMs` re-fire inside the SAME bucket skips the scan).
      * Absent/invalid → 60000. */
     contextThresholdPollMs?: number
+    /** M-A — the completion reserve (fb-50): the model's max OUTPUT tokens
+     * (e.g. 262144 for deepseek-v4-flash) added to the projected numerator so
+     * the monitor does NOT under-report pressure under completion projection
+     * (the pre-fix monitor showed 70% with 734,990 when the real request was
+     * 1,050,163 = 788,019 input + 262,144 completion). Absent/invalid → 0 =
+     * LEGACY behavior (projected/window — byte-identical to the pre-fb-50
+     * monitor). */
+    contextCompletionReserve?: number
     /** M-5 — the mission-stalled watchdog gate (default ON; explicit false
      * disables the delivered-but-unstarted-mission scan). */
     missionStallEnabled?: boolean
@@ -3401,6 +3409,14 @@ export const CONTEXT_THRESHOLD_DEFAULT = 0.5
  * pattern); a sub-minute daemon tick re-fires inside the same bucket and skips
  * the scan. */
 export const CONTEXT_THRESHOLD_DEFAULT_POLL_MS = 60_000
+/** M-A — the default completion reserve (fb-50, 2026-09-02): the MODEL's max
+ * OUTPUT tokens (the completion reserve) added to the projected numerator so
+ * the monitor does NOT under-report pressure under completion projection. 0 =
+ * LEGACY behavior (the projected tokens alone) — a deployment with a known
+ * max-output route (e.g. deepseek-v4-flash, 262144) sets the
+ * `health.contextCompletionReserve` knob to calibrate. Absent/invalid → 0
+ * (byte-identical to the pre-fb-50 monitor). */
+export const CONTEXT_COMPLETION_RESERVE_DEFAULT = 0
 
 /** M-A — ONE session-context input row: the token-meter `contextPressure`
  * projection numbers for one agent (a post or the host). All numeric fields
@@ -3437,6 +3453,12 @@ export interface ContextThresholdScanInput {
   /** The resolved threshold fraction (knob `contextThreshold` or the 0.5 code
    * default). */
   threshold: number
+  /** M-A fb-50 — the completion RESERVE (the model's max OUTPUT tokens, e.g.
+   * 262144 for deepseek-v4-flash): added to the projected numerator so the
+   * pressure counts the completion projection the request will actually make.
+   * Knob `contextCompletionReserve`; absent/invalid → 0 = LEGACY behavior
+   * (projected/window — byte-identical to the pre-fb-50 monitor). */
+  completionReserve?: number
   /** The clock (ms epoch) — stamped into the finding ts. */
   nowMs: number
 }
@@ -3455,13 +3477,22 @@ export function contextThresholdKey(agentId: string, band: number): string {
  * publishes it), else `max(0, pressureTokens + surfaceTokens −
  * sampledSurfaceTokens)` when `pressureTokens` is present (the raw-state
  * formula), else the surface-only heuristic fallback (a pre-first-request
- * session — conservative, never over-counts) — and alert when
- * `pct = projected / window` EXCEEDS `input.threshold`. Each finding carries
- * the per-(agent,band) dedupe key and an informative error line
- * (`<agent> <pct>% (<proj>/<win>) — cruce b<band>`) so every 30-min re-alert
- * of a persistent band stays readable. */
+ * session — conservative, never over-counts) — ADD the completion RESERVE
+ * (`input.completionReserve`, fb-50: the model's max-output tokens — the
+ * pressure the request will actually make under completion projection; a
+ * 0/absent reserve is the LEGACY numerator byte-identical) and alert when
+ * `pct = (projected + reserve) / window` EXCEEDS `input.threshold`. Each
+ * finding carries the per-(agent,band) dedupe key and an informative error
+ * line (`<agent> <pct>% (<proj>[/+reserve]/<win>) — cruce b<band>`) so every
+ * 30-min re-alert of a persistent band stays readable. */
 export function scanContextThreshold(input: ContextThresholdScanInput): HealthFinding[] {
   const findings: HealthFinding[] = []
+  // fb-50: the completion reserve (a finite non-negative number; anything
+  // else → 0 → the legacy numerator, never a NaN/negative pressure).
+  const reserve =
+    typeof input.completionReserve === 'number' && Number.isFinite(input.completionReserve) && input.completionReserve > 0
+      ? input.completionReserve
+      : 0
   for (const row of input.rows) {
     const agentId = row.postId ?? row.hostId
     if (agentId === undefined || agentId === '') continue
@@ -3478,7 +3509,8 @@ export function scanContextThreshold(input: ContextThresholdScanInput): HealthFi
     } else {
       projected = typeof row.surfaceTokens === 'number' && Number.isFinite(row.surfaceTokens) ? row.surfaceTokens : 0
     }
-    const pct = projected / row.contextWindow
+    const effective = projected + reserve
+    const pct = effective / row.contextWindow
     if (pct <= input.threshold) continue
     const band = Math.floor(pct * 10)
     findings.push({
@@ -3486,7 +3518,7 @@ export function scanContextThreshold(input: ContextThresholdScanInput): HealthFi
       key: contextThresholdKey(agentId, band),
       ...(row.postId !== undefined ? { postId: row.postId } : { hostId: row.hostId }),
       ts: input.nowMs,
-      error: `${agentId} ${Math.round(pct * 100)}% (${projected}/${row.contextWindow}) — cruce b${band}`
+      error: `${agentId} ${Math.round(pct * 100)}% (${projected}${reserve > 0 ? `+${reserve}` : ''}/${row.contextWindow}) — cruce b${band}`
     })
   }
   return findings
@@ -4670,6 +4702,14 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         ? health.contextThreshold
         : CONTEXT_THRESHOLD_DEFAULT
     const contextThresholdPollMs = resolvePositiveKnob(health?.contextThresholdPollMs, CONTEXT_THRESHOLD_DEFAULT_POLL_MS)
+    // M-A fb-50 (completion reserve): the model's max-output tokens added to
+    // the projected numerator (calibration — the pre-fix monitor under-reported
+    // under completion projection). A finite non-negative knob wins; absent/
+    // invalid → 0 → the LEGACY numerator (projected/window, byte-identical).
+    const contextCompletionReserve =
+      typeof health?.contextCompletionReserve === 'number' && Number.isFinite(health.contextCompletionReserve) && health.contextCompletionReserve > 0
+        ? health.contextCompletionReserve
+        : CONTEXT_COMPLETION_RESERVE_DEFAULT
     // M-5 — the mission-stalled watchdog knobs: `missionStallEnabled` gate
     // (default ON) + `missionStallMs` (the delivered-but-unstarted window;
     // absent/invalid → the 10-min code default via resolvePositiveKnob). The
@@ -4910,7 +4950,14 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     let contextFindings: HealthFinding[] = []
     if (contextThresholdEnabled && deps.sessionContexts !== undefined && currentContextBucket !== prevContextBucket) {
       try {
-        contextFindings = scanContextThreshold({ rows: [...(deps.sessionContexts ?? [])], threshold: contextThreshold, nowMs })
+        contextFindings = scanContextThreshold({
+          rows: [...(deps.sessionContexts ?? [])],
+          threshold: contextThreshold,
+          // M-A fb-50: the completion reserve calibration (absent/0 → the
+          // legacy numerator — byte-identical to the pre-fb-50 monitor).
+          completionReserve: contextCompletionReserve,
+          nowMs
+        })
       } catch (error: unknown) {
         deps.logger?.warn(`[deepartments] system-health: context-threshold scan failed: ${error instanceof Error ? error.message : String(error)}`)
       }

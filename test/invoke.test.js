@@ -10757,6 +10757,26 @@ test('B2 dept_exec guard (fb-10, QH): URL-LIKE ARITHMETIC tokens are NOT paths �
   assert.equal(deptExecDenyReason('cat /home/esuarez/projects/deepartments/v1/bin/run.sh', '/srv/dept-ws', roots), undefined, 'a multi-segment real path under a root stays allowed')
 })
 
+test('B2 dept_exec guard (fb-52, QH — the guard arithmetic false positive): a `/`+NUMERIC-FRAGMENT-WITH-SEPARATOR token (`/1000,1` from a python `round((dead-start)/1000,1)` heredoc, `/3.14`, `/1,000`) is ARITHMETIC not a path — NEVER denied; letter-bearing real paths OUTSIDE the roots stay DENIED (access preserved)', () => {
+  const roots = ['/home/esuarez/projects', '/usr/lib/node_modules/@deepseek-ai/dsh', '/srv/dept-ws', '/opt/dsh/.dsh-dev']
+  // (1) the QH filed record (fb-53 in the QH numbering — the batch fb-52 here):
+  // `round((dead-start)/1000,1)` tokenized '/1000,1' as a path → FALSE DENIAL.
+  assert.equal(
+    deptExecDenyReason('python3 -c \'t=(dead-start)/1000,1; print(round(t))\'; start=10; dead=2000', '/srv/dept-ws', roots),
+    undefined,
+    'a python heredoc arithmetic `…/1000,1` is NOT an absolute-path reference (the fb-52 false positive is gone)'
+  )
+  assert.equal(deptExecDenyReason('python3 <<EOF\nprint(round((dead-start)/1000,1))\nEOF', '/srv/dept-ws', roots), undefined, 'the EXACT QH heredoc-python shape is allowed')
+  // (2) the numeric-fragment class generalizes: `/` + digits with a `.`/`,` separator.
+  assert.equal(deptExecDenyReason('awk \'BEGIN { print x/1000,1 }\' | cat', '/srv/dept-ws', roots), undefined, '`/1000,1` between args is a numeric fragment, not a path')
+  assert.equal(deptExecDenyReason('echo 3.14 | bc -l; expr 10 / 1000,5', '/srv/dept-ws', roots), undefined, '`/1000,5` and `3.14` numeric fragments are not paths')
+  // (3) ACCESS is intact: a real letter-bearing path outside the roots stays DENIED.
+  assert.match(deptExecDenyReason('cat /etc/passwd', '/srv/dept-ws', roots), /references absolute path "\/etc\/passwd"/, 'an out-of-root real path stays denied')
+  assert.match(deptExecDenyReason('cat /opt/dsh/.dsh-dev/settings.yaml', '/srv/dept-ws', ['/home/esuarez/projects', '/usr/lib/node_modules/@deepseek-ai/dsh', '/srv/dept-ws']), /references absolute path/, 'a real letter-bearing path outside the roots stays denied')
+  // (4) the digits-ONLY rule (fb-10) still holds.
+  assert.equal(deptExecDenyReason('echo $((86400000/24)) //3600000 | cat', '/srv/dept-ws', roots), undefined, 'the fb-10 digits-only division rule still holds')
+})
+
 // ===========================================================================
 // E2-ZSTD (QH 2026-08-28): dept_zstd_read — the READ-ONLY .zstd session reader
 // for department posts (registered on the SAME `allowExec` gate as dept_exec,
@@ -12386,6 +12406,38 @@ test('M-A scanContextThreshold: rows ABOVE the 50% threshold → a context-thres
   assert.equal(findings.some((f) => f.postId === 'builder-nocontext'), false, 'no contextWindow → skipped (an inactive session is 0% safe)')
 })
 
+test('M-A scanContextThreshold fb-50 (completion reserve): the completionReserve is ADDED to the projected numerator (presión efectiva = projected + maxTokens) — a row the legacy monitor reads as 70% (734,990/1,048,576, UNDER the 85% effective ceiling) becomes 95% EFFECTIVE (734,990+262,144 = 997,134 → b9) and the error line names the reserve; a 0/absent reserve keeps the LEGACY numerator byte-identical', () => {
+  const T0 = new Date(2026, 7, 28, 10, 0, 0).getTime()
+  // The fb-50 evidence case: deepseek-v4-flash window 1,048,576 with
+  // maxTokens 262,144; the pre-fix monitor read 70% while the real request
+  // (788,019 input + 262,144 completion = 1,050,163) exceeded the window.
+  const legacy = scanContextThreshold({
+    rows: [{ postId: 'research-head', contextWindow: 1_048_576, projectedTokens: 734_990 }],
+    threshold: 0.85,
+    completionReserve: 0,
+    nowMs: T0
+  })
+  assert.equal(legacy.length, 0, 'LEGACY (reserve 0): 734,990/1,048,576 = 70.1% ≤ 85% → NO finding (the pre-fb-50 monitor under-reports)')
+  const calibrated = scanContextThreshold({
+    rows: [{ postId: 'research-head', contextWindow: 1_048_576, projectedTokens: 734_990 }],
+    threshold: 0.85,
+    completionReserve: 262_144,
+    nowMs: T0
+  })
+  assert.equal(calibrated.length, 1, 'CALIBRATED (reserve 262144): effective 997,134/1,048,576 = 95.1% > 85% → a finding')
+  const finding = calibrated[0]
+  assert.equal(finding.key, 'context-threshold:research-head:b9', '95.1% → band floor(9.51)=9 → key b9')
+  assert.equal(finding.error, 'research-head 95% (734990+262144/1048576) — cruce b9', 'the error line names projected, +reserve, and the window')
+  const belowLegacy = scanContextThreshold({
+    rows: [{ postId: 'builder-low', contextWindow: 1_000_000, projectedTokens: 400_000 }],
+    threshold: 0.5,
+    completionReserve: 262_144,
+    nowMs: T0
+  })
+  assert.equal(belowLegacy.length, 1, '400,000+262,144 = 66.2% > 50% with the reserve — the reserve can lift a legacy-below row ABOVE the threshold')
+  assert.equal(belowLegacy[0].key, 'context-threshold:builder-low:b6', '66.2% → band b6')
+})
+
 test('M-A runHealthDaemonTick: a post row ABOVE the 50% threshold → the context-threshold finding + host ALERT (frame bullet + band key); the audit row records it', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 28, 10, 30, 0).getTime()
@@ -12436,6 +12488,35 @@ test('M-A BAND CROSSING: 52% (b5) then 61% (b6) on consecutive ticks → TWO ale
     const state = readHealthAlertsState(stateDir)
     assert.equal(state['context-threshold:research-head:b5'], T0, 'b5 key advanced at the first alert')
     assert.equal(state['context-threshold:research-head:b6'], T0 + 60_000, 'b6 key advanced at the crossing')
+  })
+})
+
+test('M-A fb-50 runHealthDaemonTick: the contextCompletionReserve KNOB transfers the completion reserve into the scan — a row at 70% (734,990/1,048,576, under the 0.85 threshold knob) becomes 95.1% EFFECTIVE and ALERTS with the reserve in the frame bullet; ABSENT knob → the legacy numerator (no alert at 0.85)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 28, 11, 30, 0).getTime()
+    const run = async (nowMs, knobValue) => {
+      const alerts = []
+      await runHealthDaemonTick({
+        now: () => nowMs,
+        stateDir,
+        bootId: 'boot-mares',
+        hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+        sessionContexts: [{ postId: 'research-head', contextWindow: 1_048_576, projectedTokens: 734_990 }],
+        config: { health: knobValue === undefined ? { contextThreshold: 0.85 } : { contextThreshold: 0.85, contextCompletionReserve: knobValue } },
+        notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+        logger: { warn: (m) => {} }
+      })
+      return alerts
+    }
+    // Distinct tick timestamps (the per-poll bucket gate runs the scan once per
+    // `contextThresholdPollMs` bucket — a same-ts re-fire would skip it).
+    const legacyAlerts = await run(T0, undefined)
+    assert.equal(legacyAlerts.length, 0, 'ABSENT knob → reserve 0 → 70.1% ≤ 85% → the legacy monitor does NOT alert')
+    const calibratedAlerts = await run(T0 + 60_000, 262_144)
+    assert.equal(calibratedAlerts.length, 1, 'KNOB 262144 → effective 95.1% > 85% → alerts')
+    assert.match(calibratedAlerts[0].frame, /- context-threshold: research-head 95% \(734990\+262144\/1048576\) — cruce b9/, 'the frame bullet names projected + reserve + window')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state['context-threshold:research-head:b9'], T0 + 60_000, 'the per-BAND dedupe key advances under the calibrated pressure')
   })
 })
 

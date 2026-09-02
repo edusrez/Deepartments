@@ -211,6 +211,11 @@ export interface HealthConfig {
   /** M-A — the context-threshold scan cadence in ms (default 60000 = 1 min).
    * Absent/invalid → the code default. */
   contextThresholdPollMs?: number
+  /** M-A — the completion RESERVE (fb-50, 2026-09-02): the model's max OUTPUT
+   * tokens (e.g. 262144 for deepseek-v4-flash) added to the projected numerator
+   * so the monitor does not under-report pressure under completion projection.
+   * Absent/invalid → 0 = LEGACY (projected/window, byte-identical). */
+  contextCompletionReserve?: number
   /** M-5 — the MISSION-STALLED watchdog gate (default ON; explicit `false`
    * disables the delivered-but-unstarted-mission scan). Absent → on. */
   missionStallEnabled?: boolean
@@ -747,6 +752,9 @@ export const Config: z<any, any> = z.object({
     contextThresholdEnabled: z.boolean(),
     contextThreshold: z.number().min(0).max(1),
     contextThresholdPollMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    // M-A fb-50 — the completion-reserve knob (default(void 0) → absent = code
+    // default 0 = LEGACY projected-only numerator; a finite non-negative wins).
+    contextCompletionReserve: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
     // M-5 — the mission-stalled watchdog knobs (default(void 0) → absent =
     // code defaults: enabled on, missionStallMs 600000 = 10 min — the section
     // contract).
@@ -805,6 +813,7 @@ export const Config: z<any, any> = z.object({
     contextThresholdEnabled: boolean
     contextThreshold: number
     contextThresholdPollMs: number
+    contextCompletionReserve: number
     missionStallEnabled: boolean
     missionStallMs: number
     mainRedEnabled: boolean
