@@ -13227,16 +13227,32 @@ test('M-6 SMOKE (acceptance — real daemon): bootPlugin with health {intervalMs
       await waitFor(() => host.inboxMessages.some((m) => m.content[0]?.text.includes('System-health ALERT') && m.content[0].text.includes('main-red')), 8000, 'the real main-red daemon alerts the host after the new commit')
       const frame = host.inboxMessages.find((m) => m.content[0]?.text.includes('main-red')).content[0].text
       assert.match(frame, /- main-red: main rojo post-commit [0-9a-f]{40} — lock test\/boot-factory\.test\.js falló \(detectado en 0 min\)/, 'the REAL alert frame carries the owner-facing main-red line')
+      // fb-61 (2026-09-02) de-flake: the audit append (appendHealthAlertAudit) is
+      // a whole-file JSONL REWRITE, and under load two OVERLAPPING daemon ticks
+      // (intervalMs 50) can double-alert the same net-new main-red finding → two
+      // concurrent rewrites of health-alerts.jsonl. A single-shot read between
+      // the "non-empty" waitFor and the assert could then land in a truncation
+      // window of the second rewrite → an EMPTY parse → `audit.at(-1)` is
+      // undefined (the residual M-6 audit flake, reproduced 1/12-1/24 isolated
+      // + under 4-hog load; the DIAG showed two full main-red rows on disk a
+      // moment later). Poll until a PARSEABLE last row carrying the main-red
+      // finding is durably readable, CAPTURE the validated rows, and assert on
+      // the captured snapshot — never a fresh single-shot read (a partial line
+      // mid-rewrite just keeps the poll going). Same semantics, deterministic.
+      let settledAudit = []
       await waitFor(async () => {
         try {
           const auditText = await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')
-          return auditText.trim().length > 0
+          const rows = auditText.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+          const last = rows.at(-1)
+          if (last === undefined || !Array.isArray(last.findings) || !last.findings.some((f) => f.kind === 'main-red')) return false
+          settledAudit = rows
+          return true
         } catch {
-          return false
+          return false // a partial line mid-rewrite — keep polling
         }
-      }, 5000, 'the audit row is appended')
-      const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
-      assert.equal(audit.at(-1).findings.some((f) => f.kind === 'main-red'), true, 'the audit last row records the main-red finding')
+      }, 5000, 'the audit last row records the main-red finding (settled parseable read)')
+      assert.equal(settledAudit.at(-1).findings.some((f) => f.kind === 'main-red'), true, 'the audit last row records the main-red finding')
     } finally {
       await env.dispose()
     }
@@ -14434,7 +14450,25 @@ test('Bug A SOURCE GATE (retired-host ZERO new ROWS + ZERO QD directives, write 
         [retiredHostId]: { sessionId: retiredSessionId, roomId: 'board', retired: true, retiredAt: Date.now() - 1000, rotatedTo: liveHostId }
       }, null, 2))
 
-      const env = await bootWithQD(stateDir, { health: { intervalMs: 50 }, resumeNotFound: [liveSessionId] })
+      // fb-61 (2026-09-02) de-flake: intervalMs MUST be large enough that two
+      // daemon ticks can never OVERLAP inside this test (the real daemon's tick
+      // is fire-and-forget — a tick that takes > intervalMs lets setInterval
+      // start the NEXT tick while the previous one is still awaiting its async
+      // delivery chain). With intervalMs 50 two overlapping ticks BOTH scanned
+      // the freshly-seeded worker-research row as net-new (the alert-dedupe
+      // ledger is only written at the END of a tick, so an overlapping second
+      // tick read the pre-alert state), BOTH alerted the LIVE host and BOTH
+      // busDeliverToHost catches ran appendPostErrorDeduped with the SAME key —
+      // both read the (empty) recording ledger before either wrote it → TWO
+      // identical post-error rows → the exact-count assert below flaked with
+      // `expected 1, actual 2` (reproduced 3/6 isolated batches, ~40%).
+      // intervalMs 2000 >> the tick's async duration (~100-300ms incl. the real
+      // bus delivery) → ticks serialize → the alert is delivered by exactly ONE
+      // tick and the recording ledger key lands before any later tick could
+      // re-deliver → the row count is deterministic. The test still exercises
+      // the REAL daemon (real notifyHost → busDeliverToHost catch) — only the
+      // tick cadence is de-raced (the suite's intervalMs-alto de-flake idiom).
+      const env = await bootWithQD(stateDir, { health: { intervalMs: 2000 }, resumeNotFound: [liveSessionId] })
       try {
         // A legacy post-error ROW for the retired host (the 17:08 deploy noise)
         // + a FRESH post-error ROW for a worker post so the daemon tick has a
