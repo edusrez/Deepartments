@@ -92,16 +92,28 @@
     explore-deep-session, explore-deep-tools) → limpiar SOLO esos 6 cuando los
     roots lo habiliten (fb-64); respetar además `.inspect/repro-reasoning.mjs`
     y `.inspect/repro-config.mjs` en cualquier higiene amplia).
+  - **fb-61 (Bug A SOURCE GATE, test-only) — CERRADO (2f35cab, sin restart)**:
+    flake #399 reproducido (ticks daemon solapados intervalMs:50 → doble alert →
+    doble append no-atómico) → intervalMs 2000 + residual M-6 SMOKE #365
+    (waitFor durable); #559 = B5-GHOST sano; suite 732/710/0/22 4/4; reviewer
+    PASS 7/7. Fixes de raíz (atomicidad appends/ledger) → fb-68.
+  - **fb-62+fb-53 (token-guard dept_exec) — CERRADO (5c4153a, canary 19:08:04Z
+    PASS — LIVE)**: fb-62 «rm -rf /» fuera de denylist substring + helper
+    isRmRfRootWipe (destino raíz COMPLETA; scoped rm -rf ALLOWED); fb-53 regex
+    deptExecIsPathWord extendida (separador final/close-glue; paths reales
+    DENIED intacto); suite 734/712/0/22 (+2 tests B2); reviewer PASS 7/7;
+    surface frozen 311 respetado; CUT-4/presets intactos.
   - **fb-56 (clase interrupted-post/canary-kill — gestionada con re-drive +
-    FASE0)** · **fb-58 (prepared-stuck — datapoint ola 3/3 del QH 09-02:
-    confirmaciones de memo m-2518/2519/2520 prepared→nunca delivered; candidato
-    lane mirror/transporte)** — en cola.
-  - **fb-61 (Bug A SOURCE GATE, test-only)** · **fb-62+fb-53 (token-guard:
-    full-path + aritmética)** · **fb-63 (toolset reviewer)** · **fb-64
+    FASE0)** — en cola. · **fb-58 (prepared-stuck — datapoints QH 09-02: ola 3/3
+    confirmaciones m-2518/2519/2520 prepared→nunca delivered + rotación IPH
+    kind-ack m-2518/m-2520 no contados como confirmación por el mirror m-2524;
+    candidato lane mirror/transporte: reconocer kind-ack de confirmación como
+    «confirmación explícita»)** — en cola.
+  - **fb-63 (toolset reviewer)** · **fb-64
     (execRoots + stateDir READ-ONLY — corroborado EN VIVO por builder-2 09-02;
     aditivo, QH sin riesgo fb-55; verificar config real; habilita limpieza 6
-    STALE + copia canónica 2 FROZEN)** — en cola (orden: fb-61 →
-    fb-62+53 → fb-63 → fb-64; GUI monitor owner-gated parqueado).
+    STALE + copia canónica 2 FROZEN)** — en cola (orden: fb-63 → fb-64 →
+    fb-65 → fb-68; GUI monitor owner-gated parqueado).
 - **CERRADOS en esta cola (no pedir de nuevo):** M4 (system-idle),
   M-A (context-threshold + dept_head_rotate), PACING (peak/valle),
   M-5 (misión-sin-inicio), M-6 (main-red), M-7 (mission-queue),
@@ -114,7 +126,7 @@
   (5210682), **0.2.3a/b/c** (e8222af/dc9f79a/48cea9f — MISIÓN 7/8),
   **fb-57 CERRADO-con-fix** (250d4d4 dsh-key-pooler — canary 09:33:59Z PASS) ·
   **fb-59 CERRADO-con-fix** (15198b3 dsh-key-pooler — trace: bug latente del
-  pooler, NO regresión 0.2.3).
+  pooler, NO regresión 0.2.3) · **fb-61** (2f35cab) · **fb-62+53** (5c4153a).
 
 ## 2. DAG técnico — CERRADO (referencia)
 
