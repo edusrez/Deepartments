@@ -685,9 +685,13 @@ export interface ToolsSurface {
    * fallback handler consumes them at the same position — the composed dshd-gui
    * service reads the same object from the `gui` Binder bucket). */
   guiEndpointDeps: DeepartmentsEndpointDeps
-  /** LANE 0.2.2 (P4) — the dept_exec allowed-roots policy closure (service-
-   * first with the inline fallback; the dshd-orchestration `deepartments.
-   * execRoots` default binds THIS — the same computation the tool runs). */
+  /** HOTFIX 0.2.2-1 (P4) — the dept_exec allowed-roots member: the PURE inline
+   * computation (deps-bound, NO service read) exported so the dshd-
+   * orchestration `deepartments.execRoots` DEFAULT binds the SAME computation
+   * the tools run — an ACYCLIC default (the member never re-enters the
+   * execRoots service). The service-first consumption (the substituted-policy
+   * path) lives in the wrapper the dept_exec/dept_zstd_read guards run, NOT in
+   * this export. */
   execRoots: (department: DepartmentConfig | undefined) => Promise<string[]>
 }
 
@@ -861,7 +865,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // registered in installHeadBoardTools ONLY when the post's role declare-list
   // includes `dept_exec` (see postSetup's allowExec computation below).
 
-  /** The realpath-resolved SET of allowed roots for a dept_exec call: the fixed
+  /** The REALPATH-RESOLVED SET of allowed roots for a dept_exec call: the fixed
    * DEPT_EXEC_DEFAULT_ROOTS, the repo root, the runtime stateDir, the caller's
    * department workspace, any configured org.execRoots, AND any configured
    * org.missionExecRoots (an EXPLICIT, REVOCABLE, AUDITABLE mission-level owner
@@ -870,20 +874,29 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    * is realpath'd when it resolves (a symlink root collapses to its target, so
    * the cwd/path comparisons stay strict); an unresolvable root is kept verbatim.
    *
-   * LANE 0.2.2 (P4): the closure consumes the `deepartments.execRoots` POLICY
-   * service FIRST (a composable plugin may substitute the allowed-roots posture
-   * — the policy-substitution fixture does); when the service is ABSENT (the
-   * default / hermetic composition) it falls back to the SAME inline
-   * computation (R6, byte-identical). The closure is ALSO exported as the
-   * surface's `execRoots` late member so the dshd-orchestration service can
-   * bind the same default. */
-  const deptExecAllowedRoots = async (department: DepartmentConfig | undefined): Promise<string[]> => {
-    const execRootsSvc = ctx.get('deepartments.execRoots') as
-      | { resolveAllowedRoots(department: { id?: string } | undefined): Promise<string[]> }
-      | undefined
-    if (execRootsSvc !== undefined) {
-      return execRootsSvc.resolveAllowedRoots(department as { id?: string } | undefined)
-    }
+   * HOTFIX 0.2.2-1 (regresión runtime — profile live «execRoots.resolveAllowedRoots
+   * is not a function» on EVERY dept_exec call): the computation is SPLIT in two.
+   * `deptExecAllowedRootsInline` (below) is the PURE inline allowed-roots
+   * computation (deps-bound, NO service read); it IS the exported ToolsSurface
+   * `execRoots` member, so the dshd-orchestration `deepartments.execRoots`
+   * DEFAULT binds the SAME computation the tools run. `deptExecAllowedRoots`
+   * (the wrapper the dept_exec/dept_zstd_read guards actually run) consumes the
+   * `deepartments.execRoots` POLICY service FIRST (a composable plugin may
+   * substitute the allowed-roots posture — the policy-substitution fixture
+   * does); when the service is ABSENT (the default / hermetic composition) it
+   * falls back to `deptExecAllowedRootsInline` (R6, byte-identical). Exporting
+   * the PURE computation (NOT the service-first wrapper) on the surface is what
+   * keeps the default service's delegation ACYCLIC: the default →
+   * surface.execRoots path can never re-enter the execRoots service (the
+   * 0.2.2 shape mismatch that produced the live TypeError is gone BY
+   * CONSTRUCTION — no runtime marker to keep in sync). */
+  /** The PURE inline allowed-roots computation (HOTFIX 0.2.2-1 split): the
+   * fixed DEPT_EXEC_DEFAULT_ROOTS + repoRoot + stateDir + the department
+   * workspace + any configured org.execRoots/missionExecRoots, realpath'd —
+   * the SAME set the dept_exec/dept_zstd_read guards gate against. NO service
+   * read — this IS the default posture the `deepartments.execRoots` service
+   * delegates to. */
+  const deptExecAllowedRootsInline = async (department: DepartmentConfig | undefined): Promise<string[]> => {
     const raw = new Set<string>(DEPT_EXEC_DEFAULT_ROOTS)
     raw.add(repoRoot)
     if (typeof stateDir === 'string' && stateDir.trim() !== '') raw.add(stateDir)
@@ -909,6 +922,21 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       }
     }
     return resolved
+  }
+
+  /** The service-first WRAPPER the dept_exec/dept_zstd_read guards run: the
+   * composed `deepartments.execRoots` POLICY service wins when present
+   * (substitution), else the PURE inline computation above (the default /
+   * hermetic computation — R6). NOT the surface export (the surface carries
+   * the PURE computation — the acyclic default). */
+  const deptExecAllowedRoots = async (department: DepartmentConfig | undefined): Promise<string[]> => {
+    const execRootsSvc = ctx.get('deepartments.execRoots') as
+      | { resolveAllowedRoots(department: { id?: string } | undefined): Promise<string[]> }
+      | undefined
+    if (execRootsSvc !== undefined) {
+      return execRootsSvc.resolveAllowedRoots(department as { id?: string } | undefined)
+    }
+    return deptExecAllowedRootsInline(department)
   }
 
   /** Run ONE scoped shell command through `bash -lc` with a MINIMAL sanitized
@@ -5092,6 +5120,10 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     healthPoolerStatePath,
     healthBootId,
     guiEndpointDeps,
-    execRoots: deptExecAllowedRoots
+    // HOTFIX 0.2.2-1: the surface carries the PURE inline computation (NOT the
+    // service-first wrapper) — the execRoots service DEFAULT delegates to it
+    // WITHOUT a re-entry cycle (the 0.2.2 wrapper export broke the live
+    // profile with «execRoots.resolveAllowedRoots is not a function»).
+    execRoots: deptExecAllowedRootsInline
   }
 }

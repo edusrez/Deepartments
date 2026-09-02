@@ -294,18 +294,26 @@ export function apply(ctx: Context, config: OrchestrationConfig = {}) {
   }
   ctx.provide('deepartments.pacing', config.pacing ?? pacing)
   ctx.provide('deepartments.execRoots', config.execRoots ?? {
-    // The DEFAULT: delegate to the tools factory's OWN closure (a late
-    // `execRoots` export of the ToolsSurface — the tools factory binds its
-    // deps and produces the SAME computation it runs inline). The service
-    // builds laily through ensureTools (the bundle fills toolsDeps first — a
-    // missing bind FAILS LOUD R1, never a silently-empty root list).
+    // The DEFAULT (HOTFIX 0.2.2-1 — regresión runtime «execRoots.resolveAllowedRoots
+    // is not a function»): delegate to the tools factory's OWN computation — the
+    // late `execRoots` export of the ToolsSurface is the factory's PURE inline
+    // allowed-root set, a resolver FUNCTION `(department) => Promise<string[]>`
+    // (tools.ts:5127 `execRoots: deptExecAllowedRootsInline`), NOT an object
+    // with a nested resolveAllowedRoots (the 0.2.2 shape mismatch: the surface
+    // exported the service-first WRAPPER and this default called
+    // `execRoots.resolveAllowedRoots(...)` on the function — the live
+    // TypeError). Calling it AS A FUNCTION keeps the delegation ACYCLIC (the
+    // pure member never re-enters this service). The service builds lazily
+    // through ensureTools (the bundle fills toolsDeps first); a missing /
+    // malformed member FAILS LOUD R1 with a clear message — never an
+    // "is not a function" TypeError.
     resolveAllowedRoots: async (department: { id?: string } | undefined) => {
       const surface = ensureTools()
-      const execRoots = (surface as unknown as { execRoots?: ExecRootsPolicySurface }).execRoots
-      if (execRoots === undefined) {
-        throw new Error('[deepartments] execRoots resolution: the tools surface has no execRoots policy — the tools factory must export it (the default dept_exec root set)')
+      const execRoots = (surface as unknown as { execRoots?: (department: { id?: string } | undefined) => Promise<string[]> }).execRoots
+      if (typeof execRoots !== 'function') {
+        throw new Error('[deepartments] execRoots resolution: the tools surface has no execRoots policy (a resolver FUNCTION) — the tools factory must export it (the default dept_exec root set)')
       }
-      return execRoots.resolveAllowedRoots(department)
+      return execRoots(department)
     }
   })
 
