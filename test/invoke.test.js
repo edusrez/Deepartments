@@ -10781,6 +10781,12 @@ test('B2 dept_exec guard (fb-62, IPH — token-guard refinement): the ROOT-WIPE 
   // Roots mirror the runtime posture: /root/.deepartments (org stateDir) and
   // /home/esuarez/projects are allowed roots, so a cleanup UNDER one of them is
   // a legitimate scoped operation (the exact fb-62 false-positive class).
+  // NOTE (fb-64): this fixture encodes the INTENDED stateDir posture
+  // ('/root/.deepartments (org stateDir)' as a root). At runtime the stateDir
+  // config is RELATIVE ('.deepartments', packages/dshd-core/cordis.patch.yml)
+  // and the daemon runs with WorkingDirectory=/ (systemd), so the EFFECTIVE
+  // stateDir resolves to '/.deepartments' — this fixture's root is never
+  // produced by the live runtime (test↔runtime gap, pre-existing).
   const roots = ['/home/esuarez/projects', '/root/.deepartments', '/usr/lib/node_modules/@deepseek-ai/dsh', '/srv/dept-ws', '/opt/dsh/.dsh-dev']
   // (1) the COMPLETE-root destination is STILL denied — end-of-command, a
   // trailing space, or a shell separator right after the slashes (the wipe is

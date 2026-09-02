@@ -58,7 +58,24 @@ uno, a QUÉ head, en qué formato) → sección **Departments directory** del sk
 A worker's `dept_exec` is restricted to the allowed roots:
 `/home/esuarez/projects`, `/usr/lib/node_modules/@deepseek-ai/dsh`,
 `/opt/dsh/.dsh-dev` (DEV harness home), the repository root, the department
-workspace, and the runtime stateDir. The STABLE profile `/opt/dsh/.dsh` is OUT
+workspace, and the runtime stateDir. The runtime stateDir is the
+`stateDir` config resolved against the daemon's working directory: in the
+DEV profile it is declared RELATIVE (`.deepartments` in
+`packages/dshd-core/cordis.patch.yml`) and the systemd unit runs with
+`WorkingDirectory=/`, so the EFFECTIVE stateDir is `/.deepartments` — and
+THAT is an allowed root holding the org state (`feedback.jsonl`,
+`posts.json`, `journals/`, …). The department workspacePaths live in a
+SEPARATE absolute tree — `/root/.deepartments/departments/<dept>` (not the
+stateDir): under that tree only the worker's OWN deptCwd
+(`…/departments/<own-dept>`) is an allowed root (scoped in-root `rm`
+permitted, fb-62); sibling workspaces and the tree root
+`/root/.deepartments` itself are DENIED (absolute-path tokens outside the
+roots — by design). Reads of any workspace/stateDir go through the native
+file tools (`read`/`glob`/`grep`, no deny), not `dept_exec`. Note: the
+fb-62 tests (`test/invoke.test.js:10781-10784`) fixture
+`/root/.deepartments (org stateDir)` as a root — the INTENDED posture the
+runtime never produces (test↔runtime gap, pre-existing). The STABLE
+profile `/opt/dsh/.dsh` is OUT
 OF SCOPE by default — a task that needs it stops
 and asks its head (which escalates via the Asistente to the owner); anything
 else outside the allowed roots likewise requires owner approval. Workers NEVER
