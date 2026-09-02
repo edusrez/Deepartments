@@ -709,10 +709,56 @@ export function apply(ctx: Context, config: JobsConfig = {}) {
         throw new Error('[deepartments] jobs scheduler tick: ctx.get("deepartments.org") is undefined — dshd-core is not composed (register the core plugin + provide deepartments.org)')
       }
       const bound = depsHolder.get()
-      const required: Array<keyof JobsBinderDeps> = ['runJob', 'notifyHead', 'departmentForEntry', 'departmentForJob']
+      // jobs→spawn-Service (LANE 0.2.3 — gap 3 TOTAL MODULARITY): the tick's
+      // runJob resolves SERVICE-FIRST — `ctx.get('deepartments.spawn')?.runJobForDepartment`
+      // (the dshd-orchestration spawn SERVICE — the SAME engine the bundle's
+      // schedulerRunJob wrapped) with the DECOUPLING holder's runJob as the R6
+      // fallback for compositions where the spawn service is absent (the
+      // bundle stopped registering runJob into the holder; the frozen binder
+      // register still carries it for the legacy path). The head ENTRY is
+      // resolved via the SHARED catalog service (deepartments.catalog — the
+      // SAME byPost map schedulerRunJob read). The scheduler CONTRACT is
+      // unchanged: runJob resolves true when the job FIRED, false when skipped
+      // (missing head / already-running / any non-fatal error — the tick never
+      // throws from here).
+      const spawnService = ctx.get('deepartments.spawn') as
+        | { runJobForDepartment?: (department: JobsDepartment, headEntry: { postId: string; roomId: string; sessionId?: string }, jobId: string, opts?: { callerSessionId?: string; signal?: AbortSignal }) => Promise<unknown> }
+        | undefined
+      const catalog = ctx.get('deepartments.catalog') as
+        | { byPost?: Map<string, { postId: string; roomId: string; sessionId?: string }> }
+        | undefined
+      const runJobFromService: AgendaSchedulerDeps['runJob'] | undefined =
+        spawnService?.runJobForDepartment !== undefined && catalog?.byPost !== undefined
+          ? async (department, headPostId, jobId) => {
+              const headEntry = catalog!.byPost!.get(headPostId)
+              if (headEntry === undefined) {
+                // The same no-head record the bundle's schedulerRunJob wrote
+                // (W8-c — the health sink via onAutoRunSkip, reason 'no head').
+                await bound.onAutoRunSkip?.({ jobId, reason: 'no head', error: 'no head' })
+                ctx.logger.warn(`[deepartments] scheduler: job "${jobId}" (department ${department.id}) head "${headPostId}" not in the catalog — skip`)
+                return false
+              }
+              try {
+                await spawnService!.runJobForDepartment!(department, headEntry, jobId, { callerSessionId: headEntry.sessionId })
+                return true
+              } catch (error: unknown) {
+                const errorText = error instanceof Error ? error.message : String(error)
+                ctx.logger.warn(`[deepartments] scheduler: job "${jobId}" could not run (${errorText}) — skip`)
+                return false
+              }
+            }
+          : undefined
+      const runJob: AgendaSchedulerDeps['runJob'] | undefined = runJobFromService ?? bound.runJob
+      // notifyHead/departmentForEntry/departmentForJob stay holder-required (the
+      // spawn service does not expose them); runJob is required ONLY when the
+      // spawn service cannot provide it (fail loud R1 with both sources named).
+      const required: Array<keyof JobsBinderDeps> = ['notifyHead', 'departmentForEntry', 'departmentForJob']
       const missing = required.filter((key) => bound[key] === undefined)
-      if (missing.length > 0) {
-        throw new Error(`[deepartments] jobs scheduler tick: required deps-holder dep(s) missing: ${missing.join(', ')} — the DECOUPLING bundle must call ctx.get('deepartments.jobsDeps').register({ runJob, notifyHead, ... })`)
+      if (missing.length > 0 || runJob === undefined) {
+        const runJobNote = runJob === undefined
+          ? ' (runJob: the deepartments.spawn service is absent AND the holder has no runJob — compose dshd-orchestration for the spawn service or register runJob in the holder)'
+          : ''
+        throw new Error(`[deepartments] jobs scheduler tick: required deps-holder dep(s) missing: ${missing.join(', ')}${runJobNote} — the DECOUPLING bundle must call ctx.get('deepartments.jobsDeps').register({ runJob, notifyHead, ... })`)
       }
       // The repoRoot fallback keeps reading the composed `wakepack` Binder
       // bucket (the FASE 2.6-C seam, still filled by the frozen register) —
@@ -729,7 +775,7 @@ export function apply(ctx: Context, config: JobsConfig = {}) {
         calendarStateDir: org.stateDir,
         jobRunsStateDir: org.stateDir,
         headForDepartment: (department) => department.coordinator?.postId,
-        runJob: bound.runJob!,
+        runJob: runJob!,
         notifyHead: bound.notifyHead!,
         departmentForEntry: bound.departmentForEntry!,
         departmentForJob: bound.departmentForJob!,

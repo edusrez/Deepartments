@@ -1,0 +1,104 @@
+# dshd-core-min configuration layer — top-level YAML array of patch entries.
+# LANE 0.2.3 (gap 3 TOTAL MODULARITY — single-source of the org config): this
+# package is the DECLARED MINIMAL-COMPOSITION FALLBACK of the org. It carries
+# EXACTLY the SHARED org config keys the bundle's `deepartments` row used to
+# mirror (dshd-core is the ONE source of truth in the full composition; HERE is
+# the fallback for bundle-alone / minimal / hermetic compositions where
+# dshd-core is absent):
+#   - stateDir (the org stateDir, same value as the dshd-core row),
+#   - org.departments (the 3 configured departments, same catalog),
+#   - org.poolerBaseURL (the P1 rewire-pooler endpoint-drift exemption route),
+#   - org.workerAgentOptions / org.hostAgentOptions (R4 — providers→org config;
+#     the runtime-verified route, same as the dshd-core row).
+# Contract (mirrors the D5 single-source contract): the SHARED keys MUST stay
+# equal to the dshd-core row — test/org-config-parity.test.js locks the parity
+# (core ↔ dshd-core-min equality; the bundle row carries NO org mirror).
+# One-sided keys are INTENTIONAL and NOT carried here: `org.postsRetention`
+# is core-only (a minimal composition leaves it absent → pruning OFF, the
+# conservative default); `org.pacing` + `quality` are bundle-only knobs.
+# Plain scalars only — no !!js outside the runtime config engine.
+- insert:
+    - id: dshd-core-min
+      name: dshd-core-min
+      config:
+        # The org stateDir — MUST match the dshd-core row / the bundle's own
+        # config.stateDir so the catalog the bundle consumes points at the SAME
+        # posts.json/hosts.json.
+        stateDir: .deepartments
+        org:
+          departments:
+            - id: research
+              name: Research Department
+              workspacePath: /root/.deepartments/departments/research
+              purpose: >-
+                investigación web-first de la org — evidencia
+                actual/community/security (research-on-demand + tech-watch
+                biweekly; roles researcher/analyst/reviewer/organizer)
+              services: >-
+                RESEARCH REQUEST (send_message a research-head) — devuelve
+                informe + resumen 3-5 bullets
+              coordinator:
+                postId: research-head
+                title: Head of Research
+                role: Research department head
+                sessionTitle: Research Head
+                provider: opencode-zen
+                agentOptions:
+                  provider: opencode-zen
+                  model: deepseek-v4-flash
+                  reasoningEffort: max
+            - id: internal-programming
+              name: Internal Programming
+              workspacePath: /root/.deepartments/departments/internal-programming
+              purpose: >-
+                todo el trabajo de código interno de DSH/dsh-deepartments/
+                plugins — planificación, implementación (builder), análisis
+                profundo (explore-deep), revisión (reviewer), jobs semanales
+                (weekly-repo-health, version-watch); DAG/cola IPD
+              services: PROGRAMMING REQUEST (send_message a internal-programming-head)
+              coordinator:
+                postId: internal-programming-head
+                title: Internal Programming Head
+                role: Internal Programming department head
+                sessionTitle: Internal Programming Head
+                provider: opencode-zen
+                agentOptions:
+                  provider: opencode-zen
+                  model: deepseek-v4-flash
+                  reasoningEffort: max
+            - id: quality
+              name: Quality Department
+              workspacePath: /root/.deepartments/departments/quality
+              purpose: >-
+                inspecciona el runtime de la propia org (eventos de archivo
+                25%/100%, post-errors, digest diario quality-daily); SOLO
+                reporta, nunca arregla (los fixes van al IPD vía PROGRAMMING
+                REQUEST)
+              services: QUALITY REQUEST (send_message a quality-head)
+              coordinator:
+                postId: quality-head
+                title: Quality Head
+                role: Quality department head
+                sessionTitle: Quality Head
+                provider: opencode-zen
+                agentOptions:
+                  provider: opencode-zen
+                  model: deepseek-v4-flash
+                  reasoningEffort: max
+          # R4 (providers → org config, LANE 0.2.3): the DEFAULT worker/host
+          # model route — declared in the org (single source), resolved
+          # org-driven in dshd-orchestration presets.ts (literals as code
+          # fallback). deepseek-v4-flash = the RUNTIME TRUTH (verified via
+          # --dump-config: the host rows + agent-default-model run flash).
+          workerAgentOptions:
+            provider: opencode-zen
+            model: deepseek-v4-flash
+            reasoningEffort: max
+          hostAgentOptions:
+            provider: opencode-zen
+            model: deepseek-v4-flash
+            reasoningEffort: max
+          # P1 rewire-pooler: the pooler baseURL — the endpoint-drift exemption
+          # route (mirrors the dshd-core row; MUST stay equal — the parity
+          # test locks it).
+          poolerBaseURL: http://127.0.0.1:4097/v1

@@ -1,0 +1,33 @@
+{
+  "name": "dshd-core-min",
+  "version": "0.1.0-rc.1",
+  "description": "Deepartments MINIMAL-COMPOSITION org-fallback plugin (LANE 0.2.3 single-source): a pure Cordis plugin whose row declares EXACTLY the SHARED org config keys (stateDir, org.departments, org.poolerBaseURL, org.workerAgentOptions, org.hostAgentOptions) and whose `apply` provides `deepartments.org` with the SAME signature/semantics as dshd-core (index.ts:692-696) — the declared fallback for minimal/hermetic compositions WHERE dshd-core is absent (bundle-alone), so the bundle row no longer mirrors the org.",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "license": "MIT"
+}

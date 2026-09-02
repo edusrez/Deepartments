@@ -318,7 +318,7 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
    * drift from the config again (mirrors the F7 WORKER_AGENT_OPTIONS). */
   const HOST_AGENT_OPTIONS: AgentOptionsLike = {
     provider: 'opencode-zen',
-    model: 'deepseek-v4-flash-vision-exp',
+    model: 'deepseek-v4-flash',
     reasoningEffort: 'max'
   }
   /** fb-6 (QH — the resume/re-materialization "has no provider/model" class):
@@ -1184,13 +1184,25 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
   // apply-fiber destructure re-binds them at the same position (spawn/tools/
   // delivery factories + the daemons + the agent/pre-step registration read
   // the SAME bindings).
+  // R4 (LANE 0.2.3 — providers → org config): the WORKER/HOST AgentOptions
+  // resolve ORG-DRIVEN — org.workerAgentOptions / org.hostAgentOptions when
+  // the org declares them (the SHARED config source — dshd-core /
+  // dshd-core-min rows), the CODE literals above otherwise (movement-only for
+  // every consumer: the surface returns the resolved values under the SAME
+  // member names; the zone's literal consts stay as the code defaults).
+  // resolveMaterializeAgentOptions' fallback is the ORG-RESOLVED worker route
+  // (the materializePost seam for heads/workers without a usable candidate).
   // =========================================================================
+  const workerAgentOptionsResolved: AgentOptionsLike = org?.workerAgentOptions ?? WORKER_AGENT_OPTIONS
+  const hostAgentOptionsResolved: AgentOptionsLike = org?.hostAgentOptions ?? HOST_AGENT_OPTIONS
+  const resolveMaterializeAgentOptionsResolved = (candidate: AgentOptionsLike | undefined): AgentOptionsLike =>
+    isUsableAgentOptions(candidate) ? (candidate as AgentOptionsLike) : workerAgentOptionsResolved
   return {
     PRESET_ID,
     WORKER_PRESET_ID,
-    WORKER_AGENT_OPTIONS,
-    HOST_AGENT_OPTIONS,
-    resolveMaterializeAgentOptions,
+    WORKER_AGENT_OPTIONS: workerAgentOptionsResolved,
+    HOST_AGENT_OPTIONS: hostAgentOptionsResolved,
+    resolveMaterializeAgentOptions: resolveMaterializeAgentOptionsResolved,
     repoRoot,
     dshHome,
     materializePreset,

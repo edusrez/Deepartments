@@ -132,6 +132,11 @@ export interface Config {
     postsRetention?: PostsRetentionConfig
     ghostSuspect?: GhostSuspectConfig
     pacing?: PacingConfig
+    // R4 (LANE 0.2.3 — providers → org config): the org-declared default
+    // worker/host model routes the presets surface resolves org-driven (the
+    // code literals remain the fallback).
+    workerAgentOptions?: { provider?: string; model?: string; reasoningEffort?: 'max' | 'high' | 'medium' | 'low' }
+    hostAgentOptions?: { provider?: string; model?: string; reasoningEffort?: 'max' | 'high' | 'medium' | 'low' }
   }
   parallel?: ParallelConfig
   health?: HealthConfig

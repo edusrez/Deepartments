@@ -226,13 +226,21 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
   // compiles to lib/core/orchestration/presets.js — THREE levels under the
   // repo root — so the identically-valued expression carries three '..').
   // md5 stamp cd9ce710… = md5(HEAD 3022-3919 with line 3089 replaced).
+  // LANE 0.2.3 R4 RE-FREEZE (R2, evidence: the zone diff vs HEAD is EXACTLY
+  // ONE line — presets.ts:321 `HOST_AGENT_OPTIONS.model` aligned from
+  // 'deepseek-v4-flash-vision-exp' to 'deepseek-v4-flash', the RUNTIME TRUTH
+  // verified via the dev --dump-config [the host rows + agent-default-model
+  // run flash; the vision-exp literal was stale dead weight]). md5 stamp
+  // b624be3c… = md5(HEAD zone with that single literal replaced). The R4
+  // org-driven resolution lives OUTSIDE this zone (before the surface
+  // return) — no other zone byte changed.
   {
     const first = factory.indexOf('  // --- department HEADS: FIRST-CLASS ROOT AGENTS (Batch 1a)')
     const last = factory.indexOf("      logger: ctx.logger\n    })\n  })()")
     assert.ok(first !== -1 && last !== -1 && last > first, 'the factory embeds the presets zone (banner → wakePackService construction close)')
     const zoneText = factory.slice(first, last + "      logger: ctx.logger\n    })\n  })()".length) + '\n'
     const md5 = createHash('md5').update(zoneText, 'utf8').digest('hex')
-    assert.equal(md5, 'cd9ce710d79fd817983a225ffc04cdc0', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation (md5 cd9ce710…)')
+    assert.equal(md5, 'b624be3c9056a6c96c6c0da0eee2ee80', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation AND the LANE 0.2.3 R4 one-line HOST literal alignment (md5 b624be3c… — re-freeze documented above)')
     // The D1 deviation is present and documented: the factory's repoRoot
     // initializer carries THREE '..' (module-position-dependent, identical
     // value — the factory lives 3 levels under the repo root).

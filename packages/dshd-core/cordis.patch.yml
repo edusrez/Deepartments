@@ -127,6 +127,22 @@
           # EXACTLY equal to this as a HEALTHY route (NOT drift). MUST match the
           # opencode-zen baseURL set in settings.yaml.
           poolerBaseURL: http://127.0.0.1:4097/v1
+          # R4 (providers → org config, LANE 0.2.3): the DEFAULT worker/host
+          # model route — declared in the org (single source), resolved
+          # org-driven in dshd-orchestration presets.ts (literals as code
+          # fallback). deepseek-v4-flash = the RUNTIME TRUTH (verified via the
+          # dev --dump-config: the host agent-default-model + persona + the
+          # coordinator rows all run flash; the pre-R4 HOST literal vision-exp
+          # was stale). MUST mirror packages/dshd-core-min/cordis.patch.yml
+          # (org-config-parity locks the equality).
+          workerAgentOptions:
+            provider: opencode-zen
+            model: deepseek-v4-flash
+            reasoningEffort: max
+          hostAgentOptions:
+            provider: opencode-zen
+            model: deepseek-v4-flash
+            reasoningEffort: max
         # core constants (configurable, code-defaulted): the catalog is the
         # single source; no daemons / role registry here (single source stays the
         # bundle's role-orient.ts).

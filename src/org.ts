@@ -509,6 +509,27 @@ export interface Config {
      * health/quality contract.
      */
     pacing?: PacingConfig
+    /**
+     * R4 (providers → org config, LANE 0.2.3) — the DEFAULT WORKER model route:
+     * the AgentOptions EVERY materialized department worker uses when the
+     * department does not override it (a future `departments[].workerAgentOptions`
+     * for the dshd-<dept> owner). Shape IDENTICAL to `coordinator.agentOptions`
+     * ({provider, model, reasoningEffort?}). Optional — ABSENT → the code
+     * literals (WORKER_AGENT_OPTIONS in dshd-orchestration presets.ts:
+     * opencode-zen / deepseek-v4-flash / max) remain the fallback. The presets
+     * surface resolves it ORG-DRIVEN (single source declared here; movement-only
+     * for consumers — spawn/tools/delivery keep reading the same constants).
+     */
+    workerAgentOptions?: { provider?: string; model?: string; reasoningEffort?: 'max' | 'high' | 'medium' | 'low' }
+    /**
+     * R4 (providers → org config, LANE 0.2.3) — the DEFAULT HOST model route
+     * (the D4 dormant-host resume AgentOptions, delivery.ts:989). Same shape as
+     * the worker route. Optional — ABSENT → the code literals (HOST_AGENT_OPTIONS
+     * in presets.ts: opencode-zen / deepseek-v4-flash / max — the RUNTIME TRUTH:
+     * the dev dump-config runs the host on flash via agent-default-model; the
+     * pre-R4 vision-exp literal was stale, the runtime never used it).
+     */
+    hostAgentOptions?: { provider?: string; model?: string; reasoningEffort?: 'max' | 'high' | 'medium' | 'low' }
   }
   /**
    * Parallel Web Systems event_stream monitor config (W3b parallel-monitor).
@@ -630,7 +651,24 @@ export const Config: z<any, any> = z.object({
       enabled: boolean
       peakWindows: { weekday: number[]; hours: number[] }
       peakBufferMs: number
-    })
+    }),
+    // R4 (providers → org config, LANE 0.2.3) — mirrors Config.org.
+    // workerAgentOptions / hostAgentOptions (the {provider, model,
+    // reasoningEffort?} route shape, identical to coordinator.agentOptions).
+    // `default(void 0)` so an ABSENT key falls through to the CODE defaults
+    // (opencode-zen / deepseek-v4-flash / reasoningEffort max for both — the
+    // runtime-verified host route, LANE 0.2.3 alignment) — the
+    // compose-untouched contract of every org section.
+    workerAgentOptions: z.object({
+      provider: z.string(),
+      model: z.string(),
+      reasoningEffort: z.union([z.const('max'), z.const('high'), z.const('medium'), z.const('low')])
+    }).default(void 0 as unknown as { provider: string; model: string; reasoningEffort: 'max' | 'high' | 'medium' | 'low' }),
+    hostAgentOptions: z.object({
+      provider: z.string(),
+      model: z.string(),
+      reasoningEffort: z.union([z.const('max'), z.const('high'), z.const('medium'), z.const('low')])
+    }).default(void 0 as unknown as { provider: string; model: string; reasoningEffort: 'max' | 'high' | 'medium' | 'low' })
   }).required(),
   // W3b parallel-monitor (Parallel event_stream). Mirrors the runtime
   // ParallelConfig/ParallelMonitorConfig declared here in org.ts: `monitors` defaults

@@ -138,6 +138,26 @@ export interface OrgConfig {
     peakWindows?: { weekday?: number[]; hours?: number[] }
     peakBufferMs?: number
   }
+  /** R4 (providers → org config, LANE 0.2.3) — the default WORKER model route
+   * ({provider, model, reasoningEffort?}, the SAME shape as
+   * coordinator.agentOptions). Delivered VERBATIM via `deepartments.org` so
+   * the presets surface resolves it ORG-DRIVEN (the code literals as the
+   * fallback). Absent → code defaults (opencode-zen / deepseek-v4-flash / max). */
+  workerAgentOptions?: {
+    provider?: string
+    model?: string
+    reasoningEffort?: 'max' | 'high' | 'medium' | 'low'
+  }
+  /** R4 — the default HOST model route (the D4 dormant-host resume
+   * AgentOptions). Same shape as the worker route. Absent → code defaults
+   * (opencode-zen / deepseek-v4-flash / max — the RUNTIME TRUTH aligned in
+   * LANE 0.2.3; the pre-R4 vision-exp literal was stale, the config rows run
+   * the host on flash). */
+  hostAgentOptions?: {
+    provider?: string
+    model?: string
+    reasoningEffort?: 'max' | 'high' | 'medium' | 'low'
+  }
 }
 
 /** The `deepartments.org` service surface (FASE 2.6 BATCH A) — the shared

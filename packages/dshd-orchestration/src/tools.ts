@@ -5052,7 +5052,14 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // each holder resolvable exactly when the closure-bound state is ready).
   depsHealth?.register({ qiDirectiveRate: qualityWorkerInspectProbability })
   depsJobs?.register({
-    runJob: schedulerRunJob,
+    // LANE 0.2.3 (jobs→spawn-Service): `runJob` is NO LONGER registered into
+    // the holder — the dshd-jobs scheduler tick resolves the run engine
+    // SERVICE-FIRST via `ctx.get('deepartments.spawn')?.runJobForDepartment`
+    // (this package provides the spawn service) and uses this holder's runJob
+    // only as the R6 fallback in a composition where the spawn service is
+    // absent. The binder `jobs` bucket (the FROZEN CUT-4 register) still
+    // carries runJob for the legacy path (dismantled with the register in
+    // 0.2.3b).
     notifyHead: schedulerNotifyHead,
     departmentForEntry: schedulerDepartmentForEntry,
     departmentForJob: schedulerDepartmentForJob,

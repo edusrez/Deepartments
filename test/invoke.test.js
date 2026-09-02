@@ -14919,62 +14919,83 @@ test('FIX-2 (QD NO_ADAPTER alerting): readLlmPiAiProviderSettings reads + parses
   })
 })
 
-test('P1 rewire-pooler (GAP 1): the deepartments plugin org config SETS org.poolerBaseURL to the pooler route, so the endpoint-drift exemption is ACTIVE and the boot check does NOT flag the pooler as drift', async () => {
+test('P1 rewire-pooler (GAP 1): the SHARED org-config source rows (dshd-core + dshd-core-min) SET org.poolerBaseURL to the pooler route, so the endpoint-drift exemption is ACTIVE and the boot check does NOT flag the pooler as drift — and the bundle row carries NO mirror (single-source, LANE 0.2.3)', async () => {
   // GAP 1 regression guard: builder-56 wired the exemption (src/org.ts +
   // src/invoke.ts) but did NOT set the VALUE in the plugin org config, so the
   // boot provider-adapter check would STILL flag opencode-zen (baseURL
   // http://127.0.0.1:4097/v1 — the pooler) as endpoint drift and post-error at
-  // boot. This reads the REAL cordis.patch.yml (the bundled config) and asserts
-  // the deepartments org block carries org.poolerBaseURL = the pooler route.
-  // Read-only + dependency-free line scan (mirrors parseLlmPiAiProviderSettings).
+  // boot. LANE 0.2.3 (single-source): the value lives in the SHARED rows the
+  // runtime reads FIRST (`coreOrg?.org ?? cfg.org` — dshd-orchestration
+  // boot.ts:350-359): the dshd-core row (the full composition) AND the
+  // dshd-core-min row (the minimal fallback). The bundle row must NOT carry
+  // it anymore (the mirror is gone). Read-only + dependency-free line scan
+  // (mirrors parseLlmPiAiProviderSettings).
   const INDENT = (line0) => (line0.match(/^\s*/)?.[0].length ?? 0)
-  const text = await readFile(path.join(REPO_ROOT, 'cordis.patch.yml'), 'utf8')
-  const lines = text.split('\n')
-  const rowIdx = lines.findIndex((l) => /^\s*- id: deepartments\s*$/.test(l))
-  assert.ok(rowIdx >= 0, 'cordis.patch.yml contains the deepartments patch row')
-  const rowIndent = INDENT(lines[rowIdx])
-  let inConfig = false
-  let configIndent = -1
-  let inOrg = false
-  let orgIndent = -1
-  let poolerBaseURL
-  for (let i = rowIdx; i < lines.length; i += 1) {
-    const line = lines[i]
-    const indent = INDENT(line)
-    const trimmed = line.trim()
-    if (trimmed === '' || trimmed.startsWith('#')) continue
-    // Stop at the next top-level patch row (the array of patch entries).
-    if (i > rowIdx && indent <= rowIndent && /^-\s/.test(trimmed)) break
-    if (inConfig && indent <= configIndent) {
-      inConfig = false
-      inOrg = false
-    }
-    if (!inConfig && /^config\s*:/.test(trimmed) && indent > rowIndent) {
-      inConfig = true
-      configIndent = indent
-      continue
-    }
-    if (inConfig && !inOrg && /^org\s*:/.test(trimmed) && indent > configIndent) {
-      inOrg = true
-      orgIndent = indent
-      continue
-    }
-    if (inOrg) {
-      if (indent <= orgIndent) {
+  /** Scan ONE patch row text for the org.poolerBaseURL value (undefined when
+   * absent). Stops at the next top-level patch row. */
+  const scanOrgPoolerBaseURL = (text, rowId) => {
+    const lines = text.split('\n')
+    const rowIdx = lines.findIndex((l) => new RegExp(`^\\s*- id: ${rowId}\\s*$`).test(l))
+    assert.ok(rowIdx >= 0, `${rowId} patch row present in ${rowId === 'deepartments' ? 'cordis.patch.yml' : `packages/${rowId}/cordis.patch.yml`}`)
+    const rowIndent = INDENT(lines[rowIdx])
+    let inConfig = false
+    let configIndent = -1
+    let inOrg = false
+    let orgIndent = -1
+    for (let i = rowIdx; i < lines.length; i += 1) {
+      const line = lines[i]
+      const indent = INDENT(line)
+      const trimmed = line.trim()
+      if (trimmed === '' || trimmed.startsWith('#')) continue
+      // Stop at the next top-level patch row (the array of patch entries).
+      if (i > rowIdx && indent <= rowIndent && /^-\s/.test(trimmed)) break
+      if (inConfig && indent <= configIndent) {
+        inConfig = false
         inOrg = false
+      }
+      if (!inConfig && /^config\s*:/.test(trimmed) && indent > rowIndent) {
+        inConfig = true
+        configIndent = indent
         continue
       }
-      const keyMatch = /^poolerBaseURL\s*:\s*(.+)$/.exec(trimmed)
-      if (keyMatch) {
-        poolerBaseURL = keyMatch[1].trim()
-        break
+      if (inConfig && !inOrg && /^org\s*:/.test(trimmed) && indent > configIndent) {
+        inOrg = true
+        orgIndent = indent
+        continue
+      }
+      if (inOrg) {
+        if (indent <= orgIndent) {
+          inOrg = false
+          continue
+        }
+        const keyMatch = /^poolerBaseURL\s*:\s*(.+)$/.exec(trimmed)
+        if (keyMatch) return keyMatch[1].trim()
       }
     }
+    return undefined
   }
+  const bundleText = await readFile(path.join(REPO_ROOT, 'cordis.patch.yml'), 'utf8')
+  const coreText = await readFile(path.join(REPO_ROOT, 'packages', 'dshd-core', 'cordis.patch.yml'), 'utf8')
+  const minText = await readFile(path.join(REPO_ROOT, 'packages', 'dshd-core-min', 'cordis.patch.yml'), 'utf8')
+  // The SHARED source rows carry the pooler route (the runtime exemption source
+  // in BOTH the full composition and the minimal fallback).
   assert.equal(
-    poolerBaseURL,
+    scanOrgPoolerBaseURL(coreText, 'dshd-core'),
     'http://127.0.0.1:4097/v1',
-    'GAP 1: org.poolerBaseURL must be set to the pooler route (http://127.0.0.1:4097/v1) so the drift exemption is ACTIVE',
+    'GAP 1: org.poolerBaseURL must be set in the dshd-core row (the shared source — full composition) to the pooler route so the drift exemption is ACTIVE',
+  )
+  assert.equal(
+    scanOrgPoolerBaseURL(minText, 'dshd-core-min'),
+    'http://127.0.0.1:4097/v1',
+    'GAP 1: org.poolerBaseURL must be set in the dshd-core-min row (the minimal-composition fallback) to the pooler route so the drift exemption is ACTIVE bundle-alone',
+  )
+  // The bundle row carries NO mirror (LANE 0.2.3 single-source — the runtime
+  // reads the shared source FIRST; a poolerBaseURL drifting back into the
+  // bundle row would silently re-create the double source of truth).
+  assert.equal(
+    scanOrgPoolerBaseURL(bundleText, 'deepartments'),
+    undefined,
+    'LANE 0.2.3: the bundle deepartments row must NOT carry org.poolerBaseURL (single-source — the exemption lives in dshd-core / dshd-core-min)',
   )
 })
 
