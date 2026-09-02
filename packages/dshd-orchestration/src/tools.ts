@@ -2559,7 +2559,19 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       const retireProb = qualityInspectEnvProb !== undefined && Number.isFinite(qualityInspectEnvProb) && qualityInspectEnvProb >= 0 && qualityInspectEnvProb <= 1
         ? qualityInspectEnvProb
         : qualityWorkerInspectProbability
-      const retireEmitted = qualityInspectDecision('worker', { rng: () => retireRoll, workerInspectProbability: qualityWorkerInspectProbability })
+      // F6 (D-Q2 recursion anchor, m-2170): the QD does NOT sample its OWN
+      // workers — a retire of a quality-head worker (inspector OR quality job
+      // worker, managerId === 'quality-head') would roll the 25% dice → another
+      // QD inspector → its retire rolls again (12-13-case chain in 2 days,
+      // ~10-13 workers/turns/reports self-consumed, parallel forks at 2
+      // inspectors/wave). Stateless exclusion = the quality-head anti-loop
+      // precedent of the 'head' branch (dshd-quality): the recursive QD audit
+      // remains available via EXPLICIT QH dispatch (cap-in-practice cases
+      // 12/13). The roll is STILL drawn and the INFO dice line below still logs
+      // emitted=false for the excluded retire (qi-silence forensics intact) —
+      // only the directive is suppressed. Documented future option (YAGNI, NOT
+      // part of this lane): a `quality.excludeQdWorkers` knob to re-enable.
+      const retireEmitted = entry.managerId !== 'quality-head' && qualityInspectDecision('worker', { rng: () => retireRoll, workerInspectProbability: qualityWorkerInspectProbability })
       ctx.logger.info(`[deepartments] retirePost worker-retire QD dice: postId="${postId}" roll=${retireRoll} prob=${retireProb} emitted=${retireEmitted}`)
       try {
         if (retireEmitted) {

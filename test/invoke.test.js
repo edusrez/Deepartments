@@ -18024,6 +18024,69 @@ test('QD worker retire (env forced true): a fresh retire emits ONE quality-inspe
   })
 })
 
+test('F6 (D-Q2 recursion anchor, m-2170): a retire of a QUALITY-HEAD worker (quality-inspector, managerId=quality-head) emits ZERO worker-retired directives even with the dice forced true; the control researcher under research-head still emits EXACTLY ONE (sampling unchanged)', async () => {
+  // NOTE (F6 builder): NOT wrapped in `withTempStateDir` — its LANE 4 de-flake
+  // (8dcfc47d) added a `return` inside the `finally` that DISCARDS the callback's
+  // assertion failures (a `return` in `finally` overrides the pending exception),
+  // so a wrapped E2 could never fail red. Hand-rolled teardown keeps the exact
+  // fixture pattern while every assertion propagates. FLAGGED in the F6 report.
+  const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-invoke-'))
+  try {
+    process.env[QUALITY_INSPECT_ENV_VAR] = '1' // force the worker dice true
+    const env = await bootWithQD(stateDir)
+    try {
+      const signal = new AbortController().signal
+      // (a) THE EXCLUDED FAMILY: a quality-inspector spawned by the QD head
+      // itself (managerId === 'quality-head') retires with the dice FORCED
+      // true → ZERO worker-retired directives (the F6 exclusion suppresses
+      // the sample BEFORE the dice; the recursion anchor — the QD never
+      // samples its own workers).
+      const qd = qdHead(env)
+      const inspector = await f3Spawn(env, qd.headCtx, qd.key, qd.head, { role: 'quality-inspector', task: 'audit the retired researcher' })
+      const inspectorPost = (await readPosts(stateDir))[inspector.result.workerId]
+      assert.equal(inspectorPost.managerId, 'quality-head', 'the inspector is a worker OF the QD head (managerId=quality-head)')
+      const qdRetire = await qd.headCtx.tools.get('dept_worker_retire', qd.key).execute({ workerId: inspector.result.workerId }, { agent: qd.head, signal })
+      assert.equal(qdRetire.retired, true, 'the QD inspector retire commits')
+      assert.equal(qdRetire.archived, true, 'the QD inspector session is archived (D5)')
+      await waitFor(() => env.workspaceRegistry.archivedSessionIds.includes(inspector.result.sessionId), 5000, 'the QD inspector session hide-set settled')
+      let dirs = await qualityDirectives(stateDir)
+      const qdRetired = dirs.filter((d) => /worker retired/.test(d.text))
+      assert.equal(qdRetired.length, 0, 'a retire of a quality-head worker (managerId=quality-head) emits ZERO worker-retired directives even with the dice forced true (F6 anchor)')
+      assert.ok(!qdRetired.some(workerRetiredDirectiveFor(inspector.result.workerId)), 'NO directive names the QD inspector (the excluded retire emitted nothing)')
+      // (b) THE CONTROL: the SAME retire of a researcher under research-head
+      // (managerId=research-head) still samples → EXACTLY ONE directive (the
+      // exclusion is scoped to the QD family; non-QD workers keep sampling).
+      const { head, headCtx, key } = qdResearchHead(env)
+      const control = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'f6 control sample' })
+      const controlRetire = await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: control.result.workerId }, { agent: head, signal })
+      assert.equal(controlRetire.retired, true, 'the control researcher retire commits')
+      await new Promise((r) => setTimeout(r, 100))
+      dirs = await qualityDirectives(stateDir)
+      const retiredDirs = dirs.filter((d) => /worker retired/.test(d.text))
+      assert.equal(retiredDirs.length, 1, 'a retire of a research-head worker still emits EXACTLY ONE worker-retired directive (control — sampling unchanged)')
+      assert.ok(retiredDirs.some(workerRetiredDirectiveFor(control.result.workerId)), 'the single directive names the CONTROL researcher (the researcher was sampled)')
+      assert.ok(!retiredDirs.some(workerRetiredDirectiveFor(inspector.result.workerId)), 'NO directive names the QD inspector (the excluded retire emitted nothing)')
+    } finally {
+      await env.dispose()
+    }
+  } finally {
+    delete process.env[QUALITY_INSPECT_ENV_VAR] // never leak the env=1 force to later tests
+    // De-flake teardown WITHOUT the swallowing `return` (the LANE 4 helper
+    // bug): a clean rm BREAKS the loop and lets a pending assertion error
+    // propagate; a persistent ENOTEMPTY still fails loudly past the deadline.
+    const deadline = Date.now() + 2000
+    for (;;) {
+      try {
+        await rm(stateDir, { recursive: true, force: true })
+        break
+      } catch (error) {
+        if (Date.now() >= deadline) throw error
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+    }
+  }
+})
+
 /** O2 DE-FLAKE (fb-8): match a worker-retired directive by its OWN `post
  * <postId>,` token. A bare `text.includes(postId)` collides with OTHER
  * directives' SESSION ids: `worker-<slug>-<uuid>` embeds `<slug>-<N>` whenever
