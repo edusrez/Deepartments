@@ -89,6 +89,14 @@ forwards it.
    `https://registry.npmjs.org/dsh-deepartments` (+ the plugins' dist-tags).
    Report the deployed vs published delta per package. **Never touch the stable
    profile `/opt/dsh/.dsh`.**
+6. **Boot attribution (fb-43 — restart-registry).** ANTES de etiquetar
+   cualquier boot como «sin explicar»/unexplained en el digest, consultar el
+   restart-registry (`/.deepartments/restart-registry.jsonl`, mecanismo fb-43) y
+   la atribución del Asistente (restarts deliberados con canary PASS) — correlacionar
+   SIEMPRE el registry con los deploys registrados; un boot sin entrada de causa
+   puede ser deliberado (deploy) o recovery (crash). Un crash con systemd
+   on-failure (`Restart=on-failure`) aparece como boot sin atribución y NO debe
+   marcarse «sin explicar» sin cruzar los post-errors del día (ítem 4).
 
 ## Report
 
