@@ -68,11 +68,22 @@
     owner pendiente (canal cerrado 09-02 → §3). Job doc borrador en §7 del
     scoping (id gui-monitor-mode).
   - **higiene**: reports-move HECHO (09-02, copy al árbol .dsh/reports) +
-    **higiene AMPLIA EN CURSO** (lane 09-02: PENDIENTE-3 temporales 25-31 ago
-    [invoke.ts.bak, tmp-count-imports.mjs, scratch-zone7/, .scratch*/, measure/,
-    logs raíz antiguos] · PENDIENTE-4 reports/{builder,reviewer}/.scratch-m22 ·
-    PENDIENTE-5 .hyg-scratch fixtures fx1/fx2 [verificar dependencias de tests] ·
-    dir huérfano reports) + limpieza .tmp-*
+    **higiene AMPLIA CERRADA (builder-4 09-02, reporte
+    reports/builder/2026-09-02-higiene-amplia-4d92dad5.md)**: 19 archivos + 3
+    dirs (≈7.2 MB) eliminados con los 3 criterios (temporal/scratch · 0 citas ·
+    sin secretos); PENDIENTE-5 CERRADO-CONSERVAR (.hyg-scratch completo — fx1/
+    fx2 fixtures citados + f6-suite-run.log/f6-helper-check.mjs de HOY citados
+    por f6-review); PENDIENTE-4 conservado in-situ (scan-sleep.mjs citados como
+    probes forenses m22); dir huérfano reports LOCALIZADO = .dsh/reports del
+    workspace (3 stragglers: tool-goal-retiro.md CITADO por quality en tree
+    equivocado — conservar/no mover; lane1-hardening401.md duplicado idéntico;
+    -progress.md huérfano); **8 pendientes D-1..D-8 resueltos por el head:
+    TODOS CONSERVAR** (D-1 evidencia citada file:line [precedente congelación NO
+    aplicado sin lane de docs] · D-2 scripts/ tooling citado · D-3 .scratch raíz
+    [pooler-test-run1.log citado por quality] · D-4 .scratch-m22 raíz familia m22
+    · D-5 mover scan-sleep.mjs = lane de docs · D-6 .dsh/reports workspace legacy
+    no tocar · D-7 logs 01-sep candidatos futuros · D-8 tmp/ incl. port-harness-
+    fb51 HOY activo [§3]) + limpieza .tmp-*
     quality (builder-2 09-02: BLOQUEADA por fb-64 — corroboración EN VIVO;
     → **DECISIÓN QH 09-02**: **2 FROZEN evidencia fb-9** (`.tmp-qi20-defa5d61`
     + `.tmp-explore-deep-64ecf16d` — este último CORREGIDO por el QH: mi
@@ -89,8 +100,8 @@
     full-path + aritmética)** · **fb-63 (toolset reviewer)** · **fb-64
     (execRoots + stateDir READ-ONLY — corroborado EN VIVO por builder-2 09-02;
     aditivo, QH sin riesgo fb-55; verificar config real; habilita limpieza 6
-    STALE + copia canónica 2 FROZEN)** — en cola (orden: higiene amplia →
-    fb-61 → fb-62+53 → fb-63 → fb-64; GUI monitor owner-gated parqueado).
+    STALE + copia canónica 2 FROZEN)** — en cola (orden: fb-61 →
+    fb-62+53 → fb-63 → fb-64; GUI monitor owner-gated parqueado).
 - **CERRADOS en esta cola (no pedir de nuevo):** M4 (system-idle),
   M-A (context-threshold + dept_head_rotate), PACING (peak/valle),
   M-5 (misión-sin-inicio), M-6 (main-red), M-7 (mission-queue),
