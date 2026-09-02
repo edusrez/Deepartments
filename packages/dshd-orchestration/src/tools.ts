@@ -116,6 +116,10 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
+// LANE FEEDBACK-NUDGE — `createUserMessage` builds the nudge as an injected
+// plugin/notice context (the wake-pack shape); `boundContextSummary` bounds its
+// notice summary (the wake-pack pattern).
+import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { readFile, readdir, realpath, mkdir, stat } from 'node:fs/promises'
 import { readFileSync, existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
@@ -697,6 +701,43 @@ export interface ToolsSurface {
   execRoots: (department: DepartmentConfig | undefined) => Promise<string[]>
 }
 
+// ---------------------------------------------------------------------------
+// LANE FEEDBACK-NUDGE (owner backlog 2026-09-01 — ROADMAP.md:661; RD verdict
+// ROADMAP.md:663 — OPCIÓN B, el default elegido): when an agent sees a tool
+// error (or an "unknown tool"), a SHORT message invites it to consider using
+// dept_feedback to report the error or request a change/improvement to the
+// Quality Department. Three ADDITIVE surfaces, all sharing the line below:
+//   (1)  the `tools/post-execute` waterfall (registered in the factory): EVERY
+//        errored tool result — a thrown dept_* error, a guard denial, a
+//        harness "unknown tool: <name>" — gets the nudge as an ADDITIONAL
+//        CONTEXT (an injected plugin/notice), never a content replacement
+//        (opción A discarded: the error contract is never altered);
+//   (1b) OUR OWN guard-denial wrapper texts (dept_exec / dept_zstd_read —
+//        tools the text of whose denies is fully ours) carry the SAME line
+//        INLINE, so a denial read as plain text (a log, a replay) still nudges;
+//        the waterfall SKIPS those errors (dedup — exactly one nudge per
+//        error);
+//   (1c) the harness "unknown tool" text is NOT ours to edit → the matching
+//        guidance lives in the persona presets (agent.cordis.yml worker/head).
+// ---------------------------------------------------------------------------
+
+/** The single feedback-nudge line (the owner wording, ROADMAP.md:661). */
+const FEEDBACK_NUDGE_LINE = '¿Error de tool o propuesta de mejora? Repórtala con dept_feedback al QD'
+
+/** Build the nudge as an injected plugin/notice context message — the
+ * wake-pack shape (kind:'plugin' / form:'notice' → a collapsed notice row in
+ * the derived history, never a user-typed message). */
+const buildFeedbackNudgeContext = () =>
+  createUserMessage({
+    content: [{ type: 'text', text: FEEDBACK_NUDGE_LINE }],
+    source: {
+      kind: 'plugin',
+      plugin: 'deepartments',
+      form: 'notice',
+      summary: boundContextSummary('Deepartments tool-error feedback nudge (report it / propose an improvement via dept_feedback).')
+    }
+  })
+
 /**
  * Build the TOOLS ORCHESTRATION surface on the apply fiber (AGENTS.md rule 4
  * — no module-global mutable state; invoked by applyInvoke at the SAME fiber
@@ -855,6 +896,28 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   const deliverBusChild: ToolsFactoryDeps['late']['deliverBusChild'] = (...args) => late.deliverBusChild(...args)
   const freshMintHead: ToolsFactoryDeps['late']['freshMintHead'] = (...args) => late.freshMintHead(...args)
   const enqueueHostWake: ToolsFactoryDeps['late']['enqueueHostWake'] = (wake) => late.enqueueHostWake(wake)
+
+  // --- LANE FEEDBACK-NUDGE (opción B — ROADMAP.md:663): the `tools/post-execute`
+  // waterfall registration. SOLO cuando una tool LANZA error se anexa un
+  // additionalContexts breve (el nudge); un resultado de ÉXITO nunca se toca y
+  // el flujo normal no cambia (aditivo y no invasivo). El nudge viaja en las
+  // additionalContexts de la decisión (un contexto plugin/notice que el loop
+  // anexa DESPUÉS de los tool-results del paso) — el content del error y su
+  // contrato quedan intactos (la opción A — accept{content}/reemplazo — está
+  // descartada). Dedup (1b): un error cuya línea YA lleva el nudge inline (los
+  // guard-denials de dept_exec/dept_zstd_read) se salta — una sola aparición
+  // por error. El listener SIEMPRE delega vía next() y preserva la decisión
+  // downstream (un accept/block/content de un listener posterior sigue siendo
+  // autoritativo).
+  ctx.on('tools/post-execute', async (exec, result, next) => {
+    const downstream = await next()
+    if (!result.isError) return downstream
+    if (result.error.message.includes(FEEDBACK_NUDGE_LINE)) return downstream
+    return {
+      ...downstream,
+      additionalContexts: [buildFeedbackNudgeContext(), ...(downstream.additionalContexts ?? [])]
+    }
+  })
 
   // =========================================================================
   // TOOLS ZONE — SUB-BATCH 1 of 4 (hoisted VERBATIM from applyInvoke 3977-4898:
@@ -1244,7 +1307,10 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           const resolvedCwd = await realpath(cwd).catch(() => cwd)
           // The scope guard runs BEFORE any execution — a deny is a clean error.
           const deny = deptExecDenyReason(command, resolvedCwd, allowedRoots)
-          if (deny !== void 0) throw new Error(`[deepartments] dept_exec: ${deny}`)
+          // LANE FEEDBACK-NUDGE (1b): the guard-denial text is OURS → carries
+          // the nudge inline (a plain-text read of the denial still nudges);
+          // the waterfall dedups on the same line (one nudge per error).
+          if (deny !== void 0) throw new Error(`[deepartments] dept_exec: ${deny}\n${FEEDBACK_NUDGE_LINE}`)
           return runDeptExec(command, resolvedCwd)
         }
       })))
@@ -1310,7 +1376,9 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           // FIRST, exactly like dept_exec's canonicalization).
           const resolvedPath = await realpath(pathRaw).catch(() => pathRaw)
           const deny = deptZstdReadDenyReason(resolvedPath, allowedRoots)
-          if (deny !== void 0) throw new Error(`[deepartments] dept_zstd_read: ${deny}`)
+          // LANE FEEDBACK-NUDGE (1b): the guard-denial text is OURS → carries
+          // the nudge inline (see the dept_exec wrapper above).
+          if (deny !== void 0) throw new Error(`[deepartments] dept_zstd_read: ${deny}\n${FEEDBACK_NUDGE_LINE}`)
           return runDeptZstdRead(resolvedPath, offset, lines)
         }
       })))

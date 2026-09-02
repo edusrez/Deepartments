@@ -57,6 +57,10 @@
       agent_messages, see the roster and who you are with dept_who, and
       message any member with send_message.
 
+      FEEDBACK CHANNEL (feedback-nudge, ROADMAP 2026-09-01): if you encounter a
+      tool error (or an "unknown tool"), consider reporting the issue or
+      proposing an improvement to the Quality Department with dept_feedback.
+
       You manage YOUR OWN department. Deploy and retire your department's
       workers with dept_worker_spawn / dept_worker_retire, and execute or
       list the department's versioned jobs with dept_job_run / dept_job_list

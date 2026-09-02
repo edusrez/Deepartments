@@ -20645,3 +20645,171 @@ test('fb-30 CATCH-UP (gate + non-boot + WIDENED capture): health.catchupEnabled:
     assert.ok(readPostErrorsArchiveFile(stateDir).some((r) => r.postId === 'worker-b' && r.error === 'gap turn error'), 'the gap turn-error is durably ARCHIVED (the evidence home the catch-up scan reads)')
   })
 })
+
+// ---------------------------------------------------------------------------
+// LANE FEEDBACK-NUDGE (opción B — owner backlog 2026-09-01, ROADMAP.md:661;
+// RD verdict ROADMAP.md:663 — the default chosen: the nudge as an ADDITIONAL
+// CONTEXT, never altering the error contract). Covers the three additive
+// surfaces:
+//   (1)  the `tools/post-execute` waterfall handler (registered by the tools
+//        factory of dshd-orchestration): an ERRORED tool result gets ONE nudge
+//        additionalContexts (plugin/notice); a SUCCESS never does; an error
+//        whose message ALREADY carries the inline line (1b) is NOT double-
+//        nudged (dedup); a downstream accept/block decision is preserved with
+//        its content untouched (opción A discarded);
+//   (1b) the dept_exec/dept_zstd_read GUARD-DENIAL wrapper texts carry the
+//        nudge line INLINE (a plain-text read of a denial still nudges) — the
+//        waterfall then skips them (exactly one nudge per error);
+//   (1c) the persona presets (agent.cordis.yml worker/head) carry the matching
+//        FEEDBACK CHANNEL guide — the coverage for the harness "unknown tool"
+//        text (not ours to edit).
+// ---------------------------------------------------------------------------
+
+/** The exact nudge line (must stay byte-identical to the FEEDBACK_NUDGE_LINE
+ * of packages/dshd-orchestration/src/tools.ts). */
+const FEEDBACK_NUDGE_LINE = '¿Error de tool o propuesta de mejora? Repórtala con dept_feedback al QD'
+
+/** A minimal ToolExecution the real `tools/post-execute` waterfall accepts. */
+function nudgeExec(name = 'probe_tool', agent = { id: 'probe-agent' }) {
+  return { name, arguments: {}, agent }
+}
+
+/** An errored ToolExecutionResult (the shape a thrown/denied tool yields). */
+function nudgeErrorResult(message = 'boom') {
+  return { isError: true, error: { message }, content: [{ type: 'text', text: `Error: ${message}` }] }
+}
+
+/** The nudge additionalContexts among a decision's/result's contexts (the
+ * deepartments plugin/notice whose text carries the nudge line). */
+function nudgeContexts(contexts) {
+  return (contexts ?? []).filter((c) => {
+    const text = Array.isArray(c?.content) ? c.content.map((b) => b?.text ?? '').join('') : ''
+    return c?.source?.kind === 'plugin' && text.includes(FEEDBACK_NUDGE_LINE)
+  })
+}
+
+test('FEEDBACK-NUDGE (waterfall, opción B): the tools/post-execute handler appends the nudge additionalContexts ONLY on an errored result (never on success), PREPENDS it before downstream contexts, preserves the downstream accept, rides a block decision without touching its feedback content (opción A discarded), and SKIPS an error whose message already carries the inline line (dedup with 1b)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, workspaceRegistry, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      // De-flake (the 1b.1 boot-vs-teardown race): the boot materializes the
+      // configured head FIRE-AND-FORGET — wait for the materialization AND the
+      // attach chain to settle BEFORE dispose, so no in-flight continuation
+      // throws INACTIVE_EFFECT on the disposed ctx.
+      await waitFor(() => agents.store.has('head-research-head'), 10000, 'head created at boot')
+      await waitFor(() => workspaceRegistry.attachCalls.includes('head-research-head'), 10000, 'the configured-head attach settled before teardown')
+
+      const exec = nudgeExec()
+      const accept = () => Promise.resolve({ kind: 'accept' })
+
+      // (a) ERROR → the decision carries ONE nudge context; accept preserved.
+      const errDecision = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('some tool exploded'), accept)
+      assert.equal(errDecision.kind, 'accept', 'the downstream accept decision is preserved on an error')
+      const errNudges = nudgeContexts(errDecision.additionalContexts)
+      assert.equal(errNudges.length, 1, 'an errored result gets exactly ONE nudge context')
+      assert.equal(errNudges[0].source.form, 'notice', 'the nudge is a plugin/notice context (never a user-typed message)')
+      assert.equal(errNudges[0].content[0].text, FEEDBACK_NUDGE_LINE, 'the context text is the exact nudge line')
+      assert.ok(String(errNudges[0].source.summary ?? '').includes('dept_feedback'), 'the notice summary names the dept_feedback channel')
+
+      // (b) SUCCESS → NO nudge (the normal flow is untouched).
+      const okDecision = await pluginCtx().waterfall('tools/post-execute', exec, { isError: false, value: { ok: true }, content: [{ type: 'text', text: 'ok' }] }, accept)
+      assert.equal(okDecision.kind, 'accept', 'a success stays accepted')
+      assert.equal(nudgeContexts(okDecision.additionalContexts).length, 0, 'a SUCCESS never receives the nudge')
+
+      // (c) PREPEND: downstream contexts survive, the nudge comes first.
+      const preExisting = [{ role: 'user', content: [{ type: 'text', text: 'downstream context' }], source: { kind: 'plugin', plugin: 'someone-else' } }]
+      const preDecision = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('boom'), () => Promise.resolve({ kind: 'accept', additionalContexts: preExisting }))
+      const preCtxs = preDecision.additionalContexts ?? []
+      assert.equal(preCtxs.length, 2, 'the nudge joins the downstream contexts (nothing dropped)')
+      assert.equal(preCtxs[0].content[0].text, FEEDBACK_NUDGE_LINE, 'the nudge is PREPENDED (repeat-tool-reminder convention)')
+      assert.equal(preCtxs[1], preExisting[0], 'the downstream context is preserved verbatim')
+
+      // (d) DEDUP (1b): an errored result whose message ALREADY carries the
+      // inline line (a dept_exec/dept_zstd_read guard denial) → NO duplicate.
+      const dedupDecision = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult(`[deepartments] dept_exec: OUT_OF_SCOPE / DENIED — x\n${FEEDBACK_NUDGE_LINE}`), accept)
+      assert.equal(dedupDecision.kind, 'accept', 'the dedup path still accepts')
+      assert.equal(nudgeContexts(dedupDecision.additionalContexts).length, 0, 'an error that already carries the inline nudge line is NOT double-nudged (dedup)')
+
+      // (e) BLOCK decision by a downstream listener → preserved + context.
+      const blockFeedback = [{ type: 'text', text: 'blocked by a downstream policy' }]
+      const blockDecision = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('boom again'), () => Promise.resolve({ kind: 'block', feedback: blockFeedback }))
+      assert.equal(blockDecision.kind, 'block', 'a downstream block decision is preserved')
+      assert.deepEqual(blockDecision.feedback, blockFeedback, 'the block feedback content is untouched (opción A discarded)')
+      assert.equal(nudgeContexts(blockDecision.additionalContexts).length, 1, 'a block on an errored result still carries the nudge context')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('FEEDBACK-NUDGE (real path + 1b): a REAL worker dept_exec GUARD DENIAL carries the nudge line INLINE in its surfaced error text (1b); the SAME nudge rides the real agent-scoped `tools/post-execute` waterfall — appended on an errored result, SKIPPED when the message already carries the inline line (dedup), never on a success (opción B: the error contract untouched)', async () => {
+  const restore = await snapshotRoleTemplate(EXEC_ROLE)
+  try {
+    await writeFile(EXEC_ROLE_PATH, EXEC_ROLE_FRONTMATTER, 'utf8')
+    await withTempStateDir(async (stateDir) => {
+      const { root, agents, workspaceRegistry, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+      try {
+        // De-flake (the 1b.1 boot-vs-teardown race): bootWithHead waits for the
+        // head's PRESENCE only; the attach chain is fire-and-forget — wait for
+        // the attach settlement BEFORE dispose so no in-flight continuation
+        // throws INACTIVE_EFFECT on the disposed ctx.
+        await waitFor(() => workspaceRegistry.attachCalls.includes('head-research-head'), 10000, 'the configured-head attach settled before teardown')
+        const signal = new AbortController().signal
+        const { worker, ctx: workerCtx, key: workerKey } = await f3Spawn({ agents }, headCtx, key, head, { role: EXEC_ROLE, task: 'feedback-nudge probe' })
+        const exec = workerCtx.tools.get('dept_exec', workerKey)
+        assert.ok(exec, 'dept_exec is installed for the exec role')
+
+        // (a) 1b REAL deny: the surfaced error text carries the deny reason AND
+        // the inline nudge (the wrapper text is OURS — tools.ts dept_exec).
+        let denied
+        try {
+          await exec.execute({ command: 'sudo rm -rf /tmp/x' }, { agent: worker, signal })
+        } catch (error) {
+          denied = error
+        }
+        assert.ok(denied, 'the sudo command is denied')
+        assert.match(denied.message, /OUT_OF_SCOPE \/ DENIED — command contains a denied token "sudo"/, 'the deny reason survives in the surfaced error')
+        assert.ok(denied.message.includes(FEEDBACK_NUDGE_LINE), '1b: the guard-denial error text carries the nudge line INLINE')
+
+        // The agent-scoped fire is the EXACT dispatch shape the registry makes
+        // for a real call (`scopeTarget`-keyed on the agent — the row listeners
+        // sit on the dispatch path, untagged). Fire the real waterfall on the
+        // WORKER's scoped ctx:
+        const wf = (result, next) => workerCtx.waterfall('tools/post-execute', { name: 'dept_exec', arguments: { command: 'sudo rm -rf /tmp/x' }, agent: worker }, result, next)
+
+        // (b) an errored result on the agent scope → the nudge context lands.
+        const errDecision = await wf(nudgeErrorResult('registry-level boom'), () => Promise.resolve({ kind: 'accept' }))
+        assert.equal(errDecision.kind, 'accept', 'the agent-scoped accept decision is preserved')
+        assert.equal(nudgeContexts(errDecision.additionalContexts).length, 1, 'an errored result on the AGENT scope gets the nudge context (the registry dispatch shape)')
+
+        // (c) dedup on the agent scope: the REAL deny message already carries
+        // the inline line → NO duplicate context.
+        const denyMessage = denied.message
+        const dedupDecision = await wf(nudgeErrorResult(denyMessage), () => Promise.resolve({ kind: 'accept' }))
+        assert.equal(nudgeContexts(dedupDecision.additionalContexts).length, 0, 'an agent-scoped error already carrying the inline nudge line is NOT double-nudged (dedup)')
+
+        // (d) a SUCCESS on the agent scope → never nudged (flow untouched).
+        const okDecision = await wf({ isError: false, value: { ok: true }, content: [{ type: 'text', text: 'ok' }] }, () => Promise.resolve({ kind: 'accept' }))
+        assert.equal(okDecision.kind, 'accept', 'the agent-scoped success stays accepted')
+        assert.equal(nudgeContexts(okDecision.additionalContexts).length, 0, 'a SUCCESS on the agent scope never receives the nudge')
+        assert.ok(root.tools.get('dept_exec') === undefined, 'sanity: dept_exec is own-layer only (the worker scope is the real one)')
+      } finally {
+        await dispose()
+      }
+    })
+  } finally {
+    await restore()
+  }
+})
+
+test('FEEDBACK-NUDGE (persona guide, 1c): the deepartments worker + head persona presets (agent.cordis.yml) carry the FEEDBACK CHANNEL guide — a tool error / "unknown tool" → report it or propose an improvement via dept_feedback — covering the harness "unknown tool" text the plugin cannot edit', async () => {
+  for (const [label, rel] of [
+    ['worker', 'presets/deepartments-worker/agent.cordis.yml'],
+    ['head', 'presets/deepartments-head/agent.cordis.yml']
+  ]) {
+    const text = await readFile(path.join(F10_REPO_ROOT, rel), 'utf8')
+    assert.ok(text.includes('FEEDBACK CHANNEL'), `${label} preset carries the FEEDBACK CHANNEL guide`)
+    assert.match(text, /if you encounter a\s+tool error \(or an "unknown tool"\)/, `${label} preset names the unknown-tool case (the harness text we cannot edit)`)
+    assert.ok(text.includes('proposing an improvement to the Quality Department with dept_feedback'), `${label} preset points to dept_feedback for reports / improvements`)
+  }
+})
