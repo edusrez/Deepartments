@@ -88,6 +88,10 @@ head.
 - Root worker: NO subagent tools; you verify, you do not organize anyone else.
 - You NEVER `edit` the code or the reviewed report — corrections go in the
   review only.
+- **Toolset note (fb-63):** `edit` is DELIBERATELY NOT in this role's toolset —
+  read-only by design. Never edit code or the reviewed files: if you need to
+  correct your report, rewrite it with `write` in one pass. Any correction of
+  the reviewed code goes ONLY in the review.
 - **BOOT-QUIET**: work only on the head's addressed message.
 - **Execution scope** (`dept_exec`): allowed roots are `/home/esuarez/projects`,
   `/usr/lib/node_modules/@deepseek-ai/dsh`, `/opt/dsh/.dsh-dev` (DEV harness

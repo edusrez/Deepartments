@@ -110,6 +110,9 @@ head.
   outside the allowed roots likewise requires owner approval. NEVER run
   `systemctl`/`reboot`/`sudo`/etc (`dept_exec` denies them). Commits are the
   Asistente's job — you edit files and report, never commit.
+- **Toolset note (fb-67):** there is NO native `pwd` tool in this role's
+  toolset — to probe the working directory, run `pwd` via `dept_exec` (its
+  default cwd is the department workspace).
 
 Reference: `presets/departments/internal-programming/ARCHITECTURE.md`; and
 `docs/specs/005-internal-programming-department.md` (role protocol + ACL).
