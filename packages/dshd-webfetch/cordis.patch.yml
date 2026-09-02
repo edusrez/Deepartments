@@ -15,3 +15,19 @@
         timeoutMs: 30000
         maxResponseBytes: 5000000
         maxRedirects: 5
+# LANE 0.2.3c (P7b — TOTAL MODULARITY cierre): the fetchProvider SELECTION now
+# lives in THIS package as the DEFAULT — mounting dshd-webfetch IS the complete
+# web-fetch feature (provider registered AND selected), no profile pin needed.
+# The seam resolves `fetchProvider` from the composed `web` row's config
+# (@deepseek-ai/dsh-web lib/index.js: `config.fetchProvider ?? $DSH_WEB_FETCH_PROVIDER`).
+# A patch row REPLACES the targeted row's WHOLE config (no merge — the same
+# discipline the dev profile documents), so the base `searchProvider`
+# (@deepseek-ai/dsh-base web row) is restated here to stay behavior-neutral in
+# minimal compositions. The dev profile MAY keep its own `web` row: the profile
+# layer composes AFTER the bundle layers (composeProfile last-write-wins), so a
+# profile row still OVERRIDES this default — the local override seam is
+# preserved (evidence: profile-boot composeProfile order + lane023c report).
+- id: web
+  config:
+    searchProvider: deepseek-official
+    fetchProvider: deepartments-fetch
