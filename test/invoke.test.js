@@ -6734,10 +6734,19 @@ test('E2 DIRECTORIO (real Loader, fb-47 #4 dedupe): the HOST pack NO LONGER rend
       const decision = await runPreStep(pluginCtx, host, claimed, signal)
       const packText = decision.messages[decision.messages.length - 1].content[0].text
       // Exactly ONE directory occurrence in the whole pack — the skill mirror
-      // (embedded in section 9), never the standalone 5b.
-      const occurrences = packText.split('## Departments directory').length - 1
-      assert.equal(occurrences, 1, 'E2 (fb-47 #4): the directory appears EXACTLY ONCE in the host pack (the embedded skill mirror), never as a second standalone 5b section')
-      assert.match(packText, /- Research Department \(research-head\): investigación web-first de la org\. Pídelo con un RESEARCH REQUEST \(send_message a research-head\)\./, 'the skill mirror carries the research directory line with the correct head id')
+      // (embedded in section 9), never the standalone 5b. HEADING-ANCHORED
+      // (fb-60 follower): the embedded skill body ALSO cites the section name
+      // inline in its header blockquote (`> E2 mirror of the wake pack's
+      // `## Departments directory` section (section 5b)…`), so a raw split
+      // count sees 2 occurrences for 1 real section — only a REAL heading line
+      // counts as an occurrence.
+      const occurrences = (packText.match(/^## Departments directory/gm) ?? []).length
+      assert.equal(occurrences, 1, 'E2 (fb-47 #4): the directory appears EXACTLY ONCE in the host pack (as a real section — the embedded skill mirror), never as a second standalone 5b section')
+      // The mirror line itself carries the CURRENT skill text (the research
+      // line was expanded with the full service description — the same prefix
+      // form the staleness test (b) asserts; a full-line regex for the OLD
+      // short text is stale (fb-60 follower).
+      assert.match(packText, /- Research Department \(research-head\): investigación web-first de la org/, 'the skill mirror carries the research directory line with the correct head id')
     } finally {
       await dispose()
     }
@@ -13112,8 +13121,21 @@ test('M-6 SMOKE (acceptance — real daemon): bootPlugin with health {intervalMs
       // Self-register the live host (the ALERT recipient — a durable hosts.json
       // entry for pickLiveHost).
       await env.root.tools.get('dept_who').execute({}, { agent: host, signal })
-      // Give the daemon a moment to baseline — NO main-red alert at boot.
-      await new Promise((resolve) => setTimeout(resolve, 300))
+      // Wait for the DURABLE BASELINE — NO main-red alert at boot. The wait is
+      // DETERMINISTIC (fb-60 follower — flake 362): instead of a fixed 300 ms
+      // sleep that races the daemon's first poll under full-suite load, WAIT
+      // until the first main-red scan provably ran (main-red-state.json
+      // records lastSeenSha = the fixture HEAD) and THEN assert the boot
+      // contract (baseline only, never an alert — no new commit exists yet,
+      // so the scan can never emit a main-red finding).
+      await waitFor(async () => {
+        try {
+          const mainRedState = JSON.parse(await readFile(path.join(stateDir, 'main-red-state.json'), 'utf8'))
+          return typeof mainRedState.lastSeenSha === 'string' && /^[0-9a-f]{40}$/.test(mainRedState.lastSeenSha)
+        } catch {
+          return false
+        }
+      }, 5000, 'the first main-red scan recorded the durable baseline')
       assert.equal(host.inboxMessages.some((m) => m.content[0]?.text.includes('main-red')), false, 'the boot BASELINE never alerts (nunca alerta al arrancar)')
       // A NEW commit lands at the fixture HEAD (the adopted lesson: the suite
       // can go red on main WITHOUT the full suite detecting it — the watchdog
@@ -13643,7 +13665,15 @@ test('LANE 5 runHealthDaemonTick negatives: §3-only register → nothing; PEAK 
         hostRunning: opts.hostRunning ?? false,
         config: { health: { workRegisterIdleQuietMs: 60_000 }, org: { pacing: {} } },
         workRegisterPath: opts.registerPath ?? path.join(stateDir, 'WORK-REGISTER.md'),
-        notifyHost: async () => { alerts.push(1) },
+        // FB-60 FOLLOWER (373): the helper counts ONLY the system-health ALERT
+        // class. The pacing monitor's VALLE→PEAK transition notice (leg b: MON
+        // after leg a's SAT baseline) is a DIFFERENT legitimate bus frame
+        // («[From deepartments] Pacing PEAK: …») — the negatives assert the
+        // work-register-idle GATE is quiet in PEAK, not that the pacing
+        // monitor stays silent.
+        notifyHost: async (_hostEntry, frame) => {
+          if (typeof frame === 'string' && frame.startsWith('[From deepartments] System-health ALERT:')) alerts.push(1)
+        },
         logger: { warn: (m) => warns.push(m), info: () => {} }
       })
       return { alerts, warns }

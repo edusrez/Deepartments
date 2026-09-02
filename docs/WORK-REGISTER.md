@@ -36,7 +36,7 @@
     EN CURSO (lane 09-02, builder)**: regresión del de-flake lane 4 (8dcfc47d)
     — el `return` en el finally del helper PISA la excepción del try (assert.fail
     tragado → 0-fails falso). Fix `return`→`break` + guard test de propagación
-    (invoke.test.js:1021-1033 + :1157); el fix DEJA VER fallos reales antes
+    (invoke.test.js:1021-1033 + :1162-1182); el fix DEJA VER fallos reales antes
     enmascarados (188 E2 count frágil del skill mirror, 373 conflation de la
     notificación pacing en el helper del test) + el flake M-6 SMOKE (362) ahora
     visible — suite post-fix 726/702/2/22 (dur ~45 s; 362 intermitente).
