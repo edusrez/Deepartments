@@ -103,17 +103,34 @@
     deptExecIsPathWord extendida (separador final/close-glue; paths reales
     DENIED intacto); suite 734/712/0/22 (+2 tests B2); reviewer PASS 7/7;
     surface frozen 311 respetado; CUT-4/presets intactos.
+  - **fb-63/fb-66/fb-67 (familia toolset) — CERRADO (6feff49, docs puras;
+    QH resuelto 3/3)**: reviewer.md +4 (edit DELIBERADAMENTE ausente — read-only
+    por diseño, correcciones solo en review); builder.md +3 (no hay pwd nativo →
+    probe vía dept_exec); fb-66 = head write-only intencional (freeze código
+    HEAD_BASE_TOOLS invoke.ts:2348 — cambio = decisión owner). 0 cambios de
+    declaración de tools; 0 re-freeze. Scoping: reports/explore-deep/2026-09-02-
+    fb63-toolset-reviewer-scoping-b7f2c3f5.md.
   - **fb-56 (clase interrupted-post/canary-kill — gestionada con re-drive +
     FASE0)** — en cola. · **fb-58 (prepared-stuck — datapoints QH 09-02: ola 3/3
     confirmaciones m-2518/2519/2520 prepared→nunca delivered + rotación IPH
     kind-ack m-2518/m-2520 no contados como confirmación por el mirror m-2524;
     candidato lane mirror/transporte: reconocer kind-ack de confirmación como
     «confirmación explícita»)** — en cola.
-  - **fb-63 (toolset reviewer)** · **fb-64
-    (execRoots + stateDir READ-ONLY — corroborado EN VIVO por builder-2 09-02;
-    aditivo, QH sin riesgo fb-55; verificar config real; habilita limpieza 6
-    STALE + copia canónica 2 FROZEN)** — en cola (orden: fb-63 → fb-64 →
-    fb-65 → fb-68; GUI monitor owner-gated parqueado).
+  - **fb-64 (execRoots + stateDir READ-ONLY — corroborado EN VIVO por builder-2
+    09-02; aditivo, QH sin riesgo fb-55) — SCOPING/DISGNÓSTICO EN CURSO
+    (explore-deep-4 09-02)**: discrepancia a diagnosticar: el código declara
+    incluir stateDir en allowedRoots (tools.ts:964-990, HOTFIX 0.2.2-1) pero el
+    deny runtime sobre /root/.deepartments persiste; define casos de uso mínimos
+    (feedback.jsonl, zstd archives), opciones aditivas + riesgo de tests,
+    y si habilita la limpieza de los 6 STALE + copia canónica 2 FROZEN.
+  - **fb-65 (bajo — ask_user_question con owner ausente: rechazo duro sin
+    orientar al canal alternativo PENDIENTE-OWNER)** · **fb-68 (medio/fallo —
+    atomicidad post-errors src-side: appendPostErrorDeduped dedupe no atómico
+    dshd-health:767-775 + MessagesStore.append ids duplicados
+    dshd-core/messages.ts:501-528; fixes de raíz del DIAG fb-61)** — en cola
+    (orden: fb-64 → fb-65 → fb-68 → familia transporte [fb-23/69/70 send abort
+    pre-dispatch sin persistencia] → fb-58 mirror lane; GUI monitor owner-gated
+    parqueado).
 - **CERRADOS en esta cola (no pedir de nuevo):** M4 (system-idle),
   M-A (context-threshold + dept_head_rotate), PACING (peak/valle),
   M-5 (misión-sin-inicio), M-6 (main-red), M-7 (mission-queue),
@@ -126,7 +143,8 @@
   (5210682), **0.2.3a/b/c** (e8222af/dc9f79a/48cea9f — MISIÓN 7/8),
   **fb-57 CERRADO-con-fix** (250d4d4 dsh-key-pooler — canary 09:33:59Z PASS) ·
   **fb-59 CERRADO-con-fix** (15198b3 dsh-key-pooler — trace: bug latente del
-  pooler, NO regresión 0.2.3) · **fb-61** (2f35cab) · **fb-62+53** (5c4153a).
+  pooler, NO regresión 0.2.3) · **fb-61** (2f35cab) · **fb-62+53** (5c4153a) ·
+  **fb-63/66/67** (6feff49).
 
 ## 2. DAG técnico — CERRADO (referencia)
 
@@ -147,6 +165,9 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   plugin-first, 0 upstream) o A2 upstream (auth/roles para no-host selectivo)?
   Recomendación IPD: A1+B1 ahora + A2 roadmap. Job doc borrador listo (§7 del
   scoping, id gui-monitor-mode). Parqueado hasta veredicto.
+- **fb-66 (head sin edit) — write-only intencional DECLARADO (resuelto por
+  diseño; cambio de HEAD_BASE_TOOLS invoke.ts:2348 = decisión owner si algún día
+  se quiere edit para el head)**.
 - **port upstream fb-51 (PR deepseek-harness `packages/fs/tool-fs-search`)** —
   go-ahead del owner; safety copy del fix en tmp/port-harness-fb51-ca5df751/
   (workspace IPD, hashes verificados); acción del HOST (clone/PR/rebuild del
