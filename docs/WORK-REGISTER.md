@@ -5,6 +5,13 @@
 > Asistente; lo mantienen el **Internal Programming Department (IPD)** y el
 > **Asistente**. Es la fuente de verdad de la cola: IPD activa, DAG técnico
 > cerrado, decisiones pendientes del owner, capacidad, backlog y sinergias.
+> **LANDING 2026-09-02 (host Asistente)** — **MISIÓN TOTAL MODULARITY (0.2.x)
+> COMPLETA — termómetro 7/8** (ver ROADMAP 09-02): lanes 0.2.1/0.2.2/0.2.3a
+> (`e8222af`)/0.2.3b (`dc9f79a`)/0.2.3c (`48cea9f`) + fix fb-55 (`5210682`)
+> cerrados y desplegados (canary 06:14Z); suite 720/698/0/22 EXACTA; re-freeze
+> CUT-4 `5b548545`; dshmarket 1.40.0 + dsh-smooth-stream 0.4.3 live. Cola nueva
+> post-DAG (DAG del IPH): DI-by-services (residual) · fb-57 · F6 · fb-50 ·
+> fb-51/52 · feedback-nudge · GUI monitor · higiene reports.
 > **LANDING 2026-09-01 (host Asistente, 2ª pasada de alineación)** — refresh
 > completo al estado REAL post-bloque VALLE: M-4/M-A/PACING/D5/P1/publish
 > commiteados y CERRADOS en su cola; bloque VALLE aterrizado (M-7 + fb-43 +
@@ -17,38 +24,33 @@
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
-- **LANE 3 — fb-28 (QD, MEDIO)** [🔵 EN VUELO — builder desplegado]: colisión
-  de ruta de reporte al reusar postId (slug reutilizado tras retire → colisión
-  con el reporte del worker ANTERIOR; caso builder-5). Diseño: sufijar por
-  sesión con RUN-TOKEN único inyectado en el spawn (sin mutaciones de FS
-  ajenas). Al aterrizar: aviso QH (verificación + cierre fb-28).
-- **LANE 4 — de-flake W6/BugA** (frecuencia 4/8 en runs del builder; flakes
-  CONOCIDOS standalone verdes) **+ catch-up durable fb-30** (recomendación del
-  lane A: catch-up en boot vía restart-registry) [en cola, tras fb-28].
-- **POST-DAG — bloque B (2 items de owner):**
-  - **watchdog work-register-idle** (fb-46): franja VALLE ∧ trabajo pendiente
-    en el WORK-REGISTER > 0 ∧ 0 agents running ∧ quietud ≥ 15 min → alerta al
-    host para re-despacho (re-alerta 30 min; distinguir gateado vs no-gateado).
-    PROGRAMMING REQUEST ya enviado al IPH por el QH (m-1799 del QH).
-  - **mejoras de sistema (fb-47)** — 5 items (retirar R6-verbatim del skill
-    [~3 KB peso muerto real], dedupe wake routine [aparece 3×], condensar tail
-    ROADMAP del wake pack [4.3-7.3 KB], single-source directorio E2
-    pack↔skill, nudge secretary/memory-steward texto) + **T1 telemetría capa 3**
-    (lector de saldo patrón dsh-balance-meter + pooler persistir 3 ventanas).
-    Programmatic request m-1799 (QH→IPH). Invariantes de tests a preservar:
-    invoke.test.js:6704-6716 / 4166-4167. Ahorro realista ~10-12 KB/wake.
-- **LANE GUI — modo monitoreo (owner 09-01)**: composer oculto en TODAS las
-  sesiones no-host (heads/workers — moot del display Default/max en cabezas) +
-  en la sesión del host asociado al toggle Presente/Ausente. [lane pequeño,
-  disjunto (dshd-gui client-inject) — se cuela donde el IPD tenga hueco sin
-  romper la serialización; verificar viabilidad: ¿el harness expone la
-  presencia al client-inject?]
+- **POST-DAG — cola nueva (DAG del IPH tras el cierre de 0.2.x):**
+  - **DI-by-services (RESIDUAL de la misión, mapa §4.2)**: muerte TOTAL del
+    binder register → DI por servicios (el register sigue asertado en el lock
+    CUT-4 `5b548545`). Lane de decisión post-misión.
+  - **fb-57 (provider-400 'function.arguments must be valid JSON', ALTO —
+    escalado al IPH, m-2204)**: ≥2 workers distintos en <24h (q-i-6 +
+    ai-industry-news-2); fix candidato: sanitizar tool-call args en el adapter
+    / autogate reintentos N=2 con respawn de sesión fresca.
+  - **F6 (ancla recursión D-Q2)**: no muestrear inspector cuyo managerId sea
+    inspector QD, o desvío a workers NO-QD pasados N niveles — fix runtime en
+    el emitter (m-2170 del QH).
+  - **fb-50 (calibración M-A** capacidad efectiva + completion-reserve) ·
+    **fb-51/52 (glob literal-segment false-negative + guard aritmética)**.
+  - **feedback-nudge (opción B**, waterfall tools/post-execute) · **GUI modo
+    monitoreo (owner 09-01**: composer oculto no-host + toggle presencia —
+    verificar si el harness expone la presencia al client-inject) · **higiene
+    dir huérfano reports**.
 - **CERRADOS en esta cola (no pedir de nuevo):** M4 (system-idle),
   M-A (context-threshold + dept_head_rotate), PACING (peak/valle),
   M-5 (misión-sin-inicio), M-6 (main-red), M-7 (mission-queue),
   fb-43 (restart-registry), fb-39 gate (hardening 401 — 66399ad + pooler
   7248a55), fb-27 (turn/end-error notify — 04f8c31), materializePost cold
-  re-spawn (b2ecb45), pulse-digest (c59e1ab), MEMO NORM (c59e1ab + docs RD).
+  re-spawn (b2ecb45), pulse-digest (c59e1ab), MEMO NORM (c59e1ab + docs RD),
+  **fb-28** (37e9315 + QH close), **de-flake W6/BugA + fb-30** (8dcfc47),
+  **fb-46 watchdog work-register-idle** (ee0effd), **fb-47 mejoras de sistema**
+  (a5a27a7), **0.2.1 P6** (81ef5cd), **0.2.2 P1+P4** (9cda995), **fb-55**
+  (5210682), **0.2.3a/b/c** (e8222af/dc9f79a/48cea9f — MISIÓN 7/8).
 
 ## 2. DAG técnico — CERRADO (referencia)
 
