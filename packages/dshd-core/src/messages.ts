@@ -21,8 +21,11 @@
 //   {id, seq, ts, from, to[], text, kind, threadId?, sensitive?}
 //   - id = `m-<seq>`; seq = the GLOBAL contiguous counter (0-based): the
 //     record's file index, the board-store central invariant (board-store.ts
-//     :16-23); seeded at boot from the loaded file's last seq +1 (no gaps, no
-//     reordering under the single-process one-writer assumption);
+//     :16-23); seeded at boot from the loaded file's MAX seq +1 (fb-68 B1 —
+//     concurrent O_APPEND flushes can land out of order, so a last-line seed
+//     could re-mint; max-seq never does — no gaps, no reordering under the
+//     single-process one-writer assumption); the append advances the counter
+//     BEFORE its awaited flush so the in-process id-mint is atomic (fb-68 B1);
 //   - ts = Date.now() at persist (epoch ms);
 //   - from / to[] = durable MEMBER ids (postId / hostId — never session ids,
 //     so from/to survive host rotation, §3.1);
@@ -453,7 +456,7 @@ export class MessagesStore {
   /**
    * Boot entry (spec §3.2/§3.3): load `<stateDir>/messages.jsonl`, compact it
    * if it exceeds the thresholds (with a pre-compaction .bak copy), then build
-   * the per-recipient index and seed the append counter from the last seq +1.
+   * the per-recipient index and seed the append counter from the max seq +1.
    * Missing file → empty store. A malformed non-final line throws loud; a
    * trailing partial line (crash mid-append) is dropped.
    */
@@ -501,6 +504,16 @@ export class MessagesStore {
   async append(input: MessageInput): Promise<MessageRecord> {
     this.validateInput(input)
     const seq = this.nextSeq
+    // fb-68 B1: advance the counter IMMEDIATELY after reading it — BEFORE the
+    // first await below. The sync stretch from here to the durable flush has
+    // NO await, so two concurrent appends (two in-flight async chains, e.g.
+    // overlapping daemon ticks or two live agents) can never read the same seq
+    // (single-threaded): the id-mint is atomic in-process. Previously the
+    // advance ran AFTER the awaited flush, so two in-flight appends both
+    // minted `m-<seq>` (a duplicated id — the fb-61 DIAG reproduced 2x m-0).
+    // A flush that throws now burns the seq (a gap, never a duplicate); the
+    // boot seed (max-seq + 1, see `load()`) never re-mints an on-disk id.
+    this.nextSeq = seq + 1
     const record: MessageRecord = {
       id: `m-${seq}`,
       seq,
@@ -513,7 +526,6 @@ export class MessagesStore {
     if (input.threadId !== undefined && input.threadId !== null) record.threadId = input.threadId
     if (input.sensitive === true) record.sensitive = true
     await appendMessageRecord(this.filePath, record) // durable first (persist-before-deliver)
-    this.nextSeq = seq + 1
     this.records.push(record)
     this.byId.set(record.id, record)
     for (const recipient of record.to) {
@@ -564,10 +576,14 @@ export class MessagesStore {
 
   private load(records: MessageRecord[]): void {
     this.records = records
-    // Seed the append counter from the LOADED file's last seq +1 (spec §3.1):
-    // a record whose append crashed mid-write is not on disk and is re-issued
-    // with the SAME seq — no gaps, no reordering.
-    this.nextSeq = records.length > 0 ? records[records.length - 1].seq + 1 : 0
+    // Seed the append counter from the LOADED file's MAX seq +1 (spec §3.1;
+    // fb-68 B1 companion): the append now advances `nextSeq` BEFORE its
+    // awaited flush, so two concurrent O_APPEND flushes can land OUT OF ORDER
+    // on disk — a last-line seed could then RE-MINT an id that already exists
+    // earlier in the file. Max-seq + 1 never re-mints; a record whose append
+    // crashed mid-write is simply not on disk and its seq is re-issued (no
+    // gaps, no reordering for the sequential boot-append path).
+    this.nextSeq = records.reduce((max, record) => (record.seq > max ? record.seq : max), -1) + 1
     for (const record of records) {
       this.byId.set(record.id, record)
       for (const recipient of record.to) {

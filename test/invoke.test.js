@@ -17198,6 +17198,41 @@ test('W8-i appendPostErrorDeduped: appends once per key per HEALTH_DEDUPE_WINDOW
   })
 })
 
+test('fb-68 A1 appendPostErrorDeduped concurrency: 2 PARALLEL calls with the SAME key append exactly ONE row (the in-process serializer makes the read-check-write atomic)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const key = 'record:post-error:p1:session-not-found'
+    const T0 = 1_700_000_000_000
+    const entry = { ts: T0, postId: 'p1', messageId: 'm-1', error: 'session "s" not found' }
+    // Both calls start in-flight (neither awaited before the other is issued):
+    // without the fb-68 A1 serializer BOTH would read the (empty) recording
+    // ledger, both would append → TWO rows (the fb-61 flake, expected 1/actual 2).
+    const results = await Promise.all([
+      appendPostErrorDeduped(stateDir, entry, key, T0),
+      appendPostErrorDeduped(stateDir, { ...entry, messageId: 'm-2' }, key, T0 + 1)
+    ])
+    assert.equal(results.filter((appended) => appended === true).length, 1, 'exactly ONE of the two parallel calls appends')
+    assert.equal(results.filter((appended) => appended === false).length, 1, 'the other call is deduped (in-window)')
+    assert.equal(readPostErrorsFile(stateDir).length, 1, 'exactly ONE row on disk for the same key')
+    const ledger = readHealthAlertsState(stateDir)
+    assert.equal(ledger[key], T0, 'the ledger advanced the key exactly once (the first caller\'s nowMs)')
+  })
+})
+
+test('fb-68 A1 appendPostErrorDeduped concurrency: 2 PARALLEL calls with DIFFERENT keys keep BOTH rows and BOTH ledger keys (no whole-file clobber between writers)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_700_000_000_000
+    const results = await Promise.all([
+      appendPostErrorDeduped(stateDir, { ts: T0, postId: 'p1', messageId: 'm-1', error: 'session "s" not found' }, 'record:post-error:p1:session-not-found', T0),
+      appendPostErrorDeduped(stateDir, { ts: T0, postId: 'p2', messageId: 'm-2', error: 'session "t" not found' }, 'record:post-error:p2:session-not-found', T0)
+    ])
+    assert.deepEqual(results, [true, true], 'both distinct-key calls append (each is its own dedupe identity)')
+    assert.equal(readPostErrorsFile(stateDir).length, 2, 'BOTH rows survive — the second whole-file rewrite did not clobber the first')
+    const ledger = readHealthAlertsState(stateDir)
+    assert.equal(ledger['record:post-error:p1:session-not-found'], T0, 'the p1 ledger key survived')
+    assert.equal(ledger['record:post-error:p2:session-not-found'], T0, 'the p2 ledger key survived')
+  })
+})
+
 test('W8-i scanPostErrorFindings: the "session not found" class groups per (post+class) key; a generic class keeps the legacy per-post key', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = 1_700_000_000_000

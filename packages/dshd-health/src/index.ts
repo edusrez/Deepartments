@@ -209,6 +209,35 @@ export function readPostErrorsArchiveFile(stateDir: string): PostErrorEntry[] {
   }
 }
 
+// ---------------------------------------------------------------------------
+// fb-68 A1 — IN-PROCESS serializer of the post-errors write path (see the
+// fb-68 lane scoping: races of the post-error recording). The SHARED resource
+// is the post-errors FILE (appendPostError is a WHOLE-FILE rewrite: read +
+// C9 window-discard + cap-slice + write) AND the dedupe LEDGER
+// (`health-alerts-state.json`, whole-file rewrite too). appendPostErrorDeduped
+// is a read-check-write over both — two in-flight calls interleave in their
+// awaits and DUPLICATE rows (same key) / CLOBBER each other's ledger keys
+// (different keys). A module promise-chain serializes EVERY critical section
+// FIFO: the dedupe check-and-advance becomes atomic (2 parallel calls with the
+// SAME key → exactly ONE row + one `true`/one `false`) and no whole-file
+// rewrite can interleave inside another (no rows lost / no ledger keys dropped
+// between different keys). PUBLIC SIGNATURES UNCHANGED (behavior-preserving
+// for every sequential caller). LIMIT (flagged, NOT covered): the serializer
+// is IN-PROCESS ONLY — a second daemon process (the stale-twin scenario)
+// sharing the same stateDir has its own chain, so cross-process atomicity
+// would need a file-lock / O_APPEND redesign (out of this lane's scope).
+let postErrorsCriticalChain: Promise<unknown> = Promise.resolve()
+function runPostErrorsCritical<T>(critical: () => Promise<T>): Promise<T> {
+  const run = postErrorsCriticalChain.then(critical)
+  // A failure propagates to THIS caller but never stalls the chain (the next
+  // critical section still runs).
+  postErrorsCriticalChain = run.then(
+    () => undefined,
+    () => undefined
+  )
+  return run
+}
+
 /** Append ONE post-error row to `<stateDir>/post-errors.jsonl` and keep the
  * file BOUNDED: rows OLDER than the HEALTH_ERROR_WINDOW_MS anomaly window are
  * DISCARDED AT APPEND (C9 — the scan window-filters the same rows
@@ -223,8 +252,22 @@ export function readPostErrorsArchiveFile(stateDir: string): PostErrorEntry[] {
  * production call-site ends a fresh `ts` nearby `now`, so nothing observable
  * changes there. mkdir -p the dir first; a malformed/nonexistent file degrades
  * to empty (the append still lands). Never throws — callers fold a persist
- * failure into a warn. */
+ * failure into a warn. fb-68 A1: the whole-file read-modify-write runs INSIDE
+ * the in-process critical section (`runPostErrorsCritical`), so a concurrent
+ * `appendPostError`/`appendPostErrorDeduped` can never interleave inside this
+ * rewrite (no rows lost between writers — see the serializer note above). */
 export async function appendPostError(stateDir: string, entry: PostErrorEntry, nowMs: number = Date.now()): Promise<void> {
+  await runPostErrorsCritical(() => appendPostErrorUnlocked(stateDir, entry, nowMs))
+}
+
+/** The UNLOCKED whole-file rewrite core of `appendPostError` (fb-68 A1): the
+ * read + C9 window-discard + archive-on-discard + cap-slice + write WITHOUT
+ * the serializer. Public callers go through the serialized `appendPostError`;
+ * `appendPostErrorDeduped` calls this DIRECTLY inside ITS OWN critical section
+ * so its check-append-advance stays ONE atomic unit (a nested chain entry
+ * would deadlock the FIFO — the outer section awaits an inner entry that can
+ * never run). NEVER call this from outside a `runPostErrorsCritical` section. */
+async function appendPostErrorUnlocked(stateDir: string, entry: PostErrorEntry, nowMs: number): Promise<void> {
   const filePath = path.join(stateDir, POST_ERRORS_FILE)
   await mkdir(path.dirname(filePath), { recursive: true })
   const lines: string[] = []
@@ -765,13 +808,24 @@ export function isSessionNotFoundError(error: unknown): boolean {
  * silently degrades to a best-effort append (never throws — the caller wraps a
  * warn). */
 export async function appendPostErrorDeduped(stateDir: string, entry: PostErrorEntry, key: string, nowMs: number): Promise<boolean> {
-  const state = readHealthAlertsState(stateDir)
-  if (state[key] !== undefined && nowMs - state[key] <= HEALTH_DEDUPE_WINDOW_MS) return false
-  // The recording `nowMs` doubles as the append's window clock (C9): the row was
-  // just recorded as fresh, so it can never be discarded by the window filter.
-  await appendPostError(stateDir, entry, nowMs)
-  await writeHealthAlertsState(stateDir, { ...state, [key]: nowMs })
-  return true
+  // fb-68 A1: the WHOLE check-append-advance is ONE serialized critical
+  // section (the shared resource is the post-errors file + the health-alerts
+  // ledger). The read-check-write is then atomic: two parallel calls with the
+  // SAME key → exactly ONE row + one `true`/one `false`; calls with different
+  // keys → no whole-file rewrite can clobber another (no rows lost, no ledger
+  // keys dropped). The append is the UNLOCKED core: we are ALREADY inside the
+  // critical section (a nested `appendPostError` entry would deadlock the
+  // FIFO). IN-PROCESS ONLY (see the serializer note — the cross-process twin
+  // is not covered).
+  return runPostErrorsCritical(async () => {
+    const state = readHealthAlertsState(stateDir)
+    if (state[key] !== undefined && nowMs - state[key] <= HEALTH_DEDUPE_WINDOW_MS) return false
+    // The recording `nowMs` doubles as the append's window clock (C9): the row was
+    // just recorded as fresh, so it can never be discarded by the window filter.
+    await appendPostErrorUnlocked(stateDir, entry, nowMs)
+    await writeHealthAlertsState(stateDir, { ...state, [key]: nowMs })
+    return true
+  })
 }
 
 // ---------------------------------------------------------------------------

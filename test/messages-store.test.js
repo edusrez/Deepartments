@@ -107,6 +107,42 @@ test('append validation: empty to[], empty from, non-string text, unknown kind t
   })
 })
 
+test('append (fb-68 B1 concurrency): N concurrent appends (Promise.all) mint N DISTINCT ids — the counter advances before the first await', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const store = await MessagesStore.open(stateDir)
+    const N = 25
+    const records = await Promise.all(
+      Array.from({ length: N }, (_, i) => store.append({ from: SENDER, to: [RECIPIENT], text: `concurrent-${i}` }))
+    )
+    const ids = records.map((record) => record.id)
+    const seqs = records.map((record) => record.seq)
+    assert.equal(new Set(ids).size, N, 'no duplicated m-<seq> id among N in-flight appends')
+    assert.equal(new Set(seqs).size, N, 'the minted seqs are distinct too')
+    assert.deepEqual([...new Set(seqs)].sort((a, b) => a - b), Array.from({ length: N }, (_, i) => i), 'the N seqs are exactly 0..N-1 (no reuse)')
+    assert.equal(store.size, N)
+    // persist-before-deliver holds for EVERY append: all N rows are on disk.
+    const lines = (await readFile(resolveMessagesPath(stateDir), 'utf8')).split('\n').filter(Boolean)
+    assert.equal(lines.length, N, 'all N concurrent rows were flushed')
+    const onDiskIds = lines.map((line) => JSON.parse(line).id)
+    assert.equal(new Set(onDiskIds).size, N, 'no duplicated id on disk either')
+  })
+})
+
+test('append (fb-68 B1 boot seed): the counter is seeded from the MAX seq on disk — a file whose flush order is inverted (a later seq written before an earlier one) never re-mints an existing id', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // Out-of-order flush: seqs 5, 3, 4 (max 5). A last-line seed (4 + 1 = 5)
+    // would RE-MINT the m-5 that already exists at the top of the file.
+    await writeFile(resolveMessagesPath(stateDir), jsonl([wireRecord(5), wireRecord(3), wireRecord(4)]), 'utf8')
+    const store = await MessagesStore.open(stateDir)
+    assert.equal(store.size, 3)
+    const next = await store.append({ from: SENDER, to: [RECIPIENT], text: 'after-inverted-flush' })
+    assert.equal(next.id, 'm-6', 'seed = max-seq (5) + 1 = 6 — never a re-mint of an on-disk id')
+    assert.equal(store.get('m-5').text, 'text-5', 'the pre-existing m-5 record is untouched (no id reuse)')
+    const lines = (await readFile(resolveMessagesPath(stateDir), 'utf8')).split('\n').filter(Boolean)
+    assert.equal(new Set(lines.map((line) => JSON.parse(line).id)).size, 4, 'all 4 on-disk ids are distinct')
+  })
+})
+
 // --- paging ------------------------------------------------------------------
 
 test('page: newest-first paging over 25 own records — 10 / 11-20 / 21-30, before exclusive', async () => {
@@ -216,7 +252,7 @@ test('re-open: index, paging and the append counter are rebuilt from the file; a
     assert.deepEqual(reopened.page(RECIPIENT, { limit: 10 }).messages.map((m) => m.text), ['a'])
 
     const fourth = await reopened.append({ from: SENDER, to: [RECIPIENT], text: 'd' })
-    assert.equal(fourth.id, 'm-3', 'counter seeded from the loaded file\'s last seq + 1 — no reuse, no gaps')
+    assert.equal(fourth.id, 'm-3', 'counter seeded from the loaded file\'s max seq + 1 — no reuse, no gaps')
   })
 })
 
