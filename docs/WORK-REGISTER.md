@@ -289,10 +289,15 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 - Lección 09-03: **usage 200 ≠ chat-auth** (verificación de keys contra el
   adaptador/chat, no la API raw) — el clasificador 401-invalid formaliza la
   distinción 401/billing vs 429/monthly.
-- Límites conocidos: oc-10 workspace bloqueado hasta 09-07 · wrk_01KYW76T8 a
-  cero desde 08-31 (evidencia del outage 401) — owner: no urgente (top-up no
-  por ahora).
-- Watchdogs M1 activos + M-4/M-5/M-6/M-7 + context-threshold (M-A) —
+- Límites conocidos: **= 1 usable / 6 keys (CRÍTICO — gate hardening-401
+  PAUSA despachos nuevos desde 09-03; se reanuda al recuperar capacidad) —
+  la única real es oc-6; el resto oc-8/9/10/11/12 = quota/auth (resets
+  09-23..28)** · wrk_01KYW76T8 a cero desde 08-31 — **owner (a la vuelta):
+  la decisión de top-up de keys es AHORA RELEVANTE** (al 09-01 "varias keys
+  con buena capacidad" era el espejismo del health-check viejo; la verdad =
+  1 key real → o top-up o pipeline en pause hasta 09-23..28).
+- Watchdogs M1 activos + M-4/M-5/M-6/M-7 + context-threshold (M-A) +
+  pooler-capacity (hardening 66399ad — live) —
   auto-observación completa del runtime.
 
 ## 5. BACKLOG
