@@ -317,7 +317,10 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   vida (abort/kill), el feedback-nudge (tools.ts post-execute, live desde
   09-02) splicea a posts retirados → mensajes a recipient retirado = dead
   letter. Propuesta QD: excluir los aborts de vida del nudge O no splicear a
-  posts retired. Lane pequeña IPD (handler del nudge) — encolado, a orden del IPH.
+  posts retired. **DECISIÓN IPH 09-03: 'nudge-handler: excluir aborts de vida
+  / no splicear a retired (tools.ts post-execute) — lane pequeña POST-②,
+  PLEGABLE AL FOLD-IN de fb-78'** (ambas tocan tools.ts — un solo toque al
+  archivo; dead-letter es O2/bajo, no bloquea; se adelanta si QH la repunta).
   + **mejora watchdog: mission-stalled (10-min) dispara falso positivo sobre
   entregas no-wake-gated por diseño (records bajo de feedback al QH drenan al
   próximo wake — caso m-410/fb-89) — considerar excluir no-wake del detector**.
