@@ -720,6 +720,93 @@ export function needsRedelivery(status: DeliveryStatus | null): boolean {
   return status === null || status === 'prepared' || status === 'failed'
 }
 
+// --- LANE ② (incident-delivery 2026-09-03) — REDELIVERY BACKOFF + MAX-ATTEMPTS
+// (fb-79: the retry-storm class — m-183 = 450 attempts, m-188 = 226 — and the
+// no-boot-only re-drive gap). The re-drive machinery below (the boot pass +
+// the NEW non-boot sweep) shares these constants + the PURE helpers, so the
+// cadence/storm math is testable in isolation. The attempt count is derived
+// from the pair's OWN sidecar rows (`prepared`/`failed` transitions inside
+// `RE_DELIVERY_STORM_WINDOW_MS`) — the sidecar IS the attempt ledger, so no
+// extra state file is needed; the boot compaction collapse is the documented
+// caveat (a compaction restarts the count — the sweep stays bounded, never a
+// storm, because the backoff applies from the first attempt of the new count).
+// ---------------------------------------------------------------------------
+
+/** LANE ② — the bounded sweep cadence (default 60 s = ONE sweep per health
+ * poll tick; the sweep re-drives ONLY the pairs whose per-pair backoff window
+ * has elapsed, so a 60 s cadence can never become a retry storm). */
+export const RE_DELIVERY_SWEEP_DEFAULT_INTERVAL_MS = 60_000
+
+/** LANE ② — the exponential backoff BASE (15 s): attempt #1 is re-driven 15 s
+ * after its failure, #2 after 30 s, #3 after 60 s, … — the m-183 7–14 s storm
+ * cadence becomes ~7 attempts in the first hour (≤ 30/h alert threshold). */
+export const RE_DELIVERY_DEFAULT_BASE_DELAY_MS = 15_000
+
+/** LANE ② — the backoff CAP (10 min): the per-pair delay never grows beyond
+ * this, so a long-lived failure still re-drives at least ~6 times/hour (the
+ * gate-clean recovery reaches a pair within ≤ 10 min of its last attempt). */
+export const RE_DELIVERY_DEFAULT_MAX_DELAY_MS = 10 * 60_000
+
+/** LANE ② — the MAX-ATTEMPTS stop (12): after this many failed attempts
+ * (windowed by the storm window), the automatic re-drive STOPS for that pair —
+ * ONE 'terminal' row + a loud WARN (stop-with-alert) — instead of re-attempting
+ * forever (the 450/226-attempt storms). The DURABLE record stays in
+ * messages.jsonl (no content loss — recovery is manual/operational). */
+export const RE_DELIVERY_DEFAULT_MAX_ATTEMPTS = 12
+
+/** LANE ② — the attempt-count window (1 h): only the pair's rows inside the
+ * last hour count toward the backoff/exhaustion math (an OLD failure history
+ * never keeps a pair permanently exhausted). */
+export const RE_DELIVERY_STORM_WINDOW_MS = 60 * 60_000
+
+/** LANE ② (fb-58) — the prepared-stuck criterion (10 min): 0 prepared rows
+ * stuck > 10 min to a live non-dormant recipient (the crash-recovery class the
+ * boot-only re-drive left parked until the next boot). */
+export const RE_DELIVERY_PREPARED_STUCK_MS = 10 * 60_000
+
+/** PURE — the exponential-backoff delay AFTER `priorAttempts` FAILED attempts:
+ * 0 prior → 0 (the FIRST re-drive of a pair is immediate — the gate-clean
+ * recovery must not be delayed); n > 0 → `min(maxDelayMs, baseDelayMs * 2^(n-1))`
+ * (the 2nd waits base, the 3rd 2×base, … the cadence never storms: 0,15s,30s,
+ * 60s,2m,4m,8m,10m(cap) ≈ 8 attempts in the first hour — well under the 30/h
+ * alert threshold and the < 3:1 attempts/deliveries ratio by construction). */
+export function redeliveryBackoffMs(
+  priorAttempts: number,
+  baseDelayMs: number = RE_DELIVERY_DEFAULT_BASE_DELAY_MS,
+  maxDelayMs: number = RE_DELIVERY_DEFAULT_MAX_DELAY_MS
+): number {
+  const n = Number.isFinite(priorAttempts) && priorAttempts > 0 ? Math.floor(priorAttempts) : 0
+  if (n === 0) return 0
+  const exponent = Math.min(n - 1, 30) // 2^30 ≈ 1e9 ms — far beyond the cap
+  return Math.min(maxDelayMs, baseDelayMs * 2 ** exponent)
+}
+
+/** PURE — whether a pair's attempt count has EXCEEDED the max-attempts stop
+ * (the automatic re-drive gives up + alerts). attempts ≥ maxAttempts → true. */
+export function redeliveryAttemptsExhausted(attempts: number, maxAttempts: number = RE_DELIVERY_DEFAULT_MAX_ATTEMPTS): boolean {
+  return Number.isFinite(attempts) && attempts >= maxAttempts
+}
+
+/** PURE — count the delivery ATTEMPTS of one pair (the sidecar rows whose
+ * status is 'prepared' or 'failed' inside `windowMs`): the attempt ledger the
+ * backoff/exhaustion math reads. */
+export function pairAttemptCount(
+  rows: readonly DeliveryRow[],
+  messageId: string,
+  recipientId: string,
+  nowMs: number,
+  windowMs: number = RE_DELIVERY_STORM_WINDOW_MS
+): number {
+  let count = 0
+  for (const row of rows) {
+    if (row.messageId !== messageId || row.recipientId !== recipientId) continue
+    if (nowMs - row.ts > windowMs) continue
+    if (row.status !== 'prepared' && row.status !== 'failed') continue
+    count++
+  }
+  return count
+}
+
 /**
  * Sidecar boot compaction (spec §4.4 builder-verify): keep ONLY the latest
  * row per (messageId, recipientId), preserving the file order of the kept
@@ -759,10 +846,19 @@ export interface DeliveryRedelivererDeps {
   logger: { info(message: string): void; warn(message: string): void }
   /** Resolve whether a recipient is ALIVE in the durable catalog: true iff it
    * exists as a NON-RETIRED post (posts.json / byPost) OR a NON-RETIRED host
-   * (hosts.json / hosts). A NON-CATALOG recipient (a finished subagent-child
-   * session id — present in NEITHER durable registry) resolves FALSE, which is
-   * C8′: it is settled to 'terminal' ONCE (see `run`). */
+   * (hosts.json / hosts) — OR a RETIRED HOST that is REROUTABLE (a host whose
+   * rotation chain still resolves a live successor — the delivery engine's
+   * catalog route re-routes the send to the live host, so a pending pair to
+   * the retired id is re-driven instead of settled dead; the fb-58 F-3 class).
+   * A NON-CATALOG recipient (a finished subagent-child session id — present in
+   * NEITHER durable registry) resolves FALSE, which is C8′: it is settled to
+   * 'terminal' ONCE (see `run`). */
   recipientAlive(recipientId: string): boolean
+  /** LANE ② (fb-58/B3) — OPTIONAL: whether a recipient is DORMANT (a
+   * deliberate sleepEpoch mark — its noWake/'prepared' queue waits for its
+   * next REAL wake; the sweep must NEVER re-drive/wake it). Absent → false
+   * (no dormancy knowledge — the legacy behavior). */
+  recipientDormant?(recipientId: string): boolean
   /** Resolve the message record for a sidecar row (the open MessagesStore). May
    * resolve async (the store is OPENED at boot via a promise, not synchronously). */
   getRecord(messageId: string): Promise<MessageRecord | undefined>
@@ -794,20 +890,152 @@ export interface DeliveryRedelivererDeps {
  * catalog-LIVE recipient with a 'failed'/'prepared' row is unaffected and is
  * still re-delivered at boot.
  *
- * NO backoff (C7 deferred — the "no-retry-hasta-boot" contract is kept):
- * everything eligible is re-delivered in ONE boot pass, never re-scheduled.
+ * LANE ② (incident-delivery 2026-09-03) — the re-drive machinery now owns:
+ *   (a) PER-PAIR EXPONENTIAL BACKOFF with a cap (fb-79 — the m-183/188 retry
+ *       storms: 450/226 attempts at a 7–14 s cadence with NO backoff): the
+ *       NON-BOOT SWEEP (`sweepDue()`) gated by `redeliveryBackoffMs(count)`,
+ *       so a continuous failure degrades to ~8 attempts/hour (well under the
+ *       >30/h alert threshold; the attempts/deliveries ratio lands < 3:1 by
+ *       construction). The BOOT pass keeps its ONE-TIME immediate semantics
+ *       (the "no-retry-hasta-boot" recovery contract — a single boot is not a
+ *       storm; the restart-loop storm is bounded by the max-attempts stop);
+ *   (b) MAX-ATTEMPTS STOP-WITH-ALERT (boot + sweep): a pair whose in-window
+ *       attempt count reaches `maxAttempts` is settled to ONE 'terminal' row
+ *       + a loud WARN — the automatic re-drive STOPS (the message record stays
+ *       durable in messages.jsonl — no content loss, recoverable manually);
+ *   (c) the non-boot SWEEP (the no-restart re-drive seam): a bounded,
+ *       scheduled pass that re-drives the DUE pairs (gate-clean recovery
+ *       without a daemon restart — the 14 lost messages of 09-03 were only
+ *       re-delivered on the first boot post-restart) and settles the rest; a
+ *       DORMANT recipient's 'prepared' queue is NEVER re-driven (B3 — its
+ *       noWake intent waits for its next real wake); a recipient that is
+ *       DEAD/UNKNOWN settles as ONE 'terminal' row exactly like the boot pass;
+ *   (d) the fb-58 prepared-stuck criterion: any 'prepared' row OLDER than
+ *       `preparedStuckMs` (10 min) to a LIVE non-dormant recipient is due —
+ *       re-driven by the sweep (the crash-recovery class the boot-only re-drive
+ *       parked until the next boot → "0 prepared-stuck > 10 min" as closure
+ *       criterion); a FRESH prepared row (< 10 min) is left alone (the B3
+ *       noWake queue grace — never double-delivered/woken prematurely).
  */
 export class DeliveryRedeliverer {
   private readonly deps: DeliveryRedelivererDeps
+  private readonly baseDelayMs: number
+  private readonly maxDelayMs: number
+  private readonly maxAttempts: number
+  private readonly stormWindowMs: number
+  private readonly preparedStuckMs: number
 
-  constructor(deps: DeliveryRedelivererDeps) {
+  constructor(
+    deps: DeliveryRedelivererDeps,
+    opts: {
+      /** The exponential-backoff base (default `RE_DELIVERY_DEFAULT_BASE_DELAY_MS`). */
+      baseDelayMs?: number
+      /** The backoff cap (default `RE_DELIVERY_DEFAULT_MAX_DELAY_MS`). */
+      maxDelayMs?: number
+      /** The in-window attempt count that stops the automatic re-drive with an
+       * alert (default `RE_DELIVERY_DEFAULT_MAX_ATTEMPTS`). */
+      maxAttempts?: number
+      /** The attempt-count window (default `RE_DELIVERY_STORM_WINDOW_MS`). */
+      stormWindowMs?: number
+      /** The prepared-stuck criterion (default `RE_DELIVERY_PREPARED_STUCK_MS`). */
+      preparedStuckMs?: number
+    } = {}
+  ) {
     this.deps = deps
+    this.baseDelayMs = opts.baseDelayMs ?? RE_DELIVERY_DEFAULT_BASE_DELAY_MS
+    this.maxDelayMs = opts.maxDelayMs ?? RE_DELIVERY_DEFAULT_MAX_DELAY_MS
+    this.maxAttempts = opts.maxAttempts ?? RE_DELIVERY_DEFAULT_MAX_ATTEMPTS
+    this.stormWindowMs = opts.stormWindowMs ?? RE_DELIVERY_STORM_WINDOW_MS
+    this.preparedStuckMs = opts.preparedStuckMs ?? RE_DELIVERY_PREPARED_STUCK_MS
+  }
+
+  /** The sidecar parse (full read — the SAME seam the boot pass uses). */
+  private async readSidecarRows(): Promise<DeliveryRow[]> {
+    const { stateDir } = this.deps
+    try {
+      return parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [] // nothing ever sent
+      throw error
+    }
+  }
+
+  /** The attempt-count of one pair in the storm window (the pair's own sidecar
+   * rows — the attempt ledger). */
+  private pairAttempts(rows: readonly DeliveryRow[], messageId: string, recipientId: string): number {
+    return pairAttemptCount(rows, messageId, recipientId, Date.now(), this.stormWindowMs)
+  }
+
+  /** Drive ONE eligible (messageId, recipientId) pair: decide terminal / skip /
+   * re-deliver under the LANE ② gates. Shared by the boot pass and the sweep.
+   * The `nowMs` is injected so a test is deterministic. Non-fatal: every error
+   * logs and is swallowed (the pass must never block the boot/tick). */
+  private async drivePair(row: DeliveryRow, attempts: number, nowMs: number, source: string): Promise<void> {
+    const { stateDir, logger } = this.deps
+    const pairLabel = `${row.messageId} → ${row.recipientId}`
+    try {
+      // ALTO-1 / Issue-3 guard (the boot driver's own rebind rule): settle/re-drive
+      // ONLY a pair whose CURRENT record exists AND actually addresses the
+      // recipient — a stale row (its record trimmed, or the current record never
+      // addressed this recipient) is SKIPPED, never driven (the m-728 class).
+      const record = await this.deps.getRecord(row.messageId)
+      if (record === void 0 || !record.to.includes(row.recipientId)) return
+      // W7-A + C8′ (order matters — a DEAD recipient is settled regardless of
+      // backoff/exhaustion: re-attempting a dead recipient is pointless; the
+      // one-time 'terminal' makes the W6 scan silent).
+      if (!this.deps.recipientAlive(row.recipientId)) {
+        await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal')
+        logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) → 'terminal' — recipient is dead/unknown (no longer a live catalog member), settled once and never re-attempted`)
+        return
+      }
+      // LANE ② (b) — MAX-ATTEMPTS STOP-WITH-ALERT: beyond the cap the automatic
+      // re-drive STOPS for the pair (one terminal + a loud warn — the alert;
+      // the durable record stays in messages.jsonl, recoverable manually). This
+      // bounds the restart-loop storm (450/226-attempt m-183/m-188 class).
+      if (redeliveryAttemptsExhausted(attempts, this.maxAttempts)) {
+        await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal')
+        logger.warn(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) STOPPED after ${attempts} attempts (max ${this.maxAttempts}) — settled 'terminal' (stop-with-alert; the message record stays durable; recover it manually if the recipient class is temporary)`)
+        return
+      }
+      // LANE ② (c) — B3 dormancy guard: a DORMANT recipient's 'prepared' queue
+      // is a deliberate noWake — it drains at its next REAL wake, NEVER here.
+      if (this.deps.recipientDormant?.(row.recipientId) === true && row.status === 'prepared') return
+      try {
+        const callerSessionId = this.deps.resolveCallerSessionId(record.from)
+        const status = await this.deps.deliver(record, row.recipientId, callerSessionId)
+        logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) → ${status}`)
+      } catch (error: unknown) {
+        logger.warn(`[deepartments] ${source} re-delivery ${pairLabel} failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    } catch (error: unknown) {
+      logger.warn(`[deepartments] ${source} re-delivery ${pairLabel} failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** Whether the pair is DUE for a SWEEP re-drive:
+   *  - a `failed` row → due when the per-pair exponential backoff elapsed since
+   *    the last attempt (`redeliveryBackoffMs(attempts)` — the FIRST re-drive
+   *    waits the base delay (15 s), which the 60 s sweep tick bounds anyway;
+   *    repeated failures spread 15 s → 30 s → 60 s → … — the m-183 7–14 s
+   *    storm cadence is structurally impossible);
+   *  - a `prepared` row → due ONLY once it is OLDER than `preparedStuckMs`
+   *    (10 min — the fb-58 criterion; a fresh prepared row is the B3 noWake
+   *    queue grace / mid-delivery crash window, left alone). */
+  private pairDue(row: DeliveryRow, attempts: number, nowMs: number): boolean {
+    const ageMs = nowMs - row.ts
+    if (row.status === 'prepared') return ageMs > this.preparedStuckMs
+    // 'failed' (and any other needsRedelivery status): the backoff cadence.
+    return ageMs >= redeliveryBackoffMs(attempts, this.baseDelayMs, this.maxDelayMs)
   }
 
   /**
    * Run one boot pass. Non-fatal: any unexpected error is logged and swallowed
    * (the boot must never be blocked by a re-delivery issue); its re-delivery
-   * is re-attempted on the NEXT boot, IDEMPOTENTLY.
+   * is re-attempted on the NEXT boot, IDEMPOTENTLY. The pass keeps its
+   * ONE-TIME immediate semantics (every eligible pair is re-delivered in ONE
+   * boot pass — the crash-recovery contract; a single boot is not a storm) and
+   * gains the LANE ② gates: the DEAD settle (unchanged), the MAX-ATTEMPTS
+   * stop-with-alert, and the B3 dormancy skip — see `drivePair`.
    */
   async run(): Promise<void> {
     const { stateDir, logger } = this.deps
@@ -835,39 +1063,43 @@ export class DeliveryRedeliverer {
       for (const row of rows) latestPerKey.set(`${row.messageId}\u0000${row.recipientId}`, row)
       for (const row of latestPerKey.values()) {
         if (!needsRedelivery(row.status)) continue
-        const record = await this.deps.getRecord(row.messageId)
-        if (record === void 0 || !record.to.includes(row.recipientId)) {
-          // Record trimmed by the boot compaction (nothing durable remains), OR
-          // the id was REBOUND (the message store renumbered/reused this id for
-          // a DIFFERENT message that never addressed this recipient): nothing
-          // durable/RELEVANT remains to re-deliver, so the pair stays a settled
-          // no-op. A record that DOES still include the recipient is the
-          // legitimate rebound case and re-delivers below (idempotent).
-          // (Issue-3, owner acceptance.)
-          continue
-        }
-        // W7-A + C8′: a DEAD/UNKNOWN or NON-CATALOG recipient must NOT be
-        // re-attempted at every boot. Settle it as a single 'terminal' row and
-        // skip the bus re-wake — no deliver() call, so NO new 'prepared'/'failed'
-        // rows (the noise the W6 health daemon re-alerted on every boot). C8′
-        // extends this to a recipient that is NOT in the durable catalog at all
-        // (a finished subagent-child id), settling it ONCE without a catalog
-        // match; a catalog-LIVE recipient is unaffected (never settles).
-        if (!this.deps.recipientAlive(row.recipientId)) {
-          await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal')
-          logger.info(`[deepartments] boot re-delivery: ${record.id} → ${row.recipientId} (was ${row.status}) → 'terminal' — recipient is dead/unknown (no longer a live catalog member), settled once and never re-attempted`)
-          continue
-        }
-        try {
-          const callerSessionId = this.deps.resolveCallerSessionId(record.from)
-          const status = await this.deps.deliver(record, row.recipientId, callerSessionId)
-          logger.info(`[deepartments] boot re-delivery: ${record.id} → ${row.recipientId} (was ${row.status}) → ${status}`)
-        } catch (error: unknown) {
-          logger.warn(`[deepartments] boot re-delivery ${record.id} → ${row.recipientId} failed: ${error instanceof Error ? error.message : String(error)}`)
-        }
+        const attempts = this.pairAttempts(rows, row.messageId, row.recipientId)
+        await this.drivePair(row, attempts, Date.now(), 'boot')
       }
     } catch (error: unknown) {
       logger.warn(`[deepartments] boot deliveries re-delivery pass failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * LANE ② (incident-delivery 2026-09-03) — the NON-BOOT redelivery SWEEP:
+   * the no-restart re-drive seam (the failed/prepared pairs were previously
+   * re-delivered ONLY at boot — the 14 lost messages of 09-03 re-entered on
+   * the first boot post-restart). A scheduled, BOUNDED pass (the caller ticks
+   * it on a timer) that re-drives the DUE pairs — the same latestPerPair
+   * dedupe + DEAD settle + MAX-ATTEMPTS stop as the boot pass, PLUS the
+   * per-pair exponential backoff (fb-79 — a continuous failure degrades to
+   * ~8 attempts/hour, never a storm) and the B3 dormancy skip — and settles
+   * the rest. `nowMs` is injected (a test deterministically drives the sweep
+   * through the backoff/prepared-stuck windows without real waiting). NEVER
+   * throws (the tick must not be wedged by a re-delivery issue).
+   */
+  async sweepDue(nowMs: number = Date.now()): Promise<void> {
+    const { logger } = this.deps
+    try {
+      const rows = await this.readSidecarRows()
+      const latestPerKey = new Map<string, DeliveryRow>()
+      for (const row of rows) latestPerKey.set(`${row.messageId}\u0000${row.recipientId}`, row)
+      for (const row of latestPerKey.values()) {
+        if (!needsRedelivery(row.status)) continue
+        const attempts = pairAttemptCount(rows, row.messageId, row.recipientId, nowMs, this.stormWindowMs)
+        // A DEAD recipient settles regardless (the alive check inside
+        // drivePair); a NOT-yet-due live pair is left for a LATER sweep.
+        if (this.deps.recipientAlive(row.recipientId) && !this.pairDue(row, attempts, nowMs)) continue
+        await this.drivePair(row, attempts, nowMs, 'sweep')
+      }
+    } catch (error: unknown) {
+      logger.warn(`[deepartments] re-delivery sweep failed (non-fatal — the boot pass + the next sweep re-evaluate): ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 }

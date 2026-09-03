@@ -50,6 +50,7 @@ import {
   resolvePoolerDispatchBlock,
   POOLER_CAPACITY_DEFAULT_HIGH_PERCENT,
   POOLER_CAPACITY_DEFAULT_STATE_STALE_MS,
+  POOLER_CAPACITY_DEFAULT_ROTATION_STALE_MS,
   resolvePositiveKnob
 } from 'dshd-health'
 import { sanitizePromptLiterals } from 'dshd-core'
@@ -367,7 +368,8 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
       Date.now(),
       {
         highPercent: resolvePositiveKnob(config.health?.highPercent, POOLER_CAPACITY_DEFAULT_HIGH_PERCENT),
-        stateStaleMs: resolvePositiveKnob(config.health?.stateStaleMs, POOLER_CAPACITY_DEFAULT_STATE_STALE_MS)
+        stateStaleMs: resolvePositiveKnob(config.health?.stateStaleMs, POOLER_CAPACITY_DEFAULT_STATE_STALE_MS),
+        rotationStaleMs: resolvePositiveKnob(config.health?.rotationStaleMs, POOLER_CAPACITY_DEFAULT_ROTATION_STALE_MS)
       },
       ctx.logger
     )

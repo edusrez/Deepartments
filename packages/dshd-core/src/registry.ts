@@ -362,6 +362,36 @@ export function findRotationTerminal(entries: HostEntryLike[], byId: Map<string,
   return terminals.length === 1 ? terminals[0].hostId : undefined
 }
 
+/** LANE ② (fb-58 F-3 — the 'prepared'-stuck acks to a rotated host session,
+ * m-424/425/429) — follow the ROTATION CHAIN (`rotatedTo`) from ONE host id to
+ * its LIVE SUCCESSOR: the explicit spec-002 successor chain (old → rotatedTo →
+ * newer → … → the single live terminal), so a message addressed to a RETIRED
+ * host session re-routes to the session VIVA. Returns the live terminal entry;
+ * `undefined` when the walk cannot reach a live host — an id absent from the
+ * registry, a terminal that is RETIRED (no successor), a DANGLING target, or
+ * the hop cap exceeded (a corrupted cycle) — the caller falls back to
+ * `pickLiveHostEntry` (the single-live invariant) / 'unknown'. BOUNDED: at most
+ * `HOST_ROTATION_CHAIN_MAX_HOPS` hops, so a corrupted file can never loop. */
+export function followRotationChainToLive(entries: readonly HostEntryLike[], startHostId: string): HostEntryLike | undefined {
+  const byId = new Map(entries.map((entry) => [entry.hostId, entry]))
+  const start = byId.get(startHostId)
+  if (start === undefined) return undefined
+  let current = start
+  for (let hop = 0; hop < HOST_ROTATION_CHAIN_MAX_HOPS; hop++) {
+    if (current.retired !== true) return current
+    const next = typeof current.rotatedTo === 'string' ? current.rotatedTo : ''
+    if (next === '') return undefined
+    const nextEntry = byId.get(next)
+    if (nextEntry === undefined) return undefined
+    current = nextEntry
+  }
+  return undefined
+}
+
+/** The hop cap of `followRotationChainToLive` (a spec-002 chain is short — one
+ * retired id per rotation; 16 covers a pathological many-rotation history). */
+export const HOST_ROTATION_CHAIN_MAX_HOPS = 16
+
 /** Whether the `rotatedTo` graph contains a cycle among the entries present in
  * the file (a chain-integrity violation — the chain never reaches a terminal). */
 export function hasRotatedToCycle(entries: HostEntryLike[], byId: Map<string, HostEntryLike>): boolean {

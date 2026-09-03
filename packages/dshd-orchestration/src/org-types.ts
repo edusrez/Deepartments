@@ -103,6 +103,10 @@ export interface HealthConfig {
   poolerGateEnabled?: boolean
   highPercent?: number
   stateStaleMs?: number
+  /** LANE ② R1 — the freshness window of the 429→null `lastRotation` signal
+   * (default 15 min): the dispatch pre-check blocks ONLY on a FRESH rotation;
+   * a STALE 429→null rotation never re-arms the gate. */
+  rotationStaleMs?: number
   poolerCapacityEnabled?: boolean
   poolerStateFilePath?: string
   workRegisterPath?: string
@@ -115,6 +119,11 @@ export interface HealthConfig {
   missionStallEnabled?: boolean
   missionQueueEnabled?: boolean
   catchupEnabled?: boolean
+  /** LANE ② — the NON-BOOT redelivery SWEEP cadence (ms; default 60000): how
+   * often the re-drive sweep re-runs the due prepared/failed pairs (per-pair
+   * backoff + max-attempts; a gate clean-up reaches the pending pairs with NO
+   * restart). */
+  redeliverySweepIntervalMs?: number
 }
 
 /** Mirror of src/org.ts Config — the SUBSET the factories read: stateDir +

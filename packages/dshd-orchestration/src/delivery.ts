@@ -42,7 +42,8 @@ import {
   HEAD_SESSION_PREFIX,
   readDurableHostEntries,
   pickLiveHostEntry,
-  isHostRetiredOnDisk
+  isHostRetiredOnDisk,
+  followRotationChainToLive
 } from 'dshd-core'
 import type { PostEntry, HostEntry, HostEntryLike } from 'dshd-core'
 import { MessagesStore, markDelivery } from 'dshd-core'
@@ -219,8 +220,11 @@ export interface DeliveryFactoryDeps {
   resolveWorkspaceRootPath: () => Promise<string>
   /** The archive-leak head-session rotation (a non-archived resume stays). */
   rotateArchivedHeadSessionId: (postId: string, sessionId: string) => Promise<string | undefined>
-  /** The durable worker retire (the delivery auto-retire seam). */
-  retirePost: (postId: string, callerAgentId: string) => Promise<{ postId: string; retired: true }>
+  /** The durable worker retire (the delivery auto-retire seam). O1 (LANE ②): an
+   * optional `opts.deferDisposeMs` defers the caller-handle DISPOSE by a grace
+   * so an in-flight tool call completes before the retire disposes it (the
+   * auto-retire-on-delivery race — see the retirePost implementation). */
+  retirePost: (postId: string, callerAgentId: string, opts?: { deferDisposeMs?: number }) => Promise<{ postId: string; retired: true }>
   /** The head session-title pin (module-scope pure helper, passed by ref to
    * keep the factory import-free of the bundle module). */
   pinSessionTitle: (session: Session, title: string) => 'pinned' | 'already-titled' | 'failed'
@@ -340,6 +344,13 @@ export interface DeliverySurface {
   /** The 1..20 fan-out guard (spec §4.4). */
   assertBusFanOut: (to: readonly string[]) => number
 }
+
+/** O1 (LANE ② — the auto-retire-on-delivery race, 3 samples today 34→16→3ms):
+ * the dispose-GRACE the delivery auto-retire passes to retirePost — seconds
+ * for the caller's in-flight send_message tool call to complete before the
+ * retire disposes its handle (a 5 s grace is 3 orders of magnitude above the
+ * observed 3–34 ms race window and below the delivery-sweep cadence). */
+export const AUTO_RETIRE_DISPOSE_GRACE_MS = 5_000
 
 /**
  * Build the DELIVERY ORCHESTRATION surface on the apply fiber (AGENTS.md rule 4
@@ -852,7 +863,11 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
         const senderEntry = byPost.get(record.from)
         if (senderEntry !== void 0 && senderEntry.provider === 'worker' && senderEntry.retired !== true && senderEntry.managerId === entry.postId) {
           try {
-            await retirePost(record.from, String(SessionId(entry.sessionId)))
+            // O1 (LANE ②): the retire passes the DISPOSE GRACE — the worker is
+            // the CALLER of this send, still mid-tool-call; the deferred handle
+            // dispose lets its send_message tool result complete before the
+            // retire tears the handle down (the 34→16→3 ms AbortError race).
+            await retirePost(record.from, String(SessionId(entry.sessionId)), { deferDisposeMs: AUTO_RETIRE_DISPOSE_GRACE_MS })
           } catch (error: unknown) {
             ctx.logger.warn(`[deepartments] auto-retire of worker "${record.from}" on delivery to "${entry.postId}" failed (non-fatal to the delivery): ${error instanceof Error ? error.message : String(error)}`)
           }
@@ -986,7 +1001,16 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
         // intermittently empty — see HOST_AGENT_OPTIONS). The D4 setup does NOT
         // installSelection, so a non-empty `this.options` is the ONLY carrier.
         // Mirror WORKER_AGENT_OPTIONS (heads/workers) so the host is symmetric.
-        await agents.resume({ resumeSessionId: sessionId, setup, agentOptions: HOST_AGENT_OPTIONS })
+        const resumed = await agents.resume({ resumeSessionId: sessionId, setup, agentOptions: HOST_AGENT_OPTIONS })
+        // LANE ② (addendum QD D-Q3 — the m-437/438 ZOMBIE class): the D4 path
+        // previously DROPPED the resumed handle, so a HOST session's handle was
+        // NEVER in byHeadHandle — the rotation's disposeHeadHandleOnce could
+        // not tear the RETIRING host down and it kept consuming its queued
+        // inbox turns in parallel with the successor (the double-writer race
+        // LATENT). Track the host handle in the SHARED byHeadHandle (keyed by
+        // session id, the head/worker key policy) so the rotation/retire
+        // disposal reaches it like any other member handle.
+        if (resumed !== void 0) byHeadHandle.set(sessionId, resumed)
         const target = agents.get(sessionId)
         if (target === void 0) throw new Error(`[deepartments] host "${hostEntry.hostId}" could not be materialized for bus delivery`)
         target.followup(busUserMessage(record, framed, senderSessionId))
@@ -1347,8 +1371,21 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       const registry = durableHosts ?? [...hosts.values()]
       const known = registry.some((host) => host.hostId === recipientId)
       if (known) {
-        const { live } = pickLiveHostEntry(registry)
-        if (live !== void 0) return { kind: 'reroute', entry: live as HostEntry }
+        // LANE ② (fb-58 F-3 — the m-424/425/429 class): the re-route follows
+        // the SPEC-002 ROTATION CHAIN explicitly (`rotatedTo` — the retired
+        // entry names its live successor): a message addressed to a ROTATED
+        // host session means "the Asistente" (role) and must land in the
+        // SESSION VIVA, not settle dead/queued. The chain walk is bounded (a
+        // corrupted hosts.json can never loop); a broken/dangling chain falls
+        // back to the global single-live pick; NO live successor at all →
+        // falls through to 'unknown' (the delivery engine settles the pair —
+        // never a ghost, never a stuck 'prepared').
+        const chained = followRotationChainToLive(registry, recipientId)
+        const live = chained ?? pickLiveHostEntry(registry).live
+        if (live !== void 0) {
+          ctx.logger.warn(`[deepartments] bus delivery to RETIRED host "${recipientId}" re-routed ${chained !== void 0 ? `via rotatedTo → "${chained.hostId}"` : `to the live host "${live.hostId}" (pickLiveHostEntry fallback)`} (fb-58 F-3 — the Asistente's session is the live successor)`)
+          return { kind: 'reroute', entry: live as HostEntry }
+        }
       }
     }
     return { kind: 'unknown' }

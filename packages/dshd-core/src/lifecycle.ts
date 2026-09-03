@@ -26,6 +26,11 @@ import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 // settleRetiredHostDeliveries below).
 import { parseDeliveryRows, needsRedelivery, markDelivery, resolveDeliveriesPath, loadMessageRecords, resolveMessagesPath } from './messages.js'
 import type { DeliveryRow, MessageRecord } from './messages.js'
+// LANE ② (fb-58 F-3 — m-440): the rotation settle now DISTINGUISHES the
+// RETIRED HOST MEMBER id (host-<oldSession> — reroutable to the live
+// successor) from the raw retired session id. The reroutable in-flight rows
+// are NOT settled terminal — the (non-boot) re-drive re-routes them.
+import { readDurableHostEntries, followRotationChainToLive, HOST_ID_PREFIX } from './registry.js'
 import type { PostEntry, HostEntry } from './registry.js'
 import type {
   RotationPersistenceLike,
@@ -151,6 +156,22 @@ export async function settleRetiredHostDeliveries(
     }
     const latestPerKey = new Map<string, DeliveryRow>()
     for (const row of parseDeliveryRows(text)) latestPerKey.set(`${row.messageId}\u0000${row.recipientId}`, row)
+    // LANE ② (fb-58 F-3 — m-440, the QD show D-Q3 4ea935a2→8f04325f): the
+    // REROUTABLE host-member-id set — the recipient ids that ARE the retired
+    // host MEMBER ids (host-<oldSession>) whose rotation chain still resolves
+    // a live successor (the durable hosts.json, read once per settle). An
+    // IN-FLIGHT 'prepared'/'failed' row addressed to such an id is NOT settled
+    // terminal at the rotation boundary: the sender's intent was "the
+    // Asistente", so the (now NON-boot) re-drive re-routes it to the live
+    // successor — the sweep (≤ 60 s) / the boot pass re-deliver it through the
+    // catalog route's rotatedTo chain. ONLY the raw retired SESSION-id rows and
+    // the dead-end chains (no successor) keep the terminal settlement (a
+    // terminal row would make the m-440 class unrecoverable).
+    const durableHosts = readDurableHostEntries(stateDir) ?? []
+    const reroutableHostIds = new Set<string>()
+    for (const id of retiredRecipientIds) {
+      if (id.startsWith(HOST_ID_PREFIX) && followRotationChainToLive(durableHosts, id) !== undefined) reroutableHostIds.add(id)
+    }
     for (const row of latestPerKey.values()) {
       if (!retiredRecipientIds.includes(row.recipientId)) continue
       if (!needsRedelivery(row.status)) continue
@@ -159,6 +180,10 @@ export async function settleRetiredHostDeliveries(
       // NEVER settle the current record's pairs (the m-728 case). Skip it.
       const record = recordsById.get(row.messageId)
       if (record === void 0 || !record.to.includes(row.recipientId)) continue
+      if (reroutableHostIds.has(row.recipientId)) {
+        logger.info?.(`[deepartments] rotation settle: ${row.messageId} → ${row.recipientId} (was ${row.status}) NOT settled — the in-flight delivery to a REROUTABLE retired host re-routes to the live successor (fb-58 F-3; m-440 — the non-boot re-drive delivers it), never a terminal`)
+        continue
+      }
       await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal')
       logger.info?.(`[deepartments] rotation settle: ${row.messageId} → ${row.recipientId} (was ${row.status}) → 'terminal' — host session retired in-session (rotation), settled once (no boot needed)`)
     }
@@ -494,6 +519,21 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
           // S6 — retired identity: the OLD session never gets the wake pack
           // again; the NEW session's per-process set is empty by definition.
           ctx.wakePackInjected.delete(sessionId)
+          // LANE ② (addendum QD D-Q3 — the m-437/m-438 ZOMBIE class: the retired
+          // session processed 2 extra turns ~25 s in parallel with the
+          // successor's turn 1, the double-writer race LATENT): the ROTATION
+          // branch previously NEVER disposed the retiring session's handle — the
+          // old agent kept consuming its queued inbox after the S7 commit. The
+          // head-sleep precedent (fire-and-forget + dispatched BEFORE the QD
+          // directive await so the rotation can never abort the detach) applies
+          // VERBATIM: dispatch the old-handle teardown HERE, at the boundary,
+          // with the maximum head start — the detach cancels/joins the retired
+          // session's driver so NO post-retirement turn can consume the queued
+          // m-437 class side effects (the successor is the only consumer; the
+          // O1 dispose-GRACE applies ONLY to the delivery AUTO-RETIRE — a
+          // mid-tool-call worker — never here, where the sleep turn has already
+          // concluded and prompt teardown is the whole point).
+          void ctx.disposeHeadHandleOnce(sessionId)
           // fb-11 — AUTO-WAKE the rotation SUCCESSOR (the host-rotation no-wake
           // defect, QH fb-11): the new hosts.json live entry is committed at
           // S3/S7, but NOTHING materializes the new session — it parked until

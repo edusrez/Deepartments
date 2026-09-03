@@ -232,7 +232,7 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
   assert.ok(/const predictRetiredWorkerDeliverable = /.test(factory), 'predictRetiredWorkerDeliverable moved verbatim (the O2 deliverable predictor, factory-internal)')
   // The CUT-3 closures moved verbatim into the factory (SUB-BATCH 3: the
   // retire/archive + workspace/ensureHead + the boot checks/reconciles).
-  assert.ok(/const retirePost = async \(postId: string, callerAgentId: string\)/.test(factory), 'retirePost moved verbatim (the F1 retire seam — FACTORY-LOCAL now)')
+  assert.ok(/const retirePost = async \(postId: string, callerAgentId: string(?:, opts\?: \{ deferDisposeMs\?: number \})?\)/.test(factory), 'retirePost moved verbatim (the F1 retire seam — FACTORY-LOCAL now; LANE ② O1 added the optional dispose-grace opts)')
   assert.ok(/const archiveWorkerSession = async/.test(factory), 'archiveWorkerSession moved verbatim (the durable-session archiver)')
   assert.ok(/const archivePostSessionOnSleep = async/.test(factory), 'archivePostSessionOnSleep moved verbatim (the sleep-archive)')
   assert.ok(/const ensureDepartmentWorkspace = async/.test(factory), 'ensureDepartmentWorkspace moved verbatim (the workspace ensure)')
@@ -294,7 +294,8 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     assert.ok(first !== -1 && last !== -1 && last > first, 'the factory embeds the CUT4 zone (banner → host-plane effect close)')
     const zoneText = factory.slice(first, last + "  }, 'deepartments: host-plane tools')".length) + '\n'
     const md5 = createHash('md5').update(zoneText, 'utf8').digest('hex')
-    assert.equal(md5, 'b533f629cf5f0f2a46a719db0b549b66', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the LANE 0.1.2 rc.1 session-surface reads (register legacy eliminated — md5 b533f629…)')
+    // Zone md5 RE-FROZE R3 (LANE ②, incident-delivery 2026-09-03): the 4 INTENTIONAL in-span blocks — recipientCatalogAlive reroutable + recipientDormant: isDormantRecipient x2 (redeliverDeps + bus.redeliver) + startRedeliverySweep — re-freeze the hash (R2 fe319e0f… → 5b548545…; LANE ② → 7b5b1c91628b4e69d5ed171cb6d0a7e3; the O1 retirePost dispose-grace is OUTSIDE this span — a different lock).
+    assert.equal(md5, '7b5b1c91628b4e69d5ed171cb6d0a7e3', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions (md5 7b5b1c91…)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface
@@ -399,7 +400,7 @@ test('tools-factory (composed boot): the registry wiring is intact — the runne
       assert.ok(!/const archiveWorkerSession: ToolsFactoryDeps\['late'\]/.test(factory), 'archiveWorkerSession is no longer rebound as a late seam in the factory')
       assert.ok(/const resolveDepartmentWorkspaceCwd = async \(department: DepartmentConfig \| undefined\): Promise<string> =>/.test(factory), 'resolveDepartmentWorkspaceCwd is now a factory-local const (CUT3)')
       assert.ok(/const resolveWorkspaceRootPath = async \(\): Promise<string> =>/.test(factory), 'resolveWorkspaceRootPath is now a factory-local const (CUT3)')
-      assert.ok(/const retirePost = async \(postId: string, callerAgentId: string\): Promise<\{ postId: string; retired: true \}> =>/.test(factory), 'retirePost is now a factory-local const (CUT3)')
+      assert.ok(/const retirePost = async \(postId: string, callerAgentId: string(?:, opts\?: \{ deferDisposeMs\?: number \})?\): Promise<\{ postId: string; retired: true \}> =>/.test(factory), 'retirePost is now a factory-local const (CUT3) — LANE ② O1 extended the signature with the optional dispose-GRACE opts (the auto-retire-on-delivery race fix)')
       const invoke = readFileSync(path.join(REPO_ROOT, 'src', 'invoke.ts'), 'utf8')
       // The TOOLS invocation's `late` object no longer carries workerSetup or
       // the 4 CUT3 seams (the workspace/retire/archive getters are GONE), and

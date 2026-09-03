@@ -138,7 +138,8 @@ import {
   parseMessageRecords,
   needsRedelivery,
   markDelivery,
-  DeliveryRedeliverer
+  DeliveryRedeliverer,
+  RE_DELIVERY_SWEEP_DEFAULT_INTERVAL_MS
 } from 'dshd-core'
 import type { DeliveryRow, MessageRecord, DeliveryStatus, DeliveryRedelivererDeps } from 'dshd-core'
 import {
@@ -2558,7 +2559,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // at the top of this factory and dereferenced only post-boot.
   // =========================================================================
 
-  const retirePost = async (postId: string, callerAgentId: string): Promise<{ postId: string; retired: true }> => {
+  const retirePost = async (postId: string, callerAgentId: string, opts?: { deferDisposeMs?: number }): Promise<{ postId: string; retired: true }> => {
     const entry = byPost.get(postId)
     if (entry === void 0) throw new Error(`[deepartments] dept_post_retire: "${postId}" is not a registered post`)
     // Scope check for HEAD callers (a caller that IS a registered post is a
@@ -2676,7 +2677,34 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     // Also dispose any live handle (retiring a post should not leave it live) —
     // via the in-flight dedupe, so a concurrent dispose (e.g. the post's own
     // dept_sleep) is JOINED instead of raced into a double dispose.
-    void disposeHeadHandleOnce(entry.sessionId)
+    // O1 (LANE ② — the auto-retire-on-delivery race; 3 samples today 34→16→3ms):
+    // the delivery seam retires a WORKER right after its report delivered to
+    // its head — the retire disposes the CALLER's own handle while its
+    // send_message tool call is STILL completing; an immediate dispose aborts
+    // the in-flight tool result, and an auditor reads the AbortError as a LOST
+    // delivery (it is NOT — the delivery already committed before the retire).
+    // THE CHOSEN FIX (simplest + robust): the OPTIONAL DISPOSE GRACE — when
+    // `opts.deferDisposeMs` is set (the delivery auto-retire seam passes it),
+    // the handle dispose is deferred by a timer (unref'd, so it never holds
+    // the process) for the in-flight tool call to complete FIRST; the retire
+    // MARK / archive / QD / settle are ALL synchronous (unchanged), and the
+    // retired worker's handle is catalog-invisible during the grace (a retired
+    // post is never re-materialized — no wake race). Every OTHER retire path
+    // (the head's dept_worker_retire / dept_post_retire — callers NOT
+    // mid-send) keeps the immediate dispose (zero behavior change). The
+    // archived-session alternative (a «last tool aborted but delivery
+    // verified» marker) was NOT needed — the grace removes the abort window
+    // itself (documented in the lane report).
+    const disposeHandle = (): void => { void disposeHeadHandleOnce(entry.sessionId) }
+    const deferDisposeMs = typeof opts?.deferDisposeMs === 'number' && Number.isFinite(opts.deferDisposeMs) && opts.deferDisposeMs > 0
+      ? opts.deferDisposeMs
+      : 0
+    if (deferDisposeMs > 0) {
+      const timer = setTimeout(disposeHandle, deferDisposeMs)
+      if (typeof (timer as { unref?: () => unknown }).unref === 'function') (timer as { unref: () => unknown }).unref()
+    } else {
+      disposeHandle()
+    }
     return { postId, retired: true }
   }
 
@@ -4488,15 +4516,26 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // ---------------------------------------------------------------------------
   /** Resolve a bus recipient against the durable catalog: ALIVE if it exists as
    * a NON-RETIRED post (byPost / posts.json) OR a NON-RETIRED host
-   * (hosts / hosts.json); DEAD/UNKNOWN if neither exists, or the recipient's
-   * post/host is retired (a removed/closed session — e.g. a formerly-open
+   * (hosts / hosts.json) — OR, LANE ② (fb-58 F-3), a RETIRED HOST whose
+   * rotation chain still resolves a LIVE successor: the delivery engine's
+   * catalog route (resolveBusCatalogRoute) re-routes the send to the live host,
+   * so a pending pair to the retired id is RE-DRIVEN (re-routed to the session
+   * viva) — never settled dead (the m-424/425/429 'prepared'-stuck class).
+   * DEAD/UNKNOWN if neither exists, or the recipient's post/host is retired
+   * with NO successor (a removed/closed session — e.g. a formerly-open
    * subagent whose session is gone). The boot re-delivery driver uses this to
    * settle dead recipients ONCE (W7-A). */
   const recipientCatalogAlive = (recipientId: string): boolean => {
     const post = byPost.get(recipientId)
     if (post !== void 0) return post.retired !== true
     const host = hosts.get(recipientId)
-    if (host !== void 0) return host.retired !== true
+    if (host !== void 0) {
+      if (host.retired !== true) return true
+      // fb-58 F-3: a RETIRED host is reroutable while a live successor exists
+      // (the spec-002 rotation chain — the same pickLiveHostEntry the engine's
+      // host-family re-route uses).
+      return pickLiveHostEntry(hosts.values()).live !== undefined
+    }
     return false
   }
   const resolveCallerSessionIdForRedeliver = (from: string): string =>
@@ -4507,6 +4546,9 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     stateDir: messageStoreDir,
     logger: ctx.logger,
     recipientAlive: recipientCatalogAlive,
+    // LANE ② (fb-58/B3): the re-drive machinery NEVER wakes a DORMANT
+    // recipient's noWake/'prepared' queue (its intent is the next REAL wake).
+    recipientDormant: isDormantRecipient,
     getRecord: async (messageId: string): Promise<MessageRecord | undefined> =>
       (await messagesStoreReady).get(messageId),
     resolveCallerSessionId: resolveCallerSessionIdForRedeliver,
@@ -4518,9 +4560,40 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // composition (dshd-core absent) — behavior-neutral.
   const redeliverPendingDeliveries = (ctx.get('deepartments.bus') as BusSurface | undefined)?.redeliver({
     recipientAlive: recipientCatalogAlive,
+    recipientDormant: isDormantRecipient,
     resolveCallerSessionId: resolveCallerSessionIdForRedeliver,
     deliver: deliverBusRecordForRedeliver
   }) ?? new DeliveryRedeliverer(redeliverDeps)
+
+  /** LANE ② (incident-delivery 2026-09-03, item 2+fb-79) — the NON-BOOT
+   * re-delivery SWEEP timer: the failed/prepared pairs previously re-drove
+   * ONLY at boot (the 14 lost messages of 09-03 re-entered on the first boot
+   * post-restart; the gate-clean recovery depended on a restart). A bounded
+   * `setInterval` (default 60 s — ONE sweep per health poll tick; unref'd +
+   * disposed by the ctx.effect so it never holds the process, exactly the
+   * daemon-wiring discipline) re-drives the DUE pairs — with the per-pair
+   * exponential backoff + max-attempts stop inside `sweepDue` — so a gate
+   * clean-up reaches the pending pairs with NO restart and NO storm. The
+   * `health.redeliverySweepIntervalMs` knob (absent → the 60 s default). */
+  const startRedeliverySweep = (): void => {
+    const intervalMs =
+      typeof config.health?.redeliverySweepIntervalMs === 'number' && Number.isFinite(config.health.redeliverySweepIntervalMs) && config.health.redeliverySweepIntervalMs > 0
+        ? config.health.redeliverySweepIntervalMs
+        : RE_DELIVERY_SWEEP_DEFAULT_INTERVAL_MS
+    const handle = setInterval(() => {
+      void redeliverPendingDeliveries.sweepDue()
+    }, intervalMs)
+    if (typeof (handle as { unref?: () => unknown }).unref === 'function') (handle as { unref: () => unknown }).unref()
+    ctx.effect(() => () => clearInterval(handle), 'deepartments: redelivery sweep')
+    ctx.logger.info(`[deepartments] redelivery sweep armed (every ${intervalMs} ms; non-boot re-drive of prepared/failed pairs with per-pair backoff + max-attempts)`)
+  }
+  // The sweep is armed RIGHT HERE, synchronously in the apply fiber (the
+  // ctx.effect disposable requires the fiber — calling it from the async boot
+  // continuation below would throw INACTIVE_EFFECT): the interval is unref'd
+  // and its FIRST fire is one cadence away (default 60 s), which is always
+  // after the registries/store have cold-loaded; an empty sidecar sweep is a
+  // no-op. It re-drives the DUE failed/prepared pairs WITHOUT a restart.
+  startRedeliverySweep()
 
   // FASE 2.6-C: LATE-BIND the bundle's closure-bound bucket-(c) deps into the
   // dshd-core service shells. EVERY closure the lazy builders need is defined by

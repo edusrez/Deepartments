@@ -664,7 +664,7 @@ export interface HealthFinding {
      * the NON-gated items and the dedupe KEY is `work-register-idle` in the
      * SHARED ledger, re-alerting every HEALTH_DEDUPE_WINDOW_MS while the
      * condition persists). */
-  kind: 'post-error' | 'delivery-failed' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red' | 'mission-queue' | 'work-register-idle'
+  kind: 'post-error' | 'delivery-failed' | 'delivery-storm' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red' | 'mission-queue' | 'work-register-idle'
   /** The dedupe key (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS). */
   key: string
   /** The postId (post-error / stalled-post / context-threshold post row). */
@@ -2153,6 +2153,17 @@ export interface HealthConfigLike {
      * 429 rotation to NO key (`lastRotation.to === null`) or usable ≤
      * `criticalUsableKeys`. */
     stateStaleMs?: number
+    /** LANE ② R1 (incident-delivery 2026-09-03) — the FRESHNESS window of the
+     * 429→null `lastRotation` signal, measured on the rotation's OWN `at`
+     * (default 15 min = `POOLER_CAPACITY_DEFAULT_ROTATION_STALE_MS`). The
+     * dispatch pre-check's branch 3 AND the M1 watchdog's 429-prelude branch
+     * block ONLY on a FRESH rotation; a STALE 429→null rotation (older than
+     * this window) never re-arms the gate (the blackout root cause: a
+     * 44-min-old 429→null signal blocked 6/6 usable keys for 47 min) — it
+     * passes conservatively (gate) / self-reports as the
+     * `pooler-capacity:rotation-stale` WARNING (watchdog, §7.4d) when usable
+     * keys remain. */
+    rotationStaleMs?: number
     /** M1 — qi-silence watchdog gate (default ON; explicit false disables the
      * qi-silence scan). */
     qiSilenceEnabled?: boolean
@@ -2585,6 +2596,15 @@ export function scanDeliveryFindings(
       count: 1
     })
   }
+  // LANE ② (§7.5) — compose the retry-STORM findings (the per-message row
+  // count + the attempts/deliveries ratio) over the FULL 1 h sidecar: the
+  // count is an aggregate a delta reader would undercount, so the storm scan
+  // re-reads the full file (bounded — the sidecar is compacted at boot; the
+  // storm fires only in the anomaly it measures). The delta-reader FAST path
+  // of this function stays intact for the delivery-failed block.
+  for (const storm of scanDeliveryStormFindings(stateDir, nowMs, retiredMemberIds)) {
+    findings.push(storm)
+  }
   return findings
 }
 
@@ -2620,6 +2640,84 @@ export function scanDeliveryFindings(
  *     threaded in — a terminal member's legacy rows never re-alert (the live
  *     scan rules). PURE besides the reads; never throws (the readers degrade
  *     to [] like the live scanners). */
+/** LANE ② (§7.5 — QD recommendation 5) — the retry-STORM thresholds: the
+ * attempts-per-message window (1 h), the row-count alert (> 30 rows per
+ * messageId per hour — the m-183/188 classes: 450/226), and the
+ * attempts/deliveries ratio (must stay < 3:1 after the backoff re-drive
+ * lands). */
+export const HEALTH_DELIVERY_STORM_WINDOW_MS = 60 * 60_000
+export const HEALTH_DELIVERY_STORM_MAX_ROWS_PER_HOUR = 30
+export const HEALTH_DELIVERY_STORM_MAX_ATTEMPT_RATIO = 3
+
+/** LANE ② (§7.5 — the retry-STORM thresholds, QD recommendation 5) — the
+ * PER-MESSAGE delivery-row storm scan (PURE; full-file by default because the
+ * COUNT is an aggregate over the 1 h window — a delta reader would undercount
+ * — and the sidecar is bounded by the boot compaction). Reads the SAME
+ * deliveries rows the `delivery-failed` scan reads and yields TWO additive
+ * finding classes (composed by scanDeliveryFindings):
+ *   (S1) MORE THAN `HEALTH_DELIVERY_STORM_MAX_ROWS_PER_HOUR` (30) rows per
+ *        messageId within the 1 h window ('prepared'+'failed' rows — the
+ *        attempt ledger) → ONE `delivery-storm` finding, key
+ *        `delivery-storm:<messageId>` (the m-183/188 classes: 450/226 rows).
+ *   (S2) the ATTEMPTS/DELIVERIES RATIO > `HEALTH_DELIVERY_STORM_MAX_ATTEMPT_RATIO`
+ *        (3:1): the message's 'prepared'+'failed' rows vs its
+ *        'delivered'+'resumed' rows in the same window — the «el backoff real
+ *        NO logra el ratio» check (a delivery attempt that eventually delivers
+ *        should not burn > 3 attempts per delivered row).
+ * The retired-member exclusion applies per row recipient (the delivery-failed
+ * rule). NEVER throws. */
+export function scanDeliveryStormFindings(
+  stateDir: string,
+  nowMs: number,
+  retiredMemberIds?: ReadonlySet<string>,
+  reader: DeliveryRowsReader = readDeliveryRowsFull
+): HealthFinding[] {
+  let rows: DeliveryRow[] = []
+  try {
+    rows = reader(stateDir)
+  } catch {
+    rows = []
+  }
+  const windowStart = nowMs - HEALTH_DELIVERY_STORM_WINDOW_MS
+  const inWindow = rows.filter((row) => nowMs - row.ts <= HEALTH_DELIVERY_STORM_WINDOW_MS && nowMs - row.ts >= 0)
+  const fresh = retiredMemberIds === undefined ? inWindow : inWindow.filter((row) => !retiredMemberIds.has(row.recipientId))
+  const byMessage = new Map<string, { attempts: number; deliveries: number; latestTs: number }>()
+  for (const row of fresh) {
+    let entry = byMessage.get(row.messageId)
+    if (entry === undefined) {
+      entry = { attempts: 0, deliveries: 0, latestTs: row.ts }
+      byMessage.set(row.messageId, entry)
+    }
+    if (row.status === 'prepared' || row.status === 'failed') entry.attempts++
+    else if (row.status === 'delivered' || row.status === 'resumed') entry.deliveries++
+    if (row.ts > entry.latestTs) entry.latestTs = row.ts
+  }
+  const findings: HealthFinding[] = []
+  for (const [messageId, entry] of byMessage) {
+    if (entry.attempts > HEALTH_DELIVERY_STORM_MAX_ROWS_PER_HOUR) {
+      findings.push({
+        kind: 'delivery-storm',
+        key: `delivery-storm:${messageId}`,
+        messageId,
+        ts: entry.latestTs,
+        count: entry.attempts,
+        error: `${entry.attempts} delivery rows in 1 h (> ${HEALTH_DELIVERY_STORM_MAX_ROWS_PER_HOUR}) — retry storm WITHOUT backoff (fb-79; the backoff + max-attempts re-drive bounds this cadence)`
+      })
+    }
+    if (entry.deliveries > 0 && entry.attempts / entry.deliveries > HEALTH_DELIVERY_STORM_MAX_ATTEMPT_RATIO) {
+      findings.push({
+        kind: 'delivery-storm',
+        key: `delivery-storm-ratio:${messageId}`,
+        messageId,
+        ts: entry.latestTs,
+        count: entry.attempts,
+        error: `attempts/deliveries ratio ${entry.attempts}:${entry.deliveries} > ${HEALTH_DELIVERY_STORM_MAX_ATTEMPT_RATIO}:1 in 1 h — the backoff is NOT achieving the < 3:1 ratio`
+      })
+    }
+  }
+  return findings
+}
+
 export function scanHealthCatchup(
   stateDir: string,
   nowMs: number,
@@ -2749,6 +2847,14 @@ export const POOLER_CAPACITY_DEFAULT_CRITICAL_USABLE_KEYS = 1
 export const POOLER_CAPACITY_DEFAULT_BLOCKED_KEYS_IN_WINDOW = 3
 export const POOLER_CAPACITY_DEFAULT_HIGH_PERCENT = 90
 export const POOLER_CAPACITY_DEFAULT_STATE_STALE_MS = 10 * 60 * 1000
+// LANE ② R1 (incident-delivery 2026-09-03) — the FRESHNESS window of the
+// `lastRotation` 429→null signal (default 15 min): the rotation-age check of
+// the gate's branch 3 + the M1 watchdog's branch (1). A rotation OLDER than
+// this window is a STALE signal and must NEVER re-arm the dispatch gate (the
+// incident: a 44-min-old 429→null rotation blocked 6/6 usable keys for 47 min);
+// a rotation INSIDE the window is FRESH and still blocks (the 7f634ef
+// hardening for a real 503-prelude is preserved).
+export const POOLER_CAPACITY_DEFAULT_ROTATION_STALE_MS = 15 * 60 * 1000
 
 /** The pooler-capacity dedupe key LEVEL marker (the finding `key` is
  * `pooler-capacity:critical` | `pooler-capacity:warning` — DISTINCT keys so a
@@ -2756,6 +2862,11 @@ export const POOLER_CAPACITY_DEFAULT_STATE_STALE_MS = 10 * 60 * 1000
  * 30-min dedupe). */
 export const POOLER_CAPACITY_KEY_CRITICAL = 'pooler-capacity:critical'
 export const POOLER_CAPACITY_KEY_WARNING = 'pooler-capacity:warning'
+// LANE ② R1 (§7.4d) — the STALE-429→null SELF-REPORT dedupe key: a DISTINCT
+// key (≠ the critical key) so the stale-signal warning NEVER swallows /
+// is swallowed by the real-shortage critical finding (the scan returns ONE
+// finding per tick; the priority order keeps the critical branch ahead).
+export const POOLER_CAPACITY_KEY_ROTATION_STALE = 'pooler-capacity:rotation-stale'
 
 /** M1 (b) code defaults. */
 export const QI_SILENCE_DEFAULT_WINDOW_MS = 120 * 60 * 1000
@@ -2858,6 +2969,11 @@ export interface PoolerCapacityKnobs {
   blockedKeysInWindow: number
   highPercent: number
   stateStaleMs: number
+  /** LANE ② R1 — the freshness window of the 429→null `lastRotation` signal
+   * (default `POOLER_CAPACITY_DEFAULT_ROTATION_STALE_MS`, 15 min). Absent →
+   * the default; a rotation OLDER than this window is STALE (never a critical
+   * prelude while usable keys remain — the incident class). */
+  rotationStaleMs?: number
 }
 
 /** M1-a — scan the pooler state file for capacity findings. ONE finding per
@@ -2939,16 +3055,45 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
   // The 429-usage-limit rotation to NO key (`lastRotation.to === null` — the
   // pool rotated a key OUT and NO other key was eligible) — the pool is one
   // request away from the 503 KeyPoolerExhausted. Critical (owner M1).
+  // LANE ② R1 (incident-delivery 2026-09-03): the signal now carries an
+  // AGE-CHECK on the rotation's OWN `at` (not the state `updatedAt` — the
+  // pooler rewrites the file on every health change, so a FRESH updatedAt can
+  // sit atop a STALE lastRotation, exactly the incident shape). A STALE
+  // 429→null rotation (older than `rotationStaleMs`) is a bygone signal: it is
+  // NOT the critical 503 prelude anymore. When usable keys REMAIN (usable > 0),
+  // it self-reports as the R1 WARNING finding (§7.4d — «usable>0 && stale
+  // 429→null» must be observable, so an operator sees a gate held by a stale
+  // signal); a STALE rotation with usable ≤ critical falls THROUGH to the
+  // usable-count critical branch below (the real shortage still alerts). A
+  // rotation without a parseable `at` is treated FRESH (conservative — the
+  // 7f634ef hardening for a pooler that does not stamp the rotation ts).
   const rotation = state.lastRotation ?? undefined
   const rotation429ToNull = rotation !== undefined && rotation.to === null && (rotation.reason ?? '').includes('429')
   if (rotation429ToNull) {
-    return [{
-      kind: 'pooler-capacity',
-      key: POOLER_CAPACITY_KEY_CRITICAL,
-      ts: nowMs,
-      count: usableCount,
-      error: `last rotation ${rotation?.reason ?? '429 usage-limit'} → no key (to:null) — 503 prelude`
-    }]
+    const rotationStaleMs = knobs.rotationStaleMs ?? POOLER_CAPACITY_DEFAULT_ROTATION_STALE_MS
+    const rotationAtMs = rotation.at !== undefined && rotation.at !== '' ? Date.parse(rotation.at) : Number.NaN
+    const rotationAgeMs = Number.isFinite(rotationAtMs) ? nowMs - rotationAtMs : Number.NaN
+    const rotationFresh = !Number.isFinite(rotationAgeMs) || rotationAgeMs <= rotationStaleMs
+    if (!rotationFresh && usableCount > 0) {
+      return [{
+        kind: 'pooler-capacity',
+        key: POOLER_CAPACITY_KEY_ROTATION_STALE,
+        ts: nowMs,
+        count: usableCount,
+        error: `STALE 429→null rotation at ${rotation.at ?? '(unknown at)'} (${Math.round(rotationAgeMs / 60000)} min > ${Math.round(rotationStaleMs / 60000)} min window) with ${usableCount}/${totalCount} keys usable — the stale signal must NOT re-arm the dispatch gate (R1); only a FRESH 429→null rotation is the critical 503 prelude`
+      }]
+    }
+    if (rotationFresh) {
+      return [{
+        kind: 'pooler-capacity',
+        key: POOLER_CAPACITY_KEY_CRITICAL,
+        ts: nowMs,
+        count: usableCount,
+        error: `last rotation ${rotation?.reason ?? '429 usage-limit'} → no key (to:null; fresh signal @ ${rotation.at ?? '(at unknown)'}) — 503 prelude`
+      }]
+    }
+    // STALE + usable ≤ critical → fall through to the usable-count branches
+    // (the real shortage, not the bygone signal, decides).
   }
   if (usableCount <= knobs.criticalUsableKeys) {
     return [{
@@ -3023,11 +3168,16 @@ export interface PoolerDispatchBlockResult {
  * freshness window — STALE state is UNKNOWN → passthrough + a logger warn
  * naming the age (the M1 dead-man's-switch rule: the pooler writes the file
  * only on health changes, so a quiet grid looks stale by design; the CERTAIN
- * branches below never rely on freshness). */
+ * branches below never rely on freshness). LANE ② R1: `knobs.rotationStaleMs`
+ * (default `POOLER_CAPACITY_DEFAULT_ROTATION_STALE_MS`, 15 min) is the
+ * FRESHNESS window of the 429→null `lastRotation` signal — the branch-3 block
+ * applies ONLY to a FRESH rotation (measured on the rotation's OWN `at`); a
+ * STALE 429→null rotation passes conservatively (warn naming at + stale-age,
+ * §7.4) — the incident's root-cause class. */
 export function resolvePoolerDispatchBlock(
   statePath: string,
   nowMs: number,
-  knobs: { highPercent: number; stateStaleMs: number },
+  knobs: { highPercent: number; stateStaleMs: number; rotationStaleMs?: number },
   logger?: { warn(message: string): void }
 ): PoolerDispatchBlockResult | undefined {
   const state = readPoolerStateFile(statePath)
@@ -3071,9 +3221,35 @@ export function resolvePoolerDispatchBlock(
   // request away from the 503 KeyPoolerExhausted — blocking the dispatch NOW
   // avoids the primer-call 429/503 (the M1 "alert BEFORE paralysis" intent,
   // applied to the dispatch). CERTAIN → block.
+  // LANE ② R1 (incident-delivery 2026-09-03 — THE root cause of the blackout):
+  // the branch previously blocked WITHOUT an age-check of the rotation, so a
+  // STALE 429→null signal (a `lastRotation` written yesterday, never cleaned)
+  // re-armed the gate with healthy keys (the 17:00:31Z post-error: 6/6 usable
+  // still blocked; 295 failed rows 13:54→17:02Z). The signal now blocks ONLY
+  // when FRESH — a rotation within `knobs.rotationStaleMs` (the rotation's OWN
+  // `at`, never the state `updatedAt`: the pooler rewrites the file on every
+  // health change, so a fresh updatedAt can sit atop a stale lastRotation) —
+  // and a STALE 429→null DOES NOT block, even though the rotation is
+  // registered, passing conservatively with a warn naming at + stale-age
+  // (§7.4 observability: the error/warn expose the rotation `at` and the
+  // stale-age, so an operator sees WHY the gate released). A rotation WITHOUT
+  // a parseable `at` is treated FRESH — the 7f634ef hardening is PRESERVED
+  // for a pooler that does not stamp the rotation ts (NO blind revert of that
+  // commit's quota hardening; only the stale re-arm class is closed).
   const rotation = state.lastRotation ?? undefined
   if (rotation !== undefined && rotation.to === null && (rotation.reason ?? '').includes('429')) {
-    return { reason: `pool: last rotation 429 usage-limit → no key (to:null; 503 prelude) — dispatch delayed; retry when a fresh key resolves (${usable.length}/${keys.length} usable)` }
+    const rotationStaleMs = knobs.rotationStaleMs ?? POOLER_CAPACITY_DEFAULT_ROTATION_STALE_MS
+    const rotationAtMs = rotation.at !== undefined && rotation.at !== '' ? Date.parse(rotation.at) : Number.NaN
+    const rotationAgeMs = Number.isFinite(rotationAtMs) ? nowMs - rotationAtMs : Number.NaN
+    const rotationFresh = !Number.isFinite(rotationAgeMs) || rotationAgeMs <= rotationStaleMs
+    if (!rotationFresh) {
+      const ageMin = Math.round(rotationAgeMs / 60000)
+      logger?.warn(`pooler dispatch gate: last rotation 429→null is STALE (at ${rotation.at ?? '(unknown at)'}, ${ageMin} min > ${Math.round(rotationStaleMs / 60000)} min window; ${usable.length}/${keys.length} usable) — NOT blocking (a stale signal must not re-arm the gate; R1), a FRESH 429→null rotation would block`)
+      return undefined
+    }
+    const atLabel = Number.isFinite(rotationAtMs) ? rotation.at : '(at unknown)'
+    const ageLabel = Number.isFinite(rotationAgeMs) ? `${Math.round(rotationAgeMs / 60000)} min old` : 'unknown age'
+    return { reason: `pool: last rotation 429 usage-limit → no key (to:null; FRESH signal @ ${atLabel}, ${ageLabel} ≤ ${Math.round(rotationStaleMs / 60000)} min window; 503 prelude) — dispatch delayed; retry when a fresh key resolves (${usable.length}/${keys.length} usable)` }
   }
   return undefined
 }
@@ -4363,6 +4539,12 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
       const prefix = finding.catchup === true ? 'CATCH-UP ' : ''
       return `- ${prefix}delivery-failed: ${finding.messageId}`
     }
+    // LANE ② (§7.5) — the delivery-storm branch (NEVER let it reach the
+    // stalled-post fallback). The owner-facing wording is the finding's own
+    // line (the count + the threshold/ratio in the error).
+    if (finding.kind === 'delivery-storm') {
+      return `- delivery-storm: ${finding.messageId} — ${finding.error ?? `${finding.count ?? 0} delivery rows in 1 h`}`
+    }
     if (finding.kind === 'config-preset') {
       return `- config-preset: unbound template reference(s) in preset text${finding.error !== undefined && finding.error !== '' ? `: ${finding.error}` : ''}`
     }
@@ -4719,7 +4901,8 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       criticalUsableKeys: resolvePositiveKnob(health?.criticalUsableKeys, POOLER_CAPACITY_DEFAULT_CRITICAL_USABLE_KEYS),
       blockedKeysInWindow: resolvePositiveKnob(health?.blockedKeysInWindow, POOLER_CAPACITY_DEFAULT_BLOCKED_KEYS_IN_WINDOW),
       highPercent: resolvePositiveKnob(health?.highPercent, POOLER_CAPACITY_DEFAULT_HIGH_PERCENT),
-      stateStaleMs: resolvePositiveKnob(health?.stateStaleMs, POOLER_CAPACITY_DEFAULT_STATE_STALE_MS)
+      stateStaleMs: resolvePositiveKnob(health?.stateStaleMs, POOLER_CAPACITY_DEFAULT_STATE_STALE_MS),
+      rotationStaleMs: resolvePositiveKnob(health?.rotationStaleMs, POOLER_CAPACITY_DEFAULT_ROTATION_STALE_MS)
     }
     const qiWindowMs =
       typeof health?.qiSilenceWindowMinutes === 'number' && Number.isFinite(health.qiSilenceWindowMinutes) && health.qiSilenceWindowMinutes > 0
