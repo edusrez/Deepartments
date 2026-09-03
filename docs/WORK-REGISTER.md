@@ -280,6 +280,13 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   sin decisión; no urgente (capacidad ok por ahora).
 - **¿remoto GitHub para dsh-key-pooler?** — repo local-only (7248a55); pregunta
   open menor al owner.
+- **profiles/web scaffold inerte en dev (IPH 09-03, lane settings-revert)** —
+  ¿intencional o eliminar? Decisión pendiente del owner; sin acción hasta
+  veredicto (elección de limpieza → IPD).
+- **bak `cordis.patch.yml.bak-20260903-131645-stablegrant` en
+  packages/dshd-core (IPH 09-03)** — backup pre-grant (148 líneas); owner
+  decide commit/limpieza al tocar la rama fb-78/grant (el grant en sí está
+  VIVO y owner-aprobado: missionExecRoots [/opt/dsh/.dsh] — NO es residuo).
 - CERRADOS: publish 0.1.0 (efd579b) · D5 · P1 · tool-goal retirado · API key
   DeepSeek (fallback real) · restart 05:23:31Z (owner: ignorar — watch si
   reaparecen; restart-registry lo deja visible) · cause restarts 08-31
