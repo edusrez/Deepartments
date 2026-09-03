@@ -233,7 +233,7 @@ export function sanitizePromptLiterals(text: string): string {
 export function presenceGuidance(present: boolean): string {
   return present
     ? 'Owner guidance: make the most of the presence — share any question you have (none is fine — no need to force it) or report what was done while the owner was away.'
-    : 'Owner guidance: work autonomously as far as you can; you will be notified when the owner returns.'
+    : 'Owner guidance: work autonomously as far as you can; you will be notified when the owner returns. If a question needs the owner, park it in PENDIENTE-OWNER (your journal / WORK-REGISTER §3) and present it when the owner returns — ask_user_question is denied while the owner is away.'
 }
 
 /**

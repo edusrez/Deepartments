@@ -2230,7 +2230,12 @@ export function askUserGuardReason(
   const agentId = exec.agent?.id
   if (typeof agentId !== 'string') return undefined
   if (!hooks.isHostAgent(agentId)) return undefined
-  return 'owner absent (presence flag)'
+  // The `owner absent (presence flag)` prefix is a contract: the real-Loader A3
+  // test and the boot wiring regex-match it. The suffix orients the DENIED host
+  // (the only caller this guard can gate) to the org's correct channel for an
+  // owner question — PENDIENTE-OWNER (WORK-REGISTER §3 / journal) — and states
+  // the guard does NOT queue: the question is dropped unless the host parks it.
+  return 'owner absent (presence flag) — the owner is away and cannot answer an interactive question now; the question was NOT queued. Record it in PENDIENTE-OWNER (WORK-REGISTER §3 / your journal) and present it when the owner is present.'
 }
 
 // (dispatchDeepartmentsEndpoint + the envelope/trust primitives +

@@ -9506,7 +9506,15 @@ test('askUserGuardReason: DENIES the REGISTERED HOST ask_user_question when the 
     { name: 'ask_user_question', agent: { id: 'host-abc' } },
     { present: () => false, isHostAgent: () => true }
   )
-  assert.equal(reason, 'owner absent (presence flag)')
+  // The reason keeps its EXACT `owner absent (presence flag)` prefix (regexes
+  // in the real-Loader A3 test match it) and now also orients the denied host
+  // to the org's correct channel for an owner question (PENDIENTE-OWNER /
+  // WORK-REGISTER §3 / journal + present on the owner's return) — the guard
+  // itself does NOT queue the question.
+  assert.match(reason, /^owner absent \(presence flag\) — /, 'the denial keeps the exact `owner absent (presence flag)` prefix')
+  assert.ok(reason.includes('NOT queued'), 'the denial states the question was NOT queued by the guard')
+  assert.ok(reason.includes('PENDIENTE-OWNER'), 'the denial orients to PENDIENTE-OWNER (WORK-REGISTER §3 / journal)')
+  assert.ok(reason.includes('present it when the owner is present'), 'the denial tells the host to present the question when the owner returns')
 })
 
 test('askUserGuardReason: ALLOWS ask_user_question when the owner is PRESENT', () => {
