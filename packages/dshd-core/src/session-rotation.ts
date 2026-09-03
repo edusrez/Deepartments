@@ -366,6 +366,45 @@ export function isArchivedSession(
 }
 
 /**
+ * fb-78 A3 — mint a session id that is GUARANTEED not to be in the workspace
+ * registry's archived set (the sidebar hide-set). The mint seam of every spawn
+ * (dept_worker_spawn / dept_job_run / dept_post_create / the F8 fresh-mint)
+ * must NEVER materialize on an archived id: the GUI sidebar hides any archived
+ * session id (`!archived.has(id)`), so an agent created on an archived id is
+ * LIVE-BUT-INVISIBLE forever (the hide-set is add-only — there is no
+ * unarchive). The uuid mints below make a collision astronomically unlikely,
+ * but the invariant is made EXPLICIT here instead of implicit ("a fresh uuid
+ * never collides").
+ *
+ * `mint` is the caller's id mint (it returns a FRESH id per call — e.g.
+ * `mintWorkerSessionId(postId)` or the head `head-<postId>-<uuid>` literal);
+ * on the ~0 collision the guard RE-MINTS (up to `attempts`, default 3 — each
+ * attempt is a fresh uuid) and FAILS LOUD when every attempt is still
+ * archived (never silently spawn on a hidden id). A registry WITHOUT the
+ * archived seam (headless/minimal composition) reports nothing archived
+ * (isArchivedSession → false), so the FIRST mint wins — the exact
+ * non-fatal degrade of archiveWorkerSession (tools.ts:2686-2699).
+ *
+ * SYNCHRONOUS (no await): the guard runs between the mint and agents.create,
+ * keeping the fb-68 in-process atomicity of the mint seam.
+ */
+export function mintFreshSessionIdNotArchived(
+  registry: WorkspaceRegistryLike | undefined,
+  mint: () => string,
+  label: string,
+  attempts = 3
+): string {
+  let candidate = mint()
+  for (let attempt = 1; attempt < attempts && isArchivedSession(registry, candidate); attempt++) {
+    candidate = mint()
+  }
+  if (isArchivedSession(registry, candidate)) {
+    throw new Error(`[deepartments] ${label}: every minted session id (${attempts} attempts) is in the workspace-registry archived set — refusing to materialize on an archived (invisible) id`)
+  }
+  return candidate
+}
+
+/**
  * D1 — the archive CALL WRAPPER around `ctx.get('workspaceRegistry')
  * .archiveSession(oldId)`. Never throws: a missing registry or a failing call
  * resolves `{ok:false, reason}` and the caller logs loudly but continues (the

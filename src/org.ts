@@ -360,6 +360,50 @@ export interface GhostSuspectConfig {
 }
 
 /**
+ * fb-78 A1 — the F3-stale residue knob (`org.retiredResidue`, owner decision
+ * 2026-09-03): the boot retired-worker-residue pass additionally archives
+ * top-level /ungrouped durable sessions with NO post and NO live host once
+ * they are STALE (age >= minAgeMs). Optional; defaults are CODE-level (enabled
+ * true — the owner decision "todas las /ungrouped sin post son archivables" —
+ * and minAgeMs 48h). An ABSENT section (or absent key) falls through to the
+ * code defaults (the health/quality compose-untouched contract); an explicit
+ * `enabled: false` restores the pre-fb-78 behavior (F3-stale out — the
+ * researcher-2 class stays visible). Mirrors the dshd-orchestration
+ * RetiredResidueConfig.
+ */
+export interface RetiredResidueConfig {
+  /** When explicitly false, the F3-stale phase of the boot residue pass does
+   * NOT run (a no-post stale session is left visible). Absent → enabled
+   * (default true — the owner decision). */
+  enabled?: boolean
+  /** The minimum session age (ms) before a no-post/no-host/no-live session is
+   * archived. Default 48h (172800000). A session whose age cannot be
+   * determined is conservatively NOT archived. */
+  minAgeMs?: number
+}
+
+/**
+ * fb-78 A2 — the offline-worker reap knob (`org.offlineReap`, owner decision
+ * 2026-09-03): the boot census that reaps NON-retired workers whose session
+ * has NO live handle and NO sleepEpoch for a wall-clock window (the fb-56
+ * orphaned class — durable session present, daemon-killed mid-mission).
+ * Optional; defaults are CODE-level (enabled FALSE — conservative, m-228
+ * respected — and maxOfflineMs 72h). An ABSENT section (or absent key) falls
+ * through to the code defaults (the reap does NOT run); an explicit
+ * `enabled: true` opts into the reap. Mirrors the dshd-orchestration
+ * OfflineReapConfig.
+ */
+export interface OfflineReapConfig {
+  /** When explicitly true the boot offline-reap census runs. Absent → OFF
+    * (the m-228 conservative default). */
+  enabled?: boolean
+  /** How long (ms) a worker must be continuously offline (no live handle, no
+   * sleepEpoch) before it becomes a retire candidate. Default 72h
+   * (259200000). */
+  maxOfflineMs?: number
+}
+
+/**
  * One configured event_stream monitor of the deepartments plugin. The `query`
  * is the NL intent Parallel runs (settings.query); `processor`/`frequency`
  * mirror POST /v1/monitors (defaults `base`/`1d`). The whole array is read
@@ -507,6 +551,19 @@ export interface Config {
      */
     ghostSuspect?: GhostSuspectConfig
     /**
+     * fb-78 A1 — the F3-stale residue knob (enabled/minAgeMs). Optional;
+     * defaults are CODE-level (enabled true — the owner decision "todas las
+     * /ungrouped sin post son archivables" — minAgeMs 48h). Mirrors the
+     * health/quality compose-untouched contract.
+     */
+    retiredResidue?: RetiredResidueConfig
+    /**
+     * fb-78 A2 — the offline-worker reap knob (enabled/maxOfflineMs).
+     * Optional; defaults are CODE-level (enabled FALSE — conservative, m-228
+     * respected — maxOfflineMs 72h). Mirrors the compose-untouched contract.
+     */
+    offlineReap?: OfflineReapConfig
+    /**
      * PACING (owner m-PACING, 2026-08-28) — the peak/valley FRANJA monitor
      * (see PacingConfig). Optional; defaults are CODE-LEVEL (enabled true,
      * weekday [1..5], hours {1,2,3,6,7,8,9} UTC, peakBufferMs 1800000) — an
@@ -637,6 +694,23 @@ export const Config: z<any, any> = z.object({
       warnAfterTicks: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
       retireAfterTicks: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
     }).default(void 0 as unknown as { enabled: boolean; warnAfterTicks: number; retireAfterTicks: number }),
+    // fb-78 A1 — mirrors Config.org.retiredResidue. `default(void 0)` so an
+    // ABSENT section or absent key falls through to the CODE defaults (enabled
+    // true — the owner decision "todas las /ungrouped sin post son
+    // archivables" — minAgeMs 48h); an explicit `{ enabled: false }` disables
+    // the F3-stale phase of the residue pass.
+    retiredResidue: z.object({
+      enabled: z.boolean(),
+      minAgeMs: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER)
+    }).default(void 0 as unknown as { enabled: boolean; minAgeMs: number }),
+    // fb-78 A2 — mirrors Config.org.offlineReap. `default(void 0)` so an
+    // ABSENT section or absent key falls through to the CODE defaults (enabled
+    // FALSE — conservative, m-228 respected — maxOfflineMs 72h); the reap
+    // runs only with an explicit `enabled: true`.
+    offlineReap: z.object({
+      enabled: z.boolean(),
+      maxOfflineMs: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER)
+    }).default(void 0 as unknown as { enabled: boolean; maxOfflineMs: number }),
     // PACING (owner m-PACING, 2026-08-28) — mirrors Config.org.pacing.
     // `default(void 0)` so an ABSENT section or absent key falls through to the
     // CODE defaults (enabled true, weekday [1..5], hours {1,2,3,6,7,8,9} UTC,

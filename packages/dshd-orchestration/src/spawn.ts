@@ -40,8 +40,8 @@ import path from 'node:path'
 // directly (registry/messages/wakepack → dshd-core, jobs → dshd-jobs, pooler →
 // dshd-pooler, health → dshd-health); the org config types come from the local
 // org-types.js mirror.
-import { mintWorkerSessionId, workerSessionId } from 'dshd-core'
-import type { PostEntry } from 'dshd-core'
+import { mintWorkerSessionId, workerSessionId, isArchivedSession, mintFreshSessionIdNotArchived } from 'dshd-core'
+import type { PostEntry, WorkspaceRegistryLike } from 'dshd-core'
 import { readJobDefinitionFile, jobDirFor, readCalendarStateFile, writeCalendarStateFile } from 'dshd-jobs'
 import type { CalendarState } from 'dshd-jobs'
 import { readLlmPiAiProviderSettings, resolveReasoningContentPreflight } from 'dshd-pooler'
@@ -253,6 +253,18 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
   const resolveDepartmentWorkspaceCwd: SpawnFactoryDeps['late']['resolveDepartmentWorkspaceCwd'] = (...args) => late.resolveDepartmentWorkspaceCwd(...args)
   const resolveWorkspaceRootPath: SpawnFactoryDeps['late']['resolveWorkspaceRootPath'] = (...args) => late.resolveWorkspaceRootPath(...args)
   const deliverBusRecord: SpawnFactoryDeps['late']['deliverBusRecord'] = (...args) => late.deliverBusRecord(...args)
+  // fb-78 A3 — the workspace registry seam (a headless/minimal composition has
+  // NO workspaceRegistry service: the seam is undefined and the guard below
+  // degrades to the first mint — the archiveWorkerSession non-fatal pattern).
+  const workspaceRegistry = (): WorkspaceRegistryLike | undefined =>
+    ctx.get('workspaceRegistry', false) as WorkspaceRegistryLike | undefined
+  // fb-78 A3 — mint a worker session id that is guaranteed NOT in the archived
+  // set (a spawn on an archived id would be LIVE-BUT-INVISIBLE in the sidebar —
+  // the hide-set is add-only). Synchronous (no await): the mint + the
+  // isArchivedSession check run back-to-back (fb-68 atomicity), then the
+  // caller's agents.get live-guard + agents.create follow.
+  const mintFreshWorkerSessionId = (postId: string, label: string): SessionId =>
+    SessionId(mintFreshSessionIdNotArchived(workspaceRegistry(), () => mintWorkerSessionId(postId), label))
   const messagesStoreReady = {
     then(resolve: (value: MessagesStore) => unknown, reject: (reason?: unknown) => unknown) {
       return late.messagesStoreReady.then(resolve, reject)
@@ -446,7 +458,9 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     // materialize a messaging-only job worker — fail loudly BEFORE any create.
     assertWorkerToolScope(definition.meta.role, template)
     const postId = dedupedWorkerSlug(jobId)
-    const sessionId = SessionId(mintWorkerSessionId(postId))
+    // fb-78 A3: the mint is guarded against the workspace-registry archived set
+    // (a worker spawned on an archived id would be live-but-invisible).
+    const sessionId = mintFreshWorkerSessionId(postId, `dept_job_run "${jobId}"`)
     if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_job_run: a live agent already exists for session "${sessionId}"`)
     const title = definition.meta.title.trim() !== '' ? definition.meta.title : defaultWorkerTitle(definition.meta.role, definition.body, jobId, postId)
     // fb-28 (QD MEDIO — WORK-REGISTER §5): per-spawn REPORT RUN TOKEN. A worker
@@ -551,7 +565,9 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     // Slug dedup (spec §5.2): base = jobId ?? role; -2/-3… on collision —
     // INCLUDING RETIRED slugs (F1 keeps retired entries in byPost).
     const postId = dedupedWorkerSlug(opts.jobId ?? role)
-    const sessionId = SessionId(mintWorkerSessionId(postId))
+    // fb-78 A3: the mint is guarded against the workspace-registry archived set
+    // (a worker spawned on an archived id would be live-but-invisible).
+    const sessionId = mintFreshWorkerSessionId(postId, `dept_worker_spawn "${opts.jobId ?? role}"`)
     if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_worker_spawn: a live agent already exists for session "${sessionId}"`)
     const title = (opts.title ?? '').trim() !== '' ? (opts.title as string) : defaultWorkerTitle(role, opts.task, opts.jobId, postId)
     // fb-28 (QD MEDIO — WORK-REGISTER §5): per-spawn REPORT RUN TOKEN (see the

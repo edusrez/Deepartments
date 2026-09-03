@@ -15,7 +15,7 @@
 // via StubAgents.resume — the faithful production path for bringing a
 // registered resident back.
 import assert from 'node:assert/strict'
-import { access, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { access, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -69,6 +69,16 @@ import {
   DEPT_ZSTD_READ_TIMEOUT_MS,
   DEPT_ZSTD_READ_MAX_CHARS
 } from '../lib/invoke.js'
+// fb-78 A2 — the offline-reap ledger IO + PURE step live in dshd-core
+// (registry.ts) and are imported via the core bridge (NOT ../lib/invoke.js —
+// the export-parity lock freezes that surface; the core bridge star-re-exports
+// dshd-core).
+import {
+  OFFLINE_REAP_STATE_FILE,
+  readOfflineReapLedger,
+  writeOfflineReapLedger,
+  stepOfflineReapCensus
+} from '../lib/core/registry.js'
 import { Config as configSchema } from '../lib/org.js'
 import { apply as subagentForkApply, SECRETARY_PERSONA, SECRETARY_TOOL_FILTER, SECRETARY_TOOL_NAME, SECRETARY_PROVIDER, SECRETARY_MAX_DEPTH } from '../lib/subagent.js'
 import { HEAD_BASE_TOOLS, OWN_LAYER_POST_TOOLS } from '../lib/invoke.js'
@@ -513,9 +523,15 @@ class StubPersistence extends Service {
    * stub has no detached sessions, so the live-preferred corpus stays
    * live-only (a cold child cannot be resumed in this harness either). Dx1 F2:
    * when the boot opted into `durableSessions`, those ids ARE the corpus (the
-   * boot residue sweep enumerates them). */
+   * boot residue sweep enumerates them). fb-78 A1: a `durableSessions` entry
+   * may be a bare id string OR a durable header object ({id, cwd?, createdAt?}
+   * — the native list() header shape the F3-stale classifier reads: createdAt
+   * = age provenance, cwd = the (non-excluding) ownership belt); the headers
+   * are returned VERBATIM so the F3-stale age/cwd paths are exercisable. */
   async list() {
-    return [...this.durableSessions].map((id) => ({ id: String(id) }))
+    return [...this.durableSessions].map((entry) => typeof entry === 'string'
+      ? { id: String(entry) }
+      : { id: String(entry.id), ...(entry.cwd !== undefined ? { cwd: entry.cwd } : {}), ...(entry.createdAt !== undefined ? { createdAt: entry.createdAt } : {}) })
   }
 }
 
@@ -8760,6 +8776,43 @@ test('worker session-id uniqueness (F8 head-rotation pattern applied to workers)
     }
   })
 })
+
+test('fb-78 A3 (worker session-id cold-resume rotation): a NON-RETIRED worker whose durable session id is ALREADY in the workspace-registry archived set (the transient archive-leak class) is ROTATED on its next bus wake — a fresh worker-<postId>-<uuid> id + CREATE, never a resume of the archived id; the new current worker session is live and VISIBLE (not archived, attached), and the durable entry points at the FRESH id', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'researcher-alpha'
+    // A durable WORKER post (provider worker, NOT retired) whose session id is
+    // PRE-SEEDED in the registry archived set — the resumed-archived-id state
+    // that would leave the worker live-but-invisible FOREVER (the hide-set is
+    // add-only, no unarchive). The harness pre-seeds the hide-set at boot
+    // (workspaceRegistryArchived — the P2 head pattern applied to a worker).
+    await seedPost(stateDir, { postId, sessionId: 'worker-researcher-alpha', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'rank-and-file researcher', managerId: 'research-head' })
+    const { root, agents, workspaceRegistry, dispose } = await bootPlugin(stateDir, { workspaceRegistryArchived: ['worker-researcher-alpha'] })
+    try {
+      assert.ok(workspaceRegistry.archivedSessionIds.includes('worker-researcher-alpha'), 'the durable worker session is archived (the anomaly)')
+      assert.equal((await readPosts(stateDir))[postId].retired, undefined, 'the worker post is NOT retired (a live post whose session leaked into the hide-set)')
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      // A bus wake → materializePost takes the worker cold-resume path and MUST
+      // rotate (archive + not-retired) instead of resuming the archived id.
+      const r = await root.tools.get('send_message').execute({ to: [postId], text: 'wake the archived-session worker' }, { agent: host, signal })
+      assert.equal(r.delivered[postId], 'resumed', 'bus delivery reports the materialize')
+      await waitFor(() => agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-researcher-alpha-')), 5000, 'a fresh worker-researcher-alpha-<uuid> id was created (worker rotation)')
+      const freshCreate = agents.createCalls.find((c) => String(c.sessionId).startsWith('worker-researcher-alpha-'))
+      const freshId = String(freshCreate.sessionId)
+      assert.notEqual(freshId, 'worker-researcher-alpha', 'the fresh id is NOT the archived one')
+      assert.equal(agents.resumeCalls.filter((c) => String(c.resumeSessionId) === 'worker-researcher-alpha').length, 0, 'the archived worker id is NEVER resumed (no unarchive — rotate, never des-archive)')
+      assert.equal(workspaceRegistry.archivedSessionIds.includes(freshId), false, 'the NEW current worker session is NOT archived (the invariant: a live worker is never archived)')
+      assert.ok(agents.store.has(freshId), 'the rotated worker is LIVE')
+      await waitFor(() => workspaceRegistry.attachCalls.includes(freshId), 5000, 'the fresh worker session is attached to the workspace (sidebar-visible)')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts[postId].sessionId, freshId, 'the durable registry now points at the FRESH session id')
+      assert.equal(posts[postId].previousChildId, 'worker-researcher-alpha', 'the rotation records the previous (archived) incarnation')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 
 test('F3 dept_worker_retire: marks retired (entry kept, live catalog stops addressing), archives the session, cross-department head DENIED, idempotent', async () => {
   await withTempStateDir(async (stateDir) => {
@@ -19778,7 +19831,7 @@ test('P2 visibility fix (c): a NON-archived head resume is UNCHANGED (no regress
   })
 })
 
-test('P2 visibility fix (d): a WORKER resume is UNCHANGED (no regression) — a worker keeps its legacy cold-resume of its own session, never rotated by the archive-leak fix', async () => {
+test('P2 visibility fix (d): a WORKER resume is UNCHANGED (no regression) — a NON-archived worker keeps its legacy cold-resume of its own session (fb-78 A3 rotates ONLY the archived-session worker, never a healthy one)', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'researcher-alpha'
     await seedPost(stateDir, { postId, sessionId: 'worker-researcher-alpha', roomId: 'research', agentPreset: 'deepartments-worker', provider: 'worker', role: 'rank-and-file researcher' })
@@ -19786,14 +19839,14 @@ test('P2 visibility fix (d): a WORKER resume is UNCHANGED (no regression) — a 
     try {
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
-      // Even if the worker's durable id were archived (it is not, in this test),
-      // the worker resume path must stay the legacy cold-resume — the archive-leak
-      // fix is HEAD-specific.
+      // The worker's durable id is NOT archived in this test — the resume path
+      // must stay the legacy cold-resume (fb-78 A3 only rotates a worker whose
+      // session id is IN the hide-set, never a healthy worker).
       const r = await root.tools.get('send_message').execute({ to: [postId], text: 'wake the worker' }, { agent: host, signal })
       assert.equal(r.delivered[postId], 'resumed', 'bus delivery materializes the worker')
       await waitFor(() => agents.store.has('worker-researcher-alpha'), 5000, 'the worker is live under its OWN id')
       assert.ok(agents.resumeCalls.some((c) => String(c.resumeSessionId) === 'worker-researcher-alpha'), 'the worker was cold-RESUMED under its id (workers keep the legacy cold-resume)')
-      assert.ok(!agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-researcher-alpha-')), 'NO fresh rotation id was created for the worker (zero regression)')
+      assert.ok(!agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-researcher-alpha-')), 'NO fresh rotation id was created for the NON-archived worker (zero regression)')
       const posts = await readPosts(stateDir)
       assert.equal(posts[postId].sessionId, 'worker-researcher-alpha', 'the worker durable registry entry is UNCHANGED (no rotation)')
     } finally {
@@ -19951,7 +20004,7 @@ test('Dx1 F1 (b): a retire that HITS the 25% QD dice emits the inspect directive
   })
 })
 
-test('Dx1 F2 (c): at boot, EVERY retired worker\'s CURRENT session AND its slug\'s durable sessions (worker-<slug>-*) are archived (hide-set); a session of a LIVE post is NEVER archived (slug-chain guard) and an orphan (no post) is left for F3; a SECOND boot re-adds nothing (idempotent)', async () => {
+test('Dx1 F2 (c) + fb-78 A1 F3-stale: at boot, EVERY retired worker\'s CURRENT session AND its slug\'s durable sessions (worker-<slug>-*) are archived (hide-set); a session of a LIVE post is NEVER archived (slug-chain guard); an orphan (no post) is archived ONLY when STALE (age >= threshold — the fb-78 A1 F3-stale phase; a young/age-less orphan stays visible); a SECOND boot re-adds nothing (idempotent)', async () => {
   await withTempStateDir(async (stateDir) => {
     // Retired workers: 'explore-deep-10' (entry session + a SECOND durable
     // incarnation of the SAME slug — the multi-session residue) and 'builder'
@@ -19961,11 +20014,21 @@ test('Dx1 F2 (c): at boot, EVERY retired worker\'s CURRENT session AND its slug\
     // LIVE post 'builder-2' — its slug prefix shadows the retired 'builder'
     // prefix for the residue session below (the collision the guard must win).
     await seedPost(stateDir, { postId: 'builder-2', sessionId: 'worker-builder-2-dddddddd', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', managerId: 'research-head' })
+    // The durable corpus (header objects — the stub now surfaces the NATIVE
+    // header shape {id, cwd?, createdAt?} so the fb-78 A1 F3-stale phase can
+    // judge age/cwd). Orphan sub-classes:
+    //   - worker-ghost-ffffffff  — no post, NO age signal → conservative OUT
+    //     (a boot cannot prove it stale without createdAt/mtime);
+    //   - worker-ghost-9eeeeeee  — no post, OLD (> 48h) → ELIGIBLE → archived
+    //     (the F3-stale phase that the pre-fb-78 doc excluded "deliberately");
+    //   - worker-ghost-recent    — no post, YOUNG (< 48h) → OUT (age guard).
     const durableSessions = [
       'worker-explore-deep-10-bbbbbbbb', // the 2nd incarnation of retired explore-deep-10 (residue)
       'worker-builder-eeeeeeee', // the current session of retired builder
       'worker-builder-2-dddddddd', // belongs to LIVE builder-2 (share the retired 'builder' prefix!)
-      'worker-ghost-ffffffff' // orphan — no post at all (F3 is deliberately OUT)
+      'worker-ghost-ffffffff', // orphan — no post, no age signal (F3-stale: age unproven → out)
+      { id: 'worker-ghost-9eeeeeee', createdAt: Date.now() - 3 * 24 * 60 * 60 * 1000 }, // OLD orphan — the eligible F3-stale sub-class
+      { id: 'worker-ghost-recent', createdAt: Date.now() } // YOUNG orphan — under the age threshold
     ]
     const booted = await bootPlugin(stateDir, { durableSessions })
     try {
@@ -19973,11 +20036,21 @@ test('Dx1 F2 (c): at boot, EVERY retired worker\'s CURRENT session AND its slug\
       await waitFor(() => booted.workspaceRegistry.archivedSessionIds.includes('worker-explore-deep-10-aaaaaaaa'), 5000, 'the retired worker\'s CURRENT session is archived at boot (F2 a)')
       await waitFor(() => booted.workspaceRegistry.archivedSessionIds.includes('worker-explore-deep-10-bbbbbbbb'), 5000, 'the retired worker\'s slug RESIDUE session is archived at boot (F2 b sweep)')
       await waitFor(() => booted.workspaceRegistry.archivedSessionIds.includes('worker-builder-eeeeeeee'), 5000, 'the second retired worker\'s session is archived')
-      // Guards: the LIVE post's session and the orphan stay untouched.
+      // Guards: the LIVE post's session never archived (slug-chain collision
+      // guard — despite matching the retired "worker-builder-" prefix).
       assert.equal(booted.workspaceRegistry.archivedSessionIds.includes('worker-builder-2-dddddddd'), false, 'a session of a LIVE post is NEVER archived (the slug-chain collision guard — despite matching the retired "worker-builder-" prefix)')
-      assert.equal(booted.workspaceRegistry.archivedSessionIds.includes('worker-ghost-ffffffff'), false, 'an orphan session (no post) is NOT archived (F3 deliberately out — documented)')
+      // fb-78 A1 F3-stale: the OLD orphan (no post, age > 48h) IS archived —
+      // the eligible sub-class that the pre-fb-78 "F3 deliberately out" doc
+      // kept visible (owner decision 2026-09-03: stale /ungrouped no-post
+      // sessions are archival).
+      await waitFor(() => booted.workspaceRegistry.archivedSessionIds.includes('worker-ghost-9eeeeeee'), 5000, 'the OLD no-post orphan is archived (fb-78 A1 F3-stale — age >= 48h)')
+      // The YOUNG orphan (age < threshold) and the age-less orphan stay out
+      // (the age guard + the conservative age-unproven rule).
+      assert.equal(booted.workspaceRegistry.archivedSessionIds.includes('worker-ghost-recent'), false, 'a YOUNG no-post orphan is NOT archived (under the 48h age threshold)')
+      assert.equal(booted.workspaceRegistry.archivedSessionIds.includes('worker-ghost-ffffffff'), false, 'an age-LESS no-post orphan is NOT archived (age unproven — conservative)')
       const firstBoot = [...booted.workspaceRegistry.archivedSessionIds]
       assert.ok(firstBoot.includes('worker-explore-deep-10-aaaaaaaa') && firstBoot.includes('worker-explore-deep-10-bbbbbbbb'), 'boot #1 seeded the hide-set with both archetypes')
+      assert.ok(firstBoot.includes('worker-ghost-9eeeeeee'), 'boot #1 seeded the F3-stale eligible orphan')
       await booted.dispose()
       // SECOND boot on the SAME stateDir with the SAME durable corpus + the
       // already-archived hide-set pre-seeded (the real registry persists
@@ -19998,18 +20071,27 @@ test('Dx1 F2 (c): at boot, EVERY retired worker\'s CURRENT session AND its slug\
   })
 })
 
-test('Dx1 F2 (d): a LIVE post (not retired) with a durable session is NEVER archived by the boot pass — nothing in the hide-set for it', async () => {
+test('Dx1 F2 (d) + fb-78 A1: a LIVE post (not retired) with a durable session is NEVER archived by the boot pass — nothing in the hide-set for it (not even when the session looks STALE: the no-post F3-stale classifier only ever touches sessions NO post owns)', async () => {
   await withTempStateDir(async (stateDir) => {
     await seedPost(stateDir, { postId: 'researcher', sessionId: 'worker-researcher-99999999', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', managerId: 'research-head' })
     // A retired PROBE post proves the pass RAN (its session MUST be archived)
     // before we assert the live post's session stayed out of the hide-set.
     await seedPost(stateDir, { postId: 'probe-retired', sessionId: 'worker-probe-retired-00000000', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', managerId: 'research-head', retired: true })
-    const { workspaceRegistry, dispose } = await bootPlugin(stateDir, { durableSessions: ['worker-researcher-99999999', 'worker-probe-retired-00000000'] })
+    // The live post's durable header is DELIBERATELY OLD (72h) — fb-78 A1
+    // proves the F3-stale age classifier can never out-rank POST OWNERSHIP: a
+    // stale session of a LIVE post is still a post's session, never an orphan.
+    const durableSessions = [
+      { id: 'worker-researcher-99999999', createdAt: Date.now() - 72 * 60 * 60 * 1000 },
+      'worker-probe-retired-00000000'
+    ]
+    const { workspaceRegistry, dispose } = await bootPlugin(stateDir, { durableSessions })
     try {
       // The pass ran iff the retired probe session is archived.
       await waitFor(() => workspaceRegistry.archivedSessionIds.includes('worker-probe-retired-00000000'), 5000, 'the retired probe session was archived — the residue pass ran')
-      // The LIVE post's session (dormant at boot) must NOT be in the hide-set.
-      assert.equal(workspaceRegistry.archivedSessionIds.includes('worker-researcher-99999999'), false, 'a LIVE post\'s durable session is NEVER archived (a live row stays visible)')
+      // The LIVE post's session (dormant at boot, but OLD) must NOT be in the
+      // hide-set — F3-stale archives ONLY no-post sessions; a post-owned
+      // session is never an orphan (a live row stays visible).
+      assert.equal(workspaceRegistry.archivedSessionIds.includes('worker-researcher-99999999'), false, 'a LIVE post\'s durable session is NEVER archived (a live row stays visible — even when its header age would clear the F3-stale threshold)')
       assert.equal(workspaceRegistry.archivedSessionIds.filter((id) => id === 'worker-probe-retired-00000000').length, 1, 'the probe is archived exactly once (idempotent add)')
     } finally {
       await dispose()
@@ -20017,7 +20099,7 @@ test('Dx1 F2 (d): a LIVE post (not retired) with a durable session is NEVER arch
   })
 })
 
-test('Dx1 F2 (e): the sessions-root dir-scan FALLBACK (a persistence with a root but NO list()) archives a retired worker\'s slug sessions it finds on disk — and skips non-worker and worker-less matches', async () => {
+test('Dx1 F2 (e) + fb-78 A1: the sessions-root dir-scan FALLBACK (a persistence with a root but NO list()) archives a retired worker\'s slug sessions it finds on disk — and skips non-worker and worker-less matches; the fb-78 A1 F3-stale phase judges dir-scanned no-post orphans by the ARTIFACT MTIME (old mtime → archived, young mtime → stays)', async () => {
   await withTempStateDir(async (stateDir) => {
     const sessionsRoot = path.join(stateDir, 'sessions-root')
     // The jsonl store layout: <root>/<project>/<encoded-id>/session.jsonl*.
@@ -20030,6 +20112,18 @@ test('Dx1 F2 (e): the sessions-root dir-scan FALLBACK (a persistence with a root
     const headDir = path.join(sessionsRoot, '--proj-1--', 'head-other')
     await mkdir(headDir, { recursive: true })
     await writeFile(path.join(headDir, 'session.jsonl'), '')
+    // fb-78 A1 F3-stale fallback fixtures: an OLD no-post orphan dir (mtime
+    // backdated > 48h — the artifact-mtime age provenance of the dir scan)
+    // and a YOUNG no-post orphan dir (fresh mtime — under the threshold).
+    const oldOrphanDir = path.join(sessionsRoot, '--proj-1--', 'worker-ghost-old')
+    await mkdir(oldOrphanDir, { recursive: true })
+    const oldArtifact = path.join(oldOrphanDir, 'session.jsonl.zstd')
+    await writeFile(oldArtifact, '')
+    const oldMtime = Date.now() - 72 * 60 * 60 * 1000
+    await utimes(oldArtifact, new Date(oldMtime), new Date(oldMtime))
+    const youngOrphanDir = path.join(sessionsRoot, '--proj-1--', 'worker-ghost-young')
+    await mkdir(youngOrphanDir, { recursive: true })
+    await writeFile(path.join(youngOrphanDir, 'session.jsonl.zstd'), '')
     await seedPost(stateDir, { postId: 'retired-9', sessionId: 'worker-retired-9-aaaaaaaa', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', managerId: 'research-head', retired: true })
     const { workspaceRegistry, dispose } = await bootPlugin(stateDir, { persistenceRootOnly: sessionsRoot })
     try {
@@ -20037,8 +20131,71 @@ test('Dx1 F2 (e): the sessions-root dir-scan FALLBACK (a persistence with a root
       await waitFor(() => workspaceRegistry.archivedSessionIds.includes('worker-retired-9-bbbbbbbb'), 5000, 'the dir-scanned slug residue is archived (F2 b fallback)')
       assert.equal(workspaceRegistry.archivedSessionIds.includes('other-org-worker-99'), false, 'a non-worker-prefixed session in the dir scan is NEVER touched')
       assert.equal(workspaceRegistry.archivedSessionIds.includes('head-other'), false, 'a head session in the dir scan is NEVER touched')
+      // fb-78 A1 F3-stale (dir-scan provenance = artifact mtime): the OLD
+      // no-post orphan is archived, the YOUNG one stays.
+      await waitFor(() => workspaceRegistry.archivedSessionIds.includes('worker-ghost-old'), 5000, 'the dir-scanned OLD no-post orphan is archived (F3-stale — artifact mtime >= 48h)')
+      assert.equal(workspaceRegistry.archivedSessionIds.includes('worker-ghost-young'), false, 'the dir-scanned YOUNG no-post orphan stays visible (under the age threshold)')
     } finally {
       await dispose()
+    }
+  })
+})
+
+test('fb-78 A1 F3-stale guards: (i) a NON-RETIRED HOST\'s session (in hosts.json — even sleeping) is NEVER archived, no matter its age (the hosts-REGISTRY protection, never a `session-` prefix guess); (ii) `org.retiredResidue.enabled: false` restores the pre-fb-78 behavior (an OLD no-post orphan stays visible); (iii) `org.retiredResidue.minAgeMs` retunes the threshold', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // (i) — a NON-RETIRED (sleeping-by-design) host whose durable session id
+    // is ALSO in the corpus as an OLD no-post session. The F3-stale classifier
+    // MUST exclude it by REGISTRY (hosts.json), never by a `session-` prefix
+    // (the current host is exactly the `session-<uuid>` shape the owner GUI
+    // and the smoke sessions share — a prefix filter would be a bug).
+    await seedHostRegistration(stateDir, 'session-sleeping-host-66031134')
+    const oldMs = Date.now() - 100 * 60 * 60 * 1000
+    const durableSessions = [
+      { id: 'session-sleeping-host-66031134', createdAt: oldMs },
+      { id: 'session-old-orphan-00000001', createdAt: oldMs }
+    ]
+    const booted = await bootPlugin(stateDir, { durableSessions })
+    try {
+      // The pass ran: the OLD no-post non-host orphan was archived...
+      await waitFor(() => booted.workspaceRegistry.archivedSessionIds.includes('session-old-orphan-00000001'), 5000, 'the OLD no-post orphan is archived (F3-stale ran)')
+      // ...but the NON-RETIRED host session was NOT (registry protection).
+      assert.equal(booted.workspaceRegistry.archivedSessionIds.includes('session-sleeping-host-66031134'), false, 'a NON-RETIRED host\'s durable session is NEVER archived (hosts REGISTRY protection — even when OLD and sleeping)')
+      await booted.dispose()
+    } finally {
+      await booted.dispose()
+    }
+  })
+  await withTempStateDir(async (stateDir) => {
+    // (ii) — `org.retiredResidue.enabled: false` disables ONLY the F3-stale
+    // phase: the OLD orphan stays visible (the retired-worker sweep is
+    // untouched — the probe proves the pass still ran).
+    await seedPost(stateDir, { postId: 'probe-retired', sessionId: 'worker-probe-retired-00000000', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'builder', managerId: 'research-head', retired: true })
+    const oldMs = Date.now() - 100 * 60 * 60 * 1000
+    const disabled = await bootPlugin(stateDir, {
+      durableSessions: [{ id: 'worker-ghost-disabled', createdAt: oldMs }, 'worker-probe-retired-00000000'],
+      org: { ...TEST_ORG, retiredResidue: { enabled: false } }
+    })
+    try {
+      await waitFor(() => disabled.workspaceRegistry.archivedSessionIds.includes('worker-probe-retired-00000000'), 5000, 'the retired-worker sweep still ran (the knob disables ONLY the F3-stale phase)')
+      assert.equal(disabled.workspaceRegistry.archivedSessionIds.includes('worker-ghost-disabled'), false, 'enabled:false → an OLD no-post orphan is NOT archived (pre-fb-78 behavior)')
+      await disabled.dispose()
+    } finally {
+      await disabled.dispose()
+    }
+  })
+  await withTempStateDir(async (stateDir) => {
+    // (iii) — a LOW minAgeMs retunes the threshold: a 1h-old orphan clears a
+    // 30-min threshold but not the default 48h.
+    const hour = 60 * 60 * 1000
+    const retuned = await bootPlugin(stateDir, {
+      durableSessions: [{ id: 'worker-ghost-retuned', createdAt: Date.now() - 1 * hour }],
+      org: { ...TEST_ORG, retiredResidue: { minAgeMs: 30 * 60 * 1000 } }
+    })
+    try {
+      await waitFor(() => retuned.workspaceRegistry.archivedSessionIds.includes('worker-ghost-retuned'), 5000, 'minAgeMs 30min → a 1h-old orphan is archived')
+      await retuned.dispose()
+    } finally {
+      await retuned.dispose()
     }
   })
 })
@@ -20570,6 +20727,223 @@ test('B5-GHOST zero regression: a worker with a USABLE session (a resumable dura
       assert.ok(readGhostSuspectLedger(stateDir)['ghost-disabled'] !== undefined, 'enabled:false → the ledger is left untouched (the pass never ran)')
     } finally {
       await dispose()
+    }
+  })
+})
+
+// ===========================================================================
+// fb-78 A2 (owner decision 2026-09-03 — default OFF, conservative; m-228
+// respected) — the OFFLINE-WORKER REAP: the wall-clock census SIBLING of
+// b5-ghost for the fb-56 orphaned class (a NON-RETIRED worker whose DURABLE
+// session is PRESENT but has NO live handle and NO sleepEpoch for a window).
+// stepOfflineReapCensus is the PURE ladder (first offline census stamps
+// offlineSince — NEVER retires on that same census; a live census CLEARS; the
+// window crossing now − offlineSince > maxOfflineMs makes a retire candidate);
+// the real-Loader tests drive the BOOT census pass (each boot = ONE tick)
+// against seeded workers + the durable offline-reap-state.json ledger.
+// ===========================================================================
+
+test('fb-78 A2 (pure): stepOfflineReapCensus — the FIRST offline census STAMPS offlineSince and NEVER retires (warm-up); a live census CLEARS the entry (intermittent never accumulates); a PRE-EXISTING entry whose offline window crosses maxOfflineMs → retireCandidate; posts that left the census are pruned', async () => {
+  const T0 = 2_000_000_000_000
+  const maxOfflineMs = 72 * 60 * 60 * 1000
+  const row = (postId, offline) => ({ postId, sessionId: `worker-${postId}`, offline })
+  // (1) A worker offline at the FIRST census: offlineSince stamped = now,
+  // NEVER a retire candidate (warm-up — the window is 0).
+  const first = stepOfflineReapCensus([row('alpha', true)], {}, T0, { maxOfflineMs })
+  assert.deepEqual(first.retireCandidates, [], 'a FIRST offline observation is NEVER a retire candidate (warm-up)')
+  assert.equal(first.ledger.alpha.offlineSince, T0, 'the first offline observation stamps offlineSince = now')
+  assert.equal(first.ledger.alpha.lastSeenOfflineAt, T0, 'the entry records the census time')
+  // (2) A LIVE census → the entry is CLEARED (a worker that returned never
+  // accumulates an offline window).
+  const live = stepOfflineReapCensus([row('alpha', false)], first.ledger, T0 + 1000, { maxOfflineMs })
+  assert.deepEqual(live.ledger, {}, 'a live census leaves NO ledger entry (the worker is fine)')
+  assert.deepEqual(live.cleared, ['alpha'], 'the returned worker is reported cleared')
+  // (3) The window crossing: a worker offline for > maxOfflineMs across two
+  // censuses becomes a retireCandidate ONLY once the PRE-EXISTING offlineSince
+  // crosses the threshold.
+  const stamped = stepOfflineReapCensus([row('beta', true)], {}, T0, { maxOfflineMs })
+  assert.deepEqual(stamped.retireCandidates, [], 'warm-up census: no candidate')
+  const crossed = stepOfflineReapCensus([row('beta', true)], stamped.ledger, T0 + maxOfflineMs + 1, { maxOfflineMs })
+  assert.deepEqual(crossed.retireCandidates, ['beta'], 'the offline window crossing maxOfflineMs → retireCandidate (the ONLY auto-retire branch)')
+  assert.equal(crossed.ledger.beta.offlineSince, T0, 'the entry keeps the ORIGINAL offlineSince (the window is from the first stamp)')
+  assert.equal(crossed.ledger.beta.lastSeenOfflineAt, T0 + maxOfflineMs + 1, 'lastSeenOfflineAt advances each offline census')
+  // (4) NOT crossed yet (window < maxOfflineMs) → no candidate, entry stays.
+  const notYet = stepOfflineReapCensus([row('gamma', true)], { gamma: { offlineSince: T0, lastSeenOfflineAt: T0 } }, T0 + maxOfflineMs - 1, { maxOfflineMs })
+  assert.deepEqual(notYet.retireCandidates, [], 'a window under maxOfflineMs is NOT a candidate yet')
+  assert.ok(notYet.ledger.gamma !== undefined, 'the still-warming entry stays in the ledger')
+  // (5) Posts that left the census (retired/unregistered) are pruned.
+  const pruned = stepOfflineReapCensus([row('delta', false)], { gone: { offlineSince: T0, lastSeenOfflineAt: T0 } }, T0 + 1, { maxOfflineMs })
+  assert.equal(pruned.ledger.gone, undefined, 'a post no longer in the census is PRUNED from the ledger')
+  // (6) INTERMITTENT: offline (stamp), live (clear), offline again (fresh
+  // stamp — the chain never crosses because each live census resets).
+  let inter = {}
+  for (const offline of [true, false, true]) {
+    const verdict = stepOfflineReapCensus([row('epsilon', offline)], inter, T0 + 100, { maxOfflineMs })
+    inter = verdict.ledger
+  }
+  assert.equal(inter.epsilon.offlineSince, T0 + 100, 'an intermittent worker restamps offlineSince after each live gap (never accumulates a crossed window)')
+})
+
+test('fb-78 A2 (durable ledger IO): writeOfflineReapLedger persists the ledger to <stateDir>/offline-reap-state.json and readOfflineReapLedger restores it; absent/unreadable/malformed → {} (never throws)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    assert.deepEqual(readOfflineReapLedger(stateDir), {}, 'an absent ledger file → {} (the census starts clean)')
+    const ledger = {
+      'orphan-a': { offlineSince: 1111, lastSeenOfflineAt: 2222 },
+      'orphan-b': { offlineSince: 3333, lastSeenOfflineAt: 4444 }
+    }
+    await writeOfflineReapLedger(stateDir, ledger)
+    assert.deepEqual(readOfflineReapLedger(stateDir), ledger, 'the ledger round-trips through the durable file')
+    // Malformed file → {} (never throws — a torn write degrades to a clean start).
+    await writeFile(path.join(stateDir, OFFLINE_REAP_STATE_FILE), 'not: [json', 'utf8')
+    assert.deepEqual(readOfflineReapLedger(stateDir), {}, 'a malformed ledger file → {} (never throws)')
+  })
+})
+
+test('fb-78 A2 (real Loader, boot census — knob ON): a NON-RETIRED worker whose durable session is PRESENT but has NO live handle and NO sleepEpoch, with a PRE-EXISTING offlineSince older than maxOfflineMs, is AUTO-REAPED at boot (retirePost — mark + archive + the ledger entry pruned)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // 'orphan' — a non-retired worker with a durable session PRESENT (raw
+    // artifact) but NO live handle at boot and NO sleepEpoch — the fb-56 class.
+    await seedPost(stateDir, { postId: 'orphan', sessionId: 'worker-orphan-aaaaaaaa', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', managerId: 'research-head', departmentId: 'research' })
+    // Pre-seed the ledger: orphan stamped > maxOfflineMs ago (the PREVIOUS
+    // census opened the window — this census crosses it → auto-reap).
+    const maxOfflineMs = 72 * 60 * 60 * 1000
+    await writeOfflineReapLedger(stateDir, {
+      'orphan': { offlineSince: Date.now() - 2 * maxOfflineMs, lastSeenOfflineAt: Date.now() - 2 * maxOfflineMs }
+    })
+    const { agents, dispose } = await bootPlugin(stateDir, {
+      rawPersistence: true,
+      rawArtifacts: { 'worker-orphan-aaaaaaaa': 'resumable-session-content' },
+      org: { ...TEST_ORG, offlineReap: { enabled: true, maxOfflineMs } }
+    })
+    try {
+      void agents
+      // The crossed-window offline worker is AUTO-REAPED at boot (mark +
+      // archive via the shared retirePost — the ledger entry pruned).
+      await waitFor(async () => (await readPosts(stateDir))['orphan']?.retired === true, 5000, 'the crossed-window offline worker is auto-reaped at boot')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['orphan'].retired, true, 'the offline orphan is auto-reaped (retirePost — mark, not erase)')
+      const ledger = readOfflineReapLedger(stateDir)
+      assert.equal(ledger['orphan'], undefined, 'the reaped worker\u2019s ledger entry is pruned')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-78 A2 (real Loader, boot census — knob ON): a worker with a PENDING DELIVERY is woken by the boot redelivery BEFORE the sequenced reap — its stamp is CLEARED (a worker about to be woken is never a reap candidate; the reap runs after the redelivery drains)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const now = Date.now()
+    // A NON-RETIRED worker with a prepared delivery row: the boot re-delivery
+    // drains it (materializePost wakes the worker → a LIVE handle) and ONLY
+    // THEN (my sequenced wiring) does the offline-reap census judge it — it
+    // sees the handle → live → cleared, never reaped.
+    await seedPost(stateDir, { postId: 'delivery-worker', sessionId: 'worker-delivery-worker-cccccccc', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', managerId: 'research-head', departmentId: 'research' })
+    const hostId = await seedHostRegistration(stateDir, 'host-live-1')
+    await seedMessageRecords(stateDir, [
+      { id: 'm-deliv', seq: 0, ts: now, from: hostId, to: ['delivery-worker'], text: 'hello worker', kind: 'agent' }
+    ])
+    await seedDeliveryRows(stateDir, [{ messageId: 'm-deliv', recipientId: 'delivery-worker', status: 'prepared', ts: now }])
+    const maxOfflineMs = 72 * 60 * 60 * 1000
+    await writeOfflineReapLedger(stateDir, {
+      'delivery-worker': { offlineSince: Date.now() - 2 * maxOfflineMs, lastSeenOfflineAt: Date.now() - 2 * maxOfflineMs }
+    })
+    const { agents, dispose } = await bootPlugin(stateDir, { org: { ...TEST_ORG, offlineReap: { enabled: true, maxOfflineMs } } })
+    try {
+      // The redelivery materializes the worker first (the sequenced reap runs
+      // only after the redelivery drains — no race).
+      await waitFor(() => agents.store.has('worker-delivery-worker-cccccccc'), 5000, 'the pending-delivery worker was woken by the boot redelivery')
+      // The worker is LIVE → the reap census clears it (never a candidate).
+      await waitFor(() => readOfflineReapLedger(stateDir)['delivery-worker'] === undefined, 5000, 'the live worker\u2019s offline stamp was CLEARED by the census (never reaped)')
+      assert.equal(await readPosts(stateDir).then((posts) => posts['delivery-worker']?.retired), undefined, 'the pending-delivery worker is NEVER reaped (the sequenced reap saw it LIVE)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-78 A2 (real Loader): a SLEPT worker (sleepEpoch marked) is NEVER reaped even when its offline window crossed — the sleepEpoch exception mirrors the registry.ts:625-629 / computeDeptWhoState rule (a slept worker is dormant-by-design, not an orphan)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await seedPost(stateDir, { postId: 'slept-worker', sessionId: 'worker-slept-worker-cccccccc', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', managerId: 'research-head', departmentId: 'research', sleepEpoch: Date.now() - 1000 })
+    const maxOfflineMs = 72 * 60 * 60 * 1000
+    await writeOfflineReapLedger(stateDir, {
+      'slept-worker': { offlineSince: Date.now() - 2 * maxOfflineMs, lastSeenOfflineAt: Date.now() - 2 * maxOfflineMs }
+    })
+    const { dispose } = await bootPlugin(stateDir, { rawPersistence: true, org: { ...TEST_ORG, offlineReap: { enabled: true, maxOfflineMs } } })
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['slept-worker']?.retired, undefined, 'a SLEPT worker is NEVER reaped (sleepEpoch = dormant-by-design, not offline)')
+      // The census excludes slept workers from rows → its stale stamp is
+      // pruned (the post is no longer a census subject while slept).
+      assert.equal(readOfflineReapLedger(stateDir)['slept-worker'], undefined, 'a slept worker is not a census subject — its stamp is pruned')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-78 A2 (real Loader): `org.offlineReap` ABSENT (the default) → the reap does NOT run — a crossed-window offline worker is never auto-reaped (m-228 default OFF; an explicit enabled:true is the opt-in)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await seedPost(stateDir, { postId: 'default-off-orphan', sessionId: 'worker-default-off-orphan-dddddddd', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', managerId: 'research-head', departmentId: 'research' })
+    const maxOfflineMs = 72 * 60 * 60 * 1000
+    await writeOfflineReapLedger(stateDir, {
+      'default-off-orphan': { offlineSince: Date.now() - 2 * maxOfflineMs, lastSeenOfflineAt: Date.now() - 2 * maxOfflineMs }
+    })
+    const { dispose } = await bootPlugin(stateDir, { rawPersistence: true })
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      assert.equal(await readPosts(stateDir).then((posts) => posts['default-off-orphan']?.retired), undefined, 'knob ABSENT → the reap does NOT auto-retire (default OFF, m-228 respected)')
+      assert.ok(readOfflineReapLedger(stateDir)['default-off-orphan'] !== undefined, 'knob ABSENT → the ledger is left untouched (the pass never ran)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-78 A2 (real Loader, warm-up): a worker offline at the FIRST census with NO pre-existing stamp is NEVER reaped on that census — the first observation only STAMPS offlineSince (warm-up; the auto-reap needs a PREVIOUS census to have opened the window)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await seedPost(stateDir, { postId: 'warmup-orphan', sessionId: 'worker-warmup-orphan-eeeeeeee', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', managerId: 'research-head', departmentId: 'research' })
+    const maxOfflineMs = 72 * 60 * 60 * 1000
+    const { dispose } = await bootPlugin(stateDir, { rawPersistence: true, org: { ...TEST_ORG, offlineReap: { enabled: true, maxOfflineMs } } })
+    try {
+      await waitFor(() => readOfflineReapLedger(stateDir)['warmup-orphan']?.offlineSince !== undefined, 5000, 'the first offline census stamped offlineSince')
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['warmup-orphan']?.retired, undefined, 'the FIRST census never retires (warm-up — the window is 0)')
+      const ledger = readOfflineReapLedger(stateDir)
+      assert.ok(ledger['warmup-orphan'].offlineSince !== undefined, 'the offlineSince stamp is durable for the NEXT boot')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-78 A2 (real Loader, idempotency): a SECOND boot over the same stateDir does NOT re-reap — a worker already retired by boot #1 is out of the census (retired posts are never census rows) and the ledger stays pruned (no linger, no re-trigger)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await seedPost(stateDir, { postId: 'reap-twice', sessionId: 'worker-reap-twice-ffffffff', roomId: 'board', agentPreset: 'deepartments-worker', provider: 'worker', role: 'researcher', managerId: 'research-head', departmentId: 'research' })
+    const maxOfflineMs = 72 * 60 * 60 * 1000
+    await writeOfflineReapLedger(stateDir, {
+      'reap-twice': { offlineSince: Date.now() - 2 * maxOfflineMs, lastSeenOfflineAt: Date.now() - 2 * maxOfflineMs }
+    })
+    const first = await bootPlugin(stateDir, { rawPersistence: true, org: { ...TEST_ORG, offlineReap: { enabled: true, maxOfflineMs } } })
+    try {
+      // Boot #1: the crossed-window orphan is reaped (retired:true).
+      await waitFor(async () => (await readPosts(stateDir))['reap-twice']?.retired === true, 5000, 'boot #1 reaped the crossed-window orphan')
+      assert.equal(readOfflineReapLedger(stateDir)['reap-twice'], undefined, 'boot #1 pruned the reaped worker\u2019s ledger entry')
+      await first.dispose()
+    } finally {
+      await first.dispose()
+    }
+    // Boot #2 over the SAME stateDir (the worker is now retired): the census
+    // skips retired posts → no re-reap, no re-stamp, no re-trigger.
+    const second = await bootPlugin(stateDir, { rawPersistence: true, org: { ...TEST_ORG, offlineReap: { enabled: true, maxOfflineMs } } })
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      const posts = await readPosts(stateDir)
+      assert.equal(posts['reap-twice'].retired, true, 'the worker stays retired (never un-retired by the 2nd boot)')
+      assert.equal(posts['reap-twice'].sessionId, 'worker-reap-twice-ffffffff', 'the retired entry is unchanged (mark, not erase)')
+      assert.equal(readOfflineReapLedger(stateDir)['reap-twice'], undefined, 'boot #2 adds NO ledger entry for the retired worker (out of the census — no linger, no re-trigger)')
+    } finally {
+      await second.dispose()
     }
   })
 })

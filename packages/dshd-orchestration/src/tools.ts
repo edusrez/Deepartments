@@ -170,7 +170,7 @@ import {
 import { qualityInspectDecision, QUALITY_INSPECT_ENV_VAR } from 'dshd-quality'
 import type { QualityInspectDirectiveSurface } from 'dshd-quality'
 
-import { isArchivedSession, buildHeadRotationSeed } from 'dshd-core'
+import { isArchivedSession, buildHeadRotationSeed, mintFreshSessionIdNotArchived } from 'dshd-core'
 import type { WorkspaceRegistryLike } from 'dshd-core'
 import {
   mintWorkerSessionId,
@@ -181,6 +181,9 @@ import {
   readGhostSuspectLedger,
   writeGhostSuspectLedger,
   stepGhostSuspectCensus,
+  readOfflineReapLedger,
+  writeOfflineReapLedger,
+  stepOfflineReapCensus,
   pickLiveHostEntry
 } from 'dshd-core'
 import type { PostEntry, RegistryStore, HostEntry, HostEntryLike } from 'dshd-core'
@@ -193,6 +196,8 @@ import type {
   ParallelConfig,
   ParallelMonitorConfig,
   PostsRetentionConfig,
+  RetiredResidueConfig,
+  OfflineReapConfig,
   DeptWhoState
 } from './org-types.js'
 import { buildSubagentOrientation } from 'dshd-core'
@@ -1448,7 +1453,14 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           // configured head (a worker must never shadow a head's identity).
           if (byPost.has(args.postId)) throw new Error(`[deepartments] dept_post_create: postId "${args.postId}" is already registered`)
           if (coordinatorForPost(args.postId) !== void 0) throw new Error(`[deepartments] dept_post_create: postId "${args.postId}" is a configured department head, not a worker`)
-          const sessionId = mintWorkerSessionId(args.postId)
+          // fb-78 A3: the mint is guarded against the workspace-registry
+          // archived set (a worker spawned on an archived id would be
+          // live-but-invisible). Synchronous re-mint on the ~0 collision.
+          const sessionId = mintFreshSessionIdNotArchived(
+            ctx.get('workspaceRegistry', false) as WorkspaceRegistryLike | undefined,
+            () => mintWorkerSessionId(args.postId),
+            `dept_post_create "${args.postId}"`
+          )
           if (agents.get(String(SessionId(sessionId))) !== void 0) throw new Error(`[deepartments] dept_post_create: a live agent already exists for session "${sessionId}"`)
           const firstMessage = args.firstMessage ?? args.prompt
           // F10 (spec 004 §9.1): the legacy dept_post_create emits a department
@@ -3594,6 +3606,9 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    * conservative flag/warn-only semantics stay UNCHANGED. */
   const GHOST_SUSPECT_DEFAULT_WARN_TICKS = 2
   const GHOST_SUSPECT_DEFAULT_RETIRE_TICKS = 8
+  // fb-78 A1 F3-stale — the DEFAULT minimum age before a no-post/no-host/
+  // no-live top-level durable session is archived (owner decision: >= 48h).
+  const RETIRED_RESIDUE_DEFAULT_MIN_AGE_MS = 48 * 60 * 60 * 1000
   const runGhostSuspectReconcile = async (): Promise<void> => {
     try {
       const ghostSuspectConfig = (org as { ghostSuspect?: { enabled?: boolean; warnAfterTicks?: number; retireAfterTicks?: number } }).ghostSuspect
@@ -3671,6 +3686,98 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     }
   }
 
+  /** fb-78 A2 (owner decision 2026-09-03 — default OFF, conservative; m-228
+   * respected) — the OFFLINE-WORKER REAP: the wall-clock census SIBLING of
+   * runGhostSuspectReconcile (same boot-only family, same ledger pattern) for
+   * the fb-56 ORPHANED class: a NON-RETIRED worker whose DURABLE session is
+   * PRESENT but has NO LIVE HANDLE — and NO sleepEpoch — for a wall-clock
+   * window (the mid-mission daemon-kill class; the daemon of health NEVER
+   * retires this class deliberately, m-228). Where b5-ghost judges a live
+   * post with a gone session (miss-ladder), A2 stamps OFFLINE-SINCE on the
+   * first offline census and retires only when the offline window crosses
+   * `org.offlineReap.maxOfflineMs` (default 72h — conservative):
+   *   - census row: every post with provider 'worker' and NOT retired; offline
+   *     = NO live agent handle (agents.get(sessionId) === undefined) AND NO
+   *     sleepEpoch (a slept worker is dormant-by-design and is NEVER reaped —
+   *     the computeDeptWhoState mirror, agents.ts:119-130, with the
+   *     sleepEpoch exception of registry.ts:625-629);
+   *   - ledger (`<stateDir>/offline-reap-state.json`): offlineSince ??= now on
+   *     the FIRST observation (warm-up — the first census NEVER retires);
+   *     live → entry dropped (intermittent never accumulates); only
+   *     now − offlineSince > maxOfflineMs → retireCandidate;
+   *   - reap: retirePost(postId, manager-session-or-synthetic) — the SHARED
+   *     seam (markPostRetired :2591 + unconditional archive :2622 + QD dice);
+   *     idempotent (early-return :2580); the ledger entry is pruned after.
+   * RACE MITIGATION (the boot passes run PARALLEL with ensureAllHeads /
+   * redeliverPendingDeliveries — the wiring below SEQUENCES this pass AFTER
+   * the redelivery drains, and every retirePost is preceded by a SYNCHRONOUS
+   * re-check of agents.get(sessionId) — no awaits between the re-check and
+   * the retire call). NON-FATAL by design + knob-gated: `org.offlineReap.
+   * enabled !== true` → the pass is skipped (m-228 default: the daemon of
+   * health never retires this class; the reap is the explicit opt-in). */
+  const OFFLINE_REAP_DEFAULT_MAX_OFFLINE_MS = 72 * 60 * 60 * 1000
+  const runOfflineWorkerReapReconcile = async (): Promise<void> => {
+    try {
+      const offlineReapConfig = (org as { offlineReap?: OfflineReapConfig }).offlineReap
+      if (offlineReapConfig?.enabled !== true) return
+      const maxOfflineMs = offlineReapConfig?.maxOfflineMs !== undefined && Number.isFinite(offlineReapConfig.maxOfflineMs) && offlineReapConfig.maxOfflineMs > 0
+        ? offlineReapConfig.maxOfflineMs
+        : OFFLINE_REAP_DEFAULT_MAX_OFFLINE_MS
+      const previous = readOfflineReapLedger(stateDir)
+      const rows: Array<{ postId: string; sessionId: string; offline: boolean }> = []
+      for (const [postId, entry] of byPost) {
+        if (entry.provider !== 'worker' || entry.retired === true) continue
+        const liveNow = agents !== void 0 && agents.get(String(SessionId(entry.sessionId))) !== undefined
+        const slept = entry.sleepEpoch !== void 0
+        rows.push({ postId, sessionId: entry.sessionId, offline: !liveNow && !slept })
+      }
+      const nowMs = Date.now()
+      const verdict = stepOfflineReapCensus(rows, previous, nowMs, { maxOfflineMs })
+      // WARN per NEWLY-stamped worker (the first offline observation — warm-up,
+      // NOT retired yet: the offline window is 0).
+      for (const row of rows) {
+        const stamped = verdict.ledger[row.postId]
+        if (stamped !== undefined && previous[row.postId] === undefined) {
+          ctx.logger.warn(`[deepartments] offline-reap: worker "${row.postId}" (session ${row.sessionId}) observed OFFLINE (no live handle, no sleepEpoch) — offlineSince stamped; auto-retire after ${Math.round(maxOfflineMs / 3_600_000)}h offline (org.offlineReap, default OFF → pass gated)`)
+        }
+      }
+      // The AUTO-RETIRE branch — ONLY the crossed-window candidates. Re-check
+      // liveness SYNCHRONOUSLY immediately before each retirePost (the boot
+      // passes run parallel with ensureAllHeads/redeliver — a worker that
+      // materialized in the meantime is never reaped). The caller id is the
+      // post's manager head session, or a synthetic non-post id (a system
+      // action, like the b5-ghost caller).
+      for (const postId of verdict.retireCandidates) {
+        const entry = byPost.get(postId)
+        if (entry === void 0 || entry.retired === true || entry.provider !== 'worker') continue
+        // The re-check: still no live handle THIS INSTANT → reap. No await
+        // between the check and retirePost (fb-68 discipline).
+        if (agents !== void 0 && agents.get(String(SessionId(entry.sessionId))) !== undefined) {
+          ctx.logger.warn(`[deepartments] offline-reap: worker "${postId}" came back LIVE right before the reap — skipped (no retire)`)
+          delete verdict.ledger[postId]
+          continue
+        }
+        try {
+          await retirePost(postId, entry.managerId !== void 0 ? byPost.get(entry.managerId)?.sessionId ?? 'deepartments-offline-reap' : 'deepartments-offline-reap')
+          ctx.logger.warn(`[deepartments] offline-reap: auto-retired worker "${postId}" (offline without a live handle for > ${Math.round(maxOfflineMs / 3_600_000)}h — the fb-56 orphaned class)`)
+          // The reaped worker's ledger entry is PRUNED (a retired post is no
+          // longer a census subject — the entry must not linger).
+          delete verdict.ledger[postId]
+        } catch (retireError: unknown) {
+          ctx.logger.warn(`[deepartments] offline-reap: auto-retire of "${postId}" failed (non-fatal): ${retireError instanceof Error ? retireError.message : String(retireError)}`)
+        }
+      }
+      for (const postId of verdict.cleared) {
+        if (byPost.get(postId)?.retired !== true) {
+          ctx.logger.info(`[deepartments] offline-reap: worker "${postId}" is LIVE again (or left the census) — offline stamp cleared (intermittent, never reaped)`)
+        }
+      }
+      await writeOfflineReapLedger(stateDir, verdict.ledger)
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] offline-reap reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   /** Fix (head-sleep idempotency/rotation-race) — (b) BOOT RECONCILE: a HEAD
    * whose post entry carries a SLEPT mark (sleepEpoch set) but whose session was
    * NEVER archived/closed — the "half-slept" dangling state left when a
@@ -3735,15 +3842,17 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     }
   }
 
-  /** Dx1 F2 (owner bug — sidebar showed RETIRED workers as 'idle'): a boot
-   * residue pass that populates the workspace-registry hide-set (spec §5.3,
-   * D5) for the session residue NO retire seam ever archived. Before F1, the
-   * archive traveled inside the 25% QD dice of retirePost, so most AUTO-
-   * RETIRES (delivery auto-retire / half-slept reap) left the row visible
-   * forever — and even the tool retires archived ONLY entry.sessionId, so an
-   * OLDER/PARALLEL incarnation of the SAME slug (`worker-<slug>-<uuid>` #2)
-   * stayed visible too. This pass (modeled on runHalfSleptHeadReconcile) runs
-   * ONCE at boot and:
+  /** Dx1 F2 (owner bug — sidebar showed RETIRED workers as 'idle') + fb-78 A1
+   * F3-stale (owner decision 2026-09-03 — every top-level /ungrouped durable
+   * session with NO post is archival once STALE): a boot residue pass that
+   * populates the workspace-registry hide-set (spec §5.3, D5) for the session
+   * residue NO retire seam ever archived. Before F1, the archive traveled
+   * inside the 25% QD dice of retirePost, so most AUTO-RETIRES (delivery
+   * auto-retire / half-slept reap) left the row visible forever — and even the
+   * tool retires archived ONLY entry.sessionId, so an OLDER/PARALLEL
+   * incarnation of the SAME slug (`worker-<slug>-<uuid>` #2) stayed visible
+   * too. This pass (modeled on runHalfSleptHeadReconcile) runs ONCE at boot
+   * and:
    *   (a) archives the CURRENT durable session (entry.sessionId) of EVERY
    *       RETIRED WORKER post — independent of the (optional) persistence
    *       enumeration below, so a headless/minimal persistence still seals it;
@@ -3751,14 +3860,28 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    *       (sessionPersistence.list() — the backend header ids; a bounded
    *       sessions-root dir scan as a best-effort fallback when the service is
    *       absent) and archives each id whose slug prefix `worker-<postId>-`
-   *       matches a RETIRED worker post — the multi-session residue.
-   * F3 (ORPHANS — a `worker-*` durable session with NO post at all) is
-   * DELIBERATELY OUT of this pass: the session store is harness-shared and a
-   * no-post sweep cannot safely distinguish an org-owned orphan from another
-   * composition's registered worker (production sessions attach under
-   * stateDir / repoRoot / a department workspacePath / the harness root —
-   * resolveWorkspaceRootPath) — documented, deferred to a workspace-ownership
-   * decision (the researcher-2 class stays visible).
+   *       matches a RETIRED worker post — the multi-session residue;
+   *   (c) F3-STALE (fb-78 A1 — replaces the old "F3 deliberately out" doc):
+   *       the ARCHIVAL of TOP-LEVEL /UNGROUPED durable sessions that belong to
+   *       NO post and NO live host once they are OLD ENOUGH — the owner
+   *       decision resolves the workspace-ownership question the old doc
+   *       deferred (the researcher-2 class STOPS staying visible): the
+   *       REGISTRY-BASED classifier (never a prefix filter) decides — an id is
+   *       F3-eligible iff (1) NO-POST: it is not ANY post's current session
+   *       (byPost entry.sessionId — heads + workers, live or retired — nor a
+   *       byChild key), (2) NO-HOST: it is not the sessionId of a NON-RETIRED
+   *       host (the hosts REGISTRY, never a `session-` prefix guess — the
+   *       current sleeping host session-66031134… stays protected), (3)
+   *       NO-LIVE: the isLive guard (sessions.get / agents.get — re-verified
+   *       IMMEDIATELY before every archive), (4) NO LIVE-POST PREFIX: it does
+   *       not start with a live post's worker-<postId>- prefix (the slug-chain
+   *       collision guard), and (5) AGE: >= org.retiredResidue.minAgeMs
+   *       (default 48h) proven by the durable header's createdAt or the
+   *       artifact's mtime — a session whose age cannot be determined is
+   *       conservatively NOT archived. The cwd-org-owned belt is DEFENSE, not
+   *       a hard filter (owner decision: an out-of-org uuid-bare no-post
+   *       session is archived too — the classifier above MANDA); documented
+   *       here so a future reader never turns the belt into an exclusion.
    * Conservatism (ZERO-LOSS, R6/dec4): NOTHING is deleted or terminated —
    * archiveSession is a PURE hide-set add (the durable artifact stays; the
    * posts/hosts catalogs are untouched); a session that is CURRENTLY LIVE in
@@ -3791,16 +3914,32 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           }
         }
       }
-      // (b) the slug-prefix sweep over the durability-known sessions.
+      // (b)+(c) the sweep over the durability-known sessions. The corpus keeps
+      // the durable header fields the F3-stale classifier needs (id + the age
+      // provenance: the header's createdAt when the persistence service
+      // enumerated it, else the artifact file's mtime from the dir scan; the
+      // cwd for the documented (non-excluding) belt).
       const persistence = ctx.get('sessionPersistence') as
-        | { list?: (signal?: AbortSignal) => Promise<Array<{ id?: unknown } | null | undefined>>; root?: string }
+        | { list?: (signal?: AbortSignal) => Promise<Array<{ id?: unknown; createdAt?: unknown; cwd?: unknown } | null | undefined>>; root?: string }
         | undefined
-      let durableSessionIds: string[] = []
+      let durableSessions: Array<{ id: string; createdAt?: number; cwd?: string; mtimeMs?: number }> = []
       if (persistence !== void 0 && typeof persistence.list === 'function') {
         try {
-          durableSessionIds = (await persistence.list())
-            .map((header) => (header !== null && header !== void 0 && header.id !== void 0 ? String(header.id) : ''))
-            .filter((id) => id !== '')
+          durableSessions = (await persistence.list())
+            .filter((header): header is { id?: unknown; createdAt?: unknown; cwd?: unknown } =>
+              header !== null && header !== void 0 && header.id !== void 0)
+            .map((header) => {
+              const createdAt = typeof header.createdAt === 'number' && Number.isFinite(header.createdAt)
+                ? header.createdAt
+                : typeof header.createdAt === 'string' && !Number.isNaN(Date.parse(header.createdAt))
+                  ? Date.parse(header.createdAt)
+                  : undefined
+              return {
+                id: String(header.id),
+                createdAt,
+                cwd: typeof header.cwd === 'string' ? header.cwd : undefined
+              }
+            })
         } catch (error: unknown) {
           ctx.logger.warn(`[deepartments] retired-residue reconcile: sessionPersistence.list() failed — the slug-prefix sweep is skipped (the entry sessions above are still archived): ${error instanceof Error ? error.message : String(error)}`)
         }
@@ -3810,11 +3949,12 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         // <root>/<project>/<encoded-id>/session.jsonl*; for the harness id
         // charset the ENCODED DIR NAME IS the session id (identity encoding —
         // dsh-session-persistence-jsonl format.js:129-141), so a bounded
-        // two-level scan (stat-only, no full-log parse) collects the ids.
+        // two-level scan (stat-only, no full-log parse) collects the ids + the
+        // artifact mtime (the F3-stale age provenance in this path).
         const sessionsRoot = typeof persistence?.root === 'string' && persistence.root !== ''
           ? persistence.root
           : path.join(stateDir, '..', 'sessions')
-        const sessionIds: string[] = []
+        const sessionIds: Array<{ id: string; mtimeMs?: number }> = []
         try {
           const projects = (await readdir(sessionsRoot, { withFileTypes: true }))
             .filter((e) => e.isDirectory()).map((e) => e.name)
@@ -3830,8 +3970,8 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
             for (const dir of dirs) {
               for (const suffix of ['session.jsonl.zstd', 'session.jsonl']) {
                 try {
-                  await stat(path.join(projectDir, dir, suffix))
-                  sessionIds.push(dir)
+                  const st = await stat(path.join(projectDir, dir, suffix))
+                  sessionIds.push({ id: dir, mtimeMs: st.mtimeMs })
                   break
                 } catch { /* try the next suffix */ }
               }
@@ -3840,19 +3980,82 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         } catch {
           /* sessions root absent/unreadable — no fallback corpus (safe no-op) */
         }
-        durableSessionIds = sessionIds
+        durableSessions = sessionIds
       }
-      if (durableSessionIds.length === 0) return
+      if (durableSessions.length === 0) return
       const sessions = ctx.get('sessions') as { get?: (id: unknown) => unknown } | undefined
       const isLive = (sessionId: string): boolean =>
         sessions?.get?.(sessionId) !== undefined ||
         (agents !== void 0 && agents.get(SessionId(sessionId)) !== undefined)
-      for (const id of durableSessionIds) {
+      for (const { id } of durableSessions) {
         if (!id.startsWith('worker-')) continue
         if (isLive(id)) continue // never hide a RUNNING session
         if (livePrefixes.some((prefix) => id.startsWith(prefix))) continue // a LIVE post's session stays visible (also the slug-chain collision guard)
         if (retiredPrefixes.some((prefix) => id.startsWith(prefix))) {
           await archiveWorkerSession(id)
+        }
+      }
+      // (c) fb-78 A1 F3-STALE — the registry-based archival of no-post /
+      // no-host / no-live / old-enough durable sessions (the owner decision;
+      // see the pass doc). Knob: org.retiredResidue {enabled, minAgeMs} —
+      // default ON with 48h; `enabled: false` restores the pre-fb-78 behavior.
+      const retiredResidueConfig = (org as { retiredResidue?: RetiredResidueConfig }).retiredResidue
+      if (retiredResidueConfig?.enabled !== false) {
+        const minAgeMs = retiredResidueConfig?.minAgeMs !== undefined && Number.isFinite(retiredResidueConfig.minAgeMs) && retiredResidueConfig.minAgeMs > 0
+          ? retiredResidueConfig.minAgeMs
+          : RETIRED_RESIDUE_DEFAULT_MIN_AGE_MS
+        // The registry-based ownership views the classifier uses — built ONCE
+        // per pass from the DURABLE catalogs (never a prefix guess):
+        //  - postSessions: every post's CURRENT session (byPost entries —
+        //    heads + workers, live or retired) + the byChild reverse index
+        //    keys (a registered incarnation mapping);
+        //  - liveHostSessions: the sessionIds of NON-RETIRED host entries
+        //    (the hosts REGISTRY — the current sleeping host is protected
+        //    here, never by a `session-` prefix filter).
+        const postSessions = new Set<string>()
+        for (const [, entry] of byPost) {
+          postSessions.add(entry.sessionId)
+        }
+        for (const childSessionId of registry.byChild.keys()) {
+          postSessions.add(childSessionId)
+        }
+        const liveHostSessions = new Set<string>()
+        for (const [, hostEntry] of hosts) {
+          if (hostEntry.retired !== true) liveHostSessions.add(hostEntry.sessionId)
+        }
+        // Config-coordinator belt: a CONFIGURED head's DETERMINISTIC session id
+        // (head-<postId>) is never F3 — a never-registered configured head (no
+        // durable posts.json entry yet) is materialized by the PARALLEL
+        // ensureAllHeads at this same boot; without this guard the no-post
+        // classifier could archive it mid-materialization (the isLive re-check
+        // narrows the window but cannot close it — the materialization races
+        // this pass). Config heads are permanent, never orphan residue.
+        for (const department of org.departments) {
+          const coordinator = department.coordinator
+          if (coordinator?.postId !== void 0) liveHostSessions.add(headSessionId(coordinator.postId))
+        }
+        const nowMs = Date.now()
+        for (const candidate of durableSessions) {
+          if (candidate.id.startsWith('worker-') && retiredPrefixes.some((prefix) => candidate.id.startsWith(prefix))) continue // (b) already handled it
+          if (postSessions.has(candidate.id)) continue // a post's CURRENT session — never F3 (a live/retired post owns it)
+          if (liveHostSessions.has(candidate.id)) continue // a NON-RETIRED host's session — the registry protects it (a sleeping current host included)
+          if (isLive(candidate.id)) continue // never hide a RUNNING session
+          if (livePrefixes.some((prefix) => candidate.id.startsWith(prefix))) continue // a LIVE post's slug-family session stays visible (the slug-chain guard)
+          // Age: createdAt (header) OR mtime (artifact). Age UNPROVEN →
+          // conservative OUT (a boot cannot prove a session stale without an
+          // age signal — never archive on doubt).
+          const ageProvenAt = candidate.createdAt !== undefined ? candidate.createdAt
+            : candidate.mtimeMs !== undefined ? candidate.mtimeMs
+              : undefined
+          if (ageProvenAt === undefined) continue
+          const ageMs = nowMs - ageProvenAt
+          if (ageMs < minAgeMs) continue
+          // RACE mitigation (boot passes run parallel with ensureAllHeads /
+          // redeliver): re-verify liveness immediately before the archive —
+          // no await between the re-check and the hide-set add.
+          if (isLive(candidate.id)) continue
+          await archiveWorkerSession(candidate.id)
+          ctx.logger.info(`[deepartments] fb-78 A1 F3-stale: archived top-level no-post session ${candidate.id} (age ${Math.round(ageMs / 3_600_000)}h >= ${Math.round(minAgeMs / 3_600_000)}h) — the sidebar row is hidden (D5; the artifact + catalogs stay intact)`)
         }
       }
     } catch (error: unknown) {
@@ -3866,7 +4069,21 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // longer needs a live parent (root agents) — it runs at boot unconditionally.
   void Promise.all([registryLoaded, hostsLoaded]).then(() => {
     void ensureAllHeads()
-    void redeliverPendingDeliveries.run()
+    // fb-78 A2: the offline-worker reap runs SEQUENCED AFTER the redelivery
+    // drains — a worker with a pending 'prepared'/'failed' delivery is
+    // re-materialized by the redelivery IN THE SAME BOOT (agents.get defined
+    // again), so the reap must never judge it while the redelivery is still
+    // in flight (it would stamp offlineSince on a worker about to be woken).
+    void redeliverPendingDeliveries.run().then(
+      () => { void runOfflineWorkerReapReconcile() },
+      () => { void runOfflineWorkerReapReconcile() }
+    )
+    // LANE ② (item 2 — "re-drive no-boot-only"): the NON-BOOT redelivery
+    // SWEEP is armed at factory build (startRedeliverySweep above — the
+    // ctx.effect must register in-fiber); the pending failed/prepared pairs
+    // re-drive on the SCHEDULE (backoff-gated), never waiting for a restart
+    // again (the 09-03 gate-clean had to wait for the first boot post-restart
+    // to re-deliver its 14 messages).
     void runPresetAudit()
     void runInterruptedPostReconciliation()
     void runProviderAdapterBootCheck()

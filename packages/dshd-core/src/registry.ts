@@ -1039,6 +1039,158 @@ export function stepGhostSuspectCensus(
   return { ledger, newlyMarked, retireCandidates, cleared }
 }
 
+// ===========================================================================
+// fb-78 A2 — the OFFLINE-WORKER REAP ledger (the fb-56 orphaned class): the
+// wall-clock sibling of the b5-ghost census. Where b5-ghost judges a catalog-
+// LIVE post whose DURABLE SESSION is gone/unusable (a tick ladder over the
+// SAME boot-only census), A2 judges a NON-RETIRED WORKER whose session is
+// PRESENT but has NO LIVE HANDLE for a WALL-CLOCK window — the mid-mission
+// daemon-kill class (fb-56: the 7 IPD orphans with durable sessions mtime'd
+// 09-02, never re-woken because no delivery row is pending). The ledger is
+// durable (`<stateDir>/offline-reap-state.json`) and each BOOT is one census:
+//   - a worker OFFLINE at a census gets its FIRST observation STAMPED
+//     (offlineSince ??= now — the FIRST census NEVER retires: warm-up, the
+//     same conservatism as b5's "a single miss is never a marker");
+//   - a worker LIVE at any census is CLEARED (the entry drops — an
+//     intermittent/returning worker never accumulates);
+//   - only when now − offlineSince > maxOfflineMs (a PREVIOUS census stamped
+//     the entry) does the worker become a retireCandidate — the pass then
+//     re-checks liveness immediately before retirePost.
+// ALTERNATIVE (documented, not the default): the first observation could seed
+// offlineSince from the DURABLE ARTIFACT's mtime instead of now (an orphan
+// that has been dead for days would then retire on the FIRST boot after the
+// knob is enabled, without a 72h warm-up boot). The default keeps the
+// conservative warm-up (never retire on an un-warmed observation) — the
+// mtime-seed variant is a policy choice for a later owner decision.
+// ===========================================================================
+
+/** The durable A2 ledger file name. */
+export const OFFLINE_REAP_STATE_FILE = 'offline-reap-state.json'
+
+/** One A2 ledger entry: the wall-clock stamp of the worker's FIRST observed
+ * offline census. Absent entry = the worker was never observed offline (or was
+ * cleared by a later live census). */
+export interface OfflineReapLedgerEntry {
+  /** Epoch-ms when the worker was FIRST observed offline (no live handle, no
+   * sleepEpoch). Stamped on the first offline census — never the basis of a
+   * retire on the SAME census (warm-up). */
+  offlineSince: number
+  /** Epoch-ms of the LAST census that observed the worker offline. */
+  lastSeenOfflineAt: number
+}
+
+/** The durable A2 ledger: `postId → OfflineReapLedgerEntry`. */
+export type OfflineReapLedger = Record<string, OfflineReapLedgerEntry>
+
+/** One A2 census row: a NON-RETIRED worker post the census judges. */
+export interface OfflineReapCensusRow {
+  postId: string
+  sessionId: string
+  /** Whether the worker is OFFLINE at this census: NO live agent handle
+   * (agents.get(sessionId) === undefined) AND NO sleepEpoch mark (a slept
+   * worker is dormant-by-design and is NEVER reaped — the registry.ts:625-629
+   * sleepEpoch exception mirrored from computeDeptWhoState). */
+  offline: boolean
+}
+
+/** The A2 census knobs (code defaults when absent — conservative). */
+export interface OfflineReapCensusKnobs {
+  /** The wall-clock window (ms): how long a worker must be continuously
+   * offline (offlineSince → now) before it becomes a retire candidate.
+   * Default 72h. */
+  maxOfflineMs: number
+}
+
+/** The A2 census verdict for ONE census pass. */
+export interface OfflineReapCensusResult {
+  /** The NEXT ledger (persisted by the caller). */
+  ledger: OfflineReapLedger
+  /** Workers whose offline window crossed `maxOfflineMs` THIS census — the
+   * caller re-verifies liveness and calls retirePost for each (the ONLY
+   * auto-retire branch of the reap). */
+  retireCandidates: string[]
+  /** Workers that were observed LIVE (or left the census) THIS census — their
+   * entries were cleared (an intermittent/returning worker never accumulates). */
+  cleared: string[]
+}
+
+/** Read `<stateDir>/offline-reap-state.json` → the ledger. Absent / unreadable
+ * / malformed → {} (never throws — the census starts clean). */
+export function readOfflineReapLedger(stateDir: string): OfflineReapLedger {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, OFFLINE_REAP_STATE_FILE), 'utf8')) as Record<string, unknown>
+    const ledger: OfflineReapLedger = {}
+    for (const [postId, raw] of Object.entries(parsed)) {
+      if (raw === null || typeof raw !== 'object') continue
+      const e = raw as Record<string, unknown>
+      const offlineSince = typeof e.offlineSince === 'number' && Number.isFinite(e.offlineSince) ? e.offlineSince : 0
+      const lastSeenOfflineAt = typeof e.lastSeenOfflineAt === 'number' && Number.isFinite(e.lastSeenOfflineAt) ? e.lastSeenOfflineAt : 0
+      if (offlineSince <= 0) continue
+      ledger[postId] = { offlineSince, lastSeenOfflineAt }
+    }
+    return ledger
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/offline-reap-state.json` (mkdir -p the dir, then the
+ * file). NEVER throws. */
+export async function writeOfflineReapLedger(stateDir: string, ledger: OfflineReapLedger): Promise<void> {
+  try {
+    await mkdir(path.dirname(path.join(stateDir, OFFLINE_REAP_STATE_FILE)), { recursive: true })
+    await writeFile(path.join(stateDir, OFFLINE_REAP_STATE_FILE), JSON.stringify(ledger), 'utf8')
+  } catch {
+    /* non-fatal — the in-memory ledger still drives THIS pass; the next boot re-seeds */
+  }
+}
+
+/** fb-78 A2 — the PURE census step. Given the census rows + the PREVIOUS
+ * ledger + nowMs + the knobs, computes the NEXT ledger + the verdicts. Rules:
+ *  - offline row → the entry's `offlineSince` is STAMPED on the FIRST offline
+ *    observation (offlineSince ??= now — warm-up: a first observation NEVER
+ *    retires, its window is 0); only a PRE-EXISTING entry whose
+ *    now − offlineSince > maxOfflineMs becomes a retireCandidate (the window
+ *    was opened by an EARLIER census);
+ *  - live row → the entry is DROPPED (cleared — the worker returned;
+ *    intermittent workers never accumulate);
+ *  - ledger entries for posts NOT in this census (retired / unregistered) are
+ *    PRUNED (a retired worker's stamp must not linger).
+ * Pure, never throws — deterministic for the tests (a fixture of censuses
+ * drives the stamp → clear → candidate ladder exactly). */
+export function stepOfflineReapCensus(
+  rows: readonly OfflineReapCensusRow[],
+  previous: OfflineReapLedger,
+  nowMs: number,
+  knobs: OfflineReapCensusKnobs
+): OfflineReapCensusResult {
+  const maxOfflineMs = Math.max(1, Number.isFinite(knobs.maxOfflineMs) ? Math.trunc(knobs.maxOfflineMs) : 259200000)
+  const ledger: OfflineReapLedger = {}
+  const seen = new Set<string>()
+  const retireCandidates: string[] = []
+  const cleared: string[] = []
+  for (const row of rows) {
+    seen.add(row.postId)
+    const prev = previous[row.postId]
+    if (row.offline === false) {
+      // live at this census → entry dropped (never accumulate).
+      if (prev !== undefined) cleared.push(row.postId)
+      continue
+    }
+    // offline: stamp the first observation (warm-up — window 0, never a
+    // candidate on the same census); a pre-existing entry with a crossed
+    // window IS a candidate.
+    const offlineSince = prev?.offlineSince ?? nowMs
+    if (prev !== undefined && nowMs - offlineSince > maxOfflineMs) retireCandidates.push(row.postId)
+    ledger[row.postId] = { offlineSince, lastSeenOfflineAt: nowMs }
+  }
+  // Prune ledger entries whose post left the census (retired/unregistered).
+  for (const postId of Object.keys(previous)) {
+    if (!seen.has(postId)) cleared.push(postId)
+  }
+  return { ledger, retireCandidates, cleared }
+}
+
 /** Result of the deterministic live-host selection (U3 fix, spec 002 §6.1). */
 export interface PickLiveHostResult {
   /** The selected live entry, or undefined when NO live entry exists. */

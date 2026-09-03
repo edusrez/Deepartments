@@ -123,6 +123,42 @@ export interface PresenceValue {
   present: boolean;
 }
 
+// #region Monitor mode — owner presence ↔ composer visibility (GLOBAL)
+//
+// Owner decision (closed — do NOT reopen): when the EXISTING presence toggle
+// («Toggle owner presence», header utilities — PresenceToggle below) switches
+// to ABSENT, the composer (text box) is HIDDEN GLOBALLY (every session/tab of
+// the GUI, incl. the hero with no open session); switching back to PRESENT
+// shows it again. Mode = the OWNER's presence (presence.json `present:false`);
+// no new GUI state/toggle. Mechanism (FASE 0 seam, explore-deep report
+// 2026-09-03): a body class toggles ONE injected global <style> whose rule
+// hides every harness composer seat `[data-composer-seat]` (ui-conversation
+// lib/client.js:7266-7271 wraps the whole input stack — composer bar + hero +
+// approval — in ALL phases/sessions). LIMIT (owner decision): solo-UI /
+// affordance — session.prompt stays callable; the header toggle remains
+// visible and explains the state. Server-side enforcement = documented
+// POSTERIOR hardening (NOT implemented here; 0 server changes in this lane).
+// Global <style>-injection precedent: the pre-U1 client's SETTINGS_STYLE_ID
+// (document.createElement("style") + head.appendChild, git ff9e2c4^).
+
+/** Id of the <style> element injected once by apply() (removed on dispose). */
+export const MONITOR_STYLE_ID = "dsw-deepartments-monitor-style";
+/** Body class toggled while the owner is ABSENT (the style rule is scoped to
+ * it, so present → no class → composer visible). */
+export const MONITOR_BODY_CLASS = "dsw-deepartments-monitor";
+/** The injected CSS rule: with the monitor body class set, EVERY
+ * `[data-composer-seat]` is REALLY hidden (display:none — no empty slot, no
+ * disabled input; the text is never shown, the layout collapses). */
+export const MONITOR_CSS =
+  "." + MONITOR_BODY_CLASS + " [data-composer-seat] { display: none !important; }";
+
+/** PURE rule (unit-tested): the monitor body class applies ONLY while the
+ * owner is ABSENT (present === false); present → visible (no class). */
+export function shouldApplyMonitorMode(present: boolean): boolean {
+  return present === false;
+}
+// #endregion
+
 /** One scheduled job row in the agenda (mirrors dept_job_list frontmatter).
  * `role`/`description` are extras the server forwards (src/invoke.ts readAgendaJobs)
  * and feed the muted row meta line; `next` is the next cron fire as an ISO
@@ -485,6 +521,88 @@ export function apply(ctx: ClientCtx): void {
     "deepartments-client: host/status lifecycle watcher"
   );
 
+  // #region Monitor mode — owner presence ↔ composer visibility (GLOBAL)
+  /** ONE applier of the monitor body class, shared by the 5s presence poll
+   * below AND PresenceToggle's immediate apply after a successful
+   * presence/set (same bundle/module scope — the toggling tab flips at once,
+   * every other tab converges through the poll in ≤5s while focused/visible).
+   * DOM-guarded: the vm-test sandbox provides head.appendChild + body.classList
+   * (the TEST defines the sandbox, the bundle only consumes document); absent
+   * DOM/classList keeps the class inert — the pure rule stays unit-tested. */
+  function applyMonitorPresence(present: boolean): void {
+    if (typeof document === "undefined") return;
+    const classes = document.body?.classList;
+    if (!classes) return;
+    try {
+      classes.toggle(MONITOR_BODY_CLASS, shouldApplyMonitorMode(present));
+    } catch {
+      // Bare sandbox without a full classList — nothing to toggle.
+    }
+  }
+
+  // Inject the monitor <style> ONCE through an effect; the cleanup removes it
+  // on dispose/desmontar (pattern: pre-U1 SETTINGS_STYLE_ID, git ff9e2c4^).
+  // The rule only bites while `.dsw-deepartments-monitor` sits on <body>.
+  ctx.effect(
+    () => {
+      if (typeof document === "undefined") return;
+      const style = document.createElement("style");
+      style.id = MONITOR_STYLE_ID;
+      style.textContent = MONITOR_CSS;
+      document.head.appendChild(style);
+      return () => {
+        if (style.parentNode) style.parentNode.removeChild(style);
+      };
+    },
+    "deepartments-client: monitor-mode style (owner absent hides the composer)"
+  );
+
+  // One slim 5s presence poll — the SAME cadence + focus/visibility gating as
+  // the U3 host/status watcher above. Seeds on apply (default present →
+  // visible); each poll reconciles with the server so ANY tab's toggle (or a
+  // presence.json edit) converges here in ≤5s. There is no org→browser push:
+  // presence/set only followups the host agent (boot.ts:773-784), invisible to
+  // the GUI — the poll is the only cross-tab channel.
+  ctx.effect(
+    () => {
+      let disposed = false;
+      const visible = () =>
+        typeof document === "undefined" ? true : document.visibilityState !== "hidden";
+
+      const poll = async () => {
+        if (!visible()) return;
+        try {
+          const res = await rpc.call("/deepartments", "presence/get", {});
+          if (disposed || !res.ok) return;
+          // A missing `present` field degrades to present — never hide the
+          // composer on a malformed/partial envelope.
+          applyMonitorPresence((res.value as PresenceValue).present !== false);
+        } catch {
+          // Transient RPC failure — keep the last applied state; the next poll
+          // retries.
+        }
+      };
+
+      const run = () => void poll();
+      const interval = window.setInterval(run, 5000);
+      const onFocus = () => run();
+      const onVisibility = () => {
+        if (visible()) run();
+      };
+      window.addEventListener("focus", onFocus);
+      document.addEventListener("visibilitychange", onVisibility);
+      void poll(); // seed promptly on apply (default present → visible)
+      return () => {
+        disposed = true;
+        window.clearInterval(interval);
+        window.removeEventListener("focus", onFocus);
+        document.removeEventListener("visibilitychange", onVisibility);
+      };
+    },
+    "deepartments-client: presence monitor poll (owner present/absent)"
+  );
+  // #endregion
+
   // #region F4 — client UI (presence toggle + agenda view)
   // Dictionary + bound `t` for the header action and the view tab.
   ctx.effect(
@@ -507,7 +625,11 @@ export function apply(ctx: ClientCtx): void {
       rpc.call("/deepartments", "presence/get", {})
         .then((res) => {
           if (disposed || !res.ok) return;
-          setPresent((res.value as PresenceValue).present);
+          const present = (res.value as PresenceValue).present === true;
+          setPresent(present);
+          // Align the monitor body class with the server state at mount (the
+          // presence poll seeds around the same time — idempotent either way).
+          applyMonitorPresence(present);
         })
         .catch(() => {
           // Endpoint may not be mounted yet (Builder 2) — default to absent.
@@ -527,6 +649,10 @@ export function apply(ctx: ClientCtx): void {
         if (!res.ok) {
           setPresent(!next);
           console.warn("[deepartments] presence/set:", res.error);
+        } else {
+          // Confirmed by the server → apply the monitor mode IN THIS TAB at
+          // once (the 5s presence poll converges every other tab/phase).
+          applyMonitorPresence(next);
         }
       } catch (error) {
         setPresent(!next);

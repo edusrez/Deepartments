@@ -87,6 +87,44 @@ export interface GhostSuspectConfig {
   retireAfterTicks?: number
 }
 
+/** fb-78 A1 — the F3-stale residue knob (`org.retiredResidue`): the boot
+ * retired-worker-residue pass also archives top-level /ungrouped durable
+ * sessions with NO post and NO live host once they are STALE (age >= minAgeMs).
+ * Defaults are CODE-level (enabled true, minAgeMs 48h); an ABSENT section (or
+ * absent key) keeps the code defaults — the health/quality compose-untouched
+ * contract; an explicit `enabled: false` restores the pre-fb-78 behavior (only
+ * the retired-worker residue sweep, F3-stale out). Mirrors src/org.ts. */
+export interface RetiredResidueConfig {
+  /** When explicitly false, the F3-stale phase of the boot residue pass does
+   * NOT run (a no-post stale session is left visible). Absent → enabled
+   * (default true — the owner decision: every top-level /ungrouped no-post
+   * stale session is archived). */
+  enabled?: boolean
+  /** The minimum session age (ms) before a no-post/no-host/no-live session is
+   * archived. Default 48h (172800000). A session whose age cannot be
+   * determined is conservatively NOT archived. */
+  minAgeMs?: number
+}
+
+/** fb-78 A2 — the offline-worker reap knob (`org.offlineReap`): the boot
+ * census that reaps NON-retired workers whose session has NO live handle and
+ * NO sleepEpoch for a wall-clock window (the fb-56 orphaned class — durable
+ * session present, daemon-killed mid-mission). Defaults are CODE-level
+ * (enabled FALSE — conservative, m-228 respected; maxOfflineMs 72h). Absent
+ * section/key → the pass does NOT run (the daemon-of-health exclusion stays);
+ * an explicit `enabled: true` opts into the reap. Mirrors src/org.ts. */
+export interface OfflineReapConfig {
+  /** When explicitly true the boot offline-reap census runs. Absent → OFF
+    * (the m-228 conservative default — the health daemon never retires a
+    * non-retired worker without a live handle; the reap is the opt-in boot
+    * pass that does). */
+  enabled?: boolean
+  /** How long (ms) a worker must be continuously offline (no live handle, no
+   * sleepEpoch) before it becomes a retire candidate. Default 72h
+   * (259200000). */
+  maxOfflineMs?: number
+}
+
 /** Mirror of src/org.ts HealthConfig (the W6 knobs the factories read —
  * structural subset: the dispatch/preset/worker-register gates + the paths).
  * THE REST of the health knobs are resolver-internal to dshd-health (this
@@ -140,6 +178,8 @@ export interface Config {
     poolerBaseURL?: string
     postsRetention?: PostsRetentionConfig
     ghostSuspect?: GhostSuspectConfig
+    retiredResidue?: RetiredResidueConfig
+    offlineReap?: OfflineReapConfig
     pacing?: PacingConfig
     // R4 (LANE 0.2.3 — providers → org config): the org-declared default
     // worker/host model routes the presets surface resolves org-driven (the

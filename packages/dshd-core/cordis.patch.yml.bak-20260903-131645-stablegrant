@@ -143,18 +143,6 @@
             provider: opencode-zen
             model: deepseek-v4-flash
             reasoningEffort: max
-          # MISSION GRANT (owner-approved, chat del owner 09-03 «Actualiza el
-          # stable con la versión actual»): dept_exec access to the STABLE home
-          # /opt/dsh/.dsh for the OWNER-AUTHORIZED mission dshmarket→1.41.0 +
-          # dsh-smooth-stream→0.4.3 in the stable `web` profile. The guard
-          # bypasses the stable-profile protection ONLY for a root this key
-          # names (isStableHomeGranted — src/invoke.ts:1316; missionExecRoots
-          # entries are realpath'd into the allowed-root set, tools.ts:978-980)
-          # — an EXPLICIT, REVOCABLE, AUDITABLE mission-level grant; every other
-          # stable reference stays protected-denied. REVOKE: remove the entry
-          # below and restart the daemon.
-          missionExecRoots:
-            - /opt/dsh/.dsh
         # core constants (configurable, code-defaulted): the catalog is the
         # single source; no daemons / role registry here (single source stays the
         # bundle's role-orient.ts).

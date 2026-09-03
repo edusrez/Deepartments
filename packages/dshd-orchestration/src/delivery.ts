@@ -45,6 +45,9 @@ import {
   isHostRetiredOnDisk,
   followRotationChainToLive
 } from 'dshd-core'
+import { mintFreshSessionIdNotArchived, mintWorkerSessionId } from 'dshd-core'
+import { isArchivedSession } from 'dshd-core'
+import type { WorkspaceRegistryLike } from 'dshd-core'
 import type { PostEntry, HostEntry, HostEntryLike } from 'dshd-core'
 import { MessagesStore, markDelivery } from 'dshd-core'
 import type { DeliveryStatus, MessageRecord } from 'dshd-core'
@@ -95,12 +98,19 @@ import type { DepartmentConfig, CoordinatorConfig } from './org-types.js'
 // ---------------------------------------------------------------------------
 
 /** Loose structural view of a live `Agent` (the shape `ctx.agents.get(id)`
- * returns). Mirrors the bundle-local `AgentLike` of src/invoke.ts. */
+ * returns). Mirrors the bundle-local `AgentLike` of src/invoke.ts. The session
+ * member is the rc.1+ surface (`seq` = log length, `snapshotEvents()` = full
+ * log — the `events` getter is gone from 0.1.2-rc.1 on). */
 interface AgentLike {
   id: string
   status: string
   ctx: Context
-  session?: { events: unknown[] }
+  session?: {
+    seq: number
+    snapshotEvents(): readonly unknown[]
+    append?: (type: string, data: unknown, opts?: { surfaceOp?: string }) => unknown
+    header?: unknown
+  }
   followup(message: { content: readonly { type: string; text: string }[]; source: Record<string, unknown> }): void
   cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void
   whenIdle(): Promise<void>
@@ -500,7 +510,16 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
   ): Promise<AgentLike> => {
     if (agents === void 0) throw new Error('[deepartments] head fresh-mint requires the agents service')
     const previousSession = entry.sessionId
-    const freshSessionId = String(SessionId(`${HEAD_SESSION_PREFIX}${entry.postId}-${randomUUID()}`))
+    // fb-78 A3 — the fresh-mint is guarded against the workspace-registry
+    // archived set: a head minted on an archived session id would be
+    // live-but-INVISIBLE in the sidebar (the hide-set is add-only). The
+    // uuid mint never collides; the guard makes the invariant explicit
+    // (synchronous — no await between mint and check, fb-68 atomicity).
+    const freshSessionId = mintFreshSessionIdNotArchived(
+      ctx.get('workspaceRegistry', false) as WorkspaceRegistryLike | undefined,
+      () => String(SessionId(`${HEAD_SESSION_PREFIX}${entry.postId}-${randomUUID()}`)),
+      `head fresh-mint "${entry.postId}"`
+    )
     const coordinator = coordinatorForPost(entry.postId)
     // Drop the OLD session's reverse index BEFORE registering the fresh one
     // (registerEntry re-keys byChild by the new sessionId; without the delete
@@ -694,36 +713,53 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       // falls back to the shared workspace root (deptCwd ''). The resume path
       // above keeps the session's stored header cwd (immutable per session).
       const deptCwd = await resolveDepartmentWorkspaceCwd(departmentForEntry(entry))
-      // THE VISIBILITY FIX (2026-08-25 P2): a NON-slept HEAD whose durable
-      // session id is in the workspace registry's archived set must NEVER be
-      // RESUMED — a live head's session is never archived, because the GUI
-      // sidebar hides any archived session id (the re-seed resume of an archived
-      // id is the root cause of the live-but-invisible head). Rotate to a FRESH
-      // id (the F8 fresh-mint shape) and CREATE. A NON-archived head resume is
-      // byte-identical (zero regression); a WORKER's resume is untouched here
-      // (isWorker skips the rotation entirely).
-      const rotatedSessionId = isWorker ? undefined : await rotateArchivedHeadSessionId(entry.postId, String(sessionId))
+      // THE VISIBILITY FIX (2026-08-25 P2 + fb-78 A3): a NON-slept HEAD whose
+      // durable session id is in the workspace registry's archived set must
+      // NEVER be RESUMED — a live head's session is never archived, because the
+      // GUI sidebar hides any archived session id (the re-seed resume of an
+      // archived id is the root cause of the live-but-invisible head). Rotate
+      // to a FRESH id (the F8 fresh-mint shape) and CREATE. fb-78 A3 extends
+      // the SAME invariant to a WORKER whose durable session id is ARCHIVED
+      // while its post is NOT retired (the transient archive-leak class the QD
+      // observed — the hide-set is ADD-ONLY, no unarchive, so a cold-resume on
+      // the archived id would leave the worker live-but-invisible FOREVER):
+      // rotate to a FRESH worker-<postId>-<uuid> + register + CREATE (the
+      // head-branch mirror). A NON-archived worker resume stays byte-identical
+      // (zero regression on the legacy worker cold-resume).
+      const workspaceRegistry = (): WorkspaceRegistryLike | undefined =>
+        ctx.get('workspaceRegistry', false) as WorkspaceRegistryLike | undefined
+      let rotatedSessionId: string | undefined
+      if (!isWorker) {
+        rotatedSessionId = await rotateArchivedHeadSessionId(entry.postId, String(sessionId))
+      } else if (entry.retired !== true && isArchivedSession(workspaceRegistry(), String(sessionId))) {
+        // fb-78 A3 — the worker-side rotation: a fresh worker-<postId>-<uuid>
+        // mint (the mint itself is guarded against the archived set too).
+        rotatedSessionId = mintFreshSessionIdNotArchived(workspaceRegistry(), () => mintWorkerSessionId(entry.postId), `worker cold-resume "${entry.postId}"`)
+        ctx.logger.warn(`[deepartments] worker "${entry.postId}" durable session ${String(sessionId)} is ARCHIVED (post NOT retired — the transient archive-leak class) — rotating to fresh ${rotatedSessionId} instead of resuming the archived id (a live worker's session is never archived)`)
+      }
       if (rotatedSessionId !== void 0) {
         registerEntry({ ...entry, sessionId: rotatedSessionId, previousChildId: String(sessionId), sleepEpoch: undefined })
         handle = await agents.create({
           sessionId: rotatedSessionId,
-          meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: headPreset },
+          meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: preset },
           agentOptions,
           setup
         })
         if (handle !== void 0) byHeadHandle.set(rotatedSessionId, handle)
         const rotatedTarget = agents.get(rotatedSessionId)
-        if (rotatedTarget === void 0) throw new Error(`[deepartments] head "${entry.postId}" could not be materialized (archived-session rotation) for bus delivery`)
+        if (rotatedTarget === void 0) throw new Error(`[deepartments] ${isWorker ? 'worker' : 'head'} "${entry.postId}" could not be materialized (archived-session rotation) for bus delivery`)
         markHeadProgress(rotatedSessionId, rotatedTarget)
         void attachHeadSession(rotatedSessionId, 'bus-deliver')
-        const titleSession = ctx.sessions.get(SessionId(rotatedSessionId))
-        if (titleSession !== void 0) {
-          const title = coordinator?.sessionTitle || HEAD_DEFAULT_SESSION_TITLE
-          const titlePin = pinSessionTitle(titleSession, title)
-          if (titlePin === 'pinned') {
-            ctx.logger.info(`[deepartments] archive-leak rotation: pinned fresh head title "${title}" (${rotatedSessionId})`)
-          } else if (titlePin === 'failed') {
-            ctx.logger.warn(`[deepartments] archive-leak rotation: fresh head title pin failed for ${rotatedSessionId} (non-fatal — materialization continues)`)
+        if (!isWorker) {
+          const titleSession = ctx.sessions.get(SessionId(rotatedSessionId))
+          if (titleSession !== void 0) {
+            const title = coordinator?.sessionTitle || HEAD_DEFAULT_SESSION_TITLE
+            const titlePin = pinSessionTitle(titleSession, title)
+            if (titlePin === 'pinned') {
+              ctx.logger.info(`[deepartments] archive-leak rotation: pinned fresh head title "${title}" (${rotatedSessionId})`)
+            } else if (titlePin === 'failed') {
+              ctx.logger.warn(`[deepartments] archive-leak rotation: fresh head title pin failed for ${rotatedSessionId} (non-fatal — materialization continues)`)
+            }
           }
         }
         resumed = true
@@ -1470,15 +1506,34 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
   const deliverBusChild = async (callerAgentId: string, recipientId: string, record: MessageRecord, framed: string, senderSessionId: string | undefined, signal?: AbortSignal): Promise<DeliveryStatus> => {
     if (subagents === void 0) return 'failed'
     try {
-      await subagents.followup(
-        await exec_agentFor(callerAgentId) as unknown as Parameters<typeof subagents.followup>[0],
-        SessionId(recipientId),
-        // W8-b prompt-literal safety: the child-followup text (bus message
-        // content injected into a continuable child) is run through the brace
-        // sanitizer so an unbound double-brace token can never break the child
-        // session assembly.
-        [{ type: 'text', text: sanitizePromptLiterals(framed) } as const],
-        {
+      // rc.1 dsh-subagent drift (0.1.2-rc.1): `followup(parent, childId,
+      // content, { source, signal })` was REPLACED by `sendMessage(sender,
+      // targetId, content, { signal })` — the durable sender attribution is now
+      // derived by the kernel from the exact live sender, so the explicit
+      // `source` projection only exists on the ≤0.1.1 line. Structural dual:
+      // call whichever surface the runtime exposes (the rc.1 typings provide
+      // `sendMessage`; a pre-0.1.2 kernel keeps `followup`).
+      const childDeliver = subagents as unknown as {
+        followup?: (parent: unknown, childId: SessionId, content: readonly { type: string; text: string }[], options: { source?: unknown; signal?: AbortSignal }) => Promise<unknown>
+        sendMessage?: (sender: unknown, targetId: SessionId, content: readonly { type: string; text: string }[], options: { signal: AbortSignal }) => Promise<unknown>
+      }
+      const parent = await exec_agentFor(callerAgentId)
+      // W8-b prompt-literal safety: the child-followup text (bus message
+      // content injected into a continuable child) is run through the brace
+      // sanitizer so an unbound double-brace token can never break the child
+      // session assembly.
+      const content = [{ type: 'text', text: sanitizePromptLiterals(framed) } as const]
+      if (childDeliver.sendMessage !== undefined) {
+        // 0.1.2+ line: the rc.1 `SubagentSendMessageOptions` carries ONLY
+        // `signal` — the kernel derives the durable source from the exact live
+        // sender. The deepartments-supplied `source` projection below is not
+        // accepted on this surface (verify the child-source record shape in the
+        // rc.1 canary — the deepartments child-session attribution contract).
+        await childDeliver.sendMessage(parent, SessionId(recipientId), content, {
+          signal: signal ?? new AbortController().signal
+        })
+      } else if (childDeliver.followup !== undefined) {
+        await childDeliver.followup(parent, SessionId(recipientId), content, {
           // W7-B: the SAME JSON-safe projection as `busUserMessage` — the
           // child-followup source is inserted into a durable session too, so a
           // present-undefined `senderSessionId` / branded value must never reach
@@ -1497,8 +1552,11 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
           // ABORT_SIGNAL default is never reached in production harness runs
           // (exec.signal is always present there).
           signal: signal ?? new AbortController().signal
-        }
-      )
+        })
+      } else {
+        ctx.logger.warn(`[deepartments] bus child delivery to "${recipientId}" failed: the subagent runtime exposes neither sendMessage (0.1.2+) nor followup (≤0.1.1)`)
+        return 'failed'
+      }
       return 'delivered'
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] bus child-followup to "${recipientId}" failed: ${error instanceof Error ? error.message : String(error)}`)
