@@ -297,6 +297,12 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 
 ## 5. BACKLOG
 
+- **O2 del QD (09-03, dirigido a host/runtime) — nudge spliced a posts RETIRED
+  sobre abort de vida → dead-letter**: cuando un agente aborta por razón de
+  vida (abort/kill), el feedback-nudge (tools.ts post-execute, live desde
+  09-02) splicea a posts retirados → mensajes a recipient retirado = dead
+  letter. Propuesta QD: excluir los aborts de vida del nudge O no splicear a
+  posts retired. Lane pequeña IPD (handler del nudge) — encolado, a orden del IPH.
 - **Rotación host m-423 PARTIAL (veredicto QD 09-03)**: el archive de
   dept_sleep corta ~85 líneas de la cola zombie final (incl. m-426 delivered
   post-retirement; acks a host rotado 'prepared') — candidato fix IPD
