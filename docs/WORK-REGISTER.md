@@ -158,12 +158,17 @@
     DIAG fb-61 — id-mint atómico (messages.ts) + FIFO serializer + dedupe
     check-append-advance (dshd-health); suite 738/716/0/22 (+4 tests races).
   - **LANE DEL INCIDENTE 09-03 (cadena IPH, secuencial — UN lane a la vez)**:
-    ① **clasificador 401-invalid ATERRIZADO (09-03, código: probe chat real —
-    ataca la raíz; 131/131 + 12 tests; reporte 031c5dbd) — DEPLOY pendiente de
-    ventana** (explore-deep verificando reload pooler-local vs restart; tras
-    el WIP session-surface) → ② **delivery lane commits 1-4 (fix formal del
+    ① **clasificador 401-invalid: DESPLEGADO (09-03 18:23, restart canary PASS
+    — código nuevo vivo: sweep convergió, oc-8/9/11/12 quota-blocked,
+    lastRotation registrada, completion real 200) — FINDING POST-DEPLOY**:
+    oc-10 quedó SELECTABLE (invalid:false, blockedUntil 0, lastError 'auth
+    error 401', probada 18:23:51 SIN invalidar) → **402 Insufficient Balance
+    intermitente en workers** (19:45-20:12Z) — gap probe-vs-real: la clase
+    402/401 del probe cae en "resto"→inconclusive y no mata la key →
+    **hot-block oc-10 + fix del clasificador (402/401 → billing/auth-invalid)
+    = lane IPH prioridad alta** → ② **delivery lane commits 1-4 (fix formal del
     gate — VEREDICTO QD: 0 commits aún; branch 3 dshd-health:3069-3077 SIN
-    age-check RE-ARMABLE — R1, prioridad ALTA tras los aterrizajes en vuelo)** →
+    age-check RE-ARMABLE — R1, prioridad ALTA tras el fix del pool)** →
     ③ **stable :3080 (owner AUTORIZÓ 09-03 — procede al terminar ①+②; §3
     RAG-stable sentinel)**.
   - **settings revert (provider→opencode-zen con Go vivo)** — coordinar con IPH
@@ -275,7 +280,10 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 - Pool: **oc-6 = key real del OWNER (opencode-go, chat-auth 200 — la única
   real; selectable) — salva el pool tras el incidente 09-03** · oc-8/9/10/11/12
   en **cooldown mensual (resets 23-28/09)** — el LATCH (mantener el cooldown
-  hasta el fix formal) lo gestiona el host · DS-fallback a api.deepseek.com
+  hasta el fix formal) lo gestiona el host · **POST-DEPLOY 09-03 18:23: oc-8/9/
+  11/12 quota-bloqueadas automáticamente (monthly 100%); OC-10 SIGUE
+  SELECTABLE (auth 401 no invalidada por el sweep — poison 402; hot-block +
+  fix clasificador en lane IPH)** · DS-fallback a api.deepseek.com
   LIVE (c4a04bc) · fall-through 401/429 (bb22b20) · gate poolerGateEnabled
   (hardening 66399ad — live tras deploy).
 - Lección 09-03: **usage 200 ≠ chat-auth** (verificación de keys contra el
