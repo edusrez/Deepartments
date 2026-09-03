@@ -270,6 +270,12 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 
 ## 5. BACKLOG
 
+- **Hueco pre-existente zombie rule (dsh-key-pooler — OBSERVADO en lane
+  clasificador 401 09-03, NO arreglado, byte-idéntico preservado)**: probe
+  403-region-gate sobre key clase-401 sobrescribe errorClass→'403' en
+  probeInvalidKeys — candidato lane pooler post-deploy. (Mejora aparte: falso
+  positivo dept_exec en grep con patrón /models\) → reportada al QD por el
+  builder.)
 - ~~flake 1b.1~~ ~~m-64~~ ~~fb-8~~ — DONE · ~~comentario stale dshd-health~~
   DONE (PR-1) · ~~fb-25/26/27/28~~ — fb-25 (2b5a370) ✓ / fb-26 práctica ✓ /
   fb-27 ✓ (04f8c31) / fb-28 🔵 en vuelo · ~~fb-30~~ INVESTIGADO (diseño-no-bug;
