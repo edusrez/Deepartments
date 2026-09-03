@@ -86,7 +86,7 @@ class StubAgents extends Service {
       id: sessionId,
       status: 'running',
       ctx: undefined,
-      session: { events: [] },
+      session: { events: [], get seq() { return this.events.length }, snapshotEvents() { return this.events }, requestHeader() { return undefined } },
       followup() {},
       cancel() {},
       async whenIdle() {}
@@ -294,7 +294,7 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     assert.ok(first !== -1 && last !== -1 && last > first, 'the factory embeds the CUT4 zone (banner → host-plane effect close)')
     const zoneText = factory.slice(first, last + "  }, 'deepartments: host-plane tools')".length) + '\n'
     const md5 = createHash('md5').update(zoneText, 'utf8').digest('hex')
-    assert.equal(md5, '5b548545a2971a76a79fab0dbff8411d', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze (register legacy eliminated from the zone — md5 5b548545…)')
+    assert.equal(md5, 'b533f629cf5f0f2a46a719db0b549b66', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the LANE 0.1.2 rc.1 session-surface reads (register legacy eliminated — md5 b533f629…)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface

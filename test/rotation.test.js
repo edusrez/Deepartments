@@ -119,14 +119,17 @@ test('U2 T1: buildRotationSeed produces the contiguous minimal-artifact event li
     version: 0,
     id: 'session-rot-t1',
     createdAt: 1787000000000,
-    cwd: '/root'
+    cwd: '/root',
+    // rc.1 header contract: fromRestore validates `isSeeded` (fork-lineage
+    // flag — the cold-booted full-log artifact is NOT fork-inherited).
+    isSeeded: false
   })
   assert.equal(restored.seq, seed.length + 1, 'fresh session continues appending after the seed (+ end-seed marker)')
   assert.equal(restored.surface.nodes.length, 1, 'the journal node is the only surface node')
   const derived = restored.deriveMessages()
   assert.equal(derived.length, 1)
   assert.equal(derived[0].content[0].text, reKeyed, 'the wake surface node is the re-keyed journal')
-  assert.ok(!restored.events.some((ev) => ev.type === 'turn/start'), 'seeded session stays blank (no turn/start)')
+  assert.ok(!restored.snapshotEvents().some((ev) => ev.type === 'turn/start'), 'seeded session stays blank (no turn/start)')
 })
 
 test('U2 T1: buildRotationSeedMessage frames the journal as a plugin/notice context (never a user-typed message)', () => {
@@ -180,13 +183,15 @@ test('M-A: buildHeadRotationSeed mints the HEAD-ROTATION seed — raw journal VE
     version: 0,
     id: 'session-head-rot',
     createdAt: 1787000000000,
-    cwd: '/root'
+    cwd: '/root',
+    // rc.1 header contract: `isSeeded` is validated (not fork-inherited).
+    isSeeded: false
   })
   assert.equal(restored.seq, seed.length + 1, 'fresh session continues appending after the seed (+ end-seed marker)')
   assert.equal(restored.surface.nodes.length, 1, 'the journal node is the only surface node')
   const derived = restored.deriveMessages()
   assert.equal(derived[0].content[0].text, headJournal, 'the wake surface node is the raw head journal')
-  assert.ok(!restored.events.some((ev) => ev.type === 'turn/start'), 'seeded session stays blank (no turn/start)')
+  assert.ok(!restored.snapshotEvents().some((ev) => ev.type === 'turn/start'), 'seeded session stays blank (no turn/start)')
   // The DEFAULT host title stays untouched for the plain host seed (zero
   // regression on the parametrization).
   const hostDefault = buildRotationSeed(headJournal, { now: 1787000000000 })

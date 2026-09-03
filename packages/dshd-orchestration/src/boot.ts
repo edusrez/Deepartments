@@ -98,13 +98,19 @@ import type { PresenceState } from 'dshd-gui'
 
 /** Structural view of a live `Agent` (the shape `ctx.agents.get(id)` returns).
  * Mirrors the bundle-local `AgentLike` of src/invoke.ts verbatim — the boot
- * zone reads `.status` / `.session?.events` / `.followup` (Fix A2 + the A3
- * presence notify). */
+ * zone reads `.status` / `.session?.seq` (Fix A2 + the A3 presence notify).
+ * The session member is the rc.1+ surface (the `events` getter is gone from
+ * 0.1.2-rc.1 on — length reads use `seq`, full-log reads `snapshotEvents()`). */
 interface AgentLike {
   id: string
   status: string
   ctx: Context
-  session?: { events: unknown[] }
+  session?: {
+    seq: number
+    snapshotEvents(): readonly unknown[]
+    append?: (type: string, data: unknown, opts?: { surfaceOp?: string }) => unknown
+    header?: unknown
+  }
   followup(message: { content: readonly { type: string; text: string }[]; source: Record<string, unknown> }): void
   cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void
   whenIdle(): Promise<void>
@@ -398,12 +404,14 @@ export function createBootOrchestration(ctx: Context, deps: BootFactoryDeps): Bo
   const disposingHeads = new Map<string, Promise<void>>()
   // Fix A2 — per-head wake progress tracker: headSessionId → { at, eventCount }.
   // `at` = when we last observed this head, `eventCount` = the watermark of its
-  // session event log (AgentLike.session.events.length) at that time. The relay
-  // uses it to tell a HEALTHY live-but-busy head (event log still growing —
-  // its turn/step/assistant events keep appending) from a STUCK one (status
-  // 'running' with NO new event for STUCK_HEAD_MS — the resident loop is wedged).
-  // Purely in-memory and intentionally NOT durable: the durable board record is
-  // the re-delivery source, so an in-memory reset is always safe.
+  // session event log (AgentLike.session.seq — the rc.1+ `seq = log.length`
+  // contract; the old `session.events.length` read is gone with the getter from
+  // 0.1.2-rc.1 on) at that time. The relay uses it to tell a HEALTHY
+  // live-but-busy head (event log still growing — its turn/step/assistant
+  // events keep appending) from a STUCK one (status 'running' with NO new event
+  // for STUCK_HEAD_MS — the resident loop is wedged). Purely in-memory and
+  // intentionally NOT durable: the durable board record is the re-delivery
+  // source, so an in-memory reset is always safe.
   const headProgress = new Map<string, { at: number; eventCount: number }>()
   // Fix A2 — serialize the DISPOSE-then-cold-resume stuck-recovery per head
   // session. The relay is synchronous and a stuck path must dispose its frozen

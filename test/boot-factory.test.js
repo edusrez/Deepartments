@@ -13,8 +13,10 @@
 //     src/core/orchestration/boot.ts and are invoked by the bundle at the SAME
 //     fiber position (createBootOrchestration → BootSurface, MOVEMENT-ONLY —
 //     the embedded zone is byte-identical to HEAD 2345-3021, md5 stamp
-//     82761e5d…; NO movement deviation D1 is needed — the boot zone carries no
-//     module-position-dependent expression, unlike the presets repoRoot).
+//     1fb4ee22… (LANE 0.1.2 re-freeze: 679 LOCs after the rc.1 session-surface
+//     comment on the headProgress tracker); NO movement deviation D1 is needed —
+//     the boot zone carries no module-position-dependent expression, unlike the
+//     presets repoRoot).
 //   - the COMPOSITION: the factory consumes the invoke.ts module-scope pure
 //     helpers BY REFERENCE (readPresenceStateFile / writePresenceStateFile /
 //     askUserGuardReason / pinHostSessionTitle) + `config`; the three LATE
@@ -136,7 +138,7 @@ class StubAgents extends Service {
       id: sessionId,
       status: 'running',
       ctx: undefined,
-      session: { events: [] },
+      session: { events: [], get seq() { return this.events.length }, snapshotEvents() { return this.events }, requestHeader() { return undefined } },
       followup() {},
       cancel() {},
       async whenIdle() {}
@@ -221,9 +223,9 @@ test('boot-factory: the BOOT ZONE (config source + registry + catalog + lifecycl
     const last = factory.indexOf('  // (messages-store.ts + deliverBusRecord) is the only emit/delivery path.')
     assert.ok(first !== -1 && last !== -1 && last > first, 'the factory embeds the boot zone (continuation services → B3 cutover note)')
     const zoneText = factory.slice(first, last + '  // (messages-store.ts + deliverBusRecord) is the only emit/delivery path.'.length) + '\n'
-    assert.equal(zoneText.split('\n').length - 1, 677, 'the embedded boot zone is exactly 677 content LOCs (of the 678-LOC region 2344-3021 — the applyInvoke opener line 2344 stays in invoke.ts as the coordinator-block opener)')
+    assert.equal(zoneText.split('\n').length - 1, 679, 'the embedded boot zone is exactly 679 content LOCs (677 pre-lane-0.1.2 + the 2 rc.1 surface-comment lines on the headProgress tracker)')
     const md5 = createHash('md5').update(zoneText, 'utf8').digest('hex')
-    assert.equal(md5, '82761e5d46541d675185ed6d2b27a6a3', 'the embedded boot zone is byte-identical to HEAD applyInvoke 2345-3021 (md5 82761e5d… — no D1)')
+    assert.equal(md5, '1fb4ee22c82ac3515c4cc42696be081d', 'the embedded boot zone is byte-identical to HEAD applyInvoke 2345-3021 with the LANE 0.1.2 rc.1 session-surface comment (md5 1fb4ee22… — re-freeze: 679 LOCs, no D1)')
     // The md5 stamp above is the movement identity: md5 of applyInvoke 2345-3021
     // of HEAD b9e51c2 (pre-cut, 3913-line blob; the opener line 2344 stays in
     // invoke.ts as the coordinator-block opener). The 2344-3021 region no longer
@@ -384,7 +386,7 @@ test('boot-factory (E2 con Loader real): the composed boot wiring materializes t
       // result (kind 'host', title 'Asistente' — the builder's host branch).
       const whoTool = ctx.tools.get('dept_who')
       assert.ok(whoTool !== undefined, 'dept_who registered globally (host plane — the tools factory registered it reading the destructured buildCatalogRows)')
-      const whoAgent = { id: 'session-dept-who-caller', status: 'running', session: { events: [] }, followup() {}, cancel() {}, whenIdle: async () => {} }
+      const whoAgent = { id: 'session-dept-who-caller', status: 'running', session: { events: [], get seq() { return this.events.length }, snapshotEvents() { return this.events }, requestHeader() { return undefined } }, followup() {}, cancel() {}, whenIdle: async () => {} }
       // `scope: 'all'` — the fabricated hosts have no live agent (offline
       // state) and the DEFAULT active view hides non-you offline rows; the all
       // view surfaces them so the built rows are observable.

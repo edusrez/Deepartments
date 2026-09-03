@@ -292,7 +292,10 @@ test('cleanup: truncateSessionArtifact rewrites the log to header + setup + jour
         id: HOST_SESSION,
         createdAt: header.createdAt,
         cwd: header.cwd,
-        delegationDepth: header.delegationDepth
+        delegationDepth: header.delegationDepth,
+        // rc.1 header contract: fromRestore validates `isSeeded` (the fork
+        // lineage flag — a cold-booted full-log artifact is NOT fork-inherited).
+        isSeeded: false
       })
       // fromRestore appends a session/end-seed marker when the seed does not
       // end in one, so the fresh session continues appending at seed.length+1.
@@ -847,7 +850,7 @@ test('Real Loader: host dept_sleep LEGACY-FALLBACK path still completes (journal
       // static `(id, seed, header)` signature (dsh-session rc.2).
       const realSession = DshSession.create(Sid(hostSessionId),
         [{ type: 'permission/preset', seq: 0, time: 1, data: { preset: 'danger-full-access' } }],
-        { version: 0, id: hostSessionId, createdAt: 1787000000000, cwd: '/root', delegationDepth: 0 })
+        { version: 0, id: hostSessionId, createdAt: 1787000000000, cwd: '/root', delegationDepth: 0, isSeeded: false })
       const host = {
         id: hostSessionId,
         options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },

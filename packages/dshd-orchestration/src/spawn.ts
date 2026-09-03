@@ -66,12 +66,19 @@ import type { DeliverySurface } from './delivery.js'
 // ---------------------------------------------------------------------------
 
 /** Loose structural view of a live `Agent` (the shape `ctx.agents.get(id)`
- * returns). Mirrors the bundle-local `AgentLike` of src/invoke.ts. */
+ * returns). Mirrors the bundle-local `AgentLike` of src/invoke.ts. The session
+ * member is the rc.1+ surface (`seq` = log length, `snapshotEvents()` = full
+ * log — the `events` getter is gone from 0.1.2-rc.1 on). */
 interface AgentLike {
   id: string
   status: string
   ctx: Context
-  session?: { events: unknown[] }
+  session?: {
+    seq: number
+    snapshotEvents(): readonly unknown[]
+    append?: (type: string, data: unknown, opts?: { surfaceOp?: string }) => unknown
+    header?: unknown
+  }
   followup(message: { content: readonly { type: string; text: string }[]; source: Record<string, unknown> }): void
   cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void
   whenIdle(): Promise<void>

@@ -60,7 +60,7 @@ class StubAgents extends Service {
       id: String(options.sessionId),
       status: 'running',
       ctx: this.ctx,
-      session: { events: [] },
+      session: { events: [], get seq() { return this.events.length }, snapshotEvents() { return this.events }, requestHeader() { return undefined } },
       followup() {},
       cancel() {},
       async whenIdle() {}

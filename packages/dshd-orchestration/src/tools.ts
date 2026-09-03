@@ -226,12 +226,23 @@ type GuiBuildAgentRows = DeepartmentsEndpointDeps['buildAgentRows']
 // ---------------------------------------------------------------------------
 
 /** Loose structural view of a live `Agent` (the shape `ctx.agents.get(id)`
- * returns). Mirrors the bundle-local `AgentLike` of src/invoke.ts. */
+ * returns). Mirrors the bundle-local `AgentLike` of src/invoke.ts. The session
+ * member is the rc.1+ surface (`seq` = log length, `snapshotEvents()` = full
+ * log — the `events` getter is gone from 0.1.2-rc.1 on). */
 interface AgentLike {
   id: string
   status: string
   ctx: Context
-  session?: { events: unknown[] }
+  session?: {
+    seq: number
+    snapshotEvents(): readonly unknown[]
+    /** Legacy dual fallback: the pre-rc.1 core line still exposes the cached
+     * `events` getter (runtime core 0.1.1-rc.2). Optional for the
+     * 0.1.2-rc.1 surface where it is gone. */
+    events?: readonly unknown[]
+    append?: (type: string, data: unknown, opts?: { surfaceOp?: string }) => unknown
+    header?: unknown
+  }
   followup(message: { content: readonly { type: string; text: string }[]; source: Record<string, unknown> }): void
   cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void
   whenIdle(): Promise<void>
@@ -2370,7 +2381,10 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   const captureRetiredPostTurnError = async (stateDir: string, sessionId: string, postId: string): Promise<void> => {
     try {
       const liveAgent = agents?.get(sessionId)
-      const events = (liveAgent?.session?.events ?? []) as HealthSessionEvent[]
+      // Dual session-log read: `snapshotEvents()` on the 0.1.2-rc.1 surface,
+      // legacy cached `events` getter on the pre-rc.1 core (0.1.1-rc.2); absent
+      // session → empty capture.
+      const events = (liveAgent?.session?.snapshotEvents?.() ?? liveAgent?.session?.events ?? []) as HealthSessionEvent[]
       if (events.length === 0) return
       const capture = scanTurnErrorCaptures(events, postId)
       if (capture === undefined) return
@@ -3147,9 +3161,11 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   /** Fix A2 — the observable progress signature of a live head: the length of
    * its durable session event log. Every appended step/turn/assistant event is
    * lifecycle progress. Absent/session-less agents yield 0 (no progress signal
-   * → never judged stuck on the basis of this). */
+   * → never judged stuck on the basis of this). rc.1+ surface: the log length
+   * is `session.seq` (the `seq = log.length` contract — the old
+   * `events?.length` read). */
   const headEventCount = (live: AgentLike): number =>
-    live.session === undefined ? 0 : (live.session.events?.length ?? 0)
+    live.session === undefined ? 0 : live.session.seq
 
   /** Fix A2 — record that we just observed `live` making progress: stamp `at`
    * and snapshot the current event watermark. Call whenever a wake successfully
@@ -3275,9 +3291,12 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         if (live !== undefined && live.status === 'running') continue
         // Prefer the LIVE agent's in-memory log (reflects the repaired/reloaded
         // session after a resume), else the DURABLE persistence readRaw (the true
-        // on-disk crash tail for a NOT-resumed post).
-        if (live?.session?.events?.length) {
-          events = live.session.events as HealthSessionEvent[]
+        // on-disk crash tail for a NOT-resumed post). rc.1+ surface: the live-log
+        // non-empty guard is `seq > 0` and the full read is `snapshotEvents()`.
+        if ((live?.session?.seq ?? 0) > 0 && live?.session !== undefined) {
+          // Dual session-log read: `snapshotEvents()` on the 0.1.2-rc.1 surface,
+          // legacy cached `events` getter on the pre-rc.1 core (0.1.1-rc.2).
+          events = (live.session.snapshotEvents?.() ?? live.session.events ?? []) as HealthSessionEvent[]
         } else if (persistence !== undefined && typeof persistence.readRaw === 'function') {
           try {
             const raw = await persistence.readRaw(SessionId(entry.sessionId))
@@ -4649,7 +4668,9 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         sessionId: entry.sessionId,
         retired: entry.retired === true,
         running: live !== undefined && live.status === 'running',
-        events: (live?.session?.events ?? []) as HealthSessionEvent[],
+        // rc.1+ surface: the full-log read is `snapshotEvents()` (the `events`
+        // getter is gone from 0.1.2-rc.1 on; the envelope cast still holds).
+        events: (live?.session?.snapshotEvents() ?? []) as HealthSessionEvent[],
         inboxTs: inboxTsByPost.get(postId) ?? [],
         sleeping: entry.sleepEpoch !== void 0,
         provider: entry.provider,
@@ -4710,7 +4731,8 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       out.push({
         postId,
         retired: entry.retired === true,
-        events: (liveAgent?.session?.events ?? []) as HealthSessionEvent[],
+        // rc.1+ surface: `snapshotEvents()` replaces the removed `events` getter.
+        events: (liveAgent?.session?.snapshotEvents() ?? []) as HealthSessionEvent[],
         hostMessages: hostRowsByPost.get(postId) ?? [],
         sleeping: entry.sleepEpoch !== void 0
       })

@@ -1318,8 +1318,9 @@ export interface TurnErrorCapture {
  * shape degrades to "no capture"). NO HARNESS EVENT HOOK IS USED: the harness
  * exposes NO global turn/end cordis event (turn/end is a per-session append,
  * dsh-agent-loop index.js:592 — there is no `ctx.on('turn/end')`), and the
- * plugin already reads the live agents' `session.events` (the real session log
- * the harness maintains) in the daemon tick, so the cleanest available
+ * plugin already reads the live agents' session logs — `session.snapshotEvents()`
+ * / `session.seq` (the rc.1+ session surface; the `events` getter is gone from
+ * 0.1.2-rc.1 on) — in the daemon tick, so the cleanest available
  * observation point is a bounded per-tick tail-scan there. */
 export function scanTurnErrorCaptures(events: readonly HealthSessionEvent[], postId: string, sessionId?: string): TurnErrorCapture | undefined {
   const tail = events.slice(-TURN_ERROR_CAPTURE_MAX_TAIL)

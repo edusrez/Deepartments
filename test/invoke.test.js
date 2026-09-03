@@ -26,9 +26,19 @@ import { test } from 'node:test'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { bindScopeParent, createScope, scopeOf } from '@deepseek-ai/dsh-scope'
-import { Session, SessionId, snapshotJsonValue } from '@deepseek-ai/dsh-session'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
+
+/** rc.1 seal (0.1.2-rc.1): dsh-session REMOVED the `snapshotJsonValue` helper —
+ * the lossless-JSON boundary is now enforced at `Session.append` time. Appending
+ * a user/message that carries `value` as its `source` through the REAL boundary
+ * proves the value is lossless-JSON safe (an append throws otherwise). */
+function assertLosslessJsonAccepted(value) {
+  const probe = Session.create(SessionId(`lossless-probe-${Math.random().toString(36).slice(2, 10)}`))
+  probe.append('user/message', { role: 'user', content: [{ type: 'text', text: 'probe' }], source: value }, { surfaceOp: 'append' })
+}
+
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
@@ -203,7 +213,13 @@ async function materializeStubAgent(agents, sessionId, options) {
       // sessions.prepare(id, {seed, meta}) boundary (the synchronous
       // snapshots/validation are the dshd-core unit tests' job; here the
       // events must simply be observable in the fresh session).
-      events: [...(Array.isArray(options.seed) ? options.seed : [])]
+      // rc.1+ session surface: the `events` getter is gone from 0.1.2-rc.1 on —
+      // expose `seq` (= live log length) + `snapshotEvents()` (the full log)
+      // over the SAME array so migrated readers observe test-side pushes.
+      events: [...(Array.isArray(options.seed) ? options.seed : [])],
+      get seq() { return this.events.length },
+      snapshotEvents() { return this.events },
+      requestHeader() { return undefined }
     },
     inboxMessages: [],
     ctx: undefined,
@@ -696,7 +712,7 @@ function fakeParentAgent(id = SessionId(randomUUID())) {
     id,
     options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
     status: 'idle',
-    session: { header: { id }, events: [] },
+    session: { header: { id }, events: [], get seq() { return this.events.length }, snapshotEvents() { return this.events }, requestHeader() { return undefined } },
     ctx: { get: () => undefined },
     inboxMessages: [],
     injectedMessages: [],
@@ -1476,7 +1492,7 @@ test('Piece 1: ensureHead attaches the head session to the root workspace AND pi
       // event. TEST_ORG sets no coordinator.sessionTitle → the fallback label.
       const headSession = root.sessions.get(SessionId('head-research-head'))
       assert.ok(headSession !== undefined, 'the head session is entered in the real sessions store')
-      const title = headSession.events.find((ev) => ev.type === 'session/title')
+      const title = headSession.snapshotEvents().find((ev) => ev.type === 'session/title')
       assert.ok(title !== undefined, 'ensureHead pinned a session/title event')
       assert.equal(title.data.title, 'Research Head', 'the pinned title is the fallback "Research Head" (no coordinator.sessionTitle in TEST_ORG)')
       assert.deepEqual(title.data.messageSeqs, [], 'title pin cites no messages (rename() shape)')
@@ -1485,7 +1501,7 @@ test('Piece 1: ensureHead attaches the head session to the root workspace AND pi
       // The pin is single-shot: re-running ensureAllHeads-equivalents never
       // double-pins. The pure helper already asserts idempotence; here the
       // event count stays 1 after the boot attach settled.
-      assert.equal(headSession.events.filter((ev) => ev.type === 'session/title').length, 1, 'exactly one title event pinned')
+      assert.equal(headSession.snapshotEvents().filter((ev) => ev.type === 'session/title').length, 1, 'exactly one title event pinned')
     } finally {
       await dispose()
     }
@@ -2267,7 +2283,7 @@ test.skip('Batch G head sleep ROTATION (F8): a slept head is ARCHIVED on dept_sl
       // old row's title is gone — the fresh session MUST re-pin it).
       const freshSession = root.sessions.get(SessionId(freshId))
       assert.ok(freshSession !== undefined, 'fresh head session entered in the sessions store')
-      const title = freshSession.events.find((ev) => ev.type === 'session/title')
+      const title = freshSession.snapshotEvents().find((ev) => ev.type === 'session/title')
       assert.ok(title !== undefined, 'fresh head session pinned a session/title event')
       assert.equal(title.data.title, 'Research Head', 'the fresh row is pinned to the fallback "Research Head" title')
       assert.deepEqual(title.data.source, { kind: 'user' }, 'title pin is user-source')
@@ -4123,7 +4139,7 @@ test('U4 pure helper: pinHostSessionTitle pins "Asistente" only when the session
   // Fresh session (no title event): pins with the exact rename() shape.
   const fresh = Session.create(SessionId('session-title-fresh'))
   assert.equal(pinHostSessionTitle(fresh), 'pinned')
-  const pinned = fresh.events.find((ev) => ev.type === 'session/title')
+  const pinned = fresh.snapshotEvents().find((ev) => ev.type === 'session/title')
   assert.ok(pinned !== undefined, 'session/title event appended')
   assert.equal(pinned.data.title, 'Asistente')
   assert.deepEqual(pinned.data.messageSeqs, [])
@@ -4132,24 +4148,24 @@ test('U4 pure helper: pinHostSessionTitle pins "Asistente" only when the session
 
   // Idempotent: a second call never double-pins (the Asistente pin itself is
   // user-kind — the "already has the Asistente pin" guard).
-  const before = fresh.events.length
+  const before = fresh.snapshotEvents().length
   assert.equal(pinHostSessionTitle(fresh), 'already-titled')
-  assert.equal(fresh.events.length, before, 'no second title event appended')
+  assert.equal(fresh.snapshotEvents().length, before, 'no second title event appended')
 
   // The owner's manual rename (also source.user) always wins — never clobbered.
   const renamed = Session.create(SessionId('session-title-renamed'))
   renamed.append('session/title', { title: 'Mi host', messageSeqs: [], source: { kind: 'user' } })
-  const renamedCount = renamed.events.length
+  const renamedCount = renamed.snapshotEvents().length
   assert.equal(pinHostSessionTitle(renamed), 'already-titled')
-  assert.equal(renamed.events.length, renamedCount, 'owner rename untouched')
-  assert.equal(renamed.events.find((ev) => ev.type === 'session/title').data.title, 'Mi host')
+  assert.equal(renamed.snapshotEvents().length, renamedCount, 'owner rename untouched')
+  assert.equal(renamed.snapshotEvents().find((ev) => ev.type === 'session/title').data.title, 'Mi host')
 
   // Automatic LLM/fallback titles (source provider/fallback) are NOT user
   // titles — the Asistente pin overrides them (fold is last-wins).
   const auto = Session.create(SessionId('session-title-auto'))
   auto.append('session/title', { title: 'What is the plan for Q3?', messageSeqs: [0], source: { kind: 'provider', provider: 'stub', model: 'stub' } })
   assert.equal(pinHostSessionTitle(auto), 'pinned')
-  const autoTitle = auto.events.filter((ev) => ev.type === 'session/title').at(-1)
+  const autoTitle = auto.snapshotEvents().filter((ev) => ev.type === 'session/title').at(-1)
   assert.equal(autoTitle.data.title, 'Asistente', 'the Asistente user pin wins over the later-folded provider title')
 })
 
@@ -5209,7 +5225,13 @@ function fakeSubagentAgent(id = SessionId(randomUUID())) {
     status: 'idle',
     session: {
       header: { id, origin: 'subagent', parentSession: 'host-some-orchestrator' },
-      events: []
+      // rc.1+ session surface (the `events` getter is gone from 0.1.2-rc.1 on):
+      // seq = live log length, snapshotEvents() = the full log over the SAME
+      // array (test-side events asserts/pushes stay observable).
+      events: [],
+      get seq() { return this.events.length },
+      snapshotEvents() { return this.events },
+      requestHeader() { return undefined }
     },
     ctx: { get: () => undefined },
     inboxMessages: [],
@@ -7911,7 +7933,7 @@ test('F3 dept_worker_spawn: a head spawns a worker of its department (role templ
       // Title pin: user-kind session/title on the worker session (sidebar row).
       const workerSession = root.sessions.get(SessionId(workerSid))
       assert.ok(workerSession !== undefined, 'the worker session is entered in the real sessions store')
-      const title = workerSession.events.find((ev) => ev.type === 'session/title')
+      const title = workerSession.snapshotEvents().find((ev) => ev.type === 'session/title')
       assert.ok(title !== undefined, 'dept_worker_spawn pinned a session/title event')
       assert.equal(title.data.title, 'Researcher: track DSH updates and report')
       assert.deepEqual(title.data.source, { kind: 'user' }, 'the pin is user-source (the owner manual rename always wins)')
@@ -8656,7 +8678,7 @@ test('F3 title default (owner decision 2026-08-23): spawn without a title uses "
       // No title + a short task → "<RoleDisplay>: <first line of the task>".
       const short = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'track DSH updates' })
       assert.equal(short.result.title, 'Researcher: track DSH updates', 'default title = "<RoleDisplay>: <mission>" (role capitalized, not the template title)')
-      assert.equal(root.sessions.get(SessionId(short.result.sessionId)).events.find((ev) => ev.type === 'session/title')?.data.title, 'Researcher: track DSH updates', 'the pinned session title is the "Rol: Misión" default')
+      assert.equal(root.sessions.get(SessionId(short.result.sessionId)).snapshotEvents().find((ev) => ev.type === 'session/title')?.data.title, 'Researcher: track DSH updates', 'the pinned session title is the "Rol: Misión" default')
 
       // No title + a LONG task → the mission is cut to ~70 chars + ellipsis
       // (the ~70 cap applies to the MISSION, not the whole "Role: mission" row).
@@ -8672,7 +8694,7 @@ test('F3 title default (owner decision 2026-08-23): spawn without a title uses "
       // A PASSED title is respected verbatim (never substituted).
       const custom = await f3Spawn({ agents }, headCtx, key, head, { role: 'reviewer', task: 'check the report', title: 'Custom reviewer label' })
       assert.equal(custom.result.title, 'Custom reviewer label', 'a passed title overwrites the "Rol: Misión" default')
-      assert.equal(root.sessions.get(SessionId(custom.result.sessionId)).events.find((ev) => ev.type === 'session/title')?.data.title, 'Custom reviewer label', 'the pinned title is the passed override')
+      assert.equal(root.sessions.get(SessionId(custom.result.sessionId)).snapshotEvents().find((ev) => ev.type === 'session/title')?.data.title, 'Custom reviewer label', 'the pinned title is the passed override')
     } finally {
       await dispose()
     }
@@ -8860,7 +8882,7 @@ test('F3 title: the title? parameter overrides the default pin; without task/job
       const overridden = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher', task: 'x', title: 'Custom researcher label' })
       assert.equal(overridden.result.title, 'Custom researcher label', 'title? overrides the default')
       const overriddenSession = root.sessions.get(SessionId(overridden.result.sessionId))
-      assert.equal(overriddenSession.events.find((ev) => ev.type === 'session/title')?.data.title, 'Custom researcher label', 'the pinned title is the override')
+      assert.equal(overriddenSession.snapshotEvents().find((ev) => ev.type === 'session/title')?.data.title, 'Custom researcher label', 'the pinned title is the override')
 
       // No task, no jobId → the default title falls back to the derived id.
       const fallback = await f3Spawn({ agents }, headCtx, key, head, { role: 'researcher' })
@@ -9051,7 +9073,7 @@ test('F4b dept_job_run: materializes the job worker (definition role task = the 
       // Title pin (human frontmatter title on the sidebar session).
       const workerSession = root.sessions.get(SessionId(jobSid))
       assert.ok(workerSession !== undefined, 'the job worker session is entered in the real sessions store')
-      assert.equal(workerSession.events.find((ev) => ev.type === 'session/title')?.data.title, 'Monitor DSH + Deepartments ecosystem updates', 'pinned title = the human frontmatter title')
+      assert.equal(workerSession.snapshotEvents().find((ev) => ev.type === 'session/title')?.data.title, 'Monitor DSH + Deepartments ecosystem updates', 'pinned title = the human frontmatter title')
 
       // F7 (provider migration): the job worker is created with the
       // coordinator-aligned agentOptions (same discriminating assert as F3).
@@ -9234,7 +9256,7 @@ test('F5: a department with workspacePath creates its head session under that cw
       // (e) the head title pin still applies on the new-cwd session row.
       const headSession = root.sessions.get(SessionId('head-research-head'))
       assert.ok(headSession !== undefined, 'the head session is entered in the real sessions store')
-      const headTitle = headSession.events.find((ev) => ev.type === 'session/title')
+      const headTitle = headSession.snapshotEvents().find((ev) => ev.type === 'session/title')
       assert.ok(headTitle !== undefined, 'the head session title pin still applies in the department cwd')
       assert.equal(headTitle.data.title, 'Research Head')
       assert.deepEqual(headTitle.data.source, { kind: 'user' }, 'the pin is user-source (owner manual rename always wins)')
@@ -16984,7 +17006,7 @@ test('W7-B toJsonSafe: a source carrying NON-serializable fields is projected to
   }
   const sanitized = toJsonSafe(badSource)
   assert.ok(sanitized, 'toJsonSafe returns a value')
-  assert.notEqual(snapshotJsonValue(sanitized), undefined, 'the sanitized source is accepted by the dsh-session lossless-JSON boundary (snapshotJsonValue returns a snapshot, NOT undefined)')
+  assert.doesNotThrow(() => assertLosslessJsonAccepted(sanitized), 'the sanitized source is accepted by the dsh-session lossless-JSON append boundary (rc.1)')
   assert.ok(JSON.stringify(sanitized), 'JSON.stringify on the sanitized source succeeds (no throw)')
   // Semantic fields preserved as plain strings/arrays.
   assert.equal(sanitized.kind, 'agent')
@@ -17014,7 +17036,7 @@ test('W7-B jsonSafeMessageSource: a real bus `agent/send` source with senderSess
     from: 'research-head',
     senderSessionId: undefined
   })
-  assert.notEqual(snapshotJsonValue(source), undefined, 'the sanitized agent source is lossless-JSON safe (the `agent/inbox/spliced` append boundary accepts it)')
+  assert.doesNotThrow(() => assertLosslessJsonAccepted(source), 'the sanitized agent source is lossless-JSON safe (the `agent/inbox/spliced` append boundary accepts it)')
   assert.ok(JSON.stringify(source), 'JSON.stringify succeeds on the sanitized source')
   assert.ok(!Object.hasOwn(source, 'senderSessionId'), 'senderSessionId: undefined is omitted, not emitted as a present-undefined key')
   assert.equal(source.kind, 'agent')
@@ -17053,7 +17075,7 @@ test('W7-B like-for-like boot delivery to a LIVE head still succeeds and the del
       assert.ok(wake, 'the head received the bus message')
       assert.ok(wake.source, 'the delivered message carries a source')
       // The delivered wake source is lossless-JSON safe — the splice append would NOT throw.
-      assert.notEqual(snapshotJsonValue(wake.source), undefined, 'the delivered wake source is lossless-JSON safe (snapshotJsonValue != undefined)')
+      assert.doesNotThrow(() => assertLosslessJsonAccepted(wake.source), 'the delivered wake source is lossless-JSON safe (the append boundary accepts it)')
       assert.ok(JSON.stringify(wake.source), 'JSON.stringify succeeds on the delivered wake source')
       const s = await deliveryStatus(stateDir, 'm-0', 'research-head')
       assert.notEqual(s, 'terminal', 'a live recipient is never settled as terminal')

@@ -127,7 +127,13 @@ async function materializeStubAgent(agents, sessionId, options) {
         parentSession,
         delegationDepth: options.meta?.delegationDepth
       },
-      events: []
+      // rc.1+ session surface: the `events` getter is gone from 0.1.2-rc.1 on —
+      // expose `seq` (= live log length) + `snapshotEvents()` (the full log)
+      // over the SAME array so migrated readers observe test-side pushes.
+      events: [],
+      get seq() { return this.events.length },
+      snapshotEvents() { return this.events },
+      requestHeader() { return undefined }
     },
     inboxMessages: [],
     ctx: undefined,
@@ -356,7 +362,7 @@ function fakeParentAgent(id = SessionId(randomUUID())) {
     id,
     options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
     status: 'idle',
-    session: { header: { id }, events: [] },
+    session: { header: { id }, events: [], get seq() { return this.events.length }, snapshotEvents() { return this.events }, requestHeader() { return undefined } },
     ctx: { get: () => undefined },
     inboxMessages: [],
     injectedMessages: [],

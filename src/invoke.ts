@@ -730,12 +730,25 @@ interface AgentLike {
   id: string
   status: string
   ctx: Context
-  /** The agent's durable session event log. Present on the real loop Agent
-   * (`this.session.events`) and on the test stub. Its length is the Fix A2
-   * stuck-head progress signature (every appended step/turn/assistant event
-   * is observable lifecycle progress). Declared structurally; absent/undefined
-   * → treated as no signal (never misclassified as progression). */
-  session?: { events: unknown[] }
+  /** The agent's durable session event log (rc.1+ session surface: the
+   * `events` getter is GONE — read via `snapshotEvents()` / `seq`, the
+   * `seq = log.length` contract). Its length is the Fix A2 stuck-head progress
+   * signature (every appended step/turn/assistant event is observable
+   * lifecycle progress). Declared structurally; absent/undefined → treated as
+   * no signal (never misclassified as progression). */
+  session?: {
+    /** The log length (rc.1 `seq = log.length` — the old `events.length`). */
+    seq: number
+    /** The full immutable log snapshot (rc.1 — the old `events` array). */
+    snapshotEvents(): readonly unknown[]
+    /** Legacy dual fallback: the pre-rc.1 core line still exposes the cached
+     * `events` getter (runtime core 0.1.1-rc.2). Keep optional for the
+     * 0.1.2-rc.1 surface where it is gone. */
+    events?: readonly unknown[]
+    /** The append seam (rc.1 keeps `append` — optional for read-only views). */
+    append?: (type: string, data: unknown, opts?: { surfaceOp?: string }) => unknown
+    header?: unknown
+  }
   followup(message: { content: readonly { type: string; text: string }[]; source: Record<string, unknown> }): void
   /** The harness ABORT/STOP API (the GUI stop — dsh-agent Agent.cancel). W9-b
    * delivery-interrupt uses it with a `hook`/reason 'interrupted' cause and
@@ -2285,7 +2298,15 @@ export type TitlePinResult = HostTitlePinResult
  * receive the pin from ensureHead (coordinator.sessionTitle ?? fallback).
  */
 export function pinSessionTitle(session: Session, title: string): TitlePinResult {
-  const titleEvents = session.events as readonly { type: string; data?: { source?: { kind?: string } } }[]
+  // Dual session-log read: the runtime core 0.1.1-rc.2 still exposes the cached
+  // `events` getter, while the 0.1.2-rc.1 surface replaces it with
+  // `snapshotEvents()` (same frozen/cached semantics — either seam yields the
+  // same immutable log, so the pin guard is identical on both).
+  const sessionLog = session as unknown as {
+    snapshotEvents?: () => readonly unknown[]
+    events?: readonly unknown[]
+  }
+  const titleEvents = (sessionLog.snapshotEvents?.() ?? sessionLog.events ?? []) as readonly { type: string; data?: { source?: { kind?: string } } }[]
   if (titleEvents.some((ev) => ev.type === 'session/title' && ev.data?.source?.kind === 'user')) {
     return 'already-titled'
   }
@@ -2429,10 +2450,12 @@ export interface MissionActivityBuildInput {
   hosts: Iterable<HostEntryLike>
   /** The agents registry (absent in a composition WITHOUT a live agents
    * service → the session-activity term degrades to undefined, never a
-   * throw — the buildPostSnapshot empty-events contract). The events are
-   * structurally `unknown[]` (the AgentLike.session.events shape) — cast to
-   * HealthSessionEvent[] inside per the buildHealthPosts pattern. */
-  agents?: { get(sessionId: string): { session?: { events?: readonly unknown[] } } | undefined } | undefined
+   * throw — the buildPostSnapshot empty-events contract). The session events
+   * are structurally `readonly unknown[]` — read via the rc.1 surface
+   * `snapshotEvents()` when present, with a legacy `events` fallback (the
+   * pre-rc.1 line still exposes the getter) — cast to HealthSessionEvent[]
+   * inside per the buildHealthPosts pattern. */
+  agents?: { get(sessionId: string): { session?: { snapshotEvents?: () => readonly unknown[]; events?: readonly unknown[] } } | undefined } | undefined
 }
 
 /** M-5 — build the per-head-post mission-activity rows the mission-stalled
@@ -2480,8 +2503,11 @@ export function buildMissionActivity(input: MissionActivityBuildInput): MissionA
     }
     if (last === undefined) continue
     // The post's last session activity — buildPostSnapshot (the same no-I/O
-    // primitive the stall/wait scans use; empty event log → undefined).
-    const events = (input.agents?.get(entry.sessionId)?.session?.events ?? []) as readonly HealthSessionEvent[]
+    // primitive the stall/wait scans use; empty event log → undefined). The
+    // rc.1 session surface reads via `snapshotEvents()`; the legacy `events`
+    // member is the dual fallback for pre-rc.1 fixtures/compositions.
+    const liveSession = input.agents?.get(entry.sessionId)?.session
+    const events = (liveSession?.snapshotEvents?.() ?? liveSession?.events ?? []) as readonly HealthSessionEvent[]
     const snap = buildPostSnapshot({ postId, events })
     out.push({
       postId,

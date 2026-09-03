@@ -118,13 +118,23 @@ interface AgentOptionsLike {
 }
 
 /** Loose structural view of a live `Agent` (the shape `ctx.agents.get(id)`
- * returns — assembleHeartbeat reads `.session.events` / `.status`). Mirrors the
- * bundle-local `AgentLike` of src/invoke.ts (structural subset: the fields the
- * zone reads). */
+ * returns — assembleHeartbeat reads `.session.snapshotEvents()` / `.seq` /
+ * `.status`). Mirrors the bundle-local `AgentLike` of src/invoke.ts (structural
+ * subset: the fields the zone reads; the session member is the rc.1+ surface —
+ * the `events` getter is gone from 0.1.2-rc.1 on). */
 interface AgentLike {
   id: string
   status: string
-  session?: { events: unknown[] }
+  session?: {
+    seq: number
+    snapshotEvents(): readonly unknown[]
+    /** Legacy dual fallback: the pre-rc.1 core line still exposes the cached
+     * `events` getter (runtime core 0.1.1-rc.2). Optional for the
+     * 0.1.2-rc.1 surface where it is gone. */
+    events?: readonly unknown[]
+    append?: (type: string, data: unknown, opts?: { surfaceOp?: string }) => unknown
+    header?: unknown
+  }
 }
 
 /** Structural view of the `agents` service surface the zone reads (`get` only).
@@ -1058,7 +1068,8 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
       // the same snapshot primitive with an empty inbox (only activity matters).
       const hostEntry = [...hosts.values()].find((entry) => entry.hostId === hostId)
       const hostLive = hostEntry !== undefined ? agents?.get(SessionId(hostEntry.sessionId)) : undefined
-      const hostEvents = (hostLive?.session?.events ?? []) as HealthSessionEvent[]
+      // rc.1+ surface: the full-log read is `snapshotEvents()` (get events gone).
+      const hostEvents = (hostLive?.session?.snapshotEvents() ?? []) as HealthSessionEvent[]
       const hostSnap = buildPostSnapshot({ postId: hostId, events: hostEvents, inboxTs: [] })
       // Per ACTIVE (and dormant) catalog post rows + the WAIT scan inputs +
       // the W8-h INTERRUPTED (stopped) postIds.
@@ -1068,7 +1079,8 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
       for (const [postId, entry] of byPost) {
         if (entry.retired === true) continue
         const live = agents?.get(SessionId(entry.sessionId))
-        const events = (live?.session?.events ?? []) as HealthSessionEvent[]
+        // rc.1+ surface: `snapshotEvents()` replaces the removed `events` getter.
+        const events = (live?.session?.snapshotEvents() ?? []) as HealthSessionEvent[]
         const snap = buildPostSnapshot({ postId, events, inboxTs: inboxTsByPost.get(postId) ?? [] })
         rows.push({
           postId,
