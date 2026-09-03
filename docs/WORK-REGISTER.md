@@ -163,13 +163,16 @@
     (oc-8/9/11/12 quota-blocked hasta 09-23..28), completion real 200,
     **oc-10 FUERA por hot-block (billingBlocked, invalid:true; nextProbeAt
     ~24h; el fix 402→billing-block con auto-heal resolve el gap probe-vs-real
-    del finding post-deploy)** → **LATCH PENDIENTE de confirmación IPH
-    (convergencia: oc-10 fuera, oc-6 valid, 0 post-error 429→to:null — el
-    checklist post-hotfix del host fue PASS)** → ② **delivery lane commits 1-4
-    (fix formal del
-    gate — VEREDICTO QD: 0 commits aún; branch 3 dshd-health:3069-3077 SIN
-    age-check RE-ARMABLE — R1, prioridad ALTA tras el fix del pool; arranque a
-    orden del IPH)** →
+    del finding post-deploy)** → **LATCH JUBILADO (09-03, confirmación IPH
+    verificado: oc-10 fuera, oc-6 valid probe 200, 0 post-error 429→to:null —
+    el gate-clean MANUAL queda RETIRADO; clasificador + age-check por código
+    absorben su función)** → ② **delivery lane commits 1-4 — EN VUELO (HIGH,
+    arrancada 09-03: age-check R1 resolvePoolerDispatchBlock :3069-3077 + seam
+    spawn.ts:355-387 + expo at/stale-age + alerta usable>0&&stale preservando
+    el intent 7f634ef para 429 frescos · re-drive no-boot-only · fb-79
+    backoff/max-attempts + caso worker→own-head idle · fb-58 settle
+    prepared→terminal + re-routing rotatedTo (caso F-3) · O1 retire-grace/
+    marker · umbrales §7.5)** →
     ③ **stable :3080 (owner AUTORIZÓ 09-03 — §3
     RAG-stable sentinel)**.
   - **settings revert (provider→opencode-zen con Go vivo)** — coordinar con IPH
@@ -286,8 +289,9 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 
 - Pool: **oc-6 = key real del OWNER (opencode-go, chat-auth 200 — la única
   real; selectable) — salva el pool tras el incidente 09-03** · oc-8/9/10/11/12
-  en **cooldown mensual (resets 23-28/09)** — el LATCH (mantener el cooldown
-  hasta el fix formal) lo gestiona el host · **POST-DEPLOY 09-03 18:23-18:35:
+  en **cooldown mensual (resets 23-28/09)** — **LATCH JUBILADO 09-03 (el
+  gate-clean manual RETIRADO; clasificador + age-check por código absorben —
+  confirmación IPH con convergencia verificada)** · **POST-DEPLOY 09-03 18:23-18:35:
   oc-8/9/11/12 quota-bloqueadas automáticamente (monthly 100%, blockedUntil
   09-23..28); OC-10 HOT-BLOCKED (billingBlocked + invalid:true + errorClass
   401 — front A de builder-6 aplicado; la poison 402 queda fuera de selección);
