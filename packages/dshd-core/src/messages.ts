@@ -100,6 +100,7 @@
 // recipient, is a stale pre-fix row → never driven, never settled).
 //
 // NO export default (pitfall 0001 — breaks `inject`).
+import { readFileSync, writeFileSync } from 'node:fs'
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
@@ -764,6 +765,15 @@ export const RE_DELIVERY_STORM_WINDOW_MS = 60 * 60_000
  * boot-only re-drive left parked until the next boot). */
 export const RE_DELIVERY_PREPARED_STUCK_MS = 10 * 60_000
 
+/** LANE ②-bis (G2 — the LEGACY 'prepared' residue, host decision 2026-09-03:
+ * NO manual drain — the runtime settle covers the batch) — the per-cycle cap
+ * of the G2 drain seed: at most this many legacy 'prepared' dust rows are
+ * rewritten to ONE in-place 'terminal' per boot pass / sweep tick. The default
+ * 250 drains the 843-row pre-boot residue in ~4 cycles (~4 min at the 60 s
+ * sweep cadence) — bounded, never a burst of appends/rewrites, never a storm
+ * (the flip only REMOVES 'prepared' rows from the ledger; it adds none). */
+export const G2_DRAIN_SEED_DEFAULT_LIMIT = 250
+
 /** PURE — the exponential-backoff delay AFTER `priorAttempts` FAILED attempts:
  * 0 prior → 0 (the FIRST re-drive of a pair is immediate — the gate-clean
  * recovery must not be delayed); n > 0 → `min(maxDelayMs, baseDelayMs * 2^(n-1))`
@@ -826,6 +836,128 @@ export function compactDeliveryRows(rows: readonly DeliveryRow[]): DeliveryRow[]
 
 function deliveryKey(row: Pick<DeliveryRow, 'messageId' | 'recipientId'>): string {
   return `${row.messageId}\u0000${row.recipientId}`
+}
+
+// ---------------------------------------------------------------------------
+// LANE ②-bis (G2 — the LEGACY 'prepared' residue; host decision 2026-09-03:
+// G2 = the store's 'prepared' rows without a 'delivered' — the 843 pre-boot
+// legacy rows + the prepared-x2 retry-storm rows (m-155/m-158: 226/225 rows
+// for ONE pair) — to settle IN RUNTIME, NO manual drain). The re-drive
+// machinery (boot pass + sweep) drives ONLY the LATEST row per (messageId,
+// recipientId) pair, so an EARLIER 'prepared' row shadowed by a later final
+// row is never touched: it stays 'prepared' in the store until the boot
+// compaction (> COMPACTION_LINE_THRESHOLD lines) rewrites the file. G2 closes
+// that gap with a BOUNDED in-place settle: the legacy dust rows are rewritten
+// to 'terminal' — a pure store status flip: NO deliver() call, NO
+// materialization/wake of the recipient, NO new notification (a 'terminal' row
+// is never a scanDeliveryFindings anomaly), no grace/backoff (they are legacy,
+// not in-flight attempts). m-440 coexistence: a 'prepared' row in flight to a
+// REROUTABLE retired host (recipientAlive === true — the lane-② catalog
+// semantic) is NEVER settled here — the re-drive re-routes it; only the
+// dead-end/raw/shadowed-dust rows resolve terminal, without waking anyone.
+// ---------------------------------------------------------------------------
+
+/** LANE ②-bis — the classification of one settle cycle (see
+ * `classifyG2LegacyRows`). */
+export interface G2LegacyClassification {
+  /** Rows shadowed by a LATER FINAL row of the same pair (delivered/resumed/
+   * self/terminal) — the write-ahead dust of an ALREADY-resolved delivery. */
+  settleStaleDust: DeliveryRow[]
+  /** Rows shadowed by a later non-final row of a DEAD-END pair (recipient not
+   * alive / not reroutable — the pair can never deliver) — the same dead
+   * weight as the stale dust, doomed by the recipient class. */
+  settleDeadEnd: DeliveryRow[]
+  /** 'prepared' rows the G2 batch leaves to the re-drive machinery: the
+   * pair's LATEST row (drivePair's domain — dead settles terminal, alive
+   * re-drives on the backoff/prepared-stuck cadence; m-440: a reroutable
+   * retired host re-routes instead of settling) AND the older rows of an
+   * ALIVE retrying pair (the attempt ledger the backoff/exhaustion math
+   * reads — never collapsed by the settle). */
+  keptInFlight: number
+  /** 'prepared' rows younger than the legacy threshold — live write-ahead. */
+  keptFresh: number
+}
+
+/** LANE ②-bis — PURE classification of every 'prepared' sidecar row into the
+ * G2 legacy-settle classes (the exact criterion the drain seed applies). 0 API
+ * calls (pure over the rows + the injected aliveness predicate):
+ *   - **stale-dust** → settle: NOT the pair's latest AND the pair's latest is
+ *     FINAL — the row-level "prepared without delivered" residue of a delivery
+ *     that ALREADY resolved (the 843 pre-boot rows + the storm rows).
+ *   - **dead-end** → settle: NOT the pair's latest, the latest still needs
+ *     re-delivery, AND the recipient is dead/unknown (not alive, not a
+ *     reroutable retired host — a retired host without successor, a raw
+ *     session id, an unknown id). drivePair settles the pair's latest; these
+ *     older rows are the same dead weight.
+ *   - **in-flight** → keep: the row is the pair's latest (the re-drive owns
+ *     it — m-440/B3: a live 'prepared' queue drains via re-drive/real wake,
+ *     never here) OR a shadowed row of an ALIVE retrying pair (its attempt
+ *     ledger must stay intact for the backoff/exhaustion math).
+ *   - **fresh** → keep: younger than `legacyAgeMs` (default the prepared-stuck
+ *     threshold, 10 min) — part of the live write-ahead record; it ages into
+ *     the legacy classes and settles in a later cycle. */
+export function classifyG2LegacyRows(
+  rows: readonly DeliveryRow[],
+  nowMs: number,
+  legacyAgeMs: number = RE_DELIVERY_PREPARED_STUCK_MS,
+  recipientAlive: (recipientId: string) => boolean = () => true
+): G2LegacyClassification {
+  const latestKey = new Map<string, DeliveryRow>()
+  for (const row of rows) latestKey.set(deliveryKey(row), row)
+  const settleStaleDust: DeliveryRow[] = []
+  const settleDeadEnd: DeliveryRow[] = []
+  let keptInFlight = 0
+  let keptFresh = 0
+  for (const row of rows) {
+    if (row.status !== 'prepared') continue
+    if (nowMs - row.ts <= legacyAgeMs) {
+      keptFresh++
+      continue
+    }
+    const latest = latestKey.get(deliveryKey(row))
+    if (latest === undefined || latest === row) {
+      // The pair's live state — the re-drive owns it (drivePair): a DEAD
+      // recipient settles terminal there, an ALIVE one re-drives on the
+      // backoff/prepared-stuck cadence. NEVER the G2 settle (m-440 / B3).
+      keptInFlight++
+      continue
+    }
+    if (!needsRedelivery(latest.status)) {
+      settleStaleDust.push(row) // shadowed by a final row — resolved delivery
+      continue
+    }
+    // Shadowed by a later non-final row: alive → the pair still retries (its
+    // attempt ledger — kept); dead/unknown → the pair is doomed → dead weight.
+    if (recipientAlive(row.recipientId)) keptInFlight++
+    else settleDeadEnd.push(row)
+  }
+  return { settleStaleDust, settleDeadEnd, keptInFlight, keptFresh }
+}
+
+/** LANE ②-bis — the observable outcome of one `settleG2Batch` cycle (the QD
+ * closure ledger: legacy settled vs re-driven/kept vs the prepared-stuck
+ * residue). */
+export interface G2SettleCounts {
+  /** Legacy 'prepared' rows rewritten to 'terminal' in this cycle (total). */
+  settled: number
+  /** Of `settled`: rows shadowed by a later FINAL row (dust of a resolved
+   * delivery). */
+  settledStaleDust: number
+  /** Of `settled`: rows of a DEAD-END pair (the recipient can never
+   * deliver). */
+  settledDeadEnd: number
+  /** 'prepared' rows left to the re-drive machinery (m-440: never settled by
+   * G2; B3: a dormant queue's intent is its next real wake). */
+  keptInFlight: number
+  /** 'prepared' rows younger than the legacy threshold — live write-ahead. */
+  keptFresh: number
+  /** Candidate rows SKIPPED by the ALTO-1 rebind guard (their CURRENT record
+   * is trimmed/rebound — never settle the wrong pair). */
+  skippedRebind: number
+  /** PAIRS whose latest row is 'prepared' and older than the legacy threshold
+   * AFTER this cycle — the exact QD closure criterion ("0 prepared-stuck
+   * > 10 min": the sweep re-drives them; the number must reach 0). */
+  preparedStuckRemaining: number
 }
 
 // ---------------------------------------------------------------------------
@@ -924,6 +1056,8 @@ export class DeliveryRedeliverer {
   private readonly maxAttempts: number
   private readonly stormWindowMs: number
   private readonly preparedStuckMs: number
+  private readonly g2DrainSeedLimit: number
+  private readonly legacyAgeMs: number
 
   constructor(
     deps: DeliveryRedelivererDeps,
@@ -939,6 +1073,15 @@ export class DeliveryRedeliverer {
       stormWindowMs?: number
       /** The prepared-stuck criterion (default `RE_DELIVERY_PREPARED_STUCK_MS`). */
       preparedStuckMs?: number
+      /** LANE ②-bis — the per-cycle cap of the G2 legacy drain seed (default
+       * `G2_DRAIN_SEED_DEFAULT_LIMIT`): at most this many legacy 'prepared'
+       * dust rows are rewritten to 'terminal' per boot pass / sweep tick. */
+      g2DrainSeedLimit?: number
+      /** LANE ②-bis — the G2 legacy-age threshold (default
+       * `RE_DELIVERY_PREPARED_STUCK_MS` — the same 10 min as the
+       * prepared-stuck criterion): a 'prepared' dust row younger than this is
+       * live write-ahead, left alone until it ages past it. */
+      legacyAgeMs?: number
     } = {}
   ) {
     this.deps = deps
@@ -947,6 +1090,8 @@ export class DeliveryRedeliverer {
     this.maxAttempts = opts.maxAttempts ?? RE_DELIVERY_DEFAULT_MAX_ATTEMPTS
     this.stormWindowMs = opts.stormWindowMs ?? RE_DELIVERY_STORM_WINDOW_MS
     this.preparedStuckMs = opts.preparedStuckMs ?? RE_DELIVERY_PREPARED_STUCK_MS
+    this.g2DrainSeedLimit = opts.g2DrainSeedLimit ?? G2_DRAIN_SEED_DEFAULT_LIMIT
+    this.legacyAgeMs = opts.legacyAgeMs ?? RE_DELIVERY_PREPARED_STUCK_MS
   }
 
   /** The sidecar parse (full read — the SAME seam the boot pass uses). */
@@ -1066,6 +1211,18 @@ export class DeliveryRedeliverer {
         const attempts = this.pairAttempts(rows, row.messageId, row.recipientId)
         await this.drivePair(row, attempts, Date.now(), 'boot')
       }
+      // LANE ②-bis — the G2 legacy drain seed runs at boot too (the host
+      // decision: the 843-row pre-boot 'prepared' backlog settles IN RUNTIME,
+      // no manual drain): one BOUNDED batch (≤ `g2DrainSeedLimit`) of the
+      // legacy dust rows left by the re-drive loop (a pair the loop just
+      // settled to 'terminal' exposes its older 'prepared' rows as shadowed
+      // dust — settled in the same boot pass; in-flight pairs are never
+      // touched). The drain is no-wake (a pure status flip — never a deliver()
+      // call) and idempotent (terminal rows are never candidates again).
+      const g2boot = await this.settleG2Batch(Date.now())
+      if (g2boot.settled > 0 || g2boot.skippedRebind > 0) {
+        logger.info(`[deepartments] boot G2 legacy settle: ${g2boot.settled} 'prepared' dust rows → 'terminal' (${g2boot.settledStaleDust} stale-dust + ${g2boot.settledDeadEnd} dead-end), skipped-rebind ${g2boot.skippedRebind}; in-flight kept ${g2boot.keptInFlight}; prepared-stuck>${Math.round(this.legacyAgeMs / 60000)}min remaining ${g2boot.preparedStuckRemaining}`)
+      }
     } catch (error: unknown) {
       logger.warn(`[deepartments] boot deliveries re-delivery pass failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -1090,6 +1247,7 @@ export class DeliveryRedeliverer {
       const rows = await this.readSidecarRows()
       const latestPerKey = new Map<string, DeliveryRow>()
       for (const row of rows) latestPerKey.set(`${row.messageId}\u0000${row.recipientId}`, row)
+      let drove = 0 // the re-drive counter (the observability half of the ledger)
       for (const row of latestPerKey.values()) {
         if (!needsRedelivery(row.status)) continue
         const attempts = pairAttemptCount(rows, row.messageId, row.recipientId, nowMs, this.stormWindowMs)
@@ -1097,9 +1255,133 @@ export class DeliveryRedeliverer {
         // drivePair); a NOT-yet-due live pair is left for a LATER sweep.
         if (this.deps.recipientAlive(row.recipientId) && !this.pairDue(row, attempts, nowMs)) continue
         await this.drivePair(row, attempts, nowMs, 'sweep')
+        drove++
+      }
+      // LANE ②-bis — the G2 legacy drain runs AFTER the re-drive loop, so the
+      // in-flight prepared rows this cycle re-drove (→ the deliver seam
+      // appended the final row) are ALREADY shadowed dust and settle in the
+      // SAME pass — the batch and the re-drive converge on "0 prepared-stuck
+      // > 10 min" without any manual drain (host decision 2026-09-03).
+      const g2 = await this.settleG2Batch(nowMs)
+      if (drove > 0 || g2.settled > 0 || g2.skippedRebind > 0) {
+        logger.info(`[deepartments] redelivery sweep cycle: drove ${drove} pairs; G2 legacy settle ${g2.settled} (${g2.settledStaleDust} stale-dust + ${g2.settledDeadEnd} dead-end) → 'terminal' (no-wake), skipped-rebind ${g2.skippedRebind}; in-flight kept ${g2.keptInFlight}, fresh kept ${g2.keptFresh}; prepared-stuck>${Math.round(this.legacyAgeMs / 60000)}min remaining ${g2.preparedStuckRemaining}`)
       }
     } catch (error: unknown) {
       logger.warn(`[deepartments] re-delivery sweep failed (non-fatal — the boot pass + the next sweep re-evaluate): ${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  /**
+   * LANE ②-bis (G2 — the LEGACY 'prepared' residue; host decision 2026-09-03:
+   * NO manual drain) — the MISSION-QUEUE DRAIN SEED: a BOUNDED per-cycle
+   * settle of the legacy 'prepared' rows the re-drive machinery never touches
+   * (an EARLIER row shadowed by the pair's later final row: the 843 pre-boot
+   * rows + the prepared-x2 storm rows — the re-drive only drives the LATEST
+   * row per pair, so this dust would stay 'prepared' in the store FOREVER
+   * until the boot compaction rewrites the file). The settle is TERMINAL and
+   * NO-WAKE by construction: it rewrites the affected rows' status to
+   * 'terminal' IN PLACE (a pure store flip — the same write-back the boot
+   * compaction uses) and NEVER calls `deliver()`, so it can never
+   * materialize/wake the recipient nor emit a fresh notification (a terminal
+   * row is never a scanDeliveryFindings anomaly), and it applies NO
+   * grace/backoff (they are legacy, not in-flight attempts). The default
+   * per-cycle cap `G2_DRAIN_SEED_DEFAULT_LIMIT` (250) drains the 843-row
+   * residue in ~4 cycles at the 60 s sweep cadence — bounded time, no storm
+   * (the flip only REMOVES 'prepared' rows from the ledger; it adds none, so
+   * §7.5 cannot trip).
+   *
+   * The classification is `classifyG2LegacyRows`: stale-dust (shadowed by a
+   * final row) + dead-end (shadowed rows of a dead/unknown pair) settle;
+   * EVERYTHING ELSE stays: the pair's LATEST row (drivePair's domain — m-440:
+   * a 'prepared' in flight to a REROUTABLE retired host re-routes, never
+   * settles; B3: a DORMANT recipient's noWake queue drains at its next REAL
+   * wake) and the shadowed rows of an ALIVE retrying pair (their attempt
+   * ledger feeds the backoff/exhaustion math — never collapsed), plus every
+   * row younger than `legacyAgeMs` (live write-ahead). ALTO-1 (the m-728
+   * rebind guard): a candidate whose CURRENT record is trimmed or never
+   * addressed the recipient is SKIPPED (`skippedRebind`) — never settle the
+   * wrong pair.
+   *
+   * CONCURRENCY: the read → classify → flip → write runs as ONE SYNCHRONOUS
+   * stretch (`readFileSync` … `writeFileSync`). The sweep runs with the LIVE
+   * write-ahead seam active — an async read/flip/write could DROP a delivery
+   * row the seam appended in between (a real delivery's final status lost);
+   * the sync stretch is atomic w.r.t. the event loop, and the sidecar is
+   * bounded (the boot compaction caps it at `COMPACTION_LINE_THRESHOLD`
+   * lines). Non-fatal like the rest of the pass: any error logs and is
+   * swallowed (the next cycle re-evaluates). Returns the observable counts
+   * (the QD closure ledger).
+   */
+  async settleG2Batch(nowMs: number = Date.now(), limit: number = this.g2DrainSeedLimit): Promise<G2SettleCounts> {
+    const { stateDir, logger } = this.deps
+    const empty: G2SettleCounts = { settled: 0, settledStaleDust: 0, settledDeadEnd: 0, keptInFlight: 0, keptFresh: 0, skippedRebind: 0, preparedStuckRemaining: 0 }
+    try {
+      const rows = await this.readSidecarRows()
+      if (rows.length === 0) return empty
+      const classified = classifyG2LegacyRows(rows, nowMs, this.legacyAgeMs, this.deps.recipientAlive)
+      const stuckPairs = this.preparedStuckPairCount(rows, nowMs)
+      const candidates = [...classified.settleStaleDust, ...classified.settleDeadEnd].slice(0, limit)
+      // ALTO-1 (m-728): settle ONLY a candidate whose CURRENT record exists
+      // AND actually addresses the recipient (the boot driver's rebind rule).
+      const settledStaleDust: DeliveryRow[] = []
+      const settledDeadEnd: DeliveryRow[] = []
+      for (const row of candidates) {
+        const record = await this.deps.getRecord(row.messageId)
+        if (record === void 0 || !record.to.includes(row.recipientId)) continue
+        if (classified.settleStaleDust.includes(row)) settledStaleDust.push(row)
+        else settledDeadEnd.push(row)
+      }
+      const settled = [...settledStaleDust, ...settledDeadEnd]
+      const base: G2SettleCounts = {
+        settled: settled.length,
+        settledStaleDust: settledStaleDust.length,
+        settledDeadEnd: settledDeadEnd.length,
+        keptInFlight: classified.keptInFlight,
+        keptFresh: classified.keptFresh,
+        skippedRebind: candidates.length - settled.length,
+        preparedStuckRemaining: stuckPairs
+      }
+      if (settled.length === 0) return base
+      // Row-identity flip set: the EXACT serialized candidate rows (messageId +
+      // recipientId + status + ts). A pair has MANY rows sharing the same
+      // (messageId, recipientId) key — a key-only match would ALSO flip the
+      // pair's OTHER rows (e.g. the 'delivered' evidence of an already-resolved
+      // delivery, destroying the final proof). Only the precise row flips.
+      const flipRows = new Set<string>()
+      for (const row of settled) flipRows.add(JSON.stringify(row))
+      // The ONE synchronous read → status-flip → write: atomic w.r.t. the
+      // event loop (see the method doc — no lost concurrent append).
+      let flippedText: string
+      try {
+        const text = readFileSync(resolveDeliveriesPath(stateDir), 'utf8')
+        flippedText =
+          parseDeliveryRows(text)
+            .map((row) => (flipRows.has(JSON.stringify(row)) ? JSON.stringify({ messageId: row.messageId, recipientId: row.recipientId, status: 'terminal', ts: row.ts }) : JSON.stringify(row)))
+            .join('\n') + '\n'
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return empty // nothing ever sent
+        throw error
+      }
+      writeFileSync(resolveDeliveriesPath(stateDir), flippedText, 'utf8')
+      logger.info(`[deepartments] G2 legacy settle: ${settled.length} 'prepared' dust rows → 'terminal' in place (no-wake; ${settledStaleDust.length} stale-dust + ${settledDeadEnd.length} dead-end), skipped-rebind ${base.skippedRebind}; prepared-stuck>${Math.round(this.legacyAgeMs / 60000)}min remaining ${stuckPairs}`)
+      return base
+    } catch (error: unknown) {
+      logger.warn(`[deepartments] G2 legacy settle failed (non-fatal — the next cycle re-evaluates): ${error instanceof Error ? error.message : String(error)}`)
+      return empty
+    }
+  }
+
+  /** Pairs whose LATEST row is a 'prepared' OLDER than the legacy threshold —
+   * the sweep's OWN prepared-stuck view (the QD closure criterion "0
+   * prepared-stuck > 10 min": the sweep re-drives these; the G2 settle never
+   * touches the pair-latest, so this count is what must reach 0). */
+  private preparedStuckPairCount(rows: readonly DeliveryRow[], nowMs: number): number {
+    const latestKey = new Map<string, DeliveryRow>()
+    for (const row of rows) latestKey.set(deliveryKey(row), row)
+    let count = 0
+    for (const row of latestKey.values()) {
+      if (row.status === 'prepared' && nowMs - row.ts > this.legacyAgeMs) count++
+    }
+    return count
   }
 }
