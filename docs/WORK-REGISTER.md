@@ -158,18 +158,19 @@
     DIAG fb-61 — id-mint atómico (messages.ts) + FIFO serializer + dedupe
     check-append-advance (dshd-health); suite 738/716/0/22 (+4 tests races).
   - **LANE DEL INCIDENTE 09-03 (cadena IPH, secuencial — UN lane a la vez)**:
-    ① **clasificador 401-invalid: DESPLEGADO (09-03 18:23, restart canary PASS
-    — código nuevo vivo: sweep convergió, oc-8/9/11/12 quota-blocked,
-    lastRotation registrada, completion real 200) — FINDING POST-DEPLOY**:
-    oc-10 quedó SELECTABLE (invalid:false, blockedUntil 0, lastError 'auth
-    error 401', probada 18:23:51 SIN invalidar) → **402 Insufficient Balance
-    intermitente en workers** (19:45-20:12Z) — gap probe-vs-real: la clase
-    402/401 del probe cae en "resto"→inconclusive y no mata la key →
-    **hot-block oc-10 + fix del clasificador (402/401 → billing/auth-invalid)
-    = lane IPH prioridad alta** → ② **delivery lane commits 1-4 (fix formal del
+    ① **clasificador 401-invalid: DESPLEGADO 2x (09-03 18:23 73d8922 + 18:46
+    hotfix 402 0a9cdc7 — ambos canary PASS; lib live)**: sweep convergió
+    (oc-8/9/11/12 quota-blocked hasta 09-23..28), completion real 200,
+    **oc-10 FUERA por hot-block (billingBlocked, invalid:true; nextProbeAt
+    ~24h; el fix 402→billing-block con auto-heal resolve el gap probe-vs-real
+    del finding post-deploy)** → **LATCH PENDIENTE de confirmación IPH
+    (convergencia: oc-10 fuera, oc-6 valid, 0 post-error 429→to:null — el
+    checklist post-hotfix del host fue PASS)** → ② **delivery lane commits 1-4
+    (fix formal del
     gate — VEREDICTO QD: 0 commits aún; branch 3 dshd-health:3069-3077 SIN
-    age-check RE-ARMABLE — R1, prioridad ALTA tras el fix del pool)** →
-    ③ **stable :3080 (owner AUTORIZÓ 09-03 — procede al terminar ①+②; §3
+    age-check RE-ARMABLE — R1, prioridad ALTA tras el fix del pool; arranque a
+    orden del IPH)** →
+    ③ **stable :3080 (owner AUTORIZÓ 09-03 — §3
     RAG-stable sentinel)**.
   - **settings revert (provider→opencode-zen con Go vivo)** — coordinar con IPH
     (bandeja owner abierta). · **job-runs primitiva** — en cola IPD.
