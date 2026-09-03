@@ -158,9 +158,15 @@
     prepared-stuck m-425 + fb-83 4º abort hoy — clase AMPLIADA de mensajería
     (send_message/memo) a tools de OPERACIÓN (bash); consolidado en notas fb-81).
   - **fb-78 A1+A2+A3 (post-restart: re-aplicación smokes vía API + lane)** —
-    A1 EN VUELO (builder-2: registry.archiveSession — clobber confirmado:
-    workspace.json hide-set vivo updatedAt 16:39Z, .bak-smokearchive SIN la
-    edición de builder-36; nunca edit directo — fb-82).
+    **A1 CERRADO (09-03, lane builder-2 PASS; reporte
+    reports/builder/2026-09-03-smokearchive-hideset-api-d7fe08ee.md)**: los 4
+    ids (291b7fa4/d051ef54/b979e1db/bad24e6c) en archivedSessionIds del
+    workspace.json vivo (grep líneas 1614-1617, hunk único +4; diff post =
+    SOLO ese hunk, keyPooler-state intacto) vía **API canónica
+    (POST /api/workspace.archiveSession — fb-82**; la lane previa de
+    builder-36 fue edit directo → perdido en reseed, causa raíz documentada);
+    sesiones reales verificadas; re-call idempotente; restart NO necesario;
+    0 commits/0 edits. **A2/A3 pendientes**.
   - **fb-64 (execRoots + stateDir READ-ONLY — aditivo) — scoping documentado
     (`b05d75a`, opción C — ARCHITECTURE.md execution scope; NOTE comment-only en
     fixture fb-62); verificación pendiente** · GUI monitor owner-gated parqueado.
