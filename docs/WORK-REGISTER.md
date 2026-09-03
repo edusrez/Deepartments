@@ -179,7 +179,9 @@
     (send_message/memo) a tools de OPERACIÓN (bash); consolidado en notas fb-81).
     **fb-58 recidiva DOBLE (veredicto QD 09-03): F-1 m-2236 65-min stuck + F-3
     FRESCA: m-424/425/429 → host retired 66031134 quedaron 'prepared' x2 sin
-    terminal — settle del sidecar SIN implementar.** Cierre formal familia
+    terminal — settle del sidecar SIN implementar.** + **F-4 LIVE 09-03:
+    m-410 → quality-head sin inicio 10 min con idle (mission-stalled —
+    nudged always-wake; despierta y drena).** Cierre formal familia
     fb-69/70/81/m-425 = lane ② + 48h de 0 failed (criterios §7 reporte QD).
   - **fb-78 A1+A2+A3 (post-restart: re-aplicación smokes vía API + lane)** —
     **A1 CERRADO (09-03, lane builder-2 PASS; reporte
