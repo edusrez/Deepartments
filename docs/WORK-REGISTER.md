@@ -217,8 +217,11 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 - **:3080 + stable-update (19 releases pendientes)** — actualización estable
   pendiente de decisión/programación (ver veredicto RD alpha.4; HOLD 0.1.1-rc.2
   documentado en ROADMAP 09-01).
-- **0.1.2 A/B (rama WIP+main verde vs salto rc.1) + vanilla (probar la versión
-  limpia del rc)** — PENDIENTE-OWNER (bandeja abierta 09-03; nada se asume).
+- **0.1.2 — DECIDIDO (owner 09-03): OPCIÓN A — WIP+main hasta verde** (el IPD
+  aterriza la migración session-surface 0.1.2 rc.1 — tests ya re-freezados;
+  main a verde sin salto de versión). **Vanilla** (probar la versión limpia del
+  rc) — después del aterrizaje. (El rojo del main por el WIP fue detectado por
+  el watchdog system-health; cierra con el landing.)
 - **glm-fallback vía OpenRouter → DESCARTADO (owner 09-01)** — la flota sigue
   100% DS; el veredicto de fondo (ruta opencode-go es el cuello, no la key)
   queda como conocimiento del RD (reports/researcher/2026-09-01-consolidated-
