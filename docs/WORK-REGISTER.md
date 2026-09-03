@@ -21,6 +21,19 @@
 > registrado; capacidad al día (owner: top-up no por ahora). Deriva detectada
 > por el propio host al comparar con el ROADMAP (lección: sincronizar el
 > register al CERRAR cada bloque — norma de continuación, fb-46).
+> **LANDING 2026-09-03 (host Asistente)** — **DÍA DE INFARTO RESUELTO — apagón
+> de coordinación ~2h cerrado + recuperación**: crash-loop build-0.1.2-vs-kernel
+> (parche dual Stable) · keys Go inválidas/sin-crédito (usage 200 ≠ chat-auth) ·
+> **pooler-gate branch 3 re-armado por lastRotation stale → materializePost
+> bloqueado → cabezas sin despertar**. Workarounds: **key opencode-go del OWNER
+> (chat-auth 200 — la única real) en oc-6** + gate-clean + restos en cooldown
+> (monthly resets 23-28/09) → pool OK · **delivery vivo (m-416/417)** · fix
+> formal en la delivery lane (commits 1-4). Cadena IPH: ① clasificador
+> 401-invalid (en vuelo) → ② delivery lane + gate fix → ③ **stable :3080 —
+> AUTORIZADO owner 09-03 (supersede "NO TOCAR" 09-01; RAG-stable sentinel
+> aplica, §3)**. QD: inspección del incidente (2 inspectores; datapoints
+> fb-79/fb-58/fb-83 — familia de aborts ampliada de mensajería a tools de
+> operación). Suite 738/716/0/22 (fb-68). Commits del día 16+ (a00e8de último).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
@@ -123,14 +136,34 @@
     deny runtime sobre /root/.deepartments persiste; define casos de uso mínimos
     (feedback.jsonl, zstd archives), opciones aditivas + riesgo de tests,
     y si habilita la limpieza de los 6 STALE + copia canónica 2 FROZEN.
-  - **fb-65 (bajo — ask_user_question con owner ausente: rechazo duro sin
-    orientar al canal alternativo PENDIENTE-OWNER)** · **fb-68 (medio/fallo —
-    atomicidad post-errors src-side: appendPostErrorDeduped dedupe no atómico
-    dshd-health:767-775 + MessagesStore.append ids duplicados
-    dshd-core/messages.ts:501-528; fixes de raíz del DIAG fb-61)** — en cola
-    (orden: fb-64 → fb-65 → fb-68 → familia transporte [fb-23/69/70 send abort
-    pre-dispatch sin persistencia] → fb-58 mirror lane; GUI monitor owner-gated
-    parqueado).
+  - **fb-65 (bajo — ask_user_question con owner ausente) — CERRADO (`35a267e`)**:
+    opciones A+C — guard owner-absent orienta a PENDIENTE-OWNER (preserva
+    contrato regex) + guidance wakepack rama absent; suite 734/712/0/22.
+  - **fb-68 (medio/fallo — atomicidad post-errors src-side: appendPostErrorDeduped
+    dedupe no atómico dshd-health:767-775 + MessagesStore.append ids duplicados
+    dshd-core/messages.ts:501-528) — CERRADO (`a00e8de`)**: fixes de raíz del
+    DIAG fb-61 — id-mint atómico (messages.ts) + FIFO serializer + dedupe
+    check-append-advance (dshd-health); suite 738/716/0/22 (+4 tests races).
+  - **LANE DEL INCIDENTE 09-03 (cadena IPH, secuencial — UN lane a la vez)**:
+    ① **clasificador 401-invalid (EN VUELO — prioridad; demostró hoy: usage 200
+    ≠ chat-auth) — builder scoped 401/billing vs 429/monthly, 0 toques a
+    stateDir vivo** → ② **delivery lane commits 1-4 (fix formal del gate
+    materializePost + re-drive sweep — relanzada al aterrizar ①)** → ③ **stable
+    :3080 (owner AUTORIZÓ 09-03 — procede al terminar ①+②; §3 RAG-stable
+    sentinel)**.
+  - **settings revert (provider→opencode-zen con Go vivo)** — coordinar con IPH
+    (bandeja owner abierta). · **job-runs primitiva** — en cola IPD.
+  - **familia transporte (fb-23/69/70/81 send abort pre-dispatch sin
+    persistencia → fb-58 mirror lane)** — en cola (datapoints QH 09-03: ack
+    prepared-stuck m-425 + fb-83 4º abort hoy — clase AMPLIADA de mensajería
+    (send_message/memo) a tools de OPERACIÓN (bash); consolidado en notas fb-81).
+  - **fb-78 A1+A2+A3 (post-restart: re-aplicación smokes vía API + lane)** —
+    A1 EN VUELO (builder-2: registry.archiveSession — clobber confirmado:
+    workspace.json hide-set vivo updatedAt 16:39Z, .bak-smokearchive SIN la
+    edición de builder-36; nunca edit directo — fb-82).
+  - **fb-64 (execRoots + stateDir READ-ONLY — aditivo) — scoping documentado
+    (`b05d75a`, opción C — ARCHITECTURE.md execution scope; NOTE comment-only en
+    fixture fb-62); verificación pendiente** · GUI monitor owner-gated parqueado.
 - **CERRADOS en esta cola (no pedir de nuevo):** M4 (system-idle),
   M-A (context-threshold + dept_head_rotate), PACING (peak/valle),
   M-5 (misión-sin-inicio), M-6 (main-red), M-7 (mission-queue),
@@ -172,18 +205,25 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   go-ahead del owner; safety copy del fix en tmp/port-harness-fb51-ca5df751/
   (workspace IPD, hashes verificados); acción del HOST (clone/PR/rebuild del
   monorepo — no construible desde los roots del lane).
-- **billing top-up CRÍTICO** — señalado por el host en el wake 09-02.
+- **billing top-up CRÍTICO → GESTIONADO 09-03 (workaround con backup)**: la key
+  real del OWNER (opencode-go, chat-auth 200) en oc-6 salva el pool; oc-8/9/10/
+  11/12 en cooldown (monthly resets 23-28/09); top-up real sigue sin decisión.
 - **:3080 + stable-update (19 releases pendientes)** — actualización estable
   pendiente de decisión/programación (ver veredicto RD alpha.4; HOLD 0.1.1-rc.2
   documentado en ROADMAP 09-01).
+- **0.1.2 A/B (rama WIP+main verde vs salto rc.1) + vanilla (probar la versión
+  limpia del rc)** — PENDIENTE-OWNER (bandeja abierta 09-03; nada se asume).
 - **glm-fallback vía OpenRouter → DESCARTADO (owner 09-01)** — la flota sigue
   100% DS; el veredicto de fondo (ruta opencode-go es el cuello, no la key)
   queda como conocimiento del RD (reports/researcher/2026-09-01-consolidated-
   telemetry-glm-retest.md).
 - **top-up ws10/oc-6 → NO por ahora (owner 09-01)** — varias keys con buena
   capacidad; se retoma cuando las keys se agoten (watch del pool).
-- **stable 3080 → NO TOCAR (owner 09-01)** — confirmado en presencia; el item
-  del RD (monitor dsh-updates) queda cerrado con ese veredicto.
+- **stable 3080 — SUPERSEDED (owner 09-03): lane AUTORIZADA** — el IPH procede
+  con el perfil stable (/opt/dsh/.dsh) al terminar ①+② de la lane del incidente;
+  **RAG-stable sentinel aplica**: antes del primer boot del stable, (i)
+  desactivar auto-index RAG O (ii) actualizar su plugin a 0.4.0-rc.1+denylist.
+  (El "NO TOCAR" 09-01 quedó reemplazado por esta autorización.)
 - **D-Q2 → mantener cadencia event-driven (owner 09-01)** — sin cap diario.
 - **RAG-stable SENTINEL-PENDIENTE (condicional, dormido)** — si/если se toca
   /opt/dsh/.dsh: (i) desactivar auto-index RAG O (ii) actualizar su plugin a
@@ -197,11 +237,17 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   reaparecen; restart-registry lo deja visible) · cause restarts 08-31
   explicada (switch glm + reversión).
 
-## 4. CAPACIDAD (al 09-01)
+## 4. CAPACIDAD (al 09-03)
 
-- Pool: oc-11 monthly 5% sana · oc-12 (otra cuenta, cuota independiente)
-  ACTIVA · DS-fallback a api.deepseek.com LIVE (c4a04bc) · fall-through 401/429
-  (bb22b20) · gate poolerGateEnabled (hardening 66399ad — live tras deploy).
+- Pool: **oc-6 = key real del OWNER (opencode-go, chat-auth 200 — la única
+  real; selectable) — salva el pool tras el incidente 09-03** · oc-8/9/10/11/12
+  en **cooldown mensual (resets 23-28/09)** — el LATCH (mantener el cooldown
+  hasta el fix formal) lo gestiona el host · DS-fallback a api.deepseek.com
+  LIVE (c4a04bc) · fall-through 401/429 (bb22b20) · gate poolerGateEnabled
+  (hardening 66399ad — live tras deploy).
+- Lección 09-03: **usage 200 ≠ chat-auth** (verificación de keys contra el
+  adaptador/chat, no la API raw) — el clasificador 401-invalid formaliza la
+  distinción 401/billing vs 429/monthly.
 - Límites conocidos: oc-10 workspace bloqueado hasta 09-07 · wrk_01KYW76T8 a
   cero desde 08-31 (evidencia del outage 401) — owner: no urgente (top-up no
   por ahora).
