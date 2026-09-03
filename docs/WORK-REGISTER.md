@@ -34,6 +34,19 @@
 > aplica, §3)**. QD: inspección del incidente (2 inspectores; datapoints
 > fb-79/fb-58/fb-83 — familia de aborts ampliada de mensajería a tools de
 > operación). Suite 738/716/0/22 (fb-68). Commits del día 16+ (a00e8de último).
+> **VEREDICTO QD consolidado (09-03, 3 inspectores — reporte
+> .dsh/reports/quality/2026-09-03-incident-delivery-consolidated.md)**:
+> incidente RESUELTO operativamente pero NO cerrable como clase — cadena
+> confirmada con artefactos+código (pooler stale lastRotation 429→null 09-02
+> 16:10:37Z → gate branch 3 dshd-health:3069-3077 SIN age-check, bloqueó con
+> 6/6 usable → materializePost → 295 filas failed 13:54→17:02Z → gate-clean
+> 17:02:34Z re-entrega 100% en 71s, 0 pérdida); **FIX FORMAL AUSENTE (lane ② =
+> 0 commits en git — el gate-clean fue 100% operativo, no código)**; cierre
+> formal de clase = lane ② + 48h de 0 failed (criterios §7 del reporte);
+> **R1: branch 3 re-armable (sin age-check) — prioridad ALTA de la lane ②**;
+> fb-58 recidiva doble (F-3: m-424/425/429 'prepared' x2 post-retirement,
+> settle sidecar sin implementar); rotación host m-423 PARTIAL (archive corto
+> ~85 líneas, m-426 delivered post-retirement).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
@@ -145,18 +158,24 @@
     DIAG fb-61 — id-mint atómico (messages.ts) + FIFO serializer + dedupe
     check-append-advance (dshd-health); suite 738/716/0/22 (+4 tests races).
   - **LANE DEL INCIDENTE 09-03 (cadena IPH, secuencial — UN lane a la vez)**:
-    ① **clasificador 401-invalid (EN VUELO — prioridad; demostró hoy: usage 200
-    ≠ chat-auth) — builder scoped 401/billing vs 429/monthly, 0 toques a
-    stateDir vivo** → ② **delivery lane commits 1-4 (fix formal del gate
-    materializePost + re-drive sweep — relanzada al aterrizar ①)** → ③ **stable
-    :3080 (owner AUTORIZÓ 09-03 — procede al terminar ①+②; §3 RAG-stable
-    sentinel)**.
+    ① **clasificador 401-invalid ATERRIZADO (09-03, código: probe chat real —
+    ataca la raíz; 131/131 + 12 tests; reporte 031c5dbd) — DEPLOY pendiente de
+    ventana** (explore-deep verificando reload pooler-local vs restart; tras
+    el WIP session-surface) → ② **delivery lane commits 1-4 (fix formal del
+    gate — VEREDICTO QD: 0 commits aún; branch 3 dshd-health:3069-3077 SIN
+    age-check RE-ARMABLE — R1, prioridad ALTA tras los aterrizajes en vuelo)** →
+    ③ **stable :3080 (owner AUTORIZÓ 09-03 — procede al terminar ①+②; §3
+    RAG-stable sentinel)**.
   - **settings revert (provider→opencode-zen con Go vivo)** — coordinar con IPH
     (bandeja owner abierta). · **job-runs primitiva** — en cola IPD.
   - **familia transporte (fb-23/69/70/81 send abort pre-dispatch sin
     persistencia → fb-58 mirror lane)** — en cola (datapoints QH 09-03: ack
     prepared-stuck m-425 + fb-83 4º abort hoy — clase AMPLIADA de mensajería
     (send_message/memo) a tools de OPERACIÓN (bash); consolidado en notas fb-81).
+    **fb-58 recidiva DOBLE (veredicto QD 09-03): F-1 m-2236 65-min stuck + F-3
+    FRESCA: m-424/425/429 → host retired 66031134 quedaron 'prepared' x2 sin
+    terminal — settle del sidecar SIN implementar.** Cierre formal familia
+    fb-69/70/81/m-425 = lane ② + 48h de 0 failed (criterios §7 reporte QD).
   - **fb-78 A1+A2+A3 (post-restart: re-aplicación smokes vía API + lane)** —
     **A1 CERRADO (09-03, lane builder-2 PASS; reporte
     reports/builder/2026-09-03-smokearchive-hideset-api-d7fe08ee.md)**: los 4
@@ -270,6 +289,12 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 
 ## 5. BACKLOG
 
+- **Rotación host m-423 PARTIAL (veredicto QD 09-03)**: el archive de
+  dept_sleep corta ~85 líneas de la cola zombie final (incl. m-426 delivered
+  post-retirement; acks a host rotado 'prepared') — candidato fix IPD
+  (completar archive/settle del sidecar). · **Residuo live-handle**: builder-2
+  retired:true en posts.json pero running en dept_who — higiene IPD (revisar/
+  retirar handle).
 - **Hueco pre-existente zombie rule (dsh-key-pooler — OBSERVADO en lane
   clasificador 401 09-03, NO arreglado, byte-idéntico preservado)**: probe
   403-region-gate sobre key clase-401 sobrescribe errorClass→'403' en
