@@ -182,7 +182,11 @@
     FRESCA: m-424/425/429 → host retired 66031134 quedaron 'prepared' x2 sin
     terminal — settle del sidecar SIN implementar.** + **F-4 LIVE 09-03:
     m-410 → quality-head sin inicio 10 min con idle (mission-stalled —
-    nudged always-wake; despierta y drena).** Cierre formal familia
+    nudged always-wake; despierta y drena).** + **F-5: drenaje de cola del IPH
+    post-boot (18:46+): acks STALE del handoff previo asentándose al procesar
+    la cola (2+ recibidos; el LATCH real queda detrás del drain — los
+    prepared viejos se procesan al despertar, el settle del sidecar sigue
+    pendiente).** Cierre formal familia
     fb-69/70/81/m-425 = lane ② + 48h de 0 failed (criterios §7 reporte QD).
   - **fb-78 A1+A2+A3 (post-restart: re-aplicación smokes vía API + lane)** —
     **A1 CERRADO (09-03, lane builder-2 PASS; reporte
