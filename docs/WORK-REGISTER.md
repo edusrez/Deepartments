@@ -282,10 +282,13 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 - Pool: **oc-6 = key real del OWNER (opencode-go, chat-auth 200 — la única
   real; selectable) — salva el pool tras el incidente 09-03** · oc-8/9/10/11/12
   en **cooldown mensual (resets 23-28/09)** — el LATCH (mantener el cooldown
-  hasta el fix formal) lo gestiona el host · **POST-DEPLOY 09-03 18:23: oc-8/9/
-  11/12 quota-bloqueadas automáticamente (monthly 100%); OC-10 SIGUE
-  SELECTABLE (auth 401 no invalidada por el sweep — poison 402; hot-block +
-  fix clasificador en lane IPH)** · DS-fallback a api.deepseek.com
+  hasta el fix formal) lo gestiona el host · **POST-DEPLOY 09-03 18:23-18:35:
+  oc-8/9/11/12 quota-bloqueadas automáticamente (monthly 100%, blockedUntil
+  09-23..28); OC-10 HOT-BLOCKED (billingBlocked + invalid:true + errorClass
+  401 — front A de builder-6 aplicado; la poison 402 queda fuera de selección);
+  lastRotation FRESCA con to≠null → branch 3 del gate NO re-armada (R1 sigue
+  por el age-check de la lane ②); usable = oc-6 (R3 estructural)** ·
+  DS-fallback a api.deepseek.com
   LIVE (c4a04bc) · fall-through 401/429 (bb22b20) · gate poolerGateEnabled
   (hardening 66399ad — live tras deploy).
 - Lección 09-03: **usage 200 ≠ chat-auth** (verificación de keys contra el
@@ -310,6 +313,9 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   09-02) splicea a posts retirados → mensajes a recipient retirado = dead
   letter. Propuesta QD: excluir los aborts de vida del nudge O no splicear a
   posts retired. Lane pequeña IPD (handler del nudge) — encolado, a orden del IPH.
+  + **mejora watchdog: mission-stalled (10-min) dispara falso positivo sobre
+  entregas no-wake-gated por diseño (records bajo de feedback al QH drenan al
+  próximo wake — caso m-410/fb-89) — considerar excluir no-wake del detector**.
 - **Rotación host m-423 PARTIAL (veredicto QD 09-03)**: el archive de
   dept_sleep corta ~85 líneas de la cola zombie final (incl. m-426 delivered
   post-retirement; acks a host rotado 'prepared') — candidato fix IPD
