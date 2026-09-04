@@ -67,6 +67,8 @@ are organized*. Context: [docs/IDEA.md](docs/IDEA.md) (the idea),
 3. `DSH_HOME=/opt/dsh/.dsh-dev dsh --profile deepartments-dev --dump-config` — composes the tree WITHOUT booting; **must show the `# == dsh-deepartments` layer**.
 4. Real headless smoke in the twin profile: `DSH_HOME=/opt/dsh/.dsh-dev dsh --profile deepartments-dev-headless "<prompt>"` (the GUI profile `deepartments-dev` rejects CLI prompt arguments).
 
+**Tests (SRC-NATIVE method, fb-95)**: run the suite with PLAIN `node --test` over the BUILT `lib/` (`pnpm test`) — never `node --loader ./test/ts-src-loader.mjs --test` as a whole-suite default, which FALSE-FAILS the composition/Loader family even on a clean tree. The `ts-src-loader.mjs` hook is only for the lane-② src-native tests that SELF-REGISTER it (`register(new URL('./ts-src-loader.mjs', import.meta.url), …)`); built-lib tests load byte-identical either way.
+
 Before restarting the service to verify a change: use the `smart_restart` tool (canary) — never a raw `systemctl restart`/`reboot` — because a raw restart with active subagents/workers kills their in-flight turn.
 
 Development and smoke ALWAYS in `deepartments-dev` — **never against the web

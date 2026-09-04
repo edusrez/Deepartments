@@ -10923,6 +10923,44 @@ test('B2 dept_exec guard (fb-53, QH — the guard arithmetic false-positive fami
 })
 
 // ===========================================================================
+// fb-32/fb-106 (QD 2026-09-04, 2º caso del día — the guard FP family): the
+// dept_exec guard must NOT treat SED/AWK/GREP REGEX-LITERAL tokens — a sed
+// range extraction (`'/hasEarlierPendingPair/,/^ok/p'`, the builder-5 fold-in
+// case the QD flagged), anchored grep patterns (`/^#/`, `/^test\//`), a bare
+// glob (`/*`), a `/error/` regex — as ABSOLUTE-PATH references. The path-word
+// scanner now applies a deterministic regex-literal discriminator; real
+// letter-bearing multi-segment paths stay EXACTLY as before (in-root allowed,
+// out-of-root denied).
+// ===========================================================================
+test('B2 dept_exec guard (fb-32/fb-106): SED-RANGE and REGEX-LITERAL tokens are NOT paths — `sed -n \'/hasEarlierPendingPair/,/^ok/p\'` (the exact builder-5 extraction the guard falsely denied) and grep/awk regex literals (`/^#/`, `/^test\\//`, `/error/`, `/*`) run; REAL out-of-root paths STILL deny', () => {
+  const roots = ['/home/esuarez/projects', '/usr/lib/node_modules/@deepseek-ai/dsh', '/srv/dept-ws', '/opt/dsh/.dsh-dev']
+  // (1) THE 2º CASO CONCRETO — builder-5's sed-range extraction (fold-in batch
+  // A verification): an earlier prepared pair gates → grep the suite output.
+  assert.equal(
+    deptExecDenyReason("node --test test/foldins-batchA.test.js 2>&1 | sed -n '/hasEarlierPendingPair/,/^ok\\|^not ok/p' | head -60", '/srv/dept-ws', roots),
+    undefined,
+    'a sed RANGE extraction /pat/,/^ok/p is a regex literal, NOT an absolute path (the builder-5 D-Q3 FP is gone)'
+  )
+  // (2) The same fp with the compact sed form.
+  assert.equal(
+    deptExecDenyReason("sed -n '/hasEarlierPendingPair/,/^ok/p' x.txt", '/srv/dept-ws', roots),
+    undefined,
+    'the compact sed-range form is allowed'
+  )
+  // (3) grep/awk REGEX-ANCHORED literals (the fb-106 seq 4337/4427 probe
+  // shapes: /^#/, /^test\//, /error/).
+  assert.equal(deptExecDenyReason("grep -n '/^#/' file", '/srv/dept-ws', roots), undefined, 'an anchored grep pattern /^#/ is not a path')
+  assert.equal(deptExecDenyReason("grep -n '/^test\\//' file", '/srv/dept-ws', roots), undefined, 'an anchored grep pattern /^test\\// is not a path')
+  assert.equal(deptExecDenyReason("awk '$0 ~ /error/' file", '/srv/dept-ws', roots), undefined, 'an awk regex /error/ is not a path')
+  // (4) a bare glob `/*` is not a path (fb-106 seq 7299).
+  assert.equal(deptExecDenyReason('echo /*', '/srv/dept-ws', roots), undefined, 'a bare glob /* is not a path')
+  // (5) REGRESSION — real out-of-root paths STILL deny (access unchanged).
+  assert.match(deptExecDenyReason('cat /etc/passwd', '/srv/dept-ws', roots), /references absolute path "\/etc\/passwd"/, 'a real out-of-root path is STILL denied')
+  assert.match(deptExecDenyReason('cat /var/log/syslog', '/srv/dept-ws', roots), /references absolute path "\/var\/log\/syslog"/, 'a real multi-segment out-of-root path is STILL denied')
+  assert.equal(deptExecDenyReason('cat /home/esuarez/projects/README.md', '/srv/dept-ws', roots), undefined, 'a real IN-ROOT path is still allowed')
+})
+
+// ===========================================================================
 // E2-ZSTD (QH 2026-08-28): dept_zstd_read — the READ-ONLY .zstd session reader
 // for department posts (registered on the SAME `allowExec` gate as dept_exec,
 // so the roles that declare dept_exec — IPD builder/reviewer/explore-deep +

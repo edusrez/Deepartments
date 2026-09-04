@@ -1421,16 +1421,33 @@ export function isPathInside(candidate: string, root: string): boolean {
  * `[(a)/1000,1]` — the tokenizer's word class does not end at `}`/`]`), all
  * still ARITHMETIC inside heredocs/-c — NEVER a path. Multi-segment and
  * letter-bearing absolute words are STILL path words and are checked EXACTLY
- * as before. */
+ * as before.
+ * fb-32/fb-106 (QD 2026-09-04 — the guard FP family, 2º caso del día): a
+ * `/`-leading token that is a SED/AWK/GREP REGEX LITERAL or RANGE —
+ * `'/hasEarlierPendingPair/,/^ok/p'` (the builder-5 test-extraction sed range
+ * the dept_exec guard FALSELY denied as an absolute path),
+ * `/^#/`, `/^test\//`, `/error/`, `/*` — is NOT a filesystem path and must
+ * not be tokenized into an out-of-scope DENIAL. Deterministic discriminator: a
+ * token whose NAME segment carries REGEX/ANCHOR syntax a real path component
+ * never has (`^`, `\`, `[`, `{`, `*`, `?` at the segment head) or that is a
+ * TWO-sided `/…/,/…/` sed-range pattern → regex literal, NOT a path. Real
+ * letter-bearing multi-segment words (`/etc/passwd`, `/opt/dsh/.dsh`) are
+ * unchanged (checked exactly as before). */
 function deptExecIsPathWord(token: string): boolean {
   const rest = token.replace(/^\/+/, '')
   if (rest === '') return false
   // fb-10 (digits-only) + fb-52 (digits with a `.`/`,` separator fragment —
   // `1000`, `1000,1`, `1000.5`, `1,000`) + fb-53 (a TRAILING separator and/or
   // a closing `}`/`]` glued to the numeric fragment): pure numeric words are
-  // arithmetic/units, never paths. A letter-bearing word is a real path
-  // component (checked exactly as before).
-  return !/^[0-9]+(?:[.,][0-9]+)*[.,]?[}\]]*$/.test(rest)
+  // arithmetic/units, never paths.
+  if (/^[0-9]+(?:[.,][0-9]+)*[.,]?[}\]]*$/.test(rest)) return false
+  // fb-32/fb-106 — REGEX-LITERAL / REGEX-RANGE shapes are NOT paths: the first
+  // NAME segment starts with a regex anchor/class char (`^`, `\`, `[`, `{`,
+  // `*`, `?`) — a real path component never does — or the token is a
+  // `/…/,/…/` two-sided sed-range address (a comma + regex body + closing
+  // slash + optional sed command letter). Everything else stays a path word.
+  if (/^(?:[\^\\\[{*?]|[^,{}[\]]*,\/).*$/.test(rest)) return false
+  return true
 }
 
 /** fb-10 (QH): mask the `$(( ... ))` arithmetic-expansion spans of a command
@@ -1491,7 +1508,12 @@ function deptExecMaskArithmetic(command: string): string {
  * (arithmetic internals are never path tokens) and a candidate word must pass
  * `deptExecIsPathWord` — `/`+digits-only and `//`-only words are DIVISIONS
  * (units), not paths, and are skipped; real letter-bearing/multi-segment
- * absolute words are extracted EXACTLY as before. */
+ * absolute words are extracted EXACTLY as before. fb-32/fb-106 (QD 2026-09-04,
+ * 2º caso del día): a `/`-leading token that is an AWK MATCH-REGEX operand —
+ * the character immediately before the token (after optional whitespace) is
+ * the awk `~` match operator (`awk '$0 ~ /error/'`) — is a regex literal,
+ * NOT a path; it joins the sed-range/anchored literal forms skipped by
+ * `deptExecIsPathWord`. */
 function deptExecPathTokens(command: string): string[] {
   const tokens: string[] = []
   const cmd = deptExecMaskArithmetic(String(command ?? ''))
@@ -1500,6 +1522,13 @@ function deptExecPathTokens(command: string): string[] {
     const boundary = match[1] as string
     const token = match[2]
     if (typeof token !== 'string' || token.length <= 1) continue
+    // fb-32/fb-106 — the AWK `~` match operator marks the following `/…/`
+    // operand as a REGEX LITERAL, never a path: `awk '$0 ~ /error/'`. The
+    // boundary regex starts the token at a quote/space right after the awk
+    // operator — walk back over any spaces to find the `~`.
+    let prev = match.index - 1
+    while (prev >= 0 && /\s/.test(cmd[prev])) prev--
+    if (prev >= 0 && cmd[prev] === '~') continue
     // fb-10 (QH): a `/`+digits-only or `//`-only word (a division/units token,
     // e.g. `$((10-fails))/10`, `/3600000`, `//3600000`) is NOT a path.
     if (!deptExecIsPathWord(token)) continue

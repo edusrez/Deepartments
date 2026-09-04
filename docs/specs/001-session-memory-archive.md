@@ -398,7 +398,12 @@ against the live web profile.
    tree WITHOUT booting; **must show the `# == dsh-deepartments` layer** AND
    `rag.databases` containing `journals`.
 4. **Tests**: `node --test` through the real Loader → expected **114/114** (109 + 5 new
-   archive tests).
+   archive tests). SRC-NATIVE METHOD (fb-95, 2026-09-04 — the ladder's
+   `--loader ./test/ts-src-loader.mjs --test` default produces FALSE FAILS in the
+   composition/Loader family even on a clean tree): the default test command is
+   PLAIN `node --test` over the BUILT `lib/` (`pnpm test`); the `--loader`
+   `ts-src-loader.mjs` variant is used ONLY where the test itself self-registers
+   the hook (the lane-② src-native tests), never as a whole-suite default.
 5. **Headless smoke** (`deepartments-dev-headless`): a twin cycle (memo → sleep) creates a
    per-cycle session log for the twin's cycle AND the injected pack STAYS LEAN — `pack-v1:
    present` with the single checkpoint only, no archive/session leakage.

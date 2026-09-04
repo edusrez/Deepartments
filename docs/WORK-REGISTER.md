@@ -82,17 +82,23 @@
     (:1313) y dept_zstd_read (:1381) + guía 1c en agent.cordis.yml worker/head;
     suite 732/710/0/22 (+3 tests 568/569/570); reviewer PASS 8/8; CUT-4 y zonas
     F6/fb-53 intactas; 0 deps.
-  - **GUI modo monitoreo (owner 09-01) — SCOPING CERRADO 09-02
-    (reports/explore-deep/2026-09-02-gui-monitor-scoping-e2134a39.md) +
-    OWNER-GATED (parqueado — build NO iniciado)**: el harness NO expone la
+  - **GUI modo monitoreo (owner 09-01) — CERRADO (2026-09-04 — job
+    gui-monitor-mode: entrega builder-33 add98365, tests 5/5, REVIEW PASS
+    a2c1fe68, job doc decisión owner «SÍ (cerrada — NO reabrir)»,
+    0 cambios server, route-lock 6 intacto)**: scoping CERRADO 09-02
+    (reports/explore-deep/2026-09-02-gui-monitor-scoping-e2134a39.md) — el
+    harness NO expone la
     presencia org al client-inject (solo sesiones propias vía WS/SSE); la GUI no
     tiene identidad de viewer (fence no-auth; session.prompt callable) →
     «composer oculto solo-a-no-host» = upstream/auth (NO plugin-alcanzable);
     opciones org-side recomendadas: B1 presencia org (endpoint
     /deepartments/presence/list + tab, ~0.5-1d) + A1 modo monitoreo GLOBAL
-    (composer bloqueado server-side, ~1-2d); A2 (auth/roles) = upstream. Decisión
-    owner pendiente (canal cerrado 09-02 → §3). Job doc borrador en §7 del
-    scoping (id gui-monitor-mode).
+    (composer bloqueado server-side, ~1-2d); A2 (auth/roles) = upstream.
+    Ejecutado el modo solo-UI global (composer oculto vía `[data-composer-seat]`
+    + poll 5s presence/get + aplicación inmediata tras presence/set — index.tsx
+    +127/-1). Job doc versionado:
+    docs/departments/internal-programming/jobs/gui-monitor-mode.md
+    (decisión «SÍ (cerrada — NO reabrir)»). Detalle en §3.
   - **higiene**: reports-move HECHO (09-02, copy al árbol .dsh/reports) +
     **higiene AMPLIA CERRADA (builder-4 09-02, reporte
     reports/builder/2026-09-02-higiene-amplia-4d92dad5.md)**: 19 archivos + 3
@@ -201,9 +207,22 @@
     builder-36 fue edit directo → perdido en reseed, causa raíz documentada);
     sesiones reales verificadas; re-call idempotente; restart NO necesario;
     0 commits/0 edits. **A2/A3 pendientes**.
+  - **WIP f61b3d0 (leftover fb-78/gui/grant — builder-17, plan «reset mixto →
+    re-split») — ABSORBIDO (2026-09-04, Path A explore-deep-6 2492062d)**:
+    f61b3d0 es ancestro directo de la cadena verificada
+    (→6e3936c→906506d→1247c32→7d5bb70); 100% contenido vivo en el árbol
+    (11/13 blobs idénticos + 2 extendidos conservando fb-78); re-split MOOT
+    (reescribiría parents de 4 commits verificados — invalida
+    reviews/refreezes/parity); Path A aprobado (2026-09-04, explore-deep-6
+    2492062d): el plan «reset mixto → re-split» queda REEMPLAZADO — pendientes
+    de gestión: .bak stablegrant PENDIENTE-OWNER · gui-monitor-mode cerrado ·
+    fb-78 A2 offlineReap default OFF (policy, m-228). Análisis:
+    reports/explore-deep/2026-09-04-reorg-wip-f61b3d0-2492062d.md
+    (0 edits/0 commits — read-only).
   - **fb-64 (execRoots + stateDir READ-ONLY — aditivo) — scoping documentado
     (`b05d75a`, opción C — ARCHITECTURE.md execution scope; NOTE comment-only en
-    fixture fb-62); verificación pendiente** · GUI monitor owner-gated parqueado.
+    fixture fb-62); verificación pendiente** · GUI monitor job gui-monitor-mode
+    CERRADO (2026-09-04).
 - **CERRADOS en esta cola (no pedir de nuevo):** M4 (system-idle),
   M-A (context-threshold + dept_head_rotate), PACING (peak/valle),
   M-5 (misión-sin-inicio), M-6 (main-red), M-7 (mission-queue),
@@ -232,12 +251,14 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 
 ## 3. PENDIENTE-OWNER (decisiones — estado al 09-02)
 
-- **GUI modo monitoreo (owner 09-01) — DECISIÓN PENDIENTE (canal cerrado 09-02,
-  owner ausente)**: scoping CERRADO (reports/explore-deep/2026-09-02-gui-monitor-
-  scoping-e2134a39.md): ¿A1+B1 org-side (modo monitoreo global + presencia org,
-  plugin-first, 0 upstream) o A2 upstream (auth/roles para no-host selectivo)?
-  Recomendación IPD: A1+B1 ahora + A2 roadmap. Job doc borrador listo (§7 del
-  scoping, id gui-monitor-mode). Parqueado hasta veredicto.
+- **GUI modo monitoreo (owner 09-01) — CERRADO (2026-09-04)**: decisión owner
+  «SÍ (cerrada — NO reabrir)» registrada en el job doc (docs/departments/
+  internal-programming/jobs/gui-monitor-mode.md) — SÍ (composer global solo-UI,
+  0 cambios server) · NO tab presencia org (feature (b) descartada) · NO
+  per-viewer host-only (upstream) · hardening server-side posterior
+  documentado. Entregado: builder-33 add98365, tests 5/5, REVIEW PASS a2c1fe68,
+  route-lock 6 intacto. Las opciones org-side A1+B1 y A2 (upstream) quedan
+  documentadas en el scoping 09-02 — el job NO se reabre.
 - **fb-66 (head sin edit) — write-only intencional DECLARADO (resuelto por
   diseño; cambio de HEAD_BASE_TOOLS invoke.ts:2348 = decisión owner si algún día
   se quiere edit para el head)**.
