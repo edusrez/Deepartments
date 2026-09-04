@@ -139,7 +139,8 @@ import {
   needsRedelivery,
   markDelivery,
   DeliveryRedeliverer,
-  RE_DELIVERY_SWEEP_DEFAULT_INTERVAL_MS
+  RE_DELIVERY_SWEEP_DEFAULT_INTERVAL_MS,
+  getSessionEvents
 } from 'dshd-core'
 import type { DeliveryRow, MessageRecord, DeliveryStatus, DeliveryRedelivererDeps } from 'dshd-core'
 import {
@@ -704,6 +705,14 @@ export interface ToolsSurface {
   healthNotifyHead: (postId: string, frame: string) => Promise<void>
   healthPoolerStatePath: string
   healthBootId: string
+  /** FINISHER (2026-09-04, addendum 4 — m-812, sweep observability): the
+   * redelivery-sweep health datum — `{armed, cycles, lastCycleTs?,
+   * preparedStuckRemaining?}` (the LANE ② non-boot re-drive sweep: `armed`
+   * = the interval is up, `cycles`/`lastCycleTs`/`preparedStuckRemaining` =
+   * the DeliveryRedeliverer's observed sweep counters). NEVER synthesized —
+   * `lastCycleTs`/`preparedStuckRemaining` absent until a cycle observed them;
+   * `armed` is truthful (flips true at the actual arming). */
+  redeliverySweepState: () => { armed: boolean; cycles: number; lastCycleTs?: number; preparedStuckRemaining?: number }
   /** The DEEPARTMENTS RPC-channel endpoint deps (the webServer mount's
    * fallback handler consumes them at the same position — the composed dshd-gui
    * service reads the same object from the `gui` Binder bucket). */
@@ -2394,10 +2403,10 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   const captureRetiredPostTurnError = async (stateDir: string, sessionId: string, postId: string): Promise<void> => {
     try {
       const liveAgent = agents?.get(sessionId)
-      // Dual session-log read: `snapshotEvents()` on the 0.1.2-rc.1 surface,
-      // legacy cached `events` getter on the pre-rc.1 core (0.1.1-rc.2); absent
-      // session → empty capture.
-      const events = (liveAgent?.session?.snapshotEvents?.() ?? liveAgent?.session?.events ?? []) as HealthSessionEvent[]
+      // Dual session-log read via the SHARED helper (getSessionEvents — the
+      // post-incidente 2026-09-04 ONE implementation of the `snapshotEvents?.()
+      // ?? events` dual read; absent session → empty capture).
+      const events = getSessionEvents(liveAgent?.session) as HealthSessionEvent[]
       if (events.length === 0) return
       const capture = scanTurnErrorCaptures(events, postId)
       if (capture === undefined) return
@@ -3334,9 +3343,9 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         // on-disk crash tail for a NOT-resumed post). rc.1+ surface: the live-log
         // non-empty guard is `seq > 0` and the full read is `snapshotEvents()`.
         if ((live?.session?.seq ?? 0) > 0 && live?.session !== undefined) {
-          // Dual session-log read: `snapshotEvents()` on the 0.1.2-rc.1 surface,
-          // legacy cached `events` getter on the pre-rc.1 core (0.1.1-rc.2).
-          events = (live.session.snapshotEvents?.() ?? live.session.events ?? []) as HealthSessionEvent[]
+          // Dual session-log read via the SHARED helper (getSessionEvents — the
+          // post-incidente 2026-09-04 ONE implementation of the dual read).
+          events = getSessionEvents(live.session) as HealthSessionEvent[]
         } else if (persistence !== undefined && typeof persistence.readRaw === 'function') {
           try {
             const raw = await persistence.readRaw(SessionId(entry.sessionId))
@@ -4792,17 +4801,32 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    * exponential backoff + max-attempts stop inside `sweepDue` — so a gate
    * clean-up reaches the pending pairs with NO restart and NO storm. The
    * `health.redeliverySweepIntervalMs` knob (absent → the 60 s default). */
+  /** FINISHER (2026-09-04, addendum 4 — m-812, sweep observability): `armed`
+   * flips true the moment `startRedeliverySweep` arms the interval (the
+   * factory ALWAYS arms it synchronously, but the datum is only truthful when
+   * derived from the actual arming — the heartbeat never synthesizes). */
+  let sweepArmed = false
   const startRedeliverySweep = (): void => {
     const intervalMs =
       typeof config.health?.redeliverySweepIntervalMs === 'number' && Number.isFinite(config.health.redeliverySweepIntervalMs) && config.health.redeliverySweepIntervalMs > 0
         ? config.health.redeliverySweepIntervalMs
         : RE_DELIVERY_SWEEP_DEFAULT_INTERVAL_MS
     const handle = setInterval(() => {
-      void redeliverPendingDeliveries.sweepDue()
+      // INVARIANTE DE TICKS (post-incidente 2026-09-04, crash-loop 609
+      // restarts / exit 7): the interval callback body is WRAPPED — a
+      // synchronous throw must NEVER escape the setInterval (the sweep body is
+      // minimal but the daemon-liveness invariant is uniform across the 4
+      // daemon intervals: health / agenda / parallel / sweep).
+      try {
+        void redeliverPendingDeliveries.sweepDue()
+      } catch (error: unknown) {
+        ctx.logger.warn(`[deepartments] redelivery sweep tick failed: ${error instanceof Error ? error.message : String(error)} (wrapped — the sweep lives)`)
+      }
     }, intervalMs)
     if (typeof (handle as { unref?: () => unknown }).unref === 'function') (handle as { unref: () => unknown }).unref()
     ctx.effect(() => () => clearInterval(handle), 'deepartments: redelivery sweep')
     ctx.logger.info(`[deepartments] redelivery sweep armed (every ${intervalMs} ms; non-boot re-drive of prepared/failed pairs with per-pair backoff + max-attempts)`)
+    sweepArmed = true
   }
   // The sweep is armed RIGHT HERE, synchronously in the apply fiber (the
   // ctx.effect disposable requires the fiber — calling it from the async boot
@@ -4958,11 +4982,12 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         sessionId: entry.sessionId,
         retired: entry.retired === true,
         running: live !== undefined && live.status === 'running',
-        // Dual session-log read: `snapshotEvents()` on the 0.1.2-rc.1 surface,
-        // legacy `events` getter on the pre-rc.1 core (0.1.1-rc.2); absent
-        // session → empty read. NEVER a direct non-optional call — a W6
-        // builder throw would kill the health tick (and the dev profile).
-        events: (live?.session?.snapshotEvents?.() ?? live?.session?.events ?? []) as HealthSessionEvent[],
+        // Dual session-log read via the SHARED helper (getSessionEvents — the
+        // post-incidente 2026-09-04 ONE implementation of the `snapshotEvents?.()
+        // ?? events` dual read; absent session → empty read). NEVER a direct
+        // non-optional call — a W6 builder throw would kill the health tick
+        // (and the dev profile — the 609-restarts incident).
+        events: getSessionEvents(live?.session) as HealthSessionEvent[],
         inboxTs: inboxTsByPost.get(postId) ?? [],
         sleeping: entry.sleepEpoch !== void 0,
         provider: entry.provider,
@@ -5023,10 +5048,10 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       out.push({
         postId,
         retired: entry.retired === true,
-        // Dual session-log read: `snapshotEvents()` on the rc.1+ surface,
-        // legacy `events` getter on the pre-rc.1 core (0.1.1-rc.2) — never a
-        // throw on the live-but-legacy handle.
-        events: (liveAgent?.session?.snapshotEvents?.() ?? liveAgent?.session?.events ?? []) as HealthSessionEvent[],
+        // Dual session-log read via the SHARED helper (getSessionEvents — the
+        // post-incidente 2026-09-04 ONE implementation of the dual read; never
+        // a throw on the live-but-legacy handle).
+        events: getSessionEvents(liveAgent?.session) as HealthSessionEvent[],
         hostMessages: hostRowsByPost.get(postId) ?? [],
         sleeping: entry.sleepEpoch !== void 0
       })
@@ -5506,6 +5531,18 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     healthPoolerStatePath,
     healthBootId,
     guiEndpointDeps,
+    // FINISHER (2026-09-04, addendum 4 — m-812): the sweep health datum — the
+    // armed flag + the redeliverer's observed counters (the heartbeat dep the
+    // bundle passes per tick). `armed` flips true at the arming (see above).
+    redeliverySweepState: () => {
+      const s = redeliverPendingDeliveries.sweepState()
+      return {
+        armed: sweepArmed,
+        cycles: s.cycles,
+        ...(s.lastCycleTs !== undefined ? { lastCycleTs: s.lastCycleTs } : {}),
+        ...(s.preparedStuckRemaining !== undefined ? { preparedStuckRemaining: s.preparedStuckRemaining } : {})
+      }
+    },
     // HOTFIX 0.2.2-1: the surface carries the PURE inline computation (NOT the
     // service-first wrapper) — the execRoots service DEFAULT delegates to it
     // WITHOUT a re-entry cycle (the 0.2.2 wrapper export broke the live

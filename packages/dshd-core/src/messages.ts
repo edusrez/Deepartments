@@ -1058,6 +1058,15 @@ export class DeliveryRedeliverer {
   private readonly preparedStuckMs: number
   private readonly g2DrainSeedLimit: number
   private readonly legacyAgeMs: number
+  // FINISHER (2026-09-04, addendum 4 — m-812, sweep observability): the SWEEP
+  // health counters — cycles (completed sweepDue invocations), the last cycle
+  // ts and the last G2 settle's prepared-stuck residue (the fb-27 closure
+  // criterion). Updated INSIDE sweepDue only (the boot pass `run` is a
+  // different seam); never synthesized — a field stays absent until a cycle
+  // actually observed it. Exposed via `sweepState()`.
+  private sweepCycle = 0
+  private lastSweepCycleTs: number | undefined
+  private lastSweepPreparedStuckRemaining: number | undefined
 
   constructor(
     deps: DeliveryRedelivererDeps,
@@ -1243,6 +1252,11 @@ export class DeliveryRedeliverer {
    */
   async sweepDue(nowMs: number = Date.now()): Promise<void> {
     const { logger } = this.deps
+    // FINISHER (2026-09-04, addendum 4): the cycle counters are observed HERE
+    // (a fire is a cycle — the health datum is truthful even when the pass is
+    // a no-op; `sweepState()` exposes {cycles, lastCycleTs, preparedStuckRemaining}).
+    this.sweepCycle++
+    this.lastSweepCycleTs = nowMs
     try {
       const rows = await this.readSidecarRows()
       const latestPerKey = new Map<string, DeliveryRow>()
@@ -1263,11 +1277,29 @@ export class DeliveryRedeliverer {
       // SAME pass — the batch and the re-drive converge on "0 prepared-stuck
       // > 10 min" without any manual drain (host decision 2026-09-03).
       const g2 = await this.settleG2Batch(nowMs)
+      // FINISHER (addendum 4 — m-812): the prepared-stuck residue of THIS
+      // cycle (0 = the closure criterion met — the health report reads it).
+      this.lastSweepPreparedStuckRemaining = g2.preparedStuckRemaining
       if (drove > 0 || g2.settled > 0 || g2.skippedRebind > 0) {
         logger.info(`[deepartments] redelivery sweep cycle: drove ${drove} pairs; G2 legacy settle ${g2.settled} (${g2.settledStaleDust} stale-dust + ${g2.settledDeadEnd} dead-end) → 'terminal' (no-wake), skipped-rebind ${g2.skippedRebind}; in-flight kept ${g2.keptInFlight}, fresh kept ${g2.keptFresh}; prepared-stuck>${Math.round(this.legacyAgeMs / 60000)}min remaining ${g2.preparedStuckRemaining}`)
       }
     } catch (error: unknown) {
       logger.warn(`[deepartments] re-delivery sweep failed (non-fatal — the boot pass + the next sweep re-evaluate): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** FINISHER (2026-09-04, addendum 4 — m-812, sweep observability): the
+   * redelivery-sweep health datum — how many sweep cycles ran, when the last
+   * one ran and the last G2 settle's prepared-stuck residue (the fb-27 closure
+   * criterion, "0 prepared-stuck > 10 min"). NEVER synthesized: `lastCycleTs`
+   * and `preparedStuckRemaining` are ABSENT until a cycle actually observed
+   * them (absent → the heartbeat omits them); `cycles` is always present (0
+   * before the first fire — an armed sweep with no cycle yet). */
+  sweepState(): { cycles: number; lastCycleTs?: number; preparedStuckRemaining?: number } {
+    return {
+      cycles: this.sweepCycle,
+      ...(this.lastSweepCycleTs !== undefined ? { lastCycleTs: this.lastSweepCycleTs } : {}),
+      ...(this.lastSweepPreparedStuckRemaining !== undefined ? { preparedStuckRemaining: this.lastSweepPreparedStuckRemaining } : {})
     }
   }
 

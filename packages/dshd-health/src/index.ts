@@ -416,17 +416,72 @@ export async function clearUnusableWorkerSession(stateDir: string, postId: strin
   await writeUnusableSessionsMark(stateDir, marks)
 }
 
-/** The heartbeat written every daemon tick. */
+/** The heartbeat written every daemon tick. The three optional fields are the
+ * post-incidente 2026-09-04 health datums (the crash-loop 609 restarts / exit 7
+ * lane): `surface` (the detected session surface — `getSessionEvents`/`detectSessionSurface`),
+ * `nRestarts` (the systemd NRestarts read once per boot, best-effort) and
+ * `crashStreak` (the boot-crash sidecar pre-tick crash streak). Absent when the
+ * caller could not resolve them (never synthesized — the heartbeat stays
+ * truthful). `sweep` is the redelivery-sweep health datum (addendum 4 /
+ * FINISHER 2026-09-04 — the fb-27 closure observability): how the LANE ②
+ * non-boot re-drive sweep is doing. Absent when the wiring provided no sweep
+ * (a composition without the redelivery sweep — the field is omitted). */
 export interface HealthHeartbeat {
   ts: number
   bootId: string
+  /** The detected session surface of the live probe ('0.1.2-rc.1' |
+   * '0.1.1-rc.2-legacy' | 'both' | 'none' — detectSessionSurface). ABSENT →
+   * the wiring did not provide the per-tick probe (the tick never guesses). */
+  surface?: string
+  /** The systemd NRestarts counter (read once per boot, read-only
+   * `systemctl show <unit> -p NRestarts`, best-effort). ABSENT → unreadable /
+   * no unit configured — the health report reads it host-side. */
+  nRestarts?: number
+  /** The boot-crash sidecar crash streak (how many consecutive boots died
+   * BEFORE a healthy heartbeat — 0 = the previous boot ticked). ABSENT → the
+   * sidecar was not stamped (daemon disabled / minimal composition). */
+  crashStreak?: number
+  /** The redelivery-sweep health datum (addendum 4 — the LANE ② non-boot
+   * re-drive sweep): `armed` (the interval is up), `cycles` (completed
+   * `sweepDue` fires) + the LAST cycle's `lastCycleTs` / `preparedStuckRemaining`
+   * (the fb-27 closure criterion — "0 prepared-stuck > 10 min"). ABSENT → the
+   * composition has no sweep (the tick never guesses). */
+  sweep?: SweepHealthState
+}
+
+/** FINISHER (2026-09-04, addendum 4 — m-812): the redelivery-sweep health
+ * state — `armed` (the sweep interval was armed by the orchestration),
+ * `cycles` (completed sweepDue fires; always present, 0 before the first fire)
+ * and the LAST cycle's `lastCycleTs` / `preparedStuckRemaining` (the fb-27
+ * closure criterion). `lastCycleTs`/`preparedStuckRemaining` are ABSENT until
+ * a cycle observed them (never synthesized). */
+export interface SweepHealthState {
+  armed: boolean
+  cycles: number
+  lastCycleTs?: number
+  preparedStuckRemaining?: number
 }
 
 /** Read `<stateDir>/health-heartbeat.json` (absent/unreadable/malformed → undefined). */
 export function readHealthHeartbeatFile(stateDir: string): HealthHeartbeat | undefined {
   try {
     const parsed = JSON.parse(readFileSync(path.join(stateDir, 'health-heartbeat.json'), 'utf8')) as Record<string, unknown>
-    if (typeof parsed.ts === 'number' && typeof parsed.bootId === 'string') return { ts: parsed.ts, bootId: parsed.bootId }
+    if (typeof parsed.ts === 'number' && typeof parsed.bootId === 'string') {
+      const heartbeat: HealthHeartbeat = { ts: parsed.ts, bootId: parsed.bootId }
+      if (typeof parsed.surface === 'string') heartbeat.surface = parsed.surface
+      if (typeof parsed.nRestarts === 'number') heartbeat.nRestarts = parsed.nRestarts
+      if (typeof parsed.crashStreak === 'number') heartbeat.crashStreak = parsed.crashStreak
+      if (parsed.sweep !== undefined && typeof parsed.sweep === 'object' && parsed.sweep !== null) {
+        const sweep = parsed.sweep as Record<string, unknown>
+        if (typeof sweep.armed === 'boolean' && typeof sweep.cycles === 'number') {
+          const state: SweepHealthState = { armed: sweep.armed, cycles: sweep.cycles }
+          if (typeof sweep.lastCycleTs === 'number') state.lastCycleTs = sweep.lastCycleTs
+          if (typeof sweep.preparedStuckRemaining === 'number') state.preparedStuckRemaining = sweep.preparedStuckRemaining
+          heartbeat.sweep = state
+        }
+      }
+      return heartbeat
+    }
     return undefined
   } catch {
     return undefined
@@ -584,6 +639,101 @@ export function buildRestartDigest(rows: readonly RestartRegistryRow[], n: numbe
   const last = rows.slice(-Math.max(1, Math.floor(n)))
   if (last.length === 0) return '(no restart-registry rows)'
   return last.map((row) => `- restart ${new Date(row.ts).toISOString()} (boot ${row.bootId}) cause=${row.cause}`).join('\n')
+}
+
+// ---------------------------------------------------------------------------
+// POST-INCIDENTE 2026-09-04 (crash-loop 609 restarts / exit 7) — the BOOT-CRASH
+// SIDECAR: the code-layer crash-loop breaker. The restart-registry (fb-43)
+// captures every daemon BOOT but its reconcile runs INSIDE the first tick — the
+// incident class died BEFORE it (a builder throw in the un-wrapped interval
+// callback phase, the W6 wrapper seam invoke.ts:3457-3465), so the pre-tick
+// crash was invisible to the registry. This sidecar stamps the CURRENT boot at
+// APPLY START (before any interval wiring) and the NEXT boot reconciles: if the
+// previous boot's bootId has NO heartbeat of its own (it never ticked → died
+// pre-first-tick) the crashStreak increments; a previous boot that DID tick
+// (heartbeat with its bootId) clears the streak. Semantics are deliberately
+// simple and documented: a MANUAL restart that kills the process before its
+// first tick is indistinguishable from a pre-tick crash by design (the
+// heartbeat is the only healthy marker). The heartbeat of the CURRENT boot (a
+// tick) IS the clear consumed by the NEXT boot's stamp — no per-tick reconcile
+// is needed. Surface: crashStreak + nRestarts + surface flow into the
+// HealthHeartbeat (the tick reports them as health data) and the health report
+// §6 reads them from the heartbeat.
+// ---------------------------------------------------------------------------
+
+/** The boot-crash sidecar filename: `<stateDir>/boot-crash.json`. */
+export const BOOT_CRASH_FILE = 'boot-crash.json'
+
+/** The ONE row of the boot-crash sidecar — the CURRENT boot's stamp + the
+ * accumulated pre-tick crash streak (how many consecutive boots died BEFORE a
+ * healthy heartbeat; 0 = the previous boot ticked). */
+export interface BootCrashState {
+  /** The current boot's id (the SAME per-process bootId the heartbeat stamps —
+   * REUSED, never duplicated). */
+  bootId: string
+  /** The apply-start moment (ms epoch) — stamped BEFORE the interval wiring. */
+  bootStartedAt: number
+  /** The pre-tick crash streak: 0 when the PREVIOUS boot ticked (its heartbeat
+   * matched its stamp bootId), else the previous boot's streak + 1. */
+  crashStreak: number
+  /** The most recent pre-tick crash moment (ms epoch), when the streak is > 0. */
+  lastCrashAt?: number
+}
+
+/** Read `<stateDir>/boot-crash.json` (absent/unreadable/malformed → undefined). */
+export function readBootCrashFile(stateDir: string): BootCrashState | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, BOOT_CRASH_FILE), 'utf8')) as Record<string, unknown>
+    if (typeof parsed.bootId !== 'string' || typeof parsed.bootStartedAt !== 'number' || typeof parsed.crashStreak !== 'number') return undefined
+    const state: BootCrashState = { bootId: parsed.bootId, bootStartedAt: parsed.bootStartedAt, crashStreak: parsed.crashStreak }
+    if (typeof parsed.lastCrashAt === 'number') state.lastCrashAt = parsed.lastCrashAt
+    return state
+  } catch {
+    return undefined
+  }
+}
+
+/** Sync derivation of the PRE-TICK CRASH STREAK for a NEW boot — READ-ONLY,
+ * never throws (a read/parse failure → 0). The bundle calls it at apply start
+ * (deterministic value for the tick) and `stampBootCrash` uses the SAME
+ * derivation for the durable record — one source of truth for the semantics:
+ * prevTicked (the PREVIOUS stamp's bootId has a heartbeat of its own) → 0,
+ * else prev.crashStreak + 1; no previous stamp (first boot) → 0. */
+export function resolveBootCrashStreak(stateDir: string): number {
+  try {
+    const prev = readBootCrashFile(stateDir)
+    if (prev === undefined) return 0
+    const prevHeartbeat = readHealthHeartbeatFile(stateDir)
+    const prevTicked = prevHeartbeat !== undefined && prevHeartbeat.bootId === prev.bootId
+    return prevTicked ? 0 : prev.crashStreak + 1
+  } catch {
+    return 0
+  }
+}
+
+/** Stamp the CURRENT boot into the sidecar at APPLY START (before the interval
+ * wiring — the ONLY moment the pre-tick crash class can still be captured).
+ * Reconciles the PREVIOUS boot via `resolveBootCrashStreak` (prevTicked = the
+ * previous stamp's bootId has a heartbeat of its own → 0, else prev + 1; first
+ * boot → 0). Never throws (a read/write failure degrades to a silent no-op —
+ * the breaker is best-effort, the heartbeat stays the primary marker). Returns
+ * the written state (undefined on write failure). */
+export async function stampBootCrash(stateDir: string, bootId: string, nowMs: number): Promise<BootCrashState | undefined> {
+  try {
+    const prev = readBootCrashFile(stateDir)
+    const crashStreak = resolveBootCrashStreak(stateDir)
+    const state: BootCrashState = {
+      bootId,
+      bootStartedAt: nowMs,
+      crashStreak,
+      ...(crashStreak > 0 ? { lastCrashAt: nowMs } : prev?.lastCrashAt !== undefined ? { lastCrashAt: prev.lastCrashAt } : {})
+    } as BootCrashState
+    await mkdir(path.dirname(path.join(stateDir, BOOT_CRASH_FILE)), { recursive: true })
+    await writeFile(path.join(stateDir, BOOT_CRASH_FILE), JSON.stringify(state), 'utf8')
+    return state
+  } catch {
+    return undefined
+  }
 }
 
 /** The dedupe ledger of the health daemon: key → lastAlertedAtMs. The key is the
@@ -1750,6 +1900,13 @@ export interface HeartbeatSnapshot {
   /** The host (Asistente) session's last logged event ts, or undefined ('NO
    * SESSION' — the harness session record carries no events). */
   hostLastActivityTs?: number
+  /** POST-INCIDENTE 2026-09-04 — the detected session surface of the live
+   * probe session (detectSessionSurface: '0.1.2-rc.1' | '0.1.1-rc.2-legacy' |
+   * 'both' | 'none'). Rendered as a `- session surface: <value>` line when
+   * present — the code-vs-runtime drift is visible in the wake-pack heartbeat
+   * section (the drift gate), not only in the health-heartbeat.json datum.
+   * Absent → the line is omitted (legacy compositions byte-identical). */
+  surface?: string
   /** Per ACTIVE (and dormant) catalog post rows. */
   rows: HeartbeatRow[]
   /** The WAIT line reason when the host holds an unanswered/quiet expectation
@@ -1810,6 +1967,11 @@ export function buildHeartbeatSection(snapshot: HeartbeatSnapshot, nowMs: number
   // are member ids, never a template reference).
   const interrupted = (snapshot.interruptedPostIds ?? []).filter((id) => id.trim() !== '')
   lines.push(interrupted.length > 0 ? `- interrupted: ${interrupted.join(' ')}` : '- interrupted: none')
+  // POST-INCIDENTE 2026-09-04 — the SESSION SURFACE line (the drift gate; only
+  // when the assembly provided it — absent → the pre-incident section bytes).
+  if (snapshot.surface !== undefined && typeof snapshot.surface === 'string' && snapshot.surface.trim() !== '') {
+    lines.push(`- session surface: ${snapshot.surface}`)
+  }
   return lines.join('\n')
 }
 
@@ -2297,6 +2459,28 @@ export interface HealthDaemonDeps {
   stateDir: string
   /** The per-process boot id (randomUUID) stamped into the heartbeat. */
   bootId: string
+  /** POST-INCIDENTE 2026-09-04 (crash-loop 609 restarts / exit 7) — the
+   * heartbeat health datums. `sessionSurface` is the detected session surface
+   * of the LIVE probe session (the bundle computes it per tick from the live
+   * host/agent sessions via detectSessionSurface — the code-vs-runtime drift
+   * gate). `nRestarts` is the systemd NRestarts counter (read ONCE per boot,
+   * best-effort read-only `systemctl show <unit> -p NRestarts`, absent →
+   * omitted — the health report reads it host-side). `crashStreak` is the
+   * boot-crash sidecar streak (stampBootCrash at apply start — 0 = the
+   * previous boot ticked). `sweep` is the redelivery-sweep health datum
+   * (addendum 4 / FINISHER 2026-09-04 — the orchestration exposes the LANE ②
+   * non-boot sweep's armed/counters per tick). All optional: ABSENT → the
+   * field is omitted from the heartbeat (never synthesized — the tick stays
+   * truthful). */
+  sessionSurface?: string
+  nRestarts?: number
+  crashStreak?: number
+  /** FINISHER (2026-09-04, addendum 4 — m-812): the redelivery-sweep health
+   * datum — `{armed, cycles, lastCycleTs?, preparedStuckRemaining?}` (the
+   * orchestration's `redeliverySweepState`). ABSENT → the sweep field is
+   * omitted from the heartbeat (a composition without the sweep — never
+   * synthesized). */
+  sweep?: SweepHealthState
   /** The plugin Config (W6: `health.enabled`/`health.intervalMs`). The pure tick
    * reads the W8-c per-safeguard knobs (`turnErrorCaptureEnabled` /
    * `staleLiveWatchdogEnabled` + `staleLiveMinutes` / `presetAuditEnabled`) from
@@ -4866,8 +5050,30 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // of the same boot never re-runs it; the shared-ledger dedupe blocks a
     // re-alert across boots).
     const isBootTick = prevTick === undefined || (prevTick.bootId ?? '') !== deps.bootId
-    // 1. heartbeat (always — even with no anomalies).
-    await writeHealthHeartbeatFile(deps.stateDir, { ts: nowMs, bootId: deps.bootId })
+    // 1. heartbeat (always — even with no anomalies). Post-incidente 2026-09-04:
+    // the health datums (surface / nRestarts / crashStreak) ride the heartbeat
+    // when the wiring provided them (best-effort — ABSENT → omitted, never
+    // synthesized). The boot-crash sidecar's clear is CONSUMED by the NEXT
+    // boot's stamp (a heartbeat with THIS bootId = healthy marker).
+    await writeHealthHeartbeatFile(deps.stateDir, {
+      ts: nowMs,
+      bootId: deps.bootId,
+      ...(deps.sessionSurface !== undefined ? { surface: deps.sessionSurface } : {}),
+      ...(deps.nRestarts !== undefined ? { nRestarts: deps.nRestarts } : {}),
+      ...(deps.crashStreak !== undefined ? { crashStreak: deps.crashStreak } : {}),
+      ...(deps.sweep !== undefined ? { sweep: deps.sweep } : {})
+    })
+    // POST-INCIDENTE 2026-09-04: the surface gate's BOOT LOG — the FIRST tick
+    // of a new process reports the detected session surface + the breaker
+    // datums (drift visible in the first boot, before any churn). The DOUBLE
+    // optional-call form (`logger?.info?.(...)`) is deliberate: a logger
+    // object WITHOUT an `info` method (a warn-only test stub) must be a
+    // no-op, never a TypeError that a tick-level catch would swallow mid-tick.
+    if (isBootTick) {
+      deps.logger?.info?.(
+        `[deepartments] system-health: boot tick boot=<${deps.bootId}> surface=${deps.sessionSurface ?? 'n/a'} nRestarts=${deps.nRestarts ?? 'n/a'} crashStreak=${deps.crashStreak ?? 'n/a'} sweep=${deps.sweep !== undefined ? `armed=${deps.sweep.armed}, cycles=${deps.sweep.cycles}, preparedStuckRemaining=${deps.sweep.preparedStuckRemaining ?? 'n/a'}` : 'n/a'}`
+      )
+    }
     // fb-43 — the restart-registry reconcile (right after the heartbeat — the
     // boot-identity bookkeeping): seed-once-if-absent (the 4 documented
     // historical restarts) + append `{ bootId, ts, cause:'unknown' }` when the
@@ -5671,6 +5877,12 @@ export interface HealthBinderDeps {
   /** The bundle's per-process boot id (invoke.ts `healthBootId`). Absent → a
    * per-build randomUUID (the heartbeat bootId is informational). */
   bootId?: string
+  /** (POST-INCIDENTE 2026-09-04 — NOTE: the heartbeat health datums
+   * sessionSurface/nRestarts/crashStreak are deliberately NOT added here — the
+   * binder-contract lock freezes this exact field list; the bundle provides
+   * them EXPLICITLY per tick (the datums are per-tick probe results, the
+   * holder is only the static per-apply seam qiiDirectiveRate). See the
+   * widened read in apply().) */
   /** The bundle's plugin Config `health` slice (the W8-c per-safeguard knobs
    * + `health.enabled`/`intervalMs`). Absent → the code defaults. */
   config?: HealthConfigLike
@@ -5834,10 +6046,20 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
           }
         }
       }
+      // POST-INCIDENTE 2026-09-04 — the heartbeat health datums' holder
+      // fallback, WIDENED: the binder-contract lock freezes the exact
+      // HealthBinderDeps field list, so the datums (per-tick probe results the
+      // bundle passes EXPLICITLY) are added here as an OPTIONAL static seam
+      // only — the frozen contract stays untouched.
+      const healthDatumHolder = depsHolder.get() as HealthBinderDeps & { sessionSurface?: string; nRestarts?: number; crashStreak?: number; sweep?: SweepHealthState }
       await runHealthDaemonTick({
         now: explicit.now ?? (() => Date.now()),
         stateDir: org.stateDir,
         bootId: explicit.bootId ?? bootId,
+        sessionSurface: explicit.sessionSurface ?? healthDatumHolder.sessionSurface,
+        nRestarts: explicit.nRestarts ?? healthDatumHolder.nRestarts,
+        crashStreak: explicit.crashStreak ?? healthDatumHolder.crashStreak,
+        sweep: explicit.sweep ?? healthDatumHolder.sweep,
         config: { health: config.health ?? explicit.config?.health ?? {} } as HealthConfigLike,
         hosts: explicit.hosts ?? [...catalog.hosts.values()],
         posts: explicit.posts,

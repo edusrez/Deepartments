@@ -169,5 +169,23 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // bridge carries it into the surface like its M-A siblings
   // CONTEXT_THRESHOLD_DEFAULT / CONTEXT_THRESHOLD_DEFAULT_POLL_MS) — an
   // INTENTIONAL, verified surface extension that bumps the frozen count.
-  assert.equal(names.length, 311, `lib/invoke.js export count frozen at 311 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
+  // LANES ②/②-bis (2026-09-03, ec2d405 — delivery hardening: gate age-check
+  // rotationStaleMs + re-drive sweep + fb-79 backoff + fb-58 settle/rotatedTo
+  // + O1 dispose-grace + storm thresholds) added the SIX delivery-health
+  // exports (HEALTH_DELIVERY_STORM_MAX_ATTEMPT_RATIO /
+  // HEALTH_DELIVERY_STORM_MAX_ROWS_PER_HOUR / HEALTH_DELIVERY_STORM_WINDOW_MS /
+  // POOLER_CAPACITY_DEFAULT_ROTATION_STALE_MS / POOLER_CAPACITY_KEY_ROTATION_STALE
+  // / scanDeliveryStormFindings — all six from dshd-health, provenance
+  // re-verified per-export via git log -S) — an INTENTIONAL, verified surface
+  // extension that bumps the frozen count (311 → 317).
+  // LANE OBJETIVE B finisher (2026-09-04, run b7b4c158): the FOUR boot-crash
+  // breaker exports (BOOT_CRASH_FILE / readBootCrashFile / resolveBootCrashStreak
+  // / stampBootCrash from dshd-health — the post-incidente 609-restarts
+  // breaker datums) reach the bundle surface via the star re-export bridge
+  // src/core/health.ts (`export * from 'dshd-health'`) → invoke.ts — an
+  // INTENTIONAL, verified surface extension (317 → 321). The session-surface
+  // helpers (getSessionEvents / detectSessionSurface) are NOT re-exported by
+  // invoke.ts (module-scope — verified ABSENT from this export list; B's
+  // invoke.ts diff adds 0 new `export` lines).
+  assert.equal(names.length, 321, `lib/invoke.js export count frozen at 321 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })

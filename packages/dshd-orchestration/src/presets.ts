@@ -81,6 +81,8 @@ import { fileURLToPath } from 'node:url'
 // imports); roleForSession/buildSubagentOrientation resolve from dshd-core
 // (src/role-orient.ts is a re-export bridge of the core package).
 import { roleForSession, buildSubagentOrientation } from 'dshd-core'
+import { getSessionEvents, detectSessionSurface } from 'dshd-core'
+import type { SessionLogLike } from 'dshd-core'
 import type { SubagentRole, SubagentRolesService } from 'dshd-core'
 import { buildSleepJournalMessage } from 'dshd-core'
 import { createWakePackService } from 'dshd-core'
@@ -118,10 +120,12 @@ interface AgentOptionsLike {
 }
 
 /** Loose structural view of a live `Agent` (the shape `ctx.agents.get(id)`
- * returns — assembleHeartbeat reads `.session.snapshotEvents()` / `.seq` /
- * `.status`). Mirrors the bundle-local `AgentLike` of src/invoke.ts (structural
- * subset: the fields the zone reads; the session member is the rc.1+ surface —
- * the `events` getter is gone from 0.1.2-rc.1 on). */
+ * returns — assembleHeartbeat reads the session log via the SHARED dual
+ * helper (getSessionEvents — the post-incidente 2026-09-04 ONE
+ * implementation) + `.seq` / `.status`). Mirrors the bundle-local `AgentLike`
+ * of src/invoke.ts (structural subset: the fields the zone reads; the session
+ * member is the rc.1+ surface — the `events` getter is gone from 0.1.2-rc.1
+ * on; the legacy 0.1.1-rc.2 core still exposes it — the helper covers both). */
 interface AgentLike {
   id: string
   status: string
@@ -1068,10 +1072,10 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
       // the same snapshot primitive with an empty inbox (only activity matters).
       const hostEntry = [...hosts.values()].find((entry) => entry.hostId === hostId)
       const hostLive = hostEntry !== undefined ? agents?.get(SessionId(hostEntry.sessionId)) : undefined
-      // Dual session-log read: `snapshotEvents()` on the rc.1+ surface,
-      // legacy `events` getter on the pre-rc.1 core (0.1.1-rc.2) — never a
-      // throw on the live-but-legacy host handle.
-      const hostEvents = (hostLive?.session?.snapshotEvents?.() ?? hostLive?.session?.events ?? []) as HealthSessionEvent[]
+      // Dual session-log read via the SHARED helper (getSessionEvents — the
+      // post-incidente 2026-09-04 ONE implementation of the `snapshotEvents?.()
+      // ?? events` dual read; never throws on a live-but-legacy host handle).
+      const hostEvents = getSessionEvents(hostLive?.session) as HealthSessionEvent[]
       const hostSnap = buildPostSnapshot({ postId: hostId, events: hostEvents, inboxTs: [] })
       // Per ACTIVE (and dormant) catalog post rows + the WAIT scan inputs +
       // the W8-h INTERRUPTED (stopped) postIds.
@@ -1081,10 +1085,9 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
       for (const [postId, entry] of byPost) {
         if (entry.retired === true) continue
         const live = agents?.get(SessionId(entry.sessionId))
-        // Dual session-log read: `snapshotEvents()` on the rc.1+ surface,
-        // legacy `events` getter on the pre-rc.1 core (0.1.1-rc.2) — never a
-        // throw on the live-but-legacy handle.
-        const events = (live?.session?.snapshotEvents?.() ?? live?.session?.events ?? []) as HealthSessionEvent[]
+        // Dual session-log read via the SHARED helper (getSessionEvents — the
+        // post-incidente 2026-09-04 ONE implementation of the dual read).
+        const events = getSessionEvents(live?.session) as HealthSessionEvent[]
         const snap = buildPostSnapshot({ postId, events, inboxTs: inboxTsByPost.get(postId) ?? [] })
         rows.push({
           postId,
@@ -1107,10 +1110,29 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
       const waitReason = waits.length > 0
         ? `host waiting on ${waits.map((wait) => wait.postId).join(', ')}: ${waits[0].error ?? 'no reply or session activity'}`
         : undefined
+      // POST-INCIDENTE 2026-09-04 — the SESSION SURFACE gate (decision 2): the
+      // detected surface of the live probe session (host first, then the first
+      // live agent — the drift code-vs-runtime becomes visible in the wake-pack
+      // heartbeat section BEFORE any churn). Never throws (detectSessionSurface
+      // is total); 'none' → the wake-pack renders the surface line anyway (an
+      // honest «no live session» at boot is itself signal).
+      let sessionSurface = detectSessionSurface(hostLive?.session as SessionLogLike | null | undefined)
+      if (sessionSurface === 'none') {
+        for (const [, entry] of byPost) {
+          if (entry.retired === true) continue
+          const probeLive = agents?.get(SessionId(entry.sessionId))
+          const probe = detectSessionSurface(probeLive?.session as SessionLogLike | null | undefined)
+          if (probe !== 'none') {
+            sessionSurface = probe
+            break
+          }
+        }
+      }
       return buildHeartbeatSection(
         {
           hostLastActivityTs: hostSnap.lastActivityTs,
           rows,
+          surface: sessionSurface,
           ...(waitReason !== undefined ? { waitReason } : {}),
           ...(interruptedPostIds.length > 0 ? { interruptedPostIds } : {})
         },

@@ -302,7 +302,24 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     // dev profile (restart counter 609). The 2 in-span session-log reads are
     // now the DUAL read (`snapshotEvents?.() ?? events`) — md5 7b5b1c91… →
     // e0086480ef8eca7b6b2d2e573153ae50 (same span, only the read style changed).
-    assert.equal(md5, 'e0086480ef8eca7b6b2d2e573153ae50', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read re-freeze (md5 e0086480ef…)')
+    // Zone md5 RE-FROZE R6 (LANE OBJETIVE B, 2026-09-04 — the session-surface
+    // hardening after the 609-restarts incident): the in-span session-log reads
+    // COLLAPSED to the shared dshd-core helper (`getSessionEvents(live?.session)`
+    // — buildHealthPosts/buildHostWaits, the ONE implementation of the dual
+    // read) + the redelivery-sweep interval callback is now WRAPPED
+    // (INVARIANTE DE TICKS — try/catch noexcept, the same daemon-liveness
+    // invariant as the invoke.ts wrappers). md5 e0086480… → 7d0e827f3ff96df84a9bb2ef2338383a
+    // (same span, the read style + the sweep wrap changed; zone semantics the
+    // R4 dual contract, byte-identity re-frozen).
+    // Zone md5 RE-FROZE R8 (FINISHER lane, 2026-09-04 — addendum 4 / m-812,
+    // sweep observability): the sweep arming now flips the `sweepArmed` flag
+    // (the `redeliverySweepState` heartbeat datum layer — {armed, cycles,
+    // lastCycleTs?, preparedStuckRemaining?} wired per tick; the flag is set
+    // at the REAL arming inside `startRedeliverySweep`). md5 7d0e827f… →
+    // ebcd293c4aa1fc8dbb3c49fd9b576205 (same span, the arming line + one
+    // comment block changed; zone semantics unchanged — R4 dual + R6 wrap
+    // byte-identity re-frozen).
+    assert.equal(md5, 'ebcd293c4aa1fc8dbb3c49fd9b576205', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R8 sweepArmed-flag re-freeze (md5 ebcd293c…)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface

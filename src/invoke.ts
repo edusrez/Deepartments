@@ -80,11 +80,62 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './core/session-cleanup.js'
+// POST-INCIDENTE 2026-09-04 (crash-loop 609 restarts / exit 7): the ONE shared
+// dual session-log read (getSessionEvents) + the surface detector
+// (detectSessionSurface — the heartbeat `{ts, bootId, surface}` drift gate).
+import { getSessionEvents, detectSessionSurface } from './core/session-surface.js'
+import type { SessionLogLike } from './core/session-surface.js'
 
 /** Module-level promisified execFile (dept_exec's runDeptExec/runDeptZstdRead
  * use it; the apply-scope `execFileP` below is the same binding for legacy
  * code). */
 const execFileP = promisify(execFileCb)
+
+/** INVARIANTE DE TICKS (post-incidente 2026-09-04, crash-loop 609 restarts /
+ * exit 7): the STANDARD wrapper for the BODY of every daemon interval callback.
+ * The incident class was a SYNCHRONOUS throw in the builder phase of the W6
+ * health tick (invoke.ts:3457-3465 at the time — buildHealthPosts + 6 builders
+ * ran OUTSIDE the internal tick's try/catch) that escaped the setInterval →
+ * uncaught exception → exit 7 → 609 restarts. The invariant: the interval
+ * callback is NOEXCEPT — the body's throw is logged and the daemon lives for
+ * the next tick. Applies to ALL 4 daemon intervals (health / agenda scheduler /
+ * parallel-monitor here; the redelivery sweep wraps inline in the tools
+ * factory — the same pattern, same comment anchor). */
+function wrapDaemonTick(logger: { warn(message: string): void }, label: string, fn: () => void): () => void {
+  return () => {
+    try {
+      fn()
+    } catch (error: unknown) {
+      logger.warn(`[deepartments] ${label} tick failed: ${error instanceof Error ? error.message : String(error)} (wrapped — the daemon lives)`)
+    }
+  }
+}
+
+/** POST-INCIDENTE 2026-09-04 — read the systemd NRestarts counter for the
+ * deployment unit ONCE per boot (the code-layer crash-loop breaker, decision
+ * 4): read-only `systemctl show <unit> -p NRestarts` — the SAME source the
+ * host used to attribute the 609-restart incident. Best-effort: an absent unit
+ * name, an unavailable systemctl or a parse failure → undefined (the tick
+ * omits nRestarts and the health report reads the counter host-side). Never
+ * throws. The unit name is the DEEPARTMENTS_SYSTEMD_UNIT env (deployment-
+ * specific — dev/stable differ). */
+async function resolveSystemdNRestarts(unitName: string): Promise<number | undefined> {
+  if (unitName === undefined || unitName.trim() === '') return undefined
+  try {
+    const { stdout } = await execFileP('systemctl', ['show', unitName, '-p', 'NRestarts'], {
+      cwd: process.cwd(),
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+      env: process.env
+    })
+    const match = /^NRestarts=(\d+)$/m.exec(stdout.trim())
+    if (match === null) return undefined
+    const n = Number(match[1])
+    return Number.isFinite(n) ? n : undefined
+  } catch {
+    return undefined
+  }
+}
 import { runHostRotation, ASISTENTE_SESSION_TITLE, isArchivedSession, buildHeadRotationSeed } from './core/session-rotation.js'
 import type { RotationPersistenceLike, WorkspaceRegistryLike } from './core/session-rotation.js'
 import { createLifecycleService, buildSleepJournalMessage, shouldClearCleanupPending } from './core/lifecycle.js'
@@ -425,6 +476,10 @@ import {
   auditPresetText,
   appendConfigPresetMarker,
   readHealthHeartbeatFile,
+  // POST-INCIDENTE 2026-09-04 — the boot-crash sidecar (the code-layer
+  // crash-loop breaker): the apply-start stamp + the sync streak resolver.
+  stampBootCrash,
+  resolveBootCrashStreak,
   POOLER_STATE_FILE,
   resolvePoolerDispatchBlock,
   POOLER_CAPACITY_DEFAULT_HIGH_PERCENT,
@@ -2298,15 +2353,12 @@ export type TitlePinResult = HostTitlePinResult
  * receive the pin from ensureHead (coordinator.sessionTitle ?? fallback).
  */
 export function pinSessionTitle(session: Session, title: string): TitlePinResult {
-  // Dual session-log read: the runtime core 0.1.1-rc.2 still exposes the cached
-  // `events` getter, while the 0.1.2-rc.1 surface replaces it with
-  // `snapshotEvents()` (same frozen/cached semantics — either seam yields the
-  // same immutable log, so the pin guard is identical on both).
-  const sessionLog = session as unknown as {
-    snapshotEvents?: () => readonly unknown[]
-    events?: readonly unknown[]
-  }
-  const titleEvents = (sessionLog.snapshotEvents?.() ?? sessionLog.events ?? []) as readonly { type: string; data?: { source?: { kind?: string } } }[]
+  // Dual session-log read via the SHARED helper (getSessionEvents — the
+  // post-incidente 2026-09-04 ONE implementation of the `snapshotEvents?.() ??
+  // events` dual read; the runtime core 0.1.1-rc.2 exposes the cached `events`
+  // getter while the 0.1.2-rc.1 surface replaces it with `snapshotEvents()` —
+  // same frozen/cached semantics on either seam, identical pin guard).
+  const titleEvents = getSessionEvents(session) as readonly { type: string; data?: { source?: { kind?: string } } }[]
   if (titleEvents.some((ev) => ev.type === 'session/title' && ev.data?.source?.kind === 'user')) {
     return 'already-titled'
   }
@@ -2504,10 +2556,10 @@ export function buildMissionActivity(input: MissionActivityBuildInput): MissionA
     if (last === undefined) continue
     // The post's last session activity — buildPostSnapshot (the same no-I/O
     // primitive the stall/wait scans use; empty event log → undefined). The
-    // rc.1 session surface reads via `snapshotEvents()`; the legacy `events`
-    // member is the dual fallback for pre-rc.1 fixtures/compositions.
+    // dual rc.1/legacy read goes through the SHARED helper (getSessionEvents —
+    // the post-incidente 2026-09-04 ONE implementation).
     const liveSession = input.agents?.get(entry.sessionId)?.session
-    const events = (liveSession?.snapshotEvents?.() ?? liveSession?.events ?? []) as readonly HealthSessionEvent[]
+    const events = getSessionEvents(liveSession) as readonly HealthSessionEvent[]
     const snap = buildPostSnapshot({ postId, events })
     out.push({
       postId,
@@ -3250,7 +3302,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     | { runSchedulerTick(opts?: { now?: () => number }): Promise<void> }
     | undefined
   ctx.effect(() => {
-    const tick = (): void => {
+    // INVARIANTE DE TICKS (post-incidente 2026-09-04): the interval callback
+    // body is WRAPPED (wrapDaemonTick) — a synchronous throw never escapes the
+    // setInterval (the daemon-liveness invariant, all 4 daemon intervals).
+    const tick = wrapDaemonTick(ctx.logger, 'agenda scheduler', (): void => {
       if (jobsService !== undefined) {
         void jobsService.runSchedulerTick({ now: () => Date.now() })
       } else {
@@ -3269,7 +3324,7 @@ export function applyInvoke(ctx: Context, config: Config) {
           logger: ctx.logger
         })
       }
-    }
+    })
     const interval = setInterval(tick, AGENDA_SCHEDULER_INTERVAL_MS)
     return () => { clearInterval(interval) }
   }, 'deepartments: agenda scheduler daemon')
@@ -3381,7 +3436,10 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
     })
     ctx.effect(() => {
-      const interval = setInterval(() => { void daemon.tick() }, PARALLEL_MONITOR_INTERVAL_MS)
+      // INVARIANTE DE TICKS (post-incidente 2026-09-04): the interval callback
+      // body is WRAPPED (wrapDaemonTick) — a synchronous throw never escapes
+      // the setInterval (the daemon-liveness invariant, all 4 daemon intervals).
+      const interval = setInterval(wrapDaemonTick(ctx.logger, 'parallel-monitor', () => { void daemon.tick() }), PARALLEL_MONITOR_INTERVAL_MS)
       return () => { clearInterval(interval) }
     }, 'deepartments: parallel-monitor daemon')
   }
@@ -3435,8 +3493,65 @@ export function applyInvoke(ctx: Context, config: Config) {
           // (widened cast — the `deliveryRowsReader` pattern; NOT added to
           // HealthBinderDeps, keeping the binder-contract intact).
           notifyHead?: unknown
+          // POST-INCIDENTE 2026-09-04 (crash-loop 609 restarts / exit 7): the
+          // heartbeat health datums — surface (the detected session surface),
+          // nRestarts (the systemd NRestarts read once per boot) and
+          // crashStreak (the boot-crash sidecar). Optional per-tick: ABSENT →
+          // the field is omitted from the heartbeat.
+          sessionSurface?: string
+          nRestarts?: number
+          crashStreak?: number
+          // FINISHER (2026-09-04, addendum 4 — m-812, sweep observability): the
+          // redelivery-sweep health datum — {armed, cycles, lastCycleTs?,
+          // preparedStuckRemaining?} from the orchestration's redeliverySweepState
+          // (the LANE ② non-boot re-drive sweep). Optional per-tick: ABSENT →
+          // the sweep field is omitted from the heartbeat.
+          sweep?: { armed: boolean; cycles: number; lastCycleTs?: number; preparedStuckRemaining?: number }
         }): Promise<void> }
       | undefined
+    // POST-INCIDENTE 2026-09-04 — the CRASH-LOOP BREAKER setup (decision 4):
+    // (a) the boot-crash sidecar stamp runs HERE — at APPLY START, BEFORE the
+    // interval wiring — so a pre-tick crash (the incident class: a builder
+    // throw in the un-wrapped interval callback phase) is recorded; the streak
+    // is derived SYNCHRONOUSLY (read-only) so the tick reports a deterministic
+    // value while the durable stamp write is fire-and-forget (best-effort,
+    // never blocks apply — stampBootCrash re-derives the SAME value: its reads
+    // happen before this boot's first heartbeat can exist).
+    const healthCrashStreak = resolveBootCrashStreak(stateDir)
+    void stampBootCrash(stateDir, healthBootId, Date.now())
+    // (b) NRestarts — the systemd counter, read ONCE per boot (read-only
+    // `systemctl show <unit> -p NRestarts`, best-effort); the unit name comes
+    // from DEEPARTMENTS_SYSTEMD_UNIT (deployment-specific — absent → the tick
+    // omits nRestarts and the health report reads it host-side).
+    const systemdNRestartUnit = process.env.DEEPARTMENTS_SYSTEMD_UNIT
+    let healthNRestarts: number | undefined = undefined
+    if (systemdNRestartUnit !== undefined && systemdNRestartUnit.trim() !== '') {
+      void resolveSystemdNRestarts(systemdNRestartUnit).then(
+        (n) => { healthNRestarts = n },
+        () => { /* best-effort — a read failure degrades to an omitted datum */ }
+      )
+    }
+    // (c) the surface probe (decision 2): the detected session surface of the
+    // LIVE probe session (the host first, then the first live post session —
+    // the sessions the daemon's builders read). Fresh per tick (the runtime
+    // surface cannot change mid-boot, but the probe is cheap and honest).
+    const detectLiveSessionSurface = (): string => {
+      for (const entry of hosts.values()) {
+        if (entry.retired === true) continue
+        const live = agents?.get(entry.sessionId)
+        if (live?.session !== undefined) return detectSessionSurface(live.session as SessionLogLike)
+      }
+      for (const entry of byPost.values()) {
+        if (entry.retired === true) continue
+        const live = agents?.get(entry.sessionId)
+        if (live?.session !== undefined) return detectSessionSurface(live.session as SessionLogLike)
+      }
+      return 'none'
+    }
+    // THE BOOT LOG (decision 2 — "log en boot"): the drift gate fires at
+    // startup, BEFORE any churn — the surface + the breaker datums are visible
+    // in the first boot's log (and later in the heartbeat / health report).
+    ctx.logger.info(`[deepartments] system-health: boot ${healthBootId} started (crashStreak=${healthCrashStreak}, nRestarts=${healthNRestarts ?? 'n/a'}, session-surface=${detectLiveSessionSurface()})`)
     ctx.effect(() => {
       // C6: ONE tail reader per daemon — its byte-offset cursor survives ticks
       // (created here, outside the per-tick deps object), so a 60 s tick parses
@@ -3454,7 +3569,18 @@ export function applyInvoke(ctx: Context, config: Config) {
       // no stateDir write can land after dispose resolves (the tick never
       // throws, so the drain is bounded and inert).
       let inFlight: Promise<void> | undefined
-      const tick = (): void => {
+      // INVARIANTE DE TICKS (post-incidente 2026-09-04): the interval callback
+      // BODY — the builder phase INCLUDED — is WRAPPED (wrapDaemonTick). THIS
+      // was the incident's seam (invoke.ts:3457-3465 at the time): buildHealthPosts
+      // + 6 builders ran OUTSIDE any try/catch BEFORE the internal tick-wrapped
+      // body → a builder throw escaped the setInterval → exit 7 x 609 restarts.
+      // The callback is now NOEXCEPT: the body's throw is logged and the daemon
+      // lives for the next tick.
+      const tick = wrapDaemonTick(ctx.logger, 'system-health', (): void => {
+        // POST-INCIDENTE 2026-09-04 — the per-tick session-surface probe (the
+        // heartbeat datum — decision 2). Computed per tick (cheap) so the
+        // heartbeat always reports the CURRENT runtime surface.
+        const sessionSurface = detectLiveSessionSurface()
         // M-7 — the mission-queue rows: the SAME catalog-post inputs the W8-c
         // safeguards scan (buildHealthPosts — the EXISTING per-tick source),
         // materialized ONCE per tick and filtered to non-retired HEADS (the
@@ -3468,6 +3594,14 @@ export function applyInvoke(ctx: Context, config: Config) {
         if (healthService !== undefined) {
           pending = healthService.runDaemonTick({
             now: () => Date.now(),
+            // POST-INCIDENTE 2026-09-04 — the heartbeat health datums (the
+            // surface gate + the breaker: reported per tick, best-effort).
+            sessionSurface,
+            nRestarts: healthNRestarts,
+            crashStreak: healthCrashStreak,
+            // FINISHER (addendum 4 — m-812): the redelivery-sweep datum from
+            // the orchestration (armed + the observed sweep counters).
+            sweep: toolsSurface.redeliverySweepState(),
             // A FRESH single-use iterator per tick (Map.values() is single-use).
             hosts: hosts.values(),
             // W8-c: the catalog-post inputs (activity + inbox) for the turn-error
@@ -3515,6 +3649,14 @@ export function applyInvoke(ctx: Context, config: Config) {
             now: () => Date.now(),
             stateDir: stateDir,
             bootId: healthBootId,
+            // POST-INCIDENTE 2026-09-04 — the heartbeat health datums (the
+            // surface gate + the breaker: reported per tick, best-effort).
+            sessionSurface,
+            nRestarts: healthNRestarts,
+            crashStreak: healthCrashStreak,
+            // FINISHER (addendum 4 — m-812): the redelivery-sweep datum from
+            // the orchestration (armed + the observed sweep counters).
+            sweep: toolsSurface.redeliverySweepState(),
             config,
             // A FRESH single-use iterator per tick (Map.values() is single-use).
             hosts: hosts.values(),
@@ -3589,7 +3731,7 @@ export function applyInvoke(ctx: Context, config: Config) {
         // tick (a slow run vs a fast interval) is ALSO awaited — allSettled
         // never rejects, so a tick failure can never wedge the shutdown.
         inFlight = Promise.allSettled(inFlight !== undefined ? [inFlight, pending] : [pending]).then(() => undefined)
-      }
+      })
       const interval = setInterval(tick, healthIntervalMs)
       return async () => {
         clearInterval(interval)

@@ -89,14 +89,35 @@ forwards it.
    `https://registry.npmjs.org/dsh-deepartments` (+ the plugins' dist-tags).
    Report the deployed vs published delta per package. **Never touch the stable
    profile `/opt/dsh/.dsh`.**
-6. **Boot attribution (fb-43 — restart-registry).** ANTES de etiquetar
-   cualquier boot como «sin explicar»/unexplained en el digest, consultar el
-   restart-registry (`/.deepartments/restart-registry.jsonl`, mecanismo fb-43) y
-   la atribución del Asistente (restarts deliberados con canary PASS) — correlacionar
-   SIEMPRE el registry con los deploys registrados; un boot sin entrada de causa
+6. **Boot attribution (fb-43 — restart-registry + post-incidente 2026-09-04
+   breaker datums).** ANTES de etiquetar cualquier boot como «sin explicar»/unexplained
+   en el digest, consultar el restart-registry (`/.deepartments/restart-registry.jsonl`,
+   mecanismo fb-43) y la atribución del Asistente (restarts deliberados con canary PASS) —
+   correlacionar SIEMPRE el registry con los deploys registrados; un boot sin entrada de causa
    puede ser deliberado (deploy) o recovery (crash). Un crash con systemd
    on-failure (`Restart=on-failure`) aparece como boot sin atribución y NO debe
    marcarse «sin explicar» sin cruzar los post-errors del día (ítem 4).
+   **Breaker datums (post-incidente 2026-09-04, crash-loop 609 restarts / exit 7):**
+   leer el heartbeat `/.deepartments/health-heartbeat.json` — los campos
+   opcionales `{ts, bootId, surface?, nRestarts?, crashStreak?, sweep?}` — y el sidecar
+   `/.deepartments/boot-crash.json` (`{bootId, bootStartedAt, crashStreak,
+   lastCrashAt?}` — el registro del crash PRE-tick: el arranque previo murió
+   ANTES de un heartbeat sano). Reportar en la línea de atribución por boot:
+   **surface** (la superficie de sesión detectada: `0.1.2-rc.1` /
+   `0.1.1-rc.2-legacy` / `both` / `none` — un drift código-vs-runtime aparece
+   AQUÍ, antes del churn), **NRestarts** (el contador systemd que el daemon lee
+   una vez por boot cuando `DEEPARTMENTS_SYSTEMD_UNIT` está configurado; si el
+   heartbeat lo omite, dejarlo en la lista de ESCALATION para que el Asistente
+   lo lea con `systemctl show <unit> -p NRestarts`) y **crashStreak** (≥ 3 =
+   posible crash-loop en curso — escalar). **Sweep** (FINISHER 2026-09-04,
+   addendum 4 — dato de salud del cierre fb-27): el sweep de re-entrega NO-boot
+   de la lane ② reporta `sweep: {armed, cycles, lastCycleTs?, preparedStuckRemaining?}`
+   — `armed` = el intervalo está activo, `cycles` = ciclos `sweepDue` completados,
+   `lastCycleTs` = el último ciclo, `preparedStuckRemaining` = el residuo
+   prepared-stuck (> 10 min) del último ciclo — **el criterio de CLOSURE fb-27
+   es `preparedStuckRemaining` = 0** (el sweep re-impulsa por sí mismo; exceso
+   sostenido → escalar como alerta de cola). Si el heartbeat omite `sweep` (una
+   composición sin sweep), reportarlo como ausente, nunca adivinarlo.
 
 ## Report
 

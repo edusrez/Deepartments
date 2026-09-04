@@ -241,13 +241,21 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
   // the dev profile (restart counter 609). The 2 in-span session-log reads
   // are now the DUAL read (`snapshotEvents?.() ?? events`) — md5 8da034dc…
   // → c52556ba3d88a80d5dcb1fda1190ef32 (same span, only the read style).
+  // Zone md5 RE-FROZE R7 (LANE OBJETIVE B, 2026-09-04 — the session-surface
+  // hardening after the 609-restarts incident): the 2 in-span session-log
+  // reads COLLAPSED to the shared dshd-core helper (`getSessionEvents(...)`
+  // — the ONE implementation of the dual read) + assembleHeartbeat now ALSO
+  // computes the SESSION-SURFACE probe (detectSessionSurface, the decision-2
+  // drift gate) and passes it into the heartbeat snapshot (`surface:` — the
+  // wake-pack renders the `- session surface:` line). md5 c52556ba… →
+  // fdc87116c7ca4f29d9d684ff15574c3d (same span, additive datums).
   {
     const first = factory.indexOf('  // --- department HEADS: FIRST-CLASS ROOT AGENTS (Batch 1a)')
     const last = factory.indexOf("      logger: ctx.logger\n    })\n  })()")
     assert.ok(first !== -1 && last !== -1 && last > first, 'the factory embeds the presets zone (banner → wakePackService construction close)')
     const zoneText = factory.slice(first, last + "      logger: ctx.logger\n    })\n  })()".length) + '\n'
     const md5 = createHash('md5').update(zoneText, 'utf8').digest('hex')
-    assert.equal(md5, 'c52556ba3d88a80d5dcb1fda1190ef32', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation, the LANE 0.2.3 R4 one-line HOST literal alignment AND the R5 DUAL-read session-surface re-freeze (md5 c52556ba… — re-freeze documented above)')
+    assert.equal(md5, 'fdc87116c7ca4f29d9d684ff15574c3d', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation, the LANE 0.2.3 R4 one-line HOST literal alignment, the R5 DUAL-read session-surface AND the R7 getSessionEvents-collapse + surface-probe re-freeze (md5 fdc87116…)')
     // The D1 deviation is present and documented: the factory's repoRoot
     // initializer carries THREE '..' (module-position-dependent, identical
     // value — the factory lives 3 levels under the repo root).

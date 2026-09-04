@@ -58,6 +58,13 @@ export * from './role-orient.js'
 // (this package), the system-health daemon (dshd-health) and the bundle.
 export * from './pacing.js'
 import type { PacingWindowOptions, PacingState } from './pacing.js'
+// SESSION SURFACE (post-incidente 2026-09-04, crash-loop 609 restarts): the
+// ONE shared dual session-log read (getSessionEvents) + the surface detector
+// (detectSessionSurface — the heartbeat `{ts, bootId, surface}` datum). The 8
+// runtime call sites of the migrable session surface (invoke/tools/presets)
+// route through it; a new direct `session.snapshotEvents(` call elsewhere is
+// the regression this export makes greppable.
+export * from './session-surface.js'
 
 // ---------------------------------------------------------------------------
 // FASE 2.5 BATCH B — the dshd-core Cordis plugin surface.
