@@ -25,7 +25,14 @@ import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 // (latestPerKey dedupe + needsRedelivery + markDelivery 'terminal'; see
 // settleRetiredHostDeliveries below).
 import { parseDeliveryRows, needsRedelivery, markDelivery, resolveDeliveriesPath, loadMessageRecords, resolveMessagesPath } from './messages.js'
-import type { DeliveryRow, MessageRecord } from './messages.js'
+import type { DeliveryRow, DeliveryStatus, MessageRecord } from './messages.js'
+// fb-116 (fold-in batch A) — the boundary PUSH surface: `settleRetiredHostDeliveries`
+// re-drives the reroutable pairs IMMEDIATELY at the rotation through the delivery
+// engine's single seam (`deliverOrQueue` — the SAME seam the sweep drivePair uses
+// via deliverBusRecord, tools.ts), so an in-flight ACK to a ROTATED host lands in
+// the live successor in seconds instead of waiting for the 10-min prepared-stuck
+// sweep. TYPE-ONLY import (erased at runtime — no import cycle).
+import type { DeliveryEngine } from './delivery.js'
 // LANE ② (fb-58 F-3 — m-440): the rotation settle now DISTINGUISHES the
 // RETIRED HOST MEMBER id (host-<oldSession> — reroutable to the live
 // successor) from the raw retired session id. The reroutable in-flight rows
@@ -133,7 +140,20 @@ export function journalPathFor(stateDir: string, memberId: string): string {
 export async function settleRetiredHostDeliveries(
   stateDir: string,
   logger: { info?: (message: string) => void; warn: (message: string) => void },
-  retiredRecipientIds: readonly string[]
+  retiredRecipientIds: readonly string[],
+  opts: {
+    /** fb-116 (fold-in batch A) — the BOUNDARY PUSH seam: re-drive ONE reroutable
+     * in-flight record to its (retired) recipient through the delivery seam
+     * (deliverOrQueue — the SAME seam the sweep drivePair uses), so an in-flight
+     * ACK to a ROTATED host reaches the live successor in SECONDS instead of
+     * waiting for the prepared-stuck sweep (~10 min + a 60 s tick). NEVER
+     * terminal-settles here (a terminal makes the m-440 re-route unrecoverable —
+     * the send loses content). OPTIONAL: a call without it keeps the pre-fix
+     * behavior (the pair is left to the sweep; zero regression for minimal
+     * compositions). The seam must never throw into the settle — a failed push
+     * only warns (the sweep remains the fallback). */
+    rerouteDrive?: (record: MessageRecord, recipientId: string) => Promise<DeliveryStatus>
+  } = {}
 ): Promise<void> {
   try {
     // ALTO-1 rebind guard: the current record map (id → record) the settle
@@ -181,6 +201,25 @@ export async function settleRetiredHostDeliveries(
       const record = recordsById.get(row.messageId)
       if (record === void 0 || !record.to.includes(row.recipientId)) continue
       if (reroutableHostIds.has(row.recipientId)) {
+        // fb-116 (fold-in batch A — triage A, the latency improvement): DO NOT
+        // leave the pair to the sweep (~10 min preparedStuckMs + a 60 s tick).
+        // When the delivery seam is injected, RE-DRIVE it IMMEDIATELY at the
+        // boundary through deliverOrQueue (the same seam the sweep drivePair
+        // uses — deliverBusRecord, tools.ts:4769-4770): the delivery engine's
+        // catalog route re-routes it by the rotatedTo chain to the LIVE
+        // successor, so the in-flight ACK lands in seconds. NEVER a terminal-
+        // settle here (a terminal would break the m-440 re-route — the send
+        // loses content). Non-fatal: a failed push only warns — the sweep
+        // remains the crash/backoff fallback.
+        if (opts.rerouteDrive !== undefined) {
+          try {
+            const status = await opts.rerouteDrive(record, row.recipientId)
+            logger.info?.(`[deepartments] rotation settle: ${row.messageId} → ${row.recipientId} (was ${row.status}) PUSHED at the boundary → ${status} (fb-116 — reroutable pair re-driven NOW, no 10-min sweep wait)`)
+          } catch (error: unknown) {
+            logger.warn(`[deepartments] rotation settle: boundary re-drive of ${row.messageId} → ${row.recipientId} failed (non-fatal — the sweep re-drives it later): ${error instanceof Error ? error.message : String(error)}`)
+          }
+          continue
+        }
         logger.info?.(`[deepartments] rotation settle: ${row.messageId} → ${row.recipientId} (was ${row.status}) NOT settled — the in-flight delivery to a REROUTABLE retired host re-routes to the live successor (fb-58 F-3; m-440 — the non-boot re-drive delivers it), never a terminal`)
         continue
       }
@@ -572,7 +611,25 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
           // `rotation.newSessionId` are different ids, so the fresh host and
           // the exactly-one-live chain are untouched. Non-fatal (a failure
           // warns only — the rotation already committed).
-          await settleRetiredHostDeliveries(ctx.stateDir, ctx.logger, [hostId, sessionId])
+          // fb-116 (fold-in batch A): the BOUNDARY PUSH — resolve the delivery
+          // engine lazily (the composed `deepartments.deliver` facade; absent in
+          // a minimal composition → the settle keeps the pre-fix behavior) and
+          // hand it to the settle as the rerouteDrive seam: the REROUTABLE
+          // in-flight pairs are re-driven IMMEDIATELY through deliverOrQueue
+          // (the SAME seam the sweep drivePair uses) instead of waiting ~10 min
+          // for the prepared-stuck sweep. The caller session resolution mirrors
+          // the sweep's resolveCallerSessionIdForRedeliver (tools.ts:4767-4768):
+          // postId → hostId → the raw id. NEVER terminal-settles (m-440).
+          const deliverEngine = ctx.deptGet('deepartments.deliver') as DeliveryEngine | undefined
+          await settleRetiredHostDeliveries(ctx.stateDir, ctx.logger, [hostId, sessionId], {
+            rerouteDrive:
+              deliverEngine === undefined
+                ? undefined
+                : (record, recipientId) => {
+                    const callerSession = ctx.byPost.get(record.from)?.sessionId ?? ctx.hosts.get(record.from)?.sessionId ?? record.from
+                    return deliverEngine.deliverOrQueue(recipientId, record, { callerAgentId: callerSession, senderSessionId: callerSession })
+                  }
+          })
           // S8 — conclude the sleeping Asistente's turn.
           if (typeof (exec as { concludeTurn?: unknown }).concludeTurn === 'function') {
             (exec as { concludeTurn: () => void }).concludeTurn()

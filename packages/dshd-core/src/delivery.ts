@@ -174,6 +174,18 @@ export interface DeliveryEngineDeps {
     senderSessionId: string | undefined,
     opts: DeliveryInterruptOptions
   ): Promise<DeliveryStatus>
+  /** fb-117 (fold-in batch A) — the FIFO-GATE predicate per recipient: whether
+   * `recipientId` has an EARLIER seq (strictly < `record.seq`) whose delivery
+   * pair is still NON-FINAL ('prepared' pending — the write-ahead crash class
+   * the sweep re-drives only after `preparedStuckMs`). When it returns true,
+   * `deliverOrQueue` does NOT splice the inbox ahead (the durable queue is FIFO
+   * by seq — only the inbox splice inverts): it degrades this delivery to the
+   * no-wake queue behind ('prepared' pending, no materialize/wake) so the
+   * recipient's `agent/inbox/spliced` stream stays in seq order. OPTIONAL: a
+   * composition without it keeps the pre-fix behavior byte-identical (never a
+   * gate). Implementations MUST be fail-soft-friendly (a throw degrades to
+   * ungated at the engine — the ordering fix must never break a delivery). */
+  pendingEarlierSeq?: (recipientId: string, seq: number) => Promise<boolean>
 }
 
 /** The delivery engine: the single bus delivery seam. */
@@ -218,6 +230,32 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
       // Persist-before-deliver (D4): the write-ahead 'prepared' row is on disk
       // BEFORE any route/wake, so a crash mid-fan-out re-delivers idempotently.
       await deps.markPrepared(record, recipientId)
+      // fb-117 (fold-in batch A — the ROOT of the inverted-order triage): the
+      // FIFO GATE per recipient. BEFORE any inbox splice, ask the wiring
+      // whether the recipient has an EARLIER seq still pending NON-FINAL
+      // ('prepared' — e.g. a write-ahead crash-class pair the sweep re-drives
+      // only after preparedStuckMs). If so, this record is NOT spliced ahead of
+      // it: it degrades to the no-wake queue behind ('prepared' pending — the
+      // same state the WIRED noWake branch returns) so `agent/inbox/spliced`
+      // receives in seq order (the durable messages.jsonl queue is FIFO; only
+      // the completion-order splice inverts — triage fb-117 §2.3). The
+      // self-addressed hold ('self') is never gated (it never splices the
+      // inbox — the ack-loop guard). The check itself is fail-soft: a gate
+      // error only warns and proceeds ungated (the ordering fix must never
+      // break a delivery).
+      if (recipientId !== record.from && deps.pendingEarlierSeq !== void 0) {
+        let gated = false
+        try {
+          gated = await deps.pendingEarlierSeq(recipientId, record.seq)
+        } catch (error: unknown) {
+          deps.logger.warn(`[deepartments] bus delivery FIFO-gate check failed for ${record.id} → ${recipientId} (delivery proceeds ungated): ${error instanceof Error ? error.message : String(error)}`)
+        }
+        if (gated) {
+          deps.logger.info(`[deepartments] bus delivery FIFO gate: ${record.id} → ${recipientId} has an EARLIER non-final (prepared) seq — queued BEHIND (no-wake 'prepared'), the inbox splice stays in seq order (fb-117)`)
+          await deps.markFinal(record, recipientId, 'prepared')
+          return 'prepared'
+        }
+      }
       try {
         let status: DeliveryStatus
         if (recipientId === record.from) {
@@ -239,6 +277,20 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
         await deps.markFinal(record, recipientId, status)
         return status
       } catch (error: unknown) {
+        // fb-117 (fold-in batch A — triage candidate 3): a delivery that dies
+        // between markPrepared and markFinal is the write-ahead CRASH class —
+        // left as a 'prepared' orphan it would sit invisible until the 10-min
+        // sweep (the prepared-stuck x2 rows of the triage). Mark the pair
+        // 'failed' (durable, VISIBLE in the ledger, re-driveable with backoff)
+        // instead. The caller's retry semantics are UNCHANGED — the rethrow
+        // below stays; the 'failed' row is the LEDGER side (durability the
+        // recipient can see), never the in-memory flow. The mark itself is
+        // guarded: if the sidecar is down the original error still propagates.
+        try {
+          await deps.markFinal(record, recipientId, 'failed')
+        } catch (markError: unknown) {
+          deps.logger.warn(`[deepartments] bus delivery 'failed' mark for ${record.id} → ${recipientId} could not be persisted (the sidecar write itself failed): ${markError instanceof Error ? markError.message : String(markError)}`)
+        }
         // The sidecar write failed (fs): the record is durable, the delivery is
         // NOT recorded — fail loud to the caller (never silently lose a send).
         deps.logger.warn(`[deepartments] bus delivery sidecar write failed for ${record.id} → ${recipientId}: ${error instanceof Error ? error.message : String(error)}`)

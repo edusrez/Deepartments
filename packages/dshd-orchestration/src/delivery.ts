@@ -32,6 +32,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 
 // LANE 0.2.2 (gap 2) — the bundle bridges resolve to the owning packages
 // directly (registry/messages/delivery/acl/lifecycle/session-rotation/wakepack
@@ -49,7 +50,7 @@ import { mintFreshSessionIdNotArchived, mintWorkerSessionId } from 'dshd-core'
 import { isArchivedSession } from 'dshd-core'
 import type { WorkspaceRegistryLike } from 'dshd-core'
 import type { PostEntry, HostEntry, HostEntryLike } from 'dshd-core'
-import { MessagesStore, markDelivery } from 'dshd-core'
+import { MessagesStore, markDelivery, parseDeliveryRows, resolveDeliveriesPath, hasEarlierPendingPair } from 'dshd-core'
 import type { DeliveryStatus, MessageRecord } from 'dshd-core'
 import { createDeliveryEngine } from 'dshd-core'
 import type {
@@ -1578,6 +1579,21 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       logger: ctx.logger,
       markPrepared: (record, recipientId) => markDelivery(messageStoreDir, record.id, recipientId, 'prepared'),
       markFinal: (record, recipientId, status) => markDelivery(messageStoreDir, record.id, recipientId, status),
+      // fb-117 (fold-in batch A): the FIFO-gate predicate — SAME wiring as the
+      // dshd-core lazy engine (the store's per-recipient seq index + the
+      // sidecar's LATEST row per pair; fail-soft — a read error never breaks a
+      // delivery).
+      pendingEarlierSeq: async (recipientId, seq) => {
+        const store = await messagesStoreReady
+        try {
+          const text = await readFile(resolveDeliveriesPath(messageStoreDir), 'utf8')
+          return hasEarlierPendingPair(parseDeliveryRows(text), (recipient) => store.seqsFor(recipient), recipientId, seq)
+        } catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false // nothing ever sent
+          ctx.logger.warn(`[deepartments] bus delivery FIFO-gate check failed for ${recipientId} (delivery proceeds ungated): ${error instanceof Error ? error.message : String(error)}`)
+          return false
+        }
+      },
       subagents,
       resolveChild: resolveBusChild,
       deliverChild: deliverBusChild,

@@ -709,6 +709,40 @@ export async function deliveryStatus(stateDir: string, messageId: string, recipi
 }
 
 /**
+ * fb-117 (fold-in batch A — the FIFO-gate predicate, PURE): whether the
+ * recipient has an EARLIER seq (strictly < `seq`) whose LATEST delivery-sidecar
+ * pair is still 'prepared' (non-final — the write-ahead crash class of the
+ * triage, or a B3 noWake queue the sweep has not yet re-driven). The durable
+ * messages.jsonl queue is FIFO by seq (messages.ts §3.3); the INBOX SPLICE is
+ * append-in-completion-order — so a later record spliced ahead of a pending
+ * earlier one INVERTS the order the recipient sees (`agent/inbox/spliced`).
+ * `deliverOrQueue` uses this gate to degrade such a delivery to the no-wake
+ * queue ('prepared' pending) instead of splicing ahead. `rows` = the parsed
+ * sidecar (deliveries.jsonl); `seqsFor` = the recipient's OWN ascending seqs
+ * (MessagesStore.seqsFor — §3.3). A 'failed' earlier pair does NOT gate: it is
+ * re-driven by backoff (never spliced fresh), so it cannot invert an incoming
+ * splice the way a pending 'prepared' can. Strictly earlier only — this pair's
+ * own fresh 'prepared' write-ahead row (equal seq) is never the blocker.
+ */
+export function hasEarlierPendingPair(
+  rows: readonly DeliveryRow[],
+  seqsFor: (recipientId: string) => readonly number[],
+  recipientId: string,
+  seq: number
+): boolean {
+  const own = seqsFor(recipientId)
+  if (own.length === 0) return false
+  const latest = new Map<string, DeliveryRow>()
+  for (const row of rows) latest.set(`${row.messageId}\u0000${row.recipientId}`, row)
+  for (const earlier of own) {
+    if (earlier >= seq) break // ascending — strictly earlier seqs only
+    const row = latest.get(`m-${earlier}\u0000${recipientId}`)
+    if (row !== undefined && row.status === 'prepared') return true
+  }
+  return false
+}
+
+/**
  * Idempotent re-delivery predicate (spec §4.4): true when the pair must be
  * (re-)delivered — no row yet, or the last transition was 'prepared' (crash
  * between persist and delivery / mid-fan-out) or 'failed' (never delivered);

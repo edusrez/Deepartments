@@ -14,6 +14,7 @@
 // NO export default (pitfall 0001 — breaks `inject`).
 
 import type { Context } from '@deepseek-ai/cordis'
+import { readFile } from 'node:fs/promises'
 import { RegistryStore } from './registry.js'
 import { busProfileFor, aclDenyGround, aclDenyReason, canSend } from './acl.js'
 import type { BusCatalogLens, BusMemberProfile } from './acl.js'
@@ -24,7 +25,7 @@ import type { WakePackDeps, WakePackService } from './wakepack.js'
 import { runHostRotation } from './session-rotation.js'
 import { createDeliveryEngine } from './delivery.js'
 import type { DeliveryEngine, DeliveryEngineDeps } from './delivery.js'
-import { DeliveryRedeliverer, MessagesStore, markDelivery } from './messages.js'
+import { DeliveryRedeliverer, MessagesStore, markDelivery, parseDeliveryRows, resolveDeliveriesPath, hasEarlierPendingPair } from './messages.js'
 import type { DeliveryRedelivererDeps, DeliveryRow, DeliveryStatus } from './messages.js'
 // D3 (subagent/gui/pooler phase): the dispatch-time transient-subagent role
 // registry promoted to a core SERVICE (`deepartments.subagentRoles`) — ONE
@@ -591,6 +592,24 @@ function buildDeliverLazy(ctx: Context, deliverDeps: DepsHolder<Partial<Delivery
     logger: ctx.logger,
     markPrepared: (record, recipientId) => markDelivery(stateDir, record.id, recipientId, 'prepared'),
     markFinal: (record, recipientId, status) => markDelivery(stateDir, record.id, recipientId, status),
+    // fb-117 (fold-in batch A — the FIFO-gate predicate): whether the recipient
+    // has an EARLIER seq whose delivery pair is still 'prepared' (non-final).
+    // Uses the store's per-recipient seq index (§3.3) + the sidecar's LATEST row
+    // per (messageId, recipientId) — DELIVERIES.jsonl read per call (the same
+    // full-read seam the sweep tick uses; fail-soft: a read error only warns and
+    // returns false — the ordering gate must never break a delivery).
+    pendingEarlierSeq: async (recipientId, seq) => {
+      const bus = ctx.get('deepartments.bus') as BusSurface | undefined
+      const store = await (bus?.storeReady ?? MessagesStore.open(stateDir))
+      try {
+        const text = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
+        return hasEarlierPendingPair(parseDeliveryRows(text), (recipient) => store.seqsFor(recipient), recipientId, seq)
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false // nothing ever sent
+        ctx.logger.warn(`[deepartments] bus delivery FIFO-gate check failed for ${recipientId} (delivery proceeds ungated): ${error instanceof Error ? error.message : String(error)}`)
+        return false
+      }
+    },
     subagents: ctx.get('subagents'),
     resolveChild: bound.resolveChild!,
     deliverChild: bound.deliverChild!,
