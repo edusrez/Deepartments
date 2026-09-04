@@ -764,6 +764,83 @@ const buildFeedbackNudgeContext = () =>
     }
   })
 
+// --- LANE FEEDBACK-NUDGE O2 (QD 09-03 — the dead-letter / dup close) ---------
+// The nudge handler is hardened with THREE suppressions on top of the (1b)
+// inline-line dedup:
+//   (c) a RETIRED post is NEVER nudged — its retirer already notified it, and
+//       a nudge appended to a retired post's context is a DEAD LETTER (the
+//       observed QD case: the nudge spliced into posts retired by a life
+//       abort);
+//   (d) a LIFE-ABORT errored result (the runtime killed the turn — the W9-b
+//       `Agent.cancel` 'interrupted' abort or a harness abort/kill) is NOT an
+//       actionable tool error — the post cannot act on its own abort, so it
+//       never nudges;
+//   (e) TURN DEDUP: the SAME error class in the SAME working turn is nudged
+//       ONCE — the key is (postId, turn, errorClass) — so two post-execute
+//       isError of the same turn yield ONE nudge (a FRESH turn is a fresh
+//       unit of work and may re-nudge). PURE: `nudgeErrorClass` /
+//       `nudgeTurnOf` / `isNudgeLifeAbort` are module-scope (unit-testable
+//       through the waterfall in the src-native tests).
+
+/** The dedup-state cap (nudge keys are rare; a long-lived daemon never grows
+ * unboundedly — the oldest key is dropped past the cap, FIFO). */
+const NUDGE_DEDUP_CAP = 512
+
+/** O2 — the STABLE ERROR CLASS of an errored tool result: the normalized
+ * message (lowercased, whitespace-collapsed, volatile fragments masked — a
+ * quoted id, a hex digest, a plain number — so the SAME underlying error is
+ * ONE class) capped at 160 chars (a giant message cannot balloon the dedup
+ * key). Accepts an Error, a plain `{ message }` object (the harness errored
+ * results) or a raw string — NEVER `String(object)`, which would collapse
+ * every non-Error into one '[object Object]' class. PURE, never throws (a
+ * non-string input degrades to ''). */
+function nudgeErrorClass(error: unknown): string {
+  const message = error instanceof Error
+    ? error.message
+    : (typeof error === 'string'
+      ? error
+      : String((error as { message?: unknown } | null)?.message ?? ''))
+  return message
+    .toLowerCase()
+    .replace(/"[^"]*"/g, '"…"')
+    .replace(/\b[0-9a-f]{8,}\b/g, '…')
+    .replace(/\b\d{2,}\b/g, '…')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 160)
+}
+
+/** O2 — the WORKING-TURN identity of the executing agent: the count of
+ * 'turn/start' session events so far (STABLE within a turn — a fresh turn
+ * increments it, so the SAME error class in a later turn is a new unit of
+ * work and may re-nudge). A plain call-shape agent (no session — the hermetic
+ * waterfall fixtures) is turn 0 (all its executions share one work unit).
+ * PURE, never throws. */
+function nudgeTurnOf(exec: unknown): number {
+  const session = (exec as { agent?: { session?: { snapshotEvents?: () => readonly unknown[]; events?: readonly unknown[] } } } | null)?.agent?.session
+  // Dual session-log read via the SHARED helper (getSessionEvents — the
+  // post-incidente 2026-09-04 ONE implementation of the `snapshotEvents?.()
+  // ?? events` dual read; absent session → empty log → turn 0).
+  const events = getSessionEvents(session)
+  let turns = 0
+  for (const event of events) {
+    if (event !== null && typeof event === 'object' && (event as { type?: unknown }).type === 'turn/start') turns++
+  }
+  return turns
+}
+
+/** O2 — whether the errored result is a LIFE-ABORT (the runtime killed the
+ * turn — the W9-b `Agent.cancel` 'interrupted' abort, a harness abort/kill)
+ * instead of a tool error the post can act on. A killed turn cannot act on
+ * its own abort → the feedback nudge is never appended to it. Defensive: an
+ * explicit `aborted` marker on the exec/result ALSO counts. PURE. */
+function isNudgeLifeAbort(exec: unknown, result: { isError: boolean; error?: { message?: string } }): boolean {
+  if ((exec as { aborted?: unknown } | null)?.aborted === true) return true
+  if ((result as { aborted?: unknown } | null)?.aborted === true) return true
+  const message = typeof result?.error?.message === 'string' ? result.error.message : ''
+  return /\b(?:aborted?|interrupted?|killed)\b/i.test(message)
+}
+
 /**
  * Build the TOOLS ORCHESTRATION surface on the apply fiber (AGENTS.md rule 4
  * — no module-global mutable state; invoked by applyInvoke at the SAME fiber
@@ -934,11 +1011,39 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // guard-denials de dept_exec/dept_zstd_read) se salta — una sola aparición
   // por error. El listener SIEMPRE delega vía next() y preserva la decisión
   // downstream (un accept/block/content de un listener posterior sigue siendo
-  // autoritativo).
+  // autoritativo). O2 (QD 09-03 — cierre de la familia): TRES supresiones
+  // adicionales — (c) un post RETIRED nunca recibe el nudge (el retirer ya lo
+  // notificó; un nudge a un recipient retirado es dead-letter — el splice
+  // observado por el QD); (d) un error de ABORT de VIDA (la runtime mató el
+  // turno — el cancel W9-b 'interrupted', un abort/kill) no es un error de
+  // tool accionable — nunca nudgea un turno muerto; (e) el MISMO error-clase
+  // en el MISMO turno se nudgea UNA vez ((postId, turno, error-clase) — dos
+  // post-execute isError del mismo turno → 1 nudge; un turno NUEVO es una
+  // unidad de trabajo nueva y puede re-nudgear).
+  // O2: el estado de dedup es PER-FIBER (closure de createToolsOrchestration —
+  // AGENTS.md regla 4, nunca estado mutable module-global) y ACOTADO (FIFO).
+  const nudgeDedupKeys = new Set<string>()
   ctx.on('tools/post-execute', async (exec, result, next) => {
     const downstream = await next()
     if (!result.isError) return downstream
     if (result.error.message.includes(FEEDBACK_NUDGE_LINE)) return downstream
+    // (c) O2 — a RETIRED post is never nudged (dead-letter suppression). The
+    // caller post id resolves like every other own-layer tool (postIdForChild
+    // maps a transient-child session id to its post; a post agent id IS the
+    // post id).
+    const agentId = String((exec as { agent?: { id?: unknown } } | null)?.agent?.id ?? '')
+    const callerPostId = postIdForChild(agentId) ?? agentId
+    if (callerPostId !== '' && byPost.get(callerPostId)?.retired === true) return downstream
+    // (d) O2 — a LIFE-ABORT is not an actionable tool error.
+    if (isNudgeLifeAbort(exec, result)) return downstream
+    // (e) O2 — TURN DEDUP: one nudge per (postId, turn, error-class).
+    const dedupKey = `${callerPostId}\u0000${nudgeTurnOf(exec)}\u0000${nudgeErrorClass(result.error)}`
+    if (nudgeDedupKeys.has(dedupKey)) return downstream
+    nudgeDedupKeys.add(dedupKey)
+    if (nudgeDedupKeys.size > NUDGE_DEDUP_CAP) {
+      const oldest = nudgeDedupKeys.values().next().value
+      if (oldest !== undefined) nudgeDedupKeys.delete(oldest)
+    }
     return {
       ...downstream,
       additionalContexts: [buildFeedbackNudgeContext(), ...(downstream.additionalContexts ?? [])]
@@ -2614,8 +2719,11 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       await captureRetiredPostTurnError(stateDir, entry.sessionId, postId)
       // MARK, NOT ERASE (F1): the registry entry stays; the live catalog filters.
       // The store owns the durable MARK (retired:true + manager-ledger prune +
-      // persist) — it never erases a post from the catalog.
-      registry.markPostRetired(postId)
+      // persist) — it never erases a post from the catalog. O4 (m-952 + D-Q2
+      // c4739f3d): the mark ALSO appends the retire row to the retired archive
+      // (RETIRE-ON-DELIVERY — awaited so the archive row is on disk BEFORE the
+      // retire returns; non-fatal — a failed append only warns).
+      await registry.markPostRetired(postId)
       // W7-A (in-session settlement): right after the durable mark commits,
       // settle the retiring worker's pending 'prepared'/'failed' delivery rows
       // to ONE 'terminal' row per messageId — in-session, so the stale rows are

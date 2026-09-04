@@ -1745,7 +1745,14 @@ export function scanConfigPresetFindings(stateDir: string, nowMs: number): Healt
 /** W8-c PART 2 — the production inbox reader: map recipientId → the ts of its
  * ADDRESSED messages (delivery rows with status 'prepared'/'delivered'/'resumed'
  * inside the window, resolved to the message record ts). PURE — the parsed rows
- * are injected so a test drives it with fixtures. */
+ * are injected so a test drives it with fixtures.
+ *
+ * m-707 (fold-in tramo 3A) — the NO-WAKE EXCLUSION: a row marked `noWake: true`
+ * (the WIRED `noWake` transport branch: the record persisted, the recipient was
+ * NOT materialized/woken) does NOT count as addressed/wake traffic — a
+ * recipient that receives ONLY no-wakes stays idle/stalled-legitimate for the
+ * watchdog (a send no-wake must never flip the stale-live / stall detectors
+ * to "active"). */
 export function computeInboxTsByPost(
   messageTsById: ReadonlyMap<string, number>,
   deliveryRows: readonly DeliveryRow[],
@@ -1754,6 +1761,7 @@ export function computeInboxTsByPost(
 ): Map<string, number[]> {
   const out = new Map<string, number[]>()
   for (const row of deliveryRows) {
+    if (row.noWake === true) continue // m-707 — a no-wake send is not a wake
     if (nowMs - row.ts > windowMs) continue
     if (row.status !== 'prepared' && row.status !== 'delivered' && row.status !== 'resumed') continue
     const ts = messageTsById.get(row.messageId)
@@ -2009,6 +2017,10 @@ export function readInboxByPost(
   const inboxTsByPost = computeInboxTsByPost(messageTs, deliveryRows, nowMs, windowMs)
   const hostRowsByPost = new Map<string, { messageId: string; ts: number }[]>()
   for (const row of deliveryRows) {
+    // m-707 — a no-wake send is not a host WAIT expectation either (the
+    // W8-d quiet-expectation scan must not hold a no-wake delivery against
+    // the recipient).
+    if (row.noWake === true) continue
     if (nowMs - row.ts > windowMs) continue
     if (row.status !== 'prepared' && row.status !== 'delivered' && row.status !== 'resumed') continue
     if (messageFrom.get(row.messageId) !== hostId) continue

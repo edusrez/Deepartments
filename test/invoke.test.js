@@ -10961,6 +10961,53 @@ test('B2 dept_exec guard (fb-32/fb-106): SED-RANGE and REGEX-LITERAL tokens are 
 })
 
 // ===========================================================================
+// fb-25/fb-109 (reviewer-5 + QD — the DENY-LIST FP family): the dept_exec
+// deny-list is BOUNDARY-AWARE — a deny pattern matches as a WHOLE TOKEN or
+// PATH SEGMENT, never as a substring of a longer word: `halt` still denies a
+// REAL `halt` command but NEVER a read-only grep whose pattern carries the
+// identifier `KeyPoolerHalted`/`haltedAt` (the fb-109 case — the deny-list
+// substring matched INSIDE the identifier and blocked a legitimate read-only
+// verification grep), and `sudoers`/`rebooting`/`halting` are NOT the
+// `sudo`/`reboot`/`halt` tokens. REAL forbidden forms stay denied: the word
+// tokens (case-insensitive), the phrase forms (`su -`, `init 0`, `dd if=`,
+// `:(){`), the stable profile and out-of-root paths — the builder-6 path-word
+// guard (fb-53/fb-32/fb-106) is untouched (its B2 test above stays green).
+// ===========================================================================
+test('B2 dept_exec deny-list (fb-25/fb-109 — boundary-aware): `halt`-containing IDENTIFIERS in a read-only grep are NOT denied (the reviewer-5 fb-109 case) while a REAL `halt`/`sudo`/`reboot` word, the `su -`/`init 0`/`dd if=`/`:(){` phrase tokens, the stable profile and out-of-root paths STAY denied — prefixed/suffixed variants are never confused with the forbidden token', () => {
+  const roots = ['/home/esuarez/projects', '/usr/lib/node_modules/@deepseek-ai/dsh', '/srv/dept-ws', '/opt/dsh/.dsh-dev']
+  // (1) THE fb-109 case — a read-only grep pattern carrying the `halt`
+  // substring INSIDE identifiers (the reviewer-5 evidence command class:
+  // `grep -n 'KeyPoolerHalted|isOfficialBillingHalt|…' src/*.ts`).
+  assert.equal(deptExecDenyReason("grep -n 'KeyPoolerHalted|isOfficialBillingHalt|haltedAt' src/*.ts", '/srv/dept-ws', roots), undefined, 'fb-109: a grep pattern with halt-containing IDENTIFIERS is allowed (word boundary, never a substring)')
+  assert.equal(deptExecDenyReason("grep -rn 'halted' src/ | head", '/srv/dept-ws', roots), undefined, 'a grep for the word-form halted is allowed')
+  assert.equal(deptExecDenyReason("grep -n 'halting' lib/index.js", '/srv/dept-ws', roots), undefined, 'a grep for halting is allowed')
+  // (1b) prefixed/suffixed VARIANTS are never confused with the token.
+  assert.equal(deptExecDenyReason('echo sudoers', '/srv/dept-ws', roots), undefined, 'the suffixed variant sudoers is NOT the sudo token')
+  assert.equal(deptExecDenyReason('echo rebooting', '/srv/dept-ws', roots), undefined, 'the suffixed variant rebooting is NOT the reboot token')
+  assert.equal(deptExecDenyReason('echo KeyPoolerHalted', '/srv/dept-ws', roots), undefined, 'echo of an identifier carrying halt is allowed')
+  assert.equal(deptExecDenyReason('cat /home/esuarez/projects/README.md', '/srv/dept-ws', roots), undefined, 'a real in-root read stays allowed')
+  // (2) a REAL forbidden word is STILL denied (whole token, case-insensitive).
+  assert.match(deptExecDenyReason('halt now', '/srv/dept-ws', roots), /denied token "halt"/, 'a real halt command is still denied')
+  assert.match(deptExecDenyReason('HALT', '/srv/dept-ws', roots), /denied token "halt"/, 'the case-insensitive HALT is still denied')
+  assert.match(deptExecDenyReason('sudo rm -rf /tmp/x', '/srv/dept-ws', roots), /denied token "sudo"/, 'sudo is still denied (B2 regression)')
+  assert.match(deptExecDenyReason('reboot now', '/srv/dept-ws', roots), /denied token "reboot"/, 'reboot is still denied (B2 regression)')
+  assert.match(deptExecDenyReason('shutdown -h now', '/srv/dept-ws', roots), /denied token "shutdown"/, 'shutdown is still denied')
+  assert.match(deptExecDenyReason('poweroff', '/srv/dept-ws', roots), /denied token "poweroff"/, 'poweroff is still denied')
+  assert.match(deptExecDenyReason('mkfs.ext4 /dev/sdb1', '/srv/dept-ws', roots), /denied token "mkfs"/, 'mkfs is still denied')
+  assert.match(deptExecDenyReason('fdisk -l', '/srv/dept-ws', roots), /denied token "fdisk"/, 'fdisk is still denied')
+  assert.match(deptExecDenyReason('parted /dev/sda', '/srv/dept-ws', roots), /denied token "parted"/, 'parted is still denied')
+  assert.match(deptExecDenyReason('nsenter -t 1 -m', '/srv/dept-ws', roots), /denied token "nsenter"/, 'nsenter is still denied')
+  // (3) the PHRASE tokens are still denied as WHOLE token sequences.
+  assert.match(deptExecDenyReason('su - root', '/srv/dept-ws', roots), /denied token "su -"/, 'su - is still denied (B2 regression)')
+  assert.match(deptExecDenyReason('echo init 0', '/srv/dept-ws', roots), /denied token "init 0"/, 'init 0 is still denied as a token sequence')
+  assert.match(deptExecDenyReason('dd if=/dev/zero of=/tmp/x bs=1M', '/srv/dept-ws', roots), /denied token "dd if="/, 'the dd if= ingest form is still denied')
+  assert.match(deptExecDenyReason(':(){ :|:& };:', '/srv/dept-ws', roots), /denied token ":\(\)\{"/, 'the fork bomb form is still denied')
+  // (4) REAL forbidden paths stay denied via the guards that own them.
+  assert.match(deptExecDenyReason('cat /opt/dsh/.dsh/settings.yaml', '/srv/dept-ws', roots), /the stable profile is protected/, 'the stable profile is still protected-denied')
+  assert.match(deptExecDenyReason('cat /etc/passwd', '/srv/dept-ws', roots), /references absolute path "\/etc\/passwd"/, 'an out-of-root real path is still denied')
+})
+
+// ===========================================================================
 // E2-ZSTD (QH 2026-08-28): dept_zstd_read — the READ-ONLY .zstd session reader
 // for department posts (registered on the SAME `allowExec` gate as dept_exec,
 // so the roles that declare dept_exec — IPD builder/reviewer/explore-deep +
@@ -21366,6 +21413,72 @@ test('FEEDBACK-NUDGE (real path + 1b): a REAL worker dept_exec GUARD DENIAL carr
         assert.equal(okDecision.kind, 'accept', 'the agent-scoped success stays accepted')
         assert.equal(nudgeContexts(okDecision.additionalContexts).length, 0, 'a SUCCESS on the agent scope never receives the nudge')
         assert.ok(root.tools.get('dept_exec') === undefined, 'sanity: dept_exec is own-layer only (the worker scope is the real one)')
+      } finally {
+        await dispose()
+      }
+    })
+  } finally {
+    await restore()
+  }
+})
+
+test('FEEDBACK-NUDGE O2 (QD 09-03 — dedup + life-abort close): the SAME error class in the SAME turn is nudged ONCE ((postId, turn, error-class) — 2 post-execute isError of the same turn → exactly 1 nudge); a DIFFERENT error class in the same turn gets its OWN nudge; a LIFE-ABORT errored result (a killed/interrupted turn) is NEVER nudged', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, workspaceRegistry, pluginCtx, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitFor(() => agents.store.has('head-research-head'), 10000, 'head created at boot')
+      await waitFor(() => workspaceRegistry.attachCalls.includes('head-research-head'), 10000, 'the configured-head attach settled before teardown')
+
+      const exec = nudgeExec('probe_tool', { id: 'probe-agent' })
+      const accept = () => Promise.resolve({ kind: 'accept' })
+
+      // (a) THE mission item — 2 post-execute isError of the SAME turn with the
+      // SAME error class → exactly ONE nudge ((postId, turn, error-class) dedup).
+      const first = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('boom'), accept)
+      assert.equal(nudgeContexts(first.additionalContexts).length, 1, 'the FIRST same-class error of the turn gets the nudge')
+      const second = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('boom'), accept)
+      assert.equal(nudgeContexts(second.additionalContexts).length, 0, 'the SECOND same-class error of the same turn is NOT re-nudged (dedup by (postId, turn, error-class))')
+
+      // (b) a DIFFERENT error class in the same turn still gets its OWN nudge.
+      const other = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('a different error'), accept)
+      assert.equal(nudgeContexts(other.additionalContexts).length, 1, 'a DIFFERENT class in the same turn still gets its own nudge')
+
+      // (c) a LIFE-ABORT (the runtime killed the turn — the W9-b 'interrupted'
+      // cancel class) is NEVER nudged: the post cannot act on its own abort.
+      const aborted = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('the turn was aborted by the runtime'), accept)
+      assert.equal(nudgeContexts(aborted.additionalContexts).length, 0, 'a life-abort (aborted turn) is never nudged')
+      const interrupted = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('the operation was interrupted'), accept)
+      assert.equal(nudgeContexts(interrupted.additionalContexts).length, 0, 'an interrupted-operation error is never nudged')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('FEEDBACK-NUDGE O2 (real path — dead-letter suppression): a RETIRED worker post is NEVER nudged — the waterfall fires with the RETIRED post as the executing agent (the QD-observed splice shape) → 0 nudge contexts, while a LIVE worker error in the SAME fixture still gets its nudge', async () => {
+  const restore = await snapshotRoleTemplate(EXEC_ROLE)
+  try {
+    await writeFile(EXEC_ROLE_PATH, EXEC_ROLE_FRONTMATTER, 'utf8')
+    await withTempStateDir(async (stateDir) => {
+      const { root, agents, workspaceRegistry, pluginCtx, head, headCtx, key, dispose } = await bootWithHead(stateDir)
+      try {
+        await waitFor(() => workspaceRegistry.attachCalls.includes('head-research-head'), 10000, 'the configured-head attach settled before teardown')
+        const signal = new AbortController().signal
+        const { result, worker } = await f3Spawn({ agents }, headCtx, key, head, { role: EXEC_ROLE, task: 'o2 dead-letter probe' })
+        const accept = () => Promise.resolve({ kind: 'accept' })
+
+        // (a) the LIVE worker error still gets the nudge (fresh class).
+        const liveExec = { name: 'dept_exec', arguments: { command: 'probe' }, agent: worker }
+        const liveDecision = await pluginCtx().waterfall('tools/post-execute', liveExec, nudgeErrorResult('some live worker boom'), accept)
+        assert.equal(nudgeContexts(liveDecision.additionalContexts).length, 1, 'a LIVE worker error still gets the nudge')
+
+        // (b) retire the worker → a post-execute carrying the RETIRED post id is
+        // NEVER nudged (no dead-letter splice — the QD-observed case).
+        const retired = await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: result.workerId }, { agent: head, signal })
+        assert.equal(retired.retired, true, 'the worker is retired')
+        const retiredExec = { name: 'dept_exec', arguments: { command: 'probe' }, agent: { id: result.workerId } }
+        const retiredDecision = await pluginCtx().waterfall('tools/post-execute', retiredExec, nudgeErrorResult('boom after retire'), accept)
+        assert.equal(nudgeContexts(retiredDecision.additionalContexts).length, 0, 'a RETIRED post is NEVER nudged (dead-letter suppression)')
       } finally {
         await dispose()
       }

@@ -590,8 +590,8 @@ function buildDeliverLazy(ctx: Context, deliverDeps: DepsHolder<Partial<Delivery
   return createDeliveryEngine({
     stateDir,
     logger: ctx.logger,
-    markPrepared: (record, recipientId) => markDelivery(stateDir, record.id, recipientId, 'prepared'),
-    markFinal: (record, recipientId, status) => markDelivery(stateDir, record.id, recipientId, status),
+    markPrepared: (record, recipientId, opts) => markDelivery(stateDir, record.id, recipientId, 'prepared', undefined, opts?.noWake),
+    markFinal: (record, recipientId, status, opts) => markDelivery(stateDir, record.id, recipientId, status, undefined, opts?.noWake),
     // fb-117 (fold-in batch A — the FIFO-gate predicate): whether the recipient
     // has an EARLIER seq whose delivery pair is still 'prepared' (non-final).
     // Uses the store's per-recipient seq index (§3.3) + the sidecar's LATEST row

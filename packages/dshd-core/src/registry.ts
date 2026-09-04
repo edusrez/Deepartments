@@ -1418,12 +1418,28 @@ export class RegistryStore {
     this.persistPosts()
   }
 
-  /** MARK a post RETIRED (never erased — F1). Sets `retired: true` on the live
+  /**
+   * MARK a post RETIRED (never erased — F1). Sets `retired: true` on the live
    * entry, prunes it from its manager's in-flight ledger, and persists. Returns
    * `false` (no-op) when the post is unknown. The caller decides whether a
    * configured head is also UNREGISTERED (a head retire is cosmetic today) —
-   * this primitive only computes the durable MARK for workers. */
-  markPostRetired(postId: string): void {
+   * this primitive only computes the durable MARK for workers.
+   *
+   * O4 RETIRE-ON-DELIVERY (m-952 + D-Q2 c4739f3d, fold-in tramo 3A): the REAL
+   * retire ALSO appends the post's audit row to the retired archive
+   * (`retiredArchiveFile`, default `posts-retired-archive.jsonl`) — the SAME
+   * `{postId, entry, prunedAt}` row shape the boot prune appends — so EVERY
+   * real retire (dept_post_retire / dept_worker_retire / the auto-retire-on-
+   * delivery / the boot-reconcile reap — all funnel through this mark)
+   * inventories a row REGARDLESS of the retired-count prune threshold (the
+   * archive-log gap: frozen with 0 rows for 09-04 despite several retires —
+   * the archive previously grew ONLY at boot prunes beyond `retiredKeep`).
+   * Awaited by the retire seam so the row is on disk BEFORE the retire returns.
+   * Non-fatal: a failed append only warns (the retire mark already committed —
+   * the mark is the durable part; a later boot prune re-inventories the entry
+   * once the retired count crosses the keep).
+   */
+  async markPostRetired(postId: string, opts?: { retiredArchiveFile?: string; now?: () => number }): Promise<void> {
     const entry = this.byPost.get(postId)
     if (entry === void 0 || entry.retired === true) return
     entry.retired = true
@@ -1435,6 +1451,18 @@ export class RegistryStore {
       }
     }
     this.persistPosts()
+    // O4 — the RETIRE-ON-DELIVERY archive row (see the doc above). The archived
+    // entry is the DURABLE shape (postId stripped — the row's top-level postId
+    // carries the key, exactly like the boot-prune rows).
+    try {
+      const nowMs = (opts?.now ?? (() => Date.now()))()
+      const archiveFile = opts?.retiredArchiveFile ?? 'posts-retired-archive.jsonl'
+      const archivePath = path.join(this.deps.stateDir, archiveFile)
+      const { postId: _postId, ...archivedEntry } = entry
+      await appendFile(archivePath, `${JSON.stringify({ postId, entry: archivedEntry, prunedAt: nowMs })}\n`, 'utf8')
+    } catch (error: unknown) {
+      this.deps.logger.warn(`[deepartments] retire archive append failed for "${postId}" (non-fatal — the retire mark already committed; a future prune/retire re-inventories it): ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   /** Remove a post from the live catalog (a configured-head cosmetic retire:

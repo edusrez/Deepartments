@@ -126,10 +126,14 @@ export interface DeliveryEngineDeps {
   stateDir: string
   /** A warn/info-capable logger (the cordis `ctx.logger` shape). */
   logger: { info(message: string): void; warn(message: string): void }
-  /** The write-ahead sidecar 'prepared' mark (persist-before-deliver, D4). */
-  markPrepared(record: MessageRecord, recipientId: string): Promise<unknown>
-  /** The write-ahead sidecar FINAL status mark (settled — spec §4.4). */
-  markFinal(record: MessageRecord, recipientId: string, status: DeliveryStatus): Promise<unknown>
+  /** The write-ahead sidecar 'prepared' mark (persist-before-deliver, D4).
+   * `opts.noWake: true` (m-707) marks the row no-wake — the WIRED `noWake`
+   * branch sets it so the health watchdog excludes the send from its activity
+   * input (a recipient receiving only no-wakes stays idle). */
+  markPrepared(record: MessageRecord, recipientId: string, opts?: { noWake?: boolean }): Promise<unknown>
+  /** The write-ahead sidecar FINAL status mark (settled — spec §4.4).
+   * `opts.noWake: true` (m-707) marks the final row no-wake (see above). */
+  markFinal(record: MessageRecord, recipientId: string, status: DeliveryStatus, opts?: { noWake?: boolean }): Promise<unknown>
   /** The subagent continuation service (optional — absent in minimal
    * compositions, disabling the child route). */
   subagents?: unknown
@@ -229,7 +233,10 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
       const framed = frameBusRecord(record)
       // Persist-before-deliver (D4): the write-ahead 'prepared' row is on disk
       // BEFORE any route/wake, so a crash mid-fan-out re-delivers idempotently.
-      await deps.markPrepared(record, recipientId)
+      // m-707: a WIRED no-wake delivery marks BOTH its sidecar rows no-wake
+      // (the write-ahead here + the final mark below) so the health watchdog's
+      // inbox reader excludes the send from its activity computation.
+      await deps.markPrepared(record, recipientId, opts.noWake === true ? { noWake: true } : undefined)
       // fb-117 (fold-in batch A — the ROOT of the inverted-order triage): the
       // FIFO GATE per recipient. BEFORE any inbox splice, ask the wiring
       // whether the recipient has an EARLIER seq still pending NON-FINAL
@@ -274,7 +281,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
         } else {
           status = await catalogRoute(deps, recipientId, record, framed, opts)
         }
-        await deps.markFinal(record, recipientId, status)
+        await deps.markFinal(record, recipientId, status, opts.noWake === true ? { noWake: true } : undefined)
         return status
       } catch (error: unknown) {
         // fb-117 (fold-in batch A — triage candidate 3): a delivery that dies

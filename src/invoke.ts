@@ -1299,14 +1299,22 @@ export const DEPT_EXEC_DEFAULT_ROOTS: readonly string[] = [
   '/opt/dsh/.dsh-dev'
 ]
 
-/** Case-insensitive substring denylist for dept_exec commands — a denied token
- * is an out-of-scope safety net; the caller escalates via the Asistente.
- * `systemctl` is deliberately NOT in this list: the single READ-ONLY
+/** Case-insensitive WORD/SEGMENT-BOUNDARY denylist for dept_exec commands — a
+ * denied token is an out-of-scope safety net; the caller escalates via the
+ * Asistente. fb-25/fb-109 (QD — the deny-list FP family): each pattern matches
+ * as a WHOLE TOKEN or PATH SEGMENT — never as a substring of a longer word —
+ * via the `deptExecDenylistMatch` boundary matcher (see below): `halt` still
+ * denies `halt now` but NEVER `KeyPoolerHalted`/`haltedAt`/`halting` (the
+ * fb-109 case: a read-only `grep -n 'KeyPoolerHalted|…'` was DENIED because
+ * the substring `halt` matched the identifier), and a PATH-SHAPED pattern (a
+ * future entry starting with `/`, e.g. `/etc`) matches a WHOLE PATH SEGMENT —
+ * `/etc` vs `/etcetera/…` never confused, and a `/…/` regex literal never
+ * trips it. `systemctl` is deliberately NOT in this list: the single READ-ONLY
  * `systemctl is-active <unit>` form is permitted (non-mutating confirmation)
  * and is carved out in `deptExecDenyReason` via `isReadOnlySystemctl`; every
  * MUTATING systemctl form (start/stop/restart/enable/disable/daemon-reload/
  * mask/…) is still denied there. fb-62 (IPH — token-guard refinement): the
- * root-wipe «rm -rf /» is deliberately NOT a loose substring here EITHER — a
+ * root-wipe «rm -rf /» is deliberately NOT a loose token here EITHER — a
  * substring match over-blocks every SCOPED cleanup (`rm -rf /root/.deepartments/
  * …`, `rm -rf /home/esuarez/projects/…`), so the ONLY remaining deny form is
  * the COMPLETE-root destination handled by the dedicated `isRmRfRootWipe`
@@ -1337,6 +1345,60 @@ export const DEPT_EXEC_DENYLIST: readonly string[] = [
 function isRmRfRootWipe(command: string): boolean {
   const cmd = String(command ?? '')
   return /\brm\s+-rf\s+\/+(?=$|[\s;&|()<>'"`])/i.test(cmd)
+}
+
+/** fb-25/fb-109 (QD — the deny-list FP family): BOUNDARY-AWARE deny matching
+ * for the dept_exec deny-list. A deny pattern must appear as a WHOLE TOKEN or
+ * PATH SEGMENT — never as a substring of a longer word — so the deny-list
+ * stops confusing prefixed/suffixed VARIANTS with the forbidden form:
+ *   - a WORD pattern (`halt`, `sudo`, `reboot`, `shutdown`, `poweroff`,
+ *     `mkfs`, `fdisk`, `parted`, `nsenter`) matches ONLY as a whole shell
+ *     word — bordered by start/end or a non-word char on both sides — so
+ *     `halt` still denies `halt now` but NEVER `KeyPoolerHalted`/`haltedAt`/
+ *     `halting` (the fb-109 case: a read-only `grep -n 'KeyPoolerHalted|
+ *     isOfficialBillingHalt|…'` was DENIED because the substring `halt`
+ *     matched the identifier), and `sudoers`/`rebooting` are NOT the `sudo`/
+ *     `reboot` token;
+ *   - a PHRASE pattern (`su -`, `init 0`, `dd if=`, `:(){`) matches as a
+ *     WHOLE TOKEN SEQUENCE (bounded both sides) — `su - root` is denied, a
+ *     glued variant like `su -l` is NOT the `su -` token, `init 0` is denied
+ *     but `init 0x…` is not, `dd if=/dev/zero of=…` stays denied, the
+ *     `:(){ :|:& };:` fork bomb stays denied;
+ *   - a PATH-SHAPED pattern (starts with `/`, e.g. a future `/etc` entry)
+ *     matches a WHOLE PATH SEGMENT (chain): it fires ONLY on the actual path
+ *     TOKENS the guard extracts (`deptExecPathTokens` — fb-32/fb-106/fb-53,
+ *     builder-6: sed/awk/grep REGEX LITERALS, globs and arithmetic fragments
+ *     are NOT path tokens), and only when the pattern is a segment-prefix of
+ *     the token — `/etc` matches `/etc` and `/etc/passwd` but NEVER
+ *     `/etcetera/...` (the char after the pattern is a word char → not a
+ *     segment boundary). The token scan makes the REGEX-LITERAL variant safe
+ *     BY CONSTRUCTION: a `/…/` literal never reaches this matcher as a path.
+ * Case-insensitive — the legacy substring check was case-insensitive, so
+ * `HALT`/`SUDO` keep denying. Module-private (NOT exported — the frozen
+ * lib/invoke.js export count must not grow; the B2 tests exercise the rule
+ * through the public `deptExecDenyReason`). */
+function deptExecDenylistMatch(command: string, pattern: string): boolean {
+  const cmd = String(command ?? '')
+  const p = String(pattern ?? '')
+  if (p === '') return false
+  if (p.startsWith('/')) {
+    // A PATH-SHAPED deny pattern: match WHOLE path segments on the guard's own
+    // path-token scan (regex literals / arithmetic excluded by construction).
+    for (const token of deptExecPathTokens(cmd)) {
+      if (token === p) return true
+      if (token.startsWith(p) && token.charAt(p.length) === '/') return true
+    }
+    return false
+  }
+  // A word/phrase pattern: a whole TOKEN (SEQUENCE), never a substring of a
+  // longer word — both sides must be a boundary (start/end or a non-word
+  // char). `\b` would NOT work here (a pattern that STARTS or ENDS with a
+  // non-word char — `:(){`, `su -`, `dd if=` — has no `\b` at its edges), so
+  // the boundary class is the explicit non-word `[^A-Za-z0-9_]`, mirroring
+  // `isStablePath`.
+  const escaped = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`(^|[^A-Za-z0-9_])${escaped}($|[^A-Za-z0-9_])`, 'i')
+  return re.test(cmd)
 }
 
 /** Whether the command is the SINGLE READ-ONLY `systemctl is-active <unit>` form
@@ -1622,15 +1684,19 @@ export function deptExecDenyReason(command: string, cwd: string, allowedRoots: r
   if (!roots.some((root) => isPathInside(cwd, root))) {
     return `OUT_OF_SCOPE / DENIED — cwd "${cwd}" is not inside a scoped dept_exec root (escalate via the Asistente / owner approval)`
   }
-  // (2) denylist (case-insensitive substring). Runs BEFORE the systemctl
-  // carve-out so a mutating token (sudo/reboot/…) is still denied even if the
-  // command also contains a read-only `systemctl is-active`.
-  const lower = cmd.toLowerCase()
+  // (2) denylist — case-insensitive, BOUNDARY-AWARE (fb-25/fb-109 — the
+  // deny-list FP family: a deny pattern matches as a WHOLE TOKEN/SEGMENT via
+  // `deptExecDenylistMatch`, so `halt` never denies `KeyPoolerHalted` and a
+  // path-shaped pattern never matches a longer segment or a regex literal).
+  // Runs BEFORE the systemctl carve-out so a mutating token (sudo/reboot/…)
+  // is still denied even if the command also contains a read-only
+  // `systemctl is-active`.
   for (const bad of DEPT_EXEC_DENYLIST) {
-    if (lower.includes(bad)) {
+    if (deptExecDenylistMatch(cmd, bad)) {
       return `OUT_OF_SCOPE / DENIED — command contains a denied token "${bad}" (escalate via the Asistente / owner approval)`
     }
   }
+  const lower = cmd.toLowerCase()
   // (2b) systemctl — ONLY the read-only `systemctl is-active <unit>` form is
   // permitted; every mutating systemctl form stays DENIED (the Asistente/owner
   // owns those). The denylist already ran, so a mutating token is caught above.

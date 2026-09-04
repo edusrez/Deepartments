@@ -1577,8 +1577,8 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     return createDeliveryEngine({
       stateDir: messageStoreDir,
       logger: ctx.logger,
-      markPrepared: (record, recipientId) => markDelivery(messageStoreDir, record.id, recipientId, 'prepared'),
-      markFinal: (record, recipientId, status) => markDelivery(messageStoreDir, record.id, recipientId, status),
+      markPrepared: (record, recipientId, opts) => markDelivery(messageStoreDir, record.id, recipientId, 'prepared', undefined, opts?.noWake),
+      markFinal: (record, recipientId, status, opts) => markDelivery(messageStoreDir, record.id, recipientId, status, undefined, opts?.noWake),
       // fb-117 (fold-in batch A): the FIFO-gate predicate — SAME wiring as the
       // dshd-core lazy engine (the store's per-recipient seq index + the
       // sidecar's LATEST row per pair; fail-soft — a read error never breaks a

@@ -146,6 +146,14 @@ export interface DeliveryRow {
   recipientId: string
   status: DeliveryStatus
   ts: number
+  /** m-707 (fold-in tramo 3A) — TRUE when the delivery was a NO-WAKE delivery
+   * (the WIRED `noWake:true` transport branch — the record persisted, the
+   * recipient was NOT materialized/woken). The health watchdog reads it to
+   * EXCLUDE no-wake sends from its activity/inbox computation (a recipient
+   * receiving ONLY no-wakes stays idle — the m-707 watchdog contract).
+   * ABSENT (undefined/false) = a normal (always-wake or legacy) row — the
+   * pre-m-707 on-disk shape stays byte-identical (R6). */
+  noWake?: boolean
 }
 
 /** Page request: `limit` (default 10, defensively capped at 50) + optional exclusive id cursor. */
@@ -671,16 +679,23 @@ function isDeliveryRowShape(value: unknown): value is DeliveryRow {
  * Append one delivery-transition row (mkdir + appendFile, awaited). Called by
  * send_message as 'prepared' BEFORE any delivery and with the final status
  * ('delivered' | 'resumed' | 'failed' | 'self') AFTER (spec §4.4 — the
- * write-ahead makes boot re-delivery idempotent).
+ * write-ahead makes boot re-delivery idempotent). `noWake: true` (m-707) marks
+ * a NO-WAKE delivery row — the transport sets it for the WIRED `noWake:true`
+ * branch so the health watchdog can exclude the send from its activity input
+ * (a recipient receiving only no-wakes stays idle). Absent → a plain row
+ * (byte-identical to the pre-m-707 shape).
  */
 export async function markDelivery(
   stateDir: string,
   messageId: string,
   recipientId: string,
   status: DeliveryStatus,
-  ts: number = Date.now()
+  ts: number = Date.now(),
+  noWake?: boolean
 ): Promise<DeliveryRow> {
-  const row: DeliveryRow = { messageId, recipientId, status, ts }
+  const row: DeliveryRow = noWake === true
+    ? { messageId, recipientId, status, ts, noWake: true }
+    : { messageId, recipientId, status, ts }
   const filePath = resolveDeliveriesPath(stateDir)
   await mkdir(path.dirname(filePath), { recursive: true })
   await appendFile(filePath, JSON.stringify(row) + '\n', 'utf8')
@@ -740,6 +755,17 @@ export function hasEarlierPendingPair(
     if (row !== undefined && row.status === 'prepared') return true
   }
   return false
+}
+
+/** fb-117 (fold-in tramo 3A) — the DELIVERY-QUEUE SEQUENCE of one sidecar row
+ * (module-private — the sweep batch sort key): the numeric seq parsed from the
+ * record id `m-<seq>` (messages.ts §3.3 — the durable per-recipient FIFO
+ * order), falling back to the delivery-transition `ts` for a non-parseable
+ * legacy id (a stable per-pair substitute; equal → the sort stays stable).
+ * Never throws (a malformed id degrades to its ts). */
+function deliverySeqOf(row: DeliveryRow): number {
+  const n = Number(row.messageId.replace(/^m-/, ''))
+  return Number.isFinite(n) ? n : row.ts
 }
 
 /**
@@ -1283,6 +1309,13 @@ export class DeliveryRedeliverer {
    * the rest. `nowMs` is injected (a test deterministically drives the sweep
    * through the backoff/prepared-stuck windows without real waiting). NEVER
    * throws (the tick must not be wedged by a re-delivery issue).
+   *
+   * fb-117 (fold-in tramo 3A — fix candidate 2 of the triage): the DUE batch
+   * is driven in (recipientId, seq) order — the re-drives of ONE recipient
+   * enter in seq order (delivery-queue FIFO), complementing the FIFO GATE
+   * already committed in batch A (the gate closes the inversion at the ROOT —
+   * the fresh splice; the sort orders the SWEEP batch — the re-drive side).
+   * The `pairDue` criterion is UNCHANGED (prepared > 10 min / failed-backoff).
    */
   async sweepDue(nowMs: number = Date.now()): Promise<void> {
     const { logger } = this.deps
@@ -1295,13 +1328,29 @@ export class DeliveryRedeliverer {
       const rows = await this.readSidecarRows()
       const latestPerKey = new Map<string, DeliveryRow>()
       for (const row of rows) latestPerKey.set(`${row.messageId}\u0000${row.recipientId}`, row)
-      let drove = 0 // the re-drive counter (the observability half of the ledger)
+      // fb-117 (tramo 3A) — collect the DUE batch FIRST (the eligibility
+      // predicate is untouched: the DEAD settle regardless of age, a not-yet-due
+      // LIVE pair is left for a LATER sweep), then drive it in seq order.
+      const due: Array<{ row: DeliveryRow; attempts: number }> = []
       for (const row of latestPerKey.values()) {
         if (!needsRedelivery(row.status)) continue
         const attempts = pairAttemptCount(rows, row.messageId, row.recipientId, nowMs, this.stormWindowMs)
         // A DEAD recipient settles regardless (the alive check inside
         // drivePair); a NOT-yet-due live pair is left for a LATER sweep.
         if (this.deps.recipientAlive(row.recipientId) && !this.pairDue(row, attempts, nowMs)) continue
+        due.push({ row, attempts })
+      }
+      // Sort by (recipientId, seq): the re-drives of ONE recipient enter in
+      // delivery-queue sequence (`m-<seq>` — the durable FIFO order; a
+      // non-parseable legacy id falls back to its row ts). Stable — equal keys
+      // keep the file order.
+      due.sort((a, b) => {
+        const byRecipient = a.row.recipientId < b.row.recipientId ? -1 : a.row.recipientId > b.row.recipientId ? 1 : 0
+        if (byRecipient !== 0) return byRecipient
+        return deliverySeqOf(a.row) - deliverySeqOf(b.row)
+      })
+      let drove = 0 // the re-drive counter (the observability half of the ledger)
+      for (const { row, attempts } of due) {
         await this.drivePair(row, attempts, nowMs, 'sweep')
         drove++
       }
