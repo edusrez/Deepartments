@@ -159,18 +159,32 @@ export interface HealthConfig {
    * durable notice on every state flip (never silent; 0 change with a healthy
    * pool — the verdict stays OK, no notice). */
   poolerGateEnabled?: boolean
-  /** M1 — ≤ this many USABLE keys (the pooler's own eligibility:
+  /** M1 (spec 09-04, owner 2026-09-04 — «warning si solo una key; bien si
+   * ≥2») — ≤ this many USABLE keys (the pooler's own eligibility:
    * !invalid && blockedUntil<=now && cooldownUntil<=now) → a
-   * `pooler-capacity:warning` finding (default 2). */
+   * `pooler-capacity:warning` finding (default 1). The count NEVER produces
+   * critical anymore — the 0-usable outage is a FIXED exception (no knob). */
   warningUsableKeys?: number
-  /** M1 — ≤ this many USABLE keys → a `pooler-capacity:critical` finding — the
-   * mission's "alert BEFORE paralysis" threshold (default 1). */
-  criticalUsableKeys?: number
+  /** M1 (spec 09-04) — ≥ this many USABLE keys → the count grades OK (default
+   * 2, «bien si ≥2»). A host may widen the warning band by raising this. */
+  okUsableKeys?: number
+  /** M1 (spec 09-04) — the GLOBAL quota: the pool AGGREGATE weekly remaining
+   * percent below this → `pooler-capacity:critical` (default 20, «quede <20%
+   * global»). Remaining = 100 − mean(usageWeekly.percent over ALL the USABLE
+   * keys); computed only when every usable key carries weekly data (a partial
+   * view is UNKNOWN, never critical). */
+  criticalGlobalRemainingPercent?: number
+  /** M1 (spec 09-04) — the WEEKLY quota on the LAST usable key: its weekly
+   * remaining below this → `pooler-capacity:critical` (default 10, «quede
+   * <10% semanal de la última key»). Remaining = 100 − usageWeekly.percent. */
+  criticalWeeklyRemainingPercent?: number
   /** M1 — ≥ this many currently blocked/cooldown keys → a
    * `pooler-capacity:warning` finding (default 3). */
   blockedKeysInWindow?: number
-  /** M1 — a usable key whose upstream usage percent is ≥ this → a
-   * `pooler-capacity:warning` finding (default 90 — the pooler's own highPercent). */
+  /** DISPATCH pre-check criterion (unchanged — the M1 scan's old daily-hot
+   * WARNING is RETIRED by spec 09-04): a usable key whose upstream usage
+   * percent is ≥ this → the pre-check blocks when EVERY usable key is at/above
+   * it (default 90 — the pooler's own highPercent). */
   highPercent?: number
   /** M1 — the dead-man's switch: when `now − updatedAt` of the pooler state
    * file exceeds this (default 600000 = 10 min) the state is STALE →
@@ -803,12 +817,20 @@ export const Config: z<any, any> = z.object({
     heartbeatEnabled: z.boolean(),
     waitThresholdMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
     // M1 — the pooler-capacity + qi-silence watchdog knobs (all `default(void 0)`
-    // → absent = code defaults, the existing health-section contract).
+    // → absent = code defaults, the existing health-section contract). Spec
+    // 09-04 (owner 2026-09-04): the THREE-CLASS grading knobs — warning ≤
+    // warningUsableKeys (1), ok ≥ okUsableKeys (2), critical ONLY by quota
+    // (criticalGlobalRemainingPercent 20 / criticalWeeklyRemainingPercent 10)
+    // + the fixed 0-usable outage exception. `criticalUsableKeys` is RETIRED
+    // (the count no longer produces critical; an old config value is stripped
+    // by the schema — unknown keys are never validated).
     poolerCapacityEnabled: z.boolean(),
     poolerDispatchEnabled: z.boolean(),
     poolerGateEnabled: z.boolean(),
     warningUsableKeys: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
-    criticalUsableKeys: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
+    okUsableKeys: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
+    criticalGlobalRemainingPercent: z.number().min(0).max(100),
+    criticalWeeklyRemainingPercent: z.number().min(0).max(100),
     blockedKeysInWindow: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
     highPercent: z.number().min(0).max(100),
     stateStaleMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
@@ -874,7 +896,9 @@ export const Config: z<any, any> = z.object({
     poolerDispatchEnabled: boolean
     poolerGateEnabled: boolean
     warningUsableKeys: number
-    criticalUsableKeys: number
+    okUsableKeys: number
+    criticalGlobalRemainingPercent: number
+    criticalWeeklyRemainingPercent: number
     blockedKeysInWindow: number
     highPercent: number
     stateStaleMs: number

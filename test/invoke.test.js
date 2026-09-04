@@ -53,10 +53,18 @@ import { readLlmPiAiProviderSettings, resolveReasoningContentPreflight, REASONIN
 // pre-check (resolvePoolerDispatchBlock), the b5-ghost census ledger
 // (stepGhostSuspectCensus + the ledger IO) and the dept_zstd_read tool
 // surface (the pure deny guard + the bounded zstd decode + the caps).
+// Spec 09-04 (owner 2026-09-04) — the THREE-CLASS grading defaults (the count
+// no longer criticals: warning ≤ warningUsableKeys(1) / ok ≥ okUsableKeys(2);
+// critical ONLY by quota — global remaining <20% / weekly remaining <10% on
+// the last usable key — plus the fixed 0-usable outage).
 import {
   resolvePoolerDispatchBlock,
   POOLER_CAPACITY_DEFAULT_HIGH_PERCENT,
   POOLER_CAPACITY_DEFAULT_STATE_STALE_MS,
+  POOLER_CAPACITY_DEFAULT_WARNING_USABLE_KEYS,
+  POOLER_CAPACITY_DEFAULT_OK_USABLE_KEYS,
+  POOLER_CAPACITY_DEFAULT_GLOBAL_REMAINING_PERCENT,
+  POOLER_CAPACITY_DEFAULT_WEEKLY_REMAINING_PERCENT,
   resolvePositiveKnob,
   GHOST_SUSPECT_STATE_FILE,
   readGhostSuspectLedger,
@@ -11559,12 +11567,12 @@ test('W6 runHealthDaemonTick: an anomaly with NO live host → warn + skip; the 
 // Re-observations of known/primed retired posts never re-count or re-stamp.
 // ---------------------------------------------------------------------------
 
-test('M1 runHealthDaemonTick pooler-capacity SMOKE (acceptance): a fixture keyPooler-state.json with ALL keys invalid/blocked → the real tick alerts `pooler-capacity: critical` (frame with level + usable/total) + audit + dedupe (no re-alert inside the 30min window); the scan NEVER writes the fixture (read-only)', async () => {
+test('M1 runHealthDaemonTick pooler-capacity SMOKE (acceptance): a fixture keyPooler-state.json with ALL keys invalid/blocked (0 usable) → the real tick alerts `pooler-capacity: critical` — the FIXED 0-usable OUTAGE class of spec 09-04 (frame with level + usable/total + «outage total»; scarcity decides, never a count threshold) + audit + dedupe (no re-alert inside the 30min window); the scan NEVER writes the fixture (read-only)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 27, 10, 0, 0).getTime() // fixed epoch
     // Fixture: every key UNUSABLE (invalid OR blocked in the future) with a
     // FRESH updatedAt (staleness — stale=unknown, no finding — must not mask
-    // the usable-count critical branch).
+    // the 0-usable outage critical of spec 09-04).
     const snap = {
       updatedAt: new Date(T0 - 60_000).toISOString(),
       keys: {
@@ -11592,7 +11600,7 @@ test('M1 runHealthDaemonTick pooler-capacity SMOKE (acceptance): a fixture keyPo
     await tick(T0)
     assert.equal(alerts.length, 1, 'a critical pooler-capacity finding alerts once (grouped)')
     assert.match(alerts[0].frame, /^\[From deepartments\] System-health ALERT:/, 'the alert frame is the system-health frame')
-    assert.match(alerts[0].frame, /pooler-capacity critical: 0 usable \/ 3 keys \(≤ 1 critical\)/, 'the frame bullet carries the LEVEL + the usable/total detail (never the stalled-post fallback)')
+    assert.match(alerts[0].frame, /pooler-capacity critical: 0 usable \/ 3 keys — outage total: NO usable key/, 'the frame bullet carries the LEVEL + the usable/total detail + the OUTAGE class (never the stalled-post fallback)')
     const state = readHealthAlertsState(stateDir)
     assert.equal(state[POOLER_CAPACITY_KEY_CRITICAL], T0, 'the pooler-capacity:critical dedupe key is advanced at now')
     const auditRows = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l))
@@ -11606,52 +11614,207 @@ test('M1 runHealthDaemonTick pooler-capacity SMOKE (acceptance): a fixture keyPo
   })
 })
 
-test('M1 scanPoolerCapacity: the level matrix — 2 usable → warning; ≤1 usable → critical; ≥3 blocked → warning; a hot usage percent (≥90) → warning; highPercent knob', async () => {
+test('M1 runHealthDaemonTick pooler-capacity THREE-CLASS grading (spec 09-04, LOADER-real): a fresh fixture per grade drives the REAL tick — 1 usable → `pooler-capacity: warning` («solo una key», NEVER critical by count); 2 usable → NO alert (ok «bien si ≥2»); quota <20% GLOBAL (aggregate) → `critical` with the remaining %; <10% WEEKLY on the last usable → `critical` with «weekly 4% remaining (96% used)»; 0 usable → the outage `critical`', async () => {
+  const T0 = new Date(2026, 8, 4, 10, 0, 0).getTime() // spec 09-04 date
+  const usable = (id, weeklyPercent) => ({ id, workspace: `ws-${id}`, invalid: false, blockedUntil: 0, cooldownUntil: 0, lastUsage: weeklyPercent === undefined ? null : { status: 'ok', percent: 5, resetsAt: new Date(T0 + 3600_000).toISOString() }, usageWeekly: weeklyPercent === undefined ? null : { status: 'ok', percent: weeklyPercent, resetsAt: new Date(T0 + 7 * 86400_000).toISOString() }, lastError: null, lastCheckedAt: T0 })
+  const blocked = (id) => ({ id, workspace: `ws-${id}`, invalid: false, blockedUntil: T0 + 3600_000, cooldownUntil: 0, lastUsage: null, usageWeekly: null, lastError: null, lastCheckedAt: T0 })
+  const snap = (keys, lastRotation = null) => ({ updatedAt: new Date(T0 - 60_000).toISOString(), keys, lastRotation })
+  // Each grade runs in its OWN temp stateDir (the shared health-alerts ledger
+  // would dedupe a same-key re-alert inside the 30-min window — the SMOKE
+  // rule — so a per-grade dir is the honest per-grade observation).
+  // (1) 1 usable of 3 → WARNING («solo una key»).
+  const warnAlerts = await (async () => {
+    const alerts = []
+    await withTempStateDir(async (stateDir) => {
+      await writeFile(path.join(stateDir, POOLER_STATE_FILE), JSON.stringify(snap({ 'k1': usable('k1'), 'k2': blocked('k2'), 'k3': blocked('k3') })), 'utf8')
+      await runHealthDaemonTick({ now: () => T0, stateDir, bootId: 'boot-w', hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }], poolerStatePath: path.join(stateDir, POOLER_STATE_FILE), notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) }, logger: { warn: () => {} } })
+    })
+    return alerts
+  })()
+  assert.equal(warnAlerts.length, 1, '1 usable → the tick alerts once')
+  assert.match(warnAlerts[0].frame, /pooler-capacity warning: 1 usable \/ 3 keys \(≤ 1 warning/, 'the 1-usable grade is the WARNING class (spec «solo una key» — never critical by count)')
+  // (2) 2 usable → OK «bien si ≥2» → NO pooler alert.
+  const okAlerts = []
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, POOLER_STATE_FILE), JSON.stringify(snap({ 'k1': usable('k1'), 'k2': usable('k2'), 'k3': blocked('k3') })), 'utf8')
+    await runHealthDaemonTick({ now: () => T0, stateDir, bootId: 'boot-ok', hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }], poolerStatePath: path.join(stateDir, POOLER_STATE_FILE), notifyHost: async (hostEntry, frame) => { okAlerts.push({ hostEntry, frame }) }, logger: { warn: () => {} } })
+  })
+  assert.deepEqual(okAlerts, [], '2 usable → OK — the tick emits NO pooler alert («bien si ≥2»)')
+  // (3) GLOBAL quota: mean weekly 86% → 14% remaining < 20% → CRITICAL.
+  const globAlerts = []
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, POOLER_STATE_FILE), JSON.stringify(snap({ 'k1': usable('k1', 85), 'k2': usable('k2', 87), 'k3': usable('k3', 86) })), 'utf8')
+    await runHealthDaemonTick({ now: () => T0, stateDir, bootId: 'boot-g', hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }], poolerStatePath: path.join(stateDir, POOLER_STATE_FILE), notifyHost: async (hostEntry, frame) => { globAlerts.push({ hostEntry, frame }) }, logger: { warn: () => {} } })
+  })
+  assert.equal(globAlerts.length, 1, 'the pool aggregate < 20% remaining → the tick alerts once')
+  assert.match(globAlerts[0].frame, /pooler-capacity critical: pool global weekly 14% remaining \(86% used — aggregate of 3 usable keys\) < 20% critical threshold/, 'the global-grade frame carries the aggregate remaining/used %')
+  // (4) WEEKLY quota on the LAST usable key: 96% used → 4% remaining < 10% →
+  // CRITICAL with the % remaining IN the frame.
+  const weekAlerts = []
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, POOLER_STATE_FILE), JSON.stringify(snap({ 'k1': usable('k1', 40), 'k2': usable('k2', 96) })), 'utf8')
+    await runHealthDaemonTick({ now: () => T0, stateDir, bootId: 'boot-wk', hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }], poolerStatePath: path.join(stateDir, POOLER_STATE_FILE), notifyHost: async (hostEntry, frame) => { weekAlerts.push({ hostEntry, frame }) }, logger: { warn: () => {} } })
+  })
+  assert.equal(weekAlerts.length, 1, 'the last usable key < 10% weekly remaining → the tick alerts once')
+  assert.match(weekAlerts[0].frame, /pooler-capacity critical: last usable key k2 weekly 4% remaining \(96% used\) < 10% critical threshold/, 'the weekly-grade frame includes the remaining % (spec: «last key weekly 4% remaining (96% used)»)')
+  // (5) 0 usable → the OUTAGE CRITICAL (the fixed exception).
+  const zeroAlerts = []
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, POOLER_STATE_FILE), JSON.stringify(snap({ 'k1': blocked('k1'), 'k2': blocked('k2'), 'k3': blocked('k3') })), 'utf8')
+    await runHealthDaemonTick({ now: () => T0, stateDir, bootId: 'boot-z', hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }], poolerStatePath: path.join(stateDir, POOLER_STATE_FILE), notifyHost: async (hostEntry, frame) => { zeroAlerts.push({ hostEntry, frame }) }, logger: { warn: () => {} } })
+  })
+  assert.equal(zeroAlerts.length, 1, '0 usable → the tick alerts once (outage)')
+  assert.match(zeroAlerts[0].frame, /pooler-capacity critical: 0 usable \/ 3 keys — outage total/, 'the 0-usable grade is the outage critical')
+})
+
+test('M1 runHealthDaemonTick pooler-capacity CONFIGURABLE KNOBS (spec 09-04 — the host adjusts WITHOUT code): health.warningUsableKeys:3 → 3 usable WARN; health.criticalGlobalRemainingPercent:10 → a 14%-remaining pool is OK (the default 20 would critical); health.criticalWeeklyRemainingPercent:30 → a 20%-remaining last key CRITICALs (the default 10 would pass) — all through the REAL tick + config', async () => {
+  const T0 = new Date(2026, 8, 4, 11, 0, 0).getTime()
+  const fresh = (keys) => ({ updatedAt: new Date(T0 - 60_000).toISOString(), keys, lastRotation: null })
+  const usable = (id, weeklyPercent) => ({ id, workspace: `ws-${id}`, invalid: false, blockedUntil: 0, cooldownUntil: 0, lastUsage: weeklyPercent === undefined ? null : { status: 'ok', percent: 5, resetsAt: new Date(T0 + 3600_000).toISOString() }, usageWeekly: weeklyPercent === undefined ? null : { status: 'ok', percent: weeklyPercent, resetsAt: new Date(T0 + 7 * 86400_000).toISOString() }, lastError: null, lastCheckedAt: T0 })
+  const runTicked = async (keys, healthConfig) => {
+    const alerts = []
+    await withTempStateDir(async (stateDir) => {
+      await writeFile(path.join(stateDir, POOLER_STATE_FILE), JSON.stringify(fresh(keys)), 'utf8')
+      await runHealthDaemonTick({
+        now: () => T0,
+        stateDir,
+        bootId: 'boot-knobs',
+        hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+        poolerStatePath: path.join(stateDir, POOLER_STATE_FILE),
+        config: { health: healthConfig },
+        notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+        logger: { warn: () => {} }
+      })
+    })
+    return alerts
+  }
+  // (1) warningUsableKeys:3 → 3 usable (default: ok) WARNs.
+  const widened = await runTicked({ 'k1': usable('k1'), 'k2': usable('k2'), 'k3': usable('k3') }, { warningUsableKeys: 3 })
+  assert.equal(widened.length, 1, 'warningUsableKeys:3 → 3 usable warns (the default 1 would grade ok)')
+  assert.match(widened[0].frame, /pooler-capacity warning: 3 usable \/ 3 keys \(≤ 3 warning/, 'the widened warning frame names the configured threshold')
+  // (2) criticalGlobalRemainingPercent:10 → the 14%-remaining pool (mean 86%
+  // used) is NOT critical (the default 20 would critical) → 3 usable ≥ ok 2 → OK.
+  const relaxed = await runTicked({ 'k1': usable('k1', 85), 'k2': usable('k2', 87), 'k3': usable('k3', 86) }, { criticalGlobalRemainingPercent: 10 })
+  assert.deepEqual(relaxed, [], 'criticalGlobalRemainingPercent:10 → 14% remaining passes (host relaxed the global quota below the code default 20)')
+  // (3) criticalWeeklyRemainingPercent:30 → a last usable key at 80% weekly
+  // (20% remaining) CRITICALs (the default 10 would pass) — host tightened it.
+  const tightened = await runTicked({ 'k1': usable('k1', 40), 'k2': usable('k2', 80) }, { criticalWeeklyRemainingPercent: 30 })
+  assert.equal(tightened.length, 1, 'criticalWeeklyRemainingPercent:30 → a 20%-remaining last key criticals (the default 10 would pass)')
+  assert.match(tightened[0].frame, /pooler-capacity critical: last usable key k2 weekly 20% remaining \(80% used\) < 30% critical threshold/, 'the tightened weekly frame carries the remaining/used + the configured threshold')
+})
+
+test('M1 scanPoolerCapacity (spec 09-04): the CODE DEFAULTS match the owner spec (warning ≤1 · ok ≥2 · global <20% · weekly <10%) and the LIVE-context case grads as the spec says — 1 usable oc-13 (usageWeekly null) + oc-6 blocked@100% + oc-10 invalid/billing@100% → WARNING (the exhausted non-usable keys are NOT headroom; no usage data → quota not computable); oc-6 recovery → 2 usable → OK', async () => {
+  assert.equal(POOLER_CAPACITY_DEFAULT_WARNING_USABLE_KEYS, 1, 'default warning ≤ 1 usable («solo una key»)')
+  assert.equal(POOLER_CAPACITY_DEFAULT_OK_USABLE_KEYS, 2, 'default ok ≥ 2 usable («bien si ≥2»)')
+  assert.equal(POOLER_CAPACITY_DEFAULT_GLOBAL_REMAINING_PERCENT, 20, 'default global critical < 20% remaining («quede <20% global»)')
+  assert.equal(POOLER_CAPACITY_DEFAULT_WEEKLY_REMAINING_PERCENT, 10, 'default weekly critical < 10% remaining («quede <10% semanal de la última key»)')
   await withTempStateDir(async (stateDir) => {
     const T0 = 1_234_567_890_000
-    const knobs = { warningUsableKeys: 2, criticalUsableKeys: 1, blockedKeysInWindow: 3, highPercent: 90, stateStaleMs: 600000 }
+    const knobs = {
+      warningUsableKeys: POOLER_CAPACITY_DEFAULT_WARNING_USABLE_KEYS,
+      okUsableKeys: POOLER_CAPACITY_DEFAULT_OK_USABLE_KEYS,
+      blockedKeysInWindow: 3,
+      criticalGlobalRemainingPercent: POOLER_CAPACITY_DEFAULT_GLOBAL_REMAINING_PERCENT,
+      criticalWeeklyRemainingPercent: POOLER_CAPACITY_DEFAULT_WEEKLY_REMAINING_PERCENT,
+      stateStaleMs: 600000
+    }
+    const p = path.join(stateDir, 'live.json')
+    // The LIVE mirror (verified 2026-09-04 18:47Z, /opt/dsh/.dsh-dev):
+    // oc-6 weekly rate-limited 100% (blocked until its reset) · oc-10 invalid
+    // + billingBlocked with weekly 100% · oc-13 usable with usageWeekly null.
+    const liveSnap = {
+      updatedAt: new Date(T0 - 60_000).toISOString(),
+      keys: {
+        'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: T0 + 3600_000, cooldownUntil: 0, usageWeekly: { status: 'rate-limited', percent: 100, resetsAt: new Date(T0 + 7 * 86400_000).toISOString() } },
+        'oc-10': { id: 'oc-10', workspace: 'ws10', invalid: true, blockedUntil: T0 + 3600_000, cooldownUntil: 0, billingBlocked: true, usageWeekly: { status: 'rate-limited', percent: 100, resetsAt: new Date(T0 + 7 * 86400_000).toISOString() } },
+        'oc-13': { id: 'oc-13', workspace: 'ws13', invalid: false, blockedUntil: 0, cooldownUntil: 0, usageWeekly: null, lastUsage: null }
+      },
+      lastRotation: { from: 'oc-6', to: 'oc-13', reason: '429 usage-limit', at: new Date(T0 - 60_000).toISOString(), resetsAt: new Date(T0 + 7 * 86400_000).toISOString(), message: 'key rotada oc-6 → oc-13 por error 429 (usage limit)' }
+    }
+    await writeFile(p, JSON.stringify(liveSnap), 'utf8')
+    const live = scanPoolerCapacity(p, T0, knobs)
+    assert.equal(live.length, 1, '1 usable → one finding')
+    assert.equal(live[0].key, POOLER_CAPACITY_KEY_WARNING, '1 usable oc-13 → the WARNING class (never critical by count; the blocked oc-6@100% and the invalid oc-10@100% are NOT headroom, and oc-13 has no weekly data → quota not computable)')
+    assert.match(live[0].error, /1 usable \/ 3 keys \(≤ 1 warning/, 'the live-grade warning carries usable/total')
+    // oc-6 recovery (its blockedUntil passed — e.g. the 09-07T00:00Z reset):
+    // 2 usable → OK «bien si ≥2» (the 100%-weekly non-usable keys STILL do not
+    // count as headroom; oc-13 still has no weekly data → no quota finding).
+    liveSnap.keys['oc-6'].blockedUntil = 0
+    await writeFile(p, JSON.stringify(liveSnap), 'utf8')
+    assert.deepEqual(scanPoolerCapacity(p, T0, knobs), [], 'oc-6 recovery → 2 usable → OK (no finding)')
+  })
+})
+
+test('M1 scanPoolerCapacity: the spec-09-04 THREE-CLASS matrix — 1 usable → warning («solo una key»); 2 usable → OK («bien si ≥2», no finding); 0 usable → critical (the FIXED outage exception); quota <20% GLOBAL (aggregate weekly remaining) → critical; <10% WEEKLY on the last usable key → critical (frame includes the % remaining); ≥3 blocked → warning; the count NEVER criticals (1 usable is warning, not critical); the daily-hot highPercent WARNING is RETIRED', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_234_567_890_000
+    const knobs = { warningUsableKeys: 1, okUsableKeys: 2, blockedKeysInWindow: 3, criticalGlobalRemainingPercent: 20, criticalWeeklyRemainingPercent: 10, stateStaleMs: 600000 }
     const pathFor = async (name, keys) => {
       const p = path.join(stateDir, `${name}.json`)
       await writeFile(p, JSON.stringify({ updatedAt: new Date(T0 - 60_000).toISOString(), keys, lastRotation: null }), 'utf8')
       return p
     }
-    const usableKey = (id, percent) => ({ id, workspace: `ws-${id}`, invalid: false, blockedUntil: 0, cooldownUntil: 0, lastUsage: { status: 'ok', percent, resetsAt: new Date(T0 + 3600_000).toISOString() }, lastError: null, lastCheckedAt: T0 })
-    const blockedKey = (id) => ({ id, workspace: `ws-${id}`, invalid: false, blockedUntil: T0 + 3600_000, cooldownUntil: 0, lastUsage: null, lastError: null, lastCheckedAt: T0 })
-    // 2 usable of 3 → warning.
-    const warnPath = await pathFor('warn', { 'k1': usableKey('k1', 5), 'k2': usableKey('k2', 5), 'k3': blockedKey('k3') })
-    const warn = scanPoolerCapacity(warnPath, T0, knobs)
-    assert.equal(warn.length, 1, '2 usable → one warning finding')
-    assert.equal(warn[0].key, POOLER_CAPACITY_KEY_WARNING, 'the warning dedupe key')
-    assert.match(warn[0].error, /2 usable \/ 3 keys/, 'the warning error carries usable/total')
-    // 1 usable of 3 → critical.
-    const critPath = await pathFor('crit', { 'k1': usableKey('k1', 5), 'k2': blockedKey('k2'), 'k3': blockedKey('k3') })
-    const crit = scanPoolerCapacity(critPath, T0, knobs)
-    assert.equal(crit.length, 1, '1 usable → one critical finding')
-    assert.equal(crit[0].key, POOLER_CAPACITY_KEY_CRITICAL, 'the critical dedupe key')
-    assert.match(crit[0].error, /1 usable \/ 3 keys \(≤ 1 critical\)/, 'the critical error carries usable/total')
-    // 3 usable + 3 blocked (total 6): usable 3 > warning, blocked 3 ≥ 3 → warning (the block branch, NOT the usable branch).
-    const blockPath = await pathFor('block', { 'k1': usableKey('k1', 5), 'k2': usableKey('k2', 5), 'k3': usableKey('k3', 5), 'k4': blockedKey('k4'), 'k5': blockedKey('k5'), 'k6': blockedKey('k6') })
+    const usableKey = (id, weeklyPercent) => ({ id, workspace: `ws-${id}`, invalid: false, blockedUntil: 0, cooldownUntil: 0, lastUsage: { status: 'ok', percent: 5, resetsAt: new Date(T0 + 3600_000).toISOString() }, usageWeekly: weeklyPercent === undefined ? null : { status: 'ok', percent: weeklyPercent, resetsAt: new Date(T0 + 7 * 86400_000).toISOString() }, lastError: null, lastCheckedAt: T0 })
+    const blockedKey = (id) => ({ id, workspace: `ws-${id}`, invalid: false, blockedUntil: T0 + 3600_000, cooldownUntil: 0, lastUsage: null, usageWeekly: null, lastError: null, lastCheckedAt: T0 })
+    // 1 usable of 3 (no weekly data) → WARNING («solo una key») — NEVER the
+    // old count-critical.
+    const onePath = await pathFor('one', { 'k1': usableKey('k1'), 'k2': blockedKey('k2'), 'k3': blockedKey('k3') })
+    const one = scanPoolerCapacity(onePath, T0, knobs)
+    assert.equal(one.length, 1, '1 usable → one warning finding')
+    assert.equal(one[0].key, POOLER_CAPACITY_KEY_WARNING, '1 usable is the WARNING class (spec: «solo una key» — the count NEVER criticals)')
+    assert.match(one[0].error, /1 usable \/ 3 keys \(≤ 1 warning — spec: «solo una key»\)/, 'the warning error carries usable/total + the threshold')
+    // 2 usable of 3 → OK («bien si ≥2») — NO finding by count.
+    const twoPath = await pathFor('two', { 'k1': usableKey('k1'), 'k2': usableKey('k2'), 'k3': blockedKey('k3') })
+    assert.deepEqual(scanPoolerCapacity(twoPath, T0, knobs), [], '2 usable → OK (no finding)')
+    // 0 usable → CRITICAL (the FIXED outage exception — scarcity decides).
+    const zeroPath = await pathFor('zero', { 'k1': blockedKey('k1'), 'k2': blockedKey('k2'), 'k3': blockedKey('k3') })
+    const zero = scanPoolerCapacity(zeroPath, T0, knobs)
+    assert.equal(zero[0].key, POOLER_CAPACITY_KEY_CRITICAL, '0 usable → the outage critical')
+    assert.match(zero[0].error, /0 usable \/ 3 keys — outage total/, 'the outage error names the class')
+    // GLOBAL quota: mean weekly 86% used → 14% remaining < 20% → critical.
+    const globPath = await pathFor('glob', { 'k1': usableKey('k1', 85), 'k2': usableKey('k2', 87), 'k3': usableKey('k3', 86) })
+    const glob = scanPoolerCapacity(globPath, T0, knobs)
+    assert.equal(glob[0].key, POOLER_CAPACITY_KEY_CRITICAL, 'the pool aggregate weekly remaining < 20% → critical')
+    assert.match(glob[0].error, /pool global weekly 14% remaining \(86% used — aggregate of 3 usable keys\) < 20% critical threshold/, 'the global frame carries the aggregate remaining/used')
+    // WEEKLY quota on the LAST usable key: 96% used → 4% remaining < 10% →
+    // critical with the % remaining IN the frame (the spec example).
+    const weekPath = await pathFor('week', { 'k1': usableKey('k1', 40), 'k2': usableKey('k2', 96) })
+    const week = scanPoolerCapacity(weekPath, T0, knobs)
+    assert.equal(week[0].key, POOLER_CAPACITY_KEY_CRITICAL, 'the last usable key weekly remaining < 10% → critical')
+    assert.match(week[0].error, /last usable key k2 weekly 4% remaining \(96% used\) < 10% critical threshold/, 'the frame includes the remaining % (spec: «last key weekly 4% remaining (96% used)»)')
+    // The RETIRED daily-hot warning: a usable key with a high DAILY lastUsage
+    // percent but NO weekly data is NOT a finding anymore (3 usable → ok).
+    const hotPath = await pathFor('hot', { 'k1': usableKey('k1'), 'k2': usableKey('k2'), 'k3': usableKey('k3') })
+    const hotSnap = JSON.parse(await readFile(hotPath, 'utf8'))
+    hotSnap.keys['k1'].lastUsage.percent = 95
+    await writeFile(hotPath, JSON.stringify(hotSnap), 'utf8')
+    assert.deepEqual(scanPoolerCapacity(hotPath, T0, knobs), [], 'a 95% DAILY usage percent with healthy weekly data → no finding (the daily-hot warning is RETIRED)')
+    // 3 usable + 3 blocked (total 6): usable 3 ≥ ok 2 but blocked 3 ≥ 3 → the
+    // blocked branch warns BEFORE the ok grade.
+    const blockPath = await pathFor('block', { 'k1': usableKey('k1'), 'k2': usableKey('k2'), 'k3': usableKey('k3'), 'k4': blockedKey('k4'), 'k5': blockedKey('k5'), 'k6': blockedKey('k6') })
     const block = scanPoolerCapacity(blockPath, T0, knobs)
-    assert.equal(block[0].key, POOLER_CAPACITY_KEY_WARNING, '3 of 6 blocked → warning (the blocked branch)')
+    assert.equal(block[0].key, POOLER_CAPACITY_KEY_WARNING, '3 of 6 blocked → warning (the blocked branch runs before the ok grade)')
     assert.match(block[0].error, /3 blocked \/ 6 keys \(≥ 3\)/, 'the blocked warning carries blocked/total')
-    // 3 usable, one at 95% percent → warning (the hot-percent branch).
-    const hotPath = await pathFor('hot', { 'k1': usableKey('k1', 95), 'k2': usableKey('k2', 5), 'k3': usableKey('k3', 5) })
-    const hot = scanPoolerCapacity(hotPath, T0, knobs)
-    assert.equal(hot[0].key, POOLER_CAPACITY_KEY_WARNING, 'a usable key at 95% → warning (the leading indicator)')
-    assert.match(hot[0].error, /usage percent 95% ≥ 90%/, 'the hot warning names the percent')
-    // 3 usable all ≤ 90% → NO finding.
-    const okPath = await pathFor('ok', { 'k1': usableKey('k1', 10), 'k2': usableKey('k2', 20), 'k3': usableKey('k3', 30) })
-    assert.deepEqual(scanPoolerCapacity(okPath, T0, knobs), [], 'a healthy pool (3 usable, low percent) → no finding')
-    // A custom highPercent knob (96) — the 95% key is NOT hot anymore (95 < 96).
-    const custom = scanPoolerCapacity(hotPath, T0, { ...knobs, highPercent: 96 })
-    assert.deepEqual(custom, [], 'the highPercent knob raises the warning bar (95 < 96)')
+    // Quota knobs are CONFIGURABLE (defaults in code): a LOWER global
+    // threshold clears the 14%-remaining pool (14 ≥ 10 → ok).
+    const knobGlobal = scanPoolerCapacity(globPath, T0, { ...knobs, criticalGlobalRemainingPercent: 10 })
+    assert.deepEqual(knobGlobal, [], 'criticalGlobalRemainingPercent:10 → the pool at 14% remaining is not critical (knob lowered the bar)')
+    // A LOWER weekly threshold clears the 4%-remaining last key (4 ≥ 3 → ok).
+    const knobWeek = scanPoolerCapacity(weekPath, T0, { ...knobs, criticalWeeklyRemainingPercent: 3 })
+    assert.deepEqual(knobWeek, [], 'criticalWeeklyRemainingPercent:3 → the 4%-remaining last key is not critical (knob lowered the bar)')
+    // The WARNING band is configurable: warningUsableKeys 3 → 2 usable warns;
+    // okUsableKeys 3 → 2 usable is BELOW the ok bar (still no finding — the
+    // gap grades neutral, never a forced class).
+    const knobWarn = scanPoolerCapacity(twoPath, T0, { ...knobs, warningUsableKeys: 3 })
+    assert.equal(knobWarn[0].key, POOLER_CAPACITY_KEY_WARNING, 'warningUsableKeys:3 → 2 usable warns (the host widened the warning band)')
+    assert.deepEqual(scanPoolerCapacity(twoPath, T0, { ...knobs, okUsableKeys: 3 }), [], 'okUsableKeys:3 → 2 usable is below the ok bar (neutral gap — no count finding)')
   })
 })
 
-test('M1 scanPoolerCapacity: the last-rotation 429 prelude — a 429 usage-limit rotation to NO key (to:null) is critical even when keys remain usable; a rotation to a key is NOT', async () => {
+test('M1 scanPoolerCapacity: the last-rotation 429 prelude — a 429 usage-limit rotation to NO key (to:null) is critical even when keys remain usable; a rotation to a key is NOT (2 usable → OK — the count grades ok, spec 09-04)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = 1_234_567_890_000
-    const knobs = { warningUsableKeys: 2, criticalUsableKeys: 1, blockedKeysInWindow: 3, highPercent: 90, stateStaleMs: 600000 }
+    const knobs = { warningUsableKeys: 1, okUsableKeys: 2, blockedKeysInWindow: 3, criticalGlobalRemainingPercent: 20, criticalWeeklyRemainingPercent: 10, stateStaleMs: 600000 }
     const p = path.join(stateDir, 'rot.json')
     await writeFile(p, JSON.stringify({
       updatedAt: new Date(T0 - 60_000).toISOString(),
@@ -11661,21 +11824,23 @@ test('M1 scanPoolerCapacity: the last-rotation 429 prelude — a 429 usage-limit
     const finding = scanPoolerCapacity(p, T0, knobs)
     assert.equal(finding.length, 1, 'the 429-rotation-to-null prelude alerts even with usable keys left')
     assert.equal(finding[0].key, POOLER_CAPACITY_KEY_CRITICAL, 'the rotation prelude is CRITICAL')
-    assert.match(finding[0].error, /last rotation 429 usage-limit → no key \(to:null\) — 503 prelude/, 'the critical error names the 503 prelude')
-    // Control: the SAME pool with a rotation to a key (recovered) → 2 usable → warning at most, NOT the rotation critical.
+    assert.match(finding[0].error, /last rotation 429 usage-limit → no key \(to:null; fresh signal @ .*\) — 503 prelude/, 'the critical error names the 503 prelude')
+    // Control: the SAME pool with a rotation to a key (recovered) → 2 usable →
+    // OK (no finding — spec 09-04 «bien si ≥2»; the rotation-to-a-key is
+    // never the critical prelude).
     await writeFile(p, JSON.stringify({
       updatedAt: new Date(T0 - 60_000).toISOString(),
       keys: { 'k1': { id: 'k1', invalid: false, blockedUntil: 0, cooldownUntil: 0 }, 'k2': { id: 'k2', invalid: false, blockedUntil: 0, cooldownUntil: 0 } },
       lastRotation: { from: 'k3', to: 'k2', reason: '429 usage-limit', at: new Date(T0 - 60_000).toISOString(), message: 'key rotada k3 → k2' }
     }), 'utf8')
-    assert.equal(scanPoolerCapacity(p, T0, knobs)[0].key, POOLER_CAPACITY_KEY_WARNING, 'a rotation to a key is NOT the critical prelude (2 usable → warning)')
+    assert.deepEqual(scanPoolerCapacity(p, T0, knobs), [], 'a rotation to a key is NOT the critical prelude (2 usable → OK, no finding)')
   })
 })
 
-test('M1 scanPoolerCapacity: staleness is UNKNOWN → NO finding + a logger warn naming the age — a state file older than stateStaleMs (or with an unparseable updatedAt) NEVER alerts; the CERTAIN critical branch (usable ≤ critical) still fires on a FRESH snapshot; an ABSENT file → no-op ([])', async () => {
+test('M1 scanPoolerCapacity: staleness is UNKNOWN → NO finding + a logger warn naming the age — a state file older than stateStaleMs (or with an unparseable updatedAt) NEVER alerts; the FIXED 0-usable outage branch (spec 09-04) still fires on a FRESH snapshot; an ABSENT file → no-op ([])', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = 1_234_567_890_000
-    const knobs = { warningUsableKeys: 2, criticalUsableKeys: 1, blockedKeysInWindow: 3, highPercent: 90, stateStaleMs: 600000 }
+    const knobs = { warningUsableKeys: 1, okUsableKeys: 2, blockedKeysInWindow: 3, criticalGlobalRemainingPercent: 20, criticalWeeklyRemainingPercent: 10, stateStaleMs: 600000 }
     const p = path.join(stateDir, 'stale.json')
     // 11 min old (> the 10min default) while the keys are HEALTHY — a quiet
     // grid looks stale by design → NO finding, only a warn naming the age.
@@ -11700,10 +11865,10 @@ test('M1 scanPoolerCapacity: staleness is UNKNOWN → NO finding + a logger warn
     assert.deepEqual(scanPoolerCapacity(p, T0, knobs, { warn: (m) => warns2.push(m) }), [], 'an unparseable updatedAt is stale → NO finding')
     assert.equal(warns2.length, 1, 'the unparseable staleness also warns')
     assert.match(warns2[0], /pooler state unknown\/stale \(unparseable updatedAt\) — no capacity finding/, 'the warn names the unparseable updatedAt')
-    // A FRESH file with NO keys at all — the CERTAIN usable branch: the pool
-    // can never serve → critical (0 usable ≤ 1).
+    // A FRESH file with NO keys at all — the FIXED 0-usable outage: the pool
+    // can never serve → critical (spec 09-04 — scarcity decides).
     await writeFile(p, JSON.stringify({ updatedAt: new Date(T0 - 60_000).toISOString(), keys: {}, lastRotation: null }), 'utf8')
-    assert.equal(scanPoolerCapacity(p, T0, knobs)[0].key, POOLER_CAPACITY_KEY_CRITICAL, 'a FRESH pool with zero keys is exhausted → critical (the certain usable-count branch)')
+    assert.equal(scanPoolerCapacity(p, T0, knobs)[0].key, POOLER_CAPACITY_KEY_CRITICAL, 'a FRESH pool with zero keys is exhausted → critical (the fixed outage branch)')
     // ABSENT file → no-op.
     assert.deepEqual(scanPoolerCapacity(path.join(stateDir, 'missing.json'), T0, knobs), [], 'an absent state file → no finding (no-op)')
   })
@@ -11712,7 +11877,7 @@ test('M1 scanPoolerCapacity: staleness is UNKNOWN → NO finding + a logger warn
 test('HARDENING-401 (fb-39): scanPoolerCapacity billing-critical branch — EVERY key flagged billingBlocked → `pooler-capacity:critical` EVEN WHEN THE STATE IS STALE (the durable billing flag does not age out — the 08-31 «todas-secas» outage class); an ISOLATED billing key in a pool that can still serve → NOT critical (the mission: «todas markadas billing/limit-blocked»)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = 1_234_567_890_000
-    const knobs = { warningUsableKeys: 2, criticalUsableKeys: 1, blockedKeysInWindow: 3, highPercent: 90, stateStaleMs: 600000 }
+    const knobs = { warningUsableKeys: 1, okUsableKeys: 2, blockedKeysInWindow: 3, criticalGlobalRemainingPercent: 20, criticalWeeklyRemainingPercent: 10, stateStaleMs: 600000 }
     const p = path.join(stateDir, 'billing.json')
     // (1) STALE snapshot (11 min > the 10min staleMs) with EVERY key flagged
     // billingBlocked — the 08-31 class: the pooler stopped writing (all keys
@@ -11745,7 +11910,7 @@ test('HARDENING-401 (fb-39): scanPoolerCapacity billing-critical branch — EVER
     }), 'utf8')
     const partial = scanPoolerCapacity(p, T0, knobs)
     assert.ok(!partial.some((f) => f.key === POOLER_CAPACITY_KEY_CRITICAL), 'an isolated billing-flagged key with usable keys left → NOT critical (the pool can still serve)')
-    assert.equal(partial[0]?.key, POOLER_CAPACITY_KEY_WARNING, 'the pool with 2 usable / 3 keys is at most a WARNING (not the billing-critical pause)')
+    assert.deepEqual(partial, [], 'the pool with 2 usable / 3 keys (no weekly usage data) is OK — no finding (spec 09-04: «bien si ≥2», never the billing-critical pause)')
     // (3) A FRESH snapshot with every key billingBlocked → critical too (the
     // fresh path exposes the same class — nothing is masked by usable counts).
     await writeFile(p, JSON.stringify({
@@ -11785,16 +11950,17 @@ test('HARDENING-401 (fb-39): CAPACITY GATE transition monitor (molde franja PEAK
       return { notices, warns }
     }
     const billingKi = (id) => ({ id, invalid: true, blockedUntil: 0, cooldownUntil: 0, errorClass: '401', billingBlocked: true })
-    // A genuinely healthy pool: TWO usable keys (with criticalUsableKeys=1 a
-    // single-key pool would itself be CRÍTICO — the M1 threshold).
+    // A genuinely healthy pool: TWO usable keys (spec 09-04 — «bien si ≥2»; a
+    // single-key pool would be WARNING, never CRÍTICO — the count no longer
+    // criticals, and the gate pauses ONLY on the critical verdict).
     const healthy = {
       'k1': { id: 'k1', invalid: false, blockedUntil: 0, cooldownUntil: 0, lastUsage: { status: 'ok', percent: 5 } },
       'k2': { id: 'k2', invalid: false, blockedUntil: 0, cooldownUntil: 0, lastUsage: { status: 'ok', percent: 8 } }
     }
     // (1) FIRST BOOT with a HEALTHY pool: baseline recorded, NO gate notice
     // (the pacing first-boot precedent — a healthy pool never pauses). The
-    // existing watchdog may still emit a pooler-capacity WARNING alert (the
-    // 2-usable ≤ warning-2 threshold) — the GATE notice is the 'Pool capacity'
+    // M1 watchdog emits NO pooler finding for the healthy 2-key pool (spec
+    // 09-04: «bien si ≥2» → OK) — the GATE notice is the 'Pool capacity'
     // frame, which must be ABSENT here.
     let r = await run(T0, { keys: healthy, updatedAt: T0 - 60_000 })
     assert.deepEqual(r.notices.filter((n) => /Pool capacity/.test(n.frame)).map((n) => n.frame), [], 'first boot (healthy) emits no gate notice')
@@ -11884,7 +12050,7 @@ test('DISPATCH-HARDENING (pure): resolvePoolerDispatchBlock — a fresh snapshot
     }, { from: 'k1', to: null, reason: '429 usage-limit', at: new Date(T0 - 60_000).toISOString() }), 'utf8')
     const rot = resolvePoolerDispatchBlock(p, T0, knobs)
     assert.ok(rot !== undefined, 'the 429-to-null rotation prelude blocks the dispatch')
-    assert.match(rot.reason, /last rotation 429 usage-limit → no key \(to:null; 503 prelude\)/, 'the rotation branch names the 503 prelude')
+    assert.match(rot.reason, /last rotation 429 usage-limit → no key \(to:null; FRESH signal @ .*, 1 min old ≤ 15 min window; 503 prelude\)/, 'the rotation branch names the 503 prelude')
     // (4) A healthy pool (usable keys under the threshold, rotation to a key) →
     // passthrough.
     await writeFile(p, fresh({

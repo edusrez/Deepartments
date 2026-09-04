@@ -70,7 +70,16 @@ const REPO_ROOT = path.resolve(fileURLToPath(new URL('../', import.meta.url)))
 // readWorkRegisterIdleState / writeWorkRegisterIdleState from dshd-health —
 // the docs-level WORK-REGISTER stall watchdog) — an INTENTIONAL, verified
 // surface extension that bumps the frozen count.
-const FROZEN_IMPORT_STATEMENT_COUNTS = [194, 5, 5, 1, 5, 3, 14, 2]
+// M1 spec 09-04 (owner 2026-09-04, pooler-capacity 3-class grading) extended
+// the SEVENTH statement (the DISPATCH-HARDENING block) with the FOUR
+// grading-default exports (POOLER_CAPACITY_DEFAULT_WARNING_USABLE_KEYS /
+// POOLER_CAPACITY_DEFAULT_OK_USABLE_KEYS /
+// POOLER_CAPACITY_DEFAULT_GLOBAL_REMAINING_PERCENT /
+// POOLER_CAPACITY_DEFAULT_WEEKLY_REMAINING_PERCENT from dshd-health — the
+// spec knobs the 3-class tests import; WARNING_USABLE_KEYS was already an
+// export, this adds it to the TEST import surface) — an INTENTIONAL,
+// verified surface extension that bumps the frozen count.
+const FROZEN_IMPORT_STATEMENT_COUNTS = [194, 5, 5, 1, 5, 3, 18, 2]
 
 /** Parse `test/invoke.test.js` and return the 8 import statements that import
  * from '../lib/invoke.js' as arrays of imported symbol names (aliases resolved
@@ -92,19 +101,19 @@ function extractInvokeImports() {
   return statements
 }
 
-test('export-parity: test/invoke.test.js imports EXACTLY 8 statements / 229 symbols from ../lib/invoke.js (the frozen pre-decoupling surface; M-5+M-6+M-7+fb-43+hardening-401+LANE-2+fb-30+LANE-5 bumped the health statement)', () => {
+test('export-parity: test/invoke.test.js imports EXACTLY 8 statements / 233 symbols from ../lib/invoke.js (the frozen pre-decoupling surface; M-5+M-6+M-7+fb-43+hardening-401+LANE-2+fb-30+LANE-5+spec-09-04 bumped the health + dispatch statements)', () => {
   const statements = extractInvokeImports()
   assert.equal(statements.length, 8, 'exactly 8 import statements from ../lib/invoke.js')
   const counts = statements.map((names) => names.length)
-  assert.deepEqual(counts, FROZEN_IMPORT_STATEMENT_COUNTS, 'the per-statement symbol counts are frozen (194+5+5+1+5+3+14+2 = 229)')
+  assert.deepEqual(counts, FROZEN_IMPORT_STATEMENT_COUNTS, 'the per-statement symbol counts are frozen (194+5+5+1+5+3+18+2 = 233)')
   const total = counts.reduce((a, b) => a + b, 0)
-  assert.equal(total, 229, '229 named symbols total (the audit-verified import surface)')
+  assert.equal(total, 233, '233 named symbols total (the audit-verified import surface)')
 })
 
-test('export-parity: lib/invoke.js exports EVERY one of the 229 imported symbols (the drop-in superset invariant)', async () => {
+test('export-parity: lib/invoke.js exports EVERY one of the 233 imported symbols (the drop-in superset invariant)', async () => {
   const statements = extractInvokeImports()
   const required = [...new Set(statements.flat())]
-  assert.equal(required.length, 229, '229 distinct imported symbols')
+  assert.equal(required.length, 233, '233 distinct imported symbols')
   // Load the COMPILED superset (lib/invoke.js — the exact module the tests import).
   const require = createRequire(import.meta.url)
   const invoke = require(path.join(REPO_ROOT, 'lib', 'invoke.js'))
@@ -187,5 +196,15 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // helpers (getSessionEvents / detectSessionSurface) are NOT re-exported by
   // invoke.ts (module-scope — verified ABSENT from this export list; B's
   // invoke.ts diff adds 0 new `export` lines).
-  assert.equal(names.length, 321, `lib/invoke.js export count frozen at 321 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
+  // M1 spec 09-04 (owner 2026-09-04, pooler-capacity 3-class grading) — the
+  // pooler knob surface change: REMOVED the retired count-critical default
+  // (POOLER_CAPACITY_DEFAULT_CRITICAL_USABLE_KEYS — the count can no longer
+  // produce critical) and ADDED the THREE new grading defaults
+  // (POOLER_CAPACITY_DEFAULT_OK_USABLE_KEYS /
+  // POOLER_CAPACITY_DEFAULT_GLOBAL_REMAINING_PERCENT /
+  // POOLER_CAPACITY_DEFAULT_WEEKLY_REMAINING_PERCENT from dshd-health — the
+  // spec knobs of the 3-class scan; all four flow through the star re-export
+  // bridge src/core/health.ts) — an INTENTIONAL, verified surface extension
+  // (321 → 323, net +3 −1 = +2).
+  assert.equal(names.length, 323, `lib/invoke.js export count frozen at 323 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })

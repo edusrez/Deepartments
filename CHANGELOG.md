@@ -130,4 +130,25 @@ plus eight `dshd-*` package plugins, alongside the 2026-08-28 release window
 
 ### Changed
 
+- **M1 `pooler-capacity` watchdog — THREE-CLASS grading (owner spec 09-04,
+  2026-09-04)**: the key-pool health now grades `critical` / `warning` / `ok`
+  per the owner's spec «cambiar los sistemas críticos cuando quede <20%
+  global / <10% semanal de la última key; warning si solo una key; bien si
+  ≥2». Breaking semantics on purpose: the COUNT can no longer produce
+  critical (a single usable key is WARNING, never critical — the old
+  `criticalUsableKeys` knob is RETIRED); critical comes ONLY from the quota
+  branches (`criticalGlobalRemainingPercent` default 20 — pool aggregate
+  weekly remaining; `criticalWeeklyRemainingPercent` default 10 — the last
+  usable key's weekly remaining, `100 − usageWeekly.percent`) plus the FIXED
+  0-usable outage exception («outage total» — scarcity decides) and the
+  existing CERTAIN classes (429→null rotation prelude, all-keys
+  billing-blocked, the R1 stale-rotation self-report). `warningUsableKeys`
+  default 2 → 1 («solo una key»); new `okUsableKeys` default 2 («bien si
+  ≥2»). The daily x-ratelimit hot-percent WARNING is retired (`highPercent`
+  remains the DISPATCH pre-check's at-quota criterion, unchanged). Quota
+  alerts carry the % remaining («last key weekly 4% remaining (96% used)»).
+  All thresholds configurable via `health.*` knobs (absent → code defaults,
+  mirrored in `src/org.ts`). The key-pooler writes/429-rotation are untouched
+  (the scan stays SOLO-LECTURA).
+
 - (placeholder for the next release after the DECOUPLING hito / 0.2.x)

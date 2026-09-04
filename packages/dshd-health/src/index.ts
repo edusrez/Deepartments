@@ -2385,17 +2385,36 @@ export interface HealthConfigLike {
     poolerDispatchEnabled?: boolean
     /** M1 — ≤ this many USABLE keys (same eligibility the pooler uses:
      * `!invalid && blockedUntil<=now && cooldownUntil<=now`) → a
-     * `pooler-capacity:warning` finding (default 2). */
+     * `pooler-capacity:warning` finding. Spec 09-04 (owner, 2026-09-04):
+     * «warning si solo una key» → default 1. The count NEVER produces critical
+     * anymore — the 0-usable outage is a FIXED exception (no threshold). */
     warningUsableKeys?: number
-    /** M1 — ≤ this many USABLE keys → a `pooler-capacity:critical` finding —
-     * the mission's "alert BEFORE paralysis" threshold (default 1). */
-    criticalUsableKeys?: number
+    /** M1 (spec 09-04) — ≥ this many USABLE keys → the count grades OK
+     * («bien si ≥2»; default 2). A host may widen the warning band by raising
+     * this (warning ≤ `warningUsableKeys`, ok ≥ `okUsableKeys`; the gap grades
+     * no finding). The ok grade applies AFTER the quota/blocked branches. */
+    okUsableKeys?: number
+    /** M1 (spec 09-04) — the GLOBAL quota: the pool AGGREGATE weekly remaining
+     * percent below this → a `pooler-capacity:critical` finding («quede <20%
+     * global»; default 20). Remaining = 100 − mean(usageWeekly.percent over
+     * ALL the USABLE keys); computed ONLY when every usable key carries weekly
+     * data (a partial view is UNKNOWN, never critical). */
+    criticalGlobalRemainingPercent?: number
+    /** M1 (spec 09-04) — the WEEKLY quota on the LAST usable key («la última
+     * key en uso»): its weekly remaining below this → a
+     * `pooler-capacity:critical` finding («quede <10% semanal de la última
+     * key»; default 10). Remaining = 100 − usageWeekly.percent; the alert
+     * includes the % remaining when the data exists («last key weekly 4%
+     * remaining (96% used)»). */
+    criticalWeeklyRemainingPercent?: number
     /** M1 — ≥ this many currently BLOCKED/cooldown keys (blockedUntil/cooldownUntil
      * in the future) → a `pooler-capacity:warning` finding (default 3). */
     blockedKeysInWindow?: number
-    /** M1 — a usable key whose upstream usage percent (`lastUsage.percent`, the
-     * x-ratelimit leading indicator the pooler already fetched) is >= this →
-     * a `pooler-capacity:warning` finding (default 90 — mirrors the pooler's own
+    /** DISPATCH pre-check criterion (unchanged — the M1 scan's old daily-hot
+     * WARNING is RETIRED by spec 09-04): a usable key whose upstream usage
+     * percent (`lastUsage.percent`, the x-ratelimit leading indicator the
+     * pooler already fetched) is >= this → the dispatch pre-check blocks when
+     * EVERY usable key is at/above it (default 90 — mirrors the pooler's own
      * highPercent). */
     highPercent?: number
     /** M1 — the staleness window (default 10 min): the pooler writes the state
@@ -2404,8 +2423,8 @@ export interface HealthConfigLike {
      * scan logs a `warn` (naming the age) and returns NO finding — a
      * quiet-but-healthy grid looks stale by design; the real exhaustion (the
      * dead-man's-switch intent) is caught by the CERTAIN critical branches: a
-     * 429 rotation to NO key (`lastRotation.to === null`) or usable ≤
-     * `criticalUsableKeys`. */
+     * 429 rotation to NO key (`lastRotation.to === null`) or the 0-usable
+     * outage (spec 09-04 — scarcity decides, the count's only critical). */
     stateStaleMs?: number
     /** LANE ② R1 (incident-delivery 2026-09-03) — the FRESHNESS window of the
      * 429→null `lastRotation` signal, measured on the rotation's OWN `at`
@@ -3067,15 +3086,24 @@ export function scanHealthCatchup(
  *       /opt/dsh/.dsh-dev/keyPooler-state.json) — SOLO-LECTURA, the scan NEVER
  *       writes it. The snapshot is the pooler's truthful health: `updatedAt`,
  *       `keys{id,workspace,invalid,blockedUntil,cooldownUntil,
- *       lastUsage{status,percent,resetsAt},lastError,lastCheckedAt}`, and
- *       `lastRotation`. A key is USABLE with the SAME eligibility the pooler's
- *       `select()` uses (pool.ts:237-241): `!invalid && blockedUntil<=now &&
- *       cooldownUntil<=now`. Levels: warning (usable<=warningUsableKeys OR
- *       blocked>=blockedKeysInWindow OR a usable key's usage percent >=
- *       highPercent); critical (usable<=criticalUsableKeys OR the state file is
- *       STALE beyond stateStaleMs — the dead-man's switch — OR the last
- *       rotation was a 429-usage-limit rotation to NO key, to:null — the exact
- *       prelude of the 503 KeyPoolerExhausted).
+ *       lastUsage{status,percent,resetsAt},usageWeekly{status,percent,resetsAt},
+ *       lastError,lastCheckedAt}`, and `lastRotation`. A key is USABLE with the
+ *       SAME eligibility the pooler's `select()` uses (pool.ts:237-241):
+ *       `!invalid && blockedUntil<=now && cooldownUntil<=now`. THREE-CLASS
+ *       grading (spec 09-04, owner 2026-09-04 — «cambiar los sistemas críticos
+ *       cuando quede <20% global / <10% semanal de la última key; warning si
+ *       solo una key; bien si ≥2; en crítico paramos todo salvo lo urgente
+ *       hasta nueva key en uso»): CRITICAL only by QUOTA — pool aggregate
+ *       weekly remaining < criticalGlobalRemainingPercent (20; the mean over
+ *       ALL usable keys, computed ONLY when every usable key carries weekly
+ *       data — a partial view is UNKNOWN) OR the last usable key's weekly
+ *       remaining < criticalWeeklyRemainingPercent (10) —
+ *       or by the CERTAIN exhaustion classes (usable==0 outage, a 429
+ *       usage-limit rotation to NO key, every key billing-blocked); WARNING —
+ *       usable ≤ warningUsableKeys (1, «solo una key») OR blocked/cooldown ≥
+ *       blockedKeysInWindow (3) OR a STALE 429→null rotation (R1 §7.4d); OK —
+ *       usable ≥ okUsableKeys (2, «bien si ≥2»). The count NEVER produces
+ *       critical (except the fixed 0-usable outage).
  *
  *   (b) `qi-silence`: the guarantee over the worker-retire quality-inspect
  *       TRIGGER (A+B fixed the trigger; this WATCHDOG guarantees it). RETIREMENTS
@@ -3120,11 +3148,30 @@ export function resolvePositiveKnob(value: number | undefined, fallback: number)
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
 }
 
-/** M1-a code defaults (absent knobs → these). */
-export const POOLER_CAPACITY_DEFAULT_WARNING_USABLE_KEYS = 2
-export const POOLER_CAPACITY_DEFAULT_CRITICAL_USABLE_KEYS = 1
+/** M1-a code defaults (absent knobs → these). Spec 09-04 (2026-09-04, owner)
+ * re-grades the key-pool health in THREE classes: critical ONLY by quota
+ * («quede <20% global / <10% semanal de la última key») + the fixed 0-usable
+ * outage exception; warning «si solo una key»; ok «si ≥2». The count-based
+ * critical (`criticalUsableKeys`) is GONE — count can no longer produce
+ * critical (except the 0-usable outage, hardcoded). */
+export const POOLER_CAPACITY_DEFAULT_WARNING_USABLE_KEYS = 1
+export const POOLER_CAPACITY_DEFAULT_OK_USABLE_KEYS = 2
 export const POOLER_CAPACITY_DEFAULT_BLOCKED_KEYS_IN_WINDOW = 3
+/** The M1 scan's daily x-ratelimit hot-percent WARNING is RETIRED (spec 09-04:
+ * the WEEKLY quota drives critical; the daily signal stays a pooler runtime
+ * signal, never a health grade). `highPercent` REMAINS the DISPATCH
+ * pre-check's at-quota criterion (the pooler's own highPercent — spawn.ts). */
 export const POOLER_CAPACITY_DEFAULT_HIGH_PERCENT = 90
+/** Spec 09-04 — the GLOBAL quota threshold in the owner's «percent remaining»
+ * language: the pool AGGREGATE weekly remaining below this → critical
+ * (default 20 — «quede <20% global»). Remaining = 100 − mean(usageWeekly.percent
+ * over ALL the USABLE keys); computed ONLY when every usable key carries
+ * weekly data (a partial view is UNKNOWN, never critical). */
+export const POOLER_CAPACITY_DEFAULT_GLOBAL_REMAINING_PERCENT = 20
+/** Spec 09-04 — the WEEKLY quota threshold on the LAST usable key («la última
+ * key en uso»): its weekly remaining below this → critical (default 10 —
+ * «quede <10% semanal de la última key»). Remaining = 100 − usageWeekly.percent. */
+export const POOLER_CAPACITY_DEFAULT_WEEKLY_REMAINING_PERCENT = 10
 export const POOLER_CAPACITY_DEFAULT_STATE_STALE_MS = 10 * 60 * 1000
 // LANE ② R1 (incident-delivery 2026-09-03) — the FRESHNESS window of the
 // `lastRotation` 429→null signal (default 15 min): the rotation-age check of
@@ -3192,6 +3239,13 @@ export interface PoolerKeyStateLike {
   /** The last upstream /usage result the pooler fetched (the leading indicator;
    * null when the pooler has no usage data). */
   lastUsage?: { status?: string; percent?: number; resetsAt?: string } | null
+  /** Spec 09-04 — the key's upstream WEEKLY usage quota (the pooler's own
+   * weekly `/usage` signal; null when the pooler has no weekly data yet — the
+   * LIVE oc-13 after its first rotation). The quota grading computes the
+   * REMAINING percent = 100 − `usageWeekly.percent` (the owner's «quede <20%
+   * global / <10% semanal» language); a blocked/invalid key's weekly
+   * exhaustion is NOT the pool's headroom (only USABLE keys count). */
+  usageWeekly?: { status?: string; percent?: number; resetsAt?: string } | null
   lastError?: string | null
   lastCheckedAt?: number
   /** HARDENING-401 (fb-39, 2026-09-01) — the BILLING/credits class: the pooler
@@ -3241,12 +3295,39 @@ export function readPoolerStateFile(statePath: string): PoolerSnapshotLike | und
 }
 
 /** The resolved pooler-capacity knobs (code defaults when the config knob is
- * absent/invalid — the staleLiveMinutes fallback pattern). */
+ * absent/invalid — the staleLiveMinutes fallback pattern). Spec 09-04
+ * (owner, 2026-09-04) grades the key-pool health in THREE classes:
+ * critical / warning / ok — critical ONLY by quota ([g] <20% global, [w]
+ * <10% weekly on the last usable key) plus the FIXED 0-usable outage
+ * exception; warning «si solo una key» (≤ `warningUsableKeys`); ok «si ≥2»
+ * (≥ `okUsableKeys`). The old count-critical (`criticalUsableKeys`) and the
+ * daily x-ratelimit hot-percent warning are GONE. */
 export interface PoolerCapacityKnobs {
+  /** Spec 09-04 — ≤ this many USABLE keys → `pooler-capacity:warning`
+   * («warning si solo una key»; default 1). The count CANNOT produce critical
+   * anymore — the 0-usable outage is the only count-driven critical, and it is
+   * FIXED (no threshold: a positive threshold would contradict «0 keys usable
+   * = outage total»). */
   warningUsableKeys: number
-  criticalUsableKeys: number
+  /** Spec 09-04 — ≥ this many USABLE keys → the count grades OK («bien si
+   * ≥2»; default 2; a host may widen the warning band by raising this). The
+   * ok grade applies ONLY after the quota/blocked branches (a 6-key pool with
+   * 3 blocked still warns). */
+  okUsableKeys: number
+  /** M1 — ≥ this many currently BLOCKED/cooldown keys (blockedUntil/cooldownUntil
+   * in the future) → a `pooler-capacity:warning` finding (default 3). */
   blockedKeysInWindow: number
-  highPercent: number
+  /** Spec 09-04 — the GLOBAL quota: the pool AGGREGATE weekly remaining below
+   * this → `pooler-capacity:critical` (default 20 — «quede <20% global»).
+   * Aggregate remaining = 100 − mean(usageWeekly.percent over ALL the USABLE
+   * keys); computed ONLY when EVERY usable key carries weekly data (a partial
+   * view is UNKNOWN, never critical — the LIVE oc-13-no-data example). */
+  criticalGlobalRemainingPercent: number
+  /** Spec 09-04 — the WEEKLY quota on the LAST usable key («la última key en
+   * uso»): its weekly remaining below this → `pooler-capacity:critical`
+   * (default 10 — «quede <10% semanal de la última key»). Remaining = 100 −
+   * usageWeekly.percent (the pooler's own weekly signal). */
+  criticalWeeklyRemainingPercent: number
   stateStaleMs: number
   /** LANE ② R1 — the freshness window of the 429→null `lastRotation` signal
    * (default `POOLER_CAPACITY_DEFAULT_ROTATION_STALE_MS`, 15 min). Absent →
@@ -3257,16 +3338,14 @@ export interface PoolerCapacityKnobs {
 
 /** M1-a — scan the pooler state file for capacity findings. ONE finding per
  * tick (a single dedupe key per level), priority critical > warning. The state
- * file is READS ONLY; an absent/unreadable file → [] (no-op). The CRITICAL
- * branches are the CERTAIN exhaustion signals ONLY — the three candidate
- * branches, and the one that is NOT critical:
+ * file is READS ONLY; an absent/unreadable file → [] (no-op). Spec 09-04
+ * (owner, 2026-09-04) — the THREE-CLASS grading (critical / warning / ok):
+ * the CRITICAL branches are ONLY the quota shortage + the CERTAIN exhaustion
+ * classes (count can no longer produce critical):
  *  (1) the 429-rotation prelude — the last rotation was a 429 usage-limit to
  *      NO key (`lastRotation.to === null`, the pool is one request away from
- *      the 503 KeyPoolerExhausted) → CRITICAL;
- *  (2) usable keys ≤ `criticalUsableKeys` (the same eligibility the pooler's
- *      scheduler uses: !invalid && blockedUntil<=now && cooldownUntil<=now) →
- *      CRITICAL;
- *  (3) HARDENING-401 (fb-39, 2026-09-01) — the BILLING/credits class: EVERY
+ *      the 503 KeyPoolerExhausted) → CRITICAL (unchanged — a CERTAIN signal);
+ *  (2) HARDENING-401 (fb-39, 2026-09-01) — the BILLING/credits class: EVERY
  *      configured key flagged `billingBlocked` (401 CreditsError / Insufficient
  *      balance — the «todas-secas» class; an isolated billing-flagged key in a
  *      pool that can still serve never pauses). Runs BEFORE the stale check
@@ -3276,16 +3355,39 @@ export interface PoolerCapacityKnobs {
  *      even when the dead-man's-switch would otherwise call the state UNKNOWN
  *      (the 08-31 outage class: every key billed-out → the pooler stops writing
  *      → the snapshot went stale).
- *  (4) STALE state (`updatedAt` missing/unparseable or older than
+ *  (3) THE 0-USABLE OUTAGE (spec 09-04) — usable == 0 → CRITICAL, the FIXED
+ *      exception that survives the count-semantics change: with zero usable
+ *      there is no computable quota, so scarcity decides («0 keys usable =
+ *      outage total» — the «todas-secas» class HARDENING-401/fb-39 must not
+ *      break; a fresh snapshot of all-invalid/blocked keys grades critical
+ *      HERE).
+ *  (4) QUOTA (spec 09-04) — the ONLY count-independent criticals: the pool
+ *      AGGREGATE weekly remaining < `criticalGlobalRemainingPercent` (20 —
+ *      «quede <20% global») OR the LAST usable key's weekly remaining <
+ *      `criticalWeeklyRemainingPercent` (10 — «quede <10% semanal de la última
+ *      key») → CRITICAL. Remaining = 100 − usageWeekly.percent (the pooler's
+ *      own weekly quota signal). The GLOBAL aggregate is the MEAN over ALL the
+ *      USABLE keys and is computed ONLY when EVERY usable key carries weekly
+ *      data — a PARTIAL view is UNKNOWN, never critical (the conservative
+ *      dead-man's-switch rule; the LIVE oc-6 recovery example grads OK with
+ *      [oc-6@100% weekly, oc-13 usageWeekly null] because no full aggregate
+ *      is computable → the count decides «bien si ≥2»). A blocked/invalid
+ *      key's 100% is NOT headroom either (it is not usable — the LIVE
+ *      oc-6@100% blocked/oc-10@100% invalid example grads WARNING with the
+ *      single usable oc-13, whose null weekly data skips the quota branches).
+ *  (5) STALE state (`updatedAt` missing/unparseable or older than
  *      `stateStaleMs`) — NOT a critical branch: the pooler writes the file
  *      ONLY on health changes, so a quiet-but-healthy grid looks stale by
  *      design → stale = UNKNOWN, and unknown ≠ exhausted. A stale snapshot →
  *      return [] (NO finding) + a logger `warn` naming the age (absent logger
  *      dep → the warn is dropped). The dead-man's-switch intent is served by
- *      the CERTAIN branches (1)+(2), which detect the real exhaustion.
- * The WARNING branches (fresh state only): usable ≤ `warningUsableKeys`,
- * blocked/cooldown keys ≥ `blockedKeysInWindow`, a usable key at usage percent
- * ≥ `highPercent` (the x-ratelimit leading indicator). */
+ *      the CERTAIN branches (1)+(2)+(3), which detect the real exhaustion.
+ * The WARNING branches (fresh state only): usable ≤ `warningUsableKeys`
+ * («warning si solo una key»), blocked/cooldown keys ≥ `blockedKeysInWindow`.
+ * OK («bien si ≥2»): usable ≥ `okUsableKeys` after the quota/blocked branches
+ * → [] (no finding). The daily x-ratelimit hot-percent warning is RETIRED
+ * (the spec drives critical from the WEEKLY quota; `highPercent` remains the
+ * DISPATCH pre-check's at-quota criterion — spawn.ts, untouched). */
 export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: PoolerCapacityKnobs, logger?: { warn(message: string): void }): HealthFinding[] {
   const state = readPoolerStateFile(statePath)
   if (state === undefined) return []
@@ -3371,25 +3473,80 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
         error: `last rotation ${rotation?.reason ?? '429 usage-limit'} → no key (to:null; fresh signal @ ${rotation.at ?? '(at unknown)'}) — 503 prelude`
       }]
     }
-    // STALE + usable ≤ critical → fall through to the usable-count branches
-    // (the real shortage, not the bygone signal, decides).
+    // STALE + 0 usable → fall through to the outage/quota branches below (the
+    // real shortage, not the bygone signal, decides).
   }
-  if (usableCount <= knobs.criticalUsableKeys) {
+  // (3) THE 0-USABLE OUTAGE (spec 09-04) — the count's ONLY critical: 0 usable
+  // = OUTAGE TOTAL → critical. With zero usable there is no computable quota,
+  // so the scarcity decides — the «todas-secas» class (HARDENING-401/fb-39, the
+  // SMOKE fixture of all-invalid/blocked keys) grads critical HERE, never via
+  // a count threshold (the old ≤ `criticalUsableKeys` branch is RETIRED).
+  if (usableCount === 0) {
     return [{
       kind: 'pooler-capacity',
       key: POOLER_CAPACITY_KEY_CRITICAL,
       ts: nowMs,
       count: usableCount,
-      error: `${usableCount} usable / ${totalCount} keys (≤ ${knobs.criticalUsableKeys} critical)`
+      error: `0 usable / ${totalCount} keys — outage total: NO usable key (scarcity decides; the «todas-secas» class — pool cannot serve; resume with a fresh key)`
     }]
   }
+  // (4) QUOTA (spec 09-04) — critical ONLY by quota from here on. GLOBAL: the
+  // pool AGGREGATE = the MEAN of the USABLE keys' weekly usage percent —
+  // computed ONLY when EVERY usable key carries weekly data (a PARTIAL view is
+  // UNKNOWN, never critical — the conservative dead-man's-switch rule: the
+  // LIVE oc-6 recovery example grads OK: 2 usable [oc-6@100% weekly, oc-13
+  // usageWeekly null] → no full aggregate → quota not computable → the count
+  // decides «bien si ≥2»). A blocked/invalid key's 100% is NOT headroom either
+  // (it is not usable — the LIVE oc-6@100% blocked / oc-10@100% invalid
+  // example grads WARNING with the single usable oc-13).
+  let globalUsedSum = 0
+  let globalUsedCount = 0
+  for (const k of usable) {
+    const p = k.usageWeekly?.percent
+    if (typeof p === 'number') { globalUsedSum += p; globalUsedCount += 1 }
+  }
+  if (globalUsedCount > 0 && globalUsedCount === usableCount) {
+    const globalUsed = globalUsedSum / globalUsedCount
+    const globalRemaining = Math.max(0, 100 - globalUsed)
+    if (globalRemaining < knobs.criticalGlobalRemainingPercent) {
+      return [{
+        kind: 'pooler-capacity',
+        key: POOLER_CAPACITY_KEY_CRITICAL,
+        ts: nowMs,
+        count: usableCount,
+        error: `pool global weekly ${Math.round(globalRemaining)}% remaining (${Math.round(globalUsed)}% used — aggregate of ${globalUsedCount} usable keys) < ${knobs.criticalGlobalRemainingPercent}% critical threshold`
+      }]
+    }
+  }
+  // WEEKLY on the LAST usable key («la última key en uso» — the key the last
+  // rotation moved into use when it is a usable key, else the last usable in
+  // the pooler's own key order). The frame includes the remaining % when the
+  // data exists (spec: «last key weekly 4% remaining (96% used)»).
+  const rotUsable = typeof rotation?.to === 'string' ? usable.find((k) => k.id === rotation.to) : undefined
+  const lastUsable = rotUsable ?? usable[usable.length - 1]
+  const lastWeeklyPercent = typeof lastUsable?.usageWeekly?.percent === 'number' ? lastUsable.usageWeekly.percent : Number.NaN
+  if (Number.isFinite(lastWeeklyPercent)) {
+    const weekRemaining = Math.max(0, 100 - lastWeeklyPercent)
+    if (weekRemaining < knobs.criticalWeeklyRemainingPercent) {
+      return [{
+        kind: 'pooler-capacity',
+        key: POOLER_CAPACITY_KEY_CRITICAL,
+        ts: nowMs,
+        count: usableCount,
+        error: `last usable key ${lastUsable.id} weekly ${Math.round(weekRemaining)}% remaining (${Math.round(lastWeeklyPercent)}% used) < ${knobs.criticalWeeklyRemainingPercent}% critical threshold`
+      }]
+    }
+  }
+  // WARNING — «warning si solo una key»: usable ≤ `warningUsableKeys` (default
+  // 1 — a single usable key with no quota pressure is the WARNING class, NEVER
+  // critical by count).
   if (usableCount <= knobs.warningUsableKeys) {
     return [{
       kind: 'pooler-capacity',
       key: POOLER_CAPACITY_KEY_WARNING,
       ts: nowMs,
       count: usableCount,
-      error: `${usableCount} usable / ${totalCount} keys (≤ ${knobs.warningUsableKeys} warning)`
+      error: `${usableCount} usable / ${totalCount} keys (≤ ${knobs.warningUsableKeys} warning — spec: «solo una key»)`
     }]
   }
   if (blockedCount >= knobs.blockedKeysInWindow) {
@@ -3401,16 +3558,11 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
       error: `${blockedCount} blocked / ${totalCount} keys (≥ ${knobs.blockedKeysInWindow})`
     }]
   }
-  const hot = usable.find((k) => typeof k.lastUsage?.percent === 'number' && (k.lastUsage?.percent ?? 0) >= knobs.highPercent)
-  if (hot !== undefined) {
-    return [{
-      kind: 'pooler-capacity',
-      key: POOLER_CAPACITY_KEY_WARNING,
-      ts: nowMs,
-      count: usableCount,
-      error: `usable key ${hot.id} usage percent ${hot.lastUsage?.percent}% ≥ ${knobs.highPercent}% (rate-limit headroom low)`
-    }]
-  }
+  // OK — «bien si ≥2»: usable ≥ `okUsableKeys` (default 2) after the
+  // quota/blocked branches (a 6-key pool with 3 blocked still warns above).
+  if (usableCount >= knobs.okUsableKeys) return []
+  // A host-widened gap (warning < usable < ok) grades NO finding (neither
+  // class) — the count only warns/oks at the configured thresholds.
   return []
 }
 
@@ -5203,9 +5355,10 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     const qiSilenceEnabled = health?.qiSilenceEnabled !== false
     const poolerKnobs: PoolerCapacityKnobs = {
       warningUsableKeys: resolvePositiveKnob(health?.warningUsableKeys, POOLER_CAPACITY_DEFAULT_WARNING_USABLE_KEYS),
-      criticalUsableKeys: resolvePositiveKnob(health?.criticalUsableKeys, POOLER_CAPACITY_DEFAULT_CRITICAL_USABLE_KEYS),
+      okUsableKeys: resolvePositiveKnob(health?.okUsableKeys, POOLER_CAPACITY_DEFAULT_OK_USABLE_KEYS),
       blockedKeysInWindow: resolvePositiveKnob(health?.blockedKeysInWindow, POOLER_CAPACITY_DEFAULT_BLOCKED_KEYS_IN_WINDOW),
-      highPercent: resolvePositiveKnob(health?.highPercent, POOLER_CAPACITY_DEFAULT_HIGH_PERCENT),
+      criticalGlobalRemainingPercent: resolvePositiveKnob(health?.criticalGlobalRemainingPercent, POOLER_CAPACITY_DEFAULT_GLOBAL_REMAINING_PERCENT),
+      criticalWeeklyRemainingPercent: resolvePositiveKnob(health?.criticalWeeklyRemainingPercent, POOLER_CAPACITY_DEFAULT_WEEKLY_REMAINING_PERCENT),
       stateStaleMs: resolvePositiveKnob(health?.stateStaleMs, POOLER_CAPACITY_DEFAULT_STATE_STALE_MS),
       rotationStaleMs: resolvePositiveKnob(health?.rotationStaleMs, POOLER_CAPACITY_DEFAULT_ROTATION_STALE_MS)
     }
