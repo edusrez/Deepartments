@@ -16,9 +16,10 @@
 # hermetic compositions and MUST stay on the shared keys (`stateDir`,
 # `org.departments`, `org.poolerBaseURL`); test/org-config-parity.test.js
 # locks the mirror (parity = test failure, never silent drift). One-sided
-# keys are INTENTIONAL and NOT mirrored: `org.postsRetention` lives ONLY here
-# (core row — the bundle's fallback leaves it absent so hermetic pruning stays
-# OFF); `org.pacing` + `quality` live ONLY in the bundle row (they are
+# keys are INTENTIONAL and NOT mirrored: `org.postsRetention` +
+# `org.offlineReap` live ONLY here (core row — the bundle's fallback leaves
+# them absent so hermetic pruning/reap stay OFF, the conservative defaults);
+# `org.pacing` + `quality` live ONLY in the bundle row (they are
 # bundle-side knobs with code defaults — the core row never carries them).
 # NOTE: the CLI composes ONLY the
 # `dsh.profile.bundles` layers (in order); being a `dependencies` of
@@ -121,6 +122,19 @@
           postsRetention:
             maxRetiredKept: 50
             archiveFile: posts-retired-archive.jsonl
+            enabled: true
+          # Offline-worker reap (fb-78 A2, owner ignition 2026-09-04): the
+          # boot census that auto-retires NON-retired workers whose durable
+          # session has NO live handle AND NO sleepEpoch for a wall-clock
+          # window (the fb-56 orphaned class). IGNITION = explicit
+          # `enabled: true` (the m-228 default is OFF — the daemon of health
+          # never retires this class on its own); `maxOfflineMs` is ABSENT so
+          # the code default 72h applies (conservative — do not retune unless
+          # the owner says so). Lives in this CORE row because the boot
+          # reconcile reads it SHARED-first from the resolved org binding
+          # (coreOrg?.org ?? cfg.org — the dshd-core row is the shared config
+          # source); the minimal fallback leaves it absent → hermetic reap OFF.
+          offlineReap:
             enabled: true
           # P1 rewire-pooler: the pooler (dsh-key-pooler) baseURL — a LEGITIMATE
           # local/proxy LLM route. The endpoint-drift exemption treats a baseURL
