@@ -879,9 +879,9 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       // interrupted again (the re-entrancy guard); a delivery that falls inside
       // the cooldown races through to QUEUE semantics (no abort).
       if (interrupt && live !== void 0 && live.status === 'running') {
-        const aborted = await safeInterrupt(live, entry.postId, Date.now(), stateDir)
+        const aborted = await safeInterrupt(live, entry.postId, Date.now(), stateDir, opts?.sourceKey)
         if (aborted) {
-          ctx.logger.warn(`[deepartments] bus delivery to "${entry.postId}": interrupt=true — aborted the current turn (reason 'interrupted'); delivery is the first item of the next turn`)
+          ctx.logger.warn(`[deepartments] bus delivery to "${entry.postId}": interrupt=true — aborted the current turn (reason 'interrupted'); delivery is the first item of the next turn${opts?.sourceKey !== undefined ? ` (source: ${opts.sourceKey})` : ''}`)
         } else {
           ctx.logger.warn(`[deepartments] bus delivery to "${entry.postId}": interrupt=true but within the per-recipient cooldown — delivery queued (no abort)`)
         }
@@ -952,6 +952,24 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
             error: errText
           })
         }
+        // O1-EXT (P2 — the outbox-drain CLOSURE): a delivery to a post that got
+        // RETIRED concurrently (its retire dispose-grace expired while THIS
+        // delivery was in flight) must not leave its sidecar row 'prepared'/
+        // 'failed' keyed to the now-terminal post — settle the row 'terminal'
+        // defensively HERE (the retire's post-dispose settle is the same
+        // treatment for the rows it can still see; this covers the row whose
+        // delivery was mid-flight at the grace expiry, so a retired post's
+        // rows are terminal within ONE cycle, never parked until boot). Gated
+        // on `entry.retired === true` — a LIVE recipient's failed row is
+        // untouched (the boot re-drive keeps its backoff semantics).
+        if (entry.retired === true) {
+          try {
+            await markDelivery(stateDir, record.id, entry.postId, 'terminal')
+            ctx.logger.info(`[deepartments] bus delivery to RETIRED "${entry.postId}" (in-flight at the retire): row ${record.id} settled 'terminal' defensively`)
+          } catch (markError: unknown) {
+            ctx.logger.warn(`[deepartments] defensive terminal settlement of ${record.id} → retired "${entry.postId}" failed (non-fatal; the post-dispose settle / boot pass re-settle): ${markError instanceof Error ? markError.message : String(markError)}`)
+          }
+        }
       } catch (appendError: unknown) {
         ctx.logger.warn(`[deepartments] post-error capture for "${entry.postId}" failed: ${appendError instanceof Error ? appendError.message : String(appendError)}`)
       }
@@ -1010,9 +1028,9 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
           // → it is NEVER interrupted again (the re-entrancy guard); a delivery
           // inside the cooldown races through to QUEUE semantics (no abort).
           if (interrupt && live.status === 'running') {
-            const aborted = await safeInterrupt(live, hostEntry.hostId, Date.now(), stateDir)
+            const aborted = await safeInterrupt(live, hostEntry.hostId, Date.now(), stateDir, opts?.sourceKey)
             if (aborted) {
-              ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}": interrupt=true — aborted the current turn (reason 'interrupted'); delivery is the first item of the next turn`)
+              ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}": interrupt=true — aborted the current turn (reason 'interrupted'); delivery is the first item of the next turn${opts?.sourceKey !== undefined ? ` (source: ${opts.sourceKey})` : ''}`)
             } else {
               ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}": interrupt=true but within the per-recipient cooldown — delivery queued (no abort)`)
             }

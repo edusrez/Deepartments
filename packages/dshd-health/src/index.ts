@@ -1008,6 +1008,48 @@ export const INTERRUPT_COOLDOWN_KEY_PREFIX = 'interrupt:'
  * end; the interrupt gate is written DURING the bus delivery). */
 export const INTERRUPT_COOLDOWN_FILE = 'interrupt-state.json'
 
+/** O1-EXT P4 — the interrupt-OBSERVABILITY detail prefix: a SIBLING entry key
+ * (`interrupt-detail:<recipientId>` → `{reason, sourceKey, ts}`) in the SAME
+ * interrupt-state.json ledger. The GATE entries (`interrupt:<recipientId>`,
+ * numeric ts) are untouched — `readInterruptState` filters numeric values only,
+ * so the cooldown invariant (≤1 interrupt per recipient per
+ * INTERRUPT_COOLDOWN_MS) is byte-identical; the detail entry attributes the
+ * interrupt to its TRIGGER source (the daemon frame/alert identity), the thing
+ * the plain reason 'interrupted' never distinguished. NOT exported (the
+ * lib/invoke.js export count is frozen at 321 — export-parity). */
+const INTERRUPT_DETAIL_KEY_PREFIX = 'interrupt-detail:'
+
+/** O1-EXT P4 — ONE recorded interrupt's source attribution. `ts` mirrors the
+ * gate entry's timestamp; `reason` is the semantic cancel reason ('interrupted'
+ * — the INTERRUPT_CANCEL_CAUSE reason); `sourceKey` is the emitter's alert key / daemon
+ * frame identity (e.g. `post-error:<postId>:<class>`, a system-wait key, the
+ * pacing-transition key, the capacity-gate dedupeKey). */
+interface InterruptDetail {
+  reason: string
+  sourceKey: string
+  ts: number
+}
+
+/** O1-EXT P4 — read the interrupt-DETAIL map of `<stateDir>/interrupt-state.json`
+ * (the `interrupt-detail:` sibling entries; anything else — the numeric GATE
+ * map — is ignored). Absent / unreadable / malformed → {} (never throws). */
+function readInterruptDetails(stateDir: string): Record<string, InterruptDetail> {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, INTERRUPT_COOLDOWN_FILE), 'utf8')) as Record<string, unknown>
+    const out: Record<string, InterruptDetail> = {}
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!key.startsWith(INTERRUPT_DETAIL_KEY_PREFIX)) continue
+      if (typeof value !== 'object' || value === null) continue
+      const v = value as Record<string, unknown>
+      if (typeof v.ts !== 'number' || !Number.isFinite(v.ts) || typeof v.reason !== 'string') continue
+      out[key] = { reason: v.reason, sourceKey: typeof v.sourceKey === 'string' ? v.sourceKey : '', ts: v.ts }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
 /** Read `<stateDir>/interrupt-state.json` → `{ [key]: lastInterruptAtMs }`.
  * Absent / unreadable / malformed → {} (never throws). */
 export function readInterruptState(stateDir: string): HealthAlertsState {
@@ -1023,10 +1065,14 @@ export function readInterruptState(stateDir: string): HealthAlertsState {
   }
 }
 
-/** Write `<stateDir>/interrupt-state.json` (mkdir -p the dir, then the file). */
-export async function writeInterruptState(stateDir: string, state: HealthAlertsState): Promise<void> {
+/** Write `<stateDir>/interrupt-state.json` (mkdir -p the dir, then the file).
+ * `details` (O1-EXT P4 — the additive observability map, optional) rides the
+ * SAME write as the numeric gate so a detail entry survives the next gate
+ * write: the file is `{ ...state, ...details }` — the gate reader filters
+ * numeric values only and never sees the object entries. */
+export async function writeInterruptState(stateDir: string, state: HealthAlertsState, details?: Record<string, InterruptDetail>): Promise<void> {
   await mkdir(path.dirname(path.join(stateDir, INTERRUPT_COOLDOWN_FILE)), { recursive: true })
-  await writeFile(path.join(stateDir, INTERRUPT_COOLDOWN_FILE), JSON.stringify(state), 'utf8')
+  await writeFile(path.join(stateDir, INTERRUPT_COOLDOWN_FILE), JSON.stringify({ ...state, ...details }), 'utf8')
 }
 
 /** M3 — the per-recipient interrupt back-off. A shared helper that gates EVERY
@@ -1037,12 +1083,19 @@ export async function writeInterruptState(stateDir: string, state: HealthAlertsS
  * was actually aborted. NEVER throws (a ledger failure degrades to an
  * in-memory-only gate — the cooldown is best-effort but bounded; a cancel
  * failure returns false WITHOUT advancing the gate, so a failed abort never
- * caps a future genuine interrupt). */
+ * caps a future genuine interrupt). O1-EXT P4 — `sourceKey` (optional) is the
+ * emitter's trigger identity (the daemon frame/alert key the notifyHost
+ * composite passes as metadata): when present, the interrupt ALSO records an
+ * ADDITIVE `interrupt-detail:<recipientId>` → {reason, sourceKey, ts} entry in
+ * the SAME ledger (the observability probe of the interrupt trigger — the
+ * gate entry/value is untouched). Absent (the W9-b post-interrupt path) →
+ * byte-identical legacy behavior. */
 export async function safeInterrupt(
   agent: { cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void },
   recipientId: string,
   nowMs: number,
-  stateDir: string
+  stateDir: string,
+  sourceKey?: string
 ): Promise<boolean> {
   const key = `${INTERRUPT_COOLDOWN_KEY_PREFIX}${recipientId}`
   let state: HealthAlertsState = {}
@@ -1060,7 +1113,21 @@ export async function safeInterrupt(
   for (const [k, v] of Object.entries(next)) {
     if (nowMs - v > INTERRUPT_COOLDOWN_MS) delete next[k]
   }
-  try { await writeInterruptState(stateDir, next) } catch { /* best-effort */ }
+  // O1-EXT P4 — the ADDITIVE observability detail: carry existing detail
+  // entries forward (a detail row is never dropped by a gate-only write) and,
+  // when the trigger source is known, record THIS interrupt's attribution
+  // under the sibling `interrupt-detail:<recipientId>` key. Pruned with the
+  // SAME cooldown bound as the gate. Absent sourceKey → the detail map is
+  // preserved as-is (legacy bytes unchanged).
+  let details: Record<string, InterruptDetail> = {}
+  try { details = readInterruptDetails(stateDir) } catch { details = {} }
+  if (sourceKey !== undefined) {
+    details[`${INTERRUPT_DETAIL_KEY_PREFIX}${recipientId}`] = { reason: INTERRUPT_CANCEL_CAUSE.reason, sourceKey, ts: nowMs }
+  }
+  for (const [k, v] of Object.entries(details)) {
+    if (nowMs - v.ts > INTERRUPT_COOLDOWN_MS) delete details[k]
+  }
+  try { await writeInterruptState(stateDir, next, details) } catch { /* best-effort */ }
   return true
 }
 
@@ -2603,8 +2670,11 @@ export interface HealthDaemonDeps {
   mainRed?: MainRedRuntime
   /** Deliver the framed ALERT bus message to the host (production:
    * messagesStoreReady.append + busDeliverToHost; tests: a recording stub).
-   * NEVER throws. */
-  notifyHost(hostEntry: HostEntryLike, alertFrame: string): Promise<void>
+   * NEVER throws. O1-EXT P4 — `frameKey` (optional) is the trigger's alert
+   * key / daemon frame identity, forwarded as delivery metadata so
+   * safeInterrupt attributes the resulting interrupt in the
+   * interrupt-state.json detail entry (the observability probe). */
+  notifyHost(hostEntry: HostEntryLike, alertFrame: string, frameKey?: string): Promise<void>
   /** LANE 2 (fb-27) — deliver the framed turn/end-error NOTIFICATION to the
    * POST'S OWN HEAD (production: the bundle's `healthNotifyHead` closure —
    * resolves the head via the post's creator `managerId` / department
@@ -5641,8 +5711,10 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         } else {
           const alertFindings = findingsToAlert
           // 6. notify (never throw) + advance the dedupe ledger + audit.
+          // O1-EXT P4: the frameKey rides as metadata — the ALERT identities
+          // (the dedupe/ledger keys) attribute the interrupt to its trigger.
           try {
-            await deps.notifyHost(live, buildHealthAlertFrame(alertFindings))
+            await deps.notifyHost(live, buildHealthAlertFrame(alertFindings), findingsToAlert.map((f) => identityOf(f)).join('+'))
           } catch (error: unknown) {
             deps.logger?.warn(`[deepartments] system-health: host alert delivery failed: ${error instanceof Error ? error.message : String(error)}`)
           }
@@ -5676,7 +5748,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         } else {
           for (const wait of waitsToWake) {
             try {
-              await deps.notifyHost(live, buildSystemWaitFrame(wait))
+              await deps.notifyHost(live, buildSystemWaitFrame(wait), wait.key)
               nextState[wait.key] = nowMs
               stateChanged = true
             } catch (error: unknown) {
@@ -5736,7 +5808,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
                 }
               }
               try {
-                await deps.notifyHost(live, buildPacingTransitionFrame(pacingState, deferredCount))
+                await deps.notifyHost(live, buildPacingTransitionFrame(pacingState, deferredCount), PACING_TRANSITION_KEY)
                 nextState[PACING_TRANSITION_KEY] = nowMs
                 stateChanged = true
                 await writePacingState(deps.stateDir, { franja, at: nowMs })
@@ -5803,7 +5875,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
                 }
               }
               try {
-                await deps.notifyHost(live, buildCapacityGateFrame(verdict, detail, deferredCount))
+                await deps.notifyHost(live, buildCapacityGateFrame(verdict, detail, deferredCount), dedupeKey)
                 nextState[dedupeKey] = nowMs
                 stateChanged = true
                 await writeCapacityGateState(deps.stateDir, { verdict, at: nowMs })
@@ -6031,7 +6103,7 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
         const wakepackDeps = (ctx.get('deepartments.wakepackDeps') as { get(): unknown } | undefined)?.get() ?? {}
         const composed = {
           deliver: deliverDeps as {
-            deliverHost?: (host: { hostId: string }, framed: string, record: HealthStoreAppendResult, callerSessionId?: string, opts?: { interrupt?: boolean }) => Promise<unknown>
+            deliverHost?: (host: { hostId: string }, framed: string, record: HealthStoreAppendResult, callerSessionId?: string, opts?: { interrupt?: boolean; sourceKey?: string }) => Promise<unknown>
           },
           wakepack: wakepackDeps as {
             messagesStoreReady?: () => Promise<{ append(input: HealthStoreAppendInput): Promise<HealthStoreAppendResult> }>
@@ -6048,11 +6120,16 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
         if (deliverHost === undefined) {
           throw new Error('[deepartments] health daemon tick: no ALERT delivery closure — the bundle must register ctx.get("deepartments.deliverDeps").register({ deliver: { deliverHost } }) (FASE 2.6-C, composed today)')
         }
-        notifyHost = async (hostEntry: HostEntryLike, alertFrame: string): Promise<void> => {
+        notifyHost = async (hostEntry: HostEntryLike, alertFrame: string, frameKey?: string): Promise<void> => {
           try {
             const store = await storeReady()
             const record = await store.append({ from: 'deepartments', to: [hostEntry.hostId], text: alertFrame, kind: 'agent' })
-            await deliverHost(hostEntry as { hostId: string }, alertFrame, record, void 0, { interrupt: true })
+            // O1-EXT P4 — the interrupt-source METADATA: the frame/alert key the
+            // tick passes at each notify site rides into the delivery opts, so
+            // busDeliverToHost's safeInterrupt attributes the interrupt in the
+            // interrupt-state.json detail entry. Absent (a legacy notifyHost
+            // caller) → `{ interrupt: true }` exactly as before (additive).
+            await deliverHost(hostEntry as { hostId: string }, alertFrame, record, void 0, frameKey !== undefined ? { interrupt: true, sourceKey: frameKey } : { interrupt: true })
           } catch (error: unknown) {
             ctx.logger.warn(`[deepartments] system-health: host alert delivery failed: ${error instanceof Error ? error.message : String(error)}`)
           }

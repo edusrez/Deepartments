@@ -67,9 +67,17 @@ export type { BusMemberProfile, BusCatalogLens } from './acl.js'
 /** W9-b — one bus-delivery option. `interrupt: true` preempts a busy recipient
  * (aborts the CURRENT turn, reason 'interrupted', keepInbox preserved) so the
  * delivered message is the FIRST item of the recipient's NEXT turn; `false`/
- * absent (the DEFAULT) keeps the QUEUE semantics (zero regression). */
+ * absent (the DEFAULT) keeps the QUEUE semantics (zero regression).
+ * O1-EXT P4 — `sourceKey` (optional): the interrupt TRIGGER's identity (the
+ * health-daemon frame/alert key the composite notifyHost passes as metadata).
+ * It flows to `safeInterrupt`, which records it in the interrupt-state.json
+ * detail entry — pure observability, never a behavior gate. */
 export interface DeliveryInterruptOptions {
   interrupt?: boolean
+  /** O1-EXT P4 — the interrupt trigger's identity (a daemon frame/alert key),
+   * recorded in the interrupt-state.json detail entry when known. Absent →
+   * byte-identical legacy behavior. */
+  sourceKey?: string
 }
 
 /** The `deliverOrQueue` gate options. `noWake: false` (the DEFAULT) is the

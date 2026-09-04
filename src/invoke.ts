@@ -1492,7 +1492,9 @@ export function isPathInside(candidate: string, root: string): boolean {
  * not be tokenized into an out-of-scope DENIAL. Deterministic discriminator: a
  * token whose NAME segment carries REGEX/ANCHOR syntax a real path component
  * never has (`^`, `\`, `[`, `{`, `*`, `?` at the segment head) or that is a
- * TWO-sided `/…/,/…/` sed-range pattern → regex literal, NOT a path. Real
+ * TWO-sided `/…/,/…/` sed-range pattern (incl. the fb-129 `/…/,$…/` END-OF-FILE
+ * `$`-anchored form — the `,…,$` suffix is a sed last-line address, never a
+ * path) → regex literal, NOT a path. Real
  * letter-bearing multi-segment words (`/etc/passwd`, `/opt/dsh/.dsh`) are
  * unchanged (checked exactly as before). */
 function deptExecIsPathWord(token: string): boolean {
@@ -1507,8 +1509,27 @@ function deptExecIsPathWord(token: string): boolean {
   // NAME segment starts with a regex anchor/class char (`^`, `\`, `[`, `{`,
   // `*`, `?`) — a real path component never does — or the token is a
   // `/…/,/…/` two-sided sed-range address (a comma + regex body + closing
-  // slash + optional sed command letter). Everything else stays a path word.
-  if (/^(?:[\^\\\[{*?]|[^,{}[\]]*,\/).*$/.test(rest)) return false
+  // slash + optional sed command letter). fb-129 (QD 2026-09-04 — the fb-123
+  // family residue): the sed END-OF-FILE address `$` — `/pat/,$p` (a
+  // `/…/,$…/` range whose SECOND address is the `$` last-line anchor, not a
+  // path: the `,…,$` suffix is a comma DIRECTLY followed by `$` + an optional
+  // sed command letter). Everything else stays a path word.
+  if (/^(?:[\^\\\[{*?]|[^,{}[\]]*,\/|[^,{}[\]]*,\$).*$/.test(rest)) return false
+  // fb-84 (QD 2026-09-04 — the fb-32/fb-106 family RESIDUE, VERIFIED OPEN
+  // against lib/invoke.js of 0e2e735): a regex-literal fragment whose escape
+  // sits at the TOKENIZER BOUNDARY is still a regex literal, never a path.
+  // Two shapes:
+  //   (a) the token ENDS in a bare `\` — the tokenizer cut at a boundary char
+  //       right AFTER an escape (`/models\` from `'health\|probe\|/models\
+  //       |usage'` — the escaped pipe fell outside the token);
+  //   (b) the token carries a `\`-ESCAPED REGEX METACHAR mid-token
+  //       (`/models\.`, `/models\(` — `\.`, `\(`, `\*`, `\|`, …).
+  // A real absolute-path word never ends in a bare backslash nor carries a
+  // backslash-escaped regex metachar (the guard's scope targets real POSIX
+  // paths). The flat `/<word>` variant INSIDE a quoted grep|sed|awk pattern is
+  // handled by the quote-context discriminator in deptExecPathTokens.
+  if (rest.endsWith('\\')) return false
+  if (/\\[|*().?[\]{}$^+]/.test(rest)) return false
   return true
 }
 
@@ -1557,6 +1578,125 @@ function deptExecMaskArithmetic(command: string): string {
   return chars.join('')
 }
 
+/** fb-84 (QD 2026-09-04 — VERIFIED OPEN) — the quote-context discriminator for
+ * the FLAT `/word` regex-literal family: whether the `/`-token at `tokenIndex`
+ * of `cmd` is the PATTERN operand of a grep|sed|awk command. A token that is
+ * (1) INSIDE a single/double-quoted span, (2) inside the FIRST NON-OPTION
+ * argument of its pipeline segment (the program's pattern/script argument —
+ * never a file operand), and (3) FLAT (a single segment: no second `/` IN THE
+ * TOKEN'S OWN TEXT — a later `/` elsewhere in the command, e.g. `src/a.ts`, is
+ * a subsequent token and is judged on its own) is a REGEX LITERAL (a content
+ * pattern — `grep -n '/models' README.md`), NOT an absolute path. A
+ * MULTI-SEGMENT quoted argument
+ * (`grep -n '/etc/passwd' f` — `/etc/passwd` IS a real path reference) and any
+ * token outside the pattern position stay path words — the real-path scope is
+ * EXACTLY as before (the control `/etc/passwd` in a real command still denies).
+ * Conservative intencionadamente: only grep/sed/awk (the content-pattern tools),
+ * only the pattern argument, only the FLAT single-segment form. `tokenIndex`
+ * is the TOKEN start (the position right after the boundary char — when the
+ * boundary IS the opening quote, the scan must include it). */
+function deptExecIsQuotedPatternLiteral(cmd: string, token: string, tokenIndex: number): boolean {
+  const n = cmd.length
+  if (tokenIndex <= 0 || tokenIndex >= n) return false
+  // Scan the prefix: quote state at the token + the enclosing quote-opening
+  // position + the START of the pipeline segment holding that quote.
+  let inSingle = false
+  let inDouble = false
+  let qOpen = -1
+  let segStart = 0
+  for (let i = 0; i < tokenIndex; i++) {
+    const c = cmd[i]
+    if (inSingle) {
+      if (c === "'") inSingle = false
+      continue
+    }
+    if (inDouble) {
+      if (c === '"') inDouble = false
+      continue
+    }
+    if (c === "'") {
+      inSingle = true
+      qOpen = i
+    } else if (c === '"') {
+      inDouble = true
+      qOpen = i
+    } else if (c === '|' || c === '&' || c === ';' || c === '(' || c === '\n') {
+      segStart = i + 1
+    }
+  }
+  if ((!inSingle && !inDouble) || qOpen < 0) return false
+  // Flatness: a single segment after the leading `/` IN THIS TOKEN (a later
+  // `/` in the rest of the command — `src/a.ts`, a subsequent real path — is
+  // a DIFFERENT token, judged on its own flatness/context).
+  if (token.slice(1).includes('/')) return false
+  // The pipeline segment's words up to the quote opening: program + options.
+  const headWords = cmd.slice(segStart, qOpen).trim().split(/\s+/).filter((w) => w !== '')
+  if (headWords.length === 0) return false
+  const program = headWords[0].split('/').pop() ?? ''
+  if (program !== 'grep' && program !== 'sed' && program !== 'awk') return false
+  // The quoted argument is the pattern ONLY when every word between the program
+  // and the quote is an option (`-n`, `-rn`, `-E`, `-e`, …): a NON-option word
+  // before the quote (an unquoted pattern `grep foo '/tmp'`) means the quoted
+  // span is a FILE operand — still a path word. (`-e`/`--expression` are
+  // option-prefixed, so `sed -n -e '/x/p'` keeps the pattern position.)
+  for (const word of headWords.slice(1)) {
+    if (!word.startsWith('-')) return false
+  }
+  return true
+}
+
+/** fb-129 (QD 2026-09-04 — the fb-123 family residue): whether the `/`-token
+ * at `tokenIndex` of `cmd` is the TAIL of a VARIABLE-ROOTED quoted word —
+ * `"$D"/test/*`, `'$ROOT'/src/*.ts` — i.e. the `/…` sits right after a CLOSING
+ * quote whose span is a PURE variable reference (`$D`, `${D}`). The guard
+ * cannot resolve the variable's VALUE statically, so the glued fragment is not
+ * a literal absolute path: it is the continuation of an UNVERIFIABLE
+ * expression (the same posture the BARE variable form `$D/…` already has —
+ * its `/` sits mid-word and never tokenizes; fb-123's `"$D"/head-…` was denied
+ * ONLY because the closing quote creates a tokenizer boundary). A LITERAL
+ * quoted root with a glued tail (`"/etc"/passwd`) is NOT this shape — its span
+ * is not a variable, so `/etc` and `/passwd` stay path words and keep denying
+ * (the B2 control pins it). `tokenIndex` is the TOKEN start (the position
+ * right after the boundary char — when the boundary IS the closing quote, the
+ * quote sits exactly at `tokenIndex - 1`). */
+function deptExecIsQuotedVarTail(cmd: string, tokenIndex: number): boolean {
+  const n = cmd.length
+  if (tokenIndex <= 0 || tokenIndex >= n) return false
+  const closeQuote = cmd[tokenIndex - 1]
+  if (closeQuote !== '"' && closeQuote !== "'") return false
+  // Quote-state scan of the prefix (the boundary quote itself is excluded):
+  // the boundary quote must CLOSE an ACTIVE span of the same type, and `open`
+  // = the position of that span's opening quote.
+  let inSingle = false
+  let inDouble = false
+  let open = -1
+  for (let i = 0; i < tokenIndex - 1; i++) {
+    const c = cmd[i]
+    if (inSingle) {
+      if (c === "'") inSingle = false
+      continue
+    }
+    if (inDouble) {
+      if (c === '"') inDouble = false
+      continue
+    }
+    if (c === "'") {
+      inSingle = true
+      open = i
+    } else if (c === '"') {
+      inDouble = true
+      open = i
+    }
+  }
+  const active = closeQuote === '"' ? inDouble : inSingle
+  if (!active || open < 0) return false
+  // The span content between the quotes must be a PURE variable reference
+  // (plain `$D` or braced `${D}` — an identifier). Anything else — `"/etc"`,
+  // `"logs"` — is a literal and the glued tail stays a path word.
+  const span = cmd.slice(open + 1, tokenIndex - 1)
+  return /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(span) || /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/.test(span)
+}
+
 /** The `/`-leading ABSOLUTE-path tokens in a command ("path words"): a token
  * beginning at `^` or a whitespace/metacharacter boundary, terminated by
  * whitespace or a shell metacharacter. `--opt=/a` is NOT matched (the `/` is
@@ -1575,7 +1715,10 @@ function deptExecMaskArithmetic(command: string): string {
  * the character immediately before the token (after optional whitespace) is
  * the awk `~` match operator (`awk '$0 ~ /error/'`) — is a regex literal,
  * NOT a path; it joins the sed-range/anchored literal forms skipped by
- * `deptExecIsPathWord`. */
+ * `deptExecIsPathWord`. fb-129 (QD 2026-09-04 — the fb-123 family residue):
+ * a token glued after a CLOSING quote whose span is a pure `$VAR` reference
+ * (`"$D"/test/*`) is the tail of a VARIABLE-ROOTED quoted word — statically
+ * unverifiable, never a literal path (`deptExecIsQuotedVarTail`). */
 function deptExecPathTokens(command: string): string[] {
   const tokens: string[] = []
   const cmd = deptExecMaskArithmetic(String(command ?? ''))
@@ -1591,6 +1734,23 @@ function deptExecPathTokens(command: string): string[] {
     let prev = match.index - 1
     while (prev >= 0 && /\s/.test(cmd[prev])) prev--
     if (prev >= 0 && cmd[prev] === '~') continue
+    // fb-129 — a VARIABLE-ROOTED quoted word (`"$D"/test/*`, `'$ROOT'/src/x`):
+    // the token is the tail glued after a CLOSING quote whose span is a pure
+    // `$VAR` reference → statically unverifiable expression, never a literal
+    // absolute path (the bare `$D/…` form was never tokenized; the quoted form
+    // only trips because the closing quote is a tokenizer boundary).
+    if (deptExecIsQuotedVarTail(cmd, match.index + (match[1]?.length ?? 0))) continue
+    // fb-84 — a FLAT `/word` inside the quoted PATTERN argument of a
+    // grep|sed|awk segment is a regex literal (a content pattern), never a
+    // path: `grep -n '/models' README.md` and the
+    // `grep -n 'health\|probe\|/models\|usage' README.md` original (the
+    // trailing-`\` shape is ALSO skipped by deptExecIsPathWord below). A
+    // MULTI-SEGMENT quoted argument (`/etc/passwd`) and any token outside the
+    // pattern position stay path words — the real-path scope is unchanged.
+    // NOTE: the discriminator receives the TOKEN start (`match.index` + the
+    // boundary's length) — when the boundary IS the opening quote, the quote
+    // char sits exactly at `match.index`, and scanning must INCLUDE it.
+    if (deptExecIsQuotedPatternLiteral(cmd, token, match.index + (match[1]?.length ?? 0))) continue
     // fb-10 (QH): a `/`+digits-only or `//`-only word (a division/units token,
     // e.g. `$((10-fails))/10`, `/3600000`, `//3600000`) is NOT a path.
     if (!deptExecIsPathWord(token)) continue

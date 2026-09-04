@@ -204,6 +204,7 @@ import type {
 import { buildSubagentOrientation } from 'dshd-core'
 import type { SubagentRole } from 'dshd-core'
 import type { MessagesStore } from 'dshd-core'
+import { AUTO_RETIRE_DISPOSE_GRACE_MS } from './delivery.js'
 import type { DeliverySurface } from './delivery.js'
 import type { HeadToolDisposers, SpawnSurface } from './spawn.js'
 // dshd-feedback (SUB-BATCH 4 — the feedback tools zone): the store + the
@@ -2118,7 +2119,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       name: `deepartments:${isWorker ? 'worker' : 'head'}:role:${postId}`,
       order: 1,
       text: isWorker
-        ? (`You are "${postId}", a ${role || 'rank-and-file researcher'} DISPOSABLE department worker of Deepartments (DeepSeek Harness). Your department HEAD created you as a temporary worker agent; you do not edit the repository, run builders, or spawn other agents. Read your messages with agent_messages, send with send_message, orient with dept_who, and persist your findings/memory with dept_memo_write. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives. Work the task your department head assigns you; when you are DONE, write dept_memo_write to save your results, then report to your head and end your turn (head/worker sleep is retired — you never dept_sleep; only the Asistente/host rotates its own session, spec 002). You are DISPOSABLE: your head retires you with dept_worker_retire when you are finished. fb-29 TOOLSET HONESTY: verify your toolset at boot — read/write/glob/grep (plus dept_exec when your role declares it) must be present; if ANY of them is missing, report it to your head BEFORE fabricating anything (never operate with a silently reduced toolset).`
+        ? (`You are "${postId}", a ${role || 'rank-and-file researcher'} DISPOSABLE department worker of Deepartments (DeepSeek Harness). Your department HEAD created you as a temporary worker agent; you do not edit the repository, run builders, or spawn other agents. Read your messages with agent_messages, send with send_message, orient with dept_who, and persist your findings/memory with dept_memo_write. BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives. Work the task your department head assigns you; when you are DONE, ALWAYS write dept_memo_write FIRST and REPORT LAST (send_message) — the MEMO MUST PRECEDE the final send: the send triggers the retire, whose dispose-grace can then abort a memo_write you had planned AFTER the send (the ABORTED_BEFORE_DISPATCH class — a planned memo after the report may never run); persist your journal, then report to your head and end your turn (head/worker sleep is retired — you never dept_sleep; only the Asistente/host rotates its own session, spec 002). You are DISPOSABLE: your head retires you with dept_worker_retire when you are finished. fb-29 TOOLSET HONESTY: verify your toolset at boot — read/write/glob/grep (plus dept_exec when your role declares it) must be present; if ANY of them is missing, report it to your head BEFORE fabricating anything (never operate with a silently reduced toolset).`
           + (reportRunToken === '' ? '' : ` REPORT-RUN TOKEN (fb-28): your unique run token is "${reportRunToken}". ALWAYS name your report file as \`<YYYY-MM-DD>-<slug>-${reportRunToken}.md\` (the token appended to the base \`<YYYY-MM-DD>-<slug>.md\` convention) — this guarantees your report can never overwrite a previous deployment's report of the same postId. Use the SAME token for any other per-run artifact you write.`))
         : `You are "${postId}", the ${role || 'department head'}. You are a permanent, first-class agent: you do not edit the repository, run builders, or spawn other agents. Your world is the messaging bus — read with agent_messages, send with send_message, orient with dept_who, and persist memory with dept_memo_write. You are permanent: you stay idle|running (head sleep is retired — only the Asistente/host keeps dept_sleep session rotation, spec 002). You may create and retire DISPOSABLE WORKERS of your department with dept_worker_spawn and dept_worker_retire (the department-scoped worker tools — the legacy dept_post_create/dept_post_retire still exist as the raw machinery). BOOT-QUIET: you never act on your own — on any materialization/resume/boot wake you stay idle and end your turn with NO action until an explicitly addressed message arrives; you never proactively send.`
     })
@@ -2824,12 +2825,39 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     // archived-session alternative (a «last tool aborted but delivery
     // verified» marker) was NOT needed — the grace removes the abort window
     // itself (documented in the lane report).
+    // O1-EXT (P1 — the fb-23 dispose gate / ACK sincronizado del último send):
+    // a retire of a worker whose handle is LIVE with a turn IN PROGRESS
+    // (`agents.get(sessionId)?.status === 'running'`) ALWAYS defers the dispose
+    // by the AUTO_RETIRE_DISPOSE_GRACE_MS default (5s) — the in-flight turn
+    // closes its current tool result AND any planned call in the SAME window
+    // (the memo_write of the documented memo→send order — the journals/
+    // builder-5.md datapoint: the immediate head-path dispose ABORTED the
+    // planned memo_write BEFORE DISPATCH) BEFORE the teardown. The caller's
+    // explicit `opts.deferDisposeMs` (the delivery auto-retire seam passes
+    // AUTO_RETIRE_DISPOSE_GRACE_MS) still WINS (a longer/specific grace is the
+    // caller's call); a worker NOT live (or a configured-head retire) keeps
+    // today's IMMEDIATE dispose (nothing is in flight — zero behavior change).
     const disposeHandle = (): void => { void disposeHeadHandleOnce(entry.sessionId) }
+    const liveWorkerRunning = entry.provider === 'worker' && agents !== undefined && agents.get(entry.sessionId)?.status === 'running'
     const deferDisposeMs = typeof opts?.deferDisposeMs === 'number' && Number.isFinite(opts.deferDisposeMs) && opts.deferDisposeMs > 0
       ? opts.deferDisposeMs
-      : 0
+      : (liveWorkerRunning ? AUTO_RETIRE_DISPOSE_GRACE_MS : 0)
     if (deferDisposeMs > 0) {
-      const timer = setTimeout(disposeHandle, deferDisposeMs)
+      // O1-EXT (P1+P2 — the dispose CLOSURE): the deferred teardown now (a)
+      // JOINS the detach with the BOUNDED window (joinHeadDisposeOnce — the
+      // DEADLOCK FIX bound; a mid-tool whenIdle can NEVER zombie this timer:
+      // the race resolves at disposeJoinTimeoutMs) so the in-flight turn's
+      // tool result is CLOSED before the teardown is considered done, and (b)
+      // RE-SETTLES the retiring post's pending 'prepared'/'failed' delivery
+      // rows AFTER the dispose (the P2 post-dispose drain — a row whose
+      // delivery was in flight exactly at the grace expiry is settled
+      // 'terminal' in the SAME retire cycle instead of parking until boot;
+      // idempotent + non-fatal, exactly like the pre-dispose settle above).
+      const runDeferredDisposeAndSettle = async (): Promise<void> => {
+        await joinHeadDisposeOnce(entry.sessionId)
+        await settleRetiredPostDeliveries(postId)
+      }
+      const timer = setTimeout(() => { void runDeferredDisposeAndSettle() }, deferDisposeMs)
       if (typeof (timer as { unref?: () => unknown }).unref === 'function') (timer as { unref: () => unknown }).unref()
     } else {
       disposeHandle()
