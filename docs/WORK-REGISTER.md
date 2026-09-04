@@ -287,6 +287,11 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   packages/dshd-core (IPH 09-03)** — backup pre-grant (148 líneas); owner
   decide commit/limpieza al tocar la rama fb-78/grant (el grant en sí está
   VIVO y owner-aprobado: missionExecRoots [/opt/dsh/.dsh] — NO es residuo).
+- **brief diario 09-04 (RD m-782/783) — LISTO PARA PRESENTAR al owner** —
+  ruta reports/daily-news/2026-09-04.md (top: GPT-6 Astra «era AGI» con
+  trade-off monitorabilidad; Qwen3.8-Max-0902, MAI-Transcribe-2, NVIDIA
+  PAIR, Tesla Cybercab Austin); de-dup verificado (+17 URLs, +5 topics);
+  presentar a la vuelta junto con el estado post-crisis y fb-75.
 - CERRADOS: publish 0.1.0 (efd579b) · D5 · P1 · tool-goal retirado · API key
   DeepSeek (fallback real) · restart 05:23:31Z (owner: ignorar — watch si
   reaparecen; restart-registry lo deja visible) · cause restarts 08-31
