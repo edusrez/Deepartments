@@ -234,13 +234,20 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
   // b624be3c… = md5(HEAD zone with that single literal replaced). The R4
   // org-driven resolution lives OUTSIDE this zone (before the surface
   // return) — no other zone byte changed.
+  // Zone md5 RE-FROZE R5 (incident 2026-09-04 — dev :8445 crash-loop):
+  // assembleHeartbeat read `session.snapshotEvents()` NON-OPTIONALLY while
+  // the host core is still 0.1.1-rc.2 (rc.2 exposes the legacy `events`
+  // getter, NOT snapshotEvents) → the W6 heartbeat threw in-tick and killed
+  // the dev profile (restart counter 609). The 2 in-span session-log reads
+  // are now the DUAL read (`snapshotEvents?.() ?? events`) — md5 8da034dc…
+  // → c52556ba3d88a80d5dcb1fda1190ef32 (same span, only the read style).
   {
     const first = factory.indexOf('  // --- department HEADS: FIRST-CLASS ROOT AGENTS (Batch 1a)')
     const last = factory.indexOf("      logger: ctx.logger\n    })\n  })()")
     assert.ok(first !== -1 && last !== -1 && last > first, 'the factory embeds the presets zone (banner → wakePackService construction close)')
     const zoneText = factory.slice(first, last + "      logger: ctx.logger\n    })\n  })()".length) + '\n'
     const md5 = createHash('md5').update(zoneText, 'utf8').digest('hex')
-    assert.equal(md5, '8da034dc38651865917164de9239590f', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation, the LANE 0.2.3 R4 one-line HOST literal alignment AND the LANE 0.1.2 rc.1 session-surface reads (md5 8da034dc… — re-freeze documented above)')
+    assert.equal(md5, 'c52556ba3d88a80d5dcb1fda1190ef32', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation, the LANE 0.2.3 R4 one-line HOST literal alignment AND the R5 DUAL-read session-surface re-freeze (md5 c52556ba… — re-freeze documented above)')
     // The D1 deviation is present and documented: the factory's repoRoot
     // initializer carries THREE '..' (module-position-dependent, identical
     // value — the factory lives 3 levels under the repo root).

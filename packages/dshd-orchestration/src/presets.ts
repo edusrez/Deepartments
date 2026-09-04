@@ -1068,8 +1068,10 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
       // the same snapshot primitive with an empty inbox (only activity matters).
       const hostEntry = [...hosts.values()].find((entry) => entry.hostId === hostId)
       const hostLive = hostEntry !== undefined ? agents?.get(SessionId(hostEntry.sessionId)) : undefined
-      // rc.1+ surface: the full-log read is `snapshotEvents()` (get events gone).
-      const hostEvents = (hostLive?.session?.snapshotEvents() ?? []) as HealthSessionEvent[]
+      // Dual session-log read: `snapshotEvents()` on the rc.1+ surface,
+      // legacy `events` getter on the pre-rc.1 core (0.1.1-rc.2) — never a
+      // throw on the live-but-legacy host handle.
+      const hostEvents = (hostLive?.session?.snapshotEvents?.() ?? hostLive?.session?.events ?? []) as HealthSessionEvent[]
       const hostSnap = buildPostSnapshot({ postId: hostId, events: hostEvents, inboxTs: [] })
       // Per ACTIVE (and dormant) catalog post rows + the WAIT scan inputs +
       // the W8-h INTERRUPTED (stopped) postIds.
@@ -1079,8 +1081,10 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
       for (const [postId, entry] of byPost) {
         if (entry.retired === true) continue
         const live = agents?.get(SessionId(entry.sessionId))
-        // rc.1+ surface: `snapshotEvents()` replaces the removed `events` getter.
-        const events = (live?.session?.snapshotEvents() ?? []) as HealthSessionEvent[]
+        // Dual session-log read: `snapshotEvents()` on the rc.1+ surface,
+        // legacy `events` getter on the pre-rc.1 core (0.1.1-rc.2) — never a
+        // throw on the live-but-legacy handle.
+        const events = (live?.session?.snapshotEvents?.() ?? live?.session?.events ?? []) as HealthSessionEvent[]
         const snap = buildPostSnapshot({ postId, events, inboxTs: inboxTsByPost.get(postId) ?? [] })
         rows.push({
           postId,

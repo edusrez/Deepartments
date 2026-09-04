@@ -4958,9 +4958,11 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         sessionId: entry.sessionId,
         retired: entry.retired === true,
         running: live !== undefined && live.status === 'running',
-        // rc.1+ surface: the full-log read is `snapshotEvents()` (the `events`
-        // getter is gone from 0.1.2-rc.1 on; the envelope cast still holds).
-        events: (live?.session?.snapshotEvents() ?? []) as HealthSessionEvent[],
+        // Dual session-log read: `snapshotEvents()` on the 0.1.2-rc.1 surface,
+        // legacy `events` getter on the pre-rc.1 core (0.1.1-rc.2); absent
+        // session → empty read. NEVER a direct non-optional call — a W6
+        // builder throw would kill the health tick (and the dev profile).
+        events: (live?.session?.snapshotEvents?.() ?? live?.session?.events ?? []) as HealthSessionEvent[],
         inboxTs: inboxTsByPost.get(postId) ?? [],
         sleeping: entry.sleepEpoch !== void 0,
         provider: entry.provider,
@@ -5021,8 +5023,10 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       out.push({
         postId,
         retired: entry.retired === true,
-        // rc.1+ surface: `snapshotEvents()` replaces the removed `events` getter.
-        events: (liveAgent?.session?.snapshotEvents() ?? []) as HealthSessionEvent[],
+        // Dual session-log read: `snapshotEvents()` on the rc.1+ surface,
+        // legacy `events` getter on the pre-rc.1 core (0.1.1-rc.2) — never a
+        // throw on the live-but-legacy handle.
+        events: (liveAgent?.session?.snapshotEvents?.() ?? liveAgent?.session?.events ?? []) as HealthSessionEvent[],
         hostMessages: hostRowsByPost.get(postId) ?? [],
         sleeping: entry.sleepEpoch !== void 0
       })

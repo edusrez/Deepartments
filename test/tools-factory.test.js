@@ -295,7 +295,14 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     const zoneText = factory.slice(first, last + "  }, 'deepartments: host-plane tools')".length) + '\n'
     const md5 = createHash('md5').update(zoneText, 'utf8').digest('hex')
     // Zone md5 RE-FROZE R3 (LANE ②, incident-delivery 2026-09-03): the 4 INTENTIONAL in-span blocks — recipientCatalogAlive reroutable + recipientDormant: isDormantRecipient x2 (redeliverDeps + bus.redeliver) + startRedeliverySweep — re-freeze the hash (R2 fe319e0f… → 5b548545…; LANE ② → 7b5b1c91628b4e69d5ed171cb6d0a7e3; the O1 retirePost dispose-grace is OUTSIDE this span — a different lock).
-    assert.equal(md5, '7b5b1c91628b4e69d5ed171cb6d0a7e3', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions (md5 7b5b1c91…)')
+    // Zone md5 RE-FROZE R4 (incident 2026-09-04 — dev :8445 crash-loop): the
+    // W6 health builders called `session.snapshotEvents()` NON-OPTIONALLY while
+    // the host core is still 0.1.1-rc.2 (rc.2 exposes the legacy `events`
+    // getter, NOT snapshotEvents) → every 60 s health tick threw and killed the
+    // dev profile (restart counter 609). The 2 in-span session-log reads are
+    // now the DUAL read (`snapshotEvents?.() ?? events`) — md5 7b5b1c91… →
+    // e0086480ef8eca7b6b2d2e573153ae50 (same span, only the read style changed).
+    assert.equal(md5, 'e0086480ef8eca7b6b2d2e573153ae50', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read re-freeze (md5 e0086480ef…)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface
