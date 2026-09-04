@@ -364,6 +364,103 @@ export interface DeliverySurface {
  * observed 3–34 ms race window and below the delivery-sweep cadence). */
 export const AUTO_RETIRE_DISPOSE_GRACE_MS = 5_000
 
+/** R2 (fb-42/25 — the glm-5.3-flash rotation class, feedback fb-42): the
+ * ROTATION-MODEL PROBE surface — the minimal `ctx.get('llm')` slice the mint
+ * probe reads: the registered provider routes + the per-provider configured
+ * model catalog (the real dsh-llm LlmService exposes both via listProviders /
+ * listModels; an ABSENT slice is the headless/hermetic-profile signature →
+ * the probe degrades, never blocks). */
+type LlmModelProbeSurface = {
+  listProviders?: () => Array<{ id?: string }>
+  listModels?: (provider: string) => Promise<Array<string | { id?: string }>>
+}
+
+/** R2 — the mint probe verdict (module-private): 'ok' = the candidate model
+ * is verified (or the probe was impossible — warn-degrade); 'retrofitted' =
+ * the candidate model is NOT in the live provider's catalog but the known
+ * seed model IS → the mint re-targets the same provider to the seed model;
+ * 'unknown-model' = a phantom model that must NEVER be minted (the caller
+ * converts it into the fail-loud error). */
+type RotationModelMintProbe =
+  | { kind: 'ok'; options: AgentOptionsLike }
+  | { kind: 'retrofitted'; options: AgentOptionsLike; from: string; to: string }
+  | { kind: 'unknown-model'; provider: string; model: string; fallbackModel: string }
+
+/** R2 (fb-42/25, family fb-25) — the ROTATION-MODEL PROBE: verify that the
+ * RESOLVED model is CONFIGURED in the destination adapter/provider BEFORE the
+ * fresh head/worker is materialized. The fb-42 outage (2026-09-01, 2 samples):
+ * heads rotated in the cleanup wave were minted on the fleet model
+ * glm-5.3-flash (commits 4e86492/4cf9e38) while the pi-ai adapter had not
+ * configured it yet → the fresh's FIRST TURN failed with `pi-ai opencode-zen
+ * has no configured model glm-5.3-flash` (t3-recovered, ~1h45m delay). Class
+ * boundary vs fb-6 (CLOSED): fb-6 = provider+model ABSENT from the
+ * AgentOptions (the upstream resolveMaterializeAgentOptions fallback owns
+ * that class); THIS probe = the provider is LIVE/registered but the model is
+ * missing from its catalog. NEVER a phantom mint: when NEITHER the candidate
+ * NOR the known seed model is configured the probe reports 'unknown-model'
+ * (the mint FAILS LOUD with a clear reason — a fresh head whose first turn is
+ * guaranteed to fail must not be minted). Degrades to 'ok' (warn + proceed
+ * unprobed) when the probe is impossible: no llm surface (headless/hermetic
+ * profile), listProviders/listModels absent or failing, or the provider NOT
+ * registered (the NO_ADAPTER class the boot FIX-2 check owns with its bounded
+ * retry window — an unregistered provider carries no model catalog to probe).
+ * PURE structure — never throws itself; the caller maps 'unknown-model' to
+ * the abort. EXPORTED (package-internal): the dept_head_rotate tool (tools.ts)
+ * runs the SAME probe BEFORE the destructive dispose/archive steps, so a
+ * fail-loud leaves the old head untouched. */
+export function probeRotationMintModel(
+  postId: string,
+  agentOptions: AgentOptionsLike,
+  fallbackOptions: AgentOptionsLike,
+  llm: LlmModelProbeSurface | undefined,
+  logger: { warn: (message: string) => void; info: (message: string) => void }
+): Promise<RotationModelMintProbe> {
+  const provider = agentOptions.provider
+  const model = agentOptions.model
+  if (typeof provider !== 'string' || provider === '' || typeof model !== 'string' || model === '') {
+    // provider+model absent — the fb-6 CLOSED class (the upstream
+    // resolveMaterializeAgentOptions fallback already replaced the options).
+    return Promise.resolve({ kind: 'ok', options: agentOptions })
+  }
+  if (llm === undefined || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
+    logger.warn(`[deepartments] rotation mint probe "${postId}": the "llm" surface is absent (headless/hermetic profile) — model "${model}" (provider ${provider}) NOT verified, mint proceeds unprobed`)
+    return Promise.resolve({ kind: 'ok', options: agentOptions })
+  }
+  let registered: Array<{ id?: string }> = []
+  try {
+    registered = llm.listProviders() ?? []
+  } catch (error: unknown) {
+    logger.warn(`[deepartments] rotation mint probe "${postId}": listProviders() failed (${error instanceof Error ? error.message : String(error)}) — proceeding unprobed`)
+    return Promise.resolve({ kind: 'ok', options: agentOptions })
+  }
+  if (!registered.some((p) => p?.id === provider)) {
+    logger.warn(`[deepartments] rotation mint probe "${postId}": provider "${provider}" is NOT registered (NO_ADAPTER class — the boot FIX-2 check owns the alert) — model "${model}" NOT verified, mint proceeds unprobed`)
+    return Promise.resolve({ kind: 'ok', options: agentOptions })
+  }
+  return llm.listModels(provider)
+    .then((configured) => {
+      // Tolerant catalog read: the model ids may be plain strings OR
+      // {id}-shaped descriptors (the dsh-llm LlmModelInfo shape) — NEVER a
+      // phantom block over a shape difference. Ids compare case-insensitively.
+      const ids = (configured ?? []).map((m) => (typeof m === 'string' ? m : m?.id)).filter((id): id is string => typeof id === 'string')
+      const has = (candidate: string) => ids.some((id) => id.toLowerCase() === candidate.toLowerCase())
+      if (has(model)) {
+        logger.info(`[deepartments] rotation mint probe "${postId}": model "${model}" (provider ${provider}) IS configured — mint proceeds VERIFIED`)
+        return { kind: 'ok', options: agentOptions } as const
+      }
+      const fallbackModel = fallbackOptions?.model
+      if (typeof fallbackModel === 'string' && fallbackModel !== '' && has(fallbackModel)) {
+        logger.warn(`[deepartments] rotation mint probe "${postId}": model "${model}" (provider ${provider}) is NOT in the adapter catalog → RETROFIT to the known seed model "${fallbackModel}" (the fresh head runs the fleet model — the phantom model is never minted)`)
+        return { kind: 'retrofitted', options: { ...agentOptions, model: fallbackModel }, from: model, to: fallbackModel } as const
+      }
+      return { kind: 'unknown-model', provider, model, fallbackModel: fallbackModel ?? '' } as const
+    })
+    .catch((error: unknown) => {
+      logger.warn(`[deepartments] rotation mint probe "${postId}": listModels("${provider}") failed (${error instanceof Error ? error.message : String(error)}) — model "${model}" NOT verified, mint proceeds unprobed`)
+      return { kind: 'ok', options: agentOptions } as const
+    })
+}
+
 /**
  * Build the DELIVERY ORCHESTRATION surface on the apply fiber (AGENTS.md rule 4
  * — no module-global mutable state; invoked by applyInvoke at the SAME fiber
@@ -539,6 +636,18 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     // architecture section (if any).
     const setup = headSetup(entry.postId, entry.roomId, role, headPreset, dept)
     const agentOptions = resolveMaterializeAgentOptions(coordinator?.agentOptions)
+    // R2 (fb-42/25 — the glm-5.3-flash rotation class): the ROTATION-MODEL
+    // PROBE runs BEFORE the fresh mint — the resolved model must be
+    // CONFIGURED in the destination adapter/provider (a phantom-model mint
+    // aborts FAIL-LOUD; a missing candidate retrofits to the known seed model
+    // so the fresh head NEVER starts on a model its provider cannot serve).
+    const probe = await probeRotationMintModel(entry.postId, agentOptions, WORKER_AGENT_OPTIONS, ctx.get('llm', false), ctx.logger)
+    if (probe.kind === 'unknown-model') {
+      throw new Error(
+        `[deepartments] rotation mint of "${entry.postId}" ABORTED (fb-42 class): provider "${probe.provider}" is registered but NEITHER model "${probe.model}" NOR the known seed model "${probe.fallbackModel}" is configured in the adapter catalog — configure the model in the provider settings BEFORE rotating (the fresh head's first turn would fail with 'pi-ai <provider> has no configured model')`
+      )
+    }
+    const mintOptions = probe.options
     // F5: the fresh incarnation lands in its department workspace (config
     // workspacePath); a department-less/legacy head falls back to the root.
     const deptCwd = await resolveDepartmentWorkspaceCwd(dept)
@@ -550,7 +659,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       // pre-extraction empty-session create, byte-identical).
       ...(opts.seed !== undefined ? { seed: opts.seed } : {}),
       meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: headPreset },
-      agentOptions,
+      agentOptions: mintOptions,
       setup
     })
     if (handle !== void 0) byHeadHandle.set(freshSessionId, handle)

@@ -1068,16 +1068,17 @@ export function headRotationJournalStatus(journalText: string, nowMs: number): {
 // rotation proceeds (the critical-unblock rule; the archive is cosmetic).
 // ---------------------------------------------------------------------------
 
-/** The verification stamp of a rotation reason: 'verified' (the cited figure
- * matches the old session's projected/used tokens within tolerance),
- * 'unverified' (a figure EXISTS but does NOT match — the reason cites another
- * session's numbers or an impossible state), 'unavailable' (no datum: reason
- * without a figure, absent/unreadable mirror, session not projected, a
- * degenerate row — conservatively nothing to verify). */
+/** The verification stamp of a rotation reason: 'verified' (the cited figure —
+ * OR the cited «N% de contexto» fraction — matches the old session's real
+ * usage within tolerance), 'unverified' (a figure/pct EXISTS but does NOT
+ * match — the reason cites another session's numbers or an impossible state),
+ * 'unavailable' (no datum: reason without a figure, absent/unreadable mirror,
+ * session not projected, a degenerate row — conservatively nothing to
+ * verify). */
 export type ReasonVerificationStamp = 'verified' | 'unverified' | 'unavailable'
 
-/** The relative tolerance for a 'verified' verdict (the reason figure vs the
- * old session's real usage — mission guidance: ±10-15%). */
+/** The relative tolerance for a 'verified' verdict (the reason figure/pct vs
+ * the old session's real usage — mission guidance: ±10-15%). */
 export const REASON_VERIFY_TOLERANCE = 0.15
 
 /** The tolerantly-parseable token figure of a rotation reason: an optional
@@ -1086,11 +1087,29 @@ export const REASON_VERIFY_TOLERANCE = 0.15
  * (turn counts, percentages, MB sizes) are noise and filtered out. */
 const REASON_TOKEN_FIGURE_RE = /~?\s*(\d{1,3}(?:[.,]\d{3})+|\d+)\s*([kK])?/g
 
+/** fb-25 GAP-2 (R2 — the inspect 2026-09-04 IPH f7863559, GAP 2): whether a
+ * regex digit-match is actually a MESSAGE id (`m-1056`, `m-1058` — the
+ * m-1058 spurious-'unverified' case: the extractor read the id 1056 as a
+ * token usage figure and stamped a reason that cites NO usage figure as
+ * 'unverified'). The id convention is `m-`/`M-` + plain digits at a word
+ * boundary ("confirmada m-1056", "(m-1056)", "M-901"). Any other prefix
+ * ("a 318k", "a -1056") stays a candidate figure. */
+function isMessageIdPrefixed(reason: string, matchIndex: number): boolean {
+  if (matchIndex < 2) return false
+  if (reason[matchIndex - 1] !== '-') return false
+  const m = reason[matchIndex - 2]
+  if (m !== 'm' && m !== 'M') return false
+  if (matchIndex < 3) return true
+  return !/[A-Za-z0-9_\-]/.test(reason[matchIndex - 3])
+}
+
 /** Extract the FIRST token-scale figure (≥1000 after a `k` normalization) a
- * rotation reason cites — the leading claimed usage figure. Returns undefined
- * when the reason carries no token-scale number. */
+ * rotation reason cites — the leading claimed usage figure. A message-id
+ * digit run (`m-<digits>`, fb-25 GAP-2) is NEVER a usage figure. Returns
+ * undefined when the reason carries no token-scale number. */
 function extractRotateReasonTokenFigure(reason: string): number | undefined {
   for (const match of reason.matchAll(REASON_TOKEN_FIGURE_RE)) {
+    if (isMessageIdPrefixed(reason, match.index)) continue
     const raw = match[1].replace(/[.,]/g, '')
     let value = Number(raw)
     if (!Number.isFinite(value)) continue
@@ -1099,6 +1118,46 @@ function extractRotateReasonTokenFigure(reason: string): number | undefined {
     return value
   }
   return undefined
+}
+
+/** The tolerantly-parseable percentage of a rotation reason: an optional `~`,
+ * a 1-3 digit number with an optional decimal fraction (`.`,`,`), a `%` — the
+ * "N% de contexto" reason form the M-A context-threshold alert composes
+ * ("60% de contexto", "~62%", "18%", "95.1%"). */
+const REASON_PERCENT_RE = /~?\s*(\d{1,3}(?:[.,]\d{1,3})?)\s*%/g
+
+/** Extract the FIRST percentage figure (0 < N ≤ 100) a rotation reason cites
+ * — the «N% de contexto» claimed pressure. Returns undefined when the reason
+ * carries no percentage (a pct outside (0,100] is never a context figure). */
+function extractRotateReasonPercent(reason: string): number | undefined {
+  for (const match of reason.matchAll(REASON_PERCENT_RE)) {
+    const raw = match[1].replace(',', '.')
+    const value = Number(raw)
+    if (!Number.isFinite(value) || value <= 0 || value > 100) continue
+    return value
+  }
+  return undefined
+}
+
+/** The tolerant row finder shared by the reference reads: the EXACT sessionId
+ * first, then a key CONTAINING the session id (a prefix/short form). */
+function sessionProjCacheRow(projCache: unknown, sessionId: string): Record<string, unknown> | undefined {
+  const tables = (projCache as { tables?: { sessions?: Record<string, unknown> } } | undefined)?.tables
+  const sessions = tables?.sessions
+  if (sessions === undefined || typeof sessions !== 'object') return undefined
+  let row: unknown = (sessions as Record<string, unknown>)[sessionId]
+  if (row === undefined) {
+    for (const [key, value] of Object.entries(sessions)) {
+      if (key.includes(sessionId)) {
+        row = value
+        break
+      }
+    }
+  }
+  if (row === undefined || typeof row !== 'object') return undefined
+  const rows = (row as { rows?: Record<string, unknown> }).rows
+  if (rows === undefined || typeof rows !== 'object') return undefined
+  return rows as Record<string, unknown>
 }
 
 /** The projected/used tokens of one session row in the parsed projcache —
@@ -1113,22 +1172,8 @@ function extractRotateReasonTokenFigure(reason: string): number | undefined {
  * → undefined ('unavailable' — the final row of an ERROR-ended session has the
  * pressure reset, so no corroborating datum exists). */
 function projectedUsageForSession(projCache: unknown, sessionId: string): number | undefined {
-  const tables = (projCache as { tables?: { sessions?: Record<string, unknown> } } | undefined)?.tables
-  const sessions = tables?.sessions
-  if (sessions === undefined || typeof sessions !== 'object') return undefined
-  let row: unknown = (sessions as Record<string, unknown>)[sessionId]
-  if (row === undefined) {
-    // Tolerant fallback: a key CONTAINING the session id (a prefix/short form).
-    for (const [key, value] of Object.entries(sessions)) {
-      if (key.includes(sessionId)) {
-        row = value
-        break
-      }
-    }
-  }
-  if (row === undefined || typeof row !== 'object') return undefined
-  const rows = (row as { rows?: Record<string, unknown> }).rows
-  if (rows === undefined || typeof rows !== 'object') return undefined
+  const rows = sessionProjCacheRow(projCache, sessionId)
+  if (rows === undefined) return undefined
   const cpVal = (rows.contextPressure as { val?: Record<string, unknown> } | undefined)?.val
   if (cpVal !== undefined && typeof cpVal === 'object') {
     const pressure = finiteNumber(cpVal.pressureTokens)
@@ -1142,6 +1187,23 @@ function projectedUsageForSession(projCache: unknown, sessionId: string): number
   const cacheRead = buckets === undefined ? undefined : finiteNumber(buckets.cacheReadTokens)
   if (cacheRead !== undefined) return cacheRead
   return undefined
+}
+
+/** fb-25 GAP-2 (R2) — the projection row read EXTENDED with the session's
+ * CONTEXT WINDOW (`contextPressure.val.contextWindow` — the denominator the
+ * M-A context-threshold monitor uses for its percentage), so a reason citing
+ * «N% de contexto» can be verified against the OLD session's REAL fraction.
+ * Undefined when the projected datum OR the window is missing/degenerate
+ * (the same conservative 'unavailable' degradation as the token read). */
+function projectedUsageContextForSession(projCache: unknown, sessionId: string): { projected: number; contextWindow: number } | undefined {
+  const projected = projectedUsageForSession(projCache, sessionId)
+  if (projected === undefined) return undefined
+  const rows = sessionProjCacheRow(projCache, sessionId)
+  if (rows === undefined) return undefined
+  const cpVal = (rows.contextPressure as { val?: Record<string, unknown> } | undefined)?.val
+  const contextWindow = cpVal === undefined || typeof cpVal !== 'object' ? undefined : finiteNumber(cpVal.contextWindow)
+  if (contextWindow === undefined || contextWindow <= 0) return undefined
+  return { projected, contextWindow }
 }
 
 function finiteNumber(value: unknown): number | undefined {
@@ -1168,23 +1230,48 @@ export function resolveSessionProjCachePath(stateDir: string, persistenceRoot?: 
  * degenerate (≤0) usage datum → 'unavailable'; a figure matching the old
  * session's projected/used tokens within ±REASON_VERIFY_TOLERANCE → 'verified';
  * any other figure (a different session's numbers, an impossible state) →
- * 'unverified'. */
-export function verifyRotateReason(reason: unknown, oldSessionId: string, projCachePath?: string): ReasonVerificationStamp {
+ * 'unverified'. fb-25 GAP-2 (R2): a message-id digit run (`m-1056`) is NEVER a
+ * figure (the m-1058 spurious-'unverified' case — an id-only reason degrades
+ * to 'unavailable' instead), and the «N% de contexto» reason form is verified
+ * against the old session's REAL fraction — `(projected + completionReserve) /
+ * contextWindow` (the M-A fb-50 monitor formula: the reserve is the model's
+ * max-output tokens the alert frame counts, default 0 = the plain-projection
+ * fraction) — with the SAME ±tolerance. `completionReserve` is OPTIONAL: a
+ * caller that knows the reserved-pressure monitor calibration (the wiring
+ * reads `health.contextCompletionReserve`) passes it; a 3-arg call keeps the
+ * LEGACY plain-fraction semantics. */
+export function verifyRotateReason(reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number): ReasonVerificationStamp {
   if (typeof reason !== 'string' || reason.trim() === '') return 'unavailable'
   if (typeof oldSessionId !== 'string' || oldSessionId === '') return 'unavailable'
   if (typeof projCachePath !== 'string' || projCachePath === '') return 'unavailable'
-  let reference: number | undefined
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(readFileSync(projCachePath, 'utf8')) as unknown
-    reference = projectedUsageForSession(parsed, oldSessionId)
+    parsed = JSON.parse(readFileSync(projCachePath, 'utf8')) as unknown
   } catch {
     return 'unavailable'
   }
+  const reference = projectedUsageForSession(parsed, oldSessionId)
   if (!(reference !== undefined && reference > 0)) return 'unavailable'
   const figure = extractRotateReasonTokenFigure(reason)
-  if (figure === undefined) return 'unavailable'
-  const ratio = Math.abs(figure - reference) / reference
-  return ratio <= REASON_VERIFY_TOLERANCE ? 'verified' : 'unverified'
+  if (figure !== undefined) {
+    const ratio = Math.abs(figure - reference) / reference
+    return ratio <= REASON_VERIFY_TOLERANCE ? 'verified' : 'unverified'
+  }
+  // fb-25 GAP-2 (R2) — the «N% de contexto» reason form: the reason carries NO
+  // token-scale figure, only a percentage → verify the pct against the old
+  // session's real fraction (projected + the optional completion reserve over
+  // the session's context window — the monitor's own percentage formula).
+  const pct = extractRotateReasonPercent(reason)
+  if (pct !== undefined) {
+    const context = projectedUsageContextForSession(parsed, oldSessionId)
+    if (context === undefined) return 'unavailable'
+    const reserve = typeof completionReserve === 'number' && Number.isFinite(completionReserve) && completionReserve > 0 ? completionReserve : 0
+    const actualPct = (context.projected + reserve) / context.contextWindow
+    if (!(actualPct > 0)) return 'unavailable'
+    const ratio = Math.abs(pct / 100 - actualPct) / actualPct
+    return ratio <= REASON_VERIFY_TOLERANCE ? 'verified' : 'unverified'
+  }
+  return 'unavailable'
 }
 
 // ---------------------------------------------------------------------------

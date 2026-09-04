@@ -319,14 +319,16 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     // ebcd293c4aa1fc8dbb3c49fd9b576205 (same span, the arming line + one
     // comment block changed; zone semantics unchanged — R4 dual + R6 wrap
     // byte-identity re-frozen).
-    // Zone md5 RE-FROZE R9 (WAKE-SEAM lane, 2026-09-04 — fb-131 P1 Candidate B
-    // observability): the send_message tool execute now carries the queue-class
-    // observer + the enriched prepared rendering ('prepared (fifo-gated tras
-    // m-<seq>)' / 'prepared (noWake)') — an INTENTIONAL in-span change (the
-    // tool result surface; the sidecar keeps the plain 'prepared' status).
-    // md5 ebcd293c… → 3b85576cf0cd7cf5ec900ac66cfa17de (same span, the send
-    // loop body + the output type; the CUT4 movement lock semantics unchanged).
-    assert.equal(md5, '3b85576cf0cd7cf5ec900ac66cfa17de', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R8 sweepArmed-flag re-freeze + the R9 WAKE-SEAM send_message prepared-class enrichment (md5 3b85576c…)')
+    // Zone md5 RE-FROZE R10 (R2 lane, 2026-09-04 — fb-42/25 rotation-model
+    // probe + fb-25 GAP-2): TWO INTENTIONAL in-span changes in the
+    // dept_head_rotate tool — (1) the ROTATION-MODEL PROBE pre-check runs in
+    // the execute BEFORE the dispose/archive steps (an unknown-model rotation
+    // aborts with the old head untouched — fb-42 class), and (2) the reason
+    // cross-check passes the fb-50 completion-reserve calibration (the «N% de
+    // contexto» form). md5 3b85576c… → 3872790d90a6bf04a60ad448d0d1a117
+    // (same span; the CUT4 movement-lock semantics unchanged — the tool
+    // definition body only).
+    assert.equal(md5, '3872790d90a6bf04a60ad448d0d1a117', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R8 sweepArmed-flag re-freeze + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions (md5 3872790d…)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface

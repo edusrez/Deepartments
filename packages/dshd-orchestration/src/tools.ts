@@ -205,7 +205,7 @@ import type {
 import { buildSubagentOrientation } from 'dshd-core'
 import type { SubagentRole } from 'dshd-core'
 import type { MessagesStore } from 'dshd-core'
-import { AUTO_RETIRE_DISPOSE_GRACE_MS } from './delivery.js'
+import { AUTO_RETIRE_DISPOSE_GRACE_MS, probeRotationMintModel } from './delivery.js'
 import type { DeliverySurface } from './delivery.js'
 import type { HeadToolDisposers, SpawnSurface } from './spawn.js'
 // dshd-feedback (SUB-BATCH 4 — the feedback tools zone): the store + the
@@ -550,7 +550,7 @@ export interface ToolsFactoryDeps {
   /** The rotation journal-status stamp (module-scope pure helper of invoke.ts). */
   headRotationJournalStatus: (journalText: string, nowMs: number) => { timestamp?: string; stale: boolean }
   /** The fb-25 rotation-reason cross-check (module-scope pure helper). */
-  verifyRotateReason: (reason: unknown, oldSessionId: string, projCachePath?: string) => ReasonVerificationStamp
+  verifyRotateReason: (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number) => ReasonVerificationStamp
   /** The session-projcache path resolver (module-scope pure helper). */
   resolveSessionProjCachePath: (stateDir: string, persistenceRoot?: string) => string
   /** The daemon notice delivery (module-scope async helper of invoke.ts — the
@@ -5590,6 +5590,21 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         throw new Error(`[deepartments] dept_head_rotate: no durable journal for "${args.postId}" (${journalPathFor(args.postId)}) — request a dept_memo_write first, then rotate`)
       }
       const journalStatus = headRotationJournalStatus(journal, Date.now())
+      // R2 (fb-42/25 — the glm-5.3-flash rotation class, feedback fb-42): the
+      // ROTATION-MODEL PROBE runs BEFORE ANY dispose/archive — the resolved
+      // model must be CONFIGURED in the destination adapter/provider, so an
+      // unknown-model rotation ABORTS with the OLD head completely untouched
+      // (still live, still idle — the host configures the adapter and retries).
+      // A fail-loud AFTER the archive would have left the head archived with
+      // NO live successor; the mint-level probe (freshMintHead) re-verifies at
+      // create time as the single-point guarantee. Degrades to pass when the
+      // probe is impossible (headless profile / NO_ADAPTER class — the boot
+      // FIX-2 check owns that alert); a missing candidate model falls back to
+      // the known seed model (retrofitted) — never a phantom-model fresh.
+      const rotationProbe = await probeRotationMintModel(args.postId, coordinator.agentOptions ?? {}, WORKER_AGENT_OPTIONS, ctx.get('llm', false), ctx.logger)
+      if (rotationProbe.kind === 'unknown-model') {
+        throw new Error(`[deepartments] dept_head_rotate: "${args.postId}" ABORTED (fb-42 class): provider "${rotationProbe.provider}" is registered but NEITHER model "${rotationProbe.model}" NOR the known seed model "${rotationProbe.fallbackModel}" is configured in the adapter catalog — configure the model in the provider settings BEFORE rotating (the fresh head's first turn would fail with 'pi-ai ${rotationProbe.provider} has no configured model')`)
+      }
       // Bounded dispose of the old live handle (a zombie detach self-heals; the
       // fresh mint uses a NEW session id, no collision).
       if (!(await joinHeadDisposeOnce(sessionId))) {
@@ -5613,7 +5628,11 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // the QH/inspectors and the host see an unverified figure as such.
       const persistence = ctx.get('sessionPersistence') as { root?: string } | undefined
       const projCachePath = resolveSessionProjCachePath(stateDir, persistence?.root)
-      const reasonVerified = verifyRotateReason(args.reason, sessionId, projCachePath)
+      // R2 (fb-25 GAP-2): pass the M-A fb-50 completion-reserve calibration so
+      // the «N% de contexto» reason form verifies against the SAME
+      // (projected + reserve)/window fraction the context-threshold alert
+      // composed (absent knob → 0 → the plain-projection fraction, legacy).
+      const reasonVerified = verifyRotateReason(args.reason, sessionId, projCachePath, (config.health as { contextCompletionReserve?: number } | undefined)?.contextCompletionReserve)
       // QD mirror (spec 007 §6.3, D-Q3 — the host-rotated pattern): a head
       // rotation is inspected at 100%. Non-fatal (the emitter wraps itself).
       await maybeEmitQualityInspectDirective({
