@@ -93,8 +93,23 @@ export interface DeliverOrQueueOptions {
    * recipient's next real wake). WIRED (B2/B3) — the no-wake-until-wake
    * semantics the dormant-ack gate + the explicit send_message `noWake` use. */
   noWake?: boolean
-  /** W9-b: preempt a busy recipient (abort the current turn). Default false. */
+  /** W9-b: preempt a busy recipient (abort the current turn). Default false.
+   * P1 (fb-131 — WAKE-SEAM lane): `interrupt:true` ALSO BYPASSES the fb-117
+   * FIFO gate — an explicit interrupt is the sender's preemption order, so it
+   * is NEVER degraded to the no-wake queue by an earlier pending pair (the
+   * diagnosis: the gate ran BEFORE the route, so the interrupt never reached
+   * `busDeliverToPost`; the inbox order is preserved because the interrupt's
+   * splice still goes first-item of the next turn — the preemption is the
+   * documented intent of `interrupt`, not an inversion). */
   interrupt?: boolean
+  /** P1 (fb-131 — WAKE-SEAM lane) — OPTIONAL queue-class observer
+   * (observability ONLY, never a behavior gate): invoked exactly when the
+   * outcome degrades to 'prepared' WITHOUT a wake, with the queue CLASS —
+   * 'fifo' (the fb-117 gate: an earlier seq is still pending; `bySeq` = the
+   * EARLIEST gating seq when known — the 'tras m-<seq>' detail) or 'noWake'
+   * (the WIRED no-wake branch). Absent → byte-identical (the observer is the
+   * send_message tool-result enrichment seam). */
+  gateReason?: (reason: 'fifo' | 'noWake', bySeq?: number) => void
   /** The caller's agent id — used by the child route (listChildren /
    * followup) only; the catalog route ignores it. */
   callerAgentId?: string
@@ -198,6 +213,15 @@ export interface DeliveryEngineDeps {
    * gate). Implementations MUST be fail-soft-friendly (a throw degrades to
    * ungated at the engine — the ordering fix must never break a delivery). */
   pendingEarlierSeq?: (recipientId: string, seq: number) => Promise<boolean>
+  /** P1 (fb-131 — WAKE-SEAM lane) — OPTIONAL: resolve the gating seq of the
+   * FIFO gate (`pendingEarlierSeq` === true) — WHICH strictly-earlier seq's
+   * pair is still 'prepared' — for the send_message tool-result observability
+   * ('prepared (fifo-gated tras m-<seq>)'). Runs after the gate fired, best-
+   * effort (a throw/ENOENT degrades to `undefined` — the tool then reports a
+   * bare 'fifo-gated'). Absent → the tool reports the class without the seq.
+   * NEVER a behavior gate — the boolean `pendingEarlierSeq` stays the decision
+   * seam. */
+  pendingEarlierSeqDetail?: (recipientId: string, seq: number) => Promise<number | undefined>
 }
 
 /** The delivery engine: the single bus delivery seam. */
@@ -258,7 +282,16 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
       // inbox — the ack-loop guard). The check itself is fail-soft: a gate
       // error only warns and proceeds ungated (the ordering fix must never
       // break a delivery).
-      if (recipientId !== record.from && deps.pendingEarlierSeq !== void 0) {
+      // P1 (fb-131 — WAKE-SEAM lane): `opts.interrupt === true` BYPASSES the
+      // gate entirely (short-circuit — not even the sidecar read). The
+      // candidate-A fix of the diagnosis: the FIFO gate ran BEFORE the route,
+      // so the sender's `interrupt:true` NEVER reached `busDeliverToPost` (the
+      // m-1107 WAKE-NUDGE class — interrupt swallowed by the gate). An explicit
+      // interrupt is the preemption ORDER: the delivery must not degrade to the
+      // no-wake queue behind an earlier pending pair; the recipient's inbox
+      // stays in seq order because the interrupt's splice goes FIRST-ITEM of
+      // the next turn (the documented preemption — never an inversion).
+      if (recipientId !== record.from && opts.interrupt !== true && deps.pendingEarlierSeq !== void 0) {
         let gated = false
         try {
           gated = await deps.pendingEarlierSeq(recipientId, record.seq)
@@ -266,7 +299,17 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
           deps.logger.warn(`[deepartments] bus delivery FIFO-gate check failed for ${record.id} → ${recipientId} (delivery proceeds ungated): ${error instanceof Error ? error.message : String(error)}`)
         }
         if (gated) {
-          deps.logger.info(`[deepartments] bus delivery FIFO gate: ${record.id} → ${recipientId} has an EARLIER non-final (prepared) seq — queued BEHIND (no-wake 'prepared'), the inbox splice stays in seq order (fb-117)`)
+          // P1 (fb-131 — Candidate B observability): resolve the gating seq
+          // best-effort (the 'tras m-<seq>' detail of the tool result) + fire
+          // the queue-class observer. The observer NEVER gates.
+          let bySeq: number | undefined
+          try {
+            if (deps.pendingEarlierSeqDetail !== void 0) bySeq = await deps.pendingEarlierSeqDetail(recipientId, record.seq)
+          } catch (error: unknown) {
+            deps.logger.warn(`[deepartments] bus delivery FIFO-gate seq detail failed for ${record.id} → ${recipientId} (observability only): ${error instanceof Error ? error.message : String(error)}`)
+          }
+          opts.gateReason?.('fifo', bySeq)
+          deps.logger.info(`[deepartments] bus delivery FIFO gate: ${record.id} → ${recipientId} has an EARLIER non-final (prepared) seq${bySeq !== undefined ? ` (m-${bySeq})` : ''} — queued BEHIND (no-wake 'prepared'), the inbox splice stays in seq order (fb-117)`)
           await deps.markFinal(record, recipientId, 'prepared')
           return 'prepared'
         }
@@ -365,6 +408,10 @@ async function catalogRoute(
   // branch does NOT materialize/wake, so the message waits for the recipient's
   // next real wake (the no-wake-until-wake semantics).
   if (opts.noWake === true) {
+    // P1 (fb-131 — Candidate B observability): the WIRED no-wake branch is the
+    // SECOND 'prepared'-without-wake queue class — the observer distinguishes
+    // it from the FIFO gate so the send_message tool result can name it.
+    opts.gateReason?.('noWake')
     return 'prepared'
   }
   // ALWAYS-WAKE (DEFAULT — the pre-step (c) behavior EXACTLY).

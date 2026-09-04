@@ -140,7 +140,8 @@ import {
   markDelivery,
   DeliveryRedeliverer,
   RE_DELIVERY_SWEEP_DEFAULT_INTERVAL_MS,
-  getSessionEvents
+  getSessionEvents,
+  deliveryStatus
 } from 'dshd-core'
 import type { DeliveryRow, MessageRecord, DeliveryStatus, DeliveryRedelivererDeps } from 'dshd-core'
 import {
@@ -712,8 +713,13 @@ export interface ToolsSurface {
    * = the interval is up, `cycles`/`lastCycleTs`/`preparedStuckRemaining` =
    * the DeliveryRedeliverer's observed sweep counters). NEVER synthesized —
    * `lastCycleTs`/`preparedStuckRemaining` absent until a cycle observed them;
-   * `armed` is truthful (flips true at the actual arming). */
-  redeliverySweepState: () => { armed: boolean; cycles: number; lastCycleTs?: number; preparedStuckRemaining?: number }
+   * `armed` is truthful (flips true at the actual arming).
+   * P4 (fb-131 — WAKE-SEAM lane): the cycle's HONEST prepared-state summary is
+   * forwarded too — `oldestPreparedTs` (the oldest pair-latest 'prepared' row),
+   * `dormantHeld` (the B3 dormancy-held pairs — a residue that may never reach
+   * 0 BY DESIGN) and `noWakeHeld` (the P2 no-wake-held pairs — the explicit
+   * no-wake-until-wake intent the sweep no longer violates). */
+  redeliverySweepState: () => { armed: boolean; cycles: number; lastCycleTs?: number; preparedStuckRemaining?: number; oldestPreparedTs?: number; dormantHeld?: number; noWakeHeld?: number }
   /** The DEEPARTMENTS RPC-channel endpoint deps (the webServer mount's
    * fallback handler consumes them at the same position — the composed dshd-gui
    * service reads the same object from the `gui` Binder bucket). */
@@ -840,6 +846,85 @@ function isNudgeLifeAbort(exec: unknown, result: { isError: boolean; error?: { m
   if ((result as { aborted?: unknown } | null)?.aborted === true) return true
   const message = typeof result?.error?.message === 'string' ? result.error.message : ''
   return /\b(?:aborted?|interrupted?|killed)\b/i.test(message)
+}
+
+// ---------------------------------------------------------------------------
+// P3 (fb-130 — WAKE-SEAM lane) — the pre-dispose splice DRAIN. The seam
+// (diagnosis §3): `followup` splices 'next-turn' (the harness Inbox — durable
+// 'agent/inbox/spliced' session events), the retire disposes the handle, and
+// the harness `cancel({kind:'disposed'})` WITHOUT keepInbox CLEARS the inbox —
+// appending durable 'canceled' deletion splices to the session log — while the
+// sidecar ALREADY said 'delivered' («delivered ≠ expuesto», m-981/builder-6).
+// The helpers below are the two halves of the drain:
+//   - `pendingInboxSummary`: the PURE replay of ONE session's durable
+//     'agent/inbox/spliced' events (the EXACT replay algorithm of the harness
+//     Inbox constructor): the currently-PENDING bus message ids (next-turn +
+//     next-step, mapped through the W7-B `source.messageId` — the bus record
+//     id) and the ids REMOVED by 'canceled'-outcome splices (the dispose
+//     clear's durable evidence). Never throws; null/foreign events are skipped.
+//   - the factory-local `drainNotExposedAtRetire`: settles each of those
+//     (pending ∪ canceled) bus record pairs 'terminal' when their sidecar
+//     LATEST row is 'delivered'/'resumed' (a 'prepared'/'failed' row is the
+//     W7-A settle's domain; a claimed splice is a removal WITHOUT the canceled
+//     outcome AND already gone from pending — never drained — so a genuinely
+//     EXPOSED message is never touched).
+// The intent is NEVER lost (the content is durable in messages.jsonl); the
+// CORRECTION makes the sidecar honest: the pair ends 'terminal' (settled
+// without model exposure) instead of a lying 'delivered'.
+// ---------------------------------------------------------------------------
+
+/** One message inside an 'agent/inbox/spliced' insert (the W7-B JSON-safe
+ * projection — `source.messageId` IS the bus record id; a non-bus context
+ * splice has none and falls back to its own id). */
+function busInboxMessageId(message: unknown): string | undefined {
+  if (typeof message !== 'object' || message === null) return undefined
+  const m = message as Record<string, unknown>
+  const source = m.source
+  if (typeof source === 'object' && source !== null && typeof (source as Record<string, unknown>).messageId === 'string') {
+    return (source as Record<string, unknown>).messageId as string
+  }
+  return typeof m.id === 'string' ? m.id : undefined
+}
+
+/** P3 (fb-130) — PURE: replay one session's durable 'agent/inbox/spliced'
+ * events (the harness Inbox replay algorithm — state arrays per target,
+ * splice(start, removedCount, ...inserted) per event) and report:
+ *   - `pending`: the bus ids CURRENTLY in next-turn/next-step (delivered-but-
+ *     not-yet-exposed — the followups a dispose would clear),
+ *   - `canceled`: the bus ids the events show removed by a 'canceled'-outcome
+ *     splice (the dispose's inbox.clear() — the DURABLE evidence of what the
+ *     teardown discarded).
+ * Never throws (a null/malformed event is skipped — the same tolerance as the
+ * sidecar parsers). */
+function pendingInboxSummary(events: readonly unknown[]): { pending: string[]; canceled: string[] } {
+  const nextTurn: unknown[] = []
+  const nextStep: unknown[] = []
+  const canceled: string[] = []
+  const pushId = (list: string[], value: string | undefined): void => {
+    if (value !== undefined) list.push(value)
+  }
+  for (const event of events) {
+    if (typeof event !== 'object' || event === null) continue
+    const e = event as Record<string, unknown>
+    if (e.type !== 'agent/inbox/spliced') continue
+    const data = e.data
+    if (typeof data !== 'object' || data === null) continue
+    const d = data as Record<string, unknown>
+    const target = d.target
+    const list = target === 'next-step' ? nextStep : target === 'next-turn' ? nextTurn : undefined
+    if (list === undefined) continue
+    const start = typeof d.start === 'number' && Number.isFinite(d.start) ? Math.trunc(d.start) : 0
+    const removedCount = typeof d.removedCount === 'number' && Number.isFinite(d.removedCount) ? Math.trunc(d.removedCount) : 0
+    const inserted = Array.isArray(d.inserted) ? d.inserted : []
+    const removed = list.splice(Math.min(start, list.length), removedCount)
+    if (d.outcome === 'canceled') {
+      for (const message of removed) pushId(canceled, busInboxMessageId(message))
+    }
+    if (inserted.length > 0) list.splice(Math.min(start, list.length), 0, ...inserted)
+  }
+  const pending: string[] = []
+  for (const message of [...nextTurn, ...nextStep]) pushId(pending, busInboxMessageId(message))
+  return { pending: [...new Set(pending)], canceled: [...new Set(canceled)] }
 }
 
 /**
@@ -2686,6 +2771,43 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // at the top of this factory and dereferenced only post-boot.
   // =========================================================================
 
+  /** P3 (fb-130 — WAKE-SEAM lane) — the pre-dispose splice DRAIN of ONE
+   * retiring post: replay the captured session's durable 'agent/inbox/spliced'
+   * events (pending = delivered-but-not-exposed followups; canceled = the
+   * dispose's clear evidence) and settle each bus pair 'terminal' when its
+   * sidecar LATEST row is 'delivered'/'resumed' — the honest correction of
+   * «delivered ≠ expuesto» (the m-981/builder-6 class: the followup was
+   * spliced into an idle worker's inbox, marked 'delivered', and the retire's
+   * dispose cleared the inbox before any turn exposed it). Non-fatal + BOUNDED
+   * (reads only + one append per affected pair; never a wake, never a model
+   * call — the durable content in messages.jsonl is never lost, and the
+   * 'delivered' row stays as the historical splice evidence BEHIND the
+   * corrective 'terminal'). The 5s dispose-grace + the retire mark already
+   * committed before this run → no future wake can claim these splices. */
+  const drainNotExposedAtRetire = async (postId: string, sessionEvents: readonly unknown[]): Promise<void> => {
+    try {
+      const { pending, canceled } = pendingInboxSummary(sessionEvents)
+      const doomed = [...new Set([...pending, ...canceled])]
+      if (doomed.length === 0) return
+      let settled = 0
+      for (const messageId of doomed) {
+        try {
+          const latest = await deliveryStatus(stateDir, messageId, postId)
+          if (latest !== 'delivered' && latest !== 'resumed') continue // prepared/failed → the W7-A settle owns them; terminal/already → done
+          await markDelivery(stateDir, messageId, postId, 'terminal')
+          settled++
+        } catch (error: unknown) {
+          ctx.logger.warn(`[deepartments] retire pre-dispose drain (fb-130): settle of ${messageId} → "${postId}" failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      if (settled > 0) {
+        ctx.logger.warn(`[deepartments] retire pre-dispose drain (fb-130): ${settled} delivery row(s) of "${postId}" were sidecar-'delivered' but their inbox splice was NEVER EXPOSED (pending/canceled at the dispose) — settled 'terminal' (the durable content stays in messages.jsonl; recover it via agent_messages; the sidecar now tells the truth)`)
+      }
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] retire pre-dispose drain (fb-130) failed (non-fatal — the retire continues): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   const retirePost = async (postId: string, callerAgentId: string, opts?: { deferDisposeMs?: number }): Promise<{ postId: string; retired: true }> => {
     const entry = byPost.get(postId)
     if (entry === void 0) throw new Error(`[deepartments] dept_post_retire: "${postId}" is not a registered post`)
@@ -2853,14 +2975,40 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // delivery was in flight exactly at the grace expiry is settled
       // 'terminal' in the SAME retire cycle instead of parking until boot;
       // idempotent + non-fatal, exactly like the pre-dispose settle above).
+      // P3 (fb-130 — WAKE-SEAM lane): the pre-dispose splice drain runs BEFORE
+      // the join (pending next-turn splices) AND after it (the dispose's
+      // durable 'canceled' clear evidence, replayed from the SAME captured
+      // session — the running-window class: a followup spliced during the
+      // in-flight final turn is cleared by the dispose and now settles
+      // 'terminal' instead of lying 'delivered').
       const runDeferredDisposeAndSettle = async (): Promise<void> => {
+        // Capture the session BEFORE the dispose (the harness detaches it
+        // during the teardown; the captured log keeps the canceled evidence).
+        const liveRef = agents?.get(entry.sessionId)
+        await drainNotExposedAtRetire(postId, getSessionEvents(liveRef?.session))
         await joinHeadDisposeOnce(entry.sessionId)
+        await drainNotExposedAtRetire(postId, getSessionEvents(liveRef?.session))
         await settleRetiredPostDeliveries(postId)
       }
       const timer = setTimeout(() => { void runDeferredDisposeAndSettle() }, deferDisposeMs)
       if (typeof (timer as { unref?: () => unknown }).unref === 'function') (timer as { unref: () => unknown }).unref()
     } else {
-      disposeHandle()
+      // P3 (fb-130 — WAKE-SEAM lane): the pre-dispose drain for the IMMEDIATE
+      // path — the classic m-981 window (the followup spliced into an IDLE
+      // worker whose retire then disposed instantly). The retire mark already
+      // committed → no future wake can claim the pending splices; settle them
+      // honest BEFORE the teardown clears the inbox. The drain never rejects
+      // (internal non-fatal catch); the double-guard keeps the dispose ALWAYS
+      // scheduled (the retire must never hang on a drain).
+      void (async () => {
+        try {
+          await drainNotExposedAtRetire(postId, getSessionEvents(agents?.get(entry.sessionId)?.session))
+        } catch (error: unknown) {
+          ctx.logger.warn(`[deepartments] retire pre-dispose drain (fb-130) failed (non-fatal — the dispose still runs): ${error instanceof Error ? error.message : String(error)}`)
+        } finally {
+          disposeHandle()
+        }
+      })()
     }
     return { postId, retired: true }
   }
@@ -3679,7 +3827,13 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           ? {
               retiredKeep: postsRetention.maxRetiredKept,
               retiredArchiveFile: postsRetention.archiveFile,
-              enableRetiredPrune: postsRetention.enabled
+              enableRetiredPrune: postsRetention.enabled,
+              // P5 (O4/backfill — WAKE-SEAM lane): the boot BACKFILLS the
+              // retired archive BY STATE (retired:true in posts.json without an
+              // archive row of the same (postId, sessionId)) — the pre-O4
+              // deploy-gap retires get their row in the SAME boot reconcile
+              // that prunes. Same conservative gate as the prune.
+              enableRetiredArchiveBackfill: postsRetention.enabled
             }
           : {}),
         isSessionGone: async (sessionId: string): Promise<boolean> => {
@@ -4522,7 +4676,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         return [{ type: 'text', text } as const]
       }
     },
-    async execute(args, exec): Promise<{ messageId: string; delivered: Record<string, BusSendResult> }> {
+    async execute(args, exec): Promise<{ messageId: string; delivered: Record<string, BusSendResult | `prepared (fifo-gated${string}` | 'prepared (noWake)'> }> {
       const agent = exec.agent
       if (!agent) throw new Error('send_message requires a calling agent (exec.agent was undefined)')
       assertBusFanOut(args.to)
@@ -4543,7 +4697,10 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // (boot re-delivery of pre-ACL records).
       const sender = busProfileFor(from)
       const allowed: string[] = []
-      const delivered: Record<string, BusSendResult> = {}
+      // P1 (fb-131 — Candidate B observability): the delivered map carries the
+      // ENRICHED prepared classes ('prepared (fifo-gated tras m-<seq>)' /
+      // 'prepared (noWake)') besides the plain BusSendResult statuses.
+      const delivered: Record<string, BusSendResult | `prepared (fifo-gated${string}` | 'prepared (noWake)'> = {}
       for (const recipient of args.to) {
         const ground = aclDenyGround(sender, busProfileFor(recipient))
         if (ground === undefined) {
@@ -4578,15 +4735,39 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // never re-wake a just-slept head (the record persists 'prepared' and
       // drains at the recipient's next real wake). A non-ack send, an ack to a
       // non-dormant recipient, and the default (no param) stay ALWAYS-WAKE.
+      // P1 (fb-131 — Candidate B observability): the queue-class observer
+      // distinguishes the TWO 'prepared'-without-wake outcomes ('fifo' = the
+      // fb-117 gate — with the gating seq when known — vs 'noWake' = the WIRED
+      // no-wake branch) so the tool result names the class the sender sees
+      // (the pre-fix tool showed a bare 'prepared' — the interrupted m-1107
+      // sender could not tell its interrupt was swallowed).
       for (const recipient of allowed) {
         const noWake = args.noWake === true || (args.ack === true && isDormantRecipient(recipient))
-        delivered[recipient] = await delivery.deliverOrQueue(recipient, record, {
+        let gateClass: 'fifo' | 'noWake' | undefined
+        let gateSeq: number | undefined
+        const status = await delivery.deliverOrQueue(recipient, record, {
           callerAgentId: agent.id as string,
           senderSessionId: agent.id as string,
           signal: exec.signal,
           interrupt: args.interrupt === true,
-          noWake
+          noWake,
+          gateReason: (reason, bySeq) => {
+            gateClass = reason
+            gateSeq = bySeq
+          }
         })
+        // P1 (fb-131) — the honest prepared-class rendering: 'prepared' alone
+        // collapsed the fifo-gate AND the wired noWake queue into one opaque
+        // status; the envelope below names the actual queue class. NEVER
+        // touches the sidecar (the 'prepared' row stays byte-identical); it
+        // exists only in this tool result.
+        if (status === 'prepared' && gateClass === 'fifo') {
+          delivered[recipient] = gateSeq !== undefined ? `prepared (fifo-gated tras m-${gateSeq})` : 'prepared (fifo-gated)'
+        } else if (status === 'prepared' && gateClass === 'noWake') {
+          delivered[recipient] = 'prepared (noWake)'
+        } else {
+          delivered[recipient] = status
+        }
       }
       return { messageId: record.id, delivered }
     }
@@ -4902,6 +5083,20 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   }
   const resolveCallerSessionIdForRedeliver = (from: string): string =>
     byPost.get(from)?.sessionId ?? hosts.get(from)?.sessionId ?? from
+  /** P2 (fb-131 — WAKE-SEAM lane): whether a CATALOG recipient is CURRENTLY
+   * RUNNING (its live session handle is mid-turn). The no-wake-until-wake
+   * guard (drivePair) skips a noWake 'prepared' row UNLESS the recipient is
+   * running — an already-live recipient is never "woken" by a re-drive (the
+   * delivery splices into its live session; zero materialization), so its
+   * noWake rows drain safely. Mirrors the sessionRunning shape of the
+   * guiEndpointDeps (post entry first, then host entry). Absent session /
+   * absent agents service → false (not running — the conservative skip). */
+  const recipientRunningForRedeliver = (recipientId: string): boolean => {
+    if (agents === void 0) return false
+    const sessionId = byPost.get(recipientId)?.sessionId ?? hosts.get(recipientId)?.sessionId
+    if (sessionId === undefined) return false
+    return agents.get(SessionId(sessionId))?.status === 'running'
+  }
   const deliverBusRecordForRedeliver = (record: MessageRecord, recipientId: string, callerSessionId: string): Promise<DeliveryStatus> =>
     deliverBusRecord(record, recipientId, callerSessionId, callerSessionId)
   const redeliverDeps: DeliveryRedelivererDeps = {
@@ -4911,6 +5106,9 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     // LANE ② (fb-58/B3): the re-drive machinery NEVER wakes a DORMANT
     // recipient's noWake/'prepared' queue (its intent is the next REAL wake).
     recipientDormant: isDormantRecipient,
+    // P2 (fb-131 — WAKE-SEAM lane): the no-wake-until-wake guard's drain
+    // exception — a noWake row IS re-driven into a CURRENTLY RUNNING recipient.
+    recipientRunning: recipientRunningForRedeliver,
     getRecord: async (messageId: string): Promise<MessageRecord | undefined> =>
       (await messagesStoreReady).get(messageId),
     resolveCallerSessionId: resolveCallerSessionIdForRedeliver,
@@ -4923,6 +5121,9 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   const redeliverPendingDeliveries = (ctx.get('deepartments.bus') as BusSurface | undefined)?.redeliver({
     recipientAlive: recipientCatalogAlive,
     recipientDormant: isDormantRecipient,
+    // P2 (fb-131 — WAKE-SEAM lane): the shell NOW forwards the optional guards
+    // (a previous plumbing gap dropped recipientDormant in the composed path).
+    recipientRunning: recipientRunningForRedeliver,
     resolveCallerSessionId: resolveCallerSessionIdForRedeliver,
     deliver: deliverBusRecordForRedeliver
   }) ?? new DeliveryRedeliverer(redeliverDeps)
@@ -5476,7 +5677,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   const depsDeliver = ctx.get('deepartments.deliverDeps') as { register(deps: unknown): void; clear(): void } | undefined
   const depsLifecycle = ctx.get('deepartments.lifecycleDeps') as { register(deps: unknown): void; clear(): void } | undefined
   const depsWakepack = ctx.get('deepartments.wakepackDeps') as { register(deps: unknown): void; clear(): void } | undefined
-  depsBus?.register({ redeliver: { recipientAlive: recipientCatalogAlive, resolveCallerSessionId: resolveCallerSessionIdForRedeliver, deliver: deliverBusRecordForRedeliver } })
+  depsBus?.register({ redeliver: { recipientAlive: recipientCatalogAlive, recipientDormant: isDormantRecipient, recipientRunning: recipientRunningForRedeliver, resolveCallerSessionId: resolveCallerSessionIdForRedeliver, deliver: deliverBusRecordForRedeliver } })
   depsDeliver?.register({
     resolveChild: resolveBusChild,
     deliverChild: deliverBusChild,
@@ -5676,7 +5877,12 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         armed: sweepArmed,
         cycles: s.cycles,
         ...(s.lastCycleTs !== undefined ? { lastCycleTs: s.lastCycleTs } : {}),
-        ...(s.preparedStuckRemaining !== undefined ? { preparedStuckRemaining: s.preparedStuckRemaining } : {})
+        ...(s.preparedStuckRemaining !== undefined ? { preparedStuckRemaining: s.preparedStuckRemaining } : {}),
+        // P4 (fb-131 — WAKE-SEAM lane): the honest sweep summary forwarded
+        // verbatim (never synthesized — present only when a cycle observed it).
+        ...(s.oldestPreparedTs !== undefined ? { oldestPreparedTs: s.oldestPreparedTs } : {}),
+        ...(s.dormantHeld !== undefined ? { dormantHeld: s.dormantHeld } : {}),
+        ...(s.noWakeHeld !== undefined ? { noWakeHeld: s.noWakeHeld } : {})
       }
     },
     // HOTFIX 0.2.2-1: the surface carries the PURE inline computation (NOT the

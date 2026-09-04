@@ -1051,6 +1051,14 @@ export interface DeliveryRedelivererDeps {
    * next REAL wake; the sweep must NEVER re-drive/wake it). Absent → false
    * (no dormancy knowledge — the legacy behavior). */
   recipientDormant?(recipientId: string): boolean
+  /** P2 (fb-131 — WAKE-SEAM lane) — OPTIONAL: whether a recipient is
+   * CURRENTLY RUNNING (a live agent mid-turn). The no-wake-until-wake contract
+   * (P2) skips a noWake 'prepared' row UNLESS the recipient is running — an
+   * already-live recipient is never "woken" by a re-drive (the delivery splices
+   * into its live session; zero materialization), so its noWake rows drain
+   * safely. Absent → false (no liveness knowledge — a noWake row is NEVER
+   * re-driven, the conservative no-wake-until-wake semantics). */
+  recipientRunning?(recipientId: string): boolean
   /** Resolve the message record for a sidecar row (the open MessagesStore). May
    * resolve async (the store is OPENED at boot via a promise, not synchronously). */
   getRecord(messageId: string): Promise<MessageRecord | undefined>
@@ -1107,7 +1115,16 @@ export interface DeliveryRedelivererDeps {
  *       re-driven by the sweep (the crash-recovery class the boot-only re-drive
  *       parked until the next boot → "0 prepared-stuck > 10 min" as closure
  *       criterion); a FRESH prepared row (< 10 min) is left alone (the B3
- *       noWake queue grace — never double-delivered/woken prematurely).
+ *       noWake queue grace — never double-delivered/woken prematurely);
+ *   (e) P2 (fb-131 — WAKE-SEAM lane): a row whose LATEST transition carries the
+ *       explicit `noWake` flag is the sender's no-wake-until-wake ORDER — the
+ *       sweep NEVER re-drives it into a NON-running recipient (the fb-131
+ *       datapoints: the sweep woke an idle recipient whose noWake rows were
+ *       10+ min old — the row itself carries the intent, the B3 dormant guard
+ *       alone cannot see it). The ONLY drain is `recipientRunning === true`
+ *       (already live — no wake happens). The BOOT pass keeps its ONE-TIME
+ *       crash semantics for the crash class (a non-noWake 'prepared' row); a
+ *       noWake row is never crash-class, so the guard applies at boot too.
  */
 export class DeliveryRedeliverer {
   private readonly deps: DeliveryRedelivererDeps
@@ -1127,6 +1144,12 @@ export class DeliveryRedeliverer {
   private sweepCycle = 0
   private lastSweepCycleTs: number | undefined
   private lastSweepPreparedStuckRemaining: number | undefined
+  // P4 (fb-131 — WAKE-SEAM lane, sweep observability): the LAST cycle's honest
+  // prepared-state summary ({oldestPreparedTs, dormantHeld, noWakeHeld}) — the
+  // classes the single `preparedStuckRemaining` integer cannot discriminate.
+  // Never synthesized: ABSENT until a cycle actually computed it (the heartbeat
+  // omits it pre-first-cycle).
+  private lastSweepPreparedSummary: { oldestPreparedTs?: number; dormantHeld: number; noWakeHeld: number } | undefined
 
   constructor(
     deps: DeliveryRedelivererDeps,
@@ -1213,7 +1236,25 @@ export class DeliveryRedeliverer {
       }
       // LANE ② (c) — B3 dormancy guard: a DORMANT recipient's 'prepared' queue
       // is a deliberate noWake — it drains at its next REAL wake, NEVER here.
+      // P2 (fb-131 — WAKE-SEAM lane): the B3 guard stays as REDUNDANCY — the
+      // P2 guard below is the primary no-wake-until-wake guard (a noWake row is
+      // recognizable from the row itself; dormancy needs the extra catalog
+      // read). Both guards skip; drivePair only drains a noWake row into a
+      // recipient that is CURRENTLY RUNNING (already live — no wake happens).
       if (this.deps.recipientDormant?.(row.recipientId) === true && row.status === 'prepared') return
+      // P2 (fb-131 — WAKE-SEAM lane): the no-wake-until-wake guard — a row whose
+      // LATEST transition carries the explicit `noWake` flag (m-707 write-ahead
+      // semantics) is the sender's ORDERED no-wake intent: it must drain at the
+      // recipient's next REAL wake, so the SWEEP never re-drives it into a
+      // NON-running recipient (the fb-131 datapoints: the sweep woke an idle
+      // recipient whose noWake rows were 10+ min old). The BOOT pass shares
+      // drivePair, so it keeps its crash-recovery semantics for the CRASH class
+      // (a non-noWake 'prepared' row) while a noWake row is invariant across
+      // boot too (it is never crash-class — the sender explicitly no-waked it).
+      // Exception (the only drain): `recipientRunning === true` — the recipient
+      // is ALREADY live mid-turn; re-driving splices into its live session
+      // (zero materialization/wake), so the intent is honored, not violated.
+      if (row.noWake === true && this.deps.recipientRunning?.(row.recipientId) !== true) return
       try {
         const callerSessionId = this.deps.resolveCallerSessionId(record.from)
         const status = await this.deps.deliver(record, row.recipientId, callerSessionId)
@@ -1363,8 +1404,13 @@ export class DeliveryRedeliverer {
       // FINISHER (addendum 4 — m-812): the prepared-stuck residue of THIS
       // cycle (0 = the closure criterion met — the health report reads it).
       this.lastSweepPreparedStuckRemaining = g2.preparedStuckRemaining
+      // P4 (fb-131 — WAKE-SEAM lane): the cycle's HONEST prepared-state summary
+      // (the same pre-settle `rows` snapshot as the residue — consistent); the
+      // heartbeat reports each held class separately.
+      this.lastSweepPreparedSummary = this.summarizePreparedState(rows, nowMs)
+      const held = this.lastSweepPreparedSummary
       if (drove > 0 || g2.settled > 0 || g2.skippedRebind > 0) {
-        logger.info(`[deepartments] redelivery sweep cycle: drove ${drove} pairs; G2 legacy settle ${g2.settled} (${g2.settledStaleDust} stale-dust + ${g2.settledDeadEnd} dead-end) → 'terminal' (no-wake), skipped-rebind ${g2.skippedRebind}; in-flight kept ${g2.keptInFlight}, fresh kept ${g2.keptFresh}; prepared-stuck>${Math.round(this.legacyAgeMs / 60000)}min remaining ${g2.preparedStuckRemaining}`)
+        logger.info(`[deepartments] redelivery sweep cycle: drove ${drove} pairs; G2 legacy settle ${g2.settled} (${g2.settledStaleDust} stale-dust + ${g2.settledDeadEnd} dead-end) → 'terminal' (no-wake), skipped-rebind ${g2.skippedRebind}; in-flight kept ${g2.keptInFlight}, fresh kept ${g2.keptFresh}; prepared-stuck>${Math.round(this.legacyAgeMs / 60000)}min remaining ${g2.preparedStuckRemaining}${held.oldestPreparedTs !== undefined ? `; oldestPreparedTs=${new Date(held.oldestPreparedTs).toISOString()}` : ''}${held.dormantHeld > 0 ? `; dormantHeld=${held.dormantHeld}` : ''}${held.noWakeHeld > 0 ? `; noWakeHeld=${held.noWakeHeld}` : ''}`)
       }
     } catch (error: unknown) {
       logger.warn(`[deepartments] re-delivery sweep failed (non-fatal — the boot pass + the next sweep re-evaluate): ${error instanceof Error ? error.message : String(error)}`)
@@ -1377,13 +1423,54 @@ export class DeliveryRedeliverer {
    * criterion, "0 prepared-stuck > 10 min"). NEVER synthesized: `lastCycleTs`
    * and `preparedStuckRemaining` are ABSENT until a cycle actually observed
    * them (absent → the heartbeat omits them); `cycles` is always present (0
-   * before the first fire — an armed sweep with no cycle yet). */
-  sweepState(): { cycles: number; lastCycleTs?: number; preparedStuckRemaining?: number } {
+   * before the first fire — an armed sweep with no cycle yet).
+   *
+   * P4 (fb-131 — WAKE-SEAM lane): the same never-synthesized rule extends to
+   * the cycle's honest prepared-state summary — `oldestPreparedTs` (the oldest
+   * pair-latest 'prepared' row ts), `dormantHeld` (pairs of a DORMANT recipient
+   * the B3 guard holds — the residue that may never reach 0 BY DESIGN) and
+   * `noWakeHeld` (pairs whose LATEST row carries the explicit noWake flag — the
+   * P2 no-wake guard holds them until the recipient's next real wake or a
+   * currently-running recipient). All three are ABSENT before the first cycle
+   * and (for the counts) present once a cycle computed them — truthful, never
+   * guessed. */
+  sweepState(): { cycles: number; lastCycleTs?: number; preparedStuckRemaining?: number; oldestPreparedTs?: number; dormantHeld?: number; noWakeHeld?: number } {
     return {
       cycles: this.sweepCycle,
       ...(this.lastSweepCycleTs !== undefined ? { lastCycleTs: this.lastSweepCycleTs } : {}),
-      ...(this.lastSweepPreparedStuckRemaining !== undefined ? { preparedStuckRemaining: this.lastSweepPreparedStuckRemaining } : {})
+      ...(this.lastSweepPreparedStuckRemaining !== undefined ? { preparedStuckRemaining: this.lastSweepPreparedStuckRemaining } : {}),
+      ...(this.lastSweepPreparedSummary !== undefined ? { ...this.lastSweepPreparedSummary } : {})
     }
+  }
+
+  /** P4 (fb-131 — WAKE-SEAM lane): the HONEST prepared-state summary of ONE
+   * snapshot, over the PAIR-LATEST 'prepared' rows (the same latestPerKey view
+   * `preparedStuckPairCount` uses — shadowed dust never counts):
+   *   - `oldestPreparedTs`: the OLDEST pair-latest 'prepared' row ts (how old
+   *     the oldest pending prepared pair is — fresh OR stuck; the age the
+   *     integer criterion hides);
+   *   - `dormantHeld`: pairs held by the B3 dormancy guard (the recipient's
+   *     `sleepEpoch` — its queue drains at its next real wake; a residue that
+   *     legitimately never reaches 0 while the recipient sleeps);
+   *   - `noWakeHeld`: pairs whose LATEST row carries the explicit `noWake` flag
+   *     (the no-wake-until-wake intent — the P2 guard never re-drives them into
+   *     a NON-running recipient).
+   * The classes OVERLAP (a noWake row to a dormant recipient is held by both)
+   * but each is reported separately — the QD closure criterion gets the
+   * discrimination the single `preparedStuckRemaining` integer cannot give. */
+  private summarizePreparedState(rows: readonly DeliveryRow[], nowMs: number): { oldestPreparedTs?: number; dormantHeld: number; noWakeHeld: number } {
+    const latestKey = new Map<string, DeliveryRow>()
+    for (const row of rows) latestKey.set(deliveryKey(row), row)
+    let oldestPreparedTs: number | undefined
+    let dormantHeld = 0
+    let noWakeHeld = 0
+    for (const row of latestKey.values()) {
+      if (row.status !== 'prepared') continue
+      if (oldestPreparedTs === undefined || row.ts < oldestPreparedTs) oldestPreparedTs = row.ts
+      if (row.noWake === true) noWakeHeld++
+      if (this.deps.recipientDormant?.(row.recipientId) === true) dormantHeld++
+    }
+    return { ...(oldestPreparedTs !== undefined ? { oldestPreparedTs } : {}), dormantHeld, noWakeHeld }
   }
 
   /**
@@ -1471,7 +1558,12 @@ export class DeliveryRedeliverer {
         const text = readFileSync(resolveDeliveriesPath(stateDir), 'utf8')
         flippedText =
           parseDeliveryRows(text)
-            .map((row) => (flipRows.has(JSON.stringify(row)) ? JSON.stringify({ messageId: row.messageId, recipientId: row.recipientId, status: 'terminal', ts: row.ts }) : JSON.stringify(row)))
+            // P4 (fb-131 — WAKE-SEAM lane): the flip PRESERVES the row's own
+            // `noWake` flag (a no-wake intent row flipped to 'terminal' keeps
+            // its intent trace — before this the flag was silently destroyed,
+            // losing the no-wake-until-wake ledger evidence; absent flag →
+            // byte-identical to the pre-P4 shape).
+            .map((row) => (flipRows.has(JSON.stringify(row)) ? JSON.stringify({ messageId: row.messageId, recipientId: row.recipientId, status: 'terminal', ts: row.ts, ...(row.noWake === true ? { noWake: true } : {}) }) : JSON.stringify(row)))
             .join('\n') + '\n'
       } catch (error: unknown) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return empty // nothing ever sent

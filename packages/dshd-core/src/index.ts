@@ -539,6 +539,13 @@ function buildBusLazy(ctx: Context, busDeps: DepsHolder<BusBucketDeps>): BusSurf
       stateDir,
       logger,
       recipientAlive: merged.recipientAlive!,
+      // P2 (fb-131 — WAKE-SEAM lane) — the OPTIONAL guards were previously
+      // DROPPED here (the shell only forwarded the required bucket-(c) deps):
+      // `recipientDormant` never reached the DeliveryRedeliverer in the
+      // composed path (the B3 guard was silently inert) and `recipientRunning`
+      // (the new P2 no-wake drain exception) must reach it the same way.
+      ...(merged.recipientDormant !== undefined ? { recipientDormant: merged.recipientDormant } : {}),
+      ...(merged.recipientRunning !== undefined ? { recipientRunning: merged.recipientRunning } : {}),
       getRecord: async (messageId) => (await storeReady).get(messageId),
       resolveCallerSessionId: merged.resolveCallerSessionId!,
       deliver: merged.deliver!
@@ -608,6 +615,36 @@ function buildDeliverLazy(ctx: Context, deliverDeps: DepsHolder<Partial<Delivery
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false // nothing ever sent
         ctx.logger.warn(`[deepartments] bus delivery FIFO-gate check failed for ${recipientId} (delivery proceeds ungated): ${error instanceof Error ? error.message : String(error)}`)
         return false
+      }
+    },
+    // P1 (fb-131 — WAKE-SEAM lane, Candidate B observability): the FIFO-gate
+    // gating-seq detail — the EARLIEST strictly-earlier seq whose pair is still
+    // 'prepared' (the tool result's 'prepared (fifo-gated tras m-<seq>)'). Runs
+    // ONLY after the gate fired (a gated send is the minority — one extra
+    // sidecar read, fail-soft to undefined). NEVER a behavior gate.
+    pendingEarlierSeqDetail: async (recipientId, seq) => {
+      const bus = ctx.get('deepartments.bus') as BusSurface | undefined
+      const store = await (bus?.storeReady ?? MessagesStore.open(stateDir))
+      try {
+        // The gating-seq computation INLINE (no new export — the same
+        // predicate loop as the exported `hasEarlierPendingPair`, resolving
+        // the gating seq instead of a bare boolean).
+        const text = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
+        const rows = parseDeliveryRows(text)
+        const own = store.seqsFor(recipientId)
+        if (own.length === 0) return undefined
+        const latest = new Map<string, DeliveryRow>()
+        for (const row of rows) latest.set(`${row.messageId}\u0000${row.recipientId}`, row)
+        for (const earlier of own) {
+          if (earlier >= seq) break // ascending — strictly earlier seqs only
+          const row = latest.get(`m-${earlier}\u0000${recipientId}`)
+          if (row !== undefined && row.status === 'prepared') return earlier
+        }
+        return undefined
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined // nothing ever sent
+        ctx.logger.warn(`[deepartments] bus delivery FIFO-gate seq detail failed for ${recipientId} (observability only): ${error instanceof Error ? error.message : String(error)}`)
+        return undefined
       }
     },
     subagents: ctx.get('subagents'),

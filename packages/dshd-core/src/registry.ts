@@ -627,6 +627,13 @@ export interface DurablePostsReconcileResult {
    * pruned entries are preserved in the retired archive + the pre-prune
    * backup. */
   prunedPostIds: string[]
+  /** P5 (O4/backfill — WAKE-SEAM lane) — the postIds whose missing archive row
+   * was BACKFILLED by state in this reconcile, when `enableRetiredArchiveBackfill`
+   * ran (a `retired:true` posts.json entry whose (postId, sessionId) had no
+   * archive row). ABSENT when the backfill opt did not run. The rows are
+   * `{postId, entry, prunedAt}` — same shape as the prune rows; the missing
+   * rows are the pre-O4 retire gap (deploy-window retires without annex). */
+  backfilledPostIds?: string[]
 }
 
 /** PURE durable posts-registry leak detector (m-119, W8-g). Given the durable
@@ -693,6 +700,19 @@ export interface ReconcileDurablePostsOpts {
    * Absent → false (conservative default — pruning is OFF unless explicitly
    * enabled with true). */
   enableRetiredPrune?: boolean
+  /** P5 (O4/backfill — WAKE-SEAM lane, fb-41): when TRUE, after the prune the
+   * reconcile BACKFILLS the retired archive BY STATE — every `retired:true`
+   * entry still in posts.json WITHOUT an archive row of the SAME
+   * (postId, sessionId) gets one `{postId, entry, prunedAt}` row appended
+   * (the deploy-window gap: pre-O4 runtimes retired posts WITHOUT annexing an
+   * archive row; the prune only inventories the OLDEST beyond `retiredKeep`, so
+   * the pre-O4 retires among the NEWEST entries never got a row — and the O4
+   * `markPostRetired` early-returns on an already-retired entry, so it cannot
+   * re-annex). The KEY is (postId, sessionId) — a row of a PREVIOUS incarnation
+   * (the same postId, a different session) does NOT cover today's incarnation.
+   * Idempotent: a row with the same key (or appended by THIS run) is never
+   * duplicated. Absent → false (conservative — backfill OFF unless enabled). */
+  enableRetiredArchiveBackfill?: boolean
   /** Clock (ms epoch) for the backup timestamp. Absent → Date.now. */
   now?: () => number
 }
@@ -857,6 +877,73 @@ export async function reconcileDurablePostsRegistry(
     }
   }
 
+  // P5 (O4/backfill — WAKE-SEAM lane, fb-41 + the pre-O4 deploy gap 14:27:49Z →
+  // 15:39:33Z): BACKFILL the retired archive BY STATE, AFTER the prune. Every
+  // `retired:true` entry still in posts.json WITHOUT an archive row of the SAME
+  // (postId, sessionId) gets one `{postId, entry, prunedAt}` row (the exact
+  // prune/markPostRetired row shape) — the pre-O4 retires (a runtime older
+  // than O4 retired posts WITHOUT annexing; the boot-prune only inventories the
+  // OLDEST beyond `retiredKeep`, so they sat among the NEWEST entries with NO
+  // row; and O4's `markPostRetired` early-returns on an already-retired entry,
+  // so it can never re-annex them). Keyed by (postId, sessionId): a row of a
+  // PREVIOUS incarnation (same postId, older session) does NOT cover today's
+  // incarnation — the archive does not distinguish them, so the row itself must
+  // (the archived `entry.sessionId` is the discriminating field). Idempotent:
+  // an existing matching key OR a row appended by THIS run is never duplicated.
+  // Non-fatal + NEVER rewrites posts.json (`changed` stays — the backfill only
+  // APPENDS to the archive; the durable posts.json is the source, untouched).
+  let backfilledPostIds: string[] | undefined = opts.enableRetiredArchiveBackfill === true ? [] : undefined
+  if (opts.enableRetiredArchiveBackfill === true) {
+    try {
+      const nowMs = (opts.now ?? (() => Date.now()))()
+      const archiveFile = opts.retiredArchiveFile ?? 'posts-retired-archive.jsonl'
+      const archivePath = path.join(stateDir, archiveFile)
+      const baseRaw = workingRaw ?? raw
+      // The archive's existing (postId, sessionId) key set — read ONCE (the
+      // sidecar is append-only JSONL, same tolerance as the prune reader).
+      const existingKeys = new Set<string>()
+      try {
+        const archiveText = await readFile(archivePath, 'utf8')
+        for (const line of archiveText.split('\n')) {
+          if (line.length === 0) continue
+          let rec: unknown
+          try {
+            rec = JSON.parse(line)
+          } catch {
+            continue // tolerate a trailing partial row
+          }
+          if (typeof rec !== 'object' || rec === null) continue
+          const r = rec as Record<string, unknown>
+          if (typeof r.postId !== 'string') continue
+          const entry = r.entry as Record<string, unknown> | undefined
+          const sessionId = entry !== null && typeof entry === 'object' ? entry.sessionId : undefined
+          existingKeys.add(typeof sessionId === 'string' ? `${r.postId}\u0000${sessionId}` : `${r.postId}\u0000`)
+        }
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+      const appendedThisRun = new Set<string>()
+      const lines: string[] = []
+      for (const [postId, rawEntry] of Object.entries(baseRaw)) {
+        if (rawEntry === null || typeof rawEntry !== 'object' || (rawEntry as Record<string, unknown>).retired !== true) continue
+        const e = rawEntry as Record<string, unknown>
+        const sessionId = typeof e.sessionId === 'string' ? e.sessionId : ''
+        const key = `${postId}\u0000${sessionId}`
+        if (existingKeys.has(key) || appendedThisRun.has(key)) continue
+        existingKeys.add(key)
+        appendedThisRun.add(key)
+        lines.push(JSON.stringify({ postId, entry: e, prunedAt: nowMs }))
+        if (backfilledPostIds !== undefined) backfilledPostIds.push(postId)
+      }
+      if (lines.length > 0) {
+        await appendFile(archivePath, `${lines.join('\n')}\n`, 'utf8')
+        logger?.warn(`[deepartments] reconcile-posts: BACKFILLED ${lines.length} retired post(s) into the retired archive by state (pre-O4 retire gap; keyed (postId, sessionId); archive ${path.basename(archivePath)})`)
+      }
+    } catch (error: unknown) {
+      logger?.warn(`[deepartments] reconcile-posts: retired-archive backfill failed (the durable files are left untouched): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   // Write the now-current posts.json atomically (tmp + rename) when either the
   // gone-retire mark or the retired-prune changed the durable file.
   if (changed && workingRaw !== undefined) {
@@ -870,7 +957,7 @@ export async function reconcileDurablePostsRegistry(
     }
   }
 
-  return { workerRetireCandidates: result.workerRetireCandidates, workersRetired, headStaleCandidates: result.headStaleCandidates, changed, prunedPostIds }
+  return { workerRetireCandidates: result.workerRetireCandidates, workersRetired, headStaleCandidates: result.headStaleCandidates, changed, prunedPostIds, ...(backfilledPostIds !== undefined ? { backfilledPostIds } : {}) }
 }
 
 /** B5-GHOST (QH — dispatch-hardening, 2026-08-28): the AFTER half of the

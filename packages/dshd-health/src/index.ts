@@ -454,12 +454,21 @@ export interface HealthHeartbeat {
  * `cycles` (completed sweepDue fires; always present, 0 before the first fire)
  * and the LAST cycle's `lastCycleTs` / `preparedStuckRemaining` (the fb-27
  * closure criterion). `lastCycleTs`/`preparedStuckRemaining` are ABSENT until
- * a cycle observed them (never synthesized). */
+ * a cycle observed them (never synthesized).
+ * P4 (fb-131 — WAKE-SEAM lane): the cycle's HONEST prepared-state summary —
+ * `oldestPreparedTs` (the OLDEST pair-latest 'prepared' row ts), `dormantHeld`
+ * (pairs held by the B3 dormancy guard — a residue that may never reach 0 BY
+ * DESIGN) and `noWakeHeld` (pairs held by the P2 no-wake guard — the explicit
+ * no-wake-until-wake intent the sweep no longer violates). ABSENT until a
+ * cycle computed them — never guessed. */
 export interface SweepHealthState {
   armed: boolean
   cycles: number
   lastCycleTs?: number
   preparedStuckRemaining?: number
+  oldestPreparedTs?: number
+  dormantHeld?: number
+  noWakeHeld?: number
 }
 
 /** Read `<stateDir>/health-heartbeat.json` (absent/unreadable/malformed → undefined). */
@@ -477,6 +486,10 @@ export function readHealthHeartbeatFile(stateDir: string): HealthHeartbeat | und
           const state: SweepHealthState = { armed: sweep.armed, cycles: sweep.cycles }
           if (typeof sweep.lastCycleTs === 'number') state.lastCycleTs = sweep.lastCycleTs
           if (typeof sweep.preparedStuckRemaining === 'number') state.preparedStuckRemaining = sweep.preparedStuckRemaining
+          // P4 (fb-131 — WAKE-SEAM lane): the honest summary read back verbatim.
+          if (typeof sweep.oldestPreparedTs === 'number') state.oldestPreparedTs = sweep.oldestPreparedTs
+          if (typeof sweep.dormantHeld === 'number') state.dormantHeld = sweep.dormantHeld
+          if (typeof sweep.noWakeHeld === 'number') state.noWakeHeld = sweep.noWakeHeld
           heartbeat.sweep = state
         }
       }
@@ -5153,7 +5166,11 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // no-op, never a TypeError that a tick-level catch would swallow mid-tick.
     if (isBootTick) {
       deps.logger?.info?.(
-        `[deepartments] system-health: boot tick boot=<${deps.bootId}> surface=${deps.sessionSurface ?? 'n/a'} nRestarts=${deps.nRestarts ?? 'n/a'} crashStreak=${deps.crashStreak ?? 'n/a'} sweep=${deps.sweep !== undefined ? `armed=${deps.sweep.armed}, cycles=${deps.sweep.cycles}, preparedStuckRemaining=${deps.sweep.preparedStuckRemaining ?? 'n/a'}` : 'n/a'}`
+        // P4 (fb-131 — WAKE-SEAM lane): the boot log now carries the EXPLICIT
+        // sweep closure criterion (prepared-stuck > 10 min = the fb-58
+        // criterion) + the held-class summary (dormantHeld/noWakeHeld) so a QD
+        // closure read never mistakes a B3/P2-held residue for a stuck pair.
+        `[deepartments] system-health: boot tick boot=<${deps.bootId}> surface=${deps.sessionSurface ?? 'n/a'} nRestarts=${deps.nRestarts ?? 'n/a'} crashStreak=${deps.crashStreak ?? 'n/a'} sweep=${deps.sweep !== undefined ? `armed=${deps.sweep.armed}, cycles=${deps.sweep.cycles}, criterion=prepared-stuck>10min, preparedStuckRemaining=${deps.sweep.preparedStuckRemaining ?? 'n/a'}${deps.sweep.dormantHeld !== undefined ? `, dormantHeld=${deps.sweep.dormantHeld}` : ''}${deps.sweep.noWakeHeld !== undefined ? `, noWakeHeld=${deps.sweep.noWakeHeld}` : ''}` : 'n/a'}`
       )
     }
     // fb-43 — the restart-registry reconcile (right after the heartbeat — the

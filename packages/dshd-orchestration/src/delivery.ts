@@ -51,6 +51,7 @@ import { isArchivedSession } from 'dshd-core'
 import type { WorkspaceRegistryLike } from 'dshd-core'
 import type { PostEntry, HostEntry, HostEntryLike } from 'dshd-core'
 import { MessagesStore, markDelivery, parseDeliveryRows, resolveDeliveriesPath, hasEarlierPendingPair } from 'dshd-core'
+import type { DeliveryRow } from 'dshd-core'
 import type { DeliveryStatus, MessageRecord } from 'dshd-core'
 import { createDeliveryEngine } from 'dshd-core'
 import type {
@@ -1610,6 +1611,33 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false // nothing ever sent
           ctx.logger.warn(`[deepartments] bus delivery FIFO-gate check failed for ${recipientId} (delivery proceeds ungated): ${error instanceof Error ? error.message : String(error)}`)
           return false
+        }
+      },
+      // P1 (fb-131 — WAKE-SEAM lane, Candidate B observability): the gating-seq
+      // detail — the SAME wiring as the dshd-core lazy engine (the in-bundle
+      // FALLBACK runs when dshd-core is not composed — the composed tests use
+      // it, so the send_message 'prepared (fifo-gated tras m-<seq>)' detail must
+      // work HERE too). The earliest strictly-earlier seq whose pair is still
+      // 'prepared'; fail-soft to undefined (observability only — NEVER a gate).
+      pendingEarlierSeqDetail: async (recipientId, seq) => {
+        const store = await messagesStoreReady
+        try {
+          const text = await readFile(resolveDeliveriesPath(messageStoreDir), 'utf8')
+          const rows = parseDeliveryRows(text)
+          const own = store.seqsFor(recipientId)
+          if (own.length === 0) return undefined
+          const latest = new Map<string, DeliveryRow>()
+          for (const row of rows) latest.set(`${row.messageId}\u0000${row.recipientId}`, row)
+          for (const earlier of own) {
+            if (earlier >= seq) break // ascending — strictly earlier seqs only
+            const row = latest.get(`m-${earlier}\u0000${recipientId}`)
+            if (row !== undefined && row.status === 'prepared') return earlier
+          }
+          return undefined
+        } catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined // nothing ever sent
+          ctx.logger.warn(`[deepartments] bus delivery FIFO-gate seq detail failed for ${recipientId} (observability only): ${error instanceof Error ? error.message : String(error)}`)
+          return undefined
         }
       },
       subagents,
