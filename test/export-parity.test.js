@@ -79,7 +79,11 @@ const REPO_ROOT = path.resolve(fileURLToPath(new URL('../', import.meta.url)))
 // spec knobs the 3-class tests import; WARNING_USABLE_KEYS was already an
 // export, this adds it to the TEST import surface) — an INTENTIONAL,
 // verified surface extension that bumps the frozen count.
-const FROZEN_IMPORT_STATEMENT_COUNTS = [194, 5, 5, 1, 5, 3, 18, 2]
+// R1 (2026-09-04, WORK-REGISTER post-CIERRE — pooler zombie + probe
+// visibility): ADDED POOLER_CAPACITY_KEY_PROBE_FAILED to the FIRST health
+// import statement (the probe-failed dedupe key the R1 M1 tests assert — an
+// INTENTIONAL, verified test-surface extension, 194 → 195).
+const FROZEN_IMPORT_STATEMENT_COUNTS = [195, 5, 5, 1, 5, 3, 18, 2]
 
 /** Parse `test/invoke.test.js` and return the 8 import statements that import
  * from '../lib/invoke.js' as arrays of imported symbol names (aliases resolved
@@ -101,19 +105,19 @@ function extractInvokeImports() {
   return statements
 }
 
-test('export-parity: test/invoke.test.js imports EXACTLY 8 statements / 233 symbols from ../lib/invoke.js (the frozen pre-decoupling surface; M-5+M-6+M-7+fb-43+hardening-401+LANE-2+fb-30+LANE-5+spec-09-04 bumped the health + dispatch statements)', () => {
+test('export-parity: test/invoke.test.js imports EXACTLY 8 statements / 234 symbols from ../lib/invoke.js (the frozen pre-decoupling surface; M-5+M-6+M-7+fb-43+hardening-401+LANE-2+fb-30+LANE-5+spec-09-04+R1 bumped the health + dispatch statements)', () => {
   const statements = extractInvokeImports()
   assert.equal(statements.length, 8, 'exactly 8 import statements from ../lib/invoke.js')
   const counts = statements.map((names) => names.length)
-  assert.deepEqual(counts, FROZEN_IMPORT_STATEMENT_COUNTS, 'the per-statement symbol counts are frozen (194+5+5+1+5+3+18+2 = 233)')
+  assert.deepEqual(counts, FROZEN_IMPORT_STATEMENT_COUNTS, 'the per-statement symbol counts are frozen (195+5+5+1+5+3+18+2 = 234)')
   const total = counts.reduce((a, b) => a + b, 0)
-  assert.equal(total, 233, '233 named symbols total (the audit-verified import surface)')
+  assert.equal(total, 234, '234 named symbols total (the audit-verified import surface)')
 })
 
-test('export-parity: lib/invoke.js exports EVERY one of the 233 imported symbols (the drop-in superset invariant)', async () => {
+test('export-parity: lib/invoke.js exports EVERY one of the 234 imported symbols (the drop-in superset invariant)', async () => {
   const statements = extractInvokeImports()
   const required = [...new Set(statements.flat())]
-  assert.equal(required.length, 233, '233 distinct imported symbols')
+  assert.equal(required.length, 234, '234 distinct imported symbols')
   // Load the COMPILED superset (lib/invoke.js — the exact module the tests import).
   const require = createRequire(import.meta.url)
   const invoke = require(path.join(REPO_ROOT, 'lib', 'invoke.js'))
@@ -206,5 +210,11 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // spec knobs of the 3-class scan; all four flow through the star re-export
   // bridge src/core/health.ts) — an INTENTIONAL, verified surface extension
   // (321 → 323, net +3 −1 = +2).
-  assert.equal(names.length, 323, `lib/invoke.js export count frozen at 323 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
+  // R1 (2026-09-04, WORK-REGISTER post-CIERRE — pooler zombie + probe
+  // visibility): ADDED the probe-failed dedupe key
+  // (POOLER_CAPACITY_KEY_PROBE_FAILED from dshd-health — the «probe timeout —
+  // % unavailable» class of the M1 scan, surfaced for a USABLE key whose
+  // health probe timed out; flows through the same star re-export bridge) — an
+  // INTENTIONAL, verified surface extension (323 → 324).
+  assert.equal(names.length, 324, `lib/invoke.js export count frozen at 324 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })

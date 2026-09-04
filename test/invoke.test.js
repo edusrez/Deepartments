@@ -42,7 +42,7 @@ function assertLosslessJsonAccepted(value) {
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
 import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
-import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, scanHealthCatchup, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_CATCHUP_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey, scanMainRed, MAIN_RED_DEFAULT_POLL_MS, MAIN_RED_KEY_PREFIX, mainRedKey, MAIN_RED_STATE_FILE, readMainRedState, writeMainRedState, MAIN_RED_DEFAULT_LOCKS, buildMainRedState, scanMissionQueue, MISSION_QUEUE_DEFAULT_LIMIT, MISSION_QUEUE_DEFAULT_PERSIST_MS, MISSION_QUEUE_KEY_PREFIX, missionQueueKey, MISSION_QUEUE_STATE_FILE, readMissionQueueState, writeMissionQueueState, RESTART_REGISTRY_FILE, RESTART_REGISTRY_SEED_ROWS, readRestartRegistry, seedRestartRegistry, reconcileRestartRegistry, buildRestartDigest, CAPACITY_GATE_STATE_FILE, CAPACITY_GATE_TRANSITION_KEY, capacityGateDedupeKey, readCapacityGateState, writeCapacityGateState, buildCapacityGateFrame, turnErrorNotifyClass, buildTurnErrorNotifyFrame, readTurnEndNotifyState, writeTurnEndNotifyState, TURN_END_NOTIFY_STATE_FILE, scanWorkRegisterIdle, parseWorkRegisterItems, WORK_REGISTER_IDLE_KEY, WORK_REGISTER_IDLE_STATE_FILE, WORK_REGISTER_IDLE_DEFAULT_QUIET_MS, WORK_REGISTER_IDLE_GATED_SECTION_RE, WORK_REGISTER_IDLE_MAX_LISTED, readWorkRegisterIdleState, writeWorkRegisterIdleState } from '../lib/invoke.js'
+import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, scanHealthCatchup, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_CATCHUP_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, POOLER_CAPACITY_KEY_PROBE_FAILED, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey, scanMainRed, MAIN_RED_DEFAULT_POLL_MS, MAIN_RED_KEY_PREFIX, mainRedKey, MAIN_RED_STATE_FILE, readMainRedState, writeMainRedState, MAIN_RED_DEFAULT_LOCKS, buildMainRedState, scanMissionQueue, MISSION_QUEUE_DEFAULT_LIMIT, MISSION_QUEUE_DEFAULT_PERSIST_MS, MISSION_QUEUE_KEY_PREFIX, missionQueueKey, MISSION_QUEUE_STATE_FILE, readMissionQueueState, writeMissionQueueState, RESTART_REGISTRY_FILE, RESTART_REGISTRY_SEED_ROWS, readRestartRegistry, seedRestartRegistry, reconcileRestartRegistry, buildRestartDigest, CAPACITY_GATE_STATE_FILE, CAPACITY_GATE_TRANSITION_KEY, capacityGateDedupeKey, readCapacityGateState, writeCapacityGateState, buildCapacityGateFrame, turnErrorNotifyClass, buildTurnErrorNotifyFrame, readTurnEndNotifyState, writeTurnEndNotifyState, TURN_END_NOTIFY_STATE_FILE, scanWorkRegisterIdle, parseWorkRegisterItems, WORK_REGISTER_IDLE_KEY, WORK_REGISTER_IDLE_STATE_FILE, WORK_REGISTER_IDLE_DEFAULT_QUIET_MS, WORK_REGISTER_IDLE_GATED_SECTION_RE, WORK_REGISTER_IDLE_MAX_LISTED, readWorkRegisterIdleState, writeWorkRegisterIdleState } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
@@ -475,13 +475,23 @@ class StubAgents extends Service {
  * check first reads the registry (the fix-2 false positive: the check fires
  * before `ctx.llm.registerAdapter` settles). */
 class StubLLM extends Service {
-  constructor(ctx, providers) {
+  constructor(ctx, providers, listModels) {
     super(ctx, 'llm')
     this.providers = providers ?? []
+    this.listModelsFn = listModels
   }
 
   listProviders() {
     return typeof this.providers === 'function' ? this.providers() : this.providers
+  }
+
+  /** R2 (fb-42/25 — the rotation-model probe): the adapter's configured-model
+   * catalog driver — a static array or a function (per-provider listing);
+   * ABSENT → the probe's surface is incomplete → degrades (never a phantom
+   * block). Mirrors the real dsh-llm LlmService.listModels(provider). */
+  async listModels(provider) {
+    if (this.listModelsFn === undefined) return []
+    return typeof this.listModelsFn === 'function' ? this.listModelsFn(provider) : this.listModelsFn
   }
 }
 
@@ -853,7 +863,11 @@ async function bootPlugin(stateDir, opts = {}) {
   // provider-adapter check is drivable (ctx.get('llm').listProviders()). A boot
   // without this option leaves `llm` ABSENT (the hermetic default) → the boot
   // check skips with a warn (headless/minimal profile), exactly as production.
-  const llm = opts.llmListProviders !== undefined ? new StubLLM(root, opts.llmListProviders) : undefined
+  // R2 (fb-42/25): `llmListModels` (optional) drives the adapter's configured-
+  // model catalog for the rotation mint probe (listModels) — absent → the
+  // probe surface is incomplete → degrades, so the existing FIX-2 tests keep
+  // their byte-identical behavior (no catalog → probe skip).
+  const llm = opts.llmListProviders !== undefined ? new StubLLM(root, opts.llmListProviders, opts.llmListModels) : undefined
   // F10 preset-mount ordering fix: an OPT-IN stub agentPresets service that
   // replicates the real mount() timing (registers the preset fs tools into a
   // PER-PRESET standing scope and binds the agent scope to it only when mount()
@@ -11874,6 +11888,119 @@ test('M1 scanPoolerCapacity: staleness is UNKNOWN → NO finding + a logger warn
   })
 })
 
+test('R1 scanPoolerCapacity PROBE-FAILED class (2026-09-04): a USABLE key carrying the durable `probeFailed` marker (sweep probe timeout — the LIVE oc-13 shape) → the DISTINCT `pooler-capacity:probe-failed` WARNING with «probe timeout — % unavailable» (the % gap is surfaced, never a silent oc-13-style UNKNOWN); a probe-failed NON-usable key does NOT fire it; a CONFIRMED weekly quota critical (preserved data) STILL wins over the gap warning; WITHOUT the marker the prior count grade is unchanged', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = 1_234_567_890_000
+    const knobs = { warningUsableKeys: 1, okUsableKeys: 2, blockedKeysInWindow: 3, criticalGlobalRemainingPercent: 20, criticalWeeklyRemainingPercent: 10, stateStaleMs: 600000 }
+    const p = path.join(stateDir, 'probe-failed.json')
+    // (1) The LIVE mirror (verified 2026-09-04, /opt/dsh/.dsh-dev): oc-6
+    // blocked@weekly-100 · oc-10 invalid/billing · oc-13 USABLE with
+    // usageWeekly null AND the durable probe-failed marker (its sweep probe
+    // timed out — «sweep probe failed: The operation was aborted due to
+    // timeout»). Pre-R1 this graded only the count warning «solo una key»
+    // WITHOUT ever telling the operator WHY the % was missing.
+    await writeFile(p, JSON.stringify({
+      updatedAt: new Date(T0 - 60_000).toISOString(),
+      keys: {
+        'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: T0 + 3600_000, cooldownUntil: 0, usageWeekly: { status: 'rate-limited', percent: 100, resetsAt: new Date(T0 + 7 * 86400_000).toISOString() } },
+        'oc-10': { id: 'oc-10', workspace: 'ws10', invalid: true, blockedUntil: T0 + 3600_000, cooldownUntil: 0, billingBlocked: true, usageWeekly: { status: 'rate-limited', percent: 100, resetsAt: new Date(T0 + 7 * 86400_000).toISOString() } },
+        'oc-13': { id: 'oc-13', workspace: 'ws13', invalid: false, blockedUntil: 0, cooldownUntil: 0, usageWeekly: null, lastUsage: null, lastError: 'sweep probe failed: The operation was aborted due to timeout', probeFailed: { at: T0 - 60_000, error: 'sweep probe failed: The operation was aborted due to timeout', count: 2 } }
+      },
+      lastRotation: { from: 'oc-6', to: 'oc-13', reason: '429 usage-limit', at: new Date(T0 - 60_000).toISOString(), resetsAt: new Date(T0 + 7 * 86400_000).toISOString(), message: 'key rotada oc-6 → oc-13 por error 429 (usage limit)' }
+    }), 'utf8')
+    const failed = scanPoolerCapacity(p, T0, knobs)
+    assert.equal(failed.length, 1, 'the probe-failed usable key → ONE finding')
+    assert.equal(failed[0].key, POOLER_CAPACITY_KEY_PROBE_FAILED, 'the DISTINCT probe-failed dedupe key (≠ the plain count warning)')
+    assert.match(failed[0].error, /^probe timeout — % unavailable on usable key oc-13/, 'the frame STARTS with «probe timeout — % unavailable» naming the usable key (the mission wording — never silently omitted)')
+    assert.match(failed[0].error, /lastError "sweep probe failed: The operation was aborted due to timeout"/, 'the frame carries the last probe error')
+    assert.match(failed[0].error, /2 consecutive/, 'the frame carries the consecutive-failure count')
+    assert.match(failed[0].error, /1 usable \/ 3 keys/, 'the frame carries the usable/total context')
+    assert.match(failed[0].error, /weekly rule is UNKNOWN/, 'the frame says the quota rule is UNKNOWN while the probe is down')
+    // (2) WITHOUT the marker (the pre-R1 oc-13 shape) the count warning is
+    // UNCHANGED — the existing spec-09-04 grade («solo una key») still applies.
+    const snap = JSON.parse(await readFile(p, 'utf8'))
+    delete snap.keys['oc-13'].probeFailed
+    snap.keys['oc-13'].lastError = null
+    await writeFile(p, JSON.stringify(snap), 'utf8')
+    const plain = scanPoolerCapacity(p, T0, knobs)
+    assert.equal(plain[0].key, POOLER_CAPACITY_KEY_WARNING, 'no marker → the count warning grade is unchanged (spec 09-04)')
+    assert.match(plain[0].error, /1 usable \/ 3 keys/, 'the count warning context is intact')
+    // (3) A probe-failed key that is NOT usable (blocked) must NOT fire the
+    // probe-failed branch — oc-6 blocked with the marker + oc-13 usable WITHOUT
+    // it → 1 usable → the count warning (the marker of an unusable key is not a
+    // live measurement gap).
+    snap.keys['oc-13'].probeFailed = null
+    snap.keys['oc-13'].lastError = null
+    snap.keys['oc-6'].probeFailed = { at: T0 - 30_000, error: 'sweep probe failed: timeout', count: 1 }
+    await writeFile(p, JSON.stringify(snap), 'utf8')
+    const blockedFailed = scanPoolerCapacity(p, T0, knobs)
+    assert.equal(blockedFailed[0].key, POOLER_CAPACITY_KEY_WARNING, 'a probe-failed NON-usable key does not fire the probe-failed branch (the count warning still applies)')
+    // (4) A CONFIRMED weekly quota critical computed from PRESERVED data wins
+    // over the measurement-gap warning: the last usable key has its weekly
+    // percent AND the marker → CRITICAL (the owner rule is never under-reported
+    // by the probe-failed class).
+    snap.keys['oc-13'].usageWeekly = { status: 'ok', percent: 96, resetsAt: new Date(T0 + 7 * 86400_000).toISOString() }
+    snap.keys['oc-13'].probeFailed = { at: T0 - 30_000, error: 'sweep probe failed: timeout', count: 1 }
+    snap.keys['oc-13'].lastError = 'sweep probe failed: timeout'
+    snap.keys['oc-6'].blockedUntil = 0 // oc-6 usable again → 2 usable, aggregate computable
+    await writeFile(p, JSON.stringify(snap), 'utf8')
+    const crit = scanPoolerCapacity(p, T0, knobs)
+    assert.equal(crit[0].key, POOLER_CAPACITY_KEY_CRITICAL, 'the confirmed weekly shortage (preserved data) STILL grades critical — the quota branches run BEFORE the probe-failed branch')
+    assert.match(crit[0].error, /pool global weekly \d+% remaining \(.*% used — aggregate of 2 usable keys\) < 20% critical threshold/, 'the critical frame carries the PRESERVED measurement (never under-reported by the probe-failed warning)')
+    // (5) The probe-failed marker on a NON-usable key with 2 usable healthy keys
+    // → OK (no finding) — the gap only matters for keys actually in use.
+    await writeFile(p, JSON.stringify({
+      updatedAt: new Date(T0 - 60_000).toISOString(),
+      keys: {
+        'ok1': { id: 'ok1', invalid: false, blockedUntil: 0, cooldownUntil: 0 },
+        'ok2': { id: 'ok2', invalid: false, blockedUntil: 0, cooldownUntil: 0 },
+        'gone': { id: 'gone', invalid: true, blockedUntil: 0, cooldownUntil: 0, probeFailed: { at: T0 - 30_000, error: 'sweep probe failed: timeout', count: 1 } }
+      },
+      lastRotation: null
+    }), 'utf8')
+    assert.deepEqual(scanPoolerCapacity(p, T0, knobs), [], 'an invalid probe-failed key + 2 usable healthy → OK (no finding)')
+  })
+})
+
+test('R1 runHealthDaemonTick pooler-capacity PROBE-FAILED class (LIVE shape, LOADER-real): a fixture carrying the durable `probeFailed` marker on the USABLE key → the real tick alerts `pooler-capacity warning: probe timeout — % unavailable …` (the frame bullet surfaces the % gap), the DISTINCT dedupe key advances, the scan NEVER writes the fixture (read-only), and a second tick inside the 30-min dedupe window does NOT re-alert', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 4, 22, 54, 0).getTime() // the live 22:54Z window
+    const snap = {
+      updatedAt: new Date(T0 - 60_000).toISOString(),
+      keys: {
+        'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: T0 + 2 * 86400_000, cooldownUntil: 0, lastError: 'sweep probe failed: The operation was aborted due to timeout', usageWeekly: { status: 'rate-limited', percent: 100, resetsAt: new Date(T0 + 2 * 86400_000).toISOString() } },
+        'oc-13': { id: 'oc-13', workspace: 'ws13', invalid: false, blockedUntil: 0, cooldownUntil: 0, usageWeekly: null, lastUsage: null, lastError: 'sweep probe failed: The operation was aborted due to timeout', probeFailed: { at: T0 - 60_000, error: 'sweep probe failed: The operation was aborted due to timeout', count: 2 } }
+      },
+      lastRotation: { from: 'oc-6', to: 'oc-13', reason: '429 usage-limit', at: new Date(T0 - 60_000).toISOString(), resetsAt: new Date(T0 + 2 * 86400_000).toISOString(), message: 'key rotada oc-6 → oc-13 por error 429 (usage limit)' }
+    }
+    const statePath = path.join(stateDir, POOLER_STATE_FILE)
+    await writeFile(statePath, JSON.stringify(snap), 'utf8')
+    const bytesBefore = (await readFile(statePath)).byteLength
+    const alerts = []
+    const warns = []
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-r1',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      poolerStatePath: statePath,
+      notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
+      logger: { warn: (m) => warns.push(m) }
+    })
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'the probe-failed usable key alerts once')
+    assert.match(alerts[0].frame, /^\[From deepartments\] System-health ALERT:/, 'the alert frame is the system-health frame')
+    assert.match(alerts[0].frame, /pooler-capacity warning: probe timeout — % unavailable on usable key oc-13/, 'the frame bullet SURFACES the probe gap («probe timeout — % unavailable») — never a silent count-only warning')
+    assert.match(alerts[0].frame, /weekly rule is UNKNOWN/, 'the frame names the UNKNOWN quota rule')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state[POOLER_CAPACITY_KEY_PROBE_FAILED], T0, 'the DISTINCT probe-failed dedupe key is advanced at now')
+    assert.equal((await readFile(statePath)).byteLength, bytesBefore, 'the scan NEVER writes the pooler state file (READ-ONLY)')
+    await tick(T0 + 60_000)
+    assert.equal(alerts.length, 1, 'a second tick inside the 30min dedupe window does NOT re-alert')
+    assert.equal(warns.length, 0, 'a fully-resolvable tick emits no warns')
+  })
+})
+
 test('HARDENING-401 (fb-39): scanPoolerCapacity billing-critical branch — EVERY key flagged billingBlocked → `pooler-capacity:critical` EVEN WHEN THE STATE IS STALE (the durable billing flag does not age out — the 08-31 «todas-secas» outage class); an ISOLATED billing key in a pool that can still serve → NOT critical (the mission: «todas markadas billing/limit-blocked»)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = 1_234_567_890_000
@@ -14547,6 +14674,34 @@ test('fb-25 REGRESIÓN 3 (IPH m-1194 — the head\'s OWN live case): internal-pr
     const projCachePath = resolveSessionProjCachePath(stateDir, path.join(stateDir, 'sessions'))
     assert.equal(verifyRotateReason('context-threshold — IPH sesión live 57bed534 a 787k (400 real del request actual)', rotateOld, projCachePath), 'unverified', 'the m-1194 reason (~787k) against the old session ≈318k → UNVERIFIED — this mirror would have carried [reason unverified vs archive]')
     assert.equal(verifyRotateReason('context-threshold — IPH sesión live 57bed534 a ~318k', rotateOld, projCachePath), 'verified', 'a reason citing the old session\'s real figure verifies')
+  })
+})
+
+test('fb-25 GAP-2 (R2 — inspect 2026-09-04 IPH f7863559): the «N% de contexto» reason form verifies against the old session REAL fraction — (projected + the fb-50 completion reserve) / contextWindow, the monitor\'s own percentage — with the same ±tolerance; a wrong pct → unverified; a pct WITHOUT a context window → unavailable; and a message-id digit run (m-1056/m-1058) is NEVER a usage figure (the m-1058 spurious-\'unverified\' case: an id-only reason now degrades to unavailable, and an m-id next to a real figure no longer poisons the extraction)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const rotateOld = 'head-internal-programming-head-57bed534-8f4a-4b2c-9d1e-3c5a7b0d2e1f'
+    // seedProjCache(318_000): contextWindow = 1048576, projected = 318_000 →
+    // plain fraction 30.33%; WITH the fb-50 reserve 262_144 → 55.33%.
+    await seedProjCache(stateDir, { [rotateOld]: 318_000 })
+    const projCachePath = resolveSessionProjCachePath(stateDir, path.join(stateDir, 'sessions'))
+    const reserve = 262_144
+    // (a) the «N% de contexto» form — the ALERT pct (reserve-inclusive) verifies.
+    assert.equal(verifyRotateReason('context-threshold — IPH sesión live 57bed534 a 55% de contexto — cruce b5', rotateOld, projCachePath, reserve), 'verified', '55% vs the real fraction (318k+262144)/1048576 = 55.33% → VERIFIED (the reserved-pressure monitor calibration)')
+    assert.equal(verifyRotateReason('context-threshold — IPH sesión live 57bed534 a 60% de contexto — cruce b6', rotateOld, projCachePath, reserve), 'verified', '60% vs 55.33% → ratio 0.084 ≤ 0.15 → VERIFIED')
+    assert.equal(verifyRotateReason('context-threshold — IPH sesión live 57bed534 a 70% de contexto', rotateOld, projCachePath, reserve), 'unverified', '70% vs 55.33% → ratio 0.265 > 0.15 → UNVERIFIED (a pct that overstates the real pressure is stamped as such)')
+    // (b) the 3-arg LEGACY call (no reserve → 0 → the plain fraction 30.33%).
+    assert.equal(verifyRotateReason('context-threshold — IPH sesión live 57bed534 a 30% de contexto', rotateOld, projCachePath), 'verified', '3-arg call: 30% vs the PLAIN fraction 30.33% → VERIFIED (legacy plain-projection semantics)')
+    assert.equal(verifyRotateReason('context-threshold — IPH sesión live 57bed534 a 40% de contexto', rotateOld, projCachePath), 'unverified', '3-arg call: 40% vs 30.33% → UNVERIFIED')
+    // (c) a pct WITH a token figure → the token figure stays the primary claim.
+    assert.equal(verifyRotateReason('refresco de sesión; la sesión anterior terminó COMPLETED a ~318k tokens (30% del contexto)', rotateOld, projCachePath, reserve), 'verified', 'the token figure (~318k vs 318_000) remains the primary path; the parenthesized pct does not disturb it')
+    // (d) GAP-2 FIRST HALF — a message-id digit run is NEVER a usage figure.
+    assert.equal(verifyRotateReason('context-threshold — IPH sesión live confirmada m-1056 — Puedes rotar (memo lista)', rotateOld, projCachePath), 'unavailable', 'the m-1058 case: the id 1056 is NOT a usage figure and there is NO pct → UNAVAILABLE (was the spurious \'unverified\' before R2 — nothing to verify is the honest stamp)')
+    assert.equal(verifyRotateReason('context-threshold — IPH sesión live confirmada m-1056 a ~318k — Puedes rotar', rotateOld, projCachePath), 'verified', 'an m-id NEXT to a real figure no longer poisons the extraction — ~318k still verifies (the id is skipped, the real claim drives)')
+    assert.equal(verifyRotateReason('context-threshold — IPH sesión live confirmada m-901 (memo lista)', rotateOld, projCachePath), 'unavailable', 'a sub-thousand id (m-901 — the 11:05Z rotation shape) is also skipped → UNAVAILABLE')
+    // (e) a pct WITHOUT a context window → unavailable (nothing to verify).
+    const windowless = path.join(stateDir, 'storages', 'session_projcache.json')
+    await writeFile(windowless, JSON.stringify({ unit: { name: 'session_projcache', version: 3 }, global: null, tables: { sessions: { [rotateOld]: { identity: { createdAt: Date.now() }, rows: { tokenUsage: { ver: 1, seq: 1, val: { last: { turn: 1, step: 1, buckets: { cacheReadTokens: 318_000 } } } }, contextPressure: { ver: 4, seq: 1, val: { pressureTokens: 318_000, surfaceTokens: 0, sampledSurfaceTokens: 0 } } } } } } }), 'utf8')
+    assert.equal(verifyRotateReason('context-threshold — IPH sesión live 57bed534 a 60% de contexto', rotateOld, windowless, reserve), 'unavailable', 'a projected row WITHOUT contextWindow (the denominator is missing) → UNAVAILABLE (conservative)')
   })
 })
 
@@ -20685,6 +20840,103 @@ test('fb-25 dept_head_rotate CROSS-CHECK (a): a reason citing a FALSE figure (78
       assert.equal(r3.reasonVerified, 'unavailable', 'a rotation with NO reason → unavailable (nothing to verify)')
       assert.equal(r3.reason, undefined, 'no reason on the result')
       assert.notEqual(r3.sessionId, r2.sessionId, 'the no-reason rotate also commits')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('R2 fb-42/25 mint probe (a — FAIL-LOUD, the phantom-model rotation class): a live adapter whose catalog does NOT configure the resolved model → dept_head_rotate ABORTS with a clear fb-42 reason and the OLD head stays COMPLETELY untouched — no dispose, no archive, no fresh mint (the fresh head is never created with a model its provider cannot serve)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const oldSessionId = 'head-research-head'
+    await seedJournal(stateDir, postId, 'ROTATE-SEED: the probe must abort before this is ever used.')
+    // The provider 'stub-coord' IS registered (a LIVE provider — the fb-6
+    // provider+model-absent class is NOT this one) but its model catalog is
+    // EMPTY: the coordinator model deepseek-v4-flash is not configured → the
+    // fb-42 outage shape (glm-5.3-flash configured in the org, absent from the
+    // pi-ai adapter).
+    const env = await bootWithQD(stateDir, {
+      llmListProviders: [{ id: 'stub-coord', name: 'Stub Coord' }],
+      llmListModels: []
+    })
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      await assert.rejects(
+        env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'R2 probe (a)' }, { agent: host, signal }),
+        /dept_head_rotate: "research-head" ABORTED \(fb-42 class\): provider "stub-coord" is registered but NEITHER model "deepseek-v4-flash" NOR the known seed model "deepseek-v4-flash" is configured in the adapter catalog/,
+        'the rotation FAILS LOUD with the clear fb-42 reason (provider + both models named)'
+      )
+      // NO phantom mint: no new session row, the old entry untouched.
+      const posts = await readPosts(stateDir)
+      assert.equal(posts[postId].sessionId, oldSessionId, 'the durable entry still points at the OLD session (never re-minted)')
+      assert.equal(posts[postId].rotated, undefined, 'no rotation marker on the entry')
+      assert.ok(!env.workspaceRegistry.archived.includes(oldSessionId), 'the old session is NOT archived (the probe ran BEFORE the destructive steps)')
+      const fresh = env.agents.store.get(oldSessionId)
+      assert.ok(fresh, 'the old head handle is still live')
+      assert.equal(fresh.status, 'idle', 'the old head is still idle (untouched)')
+      const creations = env.agents.createCalls.filter((c) => c.sessionId !== oldSessionId && String(c.sessionId).includes(postId))
+      assert.equal(creations.length, 0, 'NO fresh <postId>-<uuid> session was created (the mint never ran)')
+      const dirs = await qualityDirectives(stateDir)
+      assert.equal(dirs.filter((d) => /head rotated/.test(d.text)).length, 0, 'NO head-rotated mirror directive was emitted (the rotation did not commit)')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('R2 fb-42/25 mint probe (b — VERIFIED): the resolved model IS configured in the live adapter catalog → the rotation proceeds normally and mints with the configured model (zero regression on the healthy path)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const oldSessionId = 'head-research-head'
+    await seedJournal(stateDir, postId, 'ROTATE-SEED: verified probe.')
+    const env = await bootWithQD(stateDir, {
+      llmListProviders: [{ id: 'stub-coord', name: 'Stub Coord' }],
+      llmListModels: ['deepseek-v4-flash']
+    })
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      const result = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'R2 probe (b)' }, { agent: host, signal })
+      assert.notEqual(result.sessionId, oldSessionId, 'the rotate COMMITS (verified model)')
+      const mint = env.agents.createCalls.filter((c) => String(c.sessionId) === result.sessionId)[0]
+      assert.ok(mint, 'the fresh mint ran')
+      assert.deepEqual(mint.agentOptions, { provider: 'stub-coord', model: 'deepseek-v4-flash' }, 'the mint carries the CONFIGURED model (verified — no retrofit, no phantom)')
+      assert.ok(env.workspaceRegistry.archived.includes(oldSessionId), 'the old session archived normally')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('R2 fb-42/25 mint probe (c — RETROFIT, the glm-5.3-flash exact class): the org configures a model the live adapter does NOT know (glm-5.3-flash) while the known seed model (deepseek-v4-flash) IS configured → the rotation commits but the fresh head is minted with the SEED model — the phantom model is NEVER materialized', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const oldSessionId = 'head-research-head'
+    await seedJournal(stateDir, postId, 'ROTATE-SEED: retrofit probe.')
+    // The exact fb-42 shape: coordinator model glm-5.3-flash (commits
+    // 4e86492/4cf9e38), live provider registered, catalog WITHOUT glm but WITH
+    // the fleet seed model.
+    const org = {
+      departments: [{
+        id: 'research',
+        name: 'Research',
+        coordinator: { postId, role: 'Research department head', provider: 'stub-coord', agentOptions: { provider: 'stub-coord', model: 'glm-5.3-flash' } }
+      }]
+    }
+    const env = await bootPlugin(stateDir, { org, llmListProviders: [{ id: 'stub-coord', name: 'Stub Coord' }], llmListModels: ['deepseek-v4-flash'] })
+    await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'research head materialized at boot')
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      const result = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'R2 probe (c)' }, { agent: host, signal })
+      assert.notEqual(result.sessionId, oldSessionId, 'the rotate COMMITS (the retrofit is a valid fallback, never a block)')
+      const mint = env.agents.createCalls.filter((c) => String(c.sessionId) === result.sessionId)[0]
+      assert.ok(mint, 'the fresh mint ran')
+      assert.deepEqual(mint.agentOptions, { provider: 'stub-coord', model: 'deepseek-v4-flash' }, 'the fresh head is minted with the KNOWN SEED model (deepseek-v4-flash) — glm-5.3-flash is NEVER materialized as the minted model')
+      const fresh = env.agents.store.get(result.sessionId)
+      assert.ok(fresh, 'the fresh head is live (with the retargeted model)')
     } finally {
       await env.dispose()
     }

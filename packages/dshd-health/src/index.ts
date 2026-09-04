@@ -3101,7 +3101,13 @@ export function scanHealthCatchup(
  *       or by the CERTAIN exhaustion classes (usable==0 outage, a 429
  *       usage-limit rotation to NO key, every key billing-blocked); WARNING —
  *       usable ≤ warningUsableKeys (1, «solo una key») OR blocked/cooldown ≥
- *       blockedKeysInWindow (3) OR a STALE 429→null rotation (R1 §7.4d); OK —
+ *       blockedKeysInWindow (3) OR a STALE 429→null rotation (R1 §7.4d) OR the
+ *       R1 PROBE-FAILED class — a USABLE key whose last health probe timed out
+ *       / failed at the network layer (the pooler's durable `probeFailed`
+ *       marker, live oc-6/oc-13 «sweep probe failed: The operation was aborted
+ *       due to timeout») carries NO trustworthy weekly % while the probe is
+ *       down → «probe timeout — % unavailable» (the quota rule is UNKNOWN, and
+ *       the gap is surfaced instead of a silent oc-13-style blindness); OK —
  *       usable ≥ okUsableKeys (2, «bien si ≥2»). The count NEVER produces
  *       critical (except the fixed 0-usable outage).
  *
@@ -3193,6 +3199,13 @@ export const POOLER_CAPACITY_KEY_WARNING = 'pooler-capacity:warning'
 // is swallowed by the real-shortage critical finding (the scan returns ONE
 // finding per tick; the priority order keeps the critical branch ahead).
 export const POOLER_CAPACITY_KEY_ROTATION_STALE = 'pooler-capacity:rotation-stale'
+// R1 (2026-09-04) — the PROBE-FAILED self-report dedupe key: a DISTINCT key
+// (≠ the count warning) so the «probe timeout — % unavailable» class alerts on
+// its own cadence and NEVER masquerades as (or is swallowed by) the plain
+// count warning — the measurement gap of a usable key whose health probe times
+// out must be OBSERVABLE (the owner rule <20% global / <10% weekly is blind for
+// a key with usageWeekly null while the probe is down).
+export const POOLER_CAPACITY_KEY_PROBE_FAILED = 'pooler-capacity:probe-failed'
 
 /** M1 (b) code defaults. */
 export const QI_SILENCE_DEFAULT_WINDOW_MS = 120 * 60 * 1000
@@ -3257,6 +3270,16 @@ export interface PoolerKeyStateLike {
    * new dispatches BEFORE the pool paralyzes (the 08-31 outage lesson: all
    * jobs died 401 CreditsError with the state going stale). */
   billingBlocked?: boolean
+  /** R1 (2026-09-04) — the probe-FAILED marker of a VALID key whose last health
+   * probe timed out / failed at the network layer (the pooler's
+   * `sweep probe failed: …` class — live oc-6/oc-13 «The operation was aborted
+   * due to timeout»). `at` = epoch ms of the LAST failed probe, `error` = the
+   * probe error, `count` = consecutive failures in the streak. The marker is
+   * cleared by ANY real probe answer (the pooler owns the write; this scan only
+   * reads it). The key's `usageWeekly`/`lastUsage` may be null WHILE the probe
+   * fails — the marker is what makes that measurement gap OBSERVABLE (the
+   * «probe timeout — % unavailable» class) instead of a silent UNKNOWN. */
+  probeFailed?: { at?: number; error?: string; count?: number } | null
 }
 
 /** The last rotation record of the pooler snapshot (a 429 usage-limit rotation
@@ -3383,7 +3406,17 @@ export interface PoolerCapacityKnobs {
  *      dep → the warn is dropped). The dead-man's-switch intent is served by
  *      the CERTAIN branches (1)+(2)+(3), which detect the real exhaustion.
  * The WARNING branches (fresh state only): usable ≤ `warningUsableKeys`
- * («warning si solo una key»), blocked/cooldown keys ≥ `blockedKeysInWindow`.
+ * («warning si solo una key»), blocked/cooldown keys ≥ `blockedKeysInWindow`,
+ * and the R1 PROBE-FAILED class — a USABLE key whose last health probe timed
+ * out / failed at the network layer (the pooler's durable `probeFailed`
+ * marker) has NO trustworthy weekly % while the probe is down: the quota rule
+ * (<20% global / <10% weekly) is UNKNOWN for it, and the grading SURFACES the
+ * gap («probe timeout — % unavailable» — the live oc-13 blindness: usable with
+ * usageWeekly null, silently worth only a count warning). Placed AFTER the
+ * quota criticals (a CONFIRMED shortage computed from preserved weekly data
+ * always wins) and BEFORE the count/blocked warnings (the gap is the more
+ * informative class when both would fire); DISTINCT dedupe key
+ * (`pooler-capacity:probe-failed`) so it alerts on its own cadence.
  * OK («bien si ≥2»): usable ≥ `okUsableKeys` after the quota/blocked branches
  * → [] (no finding). The daily x-ratelimit hot-percent warning is RETIRED
  * (the spec drives critical from the WEEKLY quota; `highPercent` remains the
@@ -3536,6 +3569,38 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
         error: `last usable key ${lastUsable.id} weekly ${Math.round(weekRemaining)}% remaining (${Math.round(lastWeeklyPercent)}% used) < ${knobs.criticalWeeklyRemainingPercent}% critical threshold`
       }]
     }
+  }
+  // R1 (2026-09-04) — the PROBE-FAILED class: a USABLE key whose last health
+  // probe timed out / failed at the network layer (the pooler's durable
+  // `probeFailed` marker — live oc-6/oc-13 «sweep probe failed: The operation
+  // was aborted due to timeout») has NO trustworthy weekly measurement while
+  // the probe is down: the quota rule (<20% global / <10% weekly de la última
+  // key) CANNOT compute its remaining % — and the grading must NOT stay silent
+  // (a usable key with `usageWeekly` null was exactly the oc-13 blindness: the
+  // count said «solo una key» without ever telling the operator WHY the % was
+  // missing). Sits AFTER the quota criticals — a CONFIRMED shortage (computed
+  // from preserved weekly data) always wins over the measurement-gap warning —
+  // and BEFORE the count/blocked warnings — the gap is the MORE informative
+  // class when both would fire. Distinct dedupe key (`pooler-capacity:
+  // probe-failed`), frame carries «probe timeout — % unavailable».
+  const probeFailedUsable = usable.filter((k) => k.probeFailed !== null && k.probeFailed !== undefined)
+  if (probeFailedUsable.length > 0) {
+    const list = probeFailedUsable.map((k) => k.id).join(', ')
+    const first = probeFailedUsable[0]
+    const pErr = first?.probeFailed?.error ?? 'network/timeout'
+    const pAt = Number(first?.probeFailed?.at)
+    const pAtIso = Number.isFinite(pAt) && pAt > 0 ? new Date(pAt).toISOString() : undefined
+    const pCount = Number(first?.probeFailed?.count) || 0
+    return [{
+      kind: 'pooler-capacity',
+      key: POOLER_CAPACITY_KEY_PROBE_FAILED,
+      ts: nowMs,
+      count: usableCount,
+      error:
+        `probe timeout — % unavailable on usable key${probeFailedUsable.length > 1 ? 's' : ''} ${list} ` +
+        `(lastError "${pErr}"${pAtIso ? ` @ ${pAtIso}` : ''}${pCount > 0 ? `, ${pCount} consecutive` : ''}) — ` +
+        `the weekly usage % cannot be measured while the probe is down: the <${knobs.criticalGlobalRemainingPercent}% global / <${knobs.criticalWeeklyRemainingPercent}% weekly rule is UNKNOWN (${usableCount} usable / ${totalCount} keys)`
+    }]
   }
   // WARNING — «warning si solo una key»: usable ≤ `warningUsableKeys` (default
   // 1 — a single usable key with no quota pressure is the WARNING class, NEVER
