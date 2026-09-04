@@ -34,6 +34,9 @@ import type { DeliveryRedelivererDeps, DeliveryRow, DeliveryStatus } from './mes
 // bundle bridge re-exports for R6.
 import { createSubagentRolesService } from './role-orient.js'
 import type { SubagentRolesService } from './role-orient.js'
+// R3 (WORK-REGISTER post-cierre 2026-09-04): the bundle-layer patch staleness
+// watchdog — installed at apply; its exports flow through the barrel below.
+import { installBundlePatchWatchdog } from './bundle-patches.js'
 
 // acl.js defines `busProfileFor`/`aclDenyGround`/`aclDenyReason`/`canSend` (+
 // types `BusMemberProfile`/`BusCatalogLens`); delivery.js RE-EXPORTS the same
@@ -66,6 +69,14 @@ import type { PacingWindowOptions, PacingState } from './pacing.js'
 // route through it; a new direct `session.snapshotEvents(` call elsewhere is
 // the regression this export makes greppable.
 export * from './session-surface.js'
+// R3 (WORK-REGISTER post-cierre 2026-09-04, QD finding 09-04): the
+// BUNDLE-LAYER PATCH STALENESS WATCHDOG — the launcher HMR watcher covers only
+// the profile + home user layers, so a knob committed in a bundle layer stays
+// inactive until a daemon restart; the watchdog snapshot/resolve/check/seam
+// exports (parseProfileNameFromArgv, resolveBundlePatchPaths,
+// snapshotBundlePatchMtimes, findChangedBundlePatches, the sidecar readers,
+// installBundlePatchWatchdog) are the durable + noisy mitigation.
+export * from './bundle-patches.js'
 
 // ---------------------------------------------------------------------------
 // FASE 2.5 BATCH B — the dshd-core Cordis plugin surface.
@@ -166,6 +177,19 @@ export interface OrgConfig {
     model?: string
     reasoningEffort?: 'max' | 'high' | 'medium' | 'low'
   }
+  /** R3 (WORK-REGISTER post-cierre 2026-09-04) — the BUNDLE-LAYER PATCH
+   * STALENESS WATCHDOG switch: the launcher HMR watcher watches ONLY the
+   * profile's own `cordis.patch.yml` + the home file, so a knob committed in a
+   * bundle layer (a dshd-core row / dsh-deepartments row) stays INACTIVE until
+   * a daemon restart. The watchdog (bundle-patches.ts) snapshots the resolved
+   * bundle-layer patch mtimes at boot and warns loudly + durably on a change.
+   * Absent/`true` → ON by default (a bundle knob committed today must never be
+   * silently inactive); `false` opts out. The check is READ-ONLY: zero impact
+   * on the knob-loading path, no automatic restart. */
+  bundlePatchCheck?: boolean
+  /** R3 — the watchdog interval override (ms); absent → the code default
+   * (60 s, aligned with the health tick). */
+  bundlePatchCheckIntervalMs?: number
 }
 
 /** The `deepartments.org` service surface (FASE 2.6 BATCH A) — the shared
@@ -743,4 +767,17 @@ export function apply(ctx: Context, config: CoreConfig) {
   // LOUD (R1 — never silently unbound). ---
   ctx.provide('deepartments.bus', lazyBus(busDeps, () => buildBusLazy(ctx, busDeps)))
   ctx.provide('deepartments.deliver', lazyDeliver(deliverDeps, () => buildDeliverLazy(ctx, deliverDeps)))
+
+  // --- R3 (WORK-REGISTER post-cierre 2026-09-04) — the BUNDLE-LAYER PATCH
+  // STALENESS WATCHDOG (bundle-patches.ts): the launcher HMR watcher covers
+  // ONLY the profile's own cordis.patch.yml + the home file, so a knob
+  // committed in a bundle layer (e.g. a dshd-core row) stays INACTIVE until a
+  // daemon restart. The watchdog snapshots the resolved-at-boot mtimes of the
+  // active profile's bundle-layer patch files and warns LOUDLY (each interval)
+  // + DURABLY (the bundle-patch-alerts.json sidecar) when one changed. Design:
+  // minimal + non-intrusive — READ-ONLY (stats/reads only), zero impact on the
+  // knob-loading path, no automatic restart; a resolution failure warns ONCE
+  // and disables the check (never a throw into apply). The returned disposer
+  // clears the interval on plugin unload (AGENTS.md rule 4 — reversible). ---
+  return installBundlePatchWatchdog(ctx, { stateDir, org: config.org })
 }
