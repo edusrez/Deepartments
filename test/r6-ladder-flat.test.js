@@ -57,6 +57,10 @@ test('r6-ladder-flat (fb-95): the self-registering tests are lane-② src-native
     'lane2-retire-grace-zombie.test.js', 'lane2-settle-rotatedto.test.js',
     'wakeseam-lane.test.js', 'dual-surface-session.test.js', 'foldins-tramo3A.test.js',
     'foldins-batchA.test.js', 'sweep-observability.test.js', 'o1ext-lane.test.js',
+    // LANE R4 (2026-09-05): the abort-intents lane is src-native (the R4
+    // write-ahead sidecar + listeners) and self-registers the hook — the same
+    // lane-② family (the o1ext-lane pattern).
+    'r4-abort-intents.test.js',
   ])
   for (const f of registerers) {
     assert.ok(laneFamily.has(f), `unexpected self-registerer ${f} — only the lane-②/src-native family may self-register the hook`)

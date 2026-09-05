@@ -150,6 +150,7 @@ import {
   readTurnErrorsState,
   writeTurnErrorsState,
   appendPostError,
+  appendPostErrorDeduped,
   readPostErrorsFile,
   HEALTH_ERROR_WINDOW_MS,
   readUnusableSessionsMark,
@@ -208,6 +209,22 @@ import type { MessagesStore } from 'dshd-core'
 import { AUTO_RETIRE_DISPOSE_GRACE_MS, probeRotationMintModel } from './delivery.js'
 import type { DeliverySurface } from './delivery.js'
 import type { HeadToolDisposers, SpawnSurface } from './spawn.js'
+// LANE R4 («aborts sin detalle + clase O1»): the WRITE-AHEAD TOOL-INTENT
+// sidecar — the pre/post-execute listeners persist the tool INTENT before the
+// real dispatch and settle it with the durable abort REASON (fb-69/70/81/83/
+// 110/111/126/133). The package-local module is the pure/fs half (append +
+// parse + abort scan + reason classifier + the interrupt-state connect).
+import {
+  appendToolIntent,
+  classifyToolAbortReason,
+  projectToolIntentArgs,
+  readToolIntents,
+  recordToolAbortInterruptDetail,
+  scanAbortedToolIntents,
+  toolIntentTarget,
+  TOOL_ABORT_DEDUPE_KEY_PREFIX,
+  TOOL_ABORT_POST_ID
+} from './tool-intents.js'
 // dshd-feedback (SUB-BATCH 4 — the feedback tools zone): the store + the
 // terminal-estado predicate + the record/option types the 3 feedback tool
 // bodies use (dshd-feedback — no cycle).
@@ -1134,6 +1151,138 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       ...downstream,
       additionalContexts: [buildFeedbackNudgeContext(), ...(downstream.additionalContexts ?? [])]
     }
+  })
+
+  // =========================================================================
+  // LANE R4 («aborts sin detalle + clase O1» — fb-69/70/81/83/110/111/126/133):
+  // THE WRITE-AHEAD TOOL-INTENT SEAM. On the HARNESS TOOL-DISPATCH pipeline the
+  // deepartments agents run, EVERY tool call of an agent (head/worker/host —
+  // the whole class, incl. operation tools and pure READS) is written to the
+  // durable <stateDir>/tool-intents.jsonl sidecar BEFORE the real dispatch:
+  //   - `tools/pre-execute` PERSISTS the intent (tool, arguments, target, ts)
+  //     BEFORE next() (the actual harness dispatch). A turn that dies
+  //     pre-dispatch / mid-call («tool call aborted before dispatch» — fb-69/
+  //     70/81/126/133) leaves the intent row WITHOUT a settle — the recoverable
+  //     record the abort family lacked (the content survives for re-drive/
+  //     health instead of being rebuilt manually).
+  //   - `tools/post-execute` SETTLES the intent ('settled' | 'error' |
+  //     'aborted'). A LIFE-ABORT settle records the durable REASON (objective
+  //     2 — classified interruption/cancel/churn/read-only abort) into the
+  //     settle row AND the O1-EXT P4 interrupt-detail ledger (m-1311 connect)
+  //     AND surfaces a deduped post-error row the W6 daemon scans into the
+  //     health report — nothing is a flat «tool call aborted» without a
+  //     trace anymore.
+  // Fail-soft discipline (both listeners): a sidecar/record failure NEVER
+  // blocks, denies, or alters a tool dispatch or a downstream decision — the
+  // write-ahead is additive observability (wrap + warn + delegate). The
+  // listeners are registered AFTER the feedback-nudge listener so the harness
+  // waterfall chain (nudge → settle → accept) preserves the nudge's byte-level
+  // behavior (each listener calls next() and returns its downstream unchanged).
+  // -------------------------------------------------------------------------
+  /** The member id of a calling agent (the nudge's resolution — postIdForChild
+   * maps a child session to its durable post; a host/plain session stays its
+   * agent id). PURE. */
+  const toolIntentMemberId = (agentId: string): string => postIdForChild(agentId) ?? agentId
+
+  /** The write-ahead INTENT persist (pre-execute, BEFORE next()). Never throws
+   * (the caller delegates downstream regardless). */
+  const persistToolIntent = async (exec: { callId?: unknown; name: string; arguments?: unknown; agent?: { id?: unknown } | null }): Promise<void> => {
+    try {
+      const agentId = String(exec.agent?.id ?? '')
+      if (agentId === '') return
+      const memberId = toolIntentMemberId(agentId)
+      const id = String(exec.callId ?? '') !== '' ? String(exec.callId) : `${memberId}:${exec.name}:${Date.now()}`
+      await appendToolIntent(stateDir, {
+        kind: 'intent',
+        id,
+        tool: exec.name,
+        agent: agentId,
+        memberId,
+        target: toolIntentTarget(exec.name, exec.arguments, memberId),
+        args: projectToolIntentArgs(exec.arguments),
+        ts: Date.now()
+      })
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] tool-intent write-ahead failed (non-fatal — the tool proceeds): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** The settle transition (post-execute, AFTER the downstream next()). Finds
+   * the intent by callId (the harness pipeline is the SAME exec pre→post), else
+   * the LATEST unsettled intent for (agent, tool) — the tolerant path for a
+   * callId-less exec. Never throws. */
+  const settleToolIntent = async (exec: { callId?: unknown; name: string; agent?: { id?: unknown } | null }, result: { isError: boolean; error?: { message?: string } | null }): Promise<void> => {
+    try {
+      const agentId = String(exec.agent?.id ?? '')
+      if (agentId === '') return
+      const memberId = toolIntentMemberId(agentId)
+      const ts = Date.now()
+      let id = String(exec.callId ?? '')
+      if (id === '') {
+        // Tolerant match: the latest unsettled intent row for (agent, tool).
+        const rows = await readToolIntents(stateDir)
+        const settledIds = new Set<string>()
+        for (const row of rows) {
+          if (row.kind === 'settle' && row.agent === agentId && row.tool === exec.name) settledIds.add(row.id)
+        }
+        let best: { id: string; memberId: string; ts: number } | undefined
+        for (const row of rows) {
+          if (row.kind !== 'intent' || row.agent !== agentId || row.tool !== exec.name) continue
+          if (settledIds.has(row.id)) continue
+          if (best === undefined || row.ts > best.ts) best = { id: row.id, memberId: row.memberId, ts: row.ts }
+        }
+        if (best === undefined) return // nothing to settle
+        id = best.id
+      }
+      const isAbort = isNudgeLifeAbort(exec, result as { isError: boolean; error?: { message?: string } })
+      const status = !result.isError ? 'settled' : isAbort ? 'aborted' : 'error'
+      const reason = isAbort ? classifyToolAbortReason(String(result.error?.message ?? ''), exec.name) : undefined
+      await appendToolIntent(stateDir, {
+        kind: 'settle',
+        id,
+        tool: exec.name,
+        agent: agentId,
+        status,
+        ...(reason !== undefined ? { reason } : {}),
+        ts
+      })
+      // The DURABLE ABORT REASON (objective 2): on a live-abort, the reason
+      // (1) rides the settle row above, (2) is recorded into the SAME
+      // interrupt-state.json detail ledger safeInterrupt writes (the m-1311
+      // O1-EXT P4 connect) and (3) is surfaced as a deduped post-error row the
+      // W6 daemon scans into the health report (the abort family's «nothing
+      // without a trace»).
+      if (isAbort) {
+        await recordToolAbortInterruptDetail(stateDir, memberId, { reason: reason ?? 'aborted', sourceKey: exec.name, ts })
+        try {
+          await appendPostErrorDeduped(
+            stateDir,
+            { ts, postId: TOOL_ABORT_POST_ID, error: `tool call aborted — ${exec.name} (${memberId}): ${reason ?? 'aborted'} at ${new Date(ts).toISOString()}` },
+            `${TOOL_ABORT_DEDUPE_KEY_PREFIX}${exec.name}:${reason ?? 'aborted'}`,
+            ts
+          )
+        } catch (error: unknown) {
+          ctx.logger.warn(`[deepartments] tool-abort health surface failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] tool-intent settle failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  // The write-ahead listener: PERSIST the intent BEFORE the harness dispatches
+  // the tool body, then delegate the allow/deny/ask decision downstream.
+  ctx.on('tools/pre-execute', async (exec, next) => {
+    await persistToolIntent(exec)
+    return next()
+  })
+
+  // The settle listener: delegate to the downstream decision FIRST (the nudge
+  // + the base accept — never alter their result), then settle the intent.
+  ctx.on('tools/post-execute', async (exec, result, next) => {
+    const downstream = await next()
+    await settleToolIntent(exec as { callId?: unknown; name: string; agent?: { id?: unknown } | null }, result as { isError: boolean; error?: { message?: string } | null })
+    return downstream
   })
 
   // =========================================================================
