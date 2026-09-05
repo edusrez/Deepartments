@@ -91,8 +91,10 @@ rotado. El rechazo es señal de coordinación, no bug.
 ## 4. Baseline de la suite (referencia para reviewers)
 
 - Método: `pnpm build` + `pnpm test` (plano sobre lib) — o `pnpm test:guarded`.
-- Baseline HEAD (R6, 2026-09-05): **832/796/14/22** (varianza documentada
-  828-832 total). Fail-set ESTABLE = 12 por nombre: F2 regression · M2.1/2.3/2.4 ·
+- Baseline (canónico de la ronda, 2026-09-05 — verificado por reviewer-68,
+  P-LATCH review bdf16217): **882/848/12/22** (previa 878/844/12/22 + 4 tests
+  nuevos, todos pass; varianza documentada 877-882 total). Fail-set ESTABLE =
+  12 por nombre: F2 regression · M2.1/2.3/2.4 ·
   B2 x3 · M-A SMOKE · A3/C2 postsRetention · head-sleep rotation-race (d) ·
   PR-2 W7-A settle · fb-11 (2) ZERO REGRESSION — deuda POR ENTORNO/legacy, NO
   arreglar. Fails adicionales por entorno/demonio (pasan aislados, fallan en
@@ -160,15 +162,19 @@ La ruta de reports canónica de un departamento es ABSOLUTA y vive FUERA del
 repo (writes vivos en el workspace del depto):
 `/root/.deepartments/departments/<dept>/reports/<rol>/<YYYY-MM-DD>-<slug>.md`.
 
-**Regla (fb-140, adoptada por el head):** los briefs y cualquier cita de
-reports usan SIEMPRE la ruta absoluta — NUNCA un short-path tipo
-`reports/researcher/…` (al leer desde la base del repo no resuelve: caso 09-04
-m-1274 «reports/researcher/2026-09-04-fb134-store-separation.md» → not-found;
-la ruta real era
-`/root/.deepartments/departments/research/reports/researcher/…`). El workspace
-del depto y su reports dir YA se documentan en
-`docs/departments/internal-programming/README.md` (y specs 004/005/007 §D-Q1);
-fb-140 complementa a fb-136 (no derivar paths desde `/.deepartments`).
+**Regla (fb-140, adoptada por el head):** la convención rige AMBAS
+DIRECCIONES — leer y escribir. Los briefs y cualquier cita de reports usan
+SIEMPRE la ruta absoluta — NUNCA un short-path tipo `reports/researcher/…`
+(al leer desde la base del repo no resuelve: caso 09-04 m-1274
+«reports/researcher/2026-09-04-fb134-store-separation.md» → not-found; la ruta
+real era
+`/root/.deepartments/departments/research/reports/researcher/…`). Y lo que el
+worker ESCRIBE — reports, referencias, citas del review — lleva IGUAL la ruta
+absoluta del workspace del depto (ronda 09-05: reviewers citando short-paths
+en outputs → H4/q-i-47). El workspace del depto y su reports dir YA se
+documentan en `docs/departments/internal-programming/README.md` (y specs
+004/005/007 §D-Q1); fb-140 complementa a fb-136 (no derivar paths desde
+`/.deepartments`).
 
 ## 7. Commit-hold procedure (HOLD-P0, lock/mark-red)
 
@@ -178,11 +184,11 @@ por el análisis QD q-i-43 (`.dsh/reports/quality/2026-09-05-worker-retired-
 builder-106-analyze.md`, O1) y completado por los reports builder-106 c551e2b8 /
 builder-107 b48b3e05 / builder-108 ce5e1979.
 
-**Cuándo se aplica (HOLD-P0):** cuando el LOCK del árbol está ROJO / **MAIN-RED**
-(p. ej. el freeze CUT4 `tools-factory.test.js`) o el floor ordena hold de
-commit sobre el árbol compartido. Mientras el lock esté rojo **NO se commitea
-NADA encima** — ni la lane propia ni otra; la orden del floor prevalece sobre el
-avance local.
+**Cuándo se aplica (HOLD-P0):** cuando el LOCK del árbol está ROJO /
+**MAIN-RED** (p. ej. el freeze CUT4 `tools-factory.test.js`) o el floor ordena
+hold de commit sobre el árbol compartido. Mientras el lock esté rojo **NO se
+commitea NADA encima** — ni la lane propia ni otra; la orden del floor
+prevalece sobre el avance local.
 
 **Mecánica (retract semántico, 0 pérdida de trabajo):**
 

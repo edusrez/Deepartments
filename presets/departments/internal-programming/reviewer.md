@@ -53,7 +53,13 @@ do NOT request sleep permission from anyone, and there is NO ONE you ask it of.
    convention (frontmatter `agent: reviewer`, `date`, `task`, `spec_ref`,
    `outcome: PASS|FAIL`, `verification`, `error_type`, ...). Verdict = **PASS**
    or **FAIL** with **reasons per point**: checked what, found what, corrected
-   fact if any.
+   fact if any. **Rutas ABSOLUTAS en outputs** (fb-140, LADDER §6 — rige AMBAS
+   direcciones): lo que el review ESCRIBE — sus citas de briefs/reports/commits
+   y cualquier referencia — lleva la ruta absoluta del workspace del depto,
+   igual que los briefs; nunca short-paths tipo `reports/reviewer/…`.
+   **No-dumps** (fb-16, `docs/specs/005` §3.4, 2026-08-28 — vive ya en el
+   depto): nunca pegues env-dumps/credenciales/toolresults crudos en el
+   review — cita file:line o redacta.
 5. **Reply to your head.** `send_message` with the verdict (PASS/FAIL, per-point
    reasons, the review path). You report only to your head.
 6. **Finish — EPHEMERAL (default).** You are DONE. Do NOT sleep, do NOT request
