@@ -328,7 +328,24 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     // contexto» form). md5 3b85576c… → 3872790d90a6bf04a60ad448d0d1a117
     // (same span; the CUT4 movement-lock semantics unchanged — the tool
     // definition body only).
-    assert.equal(md5, '3872790d90a6bf04a60ad448d0d1a117', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R8 sweepArmed-flag re-freeze + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions (md5 3872790d…)')
+    // Zone md5 RE-FROZE R8-RACE (liveness-race lane, 2026-09-05 — fb-143/144/145;
+    // the round's R8 lane, NOT the FINISHER R8 note above — labels disambiguated):
+    // TWO INTENTIONAL in-span changes — (1) dept_who now exposes the VERBATIM
+    // live-handle status (`liveStatus` — the raw driver signal the state token
+    // collapses, absent when offline; schema + row + render `, handle:<status>`
+    // — the suffix deliberately avoids the `, live` token the m-64 render
+    // assertions forbid, F9-conditioned), and (2) dept_head_rotate's free-window
+    // check is now a BOUNDED AUTOMATIC SETTLE-WAIT (headRotateSettleWaitMs —
+    // DEEPARTMENTS_HEAD_ROTATE_SETTLE_MS, default 5s): the dept_who snapshot and
+    // the rotate check read the SAME live signal (agents.get(sid).status ===
+    // 'running'), so a head that just declared ready (or that a wake turned
+    // running between the two reads) may still be `running` for its FINALIZATION
+    // TAIL — the rotate now re-verifies in a bounded poll loop and only rejects
+    // a turn still running past the bound (fb-115 preserved). md5 3872790d… →
+    // 7693beaa8c9a969a4f556edc25b2d19b (same span; the CUT4 movement-lock
+    // semantics unchanged — the two tool definition bodies only; the settle
+    // helper lives OUTSIDE the span).
+    assert.equal(md5, '7693beaa8c9a969a4f556edc25b2d19b', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions (md5 7693beaa…)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface

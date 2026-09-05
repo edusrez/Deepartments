@@ -2766,6 +2766,31 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     return Number.isFinite(n) && n >= 0 ? n : 10_000
   }
 
+  /** R8 (fb-143/144/145 — the liveness-race family): the BOUNDED SETTLE-WAIT
+   * window of dept_head_rotate's free-window check. The race the round
+   * datapoints hit: BOTH dept_who (buildCatalogRows, boot.ts:527/544) and the
+   * rotate check (below) read the SAME live signal
+   * (`agents.get(sid)?.status === 'running'`), so a 'idle' dept_who snapshot
+   * can go stale BETWEEN the two reads — a wake landed (fb-143/144: fifo-gate
+   * drain m-1335/m-1341/m-1344, settlements) OR the head's OWN declaration
+   * turn was still running when it announced readiness (fb-145: the send_message
+   * that delivered «MEMO LISTO» executes INSIDE the live turn; the dsh-agent
+   * driver keeps `status === 'running'` until the turn fully drains/closes —
+   * AgentStatus is binary 'idle'|'running', no 'finalizing' state exists). The
+   * instant rejection was correct-by-design (fb-115 — never rotate a REAL turn
+   * in flight) but the SIGNAL was race-prone. FIX: when the target handle is
+   * running, the rotate re-verifies in a bounded poll loop — a turn that closes
+   * within the window (the finalization tail) proceeds in the SAME free window
+   * (automatic retry, the fb-145 reinforced proposal); a turn STILL running
+   * past the bound is a REAL in-flight turn → the SAME loud rejection. Default
+   * 5s — a normal finalization tail closes in milliseconds-to-seconds; hermetic
+   * tests override it (0 = the legacy instant reject). */
+  const headRotateSettleWaitMs = (): number => {
+    const raw = process.env.DEEPARTMENTS_HEAD_ROTATE_SETTLE_MS
+    const n = raw === undefined ? NaN : Number(raw)
+    return Number.isFinite(n) && n >= 0 ? n : 5_000
+  }
+
   /** DEADLOCK FIX (2026-08-26) — the BOUNDED `disposeHeadHandleOnce` join for
    * the sleep respawn. Returns true when the detach settled before the bound;
    * false on timeout. A timeout can NEVER corrupt the respawn: the fresh
@@ -5107,7 +5132,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    * (the LIVE catalog — busDeliverCatalog addressing — still filters them). */
   const deptWhoTool = defineTool({
     name: 'dept_who',
-    description: 'List the whole Deepartments catalog — the Asistente host (kind "host", title "Asistente") and every registered department head/worker with its DERIVED kind (a configured department head is kind "head", a disposable worker is kind "worker"; title from the department configuration, PostEntry.role fallback) — each with a derived per-member life-cycle state (`running` = a turn IN FLIGHT, `idle` = resident with the turn finished, `sleeping` = sleepEpoch set, `offline` = no live session; a single coherent enum so no contradictory "live, sleeping"/"live, retired" render), the live/sleeping markers and session id, and your OWN entry marked you:true. Worker rows additionally carry departmentId/role/jobId (its department template and job link) and RETIRED workers are shown with retired:true (the head\'s management view; a retired worker is NOT addressed by the live catalog — sending to it fails per-recipient). This is the identity + roster tool: learn who exists and who you are in one call. No room parameter — the roster is the organization. The `scope` parameter selects the view: `active` (default) = non-retired rows whose state is {idle, running} PLUS your OWN (you:true) row ALWAYS (even when you are sleeping/offline/retired) — non-caller sleeping/offline rows are HIDDEN (reported via `inactiveHiddenCount`); `all` = the full superset (idle|running|sleeping|offline + retired with retired:true); `includeRetired` is the DEPRECATED COMPAT ALIAS of `all` (kept per R6 — never remove; existing callers/tests keep using it).',
+    description: 'List the whole Deepartments catalog — the Asistente host (kind "host", title "Asistente") and every registered department head/worker with its DERIVED kind (a configured department head is kind "head", a disposable worker is kind "worker"; title from the department configuration, PostEntry.role fallback) — each with a derived per-member life-cycle state (`running` = a turn IN FLIGHT, `idle` = resident with the turn finished, `sleeping` = sleepEpoch set, `offline` = no live session; a single coherent enum so no contradictory "live, sleeping"/"live, retired" render), the VERBATIM live-handle status (`liveStatus` — the driver\'s raw token, only when the handle is live: the exact signal the state collapses, so the «confirm idle» protocol is verifiable BEFORE a dept_head_rotate; a head that just declared ready may still be `running` for its FINALIZATION TAIL, which dept_head_rotate now auto-awaits up to its bounded settle window), the live/sleeping markers and session id, and your OWN entry marked you:true. Worker rows additionally carry departmentId/role/jobId (its department template and job link) and RETIRED workers are shown with retired:true (the head\'s management view; a retired worker is NOT addressed by the live catalog — sending to it fails per-recipient). This is the identity + roster tool: learn who exists and who you are in one call. No room parameter — the roster is the organization. The `scope` parameter selects the view: `active` (default) = non-retired rows whose state is {idle, running} PLUS your OWN (you:true) row ALWAYS (even when you are sleeping/offline/retired) — non-caller sleeping/offline rows are HIDDEN (reported via `inactiveHiddenCount`); `all` = the full superset (idle|running|sleeping|offline + retired with retired:true); `includeRetired` is the DEPRECATED COMPAT ALIAS of `all` (kept per R6 — never remove; existing callers/tests keep using it).',
     parameters: {
       scope: { type: 'string', enum: ['active', 'all', 'includeRetired'], default: 'active', description: 'Catalog scope: `active` (default) shows non-retired members whose state is idle|running plus the caller\'s own row (you:true) always; `all` shows the full roster (idle|running|sleeping|offline + retired with retired:true); `includeRetired` is the DEPRECATED COMPAT ALIAS of `all` (kept per R6 — never remove).' }
     },
@@ -5129,6 +5154,16 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
                 live: { type: 'boolean', required: true },
                 sleeping: { type: 'boolean', required: true },
                 state: { type: 'string', enum: ['running', 'idle', 'sleeping', 'offline'], required: true },
+                // R8 (fb-143/144/145 — the liveness-race family): the VERBATIM
+                // live-handle status when the member's handle is live (absent
+                // when offline) — the RAW driver signal the state token
+                // collapses, exposed so the protocol guidance («confirm idle
+                // via dept_who» before dept_head_rotate) is verifiable: a
+                // `running` row means the handle is mid-turn, incl. its
+                // FINALIZATION TAIL (the head that just declared ready is
+                // still `running` until the driver closes the turn — the
+                // exact window fb-145 hit; dept_head_rotate now auto-awaits it).
+                liveStatus: { type: 'string' },
                 sessionId: { type: 'string', required: true },
                 you: { type: 'boolean', required: true },
                 departmentId: { type: 'string' },
@@ -5148,7 +5183,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         // member never renders the contradictory "live, sleeping" nor "live,
         // retired" (m-228) — `retired` and `YOU` stay as separate markers.
         const lines = value.members.map((member) =>
-          `  - ${member.agentId} (${member.kind}, "${member.title}"${member.state === 'running' ? ', running' : member.state === 'idle' ? ', idle' : member.state === 'sleeping' ? ', sleeping' : ', offline'}${member.retired === true ? ', retired' : ''}${member.you ? ', YOU' : ''})`)
+          `  - ${member.agentId} (${member.kind}, "${member.title}"${member.state === 'running' ? ', running' : member.state === 'idle' ? ', idle' : member.state === 'sleeping' ? ', sleeping' : ', offline'}${(member as { liveStatus?: string }).liveStatus !== undefined ? `, handle:${(member as { liveStatus?: string }).liveStatus}` : ''}${member.retired === true ? ', retired' : ''}${member.you ? ', YOU' : ''})`)
         const retiredCount = value.retiredCount ?? 0
         // C1 (m-264): the header adds the sleeping/offline-hidden count — the
         // NON-retired rows the DEFAULT active view hides (the caller's own
@@ -5157,7 +5192,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         return [{ type: 'text', text: `Deepartments catalog (${value.members.length} member(s), ${retiredCount} retired, ${inactiveHiddenCount} sleeping/offline hidden):\n${lines.join('\n')}` } as const]
       }
     },
-    async execute(args, exec): Promise<{ members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; state: DeptWhoState; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }>; retiredCount: number; inactiveHiddenCount: number }> {
+    async execute(args, exec): Promise<{ members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; state: DeptWhoState; liveStatus?: string; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }>; retiredCount: number; inactiveHiddenCount: number }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_who requires a calling agent (exec.agent was undefined)')
       // C1 (m-264) — the catalog scope: `active` (default) = non-retired rows
@@ -5170,7 +5205,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // B3 gap fix: caller host self-registers when no live host exists (board
       // tools are gone; the roster must show the host with you:true).
       const callerMemberId = busEnsureHostForCaller(agent as { id: string; session?: { header?: SessionHeaderWithOrigin } })
-      const members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; state: DeptWhoState; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }> = []
+      const members: Array<{ agentId: string; kind: 'host' | 'head' | 'worker'; title: string; live: boolean; sleeping: boolean; state: DeptWhoState; liveStatus?: string; sessionId: string; you: boolean; departmentId?: string; role?: string; jobId?: string; retired?: boolean }> = []
       // A5 — `retiredCount` = the retired rows the DEFAULT (active) view hides
       // (0 when scope=all/includeRetired — nothing is hidden).
       let retiredCount = 0
@@ -5182,6 +5217,14 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // so the echo and the default view can never diverge.
       for (const row of buildCatalogRows()) {
         const you = row.agentId === callerMemberId
+        // R8 (fb-143/144/145 — the liveness-race family): the row exposes the
+        // VERBATIM live-handle status when the handle is live (the RAW driver
+        // token the state enum collapses — the signal dept_head_rotate reads
+        // at check time, so the «confirm idle» guidance is verifiable: a `running`
+        // row may be the head's FINALIZATION TAIL, which the rotate now auto-awaits).
+        const liveStatus = row.live && agents !== void 0
+          ? agents.get(SessionId(row.sessionId))?.status
+          : undefined
         if (row.retired) {
           if (scope === 'active') {
             retiredCount++
@@ -5205,6 +5248,9 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           live: row.live,
           sleeping: row.sleeping,
           state: row.state,
+          // R8: the verbatim live-handle status (conditioned spread — present
+          // ONLY when a live handle exists; F9 lossless, never undefined).
+          ...(liveStatus !== void 0 ? { liveStatus } : {}),
           sessionId: row.sessionId,
           you,
           // F3 (§5.1) + F9: conditioned spreads — the worker extras and the
@@ -5764,7 +5810,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // RUNNING head is rotated in a free window, never mid-turn).
   const globalHeadRotate = ctx.tools.register(defineTool({
     name: 'dept_head_rotate',
-    description: 'Rotate a CONFIGURED department head (HOST plane, Asistente only): an ACTIVE context refresh — the head\'s durable session is fresh-minted (NEW session id) seeded with its LAST durable journal, the old session is archived server-side, and the department title stays pinned; the postId/identity, journal and messages are untouched (archive ≠ delete) and NO sleepEpoch is set (a rotation is NOT sleep). The fresh head lands LIVE but BOOT-QUIET: its first turn starts on the NEXT message/daemon wake (the journal is already in its context as the seed). Use it on CONTEXT-THRESHOLD crossing (>= 50% of the window, e.g. the QH) or on instruction; confirm the head is IDLE first (dept_who) — a running head is rejected loudly. The LAST durable journal is ALWAYS used and the rotation NEVER delays for a fresh memo (the critical-unblock rule — a context-blocked head may not run dept_memo_write): ask the head for dept_memo_write BEFORE rotating when it is operative and the window permits, and watch the returned `journal.stale` marker ("memo no actualizado — journal previo"). Emits a Quality-inspect directive to quality-head (100% mandate).',
+    description: 'Rotate a CONFIGURED department head (HOST plane, Asistente only): an ACTIVE context refresh — the head\'s durable session is fresh-minted (NEW session id) seeded with its LAST durable journal, the old session is archived server-side, and the department title stays pinned; the postId/identity, journal and messages are untouched (archive ≠ delete) and NO sleepEpoch is set (a rotation is NOT sleep). The fresh head lands LIVE but BOOT-QUIET: its first turn starts on the NEXT message/daemon wake (the journal is already in its context as the seed). Use it on CONTEXT-THRESHOLD crossing (>= 50% of the window, e.g. the QH) or on instruction; confirm the head is IDLE first (dept_who) — a running head is rejected loudly. R8 (fb-143/144/145): the free-window check RE-VERIFIES automatically with a bounded settle-wait (DEEPARTMENTS_HEAD_ROTATE_SETTLE_MS, default 5s) — the dept_who snapshot and the rotate check read the SAME live handle signal, so a head that just DECLARED ready (or that a wake turned running between the dept_who read and the rotate) may still be `running` for its FINALIZATION TAIL; the rotate waits that tail out in the same window and proceeds when the turn closes, while a turn still running past the bound is rejected with the clear reason (never rotate a REAL in-flight turn). The LAST durable journal is ALWAYS used and the rotation NEVER delays for a fresh memo (the critical-unblock rule — a context-blocked head may not run dept_memo_write): ask the head for dept_memo_write BEFORE rotating when it is operative and the window permits, and watch the returned `journal.stale` marker ("memo no actualizado — journal previo"). Emits a Quality-inspect directive to quality-head (100% mandate).',
     parameters: {
       postId: { type: 'string', required: true, description: 'The CONFIGURED department head postId to rotate (e.g. "quality-head", "internal-programming-head"). A worker or an unconfigured post is rejected loudly.' },
       reason: { type: 'string', description: 'Optional reason for the rotation (recorded in the log + the QD mirror).' }
@@ -5821,6 +5867,29 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       const sessionId = String(SessionId(entry.sessionId))
       // Free-window rule (map §3 step 2): a RUNNING head is never rotated
       // mid-turn — the host schedules the rotation when the head is idle.
+      // R8 (fb-143/144/145 — the liveness-race family): the check now
+      // RE-VERIFIES with a bounded automatic settle-wait instead of rejecting
+      // on the first 'running' read. The race: dept_who (buildCatalogRows —
+      // boot.ts:527/544) and this check read the SAME live signal
+      // (agents.get(sid).status === 'running'), so an idle snapshot can go
+      // stale BETWEEN the two calls — a wake landed (fb-143/144) OR the head's
+      // OWN declaration turn was still finalizing when it announced readiness
+      // (fb-145 — the driver keeps 'running' until the turn fully closes). The
+      // rejection is correct-by-design (fb-115: never rotate a REAL turn in
+      // flight), but the signal is race-prone: a turn that closes within the
+      // settle window (finalization tail / short wake turn) is a FREE WINDOW in
+      // the same call — the rotation proceeds; a turn STILL running past the
+      // bound is a REAL turn → the SAME loud rejection.
+      const settleWaitMs = headRotateSettleWaitMs()
+      if (settleWaitMs > 0) {
+        const settleDeadline = Date.now() + settleWaitMs
+        for (;;) {
+          const live = agents?.get(sessionId)
+          if (live === undefined || live.status !== 'running') break
+          if (Date.now() >= settleDeadline) break
+          await new Promise((resolve) => setTimeout(resolve, 150))
+        }
+      }
       const live = agents?.get(sessionId)
       if (live !== undefined && live.status === 'running') {
         throw new Error(`[deepartments] dept_head_rotate: "${args.postId}" is RUNNING (state ${live.status}) — rotate only in a free window (head idle; re-check dept_who)`)
