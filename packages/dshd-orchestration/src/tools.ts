@@ -2567,6 +2567,30 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    * instance) and live (scopeOf → undefined → `agentCtx.agent`). */
   const agentScopeOf = (agentCtx: Context): object | undefined => scopeOf(agentCtx) ?? (agentCtx as unknown as { agent?: object }).agent
 
+  /** P2-ENTRY (fb-29 — QD nudge #2, «el entry durable del retiro sub-registra
+   * dept_zstd_read»): the CANONICAL effective-toolset candidate set — the names
+   * the M2.3 WP3 `toolset-final` waypoint enumerates on the LIVE agent scope
+   * (HEAD_BASE_TOOLS + OWN_LAYER_POST_TOOLS + the calendar/feedback additions).
+   * ONE shared definition guarantees the retire durable entry (retirePost) and
+   * the toolset-audit final row can NEVER diverge again: they derive from the
+   * SAME source. The DECLARED template list (posts.json `tools` — the
+   * role-frontmatter allow-list) is NOT this source: it never carries the
+   * allowExec-gated own-layer seam tools (dept_exec / dept_zstd_read — a role
+   * that declares dept_exec also gets dept_zstd_read, installHeadBoardTools)
+   * nor the calendar tools, which is exactly the recorded 13-vs-16 divergence. */
+  const EFFECTIVE_TOOLSET_CANDIDATES: readonly string[] = [...new Set([...HEAD_BASE_TOOLS, ...OWN_LAYER_POST_TOOLS, 'dept_calendar_add', 'dept_calendar_list', 'dept_calendar_remove', 'dept_feedback', 'dept_feedback_list', 'dept_feedback_update'])]
+
+  /** The CANONICAL effective-toolset enumeration — the agent-scope visible
+   * candidates (the SAME filter the M2.3 WP3 `toolset-final` audit waypoint
+   * runs; `undefined` when the agent's scope key cannot be resolved — no
+   * live-scope oracle, the caller degrades to the declared list). Shared by the
+   * audit waypoint AND the retire durable-entry snapshot (P2-ENTRY). */
+  const enumerateEffectiveToolset = (agentCtx: Context): string[] | undefined => {
+    const scope = agentScopeOf(agentCtx)
+    if (scope === void 0) return undefined
+    return EFFECTIVE_TOOLSET_CANDIDATES.filter((name) => agentCtx.tools.get(name, scope) !== void 0)
+  }
+
   const postSetup = (postId: string, roomId: string, role: string, opts: { preset: string; manager: boolean; persona?: string; taskText?: string; tools?: string[]; department?: DepartmentConfig; reportRunToken?: string }): ((agentCtx: Context) => unknown) => {
     const presetId = opts.preset
     const kind = opts.manager ? 'head' : 'worker'
@@ -2732,8 +2756,12 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // `ownVisible` counts the own-layer candidate names that landed (proves
       // the registration, not just secretary alone).
       {
-        const candidates = [...new Set([...HEAD_BASE_TOOLS, ...OWN_LAYER_POST_TOOLS, 'dept_calendar_add', 'dept_calendar_list', 'dept_calendar_remove', 'dept_feedback', 'dept_feedback_list', 'dept_feedback_update'])]
-        const visible = candidates.filter((name) => agentCtx.tools.get(name, agentScope) !== void 0)
+        // P2-ENTRY (fb-29 — QD nudge #2): the candidate set is the SHARED
+        // EFFECTIVE_TOOLSET_CANDIDATES (the canonical source — the retire
+        // durable-entry snapshot uses the SAME enumeration, so the two records
+        // can never diverge again). Semantics unchanged (same names, same
+        // filter, same row shape).
+        const visible = EFFECTIVE_TOOLSET_CANDIDATES.filter((name) => agentCtx.tools.get(name, agentScope) !== void 0)
         const ownVisible = visible.filter((name) => OWN_LAYER_POST_TOOLS.has(name)).length
         appendToolsetAudit(stateDir, {
           wp: 'toolset-final',
@@ -3162,6 +3190,27 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // c4739f3d): the mark ALSO appends the retire row to the retired archive
       // (RETIRE-ON-DELIVERY — awaited so the archive row is on disk BEFORE the
       // retire returns; non-fatal — a failed append only warns).
+      // P2-ENTRY (fb-29 — QD nudge #2): BEFORE the durable mark, snapshot the
+      // EFFECTIVE toolset on the STILL-LIVE handle (the dispose runs later,
+      // deferred when a turn is in flight) into `entry.tools` — the retire
+      // durable entry (the posts-retired-archive.jsonl row + the posts.json
+      // retired row) must reflect the effective toolset, sourced from the SAME
+      // canonical enumeration as the toolset-audit `toolset-final` waypoint
+      // (enumerateEffectiveToolset — the agent-scope visible candidates). The
+      // previous snapshot carried the DECLARED template list (13 for a builder)
+      // and under-recorded the allowExec-gated own-layer dept_zstd_read the
+      // audit PROVES (16). When the live scope is unavailable (the handle is
+      // gone — e.g. a boot-reconcile half-slept reap) the declared list is kept
+      // (byte-compatible no-change). Non-fatal: a failed snapshot only warns.
+      try {
+        const liveAgent = agents?.get(entry.sessionId)
+        if (liveAgent !== void 0) {
+          const effective = enumerateEffectiveToolset(liveAgent.ctx)
+          if (effective !== void 0) entry.tools = effective
+        }
+      } catch (error: unknown) {
+        ctx.logger.warn(`[deepartments] retire toolset snapshot for "${postId}" failed (non-fatal — the retire keeps the declared toolset): ${error instanceof Error ? error.message : String(error)}`)
+      }
       await registry.markPostRetired(postId)
       // W7-A (in-session settlement): right after the durable mark commits,
       // settle the retiring worker's pending 'prepared'/'failed' delivery rows
