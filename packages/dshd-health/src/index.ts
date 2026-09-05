@@ -826,8 +826,18 @@ export interface HealthFinding {
      * owner-pending decision waits for the owner BY DESIGN — the frame lists
      * the NON-gated items and the dedupe KEY is `work-register-idle` in the
      * SHARED ledger, re-alerting every HEALTH_DEDUPE_WINDOW_MS while the
-     * condition persists). */
-  kind: 'post-error' | 'delivery-failed' | 'delivery-storm' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red' | 'mission-queue' | 'work-register-idle'
+     * condition persists). fb-167 (2026-09-05, WAVE 7 LANE 1) adds
+     * `settlement-wait` — the work-register-idle SUBCLASS (the host-verify
+     * SPOF coverage): a register item whose `next:` header names the HOST (a
+     * consolidated settlement — the NEXT actor is the HOST doing
+     * verify+commit+push) is EXCLUDED from the generic non-gated census and
+     * gets its OWN finding kind/key `settlement-wait` (the message names
+     * «settlement esperando acción del HOST — next actor = host»); a
+     * settlement-only register NEVER fires the generic work-register-idle
+     * (that would be a FALSE «IPD no despachó» on work that waits on the
+     * HOST — the fb-167 blind spot: 2 real pipeline stalls on 2026-09-05
+     * were only caught by the owner, not by the watchdog). */
+  kind: 'post-error' | 'delivery-failed' | 'delivery-storm' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red' | 'mission-queue' | 'work-register-idle' | 'settlement-wait'
   /** The dedupe key (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS). */
   key: string
   /** The postId (post-error / stalled-post / context-threshold post row). */
@@ -4822,6 +4832,31 @@ export function scanMissionQueue(input: MissionQueueScanInput): MissionQueueScan
 // deliverDaemonNotice (the B4 gate — the daemon wiring delivers DIRECT). The
 // frame lists the NON-GATED items (the despatchable queue — the §3 gated items
 // are never listed). The watchdog NEVER dispatches: it only alerts.
+//
+// fb-167 (2026-09-05, WAVE 7 LANE 1 — QUALITY REQUEST QD, alto — the host-link
+// SPOF): the host's verify+commit+push step is a SINGLE POINT OF FAILURE with
+// no structural coverage — the IPH's consolidated settlements reach the host
+// spool but work-register-idle cannot distinguish «0 agents = all done» from
+// «0 agents = settlement waiting for the HOST» (2 real pipeline stalls on
+// 2026-09-05 — 1h40m + ~40min — caught by the owner, not by the watchdog).
+// The fix is a SUBCLASS inside this same scan (design adopted by the head,
+// journal 2026-09-05 — «subclase de work-register-idle + cabecera next»): a
+// register item whose line carries the `next:` next-actor header naming the
+// HOST (the adopted settlement convention «next: host verify+push» — ALREADY
+// used in the consolidated settlements) is classified as a SETTLEMENT — it is
+// NOT an IPD-despatchable item (the next actor is the HOST) and is EXCLUDED
+// from the generic non-gated census. When ≥1 settlement exists in quiet VALLE
+// ≥ window (the SAME epoch/ledger/quietWindow — the subclass reuses
+// work-register-idle-state.json + the `workRegisterIdleQuietMs` knob + the
+// `workRegisterIdleEnabled` gate): the scan emits its OWN finding (kind/key
+// `settlement-wait` — its own dedupe key in the SHARED health-alerts ledger,
+// 30-min re-alert while the settlement stays host-pending) whose message
+// names the HOST explicitly. Non-settlement non-gated items keep the generic
+// `work-register-idle` finding (both may coexist in one tick — two keys, two
+// independent re-alert cadences; a settlement-only register NEVER fires the
+// generic alarm — that would be a FALSE «IPD no despachó» on host-pending
+// work, the fb-167 blind spot). Same channel: findings→dedupe→notifyHost
+// (NEVER deliverDaemonNotice).
 // ---------------------------------------------------------------------------
 
 /** The work-register-idle dedupe key (ONE key in the SHARED health-alerts
@@ -4849,8 +4884,27 @@ export const WORK_REGISTER_IDLE_GATED_SECTION_RE = /PENDIENTE-OWNER/i
  * ALERT bullet (the count + «… y N más» carry the rest). */
 export const WORK_REGISTER_IDLE_MAX_LISTED = 8
 
+/** fb-167 — the settlement-wait dedupe key (ONE key in the SHARED health-alerts
+ * ledger — the 30-min re-alert cadence while a settlement stays host-pending).
+ * Module-private (NOT part of the frozen export surface — export-parity caps
+ * lib/invoke.js at 324): the scan/branch reference it internally, tests assert
+ * the literal. */
+const SETTLEMENT_WAIT_KEY = 'settlement-wait'
+
+/** fb-167 — the `next:` next-actor header on a WORK-REGISTER item (the head's
+ * settlement convention «next: host verify+push», adopted ALREADY in the
+ * consolidated settlements — the machine-readable «the NEXT actor is X»
+ * signal). The regex matches a `next:` header whose value NAMES THE HOST (the
+ * settlement-wait class — the verify+commit+push step is the HOST's, NEVER an
+ * IPD despatchable item); the capture is the trimmed actor value
+ * («host» / «host verify+push»). Any other actor («next: research-head») is
+ * NOT a settlement — the item stays in the generic census. Module-private (the
+ * frozen export surface). */
+const WORK_REGISTER_NEXT_ACTOR_RE = /\bnext\s*[:：]\s*(host\b[^\n*]*)/i
+
 /** ONE parsed WORK-REGISTER item: the `**…**`-bolded label under an open `## `
- * section, with its GATE classification (the §3 PENDIENTE-OWNER class = gated). */
+ * section, with its GATE classification (the §3 PENDIENTE-OWNER class = gated)
+ * and its fb-167 next-actor header (the settlement-wait subclass marker). */
 export interface WorkRegisterItem {
   /** The `## ` section heading the item lives under (its gate class source). */
   section: string
@@ -4859,6 +4913,12 @@ export interface WorkRegisterItem {
   gated: boolean
   /** The bold-marked item label (`**…**` text with the asterisks stripped). */
   label: string
+  /** fb-167 — the `next:` next-actor header value when it names the HOST (the
+   * consolidated-settlement class: «next: host» / «next: host verify+push» —
+   * the host is the next actor, the item waits on verify+commit+push and is
+   * NEVER an IPD despatchable item). ABSENT (undefined) when the item carries
+   * NO such header (a plain pending item — the generic census). */
+  nextActor?: string
 }
 
 /** LANE 5 — parse the WORK-REGISTER into its item census with the GATED vs
@@ -4870,7 +4930,11 @@ export interface WorkRegisterItem {
  * whose heading matches WORK_REGISTER_IDLE_GATED_SECTION_RE (the §3
  * PENDIENTE-OWNER class) is GATED; every other open section's items are
  * NON-gated (despatchable — the §1/§4/§5 classes; a closed/reference section
- * contributes nothing). PURE — NEVER throws (not a register-shaped doc → []). */
+ * contributes nothing). fb-167 ADDS the next-actor header: an item whose line
+ * carries a `next:` header naming the HOST (the consolidated-settlement
+ * convention «next: host verify+push») is marked `nextActor` — the
+ * settlement-wait subclass (the NEXT actor is the HOST, NOT an IPD
+ * despatchable item). PURE — NEVER throws (not a register-shaped doc → []). */
 export function parseWorkRegisterItems(text: string): WorkRegisterItem[] {
   const sections = text.split(/^##\s+/m)
   if (sections.length <= 1) return []
@@ -4883,9 +4947,20 @@ export function parseWorkRegisterItems(text: string): WorkRegisterItem[] {
     const body = lines.slice(1).join('\n')
     const markers = body.match(/\*\*([^*]+)\*\*/g)
     if (markers === null) continue
-    for (const marker of markers) {
-      if (/\b(DONE|CERRADO|RESUELTO|RETIRADO)\b/i.test(marker)) continue
-      out.push({ section: heading, gated, label: marker.slice(2, -2) })
+    // fb-167: the item's OWN LINE (the line the marker starts on — the
+    // register is one item per line) is scanned for the `next:` next-actor
+    // header; the marker may embed it (inside the bold span) or the line may
+    // carry it after the marker. A `next:` naming a NON-host actor is NOT a
+    // settlement (stays in the generic census).
+    for (const m of body.matchAll(/\*\*([^*]+)\*\*/g)) {
+      if (/\b(DONE|CERRADO|RESUELTO|RETIRADO)\b/i.test(m[0])) continue
+      const lineStart = body.lastIndexOf('\n', m.index) + 1
+      const lineEnd = body.indexOf('\n', m.index)
+      const line = body.slice(lineStart, lineEnd === -1 ? body.length : lineEnd)
+      const nextMatch = WORK_REGISTER_NEXT_ACTOR_RE.exec(line)
+      const item: WorkRegisterItem = { section: heading, gated, label: m[0].slice(2, -2) }
+      if (nextMatch !== null) item.nextActor = nextMatch[1].trim()
+      out.push(item)
     }
   }
   return out
@@ -4947,17 +5022,22 @@ export interface WorkRegisterIdleScanInput {
   ledger: WorkRegisterIdleState
 }
 
-/** The work-register-idle scan result: the findings (≤1 per tick, key
- * WORK_REGISTER_IDLE_KEY), the NEXT ledger, whether the ledger CHANGED (the
- * tick persists only then) and the warn-only flag (window done with ZERO
- * NON-gated pending items — expected quiet: no finding, the tick warns). */
+/** The work-register-idle scan result: the findings (≤2 per tick — the generic
+ * `work-register-idle` + the fb-167 `settlement-wait` subclass, each with its
+ * own dedupe key WORK_REGISTER_IDLE_KEY / SETTLEMENT_WAIT_KEY), the NEXT
+ * ledger, whether the ledger CHANGED (the tick persists only then) and the
+ * warn-only flag (window done with ZERO actionable pending — neither
+ * settlements nor NON-gated items — expected quiet: no finding, the tick
+ * warns). */
 export interface WorkRegisterIdleScanResult {
   findings: HealthFinding[]
   ledger: WorkRegisterIdleState
   changed: boolean
-  /** True when the quiet window COMPLETED with ZERO NON-gated pending items —
-   * expected quiet (either no register work at all, or a §3-only register whose
-   * gated items wait on the owner BY DESIGN) → warn-only, no finding. */
+  /** True when the quiet window COMPLETED with ZERO actionable pending items —
+   * no fb-167 settlements AND no NON-gated items (either no register work at
+   * all, or a §3-only register whose gated items wait on the owner BY DESIGN)
+   * → warn-only, no finding. A settlement-only register is NOT this case: it
+   * emits the settlement-wait finding (the host-pending condition). */
   quietWithoutPending: boolean
 }
 
@@ -4970,10 +5050,15 @@ export interface WorkRegisterIdleScanResult {
  * census decides: pending NON-gated register items → the `work-register-idle`
  * finding (key WORK_REGISTER_IDLE_KEY — the SHARED dedupe gives the 30-min
  * re-alert cadence while the condition persists; the frame lists the NON-gated
- * items); NO NON-gated pending (a §3-only register or an empty one) →
- * quietWithoutPending (the tick warns, no finding). The total-pending leg
- * REUSES `countPendingWorkRegister` (the dshd-core utility — byte-consistent
- * with the parsed census by construction). */
+ * items); NO NON-gated processing pending (a §3-only register or an empty one)
+ * → quietWithoutPending (the tick warns, no finding). fb-167 — the
+ * settlement-wait SUBCLASS: an item whose `next:` header names the HOST (a
+ * consolidated settlement — the next actor is the HOST, verify+push) is
+ * EXCLUDED from the non-gated census and emits its OWN finding (kind/key
+ * `settlement-wait`, own dedupe key in the SHARED ledger) — see the census
+ * comment below for the coexistence rules. The total-pending leg REUSES
+ * `countPendingWorkRegister` (the dshd-core utility — byte-consistent with
+ * the parsed census by construction). */
 export function scanWorkRegisterIdle(input: WorkRegisterIdleScanInput): WorkRegisterIdleScanResult {
   const ledger = { ...input.ledger }
   let changed = false
@@ -5001,25 +5086,57 @@ export function scanWorkRegisterIdle(input: WorkRegisterIdleScanInput): WorkRegi
   // The window COMPLETED → the WORK-REGISTER census decides. The total-pending
   // leg REUSES the existing count utility; the item census separates GATED
   // (§3 PENDIENTE-OWNER — waits on the owner BY DESIGN) from NON-gated.
+  // fb-167 — the settlement-wait SUBCLASS: an item whose `next:` header names
+  // the HOST (a consolidated settlement — the NEXT actor is the HOST doing
+  // verify+commit+push) is NOT an IPD-despatchable item: it is EXCLUDED from
+  // the generic non-gated census (a settlement-only register NEVER fires the
+  // generic work-register-idle — that alarm would be a FALSE «IPD no
+  // despachó» on work that waits on the HOST, the fb-167 blind spot). Rules:
+  //   - settlements only (0 other non-gated) → the settlement-wait finding
+  //     ONLY (kind/key `settlement-wait`, own dedupe key in the SHARED ledger);
+  //   - settlements + other non-gated → BOTH findings (each names a DIFFERENT
+  //     actor's stall — host verify+push AND the IPD despatchable queue — two
+  //     keys, two independent re-alert cadences; no suppression, no conflation);
+  //   - no settlements → the generic work-register-idle finding UNCHANGED.
   const totalPending = countPendingWorkRegister(input.registerText)
   const items = parseWorkRegisterItems(input.registerText)
-  const nonGated = items.filter((item) => item.gated !== true)
-  if (totalPending === undefined || totalPending <= 0 || nonGated.length === 0) {
+  const settlements = items.filter((item) => item.nextActor !== undefined && item.nextActor !== '')
+  const nonGated = items.filter((item) => item.gated !== true && item.nextActor === undefined)
+  if (totalPending === undefined || totalPending <= 0 || (settlements.length === 0 && nonGated.length === 0)) {
     return { findings: [], ledger, changed, quietWithoutPending: true }
   }
   const minutes = Math.round(quietMs / 60000)
-  // The frame's item list: the NON-gated labels, bounded (a huge register must
-  // not produce an unbounded ALERT frame) — the count carries the full census.
-  const listLabels = nonGated.map((item) => item.label)
-  const listText = listLabels.slice(0, WORK_REGISTER_IDLE_MAX_LISTED).join('; ') +
-    (listLabels.length > WORK_REGISTER_IDLE_MAX_LISTED ? `; … y ${listLabels.length - WORK_REGISTER_IDLE_MAX_LISTED} más` : '')
-  const findings: HealthFinding[] = [{
-    kind: 'work-register-idle',
-    key: WORK_REGISTER_IDLE_KEY,
-    ts: input.nowMs,
-    count: nonGated.length,
-    error: `WORK-REGISTER con ${nonGated.length} item(s) NO-gateado(s) sin despachar en VALLE (quiet ≥ ${input.quietWindowMs} ms, 0 agentes): ${listText}`
-  }]
+  const findings: HealthFinding[] = []
+  if (settlements.length > 0) {
+    // The settlement-wait finding: its OWN kind/key → own dedupe in the SHARED
+    // health-alerts ledger (the 30-min re-alert cadence while the settlement
+    // stays host-pending). The owner-facing line names the HOST explicitly —
+    // this is NOT generic stagnation: the next actor IS the host.
+    const listLabels = settlements.map((item) => item.label)
+    const listText = listLabels.slice(0, WORK_REGISTER_IDLE_MAX_LISTED).join('; ') +
+      (listLabels.length > WORK_REGISTER_IDLE_MAX_LISTED ? `; … y ${listLabels.length - WORK_REGISTER_IDLE_MAX_LISTED} más` : '')
+    findings.push({
+      kind: 'settlement-wait',
+      key: SETTLEMENT_WAIT_KEY,
+      ts: input.nowMs,
+      count: settlements.length,
+      error: `settlement esperando acción del HOST — next actor = host (${settlements.length}, quiet ≥ ${input.quietWindowMs} ms, 0 agentes): ${listText}`
+    })
+  }
+  if (nonGated.length > 0) {
+    // The frame's item list: the NON-gated labels, bounded (a huge register must
+    // not produce an unbounded ALERT frame) — the count carries the full census.
+    const listLabels = nonGated.map((item) => item.label)
+    const listText = listLabels.slice(0, WORK_REGISTER_IDLE_MAX_LISTED).join('; ') +
+      (listLabels.length > WORK_REGISTER_IDLE_MAX_LISTED ? `; … y ${listLabels.length - WORK_REGISTER_IDLE_MAX_LISTED} más` : '')
+    findings.push({
+      kind: 'work-register-idle',
+      key: WORK_REGISTER_IDLE_KEY,
+      ts: input.nowMs,
+      count: nonGated.length,
+      error: `WORK-REGISTER con ${nonGated.length} item(s) NO-gateado(s) sin despachar en VALLE (quiet ≥ ${input.quietWindowMs} ms, 0 agentes): ${listText}`
+    })
+  }
   return { findings, ledger, changed, quietWithoutPending: false }
 }
 
@@ -5118,6 +5235,16 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     // informative and the host sees WHAT to re-dispatch).
     if (finding.kind === 'work-register-idle') {
       return `- work-register-idle: ${finding.error ?? `WORK-REGISTER con ${finding.count ?? 0} item(s) NO-gateado(s) sin despachar en VALLE — posible espera que nunca llegó`}`
+    }
+    // fb-167 — the settlement-wait branch (the work-register-idle SUBCLASS:
+    // a consolidated settlement whose `next:` header names the HOST — the
+    // verify+commit+push step of the pipeline is the HOST's, NEVER an IPD
+    // despatchable item). NEVER let it reach the stale-post fallback; the
+    // owner-facing wording names the HOST explicitly (the fb-167 blind spot
+    // was EXACTLY the generic «0 agentes» conflating «all done» with
+    // «settlement waiting for the host»).
+    if (finding.kind === 'settlement-wait') {
+      return `- settlement-wait: ${finding.error ?? `${finding.count ?? 0} settlement(s) esperando acción del HOST — next actor = host`}`
     }
     return `- stalled-post: ${finding.postId} (${finding.count ?? 1} pending message(s), ${finding.error ?? 'no session activity'})`
   })
