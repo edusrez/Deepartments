@@ -33,8 +33,10 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { readFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 
 // LANE 0.2.2 (gap 2) — the bundle bridges resolve to the owning packages
 // directly (registry/messages/wakepack → dshd-core, jobs → dshd-jobs, pooler →
@@ -481,6 +483,12 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
       agentOptions: WORKER_AGENT_OPTIONS,
       setup
     })
+    // R9 (fb-29/fb-35): the RESULT-vs-DECLARED toolset guard — a job worker
+    // whose materialization degraded (a declared exec/capability tool ABSENT
+    // from the live scope / the RESULT allow-list, while the audit proves the
+    // environment serves capability tools) is disposed + refused LOUDLY BEFORE
+    // registerEntry — never a silently-mutilated worker.
+    await assertWorkerToolsetResult(postId, definition.meta.role, template.tools, handle, 'dept_job_run')
     registerEntry({
       postId,
       sessionId: String(SessionId(sessionId)),
@@ -585,6 +593,13 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
       agentOptions: WORKER_AGENT_OPTIONS,
       setup
     })
+    // R9 (fb-29/fb-35): the RESULT-vs-DECLARED toolset guard — a spawn whose
+    // materialization degraded (a declared exec/capability tool ABSENT from the
+    // live scope / the RESULT allow-list, while the audit proves the
+    // environment serves capability tools) is disposed + refused LOUDLY BEFORE
+    // registerEntry — never a silently-mutilated worker (the fb-29/fb-35 class
+    // ended messaging-only with NO loud error; this seam makes it fail-loud).
+    await assertWorkerToolsetResult(postId, role, template.tools, handle, 'dept_worker_spawn')
     registerEntry({
       postId,
       sessionId: String(SessionId(sessionId)),
@@ -754,11 +769,27 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
    * suffixed `-2`, `-3`… while the candidate is already registered — INCLUDING
    * RETIRED (a retired worker's id is never reused; F1 keeps retired entries
    * in byPost, so the dedup sees them) — or shadows a configured head. The
-   * live-session guard mirrors dept_post_create's (a legacy orphan session). */
+   * live-session guard mirrors dept_post_create's (a legacy orphan session).
+   *
+   * R9 (fb-121 — QUALITY «dedup de slugs de worker NO respeta registros
+   * RETIRADOS»): the dedup ALSO counts the DURABLE RETIRED ARCHIVE
+   * (`posts-retired-archive.jsonl` — the A3/C2 + O4 append-only, never-erased
+   * ledger of EVERY retired/pruned postId). The in-memory byPost does NOT
+   * carry the retired entries the A3/C2 prune removed (`removePosts` drops the
+   * oldest retired beyond `maxRetiredKept` from posts.json AND byPost — the
+   * live catalog's q-i-16..23 are archive-only), so `byPost.has(slug)` alone
+   * REUSES a retired slug in silence (the q-i-4/q-i-5/reviewer-2 incidents:
+   * the roster showed them retired, yet dept_worker_spawn returned those
+   * slugs). The archive is the truthful record — «a registered (even retired)
+   * slug is never reused» (the doc convention is the law): a slug present in
+   * the archive is treated as TAKEN forever, even when pruned from the live
+   * catalog. Tolerant: an absent/unreadable/empty archive → empty set (the
+   * dedup degrades to the in-memory check). */
   const dedupedWorkerSlug = (base: string): string => {
     const sanitized = String(base ?? '').trim().replace(/[^\w.-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '') || 'worker'
+    const durableRetired = readDurableRetiredPostIds()
     let slug = sanitized
-    for (let n = 2; byPost.has(slug) || coordinatorForPost(slug) !== void 0 || (agents !== void 0 && agents.get(String(SessionId(workerSessionId(slug)))) !== void 0); n++) {
+    for (let n = 2; byPost.has(slug) || durableRetired.has(slug) || coordinatorForPost(slug) !== void 0 || (agents !== void 0 && agents.get(String(SessionId(workerSessionId(slug)))) !== void 0); n++) {
       slug = `${sanitized}-${n}`
     }
     return slug
@@ -766,6 +797,175 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
 
   /** Disposer closure per tool the head own-layer registers. */
   type HeadToolDisposers = { dispose: () => void }
+
+  // --- R9 (fb-121) DURABLE RETIRED-SLUG LEDGER + (fb-29/fb-35) RESULT AUTH ---
+  // `<stateDir>/posts-retired-archive.jsonl` is the NEVER-ERASED append-only
+  // retired ledger (the A3/C2 prune + the O4 retire-on-delivery annex rows:
+  // `{postId, entry, prunedAt}`). The in-memory byPost is NOT the whole
+  // retired truth: the boot A3/C2 prune (`reconcileDurablePostsRegistry` +
+  // `registry.removePosts` in tools.ts) DROPS the oldest retired entries from
+  // posts.json AND byPost (maxRetiredKept) — their SLUGS become free to the
+  // dedup and get REUSED silently (fb-121: q-i-4/q-i-5/reviewer-2 were
+  // returned by dept_worker_spawn while the roster showed them retired — the
+  // archive had the rows, byPost did not). The archive is the authoritative
+  // «never reused» record: every postId ever retired, pruned or not.
+
+  /** Read the RETIRED-ARCHIVE postId set (tolerant: an absent/unreadable/
+   * malformed archive → empty set — the dedup degrades to the in-memory
+   * byPost check). The archive filename mirrors the registry reconcile's
+   * `org.postsRetention.archiveFile` default. */
+  const readDurableRetiredPostIds = (): Set<string> => {
+    const out = new Set<string>()
+    try {
+      const archiveFile = config.org?.postsRetention?.archiveFile ?? 'posts-retired-archive.jsonl'
+      const text = readFileSync(path.join(stateDir, archiveFile), 'utf8')
+      for (const line of text.split('\n')) {
+        if (line.trim() === '') continue
+        try {
+          const row = JSON.parse(line) as { postId?: unknown }
+          if (typeof row.postId === 'string' && row.postId !== '') out.add(row.postId)
+        } catch {
+          // a malformed tail row is tolerated (append-only JSONL)
+        }
+      }
+    } catch {
+      // ENOENT/unreadable → empty (no durable retired ledger to consult)
+    }
+    return out
+  }
+
+  // --- fb-29 / fb-35 RESULT-vs-DECLARED toolset guard (R9) -------------------
+  // The DECLARED side is already guarded (`assertWorkerToolScope` refuses an
+  // empty/absent template `tools`). The RESULT side — what the worker ACTUALLY
+  // inherited — was UNGUARDED at HEAD: postSetup (tools.ts) drops every
+  // declared tool it cannot SEE on the agent scope (a warn + `allow: []`), so
+  // a spawn whose registration chain broke mid-flight STILL DELIVERS a
+  // messaging-only worker with no loud error (fb-29: builder-7 double-mount
+  // probe allow:'' allowCount 0 → toolset-final count 8, while the template
+  // declared read/write/edit/glob/grep; fb-35: q-i-6 deployed with 8 tools and
+  // NO read/write/glob/grep/web). The guard has TWO hermetic-safe legs:
+  //   (1) the EXEC GATE — `dept_exec`/`dept_zstd_read` are OWN-LAYER
+  //       registrations (installHeadBoardTools allowExec), environment-
+  //       INDEPENDENT: a worker whose setup ran WITH the declared tools ALWAYS
+  //       has them; their ABSENCE on the live agent scope = the registration
+  //       chain interrupted/degraded (the worker is messaging-only) → FAIL-LOUD
+  //       (the exact fb-35 signature: q-i-6 had no dept_exec in its 8 tools).
+  //   (2) the CAPABILITY allow-list — the declared FILE/WEB tools must be in
+  //       the toolset-audit `probe` allow-list… WHEN the audit PROVES this
+  //       environment serves them (ANY probe row anywhere with allowCount > 0 —
+  //       the real harness, or a hermetic composition with global stubs). In a
+  //       composition that has NO capability tools at all (the test Loader
+  //       without stubs: every probe allow is empty), the empty RESULT is the
+  //       ENVIRONMENT's design, NOT a registration failure → no-op (0
+  //       regressions on every existing hermetic spawn).
+
+  /** The toolset-audit filename (mirrors TOOLSET_AUDIT_FILE in the bundle
+   * `src/toolset-audit.ts`). */
+  const TOOLSET_AUDIT_FILE = 'toolset-audit.jsonl'
+
+  /** Read the toolset-audit probe rows (tolerant; the file is bounded to the
+   * most-recent 500 rows by appendToolsetAudit). Returns the LATEST `probe`
+   * allow for the postId + whether ANY probe row (any postId) recorded a
+   * non-empty allow (the ENVIRONMENT-SERVES-CAPABILITIES proof). Absent/
+   * unreadable file OR the audit channel disabled (DEEPARTMENTS_TOOLSET_AUDIT=0)
+   * → undefined (the guard degrades to its exec-gate leg). */
+  const readToolsetAuditProbes = (postId: string): { resultAllow: string[] | undefined; envServesCapability: boolean } => {
+    let lastAllow: string | undefined
+    let envServes = false
+    try {
+      const text = readFileSync(path.join(stateDir, TOOLSET_AUDIT_FILE), 'utf8')
+      for (const line of text.split('\n')) {
+        if (line.trim() === '') continue
+        try {
+          const row = JSON.parse(line) as { wp?: unknown; postId?: unknown; allow?: unknown; allowCount?: unknown }
+          if (row.wp !== 'probe') continue
+          if (row.postId === postId && typeof row.allow === 'string') lastAllow = row.allow
+          if (typeof row.allowCount === 'number' && row.allowCount > 0) envServes = true
+        } catch {
+          // tolerate a malformed audit tail row
+        }
+      }
+    } catch {
+      // ENOENT/unreadable → no audit evidence
+    }
+    return {
+      resultAllow: lastAllow === undefined ? undefined : lastAllow.split(',').map((s) => s.trim()).filter(Boolean),
+      envServesCapability: envServes
+    }
+  }
+
+  /** The agent scope key read (mirrors tools.ts `agentScopeOf` — the M2.4
+   * dual-dsh-scope fallback: `scopeOf(agentCtx)` in hermetic (one instance),
+   * `agentCtx.agent` in the live profile (the harness's real scope key)).
+   * DEFENSIVE: a minimal stub composition (spawn-factory's bare StubAgents
+   * does NOT run the setup — `agent.ctx` is the raw plugin ctx with NO `agent`
+   * binding and NO dsh-scope) must degrade to `undefined` (no live-scope
+   * oracle → the exec-gate leg skips), never throw (`ctx.agent` on a plain
+   * cordis Context raises «cannot get property "agent" without inject»). */
+  const agentScopeKey = (agentCtx: Context): object | undefined => {
+    try {
+      const viaScope = scopeOf(agentCtx)
+      if (viaScope !== void 0) return viaScope
+    } catch {
+      // scopeOf unavailable for this ctx → fall through
+    }
+    try {
+      return (agentCtx as unknown as { agent?: object }).agent
+    } catch {
+      return undefined
+    }
+  }
+
+  /** R9 (fb-29/fb-35) — the RESULT-vs-DECLARED guard. Called right after
+   * `agents.create` (the setup ran — postSetup applied its allow-list) BEFORE
+   * registerEntry/delivery. NEVER silently delivers a mutilated worker:
+   *  (1) a DECLARED exec-gate tool missing from the live agent scope = the
+   *      registration chain degraded (allowExec never opened) → dispose +
+   *      throw LOUDLY, nothing registered, nothing delivered.
+   *  (2) when the audit PROVES the environment serves capability tools (some
+   *      probe row has allowCount>0 — the real harness, or hermetic-with-
+   *      stubs), the worker's RESULT allow must carry every DECLARED capability
+   *      tool; a missing one = the toolset degraded → dispose + throw.
+   * In a capability-less composition (the test Loader without stubs — every
+   * probe allow empty, exec gate still opens because the setup ran WITH the
+   * declared list) the guard is a no-op (0 regressions). */
+  const assertWorkerToolsetResult = async (
+    postId: string,
+    role: string,
+    declared: string[] | undefined,
+    handle: AgentHandleLike,
+    callerLabel: string
+  ): Promise<void> => {
+    if (agents === void 0) return
+    const declaredList = declared ?? []
+    const declaredExec = declaredList.filter((name) => name === 'dept_exec' || name === 'dept_zstd_read')
+    const declaredCapability = declaredList.filter((name) => name === 'read' || name === 'write' || name === 'edit' || name === 'glob' || name === 'grep' || name === 'web_search' || name === 'web_fetch')
+    if (declaredExec.length === 0 && declaredCapability.length === 0) return
+    const key = agentScopeKey(handle.agent.ctx)
+    // (1) the EXEC GATE — env-independent own-layer registration: absent = the
+    // setup never opened the allowExec gate (the registration chain broke).
+    const missingExec = key === void 0
+      ? []
+      : declaredExec.filter((name) => handle.agent.ctx.tools.get(name, key) === void 0)
+    if (missingExec.length > 0) {
+      await handle.dispose?.().catch(() => {})
+      throw new Error(
+        `[deepartments] ${callerLabel}: worker "${postId}" (role "${role}") materialized with a DEGRADED toolset — the declared exec-gate tool(s) [${missingExec.join(', ')}] are ABSENT from the live agent scope. The registration chain did not apply the role's declared tools (fb-29/fb-35: a worker is NEVER spawned silently-mutilated / messaging-only): the created agent was disposed and NOTHING was registered or delivered. Fix the registration chain / the environment that serves the role's declared tools — the worker does not materialize.`
+      )
+    }
+    // (2) the CAPABILITY allow-list — declared FILE/WEB tools must land when
+    // the audit PROVES this environment serves them.
+    const { resultAllow, envServesCapability } = readToolsetAuditProbes(postId)
+    if (declaredCapability.length > 0 && resultAllow !== void 0 && envServesCapability) {
+      const missingCapability = declaredCapability.filter((name) => !resultAllow.includes(name))
+      if (missingCapability.length > 0) {
+        await handle.dispose?.().catch(() => {})
+        throw new Error(
+          `[deepartments] ${callerLabel}: worker "${postId}" (role "${role}") materialized with a DEGRADED toolset — the declared capability tool(s) [${missingCapability.join(', ')}] are ABSENT from the RESULT allow-list (the toolset-audit probe for this spawn recorded [${resultAllow.join(', ') || 'EMPTY'}]) while the audit PROVES this environment serves capability tools (fb-29/fb-35). A worker is NEVER spawned silently-mutilated: the created agent was disposed and NOTHING was registered or delivered. Fix the registration chain / the environment that serves the role's declared tools — the worker does not materialize.`
+        )
+      }
+    }
+  }
 
   // --- W1 calendar helpers (shared by the calendar tools + the scheduler) ---
   // `<stateDir>/calendar.json` is the runtime agenda store. The read helper is
