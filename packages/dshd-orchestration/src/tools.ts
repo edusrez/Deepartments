@@ -1400,6 +1400,45 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     }
   }
 
+  /** fb-135 (R5 — the missing-package-path DX family): a discovery hint for a
+   * FAILED dept_exec run whose command references a `/packages/<name>` path
+   * that does not exist on disk (e.g. the typo «dsh-key-pooler» vs
+   * «dshd-pooler» — the recorded fb-135: grep over a misspelled package dir
+   * returned only 'exit code 2'/'IO error' with no cause). Scans the command
+   * for `/packages/<name>[/…]` tokens; when the referenced path does not
+   * exist but a `packages/` directory DOES exist at the same base, returns
+   * the discovery guidance («usa glob para listar packages/» / list the
+   * actual packages). PURE (module-local, node:fs existsSync); APPEND-ONLY to
+   * the failed result's stderr — a successful run or a command without a
+   * missing package path is untouched. */
+  const deptExecMissingPackageHint = (command: string, cwd: string): string | undefined => {
+    const re = /(^|[\s|&;'`"()<>])([^\s|&;'`"()<>]*\/packages\/[A-Za-z0-9._-]+)/g
+    const seen = new Set<string>()
+    const hints: string[] = []
+    for (const match of String(command ?? '').matchAll(re)) {
+      const raw = match[2] as string | undefined
+      if (raw === undefined) continue
+      let candidate = raw
+      if (!candidate.startsWith('/')) candidate = path.resolve(cwd, candidate)
+      if (seen.has(candidate)) continue
+      seen.add(candidate)
+      try {
+        if (existsSync(candidate)) continue
+        // The packages/ base for this token — the deepest existing ancestor
+        // ending in `/packages` (or the literal prefix). If the base exists
+        // but the referenced package does not, it's the typo class.
+        const base = candidate.slice(0, candidate.lastIndexOf('/packages/') + '/packages'.length)
+        if (!existsSync(base)) continue
+        const pkgName = candidate.slice(base.length + 1).split('/')[0]
+        if (pkgName === '') continue
+        hints.push(`[hint] «packages/${pkgName}» no existe — usa glob para listar packages/ (el dir real: ${base})`)
+      } catch {
+        // existence check never blocks the hint path
+      }
+    }
+    return hints.length > 0 ? hints.join('\n') : undefined
+  }
+
   /** markdown renderer for the dept_exec result: exit code + stdout/stderr in
    * fenced code blocks, each TRUNCATED to a cap with an explicit marker. */
   const deptExecRender = (_args: unknown, value: { ok: boolean; exitCode: number | null; stdout: string; stderr: string }): Array<{ type: 'text'; text: string }> => {
@@ -1677,7 +1716,19 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           // the nudge inline (a plain-text read of the denial still nudges);
           // the waterfall dedups on the same line (one nudge per error).
           if (deny !== void 0) throw new Error(`[deepartments] dept_exec: ${deny}\n${FEEDBACK_NUDGE_LINE}`)
-          return runDeptExec(command, resolvedCwd)
+          const result = await runDeptExec(command, resolvedCwd)
+          // R5 (fb-135 — the missing-package-path DX family): a FAILED run
+          // whose command references a `/packages/<name>` path that does not
+          // exist on disk (typo «dsh-key-pooler» vs «dshd-pooler») appends the
+          // discovery hint to the stderr — a bare 'exit code 2'/'IO error'
+          // without a cause is the exact fb-135 complaint. APPEND-ONLY.
+          if (!result.ok) {
+            const missingHint = deptExecMissingPackageHint(command, resolvedCwd)
+            if (missingHint !== undefined) {
+              result.stderr = `${result.stderr !== '' ? `${result.stderr}\n` : ''}${missingHint}`
+            }
+          }
+          return result
         }
       })))
 
@@ -1751,7 +1802,30 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     }
 
 
-    disposers.push(agentCtx.tools.register(memoWriteTool(false)))
+    // R5 (fb-88/fb-114 — the memo-validation DX family): the memoWriteTool
+    // parameters compile to an OPEN schema (no additionalProperties), so the
+    // harness validator reported ONLY 'missing required property "summary"' for
+    // a malformed call and NEVER listed the UNKNOWN/EXTRA keys (fb-88's IPH
+    // call with 2-3 invented keys; fb-114's QH omission of summary). STRICTEN
+    // the compiled schema IN PLACE at registration (the same object the tool's
+    // validate closure captured — see defineTool) so the harness INVALID_ARGS
+    // enumerates BOTH the missing required AND every undeclared key in ONE
+    // message (firma esperada vs recibida → immediate correction).
+    // RECORDED FP CHECK: the strict schema turns the terse error into
+    //   invalid arguments: missing required property "summary";
+    //   "explore-deep: …" is not a declared property (additionalProperties: false);
+    //   "Salto rc.1 …" is not a declared property (additionalProperties: false)
+    // while a VALID call passes unchanged (summary + the 4 optional keys stay
+    // declared). The HOST-plane registration below (lines ~5614, inside the
+    // frozen CUT4 zone) intentionally keeps the legacy open schema — heads/
+    // workers (the fb-88/114 instances) ride this post own-layer registration.
+    {
+      const memoDef = memoWriteTool(false)
+      if (memoDef.parameters !== undefined && typeof memoDef.parameters === 'object') {
+        (memoDef.parameters as Record<string, unknown>).additionalProperties = false
+      }
+      disposers.push(agentCtx.tools.register(memoDef))
+    }
 
     // LOTE A (owner decision 2026-08-27 — head/worker sleep RETIRED): the
     // post own-layer dept_sleep is deliberately NOT registered here. Heads and

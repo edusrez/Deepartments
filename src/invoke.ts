@@ -1806,6 +1806,107 @@ function deptExecIsQuotedVarTail(cmd: string, tokenIndex: number): boolean {
  * a token glued after a CLOSING quote whose span is a pure `$VAR` reference
  * (`"$D"/test/*`) is the tail of a VARIABLE-ROOTED quoted word — statically
  * unverifiable, never a literal path (`deptExecIsQuotedVarTail`). */
+/** fb-138 (R5 — the binary-FLAG-value FP family, QD 2026-09-05): the KNOWN
+ * PATTERN-VALUED binary flags whose `/…` OPERAND is a REGEX/GLOB literal (node
+ * test runners + grep include/exclude), never a filesystem path. A
+ * `/`-leading token that is the VALUE of one of these flags — `node --test
+ * --test-name-pattern '/pooler/i'` (or `--test-name-pattern=/pooler/i` — the
+ * `=`-glued form never tokenizes: `/` after `=` is mid-word, so the FP is the
+ * SPACE/QUOTE-separated operand) and `grep --include '/pooler/*.ts'` — was
+ * DENIED as «absolute path "/pooler/i" outside a scoped dept_exec root» by the
+ * path-token scan (the leading `/` at a boundary). A flag VALUE is content
+ * (grep opens files, never the include pattern; node consumes the regex), so
+ * the token must be SKIPPED — while a REAL path operand in flag position that
+ * the binary treats as a PATH (`--include /etc/passwd` is never a path
+ * operand either; the shell passes it verbatim) stays denied. The global
+ * CONTAINMENT of real paths is unchanged (fb-62/53 intact: `rm -rf /` and
+ * bare `/etc/passwd` keep denying). */
+const DEPT_EXEC_PATTERN_FLAGS: ReadonlySet<string> = new Set([
+  '--test-name-pattern',
+  '--test-skip-pattern',
+  '--include',
+  '--exclude'
+])
+
+/** fb-138 (R5) — the WORD immediately before a token start, across an optional
+ * QUOTE char (the tokenizer boundary may be the opening quote) and whitespace:
+ * `--test-name-pattern '/pooler/i'` → the token starts at `/`, the previous
+ * word (skipping `'` + the space) is `--test-name-pattern`. Returns undefined
+ * for a token at command start. */
+function deptExecPreviousWord(cmd: string, tokenStart: number): string | undefined {
+  if (tokenStart <= 0) return undefined
+  let i = tokenStart - 1
+  // cross one quote char (the boundary-quote that started the token's span)
+  if (cmd[i] === "'" || cmd[i] === '"') i--
+  while (i >= 0 && /\s/.test(cmd[i])) i--
+  if (i < 0) return undefined
+  const end = i + 1
+  while (i >= 0 && !/[\s|&;'`"()<>]/.test(cmd[i])) i--
+  return cmd.slice(i + 1, end)
+}
+
+/** fb-138 (R5): whether the `/`-token at `tokenStart` is the SPACE/QUOTE-
+ * separated VALUE of a known pattern-valued binary flag (see
+ * DEPT_EXEC_PATTERN_FLAGS) — a regex/glob content operand, never a path. */
+function deptExecIsPatternFlagValue(cmd: string, tokenStart: number): boolean {
+  const prev = deptExecPreviousWord(cmd, tokenStart)
+  return prev !== undefined && DEPT_EXEC_PATTERN_FLAGS.has(prev)
+}
+
+/** fb-142 (R5 — the git COMMIT-MESSAGE FP, family fb-84, QD 2026-09-05): a
+ * `/`-token that sits INSIDE a single/double-quoted span that is the OPERAND
+ * of `git commit -m "…"` / `--message "…"` is COMMIT MESSAGE TEXT (the quotes
+ * make the shell pass it verbatim as ONE argument; git stores it as the
+ * message — never a path the shell opens). The recorded FP:
+ * `git commit -m "(projected+reserve)/contextWindow"` → the `(`/`)` are
+ * tokenizer boundaries, so `/contextWindow` was extracted INSIDE the quoted
+ * `-m` span and DENIED as an absolute path. Conservative intencionadamente:
+ * ONLY the quoted operand of a git commit MESSAGE flag is skipped — every
+ * other quoted span (a `-m` value with a real path is documentable text,
+ * never opened; a real path OPERAND like `git add /etc/passwd` is NOT a
+ * message and keeps denying; fb-84's grep/sed/awk quote-context is separate). */
+function deptExecIsQuotedCommitMessage(cmd: string, tokenStart: number): boolean {
+  const n = cmd.length
+  if (tokenStart <= 0 || tokenStart >= n) return false
+  // Quote-state scan of the prefix: the token must be INSIDE an ACTIVE
+  // single/double-quoted span; `qOpen` = that span's opening quote.
+  let inSingle = false
+  let inDouble = false
+  let qOpen = -1
+  let segStart = 0
+  for (let i = 0; i < tokenStart; i++) {
+    const c = cmd[i]
+    if (inSingle) {
+      if (c === "'") inSingle = false
+      continue
+    }
+    if (inDouble) {
+      if (c === '"') inDouble = false
+      continue
+    }
+    if (c === "'") {
+      inSingle = true
+      qOpen = i
+    } else if (c === '"') {
+      inDouble = true
+      qOpen = i
+    } else if (c === '|' || c === '&' || c === ';' || c === '(' || c === '\n') {
+      segStart = i + 1
+    }
+  }
+  if ((!inSingle && !inDouble) || qOpen < 0) return false
+  // The pipeline-segment words UP TO the opening quote: `git commit -m` /
+  // `git … commit --message` — program `git`, subcommand `commit` present,
+  // LAST word before the quote is a MESSAGE flag (`-m`/`--message`/`--msg`).
+  const headWords = cmd.slice(segStart, qOpen).trim().split(/\s+/).filter((w) => w !== '')
+  if (headWords.length < 3) return false
+  const program = headWords[0].split('/').pop() ?? ''
+  const last = headWords[headWords.length - 1]
+  if (program !== 'git') return false
+  if (last !== '-m' && last !== '--message' && last !== '--msg') return false
+  return headWords.includes('commit')
+}
+
 function deptExecPathTokens(command: string): string[] {
   const tokens: string[] = []
   const cmd = deptExecMaskArithmetic(String(command ?? ''))
@@ -1838,6 +1939,13 @@ function deptExecPathTokens(command: string): string[] {
     // boundary's length) — when the boundary IS the opening quote, the quote
     // char sits exactly at `match.index`, and scanning must INCLUDE it.
     if (deptExecIsQuotedPatternLiteral(cmd, token, match.index + (match[1]?.length ?? 0))) continue
+    // fb-138 (R5): a `/`-token that is the VALUE of a known pattern-valued
+    // binary flag (`--test-name-pattern '/pooler/i'`, `--include '/pooler/x'`)
+    // is a regex/glob content operand, never a path — skip the FP.
+    if (deptExecIsPatternFlagValue(cmd, match.index + (match[1]?.length ?? 0))) continue
+    // fb-142 (R5): a `/`-token INSIDE a `git commit -m "…"` message span is
+    // message TEXT (never opened by the shell) — skip the FP.
+    if (deptExecIsQuotedCommitMessage(cmd, match.index + (match[1]?.length ?? 0))) continue
     // fb-10 (QH): a `/`+digits-only or `//`-only word (a division/units token,
     // e.g. `$((10-fails))/10`, `/3600000`, `//3600000`) is NOT a path.
     if (!deptExecIsPathWord(token)) continue
@@ -1889,6 +1997,27 @@ function deptExecCanonicalToken(token: string): string {
   return normalized
 }
 
+/** fb-135 (R5 — the missing-package-path DX family, QD 2026-09-05): a DENIED
+ * absolute-path token that LOOKS like a `/…/packages/<name>[/…]` package path
+ * AND references a directory that does not exist on disk (typo «dsh-key-pooler»
+ * vs «dshd-pooler», out-of-root variant) gains an appended discovery hint
+ * suggesting listing the real packages instead of a bare out-of-scope deny.
+ * PURE + APPEND-ONLY: the deny phrase itself is unchanged (existing regex
+ * matches keep passing); `/etc/passwd` and every non-packages token return ''
+ * (byte-identical behaviors). */
+function deptExecPackageDiscoveryHint(token: string, target: string): string {
+  if (!/\/packages\/[A-Za-z0-9._-]+/.test(token)) return ''
+  try {
+    if (existsSync(target)) return ''
+    const pkgIdx = token.indexOf('/packages/')
+    if (pkgIdx === -1) return ''
+    const pkgToken = token.slice(pkgIdx + 1) // packages/<name>[/…]
+    return ` — hint: «${pkgToken}» no existe — usa glob para listar packages/ (o: ls packages/)`
+  } catch {
+    return ''
+  }
+}
+
 /** The PURE dept_exec scope guard. `cwd` and every entry of `allowedRoots`
  * must already be REALPATH-resolved (the tool resolves them before calling).
  * Returns an out-of-scope deny reason string when the command/cwd must NOT run,
@@ -1920,7 +2049,12 @@ function deptExecCanonicalToken(token: string): string {
  * `/1,000`, incl. a TRAILING separator `/1000,` and a close-glue `/1000,1}` /
  * `/1000}` / `/1000,1]` (heredoc/-c/awk arithmetic) — is ALSO NOT a path;
  * real letter-bearing/multi-segment absolute words are checked exactly
- * as before (access preserved, out-of-root paths still denied). */
+ * as before (access preserved, out-of-root paths still denied).
+ * R5 (fb-135): an out-of-root deny for a `/…/packages/<name>` token that does
+ * not exist on disk appends the fb-135 discovery hint (see
+ * deptExecPackageDiscoveryHint) — the deny phrase itself stays byte-identical
+ * for every non-packages token (/etc/passwd and friends), so the existing
+ * exact regex matches keep passing. */
 export function deptExecDenyReason(command: string, cwd: string, allowedRoots: readonly string[]): string | undefined {
   const cmd = String(command ?? '').trim()
   const roots = allowedRoots.filter((r) => typeof r === 'string' && r !== '')
@@ -1984,7 +2118,11 @@ export function deptExecDenyReason(command: string, cwd: string, allowedRoots: r
       return 'OUT_OF_SCOPE / DENIED — the stable profile is protected — requires explicit owner approval via the Asistente'
     }
     if (!roots.some((root) => isPathInside(target, root))) {
-      return `OUT_OF_SCOPE / DENIED — command references absolute path "${token}" outside a scoped dept_exec root (escalate via the Asistente / owner approval)`
+      // R5 (fb-135): a DENIED `/…/packages/<name>` token that does not exist on
+      // disk (a typo class) appends the discovery hint — «usa glob para listar
+      // packages/» — to the deny (APPEND-ONLY: non-packages tokens keep the
+      // byte-identical phrase, so every existing deny-regex still matches).
+      return `OUT_OF_SCOPE / DENIED — command references absolute path "${token}" outside a scoped dept_exec root (escalate via the Asistente / owner approval)${deptExecPackageDiscoveryHint(token, target)}`
     }
   }
   return undefined
