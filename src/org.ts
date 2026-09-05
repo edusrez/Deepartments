@@ -725,6 +725,13 @@ export const Config: z<any, any> = z.object({
       enabled: z.boolean(),
       maxOfflineMs: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER)
     }).default(void 0 as unknown as { enabled: boolean; maxOfflineMs: number }),
+    // R3 — the bundle-layer patch staleness watchdog mirror of Config.org.
+    // bundlePatchCheck / bundlePatchCheckIntervalMs (OrgConfig,
+    // packages/dshd-core/src/index.ts:189-192). `default(void 0)` → an ABSENT
+    // key falls to the CODE defaults (check ON, interval 60 s), like
+    // offlineReap/postsRetention; an explicit `false` opts out.
+    bundlePatchCheck: z.boolean().default(void 0 as never),
+    bundlePatchCheckIntervalMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(void 0 as never),
     // PACING (owner m-PACING, 2026-08-28) — mirrors Config.org.pacing.
     // `default(void 0)` so an ABSENT section or absent key falls through to the
     // CODE defaults (enabled true, weekday [1..5], hours {1,2,3,6,7,8,9} UTC,
