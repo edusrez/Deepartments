@@ -1059,6 +1059,20 @@ export interface DeliveryRedelivererDeps {
    * safely. Absent → false (no liveness knowledge — a noWake row is NEVER
    * re-driven, the conservative no-wake-until-wake semantics). */
   recipientRunning?(recipientId: string): boolean
+  /** fb-132 (gate/wake-seam 2026-09-05 — the fb-150 re-drive deposit) —
+   * OPTIONAL: whether the recipient has an EARLIER-seq non-final ('prepared')
+   * delivery pair — the SAME FIFO-gate predicate the delivery engine's gate
+   * uses (fb-117). The sweep's re-drive of a GATED pair would degrade at the
+   * deliver seam to the no-wake queue BEHIND (its gate branch appends a FRESH
+   * 'prepared' row after the write-ahead — TWO new 'prepared' rows per pass
+   * into a gated inbox; the fb-150 spool: 28 prepared rows / 0 terminal in
+   * ~2.4h at the ~660s prepared-stuck cadence, growing without limit). When
+   * provided, `drivePair` SETTLES such a gated row to 'terminal' (the ledger's
+   * no-retry state) instead of re-marking 'prepared' — the message record
+   * stays durable in messages.jsonl and drains at the recipient's next real
+   * wake (after the gating earlier pair resolves). Absent → the gate-blind
+   * legacy re-drive (bounded by the backoff/prepared-stuck criteria; R6). */
+  pendingEarlierSeq?(recipientId: string, seq: number): Promise<boolean>
   /** Resolve the message record for a sidecar row (the open MessagesStore). May
    * resolve async (the store is OPENED at boot via a promise, not synchronously). */
   getRecord(messageId: string): Promise<MessageRecord | undefined>
@@ -1125,6 +1139,15 @@ export interface DeliveryRedelivererDeps {
  *       (already live — no wake happens). The BOOT pass keeps its ONE-TIME
  *       crash semantics for the crash class (a non-noWake 'prepared' row); a
  *       noWake row is never crash-class, so the guard applies at boot too.
+ *   (f) fb-132 (gate/wake-seam 2026-09-05 — the fb-150 deposit): the FIFO-GATE
+ *       SETTLE — a re-drive whose pair is STILL gated by an EARLIER-seq
+ *       pending pair of the SAME recipient SETTLES the driven row to
+ *       'terminal' (the ledger's no-retry state; the message record stays
+ *       durable and drains at the recipient's next real wake). It NEVER
+ *       re-marks 'prepared' into a gated inbox — only a GENUINE (ungated)
+ *       attempt starts the write-ahead + deliver. Needs the optional
+ *       `pendingEarlierSeq` dep (the engine's own fb-117 gate predicate);
+ *       absent → the gate-blind legacy re-drive (R6).
  */
 export class DeliveryRedeliverer {
   private readonly deps: DeliveryRedelivererDeps
@@ -1206,7 +1229,10 @@ export class DeliveryRedeliverer {
   /** Drive ONE eligible (messageId, recipientId) pair: decide terminal / skip /
    * re-deliver under the LANE ② gates. Shared by the boot pass and the sweep.
    * The `nowMs` is injected so a test is deterministic. Non-fatal: every error
-   * logs and is swallowed (the pass must never block the boot/tick). */
+   * logs and is swallowed (the pass must never block the boot/tick). fb-132:
+   * a pair whose re-drive is still FIFO-GATED behind an earlier-seq pending
+   * pair SETTLES 'terminal' here (never re-marks 'prepared' into a gated
+   * inbox — the fb-150 spool); only a genuine (ungated) attempt re-drives. */
   private async drivePair(row: DeliveryRow, attempts: number, nowMs: number, source: string): Promise<void> {
     const { stateDir, logger } = this.deps
     const pairLabel = `${row.messageId} → ${row.recipientId}`
@@ -1255,6 +1281,40 @@ export class DeliveryRedeliverer {
       // is ALREADY live mid-turn; re-driving splices into its live session
       // (zero materialization/wake), so the intent is honored, not violated.
       if (row.noWake === true && this.deps.recipientRunning?.(row.recipientId) !== true) return
+      // fb-132 (gate/wake-seam 2026-09-05 — the fb-150 re-drive deposit): a
+      // re-drive whose pair is STILL GATED (an EARLIER-seq non-final pair of
+      // the SAME recipient is pending — the deliver seam's FIFO gate) is NOT a
+      // genuine attempt: `deliverOrQueue` would degrade it to the no-wake queue
+      // BEHIND (where its gate branch appends a FRESH 'prepared' row after the
+      // write-ahead — TWO new 'prepared' rows per pass into a gated inbox; the
+      // fb-150 spool: 28 prepared rows / 0 terminal transitions in ~2.4h at the
+      // ~660s prepared-stuck cadence, growing without limit). The sweep must
+      // NEVER re-mark 'prepared' indiscriminately: a GATED pass SETTLES the
+      // driven row to the ledger's no-retry state ('terminal' — the same
+      // terminal the DEAD settle uses), so the sidecar stabilizes and the fb-27
+      // closure criterion ("0 prepared-stuck > 10 min") stays reachable. The
+      // message record itself is ALREADY durable in messages.jsonl — it drains
+      // at the recipient's next REAL wake, once the gating earlier pair resolves
+      // (that pair's own UNGATED re-drive is the wake that unblocks the queue) —
+      // so the settle loses NO content. A GENUINE attempt (the gate open) then
+      // proceeds unchanged: the write-ahead 'prepared' of the REAL re-drive
+      // starts below and the pass row is consumed by a final status. Fail-soft:
+      // the predicate is an OPTIONAL injected dep; a throw or an absent dep →
+      // warn + proceed gate-blind (a gating bug must never break a re-drive);
+      // the 'self' hold is never gated (mirroring the engine's own gate).
+      if (row.recipientId !== record.from && this.deps.pendingEarlierSeq !== undefined) {
+        let gated = false
+        try {
+          gated = await this.deps.pendingEarlierSeq(row.recipientId, record.seq)
+        } catch (error: unknown) {
+          logger.warn(`[deepartments] ${source} re-delivery FIFO-gate check failed for ${pairLabel} (proceeds gate-blind): ${error instanceof Error ? error.message : String(error)}`)
+        }
+        if (gated) {
+          await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal', undefined, row.noWake === true ? true : undefined)
+          logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) → 'terminal' — FIFO-gated behind an earlier-seq pending pair (fb-132: never re-mark 'prepared' into a gated inbox; the record stays durable and drains at the recipient's next real wake)`)
+          return
+        }
+      }
       try {
         const callerSessionId = this.deps.resolveCallerSessionId(record.from)
         const status = await this.deps.deliver(record, row.recipientId, callerSessionId)

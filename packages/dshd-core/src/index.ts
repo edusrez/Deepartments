@@ -570,6 +570,26 @@ function buildBusLazy(ctx: Context, busDeps: DepsHolder<BusBucketDeps>): BusSurf
       // (the new P2 no-wake drain exception) must reach it the same way.
       ...(merged.recipientDormant !== undefined ? { recipientDormant: merged.recipientDormant } : {}),
       ...(merged.recipientRunning !== undefined ? { recipientRunning: merged.recipientRunning } : {}),
+      // fb-132 (gate/wake-seam 2026-09-05 — the fb-150 re-drive deposit): the
+      // re-drive's FIFO-gate predicate — whether the recipient has an EARLIER
+      // seq whose pair is still 'prepared'. The sweep must NEVER re-mark
+      // 'prepared' into a gated inbox (each pass appended fresh rows through the
+      // deliver seam's gate branch — the unbounded spool: 28 prepared rows in
+      // ~2.4h, 0 terminal); drivePair now SETTLES a gated row to 'terminal'
+      // instead. SAME seam as the engine's gate (the store's per-recipient seq
+      // index + the sidecar's LATEST row per pair; fail-soft — a read error
+      // returns false and the re-drive proceeds gate-blind, the legacy behavior).
+      pendingEarlierSeq: async (recipientId, seq) => {
+        const store = await storeReady
+        try {
+          const text = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
+          return hasEarlierPendingPair(parseDeliveryRows(text), (recipient) => store.seqsFor(recipient), recipientId, seq)
+        } catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false // nothing ever sent
+          logger.warn(`[deepartments] re-drive FIFO-gate check failed for ${recipientId} (the pass proceeds gate-blind): ${error instanceof Error ? error.message : String(error)}`)
+          return false
+        }
+      },
       getRecord: async (messageId) => (await storeReady).get(messageId),
       resolveCallerSessionId: merged.resolveCallerSessionId!,
       deliver: merged.deliver!
