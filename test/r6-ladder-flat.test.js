@@ -61,6 +61,9 @@ test('r6-ladder-flat (fb-95): the self-registering tests are lane-② src-native
     // write-ahead sidecar + listeners) and self-registers the hook — the same
     // lane-② family (the o1ext-lane pattern).
     'r4-abort-intents.test.js',
+    // LANE R10 (2026-09-05): the workspace-clobber lane is src-native (the R10
+    // hide-set merge guard + the real-Loader E2E) and self-registers the hook.
+    'r10-workspace-clobber.test.js',
   ])
   for (const f of registerers) {
     assert.ok(laneFamily.has(f), `unexpected self-registerer ${f} — only the lane-②/src-native family may self-register the hook`)

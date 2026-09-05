@@ -136,7 +136,7 @@ async function resolveSystemdNRestarts(unitName: string): Promise<number | undef
     return undefined
   }
 }
-import { runHostRotation, ASISTENTE_SESSION_TITLE, isArchivedSession, buildHeadRotationSeed } from './core/session-rotation.js'
+import { runHostRotation, ASISTENTE_SESSION_TITLE, isArchivedSession, buildHeadRotationSeed, workspaceStatePathForSessionsRoot } from './core/session-rotation.js'
 import type { RotationPersistenceLike, WorkspaceRegistryLike } from './core/session-rotation.js'
 import { createLifecycleService, buildSleepJournalMessage, shouldClearCleanupPending } from './core/lifecycle.js'
 import type { LifecycleService } from './core/lifecycle.js'
@@ -1221,6 +1221,22 @@ export function resolveSessionProjCachePath(stateDir: string, persistenceRoot?: 
     : path.join(stateDir, '..', 'sessions')
   return path.join(path.dirname(sessionsRoot), 'storages', 'session_projcache.json')
 }
+
+/** R10 (fb-82) — resolve the DURABLE workspace domain file
+ * (`<stateHome>/storages/workspace.json` — the GUI/runtime state the harness
+ * workspaceRegistry service REPUBLISHES FROM MEMORY on every domain mutation,
+ * clobbering direct edits of the sidebar hide-set `global.archivedSessionIds`).
+ * The same `<dirname(sessionsRoot)>/storages/<name>.json` layout as the
+ * projection mirror (delegates to the dshd-core helper — ONE resolution).
+ * LOCAL (deliberately NOT exported: the lib/invoke.js export surface is frozen
+ * by the export-parity lock at 324 names — the tools factory receives it as a
+ * passed-by-reference dep like its projcache sibling). */
+const resolveWorkspaceStatePath = (stateDir: string, persistenceRoot?: string): string =>
+  workspaceStatePathForSessionsRoot(
+    typeof persistenceRoot === 'string' && persistenceRoot !== ''
+      ? persistenceRoot
+      : path.join(stateDir, '..', 'sessions')
+  )
 
 /** fb-25 (a) — PURE cross-check of a rotation reason against the OLD session's
  * real usage (PURE = never throws; EVERY failure/absence degrades to
@@ -3490,6 +3506,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     headRotationJournalStatus,
     verifyRotateReason,
     resolveSessionProjCachePath,
+    resolveWorkspaceStatePath,
     deliverDaemonNotice,
     captureSchedulerAutoRunFailure,
     buildCatalogRows,

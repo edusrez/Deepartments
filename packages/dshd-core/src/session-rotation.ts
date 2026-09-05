@@ -39,7 +39,7 @@
 //     copy only copies.
 
 import { randomUUID } from 'node:crypto'
-import { copyFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -409,11 +409,21 @@ export function mintFreshSessionIdNotArchived(
  * .archiveSession(oldId)`. Never throws: a missing registry or a failing call
  * resolves `{ok:false, reason}` and the caller logs loudly but continues (the
  * hosts.json retire is the durable part; §3.3 S2.5 is non-fatal by design).
+ *
+ * R10 (fb-82) — an OPTIONAL 4th arg `stateFile` (the durable workspace domain
+ * file `<stateHome>/storages/workspace.json`) arms the hide-set merge: before
+ * archiving `oldSessionId`, the durable `archivedSessionIds` (direct manual
+ * edits included) are RE-ABSORBED into the registry via the canonical API
+ * (reconcileWorkspaceHideSet), so this archive's republish NEVER loses a
+ * hide-set entry (the builder-36 clobber class). The legacy 3-arg call keeps
+ * the exact pre-R10 behavior (no reconcile — zero regression for callers
+ * without the state file).
  */
 export async function archiveOldSession(
   registry: WorkspaceRegistryLike | undefined,
   oldSessionId: string,
-  logger?: { error(message: string): void }
+  logger?: { error(message: string): void; warn?(message: string): void },
+  stateFile?: string
 ): Promise<RotationArchiveResult> {
   if (registry?.archiveSession === void 0) {
     const reason = 'workspaceRegistry unavailable (headless/profile without the GUI service) — the hosts.json retire still commits'
@@ -421,12 +431,120 @@ export async function archiveOldSession(
     return { ok: false, reason }
   }
   try {
+    if (typeof stateFile === 'string' && stateFile !== '') {
+      await reconcileWorkspaceHideSet(registry, stateFile, logger?.warn !== undefined
+        ? { warn: (message: string) => logger.warn?.(message) }
+        : undefined)
+    }
     await registry.archiveSession(oldSessionId)
     return { ok: true }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     logger?.error(`[deepartments] host rotation: archiveSession(${oldSessionId}) failed (non-fatal — hosts.json retire still commits): ${reason}`)
     return { ok: false, reason }
+  }
+}
+
+/** R10 (fb-82) — resolve the DURABLE workspace domain file
+ * (`<stateHome>/storages/workspace.json` — the GUI/runtime state the
+ * workspaceRegistry service REPUBLISHES FROM MEMORY on every domain mutation)
+ * from the state-home sessions root, exactly like the web-UI wiring resolves
+ * the session_projcache sibling (invoke.ts resolveSessionProjCachePath — the
+ * same `<dirname(sessionsRoot)>/storages/<name>.json` layout). Exported so
+ * every hide-set seam and the tests share ONE resolution (no
+ * tested/production drift). */
+export function workspaceStatePathForSessionsRoot(sessionsRoot: string): string {
+  return path.join(path.dirname(sessionsRoot), 'storages', 'workspace.json')
+}
+
+/** R10 (fb-82) — READ the durable sidebar hide-set
+ * (`<doc>.global.archivedSessionIds` of the workspace domain file — the
+ * exact key the native sidebar hides rows by). FOCUSED by design: a raw read
+ * of the one array, never a full domain parse (the domain belongs to the
+ * harness service). PURE — never throws: absent/unreadable/malformed → `[]`
+ * (the reconcile degrades to a no-op and the archive still runs). */
+export async function readWorkspaceArchivedIds(stateFile: string): Promise<string[]> {
+  try {
+    const parsed = JSON.parse(await readFile(stateFile, 'utf8')) as { global?: { archivedSessionIds?: unknown } } | null
+    const raw = parsed?.global?.archivedSessionIds
+    if (!Array.isArray(raw)) return []
+    return raw.filter((id): id is string => typeof id === 'string' && id !== '')
+  } catch {
+    return []
+  }
+}
+
+/** R10 (fb-82) — the NON-DESTRUCTIVE MERGE guard (the R4
+ * recordToolAbortInterruptDetail pattern: read-before-write, additive,
+ * never-throw — tool-intents.ts:305-335): RE-ABSORB every durable hide-set id
+ * (direct manual edits included — the builder-36 class) into the registry's
+ * IN-MEMORY state VIA THE CANONICAL API (`registry.archiveSession` — by
+ * design idempotent at the service: an already-archived id early-returns
+ * BEFORE any write, dsh-workspace lib/index.js:422-432), so the republisher's
+ * next whole-file rewrite carries the MERGED set and a later archive NEVER
+ * loses a hide-set entry. The daemon NEVER edits the file directly (the fb-78
+ * design note: hide-set mutations go through the API only). Skips ids already
+ * in memory (no redundant call, no redundant write); returns the disk ids
+ * found; degrades silently (a documented warn via `logger`) when the file or
+ * the registry is absent. */
+export async function reconcileWorkspaceHideSet(
+  registry: WorkspaceRegistryLike | undefined,
+  stateFile: string,
+  logger?: { warn(message: string): void }
+): Promise<string[]> {
+  const diskIds = await readWorkspaceArchivedIds(stateFile)
+  if (diskIds.length === 0) return diskIds
+  if (registry?.archiveSession === void 0) {
+    logger?.warn(`[deepartments] workspace hide-set reconcile skipped: registry unavailable — the durable archivedSessionIds (${diskIds.length}) stay file-only until the registry service is present`)
+    return diskIds
+  }
+  const inMemory = archiveIdSetOf(registry)
+  let absorbed = 0
+  for (const id of diskIds) {
+    if (inMemory.has(id)) continue
+    try {
+      await registry.archiveSession(id)
+      absorbed++
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      logger?.warn(`[deepartments] workspace hide-set reconcile: archiveSession(${id}) failed (non-fatal — the direct edit stays on disk until a later pass): ${detail}`)
+    }
+  }
+  if (absorbed > 0) {
+    logger?.warn(`[deepartments] workspace hide-set reconcile: absorbed ${absorbed} direct-edit archived session id(s) into the registry (fb-82 merge)`)
+  }
+  return diskIds
+}
+
+/** R10 (fb-82) — the SAFE archive entry every deepartments archive seam uses:
+ * reconcile the durable hide-set FIRST (the merge — a direct edit of
+ * archivedSessionIds that precedes this archive is re-absorbed through the
+ * canonical API before the archive's own write), THEN archive `sessionId`.
+ * An archive NEVER loses a hide-set entry (the fb-82 clobber class: the 4
+ * direct-edit ids of builder-36 were wiped by the archiveSession of his own
+ * auto-retire — with this guard the same sequence preserves them). Never
+ * throws: a missing registry or a failing call resolves `false` + a warn (the
+ * caller's durable mark elsewhere is the durable part, the archive is
+ * cosmetic row-hiding — the exact non-fatal discipline of archiveOldSession).
+ */
+export async function archiveSessionPreservingHideSet(
+  registry: WorkspaceRegistryLike | undefined,
+  sessionId: string,
+  stateFile: string,
+  logger?: { warn(message: string): void; error(message: string): void }
+): Promise<boolean> {
+  if (registry?.archiveSession === void 0) {
+    logger?.warn(`[deepartments] archiveSession(${sessionId}) skipped — workspaceRegistry unavailable (headless/profile without the GUI service) — the sidebar row may remain until the registry service is present`)
+    return false
+  }
+  try {
+    await reconcileWorkspaceHideSet(registry, stateFile, logger)
+    await registry.archiveSession(sessionId)
+    return true
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    logger?.error(`[deepartments] archiveSession(${sessionId}) failed (non-fatal — the durable mark still commits): ${detail}`)
+    return false
   }
 }
 
@@ -673,7 +791,17 @@ export async function runHostRotation(deps: RotationDeps): Promise<HostRotationO
   // miss or a failing call logs loudly and the rotation still commits the
   // hosts.json retire (the durable part; S2.2 already failed the rotation —
   // a host that is registered but invisible is worse than no rotation).
-  const archive = await archiveOldSession(deps.workspaceRegistry, deps.oldSessionId, deps.logger)
+  // R10 (fb-82): the archive is hide-set-safe — the DURABLE workspace file
+  // (`<dirname(sessionsRoot)>/storages/workspace.json`, the same layout the
+  // web-UI storages use) is reconciled FIRST, so a direct edit of
+  // archivedSessionIds that precedes this rotation's archive survives the
+  // republisher's whole-file rewrite from memory.
+  const archive = await archiveOldSession(
+    deps.workspaceRegistry,
+    deps.oldSessionId,
+    deps.logger,
+    workspaceStatePathForSessionsRoot(deps.sessionsRoot)
+  )
 
   // S2.7 — belt-and-suspenders evidence COPY (D2). Best-effort, never throws.
   const archiveCopy = await copyOldArtifactToArchive({

@@ -173,7 +173,7 @@ import {
 import { qualityInspectDecision, QUALITY_INSPECT_ENV_VAR } from 'dshd-quality'
 import type { QualityInspectDirectiveSurface } from 'dshd-quality'
 
-import { isArchivedSession, buildHeadRotationSeed, mintFreshSessionIdNotArchived } from 'dshd-core'
+import { isArchivedSession, buildHeadRotationSeed, mintFreshSessionIdNotArchived, archiveSessionPreservingHideSet } from 'dshd-core'
 import type { WorkspaceRegistryLike } from 'dshd-core'
 import {
   mintWorkerSessionId,
@@ -570,6 +570,12 @@ export interface ToolsFactoryDeps {
   verifyRotateReason: (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number) => ReasonVerificationStamp
   /** The session-projcache path resolver (module-scope pure helper). */
   resolveSessionProjCachePath: (stateDir: string, persistenceRoot?: string) => string
+  /** R10 (fb-82) — the DURABLE workspace domain file resolver
+   * (`<stateHome>/storages/workspace.json` — the state the harness
+   * workspaceRegistry republishes from memory on every mutation). The archive
+   * wrappers reconcile the sidebar hide-set BEFORE archiving, so a direct edit
+   * of archivedSessionIds is never clobbered (fb-82). */
+  resolveWorkspaceStatePath: (stateDir: string, persistenceRoot?: string) => string
   /** The daemon notice delivery (module-scope async helper of invoke.ts — the
    * scheduler's agenda-notice delivery, queues a dormant head). */
   deliverDaemonNotice: (targetEntry: { postId: string; sleepEpoch?: number | undefined }, record: MessageRecord, framed: string, deliver: (entry: PostEntry, framed: string, record: MessageRecord, senderSessionId: string | undefined) => Promise<DeliveryStatus>) => Promise<'queued' | 'woken'>
@@ -1033,6 +1039,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     headRotationJournalStatus,
     verifyRotateReason,
     resolveSessionProjCachePath,
+    resolveWorkspaceStatePath,
     deliverDaemonNotice,
     captureSchedulerAutoRunFailure,
     buildCatalogRows,
@@ -3251,8 +3258,17 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       return false
     }
     try {
-      await registry.archiveSession(sessionId)
-      return true
+      // R10 (fb-82): the HIDE-SET-SAFE archive. The registry service
+      // REPUBLISHES the durable workspace.json FROM MEMORY on every mutation
+      // (no watcher/merge — dsh-storage-json JsonKvUnit), so a direct edit of
+      // global.archivedSessionIds (the sidebar hide-set) that precedes this
+      // archive would be clobbered by it (builder-36's 4 smoke ids were wiped
+      // by the archiveSession of his OWN auto-retire). The guard re-absorbs
+      // the DURABLE hide-set into the registry VIA THE CANONICAL API first —
+      // the archive's rewrite then carries the MERGED set. Non-fatal.
+      const persistence = ctx.get('sessionPersistence', false) as { root?: string } | undefined
+      const workspaceStateFile = resolveWorkspaceStatePath(stateDir, persistence?.root)
+      return await archiveSessionPreservingHideSet(registry, sessionId, workspaceStateFile, ctx.logger)
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] dept_worker_retire: archiveSession(${sessionId}) failed (non-fatal — the retire mark still commits): ${error instanceof Error ? error.message : String(error)}`)
       return false
@@ -3274,8 +3290,14 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       return false
     }
     try {
-      await registry.archiveSession(sessionId)
-      return true
+      // R10 (fb-82): the HIDE-SET-SAFE archive (the same guard as
+      // archiveWorkerSession) — a direct edit of the durable
+      // workspace.json archivedSessionIds that precedes this archive is
+      // re-absorbed through the canonical API before the archive's write,
+      // so the republisher's rewrite never clobbers a hide-set entry.
+      const persistence = ctx.get('sessionPersistence', false) as { root?: string } | undefined
+      const workspaceStateFile = resolveWorkspaceStatePath(stateDir, persistence?.root)
+      return await archiveSessionPreservingHideSet(registry, sessionId, workspaceStateFile, ctx.logger)
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] dept_sleep: archiveSession(${sessionId}) failed (non-fatal — the sleep mark still commits): ${error instanceof Error ? error.message : String(error)}`)
       return false
