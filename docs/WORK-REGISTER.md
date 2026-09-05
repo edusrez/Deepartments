@@ -417,7 +417,7 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   **B6/B7** (revisar obsoletas con A+B) · **rag_index 300s timeout** (cap/
   configurabilidad) · **tsc-drift dsh-tool-web-enhanced** (E1/0.2.x) ·
   **fb-31 hygiene menor** (stale flags, doble build client) · **fb-34**
-  verified-at en reports explore-deep · **fb-37** job-def quality-daily real ·
+  verified-at en reports explore-deep · **fb-37** job-def quality-daily EVALUADO (W-1 09-05: §3 session-archive NO se ejecuta en práctica — 0 lecturas run 08-30 q-i-8; recomendación amend job-def → §3 opcional/targeted; job-def QD NO tocado — decisión del head) · **A4-2 + fb-140 CERRADO (W-1 docs 09-05: VERIFICATION-LADDER §5/§6 — review-worktree isolation + rutas absolutas de reports)** ·
   **fb-24** KB dominio→mirror · **fb-26** zstd-con-cap práctica ✓ ·
   **fb-33** tests que mutan preset reales (restore en finally) · **O3** nota
   en spec 005 §3.4 ✓ (knowledge).
