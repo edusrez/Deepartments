@@ -5,8 +5,9 @@
 > Verification ladder. Este doc consolida (R6, 2026-09-05): el método canónico
 > de la suite (fb-95), el guard de integridad de suite (fb-91), la lección de
 > proceso de rotación (fb-115), el aislamiento de review en worktree (A4-2,
-> §5) y la convención de rutas absolutas de reports (fb-140, §6). Aplica a
-> builders, reviewers y cualquier run.
+> §5), la convención de rutas absolutas de reports (fb-140, §6) y el
+> procedimiento de commit-hold (HOLD-P0, §7). Aplica a builders, reviewers y
+> cualquier run.
 
 ## 1. Ladder de tests — método canónico (fb-95, SRC-NATIVE)
 
@@ -61,6 +62,21 @@ leída desde el SOURCE `packages/dshd-orchestration/src/tools.ts`); el guard y e
 freeze comparten presa. Ver también `test/r6-tree-integrity.test.js` (higiene
 standalone: árbol vs git HEAD con skip por WIP, + selftest hermético del
 detector).
+
+**Limitación conocida (2026-09-05, builder-107 b48b3e05):** las tres fases del
+guard son de MUTACIÓN (START worktree-vs-HEAD · DURING poll 400 ms · END vs
+snapshot de inicio) — **ninguna** compara `zoneMd5` contra el valor congelado
+(que vive solo en `tools-factory.test.js:348`). El guard protege contra
+mutación MID-RUN del span (fb-91) pero **NO contra deriva POR COMMIT** (zona
+cambiada en un HEAD nuevo: worktree==HEAD deja las tres fases en verde; esa
+capa es el freeze test `tools-factory`, que relee el source en cada run).
+**Mejora candidata OPCIONAL (no implementada hoy):** asertar
+`zoneMd5(start) === freeze` en START vía un MANIFEST compartido del valor
+congelado — cierra la clase de observabilidad por commit a nivel CI. El caso
+MAIN-RED 2026-09-05 resultó FALSO POSITIVO (lock nunca rojo; el md5 del span en
+HEAD era byte-idéntico a 7693beaa) — la mejora no habría cambiado ese veredicto,
+pero elimina el punto ciego diagnóstico (diagnóstico completo del guard:
+builder-107 b48b3e05 §4).
 
 ## 3. Lección de proceso — rotación de head (fb-115)
 
@@ -153,3 +169,56 @@ la ruta real era
 del depto y su reports dir YA se documentan en
 `docs/departments/internal-programming/README.md` (y specs 004/005/007 §D-Q1);
 fb-140 complementa a fb-136 (no derivar paths desde `/.deepartments`).
+
+## 7. Commit-hold procedure (HOLD-P0, lock/mark-red)
+
+Procedimiento de HOLD de commit por lock ROJO, formalizado tras la primera
+ejecución real (2026-09-05, ronda wave 4) — validado con disciplina EJEMPLAR
+por el análisis QD q-i-43 (`.dsh/reports/quality/2026-09-05-worker-retired-
+builder-106-analyze.md`, O1) y completado por los reports builder-106 c551e2b8 /
+builder-107 b48b3e05 / builder-108 ce5e1979.
+
+**Cuándo se aplica (HOLD-P0):** cuando el LOCK del árbol está ROJO / **MAIN-RED**
+(p. ej. el freeze CUT4 `tools-factory.test.js`) o el floor ordena hold de
+commit sobre el árbol compartido. Mientras el lock esté rojo **NO se commitea
+NADA encima** — ni la lane propia ni otra; la orden del floor prevalece sobre el
+avance local.
+
+**Mecánica (retract semántico, 0 pérdida de trabajo):**
+
+1. Si el commit ya se creó (caso `49910bc`), RETRACTAR con
+   `git reset --mixed HEAD~1` — NUNCA `--hard` (pierde los diffs) ni `--soft`
+   (los devuelve a staging en vez de unstaged): HEAD vuelve al padre y los
+   archivos quedan como diffs ` M` sin commitear, byte-idénticos al commit
+   retractado.
+2. **Checklist de 4 pasos** tras el retract:
+   - **HEAD esperado**: `git rev-parse HEAD` = el commit padre acordado
+     (caso real: `49910bc` → `af4757c` = W-3).
+   - **Archivos ` M`**: `git status --porcelain` = SOLO los archivos de la lane
+     (5 en el caso real), diffs íntegros (10+/9- idénticos).
+   - **`git diff --check`** limpio (sin whitespace/EOF).
+   - **0 push**: ningún `git push` (el remoto queda intacto; en el caso real
+     main quedó `ahead 7` pre-existente, sin push).
+3. **Esperar la señal de lock VERDE**: el re-freeze (o la corrección) aterriza
+   PRIMERO; no re-committear por iniciativa propia.
+4. **Re-commit del contenido pre-revisado**: mismo alcance + mismo mensaje,
+   byte-idéntico al commit retractado (`git diff 49910bc 9fd0d47` = vacío,
+   builder-108) → reviewer breve; la review del contenido puede hacerse
+   in-place sobre los diffs ` M` (condicional §5(b) de A4-2, docs/tests puros).
+
+**Lecciones de la ronda (2026-09-05):**
+
+- **El HOLD DEBE enviarse con `interrupt:true`** para preemptar a un worker EN
+  VUELO — el caso builder-106/49910bc: el worker commiteó `49910bc` en el turno
+  1 ANTES de recibir el HOLD (m-1629, turno 2) y hubo que retractar después; con
+  `interrupt:true` el HOLD aborta el turno en curso y el commit nunca aterriza
+  (evita el ciclo commit→retract y la incoherencia de lanzar un reviewer sobre
+  el commit ya retractado — G2 del análisis QD).
+- **El retiro de un worker es OK SOLO tras la recepción del commit final** — el
+  retiro de builder-106 con el WIP ` M` aún sin commitear dejó la lane de commit
+  sin ejecutor (G1 del análisis QD; requirió un executor nuevo, builder-108):
+  no retirar hasta confirmar que el commit final de la lane aterrizó en el
+  árbol.
+
+Referencias: §5 A4-2 (aislamiento de review en worktree + condicional para
+docs/tests puros) y §6 fb-140 (citas de reports con ruta absoluta).

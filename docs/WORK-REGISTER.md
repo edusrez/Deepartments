@@ -314,6 +314,11 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   trade-off monitorabilidad; Qwen3.8-Max-0902, MAI-Transcribe-2, NVIDIA
   PAIR, Tesla Cybercab Austin); de-dup verificado (+17 URLs, +5 topics);
   presentar a la vuelta junto con el estado post-crisis y fb-75.
+- **fb-136 — footprint stale del top-level de /root/.deepartments (archivo
+  OPCIONAL → decisión OWNER; w-3/af4757c + STORES-MAP.md §1)**: el footprint
+  stale (`health-heartbeat.json`/`posts.json`/`config-presets` 09-03, clase
+  fb-134 CERRADO) queda SIN archivar hasta decisión owner; NO unificar el
+  `.dsh/reports` legacy sin decisión (D-6 «no-tocar»).
 - CERRADOS: publish 0.1.0 (efd579b) · D5 · P1 · tool-goal retirado · API key
   DeepSeek (fallback real) · restart 05:23:31Z (owner: ignorar — watch si
   reaparecen; restart-registry lo deja visible) · cause restarts 08-31
