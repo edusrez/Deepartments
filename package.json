@@ -33,7 +33,8 @@
   "scripts": {
     "build": "tsc",
     "build:client": "pnpm --filter dshd-gui run build:client && node scripts/mirror-client.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "test:guarded": "node scripts/r6-suite-guard.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
