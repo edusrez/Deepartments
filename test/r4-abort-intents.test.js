@@ -5,7 +5,7 @@
 //   - `tools/pre-execute`: the INTENT (tool, arguments, target, ts) is
 //     persisted to <stateDir>/tool-intents.jsonl BEFORE the real dispatch — a
 //     pre-dispatch abort leaves the intent row WITHOUT a settle (the
-//     recoverable record); 
+//     recoverable record);
 //   - `tools/post-execute`: the intent is SETTLED ('settled'|'error'|'aborted'
 //     with the classified REASON on a life-abort); an abort ALSO writes the
 //     reason into the interrupt-state.json detail ledger (the O1-EXT P4 m-1311

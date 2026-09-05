@@ -134,8 +134,9 @@ brief de review debe llevar la receta como FALLBACK disponible, no como default
 (A4-1, analyze reviewer-20:60).
 
 Fuentes: `.dsh/reports/quality/2026-09-05-worker-retired-reviewer-19-analyze.md`
-y `-reviewer-20-analyze.md`; `reports/reviewer/2026-09-05-r9-spawn-toolset-
-slug-review-81465423.md` (método, :103-113 / :133-137).
+y `-reviewer-20-analyze.md`;
+`/root/.deepartments/departments/internal-programming/reports/reviewer/2026-09-05-r9-spawn-toolset-slug-review-81465423.md`
+(método, :103-113 / :133-137).
 
 ## 6. Convención de proceso — rutas ABSOLUTAS de reports en briefs (fb-140)
 

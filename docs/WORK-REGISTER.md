@@ -219,10 +219,10 @@
     fb-78 A2 offlineReap default OFF (policy, m-228). Análisis:
     reports/explore-deep/2026-09-04-reorg-wip-f61b3d0-2492062d.md
     (0 edits/0 commits — read-only).
-  - **fb-64 (execRoots + stateDir READ-ONLY — aditivo) — scoping documentado
-    (`b05d75a`, opción C — ARCHITECTURE.md execution scope; NOTE comment-only en
-    fixture fb-62); verificación pendiente** · GUI monitor job gui-monitor-mode
-    CERRADO (2026-09-04).
+  - **fb-64 RESUELTO-verificado (W-3 af4757c — STORES-MAP.md; probes fresh:
+    tools.ts:1393 raw.add(stateDir) incluye stateDir; deny
+    /root/.deepartments = workspace by-design, no stateDir; QD q-i-20 no
+    re-abre)** · GUI monitor job gui-monitor-mode CERRADO (2026-09-04).
 - **CERRADOS en esta cola (no pedir de nuevo):** M4 (system-idle),
   M-A (context-threshold + dept_head_rotate), PACING (peak/valle),
   M-5 (misión-sin-inicio), M-6 (main-red), M-7 (mission-queue),

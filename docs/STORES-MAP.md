@@ -22,7 +22,7 @@ answers "which store is canonical for what" so a cited path always resolves.
 |---|---|---|
 | research | `/root/.deepartments/departments/research/reports/{researcher,daily-news,reviewer}/` | `…/daily-news/2026-09-04.md` ✓ (glob hit), `…/researcher/2026-09-04-fb134-store-separation.md` ✓ |
 | internal-programming | `/root/.deepartments/departments/internal-programming/reports/{builder,reviewer,explore-deep}/` | `…/builder/2026-09-05-…` ✓ (547 report files) |
-| quality | `/home/esuarez/projects/deepartments/.dsh/reports/quality/` — D-Q6 deliberate divergence from the department-workspace `reports/` dir (documented in `docs/specs/007-quality-department.md`, `presets/departments/quality/*`) | `…/2026-09-05-quality-daily.md` ✓ (write 09-05 11:04) |
+| quality | `/home/esuarez/projects/deepartments/.dsh/reports/quality/` — D-Q6 deliberate divergence from the department-workspace `reports/` dir (documented in `docs/specs/007-quality-department.md`, `presets/departments/quality/*`) | `…/2026-09-05-quality-daily.md` ✓ (write 09-05 08:40; el _mtime_ 09-05 11:04 del dir = el analyze `worker-retired-builder-30`, no el daily) |
 
 **Corollary for citations (fb-136/fb-120 class):** a glob on `*.deepartments*`
 may return SHORT/relative-looking paths (e.g. `.deepartments/…`, `reports/…`)
