@@ -43,6 +43,10 @@ base agent preset (the neutral head/worker bases live in
 - Role-specific allowance, by design: `edit` is granted to `organizer` (safe
   frontmatter/rename) but NOT to `researcher`/`reviewer`/`analyst` — the analyst
   deliberately consolidates without mutating source reports (see analyst.md).
+  Each of those personas declares the deliberate absence explicitly (see their
+  "Deliberate tool decision" / Scope sections, fb-63/66); the HARNESS-GENERIC
+  tool guidance that mentions `edit` is not the effective allowance — the
+  frontmatter `tools` list is (R7, fb-72/73/94/100/101/113/141).
 
 ## Worker cycle (ephemeral vs job-worker)
 

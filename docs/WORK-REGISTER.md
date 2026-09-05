@@ -380,8 +380,11 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   · ~~fb-32~~ señal consolidada (3 ANALYZEs) para refinar detector del guard
   — candidato IPD post-DAG · ~~fb-39/40/41/42/43/44/45/46/47/48~~ — fb-39 ✓
   (hardening) · fb-40/41 convención adoptada (verificación QD) · fb-42
-  watch-class · fb-43 ✓ (0dbf645) · fb-44 filed (researcher sin edit —
-  candidato preset) · fb-45/46/47/48 prácticas/normas QD+host (ver ROADMAP
+  watch-class · fb-43 ✓ (0dbf645) · fb-44 ✓ LANDED R7 (researcher sin edit —
+  presets/departments/research/researcher.md declara la ausencia deliberada de
+  `edit` — read-only por diseño fb-63/66 — + patrón read→write full-rewrite en
+  presets y docs/departments/research/jobs/daily-ai-news.md + tabla mirrors en
+  SOURCES.md) · fb-45/46/47/48 prácticas/normas QD+host (ver ROADMAP
   09-01) — pendiente de cierre formal por el QD cuando verifiquen/aterricen.
 - **MISIÓN TOTAL MODULARITY per Cordis (owner 09-01; **RATIFICADA**)**: north-star
   **P1-P8 ACEPTADO** (definición RD reports/researcher/2026-09-01-cordis-total-

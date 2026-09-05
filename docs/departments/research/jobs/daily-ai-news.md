@@ -48,6 +48,12 @@ last ~**48h** and explain **why it matters** per item.
   `seenUrls` and the new topic slugs to `seenTopics` (one kebab-case slug per
   distinct topic covered this round), keeping it valid JSON. If the file does
   not exist, create it with the two empty arrays first.
+- **The ledger is a cumulative file — extend it by FULL REWRITE via `write`**
+  (the researcher toolset has NO `edit`, by design, fb-63/66): `read` the
+  current ledger first, then `write` the complete updated JSON (old arrays +
+  your appends). Re-read to verify valid JSON. This is the sanctioned
+  "extend, never duplicate" pattern (fb-94/113/141) — never attempt `edit`;
+  it fails with "unknown tool edit".
 
 ## Search & sources
 
@@ -92,6 +98,15 @@ Body:
   the topic slug FIRST (glob/grep); if an entry exists, **EXTEND** it (add URLs,
   refresh `date`) instead of duplicating; if not, create one with the required
   frontmatter (`title`, `tags`, `urls`, `date`, `verified: false`, `notes`).
+- **EXTEND = `read` the entry, then `write` the complete new content** (old
+  frontmatter/URLs + your additions), never a partial edit — the researcher
+  toolset has NO `edit` (deliberate, fb-63/66), so `write` full-rewrite is the
+  sanctioned pattern for cumulative source records (fb-94/113/141).
+- For press-release press items, follow the researcher fetch guidance
+  (`presets/departments/research/researcher.md` § Fetch guidance + the
+  domain→status table in `docs/departments/research/SOURCES.md`): prefer the
+  vendor primary blog/repo; `businesswire.com` times out and `tmcnet.com`/
+  `zexprwire.com` 403 — do not burn fetches on them.
 
 ## Reply to the head
 
