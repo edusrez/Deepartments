@@ -49,6 +49,41 @@ agent preset (the neutral head/worker bases live in
   subagent tools; `dept_exec` is READ-ONLY (the inspector reads the archived
   session artifacts, never mutates); `write` is for the inspection report only.
 
+## Toolset guarantee (R9/fb-29/fb-35/fb-121)
+
+The role's declared `tools` are a **contract enforced at spawn**, not a hint:
+the spawn seam validates the RESULT against the DECLARED set
+(`packages/dshd-orchestration/src/spawn.ts` `assertWorkerToolsetResult`, R9) and
+the worker-slug dedup counts the durable retired archive (fb-121). Two absolute
+guarantees:
+
+- **Fail-loud toolset (fb-29/fb-35)** — an inspector/worker NEVER materializes
+  with a mutilated toolset. After `agents.create` and BEFORE `registerEntry`,
+  the spawn validates that every declared exec-gate tool (`dept_exec`,
+  `dept_zstd_read`) is present on the LIVE agent scope and — when the
+  toolset-audit proves the environment serves capability tools (any probe row
+  with `allowCount > 0`) — that every declared file/web tool
+  (`read`/`write`/`glob`/`grep`/`web_search`/`web_fetch`) is on the RESULT
+  allow-list. A degraded toolset (a declared tool ABSENT from the result) =
+  **dispose + throw LOUD**: the created agent is disposed, `0` durable rows are
+  written, `0` deliveries happen — a worker is never spawned
+  silently-mutilated / messaging-only (the 2026-08-31 empty-scope incident
+  class).
+- **Never-reused slugs (fb-121)** — the worker-slug dedup (`dedupedWorkerSlug`)
+  consults the DURABLE RETIRED ARCHIVE
+  (`<stateDir>/posts-retired-archive.jsonl` — the never-erased ledger the A3/C2
+  prune + retire-annex rows feed), NOT only the live catalog (`posts.json` /
+  byPost). A slug RETIRED — even PRUNED from `posts.json` (the
+  `maxRetiredKept` class: q-i-16..23 live are archive-only) — is NEVER returned
+  by a later spawn: «a registered (even retired) slug is never reused» is the
+  law (the dedup returns `-2`/`-3`… suffixes, never the base).
+
+**How to verify a slug is free or retired:** `dept_who` shows the live catalog
+(scope `all` renders retired workers with `retired: true`); the ground truth is
+the durable registry `posts.json` (byPost) + the retired archive file
+(`<stateDir>/posts-retired-archive.jsonl`) — a slug in EITHER is taken, a slug
+in neither is free.
+
 ## Worker cycle (ephemeral vs job-worker)
 
 - **EPHEMERAL (default)**: a one-off task worker. Completes the task, reports to

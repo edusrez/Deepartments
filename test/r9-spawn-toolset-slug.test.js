@@ -27,8 +27,10 @@
 // silencioso); (ii) el toolset real del worker == el declarado del preset
 // (quality-inspector: file tools PRESENTES); (iii) slug retirado → spawn
 // devuelve -2 (nunca el slug base reutilizado); (iv) slug live → base sin
-// dedup; (v) un ANALYZE-type misión con file tools ejecutable (durable entry
-// carries the declared tools).
+// dedup; (v) un ANALYZE-type misión con file tools ejecutable — TEST 3 (R9-3)
+// DEDICADO: la directiva QUALITY INSPECT worker-retired real (dshd-quality)
+// materializa el worker con las file tools en el scope vivo + tools en el
+// durable entry + la directiva entregada verbatim como primer bus message.
 //
 // Hermetic: temp stateDir; the smokeBoot composition of r5-dx-guards; the
 // toolset-audit channel is ENABLED for this file (the RESULT oracle the R9
@@ -44,6 +46,11 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+// The REAL QUALITY INSPECT directive frame (dshd-quality, the workspace
+// package — NOT @deepseek-ai scoped): the worker-retired variant IS the
+// ANALYZE-type mission («ANALYZE the retired agent: its log/session, the tools
+// it used, …») — TEST 3 (R9-3) mounts it as the spawn task text.
+import { QUALITY_INSPECT_WORKER_RETIRED_PREFIX, qualityInspectDirectiveText } from 'dshd-quality'
 
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('../', import.meta.url)))
 const TOOLSET_AUDIT_FLAG_ENV = 'DEEPARTMENTS_TOOLSET_AUDIT'
@@ -322,5 +329,74 @@ test('R9 (fb-121, real Loader): un slug RETIRADO (en el archive durable — incl
     }
   } finally {
     await rm(stateDir2, { recursive: true, force: true })
+  }
+})
+
+test('R9-3 ANALYZE-type mission: a learner-directive (ANALYZE kind) materializes with the file tools present and executable', async () => {
+  // (v) — the FORMAL ANALYZE case (the R9 fold-in pending, formalized): the
+  // QUALITY INSPECT worker-retired directive frame (dshd-quality
+  // qualityInspectDirectiveText — the REAL ANALYZE-type directive, «ANALYZE the
+  // retired agent: its log/session, the tools it used, its flows, its
+  // failures …») is the spawn task of a quality-inspector mission. With the
+  // FULL env the R9 guard lets the spawn through and the mission is
+  // EXECUTABLE: the worker materializes WITH the file tools PRESENT on the
+  // live scope (read/write/glob/grep — the tools the ANALYZE mission needs to
+  // read the archived session and write the report), the durable entry carries
+  // the declared tools (the VALLE-B cold re-materialization fast-path), and
+  // the directive lands verbatim as the worker's FIRST durable bus message
+  // (messages.jsonl — the assignment the worker wakes on).
+  const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-r9-analyze-'))
+  try {
+    const directive = qualityInspectDirectiveText({ kind: 'worker-retired', workerPostId: 'quality-inspector', sessionId: 'worker-quality-inspector-s1', archived: true })
+    assert.ok(directive.startsWith(QUALITY_INSPECT_WORKER_RETIRED_PREFIX), 'the fixture directive is the REAL worker-retired QUALITY INSPECT frame (the M1 prefix, never forked)')
+    assert.ok(directive.includes('ANALYZE'), 'the worker-retired frame carries the ANALYZE mission text')
+    const { pluginCtx, agentsStub, dispose } = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] }, globalTools: QUALITY_INSPECTOR_CAPABILITIES })
+    try {
+      let headChild
+      for (let i = 0; i < 160; i++) {
+        headChild = agentsStub.childContexts.find((c) => c.agent.id.includes('head-quality-head'))
+        if (headChild !== undefined) break
+        await new Promise((r) => setTimeout(r, 25))
+      }
+      assert.ok(headChild !== undefined, 'the boot materialized the quality head (ANALYZE fixture)')
+      const spawnTool = headChild.ctx.tools.get('dept_worker_spawn', headChild.key)
+      const res = await spawnTool.execute({ role: 'quality-inspector', task: directive }, { agent: headChild.agent })
+      const workerId = res.workerId ?? res.postId
+      let workerChild
+      for (let i = 0; i < 100; i++) {
+        workerChild = agentsStub.childContexts.find((c) => String(c.agent.id).includes(String(workerId)))
+        if (workerChild !== undefined) break
+        await new Promise((r) => setTimeout(r, 25))
+      }
+      assert.ok(workerChild !== undefined, 'the ANALYZE-mission worker materialized with the full env')
+      // File tools PRESENT on the live scope — the ANALYZE mission (read the
+      // archived session, write the report) is executable.
+      for (const name of QUALITY_INSPECTOR_CAPABILITIES) {
+        assert.ok(workerChild.ctx.tools.get(name, workerChild.key) !== void 0, `the ANALYZE worker scope carries "${name}" (file tools PRESENTES — the mission is executable)`)
+      }
+      // Durable entry carries the declared tools (the VALLE-B fast-path).
+      const postsAfter = JSON.parse(readFileSync(path.join(stateDir, 'posts.json'), 'utf8'))
+      const workerRow = Object.entries(postsAfter).find(([, e]) => e?.provider === 'worker' && e.sessionId === res.sessionId)
+      assert.ok(workerRow !== undefined, 'the durable worker row exists (ANALYZE mission)')
+      const [workerPostId, workerDurable] = workerRow
+      assert.equal(workerPostId, workerId, 'the durable postId equals the returned workerId')
+      assert.ok(Array.isArray(workerDurable.tools), 'the durable entry carries the tools field')
+      for (const name of QUALITY_INSPECTOR_CAPABILITIES) {
+        assert.ok(workerDurable.tools.includes(name), `the durable entry carries the declared tool "${name}"`)
+      }
+      // The directive is EXECUTABLE: it was delivered VERBATIM as the worker's
+      // first durable bus message (the composed store — the assignment the
+      // worker wakes on and acts with its live toolset).
+      const messagesPath = path.join(stateDir, 'messages.jsonl')
+      assert.ok(existsSync(messagesPath), 'the composed bus store persisted messages.jsonl (ANALYZE delivery)')
+      const lines = readFileSync(messagesPath, 'utf8').trim().split('\n').filter(Boolean)
+      const msg = lines.map((l) => JSON.parse(l)).find((r) => Array.isArray(r.to) && r.to.includes(workerPostId))
+      assert.ok(msg !== undefined, 'the ANALYZE directive was delivered as the worker first bus message')
+      assert.equal(msg.text, directive, 'the delivered bus message IS the ANALYZE directive verbatim — the learner-directive is executable')
+    } finally {
+      dispose()
+    }
+  } finally {
+    await rm(stateDir, { recursive: true, force: true })
   }
 })
