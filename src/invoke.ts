@@ -3589,6 +3589,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     schedulerNotifyHead,
     schedulerDepartmentForEntry,
     schedulerDepartmentForJob,
+    schedulerLatchReconcile,
     buildHealthPosts,
     buildHostRunning,
     buildSessionContexts,
@@ -3831,7 +3832,15 @@ export function applyInvoke(ctx: Context, config: Config) {
       }
     })
     const interval = setInterval(tick, AGENDA_SCHEDULER_INTERVAL_MS)
-    return () => { clearInterval(interval) }
+    return () => {
+      // P-LATCH (fb-154/155/157 — QD escalation): the scheduler DRAIN — the
+      // last-chance LATCH-RECONCILE before the daemon stops (the same rule as
+      // the boot reconcile: a NON-RETIRED JOB worker with NO live handle is a
+      // stale latch → retired; a LIVE worker is never touched). Fire-and-forget
+      // + never-throws (the next boot's own reconcile is the safety net).
+      void schedulerLatchReconcile()
+      clearInterval(interval)
+    }
   }, 'deepartments: agenda scheduler daemon')
 
   // --- W3b parallel-monitor daemon (Parallel event_stream monitors) --------

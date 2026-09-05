@@ -722,6 +722,14 @@ export interface ToolsSurface {
   schedulerDepartmentForEntry: (entry: { createdBy?: string }) => DepartmentConfig | undefined
   /** The W1 scheduler's job→department resolver. */
   schedulerDepartmentForJob: (jobId: string) => DepartmentConfig | undefined
+  /** P-LATCH (fb-154/155/157 — QD escalation 2026-09-05): the BOOT/DRAIN
+   * scheduler LATCH-RECONCILE closure — clears a STALE job-latch (a NON-RETIRED
+   * JOB worker post whose session has NO live handle: the turn-1 crash-loop
+   * zombie / offline class) by retiring the worker (the sanctioned latch
+   * release) so the job is eligible again at the next tick. The bundle's boot
+   * wiring fires it after the redelivery drain; the W1 daemon effect drains it
+   * at dispose. NEVER throws. */
+  schedulerLatchReconcile: (opts?: { now?: () => number }) => Promise<void>
   /** The W6 health daemon's per-tick live inputs (posts / hostRunning /
    * sessionContexts / hostWaits builders) + the ALERT delivery closure + the
    * static per-process health deps (pooler state path / boot id). */
@@ -4400,6 +4408,97 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     }
   }
 
+  /** P-LATCH (fb-154/155/157 — QD escalation 2026-09-05): the BOOT/DRAIN
+   * LATCH-RECONCILE of the W1 scheduler. The scheduler's no-fire idempotency
+   * LATCH is the LIVE worker POST itself — the `runningJobWorker` scan of the
+   * spawn engine (packages/dshd-orchestration/src/spawn.ts, the
+   * `job already running` trip) matches ANY NON-RETIRED worker post carrying
+   * the jobId, whether or not the worker is actually running. A job worker
+   * that CRASHED on its first turn (fb-154 — the crash-loop zombie, never
+   * retired), went OFFLINE (fb-155 — a dead session with no live handle), or
+   * left a stale in-memory entry while its durable row was retired+pruned
+   * (fb-157) keeps the latch for DAYS: the A2 offline-reap (org.offlineReap,
+   * maxOfflineMs 72h + warm-up census — a 24h job cycle misses ~3 slots) and
+   * the b5-ghost census (8 boot ticks) are both too slow → the job silently
+   * no-fires every morning (`job already running` idempotency-skip). This pass
+   * closes the class at the seam where the daemon re-learns state:
+   *   - BOOT  : fired by the boot wiring AFTER the redelivery drain (a worker
+   *             with a pending delivery is re-materialized in the same boot →
+   *             agents.get is defined → LIVE → the latch is kept);
+   *   - DRAIN : fired by the W1 daemon's dispose (the state the daemon leaves
+   *             behind is the same the next boot would reconcile).
+   * Rule: every NON-RETIRED JOB worker (provider worker + jobId — the EXACT
+   * latch subject) whose session has NO live agent handle (and NO sleepEpoch —
+   * a slept worker is dormant-by-design, never a zombie; the A2 exception
+   * mirrored) is RETIRED — the same sanctioned clear as dept_worker_retire
+   * (the latch IS the post; retiring releases it) — WARNED + durability-alerted
+   * via the scheduler sink (post-errors row, dedupe-keyed
+   * `scheduler:<jobId>:latch-reconcile`). A worker with a LIVE handle is NEVER
+   * touched — the in-flight no-fire dedup stays exactly as today. Idempotent
+   * (an already-retired post is skipped by the scan + retirePost) and NEVER
+   * throws (every internal failure is a warn). The liveness check is RE-RUN
+   * SYNCHRONOUSLY immediately before each retirePost (fb-68 discipline — a
+   * worker that materialized between the scan and the retire is never killed). */
+  const runSchedulerLatchReconcile = async (opts: { now?: () => number } = {}): Promise<void> => {
+    try {
+      const now = opts.now ?? (() => Date.now())
+      const stale: Array<{ postId: string; sessionId: string; jobId: string; departmentId?: string; managerId?: string }> = []
+      for (const [postId, entry] of [...byPost]) {
+        // The latch subject: a NON-RETIRED JOB worker (a worker post carrying a
+        // jobId — the `runningJobWorker` scan). Retired posts hold no latch
+        // (the scan filters `retired !== true`) — never touched here.
+        if (entry.provider !== 'worker' || entry.jobId === void 0 || entry.retired === true) continue
+        // A SLEPT worker is dormant-by-design — never a zombie (the A2
+        // exception: runOfflineWorkerReapReconcile + computeDeptWhoState).
+        if (entry.sleepEpoch !== void 0) continue
+        // LIVE → the job is genuinely in flight — the no-fire dedup stays intact.
+        if (agents !== void 0 && agents.get(String(SessionId(entry.sessionId))) !== undefined) continue
+        stale.push({
+          postId,
+          sessionId: entry.sessionId,
+          jobId: entry.jobId,
+          ...(entry.departmentId !== void 0 ? { departmentId: entry.departmentId } : {}),
+          ...(entry.managerId !== void 0 ? { managerId: entry.managerId } : {})
+        })
+      }
+      for (const candidate of stale) {
+        // fb-68: NO await between the synchronous liveness re-check and the
+        // retirePost — a worker that materialized in the meantime is never
+        // retired (the boot passes run parallel with ensureAllHeads/redeliver,
+        // exactly like the A2 reap + the b5-ghost reap).
+        if (agents !== void 0 && agents.get(String(SessionId(candidate.sessionId))) !== undefined) {
+          ctx.logger.info(`[deepartments] latch-reconcile: job worker "${candidate.postId}" (jobId ${candidate.jobId}) came back LIVE right before the clear — latch kept (the in-flight dedup stays intact)`)
+          continue
+        }
+        // The retire caller = the worker's manager head session, or a synthetic
+        // non-post id (a system action — the A2/b5-ghost caller pattern).
+        const callerAgentId = candidate.managerId !== void 0
+          ? (byPost.get(candidate.managerId)?.sessionId ?? 'deepartments-latch-reconcile')
+          : 'deepartments-latch-reconcile'
+        try {
+          await retirePost(candidate.postId, callerAgentId)
+          ctx.logger.warn(`[deepartments] latch-reconcile: job worker "${candidate.postId}" (jobId ${candidate.jobId}${candidate.departmentId !== void 0 ? `, department ${candidate.departmentId}` : ''}${candidate.managerId !== void 0 ? `, manager ${candidate.managerId}` : ''}) is OFFLINE (no live handle) with the scheduler latch still running — RETIRED (the stale latch is cleared; the job is eligible at the next tick)`)
+          // The durable ALERT (the «reconcile latches» visibility): a
+          // post-errors row via the scheduler sink — dedupe-keyed
+          // `scheduler:<jobId>:latch-reconcile` so a cleared latch is recorded
+          // ONCE per HEALTH_DEDUPE_WINDOW_MS, never spammed by consecutive
+          // boots/turns.
+          await captureSchedulerAutoRunFailure({
+            stateDir,
+            now,
+            jobId: candidate.jobId,
+            reason: 'latch-reconcile',
+            error: `stale scheduler latch of offline worker "${candidate.postId}" cleared (fb-154/155/157 class)`
+          })
+        } catch (retireError: unknown) {
+          ctx.logger.warn(`[deepartments] latch-reconcile: retire of stale job worker "${candidate.postId}" failed (non-fatal): ${retireError instanceof Error ? retireError.message : String(retireError)}`)
+        }
+      }
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] latch-reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   /** Fix (head-sleep idempotency/rotation-race) — (b) BOOT RECONCILE: a HEAD
    * whose post entry carries a SLEPT mark (sleepEpoch set) but whose session was
    * NEVER archived/closed — the "half-slept" dangling state left when a
@@ -4696,9 +4795,13 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     // re-materialized by the redelivery IN THE SAME BOOT (agents.get defined
     // again), so the reap must never judge it while the redelivery is still
     // in flight (it would stamp offlineSince on a worker about to be woken).
+    // P-LATCH (fb-154/155/157): the scheduler LATCH-RECONCILE runs on the SAME
+    // post-redelivery sequence — a JOB worker re-materialized by the redelivery
+    // (or a mid-turn worker with a live handle) is LIVE (latch kept); a worker
+    // that is still OFFLINE here is a genuine zombie (latch cleared).
     void redeliverPendingDeliveries.run().then(
-      () => { void runOfflineWorkerReapReconcile() },
-      () => { void runOfflineWorkerReapReconcile() }
+      () => { void runOfflineWorkerReapReconcile(); void runSchedulerLatchReconcile() },
+      () => { void runOfflineWorkerReapReconcile(); void runSchedulerLatchReconcile() }
     )
     // LANE ② (item 2 — "re-drive no-boot-only"): the NON-BOOT redelivery
     // SWEEP is armed at factory build (startRedeliverySweep above — the
@@ -6245,6 +6348,10 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     schedulerNotifyHead,
     schedulerDepartmentForEntry,
     schedulerDepartmentForJob,
+    // P-LATCH (fb-154/155/157 — QD escalation): the BOOT/DRAIN scheduler
+    // LATCH-RECONCILE closure — the boot wiring fires it post-redelivery; the
+    // bundle's W1 daemon effect drains it at dispose.
+    schedulerLatchReconcile: runSchedulerLatchReconcile,
     buildHealthPosts,
     buildHostRunning,
     buildSessionContexts,
