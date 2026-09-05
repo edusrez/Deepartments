@@ -8134,6 +8134,51 @@ test('fb-33 (crash-safety): the preset-fixture snapshot is git-HEAD-based — a 
   assert.equal(execHead.kind, 'absent', 'the untracked execbuilder fixture resolves to kind:"absent" at HEAD (restore removes it, never leaves it behind)')
 })
 
+test('fb-33 (abort-path guard, R6 pattern): a fixture write followed by an ABORTED body (a mid-test throw between the write and the end — the interrupted-run class) STILL restores the REAL preset — the restore lives in `finally`, so it fires even when the test dies after the write; the untracked execbuilder fixture returns to ABSENCE after the same abort', async () => {
+  // The fb-33 class the reviewers confirmed (R7/R10 "NO tocados"): the OLD
+  // pattern's restore depended on the test reaching the end — an abort/pánico
+  // between the write and the restore left the fixture in the worktree. This
+  // detector REPRODUCES that exact window: write the REAL file, then die in the
+  // body (assert.fail/timeout/ifError class). The finally-restore MUST fire
+  // anyway, leaving the preset byte-identical to git HEAD.
+  const head = gitHeadPresetContent('presets/departments/research/ARCHITECTURE.md')
+  assert.notEqual(head, undefined, 'git HEAD resolves the tracked ARCHITECTURE.md (the crash-safe path is active)')
+  assert.equal(head.kind, 'content', 'ARCHITECTURE.md is tracked at HEAD')
+  const fixture = '# fb-33 ABORT-PATH guard fixture\n## Department architecture\n'
+  const restore = await snapshotArchitectureFile()
+  let aborted = false
+  try {
+    await writeFile(F10_ARCHITECTURE_PATH, fixture, 'utf8')
+    // The abort: an assertion/timeout/ifError fires here, AFTER the write and
+    // BEFORE the test could reach an end-of-test restore. The finally below is
+    // the only thing standing between the fixture and the clean worktree.
+    assert.fail('simulated fb-33 mid-test abort after the fixture write')
+  } catch (err) {
+    assert.equal(err?.code, 'ERR_ASSERTION', 'the simulated abort is an assertion failure (the interrupted-run class)')
+    aborted = true
+  } finally {
+    await restore()
+  }
+  assert.equal(aborted, true, 'the simulated abort actually fired (the guard exercised the write→abort→finally window)')
+  const after = await readFile(F10_ARCHITECTURE_PATH, 'utf8')
+  assert.equal(after, head.data, 'AFTER the aborted body the REAL ARCHITECTURE.md is byte-identical to git HEAD (the finally restore fired)')
+  assert.notEqual(after, fixture, 'the fixture did NOT survive the abort (the restore is not end-of-test dependent)')
+  // The untracked execbuilder fixture: same abort window → restore to ABSENCE.
+  const restoreExec = await snapshotRoleTemplate(EXEC_ROLE)
+  let execAborted = false
+  try {
+    await writeFile(EXEC_ROLE_PATH, EXEC_ROLE_FRONTMATTER, 'utf8')
+    assert.fail('simulated fb-33 mid-test abort after the execbuilder fixture write')
+  } catch (err) {
+    assert.equal(err?.code, 'ERR_ASSERTION', 'the execbuilder abort is an assertion failure too')
+    execAborted = true
+  } finally {
+    await restoreExec()
+  }
+  assert.equal(execAborted, true, 'the execbuilder abort fired')
+  await assert.rejects(access(EXEC_ROLE_PATH), { code: 'ENOENT' }, 'after the abort the untracked execbuilder.md is ABSENT (never left in the worktree)')
+})
+
 /** Read ONE systemPrompt section by name for a post's scoped context. */
 async function findPromptSection(ctx, key, sectionName, useScope) {
   const sp = ctx?.get('systemPrompt')
