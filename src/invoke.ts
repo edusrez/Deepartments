@@ -3041,13 +3041,20 @@ export function buildMissionActivity(input: MissionActivityBuildInput): MissionA
     // status in the mission-consummated set (prepared/delivered/resumed/failed
     // — the missive's «delivered/prepared/pending/failed»; 'pending' is the
     // 'prepared' write-ahead, 'resumed' the delivered-equivalent re-delivery;
-    // self/terminal are never a mission), sender = the live host.
-    let last: { messageId: string; ts: number } | undefined
+    // self/terminal are never a mission), sender = the live host. LANE WFD
+    // (m-1416/QH): the row's explicit m-707 `noWake` flag is carried into the
+    // activity row so the mission-stalled scan can EXCLUDE no-wake-gated
+    // deliveries (the m-410/fb-89 class — they drain at the next real wake,
+    // never a stall). The max-ts row wins, so a LATER always-wake delivery to
+    // the same post re-arms the alarm (its row has no noWake flag).
+    let last: { messageId: string; ts: number; noWake?: boolean } | undefined
     for (const row of deliveryRows) {
       if (row.recipientId !== postId) continue
       if (row.status !== 'prepared' && row.status !== 'delivered' && row.status !== 'resumed' && row.status !== 'failed') continue
       if (messageFrom.get(row.messageId) !== live.hostId) continue
-      if (last === undefined || row.ts > last.ts) last = { messageId: row.messageId, ts: row.ts }
+      if (last === undefined || row.ts > last.ts) {
+        last = { messageId: row.messageId, ts: row.ts, ...(row.noWake === true ? { noWake: true } : {}) }
+      }
     }
     if (last === undefined) continue
     // The post's last session activity — buildPostSnapshot (the same no-I/O
@@ -3060,6 +3067,7 @@ export function buildMissionActivity(input: MissionActivityBuildInput): MissionA
     out.push({
       postId,
       mission: last,
+      ...(last.noWake === true ? { noWake: true } : {}),
       ...(snap.lastActivityTs !== undefined ? { lastActivityTs: snap.lastActivityTs } : {})
     })
   }

@@ -4310,6 +4310,17 @@ export interface MissionActivityInput {
    * are NEVER a mission (self = the post addressed itself; terminal = a
    * settled death-mark). */
   mission?: { messageId: string; ts: number }
+  /** LANE WFD (m-1416/QH — the m-410/fb-89 false-positive class): TRUE when
+   * the mission's LATEST delivery row carried the explicit m-707 `noWake`
+   * flag — a NO-WAKE-GATED delivery (the record persisted, the recipient was
+   * NOT materialized/woken; it drains at its next REAL wake). Such a delivery
+   * is quiet BY DESIGN for minutes — that is the contract, NEVER a stall (a
+   * low-severity QH feedback send, for example); the mission-stalled watchdog
+   * must exclude it. ABSENT → a normal (always-wake) delivery — the only class
+   * that CAN alarm. The bundle's buildMissionActivity reads the flag off the
+   * latest host→head delivery row (the max-ts row wins, so a LATER
+   * always-wake delivery re-arms the alarm). */
+  noWake?: boolean
   /** The post's LAST session-activity ts (the buildPostSnapshot lastActivityTs
    * — a session write/turn AFTER the mission's delivery ts proves the mission
    * was PROCESSED; absent → no session activity at all). */
@@ -4328,17 +4339,26 @@ export interface MissionStallScanInput {
 
 /** M-5 — scan the delivered-but-unstarted mission condition (PURE, NEVER
  * throws). For every row with a mission delivery: a RETIRED post is skipped
- * (terminal); a post whose last session activity is AFTER the delivery ts is
- * PROCESSED (a turn started / a session write landed after the hand-off — the
- * mission is NOT stalled, the Bug-B "a running turn is healthy progress"
- * rule); a delivery younger than `stallMs` is not stalled yet; the rest →
- * the `mission-stalled` finding with the per-mission dedupe key + the
- * owner-facing line «misión <id> entregada a <head> hace N min sin inicio —
- * posible cola stale». */
+ * (terminal); a NO-WAKE-GATED delivery (`row.noWake` — the m-707 explicit
+ * flag, the m-410/fb-89 class) is BY DESIGN quiet and skipped (it drains at
+ * the recipient's next REAL wake — never a stall); a post whose last session
+ * activity is AFTER the delivery ts is PROCESSED (a turn started / a session
+ * write landed after the hand-off — the mission is NOT stalled, the Bug-B "a
+ * running turn is healthy progress" rule); a delivery younger than `stallMs`
+ * is not stalled yet; the rest → the `mission-stalled` finding with the
+ * per-mission dedupe key + the owner-facing line «misión <id> entregada a
+ * <head> hace N min sin inicio — posible cola stale». */
 export function scanMissionStalled(input: MissionStallScanInput): HealthFinding[] {
   const findings: HealthFinding[] = []
   for (const row of input.rows) {
     if (row.retired === true) continue
+    // LANE WFD (m-1416/QH — the m-410/fb-89 false-positive class): a
+    // NO-WAKE-GATED mission (the delivery row carried the explicit m-707
+    // `noWake` flag — the record persisted, the recipient was NOT woken, the
+    // row drains at its next REAL wake) is BY DESIGN quiet for minutes — that
+    // is the contract, never a stall. Only deliveries that SHOULD have
+    // materialized a turn (always-wake) can alarm.
+    if (row.noWake === true) continue
     const mission = row.mission
     if (mission === undefined) continue
     // Processed? A session write AFTER the delivery ts proves the mission was

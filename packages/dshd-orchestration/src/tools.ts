@@ -144,6 +144,12 @@ import {
   deliveryStatus
 } from 'dshd-core'
 import type { DeliveryRow, MessageRecord, DeliveryStatus, DeliveryRedelivererDeps } from 'dshd-core'
+// LANE WFD (m-1416/QH — org.pacing franja gate for the feedback nudge): the
+// SAME pure UTC pacing machinery the wake-pack franja line + the health daemon
+// use (single source of truth, zero drift) — `isPeakAt` + the org.pacing.*
+// window resolver, consumed by the module-scope `nudgeFranjaDeferred` helper.
+import { isPeakAt, pacingWindowFromConfig } from 'dshd-core'
+import type { PacingConfigLike } from 'dshd-core'
 import {
   scanTurnErrorCaptures,
   TURN_ERROR_FRESH_WINDOW_MS,
@@ -810,7 +816,19 @@ const buildFeedbackNudgeContext = () =>
 //       isError of the same turn yield ONE nudge (a FRESH turn is a fresh
 //       unit of work and may re-nudge). PURE: `nudgeErrorClass` /
 //       `nudgeTurnOf` / `isNudgeLifeAbort` are module-scope (unit-testable
-//       through the waterfall in the src-native tests).
+//       through the waterfall in the src-native tests);
+//   (f) the FRANJA GATE (LANE WFD, m-1416/QH — org.pacing): a NEW nudge is a
+//       NEW DISPATCH — and new dispatches never launch in PEAK (the franja
+//       rule: in-flight continues, new sends pause). The org.pacing.* knobs
+//       (enabled / peakWindows / peakBufferMs) drive the SAME dshd-core
+//       pacing computation the wake-pack franja + the health daemon use; PEAK
+//       → DEFERRED (a logged no-op — the nudge is never dropped silently, it
+//       simply does not dispatch now); VALLE — or an org WITHOUT a declared
+//       franja / declared enabled:false (the pre-pacing legacy) — → nudges as
+//       today. The gate runs BEFORE the (e) dedup registration: a deferred
+//       nudge does NOT consume the per-turn slot, so the same error in the
+//       same turn still gets its nudge once VALLE returns. PURE: the gate is
+//       the module-scope `nudgeFranjaDeferred` (unit-testable).
 
 /** The dedup-state cap (nudge keys are rare; a long-lived daemon never grows
  * unboundedly — the oldest key is dropped past the cap, FIFO). */
@@ -869,6 +887,29 @@ function isNudgeLifeAbort(exec: unknown, result: { isError: boolean; error?: { m
   if ((result as { aborted?: unknown } | null)?.aborted === true) return true
   const message = typeof result?.error?.message === 'string' ? result.error.message : ''
   return /\b(?:aborted?|interrupted?|killed)\b/i.test(message)
+}
+
+/** LANE WFD (m-1416/QH — org.pacing) — the FRANJA GATE for a NEW nudge
+ * dispatch: `true` → the nudge must be DEFERRED (a logged no-op) because the
+ * org is inside a PEAK window at `nowMs`. The gate REUSES the dshd-core
+ * pacing computation (`isPeakAt` + `pacingWindowFromConfig` — the SAME pure
+ * UTC machinery the wake-pack franja line and the health-daemon franja legs
+ * use; ONE source of truth, zero drift) driven by the org.pacing.* knobs:
+ *   - an ABSENT `org.pacing` → the org never declared a franja → the
+ *     PRE-PACING LEGACY: the nudge always dispatches (an undeclared policy
+ *     cannot defer — the wake-pack absent→pre-pacing behavior);
+ *   - `enabled === false` → the explicit knob DISARM → the same legacy (the
+ *     pre-pacing restore);
+ *   - otherwise → PEAK ⇔ `isPeakAt(nowMs, pacingWindowFromConfig(pacing))`
+ *     (the code defaults: Mon-Fri, hours {1,2,3,6,7,8,9} UTC, peakBufferMs
+ *     1800000 = the 30-min edge on both boundaries).
+ * PURE — NEVER throws (a malformed window falls back to the code defaults
+ * inside the pacing module). A NEW nudge is a NEW dispatch, so PEAK defers
+ * it; in-flight work is untouched (this gate only delays the nudge context). */
+export function nudgeFranjaDeferred(pacing: PacingConfigLike | undefined, nowMs: number): boolean {
+  if (pacing === undefined) return false
+  if (pacing.enabled === false) return false
+  return isPeakAt(new Date(nowMs), pacingWindowFromConfig(pacing))
 }
 
 // ---------------------------------------------------------------------------
@@ -1146,6 +1187,18 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     if (callerPostId !== '' && byPost.get(callerPostId)?.retired === true) return downstream
     // (d) O2 — a LIFE-ABORT is not an actionable tool error.
     if (isNudgeLifeAbort(exec, result)) return downstream
+    // (f) LANE WFD (m-1416/QH — org.pacing): a NEW nudge is a NEW dispatch —
+    // and new dispatches never launch in PEAK. The org.pacing.* knobs drive
+    // the SAME dshd-core pacing the wake-pack franja + the health daemon use;
+    // PEAK → DEFERRED (a logged no-op — the nudge is never dropped silently,
+    // it simply does not dispatch now); VALLE / a franja-less org / enabled:
+    // false → the legacy path below. The deferral is BEFORE the (e) dedup
+    // registration so a deferred nudge does NOT consume the per-turn slot:
+    // the same error in the same turn still gets its nudge once VALLE returns.
+    if (nudgeFranjaDeferred(org.pacing, Date.now())) {
+      ctx.logger.info(`[deepartments] feedback-nudge DEFERRED — franja PEAK (org.pacing): ${nudgeErrorClass(result.error)}${callerPostId !== '' ? ` para ${callerPostId}` : ''} — no-op (new dispatches pause in PEAK)`)
+      return downstream
+    }
     // (e) O2 — TURN DEDUP: one nudge per (postId, turn, error-class).
     const dedupKey = `${callerPostId}\u0000${nudgeTurnOf(exec)}\u0000${nudgeErrorClass(result.error)}`
     if (nudgeDedupKeys.has(dedupKey)) return downstream
