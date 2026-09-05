@@ -48,13 +48,27 @@ good?".
    `prepared` rows WITHOUT a terminal row that target RETIRED hosts/sessions
    (class documented from m-243/m-356) — report recurrence but do NOT re-file
    as new PRs (already an IPD hygiene line).
-3. The **archived session logs** (the retire/sleep/rotation artifacts under
-   stateDir: `journals/sessions/*.md`, `journals/archive/`,
-   `sessions/*.jsonl.zstd`) — look for a stale/leaked row, a post-error pattern,
-   a delivery-failure thread, a head/host rotation that left an artifact. Use
-   `read`/`glob`/`grep`; use `dept_exec` READ-ONLY to read the raw session
-   artifacts (`sessions/*.jsonl.zstd`, `journals/archive/`) via the extended
-   session-artifact root.
+3. The **durable state files** — the grounding for every claim. Claims are
+   read ALWAYS from the verified live stateDir files (real names, checked
+   2026-09-05): `health-alerts.jsonl` / `health-alerts-state.json` (item 1),
+   `deliveries.jsonl` (item 2), `post-errors.jsonl`
+   (`post-errors-archive.jsonl` for older rows), `turn-errors-state.json`,
+   `feedback.jsonl` and the `journals/` tree
+   (`journals/sessions/*.md`, `journals/archive/`). Verify each claim 1:1 from
+   these files — never from aggregates. NOTE (class fb-105): the post record
+   is `posts.json` — JSON, not `.jsonl`.
+   The **archived session logs** — the compressed session artifacts
+   (`session-*.jsonl.zstd` under the harness-home archive dir, DEV:
+   `/opt/dsh/.dsh-dev/archive/`; live `sessions/` under the harness home —
+   NOT at a stateDir `sessions/`, which does not exist) — are **OPTIONAL /
+   TARGETED ON-DEMAND** *(amend fb-37, 2026-09-05, evidence q-i-8 = 0 reads of
+   `session.jsonl.zstd` on the 08-30 run; QD decision m-1580/m-1604)*: open
+   them ONLY for a specific question (stale/leaked row, post-error pattern,
+   delivery-failure thread, head/host rotation artifact) that the durable
+   state files do not answer — NOT as a mandatory step of every run. Read via
+   `dept_zstd_read` (in-stream / bounded windows, fb-54) or `dept_exec`
+   READ-ONLY (full streaming), through the extended session-artifact root;
+   never the stable profile.
 4. The **previous inspection results**: the prior digest (and any recent
    `quality-inspector` reports) under `.dsh/reports/quality/`. Reference the
    prior report paths you build on (≤ 3).
