@@ -345,7 +345,17 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     // 7693beaa8c9a969a4f556edc25b2d19b (same span; the CUT4 movement-lock
     // semantics unchanged — the two tool definition bodies only; the settle
     // helper lives OUTSIDE the span).
-    assert.equal(md5, '7693beaa8c9a969a4f556edc25b2d19b', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions (md5 7693beaa…)')
+    // Zone md5 RE-FROZE R11 (WAKE-SEAM mitigation — P1-EXT/GA1, 2026-09-06,
+    // eff06e0): ONE INTENTIONAL in-span change — the health-bundle row builder
+    // now exposes the worker's MANAGER (`...(entry.managerId !== void 0 ?
+    // { managerId: entry.managerId } : {})` at tools.ts:5838 — the
+    // scanGatedManagerDeliveryStuck detector consumes it to find the stuck par
+    // of a quiescent worker; the field is already carried by the catalog, the
+    // row is a P1-EXT health-bundle surface ADD with no engine read-path
+    // change — CUT4 movement-lock semantics unchanged, the tool bodies are
+    // byte-identical; the wake-seam gate/discriminator seam lives OUTSIDE this
+    // span). md5 7693beaa… → 7b01c84ff50204364d6caf04e1acb1b9.
+    assert.equal(md5, '7b01c84ff50204364d6caf04e1acb1b9', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row (md5 7b01c84f…)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface
@@ -466,12 +476,13 @@ test('tools-factory (composed boot): the registry wiring is intact — the runne
       assert.ok(!/get busTools\(\)/.test(toolsInvocation), 'the TOOLS invocation late object NO LONGER carries the busTools getter (CUT4 factory-local)')
       assert.ok(!/get feedbackEmitTools\(\)/.test(toolsInvocation), 'the TOOLS invocation late object NO LONGER carries the feedbackEmitTools getter (CUT4 factory-local)')
       assert.ok(!/get feedbackHeadTools\(\)/.test(toolsInvocation), 'the TOOLS invocation late object NO LONGER carries the feedbackHeadTools getter (CUT4 factory-local)')
-      for (const seam of ['busMemberIdFor', 'feedbackStoreReady', 'resolveQualityHeadEntry', 'feedbackForwarderFor', 'feedbackDeliveryOptions', 'busProfileFor', 'aclDenyGround', 'resolveBusCatalogRoute', 'delivery', 'isDormantRecipient', 'busEnsureHostForCaller', 'assertBusFanOut', 'busDeliverToPost', 'busDeliverToHost', 'resolveBusChild', 'deliverBusChild', 'freshMintHead', 'enqueueHostWake']) {
+      for (const seam of ['busMemberIdFor', 'feedbackStoreReady', 'resolveQualityHeadEntry', 'feedbackForwarderFor', 'feedbackDeliveryOptions', 'busProfileFor', 'aclDenyGround', 'resolveBusCatalogRoute', 'delivery', 'isDormantRecipient', 'recipientMaterialized', 'busEnsureHostForCaller', 'assertBusFanOut', 'busDeliverToPost', 'busDeliverToHost', 'resolveBusChild', 'deliverBusChild', 'freshMintHead', 'enqueueHostWake']) {
         assert.ok(new RegExp(`get ${seam}\\(\\) \\{ return deliverySurface\\.${seam} \\}`).test(toolsInvocation), `the TOOLS invocation late object carries the NEW ${seam} getter (CUT4 delivery-surface seam)`)
       }
-      // The invocation late object carries EXACTLY the 21 TDZ-safe seams (the
-      // 3 kept delivery seams + the 18 CUT4 delivery-surface seams — the 4
-      // factory-local seams are gone).
+      // The invocation late object carries EXACTLY the 22 TDZ-safe seams (the
+      // 3 kept delivery seams + the 19 CUT4 delivery-surface seams — the 4
+      // factory-local seams are gone; the P1-EXT WAKE-SEAM dormancy probe
+      // recipientMaterialized adds the 19th CUT4 seam, eff06e0).
       const lateStart = toolsInvocation.indexOf('late: {')
       let lateDepth = 1
       let k = lateStart + 'late: {'.length
@@ -481,7 +492,7 @@ test('tools-factory (composed boot): the registry wiring is intact — the runne
       }
       const lateBody = toolsInvocation.slice(lateStart, k)
       const getterCount = (lateBody.match(/get [A-Za-z_$][\w$]*\(\) \{ return/g) ?? []).length
-      assert.equal(getterCount, 21, `the TOOLS invocation late object carries exactly 21 getters (found ${getterCount})`)
+      assert.equal(getterCount, 22, `the TOOLS invocation late object carries exactly 22 getters (found ${getterCount})`)
       assert.ok(/workerSetup,[\s\S]*?headSetup,[\s\S]*?disposeHeadHandle,[\s\S]*?disposeHeadHandleOnce,[\s\S]*?disposeJoinTimeoutMs,[\s\S]*?joinHeadDisposeOnce,[\s\S]*?resolveDepartmentWorkspaceCwd,[\s\S]*?resolveWorkspaceRootPath,[\s\S]*?rotateArchivedHeadSessionId,[\s\S]*?retirePost,[\s\S]*?isHeadStuck,[\s\S]*?markHeadProgress,[\s\S]*?attachHeadSession,[\s\S]*?archivePostSessionOnSleep[\s\S]*?schedulerHeadForDepartment,[\s\S]*?schedulerRunJob,[\s\S]*?buildHealthPosts,[\s\S]*?healthBootId,[\s\S]*?guiEndpointDeps[\s\S]*?\} = toolsSurface/.test(invoke), 'the destructure carries the 29 surface members (the 15 CUT1-3 + the 14 CUT4: scheduler/health builders + guiEndpointDeps)')
     } finally {
       dispose()
