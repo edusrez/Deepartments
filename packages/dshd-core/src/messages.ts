@@ -757,6 +757,45 @@ export function hasEarlierPendingPair(
   return false
 }
 
+/**
+ * P1-EXT-EXT (2026-09-06 — WAKE-SEAM mitigation, m-2415 no-wake-head
+ * DISCRIMINATOR): whether the GATING HEAD of the FIFO gate — the EARLIEST
+ * strictly-earlier seq whose LATEST delivery pair is still 'prepared' (the
+ * exact pair `hasEarlierPendingPair` fires on) — carries the explicit `noWake`
+ * flag (m-707 write-ahead semantics). A noWake head is a DELIBERATE
+ * no-wake-until-wake send — NEVER a crash-class pending pair — so it must not
+ * retain an ALWAYS-WAKE behind it: the ALWAYS-WAKE IS the real wake and the
+ * no-wake head drains WITH it, in seq order (m-2415 «la cabeza no-wake drena
+ * CON el wake, nunca lo bloquea»). The GATE CALLER uses this to decide whether
+ * to degrade the delivery to the no-wake queue (gate) or let the ALWAYS-WAKE
+ * proceed (the wake). Same read seam as `hasEarlierPendingPair` (rows + the
+ * recipient's own ascending seqs — the caller passes the SAME parsed inputs).
+ * Returns:
+ *   - `true`   — the gating head is a noWake row (the ALWAYS-WAKE is the real
+ *                wake; it must NOT be gated — the head drains with it in order);
+ *   - `false`  — the gating head is a non-noWake 'prepared' row (the crash
+ *                class — the gate applies, fb-117);
+ *   - `undefined` — no gating head exists (only reachable when the caller
+ *                fired on a `hasEarlierPendingPair` false — a defensive guard).
+ */
+export function gatingHeadIsNoWake(
+  rows: readonly DeliveryRow[],
+  seqsFor: (recipientId: string) => readonly number[],
+  recipientId: string,
+  seq: number
+): boolean | undefined {
+  const own = seqsFor(recipientId)
+  if (own.length === 0) return undefined
+  const latest = new Map<string, DeliveryRow>()
+  for (const row of rows) latest.set(`${row.messageId}\u0000${row.recipientId}`, row)
+  for (const earlier of own) {
+    if (earlier >= seq) break // ascending — strictly earlier seqs only
+    const row = latest.get(`m-${earlier}\u0000${recipientId}`)
+    if (row !== undefined && row.status === 'prepared') return row.noWake === true
+  }
+  return undefined
+}
+
 /** fb-117 (fold-in tramo 3A) — the DELIVERY-QUEUE SEQUENCE of one sidecar row
  * (module-private — the sweep batch sort key): the numeric seq parsed from the
  * record id `m-<seq>` (messages.ts §3.3 — the durable per-recipient FIFO
@@ -1073,6 +1112,22 @@ export interface DeliveryRedelivererDeps {
    * wake (after the gating earlier pair resolves). Absent → the gate-blind
    * legacy re-drive (bounded by the backoff/prepared-stuck criteria; R6). */
   pendingEarlierSeq?(recipientId: string, seq: number): Promise<boolean>
+  /** P1-EXT-EXT (2026-09-06 — WAKE-SEAM mitigation, m-2415 no-wake-head
+   * DISCRIMINATOR) — OPTIONAL: whether the GATING HEAD of the FIFO gate (the
+   * EARLIEST strictly-earlier seq whose delivery pair is still 'prepared' —
+   * the pair `pendingEarlierSeq` fired on) is a NO-WAKE row (`noWake: true`).
+   * When it resolves `true`, the fb-132 gated SETTLE is SKIPPED for that pair:
+   * the no-wake head NEVER drains on its own (the P2 no-wake-until-wake guard
+   * above skips a noWake row into a non-running recipient), so settling the
+   * gated re-drive 'terminal' would MASK the delivery FOREVER (the
+   * scanGatedManagerDeliveryStuck class of the P0 host datapoint — the settle
+   * is the silent dead-end); the ALWAYS-WAKE re-drive IS the real wake that
+   * unblocks the queue (m-2415) → the pass proceeds to a genuine deliver.
+   * `false` → the head is a crash-class non-noWake row → the settle stays
+   * (its no-retry 'terminal' semantics unchanged). ABSENT (`undefined`) or a
+   * THROW → the settle applies (the safe default — the discriminator is
+   * opt-in via the dep). */
+  earlierHeadIsNoWake?(recipientId: string, seq: number): Promise<boolean | undefined>
   /** Resolve the message record for a sidecar row (the open MessagesStore). May
    * resolve async (the store is OPENED at boot via a promise, not synchronously). */
   getRecord(messageId: string): Promise<MessageRecord | undefined>
@@ -1310,9 +1365,36 @@ export class DeliveryRedeliverer {
           logger.warn(`[deepartments] ${source} re-delivery FIFO-gate check failed for ${pairLabel} (proceeds gate-blind): ${error instanceof Error ? error.message : String(error)}`)
         }
         if (gated) {
-          await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal', undefined, row.noWake === true ? true : undefined)
-          logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) → 'terminal' — FIFO-gated behind an earlier-seq pending pair (fb-132: never re-mark 'prepared' into a gated inbox; the record stays durable and drains at the recipient's next real wake)`)
-          return
+          // P1-EXT-EXT (2026-09-06 — WAKE-SEAM mitigation, m-2415 no-wake-head
+          // DISCRIMINATOR): this fb-132 SETTLE branch would convert a gated
+          // re-drive to 'terminal' — but a pair gated behind a NO-WAKE head is
+          // NOT in the crash-class: the no-wake head NEVER drains on its own
+          // (the P2 guard above skips it into a non-running recipient), so the
+          // settle would mask the delivery FOREVER (the P0 host datapoint: 36
+          // ALWAYS-WAKEs frozen 'prepared (fifo-gated tras m-2375)' behind a
+          // noWake head — the settle is the SILENT dead-end the detector
+          // scanGatedManagerDeliveryStuck flags). The ALWAYS-WAKE re-drive IS
+          // the real wake that unblocks the queue (m-2415 «la cabeza no-wake
+          // drena CON el wake, nunca lo bloquea») → SKIP the settle and proceed
+          // to the GENUINE deliver below (the engine's own gate applies the
+          // same discriminator, so the attempt lands 'delivered', never
+          // re-marked 'prepared' into a closed inbox). `false`/`undefined`/
+          // throw → the settle applies (crash-class head — its no-retry
+          // semantics unchanged; the safe default keeps the discriminator
+          // opt-in via the dep).
+          let headNoWake: boolean | undefined
+          try {
+            headNoWake = await this.deps.earlierHeadIsNoWake?.(row.recipientId, record.seq)
+          } catch (error: unknown) {
+            logger.warn(`[deepartments] ${source} re-delivery no-wake-head discriminator failed for ${pairLabel} (the fb-132 settle applies — safe default): ${error instanceof Error ? error.message : String(error)}`)
+          }
+          if (headNoWake === true) {
+            logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) FIFO-gated behind a NO-WAKE head — the ALWAYS-WAKE re-drive is the real wake (m-2415); proceeding to deliver (the no-wake head stays durable and drains with this wake in seq order)`)
+          } else {
+            await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal', undefined, row.noWake === true ? true : undefined)
+            logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) → 'terminal' — FIFO-gated behind an earlier-seq pending pair (fb-132: never re-mark 'prepared' into a gated inbox; the record stays durable and drains at the recipient's next real wake)`)
+            return
+          }
         }
       }
       try {

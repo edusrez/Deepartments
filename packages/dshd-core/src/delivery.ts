@@ -222,6 +222,39 @@ export interface DeliveryEngineDeps {
    * NEVER a behavior gate — the boolean `pendingEarlierSeq` stays the decision
    * seam. */
   pendingEarlierSeqDetail?: (recipientId: string, seq: number) => Promise<number | undefined>
+  /** P1 (2026-09-06 — WAKE-SEAM mitigation, fix opción-a VARIANTE (i)) —
+   * OPTIONAL: whether the CATALOG recipient is CURRENTLY MATERIALIZED (LIVE —
+   * its `agents.get(SessionId(sessionId))` handle exists in-process). When it
+   * returns `true`, the fb-117 FIFO gate applies exactly as today (the only
+   * case where the completion-order inbox splice can invert the presentational
+   * order — the ordering guarantee fb-117 protects). When it returns `false`
+   * (the recipient is DORMANT — no live handle), the gate is SKIPPED for this
+   * delivery: `busDeliverToPost` → `materializePost` wakes the recipient, and
+   * the inbox is rebuilt from the durable messages.jsonl queue in seq order —
+   * the earlier pending head lands in the SAME wake, in order («el FIFO drena
+   * en orden», m-2415 — never an inversion by construction). ABSENT
+   * (`undefined`) → the gate applies unconditionally (the pre-fix behavior —
+   * the safe default for a composition that cannot resolve liveness). A THROW
+   * inside the dep degrades to the gate APPLIED (conservative — liveness is
+   * never assumed on an error). */
+  recipientMaterialized?: (recipientId: string) => boolean | undefined
+  /** P1-EXT-EXT (2026-09-06 — WAKE-SEAM mitigation, m-2415 no-wake-head
+   * DISCRIMINATOR) — OPTIONAL: whether the GATING HEAD of the FIFO gate (the
+   * EARLIEST strictly-earlier seq whose delivery pair is still 'prepared' —
+   * the pair `pendingEarlierSeq` fired on) is a NO-WAKE row (`noWake: true`).
+   * When it resolves `true`, the gate does NOT retain the ALWAYS-WAKE behind
+   * it: a noWake head is a DELIBERATE no-wake-until-wake send, never a
+   * crash-class pending pair — the ALWAYS-WAKE IS the real wake and the head
+   * drains WITH it, in seq order (m-2415 «la cabeza no-wake drena CON el wake,
+   * nunca lo bloquea»). This is the P0 fix for the LIVE-recipient freeze (the
+   * 2026-09-06 host datapoint: 36 ALWAYS-WAKEs frozen 'prepared (fifo-gated
+   * tras m-2375)' behind a noWake head — the P2 sweep guard (messages.ts:1283)
+   * never re-drives a noWake row into a non-running recipient, so the queue
+   * froze forever). `false` (a crash-class head) → the gate applies exactly as
+   * today (fb-117 ordering intact). ABSENT (`undefined`) or a THROW → the gate
+   * applies (the safe default — the discriminator is opt-in via the dep; a
+   * composition without it keeps the pre-extension behavior). */
+  earlierHeadIsNoWake?: (recipientId: string, seq: number) => Promise<boolean | undefined>
 }
 
 /** The delivery engine: the single bus delivery seam. */
@@ -291,27 +324,88 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
       // no-wake queue behind an earlier pending pair; the recipient's inbox
       // stays in seq order because the interrupt's splice goes FIRST-ITEM of
       // the next turn (the documented preemption — never an inversion).
+      // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, fix opción-a VARIANTE (i),
+      // m-2415): the gate applies ONLY when the recipient is CURRENTLY
+      // MATERIALIZED (live). A DORMANT recipient's inbox is rebuilt at wake
+      // from the durable queue in seq order — never spliced — so gating an
+      // ALWAYS-WAKE to it is the wake-seam bug (the wake never happened; the
+      // q-i worker auto-retire stayed unreachable). Skipping the gate for a
+      // dormant recipient lets materializePost run; the earlier prepared head
+      // lands in the SAME wake, in seq order (never an inversion by
+      // construction). `undefined` (absent dep, OR the dep returned undefined)
+      // → the gate applies (the safe default — a composition that cannot
+      // resolve liveness falls back to the pre-fix behavior).
       if (recipientId !== record.from && opts.interrupt !== true && deps.pendingEarlierSeq !== void 0) {
-        let gated = false
+        // VARIANTE (i) — DORMANCY-AWARE GATE. Resolve liveness FIRST (fail-soft
+        // to undefined = apply the gate): a recipient CURRENTLY MATERIALIZED
+        // (live handle) keeps the gate; a DORMANT recipient (no live handle) is
+        // NOT gated — the ALWAYS-WAKE proceeds to `catalogRoute` →
+        // `busDeliverToPost` → `materializePost`, which re-materializes the
+        // recipient and rebuilds its inbox from the durable queue in seq order.
+        // This is the wake-seam fix (m-2415, opción-a VARIANTE (i) — the
+        // explore-deep-38 root cause): the FIFO gate used to retain the
+        // ALWAYS-WAKE behind an earlier 'prepared' head EVEN when the recipient
+        // was DORMANT — so the wake never occurred and the worker's auto-retire
+        // (Fix B, inside busDeliverToPost) was unreachable → q-i workers stuck
+        // idle never retired. Skipping the gate for a dormant recipient lets the
+        // wake happen; the earlier head drena in the same wake, in order.
+        let materialized: boolean | undefined
         try {
-          gated = await deps.pendingEarlierSeq(recipientId, record.seq)
+          materialized = deps.recipientMaterialized?.(recipientId)
         } catch (error: unknown) {
-          deps.logger.warn(`[deepartments] bus delivery FIFO-gate check failed for ${record.id} → ${recipientId} (delivery proceeds ungated): ${error instanceof Error ? error.message : String(error)}`)
+          materialized = undefined // conservative — gate applies
         }
-        if (gated) {
-          // P1 (fb-131 — Candidate B observability): resolve the gating seq
-          // best-effort (the 'tras m-<seq>' detail of the tool result) + fire
-          // the queue-class observer. The observer NEVER gates.
-          let bySeq: number | undefined
+        if (materialized !== false) {
+          let gated = false
           try {
-            if (deps.pendingEarlierSeqDetail !== void 0) bySeq = await deps.pendingEarlierSeqDetail(recipientId, record.seq)
+            gated = await deps.pendingEarlierSeq(recipientId, record.seq)
           } catch (error: unknown) {
-            deps.logger.warn(`[deepartments] bus delivery FIFO-gate seq detail failed for ${record.id} → ${recipientId} (observability only): ${error instanceof Error ? error.message : String(error)}`)
+            deps.logger.warn(`[deepartments] bus delivery FIFO-gate check failed for ${record.id} → ${recipientId} (delivery proceeds ungated): ${error instanceof Error ? error.message : String(error)}`)
           }
-          opts.gateReason?.('fifo', bySeq)
-          deps.logger.info(`[deepartments] bus delivery FIFO gate: ${record.id} → ${recipientId} has an EARLIER non-final (prepared) seq${bySeq !== undefined ? ` (m-${bySeq})` : ''} — queued BEHIND (no-wake 'prepared'), the inbox splice stays in seq order (fb-117)`)
-          await deps.markFinal(record, recipientId, 'prepared')
-          return 'prepared'
+          if (gated) {
+            // P1-EXT-EXT (2026-09-06 — WAKE-SEAM mitigation, m-2415 no-wake-head
+            // DISCRIMINATOR): BEFORE the gate fires, ask whether the GATING
+            // HEAD (the earliest strictly-earlier seq whose pair is still
+            // 'prepared' — the pair `pendingEarlierSeq` just fired on) is a
+            // NO-WAKE row. A noWake head is a DELIBERATE no-wake-until-wake
+            // send — NEVER a crash-class pending pair — so it must NOT retain
+            // an ALWAYS-WAKE behind it: the ALWAYS-WAKE IS the real wake and
+            // the no-wake head drains WITH it, in seq order (m-2415). This is
+            // the P0 fix for the LIVE-recipient freeze (2026-09-06, host: 36
+            // ALWAYS-WAKEs frozen 'prepared (fifo-gated tras m-2375)' behind a
+            // noWake m-2375 — the variant-(i) dormancy probe cannot see a
+            // HOST-family recipient and the P2 sweep guard (messages.ts:1283)
+            // never re-drives a noWake row into a non-running recipient → the
+            // queue froze forever). `true` → SKIP the gate for this
+            // ALWAYS-WAKE (proceed to the route — wake → delivery; the durable
+            // no-wake head stays and drains with the wake in order). `false`
+            // (a crash-class head) → the gate applies exactly as today
+            // (fb-117). `undefined` (dep absent / throw) → the gate applies
+            // (the safe default — the discriminator is opt-in via the dep).
+            let headNoWake: boolean | undefined
+            try {
+              headNoWake = await deps.earlierHeadIsNoWake?.(recipientId, record.seq)
+            } catch (error: unknown) {
+              deps.logger.warn(`[deepartments] bus delivery no-wake-head discriminator failed for ${record.id} → ${recipientId} (the FIFO gate applies — safe default): ${error instanceof Error ? error.message : String(error)}`)
+            }
+            if (headNoWake === true) {
+              deps.logger.info(`[deepartments] bus delivery FIFO gate SKIPPED for ${record.id} → ${recipientId}: the gating head is a NO-WAKE row (noWake:true) — the ALWAYS-WAKE is the real wake and the no-wake head drains with it in seq order (m-2415 — it never blocks)`)
+            } else {
+              // P1 (fb-131 — Candidate B observability): resolve the gating seq
+              // best-effort (the 'tras m-<seq>' detail of the tool result) + fire
+              // the queue-class observer. The observer NEVER gates.
+              let bySeq: number | undefined
+              try {
+                if (deps.pendingEarlierSeqDetail !== void 0) bySeq = await deps.pendingEarlierSeqDetail(recipientId, record.seq)
+              } catch (error: unknown) {
+                deps.logger.warn(`[deepartments] bus delivery FIFO-gate seq detail failed for ${record.id} → ${recipientId} (observability only): ${error instanceof Error ? error.message : String(error)}`)
+              }
+              opts.gateReason?.('fifo', bySeq)
+              deps.logger.info(`[deepartments] bus delivery FIFO gate: ${record.id} → ${recipientId} has an EARLIER non-final (prepared) seq${bySeq !== undefined ? ` (m-${bySeq})` : ''} — queued BEHIND (no-wake 'prepared'), the inbox splice stays in seq order (fb-117)`)
+              await deps.markFinal(record, recipientId, 'prepared')
+              return 'prepared'
+            }
+          }
         }
       }
       try {

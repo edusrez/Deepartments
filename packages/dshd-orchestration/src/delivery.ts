@@ -50,7 +50,7 @@ import { mintFreshSessionIdNotArchived, mintWorkerSessionId } from 'dshd-core'
 import { isArchivedSession } from 'dshd-core'
 import type { WorkspaceRegistryLike } from 'dshd-core'
 import type { PostEntry, HostEntry, HostEntryLike } from 'dshd-core'
-import { MessagesStore, markDelivery, parseDeliveryRows, resolveDeliveriesPath, hasEarlierPendingPair } from 'dshd-core'
+import { MessagesStore, markDelivery, parseDeliveryRows, resolveDeliveriesPath, hasEarlierPendingPair, gatingHeadIsNoWake } from 'dshd-core'
 import type { DeliveryRow } from 'dshd-core'
 import type { DeliveryStatus, MessageRecord } from 'dshd-core'
 import { createDeliveryEngine } from 'dshd-core'
@@ -351,6 +351,15 @@ export interface DeliverySurface {
   delivery: DeliveryEngine
   /** B3 (m-361): whether a CATALOG recipient is DORMANT (sleepEpoch marked). */
   isDormantRecipient: (recipientId: string) => boolean
+  /** P1-EXT (2026-09-06 — WAKE-SEAM mitigation, fix opción-a VARIANTE (i)):
+   * whether a CATALOG recipient is CURRENTLY MATERIALIZED (its post entry's
+   * live agent handle exists — `agents.get(SessionId(entry.sessionId))`). The
+   * delivery engine's optional `recipientMaterialized` dep: false (dormant) →
+   * the fb-117 FIFO gate is SKIPPED so the ALWAYS-WAKE proceeds to
+   * `materializePost` (the wake); true/undefined → the gate applies (the
+   * pre-fix behavior). A non-post recipient (host family / unknown) → undefined
+   * (default safe — the gate stays). Never throws. */
+  recipientMaterialized?: (recipientId: string) => boolean | undefined
   /** B3 gap fix: the host self-registration (send_message/dept_who callers). */
   busEnsureHostForCaller: (callerAgent: { id: string; session?: { header?: SessionHeaderWithOrigin } }) => string
   /** The 1..20 fan-out guard (spec §4.4). */
@@ -1693,6 +1702,25 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     }
   }
 
+  /** P1-EXT (2026-09-06 — WAKE-SEAM mitigation, fix opción-a VARIANTE (i)):
+   * whether a CATALOG POST recipient is CURRENTLY MATERIALIZED — its durable
+   * post entry's live agent handle exists (`agents.get(SessionId(sessionId))` —
+   * the SAME liveness probe busDeliverToPost (line ~964) uses). A DORMANT post
+   * (no live handle — asleep / never materialized / disposed) returns false →
+   * the engine SKIPS the fb-117 FIFO gate for it, so the ALWAYS-WAKE proceeds
+   * to `materializePost` (the wake) and the earlier prepared head lands in the
+   * same wake, in seq order (m-2415). A RETIRED post → undefined (today's
+   * behavior — the route settles it, never a wake). A non-post recipient (host
+   * family / unknown) → undefined (default safe — the gate stays). Never
+   * throws (a missing `agents` service → undefined). */
+  const recipientMaterializedForGate = (recipientId: string): boolean | undefined => {
+    if (agents === void 0) return undefined
+    const post = byPost.get(recipientId)
+    if (post === void 0) return undefined // host family / unknown — gate unchanged
+    if (post.retired === true) return undefined // retired — the route settles it
+    return agents.get(String(SessionId(post.sessionId))) !== undefined
+  }
+
   /** The delivery engine: the SINGLE bus delivery seam (constructed once per
    * apply, deps injected — AGENTS.md rule 4, no module-global mutable state).
    * Consumed by send_message (directly) and by the `deliverBusRecord` wrapper
@@ -1749,13 +1777,37 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
           return undefined
         }
       },
+      // P1-EXT-EXT (2026-09-06 — WAKE-SEAM mitigation, m-2415 no-wake-head
+      // DISCRIMINATOR): whether the FIFO gate's GATING HEAD is a NO-WAKE row —
+      // the SAME wiring as the dshd-core lazy engine (the in-bundle FALLBACK
+      // runs when dshd-core is not composed — the composed tests use it, so
+      // the no-wake-head gate-skip must work HERE too). `true` → the
+      // ALWAYS-WAKE behind the noWake head is NOT gated (the head drains with
+      // it, m-2415 — «nunca lo bloquea»); `false` → crash-class head (the gate
+      // applies, fb-117); `undefined` (read error / nothing pending) → the gate
+      // applies (the safe default).
+      earlierHeadIsNoWake: async (recipientId, seq) => {
+        const store = await messagesStoreReady
+        try {
+          const text = await readFile(resolveDeliveriesPath(messageStoreDir), 'utf8')
+          return gatingHeadIsNoWake(parseDeliveryRows(text), (recipient) => store.seqsFor(recipient), recipientId, seq)
+        } catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined // nothing ever sent
+          ctx.logger.warn(`[deepartments] bus delivery no-wake-head discriminator failed for ${recipientId} (the FIFO gate applies — safe default): ${error instanceof Error ? error.message : String(error)}`)
+          return undefined
+        }
+      },
       subagents,
       resolveChild: resolveBusChild,
       deliverChild: deliverBusChild,
       resolveCatalogRoute: resolveBusCatalogRoute,
       busProfileFor,
       deliverPost: busDeliverToPost,
-      deliverHost: busDeliverToHost
+      deliverHost: busDeliverToHost,
+      // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, fix opción-a VARIANTE (i)):
+      // the dormancy probe in the in-bundle FALLBACK engine (R6 parity — the
+      // composed dshd-core engine receives the same closure via the holder).
+      recipientMaterialized: recipientMaterializedForGate
     })
   })()
 
@@ -1834,6 +1886,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     deliverBusChild,
     delivery,
     isDormantRecipient,
+    recipientMaterialized: recipientMaterializedForGate,
     busEnsureHostForCaller,
     assertBusFanOut
   }

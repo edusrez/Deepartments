@@ -74,7 +74,7 @@ import { QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from 'dshd-quality'
 // (isPeakAt / pacingStateAt / pacingWindowFromConfig / countPendingWorkRegister
 // + the structural PacingConfigLike mirror). Same workspace dependency as the
 // registry readers above — no cycle.
-import { isPeakAt, pacingStateAt, pacingWindowFromConfig, countPendingWorkRegister } from 'dshd-core'
+import { isPeakAt, pacingStateAt, pacingWindowFromConfig, countPendingWorkRegister, RE_DELIVERY_PREPARED_STUCK_MS } from 'dshd-core'
 import type { PacingConfigLike, PacingState } from 'dshd-core'
 import type { DeliveryRow, HostEntryLike } from 'dshd-core'
 
@@ -469,6 +469,16 @@ export interface SweepHealthState {
   oldestPreparedTs?: number
   dormantHeld?: number
   noWakeHeld?: number
+  /** P1-EXT (2026-09-06 — WAKE-SEAM mitigation, Etapa 1): the manager-
+   * delivery-STUCK hold count of the CURRENT tick — how many QUIESCENT workers
+   * have a final delivery to their manager stuck `prepared`/`terminal`
+   * (fifo-gated, wake-seam; see `scanGatedManagerDeliveryStuck`). The class
+   * `preparedStuckRemaining` MASKS (the fb-132 gated-settle closes it to 0
+   * without a wake) — this datum restores the honest signal. Written by the
+   * health tick from the scan (0 when none); ABSENT when the sweep datum
+   * itself is absent (a composition without the sweep → the field is omitted,
+   * never synthesized). */
+  gatedIdleHeld?: number
 }
 
 /** Read `<stateDir>/health-heartbeat.json` (absent/unreadable/malformed → undefined). */
@@ -490,6 +500,10 @@ export function readHealthHeartbeatFile(stateDir: string): HealthHeartbeat | und
           if (typeof sweep.oldestPreparedTs === 'number') state.oldestPreparedTs = sweep.oldestPreparedTs
           if (typeof sweep.dormantHeld === 'number') state.dormantHeld = sweep.dormantHeld
           if (typeof sweep.noWakeHeld === 'number') state.noWakeHeld = sweep.noWakeHeld
+          // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, Etapa 1): the
+          // manager-delivery-stuck hold datum read back verbatim (0 is a real
+          // value — the CURRENT tick observed no stuck worker).
+          if (typeof sweep.gatedIdleHeld === 'number') state.gatedIdleHeld = sweep.gatedIdleHeld
           heartbeat.sweep = state
         }
       }
@@ -836,8 +850,17 @@ export interface HealthFinding {
      * settlement-only register NEVER fires the generic work-register-idle
      * (that would be a FALSE «IPD no despachó» on work that waits on the
      * HOST — the fb-167 blind spot: 2 real pipeline stalls on 2026-09-05
-     * were only caught by the owner, not by the watchdog). */
-  kind: 'post-error' | 'delivery-failed' | 'delivery-storm' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red' | 'mission-queue' | 'work-register-idle' | 'settlement-wait'
+     * were only caught by the owner, not by the watchdog). P1-EXT (2026-09-06,
+     * WAKE-SEAM mitigation, Etapa 1) adds `manager-delivery-stuck` — the q-i
+     * IDLE-HOLD class (root cause explore-deep-38): a QUIESCENT worker (idle,
+     * no pending) whose final ALWAYS-WAKE to its manager never materialized
+     * (the fb-117 FIFO gate retained it behind an earlier 'prepared' head →
+     * the wake never happened → the worker's auto-retire, Fix B, never ran;
+     * the fb-132 gated-settle masks the class by closing
+     * `preparedStuckRemaining` to 0). The dedupe KEY is per-worker
+     * `manager-delivery-stuck:<workerId>` in the SHARED ledger, re-alerting
+     * every HEALTH_DEDUPE_WINDOW_MS while the hold persists. */
+  kind: 'post-error' | 'delivery-failed' | 'delivery-storm' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red' | 'mission-queue' | 'work-register-idle' | 'settlement-wait' | 'manager-delivery-stuck'
   /** The dedupe key (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS). */
   key: string
   /** The postId (post-error / stalled-post / context-threshold post row). */
@@ -1306,6 +1329,14 @@ export interface PostActivityInput {
    * Absent (undefined) = unknown/live-permissive → never treated as orphaned
    * (a post that never reports its handle is never falsely orphan-swept). */
   hasLiveHandle?: boolean
+  /** P1-EXT (2026-09-06 — WAKE-SEAM mitigation, Etapa 1): the post's MANAGER
+   * (its creator head — the `managerId` the durable PostEntry carries; the
+   * worker-retire contract: a worker's final ALWAYS-WAKE delivery to this
+   * manager triggers the auto-retire, Fix B). Absent (a configured head, or a
+   * legacy entry without a creator) → the post is not a worker-retire subject.
+   * The `scanGatedManagerDeliveryStuck` detector uses it to find the stuck
+   * par (a `prepared`/`terminal` row to the manager of a quiescent worker). */
+  managerId?: string
 }
 
 /** The SHARED activity/pending snapshot of one post — the reusable pure helper
@@ -2361,6 +2392,11 @@ export interface HealthConfigLike {
     staleLiveWatchdogEnabled?: boolean
     /** W8-c PART 2 — the staleness threshold in minutes (default 10). */
     staleLiveMinutes?: number
+    /** P1-EXT (2026-09-06 — WAKE-SEAM mitigation, Etapa 1) — the
+     * manager-delivery-stuck detector gate (default ON; an explicit false
+     * disables the scan + the `sweep.gatedIdleHeld` datum — the q-i idle-hold
+     * watchdog). */
+    managerDeliveryStuckEnabled?: boolean
     /** W8-c PART 3 — preset audit (default ON; explicit false disables). */
     presetAuditEnabled?: boolean
     /** W8-d — the system-heartbeat gate (default ON; explicit false omits the
@@ -3020,6 +3056,176 @@ export function scanDeliveryStormFindings(
         ts: entry.latestTs,
         count: entry.attempts,
         error: `attempts/deliveries ratio ${entry.attempts}:${entry.deliveries} > ${HEALTH_DELIVERY_STORM_MAX_ATTEMPT_RATIO}:1 in 1 h — the backoff is NOT achieving the < 3:1 ratio`
+      })
+    }
+  }
+  return findings
+}
+
+/** P1-EXT — the LAST + SECOND-TO-LAST completed turn/end ts of a post's session
+ * events (the FINAL-TURN window the manager-delivery-stuck anchor uses: the
+ * worker's own final report is written DURING its last turn, i.e. its attempt
+ * ts falls in (prevEnd, lastEnd]). Pure, never throws (a malformed event is
+ * skipped). `lastEndTs` undefined → the log holds NO completed turn → no anchor
+ * (the age-only core condition applies). */
+function turnEndTimes(events: readonly HealthSessionEvent[]): { lastEndTs?: number; prevEndTs?: number } {
+  let lastEndTs: number | undefined
+  let prevEndTs: number | undefined
+  for (const event of events) {
+    if (event.type !== 'turn/end') continue
+    if (typeof event.time !== 'number' || !Number.isFinite(event.time)) continue
+    if (lastEndTs === undefined || event.time > lastEndTs) {
+      prevEndTs = lastEndTs
+      lastEndTs = event.time
+    }
+  }
+  return {
+    ...(lastEndTs !== undefined ? { lastEndTs } : {}),
+    ...(prevEndTs !== undefined ? { prevEndTs } : {})
+  }
+}
+
+/** P1-EXT (2026-09-06 — WAKE-SEAM mitigation, Etapa 1): the manager-delivery-
+ * STUCK detector (the explore-deep-38 root-cause spec §3.2 — PURE, read-only;
+ * the scanStalledPosts pattern). Detects the q-i IDLE-HOLD class: a QUIESCENT
+ * non-retired WORKER whose final ALWAYS-WAKE delivery to its OWN manager head
+ * never materialized — the fb-117 FIFO gate (delivery.ts:294-315) retained it
+ * behind an earlier 'prepared' head (the wake did not happen; the worker's
+ * auto-retire, Fix B inside busDeliverToPost, never ran → the worker stays
+ * idle without retiring: the 3rd instance today, q-i-82). The redelivery
+ * sweep cannot auto-cure the class and the fb-132 gated-settle MASKS it (the
+ * follower 'prepared' row is converted to 'terminal' at ~10 min WITHOUT a wake,
+ * so `preparedStuckRemaining` closes to 0 while the wake never happened).
+ *
+ * CONDITION (all AND — the explore-deep-38 §3.2 four conditions):
+ *   1. WORKER QUIESCENCE — post P: `provider === 'worker'`, `retired !== true`,
+ *      `running !== true` (no in-flight turn — Bug-B liveness) AND
+ *      `buildPostSnapshot(P).pendingCount === 0` (no pending instructions — it
+ *      is NOT awaiting work; a worker waiting for a briefing is not stuck).
+ *   2. STUCK PAR — a delivery row R with `R.recipientId === P.managerId`:
+ *      CORE: `R.status === 'prepared'`, `R.noWake !== true` (an explicit
+ *      no-wake order is NEVER an alarm — m-707) and
+ *      `nowMs − R.ts > RE_DELIVERY_PREPARED_STUCK_MS` (the fb-58 10-min
+ *      cadence); REFINEMENT (the gated-settle): a pair whose LATEST row is
+ *      'terminal' WITHOUT any delivered/resumed row ever (fb-132 settled the
+ *      follower to mask the failed wake) is also stuck, anchored on the pair's
+ *      LAST 'prepared' attempt ts (the original write-ahead) — same age rule.
+ *      FINAL-TURN ANCHOR: when the worker's session log has completed
+ *      turn/end events, the stuck attempt ts must fall inside its LAST turn
+ *      window (prevEnd < ts ≤ lastEnd — the row belongs to the worker's own
+ *      final turn, i.e. its report; an older/other-sender row is not counted).
+ *      A log with NO turn/end → no anchor (the age-only core applies).
+ *   3. HEAD ALIVE — the manager resolves to a NON-retired post of the posts
+ *      array (a dead/unknown/retired recipient is the settle's domain).
+ *   4. ANTI-FALSE-POSITIVE — worker running → skip; inbox pending → skip;
+ *      `R.noWake === true` → NEVER; recipient not-live → skip; 10-min window;
+ *      ONE finding per worker per tick (key `manager-delivery-stuck:<workerId>`;
+ *      the SHARED health-alerts ledger dedupes the alerts to ≤1 per
+ *      HEALTH_DEDUPE_WINDOW_MS per worker — the dedupe-by-ledger requirement).
+ *
+ * ACTION (Etapa 1 — read-only): the finding alerts the host through the tick's
+ * EXISTING alert path (the alert frame + the shared ledger); the count also
+ * rides the heartbeat as `sweep.gatedIdleHeld` (the datum `preparedStuckRemaining`
+ * masks). The DURABLE auto-retire is deliberately NOT done here (the daemon is
+ * read-only on retires — :1474-1476 pattern): the host intervenes (an interrupt
+ * re-send / a manual retire). Pure: the reader degrades to [] on any error; the
+ * scan NEVER throws. */
+export function scanGatedManagerDeliveryStuck(
+  posts: Iterable<PostActivityInput>,
+  stateDir: string,
+  nowMs: number,
+  retiredMemberIds?: ReadonlySet<string>,
+  reader: DeliveryRowsReader = readDeliveryRowsFull
+): HealthFinding[] {
+  const postList = [...posts]
+  // The LIVE catalog lens (condition 3 — the manager must be a non-retired post).
+  const liveById = new Map<string, PostActivityInput>()
+  for (const post of postList) {
+    if (post.retired !== true) liveById.set(post.postId, post)
+  }
+  // Read the delivery sidecar ONCE (the reader never throws; absent → []).
+  let rows: DeliveryRow[] = []
+  try {
+    rows = reader(stateDir)
+  } catch {
+    rows = []
+  }
+  // The per-recipient PAIR ledger: for every (messageId, recipientId) of the
+  // sidecar — the LATEST row, whether the pair was EVER delivered/resumed, and
+  // the ts of the LAST 'prepared' attempt (the write-ahead the gated-settle may
+  // have converted to 'terminal').
+  const pairLedger = new Map<string, Map<string, { latest: DeliveryRow; neverDelivered: boolean; lastPreparedTs?: number }>>()
+  for (const row of rows) {
+    let byMessage = pairLedger.get(row.recipientId)
+    if (byMessage === undefined) {
+      byMessage = new Map()
+      pairLedger.set(row.recipientId, byMessage)
+    }
+    let pair = byMessage.get(row.messageId)
+    if (pair === undefined) {
+      pair = { latest: row, neverDelivered: true }
+      byMessage.set(row.messageId, pair)
+    } else {
+      pair.latest = row
+    }
+    if (row.status === 'delivered' || row.status === 'resumed') pair.neverDelivered = false
+    if (row.status === 'prepared') pair.lastPreparedTs = row.ts
+  }
+  const findings: HealthFinding[] = []
+  for (const post of postList) {
+    // Condition 1 — worker quiescence.
+    if (post.provider !== 'worker') continue
+    if (post.retired === true) continue
+    if (post.running === true) continue // anti-FP: an in-flight turn is work in progress
+    const managerId = post.managerId
+    if (managerId === undefined || managerId === '') continue // no retire contract → not a subject
+    // Condition 3 — the manager is a LIVE catalog post.
+    if (!liveById.has(managerId)) continue // anti-FP: dead/unknown recipient → the settle owns it
+    if (retiredMemberIds !== undefined && retiredMemberIds.has(managerId)) continue // anti-FP (defense)
+    const snap = buildPostSnapshot(post)
+    if (snap.pendingCount !== 0) continue // anti-FP: awaiting instructions, not quiescent
+    // The FINAL-TURN anchor window (condition 2 refinement): the worker's own
+    // final report is written DURING its last completed turn — its attempt ts
+    // falls in (prevEnd, lastEnd]. A log without turn/end events → no anchor.
+    const ends = turnEndTimes(post.events ?? [])
+    const inFinalTurn = (ts: number): boolean => {
+      if (ends.lastEndTs === undefined) return true // no anchor — age-only core applies
+      if (ends.prevEndTs !== undefined && ts < ends.prevEndTs) return false
+      return ts <= ends.lastEndTs
+    }
+    const toManager = pairLedger.get(managerId)
+    if (toManager === undefined || toManager.size === 0) continue
+    // Condition 2 — the stuck par (ONE candidate per worker: the OLDEST stuck).
+    let stuck: { ts: number; messageId: string; status: string } | undefined
+    for (const [messageId, pair] of toManager) {
+      const latest = pair.latest
+      if (latest.noWake === true) continue // anti-FP: NEVER on an explicit no-wake order
+      if (latest.status === 'prepared') {
+        // CORE: an always-wake follower the FIFO gate retained > 10 min.
+        if (nowMs - latest.ts > RE_DELIVERY_PREPARED_STUCK_MS && inFinalTurn(latest.ts)) {
+          const candidate = { ts: latest.ts, messageId, status: 'prepared' }
+          if (stuck === undefined || candidate.ts < stuck.ts) stuck = candidate
+        }
+      } else if (latest.status === 'terminal' && pair.neverDelivered && pair.lastPreparedTs !== undefined) {
+        // REFINEMENT (fb-132 gated-settle): the pair was settled 'terminal'
+        // WITHOUT ever being delivered/resumed — the settle masked the failed
+        // wake. The original attempt must be > 10 min old AND inside the
+        // worker's final turn (the row IS the worker's own report attempt).
+        if (nowMs - pair.lastPreparedTs > RE_DELIVERY_PREPARED_STUCK_MS && inFinalTurn(pair.lastPreparedTs)) {
+          const candidate = { ts: pair.lastPreparedTs, messageId, status: 'terminal' }
+          if (stuck === undefined || candidate.ts < stuck.ts) stuck = candidate
+        }
+      }
+    }
+    if (stuck !== undefined) {
+      findings.push({
+        kind: 'manager-delivery-stuck',
+        key: `manager-delivery-stuck:${post.postId}`,
+        postId: post.postId,
+        messageId: stuck.messageId,
+        ts: stuck.ts,
+        count: 1,
+        error: `worker "${post.postId}" is quiescent (idle, no pending) but its final ALWAYS-WAKE delivery to manager "${managerId}" is '${stuck.status}' (fifo-gated behind an earlier prepared head, ${Math.round((nowMs - stuck.ts) / 60_000)} min old) — the wake-seam blocked the wake and the auto-retire never ran (q-i idle-hold); an interrupt re-send or a manual retire is required`
       })
     }
   }
@@ -5246,6 +5452,14 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     if (finding.kind === 'settlement-wait') {
       return `- settlement-wait: ${finding.error ?? `${finding.count ?? 0} settlement(s) esperando acción del HOST — next actor = host`}`
     }
+    // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, Etapa 1) — the
+    // manager-delivery-stuck branch (NEVER let it reach the stale-post
+    // fallback). The owner-facing wording is the finding's own line (the
+    // worker + its manager + the stuck status/age — the error carries the
+    // FULL line so the host sees WHAT to intervene on).
+    if (finding.kind === 'manager-delivery-stuck') {
+      return `- manager-delivery-stuck: ${finding.error ?? `worker ${finding.postId ?? ''} — final delivery to its manager stuck (q-i idle-hold)`}`
+    }
     return `- stalled-post: ${finding.postId} (${finding.count ?? 1} pending message(s), ${finding.error ?? 'no session activity'})`
   })
   return `[From deepartments] System-health ALERT:\n${lines.join('\n')}`
@@ -5509,6 +5723,46 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // of the same boot never re-runs it; the shared-ledger dedupe blocks a
     // re-alert across boots).
     const isBootTick = prevTick === undefined || (prevTick.bootId ?? '') !== deps.bootId
+    // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, Etapa 1): the catalog posts
+    // are materialized ONCE (the single-use-iterable seam) BEFORE the heartbeat
+    // write, so the manager-delivery-stuck detector runs EARLY: its count rides
+    // THIS tick's heartbeat sweep datum (`sweep.gatedIdleHeld`), and the SAME
+    // findings feed the alert path at step 3 (composed below — never scanned
+    // twice). The retired-member id set (Bug A — the delivery-failed re-alert
+    // loop) is derived in the SAME early pass and threaded into both scans.
+    const posts = [...(deps.posts ?? [])]
+    const retiredMemberIds = new Set<string>([...retiredHostIds, ...posts.filter((p) => p.retired === true).map((p) => p.postId)])
+    // C6 SHARING FIX (P1-EXT): the injected delivery-row TAIL reader has ONE
+    // byte cursor per process — TWO scans per tick can NOT both consume it
+    // (the second would read ZERO delta). Read the sidecar ONCE per tick here
+    // (the tail reader when injected, the full file otherwise — byte-identical
+    // outcomes) and hand the SAME snapshot to BOTH delivery scans below (the
+    // delivery-failed scan via a snapshot reader, the manager-delivery-stuck
+    // scan directly). NEVER throws (a read failure degrades to [] — the
+    // scan-absent contract).
+    let deliveryRowsSnapshot: DeliveryRow[] = []
+    try {
+      deliveryRowsSnapshot = (deps.deliveryRowsReader ?? readDeliveryRowsFull)(deps.stateDir)
+    } catch (error: unknown) {
+      deliveryRowsSnapshot = []
+      deps.logger?.warn(`[deepartments] system-health: delivery-row read failed (delivery scans run on an empty snapshot): ${error instanceof Error ? error.message : String(error)}`)
+    }
+    const deliveryRowsSnapshotReader: DeliveryRowsReader = () => deliveryRowsSnapshot
+    // P1-EXT — the manager-delivery-stuck scan (default-ON; an explicit
+    // `health.managerDeliveryStuckEnabled === false` disables it — the
+    // per-safeguard knob pattern). NEVER throws (the scan is pure; a failure
+    // degrades to zero findings + a warn and the heartbeat still writes).
+    const managerDeliveryStuckEnabled = deps.config?.health?.managerDeliveryStuckEnabled !== false
+    let managerDeliveryStuckFindings: HealthFinding[] = []
+    let gatedIdleHeld = 0
+    if (managerDeliveryStuckEnabled) {
+      try {
+        managerDeliveryStuckFindings = scanGatedManagerDeliveryStuck(posts, deps.stateDir, nowMs, retiredMemberIds, deliveryRowsSnapshotReader)
+        gatedIdleHeld = managerDeliveryStuckFindings.length
+      } catch (error: unknown) {
+        deps.logger?.warn(`[deepartments] system-health: manager-delivery-stuck scan failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     // 1. heartbeat (always — even with no anomalies). Post-incidente 2026-09-04:
     // the health datums (surface / nRestarts / crashStreak) ride the heartbeat
     // when the wiring provided them (best-effort — ABSENT → omitted, never
@@ -5520,7 +5774,13 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       ...(deps.sessionSurface !== undefined ? { surface: deps.sessionSurface } : {}),
       ...(deps.nRestarts !== undefined ? { nRestarts: deps.nRestarts } : {}),
       ...(deps.crashStreak !== undefined ? { crashStreak: deps.crashStreak } : {}),
-      ...(deps.sweep !== undefined ? { sweep: deps.sweep } : {})
+      // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, Etapa 1): the
+      // manager-delivery-stuck hold datum rides the sweep state of THIS tick —
+      // `gatedIdleHeld` = the count of quiescent workers with a stuck manager
+      // delivery (0 is a REAL value — the tick observed none; the datum is
+      // ABSENT only when the whole sweep datum is absent, i.e. a composition
+      // without the sweep — never synthesized).
+      ...(deps.sweep !== undefined ? { sweep: { ...deps.sweep, gatedIdleHeld } } : {})
     })
     // POST-INCIDENTE 2026-09-04: the surface gate's BOOT LOG — the FIRST tick
     // of a new process reports the detected session surface + the breaker
@@ -5664,15 +5924,6 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     const prevMainRedBucket = prevTick !== undefined ? Math.floor(prevTick.ts / mainRedPollMs) : undefined
     const currentContextBucket = Math.floor(nowMs / contextThresholdPollMs)
     const prevContextBucket = prevTick !== undefined ? Math.floor(prevTick.ts / contextThresholdPollMs) : undefined
-    const posts = [...(deps.posts ?? [])]
-    // Bug (delivery-failed re-alert loop): the set of RETIRED member ids — the
-    // union of the retired HOST ids (already computed above) and the RETIRED
-    // POST ids from the catalog — is threaded into the delivery-failed scan so a
-    // `failed` row for a retired recipient (e.g. m-570 → builder-82) is never a
-    // finding/alert. A retired member is terminal (W7 philosophy) and its rows
-    // must not re-alert the live host every ~30 min until the next boot lets the
-    // redeliver driver settle them to 'terminal'.
-    const retiredMemberIds = new Set<string>([...retiredHostIds, ...posts.filter((p) => p.retired === true).map((p) => p.postId)])
     // 2. W8-c PART 1 — turn-failure capture: a fresh turn/end ERROR reason in a
     // live post's session event log is recorded into post-errors.jsonl (deduped
     // via turn-errors-state.json so a turn is never double-counted) so the
@@ -6014,8 +6265,15 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     }
     // 3. scan.
     const findings = [
+      // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, Etapa 1): the
+      // manager-delivery-stuck findings computed BEFORE the heartbeat write
+      // (their count already rode `sweep.gatedIdleHeld`); composed here into
+      // the SAME alert/dedupe pipeline as every other scan (the shared
+      // health-alerts ledger dedupes `manager-delivery-stuck:<workerId>` to
+      // ≤1 alert per worker per HEALTH_DEDUPE_WINDOW_MS).
+      ...managerDeliveryStuckFindings,
       ...scanPostErrorFindings(deps.stateDir, nowMs, retiredHostIds),
-      ...scanDeliveryFindings(deps.stateDir, nowMs, retiredMemberIds, deps.deliveryRowsReader),
+      ...scanDeliveryFindings(deps.stateDir, nowMs, retiredMemberIds, deliveryRowsSnapshotReader),
       // fb-30 CATCH-UP (BOOT only): the bounded pass over the DURABLE event
       // ledgers — rows OUTSIDE the live 2 h window, WITHIN the look-back, that
       // were never alerted (the quiet-band blind spots) — the findings ride

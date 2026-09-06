@@ -316,8 +316,9 @@ test('P1 (fb-131): `interrupt:true` BYPASSES the fb-117 FIFO gate — a gated re
   })
 })
 
-test('P1 (fb-131, Candidate B — tool level): the send_message result distinguishes `prepared (fifo-gated tras m-N)` / `prepared (noWake)` / `delivered`, and an interrupt re-send of the gated pair WAKES the recipient (the inbox splice lands)', async () => {
+test('P1 (fb-131, Candidate B — tool level): the send_message result distinguishes `prepared (fifo-gated tras m-N)` (crash-class head) / `prepared (noWake)` / `delivered`, and the ALWAYS-WAKE behind a NO-WAKE head DELIVERS (the m-2415 no-wake-head discriminator)', async () => {
   await withBootedOrg(async ({ stateDir, env, head, headCtx, spawn, signal }) => {
+    const T0 = 1_700_000_000_000
     const workerId = spawn.workerId
     // The spawn's own first-message followup already spliced the stub inbox —
     // the BASELINE the noWake/gated sends must NOT grow (they never wake).
@@ -327,21 +328,38 @@ test('P1 (fb-131, Candidate B — tool level): the send_message result distingui
     const noWakeRes = await send({ noWake: true })
     assert.equal(noWakeRes.delivered[workerId], 'prepared (noWake)', 'P1-B: an explicit noWake send reports the noWake queue class')
     assert.equal(env.agents.store.get(spawn.sessionId).inboxMessages.length, baselineInbox, 'P1-B: the noWake send NEVER wakes the recipient (no followup splice)')
-    // (2) the SAME recipient, ALWAYS-WAKE → the fb-117 gate (the earlier
-    // 'prepared' noWake pair is still pending) → 'prepared (fifo-gated tras m-N)'.
-    const gatedRes = await send({})
-    const gated = gatedRes.delivered[workerId]
-    assert.match(gated, /^prepared \(fifo-gated tras m-\d+\)$/, `P1-B: the gated send reports the FIFO class + the gating seq (got "${gated}")`)
-    assert.equal(env.agents.store.get(spawn.sessionId).inboxMessages.length, baselineInbox, 'P1-B: the gated send stays QUEUED (no wake — the fb-117 behavior intact)')
-    // (3) the SAME condition with `interrupt:true` → the gate is BYPASSED —
-    // the recipient is WOKEN (the followup splice lands in the inbox).
+    // (2) P1-EXT-EXT (2026-09-06 — m-2415 no-wake-head DISCRIMINATOR): the SAME
+    // recipient, ALWAYS-WAKE behind the STILL-PENDING NO-WAKE head — the
+    // ALWAYS-WAKE IS the real wake (the no-wake head drains WITH it, in seq
+    // order — it never blocks; the P0 host-freeze fix), so it is NO LONGER
+    // gated: it DELIVERS into the live inbox ('delivered' — the splice).
+    const wakeRes = await send({})
+    assert.equal(wakeRes.delivered[workerId], 'delivered', `P1-B: the ALWAYS-WAKE behind the NO-WAKE head is NOT gated — it DELIVERS (the m-2415 discriminator; got "${wakeRes.delivered[workerId]}")`)
+    assert.ok(env.agents.store.get(spawn.sessionId).inboxMessages.length >= baselineInbox + 1, 'P1-B: the ALWAYS-WAKE splice lands (the wake happens — never a frozen queue)')
+    // (3) the SAME condition with `interrupt:true` → still delivered (the
+    // interrupt path is unaffected — the pair is already delivered).
     const intRes = await send({ interrupt: true })
-    assert.equal(intRes.delivered[workerId], 'delivered', 'P1-B: the interrupt re-send of the gated pair is DELIVERED (the interrupt is no longer swallowed)')
-    assert.ok(env.agents.store.get(spawn.sessionId).inboxMessages.length >= baselineInbox + 1, 'P1-B: the interrupt delivery splices the recipient inbox (materialized/woken)')
+    assert.equal(intRes.delivered[workerId], 'delivered', 'P1-B: the interrupt re-send of the pair is DELIVERED (the interrupt is never swallowed)')
+    assert.ok(env.agents.store.get(spawn.sessionId).inboxMessages.length >= baselineInbox + 2, 'P1-B: the interrupt delivery also splices the recipient inbox')
     // (4) the sidecar rows stay the PLAIN statuses (the envelope is tool-only).
     const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
     assert.ok(rows.some((r) => r.recipientId === workerId && r.status === 'prepared'), 'P1-B: the sidecar keeps the plain prepared rows (the enrichment never touches the ledger)')
-    assert.ok(rows.some((r) => r.recipientId === workerId && r.status === 'delivered'), 'P1-B: the interrupt delivery finalizes a plain delivered row')
+    assert.ok(rows.some((r) => r.recipientId === workerId && r.status === 'delivered'), 'P1-B: the wake deliveries finalize plain delivered rows')
+    // (5) the fifo-gated ENVELOPE ('prepared (fifo-gated tras m-<seq>)') is
+    // preserved for the CRASH-CLASS head (fb-117): a SECOND worker whose
+    // EARLIEST pending pair is a NON-noWake 'prepared' row still reports the
+    // FIFO class + the gating seq (the discriminator resolves false).
+    const spawn2 = await headCtx.ctx.tools.get('dept_worker_spawn', headCtx.key).execute({ role: 'researcher', task: 'wakeseam lane envelope control worker' }, { agent: head, signal })
+    assert.ok(spawn2.workerId, 'P1-B(5): the control worker spawned')
+    await waitFor(() => env.agents.store.has(spawn2.sessionId), 8000, 'the control worker is live')
+    const crashWorkerId = spawn2.workerId
+    const sendCrash = (extra) => headCtx.ctx.tools.get('send_message', headCtx.key).execute({ to: [crashWorkerId], text: `wakeseam envelope probe ${JSON.stringify(extra)}`, ...extra }, { agent: head, signal })
+    const first = await sendCrash({})
+    assert.equal(first.delivered[crashWorkerId], 'delivered', 'P1-B(5): the first always-wake to the LIVE control worker delivers')
+    const deliveriesBefore = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
+    await writeFile(resolveDeliveriesPath(stateDir), deliveriesBefore + JSON.stringify(row(first.messageId, crashWorkerId, 'prepared', T0)) + '\n', 'utf8')
+    const gated = await sendCrash({})
+    assert.match(gated.delivered[crashWorkerId], /^prepared \(fifo-gated tras m-\d+\)$/, `P1-B(5): the CRASH-CLASS head still gates with the FIFO class + the gating seq (got "${gated.delivered[crashWorkerId]}") — fb-117 observes the envelope untouched by the discriminator`)
   })
 })
 

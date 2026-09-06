@@ -25,7 +25,7 @@ import type { WakePackDeps, WakePackService } from './wakepack.js'
 import { runHostRotation } from './session-rotation.js'
 import { createDeliveryEngine } from './delivery.js'
 import type { DeliveryEngine, DeliveryEngineDeps } from './delivery.js'
-import { DeliveryRedeliverer, MessagesStore, markDelivery, parseDeliveryRows, resolveDeliveriesPath, hasEarlierPendingPair } from './messages.js'
+import { DeliveryRedeliverer, MessagesStore, markDelivery, parseDeliveryRows, resolveDeliveriesPath, hasEarlierPendingPair, gatingHeadIsNoWake } from './messages.js'
 import type { DeliveryRedelivererDeps, DeliveryRow, DeliveryStatus } from './messages.js'
 // D3 (subagent/gui/pooler phase): the dispatch-time transient-subagent role
 // registry promoted to a core SERVICE (`deepartments.subagentRoles`) — ONE
@@ -590,6 +590,26 @@ function buildBusLazy(ctx: Context, busDeps: DepsHolder<BusBucketDeps>): BusSurf
           return false
         }
       },
+      // P1-EXT-EXT (2026-09-06 — WAKE-SEAM mitigation, m-2415 no-wake-head
+      // DISCRIMINATOR): whether the re-drive's GATING HEAD is a NO-WAKE row —
+      // the `pendingEarlierSeq` complement over the SAME read seam (the
+      // sidecar's latest row per pair + the store's per-recipient seq index).
+      // `true` → the fb-132 settle is SKIPPED (the ALWAYS-WAKE re-drive is the
+      // real wake that unblocks the queue — m-2415); `false` → the head is a
+      // crash-class non-noWake row (the settle stays); `undefined` (read
+      // error / nothing pending) → the settle applies (the safe default).
+      // Fail-soft: a read error degrades to undefined — never a broken re-drive.
+      earlierHeadIsNoWake: async (recipientId, seq) => {
+        const store = await storeReady
+        try {
+          const text = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
+          return gatingHeadIsNoWake(parseDeliveryRows(text), (recipient) => store.seqsFor(recipient), recipientId, seq)
+        } catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined // nothing ever sent
+          logger.warn(`[deepartments] re-drive no-wake-head discriminator failed for ${recipientId} (the fb-132 settle applies — safe default): ${error instanceof Error ? error.message : String(error)}`)
+          return undefined
+        }
+      },
       getRecord: async (messageId) => (await storeReady).get(messageId),
       resolveCallerSessionId: merged.resolveCallerSessionId!,
       deliver: merged.deliver!
@@ -691,13 +711,41 @@ function buildDeliverLazy(ctx: Context, deliverDeps: DepsHolder<Partial<Delivery
         return undefined
       }
     },
+    // P1-EXT-EXT (2026-09-06 — WAKE-SEAM mitigation, m-2415 no-wake-head
+    // DISCRIMINATOR): whether the FIFO gate's GATING HEAD is a NO-WAKE row —
+    // the `pendingEarlierSeq` complement over the SAME read seam (sidecar
+    // latest row per pair + the store's per-recipient seq index). `true` → the
+    // engine does NOT gate the ALWAYS-WAKE behind it (the no-wake head drains
+    // WITH the wake, in seq order — m-2415 «nunca lo bloquea»; the P0 fix for
+    // the LIVE-host freeze); `false` → the head is a crash-class non-noWake row
+    // (the gate applies, fb-117); `undefined` (read error / nothing pending) →
+    // the gate applies (the safe default). Fail-soft: a read error returns
+    // undefined — the ordering gate must never break a delivery.
+    earlierHeadIsNoWake: async (recipientId, seq) => {
+      const bus = ctx.get('deepartments.bus') as BusSurface | undefined
+      const store = await (bus?.storeReady ?? MessagesStore.open(stateDir))
+      try {
+        const text = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
+        return gatingHeadIsNoWake(parseDeliveryRows(text), (recipient) => store.seqsFor(recipient), recipientId, seq)
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined // nothing ever sent
+        ctx.logger.warn(`[deepartments] bus delivery no-wake-head discriminator failed for ${recipientId} (the FIFO gate applies — safe default): ${error instanceof Error ? error.message : String(error)}`)
+        return undefined
+      }
+    },
     subagents: ctx.get('subagents'),
     resolveChild: bound.resolveChild!,
     deliverChild: bound.deliverChild!,
     resolveCatalogRoute: bound.resolveCatalogRoute!,
     busProfileFor: bound.busProfileFor!,
     deliverPost: bound.deliverPost!,
-    deliverHost: bound.deliverHost!
+    deliverHost: bound.deliverHost!,
+    // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, fix opción-a VARIANTE (i)):
+    // the OPTIONAL dormancy probe forwarded verbatim from the bundle's
+    // bucket-(c) holder (`deepartments.deliverDeps` register — the
+    // orchestration provides `recipientMaterialized` there). ABSENT → the
+    // engine keeps the pre-fix gate behavior (the safe default).
+    ...(bound.recipientMaterialized !== undefined ? { recipientMaterialized: bound.recipientMaterialized } : {})
   })
 }
 

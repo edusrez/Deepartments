@@ -250,7 +250,11 @@ test('sweep-observability [heartbeat] deps.sweep lands in the heartbeat; ABSENT 
     })
     const hb = readHealthHeartbeatFile(stateDir)
     assert.ok(hb !== undefined, 'the real tick wrote the heartbeat')
-    assert.deepEqual(hb.sweep, { armed: true, cycles: 3, lastCycleTs: 4_900_000, preparedStuckRemaining: 0 }, 'the heartbeat carries the FULL sweep datum when the wiring provided it')
+    // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, Etapa 1): the tick now ALSO
+    // stamps `gatedIdleHeld` (the manager-delivery-stuck count of the CURRENT
+    // tick — 0 with an empty catalog; the datum is only ABSENT when the whole
+    // sweep field is absent). The wiring-provided datum rides VERBATIM.
+    assert.deepEqual(hb.sweep, { armed: true, cycles: 3, lastCycleTs: 4_900_000, preparedStuckRemaining: 0, gatedIdleHeld: 0 }, 'the heartbeat carries the FULL sweep datum (the wiring fields verbatim + the tick\'s gatedIdleHeld count) when the wiring provided it')
     // absent sweep dep → the field is OMITTED (never synthesized).
     await rm(path.join(stateDir, 'health-heartbeat.json'), { force: true })
     await runHealthDaemonTick({

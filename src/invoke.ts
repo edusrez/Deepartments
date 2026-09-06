@@ -3555,6 +3555,11 @@ export function applyInvoke(ctx: Context, config: Config) {
       get resolveBusCatalogRoute() { return deliverySurface.resolveBusCatalogRoute },
       get delivery() { return deliverySurface.delivery },
       get isDormantRecipient() { return deliverySurface.isDormantRecipient },
+      // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, fix opción-a VARIANTE (i)):
+      // the dormancy probe forwarded through the late seam into the composed
+      // dshd-core engine (deliverySurface.recipientMaterialized — the gate-skip
+      // for a DORMANT recipient).
+      get recipientMaterialized() { return deliverySurface.recipientMaterialized },
       get busEnsureHostForCaller() { return deliverySurface.busEnsureHostForCaller },
       get assertBusFanOut() { return deliverySurface.assertBusFanOut },
       get busDeliverToPost() { return deliverySurface.busDeliverToPost },

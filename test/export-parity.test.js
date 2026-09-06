@@ -216,5 +216,18 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // % unavailable» class of the M1 scan, surfaced for a USABLE key whose
   // health probe timed out; flows through the same star re-export bridge) — an
   // INTENTIONAL, verified surface extension (323 → 324).
-  assert.equal(names.length, 324, `lib/invoke.js export count frozen at 324 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
+  // P1-EXT (2026-09-06, WAKE-SEAM mitigation — Etapa 1): ADDED the
+  // manager-delivery-stuck detector export (scanGatedManagerDeliveryStuck from
+  // dshd-health — the q-i idle-hold watchdog over the delivery sidecar; flows
+  // through the same star re-export bridge src/core/health.ts) — an
+  // INTENTIONAL, verified surface extension (324 → 325).
+  // P1-EXT-EXT (2026-09-06, WAKE-SEAM mitigation — the m-2415 no-wake-head
+  // DISCRIMINATOR extension): the new pure gating-head probe
+  // (gatingHeadIsNoWake from dshd-core/src/messages.ts) is consumed ONLY via
+  // the package imports (the engine/redeliverer dep wiring + the orchestration
+  // fallback) — it does NOT reach the bundle surface (invoke.ts re-exports a
+  // curated dshd-core messages list, never `export *`), so the frozen count
+  // stays 325 (verified: hasEarlierPendingPair is likewise ABSENT from
+  // lib/invoke.js — the two gate helpers share the same non-surface status).
+  assert.equal(names.length, 325, `lib/invoke.js export count frozen at 325 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })

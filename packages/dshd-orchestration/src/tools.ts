@@ -639,6 +639,12 @@ export interface ToolsFactoryDeps {
     resolveBusCatalogRoute: DeliverySurface['resolveBusCatalogRoute']
     delivery: DeliverySurface['delivery']
     isDormantRecipient: DeliverySurface['isDormantRecipient']
+    /** P1-EXT (2026-09-06 — WAKE-SEAM mitigation, fix opción-a VARIANTE (i)):
+     * the DeliverySurface's dormancy probe — forwarded into the composed
+     * dshd-core engine's `deepartments.deliverDeps` holder (the gate-skip
+     * seam for a DORMANT recipient). */
+
+    recipientMaterialized: DeliverySurface['recipientMaterialized']
     busEnsureHostForCaller: DeliverySurface['busEnsureHostForCaller']
     assertBusFanOut: DeliverySurface['assertBusFanOut']
     busDeliverToPost: DeliverySurface['busDeliverToPost']
@@ -1150,6 +1156,11 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   const aclDenyGround: ToolsFactoryDeps['late']['aclDenyGround'] = (sender, recipient) => late.aclDenyGround(sender, recipient)
   const resolveBusCatalogRoute: ToolsFactoryDeps['late']['resolveBusCatalogRoute'] = (recipientId) => late.resolveBusCatalogRoute(recipientId)
   const isDormantRecipient: ToolsFactoryDeps['late']['isDormantRecipient'] = (recipientId) => late.isDormantRecipient(recipientId)
+  // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, fix opción-a VARIANTE (i)): the
+  // dormancy probe LAZY wrapper — the `late` getter is TDZ at THIS factory
+  // position (deliverySurface is built later); the wrapper derefs only when the
+  // engine's gate calls it, never at construction (the busDeliverToPost pattern).
+  const recipientMaterialized: DeliverySurface['recipientMaterialized'] = (recipientId) => late.recipientMaterialized?.(recipientId)
   const busEnsureHostForCaller: ToolsFactoryDeps['late']['busEnsureHostForCaller'] = (callerAgent) => late.busEnsureHostForCaller(callerAgent)
   const assertBusFanOut: ToolsFactoryDeps['late']['assertBusFanOut'] = (to) => late.assertBusFanOut(to)
   const busDeliverToPost: ToolsFactoryDeps['late']['busDeliverToPost'] = (...args) => late.busDeliverToPost(...args)
@@ -5824,6 +5835,11 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         inboxTs: inboxTsByPost.get(postId) ?? [],
         sleeping: entry.sleepEpoch !== void 0,
         provider: entry.provider,
+        // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, Etapa 1): expose the
+        // worker's MANAGER (the retire-contract head) in the health bundle —
+        // the catalog already carries it; the manager-delivery-stuck detector
+        // consumes it to find the stuck par of a quiescent worker.
+        ...(entry.managerId !== void 0 ? { managerId: entry.managerId } : {}),
         ...(agents !== void 0 ? { hasLiveHandle: live !== undefined } : {})
       })
     }
@@ -6222,7 +6238,12 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     resolveCatalogRoute: resolveBusCatalogRoute,
     busProfileFor,
     deliverPost: busDeliverToPost,
-    deliverHost: busDeliverToHost
+    deliverHost: busDeliverToHost,
+    // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, fix opción-a VARIANTE (i)):
+    // the OPTIONAL dormancy probe — the composed dshd-core engine skips the
+    // fb-117 gate for a DORMANT recipient (the wake-seam fix); ABSENT in a
+    // minimal register → the pre-fix gate behavior (the safe default).
+    recipientMaterialized
   })
   depsWakepack?.register({
     refreshPresence,
