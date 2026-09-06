@@ -355,7 +355,18 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     // change — CUT4 movement-lock semantics unchanged, the tool bodies are
     // byte-identical; the wake-seam gate/discriminator seam lives OUTSIDE this
     // span). md5 7693beaa… → 7b01c84ff50204364d6caf04e1acb1b9.
-    assert.equal(md5, '7b01c84ff50204364d6caf04e1acb1b9', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row (md5 7b01c84f…)')
+    // Zone md5 RE-FROZE R12 (sweep-dormancy — the B3 sweep-fix seam,
+    // 2026-09-07, a88b352): INTENTIONAL in-span changes — the liveness-aware
+    // HOST-ONLY wrapper `recipientDormantForRedeliver` (tools.ts:5623, next to
+    // recipientRunningForRedeliver — same agents.get probe) + the TWO
+    // re-delivery recipientDormant injections swapped to it (tools.ts:5640
+    // redeliverDeps + :5655 bus.redeliver). Tool DEFINITION bodies are
+    // byte-identical (the wrapper is a helper, not a tool); the scan/re-deliver
+    // seams are unchanged; the THIRD token (:6259 depsBus.register holder)
+    // lives OUTSIDE this span. Getter count stays 22 (src/invoke.ts untouched)
+    // and export-parity 325 is unchanged (the wrapper is not an export).
+    // md5 7b01c84f… → 05c60bd186c6d6ab96e395345bce3077.
+    assert.equal(md5, '05c60bd186c6d6ab96e395345bce3077', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections (md5 05c60bd1…)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface

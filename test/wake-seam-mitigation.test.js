@@ -494,7 +494,7 @@ async function bootPluginFromSrc(stateDir, opts = {}) {
   await root.plugin(SubagentRuntime)
   root.subagents.registerProvider(stubProvider('spawn'))
   root.subagents.registerProvider(stubProvider('fork'))
-  loader.create({ id: 'deepartments', name: BUNDLE_SRC, config: { stateDir, org: opts.org ?? ORG } })
+  loader.create({ id: 'deepartments', name: BUNDLE_SRC, config: { stateDir, org: opts.org ?? ORG, ...(opts.config ?? {}) } })
   await loader.await()
   agents.scopeAnchor = loader.resolve('tools').fiber?.ctx ?? root
   return { root, agents, persistence, workspaceRegistry, pluginCtx: () => loader.resolve('deepartments').fiber?.ctx ?? loader.resolve('deepartments').ctx, dispose: () => loaderFiber.dispose() }
@@ -595,5 +595,141 @@ test('P1-EXT-EXT (A tool-level): an ALWAYS-WAKE to a DORMANT worker behind an ea
     assert.match(gated.delivered[crashWorkerId], /^prepared \(fifo-gated/, `A-tool(5): the LIVE worker behind the CRASH-CLASS (non-noWake) prepared head is STILL gated (got "${gated.delivered[crashWorkerId]}") — fb-117 live ordering intact (the discriminator only un-gates NO-WAKE heads)`)
     const inbox2 = env.agents.get(spawn2.sessionId)?.inboxMessages ?? []
     assert.equal(inbox2.length, 2, 'A-tool(5): the gated crash-class send NEVER spliced into the live inbox (baseline spawn splice + the first delivered send — the gated send adds nothing)')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// (O1) — the B3 SWEEP-DORMANCY fix (sweep-dormancy mission, 2026-09-07, run
+// token 0ee94f78). The composed tool-level harness (the same §A pattern) proves
+// the CLASS of the real fix `recipientDormantForRedeliver` (tools.ts, the B3
+// sweep seam): the pre-fix sweep dormancy probe read ONLY the catalog
+// sleepEpoch (`isDormantRecipient`), which for the HOST is PERMANENT by design
+// (spec-002 — the Asistente's dept_sleep is a session ROTATION whose live
+// successor entry MUST carry a numeric sleepEpoch, session-rotation.ts:275-276)
+// → the B3 guard (messages.ts:1325) held the host's prepared queue FOREVER even
+// with a live handle (the real B3 residuals: m-2433 — 2 host prepared rows —
+// and m-2468 — 1 host prepared row, kind ack, research-head → host — both the
+// ACK/noWake class, permanent sleepEpoch + live handle). The wrapper relaxes
+// dormancy for the re-drive ONLY when the host's live handle IS materialized
+// (the same agents.get probe as the P2 running guard); POSTS keep the
+// sleepEpoch-only semantics (the m-361 ack-no-wake path untouched).
+//
+// ACCEPTANCE PROBE (documented — nothing is restarted or verified here): after
+// the ceremony's SINGLE daemon restart (~10:00Z, the deploy that loads this
+// fix), the FIRST sweep tick (default 60 s cadence, boot arm tools.ts) must
+// deliver BOTH live B3 residuals — m-2433 (the host's 2 prepared ACK-class
+// rows) AND m-2468 (1 prepared row, kind ack, research-head → host, the same
+// ack→noWake-host class: permanent sleepEpoch, live handle) — the post-fix
+// trace of the explore-deep seam report (§4,
+// 2026-09-06-sweep-dormancy-seam-11737dd7.md). The host verifies it in its
+// post-restart ladder.
+// ---------------------------------------------------------------------------
+
+/** The hosts.json SPEC-002 rotated shape the fix is about: a RETIRED
+ * predecessor + a LIVE successor that MUST carry a numeric sleepEpoch
+ * (session-rotation.ts:275-276 — the PERMANENT catalog "sleeping" mark). */
+const O1_HOST_SESSION = 's-live'
+const O1_HOST_ID = `host-${O1_HOST_SESSION}` // the hosts.json key rule: HOST_ID_PREFIX + sessionId
+const O1_SLEEPY_WORKER = 'sleepy-worker'
+
+async function writeO1Hosts(stateDir) {
+  await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+    schemaVersion: 2,
+    'host-s-prev': { sessionId: 's-prev', roomId: 'board', retired: true, retiredAt: 1_699_999_999_999, rotatedTo: O1_HOST_ID },
+    [O1_HOST_ID]: { sessionId: O1_HOST_SESSION, roomId: 'board', sleepEpoch: 1_700_000_000_000, previousSessionId: 's-prev' }
+  }, null, 2), 'utf8')
+}
+
+/** A SLEPT worker POST (sleepEpoch set, non-retired) — the m-361/B3 family
+ * posts invariant subject: a post with sleepEpoch is dormant for the re-drive
+ * regardless of any liveness (the wrapper's byPost branch delegates to
+ * isDormantRecipient unchanged). */
+async function writeO1Posts(stateDir) {
+  await writeFile(path.join(stateDir, 'posts.json'), JSON.stringify({
+    [O1_SLEEPY_WORKER]: { postId: O1_SLEEPY_WORKER, provider: 'worker', sessionId: 's-sleepy', roomId: 'board', agentPreset: 'deepartments', managerId: 'research-head', sleepEpoch: 1_700_000_000_000 }
+  }, null, 2), 'utf8')
+}
+
+async function writeO1Messages(stateDir) {
+  // `from` = 'research-head' — the sender's POST id (the harness head's member
+  // id; the real sends record it, and the ACL classifies it as a configured
+  // HEAD — a session id would be 'unclassified' and the defensive ACL would
+  // deny the host re-drive).
+  const records = [
+    { id: 'm-2266', seq: 2266, ts: OLD, from: 'research-head', to: [O1_SLEEPY_WORKER], text: 'sleepy-worker probe', kind: 'agent' },
+    { id: 'm-2433', seq: 2433, ts: OLD, from: 'research-head', to: [O1_HOST_ID], text: 'm-2433 residual (ACK/noWake class)', kind: 'agent' },
+    { id: 'm-2434', seq: 2434, ts: OLD, from: 'research-head', to: [O1_HOST_ID], text: 'm-2434 crash-class follower', kind: 'agent' }
+  ]
+  await writeFile(resolveMessagesPath(stateDir), `${records.map((r) => JSON.stringify(r)).join('\n')}\n`, 'utf8')
+}
+
+async function latestRowStatuses(stateDir) {
+  const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+  const latest = new Map()
+  for (const r of rows) latest.set(`${r.messageId}\u0000${r.recipientId}`, r.status)
+  return latest
+}
+
+function o1LiveHostAgent() {
+  // The minimal LIVE host handle shape the delivery seam needs: the wrapper
+  // probes existence via agents.get (any object) and the P2 running guard reads
+  // `.status === 'running'`; busDeliverToHost splices via `.followup(message)`.
+  const inbox = []
+  return {
+    id: O1_HOST_SESSION,
+    status: 'running', // the datapoint: the host handle is LIVE mid-turn
+    inboxMessages: inbox,
+    followup(message) { inbox.push(message) },
+    cancel() {},
+    whenIdle() { return new Promise(() => {}) }
+  }
+}
+
+test('O1 (B3 sweep-dormancy, class ACK — the real m-2433 case): a rotated-spec-002 HOST with sleepEpoch + LIVE handle re-drives its prepared ACK/noWake + follower rows to \'delivered\' on the FIRST sweep tick (the recipientDormantForRedeliver wrapper); the SAME host WITHOUT a live handle stays DORMANT (the pre-fix head-match); a SLEPT POST (sleepEpoch, absent handle) STAYS DORMANT (the m-361/B3 posts invariant)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeO1Hosts(stateDir)
+    await writeO1Posts(stateDir)
+    await writeO1Messages(stateDir)
+    // The 3 prepared rows (> 10 min old — the fb-58 prepared-stuck criterion;
+    // written PRE-boot so the BOOT pass sees them and B3 skips them — the
+    // PHASE-A assertion is the proof both the boot pass AND the sweep skip):
+    // m-2433 = the ACK/noWake class (the REAL m-2433 residual), m-2434 = the
+    // crash-class follower, m-2266 = a slept worker POST (family posts).
+    await writeDeliveries(stateDir, [
+      row('m-2266', O1_SLEEPY_WORKER, 'prepared', OLD),
+      row('m-2433', O1_HOST_ID, 'prepared', OLD, true),
+      row('m-2434', O1_HOST_ID, 'prepared', OLD)
+    ])
+    const env = await bootPluginFromSrc(stateDir, { config: { health: { redeliverySweepIntervalMs: 250 } } })
+    try {
+      // Boot complete = registries loaded + the configured head materialized.
+      await waitFor(() => env.agents.store.has('head-research-head'), 8000, 'research head materialized')
+      // PHASE A — NO host handle: the host is DORMANT for the re-drive (the
+      // pre-fix head-match — a sleepEpoch spec-002 mark with NO liveness) and
+      // the slept POST is DORMANT too. Give the sweep 3+ ticks (250 ms each):
+      // NOTHING may be re-driven (the boot pass already B3-skipped them).
+      await new Promise((resolve) => setTimeout(resolve, 900))
+      let latest = await latestRowStatuses(stateDir)
+      assert.equal(latest.get(`m-2433\u0000${O1_HOST_ID}`), 'prepared', 'O1-A: the host ACK/noWake prepared row WITHOUT a live handle stays prepared — the pre-fix head-match (a catalog-sleeping host is dormant; the sweep must never re-drive it)')
+      assert.equal(latest.get(`m-2434\u0000${O1_HOST_ID}`), 'prepared', 'O1-A: the host crash-class follower row stays prepared (dormant host — B3 holds)')
+      assert.equal(latest.get(`m-2266\u0000${O1_SLEEPY_WORKER}`), 'prepared', 'O1-A: the slept POST row stays prepared (the m-361/B3 posts invariant — a post with sleepEpoch is never re-driven by the sweep)')
+      // PHASE B — mount the LIVE host handle: the NEXT tick must re-drive BOTH
+      // host rows to 'delivered' (the B3 wrapper resolves the live host as NOT
+      // dormant — the fix; the noWake row also clears P2 because the handle is
+      // currently running) while the slept POST row STAYS prepared.
+      const hostAgent = o1LiveHostAgent()
+      env.agents.store.set(O1_HOST_SESSION, hostAgent)
+      await waitFor(async () => {
+        const phases = await latestRowStatuses(stateDir)
+        return phases.get(`m-2433\u0000${O1_HOST_ID}`) === 'delivered' && phases.get(`m-2434\u0000${O1_HOST_ID}`) === 'delivered'
+      }, 8000, 'the sweep re-drove the host ACK/noWake + follower rows to delivered')
+      latest = await latestRowStatuses(stateDir)
+      assert.equal(latest.get(`m-2433\u0000${O1_HOST_ID}`), 'delivered', 'O1-B: the ACK/noWake class row of the LIVE host is DELIVERED on the first tick with the handle — the B3 wrapper (recipientDormantForRedeliver resolves false for a materialized host); the m-2433 residual class drains')
+      assert.equal(latest.get(`m-2434\u0000${O1_HOST_ID}`), 'delivered', 'O1-B: the crash-class follower row of the LIVE host is DELIVERED')
+      assert.ok(hostAgent.inboxMessages.length >= 2, `O1-B: BOTH re-drives spliced into the LIVE host inbox (got ${hostAgent.inboxMessages.length}) — a genuine inline delivery, never a wake (the re-drive is the delivery seam)`)
+      assert.equal(latest.get(`m-2266\u0000${O1_SLEEPY_WORKER}`), 'prepared', 'O1-B: the slept POST row STAYS prepared after the host drain (the m-361/B3 posts invariant intact — the wrapper\'s byPost branch keeps the sleepEpoch-only semantics; family posts are unaffected by the host-only relaxation)')
+    } finally {
+      await env.dispose()
+    }
   })
 })

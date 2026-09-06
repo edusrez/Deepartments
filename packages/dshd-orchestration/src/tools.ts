@@ -5604,6 +5604,29 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     if (sessionId === undefined) return false
     return agents.get(SessionId(sessionId))?.status === 'running'
   }
+  /** B3 sweep-fix seam (2026-09-07 — sweep-dormancy): whether a CATALOG
+   * recipient is DORMANT for the re-drive. The shared predicate
+   * (`isDormantRecipient`) reads ONLY the catalog sleepEpoch — for the HOST
+   * that is true FOREVER: the Asistente's dept_sleep is a SPEC-002 session
+   * ROTATION whose live successor entry MUST carry a numeric sleepEpoch
+   * (session-rotation.ts:275-276; the IPD-4c8bde46 rotation), so a live host
+   * is permanently "sleeping" in the catalog while its handle is live — and
+   * the B3 guard (messages.ts:1325) held its prepared queue FOREVER. The fix
+   * is the SWEEP's dormancy probe ONLY (never the shared isDormantRecipient
+   * — the ack-no-wake m-361 path tools.ts:5231 must keep its sleepEpoch-only
+   * semantics): a POST stays sleepEpoch-dormant unchanged; a HOST is dormant
+   * for the re-drive ONLY while its live handle is NOT materialized (the
+   * same agents.get probe as recipientRunningForRedeliver — a live host is
+   * never "woken" by a re-drive: the delivery splices into its live session,
+   * zero materialization). Absent agents service → conservative (sleepEpoch
+   * marks dormant). */
+  const recipientDormantForRedeliver = (recipientId: string): boolean => {
+    if (byPost.has(recipientId)) return isDormantRecipient(recipientId) // heads/workers: unchanged
+    const host = hosts.get(recipientId)
+    if (host === void 0) return false // child/unknown: never dormant
+    if (agents === void 0) return host.sleepEpoch !== void 0 // no liveness → conservative
+    return host.sleepEpoch !== void 0 && agents.get(SessionId(host.sessionId)) === undefined
+  }
   const deliverBusRecordForRedeliver = (record: MessageRecord, recipientId: string, callerSessionId: string): Promise<DeliveryStatus> =>
     deliverBusRecord(record, recipientId, callerSessionId, callerSessionId)
   const redeliverDeps: DeliveryRedelivererDeps = {
@@ -5612,7 +5635,9 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     recipientAlive: recipientCatalogAlive,
     // LANE ② (fb-58/B3): the re-drive machinery NEVER wakes a DORMANT
     // recipient's noWake/'prepared' queue (its intent is the next REAL wake).
-    recipientDormant: isDormantRecipient,
+    // B3 sweep-fix (2026-09-07): a LIVE host (sleepEpoch spec-002 mark + live
+    // handle) is NOT dormant for the re-drive — the wrapper resolves it.
+    recipientDormant: recipientDormantForRedeliver,
     // P2 (fb-131 — WAKE-SEAM lane): the no-wake-until-wake guard's drain
     // exception — a noWake row IS re-driven into a CURRENTLY RUNNING recipient.
     recipientRunning: recipientRunningForRedeliver,
@@ -5627,7 +5652,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // composition (dshd-core absent) — behavior-neutral.
   const redeliverPendingDeliveries = (ctx.get('deepartments.bus') as BusSurface | undefined)?.redeliver({
     recipientAlive: recipientCatalogAlive,
-    recipientDormant: isDormantRecipient,
+    recipientDormant: recipientDormantForRedeliver,
     // P2 (fb-131 — WAKE-SEAM lane): the shell NOW forwards the optional guards
     // (a previous plumbing gap dropped recipientDormant in the composed path).
     recipientRunning: recipientRunningForRedeliver,
@@ -6231,7 +6256,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   const depsDeliver = ctx.get('deepartments.deliverDeps') as { register(deps: unknown): void; clear(): void } | undefined
   const depsLifecycle = ctx.get('deepartments.lifecycleDeps') as { register(deps: unknown): void; clear(): void } | undefined
   const depsWakepack = ctx.get('deepartments.wakepackDeps') as { register(deps: unknown): void; clear(): void } | undefined
-  depsBus?.register({ redeliver: { recipientAlive: recipientCatalogAlive, recipientDormant: isDormantRecipient, recipientRunning: recipientRunningForRedeliver, resolveCallerSessionId: resolveCallerSessionIdForRedeliver, deliver: deliverBusRecordForRedeliver } })
+  depsBus?.register({ redeliver: { recipientAlive: recipientCatalogAlive, recipientDormant: recipientDormantForRedeliver, recipientRunning: recipientRunningForRedeliver, resolveCallerSessionId: resolveCallerSessionIdForRedeliver, deliver: deliverBusRecordForRedeliver } })
   depsDeliver?.register({
     resolveChild: resolveBusChild,
     deliverChild: deliverBusChild,
