@@ -1505,10 +1505,60 @@ function deptExecDenylistMatch(command: string, pattern: string): boolean {
   // char). `\b` would NOT work here (a pattern that STARTS or ENDS with a
   // non-word char — `:(){`, `su -`, `dd if=` — has no `\b` at its edges), so
   // the boundary class is the explicit non-word `[^A-Za-z0-9_]`, mirroring
-  // `isStablePath`.
+  // `isStablePath`. fb-214 (QD 2026-09-07 — the FILENAME/QUOTED word FP
+  // family): a boundary match is a real forbidden COMMAND only when its token
+  // is a STANDALONE UNQUOTED shell word. Two filename/content shapes are
+  // skipped (see `deptExecMatchInQuotes` / the path-segment char check below):
+  //   - a match whose token sits INSIDE a single/double-quoted span — a
+  //     quoted literal is CONTENT, never a command: `grep -i 'halt' ledger`
+  //     (the fb-214 read-only grep that the boundary matcher denied — the
+  //     fb-109 boundary fix covered halt-CONTAINING identifiers but a WHOLE
+  //     quoted `halt` pattern still tripped), a `cat "halt"` file argument,
+  //     `echo 'sudo'` text;
+  //   - a match whose token is a PATH SEGMENT (preceded by `/` or `./`):
+  //     `ls /path/halt`, `cat ./halt` — a FILENAME reference, never the
+  //     `halt`/`sudo`/… command. A real out-of-root path under such a segment
+  //     is STILL denied by the abs-path scope check (`/sbin/halt` keeps
+  //     denying there), so the denylist skip never opens a path hole.
+  // A bare unquoted word (`halt now`, `cat halt`, `; HALT`) stays denied —
+  // the ambiguity between a command and an unquoted operand is resolved
+  // CONSERVATIVELY toward the deny (the caller escalates via the Asistente).
   const escaped = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const re = new RegExp(`(^|[^A-Za-z0-9_])${escaped}($|[^A-Za-z0-9_])`, 'i')
-  return re.test(cmd)
+  const re = new RegExp(`(^|[^A-Za-z0-9_])${escaped}($|[^A-Za-z0-9_])`, 'gi')
+  for (const match of cmd.matchAll(re)) {
+    const tokenStart = match.index + (match[1] as string).length
+    if (deptExecMatchInQuotes(cmd, tokenStart)) continue
+    if (tokenStart > 0 && (cmd[tokenStart - 1] === '/' || cmd.slice(tokenStart - 2, tokenStart) === './')) continue
+    return true
+  }
+  return false
+}
+
+/** fb-214 (QD 2026-09-07): whether the WORD token at `tokenStart` of `cmd`
+ * sits INSIDE an ACTIVE single/double-quoted span. A quoted literal is
+ * CONTENT (a grep/sed/awk pattern, a file argument, echo/message text) —
+ * never a command token — so a denylist match inside a quote is a
+ * FILENAME/CONTENT reference, not the `halt`/`sudo`/`reboot`/… command. The
+ * scan INCLUDES the boundary char at `tokenStart - 1` (when the boundary IS
+ * the opening quote, the token is inside that quote's span). Never throws
+ * (a truncated/odd quote just stays open — the conservative skip). */
+function deptExecMatchInQuotes(cmd: string, tokenStart: number): boolean {
+  let inSingle = false
+  let inDouble = false
+  for (let i = 0; i < tokenStart; i++) {
+    const c = cmd[i]
+    if (inSingle) {
+      if (c === "'") inSingle = false
+      continue
+    }
+    if (inDouble) {
+      if (c === '"') inDouble = false
+      continue
+    }
+    if (c === "'") inSingle = true
+    else if (c === '"') inDouble = true
+  }
+  return inSingle || inDouble
 }
 
 /** Whether the command is the SINGLE READ-ONLY `systemctl is-active <unit>` form
@@ -1638,8 +1688,16 @@ function deptExecIsPathWord(token: string): boolean {
   // backslash-escaped regex metachar (the guard's scope targets real POSIX
   // paths). The flat `/<word>` variant INSIDE a quoted grep|sed|awk pattern is
   // handled by the quote-context discriminator in deptExecPathTokens.
+  // fb-214 (QD 2026-09-07 — the quoted-pattern '/' FP family): a
+  // backslash-ESCAPED SLASH (`\/`) joins the escaped-metachar class. A real
+  // awk/grep/sed regex literal carries its CONTENT delimiters escaped
+  // (`awk '/"https:\/\//'` — the counted ledger pattern that was DENIED as
+  // «absolute path "/https…"»), and a real POSIX path word never contains a
+  // literal backslash (a `\/` mid-word is a REGEX escape, not a separator —
+  // the regex's own `/` delimiters are unescaped). The control `/etc/passwd`
+  // (no backslash) is NOT affected and keeps denying exactly as before.
   if (rest.endsWith('\\')) return false
-  if (/\\[|*().?[\]{}$^+]/.test(rest)) return false
+  if (/\\[|*().?[\]{}$^+/]/.test(rest)) return false
   return true
 }
 

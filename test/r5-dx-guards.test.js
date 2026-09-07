@@ -88,6 +88,36 @@ test('R5 fb-135 (deny-side): a DENIED missing /packages/<name> token gains the d
   assert.equal(plain, 'OUT_OF_SCOPE / DENIED — command references absolute path "/etc/passwd" outside a scoped dept_exec root (escalate via the Asistente / owner approval)', 'non-packages denies are byte-identical (no hint)')
 })
 
+test('R5 fb-214 (the "/" class): an awk/grep regex literal with ESCAPED slashes inside a quoted pattern is CONTENT, never an absolute path — the q-i-93 ledger count `awk \'/"https:\\/\\//\'` (a read-only awk match-regex whose escaped `\/` separators made the token look like `/https…`) is ALLOWED; the escaped-slash discriminator joins the fb-84 regex-literal family EXACTLY (a real multi-segment path has no backslash and keeps denying)', () => {
+  // The recorded q-i-93 shape (regex with escaped content slashes) — ALLOWED.
+  assert.equal(deptExecDenyReason("awk '/\"https:\\/\\//' /.deepartments/feedback.jsonl", CWD, [...ROOTS, '/.deepartments']), undefined, 'the fb-214 awk DOUBLE-Q escaped-slash regex is allowed (the `\\/` pairs are regex escapes, never separators)')
+  assert.equal(deptExecDenyReason("awk '/https:\\/\\//' /.deepartments/feedback.jsonl", CWD, [...ROOTS, '/.deepartments']), undefined, 'the plain escaped-slash regex form is allowed too')
+  assert.equal(deptExecDenyReason("grep -c '/https:\\/\\//' /.deepartments/feedback.jsonl", CWD, [...ROOTS, '/.deepartments']), undefined, 'the grep quoted escaped-slash pattern is a regex literal, not a path')
+  assert.equal(deptExecDenyReason("awk -F'/' '/\"https:\\\\/\\\\// {c++} END {print c}' /.deepartments/feedback.jsonl", CWD, [...ROOTS, '/.deepartments']), undefined, 'the awk -F/ variant with escaped slashes stays allowed (the -F argument is a literal too)')
+  // Control — a REAL multi-segment path (quoted or not) STILL denies: a path
+  // word carries no backslash, so the escape discriminator never masks it.
+  assert.match(deptExecDenyReason("grep -n '/etc/passwd' README.md", CWD, ROOTS), /references absolute path "\/etc\/passwd"/, 'a quoted MULTI-SEGMENT real path is STILL denied (the fb-84 control — no backslash, no escape)')
+  assert.match(deptExecDenyReason('cat /etc/passwd', CWD, ROOTS), /references absolute path "\/etc\/passwd"/, 'an out-of-root real path is STILL denied')
+})
+
+test('R5 fb-214 (the "halt" class): a QUOTED denylist word and a PATH-SEGMENT/FILENAME named "halt" are CONTENT/FILE references, NEVER the command — `grep -i \'halt\' ledger`, `cat ./halt`, `ls /root/halt` and an in-root `/…/halt/…` path are ALLOWED; a REAL unquoted `halt` command word and the out-of-root protected paths STAY denied', () => {
+  // The live fb-214 repro (my own read-only grep of the ledger was DENIED) —
+  // a quoted pattern word is CONTENT, never a command.
+  assert.equal(deptExecDenyReason("grep -i 'halt' /.deepartments/feedback.jsonl", CWD, [...ROOTS, '/.deepartments']), undefined, 'a QUOTED grep pattern "halt" is allowed (content — the fb-214 read-only grep; the boundary matcher previously denied the whole word in quotes)')
+  assert.equal(deptExecDenyReason('echo "halt"', CWD, ROOTS), undefined, 'a quoted echo literal "halt" is text, never a command')
+  // Filename / path-segment references.
+  assert.equal(deptExecDenyReason('cat ./halt', CWD, ROOTS), undefined, 'a cwd-relative FILE named halt is allowed (a filename, not the command)')
+  assert.equal(deptExecDenyReason('ls /home/esuarez/projects/deepartments/halt', CWD, ROOTS), undefined, 'an in-root directory named halt is allowed (a path segment, not the command)')
+  assert.equal(deptExecDenyReason('cat /home/esuarez/projects/deepartments/halt/README.md', CWD, ROOTS), undefined, 'an in-root path through a halt segment is allowed')
+  // REAL commands / operands STAY denied (the conservative ambiguity rule).
+  assert.match(deptExecDenyReason('halt now', CWD, ROOTS), /denied token "halt"/, 'a REAL unquoted halt command is STILL denied')
+  assert.match(deptExecDenyReason('cat halt', CWD, ROOTS), /denied token "halt"/, 'a bare unquoted halt operand is STILL denied (unresolvable ambiguity — conservative)')
+  assert.match(deptExecDenyReason('cat /sbin/halt', CWD, ROOTS), /references absolute path "\/sbin\/halt"/, 'an out-of-root path THROUGH a halt segment is STILL denied (the abs-path scope closes the path hole the denylist skip opened)')
+  // The rest of the denylist + controls unchanged.
+  assert.match(deptExecDenyReason('sudo ls', CWD, ROOTS), /denied token "sudo"/, 'sudo is STILL denied')
+  assert.equal(deptExecDenyReason("grep -n 'haltedAt' src/x.ts", CWD, ROOTS), undefined, 'the fb-109 halt-identifier case is STILL allowed')
+})
+
 // ---------------------------------------------------------------------------
 // E2 (real Loader — the smokeBoot pattern): the fb-88/114 memo validator on
 // the REAL head own-layer dept_memo_write (the strict registration) + the
@@ -256,6 +286,115 @@ test('R5 fb-88/fb-114 (real Loader): the head own-layer dept_memo_write now ENUM
       const ok = await memoTool.execute({ summary: 'r5-e2-memo', decisions: [], constraints: [], openItems: [], currentStep: 'verify' }, { agent })
       assert.ok(ok !== null && typeof ok === 'object' && typeof ok.memoPath === 'string', 'a VALID dept_memo_write still returns the memoPath (the strict schema is not a regression)')
       assert.ok(existsSync(path.join(stateDir, 'journals', 'internal-programming-head.md')), 'the REAL journal file exists at <stateDir>/journals/<memberId>.md')
+    } finally {
+      dispose()
+    }
+  } finally {
+    await rm(stateDir, { recursive: true, force: true })
+    if (roleSnapshot === null) await rm(BUILDER_ROLE_PATH, { force: true })
+    else await writeFileSync(BUILDER_ROLE_PATH, roleSnapshot, 'utf8')
+  }
+})
+
+test('R5 fb-216/fb-223 (real Loader): dept_memo_write now emits the ORG validator message — ONE error enumerating EVERY violation (missing required + wrong types + undeclared keys) PLUS the expected-fields list — on BOTH the head own-layer AND the HOST plane (the fb-216 host datapoint: a call with a loose keys `decisions` STRING + invented keys only named the FIRST failure before); a malformed call NEVER reaches the journal write (zero side effects)', async () => {
+  const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-r5-dx-'))
+  const roleSnapshot = existsSync(BUILDER_ROLE_PATH) ? readFileSync(BUILDER_ROLE_PATH, 'utf8') : null
+  try {
+    const { pluginCtx, agentsStub, dispose } = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] }, agents: true })
+    try {
+      const ctx = pluginCtx()
+      let headChild
+      for (let i = 0; i < 160; i++) {
+        headChild = agentsStub.childContexts.find((c) => c.agent.id.includes('head-internal-programming-head'))
+        if (headChild !== undefined) break
+        await new Promise((r) => setTimeout(r, 25))
+      }
+      assert.ok(headChild !== undefined, 'the composed boot materialized the head')
+      const memoTool = headChild.ctx.tools.get('dept_memo_write', headChild.key)
+      const agent = headChild.agent
+      // (1) The fb-216 EXACT shape — summary omitted AND `decisions` given as a
+      // STRING ("claves sueltas en lugar de arrays") AND an invented key: the
+      // message enumerates ALL of them + the expected fields.
+      await assert.rejects(
+        () => memoTool.execute({ decisions: 'SD', 'decsions': ['x'], currentStep: 42 }, { agent }),
+        (error) => {
+          const msg = String(error?.message ?? error)
+          assert.match(msg, /missing required property "summary"/, 'the missing required field is named')
+          assert.match(msg, /"decisions" must be an array of strings/, 'the malformed decisions TYPE is named (fb-216: not only the first failure)')
+          assert.match(msg, /"decsions" is not a declared property \(additionalProperties: false\)/, 'the INVENTED key is named (the closed-set rule, org-enforced)')
+          assert.match(msg, /"currentStep" must be a string/, 'the wrong currentStep type is named too')
+          assert.match(msg, /expected fields: summary, decisions, constraints, openItems, currentStep/, 'the message lists the EXPECTED FIELDS (fb-223) in ONE error')
+          return true
+        },
+        'fb-216: ONE error enumerates EVERY violation + the expected fields'
+      )
+      // (2) A VALID call still passes (the org validator is not a regression).
+      const ok = await memoTool.execute({ summary: 'fb216-ok', decisions: ['d'], constraints: [], openItems: ['o'], currentStep: 'verify' }, { agent })
+      assert.ok(typeof ok?.memoPath === 'string', 'a valid call still writes the journal')
+      // (3) The HOST plane (the global dept_memo_write — the fb-216/223 host
+      // datapoint class: the host composing the call in parallel): the SAME org
+      // message (the single memoWriteTool definition carries the validator).
+      const hostAgent = { id: `host-${Date.now()}`, status: 'idle', ctx: { get: () => undefined }, session: { events: [], get seq() { return this.events.length }, snapshotEvents() { return this.events }, requestHeader() { return undefined } } }
+      await assert.rejects(
+        () => ctx.tools.get('dept_memo_write').execute({ 'summary': 7, 'openItems': 'not-an-array' }, { agent: hostAgent }),
+        (error) => {
+          const msg = String(error?.message ?? error)
+          assert.match(msg, /missing required property "summary"/, 'HOST plane: the missing summary is named (a NUMBER summary is not the required string)')
+          assert.match(msg, /"openItems" must be an array of strings/, 'HOST plane: the malformed openItems type is named')
+          assert.match(msg, /expected fields: summary, decisions, constraints, openItems, currentStep/, 'HOST plane: the expected-fields list rides the same message (fb-223)')
+          return true
+        },
+        'the HOST-plane registration emits the same complete org message'
+      )
+      // (4) ZERO side effects: the journal of the head was NOT touched by the
+      // malformed post-own-layer call (only the VALID call above wrote it).
+      const journal = readFileSync(path.join(stateDir, 'journals', 'internal-programming-head.md'), 'utf8')
+      assert.ok(journal.includes('fb216-ok') && !journal.includes('missing'), 'the malformed calls wrote NOTHING (the validator runs before the memo write)')
+    } finally {
+      dispose()
+    }
+  } finally {
+    await rm(stateDir, { recursive: true, force: true })
+    if (roleSnapshot === null) await rm(BUILDER_ROLE_PATH, { force: true })
+    else await writeFileSync(BUILDER_ROLE_PATH, roleSnapshot, 'utf8')
+  }
+})
+
+test('R5 fb-209a (real Loader): dept_repo_state — the READ-ONLY git-state HEAD tool — runs through the REAL head own-layer and exposes the branch + upstream + the main..<branch> log + the working-tree diff stats + the worktrees of the deepartments repo, cap-bounded and FAIL-OPEN (a git failure returns the readable columns + `error`, never a crash); it NEVER writes (working-tree state unchanged after the call)', async () => {
+  const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-r5-dx-'))
+  const roleSnapshot = existsSync(BUILDER_ROLE_PATH) ? readFileSync(BUILDER_ROLE_PATH, 'utf8') : null
+  try {
+    const { pluginCtx, agentsStub, dispose } = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] }, agents: true })
+    try {
+      const ctx = pluginCtx()
+      let headChild
+      for (let i = 0; i < 160; i++) {
+        headChild = agentsStub.childContexts.find((c) => c.agent.id.includes('head-internal-programming-head'))
+        if (headChild !== undefined) break
+        await new Promise((r) => setTimeout(r, 25))
+      }
+      assert.ok(headChild !== undefined, 'the composed boot materialized the head')
+      const repoStateTool = headChild.ctx.tools.get('dept_repo_state', headChild.key)
+      assert.ok(repoStateTool !== void 0, 'the head own-layer carries dept_repo_state (the head-only git-state tool)')
+      // Snapshot the git state BEFORE (read-only verification: the tool never
+      // writes — the exact worktree bytes must be unchanged after the call).
+      const before = readFileSync(path.join(REPO_ROOT, 'AGENTS.md'), 'utf8')
+      const result = await repoStateTool.execute({}, { agent: headChild.agent })
+      const after = readFileSync(path.join(REPO_ROOT, 'AGENTS.md'), 'utf8')
+      assert.equal(after, before, 'dept_repo_state NEVER writes the repo (a read-only tool — the AGENTS.md bytes are unchanged)')
+      assert.equal(result.repo, REPO_ROOT, 'the tool reports the plugin repoRoot')
+      assert.equal(result.branch, 'main', 'the repo is on main (the ceremony state) — the branch probe parses `git branch -vv`')
+      assert.equal(typeof result.upstream, 'string', 'the upstream is exposed (origin/main)')
+      assert.ok(Array.isArray(result.log), 'the log column is an array')
+      assert.ok(Array.isArray(result.diffStats), 'the diff-stats column is an array')
+      assert.ok(Array.isArray(result.worktrees) && result.worktrees.length >= 1, 'the worktree list is non-empty (the main worktree)')
+      assert.equal(result.worktrees[0].includes(REPO_ROOT), true, 'the first worktree is the main repo path')
+      // The diff-stats column reflects the CURRENT working tree (the merged
+      // head-tooling lanes show as uncommitted files — the ceremony fact).
+      assert.ok(result.diffStats.length >= 1, 'the diff stats carry the uncommitted ceremony state')
+      // The host plane does NOT see it (the head-only manager gate).
+      const hostTools = ctx.tools.get('dept_repo_state')
+      assert.equal(hostTools, undefined, 'dept_repo_state is NOT exposed on the host/global plane (the head own-layer manager gate)')
     } finally {
       dispose()
     }
