@@ -196,7 +196,7 @@ import {
   pickLiveHostEntry
 } from 'dshd-core'
 import type { PostEntry, RegistryStore, HostEntry, HostEntryLike } from 'dshd-core'
-import { parseJobDefFrontmatter, jobDirFor } from 'dshd-jobs'
+import { parseJobDefFrontmatter, jobDirFor, stampJobRun } from 'dshd-jobs'
 import type { CalendarEntry, SchedulerAutoRunFinding } from 'dshd-jobs'
 import type {
   Config,
@@ -2267,7 +2267,22 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           if (jobId === '') throw new Error('[deepartments] dept_job_run: `jobId` is required')
           // The SHARED job-run engine — the SAME path the W1 scheduler uses for
           // an automatic fire (no drift between manual and auto execution).
-          return runJobForDepartment(department, headEntry, jobId, { callerSessionId: agent.id as string, signal: exec.signal })
+          const result = await runJobForDepartment(department, headEntry, jobId, { callerSessionId: agent.id as string, signal: exec.signal })
+          // O3(a) (VALLE 09-07 — job-runs visibility): stamp the MANUAL re-run
+          // in the SAME `<stateDir>/job-runs-state.json` ledger the scheduler
+          // tick writes for AUTO-runs (flat {jobId: lastRunAtMs} — the SAME
+          // state, the SAME form). A head's manual re-fire after a class-outage
+          // (e.g. the 09-07 10:39Z re-run whose 09:00:02Z auto-run had died)
+          // becomes as visible as an auto-run instead of silently vanishing.
+          // NON-FATAL: a ledger persist failure warn-degrades — it must never
+          // fail the already-successful run (the writeJobRunsStateFile throw is
+          // folded into a warn, never propagated).
+          try {
+            await stampJobRun(stateDir, jobId)
+          } catch (error: unknown) {
+            ctx.logger.warn(`[deepartments] dept_job_run: job "${jobId}" ran (worker ${result.workerId}) but its job-runs stamp could not persist: ${error instanceof Error ? error.message : String(error)}`)
+          }
+          return result
         }
       })))
 

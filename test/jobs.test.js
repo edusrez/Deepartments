@@ -27,6 +27,7 @@ import {
   readJobDefinitionFile,
   readJobRunsStateFile,
   runAgendaSchedulerTick,
+  stampJobRun,
   unwrapQuotedScalar,
   writeCalendarStateFile,
   writeJobRunsStateFile
@@ -317,6 +318,80 @@ test('writeJobRunsStateFile: mkdir + overwrite (round-trip)', async () => {
     assert.deepEqual(readJobRunsStateFile(dir), { jobA: 1700000000000 })
     await writeJobRunsStateFile(dir, {})
     assert.deepEqual(readJobRunsStateFile(dir), {})
+  })
+})
+
+// --- O3-a (VALLE 09-07 — job-runs visibility): the MANUAL re-run stamp --------
+// The scheduler tick stamps AUTO-runs (`runs[job.id] = nowMs`); before O3-a a
+// MANUAL `dept_job_run` re-fire never touched the ledger, so a head's re-queue
+// after a class-outage death (09-07: auto 09:00:02Z died, head re-ran 10:39Z)
+// was invisible. `stampJobRun` writes the SAME flat {jobId: lastRunAtMs} form,
+// same state file — a manual re-run is recorded exactly like an auto-run.
+
+test('O3-a stampJobRun: a MANUAL re-run stamps the SAME flat {jobId: lastRunAtMs} form + round-trips (state file)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const ts = 1724400000000
+    const returned = await stampJobRun(stateDir, 'quality-daily', ts)
+    // The SAME flat numeric form the tick writes for auto-runs — never a
+    // second schema (a non-auto run must not silently vanish).
+    assert.deepEqual(returned, { 'quality-daily': ts }, 'the stamp returns the new full ledger')
+    assert.deepEqual(readJobRunsStateFile(stateDir), { 'quality-daily': ts }, 'manual run lands in the same ledger read')
+    // The canonical file carries it (the same file the tick persists).
+    const raw = JSON.parse(await readFile(path.join(stateDir, 'job-runs-state.json'), 'utf8'))
+    assert.deepEqual(raw, { 'quality-daily': ts }, 'the canonical <stateDir>/job-runs-state.json carries the manual stamp')
+  })
+})
+
+test('O3-a stampJobRun: read-modify-write — other jobs\' entries are preserved; a re-stamp of the SAME job advances its ts (the re-fire is the LAST run)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // An AUTO-run entry (as the tick would have left it) already sits there.
+    const autoTs = 1724400000000
+    await writeJobRunsStateFile(stateDir, { 'pulse-digest': autoTs })
+    const manualTs = autoTs + 99 * 60 * 1000 // the 10:39Z re-fire, ~99 min later
+    await stampJobRun(stateDir, 'pulse-digest', manualTs)
+    // The same job's entry ADVANCED to the manual ts (the re-fire is now the
+    // last run — visible to health's readLatestJobRunTs as a fresh run).
+    assert.deepEqual(readJobRunsStateFile(stateDir), { 'pulse-digest': manualTs }, 'the manual re-fire becomes the last run of its job')
+    // A DIFFERENT job's entry is preserved untouched.
+    await stampJobRun(stateDir, 'weekly-repo-health', autoTs)
+    assert.deepEqual(readJobRunsStateFile(stateDir), { 'pulse-digest': manualTs, 'weekly-repo-health': autoTs }, 'read-modify-write preserves the other entries (mixed auto+manual ledger)')
+  })
+})
+
+test('O3-a stampJobRun: absent/malformed ledger tolerated (mirrors readJobRunsStateFile — a stamp never throws on the read)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeFile(path.join(stateDir, 'job-runs-state.json'), 'junk', 'utf8')
+    const returned = await stampJobRun(stateDir, 'c1', 42)
+    assert.deepEqual(returned, { c1: 42 }, 'malformed ledger → starts from {} (a manual stamp still lands)')
+    assert.deepEqual(readJobRunsStateFile(stateDir), { c1: 42 })
+  })
+})
+
+test('O3-a + tick: the AUTO-run still stamps (ledger advances on fired) AND a MANUAL stamp of the same run is recorded identically — the auto-run is NOT broken', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await withTempJobDir(async (jobDir) => {
+      await writeFile(path.join(jobDir, 'c1.md'), defText({ id: 'c1', schedule: '* * * * *' }), 'utf8')
+      const runCalls = []
+      const nowMs = new Date(2026, 7, 23, 9, 0, 30).getTime()
+      const deps = {
+        now: () => nowMs,
+        departments: [{ id: 'research', name: 'Research', jobDir }],
+        repoRoot: '/nonexistent',
+        calendarStateDir: stateDir,
+        jobRunsStateDir: stateDir,
+        headForDepartment: () => 'research-head',
+        runJob: async (dept, head, jobId) => { runCalls.push({ dept: dept.id, head, jobId }); return true },
+        notifyHead: async () => {},
+        departmentForEntry: () => ({ id: 'research', name: 'Research', jobDir }),
+        departmentForJob: () => ({ id: 'research', name: 'Research', jobDir })
+      }
+      await runAgendaSchedulerTick(deps)
+      assert.deepEqual(readJobRunsStateFile(stateDir), { c1: nowMs }, 'the AUTO-run still stamps the ledger (unchanged behavior)')
+      // A manual re-fire of the same job lands in the SAME state, SAME form.
+      const manualTs = nowMs + 60 * 60000
+      await stampJobRun(stateDir, 'c1', manualTs)
+      assert.deepEqual(readJobRunsStateFile(stateDir), { c1: manualTs }, 'the manual re-run is stamped identically — one ledger, one form')
+    })
   })
 })
 

@@ -491,6 +491,25 @@ export async function writeJobRunsStateFile(stateDir: string, state: Record<stri
   await writeFile(path.join(stateDir, 'job-runs-state.json'), JSON.stringify(state), 'utf8')
 }
 
+/** O3-a (VALLE 09-07 — job-runs visibility): stamp ONE job run into
+ * `<stateDir>/job-runs-state.json` — the SAME flat `{jobId: lastRunAtMs}`
+ * idempotency ledger the scheduler tick writes for AUTO-runs, so a MANUAL
+ * `dept_job_run` re-fire (the head's re-queue after a class-outage death —
+ * the 09-07 10:39Z re-run whose auto-run 09:00:02Z had died) is recorded
+ * EXACTLY like an auto-run (same state, same form — never a second schema;
+ * a NON-AUTO run must not silently vanish from the ledger). Read-modify-
+ * write: preserves every OTHER job's entry; absent/unreadable/malformed
+ * ledger starts from `{}` (mirrors readJobRunsStateFile — a stamp never
+ * throws on the read). Returns the NEW full ledger (a test asserts the
+ * round-trip). Throws only on an fs failure — the caller folds that into a
+ * warn (a stamp must never fail the already-successful run). */
+export async function stampJobRun(stateDir: string, jobId: string, ts = Date.now()): Promise<Record<string, number>> {
+  const runs = readJobRunsStateFile(stateDir)
+  runs[jobId] = ts
+  await writeJobRunsStateFile(stateDir, runs)
+  return runs
+}
+
 // ---------------------------------------------------------------------------
 // W8-c scheduler auto-run visibility + the PURE scheduler tick.
 //
