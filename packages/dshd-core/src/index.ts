@@ -58,6 +58,7 @@ export * from './delivery.js'
 export * from './wakepack.js'
 export * from './lifecycle.js'
 export * from './session-rotation.js'
+export * from './rotation-baseline.js'
 export * from './session-cleanup.js'
 export * from './role-orient.js'
 // PACING (owner m-PACING, 2026-08-28): the peak/valley FRANJA domain — the
