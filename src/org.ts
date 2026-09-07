@@ -292,6 +292,30 @@ export interface HealthConfig {
    * work-register-idle-state.json firstQuietTs — the M4 sustained-condition
    * precedent). Absent/invalid → the 15-min code default. */
   workRegisterIdleQuietMs?: number
+  /** fb-184 (item 2, watchdog work-register-idle v2 — wave 3) — the L2
+   * ESCALATION window in ms (default 2700000 = 45 min = 3x the 15-min quiet
+   * window): the STALL clock (stallSinceTs — set at the FIRST L1 alert, never
+   * broken by the host's own activity — the anti-fb-163/171 clock) must
+   * EXCEED this before the `work-register-idle:l2` escalation finding + the
+   * DUAL-head wake (the census `next:` actors ∪ `workRegisterIdleL2Heads`).
+   * Absent/invalid → the 45-min code default. */
+  workRegisterIdleEscalT2Ms?: number
+  /** fb-184 (item 2) — the L3 ESCALATION window in ms (default 5400000 =
+   * 90 min): beyond this the `work-register-idle:l3` finding escalates to the
+   * owner-facing channel (`workRegisterIdleL3Heads`) + the host re-alert (its
+   * own dedupe key). Absent/invalid → the 90-min code default. */
+  workRegisterIdleEscalT3Ms?: number
+  /** fb-184 (item 2) — the L2 ESCALATION recipient heads (default
+   * ['internal-programming-head','quality-head'] — the QH-request DUAL wake:
+   * the IPH is the natural dispatcher of the P2 lanes, the QH the process
+   * owner). The census `next:` actors are ALWAYS included; this knob ADDS the
+   * fixed heads. An explicit non-empty array overrides the default. */
+  workRegisterIdleL2Heads?: string[]
+  /** fb-184 (item 2) — the L3 ESCALATION recipient heads (default
+   * ['quality-head'] — the owner-facing D-Q3 / QUALITY REQUEST channel;
+   * parametrized per the host decision, never hardcoded). An explicit
+   * non-empty array overrides. */
+  workRegisterIdleL3Heads?: string[]
   /** LANE 5 (fb-46) — the absolute path of the WORK-REGISTER (docs/WORK-REGISTER.md)
    * the work-register-idle watchdog READS (SOLO-LECTURA — IPD/host own every
    * write); absent → the repo default. Override for a packaged deployment or a
@@ -886,6 +910,14 @@ export const Config: z<any, any> = z.object({
     // 15 min — the section contract).
     workRegisterIdleEnabled: z.boolean(),
     workRegisterIdleQuietMs: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    // fb-184 (item 2) — the work-register-idle ESCALATION knobs (default(void
+    // 0) → absent = code defaults: escalT2Ms 2700000 = 45 min, escalT3Ms
+    // 5400000 = 90 min, L2Heads [internal-programming-head, quality-head],
+    // L3Heads [quality-head] — the section contract).
+    workRegisterIdleEscalT2Ms: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    workRegisterIdleEscalT3Ms: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+    workRegisterIdleL2Heads: z.array(z.string()).default(void 0 as never),
+    workRegisterIdleL3Heads: z.array(z.string()).default(void 0 as never),
     // LANE 5 (fb-46) — the WORK-REGISTER path override (default(void 0) →
     // absent = the repo default docs/WORK-REGISTER.md).
     workRegisterPath: z.string().default(void 0 as never)
@@ -932,6 +964,10 @@ export const Config: z<any, any> = z.object({
     catchupWindowMs: number
     workRegisterIdleEnabled: boolean
     workRegisterIdleQuietMs: number
+    workRegisterIdleEscalT2Ms: number
+    workRegisterIdleEscalT3Ms: number
+    workRegisterIdleL2Heads: string[]
+    workRegisterIdleL3Heads: string[]
     workRegisterPath: string
   }),
   // QD (spec 007 §4.1, D-Q2). Mirrors the runtime QualityConfig in src/invoke.ts:

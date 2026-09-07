@@ -83,7 +83,7 @@ const W7_REGISTER_SETTLEMENT_ONLY = [
 
 // --- parse ----------------------------------------------------------------
 
-test('fb-167 parseWorkRegisterItems: a line with the `next:` header naming the HOST marks the item nextActor (the settlement-wait subclass); the header may sit after the marker OR inside the bold span; a NON-host next actor is NOT a settlement; items without the header keep nextActor ABSENT', () => {
+test('fb-167 parseWorkRegisterItems: a line with the `next:` header naming the HOST marks the item nextActor (the settlement-wait subclass); the header may sit after the marker OR inside the bold span; fb-184 (item 4) GENERALIZES the capture to ANY actor (the SCAN classifies: host = settlement, a known post = actor-idle, unknown = generic); items without the header keep nextActor ABSENT', () => {
   const items = parseWorkRegisterItems(W7_REGISTER_MIXED)
   const byLabel = new Map(items.map((item) => [item.label, item]))
   const settlement = byLabel.get('WAVE 7 settlement (m-1806) — espera verify+push')
@@ -95,9 +95,58 @@ test('fb-167 parseWorkRegisterItems: a line with the `next:` header naming the H
   // The header INSIDE the bold span is also captured (the register may embed it).
   const inside = parseWorkRegisterItems('## 1. IPD\n\n- **WAVE 7 (m-1811) next: host verify+push**')
   assert.equal(inside[0]?.nextActor, 'host verify+push', 'the header INSIDE the bold marker is detected')
-  // A non-host next actor stays in the generic census (NOT a settlement).
+  // fb-184 (item 4): a NON-host next actor IS captured (the ANY-actor regex) —
+  // the SCAN decides the class (a known post id = actor-idle; an unknown =
+  // generic), never the parse.
   const otherActor = parseWorkRegisterItems('## 1. IPD\n\n- **LANE R8 — next: research-head research request**')
-  assert.equal(otherActor[0]?.nextActor, undefined, 'a `next:` naming a NON-host actor is NOT a settlement (the generic census keeps the item)')
+  assert.equal(otherActor[0]?.nextActor, 'research-head research request', 'a `next:` naming a NON-host actor is CAPTURED (fb-184 item 4 — the parse is class-agnostic)')
+  const headActor = parseWorkRegisterItems('## 1. IPD\n\n- **LANE R9 — next: internal-programming-head**')
+  assert.equal(headActor[0]?.nextActor, 'internal-programming-head', 'a `next:` naming a KNOWN post id is captured verbatim (the actor-idle class input)')
+})
+
+test('fb-184 (item 4) scanWorkRegisterIdle MIXED next: classes (the host+iph case): a register carrying BOTH `next: host` (settlement) AND `next: <known-head>` (actor-item) AND plain items → the settlement-wait + generic findings coexist; the generic count INCLUDES the actor item; the frame names the actor; the actor postId rides the L2 recipients', () => {
+  const T0 = new Date(2026, 8, 5, 8, 0, 0).getTime() // Saturday → VALLE
+  const mixed = [
+    '## 1. IPD — cola activa (DAG seriado)',
+    '',
+    '- **WAVE 7 settlement (m-1806) — espera verify+push** next: host verify+push',
+    '- **IPH DAG item** next: internal-programming-head',
+    '- **LANE 2 — fb-168 (delivery lane)** [en cola]',
+    '',
+    '## 3. PENDIENTE-OWNER (decisiones)',
+    '',
+    '- **top-up ws10 → NO por ahora**'
+  ].join('\n')
+  const scan = scanWorkRegisterIdle({
+    registerText: mixed,
+    valley: true,
+    hostRunning: false,
+    posts: [{ postId: 'internal-programming-head' }],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: { firstQuietTs: T0 - 60_000 }
+  })
+  assert.equal(scan.findings.length, 2, 'the mixed register → settlement-wait + generic (two actor stalls — host AND the head)')
+  const settlement = scan.findings.find((f) => f.kind === 'settlement-wait')
+  const generic = scan.findings.find((f) => f.kind === 'work-register-idle')
+  assert.equal(settlement.count, 1, 'the settlement class = the `next: host` item ONLY')
+  assert.equal(generic.count, 2, 'the generic census INCLUDES the actor item (IPH DAG item) + the plain LANE 2 — an item waiting on a HEAD is still pending work (the fb-167 host-exclusion does NOT extend to heads)')
+  assert.match(generic.error, /IPH DAG item — next: internal-programming-head/, 'the actor item is framed WITH its next-actor')
+  assert.ok(!generic.error.includes('WAVE 7 settlement'), 'the settlement label is NEVER in the generic frame')
+  const ladder = scanWorkRegisterIdle({
+    registerText: mixed,
+    valley: true,
+    hostRunning: false,
+    posts: [{ postId: 'internal-programming-head' }],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: { firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 120_000 },
+    escalT2Ms: 60_000,
+    escalT3Ms: 600_000
+  })
+  const l2 = ladder.findings.find((f) => f.kind === 'work-register-idle:l2')
+  assert.ok(l2 !== undefined, 'stall ≥ T2 → the L2 finding')
+  assert.deepEqual(l2.recipients, ['internal-programming-head'], 'the L2 recipients = the ACTOR postId (the head the items wait on)')
 })
 
 test('fb-167 parseWorkRegisterItems: the existing census semantics stay INTACT — the §3 PENDIENTE-OWNER items stay gated, the §2 CERRADO section is skipped, the total matches the section/marker split', () => {

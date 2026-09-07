@@ -537,7 +537,6 @@ análisis de fallos). M3 los institucionaliza en docs/skill. Hoy: QD→IPH
   (`fallback.peakWindows`/`peakBufferMs`) — ambos repos declaran el MISMO
   límite (horas {1,2,3,6,7,8,9} ≡ 01:00-04:00 ∪ 06:00-10:00 con el mismo
   buffer) y deben mantenerse en sync.
-
 - **SUB-NORMA ANTI-FB-163/171 (handshake de responsabilidad — 2026-09-06,
   digest QD junción; complementa la NORMA DE CONTINUACIÓN fb-46 de esta
   sección)**: NUNCA descartar un watchdog/signal sin verificación del
@@ -554,3 +553,12 @@ análisis de fallos). M3 los institucionaliza en docs/skill. Hoy: QD→IPH
   estado del red/bloqueo real (ledger main-red, health-alerts, zona CUT4) —
   el 09-05 el lock de zona paró 83 no-gated cuando el gate correcto era solo
   la zona+push.
+- **SUB-NORMA WELCOME CON DESPACHO (fb-184, item 5 — protocolo del host;
+  template canónico m-2040/2041)**: la bienvenida a un fresh (rotación OK,
+  journal seed verified) termina con ORDEN DE ARRANQUE — handoff de estado +
+  **VENTANA ACTUAL (VALLE = drenaje, no parada; fb-46)** + lanes/items
+  despachables AHORA (del census non-gated/`next:`) + «¿cuál arrancas?»
+  (BOOT-QUIET roto por el primer turno = el despacho, no la espera). Backstop
+  estructural: el watchdog despierta al head idle con sus items `next:<head>`
+  como primer trabajo (system-wait, item 6 de fb-184) — el drenaje no depende
+  de la iniciativa del host en cada rotación.

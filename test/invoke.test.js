@@ -14562,13 +14562,25 @@ test('LANE 5 SMOKE (acceptance — real daemon): bootPlugin with health {interva
   await withTempStateDir(async (stateDir) => {
     const registerPath = path.join(stateDir, 'WR-smoke.md')
     await writeFile(registerPath, WRI_REGISTER_FIXTURE, 'utf8')
+    // fb-184 (item 1) — the COMPOSITE threshold needs a VERIFIABLE pool: the
+    // REAL daemon resolves healthPoolerStatePath (default <dshHome>/keyPooler-
+    // state.json — ABSENT in a hermetic fixture → the pool leg would read
+    // «not usable» and suppress the alert, the never-fabricate direction). A
+    // FRESH pooler snapshot with 1 usable key + the poolerStateFilePath knob
+    // makes the leg pass (the pool is verifiably dispatch-capable).
+    const poolerPath = path.join(stateDir, POOLER_STATE_FILE)
+    await writeFile(poolerPath, JSON.stringify({
+      updatedAt: new Date().toISOString(),
+      keys: { 'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: 0, cooldownUntil: 0 } },
+      lastRotation: null
+    }), 'utf8')
     // Force VALLE regardless of the wall clock: a peak window whose weekday is
     // the NEXT UTC weekday (never today — the weekday filter short-circuits
     // before any hour/buffer check, so isPeakAt(now) === false ALWAYS).
     const todayUtcDow = new Date().getUTCDay() === 0 ? 7 : new Date().getUTCDay()
     const nextDow = todayUtcDow === 7 ? 1 : todayUtcDow + 1
     const env = await bootPlugin(stateDir, {
-      health: { intervalMs: 50, workRegisterIdleQuietMs: 50, workRegisterPath: registerPath },
+      health: { intervalMs: 50, workRegisterIdleQuietMs: 50, workRegisterPath: registerPath, poolerStateFilePath: poolerPath },
       org: { ...TEST_ORG, pacing: { peakWindows: { weekday: [nextDow], hours: [1] } } }
     })
     try {
@@ -14591,13 +14603,470 @@ test('LANE 5 SMOKE (acceptance — real daemon): bootPlugin with health {interva
       await waitFor(async () => {
         try {
           const auditText = await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')
-          return auditText.trim().length > 0
+          const rows = auditText.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+          // The daemon's audit append is a read-modify-write — a read inside
+          // its empty window must not count (the fb-61 non-atomic append race).
+          return rows.length > 0 && rows.at(-1).findings?.some((f) => f.kind === 'work-register-idle') === true
         } catch {
           return false
         }
-      }, 5000, 'the audit row is appended')
+      }, 5000, 'the audit row records the work-register-idle finding')
       const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
       assert.equal(audit.at(-1).findings.some((f) => f.kind === 'work-register-idle'), true, 'the audit last row records the work-register-idle finding')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+// --- LANE 5 fb-184 (wave 3 — WATCHDOG WORK-REGISTER-IDLE v2, 2026-09-06) ----
+// The QH watchdog-v2 upgrade (design explore-deep-34 586effda): (item 1) the
+// COMPOSITE threshold — the pool-usable leg (a RESOLVED-but-unusable pool →
+// NO alert; the epoch keeps accumulating) + the recentlySilentHeads leg
+// (BOOT-QUIET heads painted into the frame's composite line — the alert loads
+// its own cifra+fuente); (item 2) the ESCALATION LADDER — stallSinceTs (set at
+// the FIRST L1 alert, broken ONLY by a running post / PEAK / a resolved census
+// / a VERIFIED ACK — never by hostRunning alone, the anti-fb-163/171 clock) +
+// the `work-register-idle:l2` / `:l3` findings (their OWN dedupe keys; L2 wakes
+// the census actors ∪ the L2 heads; L3 escalates to the owner channel);
+// (item 3) the DISMISSAL verification — the census-resolution break + the
+// ACK-in-register markers verified against the whitelist («DESCARTE NO
+// VERIFICADO» when unverifiable); (item 4) the ANY-actor `next:` census
+// (settlements host / actorItems known post / nonGated no-next-or-unknown) +
+// the actor-named frame + «próximo actor sugerido»; (item 6) the HEAD
+// continuation-wake backstop (system-wait to a BOOT-QUIET head owning
+// `next:<head>` items — QUEUE first window, INTERRUPT second).
+// ---------------------------------------------------------------------------
+
+/** A register fixture with a KNOWN-head `next:` item (item 4), a settlement
+ * (`next: host verify+push` — fb-167 class), a plain item and an UNKNOWN-actor
+ * item. */
+const FB184_ACTOR_FIXTURE = [
+  '## 1. IPD — cola activa (DAG seriado)',
+  '',
+  '- **LANE X — next: research-head**',
+  '- **LANE Y (plain pending)**',
+  '- **LANE Z — settlement espera verify+push** next: host verify+push',
+  '- **LANE W — next: unknown-post**',
+  '',
+  '## 3. PENDIENTE-OWNER (decisiones)',
+  '',
+  '- **top-up ws10 → NO por ahora**'
+].join('\n')
+
+test('LANE 5 fb-184 (item 4) scanWorkRegisterIdle census classes: a `next: <known-head>` item is an ACTOR item (counted in the generic census, its postId named in the frame + feeding the escalation); `next: host` stays the settlement-wait class; `next: <unknown>` + plain items stay generic; the frame carries «— next: <actor>» + the composite legs + «próximo actor sugerido»', () => {
+  const T0 = new Date(2026, 7, 29, 8, 0, 0).getTime() // Saturday → VALLE
+  const scan = scanWorkRegisterIdle({
+    registerText: FB184_ACTOR_FIXTURE,
+    valley: true,
+    hostRunning: false,
+    posts: [{ postId: 'research-head' }],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: { firstQuietTs: T0 - 60_000 },
+    poolUsable: true,
+    poolUsableKeys: 2
+  })
+  assert.equal(scan.findings.length, 2, 'settlement-wait + generic work-register-idle (the item-4 classes coexist)')
+  const settlement = scan.findings.find((f) => f.kind === 'settlement-wait')
+  const generic = scan.findings.find((f) => f.kind === 'work-register-idle')
+  assert.equal(settlement.count, 1, 'the settlement class = the `next: host` item ONLY (LANE Z)')
+  assert.equal(generic.count, 3, 'the generic census = LANE X (actor) + LANE Y (plain) + LANE W (unknown actor) — the KNOWN actor is NOT excluded (work waits on THAT actor)')
+  assert.match(generic.error, /LANE X — next: research-head/, 'the actor item is framed WITH its next-actor')
+  assert.match(generic.error, /LANE W — next: unknown-post/, 'the unknown-actor item keeps its next: marker in the frame (never silently dropped)')
+  assert.ok(!generic.error.includes('LANE Z'), 'the settlement label is NEVER in the generic frame (subclass exclusion, fb-167)')
+  assert.ok(!generic.error.includes('top-up ws10'), 'the GATED §3 item is never listed')
+  assert.match(generic.error, /· compuesto: VALLE · quiet 1min · census 3 no-gated · 0 posts running · pool usable=2/, 'the composite legs line carries the VERIFIED evidence (VALLE · quiet · census · 0 posts · pool usable)')
+  assert.match(generic.error, /auto-cheque END-ritual: ¿reanudación sin vencer\?/, 'the frame carries the END-ritual auto-check line (protocol-only, per the host decision)')
+  assert.match(generic.error, /próximo actor sugerido: research-head/, 'the frame suggests the most-frequent next-actor')
+})
+
+test('LANE 5 fb-184 (item 1) scanWorkRegisterIdle composite pool leg: poolUsable:false → NO finding, the quiet epoch KEEPS accumulating and the STALL clock is preserved (the alert fires once the pool recovers); poolUsable:true → the finding fires with the pool count in the frame; the recentlySilentHeads leg paints the BOOT-QUIET heads', () => {
+  const T0 = new Date(2026, 7, 29, 8, 0, 0).getTime()
+  // (a) poolUsable:false → nothing; the ledger fields are INERT.
+  const noPool = scanWorkRegisterIdle({
+    registerText: WRI_REGISTER_FIXTURE,
+    valley: true,
+    hostRunning: false,
+    posts: [],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: { firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 120_000 },
+    poolUsable: false,
+    poolUsableKeys: 0
+  })
+  assert.equal(noPool.findings.length, 0, 'a RESOLVED-but-unusable pool → no finding (a dispatch would be futile)')
+  assert.equal(noPool.ledger.firstQuietTs, T0 - 60_000, 'the quiet epoch KEEPS accumulating (firstQuietTs intact)')
+  assert.equal(noPool.ledger.stallSinceTs, T0 - 120_000, 'the stall clock is PRESERVED (the ladder resumes when the pool recovers)')
+  assert.equal(noPool.quietWithoutPending, false, 'the pool-gated case is NOT the expected-quiet warn case')
+  // (b) poolUsable:true → the finding carries the pool count in the composite leg.
+  const withPool = scanWorkRegisterIdle({
+    registerText: WRI_REGISTER_FIXTURE,
+    valley: true,
+    hostRunning: false,
+    posts: [],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: { firstQuietTs: T0 - 60_000 },
+    poolUsable: true,
+    poolUsableKeys: 3
+  })
+  assert.equal(withPool.findings.length, 1, 'a usable pool + the full condition → the finding')
+  assert.match(withPool.findings[0].error, /pool usable=3/, 'the composite leg names the verified usable-key count')
+  // (c) the recentlySilentHeads leg: non-running heads with empty/old inboxes;
+  // a RUNNING head would break the whole scan (zero-running premise), so the
+  // exclusion set is a SLEEPING head + a WORKER (both excluded by the leg).
+  const heads = scanWorkRegisterIdle({
+    registerText: WRI_REGISTER_FIXTURE,
+    valley: true,
+    hostRunning: false,
+    posts: [
+      { postId: 'internal-programming-head', inboxTs: [] },
+      { postId: 'quality-head', inboxTs: [T0 - 3_600_000] },
+      { postId: 'research-head', sleeping: true, inboxTs: [] },
+      { postId: 'builder-busy', provider: 'worker', inboxTs: [] }
+    ],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: { firstQuietTs: T0 - 60_000 }
+  })
+  assert.match(heads.findings[0].error, /heads BOOT-QUIET: internal-programming-head, quality-head/, 'the silent heads are named; the SLEEPING head + the WORKER are NOT (they are not BOOT-QUIET candidates)')
+})
+
+test('LANE 5 fb-184 (item 1) runHealthDaemonTick STALE pool: a STALE pooler snapshot (updatedAt older than stateStaleMs) → the pool leg resolves NOT-usable → NO work-register-idle alert + the pool-leg warn names the reason (never-fabricate: stale = UNKNOWN ≠ usable, the M1 dead-man\'s-switch)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 29, 8, 0, 0).getTime() // Saturday → VALLE
+    await writeFile(path.join(stateDir, 'WORK-REGISTER.md'), WRI_REGISTER_FIXTURE, 'utf8')
+    await writeFile(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: T0 - 60_000 }), 'utf8')
+    // A STALE snapshot (written 2 h ago) with 1 usable key.
+    const stalePool = path.join(stateDir, POOLER_STATE_FILE)
+    await writeFile(stalePool, JSON.stringify({
+      updatedAt: new Date(T0 - 2 * 3600_000).toISOString(),
+      keys: { 'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: 0, cooldownUntil: 0 } },
+      lastRotation: null
+    }), 'utf8')
+    const alerts = []
+    const warns = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-fb184-stale',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [],
+      hostRunning: false,
+      config: { health: { workRegisterIdleQuietMs: 60_000 }, org: { pacing: {} } },
+      workRegisterPath: path.join(stateDir, 'WORK-REGISTER.md'),
+      poolerStatePath: stalePool,
+      notifyHost: async () => { alerts.push(1) },
+      logger: { warn: (m) => warns.push(m), info: () => {} }
+    })
+    assert.equal(alerts.length, 0, 'a STALE pool (unknown ≠ usable) suppresses the work-register-idle alert — never fabricate a dispatch-capable pool')
+    assert.ok(warns.some((m) => m.includes('work-register-idle pool leg NOT usable')), 'the pool-leg warn names the leg (the stale-age reason)')
+  })
+})
+
+test('LANE 5 fb-184 (item 2) scanWorkRegisterIdle ESCALATION LADDER (PURE): stall ≥ T2 → the `work-register-idle:l2` finding (its OWN key, recipients = the census actors, tier 2); stall ≥ T3 → the `:l3` finding supersedes L2 (tier 3); a RUNNING POST breaks the stall clock; hostRunning ALONE does NOT (the anti-fb-163/171 regression)', () => {
+  const T0 = new Date(2026, 7, 29, 8, 0, 0).getTime()
+  const base = { registerText: FB184_ACTOR_FIXTURE, valley: true, hostRunning: false, nowMs: T0, quietWindowMs: 60_000 }
+  // (a) stall 120 s ≥ T2 (60 s) < T3 (600 s) → the L2 finding.
+  const l2 = scanWorkRegisterIdle({
+    ...base,
+    posts: [{ postId: 'research-head' }],
+    ledger: { firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 120_000 },
+    escalT2Ms: 60_000,
+    escalT3Ms: 600_000
+  })
+  const l2Finding = l2.findings.find((f) => f.kind === 'work-register-idle:l2')
+  assert.ok(l2Finding !== undefined, 'stall ≥ T2 → the L2 finding')
+  assert.equal(l2Finding.key, 'work-register-idle:l2', 'its OWN dedupe key (never collides with the L1 key)')
+  assert.deepEqual(l2Finding.recipients, ['research-head'], 'the L2 recipients = the census next-actor posts')
+  assert.match(l2Finding.error, /estancamiento ≥1 min sin despacho/, 'the frame names the L2 stall')
+  assert.equal(l2.ledger.tier, 2, 'the ledger records tier 2')
+  assert.ok(l2.findings.some((f) => f.kind === 'work-register-idle'), 'the L1 finding coexists (the host re-alert path)')
+  // (b) stall 360 s ≥ T3 (120 s) → the L3 finding SUPERSEDES L2 (no :l2 in the findings).
+  const l3 = scanWorkRegisterIdle({
+    ...base,
+    posts: [{ postId: 'research-head' }],
+    ledger: { firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 360_000 },
+    escalT2Ms: 60_000,
+    escalT3Ms: 120_000
+  })
+  assert.ok(l3.findings.some((f) => f.kind === 'work-register-idle:l3'), 'stall ≥ T3 → the L3 finding')
+  assert.ok(!l3.findings.some((f) => f.kind === 'work-register-idle:l2'), 'the L2 finding is SUPERSEDED by the L3 escalation (one current tier)')
+  assert.match(l3.findings.find((f) => f.kind === 'work-register-idle:l3').error, /ESCALADO al owner \(D-Q3\)/, 'the L3 frame carries the OWNER escalation marker')
+  assert.equal(l3.ledger.tier, 3, 'the ledger records tier 3')
+  // (c) a RUNNING POST between the windows breaks the stall clock.
+  const postRunning = scanWorkRegisterIdle({
+    ...base,
+    posts: [{ postId: 'research-head' }, { postId: 'builder-busy', running: true }],
+    ledger: { firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 120_000, tier: 2 },
+    escalT2Ms: 60_000,
+    escalT3Ms: 600_000
+  })
+  assert.equal(postRunning.findings.length, 0, 'a running post → not quiet → no finding')
+  assert.equal(postRunning.ledger.stallSinceTs, undefined, 'real progress (a dispatch executing) BREAKS the stall clock')
+  // (d) hostRunning ALONE does NOT break the stall clock (the 09-05 pattern).
+  const hostOnly = scanWorkRegisterIdle({
+    ...base,
+    hostRunning: true,
+    posts: [],
+    ledger: { firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 120_000, tier: 2 },
+    escalT2Ms: 60_000,
+    escalT3Ms: 600_000
+  })
+  assert.equal(hostOnly.findings.length, 0, 'a running HOST → no finding (the LANE 5 legacy premise)')
+  assert.equal(hostOnly.ledger.stallSinceTs, T0 - 120_000, 'the STALL clock SURVIVES a host-only wake (the «host despierta, descarta, no despacha» pattern no longer silences the escalation)')
+  assert.equal(hostOnly.ledger.firstQuietTs, undefined, 'the LEGACY quiet epoch still breaks on hostRunning (LANE 5 contract intact)')
+})
+
+test('LANE 5 fb-184 (item 2) runHealthDaemonTick ESCALATION delivery: a seeded stall ≥ T2 → the host ALERT carries the L2 bullet AND notifyPost wakes the census actors ∪ the L2 heads with interrupt:true + the L2 sourceKey; the SHARED ledger advances the L2 key + the audit records it; the hostRunning-only tick does NOT break the persisted stall clock', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 29, 8, 0, 0).getTime() // Saturday → VALLE
+    await writeFile(path.join(stateDir, 'WORK-REGISTER.md'), FB184_ACTOR_FIXTURE, 'utf8')
+    await writeFile(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 120_000 }), 'utf8')
+    const alerts = []
+    const postNotifies = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-fb184-l2',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [{ postId: 'research-head' }],
+      hostRunning: false,
+      config: {
+        health: { workRegisterIdleQuietMs: 60_000, workRegisterIdleEscalT2Ms: 60_000, workRegisterIdleEscalT3Ms: 600_000, workRegisterIdleL2Heads: ['test-iphead'] },
+        org: { pacing: {} }
+      },
+      workRegisterPath: path.join(stateDir, 'WORK-REGISTER.md'),
+      notifyHost: async (_h, frame) => { alerts.push(frame) },
+      notifyPost: async (postId, frame, opts) => { postNotifies.push({ postId, frame, opts }) },
+      logger: { warn: () => {} }
+    })
+    assert.equal(alerts.length, 1, 'the L1+L2 condition alerts the host ONCE')
+    assert.match(alerts[0], /- work-register-idle: WORK-REGISTER con 3 item\(s\)/, 'the host ALERT carries the generic L1 bullet (census 3 — the actor+plain+unknown items)')
+    assert.match(alerts[0], /- work-register-idle L2: estancamiento ≥1 min sin despacho/, 'the host ALERT carries the L2 escalation bullet (the host re-alert with its own key)')
+    // The census ACTOR (research-head) gets TWO deliveries: the L2 escalation
+    // (the alert-path loop) AND the item-6 continuation-wake (the head owns a
+    // next: item + is idle) — each with its OWN sourceKey.
+    const toResearchL2 = postNotifies.filter((n) => n.postId === 'research-head' && n.opts?.sourceKey === 'work-register-idle:l2')
+    const toResearchWait = postNotifies.filter((n) => n.postId === 'research-head' && n.opts?.sourceKey === 'wait-head-actor:research-head')
+    const toKnob = postNotifies.filter((n) => n.postId === 'test-iphead')
+    assert.equal(toResearchL2.length, 1, 'the census ACTOR (research-head) is woken ONCE with the L2 escalation')
+    assert.equal(toKnob.length, 1, 'the fixed L2 head (the knob) is woken once')
+    assert.equal(toResearchL2[0].opts.interrupt, true, 'the L2 delivery is interrupt:true (the m-1234 preempt — beats the FIFO/wake-seam)')
+    assert.equal(toResearchL2[0].opts.sourceKey, 'work-register-idle:l2', 'the L2 sourceKey is the ladder dedupe key (O1-EXT P4 metadata)')
+    assert.match(toResearchL2[0].frame, /- work-register-idle L2:/, 'the actor frame is the L2 escalation frame')
+    assert.equal(toResearchWait.length, 1, 'the SAME head also receives the item-6 continuation-wake (its own sourceKey) — the two channels do not collide')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state['work-register-idle:l2'], T0, 'the L2 dedupe key advances in the SHARED ledger')
+    const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    assert.equal(audit.at(-1).findings.some((f) => f.kind === 'work-register-idle:l2'), true, 'the audit row records the L2 finding')
+    // A hostRunning-only re-tick (fresh dir shape): the STALL clock must survive.
+    await writeFile(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), JSON.stringify({ firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 120_000 }), 'utf8')
+    const alerts2 = []
+    await runHealthDaemonTick({
+      now: () => T0 + 60_000,
+      stateDir,
+      bootId: 'boot-fb184-hostrun',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [{ postId: 'research-head' }],
+      hostRunning: true,
+      config: { health: { workRegisterIdleQuietMs: 60_000 }, org: { pacing: {} } },
+      workRegisterPath: path.join(stateDir, 'WORK-REGISTER.md'),
+      notifyHost: async () => { alerts2.push(1) },
+      logger: { warn: () => {} }
+    })
+    assert.equal(alerts2.length, 0, 'a hostRunning tick → no alert')
+    assert.equal(readWorkRegisterIdleState(stateDir).stallSinceTs, T0 - 120_000, 'the persisted STALL clock SURVIVES the host-only wake (the anti-fb-163/171 regression at the tick level)')
+  })
+})
+
+test('LANE 5 fb-184 (item 3) scanWorkRegisterIdle DISMISSAL verification: a VERIFIED ACK (cifra == census, fuente register) resets the stall clock (one fresh T2 window; the census-moved guard); an UNVERIFIABLE ACK does NOT reset AND marks the escalation «DESCARTE NO VERIFICADO»; the job-runs whitelist fact (a run AFTER the alert) verifies', () => {
+  const T0 = new Date(2026, 7, 29, 8, 0, 0).getTime()
+  const ackFixture = '## 1. IPD — cola activa (DAG seriado)\n\n- **LANE A** ACK 3 fuente register\n- **LANE B**\n- **LANE C**'
+  const base = { registerText: ackFixture, valley: true, hostRunning: false, posts: [], nowMs: T0, quietWindowMs: 60_000, escalT2Ms: 60_000, escalT3Ms: 600_000 }
+  // (a) a VERIFIED ack: cifra 3 == the census 3 → the stall clock RESETS to now.
+  const valid = scanWorkRegisterIdle({
+    ...base,
+    ledger: { firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 120_000 }
+  })
+  assert.equal(valid.ledger.stallSinceTs, T0, 'a verified dismissal resets the stall clock to the ACK moment (one fresh T2 window)')
+  assert.equal(valid.ledger.lastAckCensus, 3, 'the census-moved guard records the verified census')
+  assert.ok(!valid.findings.some((f) => f.kind === 'work-register-idle:l2'), 'the fresh window → NO L2 in the same tick (the ladder restarted)')
+  // (b) the move-guard: an ACK with the SAME census does NOT re-reset (the
+  // «a second ACK without resolution does not extend» rule).
+  const noMove = scanWorkRegisterIdle({
+    ...base,
+    ledger: { firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 120_000, lastAckCensus: 3 },
+    nowMs: T0 + 30_000
+  })
+  assert.equal(noMove.ledger.stallSinceTs, T0 - 120_000, 'a second ACK WITHOUT a census movement does NOT re-reset (the ladder keeps advancing)')
+  // (c) an UNVERIFIABLE ack (unknown fuente) → no reset; L2 fires + the marker.
+  const bogus = scanWorkRegisterIdle({
+    ...base,
+    registerText: '## 1. IPD — cola activa (DAG seriado)\n\n- **LANE A** ACK 99 fuente mystery-source\n- **LANE B**\n- **LANE C**',
+    ledger: { firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 120_000 }
+  })
+  assert.equal(bogus.ledger.stallSinceTs, T0 - 120_000, 'an unverifiable dismissal does NOT reset the clock')
+  const l2Bogus = bogus.findings.find((f) => f.kind === 'work-register-idle:l2')
+  assert.ok(l2Bogus !== undefined, 'the escalation STILL fires (a silent dismissal no longer suppresses it)')
+  assert.match(l2Bogus.error, /DESCARTE NO VERIFICADO/, 'the escalation frame carries the «DESCARTE NO VERIFICADO» burden-of-proof marker')
+  // (d) the job-runs whitelist fact: a run AFTER the alert verifies; an older run fails.
+  const runsFixture = '## 1. IPD — cola activa (DAG seriado)\n\n- **LANE A** ACK 2 fuente job-runs-state\n- **LANE B**'
+  const after = scanWorkRegisterIdle({
+    ...base,
+    registerText: runsFixture,
+    jobRunsLatestTs: T0 - 10_000,
+    ledger: { firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 120_000 }
+  })
+  assert.equal(after.ledger.stallSinceTs, T0, 'a job run AFTER the alert ts verifies the dismissal (the action really happened)')
+  const jobBefore = scanWorkRegisterIdle({
+    ...base,
+    registerText: runsFixture,
+    jobRunsLatestTs: T0 - 200_000,
+    ledger: { firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 120_000 }
+  })
+  assert.equal(jobBefore.ledger.stallSinceTs, T0 - 120_000, 'a job run BEFORE the alert does NOT verify')
+  // (e) the capacity-gate / hosts whitelist facts.
+  const gateFixture = '## 1. IPD — cola activa (DAG seriado)\n\n- **LANE A** ACK 2 fuente capacity-gate\n- **LANE B**'
+  const gate = scanWorkRegisterIdle({
+    ...base,
+    registerText: gateFixture,
+    capacityGateStateOk: true,
+    ledger: { firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 120_000 }
+  })
+  assert.equal(gate.ledger.stallSinceTs, T0, 'an existing+parseable capacity-gate state verifies the dismissal')
+  const hostsFixture = '## 1. IPD — cola activa (DAG seriado)\n\n- **LANE A** ACK 2 fuente hosts.json\n- **LANE B**'
+  const hosts = scanWorkRegisterIdle({
+    ...base,
+    registerText: hostsFixture,
+    hostsStateOk: true,
+    ledger: { firstQuietTs: T0 - 60_000, stallSinceTs: T0 - 120_000 }
+  })
+  assert.equal(hosts.ledger.stallSinceTs, T0, 'an existing+parseable hosts.json verifies the dismissal')
+})
+
+test('LANE 5 fb-184 (item 6) runHealthDaemonTick HEAD CONTINUATION-WAKE: a BOOT-QUIET head (no inbox within the window) owning `next:<head>` register items → a `system-wait` delivery via notifyPost (QUEUE on the first window — no interrupt); the SHARED ledger advances `wait-head-actor:<postId>`; a SECOND window re-delivers with interrupt:true; a head with a RECENT inbox or a worker is never woken', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 7, 29, 8, 0, 0).getTime() // Saturday → VALLE
+    const registerText = '## 1. IPD — cola activa (DAG seriado)\n\n- **fb-184 item A** next: research-head\n- **fb-184 item B** next: research-head\n- **plain item**'
+    await writeFile(path.join(stateDir, 'WORK-REGISTER.md'), registerText, 'utf8')
+    const postNotifies = []
+    const tick = (nowMs, posts) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-fb184-w6',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts,
+      hostRunning: false,
+      config: { health: { workRegisterIdleQuietMs: 60_000 }, org: { pacing: {} } },
+      workRegisterPath: path.join(stateDir, 'WORK-REGISTER.md'),
+      notifyPost: async (postId, frame, opts) => { postNotifies.push({ postId, frame, opts }) },
+      notifyHost: async () => {},
+      logger: { warn: () => {} }
+    })
+    const idleHead = [{ postId: 'research-head', inboxTs: [] }]
+    // (a) FIRST window: a QUEUE delivery (no interrupt — nothing to abort).
+    await tick(T0, idleHead)
+    const first = postNotifies.filter((n) => n.postId === 'research-head' && n.opts?.sourceKey === 'wait-head-actor:research-head')
+    assert.equal(first.length, 1, 'the idle head owning next: items is woken once')
+    assert.equal(first[0].opts.interrupt, false, 'the FIRST window is QUEUE semantics (a dormant BOOT-QUIET head — materializePost wakes it)')
+    assert.match(first[0].frame, /^\[From deepartments\] system-wait: research-head — 2 item\(s\) next: research-head: fb-184 item A; fb-184 item B/, 'the frame names the head + the owned items')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state['wait-head-actor:research-head'], T0, 'the wait-head-actor dedupe key advances in the SHARED ledger')
+    // (b) INSIDE the window → no re-delivery.
+    await tick(T0 + 60_000, idleHead)
+    assert.equal(postNotifies.filter((n) => n.opts?.sourceKey === 'wait-head-actor:research-head').length, 1, 'inside the 30-min dedupe window the head is NOT re-woken')
+    // (c) the SECOND window (beyond HEALTH_DEDUPE_WINDOW_MS) → interrupt:true.
+    await tick(T0 + 31 * 60_000, idleHead)
+    const second = postNotifies.filter((n) => n.opts?.sourceKey === 'wait-head-actor:research-head')
+    assert.equal(second.length, 2, 'the second window re-wakes (the 30-min cadence)')
+    assert.equal(second[1].opts.interrupt, true, 'a SECOND window → interrupt:true (the m-1234 gate-bypass — the head stayed mute)')
+    // (d) a head with a RECENT inbox is NOT a continuation-wait (attended).
+    const postNotifies2 = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-fb184-w6b',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [{ postId: 'research-head', inboxTs: [T0 - 10_000] }],
+      hostRunning: false,
+      config: { health: { workRegisterIdleQuietMs: 60_000 }, org: { pacing: {} } },
+      workRegisterPath: path.join(stateDir, 'WORK-REGISTER.md'),
+      notifyPost: async (postId, frame, opts) => { postNotifies2.push({ postId, frame, opts }) },
+      notifyHost: async () => {},
+      logger: { warn: () => {} }
+    })
+    assert.equal(postNotifies2.filter((n) => n.opts?.sourceKey === 'wait-head-actor:research-head').length, 0, 'a head addressed within the window is NOT a continuation-wait (its turn may drain)')
+    // (e) a WORKER post is never a continuation-wait (heads only).
+    const postNotifies3 = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-fb184-w6c',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      posts: [{ postId: 'worker-1', provider: 'worker', inboxTs: [] }],
+      hostRunning: false,
+      config: { health: { workRegisterIdleQuietMs: 60_000, workRegisterPath: path.join(stateDir, 'WORK-REGISTER.md') }, org: { pacing: {} } },
+      workRegisterPath: path.join(stateDir, 'WORK-REGISTER.md'),
+      notifyPost: async (postId, frame, opts) => { postNotifies3.push({ postId, frame, opts }) },
+      notifyHost: async () => {},
+      logger: { warn: () => {} }
+    })
+    assert.equal(postNotifies3.length, 0, 'a worker owning next: items is NEVER woken by the item-6 backstop')
+  })
+})
+
+test('LANE 5 fb-184 SMOKE (acceptance — real daemon, the full ladder): bootPlugin with tiny interval/quiet/escalT2/escalT3 + a verifiable pooler fixture + a register with a `next: research-head` item + pacing always-VALLE → the HOST receives the L1 alert; the RESEARCH-HEAD post receives the L2 AND L3 escalation frames (the real notifyPost channel); the audit records the ladder findings', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const registerPath = path.join(stateDir, 'WR-fb184-smoke.md')
+    await writeFile(registerPath, '## 1. IPD — cola activa (DAG seriado)\n\n- **fb-184 smoke item** next: research-head\n- **fb-184 plain item**\n\n## 3. PENDIENTE-OWNER (decisiones)\n\n- **top-up ws10 → NO por ahora**', 'utf8')
+    const poolerPath = path.join(stateDir, POOLER_STATE_FILE)
+    await writeFile(poolerPath, JSON.stringify({
+      updatedAt: new Date().toISOString(),
+      keys: { 'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: 0, cooldownUntil: 0 } },
+      lastRotation: null
+    }), 'utf8')
+    const todayUtcDow = new Date().getUTCDay() === 0 ? 7 : new Date().getUTCDay()
+    const nextDow = todayUtcDow === 7 ? 1 : todayUtcDow + 1
+    const env = await bootPlugin(stateDir, {
+      // T2=60ms, T3=200ms: with the 50ms interval the stall age advances in
+      // 50ms steps (50→100→150→200) — a T3 of 90ms would make the L2 tier
+      // (60–90ms band) UNOBSERVABLE (the scan jumps straight to tier 3 — the
+      // L3 supersede semantics). A wider T3 lets the smoke watch the FULL
+      // ladder: L1 → L2 (stallAge 100ms) → L3 (stallAge 200ms).
+      health: { intervalMs: 50, workRegisterIdleQuietMs: 50, workRegisterIdleEscalT2Ms: 60, workRegisterIdleEscalT3Ms: 200, workRegisterPath: registerPath, poolerStateFilePath: poolerPath },
+      org: { ...TEST_ORG, pacing: { peakWindows: { weekday: [nextDow], hours: [1] } } }
+    })
+    try {
+      await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'head materialized at boot')
+      const host = env.agents.put(fakeParentAgent())
+      await env.root.tools.get('dept_who').execute({}, { agent: host, signal: new AbortController().signal })
+      // L1 → the HOST (the System-health ALERT frame with the L1 bullet).
+      await waitFor(() => host.inboxMessages.some((m) => m.content[0]?.text.includes('System-health ALERT') && m.content[0].text.includes('work-register-idle')), 5000, 'the real daemon alerts the host with the L1 work-register-idle line')
+      const head = env.agents.store.get('head-research-head')
+      // The HOST sees the L2 escalation bullet too (the scan + the shared
+      // dedupe emit `:l2` with its own key — the ladder reached tier 2).
+      await waitFor(() => host.inboxMessages.some((m) => m.content[0]?.text.includes('work-register-idle L2')), 5000, 'the host ALERT carries the L2 escalation bullet (stall ≥ T2 with its own key)')
+      // L2 → the census actor (research-head) via the real notifyPost seam.
+      await waitFor(() => head.inboxMessages.some((m) => m.content[0]?.text.includes('work-register-idle L2')), 5000, 'the census actor head receives the L2 escalation frame')
+      // L3 → the same actor via the real notifyPost seam (the owner escalation).
+      await waitFor(() => head.inboxMessages.some((m) => m.content[0]?.text.includes('work-register-idle L3')), 8000, 'the actor head receives the L3 escalation frame')
+      const l3Frame = head.inboxMessages.find((m) => m.content[0]?.text.includes('work-register-idle L3')).content[0].text
+      assert.match(l3Frame, /ESCALADO al owner \(D-Q3\)/, 'the L3 frame carries the owner escalation marker')
+      await waitFor(async () => {
+        try {
+          const auditText = await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')
+          const rows = auditText.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+          // The daemon's audit append is a read-modify-write — a read inside
+          // its empty window must not count (the fb-61 non-atomic append race).
+          return rows.length > 0 && rows.at(-1).findings?.some((f) => f.kind === 'work-register-idle:l2' || f.kind === 'work-register-idle:l3') === true
+        } catch {
+          return false
+        }
+      }, 5000, 'the audit row records the ladder findings')
+      const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+      assert.equal(audit.at(-1).findings.some((f) => f.kind === 'work-register-idle:l2' || f.kind === 'work-register-idle:l3'), true, 'the audit records the ladder findings')
     } finally {
       await env.dispose()
     }
@@ -21305,6 +21774,106 @@ test('R2 fb-42/25 mint probe (b — VERIFIED): the resolved model IS configured 
       assert.ok(mint, 'the fresh mint ran')
       assert.deepEqual(mint.agentOptions, { provider: 'stub-coord', model: 'deepseek-v4-flash' }, 'the mint carries the CONFIGURED model (verified — no retrofit, no phantom)')
       assert.ok(env.workspaceRegistry.archived.includes(oldSessionId), 'the old session archived normally')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('fb-118 (D1+D4 — the rotation-directive generator VERIFIES id+ts BEFORE citing): the head-rotated mirror marks a cited SYSTEM-ORIGIN id ([system record] — the m-903 incident fixture: m-901 is the system-health main-red ALERT relay, the real memo confirmation is m-902 and stays VERIFIED) and a cited id whose ADJACENT TIME diverges from its record ts is marked [ts mismatch] — while the same-day TRUE-time control travels VERBATIM (output format preserved)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const oldSessionId = 'head-research-head'
+    await seedJournal(stateDir, postId, 'ROTATE-SEED: fb-118 verify-cite.')
+    // The fb-118 store fixture (the m-903 incident window 2026-09-04 11:05Z —
+    // CONTIGUOUS store ids: a production store's seqs start at 0, the newest
+    // record is `m-<size-1>`): m-0 = host ACK, m-1 = the system-health main-red
+    // alert relay (from 'deepartments' — never the memo confirmation) and m-2 =
+    // the head's REAL memo confirmation. The ts values resolve onto the TEST day
+    // so the R4 time-token control is exact.
+    const nowMs = Date.now()
+    const dayStart = Date.UTC(new Date(nowMs).getUTCFullYear(), new Date(nowMs).getUTCMonth(), new Date(nowMs).getUTCDate())
+    const at = (hh, mm, ss) => dayStart + (hh * 3600 + mm * 60 + ss) * 1000
+    await seedMessageRecords(stateDir, [
+      { id: 'm-0', seq: 0, ts: at(11, 5, 7), from: 'host-session-test', to: ['research-head'], text: 'ACK — memo antes de rotar', kind: 'ack' },
+      { id: 'm-1', seq: 1, ts: at(11, 5, 41), from: 'deepartments', to: ['host-session-test'], text: 'system-health main-red 906506d (escalación 30 min)', kind: 'agent' },
+      { id: 'm-2', seq: 2, ts: at(11, 5, 43), from: 'research-head', to: ['host-session-test'], text: 'MEMO ESCRITA — LISTA PARA ROTAR', kind: 'agent' }
+    ])
+    const env = await bootWithQD(stateDir)
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      // D1 — the INCIDENT SHAPE: the reason cites m-1 (the ALERT) as the memo
+      // confirmation; the generator must never attribute the confirmation to the
+      // alert id. The rotate COMMITS (verification is cosmetic, never a block).
+      const r1 = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'cruce b5; memo escrita y confirmada (m-1)' }, { agent: host, signal })
+      assert.notEqual(r1.sessionId, oldSessionId, 'the rotate COMMITS (verification never blocks)')
+      let dirs = await qualityDirectives(stateDir)
+      let rotated = dirs.filter((d) => /head rotated/.test(d.text))
+      assert.equal(rotated.length, 1, 'one head-rotated directive so far')
+      assert.match(rotated[0].text, /memo escrita y confirmada \(m-1 \[system record\]\)/, 'the mirror marks the SYSTEM-ORIGIN alert id — never cite the alert as the memo confirmation (fb-118)')
+      assert.ok(!/m-2 \[/.test(rotated[0].text), 'no fabricated m-2 mark (the real confirmation is not cited in this reason)')
+      assert.match(rotated[0].text, /\[reason unverifiable\]/, 'the fb-25 figure stamp is untouched (a reason without a figure/pct stays unverifiable)')
+      // D4 — an id cited WITH a diverging adjacent time (11:02:00Z vs the record
+      // 11:05:43Z on the same UTC day) is marked [ts mismatch] (no confirmation
+      // claim → the recency rule stays out; the ts rule is the one firing).
+      const r2 = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'refresco: token m-2, 11:02:00Z' }, { agent: host, signal })
+      assert.notEqual(r2.sessionId, r1.sessionId, 'the second rotate commits')
+      dirs = await qualityDirectives(stateDir)
+      rotated = dirs.filter((d) => /head rotated/.test(d.text))
+      assert.equal(rotated.length, 2, 'two head-rotated directives')
+      assert.match(rotated[1].text, /token m-2 \[ts mismatch\], 11:02:00Z/, 'a cited time diverging from the record ts is marked [ts mismatch]')
+      // Control — the SAME citation with the TRUE time travels byte-identical.
+      const r3 = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'refresco: token m-2, 11:05:43Z' }, { agent: host, signal })
+      assert.notEqual(r3.sessionId, r2.sessionId, 'the third rotate commits')
+      dirs = await qualityDirectives(stateDir)
+      rotated = dirs.filter((d) => /head rotated/.test(d.text))
+      assert.equal(rotated.length, 3, 'three head-rotated directives')
+      assert.match(rotated[2].text, /token m-2, 11:05:43Z/, 'a cited time matching the record ts is VERIFIED — the reason travels verbatim (output format preserved)')
+      assert.ok(!/\[ts mismatch\]/.test(rotated[2].text), 'no mark on the true-time citation')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('fb-118 (D2+D3 — the fb-45 class, "ids imprecisos en directivas"): a CONFIRMATION-CONTEXT citation of an OLDER same-thread id is marked [not latest] (m-10 cited as "la misión confirmada" when the REAL newest mission is m-12 — the m-1624-vs-m-1627 signature) and a citation of a NONEXISTENT id RANGE is marked [not in store] (m-1699-1700 — the m-1698-vs-m-1699-1700 signature, both endpoints marked; the real id m-12 stays clean)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const oldSessionId = 'head-research-head'
+    await seedJournal(stateDir, postId, 'ROTATE-SEED: fb-118 fb-45 class.')
+    const base = Date.now() - 60_000
+    // The fb-45 thread fixture (CONTIGUOUS store ids — the production store
+    // shape): m-0 = an EARLIER same-author brief, m-1 = a worker advance,
+    // m-2 = the REAL (newest) mission/confirmation.
+    await seedMessageRecords(stateDir, [
+      { id: 'm-0', seq: 0, ts: base, from: 'quality-head', to: ['researcher-w'], text: 'brief misión (tramo temprano)', kind: 'agent' },
+      { id: 'm-1', seq: 1, ts: base + 1000, from: 'researcher-w', to: ['quality-head'], text: 'avance tramo 3', kind: 'agent' },
+      { id: 'm-2', seq: 2, ts: base + 2000, from: 'quality-head', to: ['researcher-w'], text: 'MISIÓN real (la confirmación nueva)', kind: 'agent' }
+    ])
+    const env = await bootWithQD(stateDir)
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      // D2 — the fb-45a signature: "confirmada m-0" when the REAL newest
+      // mission was m-2 (the off-by-N drift the inspector flagged twice).
+      const r1 = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'la misión confirmada es m-0 (la real fue m-2)' }, { agent: host, signal })
+      assert.notEqual(r1.sessionId, oldSessionId, 'the rotate commits')
+      let dirs = await qualityDirectives(stateDir)
+      let rotated = dirs.filter((d) => /head rotated/.test(d.text))
+      assert.equal(rotated.length, 1, 'one head-rotated directive')
+      assert.match(rotated[0].text, /misi[oó]n confirmada es m-0 \[not latest\]/, 'an OLDER sibling id in a confirmation claim is marked [not latest] (fb-45: never cite the penultimate for the confirmation)')
+      assert.ok(!/m-2 \[/.test(rotated[0].text), 'the REAL (newest) mission id stays verified — no mark')
+      // D3 — the fb-45b signature: the cited RANGE m-1699-1700 does not exist in
+      // the store (the real source was m-1698; here m-2) — every non-existent
+      // endpoint is marked [not in store], the real id stays clean.
+      const r2 = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'fuente rango m-1699-1700 (real m-2)' }, { agent: host, signal })
+      assert.notEqual(r2.sessionId, r1.sessionId, 'the second rotate commits')
+      dirs = await qualityDirectives(stateDir)
+      rotated = dirs.filter((d) => /head rotated/.test(d.text))
+      assert.equal(rotated.length, 2, 'two head-rotated directives')
+      assert.match(rotated[1].text, /rango m-1699 \[not in store\]-1700 \[not in store\]/, 'the non-existent range endpoints are each marked [not in store] (fb-45 range form)')
+      assert.ok(!/m-2 \[/.test(rotated[1].text), 'the real cited id (m-2) stays verified — no mark')
     } finally {
       await env.dispose()
     }

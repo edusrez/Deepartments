@@ -66,8 +66,12 @@ import {
   readDurableHostEntries,
   readDurableRetiredHostIds,
   pickLiveHostEntry,
-  BOUND_TEMPLATE_VARS
+  BOUND_TEMPLATE_VARS,
+  // LANE fb-134 F2(b): the STALE-READ CAP helper (the M1 stateStaleMs
+  // pattern on store-file reads, opt-in, non-destructive).
+  checkStoreFileStale
 } from 'dshd-core'
+import type { StoreFileReadOpts } from 'dshd-core'
 import { QUALITY_INSPECT_WORKER_RETIRED_PREFIX } from 'dshd-quality'
 // PACING (owner m-PACING, 2026-08-28) — the peak/valley FRANJA domain: the
 // pure UTC window machinery the transition monitor runs on EVERY tick
@@ -482,7 +486,13 @@ export interface SweepHealthState {
 }
 
 /** Read `<stateDir>/health-heartbeat.json` (absent/unreadable/malformed → undefined). */
-export function readHealthHeartbeatFile(stateDir: string): HealthHeartbeat | undefined {
+export function readHealthHeartbeatFile(stateDir: string, opts?: StoreFileReadOpts): HealthHeartbeat | undefined {
+  // LANE fb-134 F2(b) — STALE-READ CAP (the M1 stateStaleMs pattern): when the
+  // caller opts in, a heartbeat file OLDER than the window is flagged STALE
+  // (a stale heartbeat = a dead-liveness claim — the spec 006 §3 datum; a
+  // heartbeat read from a PARALLEL/stale store is exactly the fb-134 class).
+  // NON-DESTRUCTIVE: the data still returns; the warn is the cap.
+  checkStoreFileStale(path.join(stateDir, 'health-heartbeat.json'), opts)
   try {
     const parsed = JSON.parse(readFileSync(path.join(stateDir, 'health-heartbeat.json'), 'utf8')) as Record<string, unknown>
     if (typeof parsed.ts === 'number' && typeof parsed.bootId === 'string') {
@@ -867,8 +877,23 @@ export interface HealthFinding {
      * the fb-132 gated-settle masks the class by closing
      * `preparedStuckRemaining` to 0). The dedupe KEY is per-worker
      * `manager-delivery-stuck:<workerId>` in the SHARED ledger, re-alerting
-     * every HEALTH_DEDUPE_WINDOW_MS while the hold persists. */
-  kind: 'post-error' | 'delivery-failed' | 'delivery-storm' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red' | 'mission-queue' | 'work-register-idle' | 'settlement-wait' | 'manager-delivery-stuck'
+     * every HEALTH_DEDUPE_WINDOW_MS while the hold persists. LANE fb-134
+     * (2026-09-07, store separation) adds `ghost-store` — the daemon-BOOT
+     * ghost-store scan finding (a PARALLEL tree resolved from another cwd that
+     * carries store marker files and can be mistaken for the canonical store;
+     * ADVERTENCIA only, 0 destructive action). fb-184 (v2, wave 3 — the QH
+     * watchdog-v2 request) adds `work-register-idle:l2` / `:l3` — the
+     * ESCALATION LADDER kinds of the same stall (the stall clock stallSinceTs —
+     * set at the FIRST L1 alert, never broken by hostRunning alone — crosses
+     * `workRegisterIdleEscalT2Ms` (45-min default) → L2, the DUAL-head wake
+     * (census actors ∪ the L2 heads); crosses `workRegisterIdleEscalT3Ms`
+     * (90-min default) → L3, the OWNER-facing escalation (the L3 heads); each
+     * its OWN dedupe key `work-register-idle:l2` / `:l3` in the SHARED ledger —
+     * a re-alert cadence independent of the 30-min L1 key; the L2/L3 findings
+     * ALSO ride `recipients` (the census `next:` actors) so the tick can wake
+     * the ACTORS via notifyPost — ALERTS only, the actors decide (never
+     * dispatches)). */
+  kind: 'post-error' | 'delivery-failed' | 'delivery-storm' | 'config-preset' | 'stalled-post' | 'system-wait' | 'pooler-capacity' | 'qi-silence' | 'system-idle' | 'context-threshold' | 'mission-stalled' | 'main-red' | 'mission-queue' | 'work-register-idle' | 'settlement-wait' | 'manager-delivery-stuck' | 'ghost-store' | 'work-register-idle:l2' | 'work-register-idle:l3'
   /** The dedupe key (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS). */
   key: string
   /** The postId (post-error / stalled-post / context-threshold post row). */
@@ -903,6 +928,13 @@ export interface HealthFinding {
    * only changes the FRAME (the bullet renders a `CATCH-UP` prefix — the host
    * sees the alert is a missed-window recovery, not a fresh anomaly). */
   catchup?: boolean
+  /** fb-184 (item 2/6) — the ACTOR POSTS an escalation finding alerts (the
+   * `work-register-idle:l2` / `:l3` ladder findings carry the census `next:`
+   * actor ids — known non-retired posts). The tick unions the knob heads and
+   * delivers via notifyPost; ABSENT on every other finding kind. Never a
+   * dispatch — the actors are ALERTED with the census + suggested actor, the
+   * actor decides (the «never dispatches» rule). */
+  recipients?: string[]
 }
 
 /** One alert audit line appended to `<stateDir>/health-alerts.jsonl`. */
@@ -2615,6 +2647,32 @@ export interface HealthConfigLike {
      * sustained-condition precedent, own ledger work-register-idle-state.json).
      * Absent/invalid → 900000. */
     workRegisterIdleQuietMs?: number
+    /** fb-184 (item 2) — the L2 ESCALATION window in ms (default 2700000 =
+     * 45 min = 3x the 15-min T1 quiet window): the STALL clock (stallSinceTs —
+     * set at the FIRST L1 alert, never broken by hostRunning alone — the
+     * anti-fb-163/171 clock) must EXCEED this before the
+     * `work-register-idle:l2` escalation finding + the DUAL-head wake (the
+     * census `next:` actors ∪ `workRegisterIdleL2Heads`). Absent/invalid →
+     * 2700000. */
+    workRegisterIdleEscalT2Ms?: number
+    /** fb-184 (item 2) — the L3 ESCALATION window in ms (default 5400000 =
+     * 90 min): beyond this the `work-register-idle:l3` finding escalates to
+     * the OWNER-facing channel (`workRegisterIdleL3Heads`) + the host re-alert
+     * (its OWN dedupe key). Absent/invalid → 5400000. */
+    workRegisterIdleEscalT3Ms?: number
+    /** fb-184 (item 2) — the L2 ESCALATION recipient heads (default
+     * ['internal-programming-head','quality-head'] — the QH-request DUAL wake:
+     * the IPH is the natural dispatcher of the P2 lanes, the QH the process
+     * owner, precedent m-2046). The census `next:` actors are ALWAYS included;
+     * this knob ADDS the fixed heads. An explicit non-empty array overrides
+     * the default (the mainRedLocks array pattern). */
+    workRegisterIdleL2Heads?: string[]
+    /** fb-184 (item 2) — the L3 ESCALATION recipient heads (default
+     * ['quality-head'] — the owner-facing D-Q3 / QUALITY REQUEST channel,
+     * precedent m-2046; the deliverable recipient was parametrized per the
+     * host decision — never hardcoded). An explicit non-empty array
+     * overrides. */
+    workRegisterIdleL3Heads?: string[]
   }
   /** PACING (owner m-PACING, 2026-08-28) — the top-level `org.pacing.*`
    * franja config the transition monitor reads (the bundle passes its whole
@@ -2783,6 +2841,19 @@ export interface HealthDaemonDeps {
    * block is a CONSERVATIVE NO-OP (the legacy behavior, R6 — an unresolved
    * wiring never fabricates a head notification). NEVER throws. */
   notifyHead?: (postId: string, frame: string) => Promise<void>
+  /** fb-184 (item 2/6) — deliver a framed work-register-idle NOTIFICATION to an
+   * EXPLICIT post (production: the bundle's `healthNotifyPost` closure —
+   * store.append + busDeliverToPost, the daemon→post pattern; hermetic tests: a
+   * recording stub). `opts.interrupt` — true → the W9-b preempt (the L2/L3
+   * escalation + the second-window item-6 wake — beats the FIFO/wake-seam; the
+   * shared per-recipient safeInterrupt cooldown gates the abort); false/absent
+   * → QUEUE semantics (the item-6 first wake of a dormant BOOT-QUIET head).
+   * `sourceKey` — the trigger identity recorded in the interrupt-state.json
+   * detail (O1-EXT P4). ABSENT (undefined) → the L2/L3 + item-6 blocks are
+   * CONSERVATIVE NO-OPS (a wiring without the post-delivery seam never
+   * fabricates an actor escalation; the HOST re-alert path is unaffected).
+   * NEVER throws. */
+  notifyPost?: (postId: string, frame: string, opts?: { interrupt?: boolean; sourceKey?: string }) => Promise<void>
   /** PACING (owner m-PACING, 2026-08-28) — the absolute path of the repo's
    * WORK-REGISTER.md (docs/WORK-REGISTER.md in the bundle wiring), read ONLY
    * at a VALLE transition for the «reanuda; despachos diferidos: N» count.
@@ -5287,16 +5358,53 @@ export const WORK_REGISTER_IDLE_MAX_LISTED = 8
  * the literal. */
 const SETTLEMENT_WAIT_KEY = 'settlement-wait'
 
-/** fb-167 — the `next:` next-actor header on a WORK-REGISTER item (the head's
- * settlement convention «next: host verify+push», adopted ALREADY in the
- * consolidated settlements — the machine-readable «the NEXT actor is X»
- * signal). The regex matches a `next:` header whose value NAMES THE HOST (the
- * settlement-wait class — the verify+commit+push step is the HOST's, NEVER an
- * IPD despatchable item); the capture is the trimmed actor value
- * («host» / «host verify+push»). Any other actor («next: research-head») is
- * NOT a settlement — the item stays in the generic census. Module-private (the
- * frozen export surface). */
-const WORK_REGISTER_NEXT_ACTOR_RE = /\bnext\s*[:：]\s*(host\b[^\n*]*)/i
+/** fb-184 (item 2) — the work-register-idle ESCALATION LADDER code defaults:
+ * the stall clock (stallSinceTs — set at the FIRST L1 alert) escalates
+ * L1 → L2 (default 45 min = 3x the 15-min T1 quiet window) → L3 (default
+ * 90 min). Absent/invalid knobs (workRegisterIdleEscalT2Ms/T3Ms) → these via
+ * resolvePositiveKnob. Module-private (the frozen export surface). */
+const WORK_REGISTER_IDLE_DEFAULT_ESCAL_T2_MS = 2_700_000
+const WORK_REGISTER_IDLE_DEFAULT_ESCAL_T3_MS = 5_400_000
+
+/** fb-184 (item 2) — the L2/L3 ESCALATION finding keys (their OWN dedupe keys
+ * in the SHARED health-alerts ledger — a re-alert cadence independent of the
+ * 30-min L1 key; the frame bullets render «work-register-idle L2/L3»). */
+const WORK_REGISTER_IDLE_L2_KEY = 'work-register-idle:l2'
+const WORK_REGISTER_IDLE_L3_KEY = 'work-register-idle:l3'
+
+/** fb-184 (item 2) — the default L2 ESCALATION recipient heads (the QH-request
+ * DUAL wake: the IPH is the natural dispatcher of the P2 lanes, the QH the
+ * process owner — precedent m-2046). The census `next:` actors are ALWAYS
+ * included; this knob adds the fixed heads. Knob
+ * `workRegisterIdleL2Heads` overrides. */
+const WORK_REGISTER_IDLE_DEFAULT_L2_HEADS = ['internal-programming-head', 'quality-head']
+
+/** fb-184 (item 2) — the default L3 ESCALATION recipient heads (the
+ * owner-facing D-Q3 / QUALITY REQUEST channel — precedent m-2046). Knob
+ * `workRegisterIdleL3Heads` overrides. */
+const WORK_REGISTER_IDLE_DEFAULT_L3_HEADS = ['quality-head']
+
+/** fb-184 (item 3 — capa (a) register-native) — the ACK-in-register marker
+ * regex: a dismissal line carrying `ACK <cifra> fuente <source>` (e.g.
+ * «— ACK: 83 fuente: register»). The watchdog VERIFIES the marker against the
+ * whitelist (register / job-runs-state.json / pooler / capacity-gate / hosts)
+ * instead of trusting it silently — the anti-fb-163/171 handshake (a dismissal
+ * without verifiable evidence no longer silences the re-alert). */
+const WORK_REGISTER_ACK_RE = /\bACK\s*[:：]?\s*(\d+)\s+fuente\s*[:：]?\s*([A-Za-z0-9_.\-/]+)/i
+
+/** fb-184 (item 4) — the `next:` next-actor header on a WORK-REGISTER item
+ * (the head's settlement convention «next: host verify+push» adopted ALREADY
+ * in the consolidated settlements, GENERALIZED to ANY actor id — the
+ * machine-readable «the NEXT actor is X» signal for the IPD DAG items too).
+ * The regex captures ANY next-actor value (a postId class like
+ * «internal-programming-head», or the HOST settlement class «host» /
+ * «host verify+push»); the host/settlement classification happens IN THE SCAN
+ * (a value starting with `host` = the settlement-wait class — the
+ * verify+commit+push step is the HOST's, NEVER an IPD despatchable item; any
+ * other captured value = the actor-idle class when it names a KNOWN live post,
+ * the generic census otherwise — fb-184 item 4). Module-private (the frozen
+ * export surface). */
+const WORK_REGISTER_NEXT_ACTOR_RE = /\bnext\s*[:：]\s*([A-Za-z0-9_\-]+[^\n*]*)/i
 
 /** ONE parsed WORK-REGISTER item: the `**…**`-bolded label under an open `## `
  * section, with its GATE classification (the §3 PENDIENTE-OWNER class = gated)
@@ -5309,11 +5417,16 @@ export interface WorkRegisterItem {
   gated: boolean
   /** The bold-marked item label (`**…**` text with the asterisks stripped). */
   label: string
-  /** fb-167 — the `next:` next-actor header value when it names the HOST (the
-   * consolidated-settlement class: «next: host» / «next: host verify+push» —
-   * the host is the next actor, the item waits on verify+commit+push and is
-   * NEVER an IPD despatchable item). ABSENT (undefined) when the item carries
-   * NO such header (a plain pending item — the generic census). */
+  /** fb-167 + fb-184 — the `next:` next-actor header value when the item's OWN
+   * line carries it (fb-184 item 4 GENERALIZES the parse from the host-only
+   * settlement class to ANY actor: «next: host» / «next: host verify+push»
+   * = the consolidated-settlement class (the HOST is the next actor — the item
+   * waits on verify+commit+push and is NEVER an IPD despatchable item);
+   * «next: internal-programming-head» = the actor-idle class (the IPD DAG item
+   * the scanner classifies against the KNOWN live posts — the census names the
+   * actor and the L2 escalation wakes it). ABSENT (undefined) when the item
+   * carries NO such header (a plain pending item — the generic census). The
+   * SCAN decides the class (host vs known-post vs unknown), never the parse. */
   nextActor?: string
 }
 
@@ -5326,11 +5439,14 @@ export interface WorkRegisterItem {
  * whose heading matches WORK_REGISTER_IDLE_GATED_SECTION_RE (the §3
  * PENDIENTE-OWNER class) is GATED; every other open section's items are
  * NON-gated (despatchable — the §1/§4/§5 classes; a closed/reference section
- * contributes nothing). fb-167 ADDS the next-actor header: an item whose line
- * carries a `next:` header naming the HOST (the consolidated-settlement
- * convention «next: host verify+push») is marked `nextActor` — the
+ * contributes nothing). fb-167 + fb-184 ADDS the next-actor header: an item
+ * whose line carries a `next:` header is marked `nextActor` (the RAW captured
+ * value — fb-184 item 4 generalizes the capture from the host-only settlement
+ * class to ANY actor id; the SCAN classifies the value: `host` → the
  * settlement-wait subclass (the NEXT actor is the HOST, NOT an IPD
- * despatchable item). PURE — NEVER throws (not a register-shaped doc → []). */
+ * despatchable item), a KNOWN non-retired post id → the actor-idle subclass,
+ * an unknown value → the generic census). PURE — NEVER throws (not a
+ * register-shaped doc → []). */
 export function parseWorkRegisterItems(text: string): WorkRegisterItem[] {
   const sections = text.split(/^##\s+/m)
   if (sections.length <= 1) return []
@@ -5343,11 +5459,12 @@ export function parseWorkRegisterItems(text: string): WorkRegisterItem[] {
     const body = lines.slice(1).join('\n')
     const markers = body.match(/\*\*([^*]+)\*\*/g)
     if (markers === null) continue
-    // fb-167: the item's OWN LINE (the line the marker starts on — the
+    // fb-167 + fb-184: the item's OWN LINE (the line the marker starts on — the
     // register is one item per line) is scanned for the `next:` next-actor
     // header; the marker may embed it (inside the bold span) or the line may
-    // carry it after the marker. A `next:` naming a NON-host actor is NOT a
-    // settlement (stays in the generic census).
+    // carry it after the marker. The RAW captured value rides `nextActor` (the
+    // parser is class-agnostic — the SCAN decides settlement vs actor-idle vs
+    // generic from the known posts).
     for (const m of body.matchAll(/\*\*([^*]+)\*\*/g)) {
       if (/\b(DONE|CERRADO|RESUELTO|RETIRADO)\b/i.test(m[0])) continue
       const lineStart = body.lastIndexOf('\n', m.index) + 1
@@ -5366,19 +5483,51 @@ export function parseWorkRegisterItems(text: string): WorkRegisterItem[] {
  * FIRST tick that observed the full quiet-VALLE state (0 agents running in a
  * VALLE franja). The quiet duration is `nowMs - firstQuietTs`; the entry is
  * REPLACED when ANY agent runs OR the franja leaves VALLE (the epoch is broken
- * → the window restarts when the full condition returns). Persisted only when
- * it changes (the turn-errors/system-idle pattern). */
+ * → the window restarts when the full condition returns). fb-184 (item 2)
+ * ADDS the ESCALATION LADDER fields: `stallSinceTs` (the STALL clock — set at
+ * the FIRST L1 alert, broken ONLY by real progress / PEAK / a resolved census
+ * / a verified ACK — the anti-fb-163/171 clock), `tier` (the current 1|2|3
+ * escalation tier) and `lastAckCensus` (the non-gated census at the last
+ * VERIFIED dismissal reset — the «a second ACK without resolution does not
+ * extend» guard). Persisted only when it changes (the turn-errors/system-idle
+ * pattern). */
 export interface WorkRegisterIdleState {
   firstQuietTs?: number
+  /** fb-184 (item 2) — the STALL clock start: the ts (ms epoch) when the L1
+   * work-register-idle alert FIRST fired (the escalation ladder's reference:
+   * L2 at stallSinceTs + T2, L3 at stallSinceTs + T3). BROKEN ONLY by real
+   * progress (a non-retired post running:true — a dispatch executing), the
+   * franja leaving VALLE (PEAK — an intentional pause), a RESOLVED census
+   * (nonGated+actorItems+settlements = 0 — item 3a) or a VERIFIED dismissal
+   * (item 3 — the clock resets to give the actor one fresh window).
+   * hostRunning ALONE never breaks it — the «host despierta, descarta, no
+   * despacha» pattern must not silence the escalation (anti-fb-163/171). */
+  stallSinceTs?: number
+  /** fb-184 (item 2) — the CURRENT escalation tier reached by the stall clock
+   * (1 = L1 only, 2 = L2, 3 = L3 — the owner escalation supersedes L2).
+   * Informational (the ledger + the frame); the findings derive from the stall
+   * age vs the T2/T3 knobs. */
+  tier?: number
+  /** fb-184 (item 3) — the non-gated census COUNT at the last VERIFIED ACK
+   * reset (the «a second ACK without resolution does not extend more» guard: a
+   * new ACK resets the stall clock ONLY when the census MOVED since the last
+   * verified reset — a dismissal must actually change the register). */
+  lastAckCensus?: number
 }
 
-/** Read `<stateDir>/work-register-idle-state.json` → `{ firstQuietTs? }`.
- * Absent / unreadable / malformed → {} (never throws). */
+/** Read `<stateDir>/work-register-idle-state.json` →
+ * `{ firstQuietTs?, stallSinceTs?, tier?, lastAckCensus? }`. Absent /
+ * unreadable / malformed → {} (never throws); unknown fields are IGNORED
+ * (a forward-compatible read — the fb-134 F3 storage move / a newer schema
+ * never breaks the old reader). */
 export function readWorkRegisterIdleState(stateDir: string): WorkRegisterIdleState {
   try {
     const parsed = JSON.parse(readFileSync(path.join(stateDir, WORK_REGISTER_IDLE_STATE_FILE), 'utf8')) as Record<string, unknown>
     const out: WorkRegisterIdleState = {}
     if (typeof parsed.firstQuietTs === 'number' && Number.isFinite(parsed.firstQuietTs)) out.firstQuietTs = parsed.firstQuietTs
+    if (typeof parsed.stallSinceTs === 'number' && Number.isFinite(parsed.stallSinceTs)) out.stallSinceTs = parsed.stallSinceTs
+    if (parsed.tier === 1 || parsed.tier === 2 || parsed.tier === 3) out.tier = parsed.tier
+    if (typeof parsed.lastAckCensus === 'number' && Number.isFinite(parsed.lastAckCensus)) out.lastAckCensus = parsed.lastAckCensus
     return out
   } catch {
     return {}
@@ -5416,6 +5565,44 @@ export interface WorkRegisterIdleScanInput {
   quietWindowMs: number
   /** The CURRENT ledger (read by the tick; mutated → the returned next ledger). */
   ledger: WorkRegisterIdleState
+  /** fb-184 (item 1) — the POOL-USABLE leg of the COMPOSITE threshold: TRUE
+   * when the pooler snapshot is FRESH (non-stale — the M1 stateStaleMs
+   * dead-man's-switch) and has ≥1 USABLE key (the resolvePoolerDispatchBlock
+   * L3700 predicate); FALSE when the pool is RESOLVED-but-unusable (absent /
+   * stale / 0 usable — a dispatch would be futile → NO finding, the quiet
+   * epoch KEEPS accumulating and the ladder fields are KEPT so the alert fires
+   * with the already-measured quiet once the pool recovers); UNDEFINED (the
+   * pooler seam absent in the wiring — never fabricated) → the leg is NOT
+   * enforced (a hermetic tick without poolerStatePath keeps the LANE 5
+   * behavior). The tick computes it on the SAME deps.poolerStatePath the
+   * pooler-capacity scan already reads. */
+  poolUsable?: boolean
+  /** fb-184 (item 1) — the USABLE key COUNT when `poolUsable` resolved (the
+   * composite frame leg «pool usable=Nkeys»); undefined when the leg was not
+   * enforced (the line is omitted — never fabricated). */
+  poolUsableKeys?: number
+  /** fb-184 (item 3) — the LATEST job run ts across
+   * `<stateDir>/job-runs-state.json` (dshd-jobs' flat {jobId: lastRunTs}
+   * idempotency ledger; the tick reads it best-effort). UNDEFINED =
+   * absent/unreadable/malformed — the job-runs ACK whitelist source is NOT
+   * verifiable (a dismissal citing it fails verification). */
+  jobRunsLatestTs?: number
+  /** fb-184 (item 3) — TRUE when `<stateDir>/capacity-gate-state.json` exists
+   * and parses (an ACK-whitelist fact — the pooler-capacity gate's durable
+   * baseline). Absent → a dismissal citing it fails verification. */
+  capacityGateStateOk?: boolean
+  /** fb-184 (item 3) — TRUE when `<stateDir>/hosts.json` exists and parses
+   * (an ACK-whitelist fact — the durable host rotation chain). Absent → a
+   * dismissal citing it fails verification. */
+  hostsStateOk?: boolean
+  /** fb-184 (item 2) — the resolved L2 ESCALATION window (knob
+   * workRegisterIdleEscalT2Ms or the 45-min code default); absent → the code
+   * default (the scan is the single source of the ladder thresholds). */
+  escalT2Ms?: number
+  /** fb-184 (item 2) — the resolved L3 ESCALATION window (knob
+   * workRegisterIdleEscalT3Ms or the 90-min code default); absent → the code
+   * default. */
+  escalT3Ms?: number
 }
 
 /** The work-register-idle scan result: the findings (≤2 per tick — the generic
@@ -5454,17 +5641,41 @@ export interface WorkRegisterIdleScanResult {
  * `settlement-wait`, own dedupe key in the SHARED ledger) — see the census
  * comment below for the coexistence rules. The total-pending leg REUSES
  * `countPendingWorkRegister` (the dshd-core utility — byte-consistent with
- * the parsed census by construction). */
+ * the parsed census by construction). fb-184 (v2, wave 3) ADDS: (item 1) the
+ * COMPOSITE threshold — the POOL-USABLE leg (`poolUsable === false` → no
+ * finding; the epoch keeps accumulating) + the recentlySilentHeads leg (the
+ * BOOT-QUIET heads painted into the frame's composite line); (item 2) the
+ * ESCALATION LADDER — stallSinceTs (set at the first L1 alert; broken ONLY by
+ * a running post / PEAK / a resolved census / a VERIFIED ACK — never by
+ * hostRunning alone, the anti-fb-163/171 clock) + the `work-register-idle:l2`
+ * / `:l3` findings at T2/T3 (their OWN dedupe keys); (item 3) the DISMISSAL
+ * verification — the census resolution (item 2c) + the ACK-in-register
+ * markers parsed/verified against the whitelist; (item 4) the ANY-actor
+ * `next:` classification — settlements (host) / actorItems (a known live
+ * post) / nonGated (no next: or an unknown actor). */
 export function scanWorkRegisterIdle(input: WorkRegisterIdleScanInput): WorkRegisterIdleScanResult {
   const ledger = { ...input.ledger }
   let changed = false
-  const anyRunning = input.hostRunning === true || input.posts.some((p) => p.retired !== true && p.running === true)
+  const postRunning = input.posts.some((p) => p.retired !== true && p.running === true)
+  const anyRunning = input.hostRunning === true || postRunning
   if (anyRunning || !input.valley) {
     // The quiet-VALLE epoch is broken: an agent is mid-turn (progress, NEVER
     // quiet) OR the franja left VALLE (a PEAK is the intentional pause — the
-    // window must restart when VALLE returns).
+    // window must restart when VALLE returns). LEGACY firstQuietTs semantics
+    // UNCHANGED (hostRunning breaks it too — the LANE 5 contract).
     if (ledger.firstQuietTs !== undefined) {
       delete ledger.firstQuietTs
+      changed = true
+    }
+    // fb-184 (item 2) — the STALL clock breaks ONLY on REAL progress (a
+    // non-retired post running — a dispatch executing) or PEAK (an intentional
+    // pause). hostRunning ALONE does NOT break it — exactly the «host
+    // despierta, descarta y no despacha» pattern (fb-163/171, 5th time on
+    // 09-05) must not silence the escalation.
+    if ((postRunning || !input.valley) && (ledger.stallSinceTs !== undefined || ledger.tier !== undefined || ledger.lastAckCensus !== undefined)) {
+      delete ledger.stallSinceTs
+      delete ledger.tier
+      delete ledger.lastAckCensus
       changed = true
     }
     return { findings: [], ledger, changed, quietWithoutPending: false }
@@ -5482,12 +5693,17 @@ export function scanWorkRegisterIdle(input: WorkRegisterIdleScanInput): WorkRegi
   // The window COMPLETED → the WORK-REGISTER census decides. The total-pending
   // leg REUSES the existing count utility; the item census separates GATED
   // (§3 PENDIENTE-OWNER — waits on the owner BY DESIGN) from NON-gated.
-  // fb-167 — the settlement-wait SUBCLASS: an item whose `next:` header names
-  // the HOST (a consolidated settlement — the NEXT actor is the HOST doing
-  // verify+commit+push) is NOT an IPD-despatchable item: it is EXCLUDED from
-  // the generic non-gated census (a settlement-only register NEVER fires the
-  // generic work-register-idle — that alarm would be a FALSE «IPD no
-  // despachó» on work that waits on the HOST, the fb-167 blind spot). Rules:
+  // fb-167 + fb-184 (item 4) — the next-actor CLASSES: an item whose `next:`
+  // header names the HOST (a consolidated settlement — the NEXT actor is the
+  // HOST doing verify+commit+push) is NOT an IPD-despatchable item: EXCLUDED
+  // from the generic non-gated census (a settlement-only register NEVER fires
+  // the generic work-register-idle — the fb-167 blind spot); an item whose
+  // `next:` names a KNOWN non-retired post id (an IPD DAG item «next:
+  // internal-programming-head») is an ACTOR item — it REMAINS in the generic
+  // census (the work is still pending — it waits on THAT actor) BUT its actor
+  // postId is named in the frame and feeds the L2 escalation recipients; an
+  // item with an UNKNOWN next-actor value stays generic pending too (never
+  // silently dropped). Rules:
   //   - settlements only (0 other non-gated) → the settlement-wait finding
   //     ONLY (kind/key `settlement-wait`, own dedupe key in the SHARED ledger);
   //   - settlements + other non-gated → BOTH findings (each names a DIFFERENT
@@ -5496,13 +5712,82 @@ export function scanWorkRegisterIdle(input: WorkRegisterIdleScanInput): WorkRegi
   //   - no settlements → the generic work-register-idle finding UNCHANGED.
   const totalPending = countPendingWorkRegister(input.registerText)
   const items = parseWorkRegisterItems(input.registerText)
-  const settlements = items.filter((item) => item.nextActor !== undefined && item.nextActor !== '')
-  const nonGated = items.filter((item) => item.gated !== true && item.nextActor === undefined)
-  if (totalPending === undefined || totalPending <= 0 || (settlements.length === 0 && nonGated.length === 0)) {
+  const knownIds = new Set(input.posts.filter((p) => p.retired !== true).map((p) => p.postId))
+  const settlements = items.filter((item) => item.nextActor !== undefined && /^host\b/i.test(item.nextActor))
+  const actorItems = items.filter((item) => item.nextActor !== undefined && !/^host\b/i.test(item.nextActor) && knownIds.has(item.nextActor))
+  const nonGated = items.filter((item) => {
+    if (item.gated === true) return false
+    if (item.nextActor === undefined) return true
+    if (/^host\b/i.test(item.nextActor)) return false
+    return !knownIds.has(item.nextActor)
+  })
+  const actionableCount = nonGated.length + actorItems.length
+  // fb-184 (item 3a — the MECHANICAL resolution) + (item 2c): the census
+  // RESOLVED → the quiet is expected AND the stall is BROKEN (a dismissal
+  // that moved the items under gated/closed sections CHANGED the census — the
+  // verification IS the re-parse, cifra+fuente in the register itself).
+  if (totalPending === undefined || totalPending <= 0 || (settlements.length === 0 && actionableCount === 0)) {
+    if (ledger.stallSinceTs !== undefined || ledger.tier !== undefined || ledger.lastAckCensus !== undefined) {
+      delete ledger.stallSinceTs
+      delete ledger.tier
+      delete ledger.lastAckCensus
+      changed = true
+    }
     return { findings: [], ledger, changed, quietWithoutPending: true }
+  }
+  // fb-184 (item 1) — the POOL-USABLE leg of the composite threshold: a
+  // RESOLVED-but-unusable pool (absent/stale state, 0 usable keys) makes any
+  // dispatch futile → no finding (the quiet epoch KEEPS accumulating and the
+  // ladder fields are KEPT — the alert fires once the pool recovers, with the
+  // already-measured quiet and the already-running stall clock). UNDEFINED
+  // (the pooler seam absent) → the leg is not enforced.
+  if (input.poolUsable === false) {
+    return { findings: [], ledger, changed, quietWithoutPending: false }
   }
   const minutes = Math.round(quietMs / 60000)
   const findings: HealthFinding[] = []
+  // fb-184 (item 2) — the STALL clock: set at the FIRST L1 alert (the first
+  // tick where the full composite condition holds — the dedupe lets the first
+  // delivery through, so the clock start IS the first real alert).
+  if (ledger.stallSinceTs === undefined) {
+    ledger.stallSinceTs = input.nowMs
+    changed = true
+  }
+  // fb-184 (item 3) — the ACK-in-register verification (capa (a) register-
+  // native, 0 surface): a dismissal that records `ACK <cifra> fuente <source>`
+  // in the register is verified against the whitelist (register → the census
+  // == cifra; pooler → pool usable; job-runs-state.json → a run AFTER the
+  // alert; capacity-gate-state.json / hosts.json → the file exists+parses). A
+  // VALID ack resets the stall clock (one fresh T2 window) ONLY when the
+  // census MOVED since the last verified reset; an INVALID ack does NOT reset
+  // and marks the escalation frame «DESCARTE NO VERIFICADO» (the burden of
+  // proof returns to the dismisser — anti-fb-163/171).
+  const acks = parseRegisterAcks(input.registerText)
+  const ackValid = acks.length > 0 && acks.some((ack) => verifyRegisterAck(ack, {
+    census: actionableCount,
+    poolUsable: input.poolUsable,
+    jobRunsLatestTs: input.jobRunsLatestTs,
+    capacityGateStateOk: input.capacityGateStateOk,
+    hostsStateOk: input.hostsStateOk,
+    stallSinceTs: ledger.stallSinceTs
+  }))
+  const ackInvalid = acks.length > 0 && acks.some((ack) => !verifyRegisterAck(ack, {
+    census: actionableCount,
+    poolUsable: input.poolUsable,
+    jobRunsLatestTs: input.jobRunsLatestTs,
+    capacityGateStateOk: input.capacityGateStateOk,
+    hostsStateOk: input.hostsStateOk,
+    stallSinceTs: ledger.stallSinceTs
+  }))
+  if (ackValid) {
+    if (ledger.lastAckCensus === undefined || ledger.lastAckCensus !== actionableCount) {
+      // A VERIFIED dismissal: the actor gains one complete T2 window.
+      ledger.stallSinceTs = input.nowMs
+      ledger.tier = 1
+      ledger.lastAckCensus = actionableCount
+      changed = true
+    }
+  }
   if (settlements.length > 0) {
     // The settlement-wait finding: its OWN kind/key → own dedupe in the SHARED
     // health-alerts ledger (the 30-min re-alert cadence while the settlement
@@ -5519,21 +5804,298 @@ export function scanWorkRegisterIdle(input: WorkRegisterIdleScanInput): WorkRegi
       error: `settlement esperando acción del HOST — next actor = host (${settlements.length}, quiet ≥ ${input.quietWindowMs} ms, 0 agentes): ${listText}`
     })
   }
-  if (nonGated.length > 0) {
-    // The frame's item list: the NON-gated labels, bounded (a huge register must
-    // not produce an unbounded ALERT frame) — the count carries the full census.
-    const listLabels = nonGated.map((item) => item.label)
+  if (actionableCount > 0) {
+    // fb-184 (item 4) — the frame's item list: the NON-gated + ACTOR labels
+    // (bounded — a huge register must not produce an unbounded ALERT frame).
+    // Each ACTOR item names its next-actor («LABEL — next: <head>») so the
+    // host distinguishes «0 agentes» from «esperando acción de X»; the
+    // composite legs line (item 1) carries the VERIFIED evidence (VALLE · quiet
+    // · census · 0 posts running · pool usable · heads BOOT-QUIET) so the
+    // alert loads its own cifra+fuente (anti-informed-dismissal, fb-45); the
+    // most-frequent next-actor is surfaced as the suggested next actor.
+    const censusItems = [...nonGated, ...actorItems]
+    const listLabels = censusItems.map((item) => item.nextActor !== undefined ? `${item.label} — next: ${item.nextActor}` : item.label)
     const listText = listLabels.slice(0, WORK_REGISTER_IDLE_MAX_LISTED).join('; ') +
       (listLabels.length > WORK_REGISTER_IDLE_MAX_LISTED ? `; … y ${listLabels.length - WORK_REGISTER_IDLE_MAX_LISTED} más` : '')
+    const silentHeads = recentlySilentHeads(input.posts, input.nowMs, input.quietWindowMs)
+    const compositeLeg = `· compuesto: VALLE · quiet ${minutes}min · census ${actionableCount} no-gated · 0 posts running` +
+      (input.poolUsableKeys !== undefined ? ` · pool usable=${input.poolUsableKeys}` : '') +
+      (silentHeads.length > 0 ? ` · heads BOOT-QUIET: ${silentHeads.join(', ')}` : '') +
+      // fb-184 (ritual-END, host decision: protocol-only — the ONLY code is
+      // this frame self-check line; «reanudar a HH:MM» is not structured data,
+      // the host checks it against the END-ritual pact before dismissing).
+      ' · auto-cheque END-ritual: ¿reanudación sin vencer?'
+    const suggestedActor = mostFrequentActor(actorItems)
+    const suggestionLeg = suggestedActor !== undefined ? ` · próximo actor sugerido: ${suggestedActor}` : ''
     findings.push({
       kind: 'work-register-idle',
       key: WORK_REGISTER_IDLE_KEY,
       ts: input.nowMs,
-      count: nonGated.length,
-      error: `WORK-REGISTER con ${nonGated.length} item(s) NO-gateado(s) sin despachar en VALLE (quiet ≥ ${input.quietWindowMs} ms, 0 agentes): ${listText}`
+      count: actionableCount,
+      error: `WORK-REGISTER con ${actionableCount} item(s) NO-gateado(s) sin despachar en VALLE (quiet ≥ ${input.quietWindowMs} ms, 0 agentes): ${listText}${compositeLeg}${suggestionLeg}`
+    })
+  }
+  // fb-184 (item 2) — the ESCALATION LADDER: the stall age vs T2/T3 decides the
+  // CURRENT tier (2 = the dual-head L2 finding, 3 = the owner-facing L3 finding
+  // which SUPERSEDES L2); each tier's finding rides its OWN dedupe key in the
+  // SHARED ledger (the 30-min re-alert cadence independent of the L1 key). The
+  // recipients = the census `next:` actor ids (known non-retired posts); the
+  // tick unions the knob heads and delivers via notifyPost.
+  const stallAgeMs = input.nowMs - (ledger.stallSinceTs ?? input.nowMs)
+  const t2 = input.escalT2Ms ?? WORK_REGISTER_IDLE_DEFAULT_ESCAL_T2_MS
+  const t3 = input.escalT3Ms ?? WORK_REGISTER_IDLE_DEFAULT_ESCAL_T3_MS
+  const newTier = stallAgeMs >= t3 ? 3 : stallAgeMs >= t2 ? 2 : 1
+  if (newTier > (ledger.tier ?? 1)) {
+    ledger.tier = newTier
+    changed = true
+  }
+  if (newTier === 2) {
+    const actors = [...new Set(actorItems.map((item) => item.nextActor as string))]
+    const stallLabel = new Date(input.nowMs - stallAgeMs).toISOString().slice(11, 16)
+    const actorLabel = actors.length > 0 ? `actores sugeridos: ${actors.join(', ')}` : 'actores sugeridos: (heads por knob)'
+    findings.push({
+      kind: 'work-register-idle:l2',
+      key: WORK_REGISTER_IDLE_L2_KEY,
+      ts: input.nowMs,
+      count: actionableCount,
+      recipients: actors,
+      error: `estancamiento ≥${Math.round(t2 / 60000)} min sin despacho (stall desde ${stallLabel}Z) — ${actorLabel} · census ${actionableCount} no-gated` + (ackInvalid ? ' · DESCARTE NO VERIFICADO (fuente/es no verificables)' : '')
+    })
+  } else if (newTier === 3) {
+    const actors = [...new Set(actorItems.map((item) => item.nextActor as string))]
+    const stallLabel = new Date(input.nowMs - stallAgeMs).toISOString().slice(11, 16)
+    const actorLabel = actors.length > 0 ? `actores sugeridos: ${actors.join(', ')}` : 'actores sugeridos: (heads por knob)'
+    findings.push({
+      kind: 'work-register-idle:l3',
+      key: WORK_REGISTER_IDLE_L3_KEY,
+      ts: input.nowMs,
+      count: actionableCount,
+      recipients: actors,
+      error: `ESCALADO al owner (D-Q3) — estancamiento ≥${Math.round(t3 / 60000)} min sin despacho (stall desde ${stallLabel}Z) — ${actorLabel} · census ${actionableCount} no-gated` + (ackInvalid ? ' · DESCARTE NO VERIFICADO (fuente/es no verificables)' : '')
     })
   }
   return { findings, ledger, changed, quietWithoutPending: false }
+}
+
+/** fb-184 (item 1) — the POOL-USABLE leg: FRESH (non-stale — the M1
+ * stateStaleMs dead-man's-switch) pooler state with ≥1 USABLE key (the
+ * resolvePoolerDispatchBlock L3700 predicate) → {usable:true, usableKeys:n};
+ * STALE / absent / unparseable (the pooler writes the file ONLY on health
+ * changes — a quiet grid looks stale BY DESIGN) → {usable:false, usableKeys:0}
+ * + a warn (never fabricate a usable pool; the scanPoolerCapacity stale-warn
+ * pattern). Module-private (the frozen export surface). */
+function usablePoolerKeys(
+  statePath: string,
+  nowMs: number,
+  stateStaleMs: number,
+  logger?: { warn(message: string): void }
+): { usable: boolean; usableKeys: number } {
+  const state = readPoolerStateFile(statePath)
+  if (state === undefined) {
+    logger?.warn('pooler state unknown/absent — work-register-idle pool leg NOT usable (never fabricate)')
+    return { usable: false, usableKeys: 0 }
+  }
+  const updatedMs = state.updatedAt !== undefined ? Date.parse(state.updatedAt) : Number.NaN
+  if (!Number.isFinite(updatedMs) || nowMs - updatedMs > stateStaleMs) {
+    const ageMin = Number.isFinite(updatedMs) ? Math.round((nowMs - updatedMs) / 60000) : Number.NaN
+    logger?.warn(Number.isFinite(ageMin)
+      ? `pooler state unknown/stale (age ${ageMin} min) — work-register-idle pool leg NOT usable (never fabricate)`
+      : 'pooler state unknown/stale (unparseable updatedAt) — work-register-idle pool leg NOT usable (never fabricate)')
+    return { usable: false, usableKeys: 0 }
+  }
+  const keys = Object.values(state.keys ?? {})
+  const usableKeys = keys.filter((k) => !k.invalid && (Number(k.blockedUntil) || 0) <= nowMs && (Number(k.cooldownUntil) || 0) <= nowMs).length
+  return { usable: usableKeys > 0, usableKeys }
+}
+
+/** fb-184 (item 3) — the LATEST job run ts across `<stateDir>/job-runs-state.json`
+ * (dshd-jobs' flat {jobId: lastRunTs} idempotency ledger — the whitelist fact
+ * «the relevant run happened AFTER the alert» for the job-runs ACK source).
+ * Absent / unreadable / malformed → undefined (the source is NOT verifiable —
+ * a dismissal citing it fails verification). Module-private (the frozen export
+ * surface). */
+function readLatestJobRunTs(stateDir: string): number | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'job-runs-state.json'), 'utf8')) as Record<string, unknown>
+    let latest: number | undefined
+    for (const value of Object.values(parsed)) {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        if (latest === undefined || value > latest) latest = value
+      }
+    }
+    return latest
+  } catch {
+    return undefined
+  }
+}
+
+/** fb-184 (item 3) — TRUE when `<stateDir>/hosts.json` exists and parses (the
+ * durable host rotation chain `readDurableHostEntries` resolves — a whitelist
+ * fact for the hosts ACK source). Module-private (the frozen export surface). */
+function readHostsStateOk(stateDir: string): boolean {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'hosts.json'), 'utf8')) as unknown
+    return parsed !== null && typeof parsed === 'object'
+  } catch {
+    return false
+  }
+}
+
+/** fb-184 (item 1) — the RECENTLY-SILENT HEADS leg: the non-retired heads
+ * (provider !== 'worker') that are NOT running, NOT sleeping and have NO inbox
+ * message within `windowMs` (their inboxTs all older than the window, or
+ * empty — a fresh rotation in BOOT-QUIET waiting for its first message). The
+ * names paint the frame's composite line («N heads idle desde sus rotaciones —
+ * BOOT-QUIET esperando primer mensaje»). PURE. */
+function recentlySilentHeads(posts: readonly PostActivityInput[], nowMs: number, windowMs: number): string[] {
+  const out: string[] = []
+  for (const post of posts) {
+    if (post.retired === true) continue
+    if (post.provider === 'worker') continue
+    if (post.running === true) continue
+    if (post.sleeping === true) continue
+    const inbox = post.inboxTs ?? []
+    if (inbox.length > 0 && inbox.some((ts) => typeof ts === 'number' && Number.isFinite(ts) && nowMs - ts <= windowMs)) continue
+    out.push(post.postId)
+  }
+  return out
+}
+
+/** fb-184 (item 4) — the MOST-FREQUENT next-actor among the actor items (the
+ * frame's «próximo actor sugerido» line — the actor owning the most IPD DAG
+ * items is the natural next wake). Undefined when no actor item exists. PURE. */
+function mostFrequentActor(actorItems: WorkRegisterItem[]): string | undefined {
+  const counts = new Map<string, number>()
+  for (const item of actorItems) {
+    if (item.nextActor === undefined) continue
+    const key = item.nextActor.toLowerCase()
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  let best: string | undefined
+  let bestCount = 0
+  for (const [actor, count] of counts) {
+    if (count > bestCount) {
+      best = actor
+      bestCount = count
+    }
+  }
+  return best
+}
+
+/** fb-184 (item 3) — parse the ACK-in-register markers: every `ACK <cifra>
+ * fuente <source>` in the register text → {cifra, fuente} (cifra a finite
+ * non-negative integer, fuente a whitelist source token). PURE — a register
+ * without markers → []. */
+function parseRegisterAcks(text: string): { cifra: number; fuente: string }[] {
+  const out: { cifra: number; fuente: string }[] = []
+  for (const m of text.matchAll(new RegExp(WORK_REGISTER_ACK_RE.source, 'gi'))) {
+    const cifra = Number(m[1])
+    if (!Number.isFinite(cifra) || cifra < 0) continue
+    out.push({ cifra, fuente: m[2].toLowerCase() })
+  }
+  return out
+}
+
+/** fb-184 (item 3) — verify ONE ACK-in-register marker against the whitelist
+ * (DAEMON-readable sources, SOLO-LECTURA): fuente `register` → the CURRENT
+ * actionable census == the ack cifra (the dismissal proves the register state
+ * it claims); fuente `pooler` → the pool is usable; fuente
+ * `job-runs-state`/`job-runs` → the latest job run ts is AFTER the stall
+ * start (the action actually happened after the alert); fuente
+ * `capacity-gate`/`capacity-gate-state` → the gate's durable state file
+ * exists+parses; fuente `hosts` → the hosts.json rotation chain exists+parses.
+ * ANY other source → unverifiable (false — the burden of proof returns to the
+ * dismisser). PURE. */
+function verifyRegisterAck(
+  ack: { cifra: number; fuente: string },
+  facts: { census: number; poolUsable?: boolean; jobRunsLatestTs?: number; capacityGateStateOk?: boolean; hostsStateOk?: boolean; stallSinceTs?: number }
+): boolean {
+  switch (ack.fuente) {
+    case 'register':
+      return ack.cifra === facts.census
+    case 'pooler':
+      return facts.poolUsable === true
+    case 'job-runs':
+    case 'job-runs-state':
+      return facts.jobRunsLatestTs !== undefined && facts.stallSinceTs !== undefined && facts.jobRunsLatestTs > facts.stallSinceTs
+    case 'capacity-gate':
+    case 'capacity-gate-state':
+      return facts.capacityGateStateOk === true
+    case 'hosts':
+    case 'hosts.json':
+      return facts.hostsStateOk === true
+    default:
+      return false
+  }
+}
+
+/** fb-184 (item 6, adenda m-2123) — one HEAD continuation-wait row: a
+ * non-retired head (provider !== 'worker'), NOT running, NOT sleeping, with NO
+ * inbox message within `windowMs` (BOOT-QUIET — a fresh rotation has no
+ * pending messages and never materialized a turn), and ≥1 register item whose
+ * `next:` names its postId. The daemon wakes it with a `system-wait` frame so
+ * the register's `next:<head>` items become its FIRST work (the backstop
+ * structural for the «welcome sin despacho» gap — item 5). Module-private (the
+ * frozen export surface). */
+interface HeadContinuationWait {
+  /** The head post id (the wake recipient). */
+  postId: string
+  /** The dedupe key in the SHARED health-alerts ledger (30-min cadence, the
+   * `wait:<postId>:<messageId>` pattern) — `wait-head-actor:<postId>`. */
+  key: string
+  /** The count of register items whose next: names the head. */
+  count: number
+  /** The item labels (≤ WORK_REGISTER_IDLE_MAX_LISTED). */
+  labels: string[]
+}
+
+/** fb-184 (item 6) — scan the HEAD CONTINUATION-WAIT condition (PURE): the
+ * heads idle (not running/sleeping) with an empty/old inbox AND register items
+ * owned (`next:<head>`) → one row per head. A head with RECENT inbox activity
+ * is NOT a continuation wait (the message is being/has been attended — the
+ * buildPostSnapshot intent); a head WITHOUT `next:` items is none (nothing to
+ * wake it for). Module-private (the frozen export surface — tests exercise it
+ * through runHealthDaemonTick's delivery). NEVER throws. */
+function scanHeadContinuationWaits(
+  posts: readonly PostActivityInput[],
+  registerItems: readonly WorkRegisterItem[],
+  nowMs: number,
+  windowMs: number
+): HeadContinuationWait[] {
+  const owned = new Map<string, WorkRegisterItem[]>()
+  for (const item of registerItems) {
+    if (item.nextActor === undefined || /^host\b/i.test(item.nextActor)) continue
+    const list = owned.get(item.nextActor)
+    if (list === undefined) owned.set(item.nextActor, [item])
+    else list.push(item)
+  }
+  const out: HeadContinuationWait[] = []
+  for (const post of posts) {
+    if (post.retired === true) continue
+    if (post.provider === 'worker') continue
+    if (post.running === true) continue
+    if (post.sleeping === true) continue
+    const items = owned.get(post.postId)
+    if (items === undefined || items.length === 0) continue
+    const inbox = post.inboxTs ?? []
+    if (inbox.length > 0 && inbox.some((ts) => typeof ts === 'number' && Number.isFinite(ts) && nowMs - ts <= windowMs)) continue
+    const labels = items.slice(0, WORK_REGISTER_IDLE_MAX_LISTED).map((item) => item.label)
+    out.push({
+      postId: post.postId,
+      key: `wait-head-actor:${post.postId}`,
+      count: items.length,
+      labels
+    })
+  }
+  return out
+}
+
+/** fb-184 (item 6) — build the framed HEAD continuation-wait bus message —
+ * `[From deepartments] system-wait: <head-id> — N item(s) next: <head-id>:
+ * <labels>`. The daemon delivers it via notifyPost (QUEUE on the first window,
+ * INTERRUPT on the second). Module-private (the frozen export surface). PURE. */
+function buildHeadContinuationWaitFrame(wait: HeadContinuationWait): string {
+  return `[From deepartments] system-wait: ${wait.postId} — ${wait.count} item(s) next: ${wait.postId}: ${wait.labels.join('; ')}`
 }
 
 /** Build the framed host ALERT text — `[From deepartments] System-health ALERT:
@@ -5650,6 +6212,26 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     // FULL line so the host sees WHAT to intervene on).
     if (finding.kind === 'manager-delivery-stuck') {
       return `- manager-delivery-stuck: ${finding.error ?? `worker ${finding.postId ?? ''} — final delivery to its manager stuck (q-i idle-hold)`}`
+    }
+    // LANE fb-134 F2(c) — the ghost-store branch (NEVER let it reach the
+    // stale-post fallback). The finding is the daemon-BOOT ghost-store scan:
+    // a PARALLEL tree (a non-canonical `.deepartments` resolved from another
+    // cwd) carries store marker files (boot-crash.json / capacity-gate-state.json)
+    // and can be mistaken for the canonical store (the fb-134 class). ADVERTENCIA:
+    // 0 destructive action — the owner sees the tree + the markers and decides.
+    if (finding.kind === 'ghost-store') {
+      return `- ghost-store ADVERTENCIA: ${finding.error ?? `parallel store tree carries store marker files`}`
+    }
+    // fb-184 (item 2) — the ESCALATION LADDER branches (NEVER let them reach
+    // the stalled-post fallback). The owner-facing wording is each finding's
+    // own line (the stall age + the suggested actors + the census; the L3
+    // adds the OWNER escalation marker — D-Q3; an UNVERIFIED dismissal appends
+    // «DESCARTE NO VERIFICADO» — the anti-fb-163/171 burden of proof).
+    if (finding.kind === 'work-register-idle:l2') {
+      return `- work-register-idle L2: ${finding.error ?? `estancamiento ≥45 min sin despacho — actores sugeridos por el census, census ${finding.count ?? 0} no-gated`}`
+    }
+    if (finding.kind === 'work-register-idle:l3') {
+      return `- work-register-idle L3: ${finding.error ?? `ESCALADO al owner (D-Q3) — estancamiento ≥90 min sin despacho, census ${finding.count ?? 0} no-gated`}`
     }
     return `- stalled-post: ${finding.postId} (${finding.count ?? 1} pending message(s), ${finding.error ?? 'no session activity'})`
   })
@@ -6115,6 +6697,25 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // resolvePositiveKnob).
     const workRegisterIdleEnabled = health?.workRegisterIdleEnabled !== false
     const workRegisterIdleQuietMs = resolvePositiveKnob(health?.workRegisterIdleQuietMs, WORK_REGISTER_IDLE_DEFAULT_QUIET_MS)
+    // fb-184 (item 2) — the work-register-idle ESCALATION knobs:
+    // `workRegisterIdleEscalT2Ms` (the L2 window; absent/invalid → the 45-min
+    // code default) / `workRegisterIdleEscalT3Ms` (the L3 window; absent/
+    // invalid → the 90-min code default) via resolvePositiveKnob + the
+    // L2/L3 recipient heads (`workRegisterIdleL2Heads` default
+    // [internal-programming-head, quality-head] — the QH-request DUAL;
+    // `workRegisterIdleL3Heads` default [quality-head] — the owner-facing
+    // channel, parametrized per the host decision; the mainRedLocks array
+    // pattern — an explicit non-empty array overrides).
+    const workRegisterIdleEscalT2Ms = resolvePositiveKnob(health?.workRegisterIdleEscalT2Ms, WORK_REGISTER_IDLE_DEFAULT_ESCAL_T2_MS)
+    const workRegisterIdleEscalT3Ms = resolvePositiveKnob(health?.workRegisterIdleEscalT3Ms, WORK_REGISTER_IDLE_DEFAULT_ESCAL_T3_MS)
+    const workRegisterIdleL2Heads =
+      Array.isArray(health?.workRegisterIdleL2Heads) && health.workRegisterIdleL2Heads.every((p) => typeof p === 'string' && p !== '')
+        ? health.workRegisterIdleL2Heads
+        : WORK_REGISTER_IDLE_DEFAULT_L2_HEADS
+    const workRegisterIdleL3Heads =
+      Array.isArray(health?.workRegisterIdleL3Heads) && health.workRegisterIdleL3Heads.every((p) => typeof p === 'string' && p !== '')
+        ? health.workRegisterIdleL3Heads
+        : WORK_REGISTER_IDLE_DEFAULT_L3_HEADS
     // The per-poll BUCKET gate (the M-A per-poll precedent): the main-red scan
     // runs at most once per `mainRedPollMs` bucket — the FIRST tick of a bucket
     // (prevTick undefined → runs); a faster `health.intervalMs` re-fire inside
@@ -6426,22 +7027,27 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // register-stall alert; the poolerStatePath-absent pattern) AND
     // `deps.hostRunning` RESOLVED (the M4 pattern: without the host's liveness
     // the zero-running premise cannot be certified). Its OWN ledger
-    // work-register-idle-state.json (firstQuietTs) persists ONLY on change;
-    // the SHARED health-alerts ledger (key `work-register-idle`) gives the
-    // 30-min re-alert cadence while the condition persists. Expected quiet
-    // (window done, NO NON-gated pending — a §3-only register or an empty one)
-    // → a warn, no finding, no dedupe.
+    // work-register-idle-state.json (firstQuietTs + the fb-184 stall clock)
+    // persists ONLY on change; the SHARED health-alerts ledger (key
+    // `work-register-idle`) gives the 30-min re-alert cadence while the
+    // condition persists. Expected quiet (window done, NO NON-gated pending —
+    // a §3-only register or an empty one) → a warn, no finding, no dedupe.
+    // fb-184 COMPOSITE legs (item 1): the POOL-USABLE leg resolves on the SAME
+    // deps.poolerStatePath the pooler-capacity scan already read (the
+    // stateStaleMs freshness reuse — NEVER duplicated) + the ACK-verification
+    // whitelist facts (item 3: job-runs-state.json / capacity-gate-state.json /
+    // hosts.json — SOLO-LECTURA, best-effort).
+    // The franja VALLE leg REUSES the dshd-core pacing (isPeakAt == false —
+    // the same window the transition monitor uses). LANE 0.2.2 (P4): the leg
+    // resolves service-FIRST through the substitutable pacing policy
+    // (deepartments.pacing) when composed; the pure fallback stays R6.
+    const pacingWindowTick = pacingWindowFromConfig(deps.config?.org?.pacing)
+    const valley = deps.pacingService !== undefined
+      ? !deps.pacingService.isPeakAt(new Date(nowMs))
+      : !isPeakAt(new Date(nowMs), pacingWindowTick)
     let workRegisterIdleFindings: HealthFinding[] = []
     if (workRegisterIdleEnabled && deps.workRegisterPath !== undefined && deps.hostRunning !== undefined) {
       try {
-        // The franja VALLE leg REUSES the dshd-core pacing (isPeakAt == false
-        // — the same window the transition monitor uses). LANE 0.2.2 (P4): the
-        // leg resolves service-FIRST through the substitutable pacing policy
-        // (deepartments.pacing) when composed; the pure fallback stays R6.
-        const pacingWindow = pacingWindowFromConfig(deps.config?.org?.pacing)
-        const valley = deps.pacingService !== undefined
-          ? !deps.pacingService.isPeakAt(new Date(nowMs))
-          : !isPeakAt(new Date(nowMs), pacingWindow)
         // The register is read SOLO-LECTURA (best-effort — the watchdog NEVER
         // writes it; an unreadable/absent register degrades to '' → the census
         // legs fail → conservative no-op).
@@ -6451,6 +7057,17 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         } catch {
           registerText = ''
         }
+        // fb-184 (item 1) — the pool-usable leg (the same state file the
+        // pooler-capacity scan reads; UNDEFINED when the pooler seam is absent
+        // → the leg is NOT enforced — hermetic ticks keep the LANE 5 contract).
+        const poolState = deps.poolerStatePath !== undefined
+          ? usablePoolerKeys(deps.poolerStatePath, nowMs, poolerKnobs.stateStaleMs, deps.logger)
+          : undefined
+        // fb-184 (item 3) — the ACK-verification whitelist facts (best-effort
+        // reads; a missing/unreadable source = the source is NOT verifiable).
+        const jobRunsLatestTs = readLatestJobRunTs(deps.stateDir)
+        const capacityGateStateOk = readCapacityGateState(deps.stateDir) !== undefined
+        const hostsStateOk = readHostsStateOk(deps.stateDir)
         const wrLedger = readWorkRegisterIdleState(deps.stateDir)
         const wrScan = scanWorkRegisterIdle({
           registerText,
@@ -6459,7 +7076,14 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
           posts,
           nowMs,
           quietWindowMs: workRegisterIdleQuietMs,
-          ledger: wrLedger
+          ledger: wrLedger,
+          poolUsable: poolState?.usable,
+          poolUsableKeys: poolState?.usableKeys,
+          jobRunsLatestTs,
+          capacityGateStateOk,
+          hostsStateOk,
+          escalT2Ms: workRegisterIdleEscalT2Ms,
+          escalT3Ms: workRegisterIdleEscalT3Ms
         })
         workRegisterIdleFindings = wrScan.findings
         if (wrScan.changed) await writeWorkRegisterIdleState(deps.stateDir, wrScan.ledger)
@@ -6566,6 +7190,32 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
           } catch (error: unknown) {
             deps.logger?.warn(`[deepartments] system-health: host alert delivery failed: ${error instanceof Error ? error.message : String(error)}`)
           }
+          // fb-184 (item 2) — the ESCALATION deliveries: a FRESH `:l2`/`:l3`
+          // finding ALSO wakes the ACTOR posts via notifyPost — L2: the census
+          // `next:` actors ∪ `workRegisterIdleL2Heads` (the QH-request DUAL);
+          // L3: `workRegisterIdleL3Heads` (the owner-facing channel) with
+          // interrupt:true (the ladder fires with 0 agents running by
+          // construction — the interrupt beats the FIFO/wake-seam; the shared
+          // per-recipient safeInterrupt cooldown gates the abort). Each with
+          // its OWN sourceKey (the ladder dedupe key). All ALERTS — the
+          // recipients decide/dispatch (the «never dispatches» rule, L4811).
+          // Absent notifyPost dep → the HOST still gets the escalation in the
+          // ALERT frame; the actor wake is a conservative no-op.
+          if (deps.notifyPost !== undefined) {
+            for (const finding of findingsToAlert) {
+              const ladder = finding.kind === 'work-register-idle:l2' || finding.kind === 'work-register-idle:l3' ? finding : undefined
+              if (ladder === undefined) continue
+              const fixedHeads = ladder.kind === 'work-register-idle:l3' ? workRegisterIdleL3Heads : workRegisterIdleL2Heads
+              const recipients = [...new Set([...(ladder.recipients ?? []), ...fixedHeads])]
+              for (const postId of recipients) {
+                try {
+                  await deps.notifyPost(postId, buildHealthAlertFrame([ladder]), { interrupt: true, sourceKey: ladder.key })
+                } catch (error: unknown) {
+                  deps.logger?.warn(`[deepartments] system-health: work-register-idle escalation delivery to "${postId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+                }
+              }
+            }
+          }
           for (const finding of findingsToAlert) {
             nextState[identityOf(finding)] = nowMs
             stateChanged = true
@@ -6604,6 +7254,49 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
             }
           }
         }
+      }
+    }
+    // fb-184 (item 6, adenda m-2123) — SYSTEM-WAIT for IDLE HEADS with
+    // pending `next:<head>` register items (the QH gap H2/H3 backstop: a fresh
+    // BOOT-QUIET head — no inbox activity, never materialized a turn — whose
+    // register items name it is NOT woken by anything else; the daemon wakes it
+    // so the `next:<head>` items become its FIRST work — the structural
+    // welcome-with-dispatch, item 5). Conditions (ALL): VALLE ∧ the head
+    // non-retired ∧ provider !== 'worker' ∧ running:false ∧ sleeping:false ∧
+    // inbox EMPTY or all older than the quiet window ∧ ≥1 register item with
+    // `nextActor === its postId`. Delivery via notifyPost — QUEUE semantics on
+    // the FIRST window (a dormant BOOT-QUIET head has no turn to abort —
+    // materializePost wakes it), INTERRUPT on a SECOND window (the shared
+    // ledger key's recorded ts = a previous delivery — the m-1234 gate-bypass,
+    // precedent m-2056). Dedupe key `wait-head-actor:<postId>` in the SHARED
+    // health-alerts ledger (30-min cadence, the `wait:<postId>:<messageId>`
+    // pattern). No live... the head post itself is the recipient (no host
+    // needed). Absent notifyPost dep → conservative no-op.
+    if (workRegisterIdleEnabled && valley && deps.workRegisterPath !== undefined && deps.notifyPost !== undefined) {
+      try {
+        let registerText = ''
+        try {
+          registerText = readFileSync(deps.workRegisterPath, 'utf8')
+        } catch {
+          registerText = ''
+        }
+        const headWaits = scanHeadContinuationWaits(posts, parseWorkRegisterItems(registerText), nowMs, workRegisterIdleQuietMs)
+        for (const wait of headWaits) {
+          const due = nextState[wait.key] === undefined || nowMs - nextState[wait.key] > HEALTH_DEDUPE_WINDOW_MS
+          if (!due) continue
+          try {
+            // A previous delivery on record (the key held a ts beyond the
+            // window) → this is a SECOND window → interrupt (the gate-bypass).
+            const interrupt = nextState[wait.key] !== undefined
+            await deps.notifyPost(wait.postId, buildHeadContinuationWaitFrame(wait), { interrupt, sourceKey: wait.key })
+            nextState[wait.key] = nowMs
+            stateChanged = true
+          } catch (error: unknown) {
+            deps.logger?.warn(`[deepartments] system-health: head continuation-wait delivery to "${wait.postId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+      } catch (error: unknown) {
+        deps.logger?.warn(`[deepartments] system-health: head continuation-wait scan failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     // PACING — the peak/valley FRANJA transition monitor (owner m-PACING,
@@ -7025,6 +7718,11 @@ export function apply(ctx: Context, config: HealthConfig = {}) {
         // Absent → the turn-end-notify block is a conservative no-op (tick
         // contract).
         notifyHead: explicit.notifyHead,
+        // fb-184 (item 2/6): the per-post notification closure (the bundle's
+        // `healthNotifyPost`) — the L2/L3 escalation + the item-6 head
+        // continuation-wake deliver through it. Absent → the blocks are
+        // conservative no-ops (tick contract).
+        notifyPost: explicit.notifyPost,
         workRegisterPath: explicit.workRegisterPath,
         logger: ctx.logger
       })

@@ -753,6 +753,14 @@ export interface ToolsSurface {
    * tick's `notifyHead` dep): deliver the framed `[From deepartments] Turn-error
    * <cls> …` to the post's OWN head (store.append + busDeliverToPost). */
   healthNotifyHead: (postId: string, frame: string) => Promise<void>
+  /** fb-184 (item 2/6) — the post NOTIFICATION closure (the daemon tick's
+   * `notifyPost` dep): deliver a framed work-register-idle escalation /
+   * system-wait wake to an EXPLICIT postId (store.append + busDeliverToPost —
+   * the daemon→post pattern, addressed by id, never resolved through
+   * managerId). `opts.interrupt` (the W9-b preempt for the L2/L3 escalation
+   * + the second-window item-6 wake) + `opts.sourceKey` (the delivery/
+   * interrupt metadata, O1-EXT P4). */
+  healthNotifyPost: (postId: string, frame: string, opts?: { interrupt?: boolean; sourceKey?: string }) => Promise<void>
   healthPoolerStatePath: string
   healthBootId: string
   /** FINISHER (2026-09-04, addendum 4 — m-812, sweep observability): the
@@ -6400,6 +6408,33 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     }
   }
 
+  // fb-184 (item 2/6) — the post NOTIFICATION closure the health daemon tick's
+  // `notifyPost` dep calls: deliver the framed work-register-idle escalation /
+  // system-wait wake to an EXPLICIT postId via store.append + busDeliverToPost
+  // (the SAME daemon→post seam as healthNotifyHead, but ADDRESSED BY ID — never
+  // resolved through managerId — so the L2/L3 census actors and the item-6
+  // `wait-head-actor:<postId>` heads are woken directly). `opts.interrupt`
+  // → the W9-b preempt (the L2/L3 escalation + the second-window item-6 wake —
+  // the shared safeInterrupt cooldown gates the abort); `opts.sourceKey` → the
+  // delivery/interrupt metadata (O1-EXT P4). An unknown postId → conservative
+  // no-op (never fabricated). NEVER throws. (Defined OUTSIDE the frozen CUT-4
+  // zone — the tools-factory byte-identical md5 lock is untouched, the
+  // healthNotifyHead pattern.)
+  const healthNotifyPost = async (postId: string, frame: string, opts?: { interrupt?: boolean; sourceKey?: string }): Promise<void> => {
+    try {
+      const entry = byPost.get(postId)
+      if (entry === void 0) return
+      const store = await messagesStoreReady
+      const record = await store.append({ from: 'deepartments', to: [postId], text: frame, kind: 'agent' })
+      const deliveryOpts: { interrupt?: boolean; sourceKey?: string } = {}
+      if (opts?.interrupt === true) deliveryOpts.interrupt = true
+      if (opts?.sourceKey !== undefined) deliveryOpts.sourceKey = opts.sourceKey
+      await busDeliverToPost(entry, frame, record, void 0, deliveryOpts)
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] system-health: post notification for "${postId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   // LANE 0.2.1 (1B/1C — binder → Service, P6 disposability, gap 1): the four
   // zone dep sets now flow into PER-PACKAGE deps holders — deepartments.healthDeps /
   // jobsDeps / poolerDeps / guiDeps, PROVIDED by dshd-health / dshd-jobs /
@@ -6525,6 +6560,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     buildHostWaits,
     healthNotifyHost,
     healthNotifyHead,
+    healthNotifyPost,
     healthPoolerStatePath,
     healthBootId,
     guiEndpointDeps,

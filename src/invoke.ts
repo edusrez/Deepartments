@@ -241,7 +241,13 @@ import {
   GHOST_SUSPECT_STATE_FILE,
   readGhostSuspectLedger,
   writeGhostSuspectLedger,
-  stepGhostSuspectCensus
+  stepGhostSuspectCensus,
+  // LANE fb-134 F2(c): the GHOST-STORE boot scan + the STORE-PROFILE assert
+  // (parallel-store detection — used by the boot block below; NOT re-exported,
+  // so lib/invoke.js keeps the frozen 324-name surface).
+  scanGhostStoreTrees,
+  assertStoreProfile,
+  storeProfileLabel
 } from './core/registry.js'
 import type {
   PostEntry,
@@ -459,6 +465,7 @@ import {
   readPostErrorsFile,
   readHealthAlertsState,
   writeHealthAlertsState,
+  appendHealthAlertAudit,
   safeInterrupt,
   postErrorClass,
   appendPostErrorDeduped,
@@ -3605,6 +3612,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     buildHostWaits,
     healthNotifyHost,
     healthNotifyHead,
+    healthNotifyPost,
     healthPoolerStatePath,
     healthBootId,
     guiEndpointDeps
@@ -4016,6 +4024,10 @@ export function applyInvoke(ctx: Context, config: Config) {
           // (widened cast — the `deliveryRowsReader` pattern; NOT added to
           // HealthBinderDeps, keeping the binder-contract intact).
           notifyHead?: unknown
+          // fb-184 (item 2/6): the post notification closure (the L2/L3
+          // escalation + the item-6 head continuation-wake; the same widened
+          // cast — NOT in HealthBinderDeps).
+          notifyPost?: unknown
           // POST-INCIDENTE 2026-09-04 (crash-loop 609 restarts / exit 7): the
           // heartbeat health datums — surface (the detected session surface),
           // nRestarts (the systemd NRestarts read once per boot) and
@@ -4042,6 +4054,69 @@ export function applyInvoke(ctx: Context, config: Config) {
     // happen before this boot's first heartbeat can exist).
     const healthCrashStreak = resolveBootCrashStreak(stateDir)
     void stampBootCrash(stateDir, healthBootId, Date.now())
+    // LANE fb-134 F2(c) — GHOST-STORE DETECTION AT BOOT (ADVERTENCIA, 0
+    // destructive action): the canonical store is `/.deepartments` (stateDir
+    // is RELATIVE and resolves against this unit's CWD) — but a PARALLEL tree
+    // (a `.deepartments` resolved from ANOTHER cwd: the headless-smoke CWD=/root
+    // footprint, or the repo-cwd leftover) can carry the SAME store marker files
+    // (boot-crash.json / capacity-gate-state.json) and be mistaken for the
+    // canonical store (the fb-134 crashStreak-reconcile incident). The scan is
+    // READ-ONLY and derived candidates only (the daemon's HOME + the repo root
+    // — no hardcoded paths); a candidate tree with marker files is healed as a
+    // health-alert ADVERTENCIA + a logger warn. The canonical stateDir itself is
+    // excluded by the scan (its OWN marker files are legitimate).
+    //
+    // GATE: the scan fires ONLY for the RELATIVE-resolution composition — when
+    // the config `stateDir` IS the cwd-relative `.deepartments` (the daemon's
+    // canonical store). A hermetic test passes an EXPLICIT absolute temp
+    // stateDir (no relative-resolution ambiguity — the ghost class cannot
+    // apply), so the scan is skipped and the suite stays hermetic.
+    if (path.resolve(stateDir) === path.resolve(process.cwd(), '.deepartments')) {
+      try {
+        const ghostCandidates = [
+          path.join(os.homedir(), '.deepartments'),
+          path.join(REPO_ROOT, '.deepartments')
+        ]
+        const ghostTrees = scanGhostStoreTrees(stateDir, ghostCandidates)
+        for (const tree of ghostTrees) {
+          ctx.logger.warn(`[deepartments] boot: GHOST-STORE tree detected at ${tree.tree} (markers: ${tree.markers.join(', ')}) — ADVERTENCIA, 0 action taken (fb-134 store separation; see docs/STORES-MAP.md §2.2)`)
+          const nowMs = Date.now()
+          void appendHealthAlertAudit(stateDir, {
+            ts: nowMs,
+            findings: [{
+              kind: 'ghost-store',
+              key: `ghost-store:${tree.tree}`,
+              ts: nowMs,
+              error: `ghost-store tree ${tree.tree} carries store marker(s) ${tree.markers.join(', ')} — possible parallel/stale store (fb-134)`,
+              count: tree.markers.length
+            }],
+            dedupeKeys: [`ghost-store:${tree.tree}`]
+          })
+        }
+        // The STORE-PROFILE assert (F2(a)) also runs at boot: the dshd-core open
+        // sites warn; here the MISMATCH becomes a durable health-alert (the
+        // split-brain class 08-22/08-25). Non-destructive — nothing is modified.
+        const profileAssert = assertStoreProfile(stateDir)
+        if (profileAssert.status === 'mismatch') {
+          const nowMs = Date.now()
+          ctx.logger.warn(`[deepartments] boot: store-profile MISMATCH on ${stateDir} — claimed by "${storeProfileLabel(profileAssert.existing)}", current opener "${storeProfileLabel(profileAssert.mark)}" (fb-134)`)
+          void appendHealthAlertAudit(stateDir, {
+            ts: nowMs,
+            findings: [{
+              kind: 'ghost-store',
+              key: `store-profile-mismatch:${stateDir}`,
+              ts: nowMs,
+              error: `store-profile mismatch on ${stateDir}: claimed by "${storeProfileLabel(profileAssert.existing)}", current opener "${storeProfileLabel(profileAssert.mark)}" — possible split-brain / parallel-store reuse (fb-134)`
+            }],
+            dedupeKeys: [`store-profile-mismatch:${stateDir}`]
+          })
+        }
+      } catch (error: unknown) {
+        // NEVER throws into apply — the ghost-store boot scan is best-effort
+        // observability (a scan failure degrades to a warn, never a boot break).
+        ctx.logger.warn(`[deepartments] boot: ghost-store/store-profile scan failed (best-effort): ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     // (b) NRestarts — the systemd counter, read ONCE per boot (read-only
     // `systemctl show <unit> -p NRestarts`, best-effort); the unit name comes
     // from DEEPARTMENTS_SYSTEMD_UNIT (deployment-specific — absent → the tick
@@ -4165,7 +4240,11 @@ export function applyInvoke(ctx: Context, config: Config) {
               ? healthConfig.workRegisterPath
               : path.join(repoRoot, 'docs', 'WORK-REGISTER.md'),
             // LANE 2 (fb-27): the turn/end-error HEAD notification closure.
-            notifyHead: healthNotifyHead
+            notifyHead: healthNotifyHead,
+            // fb-184 (item 2/6): the post notification closure (the L2/L3
+            // escalation + the item-6 head continuation-wake deliver through
+            // it — absent → those blocks are conservative no-ops).
+            notifyPost: healthNotifyPost
           })
         } else {
           pending = runHealthDaemonTick({
@@ -4237,6 +4316,10 @@ export function applyInvoke(ctx: Context, config: Config) {
             // own head via store.append + busDeliverToPost — the daemon→head
             // pattern, direct like the notifyHost ALERT).
             notifyHead: healthNotifyHead,
+            // fb-184 (item 2/6): the post notification closure (the L2/L3
+            // escalation + the item-6 head continuation-wake deliver through
+            // it — absent → those blocks are conservative no-ops).
+            notifyPost: healthNotifyPost,
             // PACING (owner m-PACING, 2026-08-28): the repo WORK-REGISTER path —
             // read at a VALLE transition for the «reanuda; despachos diferidos:
             // N» count (best-effort; unreadable → the notice omits the count).

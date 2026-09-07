@@ -168,6 +168,10 @@ export interface HealthConfig {
   workRegisterPath?: string
   workRegisterIdleEnabled?: boolean
   workRegisterIdleQuietMs?: number
+  workRegisterIdleEscalT2Ms?: number
+  workRegisterIdleEscalT3Ms?: number
+  workRegisterIdleL2Heads?: string[]
+  workRegisterIdleL3Heads?: string[]
   mainRedRepoRoot?: string
   staleLiveWatchdogEnabled?: boolean
   staleLiveMinutes?: number
