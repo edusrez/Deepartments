@@ -73,6 +73,37 @@
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
+> **FORMATO `next:` (convención docs — diseño fb-184 ITEM 4,
+> reports/explore-deep/2026-09-06-fb184-watchdog-idle-v2-design-586effda.md
+> §ITEM 4; el PARSE es lane separada fb-184, aquí SOLO la convención del
+> registro)**: cada item del DAG IPD lleva `— next: <actor>` nombrando al
+> PRÓXIMO actor que lo toma. Patrón: `**<label>** … — next:
+> internal-programming-head` (items de implementación/IPD) · `next: host`
+> (settlements / push+verify del host — clase settlement-wait fb-167, convención
+> ya adoptada en el registro). El watchdog work-register-idle v2 (fb-184) lee
+> este campo para notificar «next-actor-idle» al actor nombrado.
+
+- **OLA POST-PREP (despacho host m-2077, 09-06 — DAG seriado del IPH, la ola
+  post-PREP del wave; cada item con su `next:`):**
+  - **fb-134 (store separation — único gated, destrabado con el cierre PREP
+    562d994; F0+F2, lane builder-131)** — next: internal-programming-head
+  - **fb-132 2ª mitad (gate/wake-seam settle — fe5cab4 liquidó el settle;
+    liquidar lo restante, nunca re-marcar prepared)** — next: internal-programming-head
+  - **fb-163/164 (política de despacho — informed-dismissal + gate-breadth;
+    digest QD junción 09-05)** — next: internal-programming-head
+  - **P2 hygiene (rebase search-core P2)** — next: internal-programming-head
+  - **fb-118 (fix, 4 datapoints)** — next: internal-programming-head
+  - **fb-175 (L1336)** — next: internal-programming-head
+  - **fb-184 (watchdog work-register-idle v2 — diseño explore-deep-34
+    586effda; CONSUME esta convención `next:`)** — next: internal-programming-head
+  - **canary P0s (artefactos builder-126 post-restart canary — verificación
+    del host)** — next: host
+  - **fb-190 (mejora protocolo rotación — no pre-anunciar)** — next: internal-programming-head
+  - **fb-51 (thread bilingüe + branch portador — REVISIÓN del host ANTES de
+    publicar; no publicar sin su visto bueno)** — next: host
+  - **QI-48 (registry post-cierre lane)** — next: internal-programming-head
+  - **§5.5 (opcional)** — next: internal-programming-head
+
 - **POST-DAG — cola nueva (DAG del IPH):**
   - **DI-by-services CERRADO (73f60d9, deploy canary 11:17Z — MISIÓN 8/8)**:
     muerte TOTAL del binder register → holders baseline service-first (P1 0
@@ -506,3 +537,20 @@ análisis de fallos). M3 los institucionaliza en docs/skill. Hoy: QD→IPH
   (`fallback.peakWindows`/`peakBufferMs`) — ambos repos declaran el MISMO
   límite (horas {1,2,3,6,7,8,9} ≡ 01:00-04:00 ∪ 06:00-10:00 con el mismo
   buffer) y deben mantenerse en sync.
+
+- **SUB-NORMA ANTI-FB-163/171 (handshake de responsabilidad — 2026-09-06,
+  digest QD junción; complementa la NORMA DE CONTINUACIÓN fb-46 de esta
+  sección)**: NUNCA descartar un watchdog/signal sin verificación del
+  counterpart — cifra + fuente (fb-45) del estado REAL antes de descartar. El
+  informed-dismissal sin evidencia verificada (patrón fb-163/171, 5ª vez el
+  09-05: «items en DAG post-PREP» asumido, 83 no-gated parados) NO silencia el
+  re-alert: la carga de la prueba vuelve al que descarta. En acuerdos
+  multiparte, registrar el handshake de responsabilidad (quién verifica qué,
+  con qué cifra+fuente) ANTES de cerrar la señal.
+- **SUB-NORMA ANTI-FB-164 (gate-breadth — 2026-09-06, digest QD junción)**:
+  distinguir ZONA-GATED vs PIPELINE-GATED en el register: un lock de zona
+  (p.ej. el main-red con lock de la zona CUT4) NO gatea el pipeline completo —
+  el gate correcto es solo la zona+push. Antes de dismiss/espera, verificar el
+  estado del red/bloqueo real (ledger main-red, health-alerts, zona CUT4) —
+  el 09-05 el lock de zona paró 83 no-gated cuando el gate correcto era solo
+  la zona+push.
