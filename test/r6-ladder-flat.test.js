@@ -68,6 +68,16 @@ test('r6-ladder-flat (fb-95): the self-registering tests are lane-② src-native
     // settle lane is src-native (the DeliveryRedeliverer FIFO-gate settle over
     // the dshd-core src) and self-registers the hook (the lane2 pattern).
     'w7-fb132-gate-settle.test.js',
+    // FB-132 WAKE-ON-DELIVERED (2026-09-06, the 2nd-half drain-on-wake lane):
+    // the drainRecipientQueue primitive + the composed-wake fire test are
+    // src-native (the DeliveryRedeliverer drain over the dshd-core src + the
+    // bundle-src composed harness) — the same lane2 self-register pattern.
+    'fb132-wake-on-delivered-drain.test.js',
+    // FB-132 2nd-half DELTA (2026-09-06 — the reviewers addendum GAP MENOR):
+    // the retired-target flavor (isDormantRecipient excludes retired entries)
+    // is src-native (the REAL delivery factory predicate + the lane2-style
+    // DeliveryRedeliverer sweep over the dshd-core src) — the same pattern.
+    'fb132-retired-flavor.test.js',
 // WAKE-SEAM mitigation suite (6fe390a, 2026-09-06): the engine-dormancy +
     // discriminador no-wake-head tests are src-native (the composed dshd-core
     // gate engine + the settle re-driver over the src) and self-register the

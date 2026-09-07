@@ -3739,7 +3739,15 @@ export function applyInvoke(ctx: Context, config: Config) {
     WORKER_AGENT_OPTIONS,
     HOST_AGENT_OPTIONS,
     HEAD_DEFAULT_SESSION_TITLE,
-    STUCK_HEAD_MS
+    STUCK_HEAD_MS,
+    // FB-132 (wake-on-delivered 2026-09-06 — the 2nd-half drain-on-wake lane):
+    // the LATE-BOUND DRAIN hook the delivery factory's REAL-wake primitives
+    // fire (busDeliverToPost / busDeliverToHost success + the rotation wake).
+    // Resolved ONLY at fire time (the tools surface was built above — :3585;
+    // its `redeliverDrainQueue` is bound to `redeliverPendingDeliveries`, the
+    // SAME DeliveryRedeliverer the sweep tick drives — a fire on an empty queue
+    // is a pure no-op, and a missing hook degrades to NO-OP inside the factory).
+    drainRecipientQueue: (recipientId) => toolsSurface.redeliverDrainQueue(recipientId)
   }
   ctx.get('deepartments.deliveryDeps', false)?.register(deliveryDeps)
   const deliverySurface = (ctx.get('deepartments.delivery', false) as DeliverySurface | undefined) ?? createDeliveryOrchestration(ctx, deliveryDeps)

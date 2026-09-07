@@ -773,9 +773,22 @@ export interface ToolsSurface {
    * P4 (fb-131 — WAKE-SEAM lane): the cycle's HONEST prepared-state summary is
    * forwarded too — `oldestPreparedTs` (the oldest pair-latest 'prepared' row),
    * `dormantHeld` (the B3 dormancy-held pairs — a residue that may never reach
-   * 0 BY DESIGN) and `noWakeHeld` (the P2 no-wake-held pairs — the explicit
-   * no-wake-until-wake intent the sweep no longer violates). */
-  redeliverySweepState: () => { armed: boolean; cycles: number; lastCycleTs?: number; preparedStuckRemaining?: number; oldestPreparedTs?: number; dormantHeld?: number; noWakeHeld?: number }
+   * 0 BY DESIGN), `noWakeHeld` (the P2 no-wake-held pairs — the explicit
+   * no-wake-until-wake intent the sweep no longer violates) and, fb-132
+   * WAKE-ON-DELIVERED 2026-09-06, `gatedHeld` (the FIFO-gate-held pairs of an
+   * ALIVE recipient — the 2nd-half sweep skips instead of settling; they drain
+   * at the recipient's next REAL wake). */
+  redeliverySweepState: () => { armed: boolean; cycles: number; lastCycleTs?: number; preparedStuckRemaining?: number; oldestPreparedTs?: number; dormantHeld?: number; noWakeHeld?: number; gatedHeld?: number }
+  /** FB-132 (wake-on-delivered 2026-09-06 — the 2nd-half drain-on-wake lane):
+   * the DRAIN accessor the delivery factory's REAL-wake primitives fire
+   * (fire-and-forget): drain the recipient's 'prepared' queue FIFO head-first
+   * at its real wake (the m-1933 family — the durable no-wake queue a wake
+   * must finally deliver). LATE-BOUND: resolves to the SAME
+   * `redeliverPendingDeliveries` instance the sweep tick drives (built at this
+   * factory position); the delivery factory consumes it through its own
+   * late-bound `drainRecipientQueue` dep. Returns the number of pairs drained
+   * (0 on no-op — an empty queue fire is a pure no-op). */
+  redeliverDrainQueue: (recipientId: string) => Promise<number>
   /** The DEEPARTMENTS RPC-channel endpoint deps (the webServer mount's
    * fallback handler consumes them at the same position — the composed dshd-gui
    * service reads the same object from the `gui` Binder bucket). */
@@ -6348,7 +6361,15 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     // delivery to a CURRENTLY RUNNING recipient (the record accumulates for
     // the drain-on-settle batch — seq order by construction); ABSENT in a
     // minimal register → the pre-batch gate behavior (the safe default).
-    recipientRunningLive
+    recipientRunningLive,
+    // FB-132 (wake-on-delivered 2026-09-06): the landed-delivery wake hook —
+    // the composed dshd-core engine fires it on a delivered/resumed delivery
+    // AFTER the final sidecar mark; it drains the recipient's 'prepared' queue
+    // fire-and-forget (non-fatal, capped — DeliveryRedeliverer
+    // .drainRecipientQueue over the SAME redeliverPendingDeliveries the sweep
+    // drives; the batch-drain flush marks its items 'delivered' at the settle,
+    // so a fire never re-drives a flushed batch item).
+    onDelivered: (recipientId: string) => redeliverPendingDeliveries.drainRecipientQueue(recipientId)
   })
   depsWakepack?.register({
     refreshPresence,
@@ -6578,9 +6599,18 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         // verbatim (never synthesized — present only when a cycle observed it).
         ...(s.oldestPreparedTs !== undefined ? { oldestPreparedTs: s.oldestPreparedTs } : {}),
         ...(s.dormantHeld !== undefined ? { dormantHeld: s.dormantHeld } : {}),
-        ...(s.noWakeHeld !== undefined ? { noWakeHeld: s.noWakeHeld } : {})
+        ...(s.noWakeHeld !== undefined ? { noWakeHeld: s.noWakeHeld } : {}),
+        // FB-132 (wake-on-delivered 2026-09-06): the FIFO-gate-held class
+        // forwarded the same way (P4 never-synthesized — present once a cycle
+        // observed it).
+        ...(s.gatedHeld !== undefined ? { gatedHeld: s.gatedHeld } : {})
       }
     },
+    // FB-132 (wake-on-delivered 2026-09-06): the drain the delivery factory
+    // fires at the REAL-wake primitives — LATE-BOUND to
+    // `redeliverPendingDeliveries` (the SAME instance the sweep tick drives +
+    // the composed bus redeliverer; built at this factory position).
+    redeliverDrainQueue: (recipientId) => redeliverPendingDeliveries.drainRecipientQueue(recipientId),
     // HOTFIX 0.2.2-1: the surface carries the PURE inline computation (NOT the
     // service-first wrapper) — the execRoots service DEFAULT delegates to it
     // WITHOUT a re-entry cycle (the 0.2.2 wrapper export broke the live

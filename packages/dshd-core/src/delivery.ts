@@ -296,6 +296,23 @@ export interface DeliveryEngineDeps {
    * applies (the safe default — the discriminator is opt-in via the dep; a
    * composition without it keeps the pre-extension behavior). */
   earlierHeadIsNoWake?: (recipientId: string, seq: number) => Promise<boolean | undefined>
+  /** FB-132 (wake-on-delivered 2026-09-06 — the 2nd-half drain-on-wake lane):
+   * OPTIONAL — fired ONCE per delivery that LANDED ('delivered' | 'resumed')
+   * and AFTER the final sidecar mark: the recipient was just materialized/
+   * woken — the REAL wake the drain-on-wake lane fires `drainRecipientQueue`
+   * from. Placement is the SEAM: AFTER markFinal, the just-delivered pair is
+   * already settled, so the drain (which re-drives pair-latest 'prepared'
+   * rows) can never duplicate the current delivery — firing from inside the
+   * wake primitives would see the write-ahead 'prepared' of the CURRENT
+   * delivery still pending and re-drive it (a duplicate splice; the observed
+   * c1 race). The VALLE 09-07 BATCH-DRAIN accumulates the RUNNING recipient's
+   * batch-eligible sends AT the primitives (their landing is 'prepared' — a
+   * batch item — so this hook never fires for an item the settle flushes);
+   * for every LANDED (non-batch) delivery the hook drains the 'prepared'
+   * residue FIFO head-first. The bundle wires it to the same fire-and-forget
+   * dispatcher the wake primitives use; absent → a NO-OP (the drain-on-wake
+   * contract stays merely documentary in a minimal composition). */
+  onDelivered?: (recipientId: string) => void
 }
 
 /** The delivery engine: the single bus delivery seam. */
@@ -495,6 +512,18 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
           status = await catalogRoute(deps, recipientId, record, framed, opts)
         }
         await deps.markFinal(record, recipientId, status, opts.noWake === true ? { noWake: true } : undefined)
+        // FB-132 (wake-on-delivered 2026-09-06): the landed-delivery wake hook —
+        // AFTER the final mark (the current pair is settled, so the drain can
+        // never re-drive it). Fire-and-forget + non-fatal: an absent hook → a
+        // NO-OP; a throwing hook must never break the delivery (the fire is the
+        // drain-on-wake transport the bundle wires — see `onDelivered`).
+        if ((status === 'delivered' || status === 'resumed') && deps.onDelivered !== undefined) {
+          try {
+            deps.onDelivered(recipientId)
+          } catch (error: unknown) {
+            deps.logger.warn(`[deepartments] onDelivered drain fire for ${recipientId} threw (non-fatal — the next wake/sweep re-evaluates): ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
         return status
       } catch (error: unknown) {
         // fb-117 (fold-in batch A — triage candidate 3): a delivery that dies

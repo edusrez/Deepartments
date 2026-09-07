@@ -1,5 +1,6 @@
 // dsh-deepartments — WAVE 7 LANE 4/4 (fb-132, gate/wake-seam 2026-09-05, run
-// token 2383574a): the re-drive/sweep FIFO-GATE SETTLE (the fb-150 deposit —
+// token 2383574a; UPDATED 2026-09-06 by the WAKE-ON-DELIVERED lane — the 2nd
+// half criterion): the re-drive/sweep FIFO-GATE HOLD (the fb-150 deposit —
 // «Sweep del gate FIFO DUPLICA rows prepared sin consumirlas»: 28 prepared
 // rows / 0 terminal in ~2.4h at the ~660s cadence, the spool growing without
 // limit). All src-native (0 builds, 0 real APIs; temp stateDir + stub deps
@@ -12,17 +13,25 @@
 //       (an EARLIER-seq pending pair of the same recipient), appends a SECOND
 //       fresh 'prepared' (markFinal 'prepared', delivery.ts:313-314) — TWO new
 //       'prepared' rows per sweep pass into a gated inbox, none consumed.
-//   FIX: drivePair now checks the SAME gate predicate before the deliver call —
-//       a GATED pass SETTLES the driven row to 'terminal' (the ledger's no-retry
-//       state; the message record stays durable in messages.jsonl and drains at
-//       the recipient's next real wake AFTER the gating earlier pair resolves —
-//       that pair's own UNGATED re-drive is the wake that unblocks the queue).
-//       Only a GENUINE (ungated) attempt re-marks 'prepared' (its write-ahead).
+//   FIX v1 (2026-09-05, fe5cab4): drivePair checks the SAME gate predicate
+//       before the deliver call and SETTLES the gated row 'terminal'.
+//   FIX v2 (2026-09-06, WAKE-ON-DELIVERED): a 'terminal' settle of an ALIVE
+//       recipient LOSES the pair ('terminal' is never-re-delivered) now that
+//       `drainRecipientQueue` drains a queue at the recipient's next REAL wake.
+//       The 2nd-half criterion: the sweep SKIPS a gated pair of an ALIVE
+//       recipient — no settle, no re-mark, zero rows — and the P4 summary
+//       counts it `gatedHeld` (the legit fb-27 exception of a live-but-blocked
+//       queue); the pair stays 'prepared' and becomes a DRAIN CANDIDATE at the
+//       next real wake (the FIFO unwinds pair by pair as each head resolves).
+//       The DEAD/unknown settle is UNCHANGED (the dead branch precedes the
+//       gate branch; only the alive recipient class changed).
+//   ONLY a GENUINE (ungated) attempt re-marks 'prepared' (its write-ahead).
 //   TESTS:
-//     (i)  the fb-150 reproduction: N sweep passes over a GATED inbox do NOT
-//          grow the spool — the gated pair settles 'terminal' on the first pass
-//          and the pre-seeded shadowed dust washes via the G2 settle in the same
-//          pass (prepared rows: 8 → 1 = the held P2 gating row only);
+//     (i)  the fb-150 reproduction: N sweep passes over a GATED inbox of an
+//          ALIVE recipient DO NOT grow the spool AND DO NOT settle — the gated
+//          pair stays 'prepared' (the shadowed dust stays in-flight) and is
+//          counted gatedHeld; the DRAIN then delivers both pairs at the real
+//          wake;
 //          + the CONTROL: the pre-fix gate-blind sweep GREW the spool by 2
 //          'prepared' rows per pass (the exact fb-150 mechanism).
 //     (ii) the genuine re-drive still works: an UNGATED stale pair re-drives
@@ -32,12 +41,14 @@
 //          subsequent pass is a no-op; the 'self' hold is never gate-settled.
 //     (iii) coexistence with B3/G2/m-440 (no regression): a DORMANT recipient's
 //          pair is left untouched (B3 holds; reported dormantHeld); a noWake
-//          row is left untouched (P2 holds; noWakeHeld); the G2 classification
-//          keeps the in-flight pair-latest (keptInFlight — never collapsed) and
-//          still washes shadowed dust; a FRESH live pair (< preparedStuck) is
-//          not due → untouched, then AGES into a normal re-drive (the m-440
-//          fresh-live-queue contract); the gate predicate FAIL-SOFT (a throw →
-//          warn + proceed gate-blind).
+//          row is left untouched (P2 holds; noWakeHeld); a DUE GATED pair of an
+//          ALIVE recipient is HELD (gatedHeld) and re-drives genuinely once its
+//          gating earlier pair resolves; the G2 classification keeps the
+//          in-flight pair-latest (keptInFlight — never collapsed) and still
+//          washes shadowed dust behind a FINAL row; a FRESH live pair
+//          (< preparedStuck) is not due → untouched, then AGES into a normal
+//          re-drive (the m-440 fresh-live-queue contract); the gate predicate
+//          FAIL-SOFT (a throw → warn + proceed gate-blind).
 import { register } from 'node:module'
 import { pathToFileURL } from 'node:url'
 register(new URL('./ts-src-loader.mjs', import.meta.url), { parentURL: import.meta.url })
@@ -153,17 +164,22 @@ function redeliverer(stateDir, { gate, ...overrides } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// (i) the fb-150 reproduction: the FIXED sweep settles a gated pair — the
-// spool stabilizes/settles across N passes.
+// (i) the fb-150 reproduction: the FIXED sweep HOLDS a gated pair of an ALIVE
+// recipient — the spool stays FLAT across N passes (the 2nd-half criterion of
+// the WAKE-ON-DELIVERED lane: skip + gatedHeld, NO settle — a settle to
+// 'terminal' would LOSE the pair for an alive recipient whose next real wake
+// can drain it).
 // ---------------------------------------------------------------------------
-test('w7-fb132 (i): N sweep passes over a GATED inbox DO NOT grow the spool — the gated pair settles \'terminal\' ONCE and the pre-seeded shadowed dust washes via G2 in the same pass (fb-150: prepared 8 → 1 = the held P2 gating row)', async () => {
+test('w7-fb132 (i): N sweep passes over a GATED inbox of an ALIVE recipient DO NOT grow the spool AND DO NOT settle — the gated pair stays \'prepared\' (a drain candidate for its next real wake) and is counted gatedHeld, the pre-seeded shadowed dust stays in-flight (prepared 8 → 8 flat, 0 terminal)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = Date.now() // the seam's write-ahead marks use the real clock — the injected pass times are relative to it
     const seqsByRecipient = new Map([['rx', [1, 2]]])
     // The gating pair m-1 → rx: a noWake 'prepared' P2-held (the idle
-    // recipient's no-wake intent — it NEVER re-drives → gates everything
-    // behind it). The spooled pair m-2 → rx: every pre-fix sweep pass appended
-    // fresh 'prepared' rows once the latest aged past the 10-min criterion.
+    // recipient's no-wake intent — it NEVER re-drives via the sweep → gates
+    // everything behind it; its only drain is the recipient's next REAL wake,
+    // where `drainRecipientQueue` drives it head-first). The spooled pair
+    // m-2 → rx: every pre-fix sweep pass appended fresh 'prepared' rows once
+    // the latest aged past the 10-min criterion.
     await seed(stateDir, {
       records: [record('m-1', 1, ['rx']), record('m-2', 2, ['rx'])],
       rows: [
@@ -178,38 +194,44 @@ test('w7-fb132 (i): N sweep passes over a GATED inbox DO NOT grow the spool — 
     r.__records('m-2', record('m-2', 2, ['rx']))
 
     // Pass 1: m-2 is DUE (stale) but STILL GATED behind m-1's pending pair →
-    // the drive must SETTLE it 'terminal' (never reach the deliver seam).
+    // the drive SKIPS it (2nd-half criterion: no settle — the recipient is
+    // ALIVE and its next real wake drains the queue; never reaches the deliver
+    // seam; zero new rows appended).
     await r.sweepDue(T0)
     let rows = await readRows(stateDir)
     assert.equal(r.__calls.deliver.length, 0, 'the GATED pass NEVER reaches the deliver seam (no re-mark \'prepared\')')
-    assert.equal(countPair(rows, 'm-2', 'rx', 'prepared'), 0, 'm-2 has ZERO remaining prepared rows (settled — not re-marked)')
-    assert.equal(countPair(rows, 'm-2', 'rx', 'terminal'), 8, 'm-2: 1 pass-settle row + 7 washed dust rows → 8 terminal (the deposit collapsed)')
+    assert.equal(countPair(rows, 'm-2', 'rx', 'prepared'), 7, 'm-2 keeps its 7 prepared rows (6 shadowed dust + the pair-latest — NOT settled, NOT re-marked)')
+    assert.equal(countPair(rows, 'm-2', 'rx', 'terminal'), 0, 'm-2 gains ZERO terminal rows (the 2nd-half criterion: no settle of an alive recipient — a settle would lose the pair)')
     assert.equal(countPair(rows, 'm-1', 'rx', 'prepared'), 1, 'the held P2 gating pair is untouched (still its ONE prepared row — noWakeHeld)')
-    assert.equal(rows.length, 9, 'the sidecar total after pass 1: 1 held prepared + 8 terminal (prepared 8 → 1 — the spool stabilized)')
-    assert.ok(r.__calls.informs.some((l) => /m-2 → rx \(was prepared\) → 'terminal' — FIFO-gated behind an earlier-seq pending pair/.test(l)), 'the settle logs the FIFO-gated terminal explicitly')
-    assert.ok(r.__calls.informs.some((l) => /G2 legacy settle: 7 'prepared' dust rows → 'terminal'/.test(l)), 'the SAME pass washes the pre-seeded shadowed dust via the G2 stale-dust settle')
-    // The P4 honest prepared-state summary (the P2-held residue, by design):
+    assert.equal(rows.length, 8, 'the sidecar total after pass 1 is FLAT (8 = the seeded rows; zero appends — the sweep adds nothing)')
+    assert.ok(r.__calls.informs.some((l) => /m-2 → rx \(was prepared\) held gatedHeld/.test(l)), 'the skip logs the gatedHeld hold explicitly (no settle marker)')
+    assert.ok(!r.__calls.informs.some((l) => /G2 legacy settle: .*'prepared' dust rows/.test(l)), 'G2 settles NOTHING (the shadowed dust of an ALIVE in-flight pair is keptInFlight — the attempt ledger + the drain candidates stay intact)')
+    // The P4 honest prepared-state summary (the held classes, by design):
     assert.deepEqual(r.sweepState(), {
       cycles: 1,
       lastCycleTs: T0,
-      preparedStuckRemaining: 1, // ONLY the held P2 gating pair (reported noWakeHeld)
+      preparedStuckRemaining: 2, // m-1 (noWake-held) + m-2 (gatedHeld) — the by-design residue
       oldestPreparedTs: T0 - 40 * 60_000,
       dormantHeld: 0,
-      noWakeHeld: 1
-    }, 'the sweep-state closure datum discriminates the held P2 class (the only prepared-stuck residue left)')
+      noWakeHeld: 1,
+      gatedHeld: 1
+    }, 'the sweep-state closure datum discriminates the held classes: noWakeHeld (m-1) + gatedHeld (m-2 — the FIFO-blocked ALIVE queue)')
 
-    // Passes 2..4: the pair's latest is terminal → not due; the held pair stays
-    // P2-held → the spool CANNOT grow (the N-pass stabilization).
+    // Passes 2..4: nothing is due-and-drivable (m-1 P2-held, m-2 gated-held) →
+    // the spool CANNOT grow (the N-pass stabilization; the pair stays a DRAIN
+    // candidate — `drainRecipientQueue` delivers it at the next real wake).
     const totalAfter1 = rows.length
     const preparedAfter1 = countPair(rows, 'm-1', 'rx', 'prepared') + countPair(rows, 'm-2', 'rx', 'prepared')
     for (const now of [T0 + 61_000, T0 + 700_000, T0 + 1_400_000]) {
       await r.sweepDue(now)
       rows = await readRows(stateDir)
       assert.equal(rows.length, totalAfter1, 'each further sweep pass appends NOTHING (the sidecar total is flat)')
-      assert.equal(countPair(rows, 'm-1', 'rx', 'prepared') + countPair(rows, 'm-2', 'rx', 'prepared'), preparedAfter1, 'the prepared count stays flat (1 held) across passes')
+      assert.equal(countPair(rows, 'm-1', 'rx', 'prepared') + countPair(rows, 'm-2', 'rx', 'prepared'), preparedAfter1, 'the prepared count stays flat (8 = 1 gating + 7 spooled) across passes')
     }
-    assert.equal(r.__calls.deliver.length, 0, 'the deliver seam was never reached in ANY of the N passes (the settle is the sweep\'s own domain)')
+    assert.equal(r.__calls.deliver.length, 0, 'the deliver seam was never reached in ANY of the N passes (the skip is the sweep\'s own domain)')
     assert.equal(r.sweepState().cycles, 4, '4 cycles ran — a cycle is a fire, the no-growth holds across every one')
+    // The spooled pair is STILL a drain candidate at the recipient's real wake:
+    assert.equal(await r.drainRecipientQueue('rx'), 2, 'the real wake drains BOTH pairs in FIFO order (m-1 head-first — the gate opens pair by pair)')
   })
 })
 
@@ -314,7 +336,7 @@ test('w7-fb132 (ii-self): the \'self\' hold is NEVER gate-settled (the engine\'s
 // (iii) coexistence — B3 dormancy, P2 noWake, m-440 fresh live queue, and the
 // FAIL-SOFT gate (no regression to the mother lanes).
 // ---------------------------------------------------------------------------
-test('w7-fb132 (iii): B3 dormancy + P2 noWake holds are untouched (never gate-settled; reported dormantHeld/noWakeHeld); a DUE GATED pair settles; a FRESH live pair is not due → untouched, then AGES into a normal re-drive (m-440 preserved)', async () => {
+test('w7-fb132 (iii): B3 dormancy + P2 noWake holds are untouched (never gate-settled; reported dormantHeld/noWakeHeld); a DUE GATED pair of an ALIVE recipient is HELD (stays \'prepared\' — counted gatedHeld, the 2nd-half criterion) and re-drives genuinely ONCE its gating pair ages and resolves; a FRESH live pair is not due → untouched, then AGES into a normal re-drive (m-440 preserved)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = Date.now()
     const seqsByRecipient = new Map([['rx', [3, 4]]])
@@ -342,32 +364,37 @@ test('w7-fb132 (iii): B3 dormancy + P2 noWake holds are untouched (never gate-se
 
     // Pass 1: m-3 is NOT due (fresh — the m-440 grace); m-1/m-2 are held; m-4
     // is DUE and GATED by m-3's fresh pending pair (the gate reads status, not
-    // age) → the settle fires only for m-4.
+    // age) → the 2nd-half criterion HOLDS m-4 (no settle — the recipient is
+    // ALIVE; only the dead settle terminates).
     await r.sweepDue(T0)
     let rows = await readRows(stateDir)
-    assert.equal(r.__calls.deliver.length, 0, 'nothing genuinely drivable in this pass (m-3 fresh → not due; m-1/m-2 held; m-4 gated → settled)')
+    assert.equal(r.__calls.deliver.length, 0, 'nothing genuinely drivable in this pass (m-3 fresh → not due; m-1/m-2 held; m-4 gated → held)')
     assert.equal(countPair(rows, 'm-1', 'dorm', 'prepared'), 1, 'B3: the dormant recipient\'s pair is UNTOUCHED (its queue drains at its next real wake — never settled, never re-driven)')
     assert.equal(countPair(rows, 'm-2', 'nw', 'prepared'), 1, 'P2: the explicit noWake pair is UNTOUCHED (the no-wake-until-wake intent — the WAKE-SEAM guard the lane must not break)')
     assert.equal(countPair(rows, 'm-3', 'rx', 'prepared'), 1, 'm-440: the FRESH live pair is untouched (not due — the fresh-live-queue grace; it AGES into the re-drive criteria, never the settle)')
-    assert.equal(countPair(rows, 'm-4', 'rx', 'prepared'), 0, 'the due GATED pair settled terminal (the ONE pair the pass resolves)')
-    assert.equal(await deliveryStatus(stateDir, 'm-4', 'rx'), 'terminal', 'm-4 latest row is terminal (the fb-132 gate settle)')
-    assert.equal(rows.length, 5, 'the sidecar grew by exactly ONE row (the settle mark — 4 seeded + 1; the G2 wash only rewrites IN PLACE)')
-    assert.ok(r.__calls.informs.some((l) => /m-4 → rx \(was prepared\) → 'terminal' — FIFO-gated/.test(l)), 'the settle log names the FIFO-gated terminal')
+    assert.equal(countPair(rows, 'm-4', 'rx', 'prepared'), 1, 'the DUE GATED pair is HELD — its prepared row stays (the 2nd-half criterion: alive recipient → skip, no settle, no re-mark)')
+    assert.equal(await deliveryStatus(stateDir, 'm-4', 'rx'), 'prepared', 'm-4 latest row is still prepared (the DRAIN candidate for the recipient\'s next real wake)')
+    assert.equal(rows.length, 4, 'the sidecar total is FLAT (4 seeded — the held pass appends NOTHING)')
+    assert.ok(r.__calls.informs.some((l) => /m-4 → rx \(was prepared\) held gatedHeld/.test(l)), 'the hold log names the gatedHeld class')
     assert.deepEqual(r.sweepState(), {
       cycles: 1,
       lastCycleTs: T0,
-      preparedStuckRemaining: 2, // m-1 (dormant-held) + m-2 (noWake-held) — the by-design residue
+      preparedStuckRemaining: 3, // m-1 (dormant-held) + m-2 (noWake-held) + m-4 (gatedHeld) — the by-design residue
       oldestPreparedTs: T0 - 40 * 60_000,
       dormantHeld: 1,
-      noWakeHeld: 1
-    }, 'the P4 honest summary discriminates BOTH held classes (m-3 fresh is NOT prepared-stuck — the criterion stays exact)')
+      noWakeHeld: 1,
+      gatedHeld: 1
+    }, 'the P4 honest summary discriminates ALL THREE held classes (m-3 fresh is NOT prepared-stuck — the criterion stays exact)')
 
     // The FRESH m-3 pair AGES past the prepared-stuck threshold and re-drives
-    // NORMALLY on a later pass (the m-440 live queue is never lost):
+    // NORMALLY on a later pass (the m-440 live queue is never lost); its
+    // delivery UNGATES m-4, which re-drives genuinely in the SAME pass (the
+    // FIFO progresses pair by pair — the sequence the drain exploits).
     await r.sweepDue(T0 + 700_000)
     rows = await readRows(stateDir)
-    assert.equal(r.__calls.deliver.length, 1, 'the aged m-3 pair re-drove genuinely (the fresh live queue stays in re-drive after it ages — m-440 preserved)')
+    assert.deepEqual(r.__calls.deliver.map((d) => d.messageId), ['m-3', 'm-4'], 'the aged m-3 pair re-drove in seq order AND m-4\'s gate check then read m-3 delivered → unblocked → genuine re-drive in the SAME pass (the FIFO sequence unwinds)')
     assert.equal(countPair(rows, 'm-3', 'rx', 'delivered'), 1, 'm-3 delivered via the genuine re-drive (the m-440 fresh-live-queue contract)')
+    assert.equal(countPair(rows, 'm-4', 'rx', 'delivered'), 1, 'm-4 delivered once its gating earlier pair resolved (never lost — the 2nd-half criterion keeps it a drain candidate)')
   })
 })
 
@@ -393,11 +420,12 @@ test('w7-fb132 (iii-failsoft): a THROWING gate predicate only warns and proceeds
   })
 })
 
-test('w7-fb132 (iii-g2): the G2 classification is UNCHANGED — the in-flight pair-latest stays keptInFlight (the re-drive owns it), and the final-row shadowed dust still settles (the spool collapse path test (i) exercises)', () => {
+test('w7-fb132 (iii-g2): the G2 classification is UNCHANGED — the in-flight pair-latest stays keptInFlight (the re-drive owns it), and the final-row shadowed dust still settles (the wash path behind ANY final pair-latest)', () => {
   const T0 = 10_000_000
   // (a) TWO prepared rows of ONE ALIVE pair (the pair-latest + its shadowed
   // OLDER row — the attempt ledger): NEITHER is settled by G2 (keptInFlight
-  // + keptFresh — the m-440/G2 contract: the re-drive owns the pair).
+  // + keptFresh — the m-440/G2 contract: the re-drive owns the pair; with the
+  // 2nd-half criterion these same rows ALSO stay for the drain candidates).
   const aliveRetrying = [
     row('m-1', 'rx', 'prepared', T0 - 5 * 60_000), // fresh — keptFresh
     row('m-1', 'rx', 'prepared', T0 - 40 * 60_000) // shadowed by the fresh one, alive pair — keptInFlight
@@ -405,14 +433,15 @@ test('w7-fb132 (iii-g2): the G2 classification is UNCHANGED — the in-flight pa
   const cls = classifyG2LegacyRows(aliveRetrying, T0, 600_000, () => true)
   assert.equal(cls.keptFresh + cls.keptInFlight, 2, 'G2 never collapses an ALIVE retrying pair\'s rows (the attempt ledger + the in-flight latest stay)')
   assert.equal(cls.settleStaleDust.length + cls.settleDeadEnd.length, 0, 'no G2 settle fires for the alive pair')
-  // (b) The POST-SETTLE state of test (i): the pair\'s latest is now
-  // 'terminal' (the fb-132 settle) → the OLD 'prepared' dust is shadowed by a
-  // FINAL row → stale-dust → G2 washes it in place (the spool collapse).
+  // (b) A DEAD-END pair whose latest is 'terminal' (the DEAD settle — the one
+  // terminal the 2nd-half criterion keeps): the pair's OLD 'prepared' dust is
+  // shadowed by the FINAL row → stale-dust → G2 washes it in place (the spool
+  // collapse path the pre-fix deposit leaves behind a resolved pair).
   const afterSettle = [
     row('m-1', 'rx', 'prepared', T0 - 300 * 60_000),
     row('m-1', 'rx', 'terminal', 2_000)
   ]
   const cls2 = classifyG2LegacyRows(afterSettle, T0, 600_000, () => true)
-  assert.deepEqual(cls2.settleStaleDust, [afterSettle[0]], 'the pair-latest \'terminal\' (the fb-132 settle) turns the old prepared dust stale-dust → G2 washes it IN PLACE')
+  assert.deepEqual(cls2.settleStaleDust, [afterSettle[0]], 'the pair-latest \'terminal\' (a dead-end settle) turns the old prepared dust stale-dust → G2 washes it IN PLACE')
   assert.equal(cls2.keptInFlight + cls2.keptFresh, 0, 'no in-flight rows remain after the settle (the pair resolved terminal)')
 })

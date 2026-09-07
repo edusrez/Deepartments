@@ -221,8 +221,10 @@ test('sweep-observability [redeliverer] sweepDue fires count + the last prepared
     // P4 (fb-131 — WAKE-SEAM lane): the cycle now ALSO observes the honest
     // prepared-state summary — on the empty ledger every count is 0 and
     // oldestPreparedTs stays ABSENT (there is no prepared row).
+    // FB-132 (wake-on-delivered 2026-09-06): the FIFO-gate-held class joins
+    // the summary (gatedHeld: 0 on the empty ledger).
     await r.sweepDue(5_000)
-    assert.deepEqual(r.sweepState(), { cycles: 1, lastCycleTs: 5_000, preparedStuckRemaining: 0, dormantHeld: 0, noWakeHeld: 0 }, 'one sweepDue fire: cycles 1 + lastCycleTs + the observed 0 residue + the P4 held-class summary (0/0; oldestPreparedTs ABSENT — no prepared row)')
+    assert.deepEqual(r.sweepState(), { cycles: 1, lastCycleTs: 5_000, preparedStuckRemaining: 0, dormantHeld: 0, noWakeHeld: 0, gatedHeld: 0 }, 'one sweepDue fire: cycles 1 + lastCycleTs + the observed 0 residue + the P4 held-class summary (0/0/0; oldestPreparedTs ABSENT — no prepared row)')
     // a SECOND fire advances the counters (the last-ts moves).
     await r.sweepDue(5_000 + 60_000)
     assert.equal(r.sweepState().cycles, 2, 'the second fire bumps cycles to 2')
@@ -230,6 +232,7 @@ test('sweep-observability [redeliverer] sweepDue fires count + the last prepared
     assert.equal(r.sweepState().preparedStuckRemaining, 0, 'preparedStuckRemaining stays the observed residue (0 stuck on the empty ledger)')
     assert.equal(r.sweepState().dormantHeld, 0, 'dormantHeld observes 0 on the empty ledger')
     assert.equal(r.sweepState().noWakeHeld, 0, 'noWakeHeld observes 0 on the empty ledger')
+    assert.equal(r.sweepState().gatedHeld, 0, 'gatedHeld observes 0 on the empty ledger')
     assert.equal(r.sweepState().oldestPreparedTs, undefined, 'oldestPreparedTs stays ABSENT with no prepared row (never synthesized)')
   })
 })

@@ -556,12 +556,13 @@ test('VALLE 09-07 (tool): CRASH-SAFE write-ahead — a batch left UNFLUSHED (row
   })
 })
 
-test('VALLE 09-07 (tool C2 — the m-2523 acceptance LITERAL): an ACK auto-noWake to a RETIRED host-session (sleepEpoch preserved, rotated successor) does NOT park \'prepared\' — it FAILS to the sender (the code fix: the noWake branch never returns \'prepared\' for a reroute route)', async () => {
+test('VALLE 09-07 (tool C2 — the m-2523 class, RE-BASED 2026-09-07 over the FB-132 RETIRED-FLAVOR COLLIDE): an ACK to a RETIRED host-session (sleepEpoch preserved, rotated successor) is NEVER parked \'prepared\' — the retired-flavor fix (isDormantRecipient returns FALSE for a retired entry) means the B3 dormant-ack gate does NOT auto-noWake it → the ALWAYS-WAKE re-routes to the LIVE successor (F-3, m-424/425/429 restored; the pair lands \'resumed\' keyed to the OLD id). The m-2523 forever-stuck class is prevented BY CONSTRUCTION (a retired entry is never dormant → never noWaked → never parks); a WIRED noWake ORDER to the same address still FAILS (the engine C2 branch — covered by the engine-level C2 + the control below)', async () => {
   await withTempStateDir(async (stateDir) => {
     // The hosts.json shape that produced the m-2494/m-2523 orphans: a RETIRED
     // host-family entry that KEEPS the permanent spec-002 sleepEpoch + a LIVE
-    // successor (the rotation chain) → the B3 dormant-ack gate sets noWake →
-    // the engine route resolves 'reroute' → the noWake branch must FAIL.
+    // successor (the rotation chain). The FB-132 retired-flavor predicate:
+    // the retired entry's sleepEpoch is STALE metadata — never dormant — so the
+    // b3 dormant-ack noWake gate does NOT fire; the delivery re-routes (F-3).
     // Keys follow the registry convention `host-<sessionId>` (loadHosts skips
     // a mismatched key — the wake-seam O1 precedent).
     await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
@@ -576,10 +577,19 @@ test('VALLE 09-07 (tool C2 — the m-2523 acceptance LITERAL): an ACK auto-noWak
       const headCtx = childContextFor(env.agents, 'head-research-head')
       assert.ok(headCtx, 'the head own-layer context resolves')
       const signal = new AbortController().signal
+      // (a) The ACK to the RETIRED host-session — re-based contract: NOT a
+      // frozen noWake; the ALWAYS-WAKE re-routes to the LIVE successor (the
+      // pair lands 'resumed' keyed to the OLD id; the successor receives).
       const res = await headCtx.ctx.tools.get('send_message', headCtx.key).execute({ to: ['host-s-retired'], text: 'ACK (retired host)', ack: true }, { agent: head, signal })
-      assert.equal(res.delivered['host-s-retired'], 'failed', 'C2-tool: the ack auto-noWake to the RETIRED host-session FAILS to the sender (never \'prepared (noWake)\' — the m-2523 forever-stuck class)')
+      assert.equal(res.delivered['host-s-retired'], 'resumed', 'C2-tool: the ack to the RETIRED host-session RE-ROUTES to the live successor (\'resumed\' keyed to the old id — the F-3 role intent; NEVER the m-2523 frozen \'prepared (noWake)\' class)')
       const latest = await latestRowStatuses(stateDir)
-      assert.equal(latest.get(`${res.messageId}\u0000host-s-retired`), 'failed', 'C2-tool: the pair ends \'failed\' (visible, settled — not a frozen prepared row)')
+      assert.equal(latest.get(`${res.messageId}\u0000host-s-retired`), 'resumed', 'C2-tool: the pair ends \'resumed\' (settled via the re-route — visible, never a frozen prepared row)')
+      assert.ok(![...latest.keys()].some((k) => k.endsWith('\u0000host-s-retired') && latest.get(k) === 'prepared'), 'C2-tool: ZERO \'prepared\' rows keyed to the retired address (the frozen class is structurally impossible — the retired entry is never dormant, never noWaked)')
+      // (b) The CONTROL — a WIRED noWake ORDER to the SAME retired address
+      // still takes the engine C2 branch: noWake + reroute → 'failed' (the
+      // m-2523 acceptance for an explicit no-wake order stays intact).
+      const explicit = await headCtx.ctx.tools.get('send_message', headCtx.key).execute({ to: ['host-s-retired'], text: 'explicit noWake to retired', noWake: true }, { agent: head, signal })
+      assert.equal(explicit.delivered['host-s-retired'], 'failed', 'C2-tool CONTROL: an EXPLICIT noWake ORDER to the retired address FAILS to the sender (the engine C2 branch — the noWake-to-a-never-live-address protection is intact)')
     } finally {
       await env.dispose()
     }

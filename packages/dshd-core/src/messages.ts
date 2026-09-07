@@ -807,6 +807,35 @@ function deliverySeqOf(row: DeliveryRow): number {
   return Number.isFinite(n) ? n : row.ts
 }
 
+/** FB-132 (wake-on-delivered 2026-09-06 — the drain-on-wake lane, 2nd half):
+ * PURE candidate selection for `drainRecipientQueue` — the PAIR-LATEST
+ * 'prepared' rows of ONE recipient, STRICTLY FIFO by delivery-queue seq
+ * (ascending `m-<seq>` — the same sort key the sweep batch uses; a
+ * non-parseable legacy id falls back to its row ts). Only the pair-LATEST row
+ * per (messageId, recipientId) is a candidate (the shadowed 'prepared' dust
+ * of an already-resolved pair is never re-driven — the same latestPerKey view
+ * the sweep and G2 use); a 'failed' pair is EXCLUDED (its re-drive timeline is
+ * the sweep's per-pair backoff domain — the drain must not accelerate a
+ * failure), 'self'/'terminal'/'delivered'/'resumed' are settled (never
+ * candidates). The result IS the head-first FIFO order the drain re-drives —
+ * the batch-drain lane (a641964) CO-EXISTS by construction: the batch covers
+ * the RUNNING-recipient delivery path (accumulate + flush at the settle),
+ * this FIFO orders the 'prepared' residue of a REAL wake (noWake / gated rows
+ * the engine parked), and the cap bounds the wake-storm — see
+ * `DRAIN_RECIPIENT_QUEUE_DEFAULT_CAP`. */
+export function pendingForRecipient(rows: readonly DeliveryRow[], recipientId: string): DeliveryRow[] {
+  const latestKey = new Map<string, DeliveryRow>()
+  for (const row of rows) latestKey.set(deliveryKey(row), row)
+  const pending: DeliveryRow[] = []
+  for (const row of latestKey.values()) {
+    if (row.recipientId !== recipientId) continue
+    if (row.status !== 'prepared') continue
+    pending.push(row)
+  }
+  pending.sort((a, b) => deliverySeqOf(a) - deliverySeqOf(b))
+  return pending
+}
+
 /**
  * Idempotent re-delivery predicate (spec §4.4): true when the pair must be
  * (re-)delivered — no row yet, or the last transition was 'prepared' (crash
@@ -863,6 +892,15 @@ export const RE_DELIVERY_STORM_WINDOW_MS = 60 * 60_000
  * stuck > 10 min to a live non-dormant recipient (the crash-recovery class the
  * boot-only re-drive left parked until the next boot). */
 export const RE_DELIVERY_PREPARED_STUCK_MS = 10 * 60_000
+
+/** FB-132 (wake-on-delivered 2026-09-06 — the drain-on-wake lane, 2nd half):
+ * the per-invocation cap of `DeliveryRedeliverer.drainRecipientQueue` (the
+ * FIFO head-first drain of a recipient's 'prepared' queue at its next REAL
+ * wake). At most this many pairs are re-driven per fire — the remaining pairs
+ * stay 'prepared' and drain at the next wake/sweep; the cap bounds the
+ * wake-storm of a large backlog (R3: N followups in ONE turn never exceed
+ * this). A design constant (the lane design §3.1.3 names the default cap 25). */
+export const DRAIN_RECIPIENT_QUEUE_DEFAULT_CAP = 25
 
 /** LANE ②-bis (G2 — the LEGACY 'prepared' residue, host decision 2026-09-03:
  * NO manual drain — the runtime settle covers the batch) — the per-cycle cap
@@ -1098,35 +1136,42 @@ export interface DeliveryRedelivererDeps {
    * safely. Absent → false (no liveness knowledge — a noWake row is NEVER
    * re-driven, the conservative no-wake-until-wake semantics). */
   recipientRunning?(recipientId: string): boolean
-  /** fb-132 (gate/wake-seam 2026-09-05 — the fb-150 re-drive deposit) —
-   * OPTIONAL: whether the recipient has an EARLIER-seq non-final ('prepared')
-   * delivery pair — the SAME FIFO-gate predicate the delivery engine's gate
-   * uses (fb-117). The sweep's re-drive of a GATED pair would degrade at the
-   * deliver seam to the no-wake queue BEHIND (its gate branch appends a FRESH
-   * 'prepared' row after the write-ahead — TWO new 'prepared' rows per pass
-   * into a gated inbox; the fb-150 spool: 28 prepared rows / 0 terminal in
-   * ~2.4h at the ~660s prepared-stuck cadence, growing without limit). When
-   * provided, `drivePair` SETTLES such a gated row to 'terminal' (the ledger's
-   * no-retry state) instead of re-marking 'prepared' — the message record
-   * stays durable in messages.jsonl and drains at the recipient's next real
-   * wake (after the gating earlier pair resolves). Absent → the gate-blind
-   * legacy re-drive (bounded by the backoff/prepared-stuck criteria; R6). */
+  /** fb-132 (gate/wake-seam 2026-09-05 — the fb-150 re-drive deposit; UPDATED
+   * 2026-09-06 by the WAKE-ON-DELIVERED lane, 2nd half) — OPTIONAL: whether
+   * the recipient has an EARLIER-seq non-final ('prepared') delivery pair —
+   * the SAME FIFO-gate predicate the delivery engine's gate uses (fb-117). The
+   * sweep's re-drive of a GATED pair would degrade at the deliver seam to the
+   * no-wake queue BEHIND (its gate branch appends a FRESH 'prepared' row after
+   * the write-ahead — TWO new 'prepared' rows per pass into a gated inbox; the
+   * fb-150 spool: 28 prepared rows / 0 terminal in ~2.4h at the ~660s
+   * prepared-stuck cadence, growing without limit). When provided, `drivePair`
+   * NEVER re-marks a gated pair 'prepared': the 2026-09-05 settle to 'terminal'
+   * gained the 2nd-half criterion — for an ALIVE recipient the settle would
+   * LOSE the pair ('terminal' is never-re-delivered, `needsRedelivery`) now
+   * that `drainRecipientQueue` drains the queue at the recipient's next REAL
+   * wake, so drivePair SKIPS the gated alive pair (no row, no settle; the
+   * state stays 'prepared'; the P4 summary counts it `gatedHeld`) and only a
+   * no-wake-head gating head (the P1-EXT-EXT discriminator) proceeds to a
+   * genuine deliver (the ALWAYS-WAKE re-drive IS the wake, m-2415). Absent →
+   * the gate-blind legacy re-drive (bounded by the backoff/prepared-stuck
+   * criteria; R6). */
   pendingEarlierSeq?(recipientId: string, seq: number): Promise<boolean>
   /** P1-EXT-EXT (2026-09-06 — WAKE-SEAM mitigation, m-2415 no-wake-head
    * DISCRIMINATOR) — OPTIONAL: whether the GATING HEAD of the FIFO gate (the
    * EARLIEST strictly-earlier seq whose delivery pair is still 'prepared' —
    * the pair `pendingEarlierSeq` fired on) is a NO-WAKE row (`noWake: true`).
-   * When it resolves `true`, the fb-132 gated SETTLE is SKIPPED for that pair:
+   * When it resolves `true`, the fb-132 gated branch is SKIPPED for that pair:
    * the no-wake head NEVER drains on its own (the P2 no-wake-until-wake guard
-   * above skips a noWake row into a non-running recipient), so settling the
-   * gated re-drive 'terminal' would MASK the delivery FOREVER (the
-   * scanGatedManagerDeliveryStuck class of the P0 host datapoint — the settle
-   * is the silent dead-end); the ALWAYS-WAKE re-drive IS the real wake that
-   * unblocks the queue (m-2415) → the pass proceeds to a genuine deliver.
-   * `false` → the head is a crash-class non-noWake row → the settle stays
-   * (its no-retry 'terminal' semantics unchanged). ABSENT (`undefined`) or a
-   * THROW → the settle applies (the safe default — the discriminator is
-   * opt-in via the dep). */
+   * above skips a noWake row into a non-running recipient), so holding or
+   * settling the gated re-drive would MASK the delivery FOREVER (the
+   * scanGatedManagerDeliveryStuck class of the P0 host datapoint); the
+   * ALWAYS-WAKE re-drive IS the real wake that unblocks the queue (m-2415) →
+   * the pass proceeds to a genuine deliver. `false` → the head is a
+   * crash-class non-noWake row → the fb-132 2nd-half criterion applies (the
+   * gated pair of an ALIVE recipient is HELD — skip without settle, counted
+   * `gatedHeld`; the drain at the recipient's next REAL wake delivers it).
+   * ABSENT (`undefined`) or a THROW → the same 2nd-half hold applies (the safe
+   * default — the discriminator is opt-in via the dep). */
   earlierHeadIsNoWake?(recipientId: string, seq: number): Promise<boolean | undefined>
   /** Resolve the message record for a sidecar row (the open MessagesStore). May
    * resolve async (the store is OPENED at boot via a promise, not synchronously). */
@@ -1194,13 +1239,20 @@ export interface DeliveryRedelivererDeps {
  *       (already live — no wake happens). The BOOT pass keeps its ONE-TIME
  *       crash semantics for the crash class (a non-noWake 'prepared' row); a
  *       noWake row is never crash-class, so the guard applies at boot too.
- *   (f) fb-132 (gate/wake-seam 2026-09-05 — the fb-150 deposit): the FIFO-GATE
- *       SETTLE — a re-drive whose pair is STILL gated by an EARLIER-seq
- *       pending pair of the SAME recipient SETTLES the driven row to
- *       'terminal' (the ledger's no-retry state; the message record stays
- *       durable and drains at the recipient's next real wake). It NEVER
- *       re-marks 'prepared' into a gated inbox — only a GENUINE (ungated)
- *       attempt starts the write-ahead + deliver. Needs the optional
+ *   (f) fb-132 (gate/wake-seam 2026-09-05 + WAKE-ON-DELIVERED 2026-09-06 — the
+ *       fb-150 deposit): the FIFO-GATE HOLD — a re-drive whose pair is STILL
+ *       gated by an EARLIER-seq pending pair of the SAME recipient is NEVER a
+ *       genuine attempt: `deliverOrQueue` would degrade it to the no-wake queue
+ *       BEHIND (its gate branch appends a FRESH 'prepared' row after the
+ *       write-ahead — the unbounded fb-150 spool). The sweep NEVER re-marks
+ *       'prepared' into a gated inbox. The 2026-09-05 settle to 'terminal'
+ *       gained the 2nd-half criterion: for an ALIVE recipient the settle would
+ *       LOSE the pair ('terminal' is never-re-delivered) — drivePair now SKIPS
+ *       a gated alive pair (no row, no settle; the state stays 'prepared') and
+ *       the P4 summary counts it `gatedHeld`; the pair is a DRAIN candidate at
+ *       the recipient's next REAL wake (`drainRecipientQueue`), and a gating
+ *       NO-WAKE head (the P1-EXT-EXT discriminator) lets the ALWAYS-WAKE
+ *       re-drive proceed as the real wake (m-2415). Needs the optional
  *       `pendingEarlierSeq` dep (the engine's own fb-117 gate predicate);
  *       absent → the gate-blind legacy re-drive (R6).
  */
@@ -1223,11 +1275,19 @@ export class DeliveryRedeliverer {
   private lastSweepCycleTs: number | undefined
   private lastSweepPreparedStuckRemaining: number | undefined
   // P4 (fb-131 — WAKE-SEAM lane, sweep observability): the LAST cycle's honest
-  // prepared-state summary ({oldestPreparedTs, dormantHeld, noWakeHeld}) — the
-  // classes the single `preparedStuckRemaining` integer cannot discriminate.
-  // Never synthesized: ABSENT until a cycle actually computed it (the heartbeat
-  // omits it pre-first-cycle).
-  private lastSweepPreparedSummary: { oldestPreparedTs?: number; dormantHeld: number; noWakeHeld: number } | undefined
+  // prepared-state summary ({oldestPreparedTs, dormantHeld, noWakeHeld} —
+  // fb-132 WAKE-ON-DELIVERED 2026-09-06 adds the FIFO-gate-held class
+  // `gatedHeld`) — the classes the single `preparedStuckRemaining` integer
+  // cannot discriminate. Never synthesized: ABSENT until a cycle actually
+  // computed it (the heartbeat omits it pre-first-cycle).
+  private lastSweepPreparedSummary: { oldestPreparedTs?: number; dormantHeld: number; noWakeHeld: number; gatedHeld: number } | undefined
+  // FB-132 (wake-on-delivered 2026-09-06 — the drain-on-wake lane, 2nd half):
+  // the per-recipient RE-ENTRANCY GUARD of `drainRecipientQueue` (R1 — the
+  // drain → deliver → wake → drain recursion): a recipient id present here is
+  // mid-drain; a re-entrant fire (the drained delivery's own wake fires the
+  // drain again) is a NO-OP (returns 0) instead of recursing. Instance state
+  // (AGENTS.md rule 4 — no module-global mutable state; one guard per apply).
+  private drainingQueues = new Set<string>()
 
   constructor(
     deps: DeliveryRedelivererDeps,
@@ -1336,27 +1396,35 @@ export class DeliveryRedeliverer {
       // is ALREADY live mid-turn; re-driving splices into its live session
       // (zero materialization/wake), so the intent is honored, not violated.
       if (row.noWake === true && this.deps.recipientRunning?.(row.recipientId) !== true) return
-      // fb-132 (gate/wake-seam 2026-09-05 — the fb-150 re-drive deposit): a
-      // re-drive whose pair is STILL GATED (an EARLIER-seq non-final pair of
-      // the SAME recipient is pending — the deliver seam's FIFO gate) is NOT a
-      // genuine attempt: `deliverOrQueue` would degrade it to the no-wake queue
-      // BEHIND (where its gate branch appends a FRESH 'prepared' row after the
-      // write-ahead — TWO new 'prepared' rows per pass into a gated inbox; the
-      // fb-150 spool: 28 prepared rows / 0 terminal transitions in ~2.4h at the
-      // ~660s prepared-stuck cadence, growing without limit). The sweep must
-      // NEVER re-mark 'prepared' indiscriminately: a GATED pass SETTLES the
-      // driven row to the ledger's no-retry state ('terminal' — the same
-      // terminal the DEAD settle uses), so the sidecar stabilizes and the fb-27
-      // closure criterion ("0 prepared-stuck > 10 min") stays reachable. The
-      // message record itself is ALREADY durable in messages.jsonl — it drains
-      // at the recipient's next REAL wake, once the gating earlier pair resolves
-      // (that pair's own UNGATED re-drive is the wake that unblocks the queue) —
-      // so the settle loses NO content. A GENUINE attempt (the gate open) then
-      // proceeds unchanged: the write-ahead 'prepared' of the REAL re-drive
-      // starts below and the pass row is consumed by a final status. Fail-soft:
-      // the predicate is an OPTIONAL injected dep; a throw or an absent dep →
-      // warn + proceed gate-blind (a gating bug must never break a re-drive);
-      // the 'self' hold is never gated (mirroring the engine's own gate).
+      // fb-132 (gate/wake-seam 2026-09-05 — the fb-150 re-drive deposit; UPDATED
+      // 2026-09-06 by the WAKE-ON-DELIVERED lane, 2nd half): a re-drive whose
+      // pair is STILL GATED (an EARLIER-seq non-final pair of the SAME recipient
+      // is pending — the deliver seam's FIFO gate) is NOT a genuine attempt:
+      // `deliverOrQueue` would degrade it to the no-wake queue BEHIND (where its
+      // gate branch appends a FRESH 'prepared' row after the write-ahead — TWO
+      // new 'prepared' rows per pass into a gated inbox; the fb-150 spool: 28
+      // prepared rows / 0 terminal transitions in ~2.4h at the ~660s
+      // prepared-stuck cadence, growing without limit). The sweep must NEVER
+      // re-mark 'prepared' indiscriminately. TWO sub-behaviors:
+      //   - DEAD/UNKNOWN recipient: settled 'terminal' ONCE ABOVE (:1364) — the
+      //     dead settle is BEFORE this branch and is intact (this branch only
+      //     ever sees ALIVE recipients).
+      //   - ALIVE recipient: the 2026-09-05 settle to 'terminal' is WRONG with
+      //     drain-on-wake ('terminal' is never-re-delivered, `needsRedelivery` —
+      //     the pair would be LOST even though the recipient is alive and its
+      //     next real wake could deliver it). The 2nd-half criterion: the sweep
+      //     SKIPS the pair — NO settle, NO re-mark, zero new rows (the ledger
+      //     state stays 'prepared', the pair-latest unchanged) — and the P4
+      //     cycle summary counts it in the new `gatedHeld` class. The pair
+      //     remains a DRAIN CANDIDATE: `drainRecipientQueue` at the recipient's
+      //     next REAL wake re-drives it head-first in seq order. The fb-150
+      //     growth is cut BY CONSTRUCTION (the sweep never re-drives a gated
+      //     row; nothing appends fresh rows) and the queue volume is bounded by
+      //     the real message traffic x the inter-wake interval, never by the
+      //     sweep cadence. Fail-soft: the predicate is an OPTIONAL injected dep;
+      //     a throw or an absent dep → warn + proceed gate-blind (a gating bug
+      //     must never break a re-drive); the 'self' hold is never gated
+      //     (mirroring the engine's own gate).
       if (row.recipientId !== record.from && this.deps.pendingEarlierSeq !== undefined) {
         let gated = false
         try {
@@ -1366,33 +1434,36 @@ export class DeliveryRedeliverer {
         }
         if (gated) {
           // P1-EXT-EXT (2026-09-06 — WAKE-SEAM mitigation, m-2415 no-wake-head
-          // DISCRIMINATOR): this fb-132 SETTLE branch would convert a gated
-          // re-drive to 'terminal' — but a pair gated behind a NO-WAKE head is
-          // NOT in the crash-class: the no-wake head NEVER drains on its own
-          // (the P2 guard above skips it into a non-running recipient), so the
-          // settle would mask the delivery FOREVER (the P0 host datapoint: 36
-          // ALWAYS-WAKEs frozen 'prepared (fifo-gated tras m-2375)' behind a
-          // noWake head — the settle is the SILENT dead-end the detector
-          // scanGatedManagerDeliveryStuck flags). The ALWAYS-WAKE re-drive IS
+          // DISCRIMINATOR — PRESERVED by the re-base): a pair gated behind a
+          // NO-WAKE head is NOT in the crash-class: the no-wake head NEVER
+          // drains on its own (the P2 guard above skips it into a non-running
+          // recipient), so the 2nd-half hold would park the delivery FOREVER
+          // (the P0 host datapoint: 36 ALWAYS-WAKEs frozen 'prepared (fifo-gated
+          // tras m-2375)' behind a noWake head). The ALWAYS-WAKE re-drive IS
           // the real wake that unblocks the queue (m-2415 «la cabeza no-wake
-          // drena CON el wake, nunca lo bloquea») → SKIP the settle and proceed
+          // drena CON el wake, nunca lo bloquea») → SKIP the hold and proceed
           // to the GENUINE deliver below (the engine's own gate applies the
           // same discriminator, so the attempt lands 'delivered', never
           // re-marked 'prepared' into a closed inbox). `false`/`undefined`/
-          // throw → the settle applies (crash-class head — its no-retry
-          // semantics unchanged; the safe default keeps the discriminator
-          // opt-in via the dep).
+          // throw → the 2nd-half HOLD applies (crash-class head: the gated
+          // pair of an ALIVE recipient is never settled — it stays 'prepared'
+          // and drains at its next REAL wake; the safe default keeps the
+          // discriminator opt-in via the dep).
           let headNoWake: boolean | undefined
           try {
             headNoWake = await this.deps.earlierHeadIsNoWake?.(row.recipientId, record.seq)
           } catch (error: unknown) {
-            logger.warn(`[deepartments] ${source} re-delivery no-wake-head discriminator failed for ${pairLabel} (the fb-132 settle applies — safe default): ${error instanceof Error ? error.message : String(error)}`)
+            logger.warn(`[deepartments] ${source} re-delivery no-wake-head discriminator failed for ${pairLabel} (the 2nd-half hold applies — safe default): ${error instanceof Error ? error.message : String(error)}`)
           }
           if (headNoWake === true) {
             logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) FIFO-gated behind a NO-WAKE head — the ALWAYS-WAKE re-drive is the real wake (m-2415); proceeding to deliver (the no-wake head stays durable and drains with this wake in seq order)`)
           } else {
-            await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal', undefined, row.noWake === true ? true : undefined)
-            logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) → 'terminal' — FIFO-gated behind an earlier-seq pending pair (fb-132: never re-mark 'prepared' into a gated inbox; the record stays durable and drains at the recipient's next real wake)`)
+            // 2nd-half criterion (WAKE-ON-DELIVERED): skip WITHOUT settle — a
+            // settle to 'terminal' would LOSE the pair of an ALIVE recipient
+            // (never-re-delivered) just when its next real wake could drain it.
+            // No row is written (the state stays 'prepared' — a drain
+            // candidate); the P4 summary counts the class `gatedHeld`.
+            logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) held gatedHeld — FIFO-gated behind an earlier-seq pending pair of an ALIVE recipient (fb-132/wake-on-delivered: skip without settle; the record stays durable 'prepared' and drains at the recipient's next REAL wake)`)
             return
           }
         }
@@ -1406,6 +1477,95 @@ export class DeliveryRedeliverer {
       }
     } catch (error: unknown) {
       logger.warn(`[deepartments] ${source} re-delivery ${pairLabel} failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * FB-132 (wake-on-delivered 2026-09-06 — the 2nd-half drain-on-wake lane):
+   * DRAIN the recipient's 'prepared' queue at a REAL wake — the primitive the
+   * wake primitives fire (fire-and-forget) so the documented «drains at its
+   * next REAL wake» contract (messages.ts :1050/:1264/:1314/:1559, tools.ts
+   * :5124, dshd-health :4326/:4368) finally holds. The recipient JUST was
+   * materialized/woken by the caller — liveness is the authority (the wake
+   * that happened IS the P2 exception condition met: a live splice, zero new
+   * materialization). It CO-EXISTS with the VALLE 09-07 BATCH-DRAIN lane
+   * (a641964): the batch accumulates the RUNNING recipient's new ALWAYS-WAKE
+   * sends and flushes them at the settle (delivery.ts:1014-1128 equivalent —
+   * the engine's gate-skip dshd-core delivery.ts:396-404); THIS primitive
+   * drains the 'prepared' RESIDUE (the noWake / FIFO-gated rows the engine
+   * parked, incl. the write-ahead of a batch still in flight) — the batch
+   * never delays nor duplicates the drain (the batch flush marks its rows
+   * 'delivered' at the settle; an onDelivered fire sees only STILL-'prepared'
+   * rows). Semantics:
+   *   1. Candidates = `pendingForRecipient` (the pair-LATEST 'prepared' rows
+   *      of the recipient, STRICT FIFO by seq) — a 'failed' pair is NEVER a
+   *      candidate (its re-drive stays on the sweep's per-pair backoff); dust /
+   *      'self' / 'terminal' / delivered pairs are settled, never candidates.
+   *   2. Head-first sequential: re-drive the FIRST via `deps.deliver` (the
+   *      deliverBusRecord seam — `deliverOrQueue` with noWake:false,
+   *      interrupt:false); AWAIT; CONTINUE ONLY when it landed
+   *      'delivered'|'resumed' (each later pair becomes ungated because its
+   *      earlier just resolved). Anything else ('failed' / 'prepared' /
+   *      'self') STOPS the drain — the FIFO never skips; the remainder waits
+   *      for the next wake/sweep.
+   *   3. Bounded: at most `cap` rows per invocation (default
+   *      `DRAIN_RECIPIENT_QUEUE_DEFAULT_CAP` 25) — a large backlog drains
+   *      across wakes, never one storm.
+   *   4. Re-entrancy-guarded (R1): a re-entrant fire while THIS recipient is
+   *      already mid-drain is a NO-OP (the drained delivery's own wake fires
+   *      the drain again — the guard returns 0, no recursion).
+   *   5. Liveness is the authority: NEVER consults `recipientDormant` (a stale
+   *      sleepEpoch must not re-block a queue whose recipient just woke; the
+   *      sleepEpoch lifecycle is a SEPARATE concern, R7) nor requires
+   *      `recipientRunning` (the wake that just happened IS the liveness). The
+   *      no-wake intent of a row is RESPECTED BY THE FIRE POINT, not here:
+   *      this primitive drains whatever 'prepared' the recipient holds — the
+   *      caller only fires it at a REAL wake (the no-wake-until-wake contract).
+   *   6. NON-FATAL + fire-safe: never throws (an error logs a warn and returns
+   *      0 — the next wake/sweep re-evaluates); the ALTO-1 rebind guard
+   *      mirrors drivePair (a row whose CURRENT record is trimmed / never
+   *      addressed the recipient is skipped and the drain STOPS — the FIFO
+   *      cannot jump a stale head).
+   * Returns the number of pairs actually re-driven (0 on no-op / guard /
+   * failure) — observability for the fire points.
+   */
+  async drainRecipientQueue(recipientId: string, cap: number = DRAIN_RECIPIENT_QUEUE_DEFAULT_CAP): Promise<number> {
+    const { logger } = this.deps
+    if (this.drainingQueues.has(recipientId)) return 0
+    this.drainingQueues.add(recipientId)
+    try {
+      const rows = await this.readSidecarRows()
+      if (rows.length === 0) return 0
+      const pending = pendingForRecipient(rows, recipientId)
+      if (pending.length === 0) return 0
+      const limited = pending.slice(0, cap)
+      let drained = 0
+      for (const row of limited) {
+        const pairLabel = `${row.messageId} → ${row.recipientId}`
+        // ALTO-1 / Issue-3 guard (the boot driver's own rebind rule — mirrored
+        // from drivePair): never drive a pair whose CURRENT record is gone or
+        // never addressed the recipient (the m-728 class). A stale head STOPS
+        // the FIFO (the next pair would still be gated behind it).
+        const record = await this.deps.getRecord(row.messageId)
+        if (record === void 0 || !record.to.includes(row.recipientId)) {
+          logger.info(`[deepartments] drain ${recipientId}: ${pairLabel} skipped (stale row — record trimmed / never addressed the recipient); the remainder stays 'prepared' for the next wake/sweep`)
+          break
+        }
+        const callerSessionId = this.deps.resolveCallerSessionId(record.from)
+        const status = await this.deps.deliver(record, row.recipientId, callerSessionId)
+        logger.info(`[deepartments] drain ${recipientId}: ${pairLabel} (was prepared) → ${status}${drained + 1 < limited.length ? ' — FIFO head-first: the next pair is now ungated' : ''}`)
+        drained++
+        // Head-first STOP: only a landed delivery opens the gate for the next
+        // pair ('resumed' is the sleep-boundary materialization — the same
+        // landed class drivePair's B3/P2 guards use).
+        if (status !== 'delivered' && status !== 'resumed') break
+      }
+      return drained
+    } catch (error: unknown) {
+      logger.warn(`[deepartments] drain ${recipientId} failed (non-fatal — the next wake/sweep re-evaluates): ${error instanceof Error ? error.message : String(error)}`)
+      return 0
+    } finally {
+      this.drainingQueues.delete(recipientId)
     }
   }
 
@@ -1549,10 +1709,10 @@ export class DeliveryRedeliverer {
       // P4 (fb-131 — WAKE-SEAM lane): the cycle's HONEST prepared-state summary
       // (the same pre-settle `rows` snapshot as the residue — consistent); the
       // heartbeat reports each held class separately.
-      this.lastSweepPreparedSummary = this.summarizePreparedState(rows, nowMs)
+      this.lastSweepPreparedSummary = await this.summarizePreparedState(rows, nowMs)
       const held = this.lastSweepPreparedSummary
       if (drove > 0 || g2.settled > 0 || g2.skippedRebind > 0) {
-        logger.info(`[deepartments] redelivery sweep cycle: drove ${drove} pairs; G2 legacy settle ${g2.settled} (${g2.settledStaleDust} stale-dust + ${g2.settledDeadEnd} dead-end) → 'terminal' (no-wake), skipped-rebind ${g2.skippedRebind}; in-flight kept ${g2.keptInFlight}, fresh kept ${g2.keptFresh}; prepared-stuck>${Math.round(this.legacyAgeMs / 60000)}min remaining ${g2.preparedStuckRemaining}${held.oldestPreparedTs !== undefined ? `; oldestPreparedTs=${new Date(held.oldestPreparedTs).toISOString()}` : ''}${held.dormantHeld > 0 ? `; dormantHeld=${held.dormantHeld}` : ''}${held.noWakeHeld > 0 ? `; noWakeHeld=${held.noWakeHeld}` : ''}`)
+        logger.info(`[deepartments] redelivery sweep cycle: drove ${drove} pairs; G2 legacy settle ${g2.settled} (${g2.settledStaleDust} stale-dust + ${g2.settledDeadEnd} dead-end) → 'terminal' (no-wake), skipped-rebind ${g2.skippedRebind}; in-flight kept ${g2.keptInFlight}, fresh kept ${g2.keptFresh}; prepared-stuck>${Math.round(this.legacyAgeMs / 60000)}min remaining ${g2.preparedStuckRemaining}${held.oldestPreparedTs !== undefined ? `; oldestPreparedTs=${new Date(held.oldestPreparedTs).toISOString()}` : ''}${held.dormantHeld > 0 ? `; dormantHeld=${held.dormantHeld}` : ''}${held.noWakeHeld > 0 ? `; noWakeHeld=${held.noWakeHeld}` : ''}${held.gatedHeld > 0 ? `; gatedHeld=${held.gatedHeld}` : ''}`)
       }
     } catch (error: unknown) {
       logger.warn(`[deepartments] re-delivery sweep failed (non-fatal — the boot pass + the next sweep re-evaluate): ${error instanceof Error ? error.message : String(error)}`)
@@ -1570,13 +1730,17 @@ export class DeliveryRedeliverer {
    * P4 (fb-131 — WAKE-SEAM lane): the same never-synthesized rule extends to
    * the cycle's honest prepared-state summary — `oldestPreparedTs` (the oldest
    * pair-latest 'prepared' row ts), `dormantHeld` (pairs of a DORMANT recipient
-   * the B3 guard holds — the residue that may never reach 0 BY DESIGN) and
+   * the B3 guard holds — the residue that may never reach 0 BY DESIGN),
    * `noWakeHeld` (pairs whose LATEST row carries the explicit noWake flag — the
    * P2 no-wake guard holds them until the recipient's next real wake or a
-   * currently-running recipient). All three are ABSENT before the first cycle
-   * and (for the counts) present once a cycle computed them — truthful, never
-   * guessed. */
-  sweepState(): { cycles: number; lastCycleTs?: number; preparedStuckRemaining?: number; oldestPreparedTs?: number; dormantHeld?: number; noWakeHeld?: number } {
+   * currently-running recipient) and, fb-132 WAKE-ON-DELIVERED 2026-09-06,
+   * `gatedHeld` (pairs of an ALIVE recipient the FIFO gate holds — an
+   * EARLIER-seq pending pair blocks them; the 2nd-half sweep skips instead of
+   * settling, and they drain at the recipient's next REAL wake — the legitimate
+   * fb-27 exception of a live-but-blocked queue). All are ABSENT before the
+   * first cycle and (for the counts) present once a cycle computed them —
+   * truthful, never guessed. */
+  sweepState(): { cycles: number; lastCycleTs?: number; preparedStuckRemaining?: number; oldestPreparedTs?: number; dormantHeld?: number; noWakeHeld?: number; gatedHeld?: number } {
     return {
       cycles: this.sweepCycle,
       ...(this.lastSweepCycleTs !== undefined ? { lastCycleTs: this.lastSweepCycleTs } : {}),
@@ -1596,23 +1760,46 @@ export class DeliveryRedeliverer {
    *     legitimately never reaches 0 while the recipient sleeps);
    *   - `noWakeHeld`: pairs whose LATEST row carries the explicit `noWake` flag
    *     (the no-wake-until-wake intent — the P2 guard never re-drives them into
-   *     a NON-running recipient).
+   *     a NON-running recipient);
+   *   - `gatedHeld` (fb-132 WAKE-ON-DELIVERED 2026-09-06): pairs of an ALIVE
+   *     recipient held by the FIFO gate — an EARLIER-seq pending pair of the
+   *     same recipient blocks the drain (the gate branch degrades a re-drive
+   *     behind it). With the 2nd-half criterion the sweep SKIPS these (no
+   *     settle — a settle to 'terminal' would lose the pair); they are DRAIN
+   *     candidates at the recipient's next real wake, so a held class is the
+   *     legitimate fb-27 exception exactly like dormantHeld/noWakeHeld. ASYNC:
+   *     the gate predicate is the optional async `pendingEarlierSeq` dep
+   *     (fail-soft — a throw or absent dep → that pair is not counted gated;
+   *     the self hold is never gated, mirroring drivePair).
    * The classes OVERLAP (a noWake row to a dormant recipient is held by both)
    * but each is reported separately — the QD closure criterion gets the
    * discrimination the single `preparedStuckRemaining` integer cannot give. */
-  private summarizePreparedState(rows: readonly DeliveryRow[], nowMs: number): { oldestPreparedTs?: number; dormantHeld: number; noWakeHeld: number } {
+  private async summarizePreparedState(rows: readonly DeliveryRow[], nowMs: number): Promise<{ oldestPreparedTs?: number; dormantHeld: number; noWakeHeld: number; gatedHeld: number }> {
     const latestKey = new Map<string, DeliveryRow>()
     for (const row of rows) latestKey.set(deliveryKey(row), row)
     let oldestPreparedTs: number | undefined
     let dormantHeld = 0
     let noWakeHeld = 0
+    let gatedHeld = 0
     for (const row of latestKey.values()) {
       if (row.status !== 'prepared') continue
       if (oldestPreparedTs === undefined || row.ts < oldestPreparedTs) oldestPreparedTs = row.ts
       if (row.noWake === true) noWakeHeld++
       if (this.deps.recipientDormant?.(row.recipientId) === true) dormantHeld++
+      if (this.deps.pendingEarlierSeq === undefined) continue
+      // The fb-132 gate class: pair-latest 'prepared' of an ALIVE recipient
+      // with an EARLIER-seq pending pair. Skip the self hold (drivePair
+      // mirrors the engine: self sends are never gated); a trimmed record
+      // (ALTO-1) is stale — never a gated hold.
+      try {
+        const record = await this.deps.getRecord(row.messageId)
+        if (record === void 0 || !record.to.includes(row.recipientId) || row.recipientId === record.from) continue
+        if (await this.deps.pendingEarlierSeq(row.recipientId, record.seq)) gatedHeld++
+      } catch (error: unknown) {
+        this.deps.logger.warn(`[deepartments] gatedHeld classification failed for ${row.messageId} → ${row.recipientId} (not counted gated — fail-soft): ${error instanceof Error ? error.message : String(error)}`)
+      }
     }
-    return { ...(oldestPreparedTs !== undefined ? { oldestPreparedTs } : {}), dormantHeld, noWakeHeld }
+    return { ...(oldestPreparedTs !== undefined ? { oldestPreparedTs } : {}), dormantHeld, noWakeHeld, gatedHeld }
   }
 
   /**

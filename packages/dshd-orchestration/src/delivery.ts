@@ -511,6 +511,22 @@ export interface DeliveryFactoryDeps {
   HEAD_DEFAULT_SESSION_TITLE: string
   /** The stuck-head window (Fix A2 — no progress for STUCK_HEAD_MS is wedged). */
   STUCK_HEAD_MS: number
+  /** FB-132 (wake-on-delivered 2026-09-06 — the 2nd-half drain-on-wake lane):
+   * the LATE-BOUND DRAIN hook the REAL-wake primitives FIRE (fire-and-forget):
+   * drain the recipient's 'prepared' queue FIFO head-first at its real wake
+   * (the m-1933 family — a no-wake/queued durable delivery finally lands at the
+   * recipient's next real wake). OPTIONAL + non-fatal: absent → the fire is a
+   * NO-OP (the documented «drains at its next real wake» contract stays merely
+   * documentary in a minimal composition that wires no redeliverer); a throw →
+   * warn only. The invoke.ts deliveryDeps wires it to the tools surface's
+   * `redeliverDrainQueue` (the SAME DeliveryRedeliverer the sweep drives),
+   * resolved at CALL time (the tools factory builds the redeliverer AFTER this
+   * factory — never dereference the hook at construction). CO-EXISTS with the
+   * batch-drain lane (a641964): the batch covers the RUNNING recipient's new
+   * sends (accumulate + flush), this drain covers the 'prepared' residue of a
+   * LATEST LANDED delivery (a batch item's landing is 'prepared' — the engine
+   * `onDelivered` hook fires only for delivered/resumed). */
+  drainRecipientQueue?: (recipientId: string) => Promise<number> | number
 }
 
 /** The delivery surface the rest of applyInvoke consumes at the SAME positions
@@ -771,8 +787,35 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     WORKER_AGENT_OPTIONS,
     HOST_AGENT_OPTIONS,
     HEAD_DEFAULT_SESSION_TITLE,
-    STUCK_HEAD_MS
+    STUCK_HEAD_MS,
+    drainRecipientQueue
   } = deps
+
+  /** FB-132 (wake-on-delivered 2026-09-06 — the 2nd-half drain-on-wake lane):
+   * the fire-and-forget DRAIN dispatcher the REAL-wake primitives call at
+   * their SUCCESS seams: `void fireQueueDrain(recipientId)` — the recipient
+   * JUST was materialized/woken, so its 'prepared' queue (a noWake / FIFO-gated
+   * durable delivery) must drain FIFO head-first NOW (the m-1933 family — the
+   * documented «drains at its next real wake» contract the wake enforces).
+   * NON-FATAL + never awaited on the delivery path (the current delivery does
+   * NOT wait for the drain); the drain itself is re-entrancy-guarded + bounded
+   * + non-throwing (DeliveryRedeliverer.drainRecipientQueue), and THIS
+   * dispatcher folds a synchronous hook error / async rejection to a warn (the
+   * next wake/sweep re-evaluates). Absent hook → a pure NO-OP. The BATCH-DRAIN
+   * lane co-exists: the engine's `onDelivered` fires this after markFinal only
+   * for LANDED (delivered/resumed) deliveries — a batch-accumulated item lands
+   * 'prepared' at the primitive and is flushed at the settle, never here. */
+  const fireQueueDrain = (recipientId: string): void => {
+    try {
+      const drain = deps.drainRecipientQueue
+      if (drain === undefined) return
+      void Promise.resolve(drain(recipientId)).catch((error: unknown) => {
+        ctx.logger.warn(`[deepartments] drainRecipientQueue fire for "${recipientId}" failed (non-fatal — the next wake/sweep re-evaluates): ${error instanceof Error ? error.message : String(error)}`)
+      })
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] drainRecipientQueue fire for "${recipientId}" threw (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
 
   // =========================================================================
   // DELIVERY ZONE (hoisted VERBATIM from applyInvoke — the same closures, the
@@ -1437,6 +1480,19 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
         target.followup(busUserMessage(record, framed, senderSessionId))
       }
       const status = resumed ? 'resumed' : 'delivered'
+      // FB-132 (wake-on-delivered 2026-09-06 — the 2nd-half drain lane): a
+      // SUCCESSFUL post wake IS the recipient's REAL wake — its 'prepared'
+      // queue (a noWake / FIFO-gated delivery waiting behind) must FINALLY
+      // drain, FIFO head-first in seq order (the m-1933 family; the «drains at
+      // its next real wake» contract). The drain does NOT fire HERE: at this
+      // point the CURRENT delivery's write-ahead 'prepared' row is still
+      // pending (the engine's final mark lands AFTER this primitive returns —
+      // dshd-core delivery.ts:497) — a fire here would re-drive THE CURRENT
+      // pair (the observed c1 duplicate). The engine fires the drain via its
+      // `onDelivered` hook exactly AFTER markFinal (the delivery is settled —
+      // the drain re-drives only what is still pending), fire-and-forget +
+      // non-fatal + capped; the enqueueHostWake rotation path keeps a direct
+      // `fireQueueDrain` (it bypasses the engine — no sidecar row of its own).
       // Fix B (head-sleep worker drain): a WORKER that has just delivered a
       // message to ITS OWN MANAGER HEAD is cut clean immediately — the delivery
       // itself is the retire trigger, so a worker that delivered its report to a
@@ -1650,6 +1706,13 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       // consecutive-failure counter (a recovered host must not be treated as a
       // threshold already met → an immediate re-quarantine).
       await resetHostMaterializeFailures(stateDir, hostEntry.hostId)
+      // FB-132 (wake-on-delivered 2026-09-06): a SUCCESSFUL host wake (live
+      // followup OR the D4 resume — both land here) IS the host's REAL wake —
+      // its 'prepared' queue (the m-1933 noWake / FIFO-gated family) drains
+      // FIFO head-first NOW. The fire lives in the ENGINE's `onDelivered` hook
+      // (strictly AFTER the final sidecar mark — a fire here would see the
+      // current pair's write-ahead 'prepared' still pending and re-drive it, the
+      // c1 duplicate). NOT awaited, non-fatal, capped.
       return first.status
     }
     // W8-i: a SINGLE transient 'session "<id>" not found' first-attempt failure
@@ -1669,6 +1732,9 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       const second = await attemptHostDelivery()
       if (second.status !== 'failed') {
         await resetHostMaterializeFailures(stateDir, hostEntry.hostId)
+        // FB-132 (wake-on-delivered): the SUCCESSFUL repair re-delivery is also
+        // a REAL host wake — its queue drains via the engine's `onDelivered`
+        // hook (after the final mark — never the current pair).
         return second.status
       }
       recordedError = second.error ?? first.error
@@ -1936,6 +2002,16 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       }
       const framed = `[From deepartments → ${wake.newHostId}]: ${text}`
       await busDeliverToHost(hostEntry as HostEntry, framed, record, void 0)
+      // FB-132 (wake-on-delivered 2026-09-06): the rotation wake delivered to
+      // the SUCCESSOR host is a REAL wake of the new host — its 'prepared'
+      // queue (any no-wake/FIFO-gated delivery parked while the rotation was in
+      // flight) drains FIFO head-first. DEFENSIVE (the busDeliverToHost success
+      // seam above already fires for the delivered handoff via the engine's
+      // `onDelivered`; this covers the rotation-only path where the successor
+      // had NO direct delivery through the engine — e.g. a handoff landed
+      // before the engine wired the hook) + fire-and-forget + non-fatal (the
+      // drain no-ops on an empty queue).
+      fireQueueDrain(wake.newHostId)
       ctx.logger.info?.(`[deepartments] rotation wake: delivered to the new host ${wake.newHostId} (record ${record.id}; session ${wake.newSessionId} started its first turn)`)
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] rotation wake failed (non-fatal — the rotation already committed; a later external wake or boot resumes the host): ${error instanceof Error ? error.message : String(error)}`)
@@ -2350,22 +2426,33 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       // FALLBACK engine (R6 parity — the composed dshd-core engine receives
       // the same closure via the holder; ABSENT in a minimal register → the
       // pre-batch gate behavior, the safe default).
-      recipientRunningLive: recipientRunningLiveForGate
+      recipientRunningLive: recipientRunningLiveForGate,
+      // FB-132 (wake-on-delivered 2026-09-06): the landed-delivery wake hook —
+      // the in-bundle FALLBACK engine fires it on a delivered/resumed delivery
+      // AFTER the final sidecar mark (the composed dshd-core engine receives it
+      // via the `deepartments.deliverDeps` holder — R6 parity); it drains the
+      // recipient's 'prepared' queue fire-and-forget (non-fatal, capped).
+      onDelivered: (recipientId: string) => fireQueueDrain(recipientId)
     })
   })()
 
   /** B3 (m-361): whether a CATALOG recipient is DORMANT — its durable entry
    * (posts.json `byPost` OR hosts.json `hosts`) carries a `sleepEpoch` mark
    * (deliberately asleep by a sleep directive; its pending queue drains at its
-   * next real wake). A child-route / unknown recipient has NO catalog entry →
-   * never dormant (a transient subagent or unknown id is never no-waked by B3).
-   * Used by send_message to no-wake ONLY the ack to a just-slept head — the
-   * m-361 regression where a QD ack re-woke a head that had just dept_slept. */
+   * next real wake). A RETIRED entry is NEVER dormant: its `sleepEpoch` is STALE
+   * metadata («drains at its next real wake» is a dead end under a retired id —
+   * a retired post/host is never woken again), so the B3 re-drive park must not
+   * hold a 'prepared' pair forever when the ENTRY'S OWN id is retired (the
+   * retired-HOST re-route — F-3 — needs drivePair to reach the deliver seam).
+   * A child-route / unknown recipient has NO catalog entry → never dormant (a
+   * transient subagent or unknown id is never no-waked by B3). Used by
+   * send_message to no-wake ONLY the ack to a just-slept head — the m-361
+   * regression where a QD ack re-woke a head that had just dept_slept. */
   const isDormantRecipient = (recipientId: string): boolean => {
     const post = byPost.get(recipientId)
-    if (post !== void 0) return post.sleepEpoch !== void 0
+    if (post !== void 0) return post.retired !== true && post.sleepEpoch !== void 0
     const host = hosts.get(recipientId)
-    return host !== void 0 && host.sleepEpoch !== void 0
+    return host !== void 0 && host.retired !== true && host.sleepEpoch !== void 0
   }
 
   /** B3 gap fix (reviewer B2 note a): with the board gone, the host's

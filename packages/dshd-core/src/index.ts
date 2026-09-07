@@ -769,7 +769,13 @@ function buildDeliverLazy(ctx: Context, deliverDeps: DepsHolder<Partial<Delivery
     // verbatim from the bundle's bucket-(c) holder (`deepartments.deliverDeps`
     // register — the orchestration provides `recipientRunningLive` there).
     // ABSENT → the engine keeps the pre-batch gate behavior (the safe default).
-    ...(bound.recipientRunningLive !== undefined ? { recipientRunningLive: bound.recipientRunningLive } : {})
+    ...(bound.recipientRunningLive !== undefined ? { recipientRunningLive: bound.recipientRunningLive } : {}),
+    // FB-132 (wake-on-delivered 2026-09-06): the landed-delivery wake hook —
+    // forwarded from the bundle (the drain-on-wake transport: the orchestration
+    // wires `onDelivered` → fireQueueDrain → drainRecipientQueue at the tools
+    // factory register). OPTIONAL: absent → the engine fires nothing (a minimal
+    // composition keeps the delivery byte-identical).
+    ...(bound.onDelivered !== undefined ? { onDelivered: bound.onDelivered } : {})
   })
 }
 

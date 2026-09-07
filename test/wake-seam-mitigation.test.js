@@ -534,7 +534,7 @@ async function withBootedOrg(fn) {
   })
 }
 
-test('P1-EXT-EXT (A tool-level): an ALWAYS-WAKE to a DORMANT worker behind an earlier \'prepared\' head MATERIALIZES it (\'resumed\') in seq order; the SAME worker LIVE behind the SAME NO-WAKE head is NO LONGER gated (\'resumed\' — the m-2415 no-wake-head discriminator: the ALWAYS-WAKE is the real wake, the no-wake head never blocks) AND the no-wake head STAYS durable; the CRASH-CLASS control (a LIVE worker behind a non-noWake prepared head) is STILL gated (\'prepared (fifo-gated)\' — fb-117 intact)', async () => {
+test('P1-EXT-EXT (A tool-level, RE-BASED 2026-09-07 over the FB-132 WAKE-ON-DELIVERED drain): an ALWAYS-WAKE to a DORMANT worker behind an earlier \'prepared\' head MATERIALIZES it (\'resumed\') in seq order; the DRAIN-ON-WAKE then consumes the NO-WAKE head AT THE REAL WAKE (delivered — the no-wake-until-wake R5 contract: the no-wake head drains WITH the wake, in seq order, never blocks); the SAME worker LIVE with the queue EMPTY is NOT gated — the ALWAYS-WAKE delivers (\'delivered\'); the CRASH-CLASS control (a LIVE worker behind a non-noWake prepared head) is STILL gated (\'prepared (fifo-gated)\' — the discriminator + fb-117 live ordering intact for the crash class; the no-wake-head discriminator itself is covered deterministically at the ENGINE level: tests (a)/(c)/(d)/(e) of this file)', async () => {
   await withBootedOrg(async ({ stateDir, env, head, headCtx, spawn, signal }) => {
     const workerId = spawn.workerId
     const send = (extra) => headCtx.ctx.tools.get('send_message', headCtx.key).execute({ to: [workerId], text: `wake-seam probe ${JSON.stringify(extra)}`, ...extra }, { agent: head, signal })
@@ -560,21 +560,29 @@ test('P1-EXT-EXT (A tool-level): an ALWAYS-WAKE to a DORMANT worker behind an ea
     const records = durableText.trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.to.includes(workerId))
     assert.equal(records[records.length - 2].seq < records[records.length - 1].seq, true, 'A-tool(3): the durable queue is FIFO — the earlier head (seq n) sits BEFORE the wake message (seq n+1) in the store')
     assert.equal(records[records.length - 1].to[0], workerId, 'A-tool(3): the wake message addresses the worker')
-    // (4) P1-EXT-EXT (m-2415 discriminator) — the SAME worker now LIVE
-    // (materialized again) behind the STILL-PENDING NO-WAKE head: a further
-    // ALWAYS-WAKE is NOT gated — it DELIVERS ('delivered' — the splice into the
-    // live inbox) because the gating head is a no-wake row (a deliberate
-    // no-wake-until-wake send never blocks the real wake — the P0 host-freeze
-    // fix); AND the no-wake head STAYS durable ('prepared' + noWake flag — the
-    // discriminator never touches it).
+    // (3.5) FB-132 DRAIN-ON-WAKE — the step-3 REAL wake fired the engine's
+    // `onDelivered` hook → `drainRecipientQueue(workerId)` → the parked NO-WAKE
+    // head DRAINS (re-driven noWake:false — the recipient is ALIVE, the
+    // no-wake-until-wake contract is fulfilled AT the real wake: the no-wake
+    // head drena CON el wake, nunca lo bloquea — m-2415, R5). Wait for the
+    // drain's final mark so the state is deterministic.
+    await waitFor(async () => {
+      const deliveriesText = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
+      const deliveriesRows = parseDeliveryRows(deliveriesText)
+      const headRows = deliveriesRows.filter((r) => r.recipientId === workerId && r.messageId === noWakeRes.messageId)
+      const latest = headRows[headRows.length - 1]
+      return latest !== undefined && latest.status === 'delivered'
+    }, 8000, 'the real wake drains the parked no-wake head (delivered — the drain-on-wake contract)')
+    const afterDrainRows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+    const afterDrainHead = afterDrainRows.filter((r) => r.recipientId === workerId && r.messageId === noWakeRes.messageId)
+    assert.equal(afterDrainHead[afterDrainHead.length - 1].status, 'delivered', 'A-tool(3.5): the no-wake head DRAINED AT THE REAL WAKE (delivered — never a frozen \'prepared\'; the m-1933/m-2415 class is closed by the drain)')
+    assert.ok((env.agents.get(spawn.sessionId)?.inboxMessages ?? []).map((m) => (Array.isArray(m?.content) ? m.content.map((c) => c.text ?? '').join(' ') : JSON.stringify(m))).some((t) => t.includes('wake-seam probe {"noWake":true}')), 'A-tool(3.5): the no-wake head TEXT landed in the worker inbox (the drain delivered the parked no-wake message — the no-wake-until-wake contract at the real wake)')
+    // (4) The SAME worker now LIVE with a DRAINED (empty) queue: the following
+    // ALWAYS-WAKE is NOT gated (nothing pending — the no-wake head already
+    // drained with the wake) → it DELIVERS ('delivered' — the live splice).
     const liveWake = await send({})
-    assert.equal(liveWake.delivered[workerId], 'delivered', `A-tool(4): the LIVE worker behind the NO-WAKE head is NOT gated — the ALWAYS-WAKE delivers (delivered — the live splice) (got "${liveWake.delivered[workerId]}") — the m-2415 no-wake-head discriminator`)
-    await waitFor(() => (env.agents.get(spawn.sessionId)?.inboxMessages ?? []).length >= 2, 8000, 'the live wake spliced into the live inbox (the resume created a FRESH agent — its inbox holds the step-3 wake splice + the step-4 live-wake splice; the spawn-time baseline inbox was discarded at resume)')
-    const deliveriesText = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
-    const deliveriesRows = parseDeliveryRows(deliveriesText)
-    const headRows = deliveriesRows.filter((r) => r.recipientId === workerId && r.messageId === noWakeRes.messageId)
-    assert.equal(headRows[headRows.length - 1].status, 'prepared', 'A-tool(4): the no-wake head STAYS durable (\'prepared\' — the discriminator never settles/consumes it; it drains with the wake in seq order)')
-    assert.equal(headRows[headRows.length - 1].noWake, true, 'A-tool(4): the no-wake head STAYS marked no-wake (the m-707 flag is preserved)')
+    assert.equal(liveWake.delivered[workerId], 'delivered', `A-tool(4): the LIVE worker with an EMPTY drained queue is NOT gated — the ALWAYS-WAKE delivers (delivered — the live splice) (got "${liveWake.delivered[workerId]}") — the wake-seam + drain-on-wake combo (the discriminator for a STILL-PENDING no-wake head is covered at the engine level: tests (a)/(c)/(d)/(e))`)
+    await waitFor(() => (env.agents.get(spawn.sessionId)?.inboxMessages ?? []).length >= 2, 8000, 'the live wake spliced into the live inbox (the resume created a FRESH agent — its inbox holds the step-3 wake splice + the drain\'s head splice + the step-4 live-wake splice; the spawn-time baseline inbox was discarded at resume)')
     // (5) CRASH-CLASS CONTROL (fb-117 intact) — a SECOND worker with a FRESH
     // queue: a LIVE recipient behind a CRASH-CLASS (non-noWake) prepared head is
     // STILL gated ('prepared (fifo-gated tras m-<seq>)' — the discriminator
