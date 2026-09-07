@@ -145,6 +145,14 @@ export interface HealthConfig {
    * (default 15 min): the dispatch pre-check blocks ONLY on a FRESH rotation;
    * a STALE 429→null rotation never re-arms the gate. */
   rotationStaleMs?: number
+  /** m-2333 (owner 2026-09-06) — the HALT weekly-available threshold (default
+   * 20): with EXACTLY ONE usable key, 100 − usageWeekly.percent < this → the
+   * only total-pause condition. */
+  haltWeeklyAvailablePercent?: number
+  /** m-2333 (owner 2026-09-06) — the HALT monthly-available threshold (default
+   * 10): with EXACTLY ONE usable key, 100 − usageMonthly.percent < this → the
+   * only total-pause condition. */
+  haltMonthlyAvailablePercent?: number
   poolerCapacityEnabled?: boolean
   poolerStateFilePath?: string
   workRegisterPath?: string

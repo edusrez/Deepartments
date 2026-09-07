@@ -50,9 +50,9 @@ import { readLlmPiAiProviderSettings, resolveReasoningContentPreflight } from 'd
 import {
   POOLER_STATE_FILE,
   resolvePoolerDispatchBlock,
-  POOLER_CAPACITY_DEFAULT_HIGH_PERCENT,
   POOLER_CAPACITY_DEFAULT_STATE_STALE_MS,
-  POOLER_CAPACITY_DEFAULT_ROTATION_STALE_MS,
+  POOLER_CAPACITY_DEFAULT_GLOBAL_REMAINING_PERCENT,
+  POOLER_CAPACITY_DEFAULT_WEEKLY_REMAINING_PERCENT,
   resolvePositiveKnob
 } from 'dshd-health'
 import { sanitizePromptLiterals } from 'dshd-core'
@@ -355,7 +355,8 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     return verdict.ok ? undefined : verdict.reason
   }
 
-  /** DISPATCH-HARDENING (QH — the «429-primer-call» class, 2026-08-28): the
+  /** DISPATCH-HARDENING (QH — the «429-primer-call» class, 2026-08-28;
+   * re-graded m-2333, owner 2026-09-06 — «MÁXIMA MÁQUINA CON HALT»): the
    * POOLER-CAPACITY DISPATCH PRE-CHECK (the BEFORE half — the AFTER half is
    * the b5-ghost live-post guard). The SAME dispatch seam as fb-9 (the 3+1:
    * runJobForDepartment / spawnWorkerForDepartment / dept_post_create / the
@@ -363,27 +364,36 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
    * `keyPooler-state.json` SOLO-LECTURA (the same reader the M1 watchdog uses;
    * the path is `health.poolerStateFilePath` when set, else
    * `<DSH_HOME>/keyPooler-state.json` — the M1 wiring) and, when the snapshot
-   * CERTAINS that no workspace can serve the spawn's FIRST call (zero usable
-   * keys, every usable key at/above `health.highPercent`, or a last 429
-   * usage-limit rotation to no key — the 503 prelude), returns the CLEAR EARLY
-   * error the dispatch seam throws BEFORE any materialization — the expensive
-   * primer-call 429/503 (a freshly spawned worker dying on its very first LLM
-   * turn) never happens. CONSERVATIVE — a warning, never a blocker: absent /
-   * unreadable / STALE state → undefined (passthrough, unknown ≠ exhausted);
-   * the `health.poolerDispatchEnabled: false` knob restores the pre-check-less
-   * dispatch (the M1 poolerCapacityEnabled pattern). */
+   * CERTAINS the m-2333 HALT condition (EXACTLY ONE usable key — «Disponible»
+   * = 100 − %consumido — with weekly available < `haltWeeklyAvailablePercent`
+   * (20) OR monthly available < `haltMonthlyAvailablePercent` (10)) — or the
+   * CERTAIN 0-usable outage — returns the CLEAR EARLY error the dispatch seam
+   * throws BEFORE any materialization; the expensive primer-call 429/503 (a
+   * freshly spawned worker dying on its very first LLM turn) never happens.
+   * DEFAULT = run free («máxima máquina»): every intermediate brake of the
+   * previous policy (every usable key ≥ highPercent; the 429→null rotation
+   * prelude) is REMOVED — the pre-check passes otherwise. CONSERVATIVE:
+   * absent / unreadable / STALE state → undefined (passthrough, unknown ≠
+   * exhausted); the `health.poolerDispatchEnabled: false` knob restores the
+   * pre-check-less dispatch (the M1 poolerCapacityEnabled pattern). */
   const workerPoolerDispatchBlockError = (): string | undefined => {
     if (config.health?.poolerDispatchEnabled === false) return undefined
     const poolerStatePath = config.health?.poolerStateFilePath !== undefined && config.health.poolerStateFilePath.trim() !== ''
       ? config.health.poolerStateFilePath
       : path.join(dshHome(), POOLER_STATE_FILE)
+    // m-2333 (owner 2026-09-06 — «MÁXIMA MÁQUINA CON HALT»): the pre-check is
+    // the ONLY runtime pool gate — the HALT condition (eligibleKeys==1 AND
+    // weekly available < 20 OR monthly available < 10) + the CERTAIN 0-usable
+    // outage. The previous intermediate brakes (highPercent quota, the 429→null
+    // rotation prelude) are REMOVED — the default is run free («máxima
+    // máquina»).
     const block = resolvePoolerDispatchBlock(
       poolerStatePath,
       Date.now(),
       {
-        highPercent: resolvePositiveKnob(config.health?.highPercent, POOLER_CAPACITY_DEFAULT_HIGH_PERCENT),
         stateStaleMs: resolvePositiveKnob(config.health?.stateStaleMs, POOLER_CAPACITY_DEFAULT_STATE_STALE_MS),
-        rotationStaleMs: resolvePositiveKnob(config.health?.rotationStaleMs, POOLER_CAPACITY_DEFAULT_ROTATION_STALE_MS)
+        haltWeeklyAvailablePercent: resolvePositiveKnob(config.health?.haltWeeklyAvailablePercent, POOLER_CAPACITY_DEFAULT_GLOBAL_REMAINING_PERCENT),
+        haltMonthlyAvailablePercent: resolvePositiveKnob(config.health?.haltMonthlyAvailablePercent, POOLER_CAPACITY_DEFAULT_WEEKLY_REMAINING_PERCENT)
       },
       ctx.logger
     )
