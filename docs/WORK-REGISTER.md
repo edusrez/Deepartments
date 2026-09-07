@@ -47,6 +47,27 @@
 > fb-58 recidiva doble (F-3: m-424/425/429 'prepared' x2 post-retirement,
 > settle sidecar sin implementar); rotación host m-423 PARTIAL (archive corto
 > ~85 líneas, m-426 delivered post-retirement).
+> **LANDING 2026-09-07-VALLE (host 1662eecf; owner ausente con autonomía
+> total; detalle: ROADMAP 09-07-VALLE + journal host-session-1662eecf)** —
+> **BATCH-DRAIN DE MENSAJES APROBADO por el owner (drain-on-settle puro: al
+> cerrar un turno la siguiente wake entrega TODA la cola pendiente; interrupt
+> preempta y su wake trae el interruptor + todo lo pendiente; clases noWake/ack
+> del wake-seam intactas; emergencias health-alert/franja SIN batching; idle:
+> primer mensaje despierta, el resto en lote)** → misión PROGRAMMING REQUEST al
+> IPD despachada (m-2563, prioridad ALTA; zona dshd-orchestration = la del
+> wake-seam; secuenciar tras B3) · **B3 VERIFICADO ACTIVO por el host**
+> (wrapper `recipientDormantForRedeliver` en lib/tools.js:4917/4936/4950/5563
+> del core que carga el daemon — perfil dev enlaza el worktree; mirror src
+> tools.ts:5623/5640/5655/6259; la alarma inicial «0 hits» = typo de grafía
+> Dormand↔Dormant en el reporte del IPH + launcher-cáscara; SIN restart
+> adicional por B3, activo desde boot debc67ec 10:14Z) · pooler /v1/models 200
+> live ✓ · pool 4 keys sin billingBlocked · keyPooler-state.json STALE desde
+> 03:58Z (pre-fix) con oc-15 usage 401 y usage% UNKNOWN en archivo →
+> MONITOREO (lane A en vivo; verificar reescritura del archivo) · cola activa
+> VALLE: gate salud pool pre-dispatch (fb-39/75 PRIORIDAD) · flujo-feedback IPD
+> · O2 emitter · fb-198 T1-T4 · atribución restarts (fb-43) · re-triage CORTE
+> #2 · QH b5 (50%) rotación en decisión (m-2542) · RD brief 09-07 en curso
+> (daily-ai-news-8).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
