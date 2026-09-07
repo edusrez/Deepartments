@@ -3531,6 +3531,37 @@ export interface PoolerRotationLike {
   message?: string
 }
 
+/** O1 (VALLE 09-07 — the pool-health gate pre-dispatch, fb-39/fb-75/P4): the
+ * pooler's POOL-WIDE DURABLE fail-stop records that ride the SAME
+ * keyPooler-state.json snapshot as the keys. STRUCTURAL mirrors of
+ * dsh-key-pooler `PoolHalt` (pool.ts:187-192 — the official-channel halt
+ * mirror, reason `'ds-official-insufficient-balance'`) and `BillingDownRecord`
+ * (pool.ts:214-238 — fb-75, the pool-wide «sin crédito/saldo» verdict).
+ * Fields optional by mirror convention (readPoolerStateFile casts blindly —
+ * the GATE only reads; the pooler owns every write). */
+export interface PoolerHaltLike {
+  /** ISO timestamp the halt was set. */
+  at?: string
+  /** Machine-readable class ('ds-official-insufficient-balance'). */
+  reason?: string
+}
+
+/** O1 — fb-75 the pool-wide BILLING fail-stop record (see PoolerHaltLike). */
+export interface PoolerBillingDownLike {
+  /** ISO timestamp the billing-down state was last asserted. */
+  at?: string
+  /** Machine-readable dominant cause: 'all-keys-billing' | 'billing-dominant'
+   * | 'official-insufficient-balance' (the pooler's BillingDownRecord union). */
+  cause?: string
+  /** Human-readable one-line diagnosis (per-key evidence + recovery hint). */
+  message?: string
+  /** Recovery expectation: 'none' (top-up / manual) | 'resetsAt' (a natural
+   * reset horizon exists). */
+  recovery?: string
+  /** The recovery horizon ISO (present when recovery === 'resetsAt'). */
+  resetsAt?: string
+}
+
 /** The pooler snapshot — STRUCTURAL mirror of dsh-key-pooler PoolSnapshot
  * (pool.ts:71-93). */
 export interface PoolerSnapshotLike {
@@ -3540,6 +3571,20 @@ export interface PoolerSnapshotLike {
   updatedAt?: string
   keys?: Record<string, PoolerKeyStateLike>
   lastRotation?: PoolerRotationLike | null
+  /** O1 (VALLE 09-07 — fb-75): the pooler's durable BILLING health-gate record
+   * («sin crédito/saldo — the org should FAIL-STOP»). The pooler ALWAYS
+   * persists the field on a written snapshot — null when the pool is NOT
+   * billing-down (pool.ts:1064-1067) — so absent OR null reads healthy. A
+   * non-null record is a DURABLE verdict: it does NOT age (cleared only when
+   * credit returns — an eligible key / a real probe 200), which is why the
+   * dispatch gate checks it BEFORE the stale early-return. */
+  billingDown?: PoolerBillingDownLike | null
+  /** O1 (VALLE 09-07 — P4): the pooler's durable mirror of the OFFICIAL-channel
+   * halt (ds-official insufficient balance — the pooler's PoolSnapshot.halted,
+   * written ONLY while the channel is halted and deleted when lifted,
+   * proxy.ts:843-850). Absent OR null reads not-halted; a non-null record is
+   * the durable fail-stop (same no-age treatment as billingDown). */
+  halted?: PoolerHaltLike | null
 }
 
 /** Read the pooler's `keyPooler-state.json` snapshot. Absent / unreadable /
@@ -3791,9 +3836,11 @@ export interface PoolerDispatchBlockResult {
 }
 
 /** Resolve the pooler-capacity dispatch pre-check for ONE dispatch: read the
- * pooler snapshot and return a block verdict ONLY on the m-2333 HALT condition
- * (or the CERTAIN 0-usable outage), or `undefined` (passthrough — the dispatch
- * proceeds; «máxima máquina» default) otherwise. Never throws.
+ * pooler snapshot and return a block verdict ONLY on a CERTAIN pool-wide
+ * fail-stop signal — the O1 DURABLE records (`billingDown` fb-75 / `halted`
+ * P4), the m-2333 HALT condition, or the CERTAIN 0-usable outage — or
+ * `undefined` (passthrough — the dispatch proceeds; «máxima máquina» default)
+ * otherwise. Never throws.
  *
  * m-2333 (owner 2026-09-06 — «MÁXIMA MÁQUINA CON HALT»): this is the ONLY
  * runtime pool gate. DEFAULT = run free — every intermediate brake of the
@@ -3809,7 +3856,19 @@ export interface PoolerDispatchBlockResult {
  * reads, NOT the `/__keypool/status` `usage` block, lane A not deployed). A
  * missing percent is UNKNOWN → never a halt trigger. The CERTAIN 0-usable
  * outage keeps blocking (no service at all — the owner's «espera hasta (a) el
- * owner añade keys»), as does an all-billing-blocked pool (near-permanent).
+ * owner añade keys»).
+ * O1 (VALLE 09-07 — the gap fb-39/fb-75 never landed): the two POOL-WIDE
+ * durable records the pooler persists on the SAME snapshot — `billingDown`
+ * (fb-75, «sin crédito/saldo» — no key usable by a billing cause) and
+ * `halted` (P4, the ds-official insufficient-balance FAIL-STOP mirror) — are
+ * checked BEFORE every freshness/availability branch (the STALE-DURABLE
+ * exception, precedente: the all-billing-blocked scan branch): a durable
+ * verdict does NOT age (the pooler clears it ONLY on real recovery — an
+ * eligible key, a probe 200, the manual SIGHUP / POST /__keypool/revalidate
+ * re-check), so a stale snapshot that carries one is STILL a fail-stop pool.
+ * A null/absent record (the healthy pooler shape) never blocks. The pool-wide
+ * reason names the class the per-key branches cannot see (the billing record
+ * carries the recovery horizon for the host digest without reading the state).
  * `knobs.stateStaleMs` (default 10 min = the M1 default) is the freshness
  * window — STALE state is UNKNOWN → passthrough + a logger warn naming the age
  * (the M1 dead-man's-switch rule: the pooler writes the file only on health
@@ -3823,6 +3882,44 @@ export function resolvePoolerDispatchBlock(
 ): PoolerDispatchBlockResult | undefined {
   const state = readPoolerStateFile(statePath)
   if (state === undefined) return undefined
+  // O1 (VALLE 09-07 — the fb-39/fb-75 gap): the pooler's POOL-WIDE DURABLE
+  // fail-stop records. Branch C = `billingDown` (fb-75 — «sin crédito/saldo»,
+  // no key usable by a billing/no-credit cause); branch D = `halted` (P4 — the
+  // ds-official insufficient-balance FAIL-STOP mirror). Both are checked HERE,
+  // BEFORE the stale early-return below — the STALE-DURABLE exception
+  // (precedente: the scan's all-billing-blocked branch runs ahead of its stale
+  // return too): these records do NOT age by design (the pooler clears them
+  // ONLY on real recovery — an eligible key, a real probe 200, the manual
+  // SIGHUP / POST /__keypool/revalidate re-check — never by time), so a STALE
+  // snapshot that carries one is STILL a fail-stop pool (a quiet grid that
+  // stopped writing BECAUSE everything is dry). A null/absent record — the
+  // healthy pooler shape (toState ALWAYS writes billingDown: null when not
+  // down; halted is deleted when lifted) — never blocks. The messages keep a
+  // STABLE branch prefix for triage + the pooler's own record fields (the
+  // billing message carries the recovery horizon — the host digests it without
+  // reading the state file).
+  if (state.billingDown != null && typeof state.billingDown === 'object') {
+    const bd = state.billingDown
+    return {
+      reason:
+        `pool: billingDown — ${typeof bd.cause === 'string' && bd.cause !== '' ? bd.cause : 'billing'}: ` +
+        `${typeof bd.message === 'string' && bd.message !== '' ? bd.message : 'no usable key by a billing/no-credit cause — the org should fail-stop'}`
+    }
+  }
+  if (state.halted != null && typeof state.halted === 'object') {
+    const haltReason = typeof state.halted.reason === 'string' ? state.halted.reason : ''
+    // The pooler's PoolHalt reason is the single documented class
+    // 'ds-official-insufficient-balance' (proxy.ts:846); the label maps it to
+    // the human fail-stop phrase and falls back to the raw reason verbatim for
+    // any future class (never invent a label for an unknown reason).
+    const label = haltReason === 'ds-official-insufficient-balance'
+      ? 'insufficient balance'
+      : (haltReason !== '' ? haltReason : 'pooler halt')
+    return {
+      reason:
+        `pool: ds-official HALTED (${label}) — dispatch delayed; retry when the pooler lifts the halt (SIGHUP / POST /__keypool/revalidate after top-up)`
+    }
+  }
   const updatedMs = state.updatedAt !== undefined ? Date.parse(state.updatedAt) : Number.NaN
   if (!Number.isFinite(updatedMs) || nowMs - updatedMs > knobs.stateStaleMs) {
     const ageMin = Number.isFinite(updatedMs) ? Math.round((nowMs - updatedMs) / 60000) : Number.NaN

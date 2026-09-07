@@ -16355,14 +16355,20 @@ test('fb-9 RESUME SEAM zero-regression (acceptance 7 — materializePost): a dor
 // ===========================================================================
 
 /** Write a FRESH pooler snapshot to a fixture path. `keys` maps keyId →
- * {workspace, invalid?, blockedUntil?, cooldownUntil?, lastUsage?}. */
-async function writePoolerFixture(stateDir, keys, { fresh = true, lastRotation = null, updatedAtMs = Date.now() } = {}) {
+ * {workspace, invalid?, blockedUntil?, cooldownUntil?, lastUsage?}. O1: the
+ * pool-wide durable records (`billingDown` fb-75 / `halted` P4) are written
+ * ONLY when given — an explicit null writes null (the healthy pooler shape),
+ * undefined leaves the field absent. */
+async function writePoolerFixture(stateDir, keys, { fresh = true, lastRotation = null, updatedAtMs = Date.now(), billingDown, halted } = {}) {
   const p = path.join(stateDir, POOLER_STATE_FILE)
-  await writeFile(p, JSON.stringify({
+  const snapshot = {
     updatedAt: fresh ? new Date(updatedAtMs).toISOString() : new Date(updatedAtMs - 11 * 60_000).toISOString(),
     keys,
     lastRotation
-  }, null, 2), 'utf8')
+  }
+  if (billingDown !== undefined) snapshot.billingDown = billingDown
+  if (halted !== undefined) snapshot.halted = halted
+  await writeFile(p, JSON.stringify(snapshot, null, 2), 'utf8')
   return p
 }
 
@@ -16490,6 +16496,109 @@ test('DISPATCH-HARDENING (acceptance 2 — the RESUME seam + the healthy/passthr
     try {
       const { result } = await f3Spawn({ agents, root }, headCtx, key, head, { role: 'researcher', task: 'dispatch pre-check disabled — spawn normal' })
       assert.ok(agents.createCalls.some((c) => String(c.sessionId) === result.sessionId), 'poolerDispatchEnabled:false → the exhausted fixture does NOT block (explicit opt-out)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+// --- O1 (VALLE 09-07 — the pool-health gate pre-dispatch, fb-39/fb-75/P4) ---
+// Acceptance 3: the POOL-WIDE DURABLE records the pooler persists on the SAME
+// keyPooler-state.json snapshot (`billingDown` — fb-75 «sin crédito/saldo» —
+// and `halted` — P4 ds-official insufficient-balance mirror) now BLOCK the
+// dispatch seams LOUDLY and EARLY, like the exhaustion fixtures above: 0
+// agents.create, 0 durable posts — nothing materializes; and when the record
+// CLEARS (the pooler recovered — an eligible key / top-up), the SAME boot
+// re-reads the snapshot per dispatch and the dispatch proceeds NORMALLY (the
+// DEFER is not a kill: jobs are re-evaluated, never lost — fb-154 semantics).
+test('O1 pool-health gate (acceptance 3 — the DURABLE pool-wide records on the REAL loader): a `billingDown` fixture rejects dept_worker_spawn + dept_job_run with the stable «pool: billingDown — …» EARLY error (0 workers created, 0 durable posts); a `halted` fixture rejects with «pool: ds-official HALTED (insufficient balance) — …»; CLEARING the record on the SAME boot (billingDown → null) makes the SAME dispatch spawn NORMALLY (the gate re-reads per dispatch)', async () => {
+  // (a) billingDown fixture → dept_worker_spawn rejects LOUDLY and EARLY
+  // (before any materialization) with the branch-C reason.
+  await withTempStateDir(async (stateDir) => {
+    await writePoolerFixture(stateDir, {
+      'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: 0, cooldownUntil: 0, usageWeekly: { status: 'ok', percent: 10, resetsAt: new Date(Date.now() + 7 * 86400_000).toISOString() }, usageMonthly: { status: 'ok', percent: 20, resetsAt: new Date(Date.now() + 30 * 86400_000).toISOString() } }
+    }, {
+      billingDown: { at: new Date().toISOString(), cause: 'official-insufficient-balance', message: 'billing gate: NO eligible key — the pool is dry by billing/no-credit cause (oc-6(billingBlocked)) — recovery: manual top-up (no automatic reset)', recovery: 'none' }
+    })
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { health: { poolerStateFilePath: path.join(stateDir, POOLER_STATE_FILE), poolerDispatchEnabled: true } })
+    try {
+      const signal = new AbortController().signal
+      await assert.rejects(
+        () => headCtx.tools.get('dept_worker_spawn', key).execute({ role: 'researcher', task: 'blocked by the pool-wide billing gate' }, { agent: head, signal }),
+        /\[deepartments\] pool: billingDown — official-insufficient-balance: billing gate: NO eligible key — the pool is dry by billing\/no-credit cause \(oc-6\(billingBlocked\)\) — recovery: manual top-up \(no automatic reset\)$/,
+        'dept_worker_spawn rejects with the branch-C billingDown EARLY error (even with an ELIGIBLE key — the pool-wide verdict blocks)'
+      )
+      // BEFORE materializing: NO worker agent created + NO durable worker post.
+      assert.equal(agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-')), false, 'no worker agent was created (the billingDown pre-check fires BEFORE agents.create)')
+      const posts = await readPosts(stateDir)
+      assert.equal(Object.values(posts).some((p0) => p0.provider === 'worker'), false, 'no durable worker post was registered (nothing materializes under the billing gate)')
+    } finally {
+      await dispose()
+    }
+  })
+  // (b) The SHARED job engine (runJobForDepartment) is guarded the same way.
+  await withTempStateDir(async (stateDir) => {
+    await writePoolerFixture(stateDir, {
+      'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: 0, cooldownUntil: 0 }
+    }, {
+      billingDown: { at: new Date().toISOString(), cause: 'all-keys-billing', message: 'billing gate: NO eligible key — the pool is dry by billing/no-credit cause (ALL key(s): oc-6(billingBlocked)) — recovery: manual top-up (no automatic reset)', recovery: 'none' }
+    })
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { health: { poolerStateFilePath: path.join(stateDir, POOLER_STATE_FILE), poolerDispatchEnabled: true } })
+    try {
+      const signal = new AbortController().signal
+      await assert.rejects(
+        () => headCtx.tools.get('dept_job_run', key).execute({ jobId: 'monitor-dsh-updates' }, { agent: head, signal }),
+        /\[deepartments\] pool: billingDown — all-keys-billing: billing gate: NO eligible key/,
+        'dept_job_run rejects with the SAME billingDown EARLY error (runJobForDepartment — the shared job engine; the scheduler tick captures the throw → onAutoRunSkip → the job re-evaluates on the next tick, never lost)'
+      )
+      assert.equal(agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-')), false, 'no job worker was created (the rejection precedes agents.create)')
+    } finally {
+      await dispose()
+    }
+  })
+  // (c) halted fixture → the branch-D reason (P4 ds-official fail-stop mirror).
+  await withTempStateDir(async (stateDir) => {
+    await writePoolerFixture(stateDir, {
+      'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: 0, cooldownUntil: 0 }
+    }, {
+      halted: { at: new Date().toISOString(), reason: 'ds-official-insufficient-balance' }
+    })
+    const { agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { health: { poolerStateFilePath: path.join(stateDir, POOLER_STATE_FILE), poolerDispatchEnabled: true } })
+    try {
+      const signal = new AbortController().signal
+      await assert.rejects(
+        () => headCtx.tools.get('dept_worker_spawn', key).execute({ role: 'researcher', task: 'blocked by the official-channel halt' }, { agent: head, signal }),
+        /\[deepartments\] pool: ds-official HALTED \(insufficient balance\) — dispatch delayed; retry when the pooler lifts the halt \(SIGHUP \/ POST \/__keypool\/revalidate after top-up\)$/,
+        'dept_worker_spawn rejects with the branch-D halted EARLY error (the P4 fail-stop mirror)'
+      )
+      assert.equal(agents.createCalls.some((c) => String(c.sessionId).startsWith('worker-')), false, 'no worker agent was created under the halted fixture')
+    } finally {
+      await dispose()
+    }
+  })
+  // (d) RECOVERY on the SAME boot: the pooler clears the record (credit back —
+  // billingDown → null, the healthy write) → the SAME dispatch seam spawns
+  // NORMALLY (the gate re-reads the snapshot per dispatch — defer, not kill).
+  await withTempStateDir(async (stateDir) => {
+    await writePoolerFixture(stateDir, {
+      'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: 0, cooldownUntil: 0, usageWeekly: { status: 'ok', percent: 10, resetsAt: new Date(Date.now() + 7 * 86400_000).toISOString() }, usageMonthly: { status: 'ok', percent: 20, resetsAt: new Date(Date.now() + 30 * 86400_000).toISOString() } }
+    }, {
+      billingDown: { at: new Date().toISOString(), cause: 'official-insufficient-balance', message: 'billing gate: NO eligible key — recovery: manual top-up', recovery: 'none' }
+    })
+    const { root, agents, head, headCtx, key, dispose } = await bootWithHead(stateDir, { health: { poolerStateFilePath: path.join(stateDir, POOLER_STATE_FILE), poolerDispatchEnabled: true } })
+    try {
+      const signal = new AbortController().signal
+      await assert.rejects(
+        () => headCtx.tools.get('dept_worker_spawn', key).execute({ role: 'researcher', task: 'deferred under the billing gate' }, { agent: head, signal }),
+        /\[deepartments\] pool: billingDown — /,
+        'the dispatch is deferred while billingDown stands'
+      )
+      // The pooler recovered (credit back): the durable record clears to null.
+      await writePoolerFixture(stateDir, {
+        'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: 0, cooldownUntil: 0, usageWeekly: { status: 'ok', percent: 10, resetsAt: new Date(Date.now() + 7 * 86400_000).toISOString() }, usageMonthly: { status: 'ok', percent: 20, resetsAt: new Date(Date.now() + 30 * 86400_000).toISOString() } }
+      }, { billingDown: null })
+      const { result } = await f3Spawn({ agents, root }, headCtx, key, head, { role: 'researcher', task: 'pool recovered — the deferred dispatch runs' })
+      assert.ok(agents.createCalls.some((c) => String(c.sessionId) === result.sessionId), 'after the record clears (billingDown → null), the SAME boot spawns normally — the DEFER re-evaluates, the job is never lost')
     } finally {
       await dispose()
     }
