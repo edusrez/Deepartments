@@ -247,3 +247,36 @@ prevalece sobre el avance local.
 
 Referencias: §5 A4-2 (aislamiento de review en worktree + condicional para
 docs/tests puros) y §6 fb-140 (citas de reports con ruta absoluta).
+
+## 8. Glob verification rule + SOP «glob = señal, read = prueba» (fb-51/52)
+
+> Fail-loud rule (familia fb-51): un 0 de glob INESPERADO NUNCA concluye «no
+> existe» por sí solo — es una SEÑAL de verificar, no una prueba de ausencia.
+
+La herramienta `glob` puede devolver un resultado vacío/«No files found»
+SILENCIOSO con ciertos patrones aunque los archivos existan (familia fb-49:
+`**`/niveles medios; fb-52: segmento literal inicial con `path` presente, p.ej.
+`dshd-orchestration/**` o `src/*.ts` — mientras los `**`-leading o
+basename-only encuentran). Estado del matcher (verificado 2026-09-06, lane
+fb-52): el RUNTIME servido ya lleva el fix raíz del matcher —
+`anchorGlobPattern` en `@deepseek-ai/dsh-tool-fs-search` (sha256 fijado
+`02e62ca4…`/`d3940b54…`, exact-argv `--glob=**/dshd-orchestration/**` +
+2 reproducciones rg reales PASS) — y el árbol deepartments NO contiene código
+glob (external package, greps 0/5 chunks; port upstream → WORK-REGISTER §3).
+Con el matcher sano, el guard pendiente es PROCESO, no código:
+
+- **SOP «glob = señal, read = prueba»**: un glob vacío es señal, no prueba —
+  ante un 0 INESPERADO verificar SIEMPRE por vías múltiples antes de concluir
+  ausencia: (1) `read` directo del archivo/segmento esperado, (2) patrón
+  alternativo (`**`-leading, basename-only, o el segmento padre), y (3)
+  `dept_exec ls` como último recurso. Solo con ≥2 vías concordantes se concluye
+  «no existe».
+- **Regla fail-loud (fb-51)**: un 0 inesperado NO debe descartar el check real
+  (caso fb-49: checkpoint REAL diagnosticado FICTICIO por falsa negativa —
+  split+parada innecesarios). Toda verificación cita la vía usada (glob +
+  confirmación `read` directo).
+- **No confundir (registral)**: el «fb-52 guard aritmética» del batch 5ada8ac
+  es el guard de fragmento aritmético de `dept_exec` (numeración QH fb-53) —
+  OTRO guard, ya cerrado en 5ada8ac; el presente §8 es el cierre del record
+  fb-52 glob (matcher literal-first-segment), que quedó `abierto` en el backlog
+  hasta esta lane.
