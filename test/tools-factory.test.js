@@ -379,7 +379,23 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     // (the `recipientRunningLive` late seam, src/invoke.ts) and export-parity
     // 325 is unchanged (the flag is not an export).
     // md5 05c60bd1… → 511493a91a89a12e68719fd951c75342.
-    assert.equal(md5, '511493a91a89a12e68719fd951c75342', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope (md5 511493a9…)')
+    // Zone md5 RE-FROZE VALLE 09-07 (HEAD-TOOLING, 2026-09-07, 618dd70b):
+    // INTENTIONAL in-span changes of the head-tooling package — (1) the
+    // fb-216/fb-223 memo-validation DX move (the legacy R5
+    // additionalProperties mutation REMOVED — the org memo validator inside
+    // the tool definition is now the single enforcement; the post-own-layer
+    // registration became a plain register), (2) O4 title persistence in the
+    // legacy dept_post_create registerEntry (the durable worker title), (3)
+    // the fb-220 RUNNING-rejection OBSERVABILITY (headRotateRunningDiagnostics
+    // + the running-since/last-wake message tail — R8/fb-115 intact), and (4)
+    // the fb-209a dept_repo_state READ-ONLY head git-state tool (registration
+    // in the head own-layer). All four are R-tooling / persistence —
+    // observability + read-only surfaces, never a delivery-semantics change
+    // (the batch-drain envelope is byte-identical). The late getter count
+    // stays 23 (src/invoke.ts untouched — the guards/helpers are module-
+    // private, never new late seams) and export-parity 325 is unchanged.
+    // md5 511493a9… → 8decad354bb45daaca6f05e4639c298d.
+    assert.equal(md5, '8decad354bb45daaca6f05e4639c298d', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration (md5 8decad35…)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface

@@ -2379,6 +2379,129 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         }
       })))
 
+      // --- fb-209a (VALLE 09-07 — head-tooling R-tooling): dept_repo_state —
+      // the head's READ-ONLY git-state surface of the plugin repo. Registered
+      // ONLY in the head own-layer (a "head tool": the head has NO dept_exec,
+      // so the merge-manifest ceremony forced a explore-deep worker just to run
+      // `git log main..branch` — fb-209's datapoint). The tool runs `git`
+      // DIRECTLY via execFile with a FIXED read-only argv (no shell, no user
+      // command text — there is NO injection surface) against the SINGLE
+      // repoRoot. Scope is bounded: read-only by construction (branch -vv /
+      // log main..<branch> --oneline / diff --stat / worktree list), one repo,
+      // every subcommand whitelisted. NEVER writes; a git failure FAILS OPEN
+      // (the working columns are returned + the error text in `error`).
+      // ---------------------------------------------------------------------
+      const DEPT_REPO_STATE_MAX_BUFFER = 8 * 1024 * 1024
+      const DEPT_REPO_STATE_TIMEOUT_MS = 30_000
+      const DEPT_REPO_STATE_LOG_CAP = 60
+      const DEPT_REPO_STATE_DIFF_CAP = 40
+      const runRepoGit = async (args: readonly string[]): Promise<{ code: number; stdout: string; stderr: string }> => {
+        try {
+          const { stdout, stderr } = await execFileP('git', ['-C', repoRoot, ...args], {
+            cwd: repoRoot,
+            timeout: DEPT_REPO_STATE_TIMEOUT_MS,
+            maxBuffer: DEPT_REPO_STATE_MAX_BUFFER,
+            env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', LANG: process.env.LANG ?? 'C' }
+          })
+          return { code: 0, stdout, stderr }
+        } catch (error: unknown) {
+          const e = error as { code?: number; stdout?: string; stderr?: string }
+          const stdout = typeof e.stdout === 'string' ? e.stdout : ''
+          const stderr = typeof e.stderr === 'string' ? e.stderr : error instanceof Error ? error.message : String(error)
+          return { code: typeof e.code === 'number' ? e.code : 1, stdout, stderr }
+        }
+      }
+      /** Parse the CURRENT line of `git branch -vv` — `* <name> <sha> [<upstream>: ahead N, behind M]`:
+       * branch name + the bracket content (upstream + ahead/behind, when present). */
+      const parseBranchVVCurrent = (text: string): { branch: string; upstream?: string; ahead: number; behind: number } => {
+        const line = text.split('\n').find((l) => l.startsWith('* '))
+        if (line === undefined) return { branch: '', ahead: 0, behind: 0 }
+        const m = line.match(/^\*\s+(\S+)\s+\S+(\s+\[([^\]]+)\])?/)
+        const branch = m?.[1] ?? line.slice(2).split(/\s+/)[0] ?? ''
+        const bracket = m?.[3] ?? ''
+        let upstream: string | undefined
+        let ahead = 0
+        let behind = 0
+        if (bracket !== '') {
+          // `origin/main: ahead 2, behind 1` → split the upstream from the counts.
+          const countM = bracket.match(/^(.*?)(?::\s+ahead\s+(\d+)(?:,\s+behind\s+(\d+))?)?$/)
+          upstream = countM?.[1]?.trim() || undefined
+          ahead = countM?.[2] !== undefined ? Number(countM[2]) : 0
+          behind = countM?.[3] !== undefined ? Number(countM[3]) : 0
+        }
+        return { branch, upstream, ahead, behind }
+      }
+      disposers.push(agentCtx.tools.register(defineTool({
+        name: 'dept_repo_state',
+        description: `Read-only git STATE of the plugin repository at <repoRoot> (${repoRoot}) — the head's ceremony/merge-manifest tool (fb-209): the current branch + upstream (+ ahead/behind), the commit log of the current branch against main (git log main..<branch>, capped at ${DEPT_REPO_STATE_LOG_CAP} commits), the working-tree diff stats (capped at ${DEPT_REPO_STATE_DIFF_CAP} files) and the worktree list. Runs \`git\` DIRECTLY with a FIXED read-only argv (no shell, no user command text — no injection surface) and can only ever READ the deepartments repo. Use it for the merge-manifest / ceremony facts (branches, unique commits, pending diffs, worktrees) WITHOUT dispatching an explore-deep worker. Output: {repo, branch, upstream?, ahead, behind, log[], diffStats[], worktrees[], error?} — a git failure FAILS OPEN (the readable columns + the error text). Never writes. Registered ONLY in the head own-layer.`,
+        parameters: {},
+        output: {
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              repo: { type: 'string', required: true },
+              branch: { type: 'string', required: true },
+              upstream: { type: 'string' },
+              ahead: { type: 'number', required: true },
+              behind: { type: 'number', required: true },
+              log: { type: 'array', required: true, items: { type: 'string' } },
+              diffStats: { type: 'array', required: true, items: { type: 'string' } },
+              worktrees: { type: 'array', required: true, items: { type: 'string' } },
+              error: { type: 'string' }
+            }
+          },
+          render: (_args, value) => {
+            const lines = [value.branch === '' ? 'detached/no branch' : value.branch]
+            if (value.upstream !== undefined) lines.push(`  upstream: ${value.upstream}${value.ahead > 0 || value.behind > 0 ? ` (ahead ${value.ahead}, behind ${value.behind})` : ''}`)
+            if (value.log.length > 0) lines.push(`main..${value.branch}: ${value.log.length} commit(s):`, ...value.log.map((l) => `  ${l}`))
+            if (value.diffStats.length > 0) lines.push('working-tree diff:', ...value.diffStats.map((l) => `  ${l}`))
+            lines.push(`worktrees: ${value.worktrees.length}`)
+            for (const w of value.worktrees) lines.push(`  ${w}`)
+            if (value.error !== undefined) lines.push(`git error (fail-open): ${value.error}`)
+            return [{ type: 'text', text: lines.join('\n') } as const]
+          }
+        },
+        async execute(_args, exec): Promise<{ repo: string; branch: string; upstream?: string; ahead: number; behind: number; log: string[]; diffStats: string[]; worktrees: string[]; error?: string }> {
+          const agent = exec.agent
+          if (!agent) throw new Error('dept_repo_state requires a calling agent (exec.agent was undefined)')
+          const headId = postIdForChild(agent.id as string)
+          if (headId === void 0) throw new Error('[deepartments] dept_repo_state is for a department HEAD (registered post), not the host')
+          const errors: string[] = []
+          // The branch probe is the PRECONDITION (a non-git repo → loud error).
+          const branchRun = await runRepoGit(['branch', '-vv'])
+          if (branchRun.code !== 0) {
+            throw new Error(`[deepartments] dept_repo_state: cannot read git state of "${repoRoot}" (${branchRun.stderr.trim() || 'git failed'})`)
+          }
+          const { branch, upstream, ahead, behind } = parseBranchVVCurrent(branchRun.stdout)
+          // log main..<branch> — the unique branch commits vs main (capped);
+          // a detached HEAD falls back to `main..HEAD`.
+          const logTarget = branch !== '' ? branch : 'HEAD'
+          const logRun = await runRepoGit(['log', `main..${logTarget}`, '--oneline', `-${DEPT_REPO_STATE_LOG_CAP}`])
+          const log = logRun.code === 0 ? logRun.stdout.split('\n').filter((l) => l.trim() !== '') : []
+          if (logRun.code !== 0) errors.push(`log main..${logTarget}: ${logRun.stderr.trim()}`)
+          // Working-tree diff stats (capped) — the uncommitted ceremony state.
+          const diffRun = await runRepoGit(['diff', '--stat', '-M', `-${DEPT_REPO_STATE_DIFF_CAP}`])
+          const diffStats = diffRun.code === 0 ? diffRun.stdout.split('\n').filter((l) => l.trim() !== '') : []
+          if (diffRun.code !== 0) errors.push(`diff --stat: ${diffRun.stderr.trim()}`)
+          // The worktree list.
+          const wtRun = await runRepoGit(['worktree', 'list'])
+          const worktrees = wtRun.code === 0 ? wtRun.stdout.split('\n').filter((l) => l.trim() !== '') : []
+          if (wtRun.code !== 0) errors.push(`worktree list: ${wtRun.stderr.trim()}`)
+          return {
+            repo: repoRoot,
+            branch,
+            ...(upstream !== undefined ? { upstream } : {}),
+            ahead,
+            behind,
+            log,
+            diffStats,
+            worktrees,
+            ...(errors.length > 0 ? { error: errors.join(' | ') } : {})
+          }
+        }
+      })))
+
       // --- W3b (spec W3 monitor → researcher): dept_monitor_list — the runtime
       // PARALLEL monitor state (read-only). Registered ONLY in the head own-layer
       // (the Asistente orchestrates/reads via tooling but never polls monitors
