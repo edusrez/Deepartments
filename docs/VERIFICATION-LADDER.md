@@ -1,13 +1,13 @@
-# VERIFICATION-LADDER — convención canónica de la suite (fb-95 / fb-91 / fb-115)
+# VERIFICATION-LADDER — convención canónica de la suite (fb-95 / fb-91 / fb-115 / fb-190)
 
 > Referencia breve del LADDER de verificación del repo. Fuente de verdad de la
 > convención de tests: `AGENTS.md` § TIERED verification + `docs/specs/001` §
 > Verification ladder. Este doc consolida (R6, 2026-09-05): el método canónico
 > de la suite (fb-95), el guard de integridad de suite (fb-91), la lección de
-> proceso de rotación (fb-115), el aislamiento de review en worktree (A4-2,
-> §5), la convención de rutas absolutas de reports (fb-140, §6) y el
-> procedimiento de commit-hold (HOLD-P0, §7). Aplica a builders, reviewers y
-> cualquier run.
+> proceso de rotación (fb-115 + la sub-norma de rotación en silencio fb-190,
+> §3.1), el aislamiento de review en worktree (A4-2, §5), la convención de
+> rutas absolutas de reports (fb-140, §6) y el procedimiento de commit-hold
+> (HOLD-P0, §7). Aplica a builders, reviewers y cualquier run.
 
 ## 1. Ladder de tests — método canónico (fb-95, SRC-NATIVE)
 
@@ -87,6 +87,25 @@ INMEDIATAMENTE antes de rotar** — una lectura de roster "confirmó listo" pued
 quedar stale (el target entró running/otra operación en curso). Rutina segura:
 `dept_who` (fresh) → confirmar target idle → `dept_head_rotate` → verificar el
 rotado. El rechazo es señal de coordinación, no bug.
+
+### 3.1 Sub-norma — ROTACIÓN EN SILENCIO (fb-190, 2026-09-06)
+
+Complementa la lección fb-115 con la forma de NO auto-inducir el rechazo:
+
+> **ROTACIÓN EN SILENCIO:** el host NO anuncia la rotación al head saliente en
+> su mismo turno — el anuncio lo DESPIERTA (materialización) y
+> `dept_head_rotate` rechaza con **RUNNING** (carrera auto-inducida; familia
+> R8/race-liveness fb-143/144/145). Procedimiento: verificar idle REAL
+> (`dept_who` con `liveStatus: idle` — la finalization tail de un head que
+> acaba de declararse listo aún corre, y `dept_head_rotate` la auto-espera con
+> su settle-wait 5s), re-check justo antes de rotar (práctica fb-115, supra),
+> rotar EN SILENCIO, y saludar al FRESH con handoff ORIENTADOR — el
+> seed/journal del saliente ES la orientación, así que el anuncio pre-rotación
+> es redundante y dañino. Referencia: precedente `dept_head_rotate` settle-wait
+> 5s (R8), fb-115 (re-check pre-rotate) y el ciclo welcome/handoff
+> (m-2040/2041/2069 — handoff con lanes enumeradas, NO pre-anuncio). La norma
+> la EJECUTA el host (único ejecutor de `dept_head_rotate`); la lane solo la
+> registra.
 
 ## 4. Baseline de la suite (referencia para reviewers)
 
