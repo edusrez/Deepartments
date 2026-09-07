@@ -4353,24 +4353,45 @@ export function scanSystemIdle(input: SystemIdleScanInput): SystemIdleScanResult
 // eager-driven, zero-I/O WIRE VIEW — the version-agnostic common surface of
 // dsh-session-projection) and passed as the structural dep
 // `deps.sessionContexts` (the package stays MODO LIB, no harness import).
-// DEDUPE BY BAND (mission decision — no ledger of its own): the finding key
-// is `context-threshold:<agentId>:b<floor(pct*10)>`, so the SHARED
-// health-alerts ledger gives exactly the wanted cadence —
-//   * a BAND CROSSING (52% → 61%) is a NEW key → an IMMEDIATE re-alert (the
-//     mission's «re-alerta cuando cruza cada 10% más») even inside the 30-min
-//     window of the previous band;
-//   * a PERSISTENT band re-alerts every HEALTH_DEDUPE_WINDOW_MS (30 min) while
-//     the condition still holds (the qi-silence/M4 «nunca one-shot» precedent);
-//   * the shared 2h defensive prune is safe: band keys are per-agent bands,
-//     a ≥2h-old key is already immune to the 30-min window.
-// KINDS/KEYS DISJOINT from M4/system-idle and M1/pooler-capacity/qi-silence —
-// the same tick composes all of them (system-idle says «nadie corre»;
-// context-threshold says «alguien se está quedando sin contexto»). The scan
-// NEVER reads settings.yaml (`contextWindow` is carried per-request by the
-// projection) and NEVER fabricates a false positive: a row WITHOUT a resolved
-// `contextWindow` (a session that never emitted a request/context — inactive)
-// is SKIPPED (0% safe). `deps.sessionContexts` ABSENT → the tick no-ops the
-// whole scan (the hostRunning/poolerStatePath-absent pattern).
+// DEDUPE + HYSTERESIS (fb-50 RE calibration, 2026-09-06 — the night noise:
+// «QH 56% x4» with the SAME level re-alerted every 30 min and no actionable
+// change): the finding key is `context-threshold:<agentId>:b<floor(pct*10)>`
+// (per (member, TIER) — each 10% band IS a tier), riding the SHARED
+// health-alerts ledger (≤1 alert per key per HEALTH_DEDUPE_WINDOW_MS = the
+// re-crossing COOLDOWN) PLUS a per-member TIER LATCH — its own small durable
+// file context-threshold-state.json (the shared ledger's 2h defensive prune
+// would drop a long episode; the system-idle-state.json precedent) —
+// implementing the crossing semantics:
+//   * the FIRST crossing of a tier — and EVERY UPWARD crossing into a HIGHER
+//     tier — alerts IMMEDIATELY (the mission's «re-alerta cuando cruza cada
+//     10% más»: 52% → 61% is a NET-NEW key, never swallowed by the previous
+//     band's window); the first alert of an episode = the EMERGENCY alert,
+//     semantics intact;
+//   * a PERSISTENT tier is SILENT: while the member stays inside the SAME band
+//     (the QH 56% x4 case) NO repeat fires — the latch sees band == latched
+//     tier and suppresses the finding (a repeated alert of the SAME level with
+//     zero actionable change is noise, not a new anomaly);
+//   * a DECREMENT (a lower band while still above the threshold) NEVER alerts
+//     (no «bajó de presión» alarms) — the latch TRACKS DOWN so a later
+//     re-crossing of a higher tier is a FRESH crossing (hysteresis follows the
+//     current tier);
+//   * RETURN TO NORMAL (pct ≤ threshold) RESETS the latch — a later
+//     re-crossing of the same tier is a NEW crossing, still bounded by the
+//     shared 30-min cooldown (a re-crossing of a tier alerted < 30 min ago is
+//     swallowed by the SHARED ledger).
+// The scan stays PURE and NEVER throws: the latches are a scan INPUT + OUTPUT
+// (the system-idle ledger pattern — passed in, returned advanced, the tick
+// persists ONLY on change). KINDS/KEYS DISJOINT from M4/system-idle and
+// M1/pooler-capacity/qi-silence — the same tick composes all of them
+// (system-idle says «nadie corre»; context-threshold says «alguien se está
+// quedando sin contexto»). The scan NEVER reads settings.yaml (`contextWindow`
+// is carried per-request by the projection) and NEVER fabricates a false
+// positive: a row WITHOUT a resolved `contextWindow` (a session that never
+// emitted a request/context — inactive) is SKIPPED (0% safe), and a row
+// ABSENT from the materialized set is NOT a return-to-normal (a projection
+// gap must never reset a latch — only an explicit pct ≤ threshold does).
+// `deps.sessionContexts` ABSENT → the tick no-ops the whole scan (the
+// hostRunning/poolerStatePath-absent pattern).
 // ---------------------------------------------------------------------------
 
 /** M-A — the default context threshold: the 50% window-usage trigger. */
@@ -4387,6 +4408,47 @@ export const CONTEXT_THRESHOLD_DEFAULT_POLL_MS = 60_000
  * `health.contextCompletionReserve` knob to calibrate. Absent/invalid → 0
  * (byte-identical to the pre-fb-50 monitor). */
 export const CONTEXT_COMPLETION_RESERVE_DEFAULT = 0
+
+/** M-A CALIBRATION (fb-50 RE, 2026-09-06 — repeated same-level context alerts
+ * are NOISE) — the per-member TIER LATCH: agentId → the 10% tier band the
+ * member currently HOLDS (the band of the last crossing that alerted, or the
+ * tracked-down band of the current pressure). ABSENT = normal / never seen →
+ * the next above-threshold observation is a FRESH crossing. A SEPARATE small
+ * durable file (the shared health-alerts ledger's defensive 2h prune would
+ * drop a long episode; the system-idle-state.json / qi-silence-state.json
+ * precedent), persisted ONLY on change by the tick. INTERNAL (NOT exported —
+ * parity 324: the latch is an orchestration detail of the tick/scan; tests
+ * drive it through the daemon tick). */
+interface ContextTierLatches {
+  [agentId: string]: number
+}
+
+/** The context-tier latch file — SEPARATE from the shared health-alerts
+ * ledger (whose 2h defensive prune would drop a long episode). */
+const CONTEXT_THRESHOLD_STATE_FILE = 'context-threshold-state.json'
+
+/** Read `<stateDir>/context-threshold-state.json` → the per-member band
+ * latches. Absent / unreadable / malformed → {} (never throws); only finite,
+ * non-negative integer bands are kept. */
+function readContextTierLatches(stateDir: string): ContextTierLatches {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, CONTEXT_THRESHOLD_STATE_FILE), 'utf8')) as Record<string, unknown>
+    const out: ContextTierLatches = {}
+    for (const [agentId, band] of Object.entries(parsed)) {
+      if (typeof band === 'number' && Number.isInteger(band) && band >= 0) out[agentId] = band
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/context-threshold-state.json` (mkdir -p the dir, then
+ * the file — the writeContextTierLatches/other ledger-write pattern). */
+async function writeContextTierLatches(stateDir: string, latches: ContextTierLatches): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, CONTEXT_THRESHOLD_STATE_FILE)), { recursive: true })
+  await writeFile(path.join(stateDir, CONTEXT_THRESHOLD_STATE_FILE), JSON.stringify(latches), 'utf8')
+}
 
 /** M-A — ONE session-context input row: the token-meter `contextPressure`
  * projection numbers for one agent (a post or the host). All numeric fields
@@ -4431,12 +4493,31 @@ export interface ContextThresholdScanInput {
   completionReserve?: number
   /** The clock (ms epoch) — stamped into the finding ts. */
   nowMs: number
+  /** M-A CAL (fb-50 RE) — the per-member TIER LATCH map (agentId → the tier
+   * band currently held; ABSENT = normal / never seen). Read by the tick from
+   * context-threshold-state.json, passed in, and returned ADVANCED in the
+   * scan result (the system-idle ledger pattern). Absent input → {} → every
+   * above-threshold row is a FIRST crossing (the pre-calibration pure
+   * behavior). */
+  tierLatches?: Readonly<ContextTierLatches>
+}
+
+/** M-A CAL (fb-50 RE) — the context-threshold scan result: the crossings to
+ * ALERT (upward tier crossings + the first/emergency alert + re-crossings
+ * after a return to normal; the SHARED 30-min ledger stays the re-crossing
+ * cooldown), the NEXT per-member tier latches (the tick persists ONLY when
+ * `changed`), and whether the latches moved. */
+export interface ContextThresholdScanResult {
+  findings: HealthFinding[]
+  latches: ContextTierLatches
+  changed: boolean
 }
 
 /** M-A — build the per-BAND dedupe key: `context-threshold:<agentId>:b<band>`
- * (band = floor(pct*10): 52% → b5, 61% → b6). A band crossing is a NEW key →
- * an immediate re-alert; a persistent band re-alerts at the shared 30-min
- * cadence — the mission's dedupe-by-band decision, no ledger of its own. */
+ * (band = floor(pct*10): 52% → b5, 61% → b6) — per (member, TIER) (each 10%
+ * band IS a tier). An UPWARD band crossing is a NET-NEW key → an immediate
+ * re-alert (the «cada 10% más» semantics); the SHARED 30-min window is the
+ * re-crossing cooldown of the same tier (fb-50 RE). */
 export function contextThresholdKey(agentId: string, band: number): string {
   return `context-threshold:${agentId}:b${band}`
 }
@@ -4451,12 +4532,23 @@ export function contextThresholdKey(agentId: string, band: number): string {
  * (`input.completionReserve`, fb-50: the model's max-output tokens — the
  * pressure the request will actually make under completion projection; a
  * 0/absent reserve is the LEGACY numerator byte-identical) and alert when
- * `pct = (projected + reserve) / window` EXCEEDS `input.threshold`. Each
- * finding carries the per-(agent,band) dedupe key and an informative error
- * line (`<agent> <pct>% (<proj>[/+reserve]/<win>) — cruce b<band>`) so every
- * 30-min re-alert of a persistent band stays readable. */
-export function scanContextThreshold(input: ContextThresholdScanInput): HealthFinding[] {
+ * `pct = (projected + reserve) / window` EXCEEDS `input.threshold`. The
+ * HYSTERESIS (fb-50 RE calibration, the QH 56% x4 noise): a finding fires
+ * ONLY on an UPWARD tier crossing (first-seen counts as a crossing — the
+ * emergency alert) while a member PERSISTING in the same band is SILENT,
+ * a decrement (a lower band, still above the threshold) never alerts but
+ * TRACKS the latch DOWN (a later re-crossing of a higher tier is a fresh
+ * crossing), and a return to normal (pct ≤ threshold) RESETS the member's
+ * latch (a later re-crossing of the same tier is a NEW crossing — still
+ * bounded by the SHARED 30-min cooldown on the finding key). Each finding
+ * carries the per-(member, tier) dedupe key and an informative error line
+ * (`<agent> <pct>% (<proj>[/+reserve]/<win>) — cruce b<band>`). The returned
+ * `latches` map is the NEXT per-member tier state (the tick persists it ONLY
+ * when `changed` — the system-idle ledger pattern). */
+export function scanContextThreshold(input: ContextThresholdScanInput): ContextThresholdScanResult {
   const findings: HealthFinding[] = []
+  const latches: ContextTierLatches = { ...(input.tierLatches ?? {}) }
+  let changed = false
   // fb-50: the completion reserve (a finite non-negative number; anything
   // else → 0 → the legacy numerator, never a NaN/negative pressure).
   const reserve =
@@ -4467,7 +4559,8 @@ export function scanContextThreshold(input: ContextThresholdScanInput): HealthFi
     const agentId = row.postId ?? row.hostId
     if (agentId === undefined || agentId === '') continue
     // No viable denominator → skip (a session without any request/context is
-    // inactive — 0% safe; never a false positive).
+    // inactive — 0% safe; never a false positive; never a latch reset either —
+    // an absent row is NOT a return to normal).
     if (typeof row.contextWindow !== 'number' || !Number.isFinite(row.contextWindow) || row.contextWindow <= 0) continue
     let projected: number
     if (typeof row.projectedTokens === 'number' && Number.isFinite(row.projectedTokens)) {
@@ -4481,8 +4574,36 @@ export function scanContextThreshold(input: ContextThresholdScanInput): HealthFi
     }
     const effective = projected + reserve
     const pct = effective / row.contextWindow
-    if (pct <= input.threshold) continue
+    // RETURN TO NORMAL (pct ≤ threshold) → the hysteresis CLEARS: the member's
+    // latch resets so a later re-crossing of the same tier is a FRESH crossing
+    // (never an alert on the way down — only the latch state changes).
+    if (pct <= input.threshold) {
+      if (latches[agentId] !== undefined) {
+        delete latches[agentId]
+        changed = true
+      }
+      continue
+    }
     const band = Math.floor(pct * 10)
+    const prevBand = latches[agentId]
+    if (prevBand !== undefined && band <= prevBand) {
+      // Same tier (band === prevBand) → the calibration: SILENT while the
+      // member persists in the SAME band (the QH 56% x4 noise — one alert is
+      // the truth, a repeat of the SAME level is not a new anomaly). A
+      // DECREMENT (band < prevBand, still above the threshold) → never alert
+      // a fall, but TRACK the latch DOWN so the next upward move out of the
+      // lower tier is a FRESH crossing (hysteresis follows the current tier).
+      if (band < prevBand) {
+        latches[agentId] = band
+        changed = true
+      }
+      continue
+    }
+    // UPWARD crossing (band > prevBand) or FIRST observation (no latch — a
+    // freshly-seen pressured member, e.g. after a boot) → the ALERT: the
+    // first/emergency semantics + the «cada 10% más» tier+1 re-alert, both
+    // intact. The SHARED 30-min window on the finding key is the re-crossing
+    // cooldown (a re-crossing of a tier alerted < 30 min ago is swallowed).
     findings.push({
       kind: 'context-threshold',
       key: contextThresholdKey(agentId, band),
@@ -4490,8 +4611,10 @@ export function scanContextThreshold(input: ContextThresholdScanInput): HealthFi
       ts: input.nowMs,
       error: `${agentId} ${Math.round(pct * 100)}% (${projected}${reserve > 0 ? `+${reserve}` : ''}/${row.contextWindow}) — cruce b${band}`
     })
+    latches[agentId] = band
+    changed = true
   }
-  return findings
+  return { findings, latches, changed }
 }
 
 // ---------------------------------------------------------------------------
@@ -4505,8 +4628,10 @@ export function scanContextThreshold(input: ContextThresholdScanInput): HealthFi
 // the buildPostSnapshot lastActivityTs primitive). DEDUPE: key
 // `mission-stall:<postId>:<messageId>` in the SHARED health-alerts-state.json
 // ledger — a persistent unprocessed mission re-alerts every
-// HEALTH_DEDUPE_WINDOW_MS (30 min) while it stays stalled (the M-A per-band
-// shared-ledger precedent). The quiet window is ABSOLUTE from the DELIVERY ts
+// HEALTH_DEDUPE_WINDOW_MS (30 min) while it stays stalled (the qi-silence/M4
+// shared-ledger «nunca one-shot» precedent — a stalled MISSION is a persistent
+// problem, unlike the M-A context tier, which since the fb-50 RE calibration
+// is one-shot per tier). The quiet window is ABSOLUTE from the DELIVERY ts
 // (a per-row fact, never accumulated) → NO ledger of its own is needed (the
 // system-idle firstQuietTs pattern is NOT applicable: M-5 has no epoch to
 // accumulate, every tick recomputes `nowMs - deliveryTs` from the same row).
@@ -5472,7 +5597,8 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     // M-A — the context-threshold branch (NEVER let it reach the stale-post
     // fallback). The owner-facing wording is the finding's own line (agent +
     // percent + tokens/window + the band crossed — the error carries the FULL
-    // line so every 30-min per-band re-alert stays informative).
+    // line so every crossing/emergency re-alert stays informative; the fb-50
+    // RE calibration made same-tier repeats silent).
     if (finding.kind === 'context-threshold') {
       return `- context-threshold: ${finding.error ?? `${finding.postId ?? finding.hostId} context window usage above the threshold`}`
     }
@@ -6177,19 +6303,28 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // materialized in-process); the findings join the shared array — kinds/keys
     // DISJOINT from system-idle/qi-silence/pooler-capacity
     // (`context-threshold:<agentId>:b<band>`), so the same tick composes them
-    // without collision; the shared 30-min dedupe gives the re-alert cadence
-    // per band, no ledger of its own.
+    // without collision. M-A CAL (fb-50 RE): the scan is HYSTERESIS-CALIBRATED
+    // — one alert per (member, TIER) crossing (a persistent tier is silent,
+    // decrements never alert, return-to-normal resets) — via the per-member
+    // TIER LATCH (its own small durable file context-threshold-state.json, the
+    // system-idle pattern: read → scan → write ONLY when the latch changed);
+    // the shared 30-min dedupe on the finding key stays the re-crossing
+    // cooldown.
     let contextFindings: HealthFinding[] = []
     if (contextThresholdEnabled && deps.sessionContexts !== undefined && currentContextBucket !== prevContextBucket) {
       try {
-        contextFindings = scanContextThreshold({
+        const tierLatches = readContextTierLatches(deps.stateDir)
+        const contextScan = scanContextThreshold({
           rows: [...(deps.sessionContexts ?? [])],
           threshold: contextThreshold,
           // M-A fb-50: the completion reserve calibration (absent/0 → the
           // legacy numerator — byte-identical to the pre-fb-50 monitor).
           completionReserve: contextCompletionReserve,
+          tierLatches,
           nowMs
         })
+        contextFindings = contextScan.findings
+        if (contextScan.changed) await writeContextTierLatches(deps.stateDir, contextScan.latches)
       } catch (error: unknown) {
         deps.logger?.warn(`[deepartments] system-health: context-threshold scan failed: ${error instanceof Error ? error.message : String(error)}`)
       }

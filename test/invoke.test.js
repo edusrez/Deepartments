@@ -12932,20 +12932,26 @@ test('M4 system-idle SMOKE (acceptance — real daemon): bootPlugin with health 
 // findings→dedupe→notifyHost flow. The percent comes from the token-meter
 // `contextPressure` projection (contextWindow/pressureTokens/surfaceTokens/
 // sampledSurfaceTokens), read LIVE in-process by the bundle
-// (`ctx.sessionProjections.stateOf(session,'contextPressure')`) and passed as
-// the structural dep `deps.sessionContexts`. DEDUPE BY BAND (mission decision
-// — NO ledger of its own): key `context-threshold:<agentId>:b<band>`
-// (band=floor(pct*10)) → a band CROSSING (52%→61%) is a NEW key = an IMMEDIATE
-// re-alert even inside the 30-min window; a PERSISTENT band re-alerts every
-// HEALTH_DEDUPE_WINDOW_MS. `deps.sessionContexts` ABSENT → the scan is a
-// no-op (unknown context pressure never fabricates an alert). A row WITHOUT a
-// resolved `contextWindow` (an inactive session) is skipped (0% safe).
+// (`ctx.sessionProjections.snapshot(session,'contextPressure')`) and passed as
+// the structural dep `deps.sessionContexts`. DEDUPE + HYSTERESIS (fb-50 RE
+// calibration, 2026-09-06 — the QH 56% x4 night noise): key
+// `context-threshold:<agentId>:b<band>` (band=floor(pct*10) — per
+// (member, TIER)) in the SHARED ledger — an UPWARD band crossing (52%→61%) is
+// a NET-NEW key = an IMMEDIATE re-alert; the shared 30-min window is the
+// re-crossing COOLDOWN. The per-member TIER LATCH (context-threshold-state
+// .json, its own small durable file) makes a PERSISTENT tier SILENT (repeat
+// observations in the SAME band never re-alert), decrements never alert (the
+// latch tracks down), and a RETURN TO NORMAL (pct ≤ threshold) resets the
+// latch so a later re-crossing is a NEW alert (cooldown-bounded).
+// `deps.sessionContexts` ABSENT → the scan is a no-op (unknown context
+// pressure never fabricates an alert). A row WITHOUT a resolved
+// `contextWindow` (an inactive session) is skipped (0% safe).
 // `contextThresholdPollMs` gates the scan to the first tick of each bucket
 // (the WAIT per-minute pattern generalized to an arbitrary cadence).
 
-test('M-A scanContextThreshold: rows ABOVE the 50% threshold → a context-threshold finding with the per-BAND key + error (percent/tokens/window/band); BELOW → nothing; a row WITHOUT a resolved contextWindow is SKIPPED (never a false positive); the surface-only numerator fallback; the wire-view projectedTokens is the preferred numerator', () => {
+test('M-A scanContextThreshold: rows ABOVE the 50% threshold → a context-threshold finding with the per-BAND key + error (percent/tokens/window/band); BELOW → nothing; a row WITHOUT a resolved contextWindow is SKIPPED (never a false positive); the surface-only numerator fallback; the wire-view projectedTokens is the preferred numerator; each crossing ADVANCES the member TIER LATCH (fb-50 RE)', () => {
   const T0 = new Date(2026, 7, 28, 10, 0, 0).getTime()
-  const findings = scanContextThreshold({
+  const scan = scanContextThreshold({
     rows: [
       { postId: 'research-head', contextWindow: 1_000_000, pressureTokens: 520_000, surfaceTokens: 0, sampledSurfaceTokens: 0 }, // 52% → b5
       { hostId: 'host-asst', contextWindow: 1_048_576, pressureTokens: 640_000, surfaceTokens: 10_000, sampledSurfaceTokens: 25 }, // ~62% → b6
@@ -12957,6 +12963,7 @@ test('M-A scanContextThreshold: rows ABOVE the 50% threshold → a context-thres
     threshold: CONTEXT_THRESHOLD_DEFAULT,
     nowMs: T0
   })
+  const findings = scan.findings
   assert.equal(findings.length, 4, '4 of 6 rows exceed the 50% threshold')
   const post = findings.find((f) => f.postId === 'research-head')
   assert.equal(post.kind, 'context-threshold')
@@ -12970,6 +12977,13 @@ test('M-A scanContextThreshold: rows ABOVE the 50% threshold → a context-thres
   assert.equal(projected.key, 'context-threshold:builder-projected:b6', 'the wire-view projectedTokens is the preferred numerator (640000/1000000 → 64% → b6)')
   assert.equal(findings.some((f) => f.postId === 'builder-low'), false, '30% ≤ 50% → no finding')
   assert.equal(findings.some((f) => f.postId === 'builder-nocontext'), false, 'no contextWindow → skipped (an inactive session is 0% safe)')
+  assert.equal(scan.changed, true, 'the crossings CHANGED the latch map (the tick persists it)')
+  assert.equal(scan.latches['research-head'], 5, 'the member latch ADVANCED to the crossed tier (b5)')
+  assert.equal(scan.latches['host-asst'], 6, 'the host latch advanced to b6')
+  assert.equal(scan.latches['builder-surface'], 5, 'the surface-only row latched at b5')
+  assert.equal(scan.latches['builder-projected'], 6, 'the wire-view row latched at b6')
+  assert.equal('builder-low' in scan.latches, false, 'a below-threshold row never latches')
+  assert.equal('builder-nocontext' in scan.latches, false, 'a skipped row never latches (an absent row is NOT a return to normal)')
 })
 
 test('M-A scanContextThreshold fb-50 (completion reserve): the completionReserve is ADDED to the projected numerator (presión efectiva = projected + maxTokens) — a row the legacy monitor reads as 70% (734,990/1,048,576, UNDER the 85% effective ceiling) becomes 95% EFFECTIVE (734,990+262,144 = 997,134 → b9) and the error line names the reserve; a 0/absent reserve keeps the LEGACY numerator byte-identical', () => {
@@ -12983,25 +12997,28 @@ test('M-A scanContextThreshold fb-50 (completion reserve): the completionReserve
     completionReserve: 0,
     nowMs: T0
   })
-  assert.equal(legacy.length, 0, 'LEGACY (reserve 0): 734,990/1,048,576 = 70.1% ≤ 85% → NO finding (the pre-fb-50 monitor under-reports)')
+  assert.equal(legacy.findings.length, 0, 'LEGACY (reserve 0): 734,990/1,048,576 = 70.1% ≤ 85% → NO finding (the pre-fb-50 monitor under-reports)')
+  assert.equal(legacy.changed, false, 'a below-threshold row leaves the latch untouched (no crossing)')
   const calibrated = scanContextThreshold({
     rows: [{ postId: 'research-head', contextWindow: 1_048_576, projectedTokens: 734_990 }],
     threshold: 0.85,
     completionReserve: 262_144,
     nowMs: T0
   })
-  assert.equal(calibrated.length, 1, 'CALIBRATED (reserve 262144): effective 997,134/1,048,576 = 95.1% > 85% → a finding')
-  const finding = calibrated[0]
+  assert.equal(calibrated.findings.length, 1, 'CALIBRATED (reserve 262144): effective 997,134/1,048,576 = 95.1% > 85% → a finding')
+  const finding = calibrated.findings[0]
   assert.equal(finding.key, 'context-threshold:research-head:b9', '95.1% → band floor(9.51)=9 → key b9')
   assert.equal(finding.error, 'research-head 95% (734990+262144/1048576) — cruce b9', 'the error line names projected, +reserve, and the window')
+  assert.equal(calibrated.latches['research-head'], 9, 'the calibrated crossing latched the member at b9')
   const belowLegacy = scanContextThreshold({
     rows: [{ postId: 'builder-low', contextWindow: 1_000_000, projectedTokens: 400_000 }],
     threshold: 0.5,
     completionReserve: 262_144,
     nowMs: T0
   })
-  assert.equal(belowLegacy.length, 1, '400,000+262,144 = 66.2% > 50% with the reserve — the reserve can lift a legacy-below row ABOVE the threshold')
-  assert.equal(belowLegacy[0].key, 'context-threshold:builder-low:b6', '66.2% → band b6')
+  assert.equal(belowLegacy.findings.length, 1, '400,000+262,144 = 66.2% > 50% with the reserve — the reserve can lift a legacy-below row ABOVE the threshold')
+  assert.equal(belowLegacy.findings[0].key, 'context-threshold:builder-low:b6', '66.2% → band b6')
+  assert.equal(belowLegacy.latches['builder-low'], 6, 'the lifted row latched at b6')
 })
 
 test('M-A runHealthDaemonTick: a post row ABOVE the 50% threshold → the context-threshold finding + host ALERT (frame bullet + band key); the audit row records it', async () => {
@@ -13086,28 +13103,55 @@ test('M-A fb-50 runHealthDaemonTick: the contextCompletionReserve KNOB transfers
   })
 })
 
-test('M-A PERSISTENT BAND: the SAME band keeps alerting every HEALTH_DEDUPE_WINDOW_MS while the condition persists (never a one-shot) and is SILENT inside the window', async () => {
+test('M-A CALIBRATION (fb-50 RE — the night-noise scenario): a PERSISTENT tier is SILENT — the same session in the SAME band alerts ONCE (the QH 56% x4 case → 1) — an UPWARD crossing to tier+1 alerts immediately, a DECREMENT never alerts (the latch tracks down), a RETURN TO NORMAL resets the latch, and a later re-crossing of the SAME tier is a NEW alert bounded by the SHARED 30-min cooldown (a re-crossing inside the window is swallowed)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 28, 12, 0, 0).getTime()
     const alerts = []
-    const tick = (nowMs) => runHealthDaemonTick({
+    const tick = (nowMs, pct) => runHealthDaemonTick({
       now: () => nowMs,
       stateDir,
       bootId: 'boot-mad',
       hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
-      sessionContexts: [{ postId: 'research-head', contextWindow: 1_000_000, pressureTokens: 620_000 }], // 62% → band b6
+      sessionContexts: [{ postId: 'research-head', contextWindow: 1_000_000, pressureTokens: Math.round(pct * 1_000_000) }],
       config: { health: {} },
       notifyHost: async () => { alerts.push(1) },
       logger: { warn: (m) => {} }
     })
-    await tick(T0)
-    assert.equal(alerts.length, 1, '62% alerts at T0 (band b6)')
-    await tick(T0 + 5 * 60_000)
-    assert.equal(alerts.length, 1, '5 min later the SAME band is SILENT (inside the 30-min dedupe window)')
-    await tick(T0 + 35 * 60_000)
-    assert.equal(alerts.length, 2, '35 min later the SAME persistent band RE-ALERTS (the guarantee is never a one-shot)')
+    // Phase 1 — the night noise: the SAME ~56% (b5) observed FOUR times,
+    // including two PAST the 30-min dedupe window → ONE alert (the old monitor
+    // re-alerted every HEALTH_DEDUPE_WINDOW_MS — the QH 56% x4 noise). Total
+    // span stays under 2 h so the SHARED ledger's defensive 2h prune never
+    // drops the first b5 key mid-test.
+    await tick(T0, 0.56)
+    assert.equal(alerts.length, 1, '56% alerts once (band b5 — the FIRST/emergency alert)')
+    await tick(T0 + 35 * 60_000, 0.56)
+    assert.equal(alerts.length, 1, '35 min later the SAME 56% (same band b5, past the 30-min window) stays SILENT — the calibrated tier latch (the old code re-alerted here)')
+    await tick(T0 + 55 * 60_000, 0.57)
+    await tick(T0 + 75 * 60_000, 0.56)
+    assert.equal(alerts.length, 1, 'the QH 56% x4 night scenario → 1 alert + silence while the member persists in band b5')
+    // Phase 2 — an UPWARD crossing to tier+1 alerts IMMEDIATELY (the «cada
+    // 10% más» semantics — the re-alert after a genuine escalation).
+    await tick(T0 + 80 * 60_000, 0.63)
+    assert.equal(alerts.length, 2, '63% is a NEW band (b6) → the upward crossing re-alerts immediately')
+    // Phase 3 — a DECREMENT (still above the 50% threshold) NEVER alerts and
+    // the latch tracks down (a re-crossing of b6 from below stays possible).
+    await tick(T0 + 81 * 60_000, 0.54)
+    assert.equal(alerts.length, 2, 'a decrement to 54% (b5 < b6, still pressured) NEVER alerts')
+    // Phase 4 — the re-crossing of b6 INSIDE the 30-min cooldown is swallowed
+    // by the SHARED health-alerts ledger (the same-tier key is still fresh).
+    await tick(T0 + 85 * 60_000, 0.62)
+    assert.equal(alerts.length, 2, 'a re-crossing of b6 < 30 min after the b6 alert is DEDUPED (the cooldown respected)')
+    // Phase 5 — RETURN TO NORMAL (30% ≤ 50%) resets the latch...
+    await tick(T0 + 90 * 60_000, 0.30)
+    assert.equal(alerts.length, 2, 'a return to normal never alerts (only the latch resets)')
+    // ...and a re-crossing AFTER the normal reset AND outside the 30-min
+    // cooldown (b6 last advanced at T0+80m, now T0+115m = 35 min later) is a
+    // NEW crossing → a fresh alert.
+    await tick(T0 + 115 * 60_000, 0.62)
+    assert.equal(alerts.length, 3, 'a re-crossing of b6 after the return to normal and outside the 30-min cooldown → a NEW alert')
     const state = readHealthAlertsState(stateDir)
-    assert.equal(state['context-threshold:research-head:b6'], T0 + 35 * 60_000, 'the re-alert advanced the SAME band key at the new ts')
+    assert.equal(state['context-threshold:research-head:b5'], T0, 'the b5 key advanced at the FIRST crossing only (never re-advanced while the member persisted in b5)')
+    assert.equal(state['context-threshold:research-head:b6'], T0 + 115 * 60_000, 'the b6 key advanced at the FIRST b6 crossing (T0+80m) and re-advanced only at the post-cooldown re-crossing (T0+115m)')
   })
 })
 
@@ -13405,7 +13449,7 @@ test('M-5 the missionStallMs knob: a small window alerts on a SHORT quiet; ABSEN
   })
 })
 
-test('M-5 DEDUPE: inside the 30-min health dedupe the SAME unprocessed mission does NOT re-alert; AFTER HEALTH_DEDUPE_WINDOW_MS with the mission STILL unprocessed → RE-ALERT (the mission persists → never a one-shot; the M-A per-band re-alert precedent)', async () => {
+test('M-5 DEDUPE: inside the 30-min health dedupe the SAME unprocessed mission does NOT re-alert; AFTER HEALTH_DEDUPE_WINDOW_MS with the mission STILL unprocessed → RE-ALERT (the mission persists → never a one-shot; the qi-silence/M4 «nunca one-shot» precedent — a stalled mission is a persistent problem, unlike the M-A context tier, which since fb-50 RE is one-shot per tier)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 31, 11, 0, 0).getTime()
     const alerts = []
@@ -14051,7 +14095,7 @@ test('M-7 runHealthDaemonTick: a HEAD with a SUSTAINED over-limit queue → the 
   })
 })
 
-test('M-7 DEDUPE: the FIRST crossing records firstSeen only (anti-transient); the SECOND tick (persist window done) alerts; a tick INSIDE the 30-min health dedupe does NOT re-alert; AFTER HEALTH_DEDUPE_WINDOW_MS with the backlog STILL undrained → RE-ALERT (never a one-shot; the M-A per-band re-alert precedent)', async () => {
+test('M-7 DEDUPE: the FIRST crossing records firstSeen only (anti-transient); the SECOND tick (persist window done) alerts; a tick INSIDE the 30-min health dedupe does NOT re-alert; AFTER HEALTH_DEDUPE_WINDOW_MS with the backlog STILL undrained → RE-ALERT (never a one-shot; the qi-silence/M4 sustained-condition precedent — the mission-queue is a persistent backlog, unlike the M-A context tier, which since fb-50 RE is one-shot per tier)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 8, 1, 15, 0, 0).getTime()
     const alerts = []
