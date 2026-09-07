@@ -11534,11 +11534,17 @@ test('W6 runHealthDaemonTick: heartbeat written; scans post-errors + delivery-fa
     // Dedupe state persisted for both identities.
     const state = readHealthAlertsState(stateDir)
     assert.equal(state[researchIdentity], T0, 'the post-error IDENTITY key is deduped at now (Bug C: error-identity)')
-    assert.equal(state['delivery-failed:m-2'], T0, 'the delivery-failed key is deduped at now')
+    // FB-198 T2: the delivery-failed identity key is the NON-RENUMERABLE signed
+    // shape (messageId + recipient + row ts — a post-compaction renumber can
+    // recycle the messageId, so a bare `delivery-failed:<id>` key would stale-
+    // dedupe a NEW failure of the recycled id — the fb-198 durable false
+    // negative).
+    const dfKey = `delivery-failed:m-2#research-head#${T0 - 5 * 60000}`
+    assert.equal(state[dfKey], T0, 'the delivery-failed key (signed — fb-198 T2) is deduped at now')
     // Audit line written.
     const auditRows = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l))
     assert.equal(auditRows.length, 1, 'one audit line per alert')
-    assert.deepEqual(auditRows[0].dedupeKeys.sort(), ['delivery-failed:m-2', 'post-error:research-head'], 'the audit records the dedupe keys')
+    assert.deepEqual(auditRows[0].dedupeKeys.sort(), [dfKey, 'post-error:research-head'], 'the audit records the dedupe keys (the delivery-failed one signed — fb-198 T2)')
     assert.equal(auditRows[0].ts, T0, 'the audit carries the alert ts')
     // Tick 2 @ T0 (inside the 30min dedupe window) → ≤1 alert per identity: NOTHING new.
     await tick(T0)

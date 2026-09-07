@@ -2989,6 +2989,29 @@ export function createDeliveryRowsTailReader(): DeliveryRowsReader {
   }
 }
 
+/** FB-198 (T2, 2026-09-07) — the DELIVERY-FAILED identity key with a
+ * NON-RENUMERABLE signature. The pre-fix key `delivery-failed:<messageId>`
+ * identified ONLY the message id — and a boot compaction RENUMBERS message ids
+ * (messages.ts compactMessagesFile: the old id is recycled onto an UNRELATED
+ * later record; only the sidecar is remapped — remapDeliveryRows). The
+ * health-alerts ledger (health-alerts-state.json + the health-alerts.jsonl
+ * audit dedupeKeys) was never remapped, so after a renumber the old key kept
+ * pointing at a REUSED id: a NEW delivery failure under the recycled id DEDUPED
+ * against the stale entry → the durable false negative (the fb-198 forensics:
+ * keys `delivery-failed:m-2219…` — x4 — pointed at other records after the R0
+ * -46 renumber; the operator reads «m-2219 not delivered» when the real event
+ * is elsewhere and delivered). The signature `#<recipientId>#<ts>` — the
+ * row's own immutable fields (compaction rewrites ONLY `messageId`) — makes
+ * the key identify the DELIVERY EVENT, not just the message id: a reused id
+ * produces a DIFFERENT recipient+ts → a fresh key → the alert fires (the class
+ * fix). The row never carries the sender (`from` — the characterization's
+ * generic `<from>#<ts>`), so the recipient is the available pair anchor.
+ * Module-private (NOT exported): the lib/invoke.js export-parity lock freezes
+ * the runtime surface at 325 — this helper is an internal scanner detail. */
+function deliveryFailedKey(row: Pick<DeliveryRow, 'messageId' | 'recipientId' | 'ts'>): string {
+  return `delivery-failed:${row.messageId}#${row.recipientId}#${row.ts}`
+}
+
 /** Group fresh delivery 'failed' rows inside HEALTH_ERROR_WINDOW_MS, deduped per
  * messageId (multiple rows for the same messageId → ONE finding).
  * Bug (re-alert loop): a `retiredMemberIds` set of RETIRED member ids (hosts +
@@ -3036,7 +3059,9 @@ export function scanDeliveryFindings(
   for (const [messageId, row] of byMessage) {
     findings.push({
       kind: 'delivery-failed',
-      key: `delivery-failed:${messageId}`,
+      // FB-198 (T2): the NON-RENUMERABLE signed key — a reused message id (a
+      // post-compaction renumber) never dedupes against a stale ledger entry.
+      key: deliveryFailedKey(row),
       messageId,
       ts: row.ts,
       count: 1
@@ -3384,7 +3409,10 @@ export function scanHealthCatchup(
   for (const [messageId, row] of byMessage) {
     findings.push({
       kind: 'delivery-failed',
-      key: `delivery-failed:${messageId}`,
+      // FB-198 (T2): the NON-RENUMERABLE signed key — identical to the live
+      // scan's (the shared-ledger dedupe applies verbatim; a reused id after a
+      // compaction never collides with the stale entry).
+      key: deliveryFailedKey(row),
       messageId,
       ts: row.ts,
       count: 1,
