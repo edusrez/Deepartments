@@ -196,7 +196,7 @@ import {
   pickLiveHostEntry
 } from 'dshd-core'
 import type { PostEntry, RegistryStore, HostEntry, HostEntryLike } from 'dshd-core'
-import { parseJobDefFrontmatter, jobDirFor, stampJobRun } from 'dshd-jobs'
+import { parseJobDefFrontmatter, jobDirFor, stampJobRun, collectClassOutageCandidate } from 'dshd-jobs'
 import type { CalendarEntry, SchedulerAutoRunFinding } from 'dshd-jobs'
 import type {
   Config,
@@ -6720,6 +6720,33 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     }
   }
 
+  // O3(b) (VALLE 09-07 — class-outage auto-backfill): the SINK WRAPPER — every
+  // scheduler auto-run failure capture ALSO feeds the backfill collector (the
+  // `<stateDir>/job-runs-backfill.json` candidate store). The collector
+  // classifies the class-outage family (400/503/429 reasons — design §4.2.1)
+  // and dedupes per episode; an O1 dispatch block (`[deepartments] pool: …` —
+  // a PEAK-deferred job whose worker was NEVER materialized) never collects
+  // (design §4.2.5 anti-storm). NON-FATAL: a collector persist failure
+  // warn-degrades — the post-error capture never fails. (Defined OUTSIDE the
+  // frozen CUT-4 zone — the tools-factory byte-identical md5 lock is
+  // untouched, the healthNotifyPost pattern.)
+  const captureSchedulerAutoRunFailureWithBackfill = async (opts: {
+    stateDir: string
+    now(): number
+    jobId: string
+    reason: string
+    error?: string
+    logger?: { warn(message: string): void }
+  }): Promise<boolean> => {
+    const captured = await captureSchedulerAutoRunFailure(opts)
+    try {
+      await collectClassOutageCandidate(opts.stateDir, opts.jobId, opts.reason, opts.error, opts.now())
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] backfill: class-outage collector for job "${opts.jobId}" failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return captured
+  }
+
   // LANE 0.2.1 (1B/1C — binder → Service, P6 disposability, gap 1): the four
   // zone dep sets now flow into PER-PACKAGE deps holders — deepartments.healthDeps /
   // jobsDeps / poolerDeps / guiDeps, PROVIDED by dshd-health / dshd-jobs /
@@ -6745,7 +6772,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // holders are filled above; this unload effect releases ALL of them (P6).
   const depsHealth = ctx.get('deepartments.healthDeps') as { register(deps: { qiDirectiveRate?: number }): void; clear(): void } | undefined
   const depsJobs = ctx.get('deepartments.jobsDeps') as {
-    register(deps: { runJob?: unknown; notifyHead?: unknown; departmentForEntry?: unknown; departmentForJob?: unknown; onAutoRunSkip?: unknown; captureAutoRunFailure?: unknown; repoRoot?: string }): void
+    register(deps: { runJob?: unknown; notifyHead?: unknown; departmentForEntry?: unknown; departmentForJob?: unknown; onAutoRunSkip?: unknown; captureAutoRunFailure?: unknown; repoRoot?: string; backfillPoolDispatchBlockError?: () => string | undefined }): void
     clear(): void
   } | undefined
   const depsPooler = ctx.get('deepartments.poolerDeps') as { register(deps: unknown): void; clear(): void } | undefined
@@ -6777,7 +6804,13 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     // apply-fiber stateDir/now. Absent sink (minimal composition) → the adapter
     // stays warn-only (R6).
     captureAutoRunFailure: (finding: SchedulerAutoRunFinding) =>
-      captureSchedulerAutoRunFailure({ stateDir, now: () => Date.now(), jobId: finding.jobId, reason: finding.reason, error: finding.error })
+      captureSchedulerAutoRunFailureWithBackfill({ stateDir, now: () => Date.now(), jobId: finding.jobId, reason: finding.reason, error: finding.error }),
+    // O3(b) (VALLE 09-07 — class-outage auto-backfill): the O1 POOL GATE the
+    // dshd-jobs backfill tick reads per candidate (undefined = healthy, a
+    // string = BLOCKED — a blocked pool skips the retry, the candidate stays
+    // pending). The SAME closure the dispatch seams use (`workerPoolerDispatchBlockError`
+    // — the pooler-capacity pre-check) — the backfill never bypasses O1.
+    backfillPoolDispatchBlockError: () => workerPoolerDispatchBlockError()
   })
   depsGui?.register({ endpointDeps: guiEndpointDeps })
   // depsPooler: INTENTIONALLY unfilled (1C — fully derivable, see above; the

@@ -14,10 +14,16 @@ import path from 'node:path'
 import { test } from 'node:test'
 import {
   CRON_DESYNC_WINDOW_MIN,
+  CLASS_OUTAGE_REASON_RE,
+  JOB_BACKFILL_OFFSETS_MIN,
+  JOB_BACKFILL_MAX_ATTEMPTS,
   cronAll,
   cronFieldParse,
   cronIsDue,
   cronMatches,
+  collectClassOutageCandidate,
+  isClassOutageReason,
+  isJobDispatchBlockReason,
   jobDirFor,
   nextCronFire,
   parseCronSchedule,
@@ -25,11 +31,16 @@ import {
   readAgendaJobs,
   readCalendarStateFile,
   readJobDefinitionFile,
+  readJobRunsBackfillFile,
+  readJobRunsDetailFile,
   readJobRunsStateFile,
   runAgendaSchedulerTick,
+  runJobBackfillTick,
   stampJobRun,
   unwrapQuotedScalar,
   writeCalendarStateFile,
+  writeJobRunsBackfillFile,
+  writeJobRunsDetailFile,
   writeJobRunsStateFile
 } from '../lib/jobs.js'
 
@@ -596,5 +607,349 @@ test('readJobDefinitionFile path + readJobRunsStateFile/writeJobRunsStateFile us
     await writeJobRunsStateFile(stateDir, { k: 42 })
     const raw = JSON.parse(await readFile(path.join(stateDir, 'job-runs-state.json'), 'utf8'))
     assert.deepEqual(raw, { k: 42 })
+  })
+})
+
+// --- O3-b (VALLE 09-07 — class-outage auto-backfill): the collector + stores +
+// the pure backfill tick. A job whose AUTO-run died with a class-outage
+// (400/503/429 family) registers ONE pending candidate per episode (dedupe);
+// the tick retries it at +15min/+60min FROM THE FIRST failure, only when the
+// pool is healthy (O1 never bypassed) and the cron is still due OR the job is
+// in debt (its last run predates the episode) — max 2 retries per episode.
+// ----------------------------------------------------------------------------
+
+test('O3-b: the class-outage family regex + classifiers match the 400/503/429 reasons and reject the O1 dispatch-block family', () => {
+  assert.ok(isClassOutageReason('HTTP 429 rate limit exceeded'), '429 class')
+  assert.ok(isClassOutageReason('503 service unavailable'), '503 class')
+  assert.ok(isClassOutageReason('provider rejected: reasoning_content must be passed back'), 'the 400 reasoning_content class')
+  assert.ok(isClassOutageReason('MissingSessionID'), 'MissingSessionID class')
+  assert.ok(isClassOutageReason('quota exceeded for the current month'), 'quota class')
+  assert.ok(isClassOutageReason('UPSTREAM 429 TOO MANY REQUESTS (rate limit)'), 'case-insensitive')
+  assert.equal(isClassOutageReason('idempotency-skip'), false)
+  assert.equal(isClassOutageReason('no head'), false)
+  assert.equal(isClassOutageReason('boom'), false)
+  // The O1 family (PEAK-deferred) — regex source of truth.
+  assert.equal(isJobDispatchBlockReason('[deepartments] pool: HALT — 1 usable key oc-6 (weekly available 5% < 20%)'), true)
+  assert.equal(isJobDispatchBlockReason('[deepartments] pool: workspace ws1 at quota (0 usable keys) — dispatch delayed'), true)
+  assert.equal(isJobDispatchBlockReason('503 service unavailable'), false)
+  assert.equal(CLASS_OUTAGE_REASON_RE.source, /reasoning_content|MissingSessionID|429|rate limit|503|service unavailable|quota/i.source, 'the family regex is the approved design §4.2 regex verbatim')
+  assert.deepEqual(JOB_BACKFILL_OFFSETS_MIN, [15, 60], 'the fixed backoff is +15min / +60min')
+  assert.equal(JOB_BACKFILL_MAX_ATTEMPTS, 2, 'max 2 retries per episode')
+})
+
+test('O3-b collectClassOutageCandidate: classifies the class-outage family (reason OR error) into ONE pending candidate per job', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The reason carries the family.
+    const r1 = await collectClassOutageCandidate(stateDir, 'c1', 'HTTP 429 rate limit exceeded', undefined, 1000)
+    assert.equal(r1.collected, true)
+    assert.deepEqual(readJobRunsBackfillFile(stateDir).candidates.c1, { jobId: 'c1', firstFailureAt: 1000, pending: true, attempts: 0 })
+    // The ERROR text alone classifies (a normalized/opaque reason still collects).
+    const r2 = await collectClassOutageCandidate(stateDir, 'c2', 'run failed', 'provider rejected: reasoning_content must be passed back', 2000)
+    assert.equal(r2.collected, true)
+    assert.equal(readJobRunsBackfillFile(stateDir).candidates.c2.firstFailureAt, 2000)
+    // Non-family reasons never collect (no head / idempotency-skips stay out).
+    const nr = await collectClassOutageCandidate(stateDir, 'c3', 'no head', undefined, 3000)
+    assert.equal(nr.collected, false)
+    assert.equal(readJobRunsBackfillFile(stateDir).candidates.c3, undefined)
+    const nr2 = await collectClassOutageCandidate(stateDir, 'c4', 'idempotency-skip', undefined, 3000)
+    assert.equal(nr2.collected, false)
+  })
+})
+
+test('O3-b collectClassOutageCandidate: dedupe per episode — a SECOND outage of the SAME job with a retry pending is IGNORED (the episode start never advances); a resolved episode starts a NEW one', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await collectClassOutageCandidate(stateDir, 'c1', '503 service unavailable', undefined, 1000)
+    const dup = await collectClassOutageCandidate(stateDir, 'c1', '429 rate limit', 'another 503', 99999)
+    assert.equal(dup.collected, false, 'a second outage while a retry is pending is ignored')
+    let c = readJobRunsBackfillFile(stateDir).candidates.c1
+    assert.equal(c.firstFailureAt, 1000, 'the episode start stays the FIRST failure')
+    assert.equal(c.attempts, 0)
+    // A DIFFERENT job collects its own episode.
+    await collectClassOutageCandidate(stateDir, 'c2', 'quota exceeded', undefined, 2000)
+    assert.equal(readJobRunsBackfillFile(stateDir).candidates.c2.firstFailureAt, 2000)
+    // A RESOLVED episode → a NEW outage starts a NEW episode (fresh budget).
+    const state = readJobRunsBackfillFile(stateDir)
+    state.candidates.c1.pending = false
+    await writeJobRunsBackfillFile(stateDir, state)
+    const again = await collectClassOutageCandidate(stateDir, 'c1', '503 service unavailable', undefined, 5000)
+    assert.equal(again.collected, true)
+    c = readJobRunsBackfillFile(stateDir).candidates.c1
+    assert.equal(c.firstFailureAt, 5000, 'a new episode starts from the new first failure')
+    assert.equal(c.pending, true)
+    assert.equal(c.attempts, 0)
+  })
+})
+
+test('O3-b PEAK anti-storm: an O1 dispatch block ([deepartments] pool: …) NEVER generates a candidate — the exclusion wins even over a family token (at-quota)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The pooler 0-usable branch carries the family token "quota" — the PEAK
+    // rule must win (a job deferred by O1 was never materialized; no backfill).
+    const atQuota = '[deepartments] pool: workspace ws1 at quota (0 usable keys — all blocked/cooldown/invalid; 1/1 keys) — dispatch delayed; retry when a fresh key resolves'
+    const r1 = await collectClassOutageCandidate(stateDir, 'c1', atQuota, undefined, 1000)
+    assert.equal(r1.collected, false)
+    // The HALT branch via the ERROR text too.
+    const halt = '[deepartments] pool: HALT — 1 usable key oc-6 (weekly available 5% < 20% or monthly available 0% < 10%) — NO new dispatches until ≥2 usable keys or new keys are added'
+    const r2 = await collectClassOutageCandidate(stateDir, 'c2', 'run failed', halt, 2000)
+    assert.equal(r2.collected, false)
+    assert.deepEqual(readJobRunsBackfillFile(stateDir), { candidates: {} }, 'an O1-deferred job never leaves a candidate (no storm at PEAK)')
+  })
+})
+
+test('O3-b runJobBackfillTick: backoff — retries at +15min and +60min FROM THE FIRST failure (never before, never shifted by earlier attempts)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await withTempJobDir(async (jobDir) => {
+      await writeFile(path.join(jobDir, 'c1.md'), defText({ id: 'c1', schedule: '* * * * *' }), 'utf8')
+      const firstFailureAt = new Date(2026, 7, 23, 9, 0, 0).getTime()
+      const runCalls = []
+      const base = {
+        stateDir,
+        repoRoot: '/nonexistent',
+        departments: [{ id: 'research', name: 'Research', jobDir }],
+        departmentForJob: () => ({ id: 'research', name: 'Research', jobDir }),
+        headForDepartment: () => 'research-head',
+        // A SKIPPED retry (false) consumes the attempt and keeps the episode
+        // pending — so the SECOND slot (+60min) is reached.
+        runJob: async (dept, head, jobId) => { runCalls.push(jobId); return false },
+        poolDispatchBlockError: () => undefined
+      }
+      await collectClassOutageCandidate(stateDir, 'c1', '503 service unavailable', undefined, firstFailureAt)
+      const tickAt = async (nowMs) => { await runJobBackfillTick({ ...base, now: () => nowMs }) }
+      // +5 min → before the first slot (+15) → nothing.
+      await tickAt(firstFailureAt + 5 * 60000)
+      assert.equal(runCalls.length, 0)
+      assert.equal(readJobRunsBackfillFile(stateDir).candidates.c1.attempts, 0)
+      // +15 min → attempt 1.
+      await tickAt(firstFailureAt + 15 * 60000)
+      assert.equal(runCalls.length, 1)
+      assert.equal(readJobRunsBackfillFile(stateDir).candidates.c1.attempts, 1)
+      // +30 min → before the second slot (+60) → nothing (the FIXED schedule never shifts).
+      await tickAt(firstFailureAt + 30 * 60000)
+      assert.equal(runCalls.length, 1)
+      // +60 min → attempt 2.
+      await tickAt(firstFailureAt + 60 * 60000)
+      assert.equal(runCalls.length, 2)
+      assert.equal(readJobRunsBackfillFile(stateDir).candidates.c1.attempts, 2)
+    })
+  })
+})
+
+test('O3-b runJobBackfillTick: MAX attempts — 2 per episode, then the candidate DIES (pending=false, never a 3rd); a later outage starts a new episode', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await withTempJobDir(async (jobDir) => {
+      await writeFile(path.join(jobDir, 'c1.md'), defText({ id: 'c1', schedule: '* * * * *' }), 'utf8')
+      const firstFailureAt = new Date(2026, 7, 23, 9, 0, 0).getTime()
+      const runCalls = []
+      const base = {
+        stateDir, repoRoot: '/nonexistent',
+        departments: [{ id: 'research', name: 'Research', jobDir }],
+        departmentForJob: () => ({ id: 'research', name: 'Research', jobDir }),
+        headForDepartment: () => 'research-head',
+        // Both retries FAIL with a fresh class-outage (the retry's own spawn died).
+        runJob: async (dept, head, jobId) => { runCalls.push(jobId); throw new Error('503 service unavailable — the retry also died') },
+        poolDispatchBlockError: () => undefined
+      }
+      await collectClassOutageCandidate(stateDir, 'c1', '503 service unavailable', undefined, firstFailureAt)
+      // +15 → attempt 1 FAILS → stays pending (1 < 2).
+      await runJobBackfillTick({ ...base, now: () => firstFailureAt + 15 * 60000 })
+      let c = readJobRunsBackfillFile(stateDir).candidates.c1
+      assert.equal(c.attempts, 1)
+      assert.equal(c.pending, true)
+      assert.equal(c.lastOutcome, 'failed')
+      // +60 → attempt 2 FAILS → the candidate DIES.
+      await runJobBackfillTick({ ...base, now: () => firstFailureAt + 60 * 60000 })
+      c = readJobRunsBackfillFile(stateDir).candidates.c1
+      assert.equal(c.attempts, 2)
+      assert.equal(c.pending, false)
+      // A tick after death does nothing more (≤2 always).
+      await runJobBackfillTick({ ...base, now: () => firstFailureAt + 120 * 60000 })
+      assert.equal(runCalls.length, 2, 'never more than 2 retries per episode')
+      // A NEW outage → a NEW episode (fresh base, fresh budget).
+      const nextDay = firstFailureAt + 24 * 3600 * 1000
+      await collectClassOutageCandidate(stateDir, 'c1', '503 service unavailable', undefined, nextDay)
+      c = readJobRunsBackfillFile(stateDir).candidates.c1
+      assert.equal(c.pending, true)
+      assert.equal(c.attempts, 0)
+      assert.equal(c.firstFailureAt, nextDay)
+    })
+  })
+})
+
+test('O3-b runJobBackfillTick: pool NOT healthy → the retry is SKIPPED and the candidate STAYS PENDING — the O1 gate is never bypassed (the gate AND the engine belt)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await withTempJobDir(async (jobDir) => {
+      await writeFile(path.join(jobDir, 'c1.md'), defText({ id: 'c1', schedule: '* * * * *' }), 'utf8')
+      const firstFailureAt = new Date(2026, 7, 23, 9, 0, 0).getTime()
+      const block = '[deepartments] pool: HALT — 1 usable key oc-6 (weekly available 5% < 20% or monthly available 0% < 10%) — NO new dispatches until ≥2 usable keys or new keys are added'
+      const runCalls = []
+      await collectClassOutageCandidate(stateDir, 'c1', '503 service unavailable', undefined, firstFailureAt)
+      // (a) The GATE blocks: poolDispatchBlockError() returns the block → the
+      // runJob stub (which would itself throw the O1 block if ever reached) is
+      // NEVER called; the candidate stays pending with 0 attempts consumed.
+      await runJobBackfillTick({
+        stateDir, repoRoot: '/nonexistent',
+        departments: [{ id: 'research', name: 'Research', jobDir }],
+        departmentForJob: () => ({ id: 'research', name: 'Research', jobDir }),
+        headForDepartment: () => 'research-head',
+        now: () => firstFailureAt + 15 * 60000,
+        runJob: async () => { runCalls.push('unreachable'); throw new Error(block) },
+        poolDispatchBlockError: () => block
+      })
+      let c = readJobRunsBackfillFile(stateDir).candidates.c1
+      assert.equal(runCalls.length, 0, 'a blocked pool never reaches the engine')
+      assert.equal(c.attempts, 0, 'the gate skip never consumes an attempt')
+      assert.equal(c.pending, true, 'a blocked retry leaves the candidate pending')
+      // (b) The ENGINE belt: a HEALTHY gate + a runJob that throws the O1 block
+      // (the pool declined between the check and the dispatch) → STILL no
+      // attempt consumed and the candidate stays pending (nothing materialized).
+      await runJobBackfillTick({
+        stateDir, repoRoot: '/nonexistent',
+        departments: [{ id: 'research', name: 'Research', jobDir }],
+        departmentForJob: () => ({ id: 'research', name: 'Research', jobDir }),
+        headForDepartment: () => 'research-head',
+        now: () => firstFailureAt + 15 * 60000,
+        runJob: async () => { runCalls.push('engine'); throw new Error(block) },
+        poolDispatchBlockError: () => undefined
+      })
+      c = readJobRunsBackfillFile(stateDir).candidates.c1
+      assert.equal(runCalls.length, 1, 'the engine was reached once (healthy gate)')
+      assert.equal(c.attempts, 0, 'an O1 engine throw never consumes an attempt')
+      assert.equal(c.pending, true)
+    })
+  })
+})
+
+test('O3-b runJobBackfillTick: a GREEN retry stamps with stampJobRun (the SAME flat O3-a ledger) and writes job-runs-detail.json with trigger "backfill" — the flat ledger stays intact (numbers only)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await withTempJobDir(async (jobDir) => {
+      await writeFile(path.join(jobDir, 'c1.md'), defText({ id: 'c1', schedule: '* * * * *' }), 'utf8')
+      const firstFailureAt = new Date(2026, 7, 23, 9, 0, 0).getTime()
+      // A previous successful round (yesterday) + an unrelated entry occupy the ledger.
+      await writeJobRunsStateFile(stateDir, { c1: firstFailureAt - 24 * 3600 * 1000, 'other-job': 42 })
+      await collectClassOutageCandidate(stateDir, 'c1', '503 service unavailable', undefined, firstFailureAt)
+      const retryTs = firstFailureAt + 15 * 60000
+      await runJobBackfillTick({
+        stateDir, repoRoot: '/nonexistent',
+        departments: [{ id: 'research', name: 'Research', jobDir }],
+        departmentForJob: () => ({ id: 'research', name: 'Research', jobDir }),
+        headForDepartment: () => 'research-head',
+        now: () => retryTs,
+        runJob: async () => true,
+        poolDispatchBlockError: () => undefined
+      })
+      // The retry stamped the FLAT ledger — SAME form as the auto/manual runs
+      // (the O3-a helper; job-runs-state.json stays the ONLY idempotency source).
+      assert.deepEqual(readJobRunsStateFile(stateDir), { c1: retryTs, 'other-job': 42 }, 'the flat ledger advanced for c1 (stampJobRun) with the other entry untouched')
+      // The OPTIONAL sibling detail ledger distinguishes the trigger without
+      // touching the flat schema.
+      assert.deepEqual(readJobRunsDetailFile(stateDir), { c1: { ts: retryTs, trigger: 'backfill' } }, 'job-runs-detail.json carries {ts, trigger:"backfill"}')
+      const rawDetail = JSON.parse(await readFile(path.join(stateDir, 'job-runs-detail.json'), 'utf8'))
+      assert.deepEqual(rawDetail, { c1: { ts: retryTs, trigger: 'backfill' } }, 'the canonical <stateDir>/job-runs-detail.json carries the entry')
+      // The candidate resolved.
+      const c = readJobRunsBackfillFile(stateDir).candidates.c1
+      assert.equal(c.pending, false)
+      assert.equal(c.attempts, 1)
+      assert.equal(c.lastOutcome, 'fired')
+      // A later MANUAL re-run still stamps the SAME flat form (the ledger is not broken).
+      const manualTs = retryTs + 60 * 60000
+      await stampJobRun(stateDir, 'c1', manualTs)
+      assert.deepEqual(readJobRunsStateFile(stateDir), { c1: manualTs, 'other-job': 42 })
+    })
+  })
+})
+
+test('O3-b runJobBackfillTick: DEBT — a job whose cron desync window has PASSED is still retried when its last run predates the episode (the round is owed), never more than 2', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await withTempJobDir(async (jobDir) => {
+      // A DAILY job (09:00): the retry at 09:15 / 10:00 is NEVER window-due —
+      // only the DEBT (yesterday's run < today's failed episode) entitles it.
+      await writeFile(path.join(jobDir, 'daily.md'), defText({ id: 'daily', schedule: '0 9 * * *' }), 'utf8')
+      const firstFailureAt = new Date(2026, 7, 23, 9, 0, 0).getTime() // the lost round today (exact — the +15 slot is 09:15:00)
+      await writeJobRunsStateFile(stateDir, { daily: new Date(2026, 7, 22, 9, 0, 0).getTime() }) // yesterday 09:00 OK
+      await collectClassOutageCandidate(stateDir, 'daily', '429 rate limit', undefined, firstFailureAt)
+      const runCalls = []
+      const base = {
+        stateDir, repoRoot: '/nonexistent',
+        departments: [{ id: 'research', name: 'Research', jobDir }],
+        departmentForJob: () => ({ id: 'research', name: 'Research', jobDir }),
+        headForDepartment: () => 'research-head',
+        runJob: async (dept, head, jobId) => { runCalls.push(jobId); return false },
+        poolDispatchBlockError: () => undefined
+      }
+      // 09:15 — the 09:00 cron window (2 min) has PASSED; the debt still
+      // entitles the retry (the round is owed).
+      await runJobBackfillTick({ ...base, now: () => new Date(2026, 7, 23, 9, 15, 0).getTime() })
+      assert.equal(runCalls.length, 1, 'a debt job is retried even after the desync window passed')
+      // 10:00 (+60min) — the second and LAST debt retry.
+      await runJobBackfillTick({ ...base, now: () => new Date(2026, 7, 23, 10, 0, 0).getTime() })
+      assert.equal(runCalls.length, 2, 'never more than 2 retries per episode')
+      const c = readJobRunsBackfillFile(stateDir).candidates.daily
+      assert.equal(c.attempts, 2)
+      assert.equal(c.pending, false)
+    })
+  })
+})
+
+test('O3-b runJobBackfillTick: a candidate whose round was completed by a LATER run RESOLVES without firing (never a duplicate round)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await withTempJobDir(async (jobDir) => {
+      await writeFile(path.join(jobDir, 'daily.md'), defText({ id: 'daily', schedule: '0 9 * * *' }), 'utf8')
+      const firstFailureAt = new Date(2026, 7, 23, 9, 0, 30).getTime()
+      await collectClassOutageCandidate(stateDir, 'daily', '503 service unavailable', undefined, firstFailureAt)
+      // The head manually re-ran the job at 10:39 (the O3-a stamp) → recovered.
+      await stampJobRun(stateDir, 'daily', new Date(2026, 7, 23, 10, 39, 0).getTime())
+      const runCalls = []
+      // 11:00 (past the +60 slot): the cron is NOT due AND the job is NOT in
+      // debt (10:39 > 09:00:30) → resolved WITHOUT a retry.
+      await runJobBackfillTick({
+        stateDir, repoRoot: '/nonexistent',
+        departments: [{ id: 'research', name: 'Research', jobDir }],
+        departmentForJob: () => ({ id: 'research', name: 'Research', jobDir }),
+        headForDepartment: () => 'research-head',
+        now: () => new Date(2026, 7, 23, 11, 0, 0).getTime(),
+        runJob: async (dept, head, jobId) => { runCalls.push(jobId); return true },
+        poolDispatchBlockError: () => undefined
+      })
+      assert.equal(runCalls.length, 0, 'a completed round is never re-fired')
+      const c = readJobRunsBackfillFile(stateDir).candidates.daily
+      assert.equal(c.pending, false)
+      assert.equal(c.attempts, 0)
+    })
+  })
+})
+
+test('O3-b job-runs-backfill.json + job-runs-detail.json stores: absent/malformed tolerated, non-record values dropped (the canonical file names)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    assert.deepEqual(readJobRunsBackfillFile(stateDir), { candidates: {} }, 'absent → empty')
+    assert.deepEqual(readJobRunsBackfillFile(path.join(stateDir, 'nope')), { candidates: {} })
+    assert.deepEqual(readJobRunsDetailFile(stateDir), {}, 'absent detail → empty')
+    await writeFile(path.join(stateDir, 'job-runs-backfill.json'), 'NOT JSON', 'utf8')
+    assert.deepEqual(readJobRunsBackfillFile(stateDir), { candidates: {} }, 'malformed → empty (never throws)')
+    await writeFile(path.join(stateDir, 'job-runs-detail.json'), 'junk', 'utf8')
+    assert.deepEqual(readJobRunsDetailFile(stateDir), {}, 'malformed detail → empty')
+    // Structural guards: partial / non-numeric / non-object records are dropped.
+    await writeFile(path.join(stateDir, 'job-runs-backfill.json'), JSON.stringify({
+      candidates: {
+        ok: { jobId: 'ok', firstFailureAt: 1000, pending: true, attempts: 0 },
+        partial: { jobId: 'partial' },
+        notnum: { jobId: 'notnum', firstFailureAt: 'x', pending: true, attempts: 0 },
+        junk: 'not-an-object'
+      }
+    }), 'utf8')
+    assert.deepEqual(readJobRunsBackfillFile(stateDir).candidates, { ok: { jobId: 'ok', firstFailureAt: 1000, pending: true, attempts: 0 } })
+    // The canonical file name carries the store (the collector/tick round-trip).
+    const raw = JSON.parse(await readFile(path.join(stateDir, 'job-runs-backfill.json'), 'utf8'))
+    assert.ok(raw.candidates.ok, 'the canonical <stateDir>/job-runs-backfill.json persists the candidates object')
+    // Detail guards: ts/trigger required, workerId/sessionId optional strings.
+    await writeFile(path.join(stateDir, 'job-runs-detail.json'), JSON.stringify({
+      good: { ts: 1000, trigger: 'backfill' },
+      withIds: { ts: 2000, trigger: 'backfill', workerId: 'w1', sessionId: 's1' },
+      noTs: { trigger: 'backfill' },
+      badTrigger: { ts: 3000, trigger: 42 }
+    }), 'utf8')
+    const detail = readJobRunsDetailFile(stateDir)
+    assert.deepEqual(detail.good, { ts: 1000, trigger: 'backfill' })
+    assert.deepEqual(detail.withIds, { ts: 2000, trigger: 'backfill', workerId: 'w1', sessionId: 's1' })
+    assert.equal(detail.noTs, undefined)
+    assert.equal(detail.badTrigger, undefined)
   })
 })

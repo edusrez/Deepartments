@@ -511,6 +511,218 @@ export async function stampJobRun(stateDir: string, jobId: string, ts = Date.now
 }
 
 // ---------------------------------------------------------------------------
+// O3(b) (VALLE 09-07 — class-outage AUTO-BACKFILL, design §4 of the O3 report):
+// the collector + the two runtime stores + the pure backfill tick. A job whose
+// AUTO-run died with a class-outage (the 400/503/429 family) leaves a lost
+// round — the backfill re-runs it (max 2 retries per episode, fixed +15min /
+// +60min backoff from the FIRST failure, ONLY when the pool is healthy — the
+// O1 gate is never bypassed) through the SAME runJob engine, so a recovered
+// round lands in the flat job-runs-state ledger exactly like a manual/auto run.
+// The flat ledger stays the ONLY idempotency source (nobody touches
+// readJobRunsStateFile / cronIsDue / readLatestJobRunTs / fb134); the detail
+// store is an OPTIONAL sibling that only distinguishes trigger:'backfill'.
+// ---------------------------------------------------------------------------
+
+/** The class-outage reason family (design §4.2): the 400 `reasoning_content` /
+ * MissingSessionID class, the 429 rate-limit class, the 503
+ * service-unavailable class and the quota-exhaustion class. Case-insensitive.
+ * VERBATIM from the approved design (the regex of §4.2). */
+export const CLASS_OUTAGE_REASON_RE = /reasoning_content|MissingSessionID|429|rate limit|503|service unavailable|quota/i
+
+/** The O1 dispatch-block family (design §4.2.5 — the PEAK anti-storm rule):
+ * the pooler capacity pre-check (`workerPoolerDispatchBlockError`) rejects a
+ * dispatch BEFORE any materialization with a `[deepartments] pool: …` error. A
+ * job deferred by O1 was NEVER materialized (no dead post-arranque worker), so
+ * it must NEVER generate a backfill candidate — the exclusion must win even
+ * when the block text carries a family token (e.g. the at-quota cause). */
+const JOB_DISPATCH_BLOCK_RE = /\[deepartments\]\s+pool:/i
+
+/** Whether `text` carries a class-outage family signal (the §4.2 regex). */
+export function isClassOutageReason(text: string): boolean {
+  return CLASS_OUTAGE_REASON_RE.test(String(text ?? ''))
+}
+
+/** Whether `text` is an O1 dispatch block (a PEAK-deferred job — the backfill
+ * must NOT cover it). */
+export function isJobDispatchBlockReason(text: string): boolean {
+  return JOB_DISPATCH_BLOCK_RE.test(String(text ?? ''))
+}
+
+/** One backfill candidate episode (design §4.2.2): a job whose auto-run died
+ * with a class-outage. `pending` stays true while the episode still has a
+ * retry in flight — the collector IGNORES a second outage of the same job
+ * while a candidate is pending (dedupe per episode). The episode RESOLVES on a
+ * green retry (or when a later run completed the round) and DIES after
+ * `JOB_BACKFILL_MAX_ATTEMPTS` consumed attempts — a new outage then starts a
+ * NEW episode. */
+export interface JobRunBackfillCandidate {
+  jobId: string
+  /** The FIRST failure of the episode (ms epoch — the backoff base: +15min /
+   * +60min are measured from HERE, never from the last attempt). */
+  firstFailureAt: number
+  /** True while the episode can still retry; false when resolved/dead. */
+  pending: boolean
+  /** Retry attempts consumed (0..JOB_BACKFILL_MAX_ATTEMPTS). */
+  attempts: number
+  /** The last retry attempt time (ms epoch). */
+  lastAttemptAt?: number
+  /** The last retry outcome. */
+  lastOutcome?: 'skipped' | 'failed' | 'fired'
+}
+
+/** The `<stateDir>/job-runs-backfill.json` store: candidates + attempts. */
+export interface JobRunBackfillState {
+  candidates: Record<string, JobRunBackfillCandidate>
+}
+
+/** One `<stateDir>/job-runs-detail.json` entry — the OPTIONAL sibling ledger
+ * (design §4.2.4) distinguishing `trigger: 'backfill'` (a retry/gatillo) from
+ * the flat auto/manual runs. The flat job-runs-state.json remains the ONLY
+ * idempotency source — NOBODY reads the detail store for due/fire decisions
+ * (0 change in existing consumers: readJobRunsStateFile/cronIsDue/
+ * readLatestJobRunTs/fb134 stay number-shaped). */
+export interface JobRunDetailEntry {
+  /** The run time (ms epoch). */
+  ts: number
+  /** The run trigger: 'backfill' for an auto-backfill retry. */
+  trigger: string
+  workerId?: string
+  sessionId?: string
+}
+
+/** The `<stateDir>/job-runs-detail.json` store: jobId → detail entry. */
+export type JobRunDetailState = Record<string, JobRunDetailEntry>
+
+/** Structural guard for a backfill candidate (a malformed/partial record is
+ * dropped rather than leaked into the tick). */
+function isJobRunBackfillCandidate(value: unknown): value is JobRunBackfillCandidate {
+  if (typeof value !== 'object' || value === null) return false
+  const c = value as Record<string, unknown>
+  if (typeof c.jobId !== 'string' || c.jobId === '') return false
+  if (typeof c.firstFailureAt !== 'number' || !Number.isFinite(c.firstFailureAt)) return false
+  if (typeof c.pending !== 'boolean') return false
+  if (typeof c.attempts !== 'number' || !Number.isFinite(c.attempts) || c.attempts < 0) return false
+  if (c.lastAttemptAt !== undefined && (typeof c.lastAttemptAt !== 'number' || !Number.isFinite(c.lastAttemptAt))) return false
+  if (c.lastOutcome !== undefined && c.lastOutcome !== 'skipped' && c.lastOutcome !== 'failed' && c.lastOutcome !== 'fired') return false
+  return true
+}
+
+/** Structural guard for a detail entry. */
+function isJobRunDetailEntry(value: unknown): value is JobRunDetailEntry {
+  if (typeof value !== 'object' || value === null) return false
+  const e = value as Record<string, unknown>
+  if (typeof e.ts !== 'number' || !Number.isFinite(e.ts)) return false
+  if (typeof e.trigger !== 'string' || e.trigger === '') return false
+  if (e.workerId !== undefined && typeof e.workerId !== 'string') return false
+  if (e.sessionId !== undefined && typeof e.sessionId !== 'string') return false
+  return true
+}
+
+/** Read `<stateDir>/job-runs-backfill.json` (candidates + attempts).
+ * Absent/unreadable/malformed → `{ candidates: {} }` (never throws — mirrors
+ * the other runtime stores); non-candidate records are dropped. */
+export function readJobRunsBackfillFile(stateDir: string, opts?: StoreFileReadOpts): JobRunBackfillState {
+  // LANE fb-134 F2(b) — STALE-READ CAP (the M1 pattern, inline — no deps).
+  checkStoreFileStaleJobs(path.join(stateDir, 'job-runs-backfill.json'), opts)
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'job-runs-backfill.json'), 'utf8')) as { candidates?: unknown }
+    if (parsed !== null && typeof parsed === 'object' && typeof parsed.candidates === 'object' && parsed.candidates !== null && !Array.isArray(parsed.candidates)) {
+      const candidates: Record<string, JobRunBackfillCandidate> = {}
+      for (const [jobId, value] of Object.entries(parsed.candidates as Record<string, unknown>)) {
+        if (isJobRunBackfillCandidate(value)) candidates[jobId] = value
+      }
+      return { candidates }
+    }
+    return { candidates: {} }
+  } catch {
+    return { candidates: {} }
+  }
+}
+
+/** Write `<stateDir>/job-runs-backfill.json` (mkdir -p the dir, then the
+ * store). Throws on an fs failure — the collector/tick fold it into a warn. */
+export async function writeJobRunsBackfillFile(stateDir: string, state: JobRunBackfillState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, 'job-runs-backfill.json')), { recursive: true })
+  await writeFile(path.join(stateDir, 'job-runs-backfill.json'), JSON.stringify(state), 'utf8')
+}
+
+/** Read `<stateDir>/job-runs-detail.json` (the OPTIONAL sibling ledger).
+ * Absent/unreadable/malformed → `{}` (never throws). */
+export function readJobRunsDetailFile(stateDir: string, opts?: StoreFileReadOpts): JobRunDetailState {
+  checkStoreFileStaleJobs(path.join(stateDir, 'job-runs-detail.json'), opts)
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, 'job-runs-detail.json'), 'utf8')) as Record<string, unknown>
+    const out: JobRunDetailState = {}
+    for (const [jobId, value] of Object.entries(parsed)) {
+      if (isJobRunDetailEntry(value)) out[jobId] = value
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Write `<stateDir>/job-runs-detail.json` (mkdir -p the dir, then the store —
+ * read-modify-write preserves every OTHER job's entry). */
+export async function writeJobRunsDetailFile(stateDir: string, state: JobRunDetailState): Promise<void> {
+  await mkdir(path.dirname(path.join(stateDir, 'job-runs-detail.json')), { recursive: true })
+  await writeFile(path.join(stateDir, 'job-runs-detail.json'), JSON.stringify(state), 'utf8')
+}
+
+/** The fixed retry backoff per episode, in minutes FROM THE FIRST FAILURE
+ * (design §4.2.2): the 1st retry at +15 min, the 2nd at +60 min. */
+export const JOB_BACKFILL_OFFSETS_MIN = [15, 60]
+
+/** The max automatic retries per episode (design §4.2.2 — never a storm). */
+export const JOB_BACKFILL_MAX_ATTEMPTS = 2
+
+/** O3(b) — the CLASS-OUTAGE CANDIDATE COLLECTOR (design §4.2.1/§4.2.5): hook
+ * the scheduler auto-run failure sink (`onAutoRunSkip` /
+ * `captureSchedulerAutoRunFailure` — both ALREADY capture the post-errors with
+ * the normalized reason, so the backfill does NOT invent a new detector). A job
+ * whose auto-run died with a class-outage (400/503/429 family) registers ONE
+ * PENDING candidate in `<stateDir>/job-runs-backfill.json` for the backfill
+ * tick. The classification searches `reason` AND `error` (the normalized reason
+ * can be 'idempotency-skip' while the error text carries the 503/429 class).
+ * DEDUPE PER EPISODE: a second outage of the SAME job while a retry is pending
+ * is IGNORED; a resolved/dead episode → a NEW episode starts (fresh
+ * firstFailureAt). PEAK ANTI-STORM (rule 5): an O1 dispatch block
+ * (`[deepartments] pool: …` — a job deferred because the pool is not healthy,
+ * the worker was NEVER materialized) never generates a candidate — the
+ * exclusion wins even over a family token inside the block text. Never throws
+ * on the read (tolerant store); throws only on an fs write failure — the caller
+ * folds that into a warn (a sink capture never fails the run). Returns
+ * { collected, state } — the new store state (tests assert the round-trip). */
+export async function collectClassOutageCandidate(
+  stateDir: string,
+  jobId: string,
+  reason: string,
+  error?: string,
+  ts = Date.now()
+): Promise<{ collected: boolean; state: JobRunBackfillState }> {
+  const reasonText = String(reason ?? '')
+  const errorText = String(error ?? '')
+  // PEAK anti-storm (4.2.5): an O1 pool block is NEVER class-outage — the job
+  // was deferred pre-materialization, there is nothing to backfill.
+  if (isJobDispatchBlockReason(reasonText) || isJobDispatchBlockReason(errorText)) {
+    return { collected: false, state: readJobRunsBackfillFile(stateDir) }
+  }
+  // The class-outage family classification (4.2.1) — reason OR error.
+  if (!isClassOutageReason(reasonText) && !isClassOutageReason(errorText)) {
+    return { collected: false, state: readJobRunsBackfillFile(stateDir) }
+  }
+  const state = readJobRunsBackfillFile(stateDir)
+  const existing = state.candidates[jobId]
+  // Dedupe per episode (4.2.2): a pending retry absorbs a second outage.
+  if (existing !== undefined && existing.pending === true) {
+    return { collected: false, state }
+  }
+  state.candidates[jobId] = { jobId, firstFailureAt: ts, pending: true, attempts: 0 }
+  await writeJobRunsBackfillFile(stateDir, state)
+  return { collected: true, state }
+}
+
+// ---------------------------------------------------------------------------
 // W8-c scheduler auto-run visibility + the PURE scheduler tick.
 //
 // NOTE (split boundary): `captureSchedulerAutoRunFailure` + the W6-health
@@ -676,6 +888,184 @@ export async function runAgendaSchedulerTick(deps: AgendaSchedulerDeps): Promise
 }
 
 // ---------------------------------------------------------------------------
+// W1 O3(b) — the class-outage BACKFILL tick (PURE — an injectable clock +
+// injected hooks, the runAgendaSchedulerTick style).
+// ---------------------------------------------------------------------------
+
+/** Injected hooks + inputs the backfill tick reads. The PRODUCTION wiring (the
+ * dshd-jobs service `runSchedulerTick` — the W1 daemon scheduler's composed
+ * engine) binds the same live registries the agenda tick uses (departments,
+ * the spawn-service runJob adapter, the coordinator head resolver, the pooler
+ * dispatch gate); tests construct this directly with a FIXED clock + stub
+ * runJob/pool gate. Abstracted exactly like AgendaSchedulerDeps so the tick is
+ * unit-testable without a booted plugin. */
+export interface JobBackfillDeps {
+  /** The clock (ms epoch) — injectable so a tick test is deterministic. */
+  now(): number
+  /** The stateDir whose `job-runs-backfill.json` (candidates) +
+   * `job-runs-state.json` (the flat idempotency ledger, stamped on a green
+   * retry with `stampJobRun`) + `job-runs-detail.json` (the optional sibling
+   * ledger) live. */
+  stateDir: string
+  /** The repo root for the department jobDir resolution (readAgendaJobs). */
+  repoRoot: string
+  /** Every configured department the backfill resolves job owners for. */
+  departments: JobsDepartment[]
+  /** Which department OWNS a jobId (scans the jobDirs). */
+  departmentForJob(jobId: string): JobsDepartment | undefined
+  /** Resolve the head MEMBER id (postId) a department runs under. */
+  headForDepartment(department: JobsDepartment): string | undefined
+  /** Run ONE department job — the SAME engine the agenda/manual runs use
+   * (runJobForDepartment: inherits the fb-9 reasoning preflight + the O1
+   * dispatch block). Resolves `true` when it FIRED (a worker materialized),
+   * `false` when it was SKIPPED (already running / no head / any non-fatal
+   * error) — the tick never throws from here. */
+  runJob(department: JobsDepartment, headPostId: string, jobId: string): Promise<boolean>
+  /** The O1 pool gate (`workerPoolerDispatchBlockError`): `undefined` = the
+   * pool is HEALTHY (a retry may dispatch); a string = BLOCKED — the retry is
+   * SKIPPED and the candidate STAYS PENDING (the O1 gate is never bypassed; a
+   * later tick re-checks). Absent dep (minimal composition) → healthy. */
+  poolDispatchBlockError?(): string | undefined
+  /** Optional warn-capable logger (absent dep → the warn is dropped). */
+  logger?: { warn(message: string): void }
+}
+
+/** ONE backfill tick (design §4.2.2/§4.2.3): for every PENDING candidate in
+ * `<stateDir>/job-runs-backfill.json` whose fixed retry time (+15min / +60min
+ * from the episode's FIRST failure) has arrived, retry the job through the
+ * SAME runJob engine — ONLY when (a) the pool is HEALTHY
+ * (`poolDispatchBlockError()` === undefined: a blocked pool skips the retry
+ * and the candidate stays pending — O1 never bypassed, including an O1-class
+ * throw from the engine, the belt) AND (b) the job's cron would still be due in
+ * the window OR the job is IN DEBT (its last successful run predates the
+ * episode — the round was lost and is owed; retried even after the desync
+ * window passed, never more than 2 times). A candidate whose round was
+ * completed by a LATER run (lastRunAt >= firstFailureAt, not window-due)
+ * RESOLVES without firing (no duplicate round). A green retry stamps the flat
+ * ledger with `stampJobRun` (the O3-a helper — identical to a manual/auto run)
+ * and writes `<stateDir>/job-runs-detail.json` with trigger 'backfill' (both
+ * non-fatal: a persist failure warn-degrades). NEVER throws (every internal
+ * failure is a warn — the tick contract). */
+export async function runJobBackfillTick(deps: JobBackfillDeps): Promise<void> {
+  try {
+    const nowMs = deps.now()
+    const runs = readJobRunsStateFile(deps.stateDir)
+    const state = readJobRunsBackfillFile(deps.stateDir)
+    let changed = false
+    for (const candidate of Object.values(state.candidates)) {
+      if (candidate.pending !== true) continue
+      // A dangling candidate past its budget dies (a guard for a malformed /
+      // hand-edited store — never a runaway retry).
+      if (candidate.attempts >= JOB_BACKFILL_MAX_ATTEMPTS) {
+        candidate.pending = false
+        changed = true
+        continue
+      }
+      const offsetMin = JOB_BACKFILL_OFFSETS_MIN[candidate.attempts]
+      if (offsetMin === undefined) {
+        candidate.pending = false
+        changed = true
+        continue
+      }
+      // The FIXED backoff base is the FIRST failure of the episode — a retry
+      // never fires before its slot, regardless of when earlier attempts ran.
+      const nextAttemptAt = candidate.firstFailureAt + offsetMin * 60_000
+      if (nowMs < nextAttemptAt) continue
+      // Resolve the job's department + head (a pending candidate of a job that
+      // disappeared stays pending — a later tick re-checks).
+      const department = deps.departmentForJob(candidate.jobId)
+      if (department === undefined) {
+        deps.logger?.warn(`[deepartments] backfill: job "${candidate.jobId}" no longer resolves a department — candidate kept pending`)
+        continue
+      }
+      const headPostId = deps.headForDepartment(department)
+      if (headPostId === undefined) {
+        deps.logger?.warn(`[deepartments] backfill: job "${candidate.jobId}" (department ${department.id}) has NO head — candidate kept pending`)
+        continue
+      }
+      // (a) The pool gate (4.2.3): a BLOCKED pool skips the retry — the
+      // candidate stays pending with its attempt budget untouched (the O1 gate
+      // is the SAME gate the engine enforces; the backfill never bypasses it).
+      const poolBlock = deps.poolDispatchBlockError?.()
+      if (poolBlock !== undefined) {
+        deps.logger?.warn(`[deepartments] backfill: pool dispatch blocked (${poolBlock}) — job "${candidate.jobId}" retry SKIPPED (stays pending)`)
+        continue
+      }
+      // (b) Eligibility (4.2.2): retry ONLY when the cron would still be due in
+      // the window OR the job is in debt (its last successful run predates the
+      // episode — the round was lost). A candidate whose round was completed by
+      // a later run (e.g. a manual re-run stamped after the episode) RESOLVES
+      // without firing — never a duplicate round.
+      const jobs = await readAgendaJobs(deps.repoRoot, [department], nowMs)
+      const definition = jobs.find((job) => job.id === candidate.jobId)
+      const lastRunAt = runs[candidate.jobId]
+      const inDebt = lastRunAt === undefined || lastRunAt < candidate.firstFailureAt
+      const windowDue = definition?.cron !== undefined && cronIsDue(definition.cron, new Date(nowMs), lastRunAt)
+      if (!windowDue && !inDebt) {
+        candidate.pending = false
+        changed = true
+        deps.logger?.warn(`[deepartments] backfill: job "${candidate.jobId}" round already completed (last run ${lastRunAt} >= episode ${candidate.firstFailureAt}, cron not due) — candidate RESOLVED without a retry`)
+        continue
+      }
+      // The retry — the SAME engine (fb-9 preflight + O1 dispatch block
+      // inherited inside runJobForDepartment).
+      try {
+        const fired = await deps.runJob(department, headPostId, candidate.jobId)
+        candidate.attempts += 1
+        candidate.lastAttemptAt = nowMs
+        if (fired) {
+          candidate.lastOutcome = 'fired'
+          candidate.pending = false // the round is recovered — the episode resolves
+          deps.logger?.warn(`[deepartments] backfill: job "${candidate.jobId}" retry ${candidate.attempts}/${JOB_BACKFILL_MAX_ATTEMPTS} FIRED — the round is recovered`)
+          // Stamp the flat ledger with the O3-a helper — identical to a
+          // manual/auto run (same state, same form; the ONLY idempotency
+          // source). NON-FATAL: a persist failure warn-degrades, never fails
+          // the already-fired retry.
+          try {
+            await stampJobRun(deps.stateDir, candidate.jobId, nowMs)
+          } catch (error: unknown) {
+            deps.logger?.warn(`[deepartments] backfill: job "${candidate.jobId}" fired (retry) but its job-runs stamp could not persist: ${error instanceof Error ? error.message : String(error)}`)
+          }
+          // The OPTIONAL sibling detail ledger (4.2.4) — trigger 'backfill'
+          // distinguishes the retry without touching the flat schema (jobId →
+          // {ts, trigger, workerId?, sessionId?}; read-modify-write preserves
+          // the other entries).
+          try {
+            const detail = readJobRunsDetailFile(deps.stateDir)
+            detail[candidate.jobId] = { ts: nowMs, trigger: 'backfill' }
+            await writeJobRunsDetailFile(deps.stateDir, detail)
+          } catch (error: unknown) {
+            deps.logger?.warn(`[deepartments] backfill: job "${candidate.jobId}" detail ledger write failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+          }
+        } else {
+          candidate.lastOutcome = 'skipped'
+          if (candidate.attempts >= JOB_BACKFILL_MAX_ATTEMPTS) candidate.pending = false
+        }
+      } catch (error: unknown) {
+        const errorText = error instanceof Error ? error.message : String(error)
+        // The O1 belt: an engine error that IS the dispatch block (the pool
+        // declined between the gate check and the dispatch — nothing
+        // materialized) never consumes an attempt — the candidate stays
+        // pending, exactly like the gate skip.
+        if (isJobDispatchBlockReason(errorText)) {
+          deps.logger?.warn(`[deepartments] backfill: job "${candidate.jobId}" retry hit the O1 dispatch block (${errorText}) — SKIPPED (stays pending)`)
+          continue
+        }
+        candidate.attempts += 1
+        candidate.lastAttemptAt = nowMs
+        candidate.lastOutcome = 'failed'
+        if (candidate.attempts >= JOB_BACKFILL_MAX_ATTEMPTS) candidate.pending = false
+        deps.logger?.warn(`[deepartments] backfill: job "${candidate.jobId}" retry ${candidate.attempts}/${JOB_BACKFILL_MAX_ATTEMPTS} failed: ${errorText}`)
+      }
+      changed = true
+    }
+    if (changed) await writeJobRunsBackfillFile(deps.stateDir, state)
+  } catch (error: unknown) {
+    deps.logger?.warn(`[deepartments] backfill tick failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+// ---------------------------------------------------------------------------
 // P1 (MODULARIZACIÓN, 2026-08-29) — the dshd-jobs Cordis PLUGIN surface.
 // Thin name/inject/apply (the dshd-core/dshd-webfetch pattern): the package
 // now ALSO composes as a real plugin row (cordis.patch.yml) and provides
@@ -727,6 +1117,13 @@ export interface JobsBinderDeps {
   /** The bundle's repoRoot (registers the same value the `wakepack` bucket
    * carries; absent → the wakepack bucket). */
   repoRoot?: string
+  /** O3(b) (VALLE 09-07 — class-outage auto-backfill): the O1 POOL GATE closure
+   * (`workerPoolerDispatchBlockError` — undefined = the pool is HEALTHY, a
+   * string = BLOCKED). The backfill tick reads it per candidate (a blocked
+   * pool skips the retry, the candidate stays pending); absent in a minimal
+   * composition → the pass treats the pool as healthy (R6 — no pooler there
+   * either). The bundle registers its live closure. */
+  backfillPoolDispatchBlockError?: () => string | undefined
 }
 
 /** The `deepartments.jobs` service surface — the scheduler tick the bundle
@@ -873,6 +1270,26 @@ export function apply(ctx: Context, config: JobsConfig = {}) {
         departmentForEntry: bound.departmentForEntry!,
         departmentForJob: bound.departmentForJob!,
         onAutoRunSkip: bound.onAutoRunSkip,
+        logger: ctx.logger
+      })
+      // O3(b) (VALLE 09-07 — class-outage auto-backfill): the SAME daemon tick
+      // (the W1 scheduler invokes runSchedulerTick every interval) ALSO runs
+      // the BACKFILL pass — the automatic retry of jobs whose auto-run died
+      // with a class-outage (400/503/429 family; the collector hooked at the
+      // capture sink registers the candidates in job-runs-backfill.json). The
+      // retry reuses the SAME runJob engine (fb-9 + O1 inherited), is gated by
+      // the pool health (backfillPoolDispatchBlockError — a blocked pool skips,
+      // the candidate stays pending) + the cron-window/debt eligibility, and
+      // stamps the flat ledger + the optional detail ledger on a green fire.
+      await runJobBackfillTick({
+        now: opts.now ?? (() => Date.now()),
+        stateDir: org.stateDir,
+        repoRoot,
+        departments: config.departments ?? org.org?.departments ?? [],
+        departmentForJob: bound.departmentForJob!,
+        headForDepartment: (department) => department.coordinator?.postId,
+        runJob: runJob!,
+        poolDispatchBlockError: () => bound.backfillPoolDispatchBlockError?.(),
         logger: ctx.logger
       })
     }
