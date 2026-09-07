@@ -475,3 +475,73 @@ test('R8 DORMANT normal (control): a head with NO live handle (the durable entry
     }
   })
 })
+
+test('R8 fb-220 (OBSERVABILITY): the RUNNING rejection exposes running-since (the last turn/start of the live session) + the last wake (the last agent/inbox/spliced), FIRST from the live session events and SECOND from the durable journal fallback (last_wake frontmatter); the R8 reason text stays byte-identical (the appended diagnostics never alter the rejection itself) — the host distinguishes a tail-past-bound (started BEFORE the settle window — immediate retry legitimate) from a NEW turn (started WITHIN) WITHOUT a second dept_who+alert cycle', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'internal-programming-head'
+    await seedJournal(stateDir, postId, 'R8-SEED: fb-220 rotation diagnostics.')
+    const env = await smokeBoot(stateDir, { org: { departments: [DEPARTMENT] }, agents: true })
+    try {
+      await waitFor(() => env.agentsStub.store.has(`head-${postId}`), 8000, 'head materialized at boot')
+      const signal = new AbortController().signal
+      const head = env.agentsStub.store.get(`head-${postId}`)
+      // Seed the live session log: the current turn started 60s ago (a turn
+      // running THROUGH the whole settle bound — the tail-past-bound class),
+      // the last inbox splice (the wake that fed it) at 59s ago. Times are
+      // anchored at PUSH time (the boot above already consumed ~seconds).
+      const pushNow = Date.now()
+      const turnStart = pushNow - 60_000
+      const lastWake = pushNow - 59_000
+      head.session.events.push(
+        { type: 'turn/start', seq: head.session.events.length, time: turnStart, data: { turn: 1 } },
+        { type: 'user/message', seq: head.session.events.length, time: turnStart + 500, data: {} },
+        { type: 'assistant/message', seq: head.session.events.length, time: turnStart + 900, data: {} },
+        { type: 'agent/inbox/spliced', seq: head.session.events.length, time: lastWake, data: {} }
+      )
+      head.status = 'running'
+      // The tiny settle bound (50ms) expires while the turn never closes — the
+      // SAME loud rejection, now WITH the running-since/last-wake diagnostics.
+      await withSettleMs(50, () =>
+        assert.rejects(
+          env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'R8 fb-220: real turn in flight' }, { agent: fakeHostAgent(), signal }),
+          (error) => {
+            const message = String(error instanceof Error ? error.message : error)
+            // The R8 reason core is byte-identical (the tests + fb-115 intact).
+            assert.match(message, /is RUNNING \(state running\) — rotate only in a free window \(head idle; re-check dept_who\)/, 'the R8 free-window reason stays EXACT (the appended diagnostics never replace it)')
+            // The fb-220 observability: running-since from the turn/start event.
+            assert.ok(message.includes(new Date(turnStart).toISOString()), 'running-since = the last turn/start session-event time (ISO)')
+            assert.match(message, /\(\d+s ago\)/, 'the running-since carries the age (~60s — the exact second is contention-dependent)')
+            assert.ok(message.includes('started BEFORE the settle window'), 'a turn begun before the settle-wait is a TAIL past the bound (immediate retry legitimate)')
+            // Last wake from the agent/inbox/spliced event.
+            assert.ok(message.includes(new Date(lastWake).toISOString()), 'last wake = the last agent/inbox/spliced session-event time (ISO)')
+            assert.ok(message.includes('last wake'), 'the message names the last wake')
+            return true
+          },
+          'the RUNNING rejection exposes running-since + last wake (fb-220) while keeping the R8 reason intact'
+        )
+      )
+      // (2) The DURABLE fallback — the journal `last_wake` frontmatter when the
+      // session log has NO events: a fresh boot-less state (events cleared) →
+      // the diagnostics degrade to the journal, never to a bare rejection.
+      const journalPath = path.join(stateDir, 'journals', `${postId}.md`)
+      const journalBody = readFileSync(journalPath, 'utf8').replace(/(^wake_counter:\s*\d+$)/m, `$1\nlast_wake: ${new Date(lastWake).toISOString()}`)
+      await writeFile(journalPath, journalBody, 'utf8')
+      head.session.events = []
+      head.status = 'running'
+      await withSettleMs(50, () =>
+        assert.rejects(
+          env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'R8 fb-220: journal fallback' }, { agent: fakeHostAgent(), signal }),
+          (error) => {
+            const message = String(error instanceof Error ? error.message : error)
+            assert.ok(message.includes(new Date(lastWake).toISOString()), 'the last-wake DURABLE fallback (journal last_wake frontmatter) rides the rejection when the session events are absent')
+            return true
+          },
+          'the journal last_wake fallback reaches the message'
+        )
+      )
+      head.status = 'idle'
+    } finally {
+      await env.dispose()
+    }
+  })
+})

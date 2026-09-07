@@ -6137,6 +6137,85 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // injected at pre-step). Scope: host-only (a head cannot rotate), configured
   // heads only (a worker / unconfigured post rejects loudly), idle only (a
   // RUNNING head is rotated in a free window, never mid-turn).
+
+  /** fb-220 (QD 2026-09-07 — head-tooling OBSERVABILITY, R8 intact): the
+   * RUNNING-rejection DIAGNOSTICS of dept_head_rotate. The host must
+   * distinguish (a) a turn that kept 'running' THROUGH the settle bound (a
+   * FINALIZATION TAIL past the bound — a legitimate immediate retry when the
+   * head declared ready) from (b) a NEW turn that a fresh wake started DURING
+   * the wait (wait for it to close). The rejection carries two purely
+   * observational signals — NEVER a behavior gate (the rejection itself is
+   * byte-identical; only the message gains detail):
+   *   - running-since: the LAST `turn/start` session-event time of the live
+   *     handle (the current turn's start — the harness driver appends
+   *     turn/start when a phase begins); fallback the last `user/message`
+   *     time, then the headProgress `at` stamp (the last observed progress —
+   *     a head whose event log is unavailable/empty), then unknown.
+   *   - last wake: the last `agent/inbox/spliced` session-event time (the
+   *     last message delivered INTO the inbox — the wake/feed arrival);
+   *     fallback the durable journal frontmatter `last_wake` (readJournal —
+   *     DURABLE, survives a cold registration), then unknown.
+   * `tailPastBound` = the running turn STARTED BEFORE the settle-wait window
+   * began (runningSince < waitStart): the wait already covered the whole turn
+   * — a tail past the bound. A turn that started WITHIN the window is a NEW
+   * wake turn. Best-effort: a throwing read / absent event/entry degrades to
+   * 'unknown' — never a different rejection. */
+  const headRotateRunningDiagnostics = async (
+    live: AgentLike,
+    postId: string,
+    opts: { settleWaitMs: number; now: number }
+  ): Promise<{ runningSinceMs?: number; lastWakeMs?: number; tailPastBound: boolean; runningSinceLabel: string; lastWakeLabel: string }> => {
+    let runningSinceMs: number | undefined
+    let lastWakeMs: number | undefined
+    let lastUserMessageMs: number | undefined
+    try {
+      const events = live.session?.snapshotEvents?.() ?? []
+      // The log is chronological — scan BACKWARD for the LAST marker of each
+      // class (an in-flight turn's log ends at the CURRENT phase, no turn/end).
+      // `turn/start` is the AUTHORITATIVE turn boundary (the current turn's
+      // start); `user/message` is its content — used only when NO turn/start
+      // exists in the log (a legacy/stub session without the lifecycle marker).
+      for (let i = events.length - 1; i >= 0; i--) {
+        const e = events[i] as { type?: unknown; time?: unknown } | undefined
+        if (e === undefined || typeof e !== 'object') continue
+        const type = String(e.type ?? '')
+        const time = typeof e.time === 'number' && Number.isFinite(e.time) ? e.time : undefined
+        if (time === undefined) continue
+        if (runningSinceMs === undefined && type === 'turn/start') runningSinceMs = time
+        if (lastUserMessageMs === undefined && type === 'user/message') lastUserMessageMs = time
+        if (lastWakeMs === undefined && type === 'agent/inbox/spliced') lastWakeMs = time
+        if (runningSinceMs !== undefined && lastWakeMs !== undefined) break
+      }
+      // No turn/start in the whole log → fall back to the last user/message.
+      if (runningSinceMs === undefined) runningSinceMs = lastUserMessageMs
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] dept_head_rotate: running diagnostics for "${postId}" could not read the session events (degrading to the fallbacks): ${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (runningSinceMs === undefined) runningSinceMs = headProgress.get(String(SessionId(live.id)))?.at
+    if (lastWakeMs === undefined) {
+      // DURABLE fallback — the journal's `last_wake` frontmatter (the wake
+      // BEFORE the latest memo; best-effort, the read also serves the rotate's
+      // mandatory journal path right below).
+      try {
+        const journal = await readJournal(postId)
+        const lw = journal?.match(/^last_wake:\s*(.+)$/m)?.[1]
+        if (lw !== undefined && lw !== 'none' && !Number.isNaN(Date.parse(lw))) lastWakeMs = Date.parse(lw)
+      } catch (error: unknown) {
+        ctx.logger.warn(`[deepartments] dept_head_rotate: last-wake journal read for "${postId}" failed (degrading to unknown): ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    const waitStart = opts.now - opts.settleWaitMs
+    const tailPastBound = runningSinceMs !== undefined && runningSinceMs < waitStart
+    const label = (ms: number | undefined): string => ms === undefined ? 'unknown' : `${new Date(ms).toISOString()} (${Math.max(0, Math.round((opts.now - ms) / 1000))}s ago)`
+    return {
+      runningSinceMs,
+      lastWakeMs,
+      tailPastBound,
+      runningSinceLabel: label(runningSinceMs),
+      lastWakeLabel: label(lastWakeMs)
+    }
+  }
+
   const globalHeadRotate = ctx.tools.register(defineTool({
     name: 'dept_head_rotate',
     description: 'Rotate a CONFIGURED department head (HOST plane, Asistente only): an ACTIVE context refresh — the head\'s durable session is fresh-minted (NEW session id) seeded with its LAST durable journal, the old session is archived server-side, and the department title stays pinned; the postId/identity, journal and messages are untouched (archive ≠ delete) and NO sleepEpoch is set (a rotation is NOT sleep). The fresh head lands LIVE but BOOT-QUIET: its first turn starts on the NEXT message/daemon wake (the journal is already in its context as the seed). Use it on CONTEXT-THRESHOLD crossing (>= 50% of the window, e.g. the QH) or on instruction; confirm the head is IDLE first (dept_who) — a running head is rejected loudly. R8 (fb-143/144/145): the free-window check RE-VERIFIES automatically with a bounded settle-wait (DEEPARTMENTS_HEAD_ROTATE_SETTLE_MS, default 5s) — the dept_who snapshot and the rotate check read the SAME live handle signal, so a head that just DECLARED ready (or that a wake turned running between the dept_who read and the rotate) may still be `running` for its FINALIZATION TAIL; the rotate waits that tail out in the same window and proceeds when the turn closes, while a turn still running past the bound is rejected with the clear reason (never rotate a REAL in-flight turn). The LAST durable journal is ALWAYS used and the rotation NEVER delays for a fresh memo (the critical-unblock rule — a context-blocked head may not run dept_memo_write): ask the head for dept_memo_write BEFORE rotating when it is operative and the window permits, and watch the returned `journal.stale` marker ("memo no actualizado — journal previo"). Emits a Quality-inspect directive to quality-head (100% mandate).',
@@ -6221,7 +6300,13 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       }
       const live = agents?.get(sessionId)
       if (live !== undefined && live.status === 'running') {
-        throw new Error(`[deepartments] dept_head_rotate: "${args.postId}" is RUNNING (state ${live.status}) — rotate only in a free window (head idle; re-check dept_who)`)
+        // fb-220 (QD 2026-09-07 — OBSERVABILITY only; R8/fb-115 intact): the
+        // rejection exposes the running-since + the last wake so the host can
+        // distinguish a FINALIZATION TAIL past the bound (an immediate retry is
+        // legitimate after a fresh «ready» declaration) from a NEW wake turn
+        // (wait for it to close) WITHOUT a second dept_who+alert cycle.
+        const diag = await headRotateRunningDiagnostics(live, args.postId, { settleWaitMs, now: Date.now() })
+        throw new Error(`[deepartments] dept_head_rotate: "${args.postId}" is RUNNING (state ${live.status}) — rotate only in a free window (head idle; re-check dept_who); running since ${diag.runningSinceLabel}${diag.tailPastBound ? ` (started BEFORE the settle window — the turn ran through the whole bound: a tail past the bound; if the head declared ready, an immediate retry is legitimate)` : ` (started WITHIN the settle window — a NEW turn; wait for it to close)`}; last wake ${diag.lastWakeLabel}`)
       }
       // Journal — CRITICAL-UNBLOCK RULE: always use the LAST durable journal,
       // never delay for a fresh memo (a context-over-threshold head — the QH
