@@ -49,6 +49,10 @@ import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSessio
 import { RegistryStore } from '../lib/invoke.js'
 import { headRotationJournalStatus, HEAD_ROTATE_JOURNAL_STALE_MS, verifyRotateReason, resolveSessionProjCachePath, REASON_VERIFY_TOLERANCE } from '../lib/invoke.js'
 import { readLlmPiAiProviderSettings, resolveReasoningContentPreflight, REASONING_CONTENT_PREFLIGHT_POST_ID } from '../lib/invoke.js'
+// MICRO-LANE O2 (2026-09-06): the qi-silence watchdog directive counter — imported
+// from the dshd-health PACKAGE lib directly, NOT from ../lib/invoke.js (the
+// export-parity lock freezes that import surface at 8 statements / 234 symbols).
+import { readQiDirectiveCount } from '../packages/dshd-health/lib/index.js'
 // DISPATCH-HARDENING + E2-ZSTD (2026-08-28): the pooler-capacity dispatch
 // pre-check (resolvePoolerDispatchBlock), the b5-ghost census ledger
 // (stepGhostSuspectCensus + the ledger IO) and the dept_zstd_read tool
@@ -20698,6 +20702,108 @@ test('QD worker-retire dice instrumentation (QH [HIGH] 2026-08-28 — qi-silence
       } finally {
         Math.random = originalRandom
         logger.info = origInfo
+      }
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+// ===========================================================================
+// MICRO-LANE O2 (2026-09-06) — EMITTER OBSERVABILITY (deliveries-emitter-row +
+// dice-durability, dictamen explore-deep-37 837f0414): the worker-retired QD
+// directive now writes its delivery sidecar row 'terminal' (deliveries.jsonl —
+// NEVER 'prepared', so no boot re-drive / W6 re-alert) and the retire dice is
+// durable in the append-only `retire-dice.jsonl` ledger (roll/prob/emitted —
+// the O4 archive row shape is frozen to {postId, entry, prunedAt} by the
+// P2-ENTRY CONTROL, so a dedicated ledger carries the dice). A future
+// qi-silence alert audits WITHOUT journald: directive absent + emitted=false →
+// dice-silence (healthy); directive absent + emitted=true → emitter-silence
+// (actionable bug).
+// ===========================================================================
+
+test('O2 (MICRO-LANE O2 deliveries-emitter-row): a worker-retired directive writes its deliveries.jsonl row as ONE `terminal` (never `prepared`) for the (messageId, quality-head) pair, and readQiDirectiveCount STILL counts the directive (the sidecar row is purely observational — the watchdog keeps counting by prefix in messages.jsonl)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    delete process.env[QUALITY_INSPECT_ENV_VAR] // exercise the code default 0.25 (never an env override)
+    const env = await bootWithQD(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const { head, headCtx, key } = qdResearchHead(env)
+      const originalRandom = Math.random
+      try {
+        const spawned = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'o2 emitter row' })
+        Math.random = () => 0.1 // below the 0.25 sample threshold → the dice FIRES → one directive
+        await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: spawned.result.workerId }, { agent: head, signal })
+        Math.random = originalRandom
+        await waitFor(async () => (await qualityDirectives(stateDir)).filter((d) => /worker retired/.test(d.text)).length >= 1, 5000, 'the dice-hit retire emitted EXACTLY ONE worker-retired directive')
+        const dirs = await qualityDirectives(stateDir)
+        const directive = dirs.find((d) => /worker retired/.test(d.text))
+        assert.ok(directive, 'the directive record exists in messages.jsonl')
+        const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8')).filter((r) => r.messageId === directive.id && r.recipientId === 'quality-head')
+        assert.equal(rows.filter((r) => r.status === 'prepared').length, 0, 'NO `prepared` row for the directive pair (the boot re-drive / W6 re-alert class stays impossible)')
+        assert.equal(rows.filter((r) => r.status === 'terminal').length, 1, 'EXACTLY ONE `terminal` row for the directive pair (deliveries.jsonl now inventories the emitter directive)')
+        assert.equal(rows.filter((r) => r.status === 'failed').length, 0, 'no `failed` row either (the delivery succeeded)')
+        // Watchdog UNCHANGED: readQiDirectiveCount counts messages.jsonl records by
+        // prefix (dshd-health) — the added sidecar row must NOT affect it.
+        assert.equal(readQiDirectiveCount(stateDir, 2 * 60 * 60 * 1000, Date.now()), 1, 'readQiDirectiveCount still counts the directive (the terminal row is purely observational)')
+      } finally {
+        Math.random = originalRandom
+      }
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('O2 (MICRO-LANE O2 dice-durability): the append-only retire-dice ledger records roll/prob/emitted coherent with the dice — seeded rng 0.1 (roll low) → emitted=true + the directive + its terminal row; seeded rng 0.9 (roll high) → emitted=false + NO directive + NO sidecar row (the audit separates dice-silence from emitter-silence WITHOUT journald)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    delete process.env[QUALITY_INSPECT_ENV_VAR] // exercise the code default 0.25
+    const env = await bootWithQD(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const { head, headCtx, key } = qdResearchHead(env)
+      const originalRandom = Math.random
+      try {
+        // (a) HIT — seeded rng 0.1 → the 0.25 dice fires: emitted=true + directive.
+        const hit = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'o2 dice hit' })
+        Math.random = () => 0.1 // below the 0.25 sample threshold → dice TRUE
+        await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: hit.result.workerId }, { agent: head, signal })
+        Math.random = originalRandom
+        // (b) MISS — seeded rng 0.9 → the dice skips: emitted=false + no directive.
+        const miss = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'o2 dice miss' })
+        Math.random = () => 0.9 // above the 0.25 sample threshold → dice FALSE
+        await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: miss.result.workerId }, { agent: head, signal })
+        Math.random = originalRandom
+        await new Promise((r) => setTimeout(r, 100))
+        // The ledger is the durable dice (one row per real worker retire).
+        const ledgerText = await readFile(path.join(stateDir, 'retire-dice.jsonl'), 'utf8')
+        const ledger = ledgerText.trim().split('\n').filter((l) => l.length > 0).map((l) => JSON.parse(l))
+        const hitRow = ledger.find((r) => r.postId === hit.result.workerId)
+        const missRow = ledger.find((r) => r.postId === miss.result.workerId)
+        assert.ok(hitRow, 'the HIT retire wrote a ledger row')
+        assert.equal(hitRow.retireRoll, 0.1, 'the HIT row carries the roll the gate drew (0.1)')
+        assert.equal(hitRow.retireProb, 0.25, 'the HIT row carries the RESOLVED probability (env → config → code default 0.25)')
+        assert.equal(hitRow.retireEmitted, true, 'the HIT row marks emitted=true')
+        assert.equal(typeof hitRow.ts, 'number', 'the HIT row carries the retire timestamp')
+        assert.ok(missRow, 'the MISS retire ALSO wrote a ledger row (every eligible retire inventories the dice)')
+        assert.equal(missRow.retireRoll, 0.9, 'the MISS row carries the roll the gate drew (0.9)')
+        assert.equal(missRow.retireProb, 0.25, 'the MISS row carries the RESOLVED probability (0.25)')
+        assert.equal(missRow.retireEmitted, false, 'the MISS row marks emitted=false')
+        // The audit distinction a future qi-silence alert relies on: the low-roll
+        // retire has the directive + its terminal sidecar row; the high-roll
+        // retire has NEITHER (healthy dice-silence — never an emitter bug).
+        const dirs = await qualityDirectives(stateDir)
+        const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+        const hitDirective = dirs.find(workerRetiredDirectiveFor(hit.result.workerId))
+        assert.ok(hitDirective, 'the emitted (low-roll) retire produced its directive')
+        assert.equal(rows.filter((r) => r.messageId === hitDirective.id && r.recipientId === 'quality-head' && r.status === 'terminal').length, 1, 'the emitted directive has its ONE terminal sidecar row')
+        const missDirective = dirs.find(workerRetiredDirectiveFor(miss.result.workerId))
+        assert.equal(missDirective, undefined, 'the skipped (high-roll) retire produced NO directive (dice-silence — healthy)')
+        const qhRows = rows.filter((r) => r.recipientId === 'quality-head')
+        assert.equal(qhRows.length, 1, 'the ONLY quality-head sidecar row in deliveries.jsonl is the HIT directive terminal row (the MISS retire is sidecar-free — dice-silence leaves no emitter trace, exactly the audit signal)')
+        assert.equal(qhRows[0].messageId, hitDirective.id, 'the sole quality-head sidecar row belongs to the emitted directive')
+      } finally {
+        Math.random = originalRandom
       }
     } finally {
       await env.dispose()

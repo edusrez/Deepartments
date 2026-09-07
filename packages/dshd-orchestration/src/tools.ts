@@ -3284,6 +3284,17 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // part of this lane): a `quality.excludeQdWorkers` knob to re-enable.
       const retireEmitted = entry.managerId !== 'quality-head' && qualityInspectDecision('worker', { rng: () => retireRoll, workerInspectProbability: qualityWorkerInspectProbability })
       ctx.logger.info(`[deepartments] retirePost worker-retire QD dice: postId="${postId}" roll=${retireRoll} prob=${retireProb} emitted=${retireEmitted}`)
+      // MICRO-LANE O2 (dice-durability, 2026-09-06): persist the dice to the
+      // append-only `retire-dice.jsonl` ledger in stateDir — the roll lived
+      // ONLY in the INFO line above (journald, read-inaccessible), so a future
+      // qi-silence alert could not separate dice-silence (roll high →
+      // emitted=false, healthy) from emitter-silence (roll low → emitted=true
+      // but no directive, actionable) without journald. The O4 retire-archive
+      // row cannot carry the fields (the P2-ENTRY CONTROL freezes its shape to
+      // {postId, entry, prunedAt}) → a dedicated ledger (registry.ts
+      // appendRetireDice). Non-fatal: a failed append only warns — the retire
+      // already committed and the retire path NEVER breaks here.
+      await registry.appendRetireDice(postId, { retireRoll, retireProb, retireEmitted })
       try {
         if (retireEmitted) {
           // O2 (MICRO-BATCH O2, QD compromiso — ANALYZE m-598): label the

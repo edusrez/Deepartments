@@ -1552,6 +1552,35 @@ export class RegistryStore {
     }
   }
 
+  /** MICRO-LANE O2 (dice-durability, 2026-09-06): append ONE durable dice row
+   * for a worker retire to the `retire-dice.jsonl` ledger in stateDir —
+   * `{postId, retireRoll, retireProb, retireEmitted, ts}` — the values a future
+   * qi-silence alert needs to separate dice-silence (roll high → emitted=false,
+   * healthy) from emitter-silence (roll low → emitted=true but no directive,
+   * actionable) WITHOUT journald access (the roll previously lived ONLY in the
+   * retirePost INFO line, tools.ts). The O4 retire-archive row cannot carry the
+   * fields — the P2-ENTRY CONTROL (test/p2-entry-retire-toolset.test.js)
+   * freezes its shape to {postId, entry, prunedAt} — so a dedicated append-only
+   * ledger is used instead. Backward-compatible: a NEW file; no existing format
+   * is touched (additive optional fields, never a rewrite). One row per real
+   * worker retire (called from the retirePost worker branch, where the dice is
+   * drawn). Non-fatal: a failed append only warns (the retire mark already
+   * committed — the retire path NEVER breaks here). */
+  async appendRetireDice(
+    postId: string,
+    dice: { retireRoll: number; retireProb: number; retireEmitted: boolean },
+    opts?: { retireDiceFile?: string; now?: () => number }
+  ): Promise<void> {
+    try {
+      const nowMs = (opts?.now ?? (() => Date.now()))()
+      const diceFile = opts?.retireDiceFile ?? 'retire-dice.jsonl'
+      const dicePath = path.join(this.deps.stateDir, diceFile)
+      await appendFile(dicePath, `${JSON.stringify({ postId, retireRoll: dice.retireRoll, retireProb: dice.retireProb, retireEmitted: dice.retireEmitted, ts: nowMs })}\n`, 'utf8')
+    } catch (error: unknown) {
+      this.deps.logger.warn(`[deepartments] retire-dice ledger append failed for "${postId}" (non-fatal — the retire mark already committed): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   /** Remove a post from the live catalog (a configured-head cosmetic retire:
    * the entry is deleted from byPost/byChild and persisted; the durable
    * posts.json entry is rewritten without it — the config re-materializes it at

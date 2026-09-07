@@ -1345,6 +1345,10 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
   }
 
   const maybeEmitQualityInspectDirective = async (surface: QualityInspectDirectiveSurface): Promise<void> => {
+    // MICRO-LANE O2 (deliveries-emitter-row, 2026-09-06): the delivery-sidecar
+    // row the directive path writes needs the record id in BOTH the success
+    // ('terminal') and the failure ('failed') branch → hoisted out of the try.
+    let record: MessageRecord | undefined
     try {
       // QD anti-loop (owner m-178/m-182): the QH's OWN sleep is NOT part of the
       // 100% head-inspect mandate — a 'head-slept' surface whose headPostId is
@@ -1369,9 +1373,32 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       if (qualityHead === undefined) return
       const store = await messagesStoreReady
       const text = qualityInspectDirectiveText(surface)
-      const record = await store.append({ from: 'deepartments', to: ['quality-head'], text, kind: 'agent' })
+      record = await store.append({ from: 'deepartments', to: ['quality-head'], text, kind: 'agent' })
       await busDeliverToPost(qualityHead, `[From deepartments → quality-head]: ${text}`, record, void 0)
+      // MICRO-LANE O2 (deliveries-emitter-row, 2026-09-06): the emitter
+      // previously wrote NO delivery sidecar (0 deliveries.jsonl rows for the
+      // made directives m-2282/2283/2355/2395 — the O2 observability gap), so a
+      // qi-silence alert could not distinguish "the dice skipped" from "the
+      // emitter failed". Write the directive's write-ahead row as 'terminal'
+      // RIGHT AFTER the delivery (markDelivery — dshd-core messages.ts:688).
+      // NEVER 'prepared': a prepared row would let the BOOT re-delivery driver
+      // re-run the 'deepartments'-from route the ACL denies → a 'failed' row
+      // the W6 scan re-alerts on every boot (the same no-sidecar rationale as
+      // the enqueueHostWake closure further below — 'terminal' is the whitelist
+      // the delivery scan never flags). Non-fatal by design: a sidecar failure
+      // falls into the catch below → warn (the directive record itself stays
+      // durable in messages.jsonl).
+      await markDelivery(stateDir, record.id, 'quality-head', 'terminal')
     } catch (error: unknown) {
+      // MICRO-LANE O2 (deliveries-emitter-row, 2026-09-06): best-effort
+      // 'failed' row for the directive's record — an audit then reads
+      // "delivery failed" (the record exists but never reached the QH), never
+      // "emitter silent". Guarded so it NEVER throws (the warn below stays the
+      // only journal trace); a record that never appended gets no row (the
+      // emitter-failure class the durable dice ledger exposes instead).
+      if (record !== undefined) {
+        await markDelivery(stateDir, record.id, 'quality-head', 'failed').catch(() => undefined)
+      }
       ctx.logger.warn(`[deepartments] quality-inspect directive to "quality-head" failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
