@@ -42,7 +42,7 @@ const BASELINE_HOLDERS = {
 const ZONE_HOLDERS = ['health', 'jobs', 'pooler', 'gui']
 const ZONE_BUCKET_CONTRACTS = {
   gui: ['endpointDeps'],
-  jobs: ['runJob', 'notifyHead', 'departmentForEntry', 'departmentForJob', 'onAutoRunSkip', 'captureAutoRunFailure', 'repoRoot'],
+  jobs: ['runJob', 'notifyHead', 'departmentForEntry', 'departmentForJob', 'onAutoRunSkip', 'captureAutoRunFailure', 'repoRoot', 'backfillPoolDispatchBlockError'],
   health: ['bootId', 'config', 'posts', 'hostWaits', 'sessionContexts', 'hostRunning', 'missionActivity', 'mainRed', 'missionQueue', 'notifyHost', 'poolerStatePath', 'workRegisterPath', 'qiDirectiveRate'],
   pooler: ['configuredProviders', 'appendPostError']
 }
