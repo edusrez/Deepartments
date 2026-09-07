@@ -395,7 +395,27 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     // stays 23 (src/invoke.ts untouched — the guards/helpers are module-
     // private, never new late seams) and export-parity 325 is unchanged.
     // md5 511493a9… → 8decad354bb45daaca6f05e4639c298d.
-    assert.equal(md5, '8decad354bb45daaca6f05e4639c298d', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration (md5 8decad35…)')
+    // Zone md5 RE-FROZE VALLE 09-07 (FB-198 T1, 2026-09-07): INTENTIONAL
+    // in-span change — the send_message per-recipient RESULT ENRICHMENT for a
+    // persisted record whose delivery resolved 'failed' (the fb-198 false
+    // negative: a durable record whose WAKE failed under pool pressure was
+    // reported bare 'failed', indistinguishable from a lost send). The
+    // per-recipient failedGround observer is threaded into deliverOrQueue and
+    // the envelope names the class — 'prepared (wake-failed)' (the WAKE
+    // family: session-not-found / materialization-failed / pool — the address
+    // is valid, the durable record stays re-driveable by the sweep) or
+    // `failed:<ground>` (the TERMINAL family: unknown / retired / acl /
+    // reroute / child) — NEVER a bare 'failed' for a persisted record — plus
+    // the execute-scoped id-truth assertion (store.get(record.id)?.id ===
+    // record.id). The observer is a NEW delivery.ts seam (dshd-core — its own
+    // lock) + the primitives' ground classification (orchestration delivery.ts);
+    // the tool DEFINITION body stays the same shape (parameters/output schema
+    // unchanged). Getter count stays 23 (src/invoke.ts untouched — the new
+    // ground type + observer fields are type-only, never new late seams) and
+    // export-parity 325 is unchanged (BusDeliveryFailedGround is a TYPE-only
+    // export — erased at runtime).
+    // md5 8decad35… → f919606a15a542e940e14477b73b86a9.
+    assert.equal(md5, 'f919606a15a542e940e14477b73b86a9', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + the VALLE 09-07 FB-198 T1 failedGround observer + prepared (wake-failed) / failed:<ground> envelope + id-truth assertion (md5 f919606a…)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface

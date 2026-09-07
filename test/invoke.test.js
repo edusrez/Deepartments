@@ -1649,7 +1649,7 @@ test('B3 bus head wake: send_message to a registered department head delivers wi
         { to: ['ghost'], text: 'who?' },
         { agent: { id: 'host-any', session: { header: {} } }, signal }
       )
-      assert.equal(ghostResult.delivered.ghost, 'failed', 'unknown member fails per-recipient')
+      assert.equal(ghostResult.delivered.ghost, 'failed:unknown', 'unknown member fails per-recipient (fb-198 T1: the terminal ground names the class)')
 
       // 4. Head wake needs NO live parent: the head stays live with no host and
       //    a later message still wakes it (root-agent model).
@@ -3277,7 +3277,7 @@ test('F1 host retire scope: the HOST retires any worker (marked, entry kept) —
       const send = await root.tools.get('send_message').execute(
         { to: ['researcher-alpha'], text: 'are you there?' }, { agent: host, signal }
       )
-      assert.equal(send.delivered['researcher-alpha'], 'failed', 'a retired worker is not addressed by the live catalog')
+      assert.equal(send.delivered['researcher-alpha'], 'failed:retired', 'a retired worker is not addressed by the live catalog (fb-198 T1: the terminal ground names the class)')
 
       // F3-amended 6(d) — the DISCRIMINATING assertion: a retired worker IS
       // LISTED in dept_who (the head's management view) with retired:true,
@@ -3908,7 +3908,7 @@ test('F2 ACL: MIXED message — the allowed recipients are delivered + persisted
       )
       assert.equal(r.delivered['researcher-beta'], 'delivered', 'the allowed peer IS delivered')
       assert.equal(r.delivered['coder-alpha'], 'failed:acl:other-department', 'the other-department worker is DENIED (ACL ground in the result)')
-      assert.equal(r.delivered['ghost-unknown'], 'failed', 'an unknown id is NOT an ACL subject — it keeps the per-recipient unknown failure')
+      assert.equal(r.delivered['ghost-unknown'], 'failed:unknown', 'an unknown id is NOT an ACL subject — it keeps the per-recipient unknown failure (fb-198 T1: the terminal ground names the class)')
       assert.equal(r.messageId, `m-${recordsBefore}`, 'ONE record for the whole send (not one per recipient)')
 
       const records = await loadMessageRecords(resolveMessagesPath(stateDir))
@@ -7475,7 +7475,7 @@ test('B2 send_message: MULTI-recipient splits per-recipient — live head delive
       const result = await send.execute({ to: ['research-head', 'ghost-unknown'], text: 'one known, one ghost' }, { agent: host, signal })
 
       assert.equal(result.delivered['research-head'], 'delivered')
-      assert.equal(result.delivered['ghost-unknown'], 'failed', 'unknown catalog id is per-recipient failed, not a hard error')
+      assert.equal(result.delivered['ghost-unknown'], 'failed:unknown', 'unknown catalog id is per-recipient failed, not a hard error (fb-198 T1: the terminal ground names the class)')
       const records = await loadMessageRecords(resolveMessagesPath(stateDir))
       assert.equal(records.length, 1, 'ONE record for the whole send (to[] = all recipients)')
       assert.deepEqual(records[0].to, ['research-head', 'ghost-unknown'])
@@ -8440,7 +8440,7 @@ test('VALLE lane B (fb-29 structural fix): a legacy dept_post_create worker (fre
         const host = agents.put(fakeParentAgent())
         const signal = new AbortController().signal
         const r = await root.tools.get('send_message').execute({ to: ['valle-guard'], text: 'wake the empty-scope worker' }, { agent: host, signal })
-        assert.equal(r.delivered['valle-guard'], 'failed', 'the empty-scope role-template worker FAILS the cold re-spawn loudly (fb-29 guard)')
+        assert.equal(r.delivered['valle-guard'], 'prepared (wake-failed)', 'the empty-scope role-template worker FAILS the cold re-spawn loudly (fb-29 guard) — and the RESULT names the wake class (fb-198 T1: the record is durable, the wake failed)')
         assert.equal(agents.resumeCalls.some((c) => String(c.resumeSessionId) === sessionId), false, 'NO agents.resume ran (the guard fires BEFORE any materialization)')
         assert.equal(agents.store.has(sessionId), false, 'the empty-scope worker is NOT materialized')
         const rows = readPostErrorsFile(stateDir).filter((r0) => r0.postId === 'valle-guard')
@@ -8913,7 +8913,7 @@ test('F3 dept_worker_retire: marks retired (entry kept, live catalog stops addre
       // LIVE catalog stops addressing it (per-recipient failed, like unknown).
       const host = env.agents.put(fakeParentAgent())
       const send = await env.root.tools.get('send_message').execute({ to: ['researcher'], text: 'are you there?' }, { agent: host, signal })
-      assert.equal(send.delivered['researcher'], 'failed', 'a retired worker is not addressed by the live catalog')
+      assert.equal(send.delivered['researcher'], 'failed:retired', 'a retired worker is not addressed by the live catalog (fb-198 T1: the terminal ground names the class)')
 
       // dept_who (the MANAGEMENT view) still lists it WITH retired:true.
       const who = await env.root.tools.get('dept_who').execute({ scope: 'includeRetired' }, { agent: host, signal })
@@ -11554,7 +11554,7 @@ test('W6 runHealthDaemonTick: heartbeat written; scans post-errors + delivery-fa
     assert.match(alerts.at(-1).frame, /delivery-failed: m-2/, 'the delivery-failed finding re-alerts (legacy per-key window preserved)')
     const state2 = readHealthAlertsState(stateDir)
     assert.equal(state2[researchIdentity], T0, 'the delivered post-error identity is NOT advanced (it never re-alerts)')
-    assert.equal(state2['delivery-failed:m-2'], T1, 'the delivery-failed ledger advances on the re-alert')
+    assert.equal(state2[dfKey], T1, 'the delivery-failed ledger advances on the re-alert (signed key — fb-198 T2)')
     // A FRESH post-error for a NEW postId (a NEW error identity) → alerts immediately (no prior dedupe).
     await appendPostError(stateDir, { ts: T1, postId: 'worker-x', messageId: 'm-9', error: 'boom' }, T1)
     await tick(T1)
@@ -15180,7 +15180,7 @@ test('W6 bus delivery FAILING materialization records a post-error line (real Lo
       const signal = new AbortController().signal
       const send = pluginCtx().tools.get('send_message')
       const result = await send.execute({ to: ['ghost-head'], text: 'wake the unwakeable head' }, { agent: host, signal })
-      assert.equal(result.delivered['ghost-head'], 'failed', 'a dual-fail materialization reports failed (never silently success)')
+      assert.equal(result.delivered['ghost-head'], 'prepared (wake-failed)', 'a dual-fail materialization reports the wake class (fb-198 T1: materialization-failed — the record is durable, never the bare-failed false negative)')
       const errors = readPostErrorsFile(stateDir)
       assert.equal(errors.length, 1, 'one post-error line recorded')
       assert.equal(errors[0].postId, 'ghost-head', 'the post-error carries the failed postId')
@@ -15629,7 +15629,7 @@ test('Bug A SOURCE GATE (no over-suppression, write seam): a NON-retired host wi
         { to: [liveHostId], text: 'persistent wake' },
         { agent: head, signal }
       )
-      assert.equal(send.delivered[liveHostId], 'failed', 'a persistent session-not-found host delivery reports failed')
+      assert.equal(send.delivered[liveHostId], 'prepared (wake-failed)', 'a persistent session-not-found host delivery reports the wake class (fb-198 T1: the record is durable and re-driveable — never the bare-failed false negative)')
       // The busDeliverToHost catch re-validates against the durable registry:
       // the host is NOT retired, so `(hosts.get()?.retired ?? hostEntry.retired)
       // === true` is FALSE → the source gate does NOT suppress the write.
@@ -15715,7 +15715,7 @@ test('Bug A SOURCE GATE (retired-host ZERO new ROWS + ZERO QD directives, write 
           { to: [retiredHostId], text: 'wake the retired host' },
           { agent: head, signal }
         )
-        assert.equal(sendRetired.delivered[retiredHostId], 'failed', 'a delivery to a durable-RETIRED host reports failed')
+        assert.equal(sendRetired.delivered[retiredHostId], 'prepared (wake-failed)', 'a delivery to a durable-RETIRED host RE-ROUTES to the rotation successor (Issue-1/fb-58 F-3), whose own persistent not-found wake fails — the sender sees the WAKE class of the live successor, never a bare failed (fb-198 T1)')
         const after = readPostErrorsFile(stateDir).filter((r) => r.postId === retiredHostId).length
         assert.equal(after, before, 'the RETIRED host got ZERO NEW post-error ROWs (the source gate suppresses the write)')
         await waitFor(async () => {
@@ -15772,7 +15772,7 @@ test('Bug A DURABLE GATE (STALE in-memory registry, real Loader): a host that is
           { to: [hostId], text: 'wake the stale-live twin' },
           { agent: head, signal }
         )
-        assert.equal(send.delivered[hostId], 'failed', 'the delivery reports failed')
+        assert.equal(send.delivered[hostId], 'failed:retired', 'the delivery reports the TERMINAL retired ground (fb-198 T1 — the durable source gate re-validated the host RETIRED on disk, so the terminal class wins over the transient session-not-found; the record is durable, the address terminal)')
         // The in-memory registry was stale-live, so busDeliverToHost DID attempt the
         // host resume (proving the catch was reached) — the durable gate alone is what
         // stops the ROW.
@@ -16917,7 +16917,7 @@ test('fb-9 RESUME SEAM (acceptance 6 — materializePost, coverage-map §4-3): a
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
       const r = await root.tools.get('send_message').execute({ to: [postId], text: 'wake the worker under the dead top-level flag' }, { agent: host, signal })
-      assert.equal(r.delivered[postId], 'failed', 'the bus wake FAILS (the materializePost pre-flight rejects the resume class)')
+      assert.equal(r.delivered[postId], 'prepared (wake-failed)', 'the bus wake FAILS (the materializePost pre-flight rejects the resume class) — and the RESULT names the wake class (fb-198 T1: the record is durable, the wake failed)')
       assert.equal(agents.resumeCalls.some((c) => String(c.resumeSessionId) === 'worker-researcher-alpha'), false, 'NO agents.resume ran for the worker (the guard fires BEFORE the resume)')
       assert.equal(agents.createCalls.some((c) => String(c.sessionId) === 'worker-researcher-alpha'), false, 'NO create fallback ran either (the resume path is never entered)')
       assert.equal(agents.store.has('worker-researcher-alpha'), false, 'the worker is NOT live')
@@ -17071,7 +17071,7 @@ test('DISPATCH-HARDENING (acceptance 2 — the RESUME seam + the healthy/passthr
       const host = agents.put(fakeParentAgent())
       const signal = new AbortController().signal
       const r = await root.tools.get('send_message').execute({ to: ['researcher-alpha'], text: 'wake under an exhausted pool' }, { agent: host, signal })
-      assert.equal(r.delivered['researcher-alpha'], 'failed', 'the bus wake against an exhausted pool is mapped to failed (fail-early on the resume class)')
+      assert.equal(r.delivered['researcher-alpha'], 'prepared (wake-failed)', 'the bus wake against an exhausted pool is mapped to the wake class (fb-198 T1: the ORIGINAL allBlocked/429 trigger — the durable record stays re-driveable)')
       assert.equal(agents.resumeCalls.some((c) => String(c.resumeSessionId) === 'worker-researcher-alpha'), false, 'no resume was attempted (the pool pre-check fires BEFORE agents.resume)')
     } finally {
       await dispose()
@@ -18538,11 +18538,11 @@ test('W8-i (b): a PERSISTENT "session not found" host delivery records exactly O
       )
       // First attempt: the retry ALSO fails → recorded ONCE (per post+class).
       const r1 = await send()
-      assert.equal(r1.delivered[hostId], 'failed', 'a persistent not-found reports failed')
+      assert.equal(r1.delivered[hostId], 'prepared (wake-failed)', 'a persistent not-found reports the wake class (fb-198 T1)')
       assert.equal(readPostErrorsFile(stateDir).length, 1, 'ONE post-error row recorded after the retry also failed')
       // A SECOND attempt within the same 30min window does NOT re-record.
       const r2 = await send()
-      assert.equal(r2.delivered[hostId], 'failed', 'the second attempt also reports failed')
+      assert.equal(r2.delivered[hostId], 'prepared (wake-failed)', 'the second attempt also reports the wake class (fb-198 T1)')
       assert.equal(readPostErrorsFile(stateDir).length, 1, 'a second attempt within the window does NOT re-record (per post+class dedupe)')
 
       // The health daemon ALERTS the host for the recorded not-found ONCE per
@@ -18705,10 +18705,10 @@ test('M3 R1 GENERIC-CLASS WRITE DEDUPE (spec acc 6): a persistently-broken NON-r
         { agent: head, signal }
       )
       const r1 = await send()
-      assert.equal(r1.delivered[hostId], 'failed', 'a generic-broken host reports failed')
+      assert.equal(r1.delivered[hostId], 'prepared (wake-failed)', 'a generic-broken host reports the wake class (fb-198 T1: materialization-failed — the durable record stays re-driveable)')
       assert.equal(readPostErrorsFile(stateDir).length, 1, 'ONE generic-class post-error row recorded on the first attempt')
       const r2 = await send()
-      assert.equal(r2.delivered[hostId], 'failed', 'the second attempt also reports failed')
+      assert.equal(r2.delivered[hostId], 'prepared (wake-failed)', 'the second attempt also reports the wake class (fb-198 T1)')
       // R1: the SECOND attempt within the window does NOT append a row (the host
       // branch now uses the recording ledger for EVERY host class — no unbounded
       // row growth).
@@ -18733,7 +18733,7 @@ test('M3 MATERIALIZATION-CASCADE GUARD (spec acc 7, safe subset): a NON-retired-
       // Drive N (=MATERIALIZE_QUARANTINE_N) consecutive materialization failures.
       for (let i = 0; i < MATERIALIZE_QUARANTINE_N; i++) {
         const r = await send()
-        assert.equal(r.delivered[hostId], 'failed', `attempt ${i + 1} reports failed`)
+        assert.equal(r.delivered[hostId], 'prepared (wake-failed)', `attempt ${i + 1} reports the wake class (fb-198 T1)`)
       }
       const issue = readMaterializeState(stateDir)[hostId]
       assert.ok(issue !== undefined, 'the materialize-state ledger records the host issue')
@@ -18743,7 +18743,7 @@ test('M3 MATERIALIZATION-CASCADE GUARD (spec acc 7, safe subset): a NON-retired-
       // bounded (R1 caps at ≤1 per (host,class); the quarantine additionally
       // suppresses the recording).
       const r = await send()
-      assert.equal(r.delivered[hostId], 'failed', 'a quarantined host still reports failed (the attempt is never skipped)')
+      assert.equal(r.delivered[hostId], 'prepared (wake-failed)', 'a quarantined host still reports the wake class (fb-198 T1: the attempt is never skipped, the record stays durable)')
       assert.equal(readPostErrorsFile(stateDir).length, 1, 'a quarantined host does NOT emit an unbounded post-error stream (≤1 row)')
       // A SUCCESSFUL delivery clears the host\u2019s consecutive-failure counter (a
       // recovered host is not treated as a threshold already met) — verified via
@@ -18795,7 +18795,7 @@ test('M3 RETIRED-HOST SOURCE GATE (spec acc 5, regression pin): a RETIRED host p
         { to: [retiredPostId], text: 'wake the retired member' },
         { agent: head, signal }
       )
-      assert.equal(resultNonHost.delivered[retiredPostId], 'failed', 'a retired NON-host-family id reports failed (W7 terminal — the Issue-1 re-route does NOT touch a non-host-family address)')
+      assert.equal(resultNonHost.delivered[retiredPostId], 'failed:unknown', 'a retired NON-host-family id reports failed with the terminal unknown ground (fb-198 T1 — the id is NOT a catalog member: W7 terminal, the Issue-1 re-route does NOT touch a non-host-family address)')
       assert.equal(readPostErrorsFile(stateDir).length, 0, 'ZERO post-error rows for a retired host even via a stale in-memory registry (durable source gate)')
     } finally {
       await dispose()
@@ -18950,7 +18950,7 @@ test('fb-6 forensics: when the WORKER_AGENT_OPTIONS fallback ALSO fails (the fre
         { to: ['forensic-alpha'], text: 'wake' },
         { agent: { id: 'host-any', session: { header: {} } }, signal }
       )
-      assert.equal(r.delivered['forensic-alpha'], 'failed', 'the residual no-provider create failure is a FAILED delivery (never silent)')
+      assert.equal(r.delivered['forensic-alpha'], 'prepared (wake-failed)', 'the residual no-provider create failure is a FAILED delivery (never silent) — and the RESULT names the wake class (fb-198 T1: the record is durable)')
       // The failed create received the RESOLVED (fallback) AgentOptions...
       const createCall = agents.createCalls.find((c) => String(c.sessionId) === wsid)
       assert.ok(createCall?.agentOptions, 'the create-fresh fallback received the resolved agentOptions')
@@ -19923,7 +19923,7 @@ test('QD event-driven post-error: a bus-delivery failure appends a post-error re
       const signal = new AbortController().signal
       const send = env.pluginCtx().tools.get('send_message')
       const result = await send.execute({ to: ['ghost-head'], text: 'wake the unwakeable' }, { agent: host, signal })
-      assert.equal(result.delivered['ghost-head'], 'failed', 'a dual-fail materialization reports failed')
+      assert.equal(result.delivered['ghost-head'], 'prepared (wake-failed)', 'a dual-fail materialization reports the wake class (fb-198 T1: the record is durable)')
       const errors = readPostErrorsFile(stateDir)
       assert.equal(errors.length, 1, 'one post-error line recorded')
       assert.equal(errors[0].postId, 'ghost-head', 'the post-error carries the failed postId')
@@ -19958,7 +19958,7 @@ test('QD echo guard (cross-check 5): a failing bus delivery to the QD target (po
       const signal = new AbortController().signal
       const send = env.pluginCtx().tools.get('send_message')
       const result = await send.execute({ to: ['quality-head'], text: 'wake the unwakeable QD target' }, { agent: host, signal })
-      assert.equal(result.delivered['quality-head'], 'failed', 'a dual-fail materialization of the QD target reports failed')
+      assert.equal(result.delivered['quality-head'], 'prepared (wake-failed)', 'a dual-fail materialization of the QD target reports the wake class (fb-198 T1: the record is durable)')
       // The failure IS a real post-error record (the echo is not silently dropped).
       const errors = readPostErrorsFile(stateDir)
       assert.equal(errors.length, 1, 'the QD target failure is RECORDED in post-errors.jsonl')
@@ -19980,7 +19980,7 @@ test('QD echo guard (cross-check 5): a failing bus delivery to the QD target (po
       const signal = new AbortController().signal
       const send = env.pluginCtx().tools.get('send_message')
       const result = await send.execute({ to: ['ghost-head'], text: 'wake the unwakeable' }, { agent: host, signal })
-      assert.equal(result.delivered['ghost-head'], 'failed', 'a dual-fail materialization reports failed')
+      assert.equal(result.delivered['ghost-head'], 'prepared (wake-failed)', 'a dual-fail materialization reports the wake class (fb-198 T1: the record is durable)')
       const dirs = await qualityDirectives(stateDir)
       const errorDirs = dirs.filter((d) => /post-error/.test(d.text))
       assert.equal(errorDirs.length, 1, 'a non-QD failure still emits exactly ONE post-error directive')
@@ -22568,7 +22568,7 @@ test('fb-30 CATCH-UP (PURE): scanHealthCatchup groups OLD durable rows (post-err
     assert.match(pe.error, /session "s-old" not found/, 'the finding carries the error text')
     const df = findings.find((f) => f.kind === 'delivery-failed')
     assert.equal(df.messageId, 'm-old', 'the catch-up delivery-failed names the messageId')
-    assert.equal(df.key, 'delivery-failed:m-old', 'the LIVE delivery-failed identity key')
+    assert.equal(df.key, `delivery-failed:m-old#research-head#${T0 - 3 * 3600_000}`, 'the LIVE delivery-failed identity key (the NON-RENUMERABLE signed shape — fb-198 T2)')
     assert.equal(df.catchup, true, 'the catch-up marker rides the delivery finding')
     assert.ok(!findings.some((f) => f.postId === 'research-head'), 'a FRESH (in-2h) row is NEVER a catch-up finding')
     // (d) the bounded window: a row OLDER than the look-back is never caught up.

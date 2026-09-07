@@ -7,8 +7,8 @@
       "file": "packages/dshd-orchestration/src/tools.ts",
       "banner": "  // --- messaging bus TOOL DEFINITIONS (ONE body per tool; registered in the",
       "close": "  }, 'deepartments: host-plane tools')",
-      "md5": "8decad354bb45daaca6f05e4639c298d",
-      "note": "The frozen CUT-4 factory zone (tools-factory.test.js \u2014 LANE 0.2.3b re-freeze + R8-RACE liveStatus + settle-wait + R11/R12 + BATCH-DRAIN + VALLE 09-07 HEAD-TOOLING: fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration; R-tooling/persistence, never delivery semantics)."
+      "md5": "f919606a15a542e940e14477b73b86a9",
+      "note": "The frozen CUT-4 factory zone (tools-factory.test.js \u2014 LANE 0.2.3b re-freeze + R8-RACE liveStatus + settle-wait + R11/R12 + BATCH-DRAIN + VALLE 09-07 HEAD-TOOLING: fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + VALLE 09-07 FB-198 T1: the send_message failedGround observer + 'prepared (wake-failed)' / failed:<ground> per-recipient envelope + the id-truth assertion; R-tooling/persistence + the delivery-result observability enrichment, never an engine behavior change)."
     },
     {
       "id": "a-harness-fs-local-index",

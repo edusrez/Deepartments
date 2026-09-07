@@ -239,7 +239,7 @@ import type { FeedbackEstado, FeedbackInput, FeedbackListOptions, FeedbackListRe
 // The core delivery module (SUB-BATCH 4 — the bus/ACL/catalog/delivery seams
 // the bus-feedback tools + the Binder buckets dereference): the types of the
 // delivery-surface members the CUT4 zone consumes late.
-import type { DeliveryEngine, BusMemberProfile, BusSendResult, CatalogRoute, DeliveryInterruptOptions, BusSurface } from 'dshd-core'
+import type { DeliveryEngine, BusMemberProfile, BusSendResult, CatalogRoute, DeliveryInterruptOptions, BusSurface, BusDeliveryFailedGround } from 'dshd-core'
 // The dshd-gui channel deps (SUB-BATCH 4 — guiEndpointDeps: the endpointDeps
 // wiring object the CUT4 zone builds and the webServer mount consumes).
 import type { DeepartmentsEndpointDeps, EndpointPostEntryLike, PresenceState } from 'dshd-gui'
@@ -5354,7 +5354,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         return [{ type: 'text', text } as const]
       }
     },
-    async execute(args, exec): Promise<{ messageId: string; delivered: Record<string, BusSendResult | `prepared (fifo-gated${string}` | 'prepared (noWake)' | 'prepared (batch-until-settle)'> }> {
+    async execute(args, exec): Promise<{ messageId: string; delivered: Record<string, BusSendResult | `prepared (fifo-gated${string}` | 'prepared (noWake)' | 'prepared (batch-until-settle)' | 'prepared (wake-failed)' | `failed:${string}`> }> {
       const agent = exec.agent
       if (!agent) throw new Error('send_message requires a calling agent (exec.agent was undefined)')
       assertBusFanOut(args.to)
@@ -5378,7 +5378,9 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // P1 (fb-131 — Candidate B observability): the delivered map carries the
       // ENRICHED prepared classes ('prepared (fifo-gated tras m-<seq>)' /
       // 'prepared (noWake)') besides the plain BusSendResult statuses.
-      const delivered: Record<string, BusSendResult | `prepared (fifo-gated${string}` | 'prepared (noWake)' | 'prepared (batch-until-settle)'> = {}
+      // FB-198 (T1): a 'failed' for a PERSISTED record is ENRICHED too —
+      // 'prepared (wake-failed)' / `failed:<ground>` (never bare 'failed').
+      const delivered: Record<string, BusSendResult | `prepared (fifo-gated${string}` | 'prepared (noWake)' | 'prepared (batch-until-settle)' | 'prepared (wake-failed)' | `failed:${string}`> = {}
       for (const recipient of args.to) {
         const ground = aclDenyGround(sender, busProfileFor(recipient))
         if (ground === undefined) {
@@ -5423,6 +5425,12 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         const noWake = args.noWake === true || (args.ack === true && isDormantRecipient(recipient))
         let gateClass: 'fifo' | 'noWake' | undefined
         let gateSeq: number | undefined
+        // FB-198 (T1): the per-recipient FAILURE-ground observer — the engine /
+        // the wake primitives fire it exactly when the delivery resolves to
+        // 'failed', with the class that splits «lost» from «queued» (a durable
+        // record whose WAKE failed stays re-driveable by the sweep — the bare
+        // 'failed' of the fb-198 episode hid that from the sender). Never gates.
+        let failedGround: BusDeliveryFailedGround | undefined
         // VALLE 09-07 (BATCH-DRAIN): the batch-eligibility opt-in — true ONLY
         // on the ALWAYS-WAKE no-interrupt default (the branch the deliver
         // engine can coalesce). Every other branch keeps batchEligible ABSENT
@@ -5441,6 +5449,9 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           gateReason: (reason, bySeq) => {
             gateClass = reason
             gateSeq = bySeq
+          },
+          failedGround: (ground) => {
+            failedGround = ground
           }
         })
         // P1 (fb-131) — the honest prepared-class rendering: 'prepared' alone
@@ -5451,15 +5462,49 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         // VALLE 09-07 (BATCH-DRAIN): a 'prepared' without a queue class from a
         // batch-eligible send is the BATCH class ('prepared (batch-until-
         // settle)' — the record accumulated and will drain at the settle).
+        // FB-198 (T1): a returned 'failed' for a PERSISTED record is NEVER
+        // reported bare — the per-recipient result names the class: the WAKE
+        // family (session-not-found / materialization-failed / pool — the
+        // address is valid, the materialize/wake failed, the durable record
+        // stays re-driveable by the sweep/backoff; the fb-198 episode class)
+        // renders 'prepared (wake-failed)' (queued, will drain), and the
+        // TERMINAL family (unknown / retired / acl / reroute / child — the
+        // address can never receive it) renders `failed:<ground>`. The durable
+        // id always rides the result (`record.id` = the `messageId` below) —
+        // the id the caller can correlate against the store (a later boot
+        // compaction renumbers ids; the record id is the pre-compaction truth).
         if (status === 'prepared' && gateClass === 'fifo') {
           delivered[recipient] = gateSeq !== undefined ? `prepared (fifo-gated tras m-${gateSeq})` : 'prepared (fifo-gated)'
         } else if (status === 'prepared' && gateClass === 'noWake') {
           delivered[recipient] = 'prepared (noWake)'
         } else if (status === 'prepared' && gateClass === undefined && batchEligible === true) {
           delivered[recipient] = 'prepared (batch-until-settle)'
+        } else if (status === 'failed') {
+          if (failedGround === 'unknown' || failedGround === 'retired' || failedGround === 'acl' || failedGround === 'reroute' || failedGround === 'child') {
+            delivered[recipient] = `failed:${failedGround}`
+          } else {
+            // A wake-class failure (or an unobserved ground — the DEFENSIVE
+            // fallback: every 'failed' return of the wired engine names its
+            // ground, but a composition gap must never resurrect the bare
+            // 'failed' false negative for a persisted record).
+            if (failedGround === undefined) {
+              ctx.logger.warn(`[deepartments] send_message: delivery of ${record.id} → ${recipient} returned 'failed' WITHOUT a failure ground (fb-198 class — falling back to 'prepared (wake-failed)'; the record is durable and the sweep re-evaluates it)`)
+            }
+            delivered[recipient] = 'prepared (wake-failed)'
+          }
         } else {
           delivered[recipient] = status
         }
+      }
+      // FB-198 (T1) — the id-truth ASSERTION (the future-class detector): the
+      // per-recipient results above carry `record.id` — the id the store
+      // MINTS at append — and the durable record MUST resolve under that id
+      // (post-append, the in-memory index is authoritative; a composition
+      // change that decouples the delivery id from the store id fails HERE,
+      // loudly, instead of silently emitting a correlatable-but-wrong id).
+      const durable = await store.get(record.id)
+      if (durable?.id !== record.id) {
+        throw new Error(`send_message id-truth violated: delivered id ${record.id} does not resolve to the durable store record (fb-198 id-stability assertion)`)
       }
       return { messageId: record.id, delivered }
     }

@@ -399,7 +399,7 @@ test('ALTO-2 (m-891): a host-session-* TYPO absent from hosts.json reports per-r
         { to: [typoHostId], text: 'fb-15 closure — typo id' },
         { agent: head, signal }
       )
-      assert.equal(typoResult.delivered[typoHostId], 'failed', 'a host-session-* typo NOT in hosts.json reports failed per-recipient (the m-891 ghost is fixed)')
+      assert.equal(typoResult.delivered[typoHostId], 'failed:unknown', 'a host-session-* typo NOT in hosts.json reports failed per-recipient with the terminal unknown ground (fb-198 T1 — the m-891 ghost is fixed)')
       assert.equal(await deliveryStatus(stateDir, typoResult.messageId, typoHostId), 'failed', 'the typo pair settles failed')
       const typoRows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
         .filter((r) => r.messageId === typoResult.messageId && r.recipientId === typoHostId)
@@ -431,7 +431,7 @@ test('ALTO-2 (m-891): a host-session-* TYPO absent from hosts.json reports per-r
         { to: [childGhost], text: 'who?' },
         { agent: head, signal }
       )
-      assert.equal(ghostResult.delivered[childGhost], 'failed', 'an unknown non-host session id still reports failed (the m-380 thread, unchanged)')
+      assert.equal(ghostResult.delivered[childGhost], 'failed:unknown', 'an unknown non-host session id still reports failed with the terminal unknown ground (fb-198 T1 — the m-380 thread, unchanged)')
     } finally {
       await env.dispose()
     }

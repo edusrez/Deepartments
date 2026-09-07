@@ -60,7 +60,8 @@ import type {
   BusMemberProfile,
   CatalogRoute,
   AclSurface,
-  BusSurface
+  BusSurface,
+  BusDeliveryFailedGround
 } from 'dshd-core'
 import { busProfileFor as aclBusProfileFor, aclDenyGround as aclDenyGroundImpl } from 'dshd-core'
 import type { BusCatalogLens } from 'dshd-core'
@@ -1403,6 +1404,20 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     })
   })
 
+  /** FB-198 (T1, 2026-09-07) — classify a wake primitive's caught error into
+   * its WAKE failure ground (the durable-re-driveable family; the ADDRESS is
+   * valid, the materialize/wake failed). The 'session not found' class is the
+   * harness session-persistence seam (the W8-i resilient-retry exhausted); the
+   * 'pool' class is the pooler-capacity gate text (the fb-198 allBlocked/429
+   * trigger — `pool: workspace … at quota … dispatch delayed`); everything else
+   * is the generic materialization/wake failure. PURE, never throws. */
+  function wakeFailureGround(error: unknown): BusDeliveryFailedGround {
+    const message = error instanceof Error ? error.message : String(error)
+    if (isSessionNotFoundError(message)) return 'session-not-found'
+    if (/pool:|at quota|dispatch delayed/i.test(message)) return 'pool'
+    return 'materialization-failed'
+  }
+
   /** The shared post DELIVERY of one bus message: the wakePost seam including
    * the stuck-head recovery verbatim (relay guards §4.4). Never throws — the
    * error is logged AND returned as 'failed' (never silent). W9-b: when
@@ -1577,6 +1592,10 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       } catch (appendError: unknown) {
         ctx.logger.warn(`[deepartments] post-error capture for "${entry.postId}" failed: ${appendError instanceof Error ? appendError.message : String(appendError)}`)
       }
+      // FB-198 (T1): the WAKE failure ground reaches the sender's `failedGround`
+      // observer (the durable record stays re-driveable by the sweep/backoff —
+      // never reported to the caller as a bare, indistinguishable 'failed').
+      opts?.failedGround?.(wakeFailureGround(error))
       return 'failed'
     }
   }
@@ -1591,7 +1610,12 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
    * turn is aborted (reason 'interrupted', keepInbox preserved) so the message
    * is the FIRST item of the host's next turn. Default (false) = QUEUE. */
   const busDeliverToHost = async (hostEntry: HostEntry, framed: string, record: MessageRecord, senderSessionId: string | undefined, opts?: DeliveryInterruptOptions): Promise<DeliveryStatus> => {
-    if (agents === void 0) return 'failed'
+    if (agents === void 0) {
+      // FB-198 (T1): the wake infra is absent — the address is valid, the wake
+      // cannot happen (wake-class ground; the durable record stays re-driveable).
+      opts?.failedGround?.('materialization-failed')
+      return 'failed'
+    }
     // W7 terminal philosophy (Bug A, PRIMARY): a RETIRED host is terminal — it is
     // NEVER attempted and NEVER recorded (no resume, no materialization, no
     // post-error row). The only registered live host is the rotation successor.
@@ -1610,6 +1634,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     // NON-host-family retired/unresolvable id.
     if (hostEntry.retired === true) {
       ctx.logger.warn(`[deepartments] bus delivery to RETIRED host "${hostEntry.hostId}" skipped (terminal — a retired host is never attempted or recorded)`)
+      opts?.failedGround?.('retired')
       return 'failed'
     }
     const sessionId = String(SessionId(hostEntry.sessionId))
@@ -1771,6 +1796,9 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       const durableRetired = durableRetiredOnDisk === true || (durableRetiredOnDisk === undefined && inMemoryRetired)
       if (durableRetired) {
         ctx.logger.warn(`[deepartments] bus delivery to RETIRED host "${hostEntry.hostId}" — post-error ROW write skipped (terminal; durable source gate)`)
+        // FB-198 (T1): the durable source gate re-classified the recipient as
+        // terminal (retired) — the terminal ground reaches the sender.
+        opts?.failedGround?.('retired')
         return 'failed'
       }
       // M3 materialization-cascade guard (spec §3.3, R5 — the SAFEST subset of
@@ -1793,6 +1821,9 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       await writeMaterializeState(stateDir, nextMat)
       if (quarantined) {
         ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}": ${MATERIALIZE_QUARANTINE_N} consecutive materialization failures — quarantined until ${new Date(entry.ts + MATERIALIZE_QUARANTINE_MS).toISOString()} (post-error recording + QD directive suppressed; the delivery attempt + durable repair are unchanged)`)
+        // FB-198 (T1): a quarantined host is broken-but-addressed — the wake
+        // class ground (the durable record stays re-driveable).
+        opts?.failedGround?.('materialization-failed')
         return 'failed'
       }
       const cls = postErrorClass(entry.error)
@@ -1810,6 +1841,10 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     } catch (appendError: unknown) {
       ctx.logger.warn(`[deepartments] post-error capture for host "${hostEntry.hostId}" failed: ${appendError instanceof Error ? appendError.message : String(appendError)}`)
     }
+    // FB-198 (T1): the WAKE failure ground (session-not-found after the W8-i
+    // resilient retry / pool / materialization) reaches the sender's observer —
+    // the durable record stays re-driveable by the sweep/backoff.
+    opts?.failedGround?.(wakeFailureGround(recordedError))
     return 'failed'
   }
 

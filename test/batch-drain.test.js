@@ -602,7 +602,7 @@ test('VALLE 09-07 (tool C2 — the m-2523 class, RE-BASED 2026-09-07 over the FB
       // still takes the engine C2 branch: noWake + reroute → 'failed' (the
       // m-2523 acceptance for an explicit no-wake order stays intact).
       const explicit = await headCtx.ctx.tools.get('send_message', headCtx.key).execute({ to: ['host-s-retired'], text: 'explicit noWake to retired', noWake: true }, { agent: head, signal })
-      assert.equal(explicit.delivered['host-s-retired'], 'failed', 'C2-tool CONTROL: an EXPLICIT noWake ORDER to the retired address FAILS to the sender (the engine C2 branch — the noWake-to-a-never-live-address protection is intact)')
+      assert.equal(explicit.delivered['host-s-retired'], 'failed:reroute', 'C2-tool CONTROL: an EXPLICIT noWake ORDER to the retired address FAILS to the sender with the terminal reroute ground (fb-198 T1 — the engine C2 branch; the noWake-to-a-never-live-address protection is intact)')
     } finally {
       await env.dispose()
     }

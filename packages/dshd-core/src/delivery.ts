@@ -88,6 +88,17 @@ export interface DeliveryInterruptOptions {
    * only ever reached by the ALWAYS-WAKE no-interrupt route). Absent/false →
    * byte-identical legacy behavior. */
   batchEligible?: boolean
+  /** FB-198 (T1, 2026-09-07) — TRANSPORT ground observer threaded from
+   * `deliverOrQueue` into the ALWAYS-WAKE primitives: the wake primitives
+   * (`deps.deliverPost` / `deps.deliverHost` — whose NEVER-throw contract maps
+   * a materialization/wake failure to a returned 'failed') fire the FAILURE
+   * GROUND they classified here, so the caller (send_message) can name the
+   * class in its per-recipient result instead of the bare 'failed' false
+   * negative (fb-198: a durable record whose wake failed under pool pressure
+   * was reported 'failed', indistinguishable from a lost send). Absent →
+   * no-op (the primitives' 'failed' returns keep their byte-identical legacy
+   * shape — the observer is purely observational). */
+  failedGround?: (ground: BusDeliveryFailedGround) => void
 }
 
 /** The `deliverOrQueue` gate options. `noWake: false` (the DEFAULT) is the
@@ -134,6 +145,19 @@ export interface DeliverOrQueueOptions {
    * (the WIRED no-wake branch). Absent → byte-identical (the observer is the
    * send_message tool-result enrichment seam). */
   gateReason?: (reason: 'fifo' | 'noWake', bySeq?: number) => void
+  /** FB-198 (T1, 2026-09-07) — OPTIONAL failure-ground observer
+   * (observability ONLY, never a behavior gate): invoked exactly when the
+   * per-recipient delivery outcome resolves to 'failed', with the GROUND the
+   * engine/the wake primitives classified. A TERMINAL ground (unknown /
+   * retired / acl / reroute / child — the address can never receive the
+   * record) and a WAKE ground (session-not-found / materialization-failed /
+   * pool — the address is valid, the materialize/wake failed, the durable
+   * record stays re-driveable by the sweep) split the bare 'failed' the
+   * send_message result used to show for a PERSISTED record (the fb-198 false
+   * negative: 'failed' meant both «lost» and «queued»). Absent → byte-identical
+   * (the observer is the send_message tool-result enrichment seam, the same
+   * pattern as `gateReason`). */
+  failedGround?: (ground: BusDeliveryFailedGround) => void
   /** The caller's agent id — used by the child route (listChildren /
    * followup) only; the catalog route ignores it. */
   callerAgentId?: string
@@ -162,6 +186,28 @@ export type CatalogRoute =
  * sidecar — it exists only in the tool result so the sender knows the message
  * must be channeled via the recipient's department head. */
 export type BusSendResult = DeliveryStatus | `failed:acl:${string}`
+
+/** FB-198 (T1, 2026-09-07) — the delivery-failure GROUND fed to the
+ * `failedGround` observer when a per-recipient delivery resolves to 'failed'.
+ * The classes split the ONE opaque status into the two honest families the
+ * sender must distinguish (the characterization §3.1/§4.1 — never a bare
+ * 'failed' for a PERSISTED record):
+ *   - TERMINAL (the ADDRESS can never receive the record — the delivery is
+ *     final, the sidecar row settles 'failed' and the sweep eventually
+ *     'terminal'): 'unknown' (no catalog member), 'retired' (F1 — marked,
+ *     never woken), 'acl' (the defensive engine gate — the send_message
+ *     pre-filter already reports `failed:acl:<ground>` before any persistence),
+ *     'reroute' (C2 — a WIRED noWake to a RETIRED host-family address with a
+ *     live successor: the addressed recipient can never wake), 'child' (the
+ *     caller's direct continuable child could not be delivered).
+ *   - WAKE (the ADDRESS is valid; the materialize/wake failed; the record is
+ *     DURABLE and re-driveable by the sweep/backoff — the fb-198 episode
+ *     class): 'session-not-found' (the W8-i resilient-retry exhausted),
+ *     'materialization-failed' (dual resume+create failure / preflight /
+ *     quarantine — a broken-but-addressed recipient), 'pool' (the pooler
+ *     capacity gate: no workspace can serve the wake — the original fb-198
+ *     allBlocked/429 trigger). */
+export type BusDeliveryFailedGround = 'unknown' | 'retired' | 'acl' | 'reroute' | 'child' | 'session-not-found' | 'materialization-failed' | 'pool'
 
 /** The deps a `DeliveryEngine` needs from the apply fiber (or a test harness).
  * Injected so the engine stays free of any module-global state and free of the
@@ -505,6 +551,10 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
           const isChild = await deps.resolveChild(recipientId, opts.callerAgentId ?? '', opts.signal)
           if (isChild) {
             status = await deps.deliverChild(opts.callerAgentId ?? '', recipientId, record, framed, opts.senderSessionId, opts.signal)
+            // FB-198 (T1): a child-route 'failed' carries its terminal ground —
+            // the caller's continuable child could not be delivered (the record
+            // IS durable — persisted before the route). The observer never gates.
+            if (status === 'failed') opts.failedGround?.('child')
           } else {
             status = await catalogRoute(deps, recipientId, record, framed, opts)
           }
@@ -568,6 +618,7 @@ async function catalogRoute(
   const route = deps.resolveCatalogRoute(recipientId)
   if (route.kind === 'unknown') {
     deps.logger.warn(`[deepartments] bus delivery to unknown member "${recipientId}" (record ${record.id})`)
+    opts.failedGround?.('unknown')
     return 'failed'
   }
   // F2 — the defensive ACL gate (spec §4.2 route 2 + §5.6), BEFORE any wake. The
@@ -579,6 +630,7 @@ async function catalogRoute(
   if (route.kind === 'reroute') {
     if (aclDenyGround(sender, { kind: 'host', memberId: route.entry.hostId }) !== undefined) {
       deps.logger.warn(`[deepartments] bus delivery re-route to the live host "${route.entry.hostId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — a worker never writes to the Asistente (spec 004 §5.6/D6)`)
+      opts.failedGround?.('acl')
       return 'failed'
     }
   } else if (aclDenyGround(sender, deps.busProfileFor(recipientId)) !== undefined) {
@@ -587,11 +639,13 @@ async function catalogRoute(
     } else {
       deps.logger.warn(`[deepartments] bus delivery to "${recipientId}" DENIED by the messaging ACL (record ${record.id}, sender ${record.from}) — skipped; it goes via the recipient's department head (spec 004 §5.6)`)
     }
+    opts.failedGround?.('acl')
     return 'failed'
   }
   // F1 — a RETIRED member is never woken/attempted (marked, never erased).
   if (route.kind === 'post' && route.entry.retired === true) {
     deps.logger.warn(`[deepartments] bus delivery to RETIRED member "${recipientId}" skipped (record ${record.id})`)
+    opts.failedGround?.('retired')
     return 'failed'
   }
   // noWake gate (WIRED — B2/B3: the explicit send_message `noWake` param + the
@@ -620,6 +674,7 @@ async function catalogRoute(
     // to the live successor (named by the host-rotation notice — O3).
     if (route.kind === 'reroute') {
       deps.logger.warn(`[deepartments] bus delivery noWake to RETIRED host "${recipientId}" FAILED (record ${record.id}): the address is terminal (re-route target is the live host "${route.entry.hostId}") — re-address the send to the live successor; the record stays durable (C2: a noWake to a never-live recipient never parks 'prepared')`)
+      opts.failedGround?.('reroute')
       return 'failed'
     }
     return 'prepared'
@@ -631,7 +686,8 @@ async function catalogRoute(
   // splicing the inbox 1:1 (absent → the byte-identical pre-batch opts).
   const interrupt: DeliveryInterruptOptions = {
     ...(opts.interrupt === true ? { interrupt: true } : {}),
-    ...(opts.batchEligible === true ? { batchEligible: true } : {})
+    ...(opts.batchEligible === true ? { batchEligible: true } : {}),
+    ...(opts.failedGround !== undefined ? { failedGround: opts.failedGround } : {})
   }
   if (route.kind === 'post') {
     return deps.deliverPost(route.entry, framed, record, opts.senderSessionId, interrupt)
