@@ -641,19 +641,27 @@ export async function seedRestartRegistry(stateDir: string): Promise<void> {
 }
 
 /** fb-43 — reconcile ONE daemon tick against the registry: seed-if-absent,
- * then append `{ bootId, ts: nowMs, cause: 'unknown' }` ONLY when the current
- * bootId is NOT the last row's (a NEW daemon boot — the bootId is the EXISTING
+ * then append `{ bootId, ts: nowMs, cause }` ONLY when the current bootId is
+ * NOT the last row's (a NEW daemon boot — the bootId is the EXISTING
  * per-process boot id the bundle stamps into the heartbeat; REUSED, never
  * duplicated). A same-boot re-tick is a no-op (idempotent per boot). Never
- * throws. */
-export async function reconcileRestartRegistry(stateDir: string, bootId: string, nowMs: number): Promise<void> {
+ * throws.
+ *
+ * QI-48 (2026-09-06, registry post-cierre lane): the optional `cause` argument
+ * lets a caller that KNOWS the restart reason (a sanctioned canary/deploy/ignition,
+ * a documented attribution, a health-alert neighbor) record it AT APPEND TIME
+ * instead of defaulting to 'unknown' — the mechanical gap that left every
+ * post-seed boot at 0% attribution was that the writer hardcoded 'unknown' and
+ * no attribution/backfill path existed. Backward compatible: a 3-arg call
+ * behaves exactly as before ('unknown'). */
+export async function reconcileRestartRegistry(stateDir: string, bootId: string, nowMs: number, cause = 'unknown'): Promise<void> {
   try {
     await seedRestartRegistry(stateDir)
     const rows = readRestartRegistry(stateDir)
     const last = rows[rows.length - 1]
     if (last !== undefined && last.bootId === bootId) return
     await mkdir(path.dirname(path.join(stateDir, RESTART_REGISTRY_FILE)), { recursive: true })
-    await appendFile(path.join(stateDir, RESTART_REGISTRY_FILE), JSON.stringify({ bootId, ts: nowMs, cause: 'unknown' }) + '\n', 'utf8')
+    await appendFile(path.join(stateDir, RESTART_REGISTRY_FILE), JSON.stringify({ bootId, ts: nowMs, cause }) + '\n', 'utf8')
   } catch {
     /* never throws — the audit append is best-effort (the tick contract) */
   }

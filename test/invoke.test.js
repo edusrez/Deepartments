@@ -14537,6 +14537,29 @@ test('fb-43 reconcileRestartRegistry: a NEW bootId appends ONE row with cause=\'
   })
 })
 
+test('fb-43 (QI-48 delta) reconcileRestartRegistry: an OPTIONAL cause (4th arg) is written verbatim at append time (a caller that KNOWS the restart reason records it — the QI-48 attribution gap); the 3-arg default stays \'unknown\'; a same-boot re-tick does NOT overwrite a recorded cause', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 7, 0, 0).getTime()
+    await reconcileRestartRegistry(stateDir, 'boot-known', T0, 'smart_restart canary PASS key_14 11:33:17Z')
+    let rows = readRestartRegistry(stateDir)
+    assert.equal(rows.length, 5, 'the first reconcile = the seed (4 historical) + the known boot')
+    assert.equal(rows[4].bootId, 'boot-known', 'the LAST row is the known boot')
+    assert.equal(rows[4].cause, 'smart_restart canary PASS key_14 11:33:17Z', 'the known cause is written verbatim at append time')
+    assert.equal(rows[4].ts, T0, 'the row ts is the reconcile clock')
+    // A same-boot re-tick — even with a DIFFERENT cause — appends NOTHING (idempotence preserved; no cause overwrite).
+    await reconcileRestartRegistry(stateDir, 'boot-known', T0 + 60_000, 'an overwrite attempt must not land')
+    rows = readRestartRegistry(stateDir)
+    assert.equal(rows.length, 5, 'a same-boot re-tick appends NOTHING')
+    assert.equal(rows[4].cause, 'smart_restart canary PASS key_14 11:33:17Z', 'a re-tick does NOT overwrite the recorded cause')
+    // The 3-arg default is unchanged.
+    await reconcileRestartRegistry(stateDir, 'boot-default', T0 + 2 * 60_000)
+    rows = readRestartRegistry(stateDir)
+    assert.equal(rows.length, 6, 'a NEW boot appends ONE row (default path)')
+    assert.equal(rows[5].bootId, 'boot-default', 'the default-path boot row')
+    assert.equal(rows[5].cause, 'unknown', 'the 3-arg default stays cause unknown')
+  })
+})
+
 test('fb-43 buildRestartDigest: renders the LAST N restarts with their cause (the pulse digest + debug utility); an empty registry → the no-rows line', () => {
   const T0 = Date.UTC(2026, 8, 1, 7, 0, 0)
   const rows = [
