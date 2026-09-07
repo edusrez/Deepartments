@@ -68,8 +68,8 @@
 > MONITOREO (lane A en vivo; verificar reescritura del archivo) · cola activa
 > VALLE: gate salud pool pre-dispatch (fb-39/75 PRIORIDAD) · flujo-feedback IPD
 > · O2 emitter · fb-198 T1-T4 · atribución restarts (fb-43) · re-triage CORTE
-> #2 · QH b5 (50%) rotación en decisión (m-2542) · RD brief 09-07 en curso
-> (daily-ai-news-8).
+> #2 · **QH ROTADO (11fdee57→dab1b424, guardrail b5 ejecutado ~11:0xZ; handoff m-2573)** · RD brief 09-07 en curso
+> (daily-ai-news-8) · **D-Q3 DE LA ROTACIÓN DEL HOST 1662eecf (q-i-92) PASS-CONDITIONAL** (C1 = B3 runtime, mi restart GO · **C2 O1: noWake→destinatario retirado = prepared-stuck [drop/fail o re-puntar al sucesor — clase delivery-seam, hermana del batch-drain m-2564]** · C3/O4: punteros stale del seed · O2 8º datapoint emitter · **O5: monitor de contexto del host SILENCIOSO un ciclo (12h15m) — no fiarse de alertas para el propio umbral; calibrar por journal**).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
