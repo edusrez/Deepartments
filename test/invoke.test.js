@@ -15198,6 +15198,194 @@ test('W6 bus delivery FAILING materialization records a post-error line (real Lo
   })
 })
 
+// ---------------------------------------------------------------------------
+// FB-198 (VALLE 09-07 — T1/T2/T3): the seam's OBSERVABILITY family. The
+// characterization (explore-deep 2026-09-06) closed: the '+46' of the fb-198
+// forensics was the delta of a boot compaction renumber, the 'failed' of the
+// send_message was REAL but the record was durable — the false negative was
+// (1) the bare-'failed' semantics for a PERSISTED record (T1: the result now
+// names the class — 'prepared (wake-failed)' for a wake failure /
+// `failed:<ground>` for a terminal address — plus the id-truth assertion),
+// (2) the NON-remapped health-alerts delivery-failed keys pointing at REUSED
+// ids (T2: the signed non-renumerable identity key), and (3) the exact window
+// of the episode (T3: N wake-failed sends settle terminal → 0 alerts; the
+// result ids == the durable pre-compaction ids).
+// ---------------------------------------------------------------------------
+
+test('FB-198 T1: a send whose WAKE fails (agents.resume throw — the dual materialization failure) reports the wake class `prepared (wake-failed)` to the sender — NEVER a bare `failed` for a PERSISTED record — with a `failed` sidecar row (the write-ahead truth) and the durable id that resolves in the store (id-truth: the execute-level assertion store.get(record.id)?.id === record.id is the future-class detector)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await seedPost(stateDir, { postId: 'ghost-head', sessionId: 'head-ghost-head', roomId: 'board', agentPreset: 'deepartments-head' })
+    const { agents, pluginCtx, dispose } = await bootPlugin(stateDir, { resumeRejects: ['head-ghost-head'], createRejects: ['head-ghost-head'] })
+    try {
+      const host = agents.put(fakeParentAgent())
+      const signal = new AbortController().signal
+      const send = pluginCtx().tools.get('send_message')
+      const result = await send.execute({ to: ['ghost-head'], text: 'wake the unwakeable head (fb-198 T1)' }, { agent: host, signal })
+      // (1) the CLASS: the wake-failed-but-durable record is named
+      // 'prepared (wake-failed)' (the record is queued/re-driveable — the
+      // sweep delivers later) — the bare-'failed' false negative is gone.
+      assert.equal(result.delivered['ghost-head'], 'prepared (wake-failed)', 'a wake-failed but DURABLE record reports the wake class (never the bare-failed false negative)')
+      // (2) the sidecar row stays 'failed' (the write-ahead truth —
+      // needsRedelivery re-drives it; the engine's record is unchanged).
+      assert.equal(await deliveryStatus(stateDir, result.messageId, 'ghost-head'), 'failed', 'the pair is marked failed in the sidecar (the engine record — unchanged)')
+      // (3) id-truth: the delivered id resolves to the DURABLE record the
+      // store minted (same id, same text, same recipient — the tool's own
+      // store.get(record.id)?.id === record.id assertion passed in-execute;
+      // here we verify the durable messages.jsonl under the SAME id).
+      const records = await loadMessageRecords(resolveMessagesPath(stateDir))
+      const durable = records.find((r) => r.id === result.messageId)
+      assert.ok(durable !== undefined, 'the result id resolves to the durable store record (id-truth)')
+      assert.equal(durable.text, 'wake the unwakeable head (fb-198 T1)', 'the durable record is the one just sent')
+      assert.deepEqual(durable.to, ['ghost-head'], 'the durable record carries the recipient')
+      // (4) the post-error ledger side is unchanged (only the tool RESULT
+      // semantics were enriched).
+      const errors = readPostErrorsFile(stateDir)
+      assert.equal(errors.length, 1, 'one post-error line recorded (unchanged)')
+      assert.equal(errors[0].messageId, result.messageId, 'the post-error carries the same durable id')
+      // (5) the terminal-ground flavor: an UNKNOWN recipient names the class.
+      const unk = await send.execute({ to: ['ghost-unknown'], text: 'who?' }, { agent: host, signal })
+      assert.equal(unk.delivered['ghost-unknown'], 'failed:unknown', 'a terminal-address failure names the ground (failed:<ground>) — still never a bare failed')
+      assert.ok(unk.messageId !== 'none' && unk.messageId !== result.messageId, 'the unknown-recipient send has its OWN durable id')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('FB-198 T2 (the DURABLE false-negative class): a FAILED row whose message id was REUSED (a compaction renumbered the OLD record away; a NEW record minted the same id) ALERTS — the signed identity key `delivery-failed:<id>#<recipient>#<ts>` never dedupes against the stale pre-fix ledger entry that pointed at the OLD record (the fb-198 forensics: health-alerts.jsonl keys `delivery-failed:m-2219…` — x4 — pointed at RECYCLED ids after the R0 -46 renumber; the operator read «m-2219 not delivered» for an unrelated record). The legacy per-key cadence (same row re-alerts only after its dedupe window) is preserved', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 7, 12, 0, 0).getTime()
+    const alerts = []
+    const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-fb198-t2',
+      hosts,
+      notifyHost: async (hostEntry, frame) => { alerts.push(frame) },
+      logger: { warn: () => {} }
+    })
+    // A FRESH failed row for message m-9 — the NEW record that REUSED the id
+    // after a compaction renumbered the OLD m-9 away (the row carries its
+    // immutable recipient + ts).
+    await seedDeliveryRows(stateDir, [{ messageId: 'm-9', recipientId: 'research-head', status: 'failed', ts: T0 - 5 * 60000 }])
+    // The SHARED ledger already holds the STALE pre-fix UNSIGNED key
+    // `delivery-failed:m-9` (the OLD record's alert — a compaction renumbered
+    // it, the ledger was never remapped). Under the pre-fix key scheme the NEW
+    // m-9 failure would DEDUPE against it → the durable false negative; the
+    // signed key never collides.
+    await writeHealthAlertsState(stateDir, { 'delivery-failed:m-9': T0 - 3 * 60000 })
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'the reused-id failure ALERTS (the stale unsigned ledger entry does NOT suppress it — the signed key never collides)')
+    assert.match(alerts[0], /delivery-failed: m-9/, 'the alert names the message id')
+    const state = readHealthAlertsState(stateDir)
+    assert.equal(state[`delivery-failed:m-9#research-head#${T0 - 5 * 60000}`], T0, 'the SIGNED identity key is what the ledger advanced (the stale unsigned entry stays — harmless, pruned by the defensive 2 h prune)')
+    // The SAME row inside the dedupe window → no re-alert (legacy cadence per
+    // identity intact).
+    await tick(T0 + 60_000)
+    assert.equal(alerts.length, 1, 'the same signed identity inside the window does NOT re-alert')
+    // After the window → re-alerts (same row, same signature — the legacy
+    // per-key cadence preserved).
+    const T1 = T0 + 31 * 60000
+    await tick(T1)
+    assert.equal(alerts.length, 2, 'the same signed identity re-alerts after the dedupe window (the legacy per-key cadence preserved)')
+    assert.ok(alerts.at(-1).includes('delivery-failed: m-9'), 'the re-alert still names the id')
+    // The AUDIT ledger records the SIGNED dedupe keys (the forensia no longer
+    // stores an ambiguous bare `delivery-failed:<id>` that a later renumber
+    // would point at a recycled record).
+    const auditRows = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l))
+    assert.ok(auditRows.every((r) => r.dedupeKeys.every((k) => !k.startsWith('delivery-failed:') || k.includes('#'))), 'no audit dedupe key is a bare delivery-failed:<id> (every delivery-failed key is signed — fb-198 T2)')
+  })
+})
+
+test('FB-198 T3 (the EXACT-window regression): N sends whose wake FAILS (all reported `prepared (wake-failed)`, one durable record each) + the recipient becomes TERMINAL (retired) + a re-boot runs the redeliver driver → the failed pairs settle `terminal` ONCE → 0 `delivery-failed` alerts post-terminal; the result ids == the durable pre-compaction ids (the exact-window correlation of the fb-198 episode: sessions saw REAL ids, delivery by disk, 0 loss)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await seedPost(stateDir, { postId: 'sleeper-head', sessionId: 'head-sleeper-head', roomId: 'board', agentPreset: 'deepartments-head' })
+    const N = 3
+    const ids = []
+    // Phase 1 — the wake-fail window: N sends against a recipient whose
+    // materialization fails (the pool-429 class of the episode).
+    {
+      const env = await bootPlugin(stateDir, { resumeRejects: ['head-sleeper-head'], createRejects: ['head-sleeper-head'] })
+      try {
+        const host = env.agents.put(fakeParentAgent())
+        const signal = new AbortController().signal
+        const send = env.pluginCtx().tools.get('send_message')
+        for (let i = 0; i < N; i++) {
+          const r = await send.execute({ to: ['sleeper-head'], text: `fb-198 T3 wake-fail send ${i}` }, { agent: host, signal })
+          assert.equal(r.delivered['sleeper-head'], 'prepared (wake-failed)', `send ${i + 1}/${N} reports the wake class`)
+          ids.push(r.messageId)
+        }
+        // The result ids == the durable records AT THE SEND MOMENT (pre-
+        // compaction — the correlation the fb-198 forensics needed).
+        const recordsNow = await loadMessageRecords(resolveMessagesPath(stateDir))
+        for (const id of ids) {
+          assert.ok(recordsNow.some((r) => r.id === id), `the result id ${id} resolves to the durable record pre-settle`)
+        }
+        // The write-ahead: N failed sidecar rows (the sweep/redeliver re-drives
+        // them — the durable recovery path of the episode).
+        const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+          .filter((r) => r.status === 'failed' && r.recipientId === 'sleeper-head')
+        assert.equal(rows.length, N, `${N} failed sidecar rows (one per send — the write-ahead truth)`)
+      } finally {
+        await env.dispose()
+      }
+    }
+    // Phase 2 — the recipient becomes TERMINAL (retired, durable) + a re-boot:
+    // the boot redeliver driver settles its pairs 'terminal' ONCE (W7-A —
+    // needsRedelivery('failed') re-drives only ALIVE recipients; a dead one
+    // settles dead on the FIRST pass).
+    const posts = JSON.parse(await readFile(path.join(stateDir, 'posts.json'), 'utf8'))
+    posts['sleeper-head'].retired = true
+    await writeFile(path.join(stateDir, 'posts.json'), JSON.stringify(posts), 'utf8')
+    {
+      const env2 = await bootPlugin(stateDir)
+      try {
+        // The re-boot redeliverer runs FIRE-AND-FORGET (tools.ts `void …run()`)
+        // — await the settle: every pair of the retired recipient becomes
+        // terminal (never re-delivered, never an anomaly). markDelivery APPENDS,
+        // so the LATEST row per pair is the truth (the write-ahead
+        // 'prepared'/'failed' history stays behind).
+        await waitFor(async () => {
+          const settled = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+            .filter((r) => r.recipientId === 'sleeper-head')
+          const latestByPair = new Map()
+          for (const row of settled) latestByPair.set(`${row.messageId}\u0000${row.recipientId}`, row)
+          return [...latestByPair.values()].length >= N && [...latestByPair.values()].every((r) => r.status === 'terminal')
+        }, 10000, 'the boot redeliverer settles every retired-recipient pair terminal ONCE (W7-A)')
+        // 0 delivery-failed alerts post-terminal: a health tick over the SAME
+        // stateDir (WITH the retired-member exclusion the production daemon
+        // computes — Bug A/C6: the retired-recipient rows are never an
+        // anomaly; the historical 'failed' rows of its settled pairs are
+        // excluded by the retiredMemberIds set, exactly like the W7-A test)
+        // finds NOTHING delivery-failed.
+        const alertFrames = []
+        const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
+        const T0 = Date.now()
+        await runHealthDaemonTick({
+          now: () => T0,
+          stateDir,
+          bootId: 'boot-fb198-t3',
+          hosts,
+          posts: [{ postId: 'sleeper-head', retired: true, events: [], inboxTs: [], running: false }],
+          notifyHost: async (hostEntry, frame) => { alertFrames.push(frame) },
+          logger: { warn: () => {} }
+        })
+        assert.ok(alertFrames.every((f) => !f.includes('delivery-failed')), '0 delivery-failed alerts after the terminal settle (the T3 regression — the retired-member exclusion + the one-time terminal settle silence the class)')
+        assert.deepEqual(scanDeliveryFindings(stateDir, T0, new Set(['sleeper-head']), readDeliveryRowsFull), [], 'scanDeliveryFindings returns 0 delivery-failed findings post-terminal (with the retired-member set)')
+        // The ids the senders saw STILL resolve to the durable records (the
+        // exact-window correlation holds — pre-compaction ids, 0 loss).
+        const recordsAfter = await loadMessageRecords(resolveMessagesPath(stateDir))
+        for (const id of ids) {
+          assert.ok(recordsAfter.some((r) => r.id === id), `the result id ${id} still resolves post-settle (the exact-window correlation)`)
+        }
+      } finally {
+        await env2.dispose()
+      }
+    }
+  })
+})
+
 test('W6 boot: health.intervalMs override registers a ticking daemon (heartbeat written); health.enabled:false → NO daemon (no heartbeat, no alert)', async () => {
   await withTempStateDir(async (stateDir) => {
     // (a) enabled by default + intervalMs override → the daemon registers + ticks.
