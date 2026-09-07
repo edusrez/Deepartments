@@ -95,6 +95,14 @@ export interface PostEntry {
    * `coordinatorForPost` is undefined for workers (they have no config), so the
    * durable entry carries the role the creating head supplied. */
   role?: string
+  /** O4 (VALLE 09-07 — head-tooling): the worker's HUMAN display TITLE,
+   * persisted at spawn (dept_worker_spawn / dept_job_run / dept_post_create —
+   * the SAME title the spawn pins on the live session, `opts.title` or the
+   * `<RoleDisplay>: <mission>` default). Durable so a restart / a prune /
+   * posts.json consumers (a future roster/audit) can re-derive the sidebar
+   * row WITHOUT the live session. Absent on legacy workers (pre-O4 entries)
+   * and on heads (config-derived). */
+  title?: string
   /** F1 (spec 004 §4.1): the durable department link of a WORKER — the config
    * department id of the creating head's department, recorded at create (the
    * pre-F1 code only copied the inert roomId). A configured department head is
@@ -162,6 +170,9 @@ export interface PostEntryPersisted {
   departmentId?: string
   managerId?: string
   jobId?: string
+  /** O4 (VALLE 09-07) — a worker's HUMAN display title (see PostEntry.title).
+   * Persisted only when set (absent = legacy/pre-O4 worker or a head). */
+  title?: string
   retired?: boolean
   sleepEpoch?: number
   boundarySeq?: number
@@ -1502,6 +1513,9 @@ export class RegistryStore {
         ...(entry.departmentId !== void 0 ? { departmentId: entry.departmentId } : {}),
         ...(entry.managerId !== void 0 ? { managerId: entry.managerId } : {}),
         ...(entry.jobId !== void 0 ? { jobId: entry.jobId } : {}),
+        // O4 (VALLE 09-07): the worker's HUMAN display title survives the
+        // restart like the other durable worker fields.
+        ...(entry.title !== void 0 ? { title: entry.title } : {}),
         ...(entry.retired === true ? { retired: true } : {}),
         ...(entry.sleepEpoch !== void 0 ? { sleepEpoch: entry.sleepEpoch } : {}),
         ...(entry.boundarySeq !== void 0 ? { boundarySeq: entry.boundarySeq } : {}),
@@ -1703,6 +1717,9 @@ export class RegistryStore {
         const departmentId = typeof entry.departmentId === 'string' ? entry.departmentId : undefined
         const managerId = typeof entry.managerId === 'string' ? entry.managerId : undefined
         const jobId = typeof entry.jobId === 'string' ? entry.jobId : undefined
+        // O4 (VALLE 09-07): the worker's durable HUMAN display title survives
+        // the cold load (the same persistence class as role/managerId/jobId).
+        const title = typeof entry.title === 'string' ? entry.title : undefined
         const retired = entry.retired === true
         const inflightWorkers = Array.isArray(entry.inflightWorkers)
           ? entry.inflightWorkers.filter((w): w is string => typeof w === 'string')
@@ -1729,6 +1746,7 @@ export class RegistryStore {
           ...(departmentId !== void 0 ? { departmentId } : {}),
           ...(managerId !== void 0 ? { managerId } : {}),
           ...(jobId !== void 0 ? { jobId } : {}),
+          ...(title !== void 0 ? { title } : {}),
           ...(retired ? { retired: true } : {}),
           ...(sleepEpoch !== void 0 ? { sleepEpoch } : {}),
           ...(boundarySeq !== void 0 ? { boundarySeq } : {}),

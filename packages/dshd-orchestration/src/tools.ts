@@ -2057,7 +2057,12 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
             provider: 'worker',
             role: args.role,
             managerId: headId,
-            ...(department !== void 0 ? { departmentId: department.id } : {})
+            ...(department !== void 0 ? { departmentId: department.id } : {}),
+            // O4 (VALLE 09-07 — head-tooling): the LEGACY create persists the
+            // SAME "Rol: Misión" default title it pins below in the DURABLE
+            // entry too (the sidebar title survives a restart without the live
+            // session — parity with the dept_worker_spawn / dept_job_run rows).
+            title: defaultWorkerTitle(args.role, firstMessage, void 0, args.postId)
           })
           byHeadHandle.set(String(SessionId(sessionId)), handle)
           // F3 pin (owner decision 2026-08-23): the legacy create path deploys a

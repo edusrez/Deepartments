@@ -509,6 +509,10 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
       managerId: headEntry.postId,
       departmentId: department.id,
       jobId,
+      // O4 (VALLE 09-07 — head-tooling): the worker's HUMAN title is persisted
+      // in posts.json (the same title pinned on the live session below), so a
+      // restart never loses it (the durable row carries role/manager/title).
+      title,
       // VALLE lane B (fb-29 structural fix): thread the role template's tools
       // into the DURABLE entry (B — the cold re-materialization fast-path; the
       // A re-resolution at the seam covers legacy entries WITHOUT this field).
@@ -620,6 +624,11 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
       managerId: headEntry.postId,
       departmentId: department.id,
       ...(opts.jobId !== void 0 ? { jobId: opts.jobId } : {}),
+      // O4 (VALLE 09-07 — head-tooling): the worker's HUMAN title persists in
+      // posts.json (the same title pinned on the live session below) so the
+      // durable row carries role/manager/title (the sidebar row survives a
+      // restart / prune without the live session).
+      title,
       // VALLE lane B (fb-29 structural fix): the durable entry carries the role
       // template's tools (B — the cold re-materialization fast-path; the A
       // re-resolution at the seam covers entry WITHOUT this field). Non-empty by

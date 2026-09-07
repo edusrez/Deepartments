@@ -176,6 +176,15 @@ test('jobs→spawn (composed): the tick resolves deepartments.spawn (no holder r
         return row !== undefined && (row.provider === 'worker' || row.sessionId !== undefined)
       })
       assert.ok(persisted, 'the durable posts.json carries the job worker post (registerEntry + persistPosts ran)')
+      // O4 (VALLE 09-07 — head-tooling): the worker's HUMAN title AND its jobId
+      // are PERSISTED in posts.json (the durable row of a job spawn carries
+      // role/manager/department/title/jobId — dept_who and a restart re-derive
+      // the sidebar title from the row, not the live session).
+      const o4posts = JSON.parse(readFileSync(path.join(stateDir, 'posts.json'), 'utf8'))
+      const o4row = o4posts['pulse-digest'] ?? o4posts['pulse-digest-2']
+      assert.equal(o4row.provider, 'worker', 'O4: the durable row is a worker')
+      assert.equal(o4row.title, 'Daily job pulse digest (concise job metrics to the Asistente)', 'O4: the durable row carries the job\'s HUMAN frontmatter title (persisted at spawn, not only pinned on the live session)')
+      assert.equal(o4row.jobId, 'pulse-digest', 'O4: the durable row carries the jobId (the F4 link survives the row)')
       // The calendar entry marked fired.
       const fired = await poll(() => {
         if (!existsSync(path.join(stateDir, 'calendar.json'))) return false
