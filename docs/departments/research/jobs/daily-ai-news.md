@@ -55,6 +55,26 @@ last ~**48h** and explain **why it matters** per item.
   "extend, never duplicate" pattern (fb-94/113/141) — never attempt `edit`;
   it fails with "unknown tool edit".
 
+### Ledger counts (report the TRUE lengths — q-i-93, discipline of count)
+
+- **Count from the FILE, never from memory or arithmetic on prior reports.**
+  After the final `write`+re-read of the ledger, determine the real array
+  lengths (q-i-93, round 09-07: a worker reported "165 URLs" while the durable
+  JSON had 163 — 160 + 3 appended; cosmetic to de-dup, but the propagated
+  counts were wrong).
+- Reproducible method with the tools you have (no shell): use `grep` on
+  `ledger.json` to find the line numbers of the first URL of `seenUrls` and the
+  closing `]`, and of `seenTopics`; count the entries (or count by reading the
+  whole file — the arrays are one entry per line). Simpler robust alternative:
+  state the counts in the brief as **"URLs: <N> / topics: <M> — contados de
+  reports/daily-news/ledger.json (líneas X–Y)"** so every round is auditable.
+- Report those file-derived counts in the brief's "Ledger update" line (e.g.
+  `157 → 163 URLs / 76 → 79 topics` — always `old+appended`, verified by
+  re-read, not by adding rounded numbers).
+- The counts are **discipline, not a hard constraint** (de-dup uses the URL
+  values themselves, not counts) — but wrong counts degrade the audit trail;
+  when in doubt, quote the file and the line range.
+
 ## Search & sources
 
 - `web_search` (use the available sections — Parallel fast / RAG / searxng), then
@@ -64,6 +84,14 @@ last ~**48h** and explain **why it matters** per item.
   announcements, model cards, and dated news/press. Cite both URL and date.
 - A source that changed or is unreachable → record its CURRENT state, never
   guess.
+- **Fetch budget (fb-211, SOURCES.md domain table):** consult
+  `docs/departments/research/SOURCES.md` § domain→reliability BEFORE fetching a
+  press/news domain. Known from this environment: `openai.com` = 403 anti-bot
+  (do not attempt; capture via search-provider content + dated secondaries),
+  `aireleasetracker.com` = 429 rate-limited (one attempt max, then cross-check
+  via search snippet), `businesswire.com` = 30 s timeout (one attempt max),
+  `tmcnet.com`/`zexprwire.com` = 403 (do not attempt). Table normally grows with
+  each round — check it every time.
 
 ## Report
 
@@ -89,6 +117,8 @@ Body:
   **why it matters**.
 - If there are none: a clear **"No notable news"** section instead, and the
   frontmatter status `none`.
+- The **"Ledger update"** line must quote the FILE-derived counts (see
+  "Ledger counts" above).
 
 ## Archive (sources/)
 
@@ -137,7 +167,9 @@ hole).
 
 - Research-only: no code/repo changes, no commits, no builds. The brief, the
   ledger and any new source entries are the only files you write — all in the
-  department workspace, **not** the repo.
+  department workspace, **not** the repo. (Exception: none — `SOURCES.md` and
+  this job definition live in the repo and are curated by the head, not by the
+  worker.)
 - Freshness and de-duplication are hard constraints; when in doubt, exclude.
 - Reference prior report paths you build on (≤ 3 per category), e.g. the
   previous brief `reports/daily-news/<YYYY-MM-DD>.md` and the ledger.
