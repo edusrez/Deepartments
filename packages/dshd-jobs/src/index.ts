@@ -35,9 +35,57 @@
 //     does NOT couple to the bundle's health system (jobs→health cleaned).
 //
 // NO export default (pitfall 0001 — breaks `inject`).
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+
+// ---------------------------------------------------------------------------
+// LANE fb-134 F2(b) — the STALE-READ CAP (the M1 `stateStaleMs` pattern, INLINE
+// — dshd-jobs is a pure library with NO dependencies, so it cannot import the
+// shared helper from dshd-core; the hygiene-B precedent: the same pattern is
+// also inline in orchestration tools.ts). When a caller opts in, a store-file
+// read older than the window is flagged STALE (a parallel/stale store read —
+// the fb-134 class) with the DX hint of the fb-119/135/146 family. The read is
+// NON-DESTRUCTIVE: the data still returns; the warn is the cap.
+// ---------------------------------------------------------------------------
+
+/** The default stale-read window (ms) — the M1 code default (10 min). */
+const STORE_FILE_STALE_DEFAULT_MS = 10 * 60 * 1000
+
+/** The optional opts of a stale-capable store-file read (structural — jobs has
+ * no dependency on dshd-core's shared type). */
+interface StoreFileReadOpts {
+  /** The staleness window (ms). Absent → the M1 default. */
+  staleAfterMs?: number
+  /** An optional warn-capable logger (absent → the staleness is silent). */
+  logger?: { warn(message: string): void }
+  /** The read's clock (ms epoch) — injectable for deterministic tests. */
+  now?: number
+}
+
+/** Check a store-file's mtime against the staleness window and warn when stale
+ * (the M1 pattern + the fb-119/135/146 DX hint). Returns `true` when STALE.
+ * NON-DESTRUCTIVE — the caller decides what a stale read means. */
+function checkStoreFileStaleJobs(filePath: string, opts?: StoreFileReadOpts): boolean {
+  try {
+    const nowMs = opts?.now ?? Date.now()
+    const windowMs = opts?.staleAfterMs !== undefined && Number.isFinite(opts.staleAfterMs) && opts.staleAfterMs > 0
+      ? opts.staleAfterMs
+      : STORE_FILE_STALE_DEFAULT_MS
+    const st = statSync(filePath)
+    const stale = nowMs - st.mtimeMs > windowMs
+    if (stale) {
+      const ageMin = Math.round((nowMs - st.mtimeMs) / 60_000)
+      const windowMin = Math.round(windowMs / 60_000)
+      opts?.logger?.warn(
+        `store read STALE: ${filePath} is ${ageMin} min old (> ${windowMin} min window) — the file may come from a stale/parallel store or be a wrong path: if the path "no existe", use glob to resolve the canonical store path (fb-119/135/146)`
+      )
+    }
+    return stale
+  } catch {
+    return false
+  }
+}
 
 // ---------------------------------------------------------------------------
 // The minimal department shape the engine reads. The bundle's real
@@ -390,7 +438,11 @@ function isCalendarEntry(value: unknown): value is CalendarEntry {
  * `{ entries: [] }` (never throws — PURE, mirrors readPresenceStateFile).
  * Exported so the dispatch/scheduler tests exercise the same reader as the
  * live wiring. */
-export function readCalendarStateFile(stateDir: string): CalendarState {
+export function readCalendarStateFile(stateDir: string, opts?: StoreFileReadOpts): CalendarState {
+  // LANE fb-134 F2(b) — STALE-READ CAP (M1 pattern, inline — no deps):
+  // a calendar.json older than the window is flagged STALE (parallel-store
+  // class). NON-DESTRUCTIVE: data still returns; the warn is the cap.
+  checkStoreFileStaleJobs(path.join(stateDir, 'calendar.json'), opts)
   try {
     const parsed = JSON.parse(readFileSync(path.join(stateDir, 'calendar.json'), 'utf8')) as { entries?: unknown }
     if (parsed !== null && typeof parsed === 'object' && Array.isArray(parsed.entries)) {
@@ -416,7 +468,11 @@ export async function writeCalendarStateFile(stateDir: string, state: CalendarSt
  * Value = the ms epoch of the last scheduler fire for that job (minute
  * resolution; the scheduler relies on the minute floor so a per-minute job
  * fires exactly once a minute and never re-fires inside the same window). */
-export function readJobRunsStateFile(stateDir: string): Record<string, number> {
+export function readJobRunsStateFile(stateDir: string, opts?: StoreFileReadOpts): Record<string, number> {
+  // LANE fb-134 F2(b) — STALE-READ CAP (M1 pattern, inline — no deps):
+  // a job-runs-state.json older than the window is flagged STALE (parallel-
+  // store class). NON-DESTRUCTIVE: data still returns; the warn is the cap.
+  checkStoreFileStaleJobs(path.join(stateDir, 'job-runs-state.json'), opts)
   try {
     const parsed = JSON.parse(readFileSync(path.join(stateDir, 'job-runs-state.json'), 'utf8')) as Record<string, unknown>
     const out: Record<string, number> = {}

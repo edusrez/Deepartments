@@ -23,6 +23,7 @@ import { copyFile, writeFile, rename, readFile, appendFile, mkdir } from 'node:f
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { ROTATION_SCHEMA_VERSION, validateHostsRotationFile } from './session-rotation.js'
+import { checkStoreFileStale, type StoreFileReadOpts, assertStoreProfile, storeProfileLabel } from './store-profile.js'
 
 /** Prefix of a runtime host-address registry entry: `host-<sessionId>`. */
 export const HOST_ID_PREFIX = 'host-'
@@ -230,9 +231,14 @@ export interface HostEntryLike {
  * back to the in-memory registry. This is the Bug A AUTHORITATIVE on-disk
  * source: a long-lived process may hold a STALE in-memory `hosts` Map, but the
  * file is the truthful rotation record. */
-export function readDurableHostsRegistry(stateDir: string): Record<string, { retired: boolean }> | undefined {
+export function readDurableHostsRegistry(stateDir: string, opts?: StoreFileReadOpts): Record<string, { retired: boolean }> | undefined {
   try {
     const parsed = JSON.parse(readFileSync(path.join(stateDir, 'hosts.json'), 'utf8')) as Record<string, unknown>
+    // LANE fb-134 F2(b) — STALE-READ CAP (the M1 stateStaleMs pattern): when the
+    // caller opts in, a hosts.json older than the window is flagged as STALE
+    // (the file may come from a parallel/stale store — the fb-134 class). The
+    // read is NON-DESTRUCTIVE: the data still returns; the warn is the cap.
+    checkStoreFileStale(path.join(stateDir, 'hosts.json'), opts)
     const out: Record<string, { retired: boolean }> = {}
     for (const [hostId, entry] of Object.entries(parsed)) {
       if (hostId === 'schemaVersion') continue
@@ -262,8 +268,8 @@ export function isHostRetiredOnDisk(stateDir: string, hostId: string): boolean |
  * fresh on every call). `undefined` when the file is unreadable/malformed. Used
  * by the system-health daemon so the retired-host scan gate is robust to a
  * STALE in-memory registry (a process that booted before a rotation). */
-export function readDurableRetiredHostIds(stateDir: string): Set<string> | undefined {
-  const registry = readDurableHostsRegistry(stateDir)
+export function readDurableRetiredHostIds(stateDir: string, opts?: StoreFileReadOpts): Set<string> | undefined {
+  const registry = readDurableHostsRegistry(stateDir, opts)
   if (registry === undefined) return undefined
   const ids = new Set<string>()
   for (const [hostId, entry] of Object.entries(registry)) {
@@ -281,9 +287,13 @@ export function readDurableRetiredHostIds(stateDir: string): Set<string> | undef
  * malformed, so the caller falls back to the in-memory registry; an EMPTY array
  * (a readable file with no entries) is a valid read. This is the DURABLE source
  * the system-health daemon ALERT recipient must resolve from. */
-export function readDurableHostEntries(stateDir: string): HostEntryLike[] | undefined {
+export function readDurableHostEntries(stateDir: string, opts?: StoreFileReadOpts): HostEntryLike[] | undefined {
   try {
     const parsed = JSON.parse(readFileSync(path.join(stateDir, 'hosts.json'), 'utf8')) as Record<string, unknown>
+    // LANE fb-134 F2(b) — STALE-READ CAP (the M1 stateStaleMs pattern): the
+    // durable-first alert recipient flags a STALE hosts.json (parallel-store
+    // class) when the caller opts in. NON-DESTRUCTIVE: data still returns.
+    checkStoreFileStale(path.join(stateDir, 'hosts.json'), opts)
     const entries: HostEntryLike[] = []
     for (const [hostId, raw] of Object.entries(parsed)) {
       if (hostId === 'schemaVersion') continue
@@ -1409,6 +1419,17 @@ export class RegistryStore {
     this.deps = deps
     this.postsPath = path.join(deps.stateDir, 'posts.json')
     this.hostsPath = path.join(deps.stateDir, 'hosts.json')
+    // LANE fb-134 F2(a) — STORE-PROFILE ASSERT ON OPEN: the first opener CLAIMS
+    // the store with a `.store-profile` marker; a LATER open by a DIFFERENT
+    // profile/home/host is the split-brain class (08-22/08-25). The assert is
+    // NON-DESTRUCTIVE (claims only when absent, never touches a foreign marker);
+    // the mismatch is a WARN here (the bundle boot emits the health-alert).
+    const profileAssert = assertStoreProfile(deps.stateDir)
+    if (profileAssert.status === 'mismatch') {
+      deps.logger.warn(
+        `[deepartments] store-profile MISMATCH on open: ${deps.stateDir} is claimed by "${storeProfileLabel(profileAssert.existing)}" but the current opener is "${storeProfileLabel(profileAssert.mark)}" — possible split-brain / parallel-store reuse (fb-134); the store is NOT modified`
+      )
+    }
   }
 
   // --- catalog accessors ---------------------------------------------------

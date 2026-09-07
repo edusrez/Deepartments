@@ -37,6 +37,10 @@ import type { SubagentRolesService } from './role-orient.js'
 // R3 (WORK-REGISTER post-cierre 2026-09-04): the bundle-layer patch staleness
 // watchdog — installed at apply; its exports flow through the barrel below.
 import { installBundlePatchWatchdog } from './bundle-patches.js'
+// LANE fb-134 F2(a): the STORE-PROFILE marker + assert-on-open helpers used at
+// the bus storeReady seam below (and exported through the barrel for the
+// bundle boot + the lane tests).
+import { assertStoreProfile, storeProfileLabel } from './store-profile.js'
 
 // acl.js defines `busProfileFor`/`aclDenyGround`/`aclDenyReason`/`canSend` (+
 // types `BusMemberProfile`/`BusCatalogLens`); delivery.js RE-EXPORTS the same
@@ -77,6 +81,10 @@ export * from './session-surface.js'
 // snapshotBundlePatchMtimes, findChangedBundlePatches, the sidecar readers,
 // installBundlePatchWatchdog) are the durable + noisy mitigation.
 export * from './bundle-patches.js'
+// LANE fb-134 (store separation) F2: the STORE-PROFILE marker + assert-on-open
+// (a), the STALE-READ CAP on store-file reads (b — the M1 stateStaleMs pattern
+// helper shared by dshd-core/dshd-health) and the GHOST-STORE tree scan (c).
+export * from './store-profile.js'
 
 // ---------------------------------------------------------------------------
 // FASE 2.5 BATCH B — the dshd-core Cordis plugin surface.
@@ -543,6 +551,17 @@ function buildBusLazy(ctx: Context, busDeps: DepsHolder<BusBucketDeps>): BusSurf
   }
   const stateDir = org.stateDir
   const logger = ctx.logger
+  // LANE fb-134 F2(a) — STORE-PROFILE ASSERT at the MESSAGES-store open (the
+  // `storeReady` seam): the marker claim + the split-brain mismatch warn (the
+  // RegistryStore constructor asserts the catalog store; this asserts the bus
+  // store — the SAME claim file, so the second open is an idempotent re-check).
+  // NON-DESTRUCTIVE: a mismatch only WARNS (the boot path emits the health-alert).
+  const profileAssert = assertStoreProfile(stateDir)
+  if (profileAssert.status === 'mismatch') {
+    logger.warn(
+      `[deepartments] store-profile MISMATCH on bus open: ${stateDir} is claimed by "${storeProfileLabel(profileAssert.existing)}" but the current opener is "${storeProfileLabel(profileAssert.mark)}" — possible split-brain / parallel-store reuse (fb-134); the store is NOT modified`
+    )
+  }
   const storeReady = MessagesStore.open(stateDir)
   const mark = (messageId: string, recipientId: string, status: DeliveryStatus): Promise<DeliveryRow> =>
     markDelivery(stateDir, messageId, recipientId, status)
