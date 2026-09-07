@@ -645,6 +645,11 @@ export interface ToolsFactoryDeps {
      * seam for a DORMANT recipient). */
 
     recipientMaterialized: DeliverySurface['recipientMaterialized']
+    /** VALLE 09-07 (BATCH-DRAIN): the DeliverySurface's running-liveness probe
+     * — forwarded into the composed dshd-core engine's `deepartments.deliverDeps`
+     * holder (the FIFO-gate-skip seam for a batch-eligible delivery to a
+     * CURRENTLY RUNNING recipient). */
+    recipientRunningLive: DeliverySurface['recipientRunningLive']
     busEnsureHostForCaller: DeliverySurface['busEnsureHostForCaller']
     assertBusFanOut: DeliverySurface['assertBusFanOut']
     busDeliverToPost: DeliverySurface['busDeliverToPost']
@@ -1161,6 +1166,11 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // position (deliverySurface is built later); the wrapper derefs only when the
   // engine's gate calls it, never at construction (the busDeliverToPost pattern).
   const recipientMaterialized: DeliverySurface['recipientMaterialized'] = (recipientId) => late.recipientMaterialized?.(recipientId)
+  // VALLE 09-07 (BATCH-DRAIN): the running-liveness probe LAZY wrapper (the
+  // `late` getter is TDZ at THIS factory position — same pattern as the
+  // dormancy probe above; the wrapper derefs only when the engine's gate calls
+  // it, never at construction).
+  const recipientRunningLive: DeliverySurface['recipientRunningLive'] = (recipientId) => late.recipientRunningLive?.(recipientId)
   const busEnsureHostForCaller: ToolsFactoryDeps['late']['busEnsureHostForCaller'] = (callerAgent) => late.busEnsureHostForCaller(callerAgent)
   const assertBusFanOut: ToolsFactoryDeps['late']['assertBusFanOut'] = (to) => late.assertBusFanOut(to)
   const busDeliverToPost: ToolsFactoryDeps['late']['busDeliverToPost'] = (...args) => late.busDeliverToPost(...args)
@@ -5173,7 +5183,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         return [{ type: 'text', text } as const]
       }
     },
-    async execute(args, exec): Promise<{ messageId: string; delivered: Record<string, BusSendResult | `prepared (fifo-gated${string}` | 'prepared (noWake)'> }> {
+    async execute(args, exec): Promise<{ messageId: string; delivered: Record<string, BusSendResult | `prepared (fifo-gated${string}` | 'prepared (noWake)' | 'prepared (batch-until-settle)'> }> {
       const agent = exec.agent
       if (!agent) throw new Error('send_message requires a calling agent (exec.agent was undefined)')
       assertBusFanOut(args.to)
@@ -5197,7 +5207,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // P1 (fb-131 — Candidate B observability): the delivered map carries the
       // ENRICHED prepared classes ('prepared (fifo-gated tras m-<seq>)' /
       // 'prepared (noWake)') besides the plain BusSendResult statuses.
-      const delivered: Record<string, BusSendResult | `prepared (fifo-gated${string}` | 'prepared (noWake)'> = {}
+      const delivered: Record<string, BusSendResult | `prepared (fifo-gated${string}` | 'prepared (noWake)' | 'prepared (batch-until-settle)'> = {}
       for (const recipient of args.to) {
         const ground = aclDenyGround(sender, busProfileFor(recipient))
         if (ground === undefined) {
@@ -5242,12 +5252,21 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         const noWake = args.noWake === true || (args.ack === true && isDormantRecipient(recipient))
         let gateClass: 'fifo' | 'noWake' | undefined
         let gateSeq: number | undefined
+        // VALLE 09-07 (BATCH-DRAIN): the batch-eligibility opt-in — true ONLY
+        // on the ALWAYS-WAKE no-interrupt default (the branch the deliver
+        // engine can coalesce). Every other branch keeps batchEligible ABSENT
+        // (the safe default): the explicit noWake / the B3 dormant-ack no-wake
+        // / an interrupt order never enter the drain-on-settle accumulator
+        // (their wake-seam semantics are byte-identical — only ALWAYS-WAKE
+        // coalesces, per the mission's 5 semantics).
+        const batchEligible = noWake === true || args.interrupt === true ? false : true
         const status = await delivery.deliverOrQueue(recipient, record, {
           callerAgentId: agent.id as string,
           senderSessionId: agent.id as string,
           signal: exec.signal,
           interrupt: args.interrupt === true,
           noWake,
+          batchEligible,
           gateReason: (reason, bySeq) => {
             gateClass = reason
             gateSeq = bySeq
@@ -5258,10 +5277,15 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         // status; the envelope below names the actual queue class. NEVER
         // touches the sidecar (the 'prepared' row stays byte-identical); it
         // exists only in this tool result.
+        // VALLE 09-07 (BATCH-DRAIN): a 'prepared' without a queue class from a
+        // batch-eligible send is the BATCH class ('prepared (batch-until-
+        // settle)' — the record accumulated and will drain at the settle).
         if (status === 'prepared' && gateClass === 'fifo') {
           delivered[recipient] = gateSeq !== undefined ? `prepared (fifo-gated tras m-${gateSeq})` : 'prepared (fifo-gated)'
         } else if (status === 'prepared' && gateClass === 'noWake') {
           delivered[recipient] = 'prepared (noWake)'
+        } else if (status === 'prepared' && gateClass === undefined && batchEligible === true) {
+          delivered[recipient] = 'prepared (batch-until-settle)'
         } else {
           delivered[recipient] = status
         }
@@ -6279,7 +6303,13 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     // the OPTIONAL dormancy probe — the composed dshd-core engine skips the
     // fb-117 gate for a DORMANT recipient (the wake-seam fix); ABSENT in a
     // minimal register → the pre-fix gate behavior (the safe default).
-    recipientMaterialized
+    recipientMaterialized,
+    // VALLE 09-07 (BATCH-DRAIN): the OPTIONAL running-liveness probe — the
+    // composed dshd-core engine skips the fb-117 gate for a batch-eligible
+    // delivery to a CURRENTLY RUNNING recipient (the record accumulates for
+    // the drain-on-settle batch — seq order by construction); ABSENT in a
+    // minimal register → the pre-batch gate behavior (the safe default).
+    recipientRunningLive
   })
   depsWakepack?.register({
     refreshPresence,

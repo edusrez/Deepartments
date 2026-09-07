@@ -366,7 +366,20 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     // lives OUTSIDE this span. Getter count stays 22 (src/invoke.ts untouched)
     // and export-parity 325 is unchanged (the wrapper is not an export).
     // md5 7b01c84f… → 05c60bd186c6d6ab96e395345bce3077.
-    assert.equal(md5, '05c60bd186c6d6ab96e395345bce3077', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections (md5 05c60bd1…)')
+    // Zone md5 RE-FROZE VALLE 09-07 (BATCH-DRAIN, 2026-09-07, d9cc05ce):
+    // INTENTIONAL in-span changes — the send_message per-recipient batch-
+    // eligibility flag (`batchEligible` — true ONLY on the ALWAYS-WAKE
+    // no-interrupt default, the branch the drain-on-settle accumulator
+    // coalesces; never on noWake/ack-dormant/interrupt) threaded into
+    // deliverOrQueue + the prepared-class envelope extension
+    // ('prepared (batch-until-settle)' — the batch class the sender sees).
+    // Tool definition bodies are byte-identical apart from the flag/envelope;
+    // the batch accumulator/flush/settle-hook live OUTSIDE this span
+    // (delivery.ts — a different lock); the late getter count bumps 22 → 23
+    // (the `recipientRunningLive` late seam, src/invoke.ts) and export-parity
+    // 325 is unchanged (the flag is not an export).
+    // md5 05c60bd1… → 511493a91a89a12e68719fd951c75342.
+    assert.equal(md5, '511493a91a89a12e68719fd951c75342', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope (md5 511493a9…)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface
@@ -487,13 +500,15 @@ test('tools-factory (composed boot): the registry wiring is intact — the runne
       assert.ok(!/get busTools\(\)/.test(toolsInvocation), 'the TOOLS invocation late object NO LONGER carries the busTools getter (CUT4 factory-local)')
       assert.ok(!/get feedbackEmitTools\(\)/.test(toolsInvocation), 'the TOOLS invocation late object NO LONGER carries the feedbackEmitTools getter (CUT4 factory-local)')
       assert.ok(!/get feedbackHeadTools\(\)/.test(toolsInvocation), 'the TOOLS invocation late object NO LONGER carries the feedbackHeadTools getter (CUT4 factory-local)')
-      for (const seam of ['busMemberIdFor', 'feedbackStoreReady', 'resolveQualityHeadEntry', 'feedbackForwarderFor', 'feedbackDeliveryOptions', 'busProfileFor', 'aclDenyGround', 'resolveBusCatalogRoute', 'delivery', 'isDormantRecipient', 'recipientMaterialized', 'busEnsureHostForCaller', 'assertBusFanOut', 'busDeliverToPost', 'busDeliverToHost', 'resolveBusChild', 'deliverBusChild', 'freshMintHead', 'enqueueHostWake']) {
+      for (const seam of ['busMemberIdFor', 'feedbackStoreReady', 'resolveQualityHeadEntry', 'feedbackForwarderFor', 'feedbackDeliveryOptions', 'busProfileFor', 'aclDenyGround', 'resolveBusCatalogRoute', 'delivery', 'isDormantRecipient', 'recipientMaterialized', 'recipientRunningLive', 'busEnsureHostForCaller', 'assertBusFanOut', 'busDeliverToPost', 'busDeliverToHost', 'resolveBusChild', 'deliverBusChild', 'freshMintHead', 'enqueueHostWake']) {
         assert.ok(new RegExp(`get ${seam}\\(\\) \\{ return deliverySurface\\.${seam} \\}`).test(toolsInvocation), `the TOOLS invocation late object carries the NEW ${seam} getter (CUT4 delivery-surface seam)`)
       }
-      // The invocation late object carries EXACTLY the 22 TDZ-safe seams (the
-      // 3 kept delivery seams + the 19 CUT4 delivery-surface seams — the 4
+      // The invocation late object carries EXACTLY the 23 TDZ-safe seams (the
+      // 3 kept delivery seams + the 20 CUT4 delivery-surface seams — the 4
       // factory-local seams are gone; the P1-EXT WAKE-SEAM dormancy probe
-      // recipientMaterialized adds the 19th CUT4 seam, eff06e0).
+      // recipientMaterialized adds the 19th CUT4 seam, eff06e0; the VALLE
+      // 09-07 BATCH-DRAIN running-liveness probe recipientRunningLive adds the
+      // 20th CUT4 seam, d9cc05ce).
       const lateStart = toolsInvocation.indexOf('late: {')
       let lateDepth = 1
       let k = lateStart + 'late: {'.length
@@ -503,7 +518,7 @@ test('tools-factory (composed boot): the registry wiring is intact — the runne
       }
       const lateBody = toolsInvocation.slice(lateStart, k)
       const getterCount = (lateBody.match(/get [A-Za-z_$][\w$]*\(\) \{ return/g) ?? []).length
-      assert.equal(getterCount, 22, `the TOOLS invocation late object carries exactly 22 getters (found ${getterCount})`)
+      assert.equal(getterCount, 23, `the TOOLS invocation late object carries exactly 23 getters (found ${getterCount})`)
       assert.ok(/workerSetup,[\s\S]*?headSetup,[\s\S]*?disposeHeadHandle,[\s\S]*?disposeHeadHandleOnce,[\s\S]*?disposeJoinTimeoutMs,[\s\S]*?joinHeadDisposeOnce,[\s\S]*?resolveDepartmentWorkspaceCwd,[\s\S]*?resolveWorkspaceRootPath,[\s\S]*?rotateArchivedHeadSessionId,[\s\S]*?retirePost,[\s\S]*?isHeadStuck,[\s\S]*?markHeadProgress,[\s\S]*?attachHeadSession,[\s\S]*?archivePostSessionOnSleep[\s\S]*?schedulerHeadForDepartment,[\s\S]*?schedulerRunJob,[\s\S]*?buildHealthPosts,[\s\S]*?healthBootId,[\s\S]*?guiEndpointDeps[\s\S]*?\} = toolsSurface/.test(invoke), 'the destructure carries the 29 surface members (the 15 CUT1-3 + the 14 CUT4: scheduler/health builders + guiEndpointDeps)')
     } finally {
       dispose()

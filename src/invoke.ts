@@ -3560,6 +3560,10 @@ export function applyInvoke(ctx: Context, config: Config) {
       // dshd-core engine (deliverySurface.recipientMaterialized — the gate-skip
       // for a DORMANT recipient).
       get recipientMaterialized() { return deliverySurface.recipientMaterialized },
+      // VALLE 09-07 (BATCH-DRAIN): the running-liveness probe forwarded through
+      // the SAME late seam into the composed dshd-core engine (the FIFO-gate-skip
+      // for a batch-eligible delivery to a CURRENTLY RUNNING recipient).
+      get recipientRunningLive() { return deliverySurface.recipientRunningLive },
       get busEnsureHostForCaller() { return deliverySurface.busEnsureHostForCaller },
       get assertBusFanOut() { return deliverySurface.assertBusFanOut },
       get busDeliverToPost() { return deliverySurface.busDeliverToPost },

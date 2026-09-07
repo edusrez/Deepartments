@@ -73,6 +73,10 @@ test('r6-ladder-flat (fb-95): the self-registering tests are lane-② src-native
     // gate engine + the settle re-driver over the src) and self-register the
     // hook (the wakeseam-lane pattern).
     'wake-seam-mitigation.test.js',
+    // VALLE 09-07 (BATCH-DRAIN, 2026-09-07): the drain-on-settle lane is
+    // src-native (the composed bundle over the crate engine + the settle event)
+    // and self-registers the hook (the wake-seam-mitigation pattern).
+    'batch-drain.test.js',
   ])
   for (const f of registerers) {
     assert.ok(laneFamily.has(f), `unexpected self-registerer ${f} — only the lane-②/src-native family may self-register the hook`)

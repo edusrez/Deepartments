@@ -78,6 +78,16 @@ export interface DeliveryInterruptOptions {
    * recorded in the interrupt-state.json detail entry when known. Absent →
    * byte-identical legacy behavior. */
   sourceKey?: string
+  /** VALLE 09-07 (BATCH-DRAIN) — TRANSPORT flag threaded from `deliverOrQueue`
+   * into the ALWAYS-WAKE primitives (`deps.deliverPost` / `deps.deliverHost`):
+   * the caller's send is batch-eligible (the send_message ALWAYS-WAKE default).
+   * The batch surface (dshd-orchestration) uses it to ACCUMULATE the record for
+   * a drain-on-settle delta instead of splicing the inbox 1:1 while the
+   * recipient is running. NEVER set for noWake/interrupt/ack/fifo-gated sends
+   * (those branches keep their pre-batch semantics; the batch accumulator is
+   * only ever reached by the ALWAYS-WAKE no-interrupt route). Absent/false →
+   * byte-identical legacy behavior. */
+  batchEligible?: boolean
 }
 
 /** The `deliverOrQueue` gate options. `noWake: false` (the DEFAULT) is the
@@ -102,6 +112,20 @@ export interface DeliverOrQueueOptions {
    * splice still goes first-item of the next turn — the preemption is the
    * documented intent of `interrupt`, not an inversion). */
   interrupt?: boolean
+  /** VALLE 09-07 (BATCH-DRAIN) — OPTIONAL opt-in: the caller's send is
+   * batch-eligible (send_message sets it ONLY on its ALWAYS-WAKE no-interrupt
+   * default; noWake, ack-dormant, interrupt and every internal/internal-driver
+   * delivery leave it ABSENT — the safe default false, zero regression for the
+   * re-drive/boot/sweep/daemon/emergency paths). When true AND the recipient's
+   * live handle is CURRENTLY RUNNING, the engine SKIPS the fb-117 FIFO gate
+   * AND the batch surface accumulates the record for a drain-on-settle delta
+   * (one followup at the settle with all pending messages in seq order — the
+   * completion-order inversion this gate protects is structurally impossible
+   * for a batched delivery). A non-running (idle/dormant) recipient is NOT
+   * affected: the delivery proceeds to the plain ALWAYS-WAKE followup exactly
+   * as today (the first message wakes the recipient; the batch never delays a
+   * settle — no starvation by construction). */
+  batchEligible?: boolean
   /** P1 (fb-131 — WAKE-SEAM lane) — OPTIONAL queue-class observer
    * (observability ONLY, never a behavior gate): invoked exactly when the
    * outcome degrades to 'prepared' WITHOUT a wake, with the queue CLASS —
@@ -238,6 +262,23 @@ export interface DeliveryEngineDeps {
    * inside the dep degrades to the gate APPLIED (conservative — liveness is
    * never assumed on an error). */
   recipientMaterialized?: (recipientId: string) => boolean | undefined
+  /** VALLE 09-07 (BATCH-DRAIN) — OPTIONAL: whether the CATALOG recipient's
+   * live handle is CURRENTLY RUNNING (its in-process agent is mid-turn — the
+   * same `agents.get(...)?.status === 'running'` probe the batch surface uses
+   * internally; resolves posts (byPost → session) AND host entries (hosts →
+   * session); a RETIRED member → false (never running); an unknown/child id
+   * → `undefined` (no liveness knowledge). When it resolves `true` AND the
+   * delivery carries `batchEligible`, the engine SKIPS the fb-117 FIFO gate
+   * for this delivery: the batch surface accumulates the record and presents
+   * it in ONE followup at the settle in seq order — the completion-order
+   * splice inversion the gate protects cannot occur for a batched delivery
+   * (nothing is spliced until the flush), so the ordering guarantee is
+   * preserved BY CONSTRUCTION instead of by gating. ABSENT (`undefined` dep
+   * or result) → the gate applies unconditionally (the safe default — a
+   * composition that cannot resolve running-liveness keeps the pre-batch gate
+   * behavior byte-identical). A THROW inside the dep degrades to the gate
+   * APPLIED (conservative — running-status is never assumed on an error). */
+  recipientRunningLive?: (recipientId: string) => boolean | undefined
   /** P1-EXT-EXT (2026-09-06 — WAKE-SEAM mitigation, m-2415 no-wake-head
    * DISCRIMINATOR) — OPTIONAL: whether the GATING HEAD of the FIFO gate (the
    * EARLIEST strictly-earlier seq whose delivery pair is still 'prepared' —
@@ -336,6 +377,32 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
       // → the gate applies (the safe default — a composition that cannot
       // resolve liveness falls back to the pre-fix behavior).
       if (recipientId !== record.from && opts.interrupt !== true && deps.pendingEarlierSeq !== void 0) {
+        // VALLE 09-07 (BATCH-DRAIN) — the FIFO-gate SKIP for a batch-eligible
+        // delivery to a CURRENTLY RUNNING recipient. The drain-on-settle batch
+        // accumulates the record (dshd-orchestration's busDeliverToPost/Host —
+        // the ALWAYS-WAKE route) and presents ALL pending messages in ONE
+        // followup at the settle, in seq order by construction — nothing is
+        // spliced into the live inbox until the flush, so the completion-order
+        // inversion the fb-117 gate protects is STRUCTURALLY IMPOSSIBLE for a
+        // batched delivery and the gate would only retain it behind an earlier
+        // pair for no ordering benefit (the batch must not park a running
+        // recipient's queue behind a crash-class head — it would un-batch the
+        // delivery AND stall the drain). The skip is narrow: batchEligible
+        // comes ONLY from send_message's ALWAYS-WAKE no-interrupt default, so
+        // the fifo-gate stays intact for noWake/ack/interrupt/re-drive/boot/
+        // daemon/emergency deliveries and for every non-running recipient
+        // (idle/dormant keep the exact pre-batch gate — including the
+        // dormancy-aware variant (i) and the no-wake-head discriminator).
+        let batchRunning: boolean | undefined
+        try {
+          batchRunning = deps.recipientRunningLive?.(recipientId)
+        } catch (error: unknown) {
+          batchRunning = undefined // conservative — the gate applies
+          deps.logger.warn(`[deepartments] bus delivery running-liveness probe failed for ${record.id} → ${recipientId} (the FIFO gate applies — safe default): ${error instanceof Error ? error.message : String(error)}`)
+        }
+        if (opts.batchEligible === true && batchRunning === true) {
+          deps.logger.info(`[deepartments] bus delivery FIFO gate SKIPPED for ${record.id} → ${recipientId}: batch-eligible ALWAYS-WAKE to a RUNNING recipient — the record accumulates for the drain-on-settle batch (seq order preserved by construction, fb-117 inapplicable)`)
+        } else {
         // VARIANTE (i) — DORMANCY-AWARE GATE. Resolve liveness FIRST (fail-soft
         // to undefined = apply the gate): a recipient CURRENTLY MATERIALIZED
         // (live handle) keeps the gate; a DORMANT recipient (no live handle) is
@@ -406,6 +473,7 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
               return 'prepared'
             }
           }
+        }
         }
       }
       try {
@@ -506,10 +574,36 @@ async function catalogRoute(
     // SECOND 'prepared'-without-wake queue class — the observer distinguishes
     // it from the FIFO gate so the send_message tool result can name it.
     opts.gateReason?.('noWake')
+    // C2 (m-2523, VALLE 09-07 — the noWake→retired frozen-'prepared' class):
+    // a WIRED no-wake delivery whose CATALOG ROUTE is 'reroute' (a RETIRED
+    // host-family address — `host-session-<uuid>` of a rotated host — resolved
+    // to its LIVE successor, the m-331 role intent) is NEVER returned
+    // 'prepared': the ADDRESSED recipient is terminal and can never wake, so a
+    // 'prepared' row keyed to it would freeze forever — the B3 dormancy guard
+    // (sleepEpoch preserved on the retired entry) AND the P2 no-wake running
+    // guard both hold a noWake row for a recipient that is never live again
+    // (no re-drive, no drain, no boot settle: the keep-forever class). The
+    // m-331 re-route preserves the ALWAYS-WAKE delivery (it delivers TO the
+    // successor); a NO-WAKE ORDER to a dead address has no wake to coalesce
+    // with, so it FAILS to the sender ('failed' — visible in the ledger, the
+    // record stays durable in messages.jsonl, and the noWake flag keeps the
+    // P2 guard from re-driving it into a retry storm). The sender re-addresses
+    // to the live successor (named by the host-rotation notice — O3).
+    if (route.kind === 'reroute') {
+      deps.logger.warn(`[deepartments] bus delivery noWake to RETIRED host "${recipientId}" FAILED (record ${record.id}): the address is terminal (re-route target is the live host "${route.entry.hostId}") — re-address the send to the live successor; the record stays durable (C2: a noWake to a never-live recipient never parks 'prepared')`)
+      return 'failed'
+    }
     return 'prepared'
   }
   // ALWAYS-WAKE (DEFAULT — the pre-step (c) behavior EXACTLY).
-  const interrupt: DeliveryInterruptOptions = opts.interrupt === true ? { interrupt: true } : {}
+  // VALLE 09-07 (BATCH-DRAIN): the batch-eligibility TRANSPORT flag is threaded
+  // from `deliverOrQueue` into the ALWAYS-WAKE primitives so the batch surface
+  // (dshd-orchestration) can accumulate a running recipient's record instead of
+  // splicing the inbox 1:1 (absent → the byte-identical pre-batch opts).
+  const interrupt: DeliveryInterruptOptions = {
+    ...(opts.interrupt === true ? { interrupt: true } : {}),
+    ...(opts.batchEligible === true ? { batchEligible: true } : {})
+  }
   if (route.kind === 'post') {
     return deps.deliverPost(route.entry, framed, record, opts.senderSessionId, interrupt)
   }

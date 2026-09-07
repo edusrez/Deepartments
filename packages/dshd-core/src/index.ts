@@ -745,7 +745,12 @@ function buildDeliverLazy(ctx: Context, deliverDeps: DepsHolder<Partial<Delivery
     // bucket-(c) holder (`deepartments.deliverDeps` register — the
     // orchestration provides `recipientMaterialized` there). ABSENT → the
     // engine keeps the pre-fix gate behavior (the safe default).
-    ...(bound.recipientMaterialized !== undefined ? { recipientMaterialized: bound.recipientMaterialized } : {})
+    ...(bound.recipientMaterialized !== undefined ? { recipientMaterialized: bound.recipientMaterialized } : {}),
+    // VALLE 09-07 (BATCH-DRAIN): the optional running-liveness probe forwarded
+    // verbatim from the bundle's bucket-(c) holder (`deepartments.deliverDeps`
+    // register — the orchestration provides `recipientRunningLive` there).
+    // ABSENT → the engine keeps the pre-batch gate behavior (the safe default).
+    ...(bound.recipientRunningLive !== undefined ? { recipientRunningLive: bound.recipientRunningLive } : {})
   })
 }
 

@@ -50,7 +50,7 @@ import { mintFreshSessionIdNotArchived, mintWorkerSessionId } from 'dshd-core'
 import { isArchivedSession } from 'dshd-core'
 import type { WorkspaceRegistryLike } from 'dshd-core'
 import type { PostEntry, HostEntry, HostEntryLike } from 'dshd-core'
-import { MessagesStore, markDelivery, parseDeliveryRows, resolveDeliveriesPath, hasEarlierPendingPair, gatingHeadIsNoWake } from 'dshd-core'
+import { MessagesStore, markDelivery, parseDeliveryRows, resolveDeliveriesPath, hasEarlierPendingPair, gatingHeadIsNoWake, deliveryStatus } from 'dshd-core'
 import type { DeliveryRow } from 'dshd-core'
 import type { DeliveryStatus, MessageRecord } from 'dshd-core'
 import { createDeliveryEngine } from 'dshd-core'
@@ -360,6 +360,30 @@ export interface DeliverySurface {
    * pre-fix behavior). A non-post recipient (host family / unknown) → undefined
    * (default safe — the gate stays). Never throws. */
   recipientMaterialized?: (recipientId: string) => boolean | undefined
+  /** VALLE 09-07 (BATCH-DRAIN): whether a CATALOG recipient's live handle is
+   * CURRENTLY RUNNING (mid-turn — the `agents.get(...)?.status === 'running'`
+   * probe; posts by byPost → session, hosts by hosts → session; retired →
+   * false; unknown/child → undefined). The delivery engine's optional
+   * `recipientRunningLive` dep: `true` + `batchEligible` → the fb-117 FIFO
+   * gate is SKIPPED (the batch presents the record at the settle in seq order
+   * — the inversion the gate protects is impossible for a batched delivery);
+   * false/undefined → the gate applies (the pre-batch behavior). */
+  recipientRunningLive?: (recipientId: string) => boolean | undefined
+  /** VALLE 09-07 (BATCH-DRAIN): queue ONE batch-eligible record for a RUNNING
+   * session (only the ALWAYS-WAKE no-interrupt send ever calls it — via
+   * busDeliverToPost/Host). Returns whether the record was queued (a defensive
+   * record.id dedupe rejects a double-queue). */
+  queueBatchFor: (sessionId: string, item: { record: MessageRecord; framed: string; senderSessionId?: string }) => boolean
+  /** VALLE 09-07 (BATCH-DRAIN): FLUSH the pending batch of ONE session in a
+   * single followup (`withFirst` = the W9-b interruptor, presented first). The
+   * settle hook (ctx.on('agent/status') running→idle) + the interrupt drain
+   * call it; a test may call it directly. Returns the number of records
+   * presented (0 = no-op / handle-gone / all-already-settled). NEVER throws. */
+  flushBatchFor: (sessionId: string, opts?: { withFirst?: { record: MessageRecord; framed: string; senderSessionId?: string } }) => Promise<number>
+  /** VALLE 09-07 (BATCH-DRAIN): the sessions with a PENDING batch (test probe
+   * + observability — the batch is in-memory/apply-scoped, nothing durable
+   * lives here beyond the 'prepared' rows). */
+  batchState: () => string[]
   /** B3 gap fix: the host self-registration (send_message/dept_who callers). */
   busEnsureHostForCaller: (callerAgent: { id: string; session?: { header?: SessionHeaderWithOrigin } }) => string
   /** The 1..20 fan-out guard (spec §4.4). */
@@ -959,6 +983,167 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       })
     })
 
+  // ---------------------------------------------------------------------------
+  // BATCH-DRAIN (VALLE 09-07 — PROGRAMMING REQUEST 1662eecf, drain-on-settle
+  // PURO; spec explore-deep-47/b99b8ce6): the delivery to a RUNNING recipient
+  // accumulates its queue; at the SETTLE (the `agent/status` running→idle
+  // transition — setPhase, dsh-agent-loop) the wake successor receives ALL the
+  // pending messages in ONE followup (delta multi-mensaje, seq order) instead
+  // of 1 message → 1 turn. The batch resolves the 1:1 at the FIRST link (the
+  // engine's per-record followup: busDeliverToPost :1009 / :1157 / :1190); the
+  // harness Inbox (dsh-agent lib/types/inbox.js:53 — one next-turn claim per
+  // turn) is untouched. ACCUMULATOR is apply-scoped (AGENTS.md rule 4 — no
+  // module-global mutable state); the rows stay 'prepared' (write-ahead) until
+  // the flush marks 'delivered' — a crash mid-batch is the same crash-safe
+  // re-drive class of today (the boot re-delivery driver / sweep re-drive the
+  // 'prepared' pairs 1:1, no loss). Only the ALWAYS-WAKE no-interrupt send
+  // (batchEligible) ever accumulates: noWake/ack/interrupt/child/re-drive/
+  // boot/daemon/emergencies bypass by construction (no flag).
+  // ---------------------------------------------------------------------------
+  /** ONE accumulated bus message to a running session (the batch's unit): the
+   * durable record + its framed text + the sender's session id (for the delta
+   * source projection). */
+  interface BatchItem {
+    record: MessageRecord
+    framed: string
+    senderSessionId?: string
+  }
+
+  /** The apply-scoped batch accumulator: sessionId (the LIVE handle's session
+   * id) → the pending always-wake records in ARRIVAL (seq) order. */
+  const batchDrain = new Map<string, BatchItem[]>()
+
+  /** Queue one batch-eligible record for a RUNNING session. Defensive dedupe
+   * by record.id (the sweep's re-drive of a >10-min 'prepared' batch row must
+   * never double-queue a record — the flush additionally filters already-
+   * settled rows, see flushBatchFor). */
+  const queueBatchFor = (sessionId: string, item: BatchItem): boolean => {
+    const existing = batchDrain.get(sessionId) ?? []
+    if (existing.some((i) => i.record.id === item.record.id)) {
+      ctx.logger.warn(`[deepartments] batch-drain queue dedupe: record ${item.record.id} already queued for session "${sessionId}" — skipped (defensive; the batch presents each record once)`)
+      return false
+    }
+    batchDrain.set(sessionId, [...existing, item])
+    ctx.logger.info(`[deepartments] batch-drain: record ${item.record.id} queued for running session "${sessionId}" (${existing.length + 1} pending — delivered in ONE followup at the settle)`)
+    return true
+  }
+
+  /** The drain-on-settle DELTA for one session: the N pending frames in ONE
+   * content (sanitizePromptLiterals per frame — W8-b) + a single `agent/send`
+   * source carrying the batch marker (`batch: true` + messageIds, W7-B JSON-safe
+   * projection). `withFirst` (the W9-b interruptor) comes FIRST — the preemption
+   * order: the wake later brings [interruptor, ...pending in seq order]. */
+  const busBatchUserMessage = (items: BatchItem[]): { content: readonly { type: string; text: string }[]; source: Record<string, unknown> } => {
+    const first = items[0]
+    const frames = items.map((item) => sanitizePromptLiterals(item.framed)).join('\n')
+    // The followup-boundary shape (the same { content, source } projection the
+    // plain `busUserMessage` builds via createUserMessage — W8-b literal
+    // sanitization per frame, W7-B JSON-safe source with the batch marker).
+    return {
+      content: [{ type: 'text', text: frames } as const],
+      source: jsonSafeMessageSource({
+        kind: 'agent',
+        form: 'send',
+        plugin: 'deepartments',
+        summary: boundContextSummary(`${items.length} bus message(s) delivered together at the settle (drain-on-settle batch).`),
+        to: [...first.record.to],
+        messageId: first.record.id,
+        messageIds: items.map((item) => item.record.id),
+        batch: true,
+        from: first.record.from,
+        senderSessionId: first.senderSessionId === undefined ? undefined : SessionId(first.senderSessionId)
+      })
+    }
+  }
+
+  /** FLUSH the pending batch of ONE session in a single followup (the settle
+   * hook + the W9-b interrupt drain). `opts.withFirst` = an additional item
+   * presented FIRST (the interruptor — its record was delivered through the
+   * normal route, never accumulated). Semantics:
+   *   1. items (withFirst + pending, seq order preserved) → ONE delta followup
+   *      into the LIVE handle (`agents.get(sessionId)`);
+   *   2. per item: markDelivery 'delivered' (the row was 'prepared' — the
+   *      write-ahead); items whose LATEST row is already final (the sweep's
+   *      1:1 re-drive spliced them during a >10-min turn) are EXCLUDED from
+   *      the delta and the marks (never a double presentation);
+   *   3. `agents.get(sessionId) === undefined` (the handle died / rotated /
+   *      disposed before the flush) → NO marks, rows stay 'prepared' → the
+   *      boot re-drive delivers them 1:1 (the spec §5.1 degraded path — a
+   *      mark without a splice would LOSE the message);
+   *   4. `batchDrain.delete(sessionId)` — the flush is the drain.
+   * Crash between the followup and the marks → rows stay 'prepared' → re-drive
+   * 1:1 (the same write-ahead class of today; no loss). NEVER throws.
+   * Returns the number of records presented (0 = no-op). */
+  const flushBatchFor = async (sessionId: string, opts?: { withFirst?: BatchItem }): Promise<number> => {
+    try {
+      const pending = batchDrain.get(sessionId) ?? []
+      const all = opts?.withFirst !== undefined ? [opts.withFirst, ...pending] : pending
+      if (all.length === 0) return 0
+      const memberId = postIdForChild(sessionId) ?? hostIdForSession(sessionId)
+      if (memberId === undefined) {
+        ctx.logger.warn(`[deepartments] batch-drain flush for session "${sessionId}": no catalog member id resolves (postIdForChild/hostIdForSession) — rows stay 'prepared' for the re-drive (no marks, no loss)`)
+        batchDrain.delete(sessionId)
+        return 0
+      }
+      // Re-drive guard: an item whose LATEST sidecar row is already FINAL was
+      // delivered 1:1 by the sweep (a >10-min turn raced the batch) — exclude
+      // it from the delta (never present the same message twice).
+      const toPresent: BatchItem[] = []
+      for (const item of all) {
+        let st: DeliveryStatus | null = null
+        try {
+          st = await deliveryStatus(stateDir, item.record.id, memberId)
+        } catch (error: unknown) {
+          ctx.logger.warn(`[deepartments] batch-drain flush: delivery-status read failed for ${item.record.id} → ${memberId} (item included — fail-open: the read is a de-dupe guard only): ${error instanceof Error ? error.message : String(error)}`)
+        }
+        if (st !== null && st !== 'prepared') continue // already delivered/settled 1:1
+        toPresent.push(item)
+      }
+      batchDrain.delete(sessionId)
+      if (toPresent.length === 0) return 0
+      const live = agents?.get(sessionId)
+      if (live === void 0) {
+        // The handle died before the flush — never mark 'delivered' without a
+        // splice (spec §5.1: a mark without the delivery = message loss). The
+        // rows stay 'prepared' → the boot re-drive / sweep delivers them 1:1.
+        ctx.logger.warn(`[deepartments] batch-drain flush for session "${sessionId}": the live handle is GONE (retired/rotated/disposed) — ${toPresent.length} record(s) left 'prepared' for the 1:1 re-drive (no loss, degraded)`)
+        return 0
+      }
+      const delta = busBatchUserMessage(toPresent)
+      live.followup(delta)
+      for (const item of toPresent) {
+        try {
+          await markDelivery(stateDir, item.record.id, memberId, 'delivered')
+        } catch (markError: unknown) {
+          ctx.logger.warn(`[deepartments] batch-drain flush: 'delivered' mark for ${item.record.id} → ${memberId} failed (non-fatal — the row stays 'prepared' for the re-drive): ${markError instanceof Error ? markError.message : String(markError)}`)
+        }
+      }
+      ctx.logger.info(`[deepartments] batch-drain FLUSHED session "${sessionId}": ${toPresent.length} record(s) in ONE followup → 'delivered' (${opts?.withFirst !== undefined ? 'with the interruptor first' : 'drain-on-settle'})`)
+      return toPresent.length
+    } catch (error: unknown) {
+      // Never throws: a flush failure leaves the rows 'prepared' (re-driveable).
+      ctx.logger.warn(`[deepartments] batch-drain flush for session "${sessionId}" failed (rows stay 'prepared' — the re-drive recovers): ${error instanceof Error ? error.message : String(error)}`)
+      return 0
+    }
+  }
+
+  /** BATCH-DRAIN SETTLE HOOK (drain-on-settle puro — sin ventanas): the
+   * `agent/status` running→idle transition (setPhase, dsh-agent-loop lib
+   * /index.js:384-388 + kick finally :480-490) IS the settle event. The plugin
+   * already consumes agent events (agent/created tools.ts:5532 — the same bus);
+   * the payload arrives FUSED as { status, agent } (agentEvents, dsh-agent).
+   * The flush is fire-and-forget (void + .catch — NEVER throws onto the
+   * driver's settle path). Idle-with-no-batch → no-op (the hook costs nothing
+   * for the 99.9% non-batch flow). */
+  ctx.on('agent/status', ({ agent, status }: { agent?: { id?: string }; status?: string }) => {
+    if (status !== 'idle') return
+    const sessionId = String(agent?.id ?? '')
+    if (sessionId === '') return
+    void flushBatchFor(sessionId).catch((error: unknown) => {
+      ctx.logger.warn(`[deepartments] batch-drain settle flush for session "${sessionId}" rejected: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  })
+
   /** The shared post DELIVERY of one bus message: the wakePost seam including
    * the stuck-head recovery verbatim (relay guards §4.4). Never throws — the
    * error is logged AND returned as 'failed' (never silent). W9-b: when
@@ -971,6 +1156,23 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     const interrupt = opts?.interrupt === true
     try {
       const live = agents?.get(sessionId)
+      // VALLE 09-07 (BATCH-DRAIN) — the ACCUMULATION seam (eslabón 1 of the
+      // 1:1): a batch-eligible ALWAYS-WAKE (send_message default; NEVER on
+      // noWake/ack/interrupt/child/re-drive/boot/daemon/emergencies) to a
+      // CURRENTLY RUNNING recipient does NOT splice the inbox 1:1 — the record
+      // (already 'prepared', write-ahead) is queued for the drain-on-settle
+      // flush (ONE followup at the settle with ALL pending, seq order). The
+      // engine's markFinal writes a second 'prepared' row — the SAME crash-safe
+      // pattern as the fifo-gate/noWake classes; a crash mid-batch re-drives
+      // 1:1 (no loss). The stuck-head case is EXCLUDED (a wedged session must
+      // take the existing dispose+cold-resume recovery, never batch). Idle
+      // (live undefined / status !== 'running') → NOT accumulated: the plain
+      // followup below wakes the recipient as today (the first message wakes;
+      // the batch NEVER delays a settle — no starvation by construction).
+      if (opts?.batchEligible === true && live !== void 0 && live.status === 'running' && !(entry.sleepEpoch === void 0 && isHeadStuck(sessionId, live))) {
+        queueBatchFor(sessionId, { record, framed, senderSessionId })
+        return 'prepared'
+      }
       // Fix A2 stuck-head resilience (verbatim): a live-but-running post with
       // NO session progress for STUCK_HEAD_MS is wedged; dispose + cold-resume
       // (serialized per head), re-delivering from the DURABLE message record —
@@ -1006,7 +1208,18 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
         }
       }
       const { target, resumed } = await materializePost(entry)
-      target.followup(busUserMessage(record, framed, senderSessionId))
+      // VALLE 09-07 (BATCH-DRAIN) — the FLUSH seam: a delivery that reaches the
+      // followup while this session has a PENDING batch (the W9-b INTERRUPT
+      // drain — the interruptor is delivered through the normal route, NEVER
+      // batch-eligible, and the wake must bring [interruptor, ...pendientes] in
+      // ONE delta) splices the batch flush instead of the plain 1:1 followup.
+      // No pending batch → the byte-identical plain followup (idle/dormant/non-
+      // batch deliveries — the settle hook flushes the rest at running→idle).
+      if (batchDrain.has(sessionId)) {
+        await flushBatchFor(sessionId, { withFirst: { record, framed, senderSessionId } })
+      } else {
+        target.followup(busUserMessage(record, framed, senderSessionId))
+      }
       const status = resumed ? 'resumed' : 'delivered'
       // Fix B (head-sleep worker drain): a WORKER that has just delivered a
       // message to ITS OWN MANAGER HEAD is cut clean immediately — the delivery
@@ -1137,6 +1350,20 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       try {
         const live = agents.get(sessionId)
         if (live !== void 0) {
+          // VALLE 09-07 (BATCH-DRAIN) — the ACCUMULATION seam (HOST side): a
+          // batch-eligible ALWAYS-WAKE to a currently-RUNNING host is queued
+          // for the drain-on-settle flush (returning 'prepared' keeps the
+          // write-ahead — the engine's markFinal writes the same 'prepared'
+          // row the fifo-gate/noWake classes use; the flush marks 'delivered'
+          // at the settle with ALL pending in ONE followup). The host has NO
+          // stuck-head recovery, so the accumulation condition is the plain
+          // running check. Idle/dormant hosts are NOT affected (the followup
+          // below wakes as today — D4 resume).
+          if (opts?.batchEligible === true && live.status === 'running') {
+            queueBatchFor(sessionId, { record, framed, senderSessionId })
+            ctx.logger.info(`[deepartments] bus delivery to host "${hostEntry.hostId}": running + batch-eligible → record ${record.id} queued for the drain-on-settle batch`)
+            return { status: 'prepared' }
+          }
           // W9-b interrupt: a LIVE, currently-running host with `interrupt:
           // true` is preempted — abort its CURRENT turn (reason 'interrupted')
           // and preserve any already-pending inbox work (keepInbox).
@@ -1154,7 +1381,15 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
               ctx.logger.warn(`[deepartments] bus delivery to host "${hostEntry.hostId}": interrupt=true but within the per-recipient cooldown — delivery queued (no abort)`)
             }
           }
-          live.followup(busUserMessage(record, framed, senderSessionId))
+          // VALLE 09-07 (BATCH-DRAIN) — the FLUSH seam (HOST side, same as the
+          // post path): a W9-b interrupt wake with a PENDING batch splices
+          // [interruptor, ...pendientes] in ONE delta; no batch → the plain
+          // followup (unchanged).
+          if (batchDrain.has(sessionId)) {
+            await flushBatchFor(sessionId, { withFirst: { record, framed, senderSessionId } })
+          } else {
+            live.followup(busUserMessage(record, framed, senderSessionId))
+          }
           return { status: 'delivered' }
         }
         // D4 — a dormant host is ALWAYS woken: resume the durable host session.
@@ -1748,6 +1983,30 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     return agents.get(String(SessionId(post.sessionId))) !== undefined
   }
 
+  /** VALLE 09-07 (BATCH-DRAIN) — whether a CATALOG recipient's live handle is
+   * CURRENTLY RUNNING (mid-turn): the `agents.get(...)?.status === 'running'`
+   * probe — the SAME liveness the batch surface uses internally (posts by
+   * byPost → session, hosts by hosts → session). Resolves `true` → the engine
+   * SKIPS the fb-117 FIFO gate for a batch-eligible delivery (the batch
+   * presents the record at the settle in seq order — the completion-order
+   * inversion the gate protects is impossible for a batched delivery); `false`
+   * (idle/dormant/retired) or `undefined` (unknown/child/absent agents) → the
+   * gate applies (the safe default — pre-batch behavior). Never throws. */
+  const recipientRunningLiveForGate = (recipientId: string): boolean | undefined => {
+    if (agents === void 0) return undefined
+    const post = byPost.get(recipientId)
+    if (post !== void 0) {
+      if (post.retired === true) return false // terminal — never running
+      return agents.get(String(SessionId(post.sessionId)))?.status === 'running'
+    }
+    const host = hosts.get(recipientId)
+    if (host !== void 0) {
+      if (host.retired === true) return false // terminal — never running
+      return agents.get(String(SessionId(host.sessionId)))?.status === 'running'
+    }
+    return undefined // child / unknown — no liveness knowledge (the gate stays)
+  }
+
   /** The delivery engine: the SINGLE bus delivery seam (constructed once per
    * apply, deps injected — AGENTS.md rule 4, no module-global mutable state).
    * Consumed by send_message (directly) and by the `deliverBusRecord` wrapper
@@ -1834,7 +2093,12 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       // P1-EXT (2026-09-06 — WAKE-SEAM mitigation, fix opción-a VARIANTE (i)):
       // the dormancy probe in the in-bundle FALLBACK engine (R6 parity — the
       // composed dshd-core engine receives the same closure via the holder).
-      recipientMaterialized: recipientMaterializedForGate
+      recipientMaterialized: recipientMaterializedForGate,
+      // VALLE 09-07 (BATCH-DRAIN): the running-liveness probe in the in-bundle
+      // FALLBACK engine (R6 parity — the composed dshd-core engine receives
+      // the same closure via the holder; ABSENT in a minimal register → the
+      // pre-batch gate behavior, the safe default).
+      recipientRunningLive: recipientRunningLiveForGate
     })
   })()
 
@@ -1914,6 +2178,13 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     delivery,
     isDormantRecipient,
     recipientMaterialized: recipientMaterializedForGate,
+    // VALLE 09-07 (BATCH-DRAIN): the surface's batch-drain members (the tools
+    // factory forwards the probe into the composed engine's deliverDeps holder;
+    // the queue/flush/state are the settle hook's + the tests' seams).
+    recipientRunningLive: recipientRunningLiveForGate,
+    queueBatchFor,
+    flushBatchFor,
+    batchState: () => [...batchDrain.keys()],
     busEnsureHostForCaller,
     assertBusFanOut
   }
