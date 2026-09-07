@@ -1925,28 +1925,19 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     }
 
 
-    // R5 (fb-88/fb-114 — the memo-validation DX family): the memoWriteTool
-    // parameters compile to an OPEN schema (no additionalProperties), so the
-    // harness validator reported ONLY 'missing required property "summary"' for
-    // a malformed call and NEVER listed the UNKNOWN/EXTRA keys (fb-88's IPH
-    // call with 2-3 invented keys; fb-114's QH omission of summary). STRICTEN
-    // the compiled schema IN PLACE at registration (the same object the tool's
-    // validate closure captured — see defineTool) so the harness INVALID_ARGS
-    // enumerates BOTH the missing required AND every undeclared key in ONE
-    // message (firma esperada vs recibida → immediate correction).
-    // RECORDED FP CHECK: the strict schema turns the terse error into
-    //   invalid arguments: missing required property "summary";
-    //   "explore-deep: …" is not a declared property (additionalProperties: false);
-    //   "Salto rc.1 …" is not a declared property (additionalProperties: false)
-    // while a VALID call passes unchanged (summary + the 4 optional keys stay
-    // declared). The HOST-plane registration below (lines ~5614, inside the
-    // frozen CUT4 zone) intentionally keeps the legacy open schema — heads/
-    // workers (the fb-88/114 instances) ride this post own-layer registration.
+    // R5 (fb-88/fb-114) → fb-216/fb-223 (VALLE 09-07 — SUPERSEDED): the memo
+    // validator is now ORG-OWNED in the SINGLE memoWriteTool definition
+    // (boot.ts — memoWriteArgsViolations): the harness schema is json-typed
+    // (no required/type coercion, so the harness never pre-rejects with a
+    // PARTIAL first-frame message) and the execute emits ONE error enumerating
+    // EVERY violation (missing required + types + undeclared keys) plus the
+    // expected-fields list. The legacy `additionalProperties:false` mutation
+    // below is REMOVED — it would pre-empt the complete org message with the
+    // harness's partial one (the strict close-set rule now lives in the org
+    // validator, on BOTH the post own-layer AND the host plane — the fb-216/
+    // fb-223 host datapoints are covered).
     {
       const memoDef = memoWriteTool(false)
-      if (memoDef.parameters !== undefined && typeof memoDef.parameters === 'object') {
-        (memoDef.parameters as Record<string, unknown>).additionalProperties = false
-      }
       disposers.push(agentCtx.tools.register(memoDef))
     }
 

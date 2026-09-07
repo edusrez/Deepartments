@@ -597,15 +597,63 @@ export function createBootOrchestration(ctx: Context, deps: BootFactoryDeps): Bo
    * path; global host plane → host path). Behavior is unchanged; for
    * dept_post_retire the executes were already identical, so it is ONE shared
    * ToolDefinition registered in both planes. */
+
+  /** fb-216/fb-223 (QD 2026-09-07 — the memo-validation DX family, R5
+   * SUPERSEEDED): the COMPLETE argument surface of dept_memo_write, enforced by
+   * the ORG validator (see below). The harness schema is declared json-typed
+   * (no `required` flags, no per-field type coercion) so the harness NEVER
+   * pre-rejects with its partial first-frame message — the org validator is the
+   * SINGLE enforcement and emits ONE error enumerating EVERY violation (missing
+   * required + wrong types + undeclared keys) PLUS the expected-fields list.
+   * The tool DOCS (the model + the host read them) still carry the exact shape
+   * via the descriptions. */
+  const MEMO_WRITE_EXPECTED_FIELDS = ['summary', 'decisions', 'constraints', 'openItems', 'currentStep'] as const
+
+  /** PURE (never throws): enumerate EVERY violation of the dept_memo_write
+   * args against the memo schema — missing required summary, a non-string
+   * summary, a non-array / non-string-array decisions/constraints/openItems, a
+   * non-string currentStep, and every UNDECLARED key (the closed-set rule the
+   * R5 strict schema used to enforce via `additionalProperties: false` — now
+   * enforced HERE so the message is complete). The phrasing keeps the legacy
+   * harness fragments (`missing required property "summary"`, `"<key>" is not a
+   * declared property (additionalProperties: false)`) so the R5 test assertions
+   * keep matching; the expected-fields list is appended once at the end. */
+  const memoWriteArgsViolations = (args: Record<string, unknown>): string[] => {
+    const violations: string[] = []
+    if (typeof args.summary !== 'string' || args.summary.trim() === '') {
+      violations.push('missing required property "summary"')
+    }
+    for (const key of ['decisions', 'constraints', 'openItems'] as const) {
+      const value = args[key]
+      if (value === undefined) continue
+      if (!Array.isArray(value)) violations.push(`"${key}" must be an array of strings`)
+      else if (value.some((item) => typeof item !== 'string')) violations.push(`"${key}" must be an array of strings`)
+    }
+    if (args.currentStep !== undefined && typeof args.currentStep !== 'string') {
+      violations.push('"currentStep" must be a string')
+    }
+    for (const key of Object.keys(args)) {
+      if (!(MEMO_WRITE_EXPECTED_FIELDS as readonly string[]).includes(key)) {
+        violations.push(`"${key}" is not a declared property (additionalProperties: false)`)
+      }
+    }
+    return violations
+  }
+
+  /** fb-216/fb-223 — the SHARED error prefix + the expected-fields trailer the
+   * memo validator appends to the enumerated violations (so the caller sees the
+   * complete contract in ONE message and corrects without re-reading the docs). */
+  const MEMO_WRITE_EXPECTED_FIELDS_LABEL = MEMO_WRITE_EXPECTED_FIELDS.join(', ')
+
   const memoWriteTool = (hostPlane: boolean) => defineTool({
     name: 'dept_memo_write',
-    description: 'Write this department member\'s long-term memory to its journal (a department head or worker; from the host plane, the HOST Asistente): a durable, schema-constrained markdown memo at <stateDir>/journals/<memberId>.md (frontmatter author/room/timestamp/wake_counter/last_wake/board_cursor + decisions/constraints/openItems (+ optional current_step) + a free-form summary with a wake-routine footer). A registered head writes journals/<postId>.md; a HOST (no registered post) writes journals/host-<sessionId>.md. Use it BEFORE sleeping to hand your memory to your future (re-materialized) self. Returns the durable memo path.',
+    description: 'Write this department member\'s long-term memory to its journal (a department head or worker; from the host plane, the HOST Asistente): a durable, schema-constrained markdown memo at <stateDir>/journals/<memberId>.md (frontmatter author/room/timestamp/wake_counter/last_wake/board_cursor + decisions/constraints/openItems (+ optional current_step) + a free-form summary with a wake-routine footer). A registered head writes journals/<postId>.md; a HOST (no registered post) writes journals/host-<sessionId>.md. Use it BEFORE sleeping to hand your memory to your future (re-materialized) self. Returns the durable memo path. REQUIRED: `summary` (the memo body, a non-empty string); OPTIONAL: `decisions`/`constraints`/`openItems` (arrays of strings), `currentStep` (a string). Unknown keys are rejected.',
     parameters: {
-      summary: { type: 'string', required: true, description: 'The memo body: a summary of your state, conclusions, and what your next incarnation must know.' },
-      decisions: { type: 'array', items: { type: 'string' }, description: 'Decisions taken (optional).' },
-      constraints: { type: 'array', items: { type: 'string' }, description: 'Constraints your future self must respect (optional).' },
-      openItems: { type: 'array', items: { type: 'string' }, description: 'Open items for your future self (optional).' },
-      currentStep: { type: 'string', description: 'Where you currently are (explicit durable state): a short status line the next wake can verify against (current_step in the journal). Optional.' }
+      summary: { type: 'json', description: 'REQUIRED — the memo body: a summary of your state, conclusions, and what your next incarnation must know (a non-empty string).' },
+      decisions: { type: 'json', description: 'Decisions taken (optional): an array of strings.' },
+      constraints: { type: 'json', description: 'Constraints your future self must respect (optional): an array of strings.' },
+      openItems: { type: 'json', description: 'Open items for your future self (optional): an array of strings.' },
+      currentStep: { type: 'json', description: 'Where you currently are (optional): a short status line (a string).' }
     },
     output: {
       schema: {
@@ -620,7 +668,19 @@ export function createBootOrchestration(ctx: Context, deps: BootFactoryDeps): Bo
       render: (_args, value) => [{ type: 'text', text: `journal written: ${value.memoPath}` } as const]
     },
     async execute(args, exec): Promise<{ room: string; member: string; memoPath: string }> {
-      return lifecycle.memoWrite(args, exec as Parameters<typeof lifecycle.memoWrite>[1], hostPlane)
+      // fb-216/fb-223 — the ORG validator runs FIRST (before ANY member
+      // resolution / journal write — a malformed call has ZERO side effects)
+      // and emits ONE error with EVERY violation + the expected fields. The
+      // args are json-typed by the harness schema (no pre-rejection), so a
+      // fine-grained cast to the validated memo shape is required here; the
+      // validator above guarantees the SHAPE (summary: string, the arrays are
+      // string arrays, currentStep: string) before the cast.
+      const violations = memoWriteArgsViolations(args as Record<string, unknown>)
+      if (violations.length > 0) {
+        throw new Error(`[deepartments] dept_memo_write: invalid arguments — ${violations.join('; ')}; expected fields: ${MEMO_WRITE_EXPECTED_FIELDS_LABEL}`)
+      }
+      const memoArgs = args as unknown as { summary: string; decisions?: string[]; constraints?: string[]; openItems?: string[]; currentStep?: string }
+      return lifecycle.memoWrite(memoArgs, exec as Parameters<typeof lifecycle.memoWrite>[1], hostPlane)
     }
   })
 

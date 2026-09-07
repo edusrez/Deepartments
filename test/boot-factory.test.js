@@ -223,9 +223,9 @@ test('boot-factory: the BOOT ZONE (config source + registry + catalog + lifecycl
     const last = factory.indexOf('  // (messages-store.ts + deliverBusRecord) is the only emit/delivery path.')
     assert.ok(first !== -1 && last !== -1 && last > first, 'the factory embeds the boot zone (continuation services → B3 cutover note)')
     const zoneText = factory.slice(first, last + '  // (messages-store.ts + deliverBusRecord) is the only emit/delivery path.'.length) + '\n'
-    assert.equal(zoneText.split('\n').length - 1, 679, 'the embedded boot zone is exactly 679 content LOCs (677 pre-lane-0.1.2 + the 2 rc.1 surface-comment lines on the headProgress tracker)')
+    assert.equal(zoneText.split('\n').length - 1, 739, 'the embedded boot zone is exactly 739 content LOCs (677 pre-lane-0.1.2 + the 2 rc.1 surface-comment lines on the headProgress tracker + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validation lines)')
     const md5 = createHash('md5').update(zoneText, 'utf8').digest('hex')
-    assert.equal(md5, '1fb4ee22c82ac3515c4cc42696be081d', 'the embedded boot zone is byte-identical to HEAD applyInvoke 2345-3021 with the LANE 0.1.2 rc.1 session-surface comment (md5 1fb4ee22… — re-freeze: 679 LOCs, no D1)')
+    assert.equal(md5, '15f04483968873badafa450e8a27bd38', 'the embedded boot zone is byte-identical to HEAD applyInvoke 2345-3021 with the LANE 0.1.2 rc.1 session-surface comment AND the VALLE 09-07 HEAD-TOOLING memo-validation move (memoWriteArgsViolations + the json-typed parameters + the execute validator — RE-FROZE: 739 LOCs, md5 15f04483…; R-tooling DX, the batch-drain/delivery semantics untouched)')
     // The md5 stamp above is the movement identity: md5 of applyInvoke 2345-3021
     // of HEAD b9e51c2 (pre-cut, 3913-line blob; the opener line 2344 stays in
     // invoke.ts as the coordinator-block opener). The 2344-3021 region no longer
