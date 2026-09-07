@@ -45,6 +45,7 @@ import type {
   HostRotationOutcome,
   RotationDeps
 } from './session-rotation.js'
+import { chainSnapshotFinalize } from './session-rotation.js'
 
 /**
  * Build the single landing node for a host surface reset: the agent's journal
@@ -572,7 +573,20 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
           // O1 dispose-GRACE applies ONLY to the delivery AUTO-RETIRE — a
           // mid-tool-call worker — never here, where the sleep turn has already
           // concluded and prompt teardown is the whole point).
-          void ctx.disposeHeadHandleOnce(sessionId)
+          // m-423 SNAPSHOT ANCHOR: the S2.7 pre-rotation copy ran MID-TURN (the
+          // sleep turn was still executing), so the old session's final
+          // `turn/end` landed in the artifact AFTER the copy — every rotated-host
+          // snapshot audit came out 3-4 lines short by the same delta. The
+          // dispose completion (driver idle ⇒ the concluding turn's events are
+          // written) is the real turn/end seam: chain the snapshot FINALIZE
+          // (re-copy the settled artifact onto the S2.7 backup) off it —
+          // fire-and-forget, never awaited, never fatal.
+          chainSnapshotFinalize(() => ctx.disposeHeadHandleOnce(sessionId), {
+            sessionsRoot: deptSleepSessionsRoot,
+            oldSessionId: sessionId,
+            backupPath: rotation.archiveCopy.path,
+            logger: ctx.logger
+          })
           // fb-11 — AUTO-WAKE the rotation SUCCESSOR (the host-rotation no-wake
           // defect, QH fb-11): the new hosts.json live entry is committed at
           // S3/S7, but NOTHING materializes the new session — it parked until

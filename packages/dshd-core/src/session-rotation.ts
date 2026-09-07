@@ -579,6 +579,69 @@ export async function copyOldArtifactToArchive(opts: { sessionsRoot: string; old
   }
 }
 
+/**
+ * m-423 (QD gap, family of rotated-host snapshot audits) — the SNAPSHOT-ANCHOR
+ * FINALIZE: re-copy the CURRENT live artifact onto an existing pre-rotation
+ * backup path, so the archived snapshot ends at the REAL final event of the old
+ * session instead of the mid-turn cut the S2.7 copy took (the S2.7 copy runs
+ * while the dept_sleep turn is still executing, so the final `turn/end` lands in
+ * the artifact AFTER it — the archive came out 3-4 lines short). The caller
+ * chains this onto the old handle's DISPOSE COMPLETION (the harness dispose
+ * cancels the driver and awaits whenIdle, i.e. resolves only after the current
+ * turn has concluded and its events are written — the exact "anchor at turn/end"
+ * the QH requested). Never throws: a missing artifact or a copy fault resolves
+ * `{ok:false, reason}` and the S2.7 copy remains the crash-window belt.
+ */
+export async function finalizePreRotationSnapshot(opts: {
+  sessionsRoot: string
+  oldSessionId: string
+  /** The S2.7 backup path to overwrite with the settled artifact (overwrite is
+   * the point — the snapshot must END at the final event). */
+  backupPath: string
+  logger?: { warn(message: string): void }
+}): Promise<RotationArchiveResult> {
+  try {
+    const artifactPath = await findSessionArtifact(opts.sessionsRoot, opts.oldSessionId)
+    if (artifactPath === undefined) {
+      return { ok: false, reason: `no stored artifact for ${opts.oldSessionId} (nothing to finalize)` }
+    }
+    await copyFile(artifactPath, opts.backupPath)
+    return { ok: true, path: opts.backupPath }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    opts.logger?.warn(`[deepartments] host rotation: pre-rotation snapshot finalize failed (non-fatal — the S2.7 copy remains): ${reason}`)
+    return { ok: false, reason }
+  }
+}
+
+/**
+ * m-423 — the FIRE-AND-FORGET snapshot-anchor CHAIN for a rotation: dispose the
+ * old session handle, and once the teardown settles (driver idle ⇒ the final
+ * `turn/end` is in the artifact), finalize the pre-rotation snapshot onto the
+ * S2.7 backup path. Non-blocking by construction (the sleep turn must return
+ * immediately — the harness dispose cannot be awaited from the very turn it
+ * tears down), never throws: a dispose rejection or a finalize fault only warns
+ * (the S2.7 copy remains). `backupPath === undefined` (the S2.7 copy failed)
+ * skips the finalize silently.
+ */
+export function chainSnapshotFinalize(
+  dispose: () => Promise<unknown>,
+  opts: { sessionsRoot: string; oldSessionId: string; backupPath?: string; logger?: { warn(message: string): void } }
+): void {
+  void dispose().then(() => {
+    if (opts.backupPath === undefined) return
+    return finalizePreRotationSnapshot({
+      sessionsRoot: opts.sessionsRoot,
+      oldSessionId: opts.oldSessionId,
+      backupPath: opts.backupPath,
+      logger: opts.logger,
+    })
+  }).catch(() => {
+    // The dispose or the finalize failed — non-fatal by design; the S2.7 copy
+    // (the crash-window belt) stays the archived snapshot.
+  })
+}
+
 /** The session-persistence seam (dsh-session-persistence coordinator
  * `create`/`append`), structurally narrowed so the plugin never hard-depends
  * on the package (mirrors dsh-session-persistence lib/index.js:802-840).
