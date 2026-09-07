@@ -92,6 +92,222 @@ import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type { DepartmentConfig, CoordinatorConfig } from './org-types.js'
 
 // ---------------------------------------------------------------------------
+// fb-118 (verify id+ts BEFORE citing a message in a directive): the QD
+// directive generator embeds the caller-supplied `reason` VERBATIM into the
+// head-rotated mirror (`qualityInspectDirectiveText` → `, reason ${reason}`),
+// and a rotation reason typically CITES message ids ("memo escrita y
+// confirmada (m-901)"). The fb-118 drift class (45 backlog): the cited id
+// resolves to a DIFFERENT message than the role the reason claims — m-903
+// (2026-09-04, IPH rotation 6048df6b → 380e8941) cited "memo … confirmada
+// (m-901)" when m-901 was the system-health main-red alert relay (escalación
+// 30 min) and the REAL memo confirmation was m-902; the QH itself drifted
+// twice the same day (fb-45: briefs citing m-1624/m-1699-1700 when the real
+// ids were m-1627/m-1698). The helpers below verify every cited id against
+// the message store BEFORE it enters the directive: an id that does not
+// exist (renumbered by compaction / stale), an id that resolves to a
+// SYSTEM-ORIGIN record (a daemon alert can never be the head's memo
+// confirmation), an id that is NOT the newest same-window record in a
+// confirmation-claim context (the off-by-N drift signature), or an id whose
+// ts contradicts the time cited next to it → the citation is MARKED in the
+// directive (never silently attributed to the wrong message). PURE and
+// NEVER throwing; a verification failure just leaves the reason verbatim.
+// Module-scope (NOT exported — the lib/invoke.js export-parity lock at 324
+// forbids growing the surface; the helpers are exercised through the
+// directive emitter in the tests).
+// ---------------------------------------------------------------------------
+
+/** One store-record probe a citation lookup returns (the fields the
+ * verification rules read; `seq` is the message id's numeric suffix). */
+interface StoredMessageCiteProbe {
+  id: string
+  seq: number
+  ts: number
+  from: string
+}
+
+/** The verdict attached to one cited id: 'missing' (no such record),
+ * 'system-origin' (a daemon record — never an agent action), 'stale-confirmation'
+ * (a confirmation-context citation that is not the newest record — the fb-45
+ * off-by-N drift signature), 'ts-mismatch' (the time cited next to the id does
+ * not match the record's ts). */
+type CiteVerdict = 'missing' | 'system-origin' | 'stale-confirmation' | 'ts-mismatch'
+
+/** A `m-<digits>` citation token (a range endpoint `m-1699-1700` yields TWO
+ * tokens — the fb-45 range-citation form). `index`/`end` are the token's
+ * [start, end) offsets in the reason text (end = position after the LAST
+ * captured digit), so the sanitizer can replace exactly the failing span. */
+interface CitedIdToken {
+  id: string
+  index: number
+  end: number
+}
+
+/** The citation token pattern: `m-<1..7 digits>` at a word boundary, with an
+ * OPTIONAL range endpoint (`m-1699-1700` — the fb-45 form; the endpoint is a
+ * SECOND citation token). The word-boundary discipline mirrors
+ * isMessageIdPrefixed (invoke.ts REASON_TOKEN_FIGURE_RE): a plain number
+ * ("354223", "a -1056") is NEVER a citation. */
+const CITED_MESSAGE_ID_RE = /\bm-(\d{1,7})(?:-(\d{1,7}))?\b/gi
+
+/** The confirmation-claim family (the role a reason attributes to a cited id —
+ * "memo … confirmada", "ack", "escrita/enviada", "lista para rotar"). A
+ * citation adjacent to one of these claims is a CONFIRMATION citation: the
+ * drift class is precisely "the memo/ack confirmation cited with the id of an
+ * OLDER sibling (or of the alert that preceded it)". */
+const CONFIRMATION_CLAIM_RE = /(?:memo|confirm|ack|escrit|enviad|listo|firmad|preparad)/i
+
+/** Extract every cited `m-<digits>` id token from a reason text (a token's
+ * `id` is the FULL store id — `m-<digits>` — the exact key the message store
+ * resolves). A range form (`m-1699-1700`) yields BOTH endpoints as separate
+ * tokens. A token's `index`/`end` delimit the DIGIT span (after the `m-`
+ * prefix — the span the sanitizer replaces), so `confirmClaimBefore`/
+ * `citedTimeAfter` anchor on the digits. */
+function extractCitedMessageIds(text: string): CitedIdToken[] {
+  const tokens: CitedIdToken[] = []
+  for (const match of text.matchAll(CITED_MESSAGE_ID_RE)) {
+    const digits = match[1]
+    const firstIndex = match.index + 2 // digits start right after the `m-`
+    tokens.push({ id: `m-${digits}`, index: firstIndex, end: firstIndex + digits.length })
+    if (match[2] !== undefined) {
+      // The range endpoint — a SECOND citation token (`m-1699-1700`).
+      const second = match[2]
+      const secondIndex = firstIndex + digits.length + 1 // right after the '-'
+      tokens.push({ id: `m-${second}`, index: secondIndex, end: secondIndex + second.length })
+    }
+  }
+  return tokens
+}
+
+/** Whether a confirmation-claim word sits within the `window` chars before
+ * `beforeIndex` (the fb-118/fb-45 citation shape: "confirmada (m-901)",
+ * "memo … confirmación m-1624"). Local-context only — a claim far away does
+ * not bless an id. */
+function confirmClaimBefore(text: string, beforeIndex: number, window = 32): boolean {
+  const start = Math.max(0, beforeIndex - window)
+  return CONFIRMATION_CLAIM_RE.test(text.slice(start, beforeIndex))
+}
+
+/** Parse a UTC time token adjacent to a citation — the `HH:MM[:SS](Z|UTC)`
+ * form the reasons cite next to an id ("(m-902, 11:05:43Z)"). Scans up to
+ * `window` chars after `fromIndex`, stopping at a `)`, a newline or the next
+ * `m-<digits>` citation. Returns {h, m, s} or undefined. */
+function citedTimeAfter(text: string, fromIndex: number, window = 40): { h: number; m: number; s: number } | undefined {
+  const tail = text.slice(fromIndex, fromIndex + window)
+  const cut = tail.search(/[)\n]|m-\d/)
+  const scope = cut === -1 ? tail : tail.slice(0, cut)
+  const match = scope.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:Z|UTC|z)\b/)
+  if (match === null) return undefined
+  const h = Number(match[1])
+  const m = Number(match[2])
+  const s = match[3] === undefined ? 0 : Number(match[3])
+  return h >= 0 && h <= 23 && m >= 0 && m <= 59 && s >= 0 && s <= 59 ? { h, m, s } : undefined
+}
+
+/** Resolve the NEWEST record of the message store (the definitive last record
+ * at directive-emit time — the reference for the confirmation-staleness rule).
+ * Backward scan from `size - 1` so a burned seq gap (fb-68: a flush-throw
+ * burns a seq) never misreads the newest (undefined → the R3 rule degrades to
+ * a no-op, never a false mark). */
+function newestStoreRecordAt(store: { get(id: string): { seq: number } | undefined; size: number }): { seq: number } | undefined {
+  for (let s = store.size - 1; s >= 0; s--) {
+    const record = store.get(`m-${s}`)
+    if (record !== undefined) return record
+  }
+  return undefined
+}
+
+/** Verify every cited id in a rotation-directive reason against the message
+ * store. PURE — never throws; a verdict map ENTRY only for a FAILING id (an
+ * empty map = every citation verified → the reason stays verbatim). Rules
+ * (deterministic, testable — the 4 datapoint fixtures of fb-118/fb-45):
+ *   R1 'missing' — the id resolves to no record (renumbered by a compaction,
+ *      stale, or fabricated — the fb-45 m-1699/1700 form);
+ *   R2 'system-origin' — the id resolves to a daemon record (from
+ *      'deepartments': health-alert relays, daemon notices). A system record
+ *      can never be the agent action ("memo confirmada") the reason claims —
+ *      the fb-118 incident (m-901 = the main-red alert vs m-902 = the memo);
+ *   R3 'stale-confirmation' — the citation sits in a confirmation-claim
+ *      context AND the id is NOT the newest store record (a NEWER record
+ *      exists): the off-by-N drift signature of fb-45 (m-1624 vs the real
+ *      m-1627 — the real confirmation is the newest record of its window);
+ *   R4 'ts-mismatch' — the citation carries an adjacent UTC time token and the
+ *      record's ts diverges (|delta| > 2 s — the exact-second resolution of
+ *      the stored epoch) — the "id + ts divergente" datapoint.
+ * `opts.now` (default Date.now()) selects the UTC day a bare HH:MM[:SS] time
+ * token resolves onto. */
+function verifyDirectiveReasonCites(
+  reason: string,
+  lookup: (id: string) => StoredMessageCiteProbe | undefined,
+  opts: { newestSeq?: number; now?: number } = {}
+): Map<string, CiteVerdict> {
+  const verdicts = new Map<string, CiteVerdict>()
+  const now = opts.now ?? Date.now()
+  for (const token of extractCitedMessageIds(reason)) {
+    const record = lookup(token.id)
+    if (record === undefined) {
+      verdicts.set(token.id, 'missing')
+      continue
+    }
+    // R2 — a daemon-origin record is never the agent-authored confirmation.
+    if (record.from === 'deepartments') {
+      verdicts.set(token.id, 'system-origin')
+      continue
+    }
+    // R3 — a confirmation-context citation must be the NEWEST store record.
+    if (opts.newestSeq !== undefined && record.seq < opts.newestSeq && confirmClaimBefore(reason, token.index)) {
+      verdicts.set(token.id, 'stale-confirmation')
+      continue
+    }
+    // R4 — an adjacent cited time must match the record's ts (±2 s).
+    const cited = citedTimeAfter(reason, token.end)
+    if (cited !== undefined) {
+      const date = new Date(now)
+      const citedEpoch = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), cited.h, cited.m, cited.s)
+      if (Math.abs(citedEpoch - record.ts) > 2000) {
+        verdicts.set(token.id, 'ts-mismatch')
+        continue
+      }
+    }
+  }
+  return verdicts
+}
+
+/** The human-readable mark label per verdict (inserted right after the failing
+ * `m-<id>` in the directive reason — the format of the surrounding frame stays
+ * byte-identical; only the unverifiable citation is annotated). */
+const CITE_VERDICT_LABELS: Record<CiteVerdict, string> = {
+  missing: 'not in store',
+  'system-origin': 'system record',
+  'stale-confirmation': 'not latest',
+  'ts-mismatch': 'ts mismatch'
+}
+
+/** Rewrite a reason so EVERY FAILING citation carries its verdict label
+ * (`m-<id>` → `m-<id> [<label>]`); VERIFIED ids stay byte-identical (the
+ * output format is preserved). The replaced span is the DIGITS ONLY (after the
+ * `m-` prefix, which stays in the text — no double `m-m-`); replaces from the
+ * END to the START so the offsets never shift mid-pass. Never throws. */
+function sanitizeDirectiveReasonCites(reason: string, verdicts: Map<string, CiteVerdict>): string {
+  const replacements: Array<{ start: number; end: number; text: string }> = []
+  for (const token of extractCitedMessageIds(reason)) {
+    const verdict = verdicts.get(token.id)
+    if (verdict === undefined) continue // verified — untouched
+    replacements.push({
+      start: token.index,
+      end: token.end,
+      text: `${token.id.slice(2)} [${CITE_VERDICT_LABELS[verdict]}]`
+    })
+  }
+  if (replacements.length === 0) return reason
+  replacements.sort((a, b) => b.start - a.start)
+  let out = reason
+  for (const replacement of replacements) {
+    out = `${out.slice(0, replacement.start)}${replacement.text}${out.slice(replacement.end)}`
+  }
+  return out
+}
+
+// ---------------------------------------------------------------------------
 // Local structural mirrors of the bundle-local harness views (src/invoke.ts
 // declares these at module scope but does NOT export them — the export-parity
 // lock freezes lib/invoke.js's export surface at 259 symbols, so the factory
@@ -1607,7 +1823,43 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       const qualityHead = resolveQualityHeadEntry()
       if (qualityHead === undefined) return
       const store = await messagesStoreReady
-      const text = qualityInspectDirectiveText(surface)
+// fb-118 (verify id+ts BEFORE citing — the drift class of fb-45): the
+      // head-rotated mirror embeds the caller's reason VERBATIM, and a rotation
+      // reason typically cites message ids ("memo escrita y confirmada (m-901)")
+      // that can resolve to the WRONG message (m-903 cited m-901 — the alert —
+      // as the memo confirmation; the real one was m-902). Before the reason
+      // enters the directive, every cited m-<id> is verified against the store
+      // (existence + author-kind + confirmation-window recency + cited-time ts)
+      // and a FAILING citation is marked inline ([not in store] / [system
+      // record] / [not latest] / [ts mismatch]) — never silently attributed to
+      // an id that is something else. NON-BLOCKING and cosmetic: a lookup
+      // failure or an empty verdict set leaves the reason byte-identical, and
+      // the whole emit stays inside this try/catch (critical-unblock — a
+      // verification must never stop the rotation mirror).
+      let surfaceToFrame = surface
+      if (surface.kind === 'head-rotated' && surface.reason !== undefined) {
+        try {
+          const newest = newestStoreRecordAt(store)
+          const verdicts = verifyDirectiveReasonCites(
+            surface.reason,
+            (id) => {
+              const record = store.get(id)
+              return record === undefined ? undefined : { id: record.id, seq: record.seq, ts: record.ts, from: record.from }
+            },
+            { newestSeq: newest?.seq, now: Date.now() }
+          )
+          if (verdicts.size > 0) {
+            surfaceToFrame = { ...surface, reason: sanitizeDirectiveReasonCites(surface.reason, verdicts) }
+          }
+        } catch {
+          // a verification failure never blocks the directive — reason verbatim
+        }
+      }
+      const text = qualityInspectDirectiveText(surfaceToFrame)
+      // fb-118 re-derivation (wave-b, main @ a641964): the O2 MICRO-LANE
+      // (ea48a67) hoisted the directive append into the OUTER `record` declared
+      // above (line 1802) — the verify-cite block assigns to it instead of
+      // declaring a shadowing const.
       record = await store.append({ from: 'deepartments', to: ['quality-head'], text, kind: 'agent' })
       await busDeliverToPost(qualityHead, `[From deepartments → quality-head]: ${text}`, record, void 0)
       // MICRO-LANE O2 (deliveries-emitter-row, 2026-09-06): the emitter
