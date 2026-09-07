@@ -827,7 +827,8 @@ const buildFeedbackNudgeContext = () =>
 //       observed QD case: the nudge spliced into posts retired by a life
 //       abort);
 //   (d) a LIFE-ABORT errored result (the runtime killed the turn — the W9-b
-//       `Agent.cancel` 'interrupted' abort or a harness abort/kill) is NOT an
+//       `Agent.cancel` 'interrupted' abort, a harness abort/kill, an explicit
+//       CANCEL — «approval for tool X was cancelled») is NOT an
 //       actionable tool error — the post cannot act on its own abort, so it
 //       never nudges;
 //   (e) TURN DEDUP: the SAME error class in the SAME working turn is nudged
@@ -897,15 +898,27 @@ function nudgeTurnOf(exec: unknown): number {
 }
 
 /** O2 — whether the errored result is a LIFE-ABORT (the runtime killed the
- * turn — the W9-b `Agent.cancel` 'interrupted' abort, a harness abort/kill)
- * instead of a tool error the post can act on. A killed turn cannot act on
- * its own abort → the feedback nudge is never appended to it. Defensive: an
- * explicit `aborted` marker on the exec/result ALSO counts. PURE. */
+ * turn — the W9-b `Agent.cancel` 'interrupted' abort, a harness abort/kill,
+ * an explicit turn/tool CANCEL — the 'cancelled' approval class
+ * `approval for tool "<name>" was cancelled`, dsh-tools) instead of a tool
+ * error the post can act on. A killed/cancelled turn cannot act on its own
+ * abort → the feedback nudge is never appended to it. The abort markers are
+ * distinguishable in the error/result object TWO ways (B3-P2 verification):
+ *   (i)  an explicit `aborted: true` marker on the exec OR the result (the
+ *        defensive flag path — a shape the harness cancel family may set);
+ *   (ii) the error message word-family of the canonical R4 abort taxonomy
+ *        (`classifyToolAbortReason`, tool-intents.ts): interrupt · abort ·
+ *        kill · cancel — NOT the churn words ('terminated'/'stopped'/
+ *        'restart'), which have no demonstrated post-execute message shape
+ *        (bare-word matching would suppress real tool errors), and NEVER bare
+ *        'timeout' (a genuine tool timeout IS an actionable error — only the
+ *        'aborted' word of e.g. «The operation was aborted due to timeout»
+ *        suppresses). PURE. */
 function isNudgeLifeAbort(exec: unknown, result: { isError: boolean; error?: { message?: string } }): boolean {
   if ((exec as { aborted?: unknown } | null)?.aborted === true) return true
   if ((result as { aborted?: unknown } | null)?.aborted === true) return true
   const message = typeof result?.error?.message === 'string' ? result.error.message : ''
-  return /\b(?:aborted?|interrupted?|killed)\b/i.test(message)
+  return /\b(?:aborted?|interrupted?|killed|cancel(?:led?)?)\b/i.test(message)
 }
 
 /** LANE WFD (m-1416/QH — org.pacing) — the FRANJA GATE for a NEW nudge
