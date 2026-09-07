@@ -55,12 +55,14 @@
 > del wake-seam intactas; emergencias health-alert/franja SIN batching; idle:
 > primer mensaje despierta, el resto en lote)** → misión PROGRAMMING REQUEST al
 > IPD despachada (m-2563, prioridad ALTA; zona dshd-orchestration = la del
-> wake-seam; secuenciar tras B3) · **B3 VERIFICADO ACTIVO por el host**
-> (wrapper `recipientDormantForRedeliver` en lib/tools.js:4917/4936/4950/5563
-> del core que carga el daemon — perfil dev enlaza el worktree; mirror src
-> tools.ts:5623/5640/5655/6259; la alarma inicial «0 hits» = typo de grafía
-> Dormand↔Dormant en el reporte del IPH + launcher-cáscara; SIN restart
-> adicional por B3, activo desde boot debc67ec 10:14Z) · pooler /v1/models 200
+> wake-seam; secuenciar tras B3) · **B3: LIB LISTA, RUNTIME NO ACTIVO**
+> (corrección QD post-estampa — el boot debc67ec cargó la lib STALE 09-06
+> 21:50 pre-fix; m-2433/m-2468 entregados por OTROS caminos; OUTCOME 0
+> residuales inalterado) · wrapper `recipientDormantForRedeliver` presente en
+> lib/tools.js:4917/4936/4950/5563 (re-emit 10:27; mirror src
+> tools.ts:5623/5640/5655/6259) → **ACTIVACIÓN = restart canary:true
+> PENDIENTE** (sonda del primer tick post-restart = prueba real; mi «activo
+> desde boot» inicial era incorrecto) · pooler /v1/models 200
 > live ✓ · pool 4 keys sin billingBlocked · keyPooler-state.json STALE desde
 > 03:58Z (pre-fix) con oc-15 usage 401 y usage% UNKNOWN en archivo →
 > MONITOREO (lane A en vivo; verificar reescritura del archivo) · cola activa

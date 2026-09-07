@@ -58,13 +58,16 @@ news-mirror domains behave differently from the datacenter IP of this
 deployment's `web_fetch`. Verified datapoints from research rounds
 (fb-96/97/98/102/103/104, 2026-09-03): a full fetch on a blocked/unreliable
 domain burns the 30 s tool budget every round — consult this table BEFORE
-fetching a press release, never after.
+fetching a press release, never after. Updated 2026-09-07 (fb-211, dictamen QH
+aceptado: openai.com + aireleasetracker.com añadidos).
 
 | Domain | Status | Observed behavior | Fallback |
 |---|---|---|---|
 | `businesswire.com` (www + secure) | **UNRELIABLE** | systematic 30 s timeout (fb-96/102/104) | one attempt max, then vendor primary |
 | `tmcnet.com` | **BLOCKED** | HTTP 403 anti-bot (fb-97/103) | do not attempt; use mirror list |
 | `zexprwire.com` | **BLOCKED** | HTTP 403 anti-bot (fb-98) | do not attempt; use mirror list |
+| `openai.com` (openai.com/index/*) | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (rounds 08-25, 09-06, 09-07; fb-211) | do not attempt; capture via search-provider content + dated secondaries |
+| `aireleasetracker.com` | **UNRELIABLE** | HTTP 429 rate-limited (round 09-07; fb-211) | one attempt max, then tracker cross-check via search snippet |
 | `01net`, `finance.yahoo.com`, `cionfluence.com` | reliable mirrors | HTTP 200 from this environment (fb-96/98) | OK as last-resort mirrors |
 | vendor primary (blog/repo/model card) | **preferred** | e.g. `ridgesecurity.ai` blog etc. (fb-103/104) | FIRST choice for press releases |
 | API/JSON endpoints (`api.github.com`, `registry.npmjs.org`) | preferred | machine-readable (monitor-dsh-updates) | FIRST choice for registry/data |
