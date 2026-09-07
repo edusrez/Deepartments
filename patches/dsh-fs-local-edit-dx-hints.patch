@@ -1,0 +1,106 @@
+# === dsh-deepartments patch: dsh-fs-local edit-DX hints (fb-85/90/107/108) ===
+#
+# WHAT THIS FIXES
+#   applyLiteralEdit's FS_EDIT_NOT_FOUND rejection gave the model NO nearby
+#   context. This patch adds a deterministic bounded scan (normalizeLiteral /
+#   hintSnippet / boundedEditDistance / nearestLiteralHint) that names WHAT the
+#   file holds near the anchor: an indentation variant, a normalized near
+#   match, or the closest line by edit distance. Messaging only — the edit
+#   still fails atomically with FS_EDIT_NOT_FOUND.
+#
+# TARGET FILE (after dsh upgrade, in the global install tree)
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js
+#
+# FINGERPRINTS (md5)
+#  17831cb327664ccb703ad737fd79e18d  pristine rc.2 lib/index.js
+#  28f0034382fe7fe280c75a6a842e6c67  patched (this patch applied)
+#
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -649,13 +649,85 @@
+ 	if (oldNorm.length === 0) throw new FsError("old_string must be a non-empty string", "FS_EDIT_NOT_FOUND");
+ 	const newNorm = normalizeLineEndings(newString);
+ 	const replacements = countOccurrences(content, oldNorm);
+-	if (replacements === 0) throw new FsError(`old_string was not found in "${displayPath}"`, "FS_EDIT_NOT_FOUND");
++	if (replacements === 0) {
++		const hint = nearestLiteralHint(content, oldNorm);
++		throw new FsError(hint === void 0 ? `old_string was not found in "${displayPath}"` : `old_string was not found in "${displayPath}".${hint}`, "FS_EDIT_NOT_FOUND");
++	}
+ 	if (!replaceAll && replacements > 1) throw new FsError(`old_string matched ${replacements} times in "${displayPath}"; provide a more specific old_string or set replace_all to true`, "FS_AMBIGUOUS_EDIT");
+ 	return {
+ 		content: content.split(oldNorm).join(newNorm),
+ 		replacements
+ 	};
+ }
++/** Collapse any run of whitespace to one space and lower-case (the near-match normalization). */
++function normalizeLiteral(text) {
++	return text.replace(/\s+/gu, " ").toLowerCase();
++}
++/** Trim a line to a bounded model-facing preview (the hint never echoes whole files). */
++function hintSnippet(line, max = 80) {
++	const trimmed = line.trim();
++	if (trimmed.length <= max) return trimmed;
++	return `${trimmed.slice(0, max - 1)}…`;
++}
++/** Levenshtein distance, truncated at a bound (early-exit keeps the scan cheap). */
++function boundedEditDistance(a, b, cap) {
++	if (a === b) return 0;
++	if (Math.abs(a.length - b.length) > cap) return cap;
++	let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
++	for (let i = 1; i <= a.length; i++) {
++		const curr = new Array(b.length + 1);
++		curr[0] = i;
++		for (let j = 1; j <= b.length; j++) {
++			const cost = a[i - 1] === b[j - 1] ? 0 : 1;
++			const value = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
++			curr[j] = value;
++			if (value > cap && j === b.length) return cap;
++		}
++		prev = curr;
++	}
++	return prev[b.length];
++}
++/**
++* The edit-DX hint for a failed literal edit: a deterministic, bounded scan of
++* the target text that tells the model WHAT is actually in the file near the
++* anchor (fb-85/90/107/108). Three probes, in order:
++*   1. indent variant — the anchor, leading-whitespace-insensitive, is a line's
++*      exact content (the 5-vs-4-space class, fb-90);
++*   2. near match — the normalized (whitespace-collapsed, case-folded) anchor
++*      appears within a line (light formatting drift, e.g. a `> ` prefix or a
++*      mid-line landing, fb-85/107/108);
++*   3. closest line by bounded edit distance (the wrapped/truncated-anchor
++*      class, fb-108).
++* The scan costs one normalized pass plus one edit-distance pass bounded to the
++* file's line count (edit-distance probing is skipped past 2 000 lines or for
++* needles over 512 chars, so a giant file only pays the two linear
++* normalizations).
++* @param content - the LF-normalized target content of the failed edit.
++* @param oldString - the literal anchor the call supplied (normalized CRLF).
++* @returns the hint text (starting with a lead-in space-separated dash), or
++*   `undefined` for an empty needle or a content too large to probe.
++*/
++function nearestLiteralHint(content, oldString) {
++	if (oldString.length === 0) return void 0;
++	const needle = normalizeLiteral(oldString);
++	if (needle.length === 0) return void 0;
++	const lines = content.split("\n");
++	for (let index = 0; index < lines.length; index++) if (lines[index].trim() === oldString.trim()) return ` — found with different indentation (line ${index + 1}): ${hintSnippet(lines[index])}`;
++	for (let index = 0; index < lines.length; index++) if (normalizeLiteral(lines[index]).includes(needle)) return ` — nearest match (line ${index + 1}): ${hintSnippet(lines[index])}`;
++	if (lines.length <= 2e3 && needle.length <= 512) {
++		let bestLine = -1;
++		let bestDistance = Number.POSITIVE_INFINITY;
++		for (let index = 0; index < lines.length; index++) {
++			if (lines[index].trim() === "") continue;
++			const distance = boundedEditDistance(normalizeLiteral(lines[index]), needle, 128);
++			if (distance < bestDistance) {
++				bestDistance = distance;
++				bestLine = index + 1;
++			}
++		}
++		if (bestLine !== -1) return ` — closest line (${bestLine}): ${hintSnippet(lines[bestLine - 1] ?? "")}`;
++	}
++}
+ //#endregion
+ //#region lib/types/index.js
+ /**

@@ -1,0 +1,37 @@
+# === dsh-deepartments patch: dsh-fs-observation-policy FS_NOT_OBSERVED message (fb-89/107) ===
+#
+# WHAT THIS FIXES
+#   FS_NOT_OBSERVED covered two causes — a target never read in this session,
+#   and a read whose observation does not survive a restart or a bash/other
+#   surface — but the message said only "read first", misleading an agent that
+#   DID read in a previous incarnation. Message change only; the code stays
+#   FS_NOT_OBSERVED.
+#
+# TARGET FILE
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-observation-policy/lib/index.js
+#
+# FINGERPRINTS (md5)
+#  03a757a7ef920657faf01ab3f959eb1e  pristine rc.2 lib/index.js
+#  aeec8df679864aaee3408b2cb8229f03  patched (this patch applied)
+#
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -59,12 +59,16 @@
+ 	/**
+ 	* Decide the edit version guard: unseen rejects with `FS_NOT_OBSERVED`,
+ 	* confirmed absence rejects with `FS_NOT_FOUND`, and presence supplies the
+-	* observed version as the CAS basis.
++	* observed version as the CAS basis. The `FS_NOT_OBSERVED` message names BOTH
++	* causes a missing prior observation covers — a target never read in this
++	* session, and a read whose observation does not survive a session restart or
++	* a non-registering read surface (bash, fb-89/fb-107) — so the remedy is not a
++	* flat "read the file" that would mislead an agent that already did.
+ 	*/
+ 	editIntent(target, actor) {
+ 		const owner = this.owner(actor);
+ 		const prior = owner ? this.get(owner, target.targetKey) : void 0;
+-		if (!owner || prior === void 0) throw new FsError(`edit requires reading "${target.displayPath}" first`, "FS_NOT_OBSERVED");
++		if (!owner || prior === void 0) throw new FsError(`edit requires reading "${target.displayPath}" first (no fresh observation of it in THIS session — a restart or a bash/other-surface read does not satisfy the policy)`, "FS_NOT_OBSERVED");
+ 		if (prior.kind === "absent") throw new FsError(`cannot edit "${target.displayPath}": not found`, "FS_NOT_FOUND");
+ 		return { version: prior.version };
+ 	}

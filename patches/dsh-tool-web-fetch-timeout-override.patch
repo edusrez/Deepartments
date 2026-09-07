@@ -1,0 +1,328 @@
+# === dsh-deepartments patch: dsh-tool-web web_fetch per-call timeout override (fb-102) ===
+#
+# WHAT THIS FIXES
+#   web_fetch timeout was pure deployment policy. This patch adds an optional
+#   model argument `timeout_ms` (per-call budget override, clamped to the
+#   deployment cap) plus the `fetchMaxTimeoutMs` config (the cap, default
+#   120000; also the tool-call budget) and the `fetchTimeoutMs` default per-call
+#   budget. clampTimeout is inlined from dsh-timeout. The provider seam request
+#   now carries `timeoutMs`. Types: FetchArgs + parseFetchArgs/applyWebFetchTool
+#   signatures + index exports (FetchArgs, DEFAULT_FETCH_MAX_TIMEOUT_MS).
+#   ADAPTATIONS to rc.2 (skew): kept the runtime's literal `order: 111` and its
+#   shorter trust text (upstream section-orders/trust wording landed after
+#   rc.2); appended only the fb-102 sentence. Kept the runtime's merged
+#   dsh-tools JsonValue import in fetch.d.ts (dsh-util-values is not a runtime
+#   dependency of rc.2 dsh-tool-web).
+#
+# TARGET FILES
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-web/lib/index.js
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-web/lib/types/fetch.d.ts
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-web/lib/types/index.d.ts
+#
+# FINGERPRINTS (md5)  [pristine rc.2 -> patched]
+#  index.js           b90fbf79fd041b32dc74e68125013302 -> 6ce6bc31cd19d78e87c405bc5defe89f
+#  fetch.d.ts         4359745b89cf3d3c59bd6b7cc0986dba -> cd99169769dcdb0c1db12a127fd5c055
+#  index.d.ts         fa96302d924d32de9df5298538f13093 -> 7116efa682ce8b1978190af135fa8aa6
+#
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -311,12 +311,32 @@
+ 	}));
+ }
+ //#endregion
++//#region ../../util/timeout/src/index.ts
++/**
++* Validate a caller's optional timeout hint, use the backend default, then cap
++* it. Supplied values must be positive and finite; zero is not a public
++* disable-timeout sentinel.
++*
++* @param requested The caller's optional hint; validated when present.
++* @param def The backend default applied when `requested` is absent.
++* @param max The backend upper bound the result is capped to.
++* @param name Field name used in the thrown message (so the caller sees which input was
++*   bad).
++* @returns The effective timeout in milliseconds: `min(requested ?? def, max)`.
++*/
++function clampTimeout(requested, def, max, name = "timeoutMs") {
++	if (requested !== void 0 && (!Number.isFinite(requested) || requested <= 0)) throw new Error(`${name} must be a positive finite number`);
++	return Math.min(requested ?? def, max);
++}
++//#endregion
+ //#region lib/types/fetch.js
+ /**
+ * The model-facing `web_fetch` tool. This module owns its schema, validation, and presentation;
+-* `ctx.web` owns retrieval. Timeout is deployment policy, not a model argument: config becomes
+-* `ToolDefinition.timeoutMs`, timeout policy enforces it, and this tool forwards the resulting
+-* signal. A provider timeout remains a backstop for direct service callers.
++* `ctx.web` owns retrieval. Timeout composes deployment policy with a per-call override (fb-102):
++* config becomes `ToolDefinition.timeoutMs` (the MAX per-call budget, enforced by the tool-call
++* timeout policy), the DEFAULT per-call budget is a second config value, and an optional model
++* argument `timeout_ms` raises (or lowers) the per-call budget — clamped to the deployment cap —
++* so a known-slow page gets a longer window without a deploy-time configuration change.
+ */
+ /**
+ * The shared HTML→markdown converter: turndown over its bundled domino DOM,
+@@ -373,17 +393,21 @@
+ 	}
+ });
+ /**
+-* Validate value constraints the schema DSL can't express: a non-blank `url`.
+-* Throws a plain `Error` otherwise. No timeout parameter — the tool-call budget
+-* is deployment policy declared via `fetchTimeoutMs` config and enforced by
+-* `@deepseek-ai/dsh-tool-call-timeout-policy`, not a model argument.
++* Validate value constraints the schema DSL can't express: a non-blank `url`
++* and, when present, a positive finite `timeout_ms` (the per-call budget
++* override, fb-102). The final clamp (`min(requested, MAX)`) happens in
++* execution with the deployment cap.
+ *
+ * @param args - the schema-validated `web_fetch` arguments.
+ * @returns the arguments as the seam's request fields.
+ */
+ function parseFetchArgs(args) {
+ 	if (args.url.trim().length === 0) throw new Error("url must be a non-empty string");
+-	return { url: args.url };
++	if (args.timeout_ms !== void 0 && (!Number.isFinite(args.timeout_ms) || args.timeout_ms <= 0)) throw new Error("timeout_ms must be a positive finite number");
++	return {
++		url: args.url,
++		...args.timeout_ms !== void 0 ? { timeoutMs: args.timeout_ms } : {}
++	};
+ }
+ /**
+ * Nesting-depth ceiling above which HTML skips conversion and passes through
+@@ -697,24 +721,35 @@
+ * @param ctx - context whose `tools` and `systemPrompt` registries receive the
+ *   registrations; both are effect-scoped and unregister on plugin dispose.
+ * @param timeoutMs - the cooperative tool-call budget (ms) attached as the tool's
+-*   `ToolDefinition.timeoutMs` for `@deepseek-ai/dsh-tool-call-timeout-policy` to enforce.
++*   `ToolDefinition.timeoutMs` for `@deepseek-ai/dsh-tool-call-timeout-policy` to
++*   enforce — also the MAX a per-call `timeout_ms` override may request.
+ * @param maxOutputChars - cap on the complete rendered tool output (see
+ *   {@link formatFetchOutput}) and on source characters converted synchronously.
++* @param options - optional wiring; `defaultTimeoutMs` is the per-call budget
++*   applied when the model passes no `timeout_ms` (defaults to `timeoutMs` for
++*   backward compatibility, which disables overrides above the tool budget).
+ */
+-function applyWebFetchTool(ctx, timeoutMs, maxOutputChars) {
++function applyWebFetchTool(ctx, timeoutMs, maxOutputChars, options = {}) {
++	const defaultTimeoutMs = options.defaultTimeoutMs ?? timeoutMs;
+ 	ctx.systemPrompt.section({
+ 		name: "tool:web_fetch",
+ 		order: 111,
+-		text: "Use the web_fetch tool to retrieve the content of a specific HTTP(S) URL (for example a result from web_search). It returns the page content decoded to text. Cite the URL as a markdown link when you use its content."
++		text: "Use the web_fetch tool to retrieve the content of a specific HTTP(S) URL (for example a result from web_search). It returns the page content decoded to text. Cite the URL as a markdown link when you use its content. For a page you expect to be slow, pass an explicit timeout_ms (the per-call budget override, capped by the deployment maximum); omit it otherwise."
+ 	});
+ 	ctx.tools.register(defineTool({
+ 		name: "web_fetch",
+ 		description: "Fetch the content of a specific HTTP(S) URL and return it decoded to text.",
+-		parameters: { url: {
+-			type: "string",
+-			required: true,
+-			description: "The HTTP(S) URL to fetch."
+-		} },
++		parameters: {
++			url: {
++				type: "string",
++				required: true,
++				description: "The HTTP(S) URL to fetch."
++			},
++			timeout_ms: {
++				type: "integer",
++				description: "Optional per-call timeout override in milliseconds (positive; clamped to the deployment maximum). Omit to use the configured default per-call budget."
++			}
++		},
+ 		output: {
+ 			schema: {
+ 				type: "object",
+@@ -776,7 +811,11 @@
+ 		isConcurrencySafe: () => true,
+ 		async execute(args, exec) {
+ 			const input = parseFetchArgs(args);
+-			const result = await ctx.web.fetch({ url: input.url }, exec.signal);
++			const effectiveTimeout = clampTimeout(input.timeoutMs, defaultTimeoutMs, timeoutMs, "timeout_ms");
++			const result = await ctx.web.fetch({
++				url: input.url,
++				timeoutMs: effectiveTimeout
++			}, exec.signal);
+ 			return {
+ 				url: result.url,
+ 				statusCode: result.statusCode,
+@@ -811,6 +850,13 @@
+ /** Default cooperative tool-call timeout budget (ms) for the web tools. */
+ const DEFAULT_WEB_TOOL_TIMEOUT_MS = 3e4;
+ /**
++* Default cap on one `web_fetch` per-call timeout override (ms). The tool's
++* cooperative budget is this cap, so a caller's `timeout_ms` hint up to it is
++* never killed by the tool-call timeout policy; the DEFAULT per-call budget
++* stays {@link DEFAULT_WEB_TOOL_TIMEOUT_MS} (fb-102).
++*/
++const DEFAULT_FETCH_MAX_TIMEOUT_MS = 12e4;
++/**
+ * Default cap on one `web_fetch` output and on source characters converted
+ * synchronously. This leaves headroom above the local provider's default
+ * 100,000-character body cap while bounding custom providers and rendered output.
+@@ -822,6 +868,7 @@
+ 	searchMaxResults: z.number().default(8),
+ 	searchMaxQueries: z.number().default(4),
+ 	fetchTimeoutMs: z.number().default(DEFAULT_WEB_TOOL_TIMEOUT_MS),
++	fetchMaxTimeoutMs: z.number().default(DEFAULT_FETCH_MAX_TIMEOUT_MS),
+ 	searchTimeoutMs: z.number().default(DEFAULT_WEB_TOOL_TIMEOUT_MS),
+ 	fetchMaxOutputChars: z.number().default(DEFAULT_FETCH_MAX_OUTPUT_CHARS)
+ });
+@@ -832,21 +879,25 @@
+ /**
+ * Register the enabled web tools. `search`/`fetch` default to true; a product
+ * that wants only one disables the other in config. Each tool's cooperative
+-* timeout budget (`fetchTimeoutMs`/`searchTimeoutMs`, default 30000) is resolved
+-* here and attached to the tool as `ToolDefinition.timeoutMs` for
+-* `@deepseek-ai/dsh-tool-call-timeout-policy` to enforce. The tools' disposers are
+-* fiber-scoped (the effect-based registries clean up on dispose), so no manual
+-* teardown is needed.
++* timeout budget is resolved here and attached to the tool as
++* `ToolDefinition.timeoutMs` for `@deepseek-ai/dsh-tool-call-timeout-policy` to
++* enforce: `searchTimeoutMs` for `web_search`; `fetchMaxTimeoutMs` for
++* `web_fetch` (the cap a per-call `timeout_ms` override may request, so an
++* override up to it is never killed by the policy — the DEFAULT per-call budget
++* is `fetchTimeoutMs`). The tools' disposers are fiber-scoped (the effect-based
++* registries clean up on dispose), so no manual teardown is needed.
+ */
+ function apply(ctx, config) {
+ 	const resolved = config;
+ 	assertPositiveInteger("searchMaxResults", resolved.searchMaxResults);
+ 	assertPositiveInteger("searchMaxQueries", resolved.searchMaxQueries);
+ 	assertPositiveInteger("fetchTimeoutMs", resolved.fetchTimeoutMs);
++	assertPositiveInteger("fetchMaxTimeoutMs", resolved.fetchMaxTimeoutMs);
+ 	assertPositiveInteger("searchTimeoutMs", resolved.searchTimeoutMs);
+ 	assertPositiveInteger("fetchMaxOutputChars", resolved.fetchMaxOutputChars);
++	if (resolved.fetchMaxTimeoutMs < resolved.fetchTimeoutMs) throw new Error(`tool-web: fetchMaxTimeoutMs (${resolved.fetchMaxTimeoutMs}) must be >= fetchTimeoutMs (${resolved.fetchTimeoutMs}) — the per-call override cap cannot be lower than the default per-call budget`);
+ 	if (resolved.search) applyWebSearchTool(ctx, resolved.searchMaxResults, resolved.searchMaxQueries, resolved.searchTimeoutMs, resolved.fetch);
+-	if (resolved.fetch) applyWebFetchTool(ctx, resolved.fetchTimeoutMs, resolved.fetchMaxOutputChars);
++	if (resolved.fetch) applyWebFetchTool(ctx, resolved.fetchMaxTimeoutMs, resolved.fetchMaxOutputChars, { defaultTimeoutMs: resolved.fetchTimeoutMs });
+ }
+ //#endregion
+-export { Config, DEFAULT_FETCH_MAX_OUTPUT_CHARS, DEFAULT_WEB_TOOL_TIMEOUT_MS, WEB_SEARCH_MAX_QUERIES, WEB_SEARCH_MAX_RESULTS, apply, applyWebFetchTool, applyWebSearchTool, fetchMetaFromResult, fetchMetaFromValue, formatFetchOutput, formatSearchOutput, inject, name, parseFetchArgs, presentFetchCall, presentFetchResult, presentSearchCall, presentSearchResult, searchMetaFromResult, searchMetaFromValue };
++export { Config, DEFAULT_FETCH_MAX_OUTPUT_CHARS, DEFAULT_FETCH_MAX_TIMEOUT_MS, DEFAULT_WEB_TOOL_TIMEOUT_MS, WEB_SEARCH_MAX_QUERIES, WEB_SEARCH_MAX_RESULTS, apply, applyWebFetchTool, applyWebSearchTool, fetchMetaFromResult, fetchMetaFromValue, formatFetchOutput, formatSearchOutput, inject, name, parseFetchArgs, presentFetchCall, presentFetchResult, presentSearchCall, presentSearchResult, searchMetaFromResult, searchMetaFromValue };
+--- a/lib/types/fetch.d.ts
++++ b/lib/types/fetch.d.ts
+@@ -1,26 +1,33 @@
+ /**
+  * The model-facing `web_fetch` tool. This module owns its schema, validation, and presentation;
+- * `ctx.web` owns retrieval. Timeout is deployment policy, not a model argument: config becomes
+- * `ToolDefinition.timeoutMs`, timeout policy enforces it, and this tool forwards the resulting
+- * signal. A provider timeout remains a backstop for direct service callers.
++ * `ctx.web` owns retrieval. Timeout composes deployment policy with a per-call override (fb-102):
++ * config becomes `ToolDefinition.timeoutMs` (the MAX per-call budget, enforced by the tool-call
++ * timeout policy), the DEFAULT per-call budget is a second config value, and an optional model
++ * argument `timeout_ms` raises (or lowers) the per-call budget — clamped to the deployment cap —
++ * so a known-slow page gets a longer window without a deploy-time configuration change.
+  */
+ import type { Context } from '@deepseek-ai/cordis';
+ import type { GenericCallView, JsonValue, ToolResult, WebFetchResultView } from '@deepseek-ai/dsh-tools';
+ import type { WebFetchResult } from '@deepseek-ai/dsh-web';
++/** The `web_fetch` tool's validated arguments after defaulting. */
++export interface FetchArgs {
++    url: string;
++    /** The per-call timeout override (ms); absent = the deployment default per-call budget. */
++    timeoutMs?: number;
++}
+ /**
+- * Validate value constraints the schema DSL can't express: a non-blank `url`.
+- * Throws a plain `Error` otherwise. No timeout parameter — the tool-call budget
+- * is deployment policy declared via `fetchTimeoutMs` config and enforced by
+- * `@deepseek-ai/dsh-tool-call-timeout-policy`, not a model argument.
++ * Validate value constraints the schema DSL can't express: a non-blank `url`
++ * and, when present, a positive finite `timeout_ms` (the per-call budget
++ * override, fb-102). The final clamp (`min(requested, MAX)`) happens in
++ * execution with the deployment cap.
+  *
+  * @param args - the schema-validated `web_fetch` arguments.
+  * @returns the arguments as the seam's request fields.
+  */
+ export declare function parseFetchArgs(args: {
+     url: string;
+-}): {
+-    url: string;
+-};
++    timeout_ms?: number;
++}): FetchArgs;
+ /**
+  * Format a fetch result as one model-facing text block, bounded as a whole.
+  *
+@@ -100,9 +107,15 @@
+  * @param ctx - context whose `tools` and `systemPrompt` registries receive the
+  *   registrations; both are effect-scoped and unregister on plugin dispose.
+  * @param timeoutMs - the cooperative tool-call budget (ms) attached as the tool's
+- *   `ToolDefinition.timeoutMs` for `@deepseek-ai/dsh-tool-call-timeout-policy` to enforce.
++ *   `ToolDefinition.timeoutMs` for `@deepseek-ai/dsh-tool-call-timeout-policy` to
++ *   enforce — also the MAX a per-call `timeout_ms` override may request.
+  * @param maxOutputChars - cap on the complete rendered tool output (see
+  *   {@link formatFetchOutput}) and on source characters converted synchronously.
+- */
+-export declare function applyWebFetchTool(ctx: Context, timeoutMs: number, maxOutputChars: number): void;
++ * @param options - optional wiring; `defaultTimeoutMs` is the per-call budget
++ *   applied when the model passes no `timeout_ms` (defaults to `timeoutMs` for
++ *   backward compatibility, which disables overrides above the tool budget).
++ */
++export declare function applyWebFetchTool(ctx: Context, timeoutMs: number, maxOutputChars: number, options?: {
++    defaultTimeoutMs?: number;
++}): void;
+ //# sourceMappingURL=fetch.d.ts.map
+\ No newline at end of file
+--- a/lib/types/index.d.ts
++++ b/lib/types/index.d.ts
+@@ -10,7 +10,7 @@
+ export { WEB_SEARCH_MAX_QUERIES, WEB_SEARCH_MAX_RESULTS, applyWebSearchTool, formatSearchOutput, presentSearchCall, presentSearchResult, searchMetaFromValue, searchMetaFromResult } from './search.ts';
+ export type { WebSearchMeta } from './search.ts';
+ export { applyWebFetchTool, formatFetchOutput, parseFetchArgs, presentFetchCall, presentFetchResult, fetchMetaFromValue, fetchMetaFromResult } from './fetch.ts';
+-export type { WebFetchMeta } from './fetch.ts';
++export type { WebFetchMeta, FetchArgs } from './fetch.ts';
+ /** Cordis plugin name used by loader diagnostics. */
+ export declare const name = "tool-web";
+ /** Services required by the web tool suite. */
+@@ -18,6 +18,13 @@
+ /** Default cooperative tool-call timeout budget (ms) for the web tools. */
+ export declare const DEFAULT_WEB_TOOL_TIMEOUT_MS = 30000;
+ /**
++ * Default cap on one `web_fetch` per-call timeout override (ms). The tool's
++ * cooperative budget is this cap, so a caller's `timeout_ms` hint up to it is
++ * never killed by the tool-call timeout policy; the DEFAULT per-call budget
++ * stays {@link DEFAULT_WEB_TOOL_TIMEOUT_MS} (fb-102).
++ */
++export declare const DEFAULT_FETCH_MAX_TIMEOUT_MS = 120000;
++/**
+  * Default cap on one `web_fetch` output and on source characters converted
+  * synchronously. This leaves headroom above the local provider's default
+  * 100,000-character body cap while bounding custom providers and rendered output.
+@@ -35,6 +42,13 @@
+     searchMaxQueries?: number;
+     /** Cooperative timeout budget (ms) for `web_fetch`. Defaults to 30000. */
+     fetchTimeoutMs?: number;
++    /**
++     * Cap (ms) on a per-call `web_fetch` `timeout_ms` override — also the tool's
++     * cooperative budget, so a caller hint up to it is never killed by the
++     * tool-call timeout policy. Must be >= `fetchTimeoutMs` (the default per-call
++     * budget). Defaults to 120000.
++     */
++    fetchMaxTimeoutMs?: number;
+     /** Cooperative timeout budget (ms) for `web_search`. Defaults to 30000. */
+     searchTimeoutMs?: number;
+     /** Cap on source characters converted and complete `web_fetch` output characters. Defaults to 200000. */
+@@ -44,11 +58,13 @@
+ /**
+  * Register the enabled web tools. `search`/`fetch` default to true; a product
+  * that wants only one disables the other in config. Each tool's cooperative
+- * timeout budget (`fetchTimeoutMs`/`searchTimeoutMs`, default 30000) is resolved
+- * here and attached to the tool as `ToolDefinition.timeoutMs` for
+- * `@deepseek-ai/dsh-tool-call-timeout-policy` to enforce. The tools' disposers are
+- * fiber-scoped (the effect-based registries clean up on dispose), so no manual
+- * teardown is needed.
++ * timeout budget is resolved here and attached to the tool as
++ * `ToolDefinition.timeoutMs` for `@deepseek-ai/dsh-tool-call-timeout-policy` to
++ * enforce: `searchTimeoutMs` for `web_search`; `fetchMaxTimeoutMs` for
++ * `web_fetch` (the cap a per-call `timeout_ms` override may request, so an
++ * override up to it is never killed by the policy — the DEFAULT per-call budget
++ * is `fetchTimeoutMs`). The tools' disposers are fiber-scoped (the effect-based
++ * registries clean up on dispose), so no manual teardown is needed.
+  */
+ export declare function apply(ctx: Context, config: Config): void;
+ //# sourceMappingURL=index.d.ts.map
+\ No newline at end of file

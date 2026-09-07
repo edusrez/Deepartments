@@ -1,0 +1,48 @@
+# === dsh-deepartments patch: dsh-web WebFetchRequest timeoutMs (fb-102) ===
+#
+# WHAT THIS FIXES
+#   The ctx.web fetch seam carried no transport control. This patch adds the
+#   optional per-call `timeoutMs` hint to WebFetchRequest (types.ts) so a
+#   caller can give a known slow page a longer budget without deploying a new
+#   provider configuration. Type-level only — dsh-web/lib/index.js is
+#   byte-identical between rc.2 and the payload state.
+#
+# TARGET FILE
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web/lib/types/types.d.ts
+#
+# FINGERPRINTS (md5)
+#  622e5d50256c200cc289dbfa35f0b43c  pristine rc.2 types.d.ts
+#  f74e2a0b1f4356cfca6fbc157d684020  patched (this patch applied)
+#
+--- a/lib/types/types.d.ts
++++ b/lib/types/types.d.ts
+@@ -52,12 +52,26 @@
+ }
+ /**
+  * What one fetch-capable backend is asked to retrieve. The request deliberately
+- * omits timeout, format, prompt, and extraction controls: cancellation is a
+- * direct execution argument, while presentation and higher-level LLM concerns
+- * belong outside safe retrieval.
++ * omits format, prompt, and extraction controls: cancellation is a direct
++ * execution argument, while presentation and higher-level LLM concerns belong
++ * outside safe retrieval. The ONE transport control it carries is an optional
++ * per-call timeout hint (`timeoutMs`, fb-102): deadline policy is the provider's
++ * own (its configured default or this override), so a caller can give a known
++ * slow page a longer budget without deploying a new provider configuration. The
++ * hint is capped by the caller's own transport/execution budget — the provider
++ * fuses the override with the execution signal, so the smaller of the two always
++ * wins.
+  */
+ export interface WebFetchRequest {
+     readonly url: string;
++    /**
++     * Per-call timeout override in milliseconds, applied as the provider's
++     * deadline for THIS request when present (the provider default otherwise).
++     * Must be a positive finite number; validated by the provider's deadline
++     * machinery. The caller's own execution budget still bounds the total (the
++     * overridden deadline and the execution signal are fused, smallest wins).
++     */
++    readonly timeoutMs?: number;
+ }
+ /**
+  * Normalized fetch outcome. A successful network fetch of a non-2xx response is

@@ -164,3 +164,55 @@ patches no longer apply. Do **not** force-apply:
   verbatim-extracted real serializers; interleaved/partial/missing shapes →
   `tool_calls` STRIPPED on both paths; clean consecutive shapes → byte-identical
   to the stage-1 output; 9/9 assertions green.
+
+## Stages 3+ — A-HARNESS PORT (VALLE 09-07, multi-file chain)
+
+**What it is.** The A-HARNESS port (25-route payload: the p2-hygiene-a-editdx-webfetch
+branch's 3 commits + 13 local files) materialized as a MULTI-FILE
+fingerprint-gated chain over the installed `@deepseek-ai/dsh` 0.1.1-rc.2 runtime.
+Managed by **`scripts/reapply-dsh-patches-a-harness.sh`** (the "variant of the
+precedent"): `--check` (PASS / NOT APPLIED / NORMALIZE / PARTIAL / FAIL),
+`apply` (per-patch groups, fingerprint-gated, backup/restore to
+`/opt/dsh/backups`, idempotent), `--detect`. Functional post-apply smoke:
+**`scripts/a-harness-smoke.mjs`** (10/10 probe groups, headless, read-only).
+Fingerprints of every patchable runtime file also live in
+`scripts/zone-md5-manifest.json` (the 12 `a-harness-*` zones, frozen at the
+LIVE pre-apply values; **re-freeze them to the applied values in the same
+change that applies the patches** — the r6-suite-guard asserts them).
+
+| Patch | Target files (run-time) | Effect |
+|---|---|---|
+| `dsh-fs-local-edit-dx-hints.patch` | dsh-fs-local/lib/index.js | edit-DX hints on FS_EDIT_NOT_FOUND (fb-85/90/107/108) |
+| `dsh-fs-observation-policy-not-observed-message.patch` | dsh-fs-observation-policy/lib/index.js | FS_NOT_OBSERVED message names session-freshness (fb-89/107) |
+| `dsh-tool-fs-edit-dx-remedies.patch` | dsh-tool-fs/lib/index.js | +FS_EDIT_NOT_FOUND remedy, extended stale/not-observed wording (fb-85/89/108) |
+| `dsh-tool-web-fetch-timeout-override.patch` | dsh-tool-web/lib/index.js + lib/types/{fetch,index}.d.ts | web_fetch `timeout_ms` per-call override + fetchMaxTimeoutMs cap (fb-102) |
+| `dsh-web-fetch-request-timeout.patch` | dsh-web/lib/types/types.d.ts | WebFetchRequest.timeoutMs (fb-102) |
+| `dsh-tool-fs-search-anchor-literal-glob.patch` | dsh-tool-fs-search/lib/index.js + lib/types/glob.d.ts | anchorGlobPattern literal-first-segment fix (fs-search; durable, from reconstructed pristine) |
+| `dsh-tool-fs-search-fb51-direct-edit-normalize.patch` | same | ONE-TIME: live 2026-09-02 direct-edit → compiled payload form (the current installed state is NOT pristine) |
+| `dsh-app-boot-watch-patch-layers.patch` | dsh-app-boot/lib/index.js + lib/types/index.d.ts | watchUserPatchLayers: watch EVERY patch layer (R3) |
+| `dsh-cli-profile-boot-watch-patch-layers.patch` | dsh lib/profile-boot-<hash>.js | CLI runProfile → one watchUserPatchLayers call over bundle+profile+home layers (R3) |
+
+**Skew adaptations to the 0.1.1-rc.2 runtime (documented per patch header):**
+tool-web kept the runtime's literal `order: 111` + shorter trust text (upstream
+section-orders landed after rc.2) and its merged `JsonValue` d.ts import
+(`dsh-util-values` is not an rc.2 dependency of tool-web); app-boot's runtime
+export list lacks `DEFAULT_PROFILE_PATCH_RELOAD` (upstream drift) — only
+`watchUserPatchLayers` was added; the CLI chunk kept the rc.2 boot flow
+(no patchReload gate / proxy / app-ready — upstream drift after rc.2) and
+applied only the payload's import/composeLive/watcher changes; tool-fs-search
+was normalized from the 09-02 direct edit to the exact compiled payload form.
+The non-payload drift between rc.2 and the fork (win32 rg sidecar, section
+orders, trust notices, agent-presets removal, `processPathFromHostPath`, …) is
+INTENTIONALLY not ported.
+
+**Re-running after a dsh upgrade** (restores pristine rc.2):
+
+```bash
+scripts/reapply-dsh-patches-a-harness.sh --check   # NOT APPLIED → apply
+scripts/reapply-dsh-patches-a-harness.sh apply     # fingerprint-gated chain
+node scripts/a-harness-smoke.mjs                   # 10/10 post-apply
+```
+
+Post-apply the `zone-md5-manifest.json` `a-harness-*` zones must be re-frozen
+to the applied fingerprints (they are frozen at the live pre-apply values so
+the guard passes NOW and flags the apply loudly until re-frozen).

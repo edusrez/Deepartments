@@ -1,0 +1,65 @@
+# === dsh-deepartments patch: dsh-tool-fs remediateFsError edit-DX remedies (fb-85/89/108) ===
+#
+# WHAT THIS FIXES
+#   remediateFsError appends the recovery remedy at the model boundary. This
+#   patch extends the wording of FS_STALE_VERSION / FS_NOT_OBSERVED and adds a
+#   NEW FS_EDIT_NOT_FOUND remedy ("read the file, then retry with the exact
+#   literal — the hint names what the file holds near the anchor"). Provider
+#   messages stay machine-oriented and unchanged.
+#
+# TARGET FILE
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-fs/lib/index.js
+#
+# FINGERPRINTS (md5)
+#  b6696d35941fc4dcd41fd61c20f38a67  pristine rc.2 lib/index.js
+#  103b0b86d98f7429fd74d5b39109d50e  patched (this patch applied)
+#
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -528,26 +528,35 @@
+ //#region lib/types/error.js
+ /**
+ * Model-facing remediation for guarded-mutation failures. The provider's
+-* `FS_STALE_VERSION` and `FS_NOT_OBSERVED` messages state the condition but
+-* not the only correct recovery (re-read / read the file), so this package
+-* appends the remedy at the model boundary; provider messages stay
+-* machine-oriented and unchanged.
++* `FS_STALE_VERSION`, `FS_NOT_OBSERVED`, and `FS_EDIT_NOT_FOUND` messages state
++* the condition but not the only correct recovery (re-read / read the file / use
++* the exact literal), so this package appends the remedy at the model boundary;
++* provider messages stay machine-oriented and unchanged.
+ * @module @deepseek-ai/dsh-tool-fs/src/error
+ */
+-/** The remedy appended to each remediable failure code's message. */
++/**
++* The remedy appended to each remediable failure code's message. The
++* `FS_NOT_OBSERVED` wording names both causes the single code covers — a target
++* never read in this session, and a read whose observation does not survive a
++* session restart (fb-89) — so the flat "read the file" does not mislead an
++* agent that DID read it in a previous incarnation.
++*/
+ const REMEDIES = {
+-	FS_STALE_VERSION: "re-read the file, then retry",
+-	FS_NOT_OBSERVED: "read the file, then retry"
++	FS_STALE_VERSION: "re-read the file, then retry (your last observation predates the file's current state)",
++	FS_NOT_OBSERVED: "read the file, then retry (a fresh observation in THIS session is required — reads from before a restart or via bash do not satisfy the policy)",
++	FS_EDIT_NOT_FOUND: "read the file, then retry with the exact literal (the hint names what the file holds near the anchor)"
+ };
+ /**
+ * Append the correct recovery instruction to a guarded-mutation failure's
+ * message. `FS_STALE_VERSION` (the file changed since this session's last
+ * observation, including a missing target) recovers only by re-reading;
+-* `FS_NOT_OBSERVED` (no prior read by this session) by reading. The `FsError`
+-* code is preserved so retry/permission/UI layers keep routing on it, and the
+-* original error chains as `cause`. Anything else passes through untouched.
++* `FS_NOT_OBSERVED` (no fresh observation by this session) by reading again;
++* `FS_EDIT_NOT_FOUND` (the literal is absent) by re-reading and retrying with
++* the exact text. The `FsError` code is preserved so retry/permission/UI layers
++* keep routing on it, and the original error chains as `cause`. Anything else
++* passes through untouched.
+ * @param error - the caught value from a write/edit execution.
+-* @returns a remediated `FsError` for the two guarded-mutation codes, else the original value.
++* @returns a remediated `FsError` for the remediable guarded-mutation codes, else the original value.
+ */
+ function remediateFsError(error) {
+ 	if (!(error instanceof FsError)) return error;

@@ -1,0 +1,137 @@
+# === dsh-deepartments patch: dsh-tool-fs-search anchor literal-first-segment globs ===
+#
+# WHAT THIS FIXES
+#   ripgrep matches --glob against the path AS PRINTED (CWD-relative), so a
+#   literal-first-segment pattern under a `path` root silently found nothing.
+#   This patch adds anchorGlobPattern (prefix `**/` ONLY when a path is given
+#   and the first segment is fully literal) and applies it in
+#   buildGlobCommand. The rc.1-era direct edit (fb-51, 2026-09-02) is NORMALIZED
+#   to the exact compiled payload form; the pristine base here is the rc.2 file
+#   with the fix reversed (reconstructed). See
+#   dsh-tool-fs-search-fb51-direct-edit-normalize.patch for the live-tree
+#   transition.
+#
+# TARGET FILES
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-fs-search/lib/index.js
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-fs-search/lib/types/glob.d.ts
+#
+# FINGERPRINTS (md5)  [pristine rc.2 (reconstructed) -> patched]
+#  index.js           9d92d79d19288c8c3d6f353ff4516923 -> c1ecd7ac43eaf7923af050eee8249673
+#  glob.d.ts          abb3e1903c42e878cb7bc76cece2ad90 -> ac12dc59628e934777f224164c5459fd
+#
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -566,6 +566,36 @@
+ 	};
+ }
+ /**
++* Anchor a literal-first-segment glob at any depth under a search root, so it
++* resolves against that root instead of the process CWD.
++*
++* ripgrep matches a `--glob` pattern against each path AS PRINTED — relative to
++* the process CWD (or absolute outside it), never relative to the search-root
++* argument. A pattern whose first segment is a literal directory name
++* (`dshd-orchestration/**`, `src/*.ts`) is therefore anchored at the CWD: under
++* a `path` root the printed paths carry the root prefix
++* (`packages/dshd-orchestration/...`) and the root-relative pattern silently
++* finds nothing although the files exist. Rewriting the pattern with a leading
++* any-depth `**` prefix makes it match at any depth, so it resolves against the
++* search root wherever ripgrep anchors its print.
++*
++* Only a pattern whose first segment is fully literal (no glob metacharacters
++* `* ? [ ] { } !`) is rewritten: a basename-only or `**`-leading pattern
++* already matches at any depth, a metacharacter-first pattern carries its own
++* matching semantics, a leading-`/` pattern is an explicit root glob, and a
++* pattern without a `path` keeps the CWD as its documented root — all pass
++* through untouched (zero regression).
++*
++* @param pattern - the model-provided glob pattern.
++* @param path - the search-root argument, or `undefined` when absent.
++* @returns the pattern ripgrep should receive.
++*/
++function anchorGlobPattern(pattern, path) {
++	if (path === void 0) return pattern;
++	if (!/^[^*?[\]{}!/]+(?=\/|$)/.test(pattern)) return pattern;
++	return `**/${pattern}`;
++}
++/**
+ * Build the fixed `rg --files` argv for one `glob` call. Every
+ * model-controlled value ({@link GlobInput.pattern}, {@link GlobInput.path})
+ * is a plain argv element — no shell layer exists, so no quoting applies; the
+@@ -574,13 +604,20 @@
+ * --hidden` searches ignored and hidden files, and
+ * {@link GLOB_VCS_EXCLUDES} keeps VCS metadata out.
+ *
++* The pattern is anchored through {@link anchorGlobPattern} before the
++* `--glob=` element is built: under a `path` root a literal-first-segment
++* pattern is `**`-prefixed so ripgrep resolves it against that root instead of
++* the process CWD (where it would silently find nothing although the files
++* exist); basename-only, `**`-leading, metacharacter-first, leading-`/` and
++* no-`path` patterns pass through unchanged.
++*
+ * @param input - the validated arguments.
+ * @returns the complete ripgrep argument vector (excluding the binary itself).
+ */
+ function buildGlobCommand(input) {
+ 	const parts = [
+ 		"--files",
+-		`--glob=${input.pattern}`,
++		`--glob=${anchorGlobPattern(input.pattern, input.path)}`,
+ 		"--sort=modified",
+ 		"--no-ignore",
+ 		"--hidden",
+@@ -1265,4 +1302,4 @@
+ 	});
+ }
+ //#endregion
+-export { Config, GLOB_MAX_RESULTS, GLOB_VCS_EXCLUDES, GREP_MAX_LINE_BYTES, GREP_MAX_MATCHES, RAW_OUTPUT_MAX_BYTES, SEARCH_GRACE_MS, SEARCH_META_MAX_BYTES, SEARCH_STDERR_MAX_BYTES, SEARCH_TIMEOUT_MS, SearchError, apply, applyGlobTool, applyGrepTool, buildGlobCommand, buildGrepCommand, formatGlobOutput, formatGrepMatches, formatGrepOutput, inject, name, parseGlobArgs, parseGrepArgs, parseGrepMatches, presentGlobCall, presentGlobResult, presentGrepCall, presentGrepResult, previewLine, resolveRgPath, runRipgrep, sampleAcrossTopLevel, toWorkdirRelative, trySaveFormattedResult };
++export { Config, GLOB_MAX_RESULTS, GLOB_VCS_EXCLUDES, GREP_MAX_LINE_BYTES, GREP_MAX_MATCHES, RAW_OUTPUT_MAX_BYTES, SEARCH_GRACE_MS, SEARCH_META_MAX_BYTES, SEARCH_STDERR_MAX_BYTES, SEARCH_TIMEOUT_MS, SearchError, anchorGlobPattern, apply, applyGlobTool, applyGrepTool, buildGlobCommand, buildGrepCommand, formatGlobOutput, formatGrepMatches, formatGrepOutput, inject, name, parseGlobArgs, parseGrepArgs, parseGrepMatches, presentGlobCall, presentGlobResult, presentGrepCall, presentGrepResult, previewLine, resolveRgPath, runRipgrep, sampleAcrossTopLevel, toWorkdirRelative, trySaveFormattedResult };
+--- a/lib/types/glob.d.ts
++++ b/lib/types/glob.d.ts
+@@ -62,6 +62,32 @@
+     path?: string;
+ }): GlobInput;
+ /**
++ * Anchor a literal-first-segment glob at any depth under a search root, so it
++ * resolves against that root instead of the process CWD.
++ *
++ * ripgrep matches a `--glob` pattern against each path AS PRINTED — relative to
++ * the process CWD (or absolute outside it), never relative to the search-root
++ * argument. A pattern whose first segment is a literal directory name
++ * (`dshd-orchestration/**`, `src/*.ts`) is therefore anchored at the CWD: under
++ * a `path` root the printed paths carry the root prefix
++ * (`packages/dshd-orchestration/...`) and the root-relative pattern silently
++ * finds nothing although the files exist. Rewriting the pattern with a leading
++ * any-depth `**` prefix makes it match at any depth, so it resolves against the
++ * search root wherever ripgrep anchors its print.
++ *
++ * Only a pattern whose first segment is fully literal (no glob metacharacters
++ * `* ? [ ] { } !`) is rewritten: a basename-only or `**`-leading pattern
++ * already matches at any depth, a metacharacter-first pattern carries its own
++ * matching semantics, a leading-`/` pattern is an explicit root glob, and a
++ * pattern without a `path` keeps the CWD as its documented root — all pass
++ * through untouched (zero regression).
++ *
++ * @param pattern - the model-provided glob pattern.
++ * @param path - the search-root argument, or `undefined` when absent.
++ * @returns the pattern ripgrep should receive.
++ */
++export declare function anchorGlobPattern(pattern: string, path: string | undefined): string;
++/**
+  * Build the fixed `rg --files` argv for one `glob` call. Every
+  * model-controlled value ({@link GlobInput.pattern}, {@link GlobInput.path})
+  * is a plain argv element — no shell layer exists, so no quoting applies; the
+@@ -70,6 +96,13 @@
+  * --hidden` searches ignored and hidden files, and
+  * {@link GLOB_VCS_EXCLUDES} keeps VCS metadata out.
+  *
++ * The pattern is anchored through {@link anchorGlobPattern} before the
++ * `--glob=` element is built: under a `path` root a literal-first-segment
++ * pattern is `**`-prefixed so ripgrep resolves it against that root instead of
++ * the process CWD (where it would silently find nothing although the files
++ * exist); basename-only, `**`-leading, metacharacter-first, leading-`/` and
++ * no-`path` patterns pass through unchanged.
++ *
+  * @param input - the validated arguments.
+  * @returns the complete ripgrep argument vector (excluding the binary itself).
+  */

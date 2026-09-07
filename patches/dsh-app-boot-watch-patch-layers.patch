@@ -1,0 +1,184 @@
+# === dsh-deepartments patch: dsh-app-boot watchUserPatchLayers (R3) ===
+#
+# WHAT THIS FIXES
+#   Only the profile's own cordis.patch.yml and the home-level file were
+#   watched live; a bundle-layer knob (e.g. a dshd-core row in a bundle's
+#   cordis.patch.yml) silently stayed inactive until a daemon restart. This
+#   patch adds watchUserPatchLayers (watch EVERY patch-layer file: bundle
+#   layers required=true, then profile, then home; dedupe by resolved path;
+#   one transactional refresh; disposer drains on failure) and refactors
+#   watchUserPatches as a single-file wrapper. ADAPTATIONS to rc.2 (skew):
+#   the runtime export list lacks DEFAULT_PROFILE_PATCH_RELOAD (upstream drift)
+#   — only watchUserPatchLayers was added to it; the d.ts keeps the runtime's
+#   10 drift lines (header, export list, 2 doc lines).
+#
+# TARGET FILES
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/types/index.d.ts
+#
+# FINGERPRINTS (md5)  [pristine rc.2 -> patched]
+#  index.js           f89b0aa41c566589162295578ebb8749 -> a4f6123a217ac6f4e4cc7280a0d547dc
+#  index.d.ts         5ed502c91a525f05367730f28b10e160 -> 027fdc1cc3b47982027997f7902e2150
+#
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -752,32 +752,79 @@
+ const bootstrapIncludes = /* @__PURE__ */ new WeakMap();
+ const userPatchesSchema = entryListSchema;
+ /**
+-* Watch the user patch layer through Cordis HMR and transactionally reapply it to the boot include.
++* Watch a set of patch-layer files through Cordis HMR and transactionally
++* reapply the COMBINED list to the boot include. A change to ANY layer
++* re-reads EVERY layer fresh (required layers through
++* {@link loadOverlayPatches}, optional layers through
++* {@link loadOptionalPatches}) and composes ONE new generation through the
++* caller's `compose` closure, so a bundle-layer knob committed while the
++* daemon runs comes live like a user edit — no restart required. A rejected
++* read, parse, or Loader candidate leaves the last good tree running; the HMR
++* service broadcasts `hmr/config-update-failed(filename, Error)` after
++* logging it, and each watched file keeps its own refresh state. A filename
++* listed in several roles registers ONCE (HMR refuses a second registration
++* of the same exact path), keeping its first listed position in the
++* fresh-read order.
+ * @param ctx - settled app context containing the root Include and an active HMR service.
+-* @param options - diagnostic, file, and patch-composition inputs.
+-* @returns an asynchronous disposer after the exact-path watcher is ready.
++* @param options - diagnostic, layer list, and patch-composition inputs.
++* @returns an asynchronous disposer after every exact-path watcher is ready.
+ * @throws when HMR or the root Include is absent, watcher setup fails, or initial path resolution fails.
+ */
+-async function watchUserPatches(ctx, options) {
+-	const { binName, filename, compose = (patches) => patches } = options;
++async function watchUserPatchLayers(ctx, options) {
++	const { binName, compose = (patches) => patches } = options;
+ 	const hmr = ctx.get("hmr");
+ 	if (hmr === void 0) throw new Error(`${binName}: user patch-layer watching requires the Cordis HMR service`);
+ 	const entry = bootstrapIncludes.get(ctx);
+ 	if (entry === void 0) throw new Error(`${binName}: user patch-layer watching requires the root Include entry`);
+-	const register = hmr.registerConfig(filename, async () => {
++	const seen = /* @__PURE__ */ new Set();
++	const layers = [];
++	for (const layer of options.layers) {
++		const filename = resolve(layer.filename);
++		if (seen.has(filename)) continue;
++		seen.add(filename);
++		layers.push({
++			filename,
++			required: layer.required === true
++		});
++	}
++	const refresh = async () => {
+ 		const { patches: _previousPatches, ...includeConfig } = entry.options.config;
+-		const patches = compose(loadOptionalPatches(binName, filename) ?? []);
++		const combined = [];
++		for (const layer of layers) combined.push(...layer.required ? loadOverlayPatches(binName, layer.filename) : loadOptionalPatches(binName, layer.filename) ?? []);
++		const patches = compose(combined);
+ 		await entry.update({ config: {
+ 			...includeConfig,
+ 			patches
+ 		} });
+-	});
++	};
++	const disposers = [];
+ 	try {
+-		return await register;
++		for (const layer of layers) disposers.push(await hmr.registerConfig(layer.filename, refresh));
+ 	} catch (error) {
++		await Promise.allSettled(disposers.map((dispose) => dispose()));
+ 		if (error?.code === "INACTIVE_EFFECT") return async () => {};
+ 		throw error;
+ 	}
++	return async () => {
++		await Promise.allSettled(disposers.map((dispose) => dispose()));
++	};
++}
++/**
++* Watch ONE user patch layer file through Cordis HMR and transactionally
++* reapply it to the boot include — the single-file form of
++* {@link watchUserPatchLayers} (the profile's own `cordis.patch.yml` and the
++* home-level `cordis.patch.yml` are watched this way).
++* @param ctx - settled app context containing the root Include and an active HMR service.
++* @param options - diagnostic, file, and patch-composition inputs.
++* @returns an asynchronous disposer after the exact-path watcher is ready.
++* @throws when HMR or the root Include is absent, watcher setup fails, or initial path resolution fails.
++*/
++async function watchUserPatches(ctx, options) {
++	return watchUserPatchLayers(ctx, {
++		binName: options.binName,
++		layers: [{ filename: options.filename }],
++		...options.compose !== void 0 ? { compose: options.compose } : {}
++	});
+ }
+ /**
+ * Load an optional patch-list file: a top-level YAML array of loader patch
+@@ -1213,4 +1260,4 @@
+ 	});
+ }
+ //#endregion
+-export { DEFAULT_PROFILE_BUNDLES, FAIL_LOUD_RELEASE_TIMEOUT_MS, HARNESS_SOURCE_SECTION, PROFILES_DIR, PROFILE_PATCH_FILENAME, PROFILE_TEMPLATES, addHarnessSourceSection, assertEntriesActivated, assertEntriesLoaded, boot, composeEntries, healProfilesModuleFallback, initProfile, installFailLoud, loadEnv, loadLayeredEnv, loadOptionalPatches, loadOverlayPatches, loadProfile, mountRootInclude, readProfileManifest, renderConfigDump, resolveBundleDir, resolveConfigPath, resolveProfileDir, watchUserPatches, writeProfileManifest };
++export { DEFAULT_PROFILE_BUNDLES, FAIL_LOUD_RELEASE_TIMEOUT_MS, HARNESS_SOURCE_SECTION, PROFILES_DIR, PROFILE_PATCH_FILENAME, PROFILE_TEMPLATES, addHarnessSourceSection, assertEntriesActivated, assertEntriesLoaded, boot, composeEntries, healProfilesModuleFallback, initProfile, installFailLoud, loadEnv, loadLayeredEnv, loadOptionalPatches, loadOverlayPatches, loadProfile, mountRootInclude, readProfileManifest, renderConfigDump, resolveBundleDir, resolveConfigPath, resolveProfileDir, watchUserPatchLayers, watchUserPatches, writeProfileManifest };
+--- a/lib/types/index.d.ts
++++ b/lib/types/index.d.ts
+@@ -62,8 +62,61 @@
+      */
+     compose?: (userPatches: PatchOptions[]) => PatchOptions[];
+ }
++/** One watched patch-layer file of {@link watchUserPatchLayers}. */
++export interface UserPatchLayerEntry {
++    /** Absolute path of the patch file. */
++    filename: string;
++    /**
++     * Whether the layer is REQUIRED to parse on every refresh: `true` reads
++     * through {@link loadOverlayPatches} and a missing file FAILS the refresh,
++     * so the last good tree stays — a bundle layer the composition names must
++     * never be silently dropped. `false` (default) reads through
++     * {@link loadOptionalPatches}: a missing file means "no layer", the
++     * profile/home user-layer semantics.
++     */
++    required?: boolean;
++}
++/** Options for {@link watchUserPatchLayers}. */
++export interface UserPatchLayerWatchOptions {
++    /** Diagnostic prefix used by the patch loaders. */
++    binName: string;
++    /** The watched files in application order (bundle layers below, the
++     * profile's own layer, the home layer). */
++    layers: UserPatchLayerEntry[];
++    /**
++     * Wrap the fresh combined layer list (every file is re-read per refresh).
++     * The layers the caller keeps static — `--patch` overlays, the telemetry
++     * switch — belong here, cloned per generation so the include's
++     * insert-aliasing never mutates the caller's snapshot. Identity when
++     * omitted: the combined layers ARE the whole patch list.
++     */
++    compose?: (patches: PatchOptions[]) => PatchOptions[];
++}
++/**
++ * Watch a set of patch-layer files through Cordis HMR and transactionally
++ * reapply the COMBINED list to the boot include. A change to ANY layer
++ * re-reads EVERY layer fresh (required layers through
++ * {@link loadOverlayPatches}, optional layers through
++ * {@link loadOptionalPatches}) and composes ONE new generation through the
++ * caller's `compose` closure, so a bundle-layer knob committed while the
++ * daemon runs comes live like a user edit — no restart required. A rejected
++ * read, parse, or Loader candidate leaves the last good tree running; the HMR
++ * service broadcasts `hmr/config-update-failed(filename, Error)` after
++ * logging it, and each watched file keeps its own refresh state. A filename
++ * listed in several roles registers ONCE (HMR refuses a second registration
++ * of the same exact path), keeping its first listed position in the
++ * fresh-read order.
++ * @param ctx - settled app context containing the root Include and an active HMR service.
++ * @param options - diagnostic, layer list, and patch-composition inputs.
++ * @returns an asynchronous disposer after every exact-path watcher is ready.
++ * @throws when HMR or the root Include is absent, watcher setup fails, or initial path resolution fails.
++ */
++export declare function watchUserPatchLayers(ctx: Context, options: UserPatchLayerWatchOptions): Promise<() => Promise<void>>;
+ /**
+- * Watch the user patch layer through Cordis HMR and transactionally reapply it to the boot include.
++ * Watch ONE user patch layer file through Cordis HMR and transactionally
++ * reapply it to the boot include — the single-file form of
++ * {@link watchUserPatchLayers} (the profile's own `cordis.patch.yml` and the
++ * home-level `cordis.patch.yml` are watched this way).
+  * @param ctx - settled app context containing the root Include and an active HMR service.
+  * @param options - diagnostic, file, and patch-composition inputs.
+  * @returns an asynchronous disposer after the exact-path watcher is ready.

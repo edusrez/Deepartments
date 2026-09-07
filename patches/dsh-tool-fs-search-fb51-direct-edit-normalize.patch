@@ -1,0 +1,147 @@
+--- a/lib/index.js
+# === dsh-deepartments patch: dsh-tool-fs-search fb-51 direct-edit NORMALIZATION ===
+#
+# ONE-TIME transition for the CURRENT live tree (0.1.1-rc.2 with the 2026-09-02
+# direct edit applied): replaces the fb-51 split-based anchorGlobPattern + doc
+# with the exact compiled payload form (regex-based, canonical doc) so the file
+# converges to the SAME bytes the durable patch
+# dsh-tool-fs-search-anchor-literal-glob.patch produces from pristine. After a
+# future dsh upgrade restores a pristine file, only the durable patch is
+# needed; this normalization is for the as-installed state only.
+#
+# FINGERPRINTS (md5)  [live direct-edit -> patched]
+#  index.js           669590376ecc9d9e1d9fb9f3531100e2 -> c1ecd7ac43eaf7923af050eee8249673
+#  glob.d.ts          5d10ebee03e200ad16929e0291206efa -> ac12dc59628e934777f224164c5459fd
+#
++++ b/lib/index.js
+@@ -566,6 +566,36 @@
+ 	};
+ }
+ /**
++* Anchor a literal-first-segment glob at any depth under a search root, so it
++* resolves against that root instead of the process CWD.
++*
++* ripgrep matches a `--glob` pattern against each path AS PRINTED — relative to
++* the process CWD (or absolute outside it), never relative to the search-root
++* argument. A pattern whose first segment is a literal directory name
++* (`dshd-orchestration/**`, `src/*.ts`) is therefore anchored at the CWD: under
++* a `path` root the printed paths carry the root prefix
++* (`packages/dshd-orchestration/...`) and the root-relative pattern silently
++* finds nothing although the files exist. Rewriting the pattern with a leading
++* any-depth `**` prefix makes it match at any depth, so it resolves against the
++* search root wherever ripgrep anchors its print.
++*
++* Only a pattern whose first segment is fully literal (no glob metacharacters
++* `* ? [ ] { } !`) is rewritten: a basename-only or `**`-leading pattern
++* already matches at any depth, a metacharacter-first pattern carries its own
++* matching semantics, a leading-`/` pattern is an explicit root glob, and a
++* pattern without a `path` keeps the CWD as its documented root — all pass
++* through untouched (zero regression).
++*
++* @param pattern - the model-provided glob pattern.
++* @param path - the search-root argument, or `undefined` when absent.
++* @returns the pattern ripgrep should receive.
++*/
++function anchorGlobPattern(pattern, path) {
++	if (path === void 0) return pattern;
++	if (!/^[^*?[\]{}!/]+(?=\/|$)/.test(pattern)) return pattern;
++	return `**/${pattern}`;
++}
++/**
+ * Build the fixed `rg --files` argv for one `glob` call. Every
+ * model-controlled value ({@link GlobInput.pattern}, {@link GlobInput.path})
+ * is a plain argv element — no shell layer exists, so no quoting applies; the
+@@ -574,35 +604,16 @@
+ * --hidden` searches ignored and hidden files, and
+ * {@link GLOB_VCS_EXCLUDES} keeps VCS metadata out.
+ *
+-* fb-51/fb-52 (2026-09-02, literal-segment quirk): ripgrep matches `--glob`
+-* patterns against the path AS PRINTED — relative to the process CWD (or
+-* absolute when the search root lies outside it), NOT relative to the search
+-* root argument. A pattern whose FIRST segment is a literal directory name
+-* (`dshd-orchestration/**`, `src/*.ts`) is therefore anchored at the CWD: with
+-* a `path` that is a subdirectory, the printed paths carry the path prefix
+-* (`packages/dshd-orchestration/...`) and the root-relative pattern silently
+-* returns "No files found" although the files exist (a false negative that
+-* discarded real work in the fb-49 episode). The fix anchors such a pattern
+-* at ANY depth under the walk — a `**`-prefixed rewrite — so it resolves
+-* relative to the search ROOT regardless of where ripgrep anchors its print;
+-* basename-only (`*.ts`), `**`-leading and metachar-first patterns are
+-* untouched (they already match at any depth), and a pattern without a `path`
+-* is untouched (the CWD is the documented root — zero regression).
++* The pattern is anchored through {@link anchorGlobPattern} before the
++* `--glob=` element is built: under a `path` root a literal-first-segment
++* pattern is `**`-prefixed so ripgrep resolves it against that root instead of
++* the process CWD (where it would silently find nothing although the files
++* exist); basename-only, `**`-leading, metacharacter-first, leading-`/` and
++* no-`path` patterns pass through unchanged.
+ *
+ * @param input - the validated arguments.
+ * @returns the complete ripgrep argument vector (excluding the binary itself).
+ */
+-function anchorGlobPattern(pattern, path) {
+-	if (path === void 0) return pattern;
+-	const first = String(pattern).split("/")[0];
+-	if (first === void 0 || first === "") return pattern;
+-	// ANCHOR only a LITERAL first segment (no glob metacharacters) — a
+-	// `**`/`*`/`?`/`[`/`{`/`!`-leading pattern already matches at any depth
+-	// or carries explicit anchoring; rewriting it would CHANGE its meaning.
+-	const literal = /^[^*?[\]{}!]+$/.test(first);
+-	if (!literal) return pattern;
+-	return `**/${pattern}`;
+-}
+ function buildGlobCommand(input) {
+ 	const parts = [
+ 		"--files",
+--- a/lib/types/glob.d.ts
++++ b/lib/types/glob.d.ts
+@@ -62,14 +62,25 @@
+     path?: string;
+ }): GlobInput;
+ /**
+- * fb-51/fb-52 — anchor a literal-first-segment glob at any depth when a
+- * search `path` (≠ CWD) is given: ripgrep matches `--glob` against the path
+- * AS PRINTED (CWD-relative or absolute), so a pattern whose first segment is a
+- * literal directory name silently false-negatives under a subdirectory root
+- * (`dshd-orchestration/**` + path `packages` → "No files found" although the
+- * files exist). `**/<pattern>` makes it resolve relative to the search ROOT.
+- * Basename-only, `**`-leading, metachar-first and no-path inputs are returned
+- * UNCHANGED (zero regression).
++ * Anchor a literal-first-segment glob at any depth under a search root, so it
++ * resolves against that root instead of the process CWD.
++ *
++ * ripgrep matches a `--glob` pattern against each path AS PRINTED — relative to
++ * the process CWD (or absolute outside it), never relative to the search-root
++ * argument. A pattern whose first segment is a literal directory name
++ * (`dshd-orchestration/**`, `src/*.ts`) is therefore anchored at the CWD: under
++ * a `path` root the printed paths carry the root prefix
++ * (`packages/dshd-orchestration/...`) and the root-relative pattern silently
++ * finds nothing although the files exist. Rewriting the pattern with a leading
++ * any-depth `**` prefix makes it match at any depth, so it resolves against the
++ * search root wherever ripgrep anchors its print.
++ *
++ * Only a pattern whose first segment is fully literal (no glob metacharacters
++ * `* ? [ ] { } !`) is rewritten: a basename-only or `**`-leading pattern
++ * already matches at any depth, a metacharacter-first pattern carries its own
++ * matching semantics, a leading-`/` pattern is an explicit root glob, and a
++ * pattern without a `path` keeps the CWD as its documented root — all pass
++ * through untouched (zero regression).
+  *
+  * @param pattern - the model-provided glob pattern.
+  * @param path - the search-root argument, or `undefined` when absent.
+@@ -85,9 +96,12 @@
+  * --hidden` searches ignored and hidden files, and
+  * {@link GLOB_VCS_EXCLUDES} keeps VCS metadata out.
+  *
+- * The pattern is passed through {@link anchorGlobPattern} (fb-51/fb-52) so a
+- * literal-first-segment pattern under a `path` root does NOT silently return
+- * "No files found" although the files exist.
++ * The pattern is anchored through {@link anchorGlobPattern} before the
++ * `--glob=` element is built: under a `path` root a literal-first-segment
++ * pattern is `**`-prefixed so ripgrep resolves it against that root instead of
++ * the process CWD (where it would silently find nothing although the files
++ * exist); basename-only, `**`-leading, metacharacter-first, leading-`/` and
++ * no-`path` patterns pass through unchanged.
+  *
+  * @param input - the validated arguments.
+  * @returns the complete ripgrep argument vector (excluding the binary itself).

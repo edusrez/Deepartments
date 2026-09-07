@@ -1,0 +1,71 @@
+# === dsh-deepartments patch: dsh CLI profile-boot watchUserPatchLayers (R3) ===
+#
+# WHAT THIS FIXES
+#   The dsh CLI profile-boot watched only the profile + home patch files with
+#   two watchUserPatches calls. This patch switches it to ONE
+#   watchUserPatchLayers call over bundle layers (required) + profile + home,
+#   with the live composition rebuilt from the watcher's re-read layers.
+#   ADAPTATIONS to rc.2 (skew): the runtime chunk lacks the upstream
+#   patchReload gate / installProxyFromEnvironment / createAppReady / async
+#   composeProfile / agent-presets removal — those are upstream drift AFTER
+#   rc.2 and are intentionally NOT ported; the payload hunks were applied onto
+#   the runtime chunk as-is (import, composeLive, watchUserPatchLayers call).
+#   The chunk name is a build hash (profile-boot-<hash>.js): the reapply
+#   variant locates the real chunk by content.
+#
+# TARGET FILE
+#   <npm-root>/@deepseek-ai/dsh/lib/profile-boot-DG5t9aNs.js
+#   (the live chunk filename; after dsh upgrades re-locate by content)
+#
+# FINGERPRINTS (md5)
+#  12f9ba5a4400a8e795f1d72254119ffb  pristine rc.2 chunk
+#  c359a2f3cb7d912b38bc1c2eb14b40a1  patched (this patch applied)
+#
+--- a/lib/profile-boot-DG5t9aNs.js
++++ b/lib/profile-boot-DG5t9aNs.js
+@@ -1,6 +1,6 @@
+ import { writeFileSync } from "node:fs";
+ import { fileURLToPath } from "node:url";
+-import { PROFILE_PATCH_FILENAME, boot, composeEntries, healProfilesModuleFallback, installFailLoud, loadOptionalPatches, loadOverlayPatches, loadProfile, watchUserPatches } from "@deepseek-ai/dsh-app-boot";
++import { PROFILE_PATCH_FILENAME, boot, composeEntries, healProfilesModuleFallback, installFailLoud, loadOptionalPatches, loadOverlayPatches, loadProfile, watchUserPatchLayers } from "@deepseek-ai/dsh-app-boot";
+ import { join, resolve } from "node:path";
+ import { resolveDshHome } from "@deepseek-ai/dsh-home-paths";
+ import { DSH_LAUNCH_ENVIRONMENT_KEY } from "@deepseek-ai/dsh-launch-environment";
+@@ -238,12 +238,7 @@
+ 		await app.current?.fiber.dispose();
+ 	});
+ 	const rootConfig = join(composed.profile.dir, PROFILE_ROOT_FILENAME);
+-	const composeLive = () => structuredClone([
+-		...composed.bundlePatches,
+-		...loadOptionalPatches(NAME, composed.profile.patchPath) ?? [],
+-		...loadOptionalPatches(NAME, homePatchPath()) ?? [],
+-		...composed.overlays
+-	]);
++	const composeLive = (liveLayers) => structuredClone([...liveLayers, ...composed.overlays]);
+ 	const ctx = await boot(NAME, rootConfig, structuredClone(allPatches(composed)), (hostCtx) => {
+ 		app.current = hostCtx;
+ 		hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, options.environment);
+@@ -261,14 +256,16 @@
+ 				config: { root: [] }
+ 			});
+ 		}
+-		await watchUserPatches(ctx, {
+-			binName: NAME,
+-			filename: composed.profile.patchPath,
+-			compose: composeLive
+-		});
+-		await watchUserPatches(ctx, {
++		await watchUserPatchLayers(ctx, {
+ 			binName: NAME,
+-			filename: homePatchPath(),
++			layers: [
++				...composed.profile.layers.map((layer) => ({
++					filename: layer.patchPath,
++					required: true
++				})),
++				{ filename: composed.profile.patchPath },
++				{ filename: homePatchPath() }
++			],
+ 			compose: composeLive
+ 		});
+ 	} catch (error) {
