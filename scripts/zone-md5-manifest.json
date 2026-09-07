@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "note": "P2-HYGIENE (fb-91 class, 2026-09-06): the per-zone md5 MANIFEST the suite-integrity guard (scripts/r6-suite-guard.mjs) asserts against. It is a SNAPSHOT of the frozen file zones for change detection: each zone entry pins the file + its md5 span markers + the FROZEN zone md5. The guard compares the CURRENT source's zone md5 against this frozen value at START and END, closing the commit-drift observability gap documented in docs/VERIFICATION-LADDER.md §2 (a zone changed by a NEW HEAD leaves the worktree==HEAD mutation phases green — this manifest makes the drift fail loudly instead). The frozen value MUST stay byte-synced with the freeze lock test/tools-factory.test.js:348 (the same CUT-4 zone; a re-freeze updates BOTH the test literal and this manifest in the SAME commit).",
+  "zones": [
+    {
+      "id": "cut4-tools-zone",
+      "file": "packages/dshd-orchestration/src/tools.ts",
+      "banner": "  // --- messaging bus TOOL DEFINITIONS (ONE body per tool; registered in the",
+      "close": "  }, 'deepartments: host-plane tools')",
+      "md5": "7693beaa8c9a969a4f556edc25b2d19b",
+      "note": "The frozen CUT-4 factory zone (tools-factory.test.js:348 — LANE 0.2.3b re-freeze + R8-RACE liveStatus + settle-wait)."
+    }
+  ]
+}

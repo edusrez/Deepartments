@@ -44,12 +44,75 @@ export const GUARDED_FILE = path.join(REPO_ROOT, GUARDED_FILE_REL)
 export const ZONE_BANNER = '  // --- messaging bus TOOL DEFINITIONS (ONE body per tool; registered in the'
 export const ZONE_CLOSE = "  }, 'deepartments: host-plane tools')"
 
-export function zoneMd5(text) {
-  const first = text.indexOf(ZONE_BANNER)
-  const last = text.indexOf(ZONE_CLOSE)
+/** P2-HYGIENE (fb-91 class, 2026-09-06) — the per-zone md5 MANIFEST snapshot
+ * (`scripts/zone-md5-manifest.json`): the frozen md5 of every guarded file
+ * zone, asserted at START (= the CURRENT source must match the FROZEN value,
+ * closing the commit-drift observability gap the LADDER §2 documents — a zone
+ * changed by a NEW HEAD passes the worktree==HEAD mutation phases) and at END
+ * (no drift may survive the run). `zoneMd5WithMarkers` is the generic slicer;
+ * `zoneMd5(text)` stays the CUT-4 single-zone special case (back-compat with
+ * the hermetic freeze test). */
+export function zoneMd5WithMarkers(text, banner, close) {
+  const first = text.indexOf(banner)
+  const last = text.indexOf(close)
   if (first === -1 || last === -1 || last <= first) return null
-  const zone = text.slice(first, last + ZONE_CLOSE.length) + '\n'
+  const zone = text.slice(first, last + close.length) + '\n'
   return createHash('md5').update(zone, 'utf8').digest('hex')
+}
+
+export function zoneMd5(text) {
+  return zoneMd5WithMarkers(text, ZONE_BANNER, ZONE_CLOSE)
+}
+
+/** The per-zone md5 manifest path (P2-HYGIENE). */
+export const ZONE_MANIFEST_REL = 'scripts/zone-md5-manifest.json'
+export const ZONE_MANIFEST_FILE = path.join(REPO_ROOT, ZONE_MANIFEST_REL)
+
+/** Load the per-zone md5 MANIFEST snapshot. NEVER throws: an absent /
+ * unreadable / malformed file or an empty zone list → undefined (the guard
+ * keeps running with the legacy single-zone behavior — the manifest is the
+ * DRIFT detector, not a hard requirement of the mutation phases). */
+export function loadZoneManifest() {
+  try {
+    const parsed = JSON.parse(readFileSync(ZONE_MANIFEST_FILE, 'utf8'))
+    if (parsed === null || typeof parsed !== 'object') return undefined
+    const zones = Array.isArray(parsed.zones) ? parsed.zones : []
+    const clean = zones.filter(
+      (z) =>
+        z !== null &&
+        typeof z === 'object' &&
+        typeof z.id === 'string' &&
+        typeof z.file === 'string' &&
+        typeof z.banner === 'string' &&
+        typeof z.close === 'string' &&
+        typeof z.md5 === 'string' &&
+        /^[0-9a-f]{32}$/.test(z.md5),
+    )
+    return clean.length > 0 ? { schemaVersion: parsed.schemaVersion, zones: clean } : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Zone-vs-manifest drift rows for the CURRENT on-disk files ([] = every
+ * manifest zone matches its frozen md5). Reads each zone's file fresh; a
+ * missing/unreadable file or a missing marker span is reported as a drift row
+ * (the snapshot cannot be verified). PURE-ish (file reads, no writes). */
+export function diffManifestZones(manifest) {
+  const out = []
+  for (const zone of manifest.zones) {
+    let text
+    try {
+      text = readFileSync(path.join(REPO_ROOT, zone.file), 'utf8')
+    } catch {
+      out.push(`zone "${zone.id}" file unreadable (${zone.file}) — the frozen snapshot cannot be verified`)
+      continue
+    }
+    const cur = zoneMd5WithMarkers(text, zone.banner, zone.close)
+    if (cur === null) out.push(`zone "${zone.id}" markers not found in ${zone.file} (banner/close drifted?)`)
+    else if (cur !== zone.md5) out.push(`zone "${zone.id}" md5 ${cur.slice(0, 8)}… != frozen ${zone.md5.slice(0, 8)}… — the zone drifted by COMMIT (the freeze test tools-factory.test.js AND this manifest must move in the SAME commit)`)
+  }
+  return out
 }
 
 export function fileSnapshot(text) {
@@ -85,6 +148,13 @@ export async function runGuard(argv) {
   const skipStart = process.env.R6_GUARD_SKIP_START === '1'
   const violations = []
   const informational = []
+  // P2-HYGIENE (fb-91 class): the per-zone md5 MANIFEST snapshot — the frozen
+  // value the CURRENT source must match (commit-drift detection; the START
+  // escape hatch also skips the manifest assert so a shared-tree lane WIP that
+  // LEGITIMATELY re-freezes the zone can run the suite; the END assert stays
+  // active in both modes — no drift may survive the run).
+  const manifest = loadZoneManifest()
+  const manifestStartDrifts = manifest !== undefined && !skipStart ? diffManifestZones(manifest) : []
 
   if (headText !== undefined && !skipStart) {
     const headSnap = fileSnapshot(headText)
@@ -92,6 +162,12 @@ export async function runGuard(argv) {
     if (deltas.length > 0) {
       violations.push(`START: ${GUARDED_FILE_REL} differs from git HEAD (${deltas.join('; ')}) — the tree was NOT quiet when the run started (pre-existing mutation or concurrent lane WIP; run on a quiet tree, or R6_GUARD_SKIP_START=1 for the shared-tree escape hatch)`)
     }
+  }
+  // P2-HYGIENE (fb-91 class): the MANIFEST START assert — the CURRENT source's
+  // zone md5 must equal the FROZEN manifest value (a zone drifted by a NEW
+  // HEAD is invisible to the worktree==HEAD mutation phases; this fails loud).
+  for (const drift of manifestStartDrifts) {
+    violations.push(`START (MANIFEST): ${drift}`)
   }
 
   const child = spawn('node', ['--test', ...argv], { cwd: REPO_ROOT, stdio: ['ignore', 'inherit', 'inherit'] })
@@ -122,12 +198,24 @@ export async function runGuard(argv) {
   if (endDeltas.length > 0) {
     violations.push(`END: ${GUARDED_FILE_REL} differs from its start snapshot (${endDeltas.join('; ')}) — the suite left the tree mutated`)
   }
+  // P2-HYGIENE (fb-91 class): the MANIFEST END assert — active in EVERY mode
+  // (even R6_GUARD_SKIP_START) — no frozen-zone drift may survive the run.
+  const manifestEndDrifts = manifest !== undefined ? diffManifestZones(manifest) : []
+  for (const drift of manifestEndDrifts) {
+    violations.push(`END (MANIFEST): ${drift}`)
+  }
 
   const report = {
     guardedFile: GUARDED_FILE_REL,
     start: { md5: start.md5.slice(0, 12), size: start.size, zoneMd5: start.zoneMd5?.slice(0, 12) },
     end: { md5: end.md5.slice(0, 12), size: end.size, zoneMd5: end.zoneMd5?.slice(0, 12) },
     gitHeadMatchedStart: headText !== undefined ? diffSnapshots(fileSnapshot(headText), start).length === 0 : 'git-unavailable',
+    manifest: manifest !== undefined
+      ? {
+          file: ZONE_MANIFEST_REL,
+          zones: manifest.zones.map((z) => ({ id: z.id, file: z.file, md5: z.md5 }))
+        }
+      : 'unavailable',
     mutationEvents: events.length,
     informationalEvents: informational,
     violations,

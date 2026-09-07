@@ -136,6 +136,16 @@ export interface HealthConfig {
   presetsAuditEnabled?: boolean
   presetAuditEnabled?: boolean
   heartbeatEnabled?: boolean
+  /** P2-HYGIENE (2026-09-06) — the HEARTBEAT STALENESS CAP in ms (default =
+   * HEALTH_ERROR_WINDOW_MS, the shared 2h anomaly freshness window). tools.ts
+   * reads it to cap the interrupted-post restart-window bound: a STALE
+   * previous heartbeat (ts older than the cap) must NOT establish
+   * `restartAfterTs` — it degrades to the documented ABSENT path in
+   * reconcileInterruptedPosts («the 2h freshness window alone bounds it»).
+   * The knob is resolved INLINE in tools.ts with the positive-number-safeguard
+   * pattern (the lane deliberately adds ZERO new dshd-health exports — the
+   * export-parity lock stays frozen at 324, PREP). */
+  heartbeatStaleMs?: number
   waitThresholdMs?: number
   poolerDispatchEnabled?: boolean
   poolerGateEnabled?: boolean

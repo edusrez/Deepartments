@@ -4072,11 +4072,29 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         }
         postEvents.push({ postId, sessionId: entry.sessionId, retired: false, events })
       }
+      // P2-HYGIENE (2026-09-06) — HEARTBEAT STALENESS CAP (spec 006 §3: a
+      // stored heartbeat's `ts` is FRESH = the daemon is running, STALE = it
+      // died). The previous boot's last heartbeat ts is only a valid
+      // restart-window lower bound while it is a LIVE liveness claim: a
+      // heartbeat older than the staleness cap (`health.heartbeatStaleMs`,
+      // default = the 2h anomaly freshness window HEALTH_ERROR_WINDOW_MS — a
+      // ts older than the anomaly window can no longer be a live signal) is a
+      // DEAD claim. It must NOT establish the bound — degrading to undefined
+      // takes the documented ABSENT path in reconcileInterruptedPosts («the 2h
+      // freshness window alone bounds it»), so an old ts can never silently
+      // widen/narrow this restart's interruption window. The knob is resolved
+      // with the same positive-number-safeguard pattern as the M1 watchdog
+      // knobs; `HEALTH_ERROR_WINDOW_MS` is the shared window constant.
+      const heartbeatStaleCapMs =
+        typeof config.health?.heartbeatStaleMs === 'number' && Number.isFinite(config.health.heartbeatStaleMs) && config.health.heartbeatStaleMs > 0
+          ? config.health.heartbeatStaleMs
+          : HEALTH_ERROR_WINDOW_MS
+      const prevHeartbeatStale = prevHeartbeat === undefined || !Number.isFinite(prevHeartbeat.ts) || Date.now() - prevHeartbeat.ts > heartbeatStaleCapMs
       const result = await reconcileInterruptedPosts({
         now: () => Date.now(),
         stateDir: stateDir,
         postEvents,
-        restartAfterTs: prevHeartbeat?.ts
+        restartAfterTs: prevHeartbeatStale ? undefined : prevHeartbeat?.ts
       })
       if (result.interrupted.length > 0 || result.appended > 0) {
         ctx.logger.info(`[deepartments] interrupted-post reconciliation: ${result.interrupted.length} interrupted post(s), ${result.appended} appended to post-errors.jsonl`)

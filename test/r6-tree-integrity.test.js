@@ -25,11 +25,15 @@ import {
   GUARDED_FILE_REL,
   GUARDED_FILE,
   zoneMd5,
+  zoneMd5WithMarkers,
   fileSnapshot,
   diffSnapshots,
   gitHeadText,
   ZONE_BANNER,
   ZONE_CLOSE,
+  loadZoneManifest,
+  ZONE_MANIFEST_FILE,
+  diffManifestZones,
 } from '../scripts/r6-suite-guard.mjs'
 
 const pkg = JSON.parse(readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'))
@@ -94,4 +98,35 @@ test('r6-tree-integrity (fb-91): the CUT-4 zone span is sliceable in the current
   assert.ok(last !== -1 && last > first, 'the zone close is present after the banner')
   const z = zoneMd5(factory)
   assert.ok(typeof z === 'string' && z.length === 32, 'the zone md5 computes (a non-null 32-hex hash)')
+})
+
+test('r6-tree-integrity (P2-HYGIENE): the per-zone md5 MANIFEST exists, carries the CUT-4 zone, and its frozen value matches BOTH the current source AND the freeze lock (commit-drift detection is armed)', () => {
+  // (a) the manifest file exists and parses (NEVER throws → undefined when absent).
+  const manifest = loadZoneManifest()
+  assert.ok(manifest !== undefined && manifest.zones.length > 0, `the manifest loads (${ZONE_MANIFEST_FILE})`)
+  // (b) the CUT-4 zone entry is present with the frozen md5.
+  const cut4 = manifest.zones.find((z) => z.id === 'cut4-tools-zone')
+  assert.ok(cut4 !== undefined, 'the manifest carries the cut4-tools-zone entry')
+  assert.ok(/^[0-9a-f]{32}$/.test(cut4.md5), 'the frozen md5 is a 32-hex hash')
+  // (c) the frozen manifest value equals the CURRENT source's zone md5 — the
+  // guard's START assert stays green on a quiet tree.
+  const current = zoneMd5WithMarkers(readFileSync(path.join(REPO_ROOT, cut4.file), 'utf8'), cut4.banner, cut4.close)
+  assert.equal(current, cut4.md5, 'the manifest frozen md5 matches the CURRENT source zone md5 (no drift-to-commit today)')
+  // (d) the manifest frozen value equals the FROZEN TEST literal — the freeze
+  // lock (tools-factory.test.js:348) and the manifest must move in the SAME
+  // commit (a re-freeze that forgets one of the two fails this test).
+  const freezeTest = readFileSync(path.join(REPO_ROOT, 'test', 'tools-factory.test.js'), 'utf8')
+  assert.match(freezeTest, new RegExp(`'${cut4.md5}'`), 'the manifest frozen md5 is the SAME value the freeze lock asserts (byte-synced re-freeze)')
+  // (e) the drift detector itself works — a mid-span mutation changes the zone
+  // md5 (the exact class a NEW HEAD zone change would produce). Diff the REAL
+  // source text with a +1B INSIDE the span (the banner line gets one extra
+  // space — same-length semantics as the hermetic ±1B test above, but on the
+  // real file text, without touching disk); the manifest START/END assert keys
+  // on this md5 delta.
+  const realSource = readFileSync(path.join(REPO_ROOT, cut4.file), 'utf8')
+  const inSpanPlus1 = realSource.replace(cut4.banner, cut4.banner + ' ')
+  assert.equal(inSpanPlus1.length, realSource.length + 1, 'the in-span delta is exactly +1B')
+  const mutatedMd5 = zoneMd5WithMarkers(inSpanPlus1, cut4.banner, cut4.close)
+  assert.notEqual(mutatedMd5, cut4.md5, 'a +1B mutation INSIDE the span changes the zone md5 (the drift class the manifest detects)')
+  assert.deepEqual(diffManifestZones(manifest), [], 'the REAL manifest file still matches the real source (the mutation probe above was in-memory — disk untouched)')
 })
