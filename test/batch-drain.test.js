@@ -6,6 +6,19 @@
 // retired fix (a noWake delivery to a RETIRED host-family address is NEVER
 // 'prepared' — 'failed' to the sender; m-2523 class).
 //
+// §HOST POR DISEÑO (the host case, explore-49 verdict — OWNER-APPROVED, 09-07):
+// the Asistente is a spec-002 resident with a PERMANENT sleepEpoch (dormant
+// between turns; the D4 resume wakes it). The batch-drain appends to the host
+// EXACTLY LIKE a post and only MID-TURN: while the host's LIVE session is
+// RUNNING, batch-eligible sends accumulate and drain in ONE delta at the
+// settle (the tool-level HOST test below pins it); a DORMANT host (no live
+// handle) is NEVER accumulated — the first message resumes it and delivers 1:1
+// as today. The native host lib engages only at the host RESTART in a clean
+// window (the spec-002 rotation), so the host is never batch-reassembled
+// across a restart — «solo coalesce mid-turn» is the documented + tested host
+// contract (documented here + in the tool-level HOST test; delivery semantics
+// untouched — no redesign, the drain-on-settle spec applies to posts unchanged).
+//
 // Method (LANE ② src-native, the wake-seam-mitigation pattern): register the
 // ts-src-loader + import the SOURCE directly; the engine-level cases use
 // createDeliveryEngine directly (deterministic, no harness); the tool-level
@@ -590,6 +603,78 @@ test('VALLE 09-07 (tool C2 — the m-2523 class, RE-BASED 2026-09-07 over the FB
       // m-2523 acceptance for an explicit no-wake order stays intact).
       const explicit = await headCtx.ctx.tools.get('send_message', headCtx.key).execute({ to: ['host-s-retired'], text: 'explicit noWake to retired', noWake: true }, { agent: head, signal })
       assert.equal(explicit.delivered['host-s-retired'], 'failed', 'C2-tool CONTROL: an EXPLICIT noWake ORDER to the retired address FAILS to the sender (the engine C2 branch — the noWake-to-a-never-live-address protection is intact)')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('VALLE 09-07 (tool — the HOST case, §host por diseño): a HOST recipient with the spec-002 PERMANENT sleepEpoch whose LIVE session is mid-turn coalesces — N sends DURING the host turn accumulate and drain as ONE delta at the settle (the running host is the batch condition exactly like a post), rows \'prepared\' → \'delivered\'; the batch NEVER touches a DORMANT host (a permanent-sleepEpoch host NOT mid-turn is delivered 1:1 as today — the D4 resume; the first message wakes it). THE HOST CONTRACT (explore-49 verdict, owner-approved): «solo coalesce mid-turn» — the native host lib engages only at the host restart in a clean window (the spec-002 rotation), so the host is never batch-reassembled across a restart; the mid-turn coalesce here is both the documented and the ONLY host batch surface. Delivery semantics untouched — the test only pins the observable contract', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The spec-002 HOST: a permanent sleepEpoch (dormant between turns — the
+    // D4 resume wakes it; the registry key follows the `host-<sessionId>`
+    // convention loadHosts validates).
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      schemaVersion: 2,
+      'host-s-host': { sessionId: 's-host', roomId: 'board', sleepEpoch: T0 }
+    }, null, 2), 'utf8')
+    const env = await bootPluginFromSrc(stateDir)
+    try {
+      await waitFor(() => env.agents.store.has('head-research-head'), 8000, 'research head materialized')
+      const head = env.agents.store.get('head-research-head')
+      const headCtx = childContextFor(env.agents, 'head-research-head')
+      assert.ok(headCtx, 'the head own-layer context resolves')
+      const signal = new AbortController().signal
+      // Materialize the HOST's live handle (the D4-resume shape — a dormant
+      // host's session becomes live when its turn starts) and flip it RUNNING
+      // (mid-turn — the ONLY host state the batch accumulates).
+      const host = {
+        id: 's-host',
+        status: 'running',
+        inboxMessages: [],
+        followup(message) { this.inboxMessages.push(message) },
+        cancel() {},
+        async whenIdle() {}
+      }
+      env.agents.store.set('s-host', host)
+      const send = (text) => headCtx.ctx.tools.get('send_message', headCtx.key).execute({ to: ['host-s-host'], text }, { agent: head, signal })
+      const baseline = host.inboxMessages.length
+      // 3 always-wake sends while the HOST turn is in flight.
+      const r1 = await send('host probe one')
+      const r2 = await send('host probe two')
+      const r3 = await send('host probe three')
+      assert.equal(r1.delivered['host-s-host'], 'prepared (batch-until-settle)', 'host-t1: the first run send to the RUNNING host reports the batch class (accumulated for the settle)')
+      assert.equal(r2.delivered['host-s-host'], 'prepared (batch-until-settle)', 'host-t1: the SECOND send accumulates too (the batch surface is keyed by the live session, post AND host)')
+      assert.equal(r3.delivered['host-s-host'], 'prepared (batch-until-settle)', 'host-t1: the THIRD send accumulates')
+      assert.equal(host.inboxMessages.length, baseline, 'host-t1: NOTHING spliced into the live host inbox while running (the batch waits for the settle)')
+      let latest = await latestRowStatuses(stateDir)
+      assert.equal(latest.get(`${r1.messageId}\u0000host-s-host`), 'prepared', 'host-t1: the rows stay \'prepared\' (write-ahead)')
+      assert.equal(latest.get(`${r3.messageId}\u0000host-s-host`), 'prepared', 'host-t1: the third row is prepared too')
+      // The SETTLE (the running→idle agent/status transition — the SAME fused
+      // payload the dsh-agent-loop setPhase dispatches, applied to the host).
+      env.pluginCtx().emit('agent/status', { status: 'idle', agent: host })
+      await waitFor(() => host.inboxMessages.length === baseline + 1, 8000, 'the settle flush splices EXACTLY ONE host delta')
+      const delta = host.inboxMessages[host.inboxMessages.length - 1]
+      const text = delta.content[0].text
+      assert.equal(text.indexOf('host probe one') < text.indexOf('host probe two') && text.indexOf('host probe two') < text.indexOf('host probe three'), true, 'host-t1: the frames travel in SEQ order (the host turn coalesces like a post turn)')
+      assert.equal(text.includes('host probe three'), true, 'host-t1: the delta carries the LAST frame')
+      assert.equal(delta.source.batch, true, 'host-t1: the delta source carries the batch marker')
+      assert.deepEqual(delta.source.messageIds, [r1.messageId, r2.messageId, r3.messageId], 'host-t1: the delta source lists ALL the message ids')
+      latest = await latestRowStatuses(stateDir)
+      assert.equal(latest.get(`${r1.messageId}\u0000host-s-host`), 'delivered', 'host-t1: the rows end \'delivered\' after the flush')
+      assert.equal(latest.get(`${r3.messageId}\u0000host-s-host`), 'delivered', 'host-t1: the third row ends delivered')
+      // The DORMANT-HOST CONTROL (§host por diseño): with the live handle GONE
+      // (the host back to its permanent sleepEpoch) a send is NOT batch — the
+      // D4 resume wakes the host and the FIRST message delivers 1:1 (the
+      // batch condition is the RUNNING live session; a dormant host is never
+      // accumulated — the documented host contract).
+      env.agents.store.delete('s-host')
+      const hostWake = await send('host dormant wake')
+      assert.equal(hostWake.delivered['host-s-host'], 'resumed', 'host-control: a send to the DORMANT host (permanent sleepEpoch, no live handle) RESUMES it 1:1 — never the batch class (the host coalesces ONLY mid-turn)')
+      const dorm = env.agents.get('s-host')
+      assert.ok(dorm !== undefined, 'host-control: the D4 resume materialized the host session')
+      assert.equal(dorm.inboxMessages.length, 1, 'host-control: the dormant wake delivered ONE plain followup (1:1 — no accumulation, no batch marker)')
+      assert.equal(dorm.inboxMessages[0].source.batch, undefined, 'host-control: the plain followup carries NO batch marker')
     } finally {
       await env.dispose()
     }
