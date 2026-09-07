@@ -13840,6 +13840,10 @@ test('M-6 SMOKE (acceptance — real daemon): bootPlugin with health {intervalMs
 // `mission-queue:<postId>` in the SHARED health-alerts ledger (the 30-min
 // re-alert cadence while the backlog persists). `deps.missionQueue` ABSENT →
 // the scan is a NO-OP (unknown queues never fabricate a backlog alert).
+// fb-175 (2026-09-06): a RUNNING head is NEVER a mission-queue signal (its
+// in-flight turn IS draining the queue — the fresh post's turn 1 EN VUELO
+// false positive); the row is skipped entirely (no finding, no ledger
+// mutation) and the IDLE head with the same backlog still alerts.
 
 /** The M-7 SMOKE org: TWO configured heads (the real daemon alerts for BOTH
  * when their pending mission queues cross the limit). */
@@ -13931,6 +13935,82 @@ test('M-7 scanMissionQueue (PURE): an over-limit queue SUSTAINED >= persistMs �
   assert.equal(cleared.findings.length, 0, 'below the limit → nothing')
   assert.equal(cleared.changed, true, 'the ledger changed (the entry cleared)')
   assert.equal(cleared.ledger['research-head'], undefined, 'a drained queue forgets the sustained window')
+})
+
+test('M-7 fb-175 scanMissionQueue (running-exclusion): a FRESH head post in its turn 1 EN VUELO (running:true + an open turn/start AFTER the messages and NO turn/end yet — the exact post-rotation VALLE shape of the record) with an over-limit inbox → NO finding and NO ledger entry (its in-flight turn IS draining the queue — the FALSE POSITIVE is gone); the IDLE control with the SAME inbox still alerts (a real backlog); a RUNNING row neither confirms nor clears a pre-existing sustained epoch (the turn is the drain window, the next IDLE tick judges); REGRESSION: a RETIRED head stays excluded and a live head with a real inbox and NO turn at all still counts', () => {
+  const T0 = new Date(2026, 8, 2, 10, 0, 0).getTime()
+  const inbox = (n) => Array.from({ length: n }, (_, i) => T0 - 10 * 60_000 + i * 1000)
+  // (a) FRESH RUNNING — the record's post-rotation FP: a fresh head in turn 1,
+  // its turn/start AFTER the delivered messages (the messages are being
+  // attended-en-proceso by the in-flight turn), NO turn/end yet → the whole
+  // inbox would be "undrained" by buildPostSnapshot, but the RUNNING row is
+  // skipped entirely: 0 findings, 0 ledger entries.
+  const fresh = scanMissionQueue({
+    rows: [{ postId: 'research-head', running: true, events: [{ type: 'turn/start', time: T0 - 5000, data: { turn: 1 } }], inboxTs: inbox(6) }],
+    limit: MISSION_QUEUE_DEFAULT_LIMIT,
+    persistMs: MISSION_QUEUE_DEFAULT_PERSIST_MS,
+    nowMs: T0,
+    ledger: {}
+  })
+  assert.equal(fresh.findings.length, 0, 'a RUNNING head with an over-limit inbox NEVER alerts (an in-flight turn is draining — no false positive)')
+  assert.equal(fresh.changed, false, 'a running row records NO firstSeen (the whole row is skipped)')
+  assert.deepEqual(fresh.ledger, {}, 'a running head never enters the mission-queue ledger')
+  assert.equal(fresh.ledger['research-head'], undefined, 'no sustained epoch starts for a running head')
+  // (b) IDLE CONTROL — the SAME head once its turn ended (running absent): the
+  // over-limit inbox is a REAL undrained backlog → firstSeen recorded, then
+  // the finding after the persist window (the exclusion is NARROW — running
+  // only, an idle head with a real inbox SEGUE alertando).
+  const firstIdle = scanMissionQueue({
+    rows: [{ postId: 'research-head', events: [{ type: 'turn/end', time: T0 - 20 * 60_000, data: { turn: 1, reason: { kind: 'ok' } } }], inboxTs: inbox(6) }],
+    limit: MISSION_QUEUE_DEFAULT_LIMIT,
+    persistMs: MISSION_QUEUE_DEFAULT_PERSIST_MS,
+    nowMs: T0,
+    ledger: {}
+  })
+  assert.equal(firstIdle.changed, true, 'the IDLE control records the firstSeen (a real backlog epoch starts)')
+  assert.equal(firstIdle.ledger['research-head'], T0, 'the IDLE head enters the ledger')
+  const sustainedIdle = scanMissionQueue({
+    rows: [{ postId: 'research-head', events: [], inboxTs: inbox(6) }],
+    limit: MISSION_QUEUE_DEFAULT_LIMIT,
+    persistMs: MISSION_QUEUE_DEFAULT_PERSIST_MS,
+    nowMs: T0 + 60_000,
+    ledger: { 'research-head': T0 }
+  })
+  assert.equal(sustainedIdle.findings.length, 1, 'the IDLE head with the SAME over-limit inbox still alerts (an undrained backlog is real)')
+  assert.equal(sustainedIdle.findings[0].postId, 'research-head', 'the real alert names the idle head')
+  assert.equal(sustainedIdle.findings[0].count, 6, 'the real alert carries the pendingCount')
+  assert.match(sustainedIdle.findings[0].error, /^cola de misiones research-head: 6 pendientes sin drenar — posible backlog$/, 'the real-alert owner line is unchanged')
+  // (c) RUNNING IS A SKIP, NOT A CLEAR — a pre-existing sustained epoch (the
+  // head was IDLE-over-limit and already crossed) survives a running turn even
+  // with a BELOW-limit inbox: the turn is the natural drain window, and only
+  // the next IDLE tick judges (a running row NEITHER confirms NOR clears).
+  const runningWithLedger = scanMissionQueue({
+    rows: [{ postId: 'research-head', running: true, events: [{ type: 'turn/start', time: T0 + 1000, data: { turn: 2 } }], inboxTs: inbox(1) }],
+    limit: MISSION_QUEUE_DEFAULT_LIMIT,
+    persistMs: MISSION_QUEUE_DEFAULT_PERSIST_MS,
+    nowMs: T0 + 61_000,
+    ledger: { 'research-head': T0 }
+  })
+  assert.equal(runningWithLedger.findings.length, 0, 'a running head never emits while running')
+  assert.equal(runningWithLedger.changed, false, 'a running row does NOT clear the ledger (neither confirms nor clears)')
+  assert.equal(runningWithLedger.ledger['research-head'], T0, 'the pre-existing sustained epoch survives the running turn (the next idle tick judges)')
+  // (d) REGRESSION — the unchanged guards: a RETIRED head is STILL excluded
+  // (even running), and a LIVE head with a real inbox and NO turn at all (no
+  // events) still counts + alerts.
+  const reg = scanMissionQueue({
+    rows: [
+      { postId: 'head-retired', retired: true, running: true, events: [], inboxTs: inbox(6) }, // retired — never a mission queue, even running
+      { postId: 'quality-head', events: [], inboxTs: inbox(6) } // live, awake, no turn → pendingCount 6
+    ],
+    limit: MISSION_QUEUE_DEFAULT_LIMIT,
+    persistMs: MISSION_QUEUE_DEFAULT_PERSIST_MS,
+    nowMs: T0 + 120_000,
+    ledger: { 'quality-head': T0 }
+  })
+  assert.equal(reg.findings.length, 1, 'the retired head contributes NOTHING; the live no-turn head still alerts')
+  assert.equal(reg.findings[0].postId, 'quality-head', 'the regression finding names the LIVE head')
+  assert.equal(reg.ledger['head-retired'], undefined, 'a retired head never enters the ledger (unchanged guard)')
+  assert.equal(reg.ledger['quality-head'], T0, 'the live head keeps its sustained epoch (unchanged)')
 })
 
 test('M-7 runHealthDaemonTick: a HEAD with a SUSTAINED over-limit queue → the mission-queue finding + host ALERT (frame bullet «cola de misiones <postId>: <n> pendientes sin drenar»), the per-post dedupe key advances in the SHARED ledger, the audit row records it; a below-limit head → nothing', async () => {

@@ -4860,6 +4860,18 @@ export function scanMainRed(input: MainRedScanInput): MainRedScanResult {
 // inbox undrained = the «posible backlog» condition (Fase 4 auto-
 // observación).
 //
+// RUNNING-EXCLUSION (fb-175, 2026-09-06 — post-rotation FALSE POSITIVE): a
+// RUNNING head (`row.running === true` — its LIVE agent is mid-turn) is NEVER
+// a mission-queue signal: an in-flight turn PROCESSES its inbox, and a FRESH
+// post's turn 1 is EN VUELO before any turn/end exists (buildPostSnapshot
+// counts the whole inbox as "undrained" by design — a message is pending until
+// a completed turn/end follows it). The mission-queue measures STAGNATION (an
+// undrained backlog), NOT active turns — the same Bug-B liveness rule the
+// stale-live watchdog applies (scanStalledPosts `post.running === true`). A
+// running row is skipped ENTIRELY (no finding, no ledger mutation — the turn
+// is the natural drain window); the next IDLE tick re-evaluates, so an IDLE
+// head with a real undrained backlog SEGUE alerting.
+//
 // ANTI-TRANSIENT (the «ventana de persistencia mínima»): the scan never
 // alerts on a one-tick spike. Its OWN ledger `mission-queue-state.json`
 // (`{ [postId]: firstSeenMs }`) records the FIRST tick where a head's queue
@@ -4947,6 +4959,18 @@ export interface MissionQueueInput {
    * mission-queue signal — only heads hold mission queues); ABSENT for a
    * configured head (and any non-worker post). */
   provider?: string
+  /** True when the post's LIVE agent is CURRENTLY in an executing turn
+   * (`agents.get(sessionId)?.status === 'running'`). fb-175 (2026-09-06) — a
+   * RUNNING head is DRAINING its queue: its in-flight turn processes the
+   * inbox, so the pending count of a running head is NOT mission-queue
+   * stagnation (a FRESH post's turn 1 is EN VUELO before ANY turn/end exists —
+   * counting its full inbox as "undrained" is the FALSE POSITIVE this field
+   * excludes in scanMissionQueue). Absent/false = not running (an idle head
+   * whose undrained queue may be a real backlog). The bundle ALREADY threads
+   * it (the rows are buildHealthPosts PostActivityInput objects, whose
+   * `running` the stale-live watchdog consumes — src/invoke.ts filters them to
+   * non-retired heads unchanged). */
+  running?: boolean
   /** The post's session event log (the buildPostSnapshot lastActivityTs term —
    * a turning head DRAINS its queue; absent/empty → no activity signal). */
   events?: readonly HealthSessionEvent[]
@@ -4983,8 +5007,10 @@ export interface MissionQueueScanResult {
 }
 
 /** M-7 — scan the head mission-backlog condition (PURE, NEVER throws). For
- * every row: a RETIRED post or a WORKER is skipped (never a mission-queue
- * signal); the queue's pendingCount is the SHARED buildPostSnapshot
+ * every row: a RETIRED post, a WORKER, or a RUNNING head (fb-175 — an
+ * in-flight turn IS draining its queue; the mission-queue measures stagnation,
+ * not active turns) is skipped (never a mission-queue signal); the queue's
+ * pendingCount is the SHARED buildPostSnapshot
  * computation (REUSED — no duplicated pending logic); a queue BELOW the limit
  * clears the ledger entry (the spike broke / the head drained → the window
  * restarts clean); an over-limit queue records its firstSeen (first crossing
@@ -5003,6 +5029,18 @@ export function scanMissionQueue(input: MissionQueueScanInput): MissionQueueScan
     // HEADS ONLY — a disposable worker's queue is never a mission backlog
     // (the bundle filters it too; this is the scan's own guard).
     if (row.provider === 'worker') continue
+    // fb-175 (2026-09-06) — a RUNNING head is DRAINING its queue: its
+    // in-flight turn processes the inbox, and a FRESH post's turn 1 is EN
+    // VUELO before ANY turn/end exists — so buildPostSnapshot counts the whole
+    // inbox as "undrained" (the post-rotation FALSE POSITIVE). The
+    // mission-queue measures STAGNATION (an undrained backlog), NEVER active
+    // turns — the very Bug-B liveness short-circuit the stale-live watchdog
+    // applies (`scanStalledPosts`: `post.running === true` → alive). A RUNNING
+    // row is SKIPPED ENTIRELY (no finding, no ledger mutation): the turn
+    // itself is the natural drain window, and the next IDLE tick re-evaluates
+    // — a genuinely undrained backlog still crosses the limit and the REAL
+    // alert fires (an idle head with an inbox real backlog SEGUE alertando).
+    if (row.running === true) continue
     const snap = buildPostSnapshot(row)
     if (snap.pendingCount < input.limit) {
       // Below the limit: the backlog cleared → forget the sustained window.
