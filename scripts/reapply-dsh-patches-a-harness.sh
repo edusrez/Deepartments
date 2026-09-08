@@ -51,6 +51,17 @@
 # `patch -p1` from the owning package root, so a/ and b/ prefixes strip to the
 # runtime-relative lib/ paths.
 #
+# SYMLINK HARDENING (fb-230, VALLE 09-08): a target lib/ dir (or the dsh
+# root's own lib/) may be a SYMLINK (npm/pnpm-style staging, or the A-harness
+# fake-root staging of 09-07). GNU patch refuses files that resolve OUTSIDE its
+# -d root (O_NOFOLLOW / containment — the historical "can't find file to
+# patch" ENOTDIR on every symlinked target), so every target is resolved to
+# its REAL path (readlink -f) and the patch applies from the REAL package root:
+# md5 classification, backup, verify and restore all operate on the real
+# destination. A missing target or a dangling/inconsistent symlink aborts with
+# a clear error instead of patch's raw failure. `--detect` shows the logical ->
+# real mapping.
+#
 set -euo pipefail
 
 BACKUP_DIR="${DSH_A_HARNESS_BACKUP_DIR:-/opt/dsh/backups}"
@@ -178,7 +189,7 @@ declare -A CHAIN_PHASES=()
 fill_chain_phases() {
   local dsh_root="$1" abs relpath patch pristine applied direct key
   CHAIN_PHASES=()
-  while IFS='|' read -r abs relpath patch pristine applied direct; do
+  while IFS='|' read -r abs real relpath patch pristine applied direct; do
     key="${abs}"
     [[ -z "${key}" ]] && key="cli:${relpath}"
     CHAIN_PHASES["${key}"]+="${pristine}:PRE,"
@@ -195,18 +206,22 @@ chain_others() { # $1=abs-key $2=pristine $3=applied $4=direct
   printf '%s' "${csv%,}"
 }
 
-# resolve each chain entry: prints "abs|relpath|patch|pristine|applied|direct"
+# resolve each chain entry: prints "abs|real|relpath|patch|pristine|applied|direct"
+# — `real` is the readlink -f resolved destination of the target (empty when
+# the target is missing or a dangling symlink). All file operations below run
+# against the REAL path; the logical `abs` stays the chain-identity key.
 resolve_targets() {
   local dsh_root="$1" chunk
   chunk="$(detect_profile_boot_chunk "${dsh_root}" || true)"
   while IFS=' ' read -r pkgroot relpath patch pristine applied direct; do
-    local abs
+    local abs real
     if [[ "${relpath}" == "CLI_CHUNK" ]]; then
       if [[ -n "${chunk}" ]]; then abs="${chunk}"; relpath="${chunk#${dsh_root}/}"; else abs=""; relpath="lib/profile-boot-<chunk-missing>.js"; fi
     else
       abs="${dsh_root}/${pkgroot}/${relpath}"
     fi
-    echo "${abs}|${relpath}|${patch}|${pristine}|${applied}|${direct:-}"
+    real="$(readlink -f "${abs}" 2>/dev/null || true)"
+    echo "${abs}|${real}|${relpath}|${patch}|${pristine}|${applied}|${direct:-}"
   done <<< "$(printf '%s\n' "${A_HARNESS[@]}")"
 }
 
@@ -214,13 +229,16 @@ check_chain() {
   local dsh_root="$1" saw_applied=0 saw_pristine=0 saw_direct=0 saw_unknown=0
   echo "A-HARNESS chain over: ${dsh_root}"
   fill_chain_phases "${dsh_root}"
-  while IFS='|' read -r abs relpath patch pristine applied direct; do
+  while IFS='|' read -r abs real relpath patch pristine applied direct; do
     local state md5 others
-    if [[ -z "${abs}" || ! -f "${abs}" ]]; then
-      echo "  FAIL:  target not found for ${relpath}" >&2
+    # The REAL path is the file we fingerprint: it covers symlinked targets
+    # (lib -> outer store) and reports dangling ones clearly — never patch's
+    # raw ENOTDIR "can't find file to patch".
+    if [[ -z "${real}" || ! -f "${real}" ]]; then
+      echo "  FAIL:  target not found or dangling symlink for ${relpath} (${abs})" >&2
       return 1
     fi
-    md5="$(md5_of "${abs}")"
+    md5="$(md5_of "${real}")"
     others="$(chain_others "${abs:-cli:${relpath}}" "${pristine}" "${applied}" "${direct}")"
     state="$(classify_chain "${md5}" "${pristine}" "${applied}" "${direct}" "${others}" || echo UNKNOWN)"
     case "${state}" in
@@ -246,37 +264,70 @@ check_chain() {
 
 # apply ONE patch group (all files of a patch share one apply root at the
 # package dir; the CLI chunk applies from the dsh root).
+#
+# SYMLINK HARDENING (fb-230): every target is resolved to its REAL path
+# (readlink -f, the 2nd record field) — md5 classification, backup, verify and
+# restore all run against the real destination. The patch is applied from the
+# REAL package root (the real dir containing the package's real lib/): GNU
+# patch refuses files that resolve OUTSIDE its -d root (the historical ENOTDIR
+# "can't find file to patch" on symlinked targets), so keeping the patched
+# files inside the applied root is what makes symlinked staging work.
 apply_group() {
-  local dsh_root="$1" patch="$2" stamp="$3" pkgroot="" abs relpath pristine applied direct apply_root
+  local dsh_root="$1" patch="$2" stamp="$3" pkgroot="" abs real relpath pristine applied direct apply_root
   local files=() any=0
   fill_chain_phases "${dsh_root}"
-  while IFS='|' read -r abs relpath cur_patch pristine applied direct; do
+  while IFS='|' read -r abs real relpath cur_patch pristine applied direct; do
     [[ "${cur_patch}" == "${patch}" ]] || continue
-    files+=("${abs}|${relpath}|${cur_patch}|${pristine}|${applied}|${direct:-}")
+    files+=("${abs}|${real}|${relpath}|${cur_patch}|${pristine}|${applied}|${direct:-}")
   done < <(resolve_targets "${dsh_root}")
   [[ "${#files[@]}" -eq 0 ]] && return 0
-  # The apply root is the owning package dir: <dsh-root> for the CLI's own
-  # lib/* files, <dsh-root>/node_modules/@deepseek-ai/<pkg> for nested files.
   local first_rel first_abs
-  IFS='|' read -r first_abs first_rel cur_patch pristine applied direct <<< "${files[0]}"
+  IFS='|' read -r first_abs first_real first_rel cur_patch pristine applied direct <<< "${files[0]}"
   local apply_root
-  # Derive from the ABSOLUTE path (the record's relpath is file-only): files
-  # under <dsh-root>/lib/* belong to the CLI package (root = the dsh root);
-  # files under <dsh-root>/node_modules/@deepseek-ai/<pkg>/* belong to that
-  # package (root = the first three path segments after the dsh root).
+  # Derive the LOGICAL apply root from the ABSOLUTE path (the record's relpath
+  # is file-only): files under <dsh-root>/lib/* belong to the CLI package
+  # (root = the dsh root); files under <dsh-root>/node_modules/@deepseek-ai/<pkg>/*
+  # belong to that package (root = the first three path segments after the dsh
+  # root). The REAL root is derived below from the logical one.
+  if [[ -z "${first_abs}" ]]; then
+    echo "FAIL: missing CLI profile-boot chunk (${first_rel}) — cannot derive an apply root." >&2
+    return 1
+  fi
   case "${first_abs}" in
     "${dsh_root}"/lib/*) apply_root="${dsh_root}" ;;
     "${dsh_root}"/node_modules/*) apply_root="${dsh_root}/$(echo "${first_abs}" | sed -e "s|^${dsh_root}/||" | cut -d/ -f1-3)" ;;
     *) echo "FAIL: cannot derive apply root for ${first_abs}" >&2; return 1 ;;
   esac
+  # RESOLVE the real apply root: the real dir that CONTAINS the package's real
+  # lib/ dir (patch paths are lib/... relative to it). Even when lib/ (or the
+  # dsh root's lib/) is a symlink to an outer store, the applied files land
+  # INSIDE this real root — the containment GNU patch requires.
+  local real_lib real_root
+  real_lib="$(readlink -f "${apply_root}/lib" 2>/dev/null || true)"
+  if [[ -z "${real_lib}" || ! -d "${real_lib}" ]]; then
+    echo "FAIL: cannot resolve the real lib dir of ${apply_root} (missing or dangling symlink?) — refusing to patch." >&2
+    return 1
+  fi
+  real_root="$(dirname "${real_lib}")"
   local patch_file="${PATCH_DIR}/${patch}" chosen_patch="${patch}" one_state=""
   local need_direct=0 need_plain=0 unknown=0
   local all_applied=1
+  local t_abs t_real t_rel
   for f in "${files[@]}"; do
-    IFS='|' read -r abs relpath cur_patch pristine applied direct <<< "${f}"
+    IFS='|' read -r t_abs t_real t_rel cur_patch pristine applied direct <<< "${f}"
+    # Clear errors for missing / dangling / inconsistent staging — never
+    # patch's raw ENOTDIR "can't find file to patch".
+    if [[ -z "${t_real}" || ! -f "${t_real}" ]]; then
+      echo "FAIL: target not found or dangling symlink for ${t_rel} (${t_abs})" >&2
+      return 1
+    fi
+    if [[ "${t_real}" != "${real_lib}"/* ]]; then
+      echo "FAIL: ${t_rel} resolves OUTSIDE the group's real lib dir (${real_lib}) — inconsistent staging (real: ${t_real})." >&2
+      return 1
+    fi
     local md5 state others
-    md5="$(md5_of "${abs}")"
-    others="$(chain_others "${abs:-cli:${relpath}}" "${pristine}" "${applied}" "${direct}")"
+    md5="$(md5_of "${t_real}")"
+    others="$(chain_others "${t_abs:-cli:${t_rel}}" "${pristine}" "${applied}" "${direct}")"
     state="$(classify_chain "${md5}" "${pristine}" "${applied}" "${direct}" "${others}" || echo UNKNOWN)"
     # APPLIED and PRECEDING are both covered elsewhere in the chain: APPLIED is
     # this patch's goal state; PRECEDING is an EARLIER row's base (that group
@@ -287,7 +338,7 @@ apply_group() {
     case "${state}" in
       PRISTINE)    need_plain=1 ;;
       DIRECT_EDIT) need_direct=1 ;;
-      *) unknown=1; echo "FAIL: ${relpath} drifted (md5 ${md5}) — refusing to force-apply." >&2; return 1 ;;
+      *) unknown=1; echo "FAIL: ${t_rel} drifted (md5 ${md5}) — refusing to force-apply." >&2; return 1 ;;
     esac
   done
   [[ "${all_applied}" -eq 1 ]] && { echo "SKIP:  ${patch} already fully applied (idempotent)."; return 0; }
@@ -300,35 +351,35 @@ apply_group() {
   fi
   patch_file="${PATCH_DIR}/${chosen_patch}"
   [[ -f "${patch_file}" ]] || { echo "FAIL: patch file missing: ${patch_file}" >&2; return 1; }
-  # backup every covered target, apply once, verify each, restore all on failure.
+  # backup every covered target (REAL paths), apply once, verify each, restore all on failure.
   mkdir -p "${BACKUP_DIR}"
   local backups=()
   for f in "${files[@]}"; do
-    IFS='|' read -r abs relpath cur_patch pristine applied direct <<< "${f}"
-    local backup="${BACKUP_DIR}/$(basename "${abs}")-pre-${stamp}-a-harness"
-    cp -p "${abs}" "${backup}"
-    backups+=("${backup}|${abs}")
+    IFS='|' read -r t_abs t_real t_rel cur_patch pristine applied direct <<< "${f}"
+    local backup="${BACKUP_DIR}/$(basename "${t_real}")-pre-${stamp}-a-harness"
+    cp -p "${t_real}" "${backup}"
+    backups+=("${backup}|${t_real}")
     echo "Backup written: ${backup}"
   done
-  if ! patch -p1 -d "${apply_root}" -f -N < "${patch_file}"; then
+  if ! patch -p1 -d "${real_root}" -f -N < "${patch_file}"; then
     echo "FAIL: patch application failed for ${patch} — restoring backups." >&2
-    for b in "${backups[@]}"; do IFS='|' read -r bk abs <<< "${b}"; cp -p "${bk}" "${abs}"; done
+    for b in "${backups[@]}"; do IFS='|' read -r bk treal <<< "${b}"; cp -p "${bk}" "${treal}"; done
     return 1
   fi
   local ok=1
   for f in "${files[@]}"; do
-    IFS='|' read -r abs relpath cur_patch pristine applied direct <<< "${f}"
+    IFS='|' read -r t_abs t_real t_rel cur_patch pristine applied direct <<< "${f}"
     local new_md5
-    new_md5="$(md5_of "${abs}")"
+    new_md5="$(md5_of "${t_real}")"
     if [[ "${new_md5}" != "${applied}" ]]; then
-      echo "FAIL: post-apply verification of ${relpath} failed (md5 ${new_md5}, expected ${applied})." >&2
+      echo "FAIL: post-apply verification of ${t_rel} failed (md5 ${new_md5}, expected ${applied})." >&2
       ok=0
     else
-      echo "PASS: ${relpath} updated to the applied fingerprint (${new_md5})."
+      echo "PASS: ${t_rel} updated to the applied fingerprint (${new_md5})."
     fi
   done
   if [[ "${ok}" -eq 0 ]]; then
-    for b in "${backups[@]}"; do IFS='|' read -r bk abs <<< "${b}"; cp -p "${bk}" "${abs}"; done
+    for b in "${backups[@]}"; do IFS='|' read -r bk treal <<< "${b}"; cp -p "${bk}" "${treal}"; done
     echo "FAIL: verification failed — backups restored." >&2
     return 1
   fi
@@ -339,7 +390,7 @@ apply_chain() {
   local dsh_root="$1" stamp
   stamp="$(date +%Y%m%d-%H%M)"
   local patches=()
-  while IFS='|' read -r abs relpath patch pristine applied direct; do
+  while IFS='|' read -r abs real relpath patch pristine applied direct; do
     [[ " ${patches[*]} " == *" ${patch} "* ]] || patches+=("${patch}")
   done < <(resolve_targets "${dsh_root}")
   for p in "${patches[@]}"; do apply_group "${dsh_root}" "${p}" "${stamp}" || return 1; done
@@ -370,8 +421,14 @@ fi
 echo "dsh root: ${dsh_root}"
 
 if [[ "${cmd}" == "detect" ]]; then
-  while IFS='|' read -r abs relpath patch pristine applied direct; do
-    echo "${relpath} -> ${abs:-<not found>}"
+  while IFS='|' read -r abs real relpath patch pristine applied direct; do
+    if [[ -z "${real}" ]]; then
+      echo "${relpath} -> ${abs:-<not found>} (UNRESOLVABLE: missing or dangling symlink)"
+    elif [[ "${real}" != "${abs}" ]]; then
+      echo "${relpath} -> ${abs} (real: ${real})"
+    else
+      echo "${relpath} -> ${abs}"
+    fi
   done < <(resolve_targets "${dsh_root}")
   exit 0
 fi
