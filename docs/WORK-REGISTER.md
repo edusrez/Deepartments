@@ -245,8 +245,7 @@
     — CERRADO (reporte 6bd67800)
   - **canary P0s (artefactos builder-126 post-restart canary — verificación
     del host)** — next: host — CERRADO (reporte 02826cca)
-  - **fb-190 (mejora protocolo rotación — no pre-anunciar)** — next: internal-programming-head
-    — CERRADO (reporte d007c408)
+  - **fb-190 (mejora protocolo rotación — no pre-anunciar)** — next: internal-programming-head — CERRADO (reporte d007c408)
   - **fb-51 (thread bilingüe + branch portador — REVISIÓN del host ANTES de
     publicar; no publicar sin su visto bueno)** — next: host —
     DIFERIDO (revisión-host parkeada-owner → push-day)
