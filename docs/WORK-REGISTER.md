@@ -955,3 +955,14 @@ análisis de fallos). M3 los institucionaliza en docs/skill. Hoy: QD→IPH
   `dept_repo_state` candidata). Aplicación práctica: un head que necesita
   verificar un commit/branch/árbol pide el dato a un worker IPD (o lo recibe
   en un reporte), nunca corre `git` él mismo.
+- **FB-253 (mark-delivery CLI — builder-203, 2026-09-08)**: `scripts/mark-delivery-cli.mjs`
+  is now the host-run hygiene tool for the prepared-stale class (fb-117/137):
+  it LISTs and APPLY-settles stale `prepared`/`failed` delivery-sidecar rows
+  whose recipient is a RETIRED post (append-only `terminal` via dshd-core
+  `markDelivery`; criterion mirrors `settleRetiredPostDeliveries` incl. the
+  ALTO-1 rebind guard; idempotent). Host usage (repo root, built lib):
+  `node scripts/mark-delivery-cli.mjs --list --stateDir /.deepartments`
+  (dry probe, default) → `--apply` (append ONE `terminal` per candidate pair) →
+  optional `--recipient <id>` scope; `--apply --dry-run` for a writing preview
+  that writes nothing. Tests: `test/mark-delivery-cli.test.js` (fixtures only —
+  never the live stateDir).
