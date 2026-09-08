@@ -719,10 +719,11 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 - **A-harness (p2-hygiene lane) — DECISIÓN HOST TOMADA (m-3107, ceremonia
   09-07 — APLICAR la topología upstream deepseek-harness-fb51 `d347e703`)**:
   fase 1 A-harness ATERRIZADA (`27142eb` port patches + apply + re-freeze
-  `a27daaf`, ventana 09-07) · **2ª ventana A-harness fb51 PENDIENTE**
+  `a27daaf`, ventana 09-07) · **2ª ventana A-harness fb51 CERRADA-VERIFICADA**
   (topología `d347e703` · p2-hygiene ce467a44 · wt-harness-p2hygiene-a 271
-  archivos; seq: tras la cola VALLE actual) — next: internal-programming-head
-  (coordinación host).
+  archivos; evidencia: preflight 328fed2e + re-run host + canary 18:57Z ·
+  `--check` 14/14 · smoke 12/12 · manifest triple ✓ · apply-required 0 ·
+  web-fetch-http excluido) — next: host (commit de cierre) / owner (fb-51 push-day) — CERRADA-VERIFICADA.
 - **QI-48-A (extensión QI-48) — owner** (post-ceremonia; ver LANDING 09-06).
 - **canary fase 2 — post-ceremonia** (smoke aislado + cross-check q-i-61).
 - **restart re-escopeado (09-06) — pendientes HOST**: re-enable
