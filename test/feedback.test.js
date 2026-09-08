@@ -12,15 +12,23 @@ import { test } from 'node:test'
 import {
   DEFAULT_LIVE_CAP,
   FEEDBACK_ARCHIVE_FILE,
+  FEEDBACK_BRIDGE_FILE,
   FEEDBACK_FILE,
   FeedbackStore,
   SEVERITY_RANK,
+  STALE_REVIEW_ABIERTO_DAYS,
+  STALE_REVIEW_EN_ESTUDIO_DAYS,
+  STALE_REVIEW_INACTIVITY_DAYS,
+  extractFeedbackReferences,
+  feedbackStaleNudge,
   feedbackTransitionError,
+  findDuplicateCandidates,
   isTerminalEstado,
   loadFeedbackRecords,
   parseFeedbackRecords,
   parseFeedbackSeq,
   resolveFeedbackArchivePath,
+  resolveFeedbackBridgePath,
   resolveFeedbackPath
 } from '../lib/feedback.js'
 
@@ -346,4 +354,226 @@ test('SEVERITY_RANK orders critico > alto > medio > bajo', () => {
   assert.ok(SEVERITY_RANK.critico > SEVERITY_RANK.alto)
   assert.ok(SEVERITY_RANK.alto > SEVERITY_RANK.medio)
   assert.ok(SEVERITY_RANK.medio > SEVERITY_RANK.bajo)
+})
+
+// --- LOOP FASE 1 (RD spec §4 — dedupe / duplicado / bridge / stale) ----------
+
+test('LOOP FASE 1: duplicado is TERMINAL (the triage-dup); a duplicado never transitions again', () => {
+  assert.equal(isTerminalEstado('duplicado'), true)
+  assert.ok(feedbackTransitionError('duplicado', 'abierto') !== undefined, 'a duplicado never reopens')
+  assert.ok(feedbackTransitionError('duplicado', 'resuelto') !== undefined)
+  assert.ok(feedbackTransitionError('duplicado', 'descartado') !== undefined)
+})
+
+test('LOOP FASE 1 append (duplicate_of): the record is created duplicado (terminal, ACL-free) + evidence MERGED into the canonical tail (emisor + origen) + related[] cross-link', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const store = await FeedbackStore.open(stateDir)
+    const canonical = await store.append({ emisor: 'worker-1', tipo: 'fallo', severidad: 'alto', resumen: 'network timeout on the register sync', evidencia: 'trace-A' })
+    assert.equal(canonical.id, 'fb-0')
+    const dup = await store.append({ emisor: 'worker-2', tipo: 'fallo', severidad: 'alto', resumen: 'network timeout on the register sync', evidencia: 'trace-B', duplicate_of: 'fb-0' })
+    assert.equal(dup.id, 'fb-1')
+    assert.equal(dup.estado, 'duplicado', 'the dup is created TERMINAL duplicado')
+    assert.equal(dup.duplicate_of, 'fb-0', 'duplicate_of points to the canonical')
+    assert.deepEqual(dup.related, ['fb-0'], 'the dup cross-links the canonical')
+    // The canonical tail: the merged evidence (emisor + origen fb-XXX) + the cross-link.
+    const canonicalTail = store.get('fb-0')
+    assert.ok(canonicalTail.related.includes('fb-1'), 'the canonical cross-links the dup')
+    assert.ok(canonicalTail.evidencia.includes('trace-A'), 'the canonical keeps its own evidence')
+    assert.ok(canonicalTail.evidencia.includes('trace-B'), 'the dup evidence is appended to the canonical evidencia')
+    assert.ok(canonicalTail.evidencia.includes('origen fb-1'), 'the merge note names the origin (fb-XXX)')
+    assert.ok(canonicalTail.evidencia.includes('worker-2'), 'the merge note names the dup emisor')
+    // Append-only: 3 lines (canonical create, dup create, canonical merge tail).
+    const lines = (await readFile(resolveFeedbackPath(stateDir), 'utf8')).split('\n').filter(Boolean)
+    assert.equal(lines.length, 3)
+    assert.equal(new Set(lines.map((l) => JSON.parse(l).id)).size, 2, 'two logical records, shared file')
+    // duplicate_of format validation + unknown canonical.
+    await assert.rejects(() => store.append({ emisor: 'x', tipo: 'fallo', severidad: 'medio', resumen: 'y', duplicate_of: 'nope' }), TypeError)
+    await assert.rejects(() => store.append({ emisor: 'x', tipo: 'fallo', severidad: 'medio', resumen: 'y', duplicate_of: 'fb-99' }), /not a live feedback record/)
+  })
+})
+
+test('LOOP FASE 1 update (duplicate_of, QH): → duplicado + cerrado_por + evidence merged into the canonical tail; self/unknown canonical rejected; terminal blocks reopen', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const store = await FeedbackStore.open(stateDir)
+    const canonical = await store.append({ emisor: 'w1', tipo: 'mejora', severidad: 'bajo', resumen: 'suggestion for the review flow', evidencia: 'idea-1' })
+    const dup = await store.append({ emisor: 'w2', tipo: 'mejora', severidad: 'bajo', resumen: 'suggestion for the review flow', evidencia: 'idea-2' })
+    assert.equal(canonical.id, 'fb-0')
+    assert.equal(dup.id, 'fb-1')
+    const marked = await store.update('fb-1', { duplicate_of: 'fb-0' }, { cerradoPor: 'quality-head' })
+    assert.equal(marked.estado, 'duplicado')
+    assert.equal(marked.duplicate_of, 'fb-0')
+    assert.equal(marked.cerrado_por, 'quality-head', 'terminal stamps cerrado_por')
+    assert.ok(marked.related.includes('fb-0'))
+    const canonicalTail = store.get('fb-0')
+    assert.ok(canonicalTail.evidencia.includes('idea-2'), 'the dup evidence merged into the canonical tail')
+    assert.ok(canonicalTail.related.includes('fb-1'))
+    await assert.rejects(() => store.update('fb-0', { duplicate_of: 'fb-0' }, { cerradoPor: 'quality-head' }), /cannot be a duplicate of itself/)
+    await assert.rejects(() => store.update('fb-1', { duplicate_of: 'fb-99' }, { cerradoPor: 'quality-head' }), /not a live feedback record/)
+    await assert.rejects(() => store.update('fb-1', { estado: 'abierto' }), /terminal/, 'a duplicado never transitions again')
+  })
+})
+
+test('LOOP FASE 1 update metadata: triage_owner / related (REPLACE) / resolution / frozen are recorded on the tail (append-only)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const store = await FeedbackStore.open(stateDir)
+    await store.append({ emisor: 'w1', tipo: 'fallo', severidad: 'medio', resumen: 'x' })
+    await store.append({ emisor: 'w2', tipo: 'fallo', severidad: 'medio', resumen: 'y' })
+    const triaged = await store.update('fb-0', { estado: 'en-estudio', triage_owner: 'quality-head' })
+    assert.equal(triaged.triage_owner, 'quality-head')
+    assert.equal(triaged.estado, 'en-estudio')
+    const linked = await store.update('fb-0', { related: ['fb-1'] })
+    assert.deepEqual(linked.related, ['fb-1'], 'related REPLACES the list')
+    const closed = await store.update('fb-0', { estado: 'resuelto', resolution: 'fixed by delivery m-3450 (host lane)' }, { cerradoPor: 'quality-head' })
+    assert.equal(closed.resolution, 'fixed by delivery m-3450 (host lane)')
+    assert.equal(closed.cerrado_por, 'quality-head')
+    const frozen = await store.update('fb-1', { frozen: true })
+    assert.equal(frozen.frozen, true)
+    const unfrozen = await store.update('fb-1', { frozen: false })
+    assert.equal(unfrozen.frozen, false, 'frozen: false explicitly clears the flag')
+    // Append-only: fb-0 = create + en-estudio + related + resuelto (4); fb-1 = create + frozen + unfrozen (3).
+    const lines = (await readFile(resolveFeedbackPath(stateDir), 'utf8')).split('\n').filter(Boolean)
+    assert.equal(lines.length, 7, 'every transition is a new tail line')
+  })
+})
+
+test('LOOP FASE 1 dedupe: ≥2 shared significant tokens = candidate; tipo/severidad refine the score; ≤3; stopwords never count', () => {
+  const pool = [
+    fbRecord(0, { resumen: 'worker leak crashes the batch storage', estado: 'abierto', severidad: 'medio' }),
+    fbRecord(1, { resumen: 'worker leak in the retry loop blocks the batch', estado: 'en-estudio', severidad: 'alto' }),
+    fbRecord(2, { resumen: 'database connection drops randomly', estado: 'abierto', severidad: 'critico' }),
+    fbRecord(3, { resumen: 'suggestion: improve the report layout', estado: 'resuelto', tipo: 'mejora', severidad: 'bajo' })
+  ]
+  const candidates = findDuplicateCandidates(pool, { resumen: 'worker leak in the retry loop crashes the batch', tipo: 'fallo', severidad: 'alto' })
+  assert.ok(candidates.length >= 1 && candidates.length <= 3, 'candidates ≤ 3 (non-blocking)')
+  assert.equal(candidates[0]['fb-id'], 'fb-1', 'exact tipo+severidad refinement puts fb-1 on top (5 shared + 2 refiners)')
+  assert.equal(candidates[0].estado, 'en-estudio')
+  assert.ok(candidates[0].score >= 2)
+  // Fewer than 2 shared significant tokens → no candidate.
+  assert.deepEqual(findDuplicateCandidates(pool, { resumen: 'menu wording', tipo: 'mejora', severidad: 'bajo' }), [])
+  // Stopword-only resumen / stopwords never count as significant tokens.
+  assert.deepEqual(findDuplicateCandidates(pool, { resumen: 'de la el en y a', tipo: 'fallo', severidad: 'medio' }), [])
+  // max cap is honored (3 identical summaries → only 3 of them).
+  const noisy = [
+    fbRecord(0, { resumen: 'alpha bravo charlie delta echo', estado: 'abierto' }),
+    fbRecord(1, { resumen: 'alpha bravo charlie delta foxtrot', estado: 'abierto' }),
+    fbRecord(2, { resumen: 'alpha bravo charlie delta golf', estado: 'abierto' }),
+    fbRecord(3, { resumen: 'alpha bravo charlie delta hotel', estado: 'abierto' })
+  ]
+  const capped = findDuplicateCandidates(noisy, { resumen: 'alpha bravo charlie delta india', tipo: 'fallo', severidad: 'medio' })
+  assert.equal(capped.length, 3, 'max 3 candidates (the ≤3 GitHub/Linear pattern)')
+})
+
+test('LOOP FASE 1: dedupeCandidates searches the LIVE backlog AND the ARCHIVE (spec §4a "abiertos + archivados")', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const filePath = resolveFeedbackPath(stateDir)
+    const records = [
+      fbRecord(0, { resumen: 'alpha beta gamma delta', estado: 'abierto', updatedAt: 1700000000100 }),
+      fbRecord(1, { resumen: 'epsilon zeta eta theta', estado: 'abierto', updatedAt: 1700000000200 }),
+      fbRecord(2, { resumen: 'kappa lambda mu nu xi omicron special', estado: 'resuelto', cerrado_por: 'quality-head', updatedAt: 1700000000000 })
+    ]
+    await writeFile(filePath, jsonl(records), 'utf8')
+    const store = await FeedbackStore.open(stateDir, { liveCap: 2 })
+    assert.equal(store.get('fb-2'), undefined, 'fb-2 was pruned to the archive (3 lines > cap 2, oldest terminal)')
+    const candidates = await store.dedupeCandidates({ resumen: 'kappa lambda mu nu xi omicron special', tipo: 'fallo', severidad: 'medio' })
+    assert.equal(candidates.length, 1)
+    assert.equal(candidates[0]['fb-id'], 'fb-2', 'the ARCHIVED record stays searchable by the dedupe')
+    assert.equal(candidates[0].estado, 'resuelto')
+    // A duplicado record is excluded from the pool (a linked dup is noise as a suggestion).
+    await store.append({ emisor: 'w3', tipo: 'fallo', severidad: 'medio', resumen: 'alpha beta gamma delta', duplicate_of: 'fb-0' })
+    const noDupPool = await store.dedupeCandidates({ resumen: 'alpha beta gamma delta', tipo: 'fallo', severidad: 'medio' })
+    assert.equal(noDupPool.some((c) => c['fb-id'] === 'fb-2'), false, 'only fb-0 is a candidate for fb-3 itself... (no dup in the pool)')
+  })
+})
+
+test('LOOP FASE 1 bridge: every OPEN create emits ONE normalized line (6 fields + destino) to feedback-bridge.jsonl; a duplicado does NOT queue', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const store = await FeedbackStore.open(stateDir)
+    const record = await store.append({ emisor: 'worker-1', tipo: 'fallo', severidad: 'medio', resumen: 'bridge test' })
+    assert.equal(record.estado, 'abierto')
+    const lines = (await readFile(resolveFeedbackBridgePath(stateDir), 'utf8')).split('\n').filter(Boolean)
+    assert.equal(lines.length, 1)
+    const line = JSON.parse(lines[0])
+    assert.equal(line['fb-id'], 'fb-0')
+    assert.equal(line.tipo, 'fallo')
+    assert.equal(line.severidad, 'medio')
+    assert.equal(line.resumen, 'bridge test')
+    assert.equal(line.evidencia_ref, 'feedback.jsonl fb-0 tail')
+    assert.equal(line.solicitante, 'worker-1')
+    assert.match(line.fecha, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+    assert.deepEqual(line.destino, ['host', 'internal-programming-head'])
+    assert.equal(FEEDBACK_BRIDGE_FILE, 'feedback-bridge.jsonl', 'the bridge file name is exported')
+    // A duplicate create (duplicado — terminal) emits NO bridge line: line 2 is the NEW abierto canonical, not the dup.
+    const canonical = await store.append({ emisor: 'w1', tipo: 'fallo', severidad: 'alto', resumen: 'dup bridge test' })
+    const dup = await store.append({ emisor: 'w2', tipo: 'fallo', severidad: 'alto', resumen: 'dup bridge test', duplicate_of: canonical.id })
+    assert.equal(dup.estado, 'duplicado')
+    const after = (await readFile(resolveFeedbackBridgePath(stateDir), 'utf8')).split('\n').filter(Boolean)
+    assert.equal(after.length, 2, 'the duplicado emits no line; the new abierto canonical does')
+    assert.equal(JSON.parse(after[1])['fb-id'], 'fb-1')
+  })
+})
+
+test('LOOP FASE 1 stale: 14d abierto → nudge QD; 30d en-estudio → nudge triage_owner; 90d medio/bajo → descartado(stale); critico/alto NEVER stale-close; frozen escapes', () => {
+  const now = 1700000000000 + 100 * 86_400_000 // +100 days
+  assert.equal(feedbackStaleNudge(fbRecord(0, { estado: 'abierto', updatedAt: now }), now).kind, 'none', 'fresh record within the windows')
+  const nudgeQd = feedbackStaleNudge(fbRecord(1, { estado: 'abierto', updatedAt: now - 14 * 86_400_000 }), now)
+  assert.equal(nudgeQd.kind, 'nudge-qd', '14d abierto sin triage → nudge QD')
+  const nudgeOwner = feedbackStaleNudge(fbRecord(2, { estado: 'en-estudio', triage_owner: 'quality-head', updatedAt: now - 30 * 86_400_000 }), now)
+  assert.equal(nudgeOwner.kind, 'nudge-owner', '30d en-estudio sin movimiento → nudge triage_owner')
+  assert.ok(nudgeOwner.reason.includes('quality-head'), 'the nudge names the triage_owner')
+  assert.equal(feedbackStaleNudge(fbRecord(3, { estado: 'abierto', severidad: 'medio', updatedAt: now - 90 * 86_400_000 }), now).kind, 'stale-descartado', '90d sin actividad + medio → descartado(stale)')
+  const critico = feedbackStaleNudge(fbRecord(4, { estado: 'abierto', severidad: 'critico', updatedAt: now - 90 * 86_400_000 }), now)
+  assert.notEqual(critico.kind, 'stale-descartado', 'critico is NEVER stale-closed (still nudges QD at 14d)')
+  assert.equal(critico.kind, 'nudge-qd')
+  assert.equal(feedbackStaleNudge(fbRecord(5, { estado: 'en-estudio', severidad: 'alto', updatedAt: now - 90 * 86_400_000 }), now).kind, 'nudge-owner', 'alto en-estudio: nudge owner at 30d, never stale-close')
+  assert.equal(feedbackStaleNudge(fbRecord(6, { estado: 'abierto', severidad: 'medio', updatedAt: now - 90 * 86_400_000, frozen: true }), now).kind, 'none', 'frozen escape — never stale-closed nor nudged')
+  assert.equal(STALE_REVIEW_ABIERTO_DAYS, 14)
+  assert.equal(STALE_REVIEW_EN_ESTUDIO_DAYS, 30)
+  assert.equal(STALE_REVIEW_INACTIVITY_DAYS, 90)
+})
+
+test('LOOP FASE 1 auto-close by reference: extractFeedbackReferences parses fb-NNN with the stable pattern (unique, in order)', () => {
+  assert.deepEqual(extractFeedbackReferences('delivery m-3450 resolves fb-13 and fb-7 (also fixes FB-13)'), ['fb-13', 'fb-7'])
+  assert.deepEqual(extractFeedbackReferences('no references here'), [])
+  assert.deepEqual(extractFeedbackReferences('fb-0 fb-1 fb-0'), ['fb-0', 'fb-1'])
+})
+
+test('LOOP FASE 1 compatibility: OLD records (without the new fields) open, transition and re-open cleanly — the new fields stay optional', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const filePath = resolveFeedbackPath(stateDir)
+    await writeFile(filePath, jsonl([
+      fbRecord(0, { estado: 'abierto', updatedAt: 1700000000001 }),
+      fbRecord(1, { estado: 'resuelto', cerrado_por: 'quality-head', updatedAt: 1700000000002 })
+    ]), 'utf8')
+    const store = await FeedbackStore.open(stateDir)
+    assert.equal(store.size, 2)
+    assert.equal(store.get('fb-0').duplicate_of, undefined, 'absent new fields are undefined')
+    assert.equal(Array.isArray(store.get('fb-0').related), false)
+    assert.equal(store.get('fb-0').triage_owner, undefined)
+    assert.equal(store.get('fb-0').resolution, undefined)
+    assert.equal(store.get('fb-0').frozen, undefined)
+    const closed = await store.update('fb-0', { estado: 'resuelto', resolution: 'done' }, { cerradoPor: 'quality-head' })
+    assert.equal(closed.resolution, 'done')
+    assert.equal(closed.cerrado_por, 'quality-head')
+    assert.equal(closed.triage_owner, undefined, 'old metadata is preserved as-is')
+    const reloaded = await FeedbackStore.open(stateDir)
+    assert.equal(reloaded.get('fb-0').resolution, 'done')
+    assert.equal(reloaded.size, 3, '1 old + 1 transition + 1 old = 3 lines')
+  })
+})
+
+test('LOOP FASE 1 prune: a duplicado is TERMINAL → pruned to the archive like resuelto/descartado', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const filePath = resolveFeedbackPath(stateDir)
+    const records = [
+      fbRecord(0, { estado: 'duplicado', duplicate_of: 'fb-9', updatedAt: 1700000000100 }),
+      fbRecord(1, { estado: 'abierto', updatedAt: 1700000000200 })
+    ]
+    await writeFile(filePath, jsonl(records), 'utf8')
+    const store = await FeedbackStore.open(stateDir, { liveCap: 1 })
+    assert.equal(store.get('fb-0'), undefined, 'the oldest TERMINAL duplicado is evicted to the archive')
+    assert.equal(store.get('fb-1').estado, 'abierto')
+    const archive = (await readFile(resolveFeedbackArchivePath(stateDir), 'utf8')).split('\n').filter(Boolean)
+    assert.equal(JSON.parse(archive[0]).estado, 'duplicado')
+    assert.equal(JSON.parse(archive[0]).duplicate_of, 'fb-9', 'the full evicted duplicado line is preserved')
+  })
 })

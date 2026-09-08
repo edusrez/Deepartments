@@ -40,7 +40,7 @@ function assertLosslessJsonAccepted(value) {
 }
 
 import { loadMessageRecords, parseDeliveryRows, resolveDeliveriesPath, resolveMessagesPath, deliveryStatus, needsRedelivery } from '../lib/messages-store.js'
-import { resolveFeedbackPath, loadFeedbackRecords } from '../lib/feedback.js'
+import { resolveFeedbackPath, loadFeedbackRecords, resolveFeedbackBridgePath } from '../lib/feedback.js'
 import { compressZstdFrame, encodeSegment } from '../lib/session-cleanup.js'
 import { buildSleepJournalMessage, buildWakePackMessage, buildWakePack, buildPresenceMessage, presenceGuidance, buildDepartmentsDirectory, DIRECTORY_ACL_NOTE, HOST_WAKE_ROUTINE_TEXT, computeHostSleepSurfacePlan, pinHostSessionTitle, readDurableHostEntries, pickLiveHostEntry, analyzeDurableHostRegistry, reconcileDurableHostRegistry, findRotationTerminal, hasRotatedToCycle, analyzeDurablePostsRegistry, reconcileDurablePostsRegistry, dispatchDeepartmentsEndpoint, askUserGuardReason, readPresenceStateFile, writePresenceStateFile, parseCronSchedule, cronMatches, nextCronFire, cronIsDue, CRON_DESYNC_WINDOW_MIN, readCalendarStateFile, writeCalendarStateFile, readJobRunsStateFile, writeJobRunsStateFile, runAgendaSchedulerTick, captureSchedulerAutoRunFailure, schedulerAutoRunKey, readAgendaJobs, parseJobDefFrontmatter, jobDirFor, readJobDefinitionFile, REPO_ROOT, resolveParallelMonitorConfig, DEFAULT_PARALLEL_MONITORS, readParallelMonitorsState, writeParallelMonitorsState, runParallelMonitorTick, createParallelMonitorDaemon, PARALLEL_FRESH_WINDOW_MS, deptExecDenyReason, DEPT_EXEC_DEFAULT_ROOTS, isStablePath, isReadOnlySystemctl, isStableHomeGranted, readPostErrorsFile, appendPostError, readHealthHeartbeatFile, writeHealthHeartbeatFile, readHealthAlertsState, writeHealthAlertsState, appendHealthAlertAudit, scanPostErrorFindings, scanDeliveryFindings, scanHealthCatchup, createDeliveryRowsTailReader, readDeliveryRowsFull, buildHealthAlertFrame, runHealthDaemonTick, HEALTH_ERROR_WINDOW_MS, HEALTH_DEDUPE_WINDOW_MS, HEALTH_CATCHUP_WINDOW_MS, HEALTH_ALERTS_MAX_LINES, POST_ERRORS_FILE, POST_ERRORS_MAX_LINES, POST_ERRORS_ARCHIVE_FILE, POST_ERRORS_ARCHIVE_MAX_LINES, readPostErrorsArchiveFile, buildPostSnapshot, scanStalledPosts, scanTurnErrorCaptures, readTurnErrorsState, writeTurnErrorsState, TURN_ERROR_FRESH_WINDOW_MS, TURN_ERROR_CAPTURE_MAX_TAIL, auditPresetText, readConfigPresetMarkers, appendConfigPresetMarker, scanConfigPresetFindings, CONFIG_PRESETS_FILE, computeInboxTsByPost, STALE_LIVE_DEFAULT_MINUTES, POST_RECENT_ACTIVITY_WINDOW_MS, scanHostWaits, buildSystemWaitFrame, buildHeartbeatSection, resolveSystemWaitMs, SYSTEM_WAIT_DEFAULT_MS, readInboxByPost, scanInterruptedTurn, reconcileInterruptedPosts, INTERRUPTED_POST_KEY_PREFIX, postErrorClass, isSessionNotFoundError, appendPostErrorDeduped, POST_ERROR_CLASS_SESSION_NOT_FOUND, POST_ERROR_RECORD_KEY_PREFIX, errorIdentityHash, toJsonSafe, jsonSafeMessageSource, sanitizePromptLiterals, resolveProviderAdapterBootFindings, providerAdapterEndpointDrift, parseLlmPiAiProviderSettings, PROVIDER_ADAPTER_CHECK_POST_ID, safeInterrupt, readInterruptState, writeInterruptState, INTERRUPT_COOLDOWN_MS, INTERRUPT_COOLDOWN_KEY_PREFIX, INTERRUPT_COOLDOWN_FILE, markHostMaterializeFailure, readMaterializeState, writeMaterializeState, resetHostMaterializeFailures, MATERIALIZE_QUARANTINE_N, MATERIALIZE_QUARANTINE_MS, MATERIALIZE_STATE_FILE, POOLER_STATE_FILE, POOLER_CAPACITY_KEY_CRITICAL, POOLER_CAPACITY_KEY_WARNING, POOLER_CAPACITY_KEY_PROBE_FAILED, readPoolerStateFile, scanPoolerCapacity, QI_SILENCE_STATE_FILE, QI_SILENCE_KEY, QI_SILENCE_CENSUS_KEY, QI_SILENCE_PRIMED_MS, readQiSilenceState, writeQiSilenceState, qiSilenceMinRetiresForRate, scanQiSilence, scanSystemIdle, readSystemIdleState, writeSystemIdleState, SYSTEM_IDLE_DEFAULT_WINDOW_MS, SYSTEM_IDLE_STATE_FILE, SYSTEM_IDLE_KEY, scanContextThreshold, contextThresholdKey, CONTEXT_THRESHOLD_DEFAULT, CONTEXT_THRESHOLD_DEFAULT_POLL_MS, QUALITY_INSPECT_WORKER_RETIRED_PREFIX, scanMissionStalled, MISSION_STALL_DEFAULT_MS, missionStallKey, scanMainRed, MAIN_RED_DEFAULT_POLL_MS, MAIN_RED_KEY_PREFIX, mainRedKey, MAIN_RED_STATE_FILE, readMainRedState, writeMainRedState, MAIN_RED_DEFAULT_LOCKS, buildMainRedState, scanMissionQueue, MISSION_QUEUE_DEFAULT_LIMIT, MISSION_QUEUE_DEFAULT_PERSIST_MS, MISSION_QUEUE_KEY_PREFIX, missionQueueKey, MISSION_QUEUE_STATE_FILE, readMissionQueueState, writeMissionQueueState, RESTART_REGISTRY_FILE, RESTART_REGISTRY_SEED_ROWS, readRestartRegistry, seedRestartRegistry, reconcileRestartRegistry, buildRestartDigest, CAPACITY_GATE_STATE_FILE, CAPACITY_GATE_TRANSITION_KEY, capacityGateDedupeKey, readCapacityGateState, writeCapacityGateState, buildCapacityGateFrame, turnErrorNotifyClass, buildTurnErrorNotifyFrame, readTurnEndNotifyState, writeTurnEndNotifyState, TURN_END_NOTIFY_STATE_FILE, scanWorkRegisterIdle, parseWorkRegisterItems, WORK_REGISTER_IDLE_KEY, WORK_REGISTER_IDLE_STATE_FILE, WORK_REGISTER_IDLE_DEFAULT_QUIET_MS, WORK_REGISTER_IDLE_GATED_SECTION_RE, WORK_REGISTER_IDLE_MAX_LISTED, readWorkRegisterIdleState, writeWorkRegisterIdleState } from '../lib/invoke.js'
 import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../lib/role-orient.js'
@@ -19911,6 +19911,150 @@ test('dshd-feedback_update: QH-only terminal transition (cerrado_por), head-only
       assert.ok(workerCtx.tools.get('dept_feedback', workerKey), 'a worker still owns the universal dept_feedback emit')
       assert.equal(workerCtx.tools.get('dept_feedback_list', workerKey), undefined, 'a worker toolset has NO dept_feedback_list (fb-18)')
       assert.equal(workerCtx.tools.get('dept_feedback_update', workerKey), undefined, 'a worker toolset has NO dept_feedback_update (fb-18)')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+// --- dshd-feedback LOOP FASE 1 (RD spec §4 — dedupe / duplicado / bridge) -----
+
+test('dshd-feedback LOOP FASE 1: the create returns ≤3 NON-blocking dedupe candidates (search-before-create) alongside the record, and still passes', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir)
+    try {
+      const { head, headCtx, key } = qdResearchHead(env)
+      const signal = new AbortController().signal
+      const first = await headCtx.tools.get('dept_feedback', key).execute(
+        { tipo: 'fallo', severidad: 'medio', resumen: 'worker leak in the retry loop crashes the batch' },
+        { agent: head, signal }
+      )
+      assert.equal(first.id, 'fb-0')
+      assert.deepEqual(first.candidates, [], 'an empty backlog → no candidates')
+      // A similar resumen: the create still goes through (NON-blocking) and
+      // suggests the existing record (score = shared tokens + refiners).
+      const second = await headCtx.tools.get('dept_feedback', key).execute(
+        { tipo: 'fallo', severidad: 'alto', resumen: 'worker leak in the retry loop blocks the batch' },
+        { agent: head, signal }
+      )
+      assert.equal(second.id, 'fb-1')
+      assert.equal(second.estado, 'abierto', 'candidates never block the create')
+      assert.ok(Array.isArray(second.candidates) && second.candidates.length <= 3, '≤3 candidates')
+      const match = second.candidates.find((c) => c['fb-id'] === 'fb-0')
+      assert.ok(match, 'the similar first record is suggested as a duplicate candidate')
+      assert.equal(match.tipo, 'fallo')
+      assert.equal(match.estado, 'abierto')
+      assert.ok(match.score >= 2, 'the candidate carries the shared-token score')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('dshd-feedback LOOP FASE 1: duplicate_of create → duplicado (ACL-free terminal) + evidence MERGED into the canonical tail + related[] cross-link; no bridge line for the dup', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir)
+    try {
+      const { head, headCtx, key } = qdResearchHead(env)
+      const signal = new AbortController().signal
+      const canonical = await headCtx.tools.get('dept_feedback', key).execute(
+        { tipo: 'fallo', severidad: 'alto', resumen: 'network timeout on the register sync', evidencia: 'trace-A' },
+        { agent: head, signal }
+      )
+      assert.equal(canonical.id, 'fb-0')
+      const dup = await headCtx.tools.get('dept_feedback', key).execute(
+        { tipo: 'fallo', severidad: 'alto', resumen: 'network timeout on the register sync', evidencia: 'trace-B', duplicate_of: 'fb-0' },
+        { agent: head, signal }
+      )
+      assert.equal(dup.id, 'fb-1')
+      assert.equal(dup.estado, 'duplicado', 'the dup is created TERMINAL duplicado (ACL-free at creation)')
+      assert.equal(dup.duplicate_of, 'fb-0')
+      assert.deepEqual(dup.related, ['fb-0'])
+      assert.deepEqual(dup.candidates, [], 'an opted-in duplicate shows no candidates (the canonical choice is authoritative)')
+      // The canonical record (live view) carries the MERGED evidence tail + the cross-link.
+      const listed = await headCtx.tools.get('dept_feedback_list', key).execute({}, { agent: head, signal })
+      const canonicalRec = listed.items.find((r) => r.id === 'fb-0')
+      assert.ok(canonicalRec.evidencia.includes('trace-B'), 'the dup evidence is appended to the canonical')
+      assert.ok(canonicalRec.evidencia.includes('origen fb-1'), 'the merge note names the origin (fb-XXX)')
+      assert.ok(canonicalRec.related.includes('fb-1'), 'the canonical cross-links the dup')
+      // The bridge: line 1 = the canonical (abierto); the duplicado emits NO line.
+      const bridgeLines = (await readFile(resolveFeedbackBridgePath(stateDir), 'utf8')).split('\n').filter(Boolean)
+      assert.equal(bridgeLines.length, 1)
+      assert.equal(JSON.parse(bridgeLines[0])['fb-id'], 'fb-0')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('dshd-feedback LOOP FASE 1: every OPEN create emits ONE normalized bridge line (fb-id/tipo/severidad/resumen/evidencia_ref/solicitante/fecha/destino)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir)
+    try {
+      const { head, headCtx, key } = qdResearchHead(env)
+      const signal = new AbortController().signal
+      const record = await headCtx.tools.get('dept_feedback', key).execute(
+        { tipo: 'fallo', severidad: 'medio', resumen: 'bridge shape probe' },
+        { agent: head, signal }
+      )
+      const lines = (await readFile(resolveFeedbackBridgePath(stateDir), 'utf8')).split('\n').filter(Boolean)
+      assert.equal(lines.length, 1)
+      const line = JSON.parse(lines[0])
+      assert.equal(line['fb-id'], record.id)
+      assert.equal(line.tipo, 'fallo')
+      assert.equal(line.severidad, 'medio')
+      assert.equal(line.resumen, 'bridge shape probe')
+      assert.equal(line.evidencia_ref, `feedback.jsonl ${record.id} tail`)
+      assert.equal(line.solicitante, record.emisor)
+      assert.match(line.fecha, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+      assert.deepEqual(line.destino, ['host', 'internal-programming-head'])
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('dshd-feedback_update LOOP FASE 1: duplicado is QH-terminal (requires duplicate_of, evidence merged) + resolution is recorded; only QH may mark dup / set frozen', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir)
+    try {
+      const { head, headCtx, key } = qdResearchHead(env)
+      const { head: qh, headCtx: qhCtx, key: qhKey } = qdHead(env)
+      const signal = new AbortController().signal
+      const a = await headCtx.tools.get('dept_feedback', key).execute({ tipo: 'fallo', severidad: 'medio', resumen: 'record A' }, { agent: head, signal })
+      const b = await headCtx.tools.get('dept_feedback', key).execute({ tipo: 'fallo', severidad: 'medio', resumen: 'record B' }, { agent: head, signal })
+      // A non-QH head can NOT mark a duplicate (terminal authority stays QH).
+      await assert.rejects(
+        () => headCtx.tools.get('dept_feedback_update', key).execute({ id: a.id, duplicate_of: b.id }, { agent: head, signal }),
+        /only quality-head may mark feedback as a duplicate/, 'a head cannot mark a duplicate'
+      )
+      // duplicado without duplicate_of → rejected (even for QH — a dup needs its canonical).
+      await assert.rejects(
+        () => qhCtx.tools.get('dept_feedback_update', qhKey).execute({ id: b.id, estado: 'duplicado' }, { agent: qh, signal }),
+        /requires `duplicate_of`/, 'duplicado demands the canonical'
+      )
+      // QH marks a.id as duplicate of b.id → duplicado + cerrado_por + evidence merged.
+      const marked = await qhCtx.tools.get('dept_feedback_update', qhKey).execute({ id: a.id, duplicate_of: b.id }, { agent: qh, signal })
+      assert.equal(marked.estado, 'duplicado')
+      assert.equal(marked.duplicate_of, b.id)
+      assert.equal(marked.cerrado_por, 'quality-head')
+      const listed = await headCtx.tools.get('dept_feedback_list', key).execute({}, { agent: head, signal })
+      const bTail = listed.items.find((r) => r.id === b.id)
+      assert.ok(bTail.related.includes(a.id), 'the canonical cross-links the dup')
+      // A duplicado NEVER transitions again (terminal).
+      await assert.rejects(
+        () => qhCtx.tools.get('dept_feedback_update', qhKey).execute({ id: a.id, estado: 'abierto' }, { agent: qh, signal }),
+        /terminal/, 'duplicado is terminal (reopen never allowed)'
+      )
+      // The auto-close-by-reference flow: the QH closes with resolution + the delivery link.
+      const closed = await qhCtx.tools.get('dept_feedback_update', qhKey).execute({ id: b.id, estado: 'resuelto', resolution: 'fixed by delivery m-3450 (host lane)' }, { agent: qh, signal })
+      assert.equal(closed.resolution, 'fixed by delivery m-3450 (host lane)')
+      assert.equal(closed.cerrado_por, 'quality-head')
+      // frozen: only QH may set the lifecycle flag (the stale-review escape).
+      await assert.rejects(
+        () => headCtx.tools.get('dept_feedback_update', key).execute({ id: b.id, frozen: true }, { agent: head, signal }),
+        /only quality-head may set the `frozen`/, 'frozen is QH-only'
+      )
     } finally {
       await env.dispose()
     }

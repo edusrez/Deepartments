@@ -415,7 +415,21 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     // export-parity 325 is unchanged (BusDeliveryFailedGround is a TYPE-only
     // export — erased at runtime).
     // md5 8decad35… → f919606a15a542e940e14477b73b86a9.
-    assert.equal(md5, 'f919606a15a542e940e14477b73b86a9', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + the VALLE 09-07 FB-198 T1 failedGround observer + prepared (wake-failed) / failed:<ground> envelope + id-truth assertion (md5 f919606a…)')
+    // Zone md5 RE-FROZE LOOP FASE 1 (fb-loop mission, 2026-09-08 — the
+    // dshd-feedback programmatic span): INTENTIONAL in-span changes of the
+    // feedback tool definitions + schemas — (1) feedbackRecordSchema extends
+    // with the 5 LOOP fields (duplicate_of / related[] / triage_owner /
+    // resolution / frozen — all OPTIONAL, 0 reader break), (2) the NEW
+    // feedbackDedupeCandidateSchema + feedbackCreateSchema constants + the
+    // feedbackCreateRender (replaces feedbackRecordRender), (3) the create
+    // tool: search-before-create dedupe (≤3 NON-blocking `candidates` in the
+    // output) + the `duplicate_of` opt-in param, and (4) the update tool: the
+    // `duplicado` TERMINAL (QH-only, requires duplicate_of) + the
+    // `related`/`triage_owner`/`resolution`/`frozen` params (frozen QH-only)
+    // + the update render surface. The feedback store (dshd-feedback) is a
+    // DIFFERENT lock; the bridge emission lives in the store, NOT here. md5
+    // f919606a… → 9f233795da55d3e28c74b4629c9b2144.
+    assert.equal(md5, '9f233795da55d3e28c74b4629c9b2144', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + the VALLE 09-07 FB-198 T1 failedGround observer + prepared (wake-failed) / failed:<ground> envelope + id-truth assertion + the LOOP FASE 1 feedback dedupe/duplicado/bridge-adjacent tool span (md5 9f233795da55d3e28c74b4629c9b2144)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface

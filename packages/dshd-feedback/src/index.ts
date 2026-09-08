@@ -3,7 +3,8 @@
 // durable append-only feedback backlog `<stateDir>/feedback.jsonl` + the
 // archive `feedback-archive.jsonl` (non-destructive prune), the record schema
 // (m-371), the append-only state machine (abierto → en-estudio → resuelto |
-// descartado, reopen only en-estudio→abierto, NEVER from a terminal state), the
+// descartado | duplicado, reopen only en-estudio→abierto, NEVER from a
+// terminal state), the
 // live-cap prune (evict TERMINAL records to the archive, never delete a line),
 // and the paged surfacing list.
 //
@@ -41,8 +42,8 @@ export type FeedbackTipo = 'fallo' | 'mejora'
 /** Severity = priority ordering (critico > alto > medio > bajo). */
 export type FeedbackSeveridad = 'critico' | 'alto' | 'medio' | 'bajo'
 
-/** Backlog state. `resuelto`/`descartado` are TERMINAL. */
-export type FeedbackEstado = 'abierto' | 'en-estudio' | 'resuelto' | 'descartado'
+/** Backlog state. `resuelto`/`descartado`/`duplicado` are TERMINAL. */
+export type FeedbackEstado = 'abierto' | 'en-estudio' | 'resuelto' | 'descartado' | 'duplicado'
 
 /** One feedback record/transition line (m-371). A full record per line
  * (append-only — a transition is a NEW tail line with the SAME id). */
@@ -64,6 +65,21 @@ export interface FeedbackRecord {
   escalado?: boolean
   escalado_a?: string
   cerrado_por?: string
+  /** LOOP FASE 1 (RD spec §4): the canonical record this record is a duplicate
+   * of (estado `duplicado`); its evidence is MERGED into the canonical tail. */
+  duplicate_of?: string
+  /** Cross-links to related feedback ids (the duplicate links both ways). */
+  related?: string[]
+  /** The member id triaging the record (set when estado → en-estudio). */
+  triage_owner?: string
+  /** How/why the record was closed (recorded on terminal transitions — e.g.
+   * the delivery link that resolved it). */
+  resolution?: string
+  /** QH lifecycle flag (spec §4c): a `frozen` record is NEVER stale-closed
+   * nor nudged — the K8s `/lifecycle frozen` escape, a boolean flag (decided
+   * over a new estado: frozen is a lifecycle property, not a state-machine
+   * step; frozen records still flow abierto→en-estudio→terminal normally). */
+  frozen?: boolean
 }
 
 /** The create input: everything the caller authors; id/createdAt/updatedAt/
@@ -78,15 +94,35 @@ export interface FeedbackInput {
   event?: string
   evidencia?: string
   report_path?: string
+  /** LOOP FASE 1: OPT-IN duplicate creation — the canonical fb-id this record
+   * duplicates. When set, the record is created as estado `duplicado` (an
+   * ACL-free TERMINAL at creation — spec §4a.3: "el QD (o el emisor) lo marca
+   * duplicate_of en la creación") and its evidence is merged into the
+   * canonical tail (emisor + origen fb-XXX). */
+  duplicate_of?: string
 }
 
 /** The update input (append-only transition): each provided field becomes the
- * new tail line's value; estado follows the state machine. */
+ * new tail line's value; estado follows the state machine. LOOP FASE 1 adds
+ * the duplicate marking (`duplicate_of` → estado `duplicado` + evidence merge)
+ * and the new metadata fields. */
 export interface FeedbackUpdateInput {
   estado?: FeedbackEstado
   notas_qh?: string
   escalado?: boolean
   escalado_a?: string
+  /** Mark as duplicate: transitions the record to `duplicado` (a QH-terminal)
+   * and merges its evidence into the canonical tail (spec §4a.3). */
+  duplicate_of?: string
+  /** REPLACE the related[] cross-links (the caller passes the full list). */
+  related?: string[]
+  /** The member id triaging the record (set alongside estado → en-estudio). */
+  triage_owner?: string
+  /** How/why the record was closed (recorded on terminal transitions — the
+   * auto-close-by-reference flow records the delivery link here). */
+  resolution?: string
+  /** The QH lifecycle flag: true → never stale-closed nor nudged. */
+  frozen?: boolean
 }
 
 /** The list (surfacing) filters + paging. */
@@ -119,17 +155,20 @@ export interface FeedbackListResult {
 /** The severity ordering: HIGHER = more severe (sort desc). */
 export const SEVERITY_RANK: Record<FeedbackSeveridad, number> = { critico: 4, alto: 3, medio: 2, bajo: 1 }
 
-/** Whether an estado is TERMINAL (resolved/discarded — no further transitions). */
+/** Whether an estado is TERMINAL (resolved/discarded/duped — no further
+ * transitions). `duplicado` is the LOOP FASE 1 triage-terminal (Linear
+ * Canceled / K8s reference-and-close, RD spec §4a). */
 export function isTerminalEstado(estado: FeedbackEstado): boolean {
-  return estado === 'resuelto' || estado === 'descartado'
+  return estado === 'resuelto' || estado === 'descartado' || estado === 'duplicado'
 }
 
 /**
  * The append-only state machine transition rule (m-371): returns an error string
  * when `current → next` is ILLEGAL, `undefined` when allowed.
  *
- * Rule: `abierto`/`en-estudio` are OPEN (transitionable); `resuelto`/`descartado`
- * are TERMINAL — a terminal record NEVER transitions again (reopen is never
+ * Rule: `abierto`/`en-estudio` are OPEN (transitionable); `resuelto`/
+ * `descartado`/`duplicado` are TERMINAL — a terminal record NEVER transitions
+ * again (reopen is never
  * allowed from a terminal state). A transition to `abierto` (reopen) is only
  * legal from `en-estudio` (with new evidence — the "evidence" requirement is a
  * tool/review concern, surfaced here as a machine rule); `abierto → abierto` and
@@ -145,6 +184,175 @@ export function feedbackTransitionError(current: FeedbackEstado, next: FeedbackE
     return `reopen to "abierto" requires the current estado to be "en-estudio" (new evidence) — an "abierto" record with state "${current}" cannot be reopened`
   }
   return undefined
+}
+
+// ---------------------------------------------------------------------------
+// LOOP FASE 1 (2026-09-08, RD spec §4 — "mínimo viable profesional") — the
+// DEDUPE (search-before-create), the BRIDGE to the shared queue, and the
+// STALE review. All PURE helpers, no infra, no daemon: the QD can run the
+// stale review via a scheduled job; the bridge is append-only runtime state
+// the IPD register-sync absorbs into the WORK-REGISTER.
+// ---------------------------------------------------------------------------
+
+/** A duplicate-candidate suggestion (NON-blocking, ≤3 — the GitHub/Linear
+ * pattern; spec §4a). `fb-id` carries the candidate record id (the spec shape
+ * `{fb-id, resumen, tipo, severidad, estado, score}`). */
+export interface FeedbackDedupeCandidate {
+  'fb-id': string
+  resumen: string
+  tipo: FeedbackTipo
+  severidad: FeedbackSeveridad
+  estado: FeedbackEstado
+  score: number
+}
+
+/** ONE normalized bridge-to-queue line (spec §4b) appended to
+ * `<stateDir>/feedback-bridge.jsonl` for EVERY record created as `abierto`
+ * (a `duplicado` is terminal — nothing to queue). APPEND-ONLY: never edit a
+ * previous line; the file format is documented here + the department report. */
+export interface FeedbackBridgeLine {
+  'fb-id': string
+  tipo: FeedbackTipo
+  severidad: FeedbackSeveridad
+  resumen: string
+  evidencia_ref: string
+  solicitante: string
+  fecha: string
+  destino: readonly string[]
+}
+
+/** The bridge destination: the shared queue is consumed by host + IPD (the
+ * WORK-REGISTER sync); the QD notification stays severity-gated separately. */
+export const FEEDBACK_BRIDGE_DESTINO: readonly string[] = ['host', 'internal-programming-head']
+
+/** Bridge file name: `<stateDir>/feedback-bridge.jsonl` (runtime state — NOT
+ * the human docs/WORK-REGISTER.md, which IPD + host maintain daily). */
+export const FEEDBACK_BRIDGE_FILE = 'feedback-bridge.jsonl'
+
+/** Bridge file location: `<stateDir>/feedback-bridge.jsonl`. */
+export function resolveFeedbackBridgePath(stateDir: string): string {
+  return path.join(stateDir, FEEDBACK_BRIDGE_FILE)
+}
+
+/** Append ONE normalized bridge line for a created record (mkdir -p). */
+export async function appendFeedbackBridgeLine(stateDir: string, record: FeedbackRecord): Promise<void> {
+  const line: FeedbackBridgeLine = {
+    'fb-id': record.id,
+    tipo: record.tipo,
+    severidad: record.severidad,
+    resumen: record.resumen,
+    evidencia_ref: `${FEEDBACK_FILE} ${record.id} tail`,
+    solicitante: record.emisor,
+    fecha: new Date(record.createdAt).toISOString(),
+    destino: FEEDBACK_BRIDGE_DESTINO
+  }
+  const filePath = resolveFeedbackBridgePath(stateDir)
+  await mkdir(path.dirname(filePath), { recursive: true })
+  await appendFile(filePath, JSON.stringify(line) + '\n', 'utf8')
+}
+
+/** The dedupe STOPWORDS set (Spanish/English function words — "significant
+ * tokens" excludes these). Kept deliberately small — the lexer is documented
+ * and tuned by tests. */
+const DEDUPE_STOPWORDS = new Set([
+  'de', 'la', 'el', 'los', 'las', 'del', 'al', 'en', 'y', 'o', 'u', 'a', 'con', 'por', 'para', 'que', 'un', 'una', 'unos', 'unas', 'se', 'su', 'sus', 'es', 'son', 'este', 'esta', 'esto',
+  'the', 'a', 'an', 'of', 'to', 'for', 'and', 'or', 'in', 'on', 'at', 'with', 'from', 'is', 'are'
+])
+
+/** The dedupe lexer: lowercase, letters+digits tokens (`\p{L}\p{N}+`), unique,
+ * length ≥ 2, stopwords dropped. Day-1 is LEXICAL (embeddings = the future
+ * upgrade — GitHub/Linear precedent, RD spec §3). */
+function dedupeTokens(text: string): string[] {
+  const tokens = text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []
+  return [...new Set(tokens.filter((token) => token.length >= 2 && !DEDUPE_STOPWORDS.has(token)))]
+}
+
+/** Find ≤`max` duplicate candidates (default 3) among a record POOL: ≥2
+ * shared significant resumen tokens = a match; tipo/severidad equality
+ * REFINES the score (score = shared + tipo-equal + severidad-equal). The
+ * suggestions are NON-blocking — the create always proceeds. Deterministic:
+ * score desc, then updatedAt desc, then id desc. */
+export function findDuplicateCandidates(
+  records: readonly FeedbackRecord[],
+  input: { resumen: string; tipo: FeedbackTipo; severidad: FeedbackSeveridad },
+  opts: { max?: number } = {}
+): FeedbackDedupeCandidate[] {
+  const max = opts.max ?? 3
+  const inputTokens = dedupeTokens(input.resumen)
+  if (inputTokens.length < 2) return []
+  const inputSet = new Set(inputTokens)
+  const scoreOf = (record: FeedbackRecord): number => {
+    const shared = dedupeTokens(record.resumen).filter((token) => inputSet.has(token)).length
+    return shared < 2 ? -1 : shared + (record.tipo === input.tipo ? 1 : 0) + (record.severidad === input.severidad ? 1 : 0)
+  }
+  const matches = records.filter((record) => scoreOf(record) >= 2)
+  matches.sort((a, b) => (scoreOf(b) - scoreOf(a)) || (b.updatedAt - a.updatedAt) || b.id.localeCompare(a.id))
+  return matches.slice(0, max).map((record) => ({
+    'fb-id': record.id,
+    resumen: record.resumen,
+    tipo: record.tipo,
+    severidad: record.severidad,
+    estado: record.estado,
+    score: scoreOf(record)
+  }))
+}
+
+/** Stale-review window constants (RD spec §4c — adapted from the K8s
+ * stale bot to the org's scale). */
+export const STALE_REVIEW_ABIERTO_DAYS = 14
+export const STALE_REVIEW_EN_ESTUDIO_DAYS = 30
+export const STALE_REVIEW_INACTIVITY_DAYS = 90
+
+/** A single-record stale-review result (kind `none` = nothing due). */
+export interface FeedbackStaleNudge {
+  kind: 'none' | 'nudge-qd' | 'nudge-owner' | 'stale-descartado'
+  days: number
+  reason: string
+}
+
+/** Pure stale review for ONE record (exported per the mission: "exponer
+ * helpers puros de stale-check exportados + documentar el nudge" — the QD may
+ * trigger it by job; NO daemon day-1). Windows: 14d in `abierto` sin triage →
+ * nudge QD; 30d in `en-estudio` sin movimiento → nudge `triage_owner` (or QD
+ * when unset); 90d sin actividad y severidad ≠ critica/alto → `descartado`
+ * (stale) con nota de audit. A record with `frozen: true` NEVER stale-closes
+ * nor nudges (the `/lifecycle frozen` escape — a boolean flag, not an estado;
+ * decision documented). */
+export function feedbackStaleNudge(record: FeedbackRecord, now: number = Date.now()): FeedbackStaleNudge {
+  const days = Math.floor((now - record.updatedAt) / 86_400_000)
+  const open = record.estado === 'abierto' || record.estado === 'en-estudio'
+  const lowSeverity = record.severidad !== 'critico' && record.severidad !== 'alto'
+  if (record.frozen === true) {
+    return { kind: 'none', days, reason: 'frozen escape — marked frozen, never stale-closed nor nudged' }
+  }
+  if (days >= STALE_REVIEW_INACTIVITY_DAYS && open && lowSeverity) {
+    return { kind: 'stale-descartado', days, reason: `${days}d sin actividad y severidad ${record.severidad} (no critica/alto) → descartado(stale) con nota de audit` }
+  }
+  if (record.estado === 'abierto' && days >= STALE_REVIEW_ABIERTO_DAYS) {
+    return { kind: 'nudge-qd', days, reason: `${days}d en "abierto" sin triage → nudge a quality-head` }
+  }
+  if (record.estado === 'en-estudio' && days >= STALE_REVIEW_EN_ESTUDIO_DAYS) {
+    return { kind: 'nudge-owner', days, reason: `${days}d en "en-estudio" sin movimiento → nudge a ${record.triage_owner ?? 'quality-head (sin triage_owner)'}` }
+  }
+  return { kind: 'none', days, reason: 'dentro de los plazos de stale-review' }
+}
+
+/** Extract the `fb-<seq>` references from a text (the "Fixes #NN"-analog): the
+ * STABLE pattern the QD/IPD tooling parses delivery notes / bridge lines to
+ * detect which feedback records a delivery references (auto-close by
+ * reference — the QH then closes the record with `resolution` + the delivery
+ * link; QD keeps the terminal authority). Unique, in order of appearance. */
+export function extractFeedbackReferences(text: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const match of text.matchAll(/\bfb-(\d+)\b/gi)) {
+    const id = `fb-${match[1]}`
+    if (!seen.has(id)) {
+      seen.add(id)
+      out.push(id)
+    }
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------
@@ -315,8 +523,14 @@ export class FeedbackStore {
   /**
    * Append one NEW feedback record (the ACL-free write — ANY agent may emit
    * feedback). id `fb-<seq>`, createdAt/updatedAt = now, source default
-   * 'dshd-feedback', estado default 'abierto'. Flushed to disk AWAITED before
-   * the in-memory index updates (persist-before-deliver).
+   * 'dshd-feedback', estado default 'abierto'. LOOP FASE 1: when
+   * `duplicate_of` is provided, the record is created as estado `duplicado`
+   * (a TERMINAL triage state — ACL-free at creation, spec §4a.3) and its
+   * evidence is MERGED into the canonical record tail (emisor + origen
+   * fb-XXX — append-only, a NEW canonical tail; both stay cross-linked via
+   * `related[]`). Every record created as `abierto` emits a BRIDGE line to
+   * `<stateDir>/feedback-bridge.jsonl` (spec §4b). Flushed to disk AWAITED
+   * before the in-memory index updates (persist-before-deliver).
    */
   async append(input: FeedbackInput): Promise<FeedbackRecord> {
     this.validateInput(input)
@@ -330,17 +544,33 @@ export class FeedbackStore {
       source: input.source ?? 'dshd-feedback',
       tipo: input.tipo,
       severidad: input.severidad,
-      estado: 'abierto',
+      estado: input.duplicate_of !== undefined ? 'duplicado' : 'abierto',
       resumen: input.resumen
     }
     if (input.archivo_linea !== undefined) record.archivo_linea = input.archivo_linea
     if (input.event !== undefined) record.event = input.event
     if (input.evidencia !== undefined) record.evidencia = input.evidencia
     if (input.report_path !== undefined) record.report_path = input.report_path
+    if (input.duplicate_of !== undefined) {
+      const canonical = this.byId.get(input.duplicate_of)
+      if (canonical === undefined) {
+        throw new Error(`[deepartments] feedback: duplicate_of "${input.duplicate_of}" is not a live feedback record (the canonical must be live, not archived)`)
+      }
+      record.duplicate_of = canonical.id
+      record.related = [canonical.id]
+      await appendFeedbackRecord(this.filePath, record)
+      await this.mergeEvidenceIntoCandidate(canonical, record.id, record.emisor, record.evidencia, ts)
+      this.nextSeq = seq + 1
+      this.records.push(record)
+      this.byId.set(record.id, record)
+      await this.emitBridgeLine(record)
+      return record
+    }
     await appendFeedbackRecord(this.filePath, record)
     this.nextSeq = seq + 1
     this.records.push(record)
     this.byId.set(record.id, record)
+    await this.emitBridgeLine(record)
     return record
   }
 
@@ -348,26 +578,52 @@ export class FeedbackStore {
    * Append-only transition: apply an update to the LIVE record (the same id,
    * NEW tail line with a bumped `updatedAt`). Validates the state-machine
    * transition; `cerradoPor` (the QH) is stamped when the new estado is
-   * TERMINAL. Returns the new live record. Throws on an unknown id or an
-   * illegal transition.
+   * TERMINAL. LOOP FASE 1: `duplicate_of` marks the record as a duplicate
+   * (estado → `duplicado`, a QH-terminal — the evidence is merged into the
+   * canonical tail); `related` (REPLACE), `triage_owner`, `resolution` and
+   * `frozen` are the new metadata fields. Returns the new live record. Throws
+   * on an unknown id or an illegal transition.
    */
   async update(id: string, input: FeedbackUpdateInput, opts: { cerradoPor?: string } = {}): Promise<FeedbackRecord> {
     const current = this.byId.get(id)
     if (current === undefined) throw new Error(`[deepartments] feedback: no record with id "${id}"`)
-    const nextEstado = input.estado ?? current.estado
+    const duplicate_of = input.duplicate_of !== undefined && input.duplicate_of !== '' ? input.duplicate_of : undefined
+    const nextEstado = duplicate_of !== undefined ? 'duplicado' : (input.estado ?? current.estado)
     const transitionError = feedbackTransitionError(current.estado, nextEstado)
     if (transitionError !== undefined) {
       throw new Error(`[deepartments] feedback ${id}: ${transitionError}`)
+    }
+    let canonical: FeedbackRecord | undefined
+    if (duplicate_of !== undefined) {
+      canonical = this.byId.get(duplicate_of)
+      if (canonical === undefined) {
+        throw new Error(`[deepartments] feedback: duplicate_of "${duplicate_of}" is not a live feedback record (the canonical must be live, not archived)`)
+      }
+      if (canonical.id === id) {
+        throw new Error(`[deepartments] feedback: record "${id}" cannot be a duplicate of itself`)
+      }
     }
     const ts = Date.now()
     const next: FeedbackRecord = { ...current, updatedAt: ts, estado: nextEstado }
     if (input.notas_qh !== undefined) next.notas_qh = input.notas_qh
     if (input.escalado !== undefined) next.escalado = input.escalado
     if (input.escalado_a !== undefined) next.escalado_a = input.escalado_a
+    if (input.related !== undefined) next.related = input.related
+    if (input.triage_owner !== undefined) next.triage_owner = input.triage_owner
+    if (input.resolution !== undefined) next.resolution = input.resolution
+    if (input.frozen !== undefined) next.frozen = input.frozen
+    if (canonical !== undefined) {
+      next.duplicate_of = canonical.id
+      next.related = [...(next.related ?? [])]
+      if (!next.related.includes(canonical.id)) next.related.push(canonical.id)
+    }
     if (isTerminalEstado(nextEstado) && opts.cerradoPor !== undefined) next.cerrado_por = opts.cerradoPor
     await appendFeedbackRecord(this.filePath, next)
     this.records.push(next)
     this.byId.set(id, next)
+    if (canonical !== undefined) {
+      await this.mergeEvidenceIntoCandidate(canonical, id, current.emisor, current.evidencia, ts)
+    }
     return next
   }
 
@@ -400,6 +656,68 @@ export class FeedbackStore {
     const result: FeedbackListResult = { total, items: window, remaining }
     if (window.length > 0 && start + window.length < total) result.cursor = window[window.length - 1].id
     return result
+  }
+
+  /**
+   * LOOP FASE 1: the search-before-create DEDUPE — NON-blocking duplicate
+   * candidates (≤`max`, default 3) over the LIVE backlog (every live estado
+   * except `duplicado` — a linked dup is noise as a suggestion) AND THE
+   * ARCHIVE (`feedback-archive.jsonl` IS consulted, spec §4a "abiertos +
+   * archivados" — decided: yes, the archive is part of the searchable backlog;
+   * the store's byId view alone indexes live records, so the archive is read
+   * on demand here). Lexical: ≥2 shared significant resumen tokens (tipo/
+   * severidad refine the score). A missing/malformed archive degrades to the
+   * live pool (dedupe is best-effort suggestions — creates never block).
+   */
+  async dedupeCandidates(
+    input: { resumen: string; tipo: FeedbackTipo; severidad: FeedbackSeveridad },
+    opts: { max?: number } = {}
+  ): Promise<FeedbackDedupeCandidate[]> {
+    const live = [...this.byId.values()].filter((record) => record.estado !== 'duplicado')
+    let archived: FeedbackRecord[] = []
+    try {
+      archived = await loadFeedbackRecords(this.archivePath)
+    } catch {
+      archived = [] // a malformed archive must never break a create
+    }
+    return findDuplicateCandidates([...live, ...archived], input, opts)
+  }
+
+  /** LOOP FASE 1: the duplicate-merge — append the dup's evidence to the
+   * CANONICAL record as a NEW tail line (same estado — a no-op transition,
+   * append-only; the machine allows same-state tails) + the `related[]`
+   * cross-link, with emisor + origen fb-XXX (spec §4a.3). The canonical must
+   * be LIVE (an archived record cannot receive a tail — the create/update
+   * validate this before calling). */
+  private async mergeEvidenceIntoCandidate(canonical: FeedbackRecord, dupId: string, emisor: string, evidencia: string | undefined, ts: number): Promise<void> {
+    const mergeNote = evidencia !== undefined
+      ? `[evidencia de ${dupId} aportada por ${emisor} (origen ${dupId})]: ${evidencia}`
+      : `[${dupId} marcado como duplicado por ${emisor} (origen ${dupId})]`
+    const related = [...(canonical.related ?? [])]
+    if (!related.includes(dupId)) related.push(dupId)
+    const mergeTail: FeedbackRecord = {
+      ...canonical,
+      updatedAt: ts,
+      related,
+      evidencia: canonical.evidencia !== undefined ? `${canonical.evidencia}\n${mergeNote}` : mergeNote
+    }
+    await appendFeedbackRecord(this.filePath, mergeTail)
+    this.records.push(mergeTail)
+    this.byId.set(canonical.id, mergeTail)
+  }
+
+  /** LOOP FASE 1: the bridge line — emitted for every record CREATED as
+   * `abierto` (a `duplicado` is terminal — nothing to queue; decided and
+   * documented: "cada fb abierto emite una línea"). Best-effort: the record
+   * is durable regardless (the bridge is runtime state the IPD register-sync
+   * absorbs into the WORK-REGISTER). */
+  private async emitBridgeLine(record: FeedbackRecord): Promise<void> {
+    if (record.estado !== 'abierto') return
+    try {
+      await appendFeedbackBridgeLine(this.stateDir, record)
+    } catch (error: unknown) {
+      this.logger?.warn(`[deepartments] feedback bridge line for ${record.id} failed (non-fatal — the record is durable): ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   private load(records: FeedbackRecord[]): void {
@@ -483,6 +801,9 @@ export class FeedbackStore {
     }
     if (input.source !== undefined && input.source !== 'dshd-feedback' && input.source !== 'quality-inspect') {
       throw new TypeError(`dshd-feedback: unknown source "${String(input.source)}"`)
+    }
+    if (input.duplicate_of !== undefined && (typeof input.duplicate_of !== 'string' || !/^fb-\d+$/.test(input.duplicate_of))) {
+      throw new TypeError(`dshd-feedback: duplicate_of must be a canonical feedback id ("fb-<seq>"), got "${String(input.duplicate_of)}"`)
     }
   }
 }

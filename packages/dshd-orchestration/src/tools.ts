@@ -235,7 +235,7 @@ import {
 // terminal-estado predicate + the record/option types the 3 feedback tool
 // bodies use (dshd-feedback — no cycle).
 import { FeedbackStore, isTerminalEstado } from 'dshd-feedback'
-import type { FeedbackEstado, FeedbackInput, FeedbackListOptions, FeedbackListResult, FeedbackRecord, FeedbackSeveridad, FeedbackTipo, FeedbackUpdateInput } from 'dshd-feedback'
+import type { FeedbackDedupeCandidate, FeedbackEstado, FeedbackInput, FeedbackListOptions, FeedbackListResult, FeedbackRecord, FeedbackSeveridad, FeedbackTipo, FeedbackUpdateInput } from 'dshd-feedback'
 // The core delivery module (SUB-BATCH 4 — the bus/ACL/catalog/delivery seams
 // the bus-feedback tools + the Binder buckets dereference): the types of the
 // delivery-surface members the CUT4 zone consumes late.
@@ -5137,7 +5137,38 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       report_path: { type: 'string' },
       escalado: { type: 'boolean' },
       escalado_a: { type: 'string' },
-      cerrado_por: { type: 'string' }
+      cerrado_por: { type: 'string' },
+      duplicate_of: { type: 'string' },
+      related: { type: 'array', items: { type: 'string' } },
+      triage_owner: { type: 'string' },
+      resolution: { type: 'string' },
+      frozen: { type: 'boolean' }
+    }
+  } as const
+
+  /** LOOP FASE 1 — the NON-blocking duplicate-candidate suggestion shape
+   * (spec §4a: `{fb-id, resumen, tipo, severidad, estado, score}`, ≤3). */
+  const feedbackDedupeCandidateSchema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      'fb-id': { type: 'string', required: true },
+      resumen: { type: 'string', required: true },
+      tipo: { type: 'string', required: true },
+      severidad: { type: 'string', required: true },
+      estado: { type: 'string', required: true },
+      score: { type: 'number', required: true }
+    }
+  } as const
+
+  /** The create tool's output schema = the created FeedbackRecord + the
+   * duplicate `candidates` (the record-return contract is unchanged — the
+   * existing record fields + this ADDitive optional array). */
+  const feedbackCreateSchema = {
+    ...feedbackRecordSchema,
+    properties: {
+      ...feedbackRecordSchema.properties,
+      candidates: { type: 'array', items: feedbackDedupeCandidateSchema }
     }
   } as const
 
@@ -5148,16 +5179,17 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    * coordinator; the real emisor travels in the record + the body). */
   const feedbackTool = defineTool({
     name: 'dept_feedback',
-    description: 'Emit a quality/feedback record to the durable feedback backlog (the quality-head backlog). ANY agent — a worker, a department head, or the host — may send; the record.write is ACL-free. `tipo` = the kind ("fallo" | "mejora"); `severidad` = priority ("critico" | "alto" | "medio" | "bajo"); `resumen` = the one-line summary (required); `evidencia`/`archivo_linea` = optional supporting detail. The record is written to <stateDir>/feedback.jsonl with estado "abierto" (emisor = YOU) and the quality-head is notified SEVERITY-GATED: critico → wake + interrupt; alto → wake; medio/bajo/mejora → no-wake queue. The notification is ACL-legal (a worker forwards via its head; the real emisor is in the record + body). Returns the created FeedbackRecord (id included).',
+    description: 'Emit a quality/feedback record to the durable feedback backlog (the quality-head backlog). ANY agent — a worker, a department head, or the host — may send; the record.write is ACL-free. `tipo` = the kind ("fallo" | "mejora"); `severidad` = priority ("critico" | "alto" | "medio" | "bajo"); `resumen` = the one-line summary (required); `evidencia`/`archivo_linea` = optional supporting detail. The record is written to <stateDir>/feedback.jsonl with estado "abierto" (emisor = YOU) and the quality-head is notified SEVERITY-GATED: critico → wake + interrupt; alto → wake; medio/bajo/mejora → no-wake queue. The notification is ACL-legal (a worker forwards via its head; the real emisor is in the record + body). LOOP FASE 1 (search-before-create): before creating, the backlog (live open + archive) is searched LEXICALLY for duplicate candidates (≥2 shared significant resumen tokens; tipo/severidad refine the score) and up to 3 NON-blocking `candidates` are returned alongside the record. To OPT IN to a duplicate instead, pass `duplicate_of: <fb-id canónico>` — the record is created as estado "duplicado" (a terminal triage state, ACL-free at creation, spec §4a.3) and its evidence is MERGED into the canonical record tail (emisor + origen fb-XXX, cross-linked `related[]`). Every record created as "abierto" emits one normalized bridge line to <stateDir>/feedback-bridge.jsonl (the shared host+IPD queue; the severity gate above is ADDITIVE, never altered). Returns the created FeedbackRecord (id included) + the duplicate `candidates` array.',
     parameters: {
       tipo: { type: 'string', required: true, description: 'The feedback type: "fallo" (defect) | "mejora" (improvement).' },
       severidad: { type: 'string', required: true, description: 'The priority: "critico" | "alto" | "medio" | "bajo".' },
       resumen: { type: 'string', required: true, description: 'The one-line summary (non-empty).' },
       evidencia: { type: 'string', description: 'Optional supporting evidence/snippet.' },
-      archivo_linea: { type: 'string', description: 'Optional file:line reference (e.g. src/invoke.ts:1234).' }
+      archivo_linea: { type: 'string', description: 'Optional file:line reference (e.g. src/invoke.ts:1234).' },
+      duplicate_of: { type: 'string', description: 'OPT-IN duplicate creation (LOOP FASE 1): the canonical fb-id this record duplicates (e.g. "fb-13"). When set, the record is created as estado "duplicado" (ACL-free terminal at creation) and its evidence is merged into the canonical tail (emisor + origen fb-XXX).' }
     },
-    output: { schema: feedbackRecordSchema, render: feedbackRecordRender },
-    async execute(args, exec): Promise<FeedbackRecord> {
+    output: { schema: feedbackCreateSchema, render: feedbackCreateRender },
+    async execute(args, exec): Promise<FeedbackRecord & { candidates: FeedbackDedupeCandidate[] }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_feedback requires a calling agent (exec.agent was undefined)')
       const emisor = busMemberIdFor(agent.id as string)
@@ -5170,6 +5202,15 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       const archivo_linea = args.archivo_linea === undefined ? undefined : String(args.archivo_linea).trim()
       if (evidencia !== undefined && evidencia !== '') input.evidencia = evidencia
       if (archivo_linea !== undefined && archivo_linea !== '') input.archivo_linea = archivo_linea
+      const duplicateOfRaw = args.duplicate_of === undefined ? undefined : String(args.duplicate_of).trim()
+      if (duplicateOfRaw !== undefined && duplicateOfRaw !== '') input.duplicate_of = duplicateOfRaw
+      // LOOP FASE 1 — search-before-create (spec §4a): NON-blocking lexical
+      // candidates over the live open + archive backlog. Skipped when the
+      // emitter already opted in to a duplicate (the canonical choice is
+      // authoritative — the candidates would only be noise).
+      const candidates = duplicateOfRaw === undefined || duplicateOfRaw === ''
+        ? await store.dedupeCandidates({ resumen, tipo, severidad })
+        : []
       const record = await store.append(input)
       // R7 — notify quality-head severity-gated (fire-and-forget; the feedback
       // record is durable regardless of the notification outcome).
@@ -5201,7 +5242,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           ctx.logger.warn(`[deepartments] dept_feedback notification to quality-head failed (non-fatal — the feedback record is durable): ${error instanceof Error ? error.message : String(error)}`)
         }
       }
-      return record
+      return { ...record, candidates }
     }
   })
 
@@ -5264,19 +5305,28 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
 
   /** `dept_feedback_update` — append-only state transition (m-371). AUTHORITY:
    * only quality-head may move a record to a TERMINAL estado (resuelto |
-   * descartado — stamping `cerrado_por` = the caller); a non-QH head may set
-   * `en-estudio`; a reopen (estado → abierto) is only legal from `en-estudio`
-   * and ONLY for quality-head, never from a terminal state. Each change is a NEW
-   * tail line (same id, updatedAt, estado) — append-only, no in-place edit. */
+   * descartado | duplicado — stamping `cerrado_por` = the caller); a non-QH
+   * head may set `en-estudio`; a reopen (estado → abierto) is only legal from
+   * `en-estudio` and ONLY for quality-head, never from a terminal state. Each
+   * change is a NEW tail line (same id, updatedAt, estado) — append-only, no
+   * in-place edit. LOOP FASE 1: `duplicate_of` marks a record as a duplicate
+   * (→ `duplicado`, QH-only, evidence merged into the canonical tail);
+   * `related`/`triage_owner`/`resolution`/`frozen` are the new metadata
+   * fields (`frozen` is the QH-only stale-review escape). */
   const feedbackUpdateTool = defineTool({
     name: 'dept_feedback_update',
-    description: 'Transition the state of one durable feedback record (append-only): each change appends a NEW tail line with the SAME id, a bumped `updatedAt`, and the new `estado`. AUTHORITY (spec §4): only `quality-head` may pass a record to a TERMINAL estado (`resuelto` | `descartado` — it stamps `cerrado_por` = the caller); a department head (non-QH) may set `en-estudio`; a reopen (`estado` → `abierto`) is legal only from `en-estudio` (with new evidence) and ONLY for quality-head, and is NEVER allowed from a terminal state. `notas_qh`/`escalado`/`escalado_a` are metadata update fields. WORKER callers are rejected. Returns the updated FeedbackRecord.',
+    description: 'Transition the state of one durable feedback record (append-only): each change appends a NEW tail line with the SAME id, a bumped `updatedAt`, and the new `estado`. AUTHORITY (spec §4): only `quality-head` may pass a record to a TERMINAL estado (`resuelto` | `descartado` | `duplicado` — it stamps `cerrado_por` = the caller); a department head (non-QH) may set `en-estudio`; a reopen (`estado` → `abierto`) is legal only from `en-estudio` (with new evidence) and ONLY for quality-head, and is NEVER allowed from a terminal state. LOOP FASE 1 (RD spec §4): `duplicate_of` marks the record as a duplicate (estado → `duplicado`, QH-only — the record\'s evidence is merged into the canonical tail, emisor + origen fb-XXX); `related` (REPLACE the cross-links), `triage_owner` (the triage responsibility), `resolution` (how/why it was closed — the auto-close-by-reference flow records the delivery link here) and `frozen` (QH-only lifecycle flag: a frozen record is never stale-closed nor nudged — the K8s /lifecycle frozen escape) are the new metadata fields. `notas_qh`/`escalado`/`escalado_a` stay unchanged. WORKER callers are rejected. Returns the updated FeedbackRecord.',
     parameters: {
       id: { type: 'string', required: true, description: 'The feedback record id (fb-<seq>).' },
-      estado: { type: 'string', description: 'The target estado: "abierto" | "en-estudio" | "resuelto" | "descartado".' },
+      estado: { type: 'string', description: 'The target estado: "abierto" | "en-estudio" | "resuelto" | "descartado" | "duplicado" (duplicado requires `duplicate_of`).' },
       notas_qh: { type: 'string', description: 'Quality-head notes on the record.' },
       escalado: { type: 'boolean', description: 'Mark the record as escalated.' },
-      escalado_a: { type: 'string', description: 'Who/where the record was escalated to.' }
+      escalado_a: { type: 'string', description: 'Who/where the record was escalated to.' },
+      duplicate_of: { type: 'string', description: 'Mark this record as a duplicate of the canonical fb-id (QH-only: terminal transition to "duplicado" + evidence merged into the canonical tail).' },
+      related: { type: 'array', items: { type: 'string' }, description: 'REPLACE the related[] cross-link list (full array of fb-ids).' },
+      triage_owner: { type: 'string', description: 'The member id triaging this record (set alongside estado "en-estudio").' },
+      resolution: { type: 'string', description: 'How/why the record was closed (recorded on terminal transitions — auto-close by reference records the delivery link here, e.g. "fixed by delivery m-3450").' },
+      frozen: { type: 'boolean', description: 'QH-only lifecycle flag: true → never stale-closed nor nudged (the stale-review escape).' }
     },
     output: { schema: feedbackRecordSchema, render: feedbackUpdateRender },
     async execute(args, exec): Promise<FeedbackRecord> {
@@ -5298,15 +5348,34 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       if (estadoRaw !== '') {
         const estado = estadoRaw as FeedbackEstado
         if (isTerminalEstado(estado)) {
-          if (!isQh) throw new Error('[deepartments] dept_feedback_update: only quality-head may move feedback to a TERMINAL estado (resuelto | descartado)')
+          if (!isQh) throw new Error('[deepartments] dept_feedback_update: only quality-head may move feedback to a TERMINAL estado (resuelto | descartado | duplicado)')
         } else if (estado === 'abierto') {
           if (!isQh) throw new Error('[deepartments] dept_feedback_update: only quality-head may reopen feedback (en-estudio → abierto, with new evidence)')
         }
+        if (estado === 'duplicado' && (args.duplicate_of === undefined || String(args.duplicate_of).trim() === '')) {
+          throw new Error('[deepartments] dept_feedback_update: passing a record to "duplicado" requires `duplicate_of` (the canonical fb-id)')
+        }
         input.estado = estado
+      }
+      // LOOP FASE 1: the duplicate mark (QH-terminal; the store transitions to
+      // "duplicado" and merges the evidence into the canonical tail).
+      if (args.duplicate_of !== undefined) {
+        const dupOf = String(args.duplicate_of).trim()
+        if (dupOf !== '') {
+          if (!isQh) throw new Error('[deepartments] dept_feedback_update: only quality-head may mark feedback as a duplicate (terminal duplicate_of)')
+          input.duplicate_of = dupOf
+        }
       }
       if (args.notas_qh !== undefined) input.notas_qh = String(args.notas_qh)
       if (args.escalado !== undefined) input.escalado = args.escalado === true
       if (args.escalado_a !== undefined) input.escalado_a = String(args.escalado_a)
+      if (args.related !== undefined) input.related = Array.isArray(args.related) ? args.related.map((v) => String(v)) : [String(args.related)]
+      if (args.triage_owner !== undefined) input.triage_owner = String(args.triage_owner)
+      if (args.resolution !== undefined) input.resolution = String(args.resolution)
+      if (args.frozen !== undefined) {
+        if (!isQh) throw new Error('[deepartments] dept_feedback_update: only quality-head may set the `frozen` lifecycle flag (the stale-review escape)')
+        input.frozen = args.frozen === true
+      }
       return store.update(id, input, isQh ? { cerradoPor: memberId } : {})
     }
   })
@@ -5314,14 +5383,23 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   const feedbackEmitTools: readonly ReturnType<typeof defineTool>[] = [feedbackTool]
   const feedbackHeadTools: readonly ReturnType<typeof defineTool>[] = [feedbackListTool, feedbackUpdateTool]
 
-  /** Shared render for a single FeedbackRecord (create/update). */
-  function feedbackRecordRender(_args: unknown, value: FeedbackRecord) {
-    return [{ type: 'text', text: `feedback ${value.id} ${value.estado} (${value.severidad}/${value.tipo} from ${value.emisor}): ${value.resumen}${value.cerrado_por !== void 0 ? ` — closed by ${value.cerrado_por}` : ''}` } as const]
+  /** LOOP FASE 1 — the CREATE tool render: the record (id/estado, duplicate_of
+   * when marked) + the NON-blocking duplicate candidates (≤3) found BEFORE
+   * the create (search-before-create, spec §4a). */
+  function feedbackCreateRender(_args: unknown, value: FeedbackRecord & { candidates: FeedbackDedupeCandidate[] }) {
+    const base = `feedback ${value.id} ${value.estado} (${value.severidad}/${value.tipo} from ${value.emisor}): ${value.resumen}${value.cerrado_por !== void 0 ? ` — closed by ${value.cerrado_por}` : ''}${value.duplicate_of !== void 0 ? ` (duplicate_of ${value.duplicate_of})` : ''}`
+    const candidates = value.candidates ?? []
+    if (candidates.length === 0) return [{ type: 'text', text: `${base} — no duplicate candidates` } as const]
+    const lines = candidates.map((candidate) => `  - ${candidate['fb-id']} [${candidate.severidad}] ${candidate.tipo} ${candidate.estado} (score ${candidate.score}): ${candidate.resumen}`)
+    return [{ type: 'text', text: `${base}\nduplicate candidates (non-blocking, ≤3):\n${lines.join('\n')}` } as const]
   }
 
   /** Shared render for the update tool (append-only transition result). */
   function feedbackUpdateRender(_args: unknown, value: FeedbackRecord) {
-    return [{ type: 'text', text: `feedback ${value.id} → ${value.estado}${value.cerrado_por !== void 0 ? ` (closed by ${value.cerrado_por})` : ''}` } as const]
+    const extra: string[] = []
+    if (value.duplicate_of !== void 0) extra.push(`duplicate_of ${value.duplicate_of}`)
+    if (value.resolution !== void 0) extra.push(`resolution: ${value.resolution}`)
+    return [{ type: 'text', text: `feedback ${value.id} → ${value.estado}${value.cerrado_por !== void 0 ? ` (closed by ${value.cerrado_por})` : ''}${extra.length > 0 ? ` (${extra.join('; ')})` : ''}` } as const]
   }
 
   /** `send_message` — the unified plugin-owned tool (spec §4). NEVER registers
