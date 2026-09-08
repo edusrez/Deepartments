@@ -6614,7 +6614,10 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // is the SAME per-process id the heartbeat stamps above; REUSED, never
     // duplicated). Idempotent per boot; never throws.
     try {
-      await reconcileRestartRegistry(deps.stateDir, deps.bootId, nowMs)
+      // fb-43 §7 (2026-09-07): plumb the recovery cause — crashStreak > 0 (the
+      // previous boot died pre-tick) stamps `recovery pre-tick crash (streak N)`;
+      // 0/absent → 'unknown' (the QI-48 4-arg default). 1-line, 0 exports new.
+      await reconcileRestartRegistry(deps.stateDir, deps.bootId, nowMs, deps.crashStreak != null && deps.crashStreak > 0 ? `recovery pre-tick crash (streak ${deps.crashStreak})` : undefined)
     } catch (error: unknown) {
       deps.logger?.warn(`[deepartments] system-health: restart-registry reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
     }

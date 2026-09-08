@@ -15177,6 +15177,150 @@ test('fb-43 buildRestartDigest: renders the LAST N restarts with their cause (th
   assert.equal(buildRestartDigest([], 5), '(no restart-registry rows)', 'an empty registry degrades to the no-rows line')
 })
 
+// ---------------------------------------------------------------------------
+// fb-43 §7 (2026-09-07, ATRIBUCIÓN DE RESTARTS — the SANCTIONED backfill +
+// the recovery-cause plumbing). The design (reports/explore-deep/
+// 2026-09-07-fb43-attribution-design-4b3a89e3.md — Modo 1) delivers a ONE-SHOT
+// host-run rewrite script (scripts/backfill-restart-registry.mjs) whose PURE
+// logic the tests exercise over a COPY — the REAL live-file snapshot
+// (2026-09-07 12:33Z: header + 46 rows = 4 seeds + 42 UUID) embedded as the
+// fixture below (regenerate read-only after the live file grows; see the script
+// header). The runtime NEVER re-writes (append-only preserved); the tests never
+// fs the live stateDir; 0 new exports / 0 new imports (the frozen fb-43 symbols
+// at the top of this file already cover the zone).
+//
+// The SANCTIONED map (ledger QI-48 §1/§2 wording): 10 CONFIRMED UUIDs →
+// 14/46 rows attributed (~30%) after the backfill; the 4 seeds stay untouched
+// (already attributed); the 32 remaining rows stay 'unknown' DELIBERATELY
+// (22 pre-ventana + 4 f1/f2 ambiguas + 6 post-ceremonia — never invented
+// causes). The ARTERACTO429 wall-18:00 moment is NOT a registry row (never
+// booted) → NOT in the map (the no-invented-row discriminator).
+const FB43_REGISTRY_FIXTURE = `# restart-registry (fb-43, 2026-09-01): append-only daemon-boot audit {bootId, ts, cause}. Seeded ONCE with the 4 documented historical restarts; every later new boot appends cause='unknown' until attributed.
+{"bootId":"seed-1","ts":1788215460000,"cause":"switch flota glm"}
+{"bootId":"seed-2","ts":1788216600000,"cause":"reversión flota deepseek-v4-flash"}
+{"bootId":"seed-3","ts":1788240211000,"cause":"DESCONOCIDA (pendiente investigación)"}
+{"bootId":"seed-4","ts":1788242937000,"cause":"reload version-watch smart_restart canary"}
+{"bootId":"67725ff1-0ef7-4431-abf0-6538cc632b22","ts":1788311668653,"cause":"unknown"}
+{"bootId":"1f9a1df0-de42-4d02-bcd6-d56d655affed","ts":1788315796651,"cause":"unknown"}
+{"bootId":"2ef32418-3c26-4af6-8f3f-f783bd054911","ts":1788321475650,"cause":"unknown"}
+{"bootId":"1bb43887-fd29-47d6-8f85-e3457f7bd256","ts":1788326258027,"cause":"unknown"}
+{"bootId":"179e36f6-2e38-4ba1-951e-af20f0cd9272","ts":1788329739073,"cause":"unknown"}
+{"bootId":"c63cfd2b-74ef-4d3a-b988-773d822b287f","ts":1788333710687,"cause":"unknown"}
+{"bootId":"2544b2e5-8bee-4966-97e4-e248297323b4","ts":1788338474830,"cause":"unknown"}
+{"bootId":"30563ba1-7724-48a2-a12e-45dd210b18ff","ts":1788338786145,"cause":"unknown"}
+{"bootId":"474ce22f-a64e-4de7-94bc-7811ad47e18b","ts":1788341700723,"cause":"unknown"}
+{"bootId":"79608d1e-d621-478c-9d4a-530a5fba7d0c","ts":1788347930204,"cause":"unknown"}
+{"bootId":"3104d232-addc-4feb-81ce-4a602d1bc5fe","ts":1788352413771,"cause":"unknown"}
+{"bootId":"ddf006e4-66bc-4566-b7d7-ae7999465d6d","ts":1788363530553,"cause":"unknown"}
+{"bootId":"9f572170-6bcf-420d-944a-8f1310bec1a9","ts":1788369131181,"cause":"unknown"}
+{"bootId":"1ff3669e-15ed-4b59-9693-2c4cb2e00054","ts":1788376145322,"cause":"unknown"}
+{"bootId":"0a783a25-c565-4279-8325-0730a2793e50","ts":1788452439368,"cause":"unknown"}
+{"bootId":"c1463dd8-388a-4cf6-8044-5356aa43ac18","ts":1788452601244,"cause":"unknown"}
+{"bootId":"c0a8e0a7-00e5-4670-86d0-6f3b9427ad0c","ts":1788453291339,"cause":"unknown"}
+{"bootId":"21197945-5f9d-4cb7-881b-31ff23d0b227","ts":1788453799494,"cause":"unknown"}
+{"bootId":"4aa041dc-7e4c-43c8-ba2c-5a35439a131a","ts":1788454886683,"cause":"unknown"}
+{"bootId":"72f61f50-5771-4c00-9dde-dd1664fa1d66","ts":1788455055260,"cause":"unknown"}
+{"bootId":"241f6204-6317-49da-a62e-c699b6d0776c","ts":1788459873568,"cause":"unknown"}
+{"bootId":"b9ec5f38-9b89-4887-bda0-4ebfb4dfb02f","ts":1788461243850,"cause":"unknown"}
+{"bootId":"6a34b72d-0cda-4be4-b123-90e01369584e","ts":1788466449369,"cause":"unknown"}
+{"bootId":"7ca6ce7c-0d2f-4cc7-92de-88796c4ae4d7","ts":1788471923318,"cause":"unknown"}
+{"bootId":"885259bd-8eb0-4069-9908-f2ca708545f2","ts":1788515858573,"cause":"unknown"}
+{"bootId":"5eb8310f-ffbb-41c3-904f-0f546030f23a","ts":1788516221479,"cause":"unknown"}
+{"bootId":"28c3a44e-1ebb-4ca0-875e-714ed4aba7db","ts":1788520479896,"cause":"unknown"}
+{"bootId":"32df6bad-08ff-4507-8b1b-9ed8c91e9003","ts":1788521934739,"cause":"unknown"}
+{"bootId":"406faf93-8d5a-4c77-b42d-719be5d2a2cd","ts":1788522050320,"cause":"unknown"}
+{"bootId":"924c9a24-8464-4034-9df5-f86b33981e03","ts":1788529469630,"cause":"unknown"}
+{"bootId":"cbe5c0b7-02b2-451d-b414-269361bc7b24","ts":1788536433106,"cause":"unknown"}
+{"bootId":"146d1d07-7cef-4447-8ca4-ca86f15300e6","ts":1788542463098,"cause":"unknown"}
+{"bootId":"4468ca24-cde6-48d1-a290-ccb7dacd6a7f","ts":1788555048569,"cause":"unknown"}
+{"bootId":"d2fc05b6-d22b-4070-8da3-a94e7063bbdd","ts":1788608057761,"cause":"unknown"}
+{"bootId":"c0843e91-29c8-424c-94b5-3401dbcb20d9","ts":1788618962718,"cause":"unknown"}
+{"bootId":"977683e7-ed06-45d0-98b3-4f65a72ccecf","ts":1788657336700,"cause":"unknown"}
+{"bootId":"7cb79d55-f44b-44ae-b41e-90e329db4587","ts":1788700473507,"cause":"unknown"}
+{"bootId":"b0dc99df-b1ce-4807-b48a-691301d30fd1","ts":1788700724092,"cause":"unknown"}
+{"bootId":"371f3080-8d09-45c4-b37a-8b01c6a0d2ab","ts":1788730857513,"cause":"unknown"}
+{"bootId":"87b24a28-75d1-4761-bb7f-dc06da468b12","ts":1788732236785,"cause":"unknown"}
+{"bootId":"debc67ec-0e8f-4aef-8b15-267b1553cd1b","ts":1788776059787,"cause":"unknown"}
+{"bootId":"009e2fcc-9735-4ac4-b2f8-7e85bb5f250b","ts":1788784426232,"cause":"unknown"}
+`
+
+test('fb-43 (§7 backfill over a COPY) — the SANCTIONED map materializes the 10 CONFIRMED causes onto the REAL 46-row snapshot: 14/46 rows attributed; the 4 seeds stay byte-identical; the 32 un-attributed rows keep \'unknown\'; NOTHING is invented (ARTERACTO429 wall-18:00 is not a row and not in the map); the discriminator failures (fila repetida / boot desconocido / cause ya presente) are LOUD — never a silent overwrite', async () => {
+  const backfill = await import('../scripts/backfill-restart-registry.mjs')
+  // (a) the fixture parses to the real snapshot: header + 46 rows.
+  const snapshot = backfill.parseRegistryFile(FB43_REGISTRY_FIXTURE)
+  assert.equal(snapshot.headerLines.length, 1, 'the fixture has exactly ONE provenance header line')
+  assert.equal(snapshot.rows.length, 46, 'the fixture snapshot has exactly 46 rows (4 seeds + 42 UUID)')
+  assert.equal(backfill.SANCTIONED_ATTRIBUTIONS.length, 10, 'the map has exactly the 10 CONFIRMED UUIDs')
+  // The map bootIds all exist in the fixture (no stale ledger id).
+  assert.doesNotThrow(() => backfill.verifyMap(backfill.SANCTIONED_ATTRIBUTIONS, snapshot.rows), 'every map bootId has a matching fixture row (no boot desconocido)')
+  // (b) the PURE apply over the COPY (neither the live file nor the fixture is fs-touched).
+  const attributed = backfill.applyAttribution(snapshot.rows, backfill.SANCTIONED_ATTRIBUTIONS)
+  assert.equal(attributed.length, 46, 'the backfill never adds/removes rows (no invented row)')
+  const byId = new Map(attributed.map((r) => [r.bootId, r.cause]))
+  for (const entry of backfill.SANCTIONED_ATTRIBUTIONS) {
+    assert.notEqual(byId.get(entry.bootId), 'unknown', `the mapped bootId ${entry.bootId.slice(0, 8)} is attributed`)
+    assert.equal(byId.get(entry.bootId), entry.cause, `the mapped bootId ${entry.bootId.slice(0, 8)} carries the SANCTIONED cause verbatim`)
+  }
+  // Counts: 4 seeds + 10 mapped = 14 attributed; 46 − 14 = 32 stay 'unknown'.
+  const attributedCount = attributed.filter((r) => r.cause !== 'unknown').length
+  assert.equal(attributedCount, 14, '14 of 46 rows attributed (4 seeds + the 10 confirmed UUIDs ≈ 30%)')
+  assert.equal(attributed.filter((r) => r.cause === 'unknown').length, 32, 'the 32 un-sanctioned rows stay unknown deliberately (22 pre-ventana + 4 f1/f2 + 6 post-ceremonia)')
+  // (c) the 4 SEED rows stay byte-identical (never overwritten — even when the map were extended with them).
+  const seedRows = attributed.slice(0, 4)
+  assert.deepEqual(seedRows.map((r) => r.cause), ['switch flota glm', 'reversión flota deepseek-v4-flash', 'DESCONOCIDA (pendiente investigación)', 'reload version-watch smart_restart canary'], 'the 4 seeds keep their documented attribution (no-op of the backfill)')
+  const rewritten = backfill.rewriteRegistryText(FB43_REGISTRY_FIXTURE, backfill.SANCTIONED_ATTRIBUTIONS)
+  const fixtureLines = FB43_REGISTRY_FIXTURE.split('\n')
+  assert.equal(rewritten.split('\n').slice(0, 5).join('\n'), fixtureLines.slice(0, 5).join('\n'), 'the header + the 4 seed lines are byte-identical after the rewrite (seeds never overwritten)')
+  // (d) NO invented row: the ARTERACTO429 wall-18:00 moment is NOT a registry
+  // row and NOT in the map — the backfill neither invents nor touches it.
+  assert.ok(!backfill.SANCTIONED_ATTRIBUTIONS.some((e) => e.cause.includes('18:00')), 'the map has no ARTERACTO429 wall-18:00 entry (never a row / never booted)')
+  assert.ok(!attributed.some((r) => r.cause.includes('artefacto') || r.cause.includes('wall-18:00')), 'no invented artefacto-429 row appears in the attributed copy')
+  // (e) DISCRIMINATORS — always LOUD, never a silent overwrite:
+  // 1. fila repetida: the same bootId twice in the map → loud failure.
+  assert.throws(() => backfill.verifyMap([...backfill.SANCTIONED_ATTRIBUTIONS, backfill.SANCTIONED_ATTRIBUTIONS[0]], snapshot.rows), /fila repetida/, 'a duplicated map bootId fails loudly (fila repetida)')
+  // 2. boot desconocido: a map bootId with no fixture row → loud failure NAMING the bootId.
+  assert.throws(() => backfill.verifyMap([...backfill.SANCTIONED_ATTRIBUTIONS, { bootId: '00000000-0000-0000-0000-000000000000', cause: 'invented' }], snapshot.rows), /00000000-0000-0000-0000-000000000000/, 'a map bootId with no matching row fails loudly naming the bootId (boot desconocido)')
+  // 3. cause ya presente: a row ALREADY attributed with a DIFFERENT cause → loud conflict (never overwrite).
+  const conflicted = snapshot.rows.map((r) => (r.bootId === '28c3a44e-1ebb-4ca0-875e-714ed4aba7db' ? { ...r, cause: 'some other cause' } : r))
+  assert.throws(() => backfill.applyAttribution(conflicted, backfill.SANCTIONED_ATTRIBUTIONS), /cause ya presente/, 'a row already attributed with a different cause fails loudly (never a silent overwrite)')
+  assert.throws(() => backfill.rewriteRegistryText(FB43_REGISTRY_FIXTURE.replace('"cause":"unknown"}', '"cause":"already-different"}'), [...backfill.SANCTIONED_ATTRIBUTIONS, { bootId: 'seed-1', cause: 'NEW cause must NOT overwrite the seed' }]), /cause ya presente/, 'an overwrite attempt on an already-attributed row (even seed-1) fails loudly')
+})
+
+test('fb-43 (§7 recovery-cause plumbing) — a tick whose deps carry crashStreak 3 appends the recovery cause verbatim (streak 3); crashStreak 0 and ABSENT both keep \'unknown\' (the QI-48 default); 0 new exports / 0 new imports', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 1, 7, 0, 0).getTime()
+    const tick = (nowMs, bootId, crashStreak) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId,
+      ...(crashStreak !== undefined ? { crashStreak } : {}),
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      notifyHost: async () => {},
+      logger: { warn: () => {}, info: () => {} }
+    })
+    // crashStreak 3 = the previous boot died PRE-tick (the boot-crash sidecar
+    // class — HealthDaemonDeps.crashStreak, documented packages/dshd-health/
+    // src/index.ts:2708-2723) → the recovery cause rides the append.
+    await tick(T0, 'boot-recovery', 3)
+    let rows = readRestartRegistry(stateDir)
+    assert.equal(rows.length, 5, 'the first tick = the seed (4 historical) + the recovery boot')
+    assert.equal(rows[4].bootId, 'boot-recovery', 'the LAST row is the recovery boot')
+    assert.equal(rows[4].cause, 'recovery pre-tick crash (streak 3)', 'crashStreak 3 appends the recovery cause verbatim with the streak')
+    // crashStreak 0 → the tick is NOT a crash recovery → the QI-48 default 'unknown'.
+    await tick(T0 + 60_000, 'boot-clean', 0)
+    rows = readRestartRegistry(stateDir)
+    assert.equal(rows.length, 6, 'a NEW boot appends ONE row')
+    assert.equal(rows[5].bootId, 'boot-clean', 'the clean boot row')
+    assert.equal(rows[5].cause, 'unknown', 'crashStreak 0 → the default unknown (never synthesized)')
+    // ABSENT crashStreak → the same default 'unknown'.
+    await tick(T0 + 120_000, 'boot-absent')
+    rows = readRestartRegistry(stateDir)
+    assert.equal(rows.length, 7, 'a third NEW boot appends ONE row')
+    assert.equal(rows[6].bootId, 'boot-absent', 'the absent-streak boot row')
+    assert.equal(rows[6].cause, 'unknown', 'an ABSENT crashStreak → the default unknown (backward compatible 3-arg semantics)')
+  })
+})
+
 test('W6 bus delivery FAILING materialization records a post-error line (real Loader — a dual resume+create failure reaches the catch block)', async () => {
   await withTempStateDir(async (stateDir) => {
     await seedPost(stateDir, { postId: 'ghost-head', sessionId: 'head-ghost-head', roomId: 'board', agentPreset: 'deepartments-head' })
