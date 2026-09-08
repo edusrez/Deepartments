@@ -880,7 +880,17 @@ export async function reconcileDurablePostsRegistry(
         const pruned = items.slice(0, pruneCount)
         const prunedSet = new Set(pruned.map((item) => item.postId))
         // Archive each pruned entry (append-only JSONL — full entry preserved).
-        const archiveLines = pruned.map((item) => JSON.stringify({ postId: item.postId, entry: baseRaw[item.postId], prunedAt: nowMs }))
+        // VALLE 09-08 F3 (O5-flags — class marker, additive): prune rows are
+        // RE-INVENTORIES of already-retired posts (their REAL retire already
+        // appended its own row via markPostRetired, or pre-O4 with none) — a
+        // census counting prunedAt stamps as retire events inflates the count
+        // (the 33 phantom rows of 09-07). `kind: 'prune-reinventory'`
+        // distinguishes this class from the real-retire rows (which carry NO
+        // kind — the P2-ENTRY CONTROL freezes their shape to {postId, entry,
+        // prunedAt}); the pre-change first-row method (the FIRST archive row of
+        // a (postId, sessionId) is the retire event; later rows re-inventory)
+        // resolves rows written before this marker.
+        const archiveLines = pruned.map((item) => JSON.stringify({ postId: item.postId, entry: baseRaw[item.postId], prunedAt: nowMs, kind: 'prune-reinventory' }))
         await appendFile(archivePath, `${archiveLines.join('\n')}\n`, 'utf8')
         // Rebuild posts.json WITHOUT the pruned entries (live + newest retirement
         // keep the exact on-disk shape — R6).
@@ -901,18 +911,23 @@ export async function reconcileDurablePostsRegistry(
   // P5 (O4/backfill — WAKE-SEAM lane, fb-41 + the pre-O4 deploy gap 14:27:49Z →
   // 15:39:33Z): BACKFILL the retired archive BY STATE, AFTER the prune. Every
   // `retired:true` entry still in posts.json WITHOUT an archive row of the SAME
-  // (postId, sessionId) gets one `{postId, entry, prunedAt}` row (the exact
-  // prune/markPostRetired row shape) — the pre-O4 retires (a runtime older
-  // than O4 retired posts WITHOUT annexing; the boot-prune only inventories the
-  // OLDEST beyond `retiredKeep`, so they sat among the NEWEST entries with NO
-  // row; and O4's `markPostRetired` early-returns on an already-retired entry,
-  // so it can never re-annex them). Keyed by (postId, sessionId): a row of a
-  // PREVIOUS incarnation (same postId, older session) does NOT cover today's
-  // incarnation — the archive does not distinguish them, so the row itself must
-  // (the archived `entry.sessionId` is the discriminating field). Idempotent:
-  // an existing matching key OR a row appended by THIS run is never duplicated.
-  // Non-fatal + NEVER rewrites posts.json (`changed` stays — the backfill only
-  // APPENDS to the archive; the durable posts.json is the source, untouched).
+  // (postId, sessionId) gets one `{postId, entry, prunedAt, kind:
+  // 'prune-reinventory'}` row (the exact prune shape) — the pre-O4 retires (a
+  // runtime older than O4 retired posts WITHOUT annexing; the boot-prune only
+  // inventories the OLDEST beyond `retiredKeep`, so they sat among the NEWEST
+  // entries with NO row; and O4's `markPostRetired` early-returns on an
+  // already-retired entry, so it can never re-annex them). VALLE 09-08 F3
+  // (O5-flags): the backfill rows carry the SAME `kind: 'prune-reinventory'`
+  // class marker as the prune rows — they are RE-INVENTORIES, not retire
+  // events (their stamp is the backfill time, not the retire time; see the
+  // prune block for the census rule + the pre-change first-row method). Keyed
+  // by (postId, sessionId): a row of a PREVIOUS incarnation (same postId,
+  // older session) does NOT cover today's incarnation — the archive does not
+  // distinguish them, so the row itself must (the archived `entry.sessionId`
+  // is the discriminating field). Idempotent: an existing matching key OR a
+  // row appended by THIS run is never duplicated. Non-fatal + NEVER rewrites
+  // posts.json (`changed` stays — the backfill only APPENDS to the archive;
+  // the durable posts.json is the source, untouched).
   let backfilledPostIds: string[] | undefined = opts.enableRetiredArchiveBackfill === true ? [] : undefined
   if (opts.enableRetiredArchiveBackfill === true) {
     try {
@@ -953,7 +968,7 @@ export async function reconcileDurablePostsRegistry(
         if (existingKeys.has(key) || appendedThisRun.has(key)) continue
         existingKeys.add(key)
         appendedThisRun.add(key)
-        lines.push(JSON.stringify({ postId, entry: e, prunedAt: nowMs }))
+        lines.push(JSON.stringify({ postId, entry: e, prunedAt: nowMs, kind: 'prune-reinventory' }))
         if (backfilledPostIds !== undefined) backfilledPostIds.push(postId)
       }
       if (lines.length > 0) {
@@ -1549,13 +1564,22 @@ export class RegistryStore {
    *
    * O4 RETIRE-ON-DELIVERY (m-952 + D-Q2 c4739f3d, fold-in tramo 3A): the REAL
    * retire ALSO appends the post's audit row to the retired archive
-   * (`retiredArchiveFile`, default `posts-retired-archive.jsonl`) — the SAME
-   * `{postId, entry, prunedAt}` row shape the boot prune appends — so EVERY
-   * real retire (dept_post_retire / dept_worker_retire / the auto-retire-on-
-   * delivery / the boot-reconcile reap — all funnel through this mark)
-   * inventories a row REGARDLESS of the retired-count prune threshold (the
-   * archive-log gap: frozen with 0 rows for 09-04 despite several retires —
-   * the archive previously grew ONLY at boot prunes beyond `retiredKeep`).
+   * (`retiredArchiveFile`, default `posts-retired-archive.jsonl`) — the
+   * `{postId, entry, prunedAt}` row shape (NO kind field — the P2-ENTRY
+   * CONTROL freezes it byte-compatible; this is the REAL-RETIRE class) — so
+   * EVERY real retire (dept_post_retire / dept_worker_retire / the
+   * auto-retire-on-delivery / the boot-reconcile reap — all funnel through
+   * this mark) inventories a row REGARDLESS of the retired-count prune
+   * threshold (the archive-log gap: frozen with 0 rows for 09-04 despite
+   * several retires — the archive previously grew ONLY at boot prunes beyond
+   * `retiredKeep`). VALLE 09-08 F3 (O5-flags): the boot PRUNE and the P5
+   * BACKFILL rows carry `kind: 'prune-reinventory'` (re-inventories, NOT
+   * retire events); this retire row carries NO kind — the class distinction:
+   * a row WITHOUT kind (or pre-F3 rows) = a real retire, a row WITH
+   * kind='prune-reinventory' = a re-inventory (the pre-change FIRST-ROW
+   * method — the first archive row of a (postId, sessionId) is the retire
+   * event, later rows are re-inventories — resolves rows written before the
+   * marker).
    * Awaited by the retire seam so the row is on disk BEFORE the retire returns.
    * Non-fatal: a failed append only warns (the retire mark already committed —
    * the mark is the durable part; a later boot prune re-inventories the entry
@@ -1600,17 +1624,27 @@ export class RegistryStore {
    * is touched (additive optional fields, never a rewrite). One row per real
    * worker retire (called from the retirePost worker branch, where the dice is
    * drawn). Non-fatal: a failed append only warns (the retire mark already
-   * committed — the retire path NEVER breaks here). */
+   * committed — the retire path NEVER breaks here).
+   * VALLE 09-08 F2 (O5-flags — observability, additive): the row OPTIONALLY
+   * carries `reason: 'qd-worker' | 'dice'` — the retire's class, decided by the
+   * caller (retirePost): a quality-head worker retire is the structural F6
+   * exclusion (roll drawn, emitted=false, directive NEVER emitted BY DESIGN —
+   * tools.ts F6 gate), so a watcher reading «roll low + no directive» as
+   * emit-fail must exclude reason='qd-worker' rows. reason='dice' = any other
+   * worker (the 25% sample applies). ADDITIVE: rows WITHOUT the field
+   * (pre-F2 / a caller that does not pass it) stay byte-identical and readable —
+   * readers must tolerate its absence (the field is only ever added). The ledger
+   * remains append-only: existing rows are NEVER rewritten. */
   async appendRetireDice(
     postId: string,
-    dice: { retireRoll: number; retireProb: number; retireEmitted: boolean },
+    dice: { retireRoll: number; retireProb: number; retireEmitted: boolean; reason?: 'qd-worker' | 'dice' },
     opts?: { retireDiceFile?: string; now?: () => number }
   ): Promise<void> {
     try {
       const nowMs = (opts?.now ?? (() => Date.now()))()
       const diceFile = opts?.retireDiceFile ?? 'retire-dice.jsonl'
       const dicePath = path.join(this.deps.stateDir, diceFile)
-      await appendFile(dicePath, `${JSON.stringify({ postId, retireRoll: dice.retireRoll, retireProb: dice.retireProb, retireEmitted: dice.retireEmitted, ts: nowMs })}\n`, 'utf8')
+      await appendFile(dicePath, `${JSON.stringify({ postId, retireRoll: dice.retireRoll, retireProb: dice.retireProb, retireEmitted: dice.retireEmitted, ...(dice.reason !== undefined ? { reason: dice.reason } : {}), ts: nowMs })}\n`, 'utf8')
     } catch (error: unknown) {
       this.deps.logger.warn(`[deepartments] retire-dice ledger append failed for "${postId}" (non-fatal — the retire mark already committed): ${error instanceof Error ? error.message : String(error)}`)
     }

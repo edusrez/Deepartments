@@ -526,6 +526,13 @@ test('P5 (O4/backfill): the reconcile backfills the retired archive BY STATE —
     assert.equal(byPostId.get('w-reinc').entry.sessionId, 's-new', 'P5: the reincarnated post gains a row for the NEW session (the old-session row does not cover)')
     assert.ok(byPostId.get('w-reinc').entry.sessionId === 's-new' && byPostId.has('w-pre-o4'), 'P5: the gap row carries the full entry + prunedAt shape')
     assert.equal(typeof byPostId.get('w-pre-o4').prunedAt, 'number', 'P5: the backfilled row carries a numeric prunedAt')
+    // O5-F3 (VALLE 09-08): the backfilled rows carry the prune-reinventory
+    // class marker (a backfill is a RE-INVENTORY, not a retire event — the
+    // census trap), while the PRE-SEEDED rows (no kind — the pre-F3 shape)
+    // stay legible and are NEVER rewritten.
+    assert.equal(byPostId.get('w-pre-o4').kind, 'prune-reinventory', 'O5-F3: the backfilled row carries kind="prune-reinventory" (a re-inventory, not a retire event)')
+    assert.equal(byPostId.get('w-reinc').kind, 'prune-reinventory', 'O5-F3: the reincarnation backfill row carries the same class marker')
+    assert.equal(byPostId.get('w-covered').kind, undefined, 'O5-F3: the PRE-SEEDED row (pre-F3 shape without kind) stays legible and is NOT rewritten (append-only tolerance)')
     assert.ok(logged.some((m) => m.includes('BACKFILLED 2 retired post(s)')), 'P5: the backfill logs the count')
     // Idempotence: a second run adds NOTHING (the keys are covered now).
     const second = await reconcileDurablePostsRegistry(stateDir, {

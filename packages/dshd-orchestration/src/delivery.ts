@@ -1922,7 +1922,20 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
         return
       }
       const qualityHead = resolveQualityHeadEntry()
-      if (qualityHead === undefined) return
+      // VALLE 09-08 F1 (O5-flags — observability ONLY, 0 flow change): the
+      // emitter's ONLY silent drop — a directive addressed to a 'quality-head'
+      // that is NOT in byPost returned with NO warn and NO sidecar row (a
+      // qi-silence audit would misread the drop as dice-skip or emit-fail).
+      // ONE warn line with context (recipient/postId/kind), then the SAME
+      // early-return — semantics unchanged.
+      if (qualityHead === undefined) {
+        const droppedPostId = surface.kind === 'worker-retired' ? surface.workerPostId
+          : surface.kind === 'head-slept' || surface.kind === 'head-rotated' ? surface.headPostId
+          : surface.kind === 'post-error' ? surface.postId
+          : ''
+        ctx.logger.warn(`[deepartments] quality-inspect directive DROPPED: recipient "quality-head" not in byPost (kind=${surface.kind}${droppedPostId === '' ? '' : ` postId=${droppedPostId}`}) — no directive emitted`)
+        return
+      }
       const store = await messagesStoreReady
 // fb-118 (verify id+ts BEFORE citing — the drift class of fb-45): the
       // head-rotated mirror embeds the caller's reason VERBATIM, and a rotation

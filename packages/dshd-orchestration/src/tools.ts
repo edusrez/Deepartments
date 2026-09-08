@@ -3472,7 +3472,12 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // {postId, entry, prunedAt}) → a dedicated ledger (registry.ts
       // appendRetireDice). Non-fatal: a failed append only warns — the retire
       // already committed and the retire path NEVER breaks here.
-      await registry.appendRetireDice(postId, { retireRoll, retireProb, retireEmitted })
+      // VALLE 09-08 F2 (O5-flags — observability, additive): label the ledger
+      // row with the retire's class — a quality-head worker retire is the
+      // structural F6 exclusion (the SAME condition as the gate above; it
+      // NEVER emits BY DESIGN — a watcher must not read it as emit-fail); any
+      // other worker is a plain 'dice' retire (the 25% sample applies).
+      await registry.appendRetireDice(postId, { retireRoll, retireProb, retireEmitted, reason: entry.managerId === 'quality-head' ? 'qd-worker' : 'dice' })
       try {
         if (retireEmitted) {
           // O2 (MICRO-BATCH O2, QD compromiso — ANALYZE m-598): label the

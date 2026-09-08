@@ -20871,6 +20871,7 @@ test('C2 partial-prune fix (wiring): the durable prune reports prunedPostIds; re
     // Archive + backup preserved (non-destructive — R6).
     const archive = (await readFile(path.join(stateDir, 'posts-retired-archive.jsonl'), 'utf8')).trim().split('\n')
     assert.equal(archive.length, 50, 'C2: all 50 pruned retired entries are archived (never erased)')
+    assert.ok(archive.every((l) => JSON.parse(l).kind === 'prune-reinventory'), 'O5-F3: every pruned archive row carries kind="prune-reinventory" — a RE-INVENTORY, not a retire event (the 09-07 census trap: stamps of prune rows are NOT retire stamps)')
     assert.ok((await readdir(stateDir)).some((f) => f.startsWith('posts.json.bak-') && f.endsWith('-prune')), 'C2: a pre-prune backup was written')
     // THE REGRESSION GUARD: a LATER persistPosts must write the PRUNED set, NOT
     // the full pre-prune set (the C2 bug — the prune was undone moments later).
@@ -21946,10 +21947,12 @@ test('O2 (MICRO-LANE O2 dice-durability): the append-only retire-dice ledger rec
         assert.equal(hitRow.retireProb, 0.25, 'the HIT row carries the RESOLVED probability (env → config → code default 0.25)')
         assert.equal(hitRow.retireEmitted, true, 'the HIT row marks emitted=true')
         assert.equal(typeof hitRow.ts, 'number', 'the HIT row carries the retire timestamp')
+        assert.equal(hitRow.reason, 'dice', 'O5-F2: a research worker retire (managerId !== quality-head) labels the row reason="dice"')
         assert.ok(missRow, 'the MISS retire ALSO wrote a ledger row (every eligible retire inventories the dice)')
         assert.equal(missRow.retireRoll, 0.9, 'the MISS row carries the roll the gate drew (0.9)')
         assert.equal(missRow.retireProb, 0.25, 'the MISS row carries the RESOLVED probability (0.25)')
         assert.equal(missRow.retireEmitted, false, 'the MISS row marks emitted=false')
+        assert.equal(missRow.reason, 'dice', 'O5-F2: the plain dice-silence row is also labeled reason="dice"')
         // The audit distinction a future qi-silence alert relies on: the low-roll
         // retire has the directive + its terminal sidecar row; the high-roll
         // retire has NEITHER (healthy dice-silence — never an emitter bug).
@@ -21963,6 +21966,58 @@ test('O2 (MICRO-LANE O2 dice-durability): the append-only retire-dice ledger rec
         const qhRows = rows.filter((r) => r.recipientId === 'quality-head')
         assert.equal(qhRows.length, 1, 'the ONLY quality-head sidecar row in deliveries.jsonl is the HIT directive terminal row (the MISS retire is sidecar-free — dice-silence leaves no emitter trace, exactly the audit signal)')
         assert.equal(qhRows[0].messageId, hitDirective.id, 'the sole quality-head sidecar row belongs to the emitted directive')
+      } finally {
+        Math.random = originalRandom
+      }
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('O5-F2 (VALLE 09-08 — O5-flags, ledger reason): a quality-head worker retire writes reason="qd-worker" (the structural F6 class — emitted=false BY DESIGN, never emit-fail); a pre-F2 ledger row WITHOUT the field stays legible side-by-side (append-only tolerance)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    delete process.env[QUALITY_INSPECT_ENV_VAR] // exercise the code default 0.25
+    const env = await bootWithQD(stateDir)
+    try {
+      const signal = new AbortController().signal
+      const originalRandom = Math.random
+      try {
+        // (a) a QUALITY-HEAD worker retire → reason 'qd-worker' (F6: roll low
+        // would HIT, but the structural exclusion suppresses the emit BY DESIGN).
+        const { head: qh, headCtx: qhCtx, key: qhKey } = qdHead(env)
+        const qdW = await f3Spawn(env, qhCtx, qhKey, qh, { role: 'quality-inspector', task: 'o5-f2 qd worker' })
+        Math.random = () => 0.1 // below the 0.25 sample threshold → a HIT roll, suppressed by F6
+        await qhCtx.tools.get('dept_worker_retire', qhKey).execute({ workerId: qdW.result.workerId }, { agent: qh, signal })
+        Math.random = originalRandom
+        // (b) a research worker retire → reason 'dice' (the 25% sample applies).
+        const { head, headCtx, key } = qdResearchHead(env)
+        const rw = await f3Spawn(env, headCtx, key, head, { role: 'researcher', task: 'o5-f2 dice worker' })
+        Math.random = () => 0.9 // above the threshold → a plain dice-miss row
+        await headCtx.tools.get('dept_worker_retire', key).execute({ workerId: rw.result.workerId }, { agent: head, signal })
+        Math.random = originalRandom
+        await new Promise((r) => setTimeout(r, 100))
+        const ledgerText = await readFile(path.join(stateDir, 'retire-dice.jsonl'), 'utf8')
+        const ledger = ledgerText.trim().split('\n').filter((l) => l.length > 0).map((l) => JSON.parse(l))
+        const qdRow = ledger.find((r) => r.postId === qdW.result.workerId)
+        const diceRow = ledger.find((r) => r.postId === rw.result.workerId)
+        assert.ok(qdRow, 'the quality-head worker retire wrote a ledger row')
+        assert.equal(qdRow.reason, 'qd-worker', 'a quality-head worker retire is labeled reason="qd-worker" (the F6 class)')
+        assert.equal(qdRow.retireEmitted, false, 'the qd-worker row rolls low but emitted=false — the F6 structural exclusion, NOT an emit-fail (the reason field is exactly what keeps a watcher from misreading it)')
+        assert.ok(diceRow, 'the research worker retire wrote a ledger row')
+        assert.equal(diceRow.reason, 'dice', 'a plain research worker retire is labeled reason="dice"')
+        // (c) rows WITHOUT the field (pre-F2) stay legible side-by-side — the
+        // append-only ledger never rewrites, and a reader must tolerate both.
+        const store = new RegistryStore({ stateDir, logger: { warn: () => {} } })
+        await store.appendRetireDice('legacy-ow', { retireRoll: 0.3, retireProb: 0.25, retireEmitted: false })
+        await store.appendRetireDice('legacy-qd', { retireRoll: 0.1, retireProb: 0.25, retireEmitted: false, reason: 'qd-worker' })
+        const after = (await readFile(path.join(stateDir, 'retire-dice.jsonl'), 'utf8')).trim().split('\n').filter((l) => l.length > 0).map((l) => JSON.parse(l))
+        const oldRow = after.find((r) => r.postId === 'legacy-ow')
+        const newRow = after.find((r) => r.postId === 'legacy-qd')
+        assert.ok(oldRow !== undefined && newRow !== undefined, 'the pre-F2 row and the new row coexist in the same ledger')
+        assert.equal(oldRow.reason, undefined, 'a pre-F2 row without reason parses legibly (reason undefined — readers must tolerate the absent field)')
+        assert.equal(newRow.reason, 'qd-worker', 'the direct-store append persists the given reason verbatim')
+        assert.deepEqual(Object.keys(newRow).sort(), ['postId', 'reason', 'retireEmitted', 'retireProb', 'retireRoll', 'ts'], 'a new row adds ONLY the additive reason field alongside the frozen O2 fields')
       } finally {
         Math.random = originalRandom
       }
