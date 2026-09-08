@@ -19,6 +19,14 @@
 //   - fb-142 — git commit -m "…(projected+reserve)/contextWindow…" FP: a
 //     `/`-token inside a `git commit -m "…"` MESSAGE span is message TEXT, not
 //     a path (the `(`/`)` tokenizer boundaries extracted `/contextWindow`).
+//   - O1 q-i-110 (VALLE 09-08 lane) — the INLINE-SCRIPT interpreter FP: the
+//     quoted OPERAND of `node -e|--eval`, `python -c`, `perl -e`, `ruby -e`,
+//     `php -r` is SCRIPT CONTENT; a FLAT `/word` regex literal inside it
+//     (`node --input-type=module -e 't.match(/const …/)'`) was DENIED as an
+//     absolute path because the fb-84 quoted-pattern carve-out covered only
+//     grep|sed|awk. The new deptExecIsQuotedInlineScript discriminator skips
+//     the flat form (fb-84 mirror); MULTI-SEGMENT real paths inside the script
+//     and every non-inline form STAY denied.
 //
 // Controls locked: fb-62/53 intact (rm -rf / still DENIED; /etc/passwd still
 // DENIED; in-root paths still allowed; the denylist unchanged).
@@ -75,6 +83,25 @@ test('R5 fb-142: git commit -m "…(projected+reserve)/contextWindow…" is MESS
   assert.match(deptExecDenyReason('git add /etc/passwd', CWD, ROOTS), /references absolute path "\/etc\/passwd"/, 'a REAL git path OPERAND (git add /etc/passwd) is still denied — only the -m message span is skipped')
   assert.equal(deptExecDenyReason('git add /home/esuarez/projects/README.md', CWD, ROOTS), undefined, 'an IN-ROOT git operand is still allowed')
   assert.match(deptExecDenyReason('git commit -m "msg" /etc/passwd', CWD, ROOTS), /references absolute path "\/etc\/passwd"/, 'a REAL path OUTSIDE the -m message span is still denied')
+})
+
+test('R5 O1 q-i-110: the quoted INLINE-SCRIPT operand of node -e/--eval, python -c, perl -e, ruby -e, php -r is SCRIPT CONTENT, not an absolute path — `node --input-type=module -e \'t.match(/const …/)\'` (the recorded live FP: DENIED as the absolute path "/const") is ALLOWED; the REAL path forms STAY denied', () => {
+  // The recorded O1 FP (probe c93f8015): node -e regex literal was DENIED as
+  // "/const" because the fb-84 quoted-pattern discriminator covers only
+  // grep|sed|awk. The inline-script operand joins the family.
+  assert.equal(deptExecDenyReason("node --input-type=module -e 't.match(/const x/)'", CWD, ROOTS), undefined, 'the node --input-type=module -e regex literal is allowed (O1 q-i-110 FP)')
+  assert.equal(deptExecDenyReason("node -e 't.match(/const x/)'", CWD, ROOTS), undefined, 'the plain node -e form is allowed too')
+  assert.equal(deptExecDenyReason("node --eval 't.match(/const x/)'", CWD, ROOTS), undefined, '--eval joins the node inline flags')
+  assert.equal(deptExecDenyReason("python -c 'import re; re.match(r\"/const\", s)'", CWD, ROOTS), undefined, 'the python -c script is allowed')
+  assert.equal(deptExecDenyReason("python3 -c 'print(re.match(r\"/const\", s))'", CWD, ROOTS), undefined, 'the python3 -c script is allowed')
+  assert.equal(deptExecDenyReason("perl -e 'die qq{/const}'", CWD, ROOTS), undefined, 'the perl -e script is allowed')
+  assert.equal(deptExecDenyReason("ruby -e 'puts /const x/'", CWD, ROOTS), undefined, 'the ruby -e script is allowed')
+  assert.equal(deptExecDenyReason("php -r 'echo preg_match(\"/const/\", $s);'", CWD, ROOTS), undefined, 'the php -r script is allowed')
+  // Controls — the conservative FLAT-only scope and real-path protection intact.
+  assert.match(deptExecDenyReason('node /etc/passwd', CWD, ROOTS), /references absolute path "\/etc\/passwd"/, 'a real node FILE operand is STILL denied (no inline flag, no quoted span)')
+  assert.match(deptExecDenyReason('cat /etc/passwd', CWD, ROOTS), /references absolute path "\/etc\/passwd"/, 'cat /etc/passwd is STILL denied')
+  assert.match(deptExecDenyReason("node -e 'fs.readFileSync(\"/etc/passwd\")'", CWD, ROOTS), /references absolute path "\/etc\/passwd"/, 'a MULTI-SEGMENT real path INSIDE the script is STILL denied (the skip is FLAT single-segment only — fb-84 mirror)')
+  assert.match(deptExecDenyReason('node /opt/dsh/.dsh/settings.yaml', CWD, ROOTS), /the stable profile is protected/, 'a real stable-profile operand is STILL protected-denied')
 })
 
 test('R5 fb-135 (deny-side): a DENIED missing /packages/<name> token gains the discovery hint; non-packages denies stay byte-identical', () => {

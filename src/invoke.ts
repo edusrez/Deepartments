@@ -1813,6 +1813,92 @@ function deptExecIsQuotedPatternLiteral(cmd: string, token: string, tokenIndex: 
   return true
 }
 
+/** O1 q-i-110 (QD 2026-09-08 — the INLINE-SCRIPT interpreter FP family): the
+ * `/`-token at `tokenIndex` of `cmd` sits INSIDE a single/double-quoted span
+ * that is the OPERAND of an INLINE SCRIPT flag (`node -e '…'`,
+ * `node --eval '…'`, `node --input-type=module -e '…'`, `python -c '…'`,
+ * `perl -e '…'`, `ruby -e '…'`, `php -r '…'`) — the quoted span is SCRIPT
+ * CONTENT (regex literals, division, strings), never an absolute path the
+ * shell opens. Mirror of the fb-84 (grep/sed/awk quoted pattern) and fb-142
+ * (git commit -m) spans: the span is the FIRST non-option operand after the
+ * interpreter + its inline flag. The live FP (probe c93f8015):
+ * `node --input-type=module -e 't.match(/const FB43_REGISTRY_FIXTURE/)'` →
+ * the `/const` token was DENIED as the absolute path "/const" because the
+ * quoted-pattern discriminator (fb-84) covers only grep|sed|awk.
+ * Conservative intencionadamente (the fb-84 flat-only posture): ONLY the FLAT
+ * single-segment `/word` form is content-ambiguous — a MULTI-SEGMENT quoted
+ * reference (`node -e 'fs.readSync("/etc/passwd")'`) is a real absolute-path
+ * reference and STAYS a path word (keeps denying), and every NON-inline form
+ * (`node /etc/passwd`, `cat /etc/passwd`) is untouched. `tokenIndex` is the
+ * TOKEN start (the position right after the boundary char — when the boundary
+ * IS the opening quote, the scan must include it). */
+function deptExecIsQuotedInlineScript(cmd: string, token: string, tokenIndex: number): boolean {
+  const n = cmd.length
+  if (tokenIndex <= 0 || tokenIndex >= n) return false
+  // Scan the prefix (the fb-84 shape): quote state at the token + the
+  // enclosing quote-opening + the pipeline segment start.
+  let inSingle = false
+  let inDouble = false
+  let qOpen = -1
+  let segStart = 0
+  for (let i = 0; i < tokenIndex; i++) {
+    const c = cmd[i]
+    if (inSingle) {
+      if (c === "'") inSingle = false
+      continue
+    }
+    if (inDouble) {
+      if (c === '"') inDouble = false
+      continue
+    }
+    if (c === "'") {
+      inSingle = true
+      qOpen = i
+    } else if (c === '"') {
+      inDouble = true
+      qOpen = i
+    } else if (c === '|' || c === '&' || c === ';' || c === '(' || c === '\n') {
+      segStart = i + 1
+    }
+  }
+  if ((!inSingle && !inDouble) || qOpen < 0) return false
+  // Flatness mirror (fb-84), plus the regex-literal CLOSING delimiter: the
+  // token of `/const/` (a JS/Perl/Ruby/PHP regex literal with no interior
+  // space) is `/const/` — ONE trailing `/` is stripped before the
+  // single-segment test, so both the recorded `t.match(/const …/)` and the
+  // no-space `t.match(/const/)` shapes are content. Any INTERIOR `/`
+  // (`/etc/passwd`, `/a/b`, a real multi-segment reference) still fails the
+  // test and keeps denying (the conservative fb-84 posture).
+  const body = token.slice(1)
+  if ((body.endsWith('/') ? body.slice(0, -1) : body).includes('/')) return false
+  // The pipeline segment's words up to the quote opening: interpreter + flags.
+  const headWords = cmd.slice(segStart, qOpen).trim().split(/\s+/).filter((w) => w !== '')
+  if (headWords.length < 2) return false
+  const program = headWords[0].split('/').pop() ?? ''
+  const flags = DEPT_EXEC_INLINE_SCRIPT_FLAGS.get(program)
+  if (flags === undefined) return false
+  // The quoted span is the script operand ONLY when every word between the
+  // interpreter and the quote is an OPTION and the LAST one is the inline
+  // script flag (-e/--eval/-c/-r): a NON-option word before the quote
+  // (`node foo '/tmp'`) means the quoted span is a file operand — still a
+  // path word.
+  for (const word of headWords.slice(1)) {
+    if (!word.startsWith('-')) return false
+  }
+  return flags.has(headWords[headWords.length - 1] ?? '')
+}
+
+/** The inline-script flags per interpreter (O1 q-i-110): the flag whose quoted
+ * OPERAND is the script body, so a `/…` inside it is content, never a path. */
+const DEPT_EXEC_INLINE_SCRIPT_FLAGS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['node', new Set(['-e', '--eval'])],
+  ['python', new Set(['-c'])],
+  ['python3', new Set(['-c'])],
+  ['perl', new Set(['-e'])],
+  ['ruby', new Set(['-e'])],
+  ['php', new Set(['-r'])],
+])
+
 /** fb-129 (QD 2026-09-04 — the fb-123 family residue): whether the `/`-token
  * at `tokenIndex` of `cmd` is the TAIL of a VARIABLE-ROOTED quoted word —
  * `"$D"/test/*`, `'$ROOT'/src/*.ts` — i.e. the `/…` sits right after a CLOSING
@@ -2020,6 +2106,14 @@ function deptExecPathTokens(command: string): string[] {
     // boundary's length) — when the boundary IS the opening quote, the quote
     // char sits exactly at `match.index`, and scanning must INCLUDE it.
     if (deptExecIsQuotedPatternLiteral(cmd, token, match.index + (match[1]?.length ?? 0))) continue
+    // O1 q-i-110 (QD 2026-09-08): a FLAT `/word` inside the quoted INLINE-SCRIPT
+    // operand of `node -e|--eval`, `python -c`, `perl -e`, `ruby -e`, `php -r`
+    // is script CONTENT (regex literal, division), never an absolute path:
+    // `node --input-type=module -e 't.match(/const x/)'` — mirror of fb-84
+    // (grep|sed|awk quoted pattern), with the SAME conservative flat-only
+    // scope: a MULTI-SEGMENT quoted reference (`/etc/passwd`) inside the
+    // script stays a path word and keeps denying.
+    if (deptExecIsQuotedInlineScript(cmd, token, match.index + (match[1]?.length ?? 0))) continue
     // fb-138 (R5): a `/`-token that is the VALUE of a known pattern-valued
     // binary flag (`--test-name-pattern '/pooler/i'`, `--include '/pooler/x'`)
     // is a regex/glob content operand, never a path — skip the FP.
