@@ -1,0 +1,100 @@
+# === dsh-deepartments patch: dsh-tool-fs-search path-not-found class (SEARCH_PATH_NOT_FOUND) ===
+#
+# WHAT THIS FIXES
+#   glob/grep over a NON-EXISTENT path surfaced rg's raw stderr as a generic
+#   SEARCH_FAILED ('rg: <path>: IO error for operation on <path>: No such file
+#   or directory') — indistinguishable from a tool fault. This patch (a) adds a
+#   path-cause PRE-CHECK in runRipgrep (a stat over the `-- <path>` target,
+#   resolved against the session cwd; targets carrying glob metacharacters
+#   skip it) that throws the clean `path not found: <path>` error BEFORE rg
+#   spawns (fb-224/226/228/229), (b) classifies rg's own IO stderr
+#   (`no such file or directory`) into the SAME SEARCH_PATH_NOT_FOUND branch as
+#   a fallback, (c) tightens the SEARCH_INVALID_PATTERN wording to
+#   `pattern rejected: <error line>` — the raw rg stderr body is no longer
+#   embedded (q-i-107), and (d) documents the empty / path-not-found /
+#   pattern-rejected distinction in the glob and grep tool descriptions
+#   (MODO 3, VALLE 09-08 lane). The exit-1 empty result ('No files found' /
+#   'No matches found') is UNTOUCHED: a missing path and a no-match search are
+#   now distinguishable BY ERROR CODE (SEARCH_PATH_NOT_FOUND vs noMatches — the
+#   fb-51 «un 0 no concluye no-existe» principle, by code).
+#
+# TARGET FILES
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-fs-search/lib/index.js
+#
+# FINGERPRINTS (md5)  [anchor-applied rc.2 (the live base) -> patched]
+#  index.js           c1ecd7ac43eaf7923af050eee8249673 -> 576e8e66b7a33e15fff58663c672272f
+#
+# ADDITIVE: applies ON TOP of dsh-tool-fs-search-anchor-literal-glob.patch
+# (the base IS that patch's applied state, the live fingerprint c1ecd7ac…).
+# No hunk re-applies an existing A-harness patch. The zone
+# `a-harness-tool-fs-search-index` of scripts/zone-md5-manifest.json must be
+# re-frozen to 576e8e66b7a33e15fff58663c672272f in the SAME change that
+# applies this patch to the runtime.
+#--- a/lib/index.js
++++ b/lib/index.js
+@@ -1,6 +1,6 @@
+ import z from "@deepseek-ai/schemastery";
+ import { MAX_TIMER_DELAY_MS } from "@deepseek-ai/dsh-timeout";
+-import { isAbsolute, relative, sep } from "node:path";
++import { isAbsolute, join, relative, sep } from "node:path";
+ import { defineTool } from "@deepseek-ai/dsh-tools";
+ import { existsSync } from "node:fs";
+ import { HarnessError } from "@deepseek-ai/dsh-llm";
+@@ -83,11 +83,16 @@
+ * no shell layer, so an exit 127 or shell "command not found" text cannot
+ * occur — a launch failure rejects at spawn (see {@link runRipgrep}).
+ */
+-function classifyRunFailure(toolName, exitCode, stderrText, stderrTruncated) {
++function classifyRunFailure(toolName, exitCode, stderrText, stderrTruncated, searchTarget) {
+ 	const stderr = stderrExcerpt(stderrText, stderrTruncated);
+-	if (/regex parse error|error parsing glob/i.test(stderr)) return new SearchError(`${toolName} pattern rejected by ripgrep: ${stderr}`, "SEARCH_INVALID_PATTERN");
++	if (/regex parse error|error parsing glob/i.test(stderr)) return new SearchError(`${toolName} pattern rejected: ${patternRejectionLine(stderr)}`, "SEARCH_INVALID_PATTERN");
++	if (/no such file or directory|IO error for operation on .*no such file/i.test(stderr)) return new SearchError(`${toolName}: path not found: ${searchTarget ?? (/rg: ([^:]+): IO error/i.exec(stderr)?.[1] ?? "the search target")}`, "SEARCH_PATH_NOT_FOUND");
+ 	return new SearchError(`${toolName} search failed (exit ${exitCode})${stderr.length > 0 ? `: ${stderr}` : ""}`, "SEARCH_FAILED");
+ }
++function patternRejectionLine(stderr) {
++	const lines = stderr.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
++	return lines.find((line) => /^error:/i.test(line)) ?? lines[0] ?? "invalid pattern";
++}
+ /**
+ * Acquire the COMPLETE raw stdout of a finished run, enforcing
+ * `rawOutputMaxBytes` on the in-memory transport. A truncated result means the
+@@ -163,6 +168,11 @@
+ async function runRipgrep(ctx, exec, toolName, argv, rawOutputMaxBytes, graceMs, stderrMaxBytes) {
+ 	if (exec.signal.aborted) throw new SearchError(`${toolName} was aborted before completion (tool timeout or caller cancellation)`, "SEARCH_ABORTED");
+ 	const workdir = exec.agent?.session.header.cwd ?? process.cwd();
++	const dashDash = argv.indexOf("--");
++	const searchTarget = dashDash === -1 ? void 0 : argv[dashDash + 1];
++	if (searchTarget !== void 0 && !/[*?[\]{}]/.test(searchTarget) && !existsSync(isAbsolute(searchTarget) ? searchTarget : join(workdir, searchTarget))) {
++		throw new SearchError(`${toolName}: path not found: ${searchTarget}`, "SEARCH_PATH_NOT_FOUND");
++	}
+ 	let handle;
+ 	try {
+ 		handle = ctx.subprocess.spawn({
+@@ -195,7 +205,7 @@
+ 	if (stdout === void 0 || stderr === void 0) throw new SearchError(`${toolName} search command produced no collected output streams`, "SEARCH_FAILED");
+ 	if (exec.signal.aborted) throw new SearchError(`${toolName} was aborted before completion (tool timeout or caller cancellation)`, "SEARCH_ABORTED");
+ 	if (outcome.signal !== null || outcome.exitCode === null) throw new SearchError(`${toolName} search command was killed by signal ${outcome.signal ?? "(unknown)"}`, "SEARCH_FAILED");
+-	if (outcome.exitCode !== 0 && outcome.exitCode !== 1) throw classifyRunFailure(toolName, outcome.exitCode, stderr.text, stderr.lossy);
++	if (outcome.exitCode !== 0 && outcome.exitCode !== 1) throw classifyRunFailure(toolName, outcome.exitCode, stderr.text, stderr.lossy, searchTarget);
+ 	return {
+ 		stdout: completeStdout(toolName, stdout, rawOutputMaxBytes),
+ 		noMatches: outcome.exitCode === 1,
+@@ -809,7 +819,7 @@
+ 	ctx.systemPrompt.section({
+ 		name: "tool:glob",
+ 		order: 103,
+-		text: `Use the glob tool — not shell find — to discover files by path pattern. A pattern with no "/" matches basenames at any depth, so "*" matches every file in the tree rather than its top level. Results are files only, never directories, and include hidden and ignored files: a result that fits comes back in modification-time order, ${overCapGuidance}`
++		text: `Use the glob tool — not shell find — to discover files by path pattern. A pattern with no "/" matches basenames at any depth, so "*" matches every file in the tree rather than its top level. Results are files only, never directories, and include hidden and ignored files: a result that fits comes back in modification-time order, ${overCapGuidance} An empty result means the pattern matched nothing under an existing path; an error "path not found: <path>" means the search path does not exist; "pattern rejected" means the pattern is invalid.`
+ 	});
+ 	const overCapDescription = caps.sampleOverCapGlobResults ? `a larger result instead returns ${caps.maxResults} paths sampled across top-level entries` : `a larger result returns the first ${caps.maxResults} paths in modification-time order`;
+ 	const tool = defineTool({
+@@ -1118,7 +1128,7 @@
+ 	ctx.systemPrompt.section({
+ 		name: "tool:grep",
+ 		order: 104,
+-		text: "Use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context."
++		text: "Use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context. An empty result means the pattern matched nothing under an existing path; an error \"path not found: <path>\" means the search path does not exist; \"pattern rejected\" means the pattern is invalid."
+ 	});
+ 	const tool = defineTool({
+ 		name: "grep",

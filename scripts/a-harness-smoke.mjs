@@ -2,7 +2,7 @@
 // Headless and read-only: imports the INSTALLED runtime packages by absolute
 // file:// URL (their own bare imports resolve against the live tree) and
 // asserts the A-HARNESS payload behaviors. Run AFTER the host applies
-// scripts/reapply-dsh-patches-a-harness.sh apply. Expected result: 10/10
+// scripts/reapply-dsh-patches-a-harness.sh apply. Expected result: 11/11
 // probe groups PASS (exit 0). BEFORE the apply, the fb-102/fb-85/fb-89/R3
 // assertions fail — that failure IS the expected pre-apply signal.
 //
@@ -102,4 +102,17 @@ assert.match(chunk, /required: true/)
 assert.match(chunk, /composed\.profile\.layers\.map/)
 ok('dsh CLI profile-boot chunk: watchUserPatchLayers layers call')
 
-console.log(`\nSMOKE RESULT: ${pass}/10 probe groups PASS (A-HARNESS applied)`)
+// 11. dsh-tool-fs-search: path-not-found class (VALLE 09-08 lane) — the
+// SEARCH_PATH_NOT_FOUND branch (pre-check + stderr fallback), the clean
+// `path not found: <path>` message and the pattern-rejection wording present
+// in the bundle; the OLD raw-stderr wording is gone. Byte-probe (headless);
+// the behavior itself is pinned by the fork integration suite.
+const fsSearchText2 = readFileSync(`${RT}/node_modules/@deepseek-ai/dsh-tool-fs-search/lib/index.js`, 'utf8')
+assert.match(fsSearchText2, /path not found: /)
+assert.match(fsSearchText2, /SEARCH_PATH_NOT_FOUND/)
+assert.match(fsSearchText2, /pattern rejected: /)
+assert.ok(!fsSearchText2.includes('pattern rejected by ripgrep:'), 'the raw-stderr pattern wording must be replaced')
+assert.match(fsSearchText2, /An empty result means the pattern matched nothing under an existing path/)
+ok('dsh-tool-fs-search path-not-found class (SEARCH_PATH_NOT_FOUND + clean wording + MODO 3 docs)')
+
+console.log(`\nSMOKE RESULT: ${pass}/11 probe groups PASS (A-HARNESS applied)`)

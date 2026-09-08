@@ -188,6 +188,7 @@ change that applies the patches** — the r6-suite-guard asserts them).
 | `dsh-tool-web-fetch-timeout-override.patch` | dsh-tool-web/lib/index.js + lib/types/{fetch,index}.d.ts | web_fetch `timeout_ms` per-call override + fetchMaxTimeoutMs cap (fb-102) |
 | `dsh-web-fetch-request-timeout.patch` | dsh-web/lib/types/types.d.ts | WebFetchRequest.timeoutMs (fb-102) |
 | `dsh-tool-fs-search-anchor-literal-glob.patch` | dsh-tool-fs-search/lib/index.js + lib/types/glob.d.ts | anchorGlobPattern literal-first-segment fix (fs-search; durable, from reconstructed pristine) |
+| `dsh-tool-fs-search-path-not-found.patch` | dsh-tool-fs-search/lib/index.js | path-not-found class: SEARCH_PATH_NOT_FOUND pre-check + stderr fallback, `pattern rejected: <line>` wording, MODO 3 tool-doc distinction (VALLE 09-08; ADDITIVE over the anchor patch — base = c1ecd7ac…, applied = 576e8e66…) |
 | `dsh-tool-fs-search-fb51-direct-edit-normalize.patch` | same | ONE-TIME: live 2026-09-02 direct-edit → compiled payload form (the current installed state is NOT pristine) |
 | `dsh-app-boot-watch-patch-layers.patch` | dsh-app-boot/lib/index.js + lib/types/index.d.ts | watchUserPatchLayers: watch EVERY patch layer (R3) |
 | `dsh-cli-profile-boot-watch-patch-layers.patch` | dsh lib/profile-boot-<hash>.js | CLI runProfile → one watchUserPatchLayers call over bundle+profile+home layers (R3) |

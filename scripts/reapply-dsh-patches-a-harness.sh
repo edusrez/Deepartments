@@ -15,6 +15,9 @@
 #   patches/dsh-tool-web-fetch-timeout-override.patch         dsh-tool-web (+types)
 #   patches/dsh-web-fetch-request-timeout.patch               dsh-web (types.d.ts)
 #   patches/dsh-tool-fs-search-anchor-literal-glob.patch      dsh-tool-fs-search (+types)
+#   patches/dsh-tool-fs-search-path-not-found.patch           dsh-tool-fs-search (SEARCH_PATH_NOT_FOUND
+#     class — applied ON TOP of the anchor patch; its pristine fingerprint is
+#     the anchor-applied state c1ecd7ac…, applied = 576e8e66…; VALLE 09-08 lane)
 #   patches/dsh-tool-fs-search-fb51-direct-edit-normalize.patch  (ONE-TIME: live
 #     direct-edit state -> compiled payload form; the durable patch is the
 #     anchor-literal-glob one above, based on the reconstructed pristine)
@@ -105,6 +108,7 @@ A_HARNESS=(
   "node_modules/@deepseek-ai/dsh-tool-web lib/types/index.d.ts dsh-tool-web-fetch-timeout-override.patch fa96302d924d32de9df5298538f13093 7116efa682ce8b1978190af135fa8aa6"
   "node_modules/@deepseek-ai/dsh-web lib/types/types.d.ts dsh-web-fetch-request-timeout.patch 622e5d50256c200cc289dbfa35f0b43c f74e2a0b1f4356cfca6fbc157d684020"
   "node_modules/@deepseek-ai/dsh-tool-fs-search lib/index.js dsh-tool-fs-search-anchor-literal-glob.patch 9d92d79d19288c8c3d6f353ff4516923 c1ecd7ac43eaf7923af050eee8249673 669590376ecc9d9e1d9fb9f3531100e2"
+  "node_modules/@deepseek-ai/dsh-tool-fs-search lib/index.js dsh-tool-fs-search-path-not-found.patch c1ecd7ac43eaf7923af050eee8249673 576e8e66b7a33e15fff58663c672272f"
   "node_modules/@deepseek-ai/dsh-tool-fs-search lib/types/glob.d.ts dsh-tool-fs-search-anchor-literal-glob.patch abb3e1903c42e878cb7bc76cece2ad90 ac12dc59628e934777f224164c5459fd 5d10ebee03e200ad16929e0291206efa"
   "node_modules/@deepseek-ai/dsh-app-boot lib/index.js dsh-app-boot-watch-patch-layers.patch f89b0aa41c566589162295578ebb8749 a4f6123a217ac6f4e4cc7280a0d547dc"
   "node_modules/@deepseek-ai/dsh-app-boot lib/types/index.d.ts dsh-app-boot-watch-patch-layers.patch 5ed502c91a525f05367730f28b10e160 027fdc1cc3b47982027997f7902e2150"
@@ -118,6 +122,72 @@ classify() {
   if [[ -n "${direct}" && "${md5}" == "${direct}" ]]; then echo "DIRECT_EDIT"; return 0; fi
   if [[ "${md5}" == "${pristine}" ]]; then echo "PRISTINE"; return 0; fi
   echo "UNKNOWN"; return 1
+}
+
+# CHAIN-AWARE classify (VALLE 09-08 lane): a target file can carry SEQUENTIAL
+# patches (dsh-tool-fs-search lib/index.js: anchor-literal-glob, then
+# path-not-found), so a copy that sits at ANOTHER row's chain position is a
+# KNOWN state, never the drift FAIL — `others` folds every OTHER row's
+# fingerprints for the same relpath as `md5:PHASE,...` pairs (PHASE=APP = that
+# row's applied state — my file is already superseded past it; PHASE=PRE =
+# that row's pristine/direct — a PRECEDING patch must land first). States:
+# APPLIED (mine, or superseded) / DIRECT_EDIT (the legacy direct-edit, needs
+# the normalize patch) / PRECEDING (an earlier row's base — the earlier group
+# handles it; a pending NOT for check, a skip for apply) / PRISTINE (MY patch
+# applies now) / UNKNOWN (drift). With no `others` this behaves EXACTLY like
+# classify() — the single-patch rows are untouched.
+classify_chain() {
+  local md5="$1" pristine="$2" applied="$3" direct="${4:-}" others="${5:-}"
+  local pair pmd5 phase
+  # OWN fingerprints first: a row's pristine can EQUAL another row's applied
+  # (the tool-fs-search pair: the anchor's applied c1ecd7ac… IS the
+  # path-not-found row's pristine) — MY patch applies NOW when my pristine
+  # matches, before the others' superseded/superfluous positions.
+  if [[ "${md5}" == "${applied}" ]]; then echo "APPLIED"; return 0; fi
+  if [[ -n "${direct}" && "${md5}" == "${direct}" ]]; then echo "DIRECT_EDIT"; return 0; fi
+  if [[ "${md5}" == "${pristine}" ]]; then echo "PRISTINE"; return 0; fi
+  if [[ -n "${others}" ]]; then
+    IFS=',' read -r -a others_arr <<< "${others%,}"
+    for pair in "${others_arr[@]}"; do
+      [[ -z "${pair}" ]] && continue
+      pmd5="${pair%%:*}"
+      phase="${pair##*:}"
+      if [[ "${md5}" == "${pmd5}" ]]; then
+        if [[ "${phase}" == "APP" ]]; then echo "APPLIED"; return 0; fi
+        echo "PRECEDING"; return 0
+      fi
+    done
+  fi
+  echo "UNKNOWN"; return 1
+}
+
+# Fold every row's fingerprints per TARGET FILE into "abs -> md5:PHASE,…"; the
+# per-row `others` csv for classify_chain is the map minus the row's OWN
+# fingerprints. The key is the ABSOLUTE path (the bare relpath is NOT unique —
+# six packages share `lib/index.js`); a missing CLI chunk keys as "cli:<rel>".
+# The global CHAIN_PHASES (declared below) is reset here — NEVER re-declared
+# (a function-local `declare -A` would shadow it and leave the global stale).
+# `return 0` closes the loop: the EOF read returns 1, and under `set -e` a
+# non-zero function return would abort the caller.
+declare -A CHAIN_PHASES=()
+fill_chain_phases() {
+  local dsh_root="$1" abs relpath patch pristine applied direct key
+  CHAIN_PHASES=()
+  while IFS='|' read -r abs relpath patch pristine applied direct; do
+    key="${abs}"
+    [[ -z "${key}" ]] && key="cli:${relpath}"
+    CHAIN_PHASES["${key}"]+="${pristine}:PRE,"
+    CHAIN_PHASES["${key}"]+="${applied}:APP,"
+    [[ -n "${direct}" ]] && CHAIN_PHASES["${key}"]+="${direct}:PRE,"
+  done < <(resolve_targets "${dsh_root}")
+  return 0
+}
+chain_others() { # $1=abs-key $2=pristine $3=applied $4=direct
+  local csv="${CHAIN_PHASES[$1]:-}"
+  csv="${csv//$2:PRE,/}"
+  csv="${csv//$3:APP,/}"
+  [[ -n "$4" ]] && csv="${csv//$4:PRE,/}"
+  printf '%s' "${csv%,}"
 }
 
 # resolve each chain entry: prints "abs|relpath|patch|pristine|applied|direct"
@@ -138,17 +208,20 @@ resolve_targets() {
 check_chain() {
   local dsh_root="$1" saw_applied=0 saw_pristine=0 saw_direct=0 saw_unknown=0
   echo "A-HARNESS chain over: ${dsh_root}"
+  fill_chain_phases "${dsh_root}"
   while IFS='|' read -r abs relpath patch pristine applied direct; do
-    local state md5
+    local state md5 others
     if [[ -z "${abs}" || ! -f "${abs}" ]]; then
       echo "  FAIL:  target not found for ${relpath}" >&2
       return 1
     fi
     md5="$(md5_of "${abs}")"
-    state="$(classify "${md5}" "${pristine}" "${applied}" "${direct}" || echo UNKNOWN)"
+    others="$(chain_others "${abs:-cli:${relpath}}" "${pristine}" "${applied}" "${direct}")"
+    state="$(classify_chain "${md5}" "${pristine}" "${applied}" "${direct}" "${others}" || echo UNKNOWN)"
     case "${state}" in
       APPLIED)    saw_applied=1; echo "  PASS:   ${relpath} is patched (${md5})";;
-      PRISTINE)   saw_pristine=1; echo "  NOT:    ${relpath} is pristine rc.2 (${md5})";;
+      PRISTINE)   saw_pristine=1; echo "  NOT:    ${relpath} is at the patch base (${md5}) — run apply";;
+      PRECEDING)  saw_pristine=1; echo "  NOT:    ${relpath} awaits a PRECEDING patch of this chain (${md5}) — run apply";;
       DIRECT_EDIT) saw_direct=1; echo "  NORM:   ${relpath} is in the fb-51 direct-edit state (${md5}) — run apply (normalize)";;
       *)          saw_unknown=1; echo "  FAIL:   ${relpath} drifted — md5 ${md5} matches no fingerprint (manual port; see patches/README.md)" >&2;;
     esac
@@ -171,6 +244,7 @@ check_chain() {
 apply_group() {
   local dsh_root="$1" patch="$2" stamp="$3" pkgroot="" abs relpath pristine applied direct apply_root
   local files=() any=0
+  fill_chain_phases "${dsh_root}"
   while IFS='|' read -r abs relpath cur_patch pristine applied direct; do
     [[ "${cur_patch}" == "${patch}" ]] || continue
     files+=("${abs}|${relpath}|${cur_patch}|${pristine}|${applied}|${direct:-}")
@@ -195,10 +269,15 @@ apply_group() {
   local all_applied=1
   for f in "${files[@]}"; do
     IFS='|' read -r abs relpath cur_patch pristine applied direct <<< "${f}"
-    local md5 state
+    local md5 state others
     md5="$(md5_of "${abs}")"
-    state="$(classify "${md5}" "${pristine}" "${applied}" "${direct}" || echo UNKNOWN)"
-    if [[ "${state}" == "APPLIED" ]]; then continue; fi
+    others="$(chain_others "${abs:-cli:${relpath}}" "${pristine}" "${applied}" "${direct}")"
+    state="$(classify_chain "${md5}" "${pristine}" "${applied}" "${direct}" "${others}" || echo UNKNOWN)"
+    # APPLIED and PRECEDING are both covered elsewhere in the chain: APPLIED is
+    # this patch's goal state; PRECEDING is an EARLIER row's base (that group
+    # applies first in an apply_chain run, so the copy reaches my base before
+    # this group's turn — defensively skipping here avoids a wrong-patch apply).
+    if [[ "${state}" == "APPLIED" || "${state}" == "PRECEDING" ]]; then continue; fi
     all_applied=0
     case "${state}" in
       PRISTINE)    need_plain=1 ;;
