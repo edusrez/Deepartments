@@ -173,6 +173,42 @@
 > ejecutado 14/46 causas del ledger QI-48; backup
 > /opt/dsh/backups/restart-registry-*-pre-fb43**; fb-43 6/6, parity
 > intacta).
+> **ENTRADA 09-08 — ABSORCIÓN DE LA JORNADA (IPD builder-188, lane paralela
+> register-sync 09-08; docs-only, 0 commits, LISTO-PARA-COMMIT — el host escribe
+> la entrada ROADMAP al cierre de sesión)** — jornada 09-08 absorbida
+> (commits → lane/worker, 1 línea de contenido c/u): **fb-221 work-register-idle
+> v2** `abed5f0` (CERRADO — el parse excluye closure-markers
+> CERRADO/DIFERIDO/ABSORBIDO/DONE/RESUELTO/RETIRADO del conteo actionable; la
+> alerta cita pendientes REALES; 156→N activos + conteo total informativo en el
+> cuerpo; +3 tests; WRI 23/23, parity 3/3, CUT-4 intacta; lane
+> work-register-idle) · **O5-flags F1/F2/F3** `3b5d65c` (CERRADO — HEAD main:
+> F1 warn del drop silencioso quality-head en delivery · F2 reason qd-worker|dice
+> en el ledger retire-dice · F3 kind prune-reinventory en el archive
+> posts-retired; O5 veredicto intacto; parity 3/3; lane obs/O5) · **SOURCES.md
+> research** `3f17879` (CERRADO — fb-211/fb-236 doc research: tabla dominios
+> BLOCKED/UNRELIABLE + fallbacks datados; commit por el host; lane research-docs)
+> · **fb-190 CERRADO (cadena completa, 2026-09-08)** — protocolo de rotación sin
+> pre-anuncio, codificado en runbook hosts `f4595b15` + `671b6ac5`; resuelto por
+> QH; pre-anuncio PROHIBIDO · **rotación host D-Q3 PASS** (q-i-112, report
+> 537bb463 — f4595b15→671b6ac5, artefacto doble start-match explicado) ·
+> **rotación QH completada** (b5, sesión 8637062a) · **fb-237 CERRADO** (retiro
+> involuntario builder-184 → auto-retire-on-delivery del protocolo efímero
+> aplicado a un turno de PAUSA — D-Q2 QH CERRADO; causa de DISEÑO del efímero,
+> lección para briefs IPH; 0 pérdida, re-despliegue 185) · **fb-239 DESCARTADO**
+> / **fb-240 en-estudio** / **fb-238 ABIERTA** (head-tooling) · **fb-241 EN
+> CURSO** (higiene secrets — redacción de 2 reports 08-19; LISTO por builder-187,
+> reviewer en vuelo; commit pendiente host + re-index RAG host-plane; lane
+> gitignored .dsh/reports NO tocada) · **oc-15 EN CURSO** (re-plan v2 — premisa
+> drop-in REFUTADA por verificación host: fragmento len=18 vs env vivo 67/64;
+> explore-deep trazando la inyección real; paquete inicial `955ced02` cancelado)
+> · **ghost-store fb-242/fb-222 EN CURSO** (anclaje de rutas absolutas — path
+> real verificado `/.deepartments/`; explore-deep diseñando) · **lane
+> fs-tooling unificada 09-08 YA EN MAIN** (`3168e8e` guard O1
+> deptExecIsQuotedInlineScript q-i-110 + `b901bbc` patch SEARCH_PATH_NOT_FOUND:
+> pre-chequeo de path en runRipgrep + fallback stderr + wording 'pattern
+> rejected'; grep único previo 0 hits — sin duplicado).
+> **DECISIÓN DE COLA (head; estampada por esta lane)** — ítem transporte =
+> CIERRE FORMAL + re-lane «pooler-capacity / reserva de keys» (ver §1).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
@@ -284,27 +320,36 @@
     absorción register-sync 09-07 (IPD builder-172), docs-only, 0 commits,
     LISTO-PARA-COMMIT; absorbe wt-register-sync-builder-150 + wt-ola-landing
     + wt-fb163-fb164-policy — carrier ya en main bd128f4).**
-  - **transporte fb-23/69/70/81/83** — ABIERTA (REAPERTURA POR RELOJ — veredicto
-    explore-deep 2ffad256 09-06: el criterio lane ② + 48h de 0 failed NO se
-    cumplió; el MECANISMO está fijado y operativo — lane ② `ec2d405` en main,
-    activada 09-03 20:13Z, sweep 247 ciclos, 0 failed hoy, 0 pérdidas; causa de
-    los failed residuales = CLASE CAPACIDAD del pooler, NO transporte) — piezas
-    REALES de la familia cerradas: fb-23 dispose-gate `3386f7b` (09-04) · clase
-    O1 `f8ce69a` R4 (09-05) · R5 `e3db75c` = wave guard/DX (NO evidencia de
-    cierre de transporte) · reloj renovado → vence **09-08 06:39Z** · lane
-    sugerida «pooler-capacity / reserva de keys» (OBSERVACIONAL; owner top-up;
-    R3) · **fb-58 CUBIERTO por `ec2d405`** (settle/rotatedTo en delivery.ts +
-    test lane2-settle-rotatedto) — fuera de la cola abierta (residual kind-ack/
-    mirror m-2524 → observacional, clase rotaciones) · **fb-56** (interrupted-
-    post/canary-kill — re-drive + FASE0) · **O2 nudge** (lane fbd-nudge-o2 LPC `8e03c04d` —
-    ceremonia 09-07; base foldeada `0e2e735`) · **zombie rule pooler** (gap
-    403→errorClass en probeInvalidKeys; pooler master cubre parcial:
-    `8da7363` tombstone P2 + `094cbf8` PROBE-FAILED marker) · **m-423**
-    (rotación host PARTIAL — archive corto; settle del sidecar; R10 tocó los
-    seams de archive) · **fb-32** (refinamiento residual del guard tras el
-    fix `91bc5a8`) · **qi-silence m-2347** (clase watchdog qi-silence —
-    datapoint m-2347 a verificar con QD) · **fb-75** (gate billingDown
-    `5fc59b5` pooler master + HALT LPC; cierre formal post-ceremonia).
+  - **transporte fb-23/69/70/81/83** — **CERRADO-con-dónde (CIERRE FORMAL 09-08 —
+    estampa de la decisión de cola del head; sustituye la renovación del reloj,
+    vencido 09-08 06:39Z — la clase ya no es transporte, por eso NO se renueva)**:
+    veredicto explore-deep 2ffad256 09-06 — el MECANISMO está fijado y operativo:
+    lane ② `ec2d405` en main, activada 09-03 20:13Z, sweep 247 ciclos, **0 failed
+    hoy auditable en el registro de deliveries (el digest 09-08 confirma 0 failed
+    rows actuales)**, 0 pérdidas; la causa de los failed residuales = **CLASE
+    CAPACIDAD del pooler, NO transporte** — piezas REALES de la familia cerradas
+    en sus lanes: fb-23 dispose-gate `3386f7b` (09-04) · clase O1 `f8ce69a` R4
+    (09-05) · R5 `e3db75c` (wave guard/DX) · fb-58 CUBIERTO por `ec2d405`
+    (settle/rotatedTo en delivery.ts + test lane2-settle-rotatedto; residual
+    kind-ack/mirror m-2524 → observacional, clase rotaciones) — la observación
+    residual se re-lanea como ítem NUEVO «pooler-capacity» (abajo).
+  - **«pooler-capacity / reserva de keys» — NUEVO (OBSERVACIONAL; re-lane del
+    residual de transporte, estampa 09-08)** — la observación residual de la
+    clase CAPACIDAD: garantizar un colchón de keys para que el pool no caiga a 0
+    usable (capacity/owner top-up/reserva de keys) · vincula **fb-75/39 gate de
+    billing — el pendiente real de la clase capacidad** (fb-75 gate billingDown
+    `5fc59b5` pooler master + HALT LPC; cierre formal post-ceremonia) · owner
+    top-up; R3 · NO re-trabajar el pipeline delivery (ec2d405 ya en main y
+    operando) — next: internal-programming-head.
+  - **fb-56** (interrupted-post/canary-kill — re-drive + FASE0) · **O2 nudge**
+    (lane fbd-nudge-o2 LPC `8e03c04d` — ceremonia 09-07; base foldeada
+    `0e2e735`) · **zombie rule pooler** (gap 403→errorClass en probeInvalidKeys;
+    pooler master cubre parcial: `8da7363` tombstone P2 + `094cbf8`
+    PROBE-FAILED marker) · **m-423** (rotación host PARTIAL — archive corto;
+    settle del sidecar; R10 tocó los seams de archive) · **fb-32** (refinamiento
+    residual del guard tras el fix `91bc5a8`) · **qi-silence m-2347** (clase
+    watchdog qi-silence — datapoint m-2347 a verificar con QD) · **fb-75** (gate
+    billingDown `5fc59b5` pooler master + HALT LPC; cierre formal post-ceremonia).
 
 - **POST-DAG — cola nueva (DAG del IPH):**
   - **DI-by-services CERRADO (73f60d9, deploy canary 11:17Z — MISIÓN 8/8)**:
@@ -541,7 +586,7 @@ fold-ins 09-04 (7d5bb70/91bc5a8/0e2e735/3386f7b/c19cde4) · pool-grading M1
 fb-167 watchdog · fb-132 gate/wake-seam settle · P-LATCH fb-154/155/157).
 Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 
-## 3. PENDIENTE-OWNER (decisiones — estado al 09-06)
+## 3. PENDIENTE-OWNER (decisiones — estado al 09-08)
 
 - **GUI modo monitoreo (owner 09-01) — CERRADO (2026-09-04)**: decisión owner
   «SÍ (cerrada — NO reabrir)» registrada en el job doc (docs/departments/
@@ -646,7 +691,7 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   0 no-planificados; cierre 09-06) — el §7 NO necesita más decisiones; el
   crashStreak 9 = artefacto clase 402 (salto 5→9 señalado).
 
-## 4. CAPACIDAD (al 09-06)
+## 4. CAPACIDAD (al 09-08)
 
 - Pool LIVE 09-06 (stateFile + GET /__keypool/status 14:54Z):
   **oc-6 = key NUEVA del owner (ws6; única ELEGIBLE — sirve el 100% del
