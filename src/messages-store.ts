@@ -36,6 +36,7 @@ export {
   parseDeliveryRows,
   markDelivery,
   deliveryStatus,
+  deliveredAt,
   needsRedelivery,
   compactDeliveryRows,
   DeliveryRedeliverer

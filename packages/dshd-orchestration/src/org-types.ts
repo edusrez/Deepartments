@@ -244,4 +244,13 @@ export interface AgentMessageSource {
   messageId?: string
   from?: string
   senderSessionId?: import('@deepseek-ai/dsh-session').SessionId
+  /** FB-258 (C3, 2026-09-08 — owner addendum m-3298): the createdAt/receivedAt
+   * PAIR of the delivered message, exposed in the followup source so the GUI
+   * and any consumer read the drain latency directly. `createdAt` = the
+   * durable record ts (Date.now() at persist, messages.jsonl); `receivedAt` =
+   * the moment the destination session received the followup (the plain 1:1
+   * splice or the batch flush/settle). Plain numbers, JSON-safe (W7-B);
+   * ABSENT only on a legacy/pre-C3 source (never a present-undefined key). */
+  createdAt?: number
+  receivedAt?: number
 }

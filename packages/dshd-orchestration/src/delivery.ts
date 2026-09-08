@@ -1240,7 +1240,16 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
         to: [...record.to],
         messageId: record.id,
         from: record.from,
-        senderSessionId: senderSessionId === undefined ? undefined : SessionId(senderSessionId)
+        senderSessionId: senderSessionId === undefined ? undefined : SessionId(senderSessionId),
+        // FB-258 (C3 — owner addendum m-3298): the createdAt/receivedAt PAIR
+        // travels in the source (W7-B JSON-safe plain numbers, never a
+        // present-undefined key). createdAt = the durable record ts (the
+        // messages.jsonl append time); receivedAt = the moment THIS followup is
+        // received by the destination session (the splice) — the Δ is the drain
+        // latency, measurable where the source is projected (agent_messages /
+        // the GUI row).
+        createdAt: record.ts,
+        receivedAt: Date.now()
       })
     })
 
@@ -1322,7 +1331,14 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
         messageIds: items.map((item) => item.record.id),
         batch: true,
         from: first.record.from,
-        senderSessionId: first.senderSessionId === undefined ? undefined : SessionId(first.senderSessionId)
+        senderSessionId: first.senderSessionId === undefined ? undefined : SessionId(first.senderSessionId),
+        // FB-258 (C3 — owner addendum m-3298): the PAIR for the delta —
+        // createdAt = the FIRST frame's durable record ts (the earliest seq;
+        // per-frame ts stay derivable via source.messageIds → messages.jsonl),
+        // receivedAt = the flush/settle moment (honest: «cuándo lo recibió la
+        // sesión destino» — the Date.now() of THIS followup splice).
+        createdAt: first.record.ts,
+        receivedAt: Date.now()
       })
     })
   }

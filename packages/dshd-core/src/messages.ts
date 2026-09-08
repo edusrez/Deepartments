@@ -724,6 +724,37 @@ export async function deliveryStatus(stateDir: string, messageId: string, recipi
 }
 
 /**
+ * FB-258 (C1 — the drain observability accessor, 2026-09-08; explore-deep-61
+ * verdict: the createdAt/receivedAt gap is OBSERVABILITY, owner addendum
+ * m-3298): the RECEIVED-AT timestamp of one (messageId, recipientId) pair —
+ * the `ts` of the FINAL delivery-sidecar row (rows are append-ordered: the
+ * last matching row wins, the same read `deliveryStatus` uses). For a
+ * delivered/resumed pair that final ts is the de-facto receivedAt of the
+ * destination session; for a batch-drain item it is the flush/settle moment
+ * (flushBatchFor writes the 'delivered' row at the flush). `undefined` when
+ * the pair has NO row at all (never delivered / not tracked — e.g. daemon
+ * messages from 'deepartments' travel direct channels without an engine row:
+ * their receivedAt is only observable via the C3 source pair). Pure READ —
+ * never mutates the append-only sidecar (the messages.jsonl record is
+ * untouched, invariante spec §3.1); same ENOENT-tolerant disk read as
+ * `deliveryStatus` (the sidecar is small and this path is not hot).
+ */
+export async function deliveredAt(stateDir: string, messageId: string, recipientId: string): Promise<number | undefined> {
+  let text: string
+  try {
+    text = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+  let latest: number | undefined
+  for (const row of parseDeliveryRows(text)) {
+    if (row.messageId === messageId && row.recipientId === recipientId) latest = row.ts
+  }
+  return latest
+}
+
+/**
  * fb-117 (fold-in batch A — the FIFO-gate predicate, PURE): whether the
  * recipient has an EARLIER seq (strictly < `seq`) whose LATEST delivery-sidecar
  * pair is still 'prepared' (non-final — the write-ahead crash class of the

@@ -16,6 +16,7 @@ import {
   compactionIdMap,
   compactDeliveryRows,
   compactMessages,
+  deliveredAt,
   deliveryStatus,
   loadMemberIds,
   loadMessageRecords,
@@ -427,6 +428,27 @@ test('sidecar: prepared → final transitions (latest row wins), unknown → nul
     const first = JSON.parse(lines[0])
     assert.deepEqual(first, { messageId: 'm-0', recipientId: 'research-head', status: 'prepared', ts: first.ts })
     assert.equal(typeof first.ts, 'number')
+  })
+})
+
+test('sidecar: deliveredAt — the ts of the FINAL row per (messageId, recipientId) pair (FB-258 C1, the drain observability accessor); undefined without a row; the read never mutates the append-only sidecar', async () => {
+  await withTempStateDir(async (stateDir) => {
+    assert.equal(await deliveredAt(stateDir, 'm-0', 'research-head'), undefined, 'no rows yet → undefined')
+    await markDelivery(stateDir, 'm-0', 'research-head', 'prepared', 1700000000001)
+    assert.equal(await deliveredAt(stateDir, 'm-0', 'research-head'), 1700000000001, 'a single prepared row → its ts (the write-ahead intent time)')
+    await markDelivery(stateDir, 'm-0', 'research-head', 'delivered', 1700000000999)
+    assert.equal(await deliveredAt(stateDir, 'm-0', 'research-head'), 1700000000999, 'the FINAL row ts wins (prepared → delivered — the receivedAt of the destination session)')
+    // Pair-scoping: a same-message DIFFERENT-recipient pair has its own final ts.
+    await markDelivery(stateDir, 'm-0', 'asistente', 'delivered', 1700000000555)
+    assert.equal(await deliveredAt(stateDir, 'm-0', 'asistente'), 1700000000555, 'recipient-scoped: the other pair exposes ITS final ts (never the other recipient\'s)')
+    assert.equal(await deliveredAt(stateDir, 'm-9', 'research-head'), undefined, 'a pair with NO rows → undefined')
+    // The accessor is a pure READ — the sidecar stays append-only (exactly the
+    // 3 written rows; no row was touched/rewritten).
+    const lines = (await readFile(resolveDeliveriesPath(stateDir), 'utf8')).split('\n').filter(Boolean)
+    assert.equal(lines.length, 3)
+    assert.deepEqual(JSON.parse(lines[0]), { messageId: 'm-0', recipientId: 'research-head', status: 'prepared', ts: 1700000000001 })
+    assert.deepEqual(JSON.parse(lines[1]), { messageId: 'm-0', recipientId: 'research-head', status: 'delivered', ts: 1700000000999 })
+    assert.deepEqual(JSON.parse(lines[2]), { messageId: 'm-0', recipientId: 'asistente', status: 'delivered', ts: 1700000000555 })
   })
 })
 

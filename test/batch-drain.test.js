@@ -46,7 +46,7 @@ import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 const D = await import('../packages/dshd-core/src/delivery.ts')
 const { createDeliveryEngine } = D
 const C = await import('../packages/dshd-core/src/messages.ts')
-const { resolveDeliveriesPath, resolveMessagesPath, parseDeliveryRows, deliveryStatus } = C
+const { resolveDeliveriesPath, resolveMessagesPath, parseDeliveryRows, parseMessageRecords, deliveryStatus, deliveredAt } = C
 
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 const BUNDLE_SRC = pathToFileURL(path.join(REPO_ROOT, 'src', 'index.ts')).href
@@ -680,5 +680,98 @@ test('VALLE 09-07 (tool — the HOST case, §host por diseño): a HOST recipient
     } finally {
       await env.dispose()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FB-258 (C1+C3 — 2026-09-08, explore-deep-61 verdict: the drain is DISEÑO, 0
+// defecto; the real gap is OBSERVABILIDAD — the owner addendum m-3298 asks that
+// every message EXPOSES the createdAt/receivedAt pair). C3 injects the pair
+// into the followup source (busUserMessage / busBatchUserMessage — the metadata
+// that travels with the message and the GUI row already projects); C1 is the
+// pure ledger accessor deliveredAt() (final-sidecar-row ts per pair). The
+// on-disk record is NEVER touched (append-only, invariante spec §3.1).
+// ---------------------------------------------------------------------------
+
+test('FB-258 (tool, C3 — SINGLE): the PLAIN followup source (busUserMessage — the idle 1:1 lane) exposes the createdAt/receivedAt PAIR — createdAt === the durable record.ts, receivedAt a plain number >= createdAt (the Δ = drain latency); no undefined-valued source key (W7-B)', async () => {
+  await withBootedOrg(async ({ stateDir, env, head, headCtx, spawn, signal }) => {
+    const workerId = spawn.workerId
+    const send = (text) => headCtx.ctx.tools.get('send_message', headCtx.key).execute({ to: [workerId], text }, { agent: head, signal })
+    const worker = env.agents.get(spawn.sessionId)
+    const baseline = worker.inboxMessages.length
+    assert.equal(worker.status, 'idle', 'C3-single: the worker is IDLE (the 1:1 lane — the first message wakes, no accumulation)')
+    const idle = await send('fb258 plain pair probe')
+    assert.equal(idle.delivered[workerId], 'delivered', 'C3-single: the idle send delivers 1:1 (the plain busUserMessage followup)')
+    assert.equal(worker.inboxMessages.length, baseline + 1, 'C3-single: exactly the plain followup spliced')
+    const msg = worker.inboxMessages[worker.inboxMessages.length - 1]
+    const records = parseMessageRecords(await readFile(resolveMessagesPath(stateDir), 'utf8'))
+    const record = records.find((r) => r.id === idle.messageId)
+    assert.ok(record, 'C3-single: the durable record exists (the source of truth for createdAt)')
+    assert.equal(msg.source.createdAt, record.ts, 'C3-single: source.createdAt === the durable record.ts (Date.now() at persist — truthful, never synthetic)')
+    assert.equal(typeof msg.source.receivedAt, 'number', 'C3-single: source.receivedAt is a plain number (W7-B JSON-safe)')
+    assert.ok(msg.source.receivedAt >= record.ts, 'C3-single: receivedAt >= createdAt (received after created)')
+    for (const [key, value] of Object.entries(msg.source)) {
+      assert.notEqual(value, undefined, `C3-single: no undefined-valued source key (W7-B) — "${key}"`)
+    }
+  })
+})
+
+test('FB-258 (tool, C3 — DELTA): the batch-drain DELTA source (busBatchUserMessage) exposes the PAIR — createdAt === the FIRST frame record.ts (the earliest seq), receivedAt === the flush/settle moment (>= EVERY frame\'s createdAt — honest «cuándo lo recibió la sesión destino»)', async () => {
+  await withBootedOrg(async ({ stateDir, env, head, headCtx, spawn, signal }) => {
+    const workerId = spawn.workerId
+    const send = (text) => headCtx.ctx.tools.get('send_message', headCtx.key).execute({ to: [workerId], text }, { agent: head, signal })
+    const worker = env.agents.get(spawn.sessionId)
+    const baseline = worker.inboxMessages.length
+    worker.status = 'running'
+    const r1 = await send('fb258 batch pair one')
+    const r2 = await send('fb258 batch pair two')
+    const r3 = await send('fb258 batch pair three')
+    assert.equal(r3.delivered[workerId], 'prepared (batch-until-settle)', 'C3-delta: the sends accumulated for the settle')
+    const flushStart = Date.now()
+    env.pluginCtx().emit('agent/status', { status: 'idle', agent: worker })
+    await waitFor(() => worker.inboxMessages.length === baseline + 1, 8000, 'the settle flush splices the ONE delta')
+    const flushEnd = Date.now()
+    const delta = worker.inboxMessages[worker.inboxMessages.length - 1]
+    assert.equal(delta.source.batch, true, 'C3-delta: the delta source carries the batch marker')
+    const records = parseMessageRecords(await readFile(resolveMessagesPath(stateDir), 'utf8'))
+    const first = records.find((r) => r.id === r1.messageId)
+    const last = records.find((r) => r.id === r3.messageId)
+    assert.ok(first !== undefined && last !== undefined, 'C3-delta: the frame records exist')
+    assert.equal(delta.source.createdAt, first.ts, 'C3-delta: source.createdAt === the FIRST frame record.ts (the delta\'s earliest seq)')
+    assert.equal(typeof delta.source.receivedAt, 'number', 'C3-delta: source.receivedAt is a plain number')
+    assert.ok(delta.source.receivedAt >= first.ts, 'C3-delta: receivedAt >= createdAt (the delta is received after creation)')
+    assert.ok(delta.source.receivedAt >= last.ts, 'C3-delta: receivedAt >= the LAST frame\'s createdAt too (the flush happens after every accumulate — the honest settle moment)')
+    assert.ok(delta.source.receivedAt >= flushStart - 1000 && delta.source.receivedAt <= flushEnd + 1000, 'C3-delta: receivedAt IS the flush/settle moment (Date.now() at the flush — not a synthetic ts)')
+    for (const [key, value] of Object.entries(delta.source)) {
+      assert.notEqual(value, undefined, `C3-delta: no undefined-valued source key (W7-B) — "${key}"`)
+    }
+  })
+})
+
+test('FB-258 (tool, C1): deliveredAt() — the ledger accessor is COHERENT with the drain-on-settle FLUSH — for a batch item it returns the ts of the FINAL sidecar row (the flush\'s \'delivered\' mark) and matches the delta\'s receivedAt (same flush, a few ms apart)', async () => {
+  await withBootedOrg(async ({ stateDir, env, head, headCtx, spawn, signal }) => {
+    const workerId = spawn.workerId
+    const send = (text) => headCtx.ctx.tools.get('send_message', headCtx.key).execute({ to: [workerId], text }, { agent: head, signal })
+    const worker = env.agents.get(spawn.sessionId)
+    const baseline = worker.inboxMessages.length
+    worker.status = 'running'
+    const r1 = await send('fb258 deliveredAt one')
+    const r2 = await send('fb258 deliveredAt two')
+    env.pluginCtx().emit('agent/status', { status: 'idle', agent: worker })
+    await waitFor(() => worker.inboxMessages.length === baseline + 1, 8000, 'the settle flush splices the delta')
+    const delta = worker.inboxMessages[worker.inboxMessages.length - 1]
+    const delivered = await deliveredAt(stateDir, r2.messageId, workerId)
+    assert.equal(typeof delivered, 'number', 'C1: the batch item HAS a deliveredAt (the flush wrote the final row)')
+    const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+    const pairRows = rows.filter((rr) => rr.messageId === r2.messageId && rr.recipientId === workerId)
+    assert.ok(pairRows.length >= 2, 'C1: the pair has the write-ahead + the flush mark rows (append-only sidecar)')
+    assert.equal(pairRows[pairRows.length - 1].status, 'delivered', 'C1: the FINAL row of the pair is the delivered flush mark')
+    assert.equal(delivered, pairRows[pairRows.length - 1].ts, 'C1: deliveredAt === the FINAL row ts (the last transition wins — the same read deliveryStatus uses)')
+    assert.ok(delta.source.receivedAt <= delivered, 'C1: the delta is spliced BEFORE the \'delivered\' mark (receivedAt <= deliveredAt — same flush, sequential)')
+    assert.ok(delivered - delta.source.receivedAt < 10_000, 'C1: the two are the SAME flush (a <10 s skew — never a synthetic/older ts)')
+    const records = parseMessageRecords(await readFile(resolveMessagesPath(stateDir), 'utf8'))
+    const record = records.find((rr) => rr.id === r2.messageId)
+    assert.ok(record !== undefined && delivered >= record.ts, 'C1: deliveredAt >= createdAt (the drain latency is measurable from the ledger alone)')
+    assert.equal(await deliveredAt(stateDir, 'm-never-sent', workerId), undefined, 'C1: a pair WITHOUT any row → undefined')
   })
 })

@@ -716,6 +716,18 @@ interface AgentMessageSource {
   messageId?: string
   from?: string
   senderSessionId?: SessionId
+  /** FB-258 (C3, 2026-09-08 — owner addendum m-3298): the createdAt/receivedAt
+   * PAIR of the delivered message, exposed in the followup source so the GUI
+   * and any consumer read the drain latency directly. `createdAt` = the
+   * durable record ts (Date.now() at persist, messages.jsonl); `receivedAt` =
+   * the moment the destination session received the followup (the plain 1:1
+   * splice or the batch flush/settle). Plain numbers, JSON-safe (W7-B);
+   * ABSENT only on a legacy/pre-C3 source (never a present-undefined key).
+   * MUST stay byte-identical to packages/dshd-orchestration/src/org-types.ts
+   * (both augment the SAME dsh-llm MessageSourceMap — a divergence is a
+   * TS2717). */
+  createdAt?: number
+  receivedAt?: number
 }
 
 // Batch C — ack-loop budget. A sender→target pair that has exchanged this many
