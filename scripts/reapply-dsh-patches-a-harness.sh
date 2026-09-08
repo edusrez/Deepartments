@@ -21,6 +21,10 @@
 #   patches/dsh-tool-fs-search-fb51-direct-edit-normalize.patch  (ONE-TIME: live
 #     direct-edit state -> compiled payload form; the durable patch is the
 #     anchor-literal-glob one above, based on the reconstructed pristine)
+#   patches/dsh-client-ui-conversation-input-message-identity.patch dsh-client-ui-conversation
+#     (GUI history-load fix: messageDefinition identity falls back to event.seq
+#     when data.id is undefined — the batch-drain undefined-id class; VALLE
+#     09-08 lane, explore-deep-58/9620de90)
 #   patches/dsh-app-boot-watch-patch-layers.patch             dsh-app-boot (+types)
 #   patches/dsh-cli-profile-boot-watch-patch-layers.patch     dsh CLI lib chunk
 #
@@ -112,6 +116,7 @@ A_HARNESS=(
   "node_modules/@deepseek-ai/dsh-tool-fs-search lib/types/glob.d.ts dsh-tool-fs-search-anchor-literal-glob.patch abb3e1903c42e878cb7bc76cece2ad90 ac12dc59628e934777f224164c5459fd 5d10ebee03e200ad16929e0291206efa"
   "node_modules/@deepseek-ai/dsh-app-boot lib/index.js dsh-app-boot-watch-patch-layers.patch f89b0aa41c566589162295578ebb8749 a4f6123a217ac6f4e4cc7280a0d547dc"
   "node_modules/@deepseek-ai/dsh-app-boot lib/types/index.d.ts dsh-app-boot-watch-patch-layers.patch 5ed502c91a525f05367730f28b10e160 027fdc1cc3b47982027997f7902e2150"
+  "node_modules/@deepseek-ai/dsh-client-ui-conversation lib/client.js dsh-client-ui-conversation-input-message-identity.patch 3f0397866d990e6ebb7debe11b715e98 4c5c610391116c6361a437db02cd2ad0"
   "lib CLI_CHUNK dsh-cli-profile-boot-watch-patch-layers.patch 12f9ba5a4400a8e795f1d72254119ffb c359a2f3cb7d912b38bc1c2eb14b40a1"
 )
 NORM_PATCH="dsh-tool-fs-search-fb51-direct-edit-normalize.patch"

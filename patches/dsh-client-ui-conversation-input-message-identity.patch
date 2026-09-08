@@ -1,0 +1,43 @@
+# === dsh-deepartments patch: dsh-client-ui-conversation input-message identity ===
+#
+# WHAT THIS FIXES
+#   The GUI history-load bug «conversation Context 13:input-message undefined
+#   received more than one start Match» (2nd occurrence, VALLE 09-08 — survived
+#   rotation; explore-deep-58 run token 9620de90). The PRODUCER batch-drain
+#   (packages/dshd-orchestration/src/delivery.ts busBatchUserMessage) delivered
+#   user/message events WITHOUT data.id → the splitter's messageDefinition
+#   identity `String(event.data.id)` collapsed EVERY batch event to "undefined"
+#   → conversationContextKey(kind,id) = "13:input-messageundefined" → the 2nd+
+#   start Match threw during history load (deterministic — the log keeps the
+#   events, so the failure survives rotation). THIS IS THE CONSUMER-SIDE FIX:
+#   the identity NEVER accepts "undefined" — a missing data.id falls back to
+#   event.seq (unique, append-order), the EXACT pattern of the sibling
+#   trajectoryMessageDefinition (dsh-client-ui-trajectory lib/client.js:549-555
+#   `id: String(event.seq)` — immune to this bug). Consequence: the 20 live
+#   batch events without id (session-671b6ac5) assemble as 20 DISTINCT
+#   contexts (`13:input-message<seq>`), the history LOADS without touching any
+#   log data. Producer-side fix (stable data.id via createUserMessage) lands in
+#   the org repo (delivery.ts) — this patch is the harness-installed splitter.
+#
+# TARGET FILES
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js
+#
+# FINGERPRINTS (md5)  [pristine rc.2 -> patched]
+#  client.js          3f0397866d990e6ebb7debe11b715e98 -> 4c5c610391116c6361a437db02cd2ad0
+#
+# ADDITIVE: standalone (no other A-harness patch touches this file). The zone
+# `a-harness-client-ui-conversation-index` of scripts/zone-md5-manifest.json
+# must be re-frozen to the APPLIED zone md5 (guard semantics: slice + final
+# newline) af64a82c4ac1266677a1147e5618f38e in the SAME change that applies
+# this patch to the runtime.
+#--- a/lib/client.js
++++ b/lib/client.js
+@@ -8606,7 +8606,7 @@
+ 			kind: "input-message",
+ 			target: "chat",
+ 			match: (event) => event.type === "user/message" && (0, _deepseek_ai_dsh_client_runtime_client.isAppendSurfaceEvent)(event) && !isCompactionCheckpoint(event) ? {
+-				id: String(event.data.id),
++				id: event.data.id === void 0 ? String(event.seq) : String(event.data.id),
+ 				role: "start"
+ 			} : null,
+ 			start: (_context, match, reader) => {

@@ -2,7 +2,7 @@
 // Headless and read-only: imports the INSTALLED runtime packages by absolute
 // file:// URL (their own bare imports resolve against the live tree) and
 // asserts the A-HARNESS payload behaviors. Run AFTER the host applies
-// scripts/reapply-dsh-patches-a-harness.sh apply. Expected result: 11/11
+// scripts/reapply-dsh-patches-a-harness.sh apply. Expected result: 12/12
 // probe groups PASS (exit 0). BEFORE the apply, the fb-102/fb-85/fb-89/R3
 // assertions fail — that failure IS the expected pre-apply signal.
 //
@@ -115,4 +115,18 @@ assert.ok(!fsSearchText2.includes('pattern rejected by ripgrep:'), 'the raw-stde
 assert.match(fsSearchText2, /An empty result means the pattern matched nothing under an existing path/)
 ok('dsh-tool-fs-search path-not-found class (SEARCH_PATH_NOT_FOUND + clean wording + MODO 3 docs)')
 
-console.log(`\nSMOKE RESULT: ${pass}/11 probe groups PASS (A-HARNESS applied)`)
+// 12. dsh-client-ui-conversation: input-message identity seq fallback (VALLE
+// 09-08 GUI history-load lane) — the messageDefinition identity NEVER accepts
+// "undefined": a data.id-less append user/message falls back to event.seq (the
+// trajectory precedent). Byte-probe: the pre-fix bare `String(event.data.id)`
+// identity is GONE from the match, the fallback branch is present. The
+// behavior itself is pinned by the fork assembler spec
+// (conversation-assembler.client.spec.ts — 2 distinct contexts for id-less
+// events; regression throws without the fallback).
+const uiConvText = readFileSync(`${RT}/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js`, 'utf8')
+assert.match(uiConvText, /String\(event\.seq\)/)
+assert.match(uiConvText, /id: event\.data\.id === void 0 \? String\(event\.seq\) : String\(event\.data\.id\)/)
+assert.ok(!new RegExp("id: String\\(event\\.data\\.id\\),\\n\\s*role: \"start\"").test(uiConvText), 'the bare data.id identity must not remain in the input-message match')
+ok('dsh-client-ui-conversation input-message identity seq fallback (data.id-less events no longer collide on "undefined")')
+
+console.log(`\nSMOKE RESULT: ${pass}/12 probe groups PASS (A-HARNESS applied)`)

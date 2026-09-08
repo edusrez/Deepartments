@@ -99,6 +99,14 @@
       "note": "A-HARNESS PORT: live fingerprint. Whole-file md5 = 5ed502c91a525f05367730f28b10e160; applied whole-file = 027fdc1cc3b47982027997f7902e2150. Re-freeze on apply."
     },
     {
+      "id": "a-harness-client-ui-conversation-index",
+      "file": "../../../../usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js",
+      "banner": "window.__ModuleLoader__.load({",
+      "close": "//# sourceMappingURL=client.js.map",
+      "md5": "af64a82c4ac1266677a1147e5618f38e",
+      "note": "A-HARNESS PORT (VALLE 09-08 GUI history-load lane): live pristine fingerprint a4431e524948cd35a18ea56e3c9ede18 -> APPLIED af64a82c4ac1266677a1147e5618f38e (zone slice = whole file + final newline — the bundle emits NO trailing newline, so the zone md5 differs from the whole-file md5 4c5c610391116c6361a437db02cd2ad0; MD5 used by reapply-dsh-patches-a-harness.sh table). Patch dsh-client-ui-conversation-input-message-identity.patch (messageDefinition identity: fallback to event.seq when data.id is undefined — the batch-drain undefined-id collision class, explore-deep-58/9620de90). RE-FREEZED to the APPLIED value in the same change that delivers the patch: the live runtime matches it only after the host applies the patch; the suite guard flags this zone until then (documented re-freeze discipline)."
+    },
+    {
       "id": "a-harness-cli-profile-boot",
       "file": "../../../../usr/lib/node_modules/@deepseek-ai/dsh/lib/profile-boot-DG5t9aNs.js",
       "banner": "import { writeFileSync } from \"node:fs\";",

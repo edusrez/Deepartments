@@ -31,6 +31,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 
@@ -330,7 +331,7 @@ interface AgentLike {
     append?: (type: string, data: unknown, opts?: { surfaceOp?: string }) => unknown
     header?: unknown
   }
-  followup(message: { content: readonly { type: string; text: string }[]; source: Record<string, unknown> }): void
+  followup(message: UserMessage): void
   cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void
   whenIdle(): Promise<void>
 }
@@ -1292,14 +1293,24 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
    * content (sanitizePromptLiterals per frame — W8-b) + a single `agent/send`
    * source carrying the batch marker (`batch: true` + messageIds, W7-B JSON-safe
    * projection). `withFirst` (the W9-b interruptor) comes FIRST — the preemption
-   * order: the wake later brings [interruptor, ...pending in seq order]. */
-  const busBatchUserMessage = (items: BatchItem[]): { content: readonly { type: string; text: string }[]; source: Record<string, unknown> } => {
+   * order: the wake later brings [interruptor, ...pending in seq order].
+   * GUI history-load identity fix (VALLE 09-08): the delta is built via
+   * `createUserMessage` EXACTLY like the single-path `busUserMessage` below so
+   * the materialized user/message carries a stable `data.id` (MessageId from a
+   * fresh randomUUID). Pre-fix this builder returned a bare { content, source }
+   * WITHOUT an id, so every batch-delivered user/message landed in the session
+   * log with `data.id === undefined` and the conversation splitter's
+   * messageDefinition identity `String(event.data.id)` collapsed ALL of them to
+   * `"undefined"` (conversationContextKey `13:input-messageundefined`) — the 2nd+
+   * start Match threw «received more than one start Match» on history load
+   * (explore-deep-58/9620de90). */
+  const busBatchUserMessage = (items: BatchItem[]): UserMessage => {
     const first = items[0]
     const frames = items.map((item) => sanitizePromptLiterals(item.framed)).join('\n')
     // The followup-boundary shape (the same { content, source } projection the
     // plain `busUserMessage` builds via createUserMessage — W8-b literal
     // sanitization per frame, W7-B JSON-safe source with the batch marker).
-    return {
+    return createUserMessage({
       content: [{ type: 'text', text: frames } as const],
       source: jsonSafeMessageSource({
         kind: 'agent',
@@ -1313,7 +1324,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
         from: first.record.from,
         senderSessionId: first.senderSessionId === undefined ? undefined : SessionId(first.senderSessionId)
       })
-    }
+    })
   }
 
   /** FLUSH the pending batch of ONE session in a single followup (the settle
