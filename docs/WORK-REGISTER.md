@@ -195,18 +195,33 @@
 > involuntario builder-184 → auto-retire-on-delivery del protocolo efímero
 > aplicado a un turno de PAUSA — D-Q2 QH CERRADO; causa de DISEÑO del efímero,
 > lección para briefs IPH; 0 pérdida, re-despliegue 185) · **fb-239 DESCARTADO**
-> / **fb-240 en-estudio** / **fb-238 ABIERTA** (head-tooling) · **fb-241 EN
-> CURSO** (higiene secrets — redacción de 2 reports 08-19; LISTO por builder-187,
-> reviewer en vuelo; commit pendiente host + re-index RAG host-plane; lane
-> gitignored .dsh/reports NO tocada) · **oc-15 EN CURSO** (re-plan v2 — premisa
-> drop-in REFUTADA por verificación host: fragmento len=18 vs env vivo 67/64;
-> explore-deep trazando la inyección real; paquete inicial `955ced02` cancelado)
+> / **fb-240 en-estudio** / **fb-238 ABIERTA** (head-tooling) · **fb-241 CERRADO
+> COMPLETO (09-08)** (higiene secrets: repo redactado + ACL 600/700 + corpus-
+> limpio — RAG rebuild 19:27Z corpus 1827, journals 0 sessions/archive, 0
+> valores completos; **rotación de key DECLINADA por owner** — m-3268, decisión
+> 09-08 §3) · **oc-15 REVIVED (09-08, m-3282)** (revalidate → probed/revived
+> [oc-15]: totalKeys 4 · eligibleKeys 4 · invalid:false · invalidSince 0 — el
+> fix del prefijo `sk-` confirmado en el boot: drop-in key-pooler.conf saneado
+> desde el env vivo (source-trace explore-deep e5d1d3f9); el re-plan v2 quedó
+> CERRADO por la ejecución host; paquete inicial `955ced02` cancelado)
 > · **ghost-store fb-242/fb-222 EN CURSO** (anclaje de rutas absolutas — path
 > real verificado `/.deepartments/`; explore-deep diseñando) · **lane
 > fs-tooling unificada 09-08 YA EN MAIN** (`3168e8e` guard O1
 > deptExecIsQuotedInlineScript q-i-110 + `b901bbc` patch SEARCH_PATH_NOT_FOUND:
 > pre-chequeo de path en runRipgrep + fallback stderr + wording 'pattern
-> rejected'; grep único previo 0 hits — sin duplicado).
+> rejected'; grep único previo 0 hits — sin duplicado) · **`a27daaf`
+> chore(manifest) bookkeeping** (re-freeze 12 zonas a-harness-* al estado
+> aplicado — A-HARNESS deploy apply 12/12 + smoke 10/10, 09-08 01:31:48Z;
+> hallazgo de completitud del reviewer def6926b: NO citado en la entrada →
+> aquí junto a fs-tooling/A-harness; chore de manifest SIN semántica de
+> ítem/lane, absorbida en la ola 2ª `27142eb`) · **prepared-stale → RESUELTO
+> (09-08)**: población m-3034/m-3037 a f4595b15 resuelta por
+> supersede/delivered (WATCH C2 m-3265: m-3034 delivered al host vivo
+> 671b6ac5 14:26:27Z · m-3037 cubierto por el supersede m-3040
+> terminal+delivered · prepared residuales a destinatario RETIRADO = historia
+> append-only NO-accionable; 0 purga, 0 script ad-hoc) — higiene FUTURA =
+> lane **fb-253 (markDelivery tooling**, exposición de CLI de la lib
+> dshd-core), NO script ad-hoc (record QH m-3271; ver §1 cola).
 > **DECISIÓN DE COLA (head; estampada por esta lane)** — ítem transporte =
 > CIERRE FORMAL + re-lane «pooler-capacity / reserva de keys» (ver §1).
 
@@ -304,9 +319,12 @@
   → lane fb-163/164 LPC (política + sub-normas §7 ANTI-163/171 + ANTI-164,
   `963e627e`) · **fb-167 (fallo de arquitectura del eslabón verify+push —
   settlement-wait watchdog EN MAIN `3db2617`)** · **fb-132 (gate/wake-seam
-  settle — EN MAIN `fe5cab4` + lane iter LPC)** · fb-137 (jam host-inbound +
+  settle — EN MAIN `fe5cab4` + iter LPC `68384de`)** (2ª mitad CERRADA 09-07 —
+  nunca re-marcar prepared) · fb-137 (jam host-inbound +
   seq-rewind — re-deliveries m-1999/m-2024; `fe5cab4` drena la cola prepared
-  en runtime) · fb-168 (smoke guard — restart re-escopeado 09-06, fila #13
+  en runtime; población prepared-stale 09-08 m-3034/m-3037 a f4595b15
+  RESUELTA por supersede/delivered — WATCH C2 m-3265; higiene futura =
+  lane fb-253 markDelivery tooling, no script ad-hoc) · fb-168 (smoke guard — restart re-escopeado 09-06, fila #13
   del §7) · fb-169 (smart_restart con stale-check + sin resume) · fb-172
   (fallo de continuación fb-46) · fb-143/144/145 (race-liveness — **R8 EN
   MAIN `a3ecfb7`**). Prácticas vinculantes adoptadas (fresh-check pre-restart
@@ -340,6 +358,14 @@
     `5fc59b5` pooler master + HALT LPC; cierre formal post-ceremonia) · owner
     top-up; R3 · NO re-trabajar el pipeline delivery (ec2d405 ya en main y
     operando) — next: internal-programming-head.
+  - **fb-253 (higiene programática de deliveries — markDelivery CLI; record QH
+    m-3271, 09-08)** — exponer CLI/tool de markDelivery (hoy vive SOLO en la lib
+    dshd-core, sin CLI) para resolver/terminalizar filas 'prepared' stale a
+    destinatarios RETIRADOS de forma controlada (append-only) — emergente de la
+    clase prepared-stuck fb-117/137; la población m-3034/m-3037 a f4595b15
+    (destinatario retirado) se resolvió 09-08 por supersede/delivered (WATCH C2
+    m-3265) SIN script ad-hoc; la higiene FUTURA pasa por esta lane —
+    next: internal-programming-head.
   - **fb-56** (interrupted-post/canary-kill — re-drive + FASE0) · **O2 nudge**
     (lane fbd-nudge-o2 LPC `8e03c04d` — ceremonia 09-07; base foldeada
     `0e2e735`) · **zombie rule pooler** (gap 403→errorClass en probeInvalidKeys;
@@ -447,9 +473,16 @@
     confirmaciones m-2518/2519/2520 prepared→nunca delivered + rotación IPH
     kind-ack m-2518/m-2520 no contados como confirmación por el mirror m-2524) —
     CUBIERTO por la lane ② `ec2d405` (settle/rotatedTo en delivery.ts + test
-    lane2-settle-rotatedto; fb-132 `fe5cab4` drena prepared en runtime) — fuera
-    de la cola abierta; el candidato kind-ack como «confirmación explícita»
+    lane2-settle-rotatedto; fb-132 `fe5cab4` + `68384de` drenan prepared en
+    runtime; 2ª mitad CERRADA 09-07) — fuera de la cola abierta; el
+    candidato kind-ack como «confirmación explícita»
     queda OBSERVACIONAL bajo la clase rotaciones (m-423), no transporte.
+    Población prepared-stale 09-08 (m-3034/m-3037 a f4595b15, destinatario
+    RETIRADO) RESUELTA por supersede/delivered — WATCH C2 m-3265 (m-3034
+    delivered al host vivo 671b6ac5 14:26:27Z · m-3037 cubierto por el
+    supersede m-3040 terminal+delivered · residuales = historia append-only
+    NO-accionable); higiene futura = lane fb-253 (markDelivery tooling),
+    NO script ad-hoc (ver §1).
   - **fb-64 (execRoots + stateDir READ-ONLY — corroborado EN VIVO por builder-2
     09-02; aditivo, QH sin riesgo fb-55) — SCOPING/DISGNÓSTICO EN CURSO
     (explore-deep-4 09-02)**: discrepancia a diagnosticar: el código declara
@@ -614,6 +647,16 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   monthly-100; **fallback DS DISABLED (owner 09-06: la cuenta oficial necesita
   top-up)** — tope de capacidad = oc-6 hasta el reset 09-07; top-up real sigue
   sin decisión (freeze previsible si el 10→25% de oc-6 sube).
+- **DECISIONES OWNER 09-08 PARA LA SYNC (m-3268, host 671b6ac5; m-3282)** —
+  **rotación de key → NO** (owner aceptó el riesgo; el corpus se excluye igual
+  en el restart — fb-241 cierra con nota «rotación declinada» + criterio corpus
+  cumplido: counts=0 post-rebuild) · **top-up → NO** + **palanca DS oficial con
+  saldo = EMERGENCIA owner** (no es la ruta activa; ver §4 DS-fallback NOTA) ·
+  **rc.1-vs-rc.2 → ESPERAR rc.2** (TEMA A RD: rc.1 viable bajo condiciones pero
+  sin mejoras urgentes; alpha 0.1.5-alpha.1 Ses-V3 breaking; node v22; rc.1
+  gate declinado/diferido) · **stable → no** · **ventana → solo q-i-118 + ruta
+  estable** · **pool 46/74/74 mensual + DS-fallback nota** (anotadas en §4 y
+  en la entrada 09-08).
 - **:3080 + stable-update (19 releases pendientes)** — actualización estable
   pendiente de decisión/programación (ver veredicto RD alpha.4; HOLD 0.1.1-rc.2
   documentado en ROADMAP 09-01).
@@ -695,6 +738,14 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 
 ## 4. CAPACIDAD (al 09-08)
 
+- **Pool LIVE 09-08 (m-3282 + ROADMAP 09-08; stateFile POST-revive)**:
+  **4 KEYS ACTIVAS — totalKeys 4 · eligibleKeys 4** (oc-6 · oc-13 · oc-14 ·
+  **oc-15 REVIVED** invalid:false, invalidSince 0 — fix del prefijo `sk-` en
+  el drop-in confirmado en el boot; restart doble-deber 18:57Z canary PASS) ·
+  pool **46/74/74% mensual + 41.8% oc-15** (lectura restart) · **DS-fallback
+  NOTA (m-3268)**: la palanca DS oficial con SALDO (api.deepseek.com) queda
+  como EMERGENCIA owner (top-up NO; la cuenta tiene saldo pero la ruta activa
+  es el pool Go).
 - Pool LIVE 09-06 (stateFile + GET /__keypool/status 14:54Z):
   **oc-6 = key NUEVA del owner (ws6; única ELEGIBLE — sirve el 100% del
   tráfico; weekly 0% = último valor conocido por probeDegraded, NO fresco:
