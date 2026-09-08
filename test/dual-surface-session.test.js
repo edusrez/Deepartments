@@ -26,7 +26,7 @@ register(new URL('./ts-src-loader.mjs', import.meta.url), { parentURL: import.me
 
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -46,7 +46,8 @@ const {
   readHealthHeartbeatFile,
   writeHealthHeartbeatFile,
   resolveBootCrashStreak,
-  stampBootCrash
+  stampBootCrash,
+  readRestartRegistry
 } = H
 // --- the bundle (src): the 2 exported session-surface call sites -------------
 const B = await import('../src/invoke.ts')
@@ -507,6 +508,89 @@ test('dual-surface [breaker] boot-crash sidecar: stamp/streak semantics — cras
     await stampBootCrash(stateDir, 'boot-B', 10_000) // B crashed pre-tick
     const stampC = await stampBootCrash(stateDir, 'boot-C', 20_000)
     assert.equal(stampC.crashStreak, 1, 'only the PREVIOUS boot is judged (B), not the older healthy A')
+  })
+})
+
+// -------------------------------------------------------------------------
+// 6-bis. FB-234 (2026-09-08, CANARY-VS-CRASH) — the INTENTIONAL-RESTART marker
+//   (`<stateDir>/restart-reason.json`, host-written BEFORE the smart_restart
+//   kill): a GRACE cause (canary/deploy/dshmarket) excusing the previous boot
+//   → the streak NEVER rises (the excused boot is treated like a ticked one);
+//   the marker is CONSUMED (write-ahead, at the stamp) so a REAL pre-tick crash
+//   AFTER the canary increments again; a STALE marker (bootId mismatch) and a
+//   NON-grace cause are inert. Marker-less behavior stays byte-identical
+//   (compat: no recoveryCause field, same increments).
+// -------------------------------------------------------------------------
+test('dual-surface [breaker] fb-234 canary-vs-crash: an intentional-restart marker excuses the previous boot (streak 0), records the canary recovery cause and is CONSUMED at the stamp; a real crash AFTER the canary increments again; a stale marker (bootId mismatch) and a non-grace cause are inert; marker-less stamps stay byte-identical', async () => {
+  await withTempDir(async (stateDir) => {
+    const markerPath = path.join(stateDir, 'restart-reason.json')
+    // Baseline (regression 0): boot-A dies pre-tick, NO marker → boot-B streaks.
+    await stampBootCrash(stateDir, 'boot-A', 1_000)
+    const stampB = await stampBootCrash(stateDir, 'boot-B', 2_000)
+    assert.equal(stampB.crashStreak, 1, 'baseline: a pre-tick crash WITHOUT a marker still streaks (breaker regression 0)')
+    // CANARY: the host writes the marker excusing boot-B, then kills it.
+    await writeFile(markerPath, JSON.stringify({ cause: 'canary', reason: 'dshmarket 06:30Z', ts: 3_000, bootId: 'boot-B' }), 'utf8')
+    const stampC = await stampBootCrash(stateDir, 'boot-C', 4_000)
+    assert.equal(stampC.crashStreak, 0, 'the canary marker excuses boot-B → the streak does NOT rise (0 — treated like a ticked boot)')
+    assert.equal(stampC.recoveryCause, 'canary', 'the stamp captures the marker cause verbatim for the registry reconcile')
+    assert.ok(!existsSync(markerPath), 'the marker is CONSUMED by the stamp (write-ahead, use-once)')
+    // REAL crash after the canary (boot-C dies pre-tick, no NEW marker) → up again.
+    const stampD = await stampBootCrash(stateDir, 'boot-D', 5_000)
+    assert.equal(stampD.crashStreak, 1, 'a REAL pre-tick crash after the consumed marker increments again (use-once semantics)')
+    assert.equal(stampD.recoveryCause, undefined, 'no marker → no recoveryCause field (marker-less stamp bytes unchanged)')
+  })
+  await withTempDir(async (stateDir) => {
+    const markerPath = path.join(stateDir, 'restart-reason.json')
+    // STALE marker: excusing boot-X while the ACTUAL previous boot is Y → inert.
+    await stampBootCrash(stateDir, 'boot-Y', 1_000)
+    await writeFile(markerPath, JSON.stringify({ cause: 'canary', ts: 1_500, bootId: 'boot-X' }), 'utf8')
+    const stampZ = await stampBootCrash(stateDir, 'boot-Z', 2_000)
+    assert.equal(stampZ.crashStreak, 1, "a STALE marker (bootId mismatch) excuses NOTHING — boot-Y's real pre-tick crash streaks (self-healing)")
+    assert.equal(stampZ.recoveryCause, undefined, 'a stale marker records no recovery cause')
+    assert.ok(!existsSync(markerPath), 'the stale marker is cleaned by the consume')
+  })
+  await withTempDir(async (stateDir) => {
+    // NON-grace cause (a marker with a crash-ish family) → NOT excused.
+    await stampBootCrash(stateDir, 'boot-A', 1_000)
+    await writeFile(path.join(stateDir, 'restart-reason.json'), JSON.stringify({ cause: 'oops-wild-crash', ts: 1_500, bootId: 'boot-A' }), 'utf8')
+    const stampB = await stampBootCrash(stateDir, 'boot-B', 2_000)
+    assert.equal(stampB.crashStreak, 1, 'a NON-grace cause (outside canary/deploy/dshmarket) does NOT excuse — the crash semantics stay')
+    assert.equal(stampB.recoveryCause, undefined, 'a non-grace marker records no recovery cause')
+  })
+  await withTempDir(async (stateDir) => {
+    // FIRST boot ever with a stray marker: nothing to excuse → streak 0 + cleanup.
+    await writeFile(path.join(stateDir, 'restart-reason.json'), JSON.stringify({ cause: 'canary', ts: 100 }), 'utf8')
+    const stampFirst = await stampBootCrash(stateDir, 'boot-FIRST', 200)
+    assert.equal(stampFirst.crashStreak, 0, 'first boot ever: no previous stamp → streak 0 even with a stray marker')
+    assert.equal(stampFirst.recoveryCause, undefined, 'no previous stamp → no recovery cause (nothing was excused)')
+    assert.ok(!existsSync(path.join(stateDir, 'restart-reason.json')), 'the stray marker is cleaned at the stamp')
+  })
+})
+
+test('dual-surface [breaker] fb-234 canary-vs-crash registry: the FIRST tick after a canary stamps the restart-registry row cause \'canary\' (NOT \'unknown\' / \'recovery pre-tick crash\'); a marker-less tick keeps the fb-43 verbatim derivation', async () => {
+  await withTempDir(async (stateDir) => {
+    const markerPath = path.join(stateDir, 'restart-reason.json')
+    // boot-A dies pre-tick; the host canary-restarts it (marker excusing A).
+    await stampBootCrash(stateDir, 'boot-A', 1_000)
+    await writeFile(markerPath, JSON.stringify({ cause: 'canary', reason: 'A-harness 01:41Z', ts: 2_000, bootId: 'boot-A' }), 'utf8')
+    // boot-B applies: excused (streak 0) + the marker is consumed at the stamp.
+    const stampB = await stampBootCrash(stateDir, 'boot-B', 3_000)
+    assert.equal(stampB.crashStreak, 0, 'the canary boot starts with streak 0')
+    assert.equal(stampB.recoveryCause, 'canary', 'the canary recovery cause rides the stamp')
+    assert.ok(!existsSync(markerPath), 'the marker was consumed at the stamp (write-ahead)')
+    // boot-B's FIRST tick reconciles the registry with the recovered cause.
+    await runHealthDaemonTick({
+      now: () => 4_000,
+      stateDir,
+      bootId: 'boot-B',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      notifyHost: async () => {},
+      logger: { warn: () => {}, info: () => {} }
+    })
+    const rows = readRestartRegistry(stateDir)
+    const last = rows[rows.length - 1]
+    assert.equal(last.bootId, 'boot-B', 'the LAST registry row is the canary successor boot')
+    assert.equal(last.cause, 'canary', "a canary boot records cause 'canary' (the marker cause verbatim — NOT 'recovery pre-tick crash' / 'unknown')")
   })
 })
 

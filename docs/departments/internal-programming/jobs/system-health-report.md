@@ -103,8 +103,13 @@ forwards it.
    leer el heartbeat `/.deepartments/health-heartbeat.json` — los campos
    opcionales `{ts, bootId, surface?, nRestarts?, crashStreak?, sweep?}` — y el sidecar
    `/.deepartments/boot-crash.json` (`{bootId, bootStartedAt, crashStreak,
-   lastCrashAt?}` — el registro del crash PRE-tick: el arranque previo murió
-   ANTES de un heartbeat sano). Reportar en la línea de atribución por boot:
+   lastCrashAt?, recoveryCause?}` — el registro del crash PRE-tick: el arranque previo murió
+   ANTES de un heartbeat sano; FB-234 (2026-09-08, canary-vs-crash): un re-boot
+   INTENCIONAL del host (smart_restart canary — marker `restart-reason.json`
+   causa `canary`/`deploy`/`dshmarket` previo al kill) NO incrementa el streak —
+   ese boot aparece con `recoveryCause: "canary"` (copiado verbatim a la fila
+   del restart-registry del boot sucesor) y el streak NO sube; un crash REAL
+   vuelve a incrementar). Reportar en la línea de atribución por boot:
    **surface** (la superficie de sesión detectada: `0.1.2-rc.1` /
    `0.1.1-rc.2-legacy` / `both` / `none` — un drift código-vs-runtime aparece
    AQUÍ, antes del churn), **NRestarts** (el contador systemd que el daemon lee

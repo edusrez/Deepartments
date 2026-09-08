@@ -56,7 +56,7 @@
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 import { readFileSync, openSync, fstatSync, readSync, closeSync } from 'node:fs'
-import { mkdir, readFile, writeFile, rename, appendFile, copyFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, rename, appendFile, copyFile, rm } from 'node:fs/promises'
 import path from 'node:path'
 import {
   parseDeliveryRows,
@@ -713,6 +713,21 @@ export function buildRestartDigest(rows: readonly RestartRegistryRow[], n: numbe
 // is needed. Surface: crashStreak + nRestarts + surface flow into the
 // HealthHeartbeat (the tick reports them as health data) and the health report
 // §6 reads them from the heartbeat.
+//
+// FB-234 (2026-09-08, CANARY-VS-CRASH): the breaker above inflates the streak
+// on an INTENTIONAL smart_restart — a canary re-boot of a HEALTHY process
+// (the host-plane smart_restart, NOT systemd; NRestarts stays 0) leaves the
+// previous boot WITHOUT its own heartbeat (a restart inside the pre-first-tick
+// window) → the next boot classifies 'recovery pre-tick crash' and increases
+// the streak despite the stable boot (recorded: A-harness 01:41Z + dshmarket
+// 06:30Z — 19 reported vs 17 real). Fix: the HOST writes an INTENTIONAL-RESTART
+// MARKER (`<stateDir>/restart-reason.json`) BEFORE the kill; the sidecar READS
+// it at the next apply start and treats the excused previous boot EXACTLY like
+// a ticked one (streak NEVER rises over an intentional restart) — and CONSUMES
+// the marker (write-ahead, in stampBootCrash) so a REAL pre-tick crash AFTER
+// the canary increments again. See the marker block below for the exact
+// host-side convention (path/shape/when). 0 new runtime exports (the
+// export-parity lock at 325 stays); the marker is a documented convention.
 // ---------------------------------------------------------------------------
 
 /** The boot-crash sidecar filename: `<stateDir>/boot-crash.json`. */
@@ -732,6 +747,98 @@ export interface BootCrashState {
   crashStreak: number
   /** The most recent pre-tick crash moment (ms epoch), when the streak is > 0. */
   lastCrashAt?: number
+  /** FB-234 — the restart-registry recovery cause captured at STAMP time when
+   * the previous boot was EXCUSED by an intentional-restart marker (a canary):
+   * the marker itself is consumed right after the write, so the FIRST tick's
+   * registry reconcile reads the cause from THIS stamp (the SAME boot row) and
+   * appends it verbatim (e.g. 'canary') instead of 'unknown'. ABSENT for every
+   * marker-less boot — the stamp bytes stay identical to the pre-fb-234 format
+   * (compat: a boot without a marker never writes the field). */
+  recoveryCause?: string
+}
+
+// FB-234 — the INTENTIONAL-RESTART MARKER (host-plane WRITER convention; the
+// sidecar only READS + CONSUMES). The host's smart_restart writes:
+//
+//   <stateDir>/restart-reason.json
+//   { "cause": "canary", "reason": "dshmarket 06:30Z", "ts": <ms epoch>,
+//     "bootId": "<the CURRENT <stateDir>/boot-crash.json bootId being killed>" }
+//
+//   - cause:   the intentional restart family — a token from the sanctioned
+//     GRACE set ['canary', 'deploy', 'dshmarket'] (documented; a NEW
+//     intentional family extends the set BY CODE in RESTART_GRACE_CAUSES). The
+//     sidecar copies it VERBATIM into the successor boot's restart-registry row.
+//   - reason:  OPTIONAL free-form human note (NO secrets — the file is a
+//     store-side marker read by the daemon; keep it plain and short).
+//   - ts:      the write moment (ms epoch).
+//   - bootId:  OPTIONAL self-healing anchor — the boot being killed (copy it
+//     from the CURRENT boot-crash.json BEFORE the kill). When present and ≠ the
+//     PREVIOUS stamp's bootId the marker is STALE and excuses NOTHING — so a
+//     marker whose consumption failed (or a marker surviving a REAL pre-tick
+//     crash of the successor) can NEVER suppress a later real crash. A marker
+//     WITHOUT bootId excuses whatever previous boot the next apply start finds.
+//   - WHEN:    BEFORE the kill, atomically (tmp+rename in the same dir — the
+//     sidecar treats a partial/unreadable marker as ABSENT → current semantics).
+//   - CONSUMPTION: the sidecar deletes the marker right after the next boot's
+//     stamp write (write-ahead in stampBootCrash) — use-once per restart.
+
+/** The restart-reason marker filename (FB-234 convention — host-written,
+ * sidecar-read; deliberately NOT part of the public surface). */
+const RESTART_REASON_FILE = 'restart-reason.json'
+
+/** The sanctioned INTENTIONAL restart families (FB-234): a marker whose cause
+ * is IN this set means the restart is NOT a crash — the excused previous boot
+ * is treated as TICKED (streak → 0). A cause outside the set (or no marker)
+ * keeps the current crash semantics. */
+const RESTART_GRACE_CAUSES = new Set(['canary', 'deploy', 'dshmarket'])
+
+/** The restart-reason marker shape (FB-234, host-written, sidecar-read). */
+interface RestartReasonMarker {
+  /** The intentional restart family (verbatim-copied into the registry row). */
+  cause: string
+  /** Optional free-form note (no secrets). */
+  reason?: string
+  /** The write moment (ms epoch). */
+  ts: number
+  /** Optional self-healing anchor — the boot being killed. */
+  bootId?: string
+}
+
+/** Read `<stateDir>/restart-reason.json` — absent/unreadable/malformed →
+ * undefined (a broken marker degrades to the CURRENT crash semantics, never a
+ * throw). */
+function readRestartReasonMarker(stateDir: string): RestartReasonMarker | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(stateDir, RESTART_REASON_FILE), 'utf8')) as Record<string, unknown>
+    if (typeof parsed.cause !== 'string' || parsed.cause === '' || typeof parsed.ts !== 'number' || !Number.isFinite(parsed.ts)) return undefined
+    const marker: RestartReasonMarker = { cause: parsed.cause, ts: parsed.ts }
+    if (typeof parsed.reason === 'string' && parsed.reason !== '') marker.reason = parsed.reason
+    if (typeof parsed.bootId === 'string' && parsed.bootId !== '') marker.bootId = parsed.bootId
+    return marker
+  } catch {
+    return undefined
+  }
+}
+
+/** TRUE when the marker excuses the PREVIOUS boot: an INTENTIONAL cause (∈
+ * RESTART_GRACE_CAUSES) AND the optional bootId anchor matches (a marker
+ * WITHOUT bootId excuses; a present bootId ≠ prev → STALE — excuses nothing). */
+function restartReasonMarkerExcuses(marker: RestartReasonMarker, prevBootId: string | undefined): boolean {
+  if (!RESTART_GRACE_CAUSES.has(marker.cause)) return false
+  if (marker.bootId === undefined) return true
+  return marker.bootId === prevBootId
+}
+
+/** CONSUME the marker — delete the file (absent → no-op; a delete failure →
+ * no-op, never a throw). The stale-marker self-healing anchor keeps a
+ * failed-delete marker INERT, and a later stamp's unconditional consume
+ * finally cleans it. */
+async function consumeRestartReasonMarker(stateDir: string): Promise<void> {
+  try {
+    await rm(path.join(stateDir, RESTART_REASON_FILE), { force: true })
+  } catch {
+    /* never throws — best-effort cleanup */
+  }
 }
 
 /** Read `<stateDir>/boot-crash.json` (absent/unreadable/malformed → undefined). */
@@ -741,6 +848,7 @@ export function readBootCrashFile(stateDir: string): BootCrashState | undefined 
     if (typeof parsed.bootId !== 'string' || typeof parsed.bootStartedAt !== 'number' || typeof parsed.crashStreak !== 'number') return undefined
     const state: BootCrashState = { bootId: parsed.bootId, bootStartedAt: parsed.bootStartedAt, crashStreak: parsed.crashStreak }
     if (typeof parsed.lastCrashAt === 'number') state.lastCrashAt = parsed.lastCrashAt
+    if (typeof parsed.recoveryCause === 'string') state.recoveryCause = parsed.recoveryCause
     return state
   } catch {
     return undefined
@@ -752,11 +860,22 @@ export function readBootCrashFile(stateDir: string): BootCrashState | undefined 
  * (deterministic value for the tick) and `stampBootCrash` uses the SAME
  * derivation for the durable record — one source of truth for the semantics:
  * prevTicked (the PREVIOUS stamp's bootId has a heartbeat of its own) → 0,
- * else prev.crashStreak + 1; no previous stamp (first boot) → 0. */
+ * else prev.crashStreak + 1; no previous stamp (first boot) → 0. FB-234: an
+ * INTENTIONAL-restart marker (cause ∈ RESTART_GRACE_CAUSES, bootId-anchored)
+ * excuses the previous boot → 0 (treated EXACTLY like a ticked one — a canary
+ * never raises the streak). READ-ONLY: the marker is consumed by stampBootCrash,
+ * never by this resolver. */
 export function resolveBootCrashStreak(stateDir: string): number {
   try {
     const prev = readBootCrashFile(stateDir)
     if (prev === undefined) return 0
+    // FB-234 — an INTENTIONAL-restart marker (cause ∈ RESTART_GRACE_CAUSES,
+    // host-written BEFORE the smart_restart kill) EXCUSES the previous boot: a
+    // canary is NOT a crash — the previous boot is treated EXACTLY like a
+    // ticked one (streak → 0, the prevTicked path). The marker's optional
+    // bootId anchor makes a STALE marker inert on a later REAL crash.
+    const marker = readRestartReasonMarker(stateDir)
+    if (marker !== undefined && restartReasonMarkerExcuses(marker, prev.bootId)) return 0
     const prevHeartbeat = readHealthHeartbeatFile(stateDir)
     const prevTicked = prevHeartbeat !== undefined && prevHeartbeat.bootId === prev.bootId
     return prevTicked ? 0 : prev.crashStreak + 1
@@ -776,14 +895,26 @@ export async function stampBootCrash(stateDir: string, bootId: string, nowMs: nu
   try {
     const prev = readBootCrashFile(stateDir)
     const crashStreak = resolveBootCrashStreak(stateDir)
+    // FB-234 — capture the registry recovery cause DURABLY when the previous
+    // boot was EXCUSED by an intentional-restart marker (a canary): the marker
+    // is consumed right after (below), so the FIRST tick's registry reconcile
+    // reads the cause from THIS stamp — the SAME boot row. Only the excused
+    // case writes the field (a marker-less boot writes byte-identical content).
+    const marker = readRestartReasonMarker(stateDir)
+    const excused = marker !== undefined && prev !== undefined && restartReasonMarkerExcuses(marker, prev.bootId)
     const state: BootCrashState = {
       bootId,
       bootStartedAt: nowMs,
       crashStreak,
+      ...(excused && marker !== undefined ? { recoveryCause: marker.cause } : {}),
       ...(crashStreak > 0 ? { lastCrashAt: nowMs } : prev?.lastCrashAt !== undefined ? { lastCrashAt: prev.lastCrashAt } : {})
     } as BootCrashState
     await mkdir(path.dirname(path.join(stateDir, BOOT_CRASH_FILE)), { recursive: true })
     await writeFile(path.join(stateDir, BOOT_CRASH_FILE), JSON.stringify(state), 'utf8')
+    // FB-234 — CONSUME the marker (write-ahead): it excused the PREVIOUS boot;
+    // from THIS boot on a real pre-tick crash must increment again (a failed
+    // delete leaves an INERT stale marker — the bootId anchor self-heals).
+    await consumeRestartReasonMarker(stateDir)
     return state
   } catch {
     return undefined
@@ -6669,7 +6800,21 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
       // fb-43 §7 (2026-09-07): plumb the recovery cause — crashStreak > 0 (the
       // previous boot died pre-tick) stamps `recovery pre-tick crash (streak N)`;
       // 0/absent → 'unknown' (the QI-48 4-arg default). 1-line, 0 exports new.
-      await reconcileRestartRegistry(deps.stateDir, deps.bootId, nowMs, deps.crashStreak != null && deps.crashStreak > 0 ? `recovery pre-tick crash (streak ${deps.crashStreak})` : undefined)
+      // FB-234 (2026-09-08, canary-vs-crash): the cause comes FIRST from the
+      // CURRENT boot's stamp `recoveryCause` (an intentional-restart marker
+      // excused the previous boot — stampBootCrash captured it at apply start
+      // and consumed the marker) → the registry row says e.g. 'canary' instead
+      // of 'unknown'. BootId-guarded (the stamp must belong to THIS boot — a
+      // foreign/stale stamp never leaks its cause); a marker-less boot (no
+      // recoveryCause) keeps the fb-43 derivation byte-identical.
+      const bootStamp = readBootCrashFile(deps.stateDir)
+      const recoveryCause = bootStamp !== undefined && bootStamp.bootId === deps.bootId ? bootStamp.recoveryCause : undefined
+      await reconcileRestartRegistry(
+        deps.stateDir,
+        deps.bootId,
+        nowMs,
+        recoveryCause ?? (deps.crashStreak != null && deps.crashStreak > 0 ? `recovery pre-tick crash (streak ${deps.crashStreak})` : undefined)
+      )
     } catch (error: unknown) {
       deps.logger?.warn(`[deepartments] system-health: restart-registry reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
     }
