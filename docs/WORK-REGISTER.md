@@ -673,10 +673,13 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   DeepSeek (fallback real) · restart 05:23:31Z (owner: ignorar — watch si
   reaparecen; restart-registry lo deja visible) · cause restarts 08-31
   explicada (switch glm + reversión).
-- **A-harness (p2-hygiene lane) — DECISIÓN HOST pendiente (ceremonia 09-07)**:
-  topología upstream deepseek-harness-fb51 (`d347e703`) — el diff del harness
-  NO se commitea en el repo de la org; el host decide cómo aplicarlo (P2
-  hygiene lane ce467a44; wt-harness-p2hygiene-a con 271 archivos).
+- **A-harness (p2-hygiene lane) — DECISIÓN HOST TOMADA (m-3107, ceremonia
+  09-07 — APLICAR la topología upstream deepseek-harness-fb51 `d347e703`)**:
+  fase 1 A-harness ATERRIZADA (`27142eb` port patches + apply + re-freeze
+  `a27daaf`, ventana 09-07) · **2ª ventana A-harness fb51 PENDIENTE**
+  (topología `d347e703` · p2-hygiene ce467a44 · wt-harness-p2hygiene-a 271
+  archivos; seq: tras la cola VALLE actual) — next: internal-programming-head
+  (coordinación host).
 - **QI-48-A (extensión QI-48) — owner** (post-ceremonia; ver LANDING 09-06).
 - **canary fase 2 — post-ceremonia** (smoke aislado + cross-check q-i-61).
 - **restart re-escopeado (09-06) — pendientes HOST**: re-enable
