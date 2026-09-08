@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "note": "P2-HYGIENE (fb-91 class, 2026-09-06): the per-zone md5 MANIFEST the suite-integrity guard (scripts/r6-suite-guard.mjs) asserts against. It is a SNAPSHOT of the frozen file zones for change detection: each zone entry pins the file + its md5 span markers + the FROZEN zone md5. The guard compares the CURRENT source's zone md5 against this frozen value at START and END, closing the commit-drift observability gap documented in docs/VERIFICATION-LADDER.md \u00a72 (a zone changed by a NEW HEAD leaves the worktree==HEAD mutation phases green \u2014 this manifest makes the drift fail loudly instead). The frozen value MUST stay byte-synced with the freeze lock test/tools-factory.test.js:348 (the same CUT-4 zone; a re-freeze updates BOTH the test literal and this manifest in the SAME commit).",
+  "note": "P2-HYGIENE (fb-91 class, 2026-09-06): the per-zone md5 MANIFEST the suite-integrity guard (scripts/r6-suite-guard.mjs) asserts against. It is a SNAPSHOT of the frozen file zones for change detection: each zone entry pins the file + its md5 span markers + the FROZEN zone md5. The guard compares the CURRENT source's zone md5 against this frozen value at START and END, closing the commit-drift observability gap documented in docs/VERIFICATION-LADDER.md §2 (a zone changed by a NEW HEAD leaves the worktree==HEAD mutation phases green — this manifest makes the drift fail loudly instead). The frozen value MUST stay byte-synced with the freeze lock test/tools-factory.test.js:348 (the same CUT-4 zone; a re-freeze updates BOTH the test literal and this manifest in the SAME commit).",
   "zones": [
     {
       "id": "cut4-tools-zone",
@@ -8,22 +8,22 @@
       "banner": "  // --- messaging bus TOOL DEFINITIONS (ONE body per tool; registered in the",
       "close": "  }, 'deepartments: host-plane tools')",
       "md5": "f919606a15a542e940e14477b73b86a9",
-      "note": "The frozen CUT-4 factory zone (tools-factory.test.js \u2014 LANE 0.2.3b re-freeze + R8-RACE liveStatus + settle-wait + R11/R12 + BATCH-DRAIN + VALLE 09-07 HEAD-TOOLING: fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + VALLE 09-07 FB-198 T1: the send_message failedGround observer + 'prepared (wake-failed)' / failed:<ground> per-recipient envelope + the id-truth assertion; R-tooling/persistence + the delivery-result observability enrichment, never an engine behavior change)."
+      "note": "The frozen CUT-4 factory zone (tools-factory.test.js — LANE 0.2.3b re-freeze + R8-RACE liveStatus + settle-wait + R11/R12 + BATCH-DRAIN + VALLE 09-07 HEAD-TOOLING: fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + VALLE 09-07 FB-198 T1: the send_message failedGround observer + 'prepared (wake-failed)' / failed:<ground> per-recipient envelope + the id-truth assertion; R-tooling/persistence + the delivery-result observability enrichment, never an engine behavior change)."
     },
     {
       "id": "a-harness-fs-local-index",
       "file": "../../../../usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js",
       "banner": "import { constants } from \"node:buffer\";",
       "close": "export { LocalFileSystem, LocalFileSystem as default };",
-      "md5": "17831cb327664ccb703ad737fd79e18d",
-      "note": "A-HARNESS PORT (VALLE 09-07, builder-173 cfc0afac): live fingerprint of the patchable runtime file (0.1.1-rc.2 pristine; the whole-file slice equals the whole-file md5). Applied state = 28f0034382fe7fe280c75a6a842e6c67 (patch dsh-fs-local-edit-dx-hints.patch). RE-FREEZE discipline: the host's apply changes this file \u2014 re-freeze this zone's md5 to the applied value in the SAME change that applies the patch (guard semantics: a drifted frozen value fails the next suite loudly, per design)."
+      "md5": "28f0034382fe7fe280c75a6a842e6c67",
+      "note": "A-HARNESS PORT (VALLE 09-07, builder-173 cfc0afac): live fingerprint of the patchable runtime file (0.1.1-rc.2 pristine; the whole-file slice equals the whole-file md5). Applied state = 28f0034382fe7fe280c75a6a842e6c67 (patch dsh-fs-local-edit-dx-hints.patch). RE-FREEZE discipline: the host's apply changes this file — re-freeze this zone's md5 to the applied value in the SAME change that applies the patch (guard semantics: a drifted frozen value fails the next suite loudly, per design)."
     },
     {
       "id": "a-harness-fs-obs-index",
       "file": "../../../../usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-observation-policy/lib/index.js",
       "banner": "import { FsError } from \"@deepseek-ai/dsh-fs\";",
       "close": "export { apply, name };",
-      "md5": "03a757a7ef920657faf01ab3f959eb1e",
+      "md5": "aeec8df679864aaee3408b2cb8229f03",
       "note": "A-HARNESS PORT: live pristine fingerprint. Applied = aeec8df679864aaee3408b2cb8229f03 (dsh-fs-observation-policy-not-observed-message.patch). Re-freeze on apply."
     },
     {
@@ -31,15 +31,15 @@
       "file": "../../../../usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-fs/lib/index.js",
       "banner": "import z from \"@deepseek-ai/schemastery\";",
       "close": "export { Config, apply, inject, name };",
-      "md5": "b6696d35941fc4dcd41fd61c20f38a67",
+      "md5": "103b0b86d98f7429fd74d5b39109d50e",
       "note": "A-HARNESS PORT: live pristine fingerprint. Applied = 103b0b86d98f7429fd74d5b39109d50e (dsh-tool-fs-edit-dx-remedies.patch). Re-freeze on apply."
     },
     {
       "id": "a-harness-tool-web-index",
       "file": "../../../../usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-web/lib/index.js",
       "banner": "import z from \"@deepseek-ai/schemastery\";",
-      "close": "export { Config, DEFAULT_FETCH_MAX_OUTPUT_CHARS, DEFAULT_WEB_TOOL_TIMEOUT_MS, WEB_SEARCH_MAX_QUERIES, WEB_SEARCH_MAX_RESULTS, apply, applyWebFetchTool, applyWebSearchTool, fetchMetaFromResult, fetchMetaFromValue, formatFetchOutput, formatSearchOutput, inject, name, parseFetchArgs, presentFetchCall, presentFetchResult, presentSearchCall, presentSearchResult, searchMetaFromResult, searchMetaFromValue };",
-      "md5": "b90fbf79fd041b32dc74e68125013302",
+      "close": "export { Config, DEFAULT_FETCH_MAX_OUTPUT_CHARS, DEFAULT_FETCH_MAX_TIMEOUT_MS, DEFAULT_WEB_TOOL_TIMEOUT_MS, WEB_SEARCH_MAX_QUERIES, WEB_SEARCH_MAX_RESULTS, apply, applyWebFetchTool, applyWebSearchTool, fetchMetaFromResult, fetchMetaFromValue, formatFetchOutput, formatSearchOutput, inject, name, parseFetchArgs, presentFetchCall, presentFetchResult, presentSearchCall, presentSearchResult, searchMetaFromResult, searchMetaFromValue };",
+      "md5": "6ce6bc31cd19d78e87c405bc5defe89f",
       "note": "A-HARNESS PORT: live pristine fingerprint. Applied = 6ce6bc31cd19d78e87c405bc5defe89f (dsh-tool-web-fetch-timeout-override.patch). Re-freeze on apply."
     },
     {
@@ -47,7 +47,7 @@
       "file": "../../../../usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-web/lib/types/fetch.d.ts",
       "banner": "/**",
       "close": "//# sourceMappingURL=fetch.d.ts.map",
-      "md5": "ea2788101f1926135e9341fbc2196bde",
+      "md5": "9b99076329c938fcf430e065dfd3663a",
       "note": "A-HARNESS PORT: live fingerprint (whole-file slice = file + final newline; no trailing newline in rc.2 emits). Whole-file md5 = 4359745b89cf3d3c59bd6b7cc0986dba; applied whole-file = cd99169769dcdb0c1db12a127fd5c055 (same patch). Re-freeze on apply."
     },
     {
@@ -55,7 +55,7 @@
       "file": "../../../../usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-web/lib/types/index.d.ts",
       "banner": "/**",
       "close": "//# sourceMappingURL=index.d.ts.map",
-      "md5": "7ec247d98bdfde0f000ed335f5079503",
+      "md5": "669b20ee28c5bfd99266c2f16ddb1e7c",
       "note": "A-HARNESS PORT: live fingerprint. Whole-file md5 = fa96302d924d32de9df5298538f13093; applied whole-file = 7116efa682ce8b1978190af135fa8aa6. Re-freeze on apply."
     },
     {
@@ -63,7 +63,7 @@
       "file": "../../../../usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web/lib/types/types.d.ts",
       "banner": "/**",
       "close": "//# sourceMappingURL=types.d.ts.map",
-      "md5": "abf704668c87c7b47186ad66380be635",
+      "md5": "f6e9edcad62205140f3c0ee176e5b6cb",
       "note": "A-HARNESS PORT: live fingerprint (WebFetchRequest.type seam). Whole-file md5 = 622e5d50256c200cc289dbfa35f0b43c; applied whole-file = f74e2a0b1f4356cfca6fbc157d684020 (dsh-web-fetch-request-timeout.patch). Re-freeze on apply."
     },
     {
@@ -71,7 +71,7 @@
       "file": "../../../../usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-fs-search/lib/index.js",
       "banner": "import z from \"@deepseek-ai/schemastery\";",
       "close": "export { Config, GLOB_MAX_RESULTS, GLOB_VCS_EXCLUDES, GREP_MAX_LINE_BYTES, GREP_MAX_MATCHES, RAW_OUTPUT_MAX_BYTES, SEARCH_GRACE_MS, SEARCH_META_MAX_BYTES, SEARCH_STDERR_MAX_BYTES, SEARCH_TIMEOUT_MS, SearchError, anchorGlobPattern, apply, applyGlobTool, applyGrepTool, buildGlobCommand, buildGrepCommand, formatGlobOutput, formatGrepMatches, formatGrepOutput, inject, name, parseGlobArgs, parseGrepArgs, parseGrepMatches, presentGlobCall, presentGlobResult, presentGrepCall, presentGrepResult, previewLine, resolveRgPath, runRipgrep, sampleAcrossTopLevel, toWorkdirRelative, trySaveFormattedResult };",
-      "md5": "669590376ecc9d9e1d9fb9f3531100e2",
+      "md5": "c1ecd7ac43eaf7923af050eee8249673",
       "note": "A-HARNESS PORT: LIVE state is the 2026-09-02 fb-51 DIRECT EDIT (split-based anchorGlobPattern), not pristine. Durable chain fingerprints: pristine (reconstructed rc.2) 9d92d79d19288c8c3d6f353ff4516923 -> applied c1ecd7ac43eaf7923af050eee8249673 (dsh-tool-fs-search-anchor-literal-glob.patch); live direct-edit -> applied via dsh-tool-fs-search-fb51-direct-edit-normalize.patch. Re-freeze on apply."
     },
     {
@@ -79,15 +79,15 @@
       "file": "../../../../usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-fs-search/lib/types/glob.d.ts",
       "banner": "/**",
       "close": "//# sourceMappingURL=glob.d.ts.map",
-      "md5": "ef6564a10fcc83ddf79b7c3ddca0d384",
+      "md5": "bc168080198027e97eb1457baeaa544a",
       "note": "A-HARNESS PORT: live fb-51 direct-edit fingerprint. Whole-file md5 = 5d10ebee03e200ad16929e0291206efa; applied whole-file = ac12dc59628e934777f224164c5459fd (both patches). Re-freeze on apply."
     },
     {
       "id": "a-harness-app-boot-index",
       "file": "../../../../usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/index.js",
       "banner": "import { createRequire } from \"node:module\";",
-      "close": "export { DEFAULT_PROFILE_BUNDLES, FAIL_LOUD_RELEASE_TIMEOUT_MS, HARNESS_SOURCE_SECTION, PROFILES_DIR, PROFILE_PATCH_FILENAME, PROFILE_TEMPLATES, addHarnessSourceSection, assertEntriesActivated, assertEntriesLoaded, boot, composeEntries, healProfilesModuleFallback, initProfile, installFailLoud, loadEnv, loadLayeredEnv, loadOptionalPatches, loadOverlayPatches, loadProfile, mountRootInclude, readProfileManifest, renderConfigDump, resolveBundleDir, resolveConfigPath, resolveProfileDir, watchUserPatches, writeProfileManifest };",
-      "md5": "f89b0aa41c566589162295578ebb8749",
+      "close": "export { DEFAULT_PROFILE_BUNDLES, FAIL_LOUD_RELEASE_TIMEOUT_MS, HARNESS_SOURCE_SECTION, PROFILES_DIR, PROFILE_PATCH_FILENAME, PROFILE_TEMPLATES, addHarnessSourceSection, assertEntriesActivated, assertEntriesLoaded, boot, composeEntries, healProfilesModuleFallback, initProfile, installFailLoud, loadEnv, loadLayeredEnv, loadOptionalPatches, loadOverlayPatches, loadProfile, mountRootInclude, readProfileManifest, renderConfigDump, resolveBundleDir, resolveConfigPath, resolveProfileDir, watchUserPatchLayers, watchUserPatches, writeProfileManifest };",
+      "md5": "a4f6123a217ac6f4e4cc7280a0d547dc",
       "note": "A-HARNESS PORT: live pristine fingerprint. Applied = a4f6123a217ac6f4e4cc7280a0d547dc (dsh-app-boot-watch-patch-layers.patch). Re-freeze on apply."
     },
     {
@@ -95,7 +95,7 @@
       "file": "../../../../usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-app-boot/lib/types/index.d.ts",
       "banner": "/**",
       "close": "//# sourceMappingURL=index.d.ts.map",
-      "md5": "38e285cb10c1d1a0a9948615afa53d78",
+      "md5": "f57d838970949e4e5807ee3d4a37111b",
       "note": "A-HARNESS PORT: live fingerprint. Whole-file md5 = 5ed502c91a525f05367730f28b10e160; applied whole-file = 027fdc1cc3b47982027997f7902e2150. Re-freeze on apply."
     },
     {
@@ -103,7 +103,7 @@
       "file": "../../../../usr/lib/node_modules/@deepseek-ai/dsh/lib/profile-boot-DG5t9aNs.js",
       "banner": "import { writeFileSync } from \"node:fs\";",
       "close": "export { resolveTelemetryPatch as a, prepareProfile as i, PROFILE_ROOT_FILENAME as n, runProfile as o, homePatchPath as r, INSTALL_ANCHOR as t };",
-      "md5": "12f9ba5a4400a8e795f1d72254119ffb",
+      "md5": "c359a2f3cb7d912b38bc1c2eb14b40a1",
       "note": "A-HARNESS PORT: live pristine fingerprint of the dsh CLI profile-boot chunk (hash-named; re-locate by content after upgrades). Applied = c359a2f3cb7d912b38bc1c2eb14b40a1 (dsh-cli-profile-boot-watch-patch-layers.patch). Re-freeze on apply."
     }
   ]
