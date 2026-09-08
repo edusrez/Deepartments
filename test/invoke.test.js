@@ -14687,6 +14687,110 @@ test('LANE 5 fb-184 (item 4) scanWorkRegisterIdle census classes: a `next: <know
   assert.match(generic.error, /próximo actor sugerido: research-head/, 'the frame suggests the most-frequent next-actor')
 })
 
+// --- LANE 5 fb-221 (2026-09-08 — the WORK-REGISTER CLOSURE-MARKER FP 83→156) --
+// The recurring FP: the alert «N item(s) NO-gateado(s)» counted the register's
+// CLOSED history — items whose OWN LINE carries a closure marker AFTER the bold
+// span (the OLA POST-PREP convention «— CERRADO (reporte …)» / «— DIFERIDO
+// (…)» / «— ABSORBIDO»). The m[0]-only status-tag check in the parse never saw
+// those (the marker sits outside the bold span) → they landed in the actor/
+// non-gated census → 156 counted vs ~2 real pending lanes (both owner-gated).
+// The semantic fix: the parse flags `closed` on the item's OWN LINE and the
+// SCAN census excludes them (the alert cites ONLY real pending items) while the
+// informative TOTAL stays in the body («X items totales, Y activos»).
+// ---------------------------------------------------------------------------
+
+/** The fb-221 closure fixture in the REAL register's shape: N total items where
+ * X carry a closure marker (CERRADO ×2, DIFERIDO ×2, ABSORBIDO ×1) and Y are
+ * REAL pending (a re-opened-by-clock transport lane + a plain open line, plus
+ * the §3 gated owner item) — the exact 09-08 FP shape (the OLA POST-PREP
+ * CERRADO/DIFERIDO history vs the few active lanes). */
+const FB221_CLOSURE_FIXTURE = [
+  '## 1. IPD — cola activa (DAG seriado)',
+  '',
+  '- **fb-134 (store separation)** — next: internal-programming-head — CERRADO (reporte 64ccedd9)',
+  '- **fb-132 2ª mitad** — next: internal-programming-head — CERRADO (reporte d0a8a4b2)',
+  '- **fb-51 (thread bilingüe)** — next: host — DIFERIDO (revisión-host parkeada-owner → push-day)',
+  '- **lane §5.5 (opcional)** — next: internal-programming-head — DIFERIDO (opcional)',
+  '- **fb-100 (absorbido por fb-134)** — next: internal-programming-head — ABSORBIDO',
+  '- **transporte fb-23/69/70/81/83** — next: internal-programming-head — ABIERTA (re-apertura por reloj)',
+  '- **LANE activa plain (pendiente real)**',
+  '',
+  '## 3. PENDIENTE-OWNER (decisiones)',
+  '',
+  '- **top-up ws10 → NO por ahora (owner)**'
+].join('\n')
+
+test('LANE 5 fb-221 parseWorkRegisterItems: the CLOSURE markers are flagged on the item’S OWN LINE (`— CERRADO (reporte …)` / `— DIFERIDO (…)` / `— ABSORBIDO` AFTER the bold span) — every item STAYS in the parsed array (the informative TOTAL + reader compat: only the new `closed` flag appears); a re-opened lane (ABIERTA) and a plain pending item are NOT closed', () => {
+  const items = parseWorkRegisterItems(FB221_CLOSURE_FIXTURE)
+  assert.equal(items.length, 8, 'the parse STILL returns ALL 8 items (7 §1 + 1 §3 gated — the closed history is NOT dropped from the array: the informative TOTAL and the existing reader census are unchanged, additive `closed` flag only)')
+  const byLabel = new Map(items.map((item) => [item.label, item]))
+  for (const closedLabel of ['fb-134 (store separation)', 'fb-132 2ª mitad', 'fb-51 (thread bilingüe)', 'lane §5.5 (opcional)', 'fb-100 (absorbido por fb-134)']) {
+    const item = byLabel.get(closedLabel)
+    assert.ok(item !== undefined, `the closed-marker item «${closedLabel}» is parsed`)
+    assert.equal(item.closed, true, `«${closedLabel}» is flagged closed (its OWN line carries the closure marker AFTER the bold span)`)
+  }
+  const reopened = byLabel.get('transporte fb-23/69/70/81/83')
+  assert.equal(reopened.closed, undefined, 'the RE-OPENED transport lane (ABIERTA — re-apertura por reloj) is NOT closed — OPEN means active pending')
+  assert.equal(byLabel.get('LANE activa plain (pendiente real)').closed, undefined, 'a plain pending line without a marker is NOT closed')
+  // The DIFERIDO line keeps its next-actor capture (the parse is additive —
+  // the closed marker does NOT mask the settlement/actor header parsing; the
+  // capture rides the line remainder per the fb-184 regex semantics, the SCAN
+  // classifies on the prefix and the closed flag excludes the item anyway).
+  assert.match(byLabel.get('fb-51 (thread bilingüe)').nextActor, /^host\b/, 'a DIFERIDO settlement line still captures its `next: host` header (the SCAN excludes it via the closed flag)')
+  assert.match(byLabel.get('fb-134 (store separation)').nextActor, /^internal-programming-head/, 'a CERRADO actor line still captures its `next:` header')
+})
+
+test('LANE 5 fb-221 scanWorkRegisterIdle: the ALERT cites ONLY the REAL pending items (Y) — NOT the register total (X) — closed-marker items (CERRADO/DIFERIDO/ABSORBIDO) are excluded from the generic census AND the settlement class; the body carries the informative «X items totales, Y activos»', () => {
+  const T0 = new Date(2026, 8, 8, 6, 39, 0).getTime() // the 09-08 06:39Z re-apertura-by-clock moment (the pure scan takes valley:true explicitly)
+  const scan = scanWorkRegisterIdle({
+    registerText: FB221_CLOSURE_FIXTURE,
+    valley: true,
+    hostRunning: false,
+    posts: [{ postId: 'internal-programming-head' }],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: { firstQuietTs: T0 - 60_000 }
+  })
+  assert.equal(scan.findings.length, 1, 'ONE generic finding — the closed fb-51 settlement is excluded from the settlement-wait class too (a DIFERIDO settlement is NOT host-pending work)')
+  const generic = scan.findings[0]
+  assert.equal(generic.kind, 'work-register-idle')
+  assert.equal(generic.count, 2, 'the ALERT count = the 2 REAL pending items (transporte ABIERTA + LANE activa plain) — NOT the 6 the old parse would have cited (5 closed + 1 plain)')
+  assert.match(generic.error, /^WORK-REGISTER con 2 item\(s\) NO-gateado\(s\) sin despachar en VALLE/, 'the alert line cites the REAL pending count (2), never the inflated closed-history count')
+  assert.match(generic.error, /transporte fb-23\/69\/70\/81\/83 — next: internal-programming-head/, 'the re-opened transport lane IS listed (a real pending actor item)')
+  assert.match(generic.error, /LANE activa plain \(pendiente real\)/, 'the plain open item IS listed (a real pending non-gated item)')
+  assert.ok(!generic.error.includes('fb-134'), 'a CERRADO history item is NEVER in the frame')
+  assert.ok(!generic.error.includes('fb-132'), 'a second CERRADO history item is NEVER in the frame')
+  assert.ok(!generic.error.includes('fb-51'), 'a DIFERIDO settlement item is NEVER in the frame')
+  assert.ok(!generic.error.includes('§5.5'), 'a §5.5 DIFERIDO item is NEVER in the frame')
+  assert.ok(!generic.error.includes('fb-100'), 'an ABSORBIDO item is NEVER in the frame')
+  assert.ok(!generic.error.includes('top-up ws10'), 'the GATED §3 item is never listed')
+  assert.match(generic.error, /· compuesto: VALLE · quiet 1min · census 2 no-gated/, 'the composite leg carries the REAL pending census (2), not the total')
+  assert.match(generic.error, /· registro: 8 items totales, 2 activos/, 'the informative register TOTAL stays in the body («X items totales, Y activos» — the FP diagnosis reads directly off the alert)')
+})
+
+test('LANE 5 fb-221 gate control: a register whose items are ALL closed-marker (CERRADO/DIFERIDO) → ZERO real pending → NO alert (quietWithoutPending warn-only — the emission gate behaves like the §3-only case; the 30-min dedupe/ledger mechanics untouched)', () => {
+  const T0 = new Date(2026, 8, 8, 6, 39, 0).getTime() // 2026-09-08 (pure scan — valley passed explicitly)
+  const closedOnly = scanWorkRegisterIdle({
+    registerText: [
+      '## 1. IPD — cola activa (DAG seriado)',
+      '',
+      '- **fb-134 (store separation)** — next: internal-programming-head — CERRADO (reporte 64ccedd9)',
+      '- **fb-51 (thread bilingüe)** — next: host — DIFERIDO (revisión-host parkeada-owner → push-day)'
+    ].join('\n'),
+    valley: true,
+    hostRunning: false,
+    posts: [{ postId: 'internal-programming-head' }],
+    nowMs: T0,
+    quietWindowMs: 60_000,
+    ledger: { firstQuietTs: T0 - 60_000 }
+  })
+  assert.equal(closedOnly.findings.length, 0, 'a closed-only register → NO alert (0 real pending — the OLD parse would have alerted on 1 non-gated + 1 settlement)')
+  assert.equal(closedOnly.quietWithoutPending, true, 'the closed-only register is the expected-quiet warn-only class (like §3-only)')
+  // Control: the SAME ledger mechanics keep accumulating the quiet epoch (no
+  // regression of the gate — firstQuietTs survives an alert-less window).
+  assert.equal(closedOnly.ledger.firstQuietTs, T0 - 60_000, 'the sustained firstQuietTs is untouched (the gate mechanics are byte-identical)')
+})
+
 test('LANE 5 fb-184 (item 1) scanWorkRegisterIdle composite pool leg: poolUsable:false → NO finding, the quiet epoch KEEPS accumulating and the STALL clock is preserved (the alert fires once the pool recovers); poolUsable:true → the finding fires with the pool count in the frame; the recentlySilentHeads leg paints the BOOT-QUIET heads', () => {
   const T0 = new Date(2026, 7, 29, 8, 0, 0).getTime()
   // (a) poolUsable:false → nothing; the ledger fields are INERT.

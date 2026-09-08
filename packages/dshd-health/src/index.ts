@@ -5443,6 +5443,18 @@ const WORK_REGISTER_ACK_RE = /\bACK\s*[:：]?\s*(\d+)\s+fuente\s*[:：]?\s*([A-Z
  * export surface). */
 const WORK_REGISTER_NEXT_ACTOR_RE = /\bnext\s*[:：]\s*([A-Za-z0-9_\-]+[^\n*]*)/i
 
+/** fb-221 — the CLOSURE-marker set of a WORK-REGISTER item line: the SEMANTIC
+ * «lane ya cerrada» classes — `— CERRADO (reporte …)`, `— DIFERIDO (…)`,
+ * `— ABSORBIDO` — plus the LEGACY status-tag classes (DONE/RESUELTO/RETIRADO —
+ * the countPendingWorkRegister tag set). An item whose OWN LINE carries any of
+ * these markers is CLOSED (history — never actionable). The check runs on the
+ * WHOLE item line (the register convention places the marker AFTER the bold
+ * span at line end) — the m[0]-only status-tag check inside the parse misses
+ * exactly those (the fb-221 FP: the watchdog counted the OLA POST-PREP history
+ * marked «— CERRADO (reporte …)» / «— DIFERIDO» — 156 counted vs ~2 real
+ * pending lanes). Module-private (the frozen export surface). */
+const WORK_REGISTER_CLOSED_LINE_RE = /\b(CERRADO|DIFERIDO|ABSORBIDO|DONE|RESUELTO|RETIRADO)\b/i
+
 /** ONE parsed WORK-REGISTER item: the `**…**`-bolded label under an open `## `
  * section, with its GATE classification (the §3 PENDIENTE-OWNER class = gated)
  * and its fb-167 next-actor header (the settlement-wait subclass marker). */
@@ -5465,6 +5477,16 @@ export interface WorkRegisterItem {
    * carries NO such header (a plain pending item — the generic census). The
    * SCAN decides the class (host vs known-post vs unknown), never the parse. */
   nextActor?: string
+  /** fb-221 — TRUE when the item's OWN LINE carries a closure marker
+   * (CERRADO / DIFERIDO / ABSORBIDO / DONE / RESUELTO / RETIRADO — a «lane ya
+   * cerrada/diferida», e.g. the line-trailing `— CERRADO (reporte …)` of the
+   * OLA POST-PREP history): the item is HISTORY (never actionable) — the SCAN
+   * census EXCLUDES it from the alert count while the informative register
+   * TOTAL still counts it («X items totales, Y activos»). ABSENT (false) for a
+   * REAL pending item (a `next:` line without a closure marker, or a plain
+   * open line). The parse keeps the item in the array (additive — existing
+   * readers see the same census, only the new flag appears). */
+  closed?: boolean
 }
 
 /** LANE 5 — parse the WORK-REGISTER into its item census with the GATED vs
@@ -5509,6 +5531,14 @@ export function parseWorkRegisterItems(text: string): WorkRegisterItem[] {
       const line = body.slice(lineStart, lineEnd === -1 ? body.length : lineEnd)
       const nextMatch = WORK_REGISTER_NEXT_ACTOR_RE.exec(line)
       const item: WorkRegisterItem = { section: heading, gated, label: m[0].slice(2, -2) }
+      // fb-221 — the CLOSURE marker is scanned on the item's OWN LINE (the
+      // register convention places it AFTER the bold span at line end:
+      // «— CERRADO (reporte …)» / «— DIFERIDO (…)» / «— ABSORBIDO» — the
+      // m[0]-only status-tag check above never sees those, the FP that counted
+      // the register's CERRADO/DIFERIDO history). The item REMAINS in the
+      // parsed array (the informative TOTAL — existing readers see the SAME
+      // census, additive) with the `closed` flag the SCAN census excludes.
+      if (WORK_REGISTER_CLOSED_LINE_RE.test(line)) item.closed = true
       if (nextMatch !== null) item.nextActor = nextMatch[1].trim()
       out.push(item)
     }
@@ -5749,10 +5779,18 @@ export function scanWorkRegisterIdle(input: WorkRegisterIdleScanInput): WorkRegi
   //   - no settlements → the generic work-register-idle finding UNCHANGED.
   const totalPending = countPendingWorkRegister(input.registerText)
   const items = parseWorkRegisterItems(input.registerText)
+  // fb-221 — the ACTIVE census EXCLUDES the CLOSED items (an item whose own
+  // line carries a closure marker — CERRADO/DIFERIDO/ABSORBIDO/… «lane ya
+  // cerrada») — ONLY real pending items feed settlements/actorItems/nonGated
+  // and the ALERT count («N item(s) NO-gateado(s)» = pedientes REALES; the
+  // closed history was the recurring FP 83→156). The informative register
+  // TOTAL (`items` — incl. the closed + gated items) is painted into the frame
+  // («X items totales, Y activos»).
+  const activeItems = items.filter((item) => item.closed !== true)
   const knownIds = new Set(input.posts.filter((p) => p.retired !== true).map((p) => p.postId))
-  const settlements = items.filter((item) => item.nextActor !== undefined && /^host\b/i.test(item.nextActor))
-  const actorItems = items.filter((item) => item.nextActor !== undefined && !/^host\b/i.test(item.nextActor) && knownIds.has(item.nextActor))
-  const nonGated = items.filter((item) => {
+  const settlements = activeItems.filter((item) => item.nextActor !== undefined && /^host\b/i.test(item.nextActor))
+  const actorItems = activeItems.filter((item) => item.nextActor !== undefined && !/^host\b/i.test(item.nextActor) && knownIds.has(item.nextActor))
+  const nonGated = activeItems.filter((item) => {
     if (item.gated === true) return false
     if (item.nextActor === undefined) return true
     if (/^host\b/i.test(item.nextActor)) return false
@@ -5864,12 +5902,18 @@ export function scanWorkRegisterIdle(input: WorkRegisterIdleScanInput): WorkRegi
       ' · auto-cheque END-ritual: ¿reanudación sin vencer?'
     const suggestedActor = mostFrequentActor(actorItems)
     const suggestionLeg = suggestedActor !== undefined ? ` · próximo actor sugerido: ${suggestedActor}` : ''
+    // fb-221 (head decision a) — the informative register TOTAL stays in the
+    // body («X items totales, Y activos») while the ALERT NUMBER (count above)
+    // is the REAL pending census (Y). The total is the parsed item array (the
+    // closed history + the gated §3 items included) — the FP diagnosis reads
+    // directly off the alert («156 items totales, 2 activos»).
+    const registerLeg = ` · registro: ${items.length} items totales, ${actionableCount} activos`
     findings.push({
       kind: 'work-register-idle',
       key: WORK_REGISTER_IDLE_KEY,
       ts: input.nowMs,
       count: actionableCount,
-      error: `WORK-REGISTER con ${actionableCount} item(s) NO-gateado(s) sin despachar en VALLE (quiet ≥ ${input.quietWindowMs} ms, 0 agentes): ${listText}${compositeLeg}${suggestionLeg}`
+      error: `WORK-REGISTER con ${actionableCount} item(s) NO-gateado(s) sin despachar en VALLE (quiet ≥ ${input.quietWindowMs} ms, 0 agentes): ${listText}${compositeLeg}${suggestionLeg}${registerLeg}`
     })
   }
   // fb-184 (item 2) — the ESCALATION LADDER: the stall age vs T2/T3 decides the
@@ -6101,6 +6145,10 @@ function scanHeadContinuationWaits(
 ): HeadContinuationWait[] {
   const owned = new Map<string, WorkRegisterItem[]>()
   for (const item of registerItems) {
+    // fb-221 — a CLOSED item (a closure-marker line — CERRADO/DIFERIDO/… «lane
+    // ya cerrada») NEVER wakes its next-actor: it is history, not pending work
+    // (the continuation-wake is a PENDING-work backstop, never a history ping).
+    if (item.closed === true) continue
     if (item.nextActor === undefined || /^host\b/i.test(item.nextActor)) continue
     const list = owned.get(item.nextActor)
     if (list === undefined) owned.set(item.nextActor, [item])
