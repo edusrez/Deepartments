@@ -142,7 +142,37 @@
 > IPD builder-170 FASE B wave-b, reviewer-87 GO 9/9) · **fb132** `68384de`
 > (wake-on-delivered FIFO + cap 25 + retired-flavor; IPD builder-171 rb
 > 8b4c43d2, reviewer-88 PASS, QA doble q-i-99+reviewer-88) · **canary**
-> `ca229bd` (dsh-smart-restart dep rc.7→0.1.2-rc.1; builder-163 ff1ae5bc).
+> `ca229bd` (dsh-smart-restart dep rc.7→0.1.2-rc.1; builder-163 ff1ae5bc) ·
+> **2ª OLA post-REGISTER-SYNC (aterrizada 63d3c2c→dc05904; cierre de wave;
+> commits → lane/worker)**: **A-harness** `27142eb` (port patches, modalidad
+> (c): payload 25-rutas como patch-chain — 9 patches [web/fetch edit-DX
+> fb-85/89/90/102/107/108 + fs-search anchor literal-glob + app-boot/CLI
+> watchUserPatchLayers R3] + scripts + manifest + README, fingerprints md5 y
+> smoke; **web-fetch-http EXCLUIDO** — verificado host 09-07; builder-173
+> cfc0afac) · **head-tooling 6/6** `0f6a680` (6e39bbe..0f6a680: O4
+> registry/spawn/tools-h2 status (worker-spawn persiste title+jobId en
+> posts.json) · fb-209a `dept_repo_state` + CUT-4 re-freeze · fb-212-216/
+> 220/223 memo validator (dept_memo_write enumera TODAS las violaciones) ·
+> dept_head_rotate fb-220 · guards dept_exec fb-214 · test caso host
+> batch-drain; 7/7 lanes, 6 commits) · **FB-198 4/4**
+> `dea0c4e`+`e12478b`+`3faa9cb`+`4525ff8` (T1 código — send_message NUNCA
+> bare-failed para registro persistido + re-freeze CUT-4 → f919606a +
+> asserts; T2 health — key delivery-failed no-renumerable + hunk W6 signed;
+> T3 test ventana wake-fails → terminal settle ONCE; T4 documentado — clase
+> de fondo delivery-failed, SIN dedupe engine) · **O3-a** `7cc942c`
+> (estampa re-runs manuales dept_job_run en job-runs-state, misma forma
+> flat {jobId: lastRunAtMs}; jobs 31/31) · **O3-b** `7d090a7` (auto-backfill
+> clase-outage 400/503/429: collector + runJobBackfillTick + stores
+> job-runs-backfill/detail; jobs 42/42) + **re-freeze** `fd632e5`
+> (binder-contract lock main-red jobs += backfillPoolDispatchBlockError,
+> 1+/1−) · **O6** `644f584` (aserción baseline rotación spec 002 M1:
+> verifyRotationBaseline puro + suite hermética no-live rotation-baseline
+> 21/21 + bridges R6) · **fb-43 §7** `dc05904` (atribución de restarts:
+> script host-run backfill-restart-registry.mjs [rewrite atómico + anti-
+> race + dry-run/apply] + plumb cause crashStreak — **backfill VIVO
+> ejecutado 14/46 causas del ledger QI-48; backup
+> /opt/dsh/backups/restart-registry-*-pre-fb43**; fb-43 6/6, parity
+> intacta).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
