@@ -6305,7 +6305,11 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
     // and can be mistaken for the canonical store (the fb-134 class). ADVERTENCIA:
     // 0 destructive action — the owner sees the tree + the markers and decides.
     if (finding.kind === 'ghost-store') {
-      return `- ghost-store ADVERTENCIA: ${finding.error ?? `parallel store tree carries store marker files`}`
+      // GHOST-STORE PATH-ANCHORING (fb-242/fb-222, VALLE 09-08 — the
+      // no-confuse marker, TEXT ONLY): the alert names the CANONICAL stateDir
+      // so the reader never reads org state from the flagged parallel tree
+      // (fb-134 class; the scan excludes the canonical itself).
+      return `- ghost-store ADVERTENCIA: ${finding.error ?? `parallel store tree carries store marker files`} — canónico = /.deepartments — no leer estado en estos árboles`
     }
     // fb-184 (item 2) — the ESCALATION LADDER branches (NEVER let them reach
     // the stalled-post fallback). The owner-facing wording is each finding's

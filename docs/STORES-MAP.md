@@ -48,6 +48,26 @@ deliveries.jsonl.bak, messages.jsonl.bak, rooms.bak-legacy-*, journals .bak-*).
 
 ### 2.3 Route-resolution rule (THE canonical rule — fb-134)
 
+> **GHOST-STORE WARNING (LANE fb-242/fb-222, 2026-09-08)** — do NOT confuse the
+> parallel trees with the daemon's state: the canonical runtime stateDir is
+> **`/.deepartments`** (resolved by the daemon, whose systemd unit runs with
+> `WorkingDirectory=/`). Two GHOST trees FINGER the store and are verifiable
+> dead-ends: `/home/esuarez/projects/deepartments/.deepartments/` (a CLI run
+> with cwd=repo — stale markers `boot-crash.json`/`capacity-gate-state.json`,
+> 2 ghost-store health-alerts on 09-08) and the TOP-LEVEL of
+> `/root/.deepartments/` (CWD=/root smokes — stale `hosts.json`; the
+> `departments/*` workspaces under it are LIVE and NEVER to be archived).
+> A relative `.deepartments/…` cited in any pack/journal/guide resolves against
+> the READER's cwd → a ghost win-easy. Since VALLE 09-08 the WAKE PACK emits
+> the stateDir + journal path ABSOLUTE by construction (`path.resolve` at the
+> daemon assembly seam in `createWakePackService` — the pre-step journal resolve
+> included), and store-path citations must follow the canon of §3 below.
+> HEALTH-ALERT wording marks the canonical (`canónico = /.deepartments`) on
+> every ghost-store finding. FOLLOW-UP (E): absolutizing the wider `boot.ts`
+> binding is LANE-PROPIA (it sits inside the frozen boot-factory zone — the
+> 739-LOC/md5 byte-identity lock in test/boot-factory.test.js; needs a
+> coordinated re-freeze).
+
 1. **`stateDir` is RELATIVE** — `packages/dshd-core/cordis.patch.yml:43`
    (`stateDir: .deepartments`), mirrored in
    `packages/dshd-core-min/cordis.patch.yml:27` and the bundle row

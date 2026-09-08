@@ -68,8 +68,10 @@ forwards it.
    count of changed/untracked paths. No commits, no writes.
 4. **Delivery-failure + post-error counts SINCE LAST RUN.** Read
    `<stateDir>/deliveries.jsonl` rows with `status:'failed'` and
-   `<stateDir>/post-errors.jsonl` rows (stateDir default `.deepartments`; your
-   cwd is the department workspace, per the report paths below). Track the prior
+   `<stateDir>/post-errors.jsonl` rows (the canonical runtime stateDir is
+   ABSOLUTE `/.deepartments/` — NEVER the relative `.deepartments` form, which
+   would resolve against your department-workspace cwd to a non-existent
+   ghost tree; cite `/.deepartments/<file>`). Track the prior
    run's last-seen positions in a per-run ledger
    (e.g. `<workspacePath>/reports/builder/system-health-ledger.json`) so the
    **delta since last run** (count and the new failed messageIds / new

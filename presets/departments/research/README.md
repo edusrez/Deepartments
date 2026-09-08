@@ -63,8 +63,10 @@ base agent preset (the neutral head/worker bases live in
 
 - Researcher reports / reviewer verdicts / analyst syntheses:
   `{{reportDir}}/<role>/<YYYY-MM-DD>-<slug>.md` (reviewer verdicts
-  `...-<slug>-review.md`) — the DEPARTMENT workspace `reports/` dir, NOT
-  `.dsh/reports/...`.
+  `...-<slug>-review.md`) — the DEPARTMENT workspace `reports/` dir, NOT the
+  repo-level `/home/esuarez/projects/deepartments/.dsh/reports/...` (the
+  legacy + LIVE quality store — D-Q6; cite it ABSOLUTE, never the short
+  `.dsh/reports/...` form).
 - Sources: `{{workspacePath}}/sources/<topic-slug>.md` — see
   `docs/departments/research/SOURCES.md`.
 - Organizer: indexes/normalizes both report dirs and maintains

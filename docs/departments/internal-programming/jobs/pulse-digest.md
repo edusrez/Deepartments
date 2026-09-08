@@ -30,7 +30,9 @@ the digest).
 
 1. **Job-runs state** — the job-runs state file (`readJobRunsStateFile`, runs
    per job: timestamps, durations, results, pauses), read from the runtime
-   stateDir (default `.deepartments`; your cwd is the department workspace).
+   stateDir — the canonical ABSOLUTE `/.deepartments/` (NEVER the relative
+   `.deepartments` form: it would resolve against your workspace cwd to a
+   non-existent ghost tree; cite `/.deepartments/<file>`).
    If the primitive is not present in your round, fall back to the run history
    derivable from recent reports + the calendar, and note the gap under
    "Missing primitives" below.

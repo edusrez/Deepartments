@@ -254,6 +254,10 @@ test('fb134 ghost-store (c): a ghost-store finding renders in the health-alert f
   }])
   assert.match(frame, /ghost-store ADVERTENCIA/, 'the ghost-store kind renders its own ADVERTENCIA branch')
   assert.doesNotMatch(frame, /stalled-post/, 'a ghost-store finding never falls through to the stalled-post fallback')
+  // GHOST-STORE PATH-ANCHORING (LANE fb-242/fb-222, VALLE 09-08): the branch
+  // carries the no-confuse marker naming the CANONICAL stateDir, so the reader
+  // never reads org state from the flagged parallel tree.
+  assert.match(frame, /canónico = \/\.deepartments/, 'the ghost-store alert carries the canonical no-confuse marker (fb-242)')
 })
 
 test('fb134 ghost-store (c): the marker list + the stale warn helper are the documented surface (source-level lock)', () => {

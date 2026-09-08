@@ -710,6 +710,19 @@ export interface WakePackService {
 /** Construct the per-apply wake-pack service. Pure construction: no module-global
  * mutable state; the returned service closes only over the injected deps. */
 export function createWakePackService(deps: WakePackDeps): WakePackService {
+  // GHOST-STORE PATH-ANCHORING (fb-242/fb-222, VALLE 09-08): the canonical
+  // stateDir resolved in the DAEMON process — the process whose cwd DEFINES the
+  // store (cordis.patch.yml declares `stateDir: .deepartments` RELATIVE by
+  // design fb-134; the systemd units run with WorkingDirectory=/ → the
+  // EFFECTIVE store is `/.deepartments`). The wake pack therefore emits the
+  // stateDir + the pre-resolved journal path ABSOLUTE by construction.
+  // INVARIANT: this resolve runs ONLY in the daemon (assembly time) — NEVER in
+  // an agent process (agent cwds are non-canonical: host=/root, workers=the
+  // department workspace, CLI=the repo), where a relative stateDir would
+  // resolve against a GHOST/parallel tree. Idempotent: an already-absolute
+  // stateDir (hermetic tests with temp dirs) passes through unchanged.
+  const canonicalStateDir = path.resolve(deps.stateDir)
+
   /** Full body of the `deepartments-workflow` skill, resolved via the PRESET
    * path (a symlink into the repo) with the repo-tracked copy as fallback.
    * Missing/unreadable → graceful `(skill unavailable)`. */
@@ -735,7 +748,7 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
     '- DSH dev home: /opt/dsh/.dsh-dev (GUI profile "deepartments-dev", port 3090 / Tailscale 8445; headless twin "deepartments-dev-headless" for CLI smoke)',
     '- DSH stable home: /opt/dsh/.dsh (port 3080 / Tailscale 8444)',
     '- Plugins: dshmarket, dsh-smooth-stream, dsh-smart-restart',
-    `- Live stateDir: ${deps.stateDir}`,
+    `- Live stateDir: ${canonicalStateDir}`,
     `- Repo root: ${deps.repoRoot}`
   ].join('\n')
 
@@ -1121,7 +1134,7 @@ export function createWakePackService(deps: WakePackDeps): WakePackService {
     // journal yet): assembleWakePack's sections degrade to '(… unavailable)'
     // and readWakeJournalKpi returns a degraded KPI line — the injector never
     // throws for a missing journal/file, so a brand-new host still gets a pack.
-    const pack = await assembleWakePack(hostId, deps.journalPathFor(hostId))
+    const pack = await assembleWakePack(hostId, path.resolve(deps.journalPathFor(hostId)))
     deps.wakePackInjected.add(sessionId)
     // The wake pack alone orients — it carries the CURRENT owner-presence state
     // (section 2); a later toggle is delivered by the bus notify, never by a

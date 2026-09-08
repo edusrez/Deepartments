@@ -62,8 +62,11 @@ deleted without approval. Convention: `docs/departments/research/SOURCES.md`.
 ## Report convention
 
 `{{reportDir}}/<role>/<YYYY-MM-DD>-<slug>.md` (reviewer verdicts
-`...-<slug>-review.md`) — the department workspace `reports/` dir, NEVER
-`.dsh/reports/...`. Frontmatter: `agent`, `date`, `task`, `spec_ref`,
+`...-<slug>-review.md`) — the department workspace `reports/` dir, NEVER the
+repo-level `/home/esuarez/projects/deepartments/.dsh/reports/...` (the legacy
+reports + the LIVE quality store — D-Q6 divergence, do-not-touch; cite it
+ABSOLUTE if ever referenced, never the short `.dsh/reports/...` form, which
+does not resolve from this workspace). Frontmatter: `agent`, `date`, `task`, `spec_ref`,
 `outcome`, `files_touched`, `error_type`, `key_findings`. The organizer
 maintains `{{reportDir}}/INDEX.md`.
 

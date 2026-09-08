@@ -53,6 +53,11 @@ import { readLlmPiAiProviderSettings, resolveReasoningContentPreflight, REASONIN
 // from the dshd-health PACKAGE lib directly, NOT from ../lib/invoke.js (the
 // export-parity lock freezes that import surface at 8 statements / 234 symbols).
 import { readQiDirectiveCount } from '../packages/dshd-health/lib/index.js'
+// GHOST-STORE PATH-ANCHORING (LANE fb-242/fb-222, VALLE 09-08): the wake-pack
+// service is imported from the PACKAGE lib (NOT ../lib/invoke.js — the
+// export-parity lock freezes that surface at 8 statements / 234 symbols; the
+// package-lib import is the fb134-test pattern and keeps the lock intact).
+import { createWakePackService } from '../packages/dshd-core/lib/index.js'
 // DISPATCH-HARDENING + E2-ZSTD (2026-08-28): the pooler-capacity dispatch
 // pre-check (resolvePoolerDispatchBlock), the b5-ghost census ledger
 // (stepGhostSuspectCensus + the ledger IO) and the dept_zstd_read tool
@@ -5246,6 +5251,103 @@ test('Context-injection gate: a session that REGISTERS mid-session (first dept_w
     }
   })
 })
+
+// --- GHOST-STORE PATH-ANCHORING (LANE fb-242/fb-222, VALLE 09-08) — the wake
+// pack emits ABSOLUTE stateDir + journal paths BY CONSTRUCTION: the service
+// resolves `deps.stateDir` in the DAEMON process (whose cwd DEFINES the store
+// — `stateDir: .deepartments` is relative by design fb-134, systemd
+// WorkingDirectory=/ → the effective store `/.deepartments`). A relative
+// stateDir (or journal) must NEVER land against an agent/CLI cwd (host=/root,
+// workers=the department workspace, CLI=the repo — the ghost-store class that
+// burned ~10 QH calls reading stale parallel trees).
+
+/** The minimal `WakePackDeps` stub for the anchor tests: a NON-retired host,
+ * empty catalog, presence present, a stubbed message store, the REAL repoRoot
+ * (git/ROADMAP reads) and a `journalPathFor` under the (possibly-relative)
+ * `stateDir`. */
+function wakePackAnchorDeps(stateDir, overrides = {}) {
+  return {
+    byPost: new Map(),
+    hosts: new Map(),
+    getHost: () => ({ retired: false }),
+    postIdForChild: () => undefined,
+    hostIdForSession: (id) => `host-${id}`,
+    refreshPresence: () => {},
+    wakePackInjected: new Set(),
+    deferredSleepReplace: new Map(),
+    persistHosts: () => {},
+    roleForSession: () => 'generic',
+    buildSubagentOrientation: () => 'role orientation',
+    computeHostSleepSurfacePlan: () => ({ surfaceOp: 'none' }),
+    buildSleepJournalMessage: () => ({}),
+    assembleHeartbeat: () => undefined,
+    readPresenceStateFile: () => ({ present: true }),
+    journalPathFor: (memberId) => path.join(stateDir, 'journals', `${memberId}.md`),
+    messagesStoreReady: async () => ({ page: () => ({ messages: [] }) }),
+    stateDir,
+    repoRoot: REPO_ROOT,
+    ...overrides
+  }
+}
+
+test('GHOST-STORE ANCHOR (fb-242/fb-222 MODO A): with a RELATIVE stateDir and a pinned NON-canonical cwd the wake pack emits the stateDir and the pre-resolved journal path ABSOLUTE (daemon-cwd resolve at the emission seam), reads the journal at the resolved path, and stays byte-identical for an already-ABSOLUTE input (idempotence)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const prevCwd = process.cwd()
+    try {
+      // The agent-view trap: a host/worker/CLI process would resolve the
+      // relative `.deepartments` against ITS cwd — pin a NON-canonical cwd
+      // inside the temp root and assert the pack is immune to it.
+      const relRoot = path.join(stateDir, 'cwd')
+      await mkdir(relRoot, { recursive: true })
+      process.chdir(relRoot)
+      const hostId = 'host-session-abc'
+      const canonical = path.join(relRoot, '.deepartments')
+      // Pre-author the journal at the RESOLVED (absolute) path — proving the
+      // assembly reads the SAME inode the pack cites (the KPI line is real).
+      await mkdir(path.join(canonical, 'journals'), { recursive: true })
+      await writeFile(
+        path.join(canonical, 'journals', `${hostId}.md`),
+        'wake_counter: 1\nopen_items: ["anchor the pack"]\n'
+      )
+
+      const service = createWakePackService(wakePackAnchorDeps('.deepartments'))
+      const signal = new AbortController().signal
+      const decision = await service.preStepHandler(
+        { agent: { id: 'session-abc', session: { header: {} } }, signal },
+        async () => ({ kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: 'wake' }] }] })
+      )
+      assert.equal(decision.kind, 'enter', 'pre-step returns enter')
+      const packText = decision.messages.at(-1).content[0].text
+      assert.ok(packText.includes(`- Live stateDir: ${canonical}`), `system-state emits the ABSOLUTE canonical stateDir (${canonical}) — never the relative .deepartments form`)
+      assert.ok(!packText.includes('- Live stateDir: .deepartments'), 'the pack never emits the relative .deepartments form')
+      assert.ok(packText.includes(`Pre-resolved journal path: \`${path.join(canonical, 'journals', `${hostId}.md`)}\``), 'journal section emits the ABSOLUTE pre-resolved journal path')
+      assert.match(packText, /- kpi: wake_counter 1; top open item: anchor the pack/, 'the KPI was read from the journal AT the resolved absolute path (same inode as the citation)')
+
+      // Idempotence: an already-ABSOLUTE stateDir (and journal) pass unchanged
+      // (the hermetic temp-absolute suite is a global no-op proof too).
+      const serviceAbs = createWakePackService(wakePackAnchorDeps(canonical))
+      const decisionAbs = await serviceAbs.preStepHandler(
+        { agent: { id: 'session-abc', session: { header: {} } }, signal },
+        async () => ({ kind: 'enter', messages: [{ role: 'user', content: [{ type: 'text', text: 'wake' }] }] })
+      )
+      const packAbs = decisionAbs.messages.at(-1).content[0].text
+      assert.ok(packAbs.includes(`- Live stateDir: ${canonical}`), 'absolute input → identical absolute emission (path.resolve no-op)')
+      assert.ok(packAbs.includes(`Pre-resolved journal path: \`${path.join(canonical, 'journals', `${hostId}.md`)}\``), 'absolute journal input → identical citation')
+    } finally {
+      process.chdir(prevCwd)
+    }
+  })
+})
+
+// NOTE — MODO B (the boot binding `path.resolve` at boot.ts:364) was INTENTED
+// in this lane (head decision: suite-gate) but the suite-GATE REVERTED it: the
+// binding line sits INSIDE the FROZEN boot-factory zone (test/boot-factory.test.js
+// pins the embedded boot zone at 739 LOCs / md5 15f04483…; the edit → 747 LOCs,
+// suite red). Per the head's rule «si la suite roja por B → REVERT solo el hunk
+// de B (deja A)», B → LANE PROPIA (the re-freeze of the boot-zone LOC/md5 lock
+// + the full-suite re-base is a coordinated host deploy step). The A seam
+// (canonicalStateDir in createWakePackService) already emits the pack absolute
+// by construction, so the pack surface is anchored regardless of B.
 
 // --- Task T4: ROLE-FOCUSED context injection for TRANSIENT subagents --------
 // Every tool-dispatched subagent (origin === 'subagent') now gets a slim
