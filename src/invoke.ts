@@ -78,7 +78,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
-import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, boundContextSummary, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { findSessionArtifact, runSleepCleanup, type SleepCleanupReport } from './core/session-cleanup.js'
 // POST-INCIDENTE 2026-09-04 (crash-loop 609 restarts / exit 7): the ONE shared
 // dual session-log read (getSessionEvents) + the surface detector
@@ -823,7 +823,7 @@ interface AgentLike {
     append?: (type: string, data: unknown, opts?: { surfaceOp?: string }) => unknown
     header?: unknown
   }
-  followup(message: { content: readonly { type: string; text: string }[]; source: Record<string, unknown> }): void
+  followup(message: UserMessage): void
   /** The harness ABORT/STOP API (the GUI stop — dsh-agent Agent.cancel). W9-b
    * delivery-interrupt uses it with a `hook`/reason 'interrupted' cause and
    * `{ keepInbox: true }` (preserve pending work) to preempt a busy recipient.

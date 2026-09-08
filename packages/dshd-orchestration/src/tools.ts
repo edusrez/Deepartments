@@ -119,7 +119,7 @@ import { scopeOf } from '@deepseek-ai/dsh-scope'
 // LANE FEEDBACK-NUDGE — `createUserMessage` builds the nudge as an injected
 // plugin/notice context (the wake-pack shape); `boundContextSummary` bounds its
 // notice summary (the wake-pack pattern).
-import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, boundContextSummary, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { readFile, readdir, realpath, mkdir, stat } from 'node:fs/promises'
 import { readFileSync, existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
@@ -275,7 +275,7 @@ interface AgentLike {
     append?: (type: string, data: unknown, opts?: { surfaceOp?: string }) => unknown
     header?: unknown
   }
-  followup(message: { content: readonly { type: string; text: string }[]; source: Record<string, unknown> }): void
+  followup(message: UserMessage): void
   cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void
   whenIdle(): Promise<void>
 }

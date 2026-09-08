@@ -280,3 +280,25 @@ Con el matcher sano, el guard pendiente es PROCESO, no código:
   OTRO guard, ya cerrado en 5ada8ac; el presente §8 es el cierre del record
   fb-52 glob (matcher literal-first-segment), que quedó `abierto` en el backlog
   hasta esta lane.
+
+## 9. ROOT-BUILD GATE — «los prebuilt NO deben enmascarar» (fb-248 class, FB-266, 2026-09-08)
+
+El `pnpm build` de RAÍZ compila SOLO `src/` (tsconfig raíz `"include": ["src"]`):
+los tipos de los paquetes del workspace llegan al tsc raíz vía sus
+`lib/*.d.ts` PREBUILT (campo `types` del package.json). Un lib STALE (compilado
+de un src ANTERIOR) ENMASCARA los errores de tipos reales del build raíz: el tsc
+raíz type-checks contra la interfaz vieja, y la primera vez que los paquetes se
+recompilan desde su src actual el build raíz explota — la clase fb-266 (b814101
+cambió `delivery.ts:334` a `followup(message: UserMessage)` pero las libs stale
+ocultaron los 4 sitios sin espejar hasta el recompile completo).
+
+**Gate canónico (anti-masking):** `pnpm build:root-check` =
+`node scripts/check-root-build.mjs` — regenera TODO lib de paquete stale (y
+SIEMPRE el de dshd-orchestration, el acoplamiento caliente) desde su src, y
+LUEGO corre el tsc raíz; falla loud si cualquier paso es != 0. Una lane que
+toque src de paquetes O el wiring del build raíz corre ESTE comando EN LUGAR
+del `pnpm build` pelado (el build pelado solo es válido cuando las libs ya son
+frescas — el gate es la forma verificada). Sitios de invocación:
+`package.json "build:root-check"` + el script `scripts/check-root-build.mjs`;
+los reviewers del flujo IPD lo usan en la verificación de lanes que tocan
+acoplamiento src↔paquete.

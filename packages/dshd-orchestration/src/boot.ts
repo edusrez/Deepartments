@@ -69,6 +69,7 @@
 // already travels). The core-bridge imports ../*.js resolve to the owning
 // packages directly (the bridges re-export them).
 import type { Context } from '@deepseek-ai/cordis'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -111,7 +112,7 @@ interface AgentLike {
     append?: (type: string, data: unknown, opts?: { surfaceOp?: string }) => unknown
     header?: unknown
   }
-  followup(message: { content: readonly { type: string; text: string }[]; source: Record<string, unknown> }): void
+  followup(message: UserMessage): void
   cancel(cause: { kind: string }, options?: { keepInbox?: boolean }): void
   whenIdle(): Promise<void>
 }
