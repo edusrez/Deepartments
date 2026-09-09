@@ -82,6 +82,10 @@ import { fileURLToPath } from 'node:url'
 // (src/role-orient.ts is a re-export bridge of the core package).
 import { roleForSession, buildSubagentOrientation } from 'dshd-core'
 import { getSessionEvents, detectSessionSurface } from 'dshd-core'
+// fb-308 — the durable-artifact locator (dshd-core session-cleanup) used ONLY
+// by the session-log FINALIZE to cite the real zstd path in the .md frontmatter
+// (additive `artifact:` line, best-effort, CUT-4 — the archive is never touched).
+import { findSessionArtifact } from 'dshd-core'
 import type { SessionLogLike } from 'dshd-core'
 import type { SubagentRole, SubagentRolesService } from 'dshd-core'
 import { buildSleepJournalMessage } from 'dshd-core'
@@ -224,6 +228,10 @@ export interface PresetsSurface {
   bumpHostSleepCounter: (memberId: string, content: string, archive?: { sessionId?: string; roomId?: string; boundarySeq?: number }) => Promise<string>
   bumpPostSleepCounter: (memberId: string, content: string, archive?: { sessionId?: string; roomId?: string; boundarySeq?: number }) => Promise<string>
   readJournal: (memberId: string) => Promise<string | undefined>
+  /** fb-308 — the session-log FINALIZE (re-capture the just-ended cycle
+   * post-dispose + seal the .md with the exact end/reason/zstd pointer).
+   * Best-effort: resolves the sealed path, or undefined when skipped. */
+  finalizeSessionLog: (memberId: string, roomId: string, sessionId: string) => Promise<string | undefined>
   coordinatorForPost: (postId: string) => CoordinatorConfig | undefined
   departmentForPost: (postId: string) => DepartmentConfig | undefined
   departmentForEntry: (entry: PostEntry) => DepartmentConfig | undefined
@@ -508,8 +516,11 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
   const archivePathFor = (memberId: string): string => path.join(stateDir, 'journals', 'archive', `${memberId}.md`)
   /** Path of the per-member search index. */
   const indexPathFor = (): string => path.join(stateDir, 'journals', 'index.json')
-  /** Path of one member+ordinal one-cycle session log. */
-  const sessionLogPathFor = (memberId: string, wakeCounter: number): string => path.join(stateDir, 'journals', 'sessions', `${memberId}-${wakeCounter}.md`)
+  /** Path of one member+ordinal one-cycle session log. The ordinal may carry
+   * the fb-308 per-session tail (`<wakeCounter>-<sessionTail>`) when the
+   * canonical `-NN.md` name is already claimed by a DIFFERENT session — see
+   * resolveSessionLogPath. */
+  const sessionLogPathFor = (memberId: string, wakeCounter: number | string): string => path.join(stateDir, 'journals', 'sessions', `${memberId}-${wakeCounter}.md`)
 
   /** Deterministic per-write UNIQUE archive marker so interleaved appends across
    * the shared stateDir stay parseable (spec §Artifacts (a) — each
@@ -558,6 +569,33 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
     return truncateText(parts.join(' '), max)
   }
 
+  /** Normalize a turn/end `reason` into a bounded human-readable string
+   * (fb-308): a plain string passes through (`completed`); an object shaped
+   * like the harness's `{kind, reason:{kind}}` collapses to `kind/sub`
+   * (`aborted/disposed`); anything else degrades to a bounded JSON string.
+   * FIXES the historical `[object Object]` render — `String(reason)` over the
+   * object form printed the raw toString (the pre-fix body line + the frozen
+   * header of every captured log). Shared by the event renderer (body) and the
+   * finalize seal (header) so both surfaces normalize identically. */
+  const normalizeTurnEndReason = (reason: unknown): string => {
+    if (typeof reason === 'string' && reason !== '') return reason
+    if (reason !== null && typeof reason === 'object') {
+      const outer = reason as { kind?: unknown; reason?: unknown }
+      const kind = typeof outer.kind === 'string' ? outer.kind : undefined
+      const inner = outer.reason
+      const innerKind = inner !== null && typeof inner === 'object' ? (inner as { kind?: unknown }).kind : undefined
+      const sub = typeof innerKind === 'string' && innerKind !== ''
+        ? innerKind
+        : typeof inner === 'string' && inner !== '' ? inner : undefined
+      if (kind !== undefined) return sub !== undefined ? `${kind}/${sub}` : kind
+    }
+    try {
+      const json = JSON.stringify(reason)
+      if (json !== undefined && json !== '') return json.slice(0, 80)
+    } catch { /* fall through to the default */ }
+    return 'unknown'
+  }
+
   /** Bounded markdown line for one session event (spec §Artifacts (b) body). */
   const serializeSessionEvent = (type: string, data: Record<string, unknown> | undefined): string | undefined => {
     if (data === undefined || typeof data !== 'object') return undefined
@@ -581,7 +619,7 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
       case 'turn/start':
         return `- **turn** ${String(data.turn)} start`
       case 'turn/end':
-        return `- **turn** ${String(data.turn)} end (${String((data as Record<string, unknown>).reason ?? '')})`
+        return `- **turn** ${String(data.turn)} end (${normalizeTurnEndReason((data as Record<string, unknown>).reason)})`
       case 'step/start':
         return `- **step** ${String(data.turn)}.${String(data.step)} start`
       case 'step/end':
@@ -593,8 +631,16 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
 
   /** Build the bounded markdown body from a sliced event list (spec §Artifacts
    * (b) §4). Bounded by MAX_FILE_BYTES — on overflow drop chunk/step noise first,
-   * then truncate the oldest tool lines, then stop. */
-  const serializeSessionLog = (memberId: string, roomId: string, sessionId: string, wakeCounter: number, events: Array<{ type: string; seq: number; time: number; data: unknown }>, boundarySeq: number | undefined): string => {
+   * then truncate the oldest tool lines, then stop. `seal` (fb-308 — the
+   * FINALIZE only) appends the ADDITIVE frontmatter after `end_time:` — before
+   * the closing `---` and the `journal:` citation: `final: true` +
+   * `turn_end_reason:` (normalized) + `zstd_final_seq:` (the turn/end seq
+   * pointer on the durable artifact) + optional `artifact:` (the zstd path).
+   * The wake-pack KPI anchors per-line (`^wake_counter:`/`^open_items:`), so
+   * the extra lines are lean-surface-invisible (the `archive_seq` precedent,
+   * writeJournal). The header lines sit BEFORE the byte cap, so the seal is
+   * always emitted verbatim even when the body truncates. */
+  const serializeSessionLog = (memberId: string, roomId: string, sessionId: string, wakeCounter: number, events: Array<{ type: string; seq: number; time: number; data: unknown }>, boundarySeq: number | undefined, seal?: { turnEndReason?: string; zstdFinalSeq?: number; artifactPath?: string }): string => {
     const first = events[0]
     const last = events[events.length - 1]
     const startSeq = boundarySeq !== undefined ? boundarySeq + 1 : first?.seq ?? 0
@@ -608,6 +654,14 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
       `end_seq: ${last?.seq ?? startSeq}`,
       `start_time: ${first !== undefined ? new Date(first.time).toISOString() : ''}`,
       `end_time: ${last !== undefined ? new Date(last.time).toISOString() : ''}`,
+      ...(seal !== undefined
+        ? [
+            'final: true',
+            `turn_end_reason: ${seal.turnEndReason ?? 'unknown'}`,
+            `zstd_final_seq: ${seal.zstdFinalSeq ?? last?.seq ?? startSeq}`,
+            ...(seal.artifactPath !== undefined ? [`artifact: ${seal.artifactPath}`] : [])
+          ]
+        : []),
       `journal: journals/${memberId}.md`,
       '---',
       '## cycle'
@@ -689,68 +743,112 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
   }
 
+  /** fb-308 (dimension 3 — the m-4049 RE-EMISSION) — the PER-SESSION session-log
+   * filename: `journals/sessions/<memberId>-<wakeCounter>.md` UNLESS that
+   * canonical name is already claimed by a DIFFERENT session (a rotation /
+   * successor that reuses the SAME wake ordinal — the D-Q3 collision class:
+   * wake_counter 12 shared by two sessions, the outgoing one left WITHOUT its
+   * own file, 0 data loss only because the zstd + memo remain the truth). In
+   * that case THIS session writes its OWN file
+   * `<memberId>-<wakeCounter>-<sessionTail>.md` (tail = the last '-' segment of
+   * the session id — stable and globally unique per session). The canonical
+   * `-NN.md` chain is NEVER rewritten or moved (CUT-4 — the historical
+   * artifacts + the wake-pack's `session_log:` citation stay intact); the
+   * current session always gets the canonical name first. Re-captures of the
+   * SAME session resolve to the SAME file (reuse/overwrite — the finalize
+   * rewrites the mid-turn capture of its own session). Best-effort: an
+   * unreadable/absent candidate keeps the canonical name. */
+  const resolveSessionLogPath = async (memberId: string, wakeCounter: number, sessionId: string): Promise<string> => {
+    const canonical = sessionLogPathFor(memberId, wakeCounter)
+    try {
+      const existing = await readFile(canonical, 'utf8')
+      const ownerMatch = existing.match(/^session_id:\s*(.+)$/m)
+      const owner = ownerMatch !== null ? ownerMatch[1].trim() : ''
+      if (owner !== '' && owner !== sessionId) {
+        const tail = sessionId.split('-').pop() ?? 'session'
+        return sessionLogPathFor(memberId, `${wakeCounter}-${tail}`)
+      }
+    } catch { /* ENOENT / unreadable → canonical name (this session owns it) */ }
+    return canonical
+  }
+
+  /** Task T1 — read + slice ONE cycle of a member's durable session events
+   * (the capture + finalize SHARED core): flush the live session tail → readRaw
+   * the durable JSONL artifact → parse (defensively) → slice by exact
+   * `seq > boundarySeq`, else by `event.time > lastWakeMs` (the prior journal's
+   * `last_wake`) for the first-ever cycle. The bound-method call shape is
+   * load-bearing (the Batch S1 in-the-wild fix — `this` must survive on
+   * `sessions.flush` / `persistence.readRaw`; spec §Capture flow 2). THROWS on
+   * any failure — the CALLERS own the best-effort degradation (capture → stub;
+   * finalize → keep the existing .md). */
+  const readSessionCycleEvents = async (memberId: string, roomId: string, sessionId: string, wakeCounter: number, boundarySeq: number | undefined): Promise<{ events: Array<{ type: string; seq: number; time: number; data: unknown }> }> => {
+    // 1. Flush the live session's in-memory tail so readRaw reflects it
+    //    (mirrors flushLiveSessionLog, session-export.js:95-101). Invoke the
+    //    real service methods as BOUND method calls — `this` must survive:
+    //    dsh-session's `flush(session)` reads `this.liveEntryFor(session)`
+    //    (dsh-session lib/index.js:1792, rc.8) and the jsonl backend's
+    //    `readRaw(id)` reads `this.findLog(...)` (dsh-session-persistence-jsonl
+    //    lib/index.js:869). The earlier extraction-then-call form
+    //    (`const f = sessions.flush; await f(live)`) lost `this` and crashed
+    //    live captures with `Cannot read properties of undefined (reading
+    //    'liveEntryFor')` — every live session log degraded to the stub
+    //    (Batch S1 in-the-wild fix; spec §Capture flow 2 documents the bound
+    //    `ctx.get('sessions').flush(session)` shape).
+    const sessions = ctx.get('sessions') as { get?: (id: string) => unknown; flush?: (session: unknown) => Promise<unknown> } | undefined
+    if (sessions !== undefined && sessionId !== undefined) {
+      const live = sessions.get?.(SessionId(sessionId))
+      if (live !== undefined && typeof sessions.flush === 'function') await sessions.flush(live)
+    }
+    // 2. In-process read of the durable JSONL artifact (readRaw).
+    const persistence = ctx.get('sessionPersistence') as { readRaw?: (id: SessionId, signal?: AbortSignal) => Promise<{ content: string } | undefined> } | undefined
+    if (persistence === undefined || typeof persistence.readRaw !== 'function') {
+      throw new Error('sessionPersistence unavailable (no readRaw)')
+    }
+    const raw = await persistence.readRaw(SessionId(sessionId))
+    if (raw === undefined || typeof raw.content !== 'string' || raw.content === '') {
+      throw new Error('no stored session artifact (readRaw returned nothing)')
+    }
+    // 3. Parse the JSONL events (skipping malformed/noise lines defensively).
+    const events: Array<{ type: string; seq: number; time: number; data: unknown }> = []
+    for (const line of raw.content.split('\n')) {
+      if (line.trim() === '') continue
+      try {
+        const ev = JSON.parse(line) as { type?: unknown; seq?: unknown; time?: unknown; data?: unknown }
+        if (ev !== null && typeof ev === 'object' && typeof ev.type === 'string' && typeof ev.seq === 'number' && typeof ev.time === 'number') {
+          events.push({ type: ev.type, seq: ev.seq, time: ev.time, data: ev.data })
+        }
+      } catch { /* skip malformed line */ }
+    }
+    // 4. Slice one cycle: exact by seq, else by time from the prior journal.
+    let lastWakeMs: number | undefined
+    if (boundarySeq === undefined) {
+      try {
+        const prior = await readFile(journalPathFor(memberId), 'utf8')
+        const m = prior.match(/^last_wake:\s*(.+)$/m)
+        if (m !== null) { const t = Date.parse(m[1].trim()); if (!Number.isNaN(t)) lastWakeMs = t }
+      } catch { /* no prior journal → include whole log */ }
+    }
+    const sliced = events.filter((ev) =>
+      boundarySeq !== undefined ? ev.seq > boundarySeq
+        : lastWakeMs !== undefined ? ev.time > lastWakeMs
+          : true)
+    return { events: sliced }
+  }
+
   /** Task T1 — capture the ONE-CYCLE session log (WAKE→memo) for a member's
-   * current cycle and write it bounded to `journals/sessions/<memberId>-<wake_counter>.md`
-   * (atomic tmp+rename). Slices by exact event `seq > boundarySeq` (the seq
-   * persisted at the previous dept_sleep), falling back to `event.time > lastWakeMs`
-   * (from the prior journal's `last_wake`) for the first-ever cycle. BEST-EFFORT:
+   * current cycle and write it bounded to
+   * `journals/sessions/<memberId>-<wake_counter>[<-sessionTail>].md`
+   * (atomic tmp+rename; the fb-308 per-session name resolution applies).
+   * Slices by exact event `seq > boundarySeq` (the seq persisted at the
+   * previous dept_sleep), falling back to `event.time > lastWakeMs` (from the
+   * prior journal's `last_wake`) for the first-ever cycle. BEST-EFFORT:
    * on ANY failure writes the STUB form and warns — never throws into the memo
    * write or sleep. Returns the session-log path (real or stub). */
   const captureSessionLog = async (memberId: string, roomId: string, sessionId: string, wakeCounter: number, boundarySeq: number | undefined): Promise<string> => {
-    const logPath = sessionLogPathFor(memberId, wakeCounter)
-    const journalPath = journalPathFor(memberId)
+    const logPath = await resolveSessionLogPath(memberId, wakeCounter, sessionId)
     try {
-      // 1. Flush the live session's in-memory tail so readRaw reflects it
-      //    (mirrors flushLiveSessionLog, session-export.js:95-101). Invoke the
-      //    real service methods as BOUND method calls — `this` must survive:
-      //    dsh-session's `flush(session)` reads `this.liveEntryFor(session)`
-      //    (dsh-session lib/index.js:1792, rc.8) and the jsonl backend's
-      //    `readRaw(id)` reads `this.findLog(...)` (dsh-session-persistence-jsonl
-      //    lib/index.js:869). The earlier extraction-then-call form
-      //    (`const f = sessions.flush; await f(live)`) lost `this` and crashed
-      //    live captures with `Cannot read properties of undefined (reading
-      //    'liveEntryFor')` — every live session log degraded to the stub
-      //    (Batch S1 in-the-wild fix; spec §Capture flow 2 documents the bound
-      //    `ctx.get('sessions').flush(session)` shape).
-      const sessions = ctx.get('sessions') as { get?: (id: string) => unknown; flush?: (session: unknown) => Promise<unknown> } | undefined
-      if (sessions !== undefined && sessionId !== undefined) {
-        const live = sessions.get?.(SessionId(sessionId))
-        if (live !== undefined && typeof sessions.flush === 'function') await sessions.flush(live)
-      }
-      // 2. In-process read of the durable JSONL artifact (readRaw).
-      const persistence = ctx.get('sessionPersistence') as { readRaw?: (id: SessionId, signal?: AbortSignal) => Promise<{ content: string } | undefined> } | undefined
-      if (persistence === undefined || typeof persistence.readRaw !== 'function') {
-        throw new Error('sessionPersistence unavailable (no readRaw)')
-      }
-      const raw = await persistence.readRaw(SessionId(sessionId))
-      if (raw === undefined || typeof raw.content !== 'string' || raw.content === '') {
-        throw new Error('no stored session artifact (readRaw returned nothing)')
-      }
-      // 3. Parse the JSONL events (skipping malformed/noise lines defensively).
-      const events: Array<{ type: string; seq: number; time: number; data: unknown }> = []
-      for (const line of raw.content.split('\n')) {
-        if (line.trim() === '') continue
-        try {
-          const ev = JSON.parse(line) as { type?: unknown; seq?: unknown; time?: unknown; data?: unknown }
-          if (ev !== null && typeof ev === 'object' && typeof ev.type === 'string' && typeof ev.seq === 'number' && typeof ev.time === 'number') {
-            events.push({ type: ev.type, seq: ev.seq, time: ev.time, data: ev.data })
-          }
-        } catch { /* skip malformed line */ }
-      }
-      // 4. Slice one cycle: exact by seq, else by time from the prior journal.
-      let lastWakeMs: number | undefined
-      if (boundarySeq === undefined) {
-        try {
-          const prior = await readFile(journalPath, 'utf8')
-          const m = prior.match(/^last_wake:\s*(.+)$/m)
-          if (m !== null) { const t = Date.parse(m[1].trim()); if (!Number.isNaN(t)) lastWakeMs = t }
-        } catch { /* no prior journal → include whole log */ }
-      }
-      const sliced = events.filter((ev) =>
-        boundarySeq !== undefined ? ev.seq > boundarySeq
-          : lastWakeMs !== undefined ? ev.time > lastWakeMs
-            : true)
-      const markdown = serializeSessionLog(memberId, roomId, sessionId, wakeCounter, sliced, boundarySeq)
+      const { events } = await readSessionCycleEvents(memberId, roomId, sessionId, wakeCounter, boundarySeq)
+      const markdown = serializeSessionLog(memberId, roomId, sessionId, wakeCounter, events, boundarySeq)
       // 5. Atomic write (tmp+rename).
       const tmpPath = `${logPath}.tmp`
       await mkdir(path.dirname(logPath), { recursive: true })
@@ -769,6 +867,93 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
         await rename(tmpPath, logPath)
       } catch { /* give up silently on the stub write — never throw */ }
       return logPath
+    }
+  }
+
+  /** fb-308 — FINALIZE the just-ended cycle's session log: RE-CAPTURE the SAME
+   * cycle from the durable artifact once the dispose settled. The harness
+   * appends `tool/result → step/end → turn/end → session/end-seed` AFTER the
+   * tool returns (session-cleanup.ts:12-14), so the mid-turn capture
+   * (memo/sleep call) froze the .md header BEFORE the real closing events —
+   * the DESYNC class the record measures (Δ up to 4689; the .md vs zstd
+   * cross-audit is a QD daily). Post-dispose the artifact holds the REAL
+   * tail, so this rewrite makes `end_seq`/`end_time` EXACT (source: the SAME
+   * readRaw — the "anchor at turn/end" guarantee the snapshot finalize already
+   * relies on, session-rotation.ts:589-591) and SEALS the .md with the
+   * ADDITIVE frontmatter `final: true` + `turn_end_reason:` (normalized) +
+   * `zstd_final_seq:` (the turn/end seq pointer) + optional `artifact:` (the
+   * durable zstd path, via findSessionArtifact). Auto-derives `wakeCounter`
+   * from the checkpoint journal (the uniform ordinal) and `boundarySeq` from
+   * the existing .md's `start_seq - 1` (fallback: the WHOLE log — the
+   * no-capture heal class, e.g. a worker cut mid-edit before any memo).
+   * BEST-EFFORT like the capture: on ANY failure warns and leaves the existing
+   * .md untouched (a mid-turn capture is never replaced by a stub — the
+   * opposite regression) — NEVER throws into the retire/sleep/rotation chain.
+   * Returns the sealed log path, or undefined when the finalize was skipped. */
+  const finalizeSessionLog = async (memberId: string, roomId: string, sessionId: string): Promise<string | undefined> => {
+    try {
+      // 1. Cycle ordinal: the journal's CURRENT wake_counter names the just-ended
+      //    cycle's session log (hosts/heads/workers — the uniform ordinal; the
+      //    sleep paths bumped it BEFORE their dispose, so it already points at
+      //    the just-ended cycle).
+      const journal = await readJournal(memberId)
+      if (journal === undefined) {
+        ctx.logger?.warn(`[deepartments] session log finalize skipped: no journal for ${memberId} (nothing to seal)`)
+        return undefined
+      }
+      const counterMatch = journal.match(/^wake_counter:\s*(\d+)/m)
+      if (counterMatch === null) {
+        ctx.logger?.warn(`[deepartments] session log finalize skipped: journal for ${memberId} has no wake_counter (nothing to seal)`)
+        return undefined
+      }
+      const wakeCounter = Number(counterMatch[1])
+      const logPath = await resolveSessionLogPath(memberId, wakeCounter, sessionId)
+      // 2. Boundary: the existing capture's `start_seq - 1` (the SAME cycle),
+      //    or the WHOLE log when no capture exists (the heal class — the
+      //    finalize then CREATES the .md from the full session).
+      let boundarySeq: number | undefined
+      try {
+        const existing = await readFile(logPath, 'utf8')
+        const startMatch = existing.match(/^start_seq:\s*(\d+)/m)
+        if (startMatch !== null) boundarySeq = Number(startMatch[1]) - 1
+      } catch { boundarySeq = undefined }
+      // 3. Re-capture the settled cycle (readRaw post-dispose — the turn/end is
+      //    in the artifact) + derive the seal from the REAL closing events.
+      const { events } = await readSessionCycleEvents(memberId, roomId, sessionId, wakeCounter, boundarySeq)
+      const lastTurnEnd = [...events].reverse().find((ev) => ev.type === 'turn/end')
+      const last = events[events.length - 1]
+      const seal: { turnEndReason?: string; zstdFinalSeq?: number; artifactPath?: string } = {
+        turnEndReason: lastTurnEnd !== undefined
+          ? normalizeTurnEndReason((lastTurnEnd.data as { reason?: unknown } | undefined)?.reason)
+          : 'unknown',
+        zstdFinalSeq: lastTurnEnd?.seq ?? last?.seq
+      }
+      // 4. Best-effort artifact citation (the sessions root derivation mirrors
+      //    boot.ts:935-937 — persistence.root ?? <stateDir>/../sessions; the
+      //    path is stored RELATIVE to the sessions root's parent, e.g.
+      //    `sessions/<project>/<id>/session.jsonl.zstd`).
+      try {
+        const persistence = ctx.get('sessionPersistence') as { root?: string } | undefined
+        const sessionsRoot = typeof persistence?.root === 'string' && persistence.root !== ''
+          ? persistence.root
+          : path.join(stateDir, '..', 'sessions')
+        const found = await findSessionArtifact(sessionsRoot, sessionId)
+        if (found !== undefined) seal.artifactPath = path.relative(path.dirname(sessionsRoot), found)
+      } catch { /* optional — omit the artifact line */ }
+      const markdown = serializeSessionLog(memberId, roomId, sessionId, wakeCounter, events, boundarySeq, seal)
+      // 5. Atomic write (tmp+rename) — idempotent: the SAME session + SAME
+      //    cycle always rewrites the SAME file.
+      const tmpPath = `${logPath}.tmp`
+      await mkdir(path.dirname(logPath), { recursive: true })
+      await writeFile(tmpPath, markdown, 'utf8')
+      await rename(tmpPath, logPath)
+      return logPath
+    } catch (error) {
+      // BEST-EFFORT: warn and LEAVE the existing .md (mid-turn capture or stub)
+      // untouched — never throw into the caller's chain, never stub-overwrite.
+      const reason = error instanceof Error ? error.message : String(error)
+      ctx.logger?.warn(`[deepartments] session log finalize skipped (the existing .md stays): ${reason}`)
+      return undefined
     }
   }
 
@@ -1250,6 +1435,7 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
     bumpHostSleepCounter,
     bumpPostSleepCounter,
     readJournal,
+    finalizeSessionLog,
     coordinatorForPost,
     departmentForPost,
     departmentForEntry,

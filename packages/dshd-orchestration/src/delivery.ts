@@ -489,6 +489,10 @@ export interface DeliveryFactoryDeps {
   writeJournal: (memberId: string, roomId: string, summary: string, decisions: string[], constraints: string[], openItems: string[], currentStep?: string, archive?: { sessionId?: string; wakeCounter?: number; archiveSeq?: string; lastWakeMs?: number; boundarySeq?: number }) => Promise<string>
   /** The journal read closure. */
   readJournal: (memberId: string) => Promise<string | undefined>
+  /** fb-308 — the session-log FINALIZE closure (the in-bundle lifecycle
+   * fallback construction needs it — re-capture the just-ended cycle
+   * post-dispose: exact header + normalized reason + zstd pointer). */
+  finalizeSessionLog: (memberId: string, roomId: string, sessionId: string) => Promise<string | undefined>
   /** The sleep-counter journal bumps (lifecycle carve). */
   bumpHostSleepCounter: (memberId: string, content: string, archive?: { sessionId?: string; roomId?: string; boundarySeq?: number }) => Promise<string>
   bumpPostSleepCounter: (memberId: string, content: string, archive?: { sessionId?: string; roomId?: string; boundarySeq?: number }) => Promise<string>
@@ -776,6 +780,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     journalPathFor,
     writeJournal,
     readJournal,
+    finalizeSessionLog,
     bumpHostSleepCounter,
     bumpPostSleepCounter,
     archivePostSessionOnSleep,
@@ -2122,6 +2127,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       journalPath: (memberId) => journalPathFor(memberId),
       writeJournal,
       readJournal,
+      finalizeSessionLog,
       bumpHostSleepCounter,
       bumpPostSleepCounter,
       archivePostSessionOnSleep,

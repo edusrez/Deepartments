@@ -377,7 +377,7 @@ function buildLifecycleLazy(ctx: Context, lifecycleDeps: DepsHolder<Partial<Life
   // deptGet, logger — resolve internally from a/b).
   const required: (keyof LifecycleCtx)[] = [
     'writeJournal', 'readJournal', 'bumpHostSleepCounter', 'bumpPostSleepCounter',
-    'archivePostSessionOnSleep', 'disposeHeadHandleOnce', 'maybeEmitQualityInspectDirective',
+    'finalizeSessionLog', 'archivePostSessionOnSleep', 'disposeHeadHandleOnce', 'maybeEmitQualityInspectDirective',
     'ensureHost', 'deferredSleepReplace', 'wakePackInjected'
   ]
   const missing = required.filter((key) => bound[key] === undefined)
@@ -396,6 +396,7 @@ function buildLifecycleLazy(ctx: Context, lifecycleDeps: DepsHolder<Partial<Life
     journalPath: (memberId) => journalPathFor(stateDir, memberId),
     writeJournal: bound.writeJournal!,
     readJournal: bound.readJournal!,
+    finalizeSessionLog: bound.finalizeSessionLog!,
     bumpHostSleepCounter: bound.bumpHostSleepCounter!,
     bumpPostSleepCounter: bound.bumpPostSleepCounter!,
     archivePostSessionOnSleep: bound.archivePostSessionOnSleep!,

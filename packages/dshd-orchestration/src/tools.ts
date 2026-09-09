@@ -604,6 +604,10 @@ export interface ToolsFactoryDeps {
   writeJournal: (memberId: string, roomId: string, summary: string, decisions: string[], constraints: string[], openItems: string[], currentStep?: string, archive?: { sessionId?: string; wakeCounter?: number; archiveSeq?: string; lastWakeMs?: number; boundarySeq?: number }) => Promise<string>
   bumpHostSleepCounter: (memberId: string, content: string, archive?: { sessionId?: string; roomId?: string; boundarySeq?: number }) => Promise<string>
   bumpPostSleepCounter: (memberId: string, content: string, archive?: { sessionId?: string; roomId?: string; boundarySeq?: number }) => Promise<string>
+  /** fb-308 — the session-log FINALIZE closure the retire/seep chains seal
+   * with (re-capture the just-ended cycle post-dispose: exact header +
+   * normalized reason + zstd_final_seq pointer; best-effort, never throws). */
+  finalizeSessionLog: (memberId: string, roomId: string, sessionId: string) => Promise<string | undefined>
   /** The LATE-BOUND seams the zone consumes at CALL time (constructed LATER on
    * this apply fiber — the agent-setup/workspace closures in the agent zone,
    * the retire/archive seams in the agent zone, the DeliverySurface at the
@@ -1160,6 +1164,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     writeJournal,
     bumpHostSleepCounter,
     bumpPostSleepCounter,
+    finalizeSessionLog,
     late
   } = deps
 
@@ -3548,7 +3553,15 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     // AUTO_RETIRE_DISPOSE_GRACE_MS) still WINS (a longer/specific grace is the
     // caller's call); a worker NOT live (or a configured-head retire) keeps
     // today's IMMEDIATE dispose (nothing is in flight — zero behavior change).
-    const disposeHandle = (): void => { void disposeHeadHandleOnce(entry.sessionId) }
+    const disposeHandle = (): void => {
+      // fb-308 (H1 — the D-Q2 desync class): chain the session-log FINALIZE
+      // onto the dispose COMPLETION — the harness writes tool/result →
+      // step/end → turn/end AFTER the tool returns, so the detach's
+      // whenIdle is the exact turn/end seam (the same anchor the rotation
+      // snapshot finalize uses). Fire-and-forget + never fatal: a dispose or
+      // finalize failure leaves the mid-turn capture as-is (zero regression).
+      void disposeHeadHandleOnce(entry.sessionId).then(() => finalizeSessionLog(postId, entry.roomId ?? 'board', entry.sessionId)).catch(() => { /* non-fatal — the mid-turn capture remains */ })
+    }
     const liveWorkerRunning = entry.provider === 'worker' && agents !== undefined && agents.get(entry.sessionId)?.status === 'running'
     const deferDisposeMs = typeof opts?.deferDisposeMs === 'number' && Number.isFinite(opts.deferDisposeMs) && opts.deferDisposeMs > 0
       ? opts.deferDisposeMs
@@ -3576,6 +3589,12 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         const liveRef = agents?.get(entry.sessionId)
         await drainNotExposedAtRetire(postId, getSessionEvents(liveRef?.session))
         await joinHeadDisposeOnce(entry.sessionId)
+        // fb-308 (H1 — deferred/joined path): seal the retiring worker's session
+        // log right after the bounded detach join — the turn has concluded and
+        // the durable artifact holds the REAL turn/end (the join resolves once
+        // the driver is idle). Best-effort (the finalize never throws); a miss
+        // leaves the mid-turn capture as-is.
+        await finalizeSessionLog(postId, entry.roomId ?? 'board', entry.sessionId)
         await drainNotExposedAtRetire(postId, getSessionEvents(liveRef?.session))
         await settleRetiredPostDeliveries(postId)
       }
@@ -6755,6 +6774,9 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     readJournal,
     bumpHostSleepCounter,
     bumpPostSleepCounter,
+    // fb-308 — the session-log FINALIZE seam (the dshd-core lifecycle lazy
+    // build REQUIRES it; retirePost chains it onto the dispose completion).
+    finalizeSessionLog,
     archivePostSessionOnSleep,
     disposeHeadHandleOnce,
     maybeEmitQualityInspectDirective,

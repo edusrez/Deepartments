@@ -294,6 +294,11 @@ export interface LifecycleCtx {
     archive?: { sessionId?: string; wakeCounter?: number; archiveSeq?: string; lastWakeMs?: number; boundarySeq?: number }
   ) => Promise<string>
   readJournal: (memberId: string) => Promise<string | undefined>
+  /** fb-308 — the session-log FINALIZE seam (re-capture the just-ended cycle
+   * post-dispose: exact end_seq/end_time + normalized turn_end_reason +
+   * zstd_final_seq; best-effort — never throws). Chained on the dispose
+   * completion for the head-sleep (H3) and host-rotation (H2) closures. */
+  finalizeSessionLog: (memberId: string, roomId: string, sessionId: string) => Promise<string | undefined>
   bumpHostSleepCounter: (memberId: string, content: string, archive?: { sessionId?: string; roomId?: string; boundarySeq?: number }) => Promise<string>
   bumpPostSleepCounter: (memberId: string, content: string, archive?: { sessionId?: string; roomId?: string; boundarySeq?: number }) => Promise<string>
   // Teardown + directive seams.
@@ -468,6 +473,11 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
       // directive below, so a host-session rotation landing on that directive
       // await can no longer abort the detach.
       void ctx.disposeHeadHandleOnce(sessionId)
+      // fb-308 (H3 — head sleep, legacy R6-kept): seal the slept head's session
+      // log on the SAME dispose-completion seam (the harness appends turn/end
+      // AFTER the tool returns — the desync class). Fire-and-forget, never
+      // fatal: a failed finalize leaves the mid-turn capture as-is.
+      void ctx.disposeHeadHandleOnce(sessionId).then(() => ctx.finalizeSessionLog(memberId, entry.roomId ?? 'board', sessionId)).catch(() => { /* non-fatal — the mid-turn capture remains */ })
       // QD (spec 007 §6.2, D-Q3): the HEAD-sleep MANDATE — a department head
       // archive is inspected at 100% for ANY head EXCEPT the QD's own
       // coordinator ('quality-head'). Emits an ADDRESSED QUALITY INSPECT
@@ -587,6 +597,18 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
             backupPath: rotation.archiveCopy.path,
             logger: ctx.logger
           })
+          // fb-308 (dimension 4 — the HOST plane, the Δ=4 class of the -47.md
+          // audits): the OLD host session's session-log .md
+          // (`journals/sessions/host-<oldSessionId>-NN.md`) froze mid-turn at
+          // the dept_sleep call — the harness appends tool/result + step/end +
+          // turn/end AFTER the tool returns. Chain the journal FINALIZE on the
+          // SAME dispose-completion seam as chainSnapshotFinalize (the
+          // once-deduped dispose joins the in-flight detach — the finalize runs
+          // once both settles). Fire-and-forget, never fatal: a failed finalize
+          // leaves the mid-turn capture as-is.
+          void ctx.disposeHeadHandleOnce(sessionId).then(() => {
+            return ctx.finalizeSessionLog(hostId, existing?.roomId ?? 'board', sessionId)
+          }).catch(() => { /* non-fatal — the mid-turn capture remains */ })
           // fb-11 — AUTO-WAKE the rotation SUCCESSOR (the host-rotation no-wake
           // defect, QH fb-11): the new hosts.json live entry is committed at
           // S3/S7, but NOTHING materializes the new session — it parked until

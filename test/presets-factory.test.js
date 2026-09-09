@@ -195,6 +195,7 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
     'const bumpPostSleepCounter = async',
     'const readJournal = async',
     'const captureSessionLog = async',
+    'const finalizeSessionLog = async',
     'const archiveJournalEntry = async',
     'const truncateText = (text',
     'const deriveIndexEntry = (memberId'
@@ -217,6 +218,7 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
   assert.ok(/const materializeHeadPreset = async/.test(factory), 'materializeHeadPreset moved verbatim')
   assert.ok(/const writeJournal = async/.test(factory), 'writeJournal moved verbatim (Task T1)')
   assert.ok(/const readJournal = async/.test(factory), 'readJournal moved verbatim')
+  assert.ok(/const finalizeSessionLog = async/.test(factory), 'finalizeSessionLog moved verbatim (fb-308 — the session-log finalize closure)')
   assert.ok(/const wakePackService = \(ctx\.get\('deepartments\.wakepack'\)/.test(factory), 'wakePackService moved verbatim (the W8-d fallback construction)')
   assert.ok(/const assembleHeartbeat = \(hostId: string\): string \| undefined =>/.test(factory), 'assembleHeartbeat moved verbatim (W8-d PART A)')
   assert.ok(/const coordinatorForPost = \(postId: string\): CoordinatorConfig \| undefined =>/.test(factory), 'coordinatorForPost moved verbatim (the F1 resolver)')
@@ -255,7 +257,18 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
     assert.ok(first !== -1 && last !== -1 && last > first, 'the factory embeds the presets zone (banner → wakePackService construction close)')
     const zoneText = factory.slice(first, last + "      logger: ctx.logger\n    })\n  })()".length) + '\n'
     const md5 = createHash('md5').update(zoneText, 'utf8').digest('hex')
-    assert.equal(md5, 'fdc87116c7ca4f29d9d684ff15574c3d', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation, the LANE 0.2.3 R4 one-line HOST literal alignment, the R5 DUAL-read session-surface AND the R7 getSessionEvents-collapse + surface-probe re-freeze (md5 fdc87116…)')
+    // Zone md5 RE-FROZE R9 (fb-308, 2026-09-09 — the session-journal desync fix):
+    // the journal T1 span gained (a) the `normalizeTurnEndReason` helper +
+    // the turn/end render switch to it (the `[object Object]` fix at the old
+    // serializeSessionEvent), (b) the additive `seal` frontmatter block in
+    // serializeSessionLog (final/turn_end_reason/zstd_final_seq/artifact), (c)
+    // `sessionLogPathFor` widened to number|string + the new
+    // `resolveSessionLogPath` (per-session name uniqueness), (d) the
+    // captureSessionLog body refactored onto the SHARED `readSessionCycleEvents`
+    // (movement-only semantics + the per-session path resolution) and (e) the
+    // NEW `finalizeSessionLog` closure (re-capture post-dispose + seal). md5
+    // fdc87116… → 3ca3116bd38fd8bbfcd1900d6ab7c45d (same span, additive).
+    assert.equal(md5, '3ca3116bd38fd8bbfcd1900d6ab7c45d', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation, the LANE 0.2.3 R4 one-line HOST literal alignment, the R5 DUAL-read session-surface, the R7 getSessionEvents-collapse + surface-probe AND the R9 fb-308 session-log finalize re-freeze (md5 3ca3116b…)')
     // The D1 deviation is present and documented: the factory's repoRoot
     // initializer carries THREE '..' (module-position-dependent, identical
     // value — the factory lives 3 levels under the repo root).
@@ -271,9 +284,10 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
   }
   assert.ok(/get messagesStoreReady\(\) \{ return deliverySurface\.messagesStoreReady \}/.test(invoke), 'the invocation passes the messagesStoreReady LATE getter (over the apply-scope deliverySurface binding)')
   // The bundle destructures the full PresetsSurface at the same fiber position
-  // (20 members — the spawn/tools/delivery factories + the daemons + the
+  // (21 members — fb-308 added finalizeSessionLog to the journal T1 surface —
+  // the spawn/tools/delivery factories + the daemons + the
   // agent/pre-step registration read the SAME bindings):
-  assert.ok(/const \{[\s\S]*?HOST_AGENT_OPTIONS,[\s\S]*?PRESET_ID,[\s\S]*?WORKER_AGENT_OPTIONS,[\s\S]*?WORKER_PRESET_ID,[\s\S]*?resolveMaterializeAgentOptions,[\s\S]*?repoRoot,[\s\S]*?dshHome,[\s\S]*?materializePreset,[\s\S]*?materializeHeadPreset,[\s\S]*?journalPathFor,[\s\S]*?writeJournal,[\s\S]*?bumpHostSleepCounter,[\s\S]*?bumpPostSleepCounter,[\s\S]*?readJournal,[\s\S]*?coordinatorForPost,[\s\S]*?departmentForPost,[\s\S]*?departmentForEntry,[\s\S]*?assembleHeartbeat,[\s\S]*?roleForSessionLive,[\s\S]*?wakePackService[\s\S]*?\} = presetsSurface/.test(invoke), 'the bundle destructures the full PresetsSurface at the same fiber position (20 members)')
+  assert.ok(/const \{[\s\S]*?HOST_AGENT_OPTIONS,[\s\S]*?PRESET_ID,[\s\S]*?WORKER_AGENT_OPTIONS,[\s\S]*?WORKER_PRESET_ID,[\s\S]*?resolveMaterializeAgentOptions,[\s\S]*?repoRoot,[\s\S]*?dshHome,[\s\S]*?materializePreset,[\s\S]*?materializeHeadPreset,[\s\S]*?journalPathFor,[\s\S]*?writeJournal,[\s\S]*?bumpHostSleepCounter,[\s\S]*?bumpPostSleepCounter,[\s\S]*?readJournal,[\s\S]*?finalizeSessionLog,[\s\S]*?coordinatorForPost,[\s\S]*?departmentForPost,[\s\S]*?departmentForEntry,[\s\S]*?assembleHeartbeat,[\s\S]*?roleForSessionLive,[\s\S]*?wakePackService[\s\S]*?\} = presetsSurface/.test(invoke), 'the bundle destructures the full PresetsSurface at the same fiber position (21 members)')
   // The compiled bundle still exports the SAME superset; the factory compiled
   // into the PACKAGE lib contains the zone closures (SUB-PASO 6).
   const lib = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'lib', 'presets.js'), 'utf8')

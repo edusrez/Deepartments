@@ -3501,6 +3501,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     bumpHostSleepCounter,
     bumpPostSleepCounter,
     readJournal,
+    finalizeSessionLog,
     coordinatorForPost,
     departmentForPost,
     departmentForEntry,
@@ -3697,6 +3698,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     writeJournal,
     bumpHostSleepCounter,
     bumpPostSleepCounter,
+    finalizeSessionLog,
     // LATE seams — the DeliverySurface members (built at the delivery factory
     // position) do NOT exist at this position; the getters capture the
     // apply-scope bindings and are dereferenced ONLY when a registration / tool
@@ -3890,6 +3892,7 @@ export function applyInvoke(ctx: Context, config: Config) {
     journalPathFor,
     writeJournal,
     readJournal,
+    finalizeSessionLog,
     bumpHostSleepCounter,
     bumpPostSleepCounter,
     archivePostSessionOnSleep,

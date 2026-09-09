@@ -7252,6 +7252,138 @@ test('T1 sleep boundary (host plane): host-plane dept_sleep records a per-sessio
   })
 })
 
+// --- Task T1 / fb-308 (2026-09-09 — the session-journal desync fix): the
+// session-log .md froze mid-turn at the memo/sleep call (the harness appends
+// tool/result → step/end → turn/end → session/end-seed AFTER the tool returns),
+// so `end_seq`/`end_time` lagged the REAL artifact close (Δ up to 4689, the
+// fb-308/QD daily cross-audit). finalizeSessionLog re-captures the SAME cycle
+// post-dispose (readRaw again — the settle guarantees the turn/end is written,
+// the same anchor the rotation snapshot finalize uses) and seals the .md with
+// the additive frontmatter. These tests drive the REAL cycle through the
+// host-rotation hook (H2) with a raw-API persistence (StubPersistenceWithRaw),
+// the per-session name uniqueness (dimension 3 — the D-Q3 collision class) and
+// the degrade path (no readRaw → warn, the mid-turn stub stays intact).
+
+test('T1 fb-308 finalize (host rotation, real artifact): dept_sleep seals the host session log with the EXACT end_seq/end_time against the durable zstd fixture + normalized turn_end_reason + zstd_final_seq (the [object Object] fix)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const host = fakeParentAgent()
+    const hostId = `host-${host.id}`
+    // The durable artifact the host session resolves via readRaw — the FULL
+    // cycle INCLUDING the closing tail the harness appends after the tool
+    // returns (tool/result → step/end → turn/end {aborted/disposed} →
+    // session/end-seed — the REAL shapes verified from the dev sessions).
+    const cycleEvents = [
+      { type: 'permission/preset', seq: 0, time: 1787761868075, data: { preset: 'danger-full-access' } },
+      { type: 'user/message', seq: 1, time: 1787761870910, data: { message: { role: 'user', content: [{ type: 'text', text: 'wake: host check-in' }] } } },
+      { type: 'tool/call', seq: 2, time: 1787762088875, data: { turn: 1, step: 1, name: 'dept_memo_write', arguments: '{}' } },
+      { type: 'tool/result', seq: 3, time: 1787762091196, data: { turn: 1, step: 1, message: { content: [] } } },
+      { type: 'step/end', seq: 4, time: 1787762091198, data: { turn: 1, step: 1 } },
+      { type: 'turn/end', seq: 5, time: 1787762091199, data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'disposed' } } } },
+      { type: 'session/end-seed', seq: 6, time: 1787768255601, data: {} }
+    ]
+    const artifact = cycleEvents.map((ev) => JSON.stringify(ev)).join('\n')
+    const { root, agents, dispose } = await bootPlugin(stateDir, { rawPersistence: true, rawArtifacts: { [String(host.id)]: artifact } })
+    try {
+      await seedJournal(stateDir, hostId, 'HOST-ARCHIVE: fb-308 finalize cycle.')
+      agents.put(host)
+      const signal = new AbortController().signal
+      const sleepResult = await root.tools.get('dept_sleep').execute({}, { agent: host, signal })
+      assert.notEqual(sleepResult.member, hostId, 'the rotation committed (a NEW host member — the H2 finalize chain is armed)')
+      const hostSessionLog = path.join(stateDir, 'journals', 'sessions', `${hostId}-2.md`)
+      // The finalize chain runs on the OLD handle's dispose completion
+      // (fire-and-forget) — poll for the seal watermark.
+      await waitFor(async () => (await readFile(hostSessionLog, 'utf8')).includes('final: true'), 8000, 'the session log seal (final: true) after the dispose settle')
+      const sealed = await readFile(hostSessionLog, 'utf8')
+      // Dimension 1 — EXACT header against the REAL artifact (the end-seed is
+      // the artifact's final event; the mid-turn slice could never see it).
+      assert.match(sealed, /^wake_counter: 2$/m, 'session log named by the BUMPED ordinal (2)')
+      assert.match(sealed, /^end_seq: 6$/m, 'end_seq is the EXACT final event seq of the durable artifact (the session/end-seed)')
+      assert.match(sealed, new RegExp(`^end_time: ${new Date(1787768255601).toISOString()}$`, 'm'), 'end_time matches the exact final event timestamp of the artifact')
+      // Dimension 2 — REASON + POINTER (normalized — the [object Object] fix).
+      assert.match(sealed, /^turn_end_reason: aborted\/disposed$/m, 'turn_end_reason is the NORMALIZED object reason (aborted/disposed — no [object Object])')
+      assert.match(sealed, /^zstd_final_seq: 5$/m, 'zstd_final_seq points at the turn/end seq (5), not the trailing end-seed (6)')
+      assert.match(sealed, /^final: true$/m, 'the finalize seal marks the log final')
+      assert.match(sealed, /^- \*\*turn\*\* 1 end \(aborted\/disposed\)$/m, 'the BODY render normalizes the reason too (the serializeSessionEvent fix)')
+      // Dimension 3 — ONE per-session file for the member+ordinal (the
+      // canonical name; no ghost/suffixed split for the host plane).
+      const sessionsDir = path.join(stateDir, 'journals', 'sessions')
+      const files = (await readdir(sessionsDir)).filter((f) => f.startsWith(`${hostId}-2`))
+      assert.deepEqual(files, [`${hostId}-2.md`], 'exactly ONE session-log file for the cycle (per-session unique name)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('T1 fb-308 name uniqueness (dimension 3 — the D-Q3 collision class): when the canonical <memberId>-NN.md is already claimed by ANOTHER session, the capture writes the session\u0027s OWN <memberId>-NN-<sessionTail>.md and NEVER clobbers the canonical file (the outgoing session keeps its artifact; the historical -NN.md chain is untouched)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const { agents, dispose } = await bootPlugin(stateDir)
+    await waitFor(() => agents.store.has(`head-${postId}`), 5000, 'head created at boot')
+    try {
+      const head = agents.store.get(`head-${postId}`)
+      const realSessionId = String(head.id)
+      // Fabricate the FOREIGN claim: the canonical -1.md belongs to a
+      // DIFFERENT session (the rotation/successor collision the D-Q3 audit
+      // measured — wake_counter shared by two sessions).
+      const canonical = path.join(stateDir, 'journals', 'sessions', `${postId}-1.md`)
+      await mkdir(path.dirname(canonical), { recursive: true })
+      await writeFile(canonical, [
+        '---',
+        'member: research-head',
+        'session_id: ghost-session-deadbeef',
+        'wake_counter: 1',
+        '---',
+        '## cycle',
+        'FOREIGN-OWNER-ARTIFACT'
+      ].join('\n'), 'utf8')
+      const tail = realSessionId.split('-').pop()
+      const own = path.join(stateDir, 'journals', 'sessions', `${postId}-1-${tail}.md`)
+      const { ctx: headCtx, key } = agents.childContexts[0]
+      const memo = headCtx.tools.get('dept_memo_write', key)
+      const signal = new AbortController().signal
+      // First memo: the capture must NOT clobber the foreign file.
+      await memo.execute({ summary: 'Session-unique cycle A.' }, { agent: head, signal })
+      const ghostText = await readFile(canonical, 'utf8')
+      assert.match(ghostText, /FOREIGN-OWNER-ARTIFACT/, 'the FOREIGN-owner canonical file is LEFT UNTOUCHED (never clobbered by the new session)')
+      const ownText = await readFile(own, 'utf8')
+      assert.match(ownText, /^member: research-head$/m, 'the new session wrote its OWN suffixed session log')
+      assert.ok(ownText.includes(`session_id: ${realSessionId}`), 'the suffixed log carries the REAL session id')
+      assert.match(ownText, /^wake_counter: 1$/m, 'the suffixed log keeps the wake ordinal (the -NN chain prefix)')
+      assert.match(ownText, /^transcript: unavailable$/m, 'the hermetic stub form (no readRaw) lands in the per-session file')
+      // Second memo (same session): the SAME suffixed file is REUSED/replaced —
+      // one file per session, never a second suffixed split.
+      await memo.execute({ summary: 'Session-unique cycle B.' }, { agent: head, signal })
+      const files = (await readdir(path.join(stateDir, 'journals', 'sessions'))).filter((f) => f.startsWith(`${postId}-1-`))
+      assert.deepEqual(files, [`${postId}-1-${tail}.md`], 're-captures of the SAME session reuse the SAME suffixed file (no split)')
+      const again = await readFile(own, 'utf8')
+      assert.ok(again.includes(`session_id: ${realSessionId}`), 'the reused suffixed file still resolves to the SAME session')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('T1 fb-308 degrade: when the finalize cannot re-capture (no readRaw — the stub-degradation harness), the mid-turn session log stays INTACT — never replaced by a stub, never sealed (warn + keep, zero regression)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      const host = agents.put(fakeParentAgent())
+      const hostId = `host-${host.id}`
+      await seedJournal(stateDir, hostId, 'HOST-ARCHIVE: fb-308 degrade cycle.')
+      const signal = new AbortController().signal
+      await root.tools.get('dept_sleep').execute({}, { agent: host, signal })
+      const hostSessionLog = path.join(stateDir, 'journals', 'sessions', `${hostId}-2.md`)
+      const logText = await readFile(hostSessionLog, 'utf8')
+      assert.match(logText, /^transcript: unavailable$/m, 'the mid-turn capture degraded to the STUB form (no readRaw)')
+      assert.ok(!logText.includes('final: true'), 'the finalize did NOT seal (no artifact to re-capture — warn + keep)')
+      assert.ok(!logText.includes('turn_end_reason:'), 'no reason seal either (the stub stays the mid-turn truth)')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
 test('T1 index: journals/index.json reflects BOTH the archive entry AND the session log for a write (session_log_path + archive_seq populated)', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
