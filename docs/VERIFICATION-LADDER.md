@@ -302,3 +302,20 @@ frescas — el gate es la forma verificada). Sitios de invocación:
 `package.json "build:root-check"` + el script `scripts/check-root-build.mjs`;
 los reviewers del flujo IPD lo usan en la verificación de lanes que tocan
 acoplamiento src↔paquete.
+
+## 10. Aislamiento de stateDir en SUBPROCESOS embebidos — el mapa de touchpoints del CONFIG del subproceso (fb-278; lección del cierre fb-234, 2026-09-09)
+
+> En una lane de AISLAMIENTO DE STATEDIR que verifica subprocesos embebidos
+> (p.ej. el DSH efímero del canary), el mapa de touchpoints NO se limita a las
+> filas del config del HOST ni a las lecturas del proceso PADRE: debe incluir
+> **«row→stateDir del config del SUBPROCESO (todas las filas: fila propia / org
+> default service-first / env / absoluto)»**.
+
+Caso fb-234: la fila `dshd-health` del DSH efímero resolvía su stateDir por el
+org default **transitivo** (service-first — heredaba el default de la org en
+vez de una fila propia con ruta explícita); la acceptance «0 huellas del
+efímero en el stateDir real» no se cerró hasta mapear esa fila (2 iteraciones
+de fix no la cerraron antes). Regla: para verificar un aislamiento, enumerar
+las filas del config del SUBPROCESO (fila propia / org default service-first /
+env / absoluto) y resolver el stateDir EFECTIVO de cada una — el stateDir
+heredado por default es tan touchpoint como una ruta explícita.
