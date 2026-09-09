@@ -855,6 +855,14 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   entregas no-wake-gated por diseño (records bajo de feedback al QH drenan al
   próximo wake — caso m-410/fb-89) — CERRADA (WFD `4d03b43` 09-05: franja-
   aware watchdog/nudge — no-wake exclusion + PEAK no-op)**.
+- **POST-MORTEM PEAK 09-09 (D-Q6) ADOPTADO (owner→host, m-3813) — 4 ítems
+  estructurales colados**: (1) GATE DURO franja en spawns/despachos (override
+  anotado), (3) re-ancla cron digests quality-daily/daily-ai-news fuera de PEAK
+  (coordinar con QD/RD + espejo dsh-key-pooler.peakWindows), (4) formalizar
+  restarts-solo-VALLE (excepción crash), (2) drain automático cola→VALLE —
+  orden 1→3→4→2; ver ROADMAP. Fuentes: reporte
+  /home/esuarez/projects/deepartments/.dsh/reports/quality/2026-09-09-
+  postmortem-peak.md + cordis.patch.yml org.pacing.
 - **Rotación host m-423 PARTIAL (veredicto QD 09-03) — EN COLA (P2)**: el
   archive de dept_sleep corta ~85 líneas de la cola zombie final (incl.
   m-426 delivered post-retirement; acks a host rotado 'prepared') —
