@@ -1026,3 +1026,16 @@ análisis de fallos). M3 los institucionaliza en docs/skill. Hoy: QD→IPH
   optional `--recipient <id>` scope; `--apply --dry-run` for a writing preview
   that writes nothing. Tests: `test/mark-delivery-cli.test.js` (fixtures only —
   never the live stateDir).
+- **NORMA EMERGENTE — WORKTREE-FUENTE ABSORBIDO (guard fb-20; candidata del QD
+  D-Q3-IPH — a register; estilo de esta sección)**: el literal LIMPIO del guard
+  fb-20 («worktree LIMPIO — cero cambios sin commitear») NO prevé remover un
+  worktree-fuente cuyo delta YA está commiteado en main: el wt absorbido está
+  legítimamente SUCIO (retiene la copia del delta ya absorbido + artefactos de
+  runs) pero su absorción es PROBADA. CRITERIO ADOPTADO (caso O2-ALIGN): con
+  absorción verificada hunk-por-hunk contra el commit en main (regiones
+  idénticas + tests byte-iguales; diff full-file restante = base-drift legítimo)
+  se autoriza `git worktree remove --force` + `prune`; remoción verificada
+  (ausente del worktree list); pérdida aceptable = copia del delta + artefactos.
+  Referencias: lane O2-ALIGN `9420964` ·
+  /root/.deepartments/departments/internal-programming/reports/builder/2026-09-09-cleanup-wt-fbd-nudge-o2-631e8329.md
+  y ...-exec-23a00303.md.
