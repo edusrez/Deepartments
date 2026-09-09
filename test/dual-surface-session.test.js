@@ -595,6 +595,51 @@ test('dual-surface [breaker] fb-234 canary-vs-crash registry: the FIRST tick aft
 })
 
 // -------------------------------------------------------------------------
+// 6-quater. FB-234 GAP-2 (2026-09-09) — the BOOTID MISMATCH / 'unknown' fix:
+//   the COMPOSED dshd-health tick must pass the bundle's bootId (healthBootId)
+//   so the recoveryCause guard (dshd-health index.ts:6810-6811,
+//   `bootStamp.bootId === deps.bootId`) matches the stamp. With the SAME bootId
+//   (the FIX — src/invoke.ts now passes bootId: healthBootId to
+//   healthService.runDaemonTick) the guard passes → the boot-real registry row
+//   reads 'canary'. With a DIFFERENT bootId (the PRE-FIX defect — the composed
+//   call omitted bootId, so dshd-health fell back to its OWN per-apply
+//   randomUUID index.ts:7855) the guard fails → recoveryCause undefined → the
+//   row reads 'unknown'. This is the deterministic mismatch, NOT a race.
+// -------------------------------------------------------------------------
+test('dual-surface [breaker] FB-234 GAP-2 bootId coherence: a tick whose bootId EQUALS the stamp bootId records the registry cause \'canary\' (the FIX); a tick with a DIFFERENT bootId (the pre-fix composed-path defect) fails the guard and records \'unknown\' (the FLIP)', async () => {
+  await withTempDir(async (stateDir) => {
+    // The FIX path (matching bootIds). boot-P dies pre-tick; the host writes a
+    // canary marker excusing boot-P; the successor boot-Q stamps excused
+    // (recoveryCause 'canary') and its FIRST tick reconciles the registry with
+    // the SAME bootId the bundle stamped → the guard passes → 'canary'.
+    await stampBootCrash(stateDir, 'boot-P', 1_000)
+    await writeFile(path.join(stateDir, 'restart-reason.json'), JSON.stringify({ cause: 'canary', reason: 'H-fix 09:00Z', ts: 1_500, bootId: 'boot-P' }), 'utf8')
+    const stampQ = await stampBootCrash(stateDir, 'boot-Q', 2_000)
+    assert.equal(stampQ.recoveryCause, 'canary', "the successor boot-Q stamp captures 'canary' (the marker cause verbatim)")
+    await runHealthDaemonTick({ now: () => 3_000, stateDir, bootId: 'boot-Q' }) // == the stamp bootId (the FIX)
+    const rowsOk = readRestartRegistry(stateDir)
+    assert.equal(rowsOk[rowsOk.length - 1].bootId, 'boot-Q', 'the registry row carries the bootId that ticked')
+    assert.equal(rowsOk[rowsOk.length - 1].cause, 'canary', "matching bootIds (the FIX): the guard passes → the boot-real row reads 'canary' (NOT 'unknown')")
+  })
+  await withTempDir(async (stateDir) => {
+    // The FLIP (mismatched bootIds — the PRE-FIX composed-path defect): the
+    // bundle stamped boot-R ('canary', the marker excused boot-R), but the
+    // tick runs with a DIFFERENT bootId (the pre-fix composed tick used
+    // dshd-health's own per-apply randomUUID, index.ts:7855, instead of the
+    // bundle's healthBootId) → the guard `bootStamp.bootId === deps.bootId`
+    // fails → recoveryCause undefined → reconcileRestartRegistry's 4-arg
+    // default ('unknown') writes the row.
+    await stampBootCrash(stateDir, 'boot-R', 1_000)
+    await writeFile(path.join(stateDir, 'restart-reason.json'), JSON.stringify({ cause: 'canary', reason: 'H-flip 09:01Z', ts: 1_500, bootId: 'boot-R' }), 'utf8')
+    await stampBootCrash(stateDir, 'boot-S', 2_000) // the stamp is boot-S ('canary')
+    await runHealthDaemonTick({ now: () => 3_000, stateDir, bootId: 'boot-T' }) // a DIFFERENT bootId (the mismatch)
+    const rowsFlip = readRestartRegistry(stateDir)
+    assert.equal(rowsFlip[rowsFlip.length - 1].bootId, 'boot-T', 'the registry row carries the ticked (dshd-health per-apply) bootId')
+    assert.equal(rowsFlip[rowsFlip.length - 1].cause, 'unknown', "mismatched bootIds (the FLIP/defect): the guard fails → recoveryCause undefined → 'unknown'")
+  })
+})
+
+// -------------------------------------------------------------------------
 // 7. STATIC REGRESSION GUARD — the 8 call sites route through getSessionEvents
 //    and NO raw non-optional `snapshotEvents()` call remains in the runtime
 //    surface files (the md5-style behavior anchor; a reintroduced direct call
@@ -624,6 +669,13 @@ test('dual-surface [static guard] the 8 call sites use getSessionEvents — no r
   assert.match(invoke, /wrapDaemonTick\(ctx\.logger, 'agenda scheduler'/, 'agenda interval wrapped')
   assert.match(invoke, /wrapDaemonTick\(ctx\.logger, 'parallel-monitor'/, 'parallel interval wrapped')
   assert.match(invoke, /wrapDaemonTick\(ctx\.logger, 'system-health'/, 'health interval wrapped (the incident seam)')
+  // FB-234 GAP-2 (2026-09-09): the COMPOSED health tick MUST pass the bundle
+  // bootId (`bootId: healthBootId`) so the dshd-health recoveryCause guard
+  // (index.ts:6810-6811) matches the stamp — a regression to the pre-fix
+  // bootId MISMATCH (which produced the 'unknown' registry row) fails here.
+  assert.match(invoke, /healthService\.runDaemonTick\(\{[\s\S]*?bootId: healthBootId,/, "healthService.runDaemonTick passes bootId: healthBootId (the FB-234 GAP-2 bootId-coherence fix)")
+  // The INLINE fallback path must also pass the bundle bootId (it already did).
+  assert.match(invoke, /runHealthDaemonTick\(\{\n\s+now: \(\) => Date\.now\(\),\n\s+stateDir: stateDir,\n\s+bootId: healthBootId,/, 'the inline fallback runHealthDaemonTick passes bootId: healthBootId (coherence with the composed path)')
   // The helper's own dual implementation stays exactly the mandated shape.
   const helper = readFileSync(path.join(REPO_ROOT, 'packages', 'dshd-core', 'src', 'session-surface.ts'), 'utf8')
   assert.match(helper, /session\?\.snapshotEvents\?\.\(\) \?\? session\?\.events \?\? \[\]/, 'getSessionEvents is the mandated dual read (never-throw, [] fallback)')

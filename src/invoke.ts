@@ -4178,6 +4178,13 @@ export function applyInvoke(ctx: Context, config: Config) {
     const healthService = ctx.get('deepartments.health') as
       | { runDaemonTick(deps: {
           now?: () => number
+          // FB-234 (2026-09-09, GAP #2): the bundle's bootId — the SAME id
+          // stamped into boot-crash.json at apply start (healthBootId). The
+          // composed dshd-health tick must be told it explicitly, or it falls
+          // back to its own per-apply randomUUID (index.ts:7855) and the
+          // recoveryCause bootId-guard (index.ts:6810-6811) fails → the
+          // boot-real registry row reads 'unknown' instead of 'canary'.
+          bootId?: string
           hosts?: Iterable<HostEntry>
           posts?: Iterable<PostActivityInput>
           hostRunning?: boolean
@@ -4364,6 +4371,17 @@ export function applyInvoke(ctx: Context, config: Config) {
         if (healthService !== undefined) {
           pending = healthService.runDaemonTick({
             now: () => Date.now(),
+            // FB-234 (2026-09-09, GAP #2 — the bootId MISMATCH / 'unknown' fix):
+            // the composed dshd-health tick must use the SAME bootId the bundle
+            // stamped into boot-crash.json at apply start (healthBootId — the
+            // bundle randomUUID, tools.ts) — the dshd-health recoveryCause guard
+            // (index.ts:6810-6811) requires `bootStamp.bootId === deps.bootId`.
+            // Without this, dshd-health falls back to its OWN per-apply
+            // randomUUID (index.ts:7855) → the guard fails → recoveryCause
+            // undefined → the boot-real registry row reads 'unknown' instead of
+            // 'canary'. The inline fallback below (runHealthDaemonTick) already
+            // passes bootId: healthBootId — this closes the composed path.
+            bootId: healthBootId,
             // POST-INCIDENTE 2026-09-04 — the heartbeat health datums (the
             // surface gate + the breaker: reported per tick, best-effort).
             sessionSurface,
