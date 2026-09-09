@@ -238,6 +238,7 @@ test('U2 D4: hostsRotationRecords builds the old retired entry + the new live en
   assert.equal(records.oldEntry.retired, true)
   assert.equal(records.oldEntry.retiredAt, 101)
   assert.equal(records.oldEntry.rotatedTo, newHostId)
+  assert.equal(records.oldEntry.sleepResult, 'success', 'the rotation close stamps the durable sleepResult success (fb-306 — the C3 rotation-close marker on the old entry)')
   assert.equal(records.oldEntry.webUiCleanupPending, undefined, 'S4: rotation never sets webUiCleanupPending')
   assert.equal(records.oldEntry.deferredJournalSeed, undefined, 'S5: rotation never sets deferredJournalSeed')
   assert.equal(records.oldEntry.previousSessionId, undefined, 'old entry never carries previousSessionId')
@@ -273,6 +274,30 @@ test('U2 D4: validateHostsRotationFile accepts legacy (v1) files, rejects malfor
   // Legacy v1 (absent retired/schemaVersion) — pre-rotation behavior preserved.
   assert.doesNotThrow(() => validateHostsRotationFile({ [oldHostId]: { sessionId: oldSessionId, roomId: 'board', sleepEpoch: 90, boundarySeq: 40 } }), 'legacy v1 file loads')
   assert.doesNotThrow(() => validateHostsRotationFile({ [oldHostId]: { sessionId: oldSessionId, roomId: 'board' } }), 'never-slept legacy entry loads')
+  // fb-306 — the OPTIONAL rotation-close marker (D4-additive): 'success'
+  // loads on a retired entry; a malformed value throws loudly (the loader's
+  // new-field discipline — never a silent drop).
+  assert.doesNotThrow(
+    () => validateHostsRotationFile({
+      [newHostId]: { sessionId: newSessionId, roomId: 'board', sleepEpoch: 100, previousSessionId: oldSessionId },
+      [oldHostId]: { sessionId: oldSessionId, roomId: 'board', sleepEpoch: 90, retired: true, retiredAt: 101, rotatedTo: newHostId, sleepResult: 'success' }
+    }),
+    'a retired entry carrying sleepResult "success" loads (the fb-306 rotation-close marker)'
+  )
+  assert.doesNotThrow(
+    () => validateHostsRotationFile({ [oldHostId]: { sessionId: oldSessionId, roomId: 'board', sleepEpoch: 90, retired: true, retiredAt: 101, rotatedTo: newHostId } }),
+    'an old rotation WITHOUT sleepResult still loads (absent = legacy-compatible)'
+  )
+  assert.throws(
+    () => validateHostsRotationFile({ [oldHostId]: { sessionId: oldSessionId, roomId: 'board', sleepEpoch: 90, retired: true, retiredAt: 101, rotatedTo: newHostId, sleepResult: 'failure' } }),
+    /invalid sleepResult/,
+    'a NON-success sleepResult throws loudly (never a silent drop)'
+  )
+  assert.throws(
+    () => validateHostsRotationFile({ [oldHostId]: { sessionId: oldSessionId, roomId: 'board', sleepEpoch: 90, retired: true, retiredAt: 101, rotatedTo: newHostId, sleepResult: 42 } }),
+    /invalid sleepResult/,
+    'a non-string sleepResult throws loudly'
+  )
   // Malformed NEW fields fail loud (never silently dropped).
   assert.throws(() => validateHostsRotationFile({ [oldHostId]: { sessionId: oldSessionId, roomId: 'board', retired: true, rotatedTo: newHostId } }), /must carry a numeric retiredAt/, 'retired entry missing retiredAt')
   assert.throws(() => validateHostsRotationFile({ [oldHostId]: { sessionId: oldSessionId, roomId: 'board', retired: true, retiredAt: 1 } }), /must carry a non-empty rotatedTo/, 'retired entry missing rotatedTo')
@@ -574,6 +599,7 @@ test('U2 §3.3/S8: the rotation COMMITS (journals + hosts.json) before it resolv
     assert.equal(state.hosts.get(deps.oldHostId).retired, true)
     assert.equal(state.hosts.get(deps.oldHostId).retiredAt, 1787000000000)
     assert.equal(state.hosts.get(deps.oldHostId).rotatedTo, newHostId)
+    assert.equal(state.hosts.get(deps.oldHostId).sleepResult, 'success', 'the runHostRotation close stamps the durable sleepResult on the retired entry (fb-306 C3 — the map entry persistHosts carries to hosts.json)')
 
     // S2.5/S2.7 — archive recorded + evidence copy landed (D1/D2).
     assert.equal(outcome.archive.ok, true, 'archive called and resolved')

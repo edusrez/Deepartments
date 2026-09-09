@@ -636,11 +636,15 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
    * the closing `---` and the `journal:` citation: `final: true` +
    * `turn_end_reason:` (normalized) + `zstd_final_seq:` (the turn/end seq
    * pointer on the durable artifact) + optional `artifact:` (the zstd path).
+   * fb-306 (rotation-close): the seal MAY additionally carry `sleep_result:`
+   * (e.g. `success(rotation)`) — an ADJACENT additive line rendered ONLY when
+   * the finalize detected the class, so a NORMAL seal (no sleep_result) is
+   * BYTE-IDENTICAL to the fb-308 output.
    * The wake-pack KPI anchors per-line (`^wake_counter:`/`^open_items:`), so
    * the extra lines are lean-surface-invisible (the `archive_seq` precedent,
    * writeJournal). The header lines sit BEFORE the byte cap, so the seal is
    * always emitted verbatim even when the body truncates. */
-  const serializeSessionLog = (memberId: string, roomId: string, sessionId: string, wakeCounter: number, events: Array<{ type: string; seq: number; time: number; data: unknown }>, boundarySeq: number | undefined, seal?: { turnEndReason?: string; zstdFinalSeq?: number; artifactPath?: string }): string => {
+  const serializeSessionLog = (memberId: string, roomId: string, sessionId: string, wakeCounter: number, events: Array<{ type: string; seq: number; time: number; data: unknown }>, boundarySeq: number | undefined, seal?: { turnEndReason?: string; sleepResult?: string; zstdFinalSeq?: number; artifactPath?: string }): string => {
     const first = events[0]
     const last = events[events.length - 1]
     const startSeq = boundarySeq !== undefined ? boundarySeq + 1 : first?.seq ?? 0
@@ -658,6 +662,9 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
         ? [
             'final: true',
             `turn_end_reason: ${seal.turnEndReason ?? 'unknown'}`,
+            // fb-306 — the ADDITIVE rotation-close marker (written ONLY when
+            // the finalize detected the class; absent on every normal seal).
+            ...(seal.sleepResult !== undefined ? [`sleep_result: ${seal.sleepResult}`] : []),
             `zstd_final_seq: ${seal.zstdFinalSeq ?? last?.seq ?? startSeq}`,
             ...(seal.artifactPath !== undefined ? [`artifact: ${seal.artifactPath}`] : [])
           ]
@@ -882,7 +889,12 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
    * relies on, session-rotation.ts:589-591) and SEALS the .md with the
    * ADDITIVE frontmatter `final: true` + `turn_end_reason:` (normalized) +
    * `zstd_final_seq:` (the turn/end seq pointer) + optional `artifact:` (the
-   * durable zstd path, via findSessionArtifact). Auto-derives `wakeCounter`
+   * durable zstd path, via findSessionArtifact). fb-306 (rotation-close): for
+   * a HOST whose durable entry is retired + rotatedTo the seal re-classifies
+   * `turn_end_reason: completed(rotation)` + the ADDITIVE `sleep_result:
+   * success(rotation)` line (the retire-dispose abort is NOT the sleep's
+   * outcome); `zstd_final_seq` stays the REAL turn/end seq — the zstd is the
+   * source of truth, never rewritten (CUT-4). Auto-derives `wakeCounter`
    * from the checkpoint journal (the uniform ordinal) and `boundarySeq` from
    * the existing .md's `start_seq - 1` (fallback: the WHOLE log — the
    * no-capture heal class, e.g. a worker cut mid-edit before any memo).
@@ -919,13 +931,29 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
       } catch { boundarySeq = undefined }
       // 3. Re-capture the settled cycle (readRaw post-dispose — the turn/end is
       //    in the artifact) + derive the seal from the REAL closing events.
+      //    fb-306 (rotation-close): when the member is a HOST whose DURABLE
+      //    hosts entry shows a COMMITTED rotation close (retired + rotatedTo —
+      //    the S3/S7 markers the rotation wrote), the REAL turn/end reason
+      //    («aborted/disposed») is the retire-dispose collateral of the
+      //    in-flight tool call, NOT the sleep's outcome — the seal RE-CLASSIFIES
+      //    the close as `completed(rotation)` + an ADDITIVE `sleep_result:
+      //    success(rotation)` line, KEEPING `zstd_final_seq` truthful (it still
+      //    points at the REAL turn/end seq; the zstd stays the source of truth,
+      //    never rewritten — CUT-4). The GATE is DURABLE (the entry markers),
+      //    never the tool name alone: ANY other close (no rotation) keeps the
+      //    normalized real reason — a genuine error is never reclassified.
       const { events } = await readSessionCycleEvents(memberId, roomId, sessionId, wakeCounter, boundarySeq)
       const lastTurnEnd = [...events].reverse().find((ev) => ev.type === 'turn/end')
       const last = events[events.length - 1]
-      const seal: { turnEndReason?: string; zstdFinalSeq?: number; artifactPath?: string } = {
-        turnEndReason: lastTurnEnd !== undefined
-          ? normalizeTurnEndReason((lastTurnEnd.data as { reason?: unknown } | undefined)?.reason)
-          : 'unknown',
+      const hostEntry = hosts.get(memberId)
+      const rotationClose = hostEntry?.retired === true && typeof hostEntry?.rotatedTo === 'string' && hostEntry.rotatedTo !== ''
+      const seal: { turnEndReason?: string; sleepResult?: string; zstdFinalSeq?: number; artifactPath?: string } = {
+        turnEndReason: rotationClose
+          ? 'completed(rotation)'
+          : lastTurnEnd !== undefined
+            ? normalizeTurnEndReason((lastTurnEnd.data as { reason?: unknown } | undefined)?.reason)
+            : 'unknown',
+        ...(rotationClose ? { sleepResult: 'success(rotation)' } : {}),
         zstdFinalSeq: lastTurnEnd?.seq ?? last?.seq
       }
       // 4. Best-effort artifact citation (the sessions root derivation mirrors

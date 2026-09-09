@@ -257,6 +257,14 @@ function intentsPath(stateDir) {
   return path.join(stateDir, TOOL_INTENTS_FILE)
 }
 
+/** Seed a DURABLE hosts.json BEFORE the plugin boots, so the fallback
+ * RegistryStore's loadHosts restores the host entries into the live map (the
+ * rotation-close / genuine-abort CONTROLS read the SAME in-memory hosts the
+ * settle gate consumes). */
+async function seedHostsJson(stateDir, data) {
+  await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify(data, null, 2), 'utf8')
+}
+
 // ===========================================================================
 // R4 PURE half — classifier / scanner / projection / target / parse.
 // ===========================================================================
@@ -503,6 +511,76 @@ test('R4 (noise guard): a SUCCESSFUL tool call settles the intent as SETTLED —
       try { postErrors = readPostErrorsFile(stateDir) } catch { /* absent */ }
       assert.equal(postErrors.length, 0, 'a success surfaces NO post-error health row')
       assert.equal(scanAbortedToolIntents(rows, Date.now(), 60_000).length, 0, 'a fully-settled sidecar has ZERO abort findings')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+// ===========================================================================
+// R4-fb306 (LANE N1 — the ROTATION-CLOSE carve-out, 2026-09-09): the
+// dept_sleep of a HOST whose rotation COMMITTED (the durable hosts entry is
+// retired + rotatedTo — the S3/S7 markers) settles the write-ahead intent
+// 'settled' with NO abort reason, NO interrupt-detail entry and NO tool-abort
+// post-error row. The «tool call aborted» frame is the retire-dispose
+// collateral (chainSnapshotFinalize → machine.cancel over the in-flight
+// tool call — fb-306/fb-2), NOT the sleep's outcome — the rotation succeeded.
+// CONTROL: the SAME abort on a dept_sleep WITHOUT a rotation commit (a live,
+// non-retired host entry) stays 'aborted' with its durable reason + detail +
+// post-error — the carve-out never masks a genuine failure.
+// ===========================================================================
+test('R4-fb306 (rotation-close carve-out): a dept_sleep whose host entry is retired+rotatedTo settles SETTLED with no abort reason / no interrupt-detail / no post-error (the semantic success — the retire-dispose abort is not a sleep failure); the CONTROL — the same abort WITHOUT the rotation commit — stays ABORTED with its durable reason + detail ledger + post-error (a genuine failure is never masked)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The DURABLE rotation-close evidence the settle gate reads: the retired
+    // old host (retiredAt + rotatedTo + the C3 sleepResult success marker —
+    // the loader accepts the optional field) + its live successor.
+    await seedHostsJson(stateDir, {
+      schemaVersion: 2,
+      'host-session-live': { sessionId: 'session-live', roomId: 'board', sleepEpoch: 100 },
+      'host-session-old': { sessionId: 'session-old', roomId: 'board', sleepEpoch: 90, boundarySeq: 40, retired: true, retiredAt: 101, rotatedTo: 'host-session-live', sleepResult: 'success' }
+    })
+    const env = await bootPluginFromSrc(stateDir)
+    try {
+      await waitFor(() => env.agents.store.has('head-research-head'), 8000, 'research head materialized')
+      // (a) ROTATION-CLOSE: the dept_sleep of the RETIRED old host session —
+      // the harness replaced its frame with «tool call aborted» (the
+      // retire-dispose), but the rotation COMMITTED (durable retired+rotatedTo)
+      // — the class the settle must classify as SUCCESS without the noise.
+      const closeExec = intentExec('dept_sleep', {}, 'session-old')
+      await env.pluginCtx().waterfall('tools/pre-execute', closeExec, () => Promise.resolve({ kind: 'allow' }))
+      const closeDecision = await env.pluginCtx().waterfall('tools/post-execute', closeExec, abortResult('tool call aborted'), () => Promise.resolve({ kind: 'accept' }))
+      assert.equal(closeDecision.kind, 'accept', 'the downstream accept decision is preserved (the carve-out is additive)')
+      const rows = await readToolIntents(stateDir)
+      const closeSettle = rows.find((r) => r.kind === 'settle' && r.tool === 'dept_sleep' && r.agent === 'session-old')
+      assert.ok(closeSettle, 'the rotation-close dept_sleep intent settled (the write-ahead row is not left unsettled)')
+      assert.equal(closeSettle.status, 'settled', 'a rotation-close settles SETTLED (the semantic success — fb-306)')
+      assert.equal(closeSettle.reason, undefined, 'a rotation-close has NO abort reason (the noise-guard — a successful settle NEVER records a reason)')
+      let interruptRaw = {}
+      try { interruptRaw = JSON.parse(await readFile(path.join(stateDir, 'interrupt-state.json'), 'utf8')) } catch { /* absent */ }
+      assert.ok(!Object.keys(interruptRaw).some((k) => k.includes('session-old')), 'a rotation-close writes NO interrupt-detail ledger entry (no abort-family noise)')
+      let postErrors = []
+      try { postErrors = readPostErrorsFile(stateDir) } catch { /* absent */ }
+      assert.equal(postErrors.filter((r) => r.postId === TOOL_ABORT_POST_ID).length, 0, 'a rotation-close surfaces NO tool-abort post-error row (the W6 health surface stays clean)')
+      assert.equal(scanAbortedToolIntents(rows, Date.now(), 60_000).length, 0, 'the rotation-close settle is never an abort finding (settled rows are batch-compat-excluded from the scan)')
+      // (b) CONTROL: the SAME «tool call aborted» on a dept_sleep that did NOT
+      // commit a rotation (a LIVE, non-retired host entry) — a GENUINE abort —
+      // settles ABORTED with the durable classified reason + the interrupt-
+      // detail ledger + the post-error health surface (the carve-out gate is
+      // the DURABLE rotation evidence, never the tool name alone).
+      const controlExec = intentExec('dept_sleep', {}, 'session-live')
+      await env.pluginCtx().waterfall('tools/pre-execute', controlExec, () => Promise.resolve({ kind: 'allow' }))
+      await env.pluginCtx().waterfall('tools/post-execute', controlExec, abortResult('tool call aborted'), () => Promise.resolve({ kind: 'accept' }))
+      const rows2 = await readToolIntents(stateDir)
+      const controlSettle = rows2.find((r) => r.kind === 'settle' && r.tool === 'dept_sleep' && r.agent === 'session-live')
+      assert.ok(controlSettle, 'the control dept_sleep intent settled')
+      assert.equal(controlSettle.status, 'aborted', 'a REAL dept_sleep abort (no rotation commit) stays ABORTED — the carve-out never masks a genuine failure')
+      assert.equal(controlSettle.reason, 'abort', 'the control carries its durable classified reason (abort)')
+      const interruptRaw2 = JSON.parse(await readFile(path.join(stateDir, 'interrupt-state.json'), 'utf8'))
+      assert.deepEqual(interruptRaw2['interrupt-detail:session-live'], { reason: 'abort', sourceKey: 'dept_sleep', ts: controlSettle.ts }, 'the control records its interrupt-detail ledger entry (the abort-family trace survives)')
+      const postErrors2 = readPostErrorsFile(stateDir)
+      assert.ok(postErrors2.some((r) => r.postId === TOOL_ABORT_POST_ID && r.error.includes('tool call aborted — dept_sleep (session-live)')), 'the control surfaces its tool-abort post-error row (the genuine-abort health surface)')
+      const findings2 = scanAbortedToolIntents(rows2, Date.now(), 60_000)
+      assert.equal(findings2.filter((f) => f.kind === 'aborted' && f.tool === 'dept_sleep').length, 1, 'the scan surfaces EXACTLY the genuine abort (the rotation-close row is batch-compat invisible)')
     } finally {
       await env.dispose()
     }

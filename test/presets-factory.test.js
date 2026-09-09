@@ -34,7 +34,7 @@ import { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -113,9 +113,25 @@ class StubAgentPresets extends Service {
   async mount(agentCtx, id) { this.mounts.push(id); return () => {} }
 }
 
+/** Minimal sessionPersistence stub with a FABRICATED readRaw (the fb-306 seal
+ * E2 — the finalizeSessionLog closure needs the durable JSONL artifact a real
+ * persistence seam would serve post-dispose). */
+class StubPersistence extends Service {
+  constructor(ctx) {
+    super(ctx, 'sessionPersistence')
+    this.contentBySession = new Map()
+  }
+  setContent(sessionId, content) { this.contentBySession.set(String(sessionId), content) }
+  async readRaw(id) {
+    const content = this.contentBySession.get(String(id))
+    if (content === undefined) return undefined
+    return { content }
+  }
+}
+
 /** The REAL Loader composition of the dev-profile subset (dshd-core + the 6 P1
  * packages + the bundle, in order) — the bootPlugin pattern. */
-async function smokeBoot(stateDir, { org = { departments: [] }, agents = false } = {}) {
+async function smokeBoot(stateDir, { org = { departments: [] }, agents = false, persistence = false } = {}) {
   const root = new Context()
   const loaderFiber = await root.plugin(Loader, { baseUrl: new URL('.', import.meta.url).href })
   const loader = root.loader
@@ -128,6 +144,7 @@ async function smokeBoot(stateDir, { org = { departments: [] }, agents = false }
   new StubConnection(root)
   new StubAgentPresets(root)
   const agentsStub = agents === true ? new StubAgents(root) : undefined
+  const persistenceStub = persistence === true ? new StubPersistence(root) : undefined
   loader.create({ id: 'dshd-core', name: 'dshd-core', config: { stateDir, org } })
   for (const id of ['dshd-feedback', 'dshd-quality', 'dshd-pooler', 'dshd-jobs', 'dshd-health', 'dshd-gui']) {
     loader.create({ id, name: id, config: {} })
@@ -146,6 +163,7 @@ async function smokeBoot(stateDir, { org = { departments: [] }, agents = false }
     loader,
     pluginCtx,
     agentsStub,
+    persistenceStub,
     dispose: () => loaderFiber.dispose()
   }
 }
@@ -268,7 +286,18 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
     // (movement-only semantics + the per-session path resolution) and (e) the
     // NEW `finalizeSessionLog` closure (re-capture post-dispose + seal). md5
     // fdc87116… → 3ca3116bd38fd8bbfcd1900d6ab7c45d (same span, additive).
-    assert.equal(md5, '3ca3116bd38fd8bbfcd1900d6ab7c45d', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation, the LANE 0.2.3 R4 one-line HOST literal alignment, the R5 DUAL-read session-surface, the R7 getSessionEvents-collapse + surface-probe AND the R9 fb-308 session-log finalize re-freeze (md5 3ca3116b…)')
+    // Zone md5 RE-FROZE R10 (fb-306, 2026-09-09 — the rotation-close seal, the
+    // LANE N1 runtime fix): the journal T1 span gained (a) the ADDITIVE
+    // `sleep_result:` seal line in serializeSessionLog (rendered ONLY when the
+    // finalize detected the rotation-close class — a NORMAL seal stays
+    // byte-identical to R9), (b) the rotation-close stamp in finalizeSessionLog
+    // (the DURABLE hosts-entry gate retired+rotatedTo ⇒ the seal re-classifies
+    // `turn_end_reason: completed(rotation)` + `sleep_result: success(rotation)`
+    // KEEPING `zstd_final_seq` truthful — the retire-dispose abort of a rotated
+    // host's dept_sleep is the semantic SUCCESS, never reclassifying a genuine
+    // error) and (c) the doc comments of both closures. md5
+    // 3ca3116b… → 587d608b10e304403c93892fed6554c7 (same span, additive).
+    assert.equal(md5, '587d608b10e304403c93892fed6554c7', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation, the LANE 0.2.3 R4 one-line HOST literal alignment, the R5 DUAL-read session-surface, the R7 getSessionEvents-collapse + surface-probe, the R9 fb-308 session-log finalize re-freeze AND the R10 fb-306 rotation-close seal re-freeze (md5 587d608b…)')
     // The D1 deviation is present and documented: the factory's repoRoot
     // initializer carries THREE '..' (module-position-dependent, identical
     // value — the factory lives 3 levels under the repo root).
@@ -433,6 +462,98 @@ test('presets-factory (E2 con Loader real): journal Task T1 lands a REAL journal
   } finally {
     if (prevDshHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = prevDshHome
+    await rm(stateDir, { recursive: true, force: true })
+  }
+})
+
+// ===========================================================================
+// fb-306 (LANE N1 — the ROTATION-CLOSE SEAL, 2026-09-09): the fb-308
+// `finalizeSessionLog` closure re-captures the just-ended cycle post-dispose
+// and seals the .md. When the member is a HOST whose DURABLE hosts entry shows
+// a COMMITTED rotation close (retired + rotatedTo), the seal RE-CLASSIFIES the
+// close — `turn_end_reason: completed(rotation)` + the ADDITIVE
+// `sleep_result: success(rotation)` line — while KEEPING `zstd_final_seq`
+// truthful (the REAL turn/end seq; the zstd stays the never-rewritten source
+// of truth — CUT-4). CONTROL: a LIVE (non-retired) host close keeps the
+// NORMALIZED real reason (`aborted/disposed`) with NO sleep_result line — a
+// genuine error is never reclassified.
+// ===========================================================================
+test('presets-factory (fb-306 seal E2 — REAL Loader): finalizeSessionLog on a ROTATED host (durable retired+rotatedTo entry) seals the session-log .md with `final: true` + `turn_end_reason: completed(rotation)` + the ADDITIVE `sleep_result: success(rotation)` while KEEPING the truthful `zstd_final_seq` and the raw aborted/disposed BODY render; a LIVE host CONTROL keeps the normalized `aborted/disposed` with NO sleep_result line', async () => {
+  const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-presets-seal-'))
+  try {
+    // The DURABLE rotation-close evidence the seal gate reads: the retired old
+    // host (the C3 sleepResult success marker rides the entry) + the live
+    // successor (the loader's single-live bootstrap).
+    const hostsJson = {
+      schemaVersion: 2,
+      'host-session-live': { sessionId: 'session-live', roomId: 'board', sleepEpoch: 100 },
+      'host-session-old': { sessionId: 'session-old', roomId: 'board', sleepEpoch: 90, boundarySeq: 40, retired: true, retiredAt: 101, rotatedTo: 'host-session-live', sleepResult: 'success' }
+    }
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify(hostsJson, null, 2), 'utf8')
+    // The journals the finalize reads for the cycle ordinal (wake_counter 1).
+    await mkdir(path.join(stateDir, 'journals'), { recursive: true })
+    for (const [hostId, sessionId] of [['host-session-old', 'session-old'], ['host-session-live', 'session-live']]) {
+      await writeFile(
+        path.join(stateDir, 'journals', `${hostId}.md`),
+        [
+          '---',
+          `author: ${hostId}`,
+          'timestamp: 2026-09-09T00:00:00.000Z',
+          'wake_counter: 1',
+          'board_cursor: none',
+          '---',
+          '',
+          `fb-306 seal E2: finalize of ${sessionId}`,
+          ''
+        ].join('\n'),
+        'utf8'
+      )
+    }
+    const { pluginCtx, persistenceStub, dispose } = await smokeBoot(stateDir, {
+      org: { departments: [DEPARTMENT] },
+      persistence: true
+    })
+    try {
+      const ctx = pluginCtx()
+      assert.ok(persistenceStub !== undefined, 'the persistence stub is mounted (the readRaw seam the finalize needs)')
+      // The durable artifact BOTH sessions leave post-dispose: the harness
+      // appended the REAL closing events AFTER the tool returned — the frame
+      // replaced by the retire-dispose abort («tool call aborted») + the
+      // turn/end aborted/disposed (fb-306 — the zstd truth).
+      const closingArtifact = [
+        '{"type":"turn/start","seq":0,"time":1000,"data":{"turn":1}}',
+        '{"type":"tool/call","seq":1,"time":1001,"data":{"name":"dept_sleep","arguments":{}}}',
+        '{"type":"tool/result","seq":2,"time":1002,"data":{"isError":true,"error":{"name":"AbortError","message":"tool call aborted"}}}',
+        '{"type":"step/end","seq":3,"time":1003,"data":{}}',
+        '{"type":"turn/end","seq":4,"time":1004,"data":{"turn":1,"reason":{"kind":"aborted","reason":{"kind":"disposed"}}}}'
+      ].join('\n')
+      persistenceStub.setContent('session-old', closingArtifact)
+      persistenceStub.setContent('session-live', closingArtifact)
+      const presetsSurface = ctx.get('deepartments.presets')
+      assert.ok(presetsSurface !== undefined && typeof presetsSurface.finalizeSessionLog === 'function', 'the composed deepartments.presets service exposes the finalizeSessionLog seam (fb-308 surface member)')
+
+      // (a) ROTATION-CLOSE: the old host's finalize re-classifies the close.
+      const sealedOld = await presetsSurface.finalizeSessionLog('host-session-old', 'board', 'session-old')
+      assert.equal(sealedOld, path.join(stateDir, 'journals', 'sessions', 'host-session-old-1.md'), 'the finalize resolved the canonical per-session log path')
+      const oldLog = readFileSync(sealedOld, 'utf8')
+      assert.match(oldLog, /^final: true$/m, 'the seal carries final: true')
+      assert.match(oldLog, /^turn_end_reason: completed\(rotation\)$/m, 'a rotation-close seal re-classifies the turn/end reason as completed(rotation) — the retire-dispose abort is NOT the sleep outcome (fb-306)')
+      assert.match(oldLog, /^sleep_result: success\(rotation\)$/m, 'the rotation-close seal carries the ADDITIVE sleep_result: success(rotation) line')
+      assert.match(oldLog, /^zstd_final_seq: 4$/m, 'zstd_final_seq stays TRUTHFUL (the REAL turn/end seq — the zstd is never rewritten, CUT-4)')
+      assert.match(oldLog, /- \*\*turn\*\* 1 end \(aborted\/disposed\)/, 'the BODY still renders the RAW event (aborted/disposed) — the semantic stamp lives in the HEADER seal, the zstd stays the source of truth')
+
+      // (b) CONTROL: a LIVE host (non-retired) keeps the NORMALIZED real
+      // reason — NO reclassification, NO sleep_result line.
+      const sealedLive = await presetsSurface.finalizeSessionLog('host-session-live', 'board', 'session-live')
+      assert.equal(sealedLive, path.join(stateDir, 'journals', 'sessions', 'host-session-live-1.md'), 'the control finalize resolved its canonical log path')
+      const liveLog = readFileSync(sealedLive, 'utf8')
+      assert.match(liveLog, /^turn_end_reason: aborted\/disposed$/m, 'a LIVE host close keeps the NORMALIZED real reason (aborted/disposed) — a genuine error is never reclassified')
+      assert.doesNotMatch(liveLog, /^sleep_result:/m, 'the control seal has NO sleep_result line (the additive marker is rotation-close ONLY)')
+      assert.match(liveLog, /^zstd_final_seq: 4$/m, 'the control keeps its truthful zstd_final_seq')
+    } finally {
+      dispose()
+    }
+  } finally {
     await rm(stateDir, { recursive: true, force: true })
   }
 })

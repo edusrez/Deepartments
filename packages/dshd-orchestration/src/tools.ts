@@ -961,6 +961,24 @@ function isNudgeLifeAbort(exec: unknown, result: { isError: boolean; error?: { m
   return NUDGE_LIFE_ABORT_CLASSES.has(classifyToolAbortReason(message, typeof tool === 'string' ? tool : ''))
 }
 
+/** fb-306 — the ROTATION-CLOSE class gate (PURE): `true` iff the host's
+ * DURABLE registry entry shows a COMMITTED rotation close (retired: true with
+ * a rotatedTo successor — the S3/S7 hosts.json markers the dept_sleep host
+ * branch writes BEFORE the tool returns). The dept_sleep of a ROTATED host is
+ * semantically a SUCCESS even when the harness replaced its frame with
+ * «tool call aborted» — that abort is the collateral of the retire-dispose
+ * (chainSnapshotFinalize → machine.cancel({kind:'disposed'}) over the
+ * in-flight call), NEVER a sleep failure (fb-306/fb-2; the tool returned OK,
+ * the rotation committed). This durable evidence — NOT the tool name alone —
+ * is the gate that separates the rotation-close class from a genuine sleep
+ * failure (an abort WITHOUT the retired+rotatedTo entry stays 'aborted' with
+ * its post-error). A hostId with no entry (non-host member) is never a close.
+ * PURE (module-private — 0 new exports, the export-parity lock stays 327). */
+function isHostRotationClosed(hosts: Map<string, HostEntry>, hostId: string): boolean {
+  const entry = hosts.get(hostId)
+  return entry?.retired === true && typeof entry?.rotatedTo === 'string' && entry.rotatedTo !== ''
+}
+
 /** LANE WFD (m-1416/QH — org.pacing) — the FRANJA GATE for a NEW nudge
  * dispatch: `true` → the nudge must be DEFERRED (a logged no-op) because the
  * org is inside a PEAK window at `nowMs`. The gate REUSES the dshd-core
@@ -1377,8 +1395,21 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         if (best === undefined) return // nothing to settle
         id = best.id
       }
-      const isAbort = result.isError && isNudgeLifeAbort(exec, result as { isError: boolean; error?: { message?: string } })
-      const status = !result.isError ? 'settled' : isAbort ? 'aborted' : 'error'
+      // fb-306 — the ROTATION-CLOSE carve-out: the dept_sleep of a HOST whose
+      // rotation COMMITTED (the DURABLE hosts entry is retired + rotatedTo —
+      // the S3/S7 markers the sleep body wrote BEFORE it returned) is a
+      // SEMANTIC SUCCESS even when the harness replaced the frame with
+      // «tool call aborted» (the retire-dispose collateral — machine.cancel
+      // over the still-in-flight tool call, fb-306/fb-2). The carve-out
+      // settles 'settled' WITHOUT the interrupt-detail + post-error noise (the
+      // W6 tool-abort-intent class) — the abort family's health surface must
+      // not scream for a rotation that succeeded. The GATE is the DURABLE
+      // rotation evidence (never the tool name alone): ANY OTHER abort — a
+      // dept_sleep with no commit, any other tool — stays classified exactly
+      // as before (a genuine failure keeps its 'aborted' settle + post-error).
+      const rotationClose = exec.name === 'dept_sleep' && isHostRotationClosed(hosts, hostIdForSession(agentId))
+      const isAbort = !rotationClose && result.isError && isNudgeLifeAbort(exec, result as { isError: boolean; error?: { message?: string } })
+      const status = !result.isError || rotationClose ? 'settled' : isAbort ? 'aborted' : 'error'
       // The durable reason rides ONLY an ERRORED abort (a successful settle
       // NEVER records a reason — the noise-guard contract — so the classifier
       // fallback on an absent error message ('aborted') can never leak an

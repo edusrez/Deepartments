@@ -216,6 +216,12 @@ export interface HostEntry {
   /** U2 (D4): on a LIVE entry that was created by a rotation — the sessionId it
    * rotated FROM (must reference a retired entry in the same file). */
   previousSessionId?: string
+  /** fb-306 — D4 ADDITIVE: the ROTATION-CLOSE result of the retiring host's
+   * dept_sleep ('success' when the rotation closed). Written by
+   * hostsRotationRecords on the retired old entry; restored by loadHosts so
+   * the C1/C2 rotation-close re-classification works post-restart too. Absent
+   * on live/legacy entries. */
+  sleepResult?: 'success'
 }
 
 /** Loose structural view of one host-registry entry (hosts.json value). */
@@ -1504,7 +1510,8 @@ export class RegistryStore {
         ...(entry.retired === true ? { retired: true } : {}),
         ...(entry.retiredAt !== void 0 ? { retiredAt: entry.retiredAt } : {}),
         ...(entry.rotatedTo !== void 0 ? { rotatedTo: entry.rotatedTo } : {}),
-        ...(entry.previousSessionId !== void 0 ? { previousSessionId: entry.previousSessionId } : {})
+        ...(entry.previousSessionId !== void 0 ? { previousSessionId: entry.previousSessionId } : {}),
+        ...(entry.sleepResult !== void 0 ? { sleepResult: entry.sleepResult } : {})
       }
     }
     writeFile(this.hostsPath, JSON.stringify(data, null, 2), 'utf8').catch(
@@ -1829,6 +1836,7 @@ export class RegistryStore {
           const retiredAt = typeof entry.retiredAt === 'number' ? entry.retiredAt : undefined
           const rotatedTo = typeof entry.rotatedTo === 'string' ? entry.rotatedTo : undefined
           const previousSessionId = typeof entry.previousSessionId === 'string' ? entry.previousSessionId : undefined
+          const sleepResult = entry.sleepResult === 'success' ? 'success' : undefined
           this.hosts.set(hostId, {
             hostId,
             sessionId: entry.sessionId,
@@ -1840,7 +1848,8 @@ export class RegistryStore {
             ...(retired ? { retired: true } : {}),
             ...(retiredAt !== void 0 ? { retiredAt } : {}),
             ...(rotatedTo !== void 0 ? { rotatedTo } : {}),
-            ...(previousSessionId !== void 0 ? { previousSessionId } : {})
+            ...(previousSessionId !== void 0 ? { previousSessionId } : {}),
+            ...(sleepResult !== void 0 ? { sleepResult } : {})
           })
           this.hostForSession.set(entry.sessionId, hostId)
           if (retired) continue

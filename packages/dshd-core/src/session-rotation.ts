@@ -86,6 +86,14 @@ export interface HostRotationEntry {
   rotatedTo?: string
   /** D4: the sessionId this live entry rotated FROM (references a retired entry). */
   previousSessionId?: string
+  /** fb-306 — D4 ADDITIVE: the ROTATION-CLOSE result of the retiring host's
+   * dept_sleep. Stamped 'success' on the retired old entry when the rotation
+   * closed (retired + rotatedTo — the C3 durable marker of the semantic
+   * SUCCESS the settle/seal re-classify on; the zstd's raw «tool call
+   * aborted» frame is the retire-dispose collateral, never a sleep failure).
+   * Absent on live/legacy entries (schema-compatible — see
+   * validateHostsRotationFile). */
+  sleepResult?: 'success'
 }
 
 /** One seed event for the new session (the minimal-artifact event-list shape
@@ -200,10 +208,12 @@ export function buildHeadRotationSeed(journal: string, opts: { preset?: string; 
 
 /**
  * S3/D4 — the old/new hosts.json entries for one rotation. The old entry
- * becomes `{...old, retired: true, retiredAt, rotatedTo: newHostId}` (stays in
- * the file, queryable — D1); the new entry carries sessionId/roomId/sleepEpoch/
- * boundarySeq?/previousSessionId and NEVER webUiCleanupPending/deferredJournalSeed
- * (S4/S5).
+ * becomes `{...old, retired: true, retiredAt, rotatedTo: newHostId,
+ * sleepResult: 'success'}` (stays in the file, queryable — D1; the sleepResult
+ * is the fb-306 rotation-close marker — the dept_sleep of a rotated host is
+ * semantically a SUCCESS, stamped here at the durable close); the new entry
+ * carries sessionId/roomId/sleepEpoch/boundarySeq?/previousSessionId and NEVER
+ * webUiCleanupPending/deferredJournalSeed (S4/S5).
  */
 export function hostsRotationRecords(
   oldEntry: HostRotationEntry,
@@ -221,7 +231,8 @@ export function hostsRotationRecords(
       ...persisted,
       retired: true,
       retiredAt: opts.retiredAt,
-      rotatedTo: opts.newHostId
+      rotatedTo: opts.newHostId,
+      sleepResult: 'success'
     },
     newEntry: {
       sessionId: newSessionId,
@@ -255,6 +266,7 @@ export function validateHostsRotationFile(data: Record<string, unknown>): void {
     const retiredAt = entry.retiredAt
     const rotatedTo = entry.rotatedTo
     const previousSessionId = entry.previousSessionId
+    const sleepResult = entry.sleepResult
     if (retired !== void 0 && typeof retired !== 'boolean') {
       throw new Error(`[deepartments] hosts.json schema violation: "${hostId}" carries a non-boolean retired marker (${JSON.stringify(retired)})`)
     }
@@ -266,6 +278,13 @@ export function validateHostsRotationFile(data: Record<string, unknown>): void {
     }
     if (previousSessionId !== void 0 && typeof previousSessionId !== 'string') {
       throw new Error(`[deepartments] hosts.json schema violation: "${hostId}" carries a non-string previousSessionId (${JSON.stringify(previousSessionId)})`)
+    }
+    // fb-306 — the OPTIONAL rotation-close marker (D4-additive; absent on
+    // live/legacy entries). 'success' is the ONLY value the rotation writes;
+    // any other value is a malformed new field and throws loudly (never a
+    // silent drop — the loader's new-field discipline).
+    if (sleepResult !== void 0 && sleepResult !== 'success') {
+      throw new Error(`[deepartments] hosts.json schema violation: "${hostId}" carries an invalid sleepResult (${JSON.stringify(sleepResult)}) — expected "success" when present`)
     }
     if (retired === true) {
       if (typeof retiredAt !== 'number') throw new Error(`[deepartments] hosts.json schema violation: retired entry "${hostId}" must carry a numeric retiredAt`)

@@ -7264,7 +7264,7 @@ test('T1 sleep boundary (host plane): host-plane dept_sleep records a per-sessio
 // the per-session name uniqueness (dimension 3 — the D-Q3 collision class) and
 // the degrade path (no readRaw → warn, the mid-turn stub stays intact).
 
-test('T1 fb-308 finalize (host rotation, real artifact): dept_sleep seals the host session log with the EXACT end_seq/end_time against the durable zstd fixture + normalized turn_end_reason + zstd_final_seq (the [object Object] fix)', async () => {
+test('T1 fb-308 finalize (host rotation, real artifact): dept_sleep seals the host session log with the EXACT end_seq/end_time against the durable zstd fixture + the fb-306 rotation-close RE-CLASSIFIED turn_end_reason (completed(rotation) + additive sleep_result: success(rotation)) + truthful zstd_final_seq (the [object Object] fix)', async () => {
   await withTempStateDir(async (stateDir) => {
     const host = fakeParentAgent()
     const hostId = `host-${host.id}`
@@ -7299,9 +7299,17 @@ test('T1 fb-308 finalize (host rotation, real artifact): dept_sleep seals the ho
       assert.match(sealed, /^wake_counter: 2$/m, 'session log named by the BUMPED ordinal (2)')
       assert.match(sealed, /^end_seq: 6$/m, 'end_seq is the EXACT final event seq of the durable artifact (the session/end-seed)')
       assert.match(sealed, new RegExp(`^end_time: ${new Date(1787768255601).toISOString()}$`, 'm'), 'end_time matches the exact final event timestamp of the artifact')
-      // Dimension 2 — REASON + POINTER (normalized — the [object Object] fix).
-      assert.match(sealed, /^turn_end_reason: aborted\/disposed$/m, 'turn_end_reason is the NORMALIZED object reason (aborted/disposed — no [object Object])')
-      assert.match(sealed, /^zstd_final_seq: 5$/m, 'zstd_final_seq points at the turn/end seq (5), not the trailing end-seed (6)')
+      // Dimension 2 — REASON + POINTER. fb-306 (the rotation-close seal): the
+      // OLD host of THIS fixture is a COMMITTED rotation (retired + rotatedTo —
+      // the sleepResult member was minted above), so the seal RE-CLASSIFIES
+      // the close — `turn_end_reason: completed(rotation)` + the ADDITIVE
+      // `sleep_result: success(rotation)` (the retire-dispose abort of a
+      // rotated host is NOT the sleep's outcome; the archive must never read
+      // «rotation failed») — while `zstd_final_seq` STILL points at the REAL
+      // turn/end seq and the BODY render keeps the RAW normalized reason.
+      assert.match(sealed, /^turn_end_reason: completed\(rotation\)$/m, 'turn_end_reason re-classifies the ROTATION-CLOSE as completed(rotation) (fb-306 — the [object Object] fix + the no-false-«failed rotation» seal)')
+      assert.match(sealed, /^sleep_result: success\(rotation\)$/m, 'the rotation-close seal carries the ADDITIVE sleep_result: success(rotation) line (fb-306 C2)')
+      assert.match(sealed, /^zstd_final_seq: 5$/m, 'zstd_final_seq points at the REAL turn/end seq (5), not the trailing end-seed (6) — the reclassification never re-points the truthful pointer')
       assert.match(sealed, /^final: true$/m, 'the finalize seal marks the log final')
       assert.match(sealed, /^- \*\*turn\*\* 1 end \(aborted\/disposed\)$/m, 'the BODY render normalizes the reason too (the serializeSessionEvent fix)')
       // Dimension 3 — ONE per-session file for the member+ordinal (the
