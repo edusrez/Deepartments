@@ -220,10 +220,42 @@
 > 671b6ac5 14:26:27Z · m-3037 cubierto por el supersede m-3040
 > terminal+delivered · prepared residuales a destinatario RETIRADO = historia
 > append-only NO-accionable; 0 purga, 0 script ad-hoc) — higiene FUTURA =
-> lane **fb-253 (markDelivery tooling**, exposición de CLI de la lib
-> dshd-core), NO script ad-hoc (record QH m-3271; ver §1 cola).
+> lane **fb-253 → CERRADO 09-09 (markDelivery CLI**: `5ab20ea` CLI + `a60cb4d`
+> adenda hosts retirados; drenaje --apply EXPRESO del host m-3019/m-3022 →
+> preparedStuckRemaining=0; el CLI y su uso ya documentados en §7 — no se
+> duplica en §1), NO script ad-hoc (record QH m-3271; ver §1 ítem).
 > **DECISIÓN DE COLA (head; estampada por esta lane)** — ítem transporte =
 > CIERRE FORMAL + re-lane «pooler-capacity / reserva de keys» (ver §1).
+> **ENTRADA 09-09 — ABSORCIÓN REGISTER-SYNC (IPD builder-212, lane register-
+> sync 09-09; docs-only, 0 commits, LISTO-PARA-COMMIT — verify + add EXPLÍCITO
+> del ÚNICO archivo docs/WORK-REGISTER.md)** — jornada 09-09 absorbida
+> (commits → lane/worker): **fb-253 CERRADO 09-09** (cadena `5ab20ea` CLI
+> mark-delivery + `a60cb4d` adenda hosts retirados [builder-209 374f527d,
+> reviewer-114 19785a52, QD dq2-5b8597cb; tests 17/17] + **drenaje --apply
+> EXPRESO del host m-3019/m-3022 → preparedStuckRemaining=0** — ver su ítem
+> CERRADO §1 + §7 CLI) · **fb-251 (clase bare-400 — 2ª ventana, record
+> canónico IPH)** (causa raíz 2 capas: 400-no-body intermitente del UPSTREAM
+> + misclasificación pi-ai overflow.js:60 → CONTEXT_WINDOW_EXCEEDED falso;
+> fix `c96b40a` errorSurface.code en post-errors.jsonl LIVE tras canary
+> 12:05:28Z; PENDIENTE-OWNER: acotar patrón pi-ai por provider +
+> dsh-compaction-basic:803 — record en-estudio) · **fb-235 (instrumentación)**
+> (captura pooler `f3d9c87` key/workspace ACTIVA tras deploy canary 12:05Z —
+> próximo bare-400 loguea key+workspace; record en-estudio) · **fb-272
+> CERRADO por QD 09-09** (prune-on-delivery = INTENCIONAL — delivery auto-
+> retire seam delivery.ts:1540-1558, benigno 7/7, resuelto-documentado, NO
+> lane de ajuste) · **fb-284 RESUELTO 09-09** (marker ghost-store anotado:
+> rename reversible capacity-gate-state.json →
+> .stale-2026-09-09-annotated-fb284, fuera de parseo, NO purga) · **fb-285
+> ABIERTO (QD, limpieza GLOBAL ghost-store /root/.deepartments — debris
+> huérfano 08-23→09-06 incl. secrets/; PENDIENTE-OWNER: purgar vs
+> anotar/archivar; revisión secrets/ fb-16)** · **fb-234 CERRADO-absorbido**
+> (su next: host CUBIERTO por 6397fb5 + cadena VALLE — ver ítem §1) ·
+> **fb-75 nota de cierre formal** (gate billingDown aterrizado O1 `0ee5a26` +
+> pooler `5fc59b5` + HALT LPC `7c6d3376` — el record QD fb-75 permanece
+> EN-ESTUDIO, watch QH#10 09-08; ver ítem §1 pooler-capacity) · **§3
+> stable-profile 19 → 25 releases al 09-09** (monitor 09-09: dshmarket
+> 1.21.2→1.45.1 + smooth-stream 0.3.4→0.6.0) · **O2-nudge fbd-nudge-o2
+> `8e03c04d` LISTO-PARA-COMMIT pendiente del host** (verify+commit; ver §5).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
@@ -237,7 +269,7 @@
 > ya adoptada en el registro). El watchdog work-register-idle v2 (fb-184) lee
 > este campo para notificar «next-actor-idle» al actor nombrado.
 
-- **fb-234 (canary-vs-crash + writer restart-reason.json + incidente ALTO phantom)** — CIERRE FORMAL (absorción register-sync 09-09, IPD builder-208; no entró por la cola del día; cadena completa: `07b4f59` sidecar → `5a310ad` writer (builder-205/11c53eec) → `71d05b5` A2+A1 perimetría (builder-206/9645cbfe) → `8fb403f` deepartments GAP-2 bootId-coherence + `c20c7dd` dsh-smart-restart GAP-2 deriveLiveStateDirOverrides (builder-207)) · validación EN VIVO post-GAP-2 (canary 06:44:12Z): boot real 59c8891c recoveryCause 'canary' crashStreak 0 · marker restart-reason AUSENTE (consumido por el BOOT REAL) · fila restart-registry del sucesor = 'canary' con bootId IDÉNTICO al sidecar (guard dshd-health:6810-6811) · efímero canary 0 huellas (0 filas config → /.deepartments — acceptance 1 por construcción) · dshmarket 1.45.1 activo (doble deber) · acceptance (1)-(4) CERRADAS (reportes del día 11c53eec/d11779d1/9645cbfe/69782011/4fc62dce/34c5347d + traces 806784e2/f51a8760) · NOTA DE ATRIBUCIÓN: streak nocturna 20→21→22 (09-08T19:00Z→09-09T00:10Z) + filas 'unknown' @00:33Z/05:53Z = PRE-fix (boots marker-less) · GAP-2 re-atribuyó filas del 09-08 (d8ac0f23/549a405c → 'smart_restart canary') · «CRITICAL streak-19» digest 09-08 = PRE-fix → SUPERSEDED — next: host (commit de cierre) / QD (verificación streak opcional) — CERRADO
+- **fb-234 (canary-vs-crash + writer restart-reason.json + incidente ALTO phantom)** — CIERRE FORMAL (absorción register-sync 09-09, IPD builder-208; no entró por la cola del día; cadena completa: `07b4f59` sidecar → `5a310ad` writer (builder-205/11c53eec) → `71d05b5` A2+A1 perimetría (builder-206/9645cbfe) → `8fb403f` deepartments GAP-2 bootId-coherence + `c20c7dd` dsh-smart-restart GAP-2 deriveLiveStateDirOverrides (builder-207)) · validación EN VIVO post-GAP-2 (canary 06:44:12Z): boot real 59c8891c recoveryCause 'canary' crashStreak 0 · marker restart-reason AUSENTE (consumido por el BOOT REAL) · fila restart-registry del sucesor = 'canary' con bootId IDÉNTICO al sidecar (guard dshd-health:6810-6811) · efímero canary 0 huellas (0 filas config → /.deepartments — acceptance 1 por construcción) · dshmarket 1.45.1 activo (doble deber) · acceptance (1)-(4) CERRADAS (reportes del día 11c53eec/d11779d1/9645cbfe/69782011/4fc62dce/34c5347d + traces 806784e2/f51a8760) · NOTA DE ATRIBUCIÓN: streak nocturna 20→21→22 (09-08T19:00Z→09-09T00:10Z) + filas 'unknown' @00:33Z/05:53Z = PRE-fix (boots marker-less) · GAP-2 re-atribuyó filas del 09-08 (d8ac0f23/549a405c → 'smart_restart canary') · «CRITICAL streak-19» digest 09-08 = PRE-fix → SUPERSEDED — next: host (commit de cierre) CUBIERTO (register-sync `6397fb5` commiteado por el host 09-09 + cadena VALLE del día `461e3fa`/`a60cb4d`/`c96b40a`/`05963b4`) / QD (verificación streak opcional) — CERRADO-absorbido (register-sync 09-09, builder-212)
 - **OLA POST-PREP (despacho host m-2077, 09-06 — DAG seriado del IPH, la ola
   post-PREP del wave; cada item con su `next:`):**
   - **fb-134 (store separation — único gated, destrabado con el cierre PREP
@@ -325,7 +357,9 @@
   seq-rewind — re-deliveries m-1999/m-2024; `fe5cab4` drena la cola prepared
   en runtime; población prepared-stale 09-08 m-3034/m-3037 a f4595b15
   RESUELTA por supersede/delivered — WATCH C2 m-3265; higiene futura =
-  lane fb-253 markDelivery tooling, no script ad-hoc) · fb-168 (smoke guard — restart re-escopeado 09-06, fila #13
+  lane fb-253 CERRADO 09-09 (CLI `5ab20ea` + adenda hosts `a60cb4d`; drenaje
+  --apply EXPRESO host m-3019/m-3022 → preparedStuckRemaining=0; §7 documenta
+  el CLI), no script ad-hoc) · fb-168 (smoke guard — restart re-escopeado 09-06, fila #13
   del §7) · fb-169 (smart_restart con stale-check + sin resume) · fb-172
   (fallo de continuación fb-46) · fb-143/144/145 (race-liveness — **R8 EN
   MAIN `a3ecfb7`**). Prácticas vinculantes adoptadas (fresh-check pre-restart
@@ -356,26 +390,29 @@
     clase CAPACIDAD: garantizar un colchón de keys para que el pool no caiga a 0
     usable (capacity/owner top-up/reserva de keys) · vincula **fb-75/39 gate de
     billing — el pendiente real de la clase capacidad** (fb-75 gate billingDown
-    `5fc59b5` pooler master + HALT LPC; cierre formal post-ceremonia) · owner
+    — **NOTA CIERRE FORMAL 09-09 (register-sync)**: piezas aterrizadas en la
+    ola/ceremonia 09-07 — pool-health gate pre-dispatch O1 `0ee5a26` (09-07
+    13:11) + pooler master `5fc59b5` + HALT LPC `7c6d3376`; el RECORD QD fb-75
+    sigue EN-ESTUDIO — última verificación QH#10 09-08: watch QD activo,
+    cierre del record = verificación QD del fix) · owner
     top-up; R3 · NO re-trabajar el pipeline delivery (ec2d405 ya en main y
     operando) — next: internal-programming-head.
   - **fb-253 (higiene programática de deliveries — markDelivery CLI; record QH
-    m-3271, 09-08)** — exponer CLI/tool de markDelivery (hoy vive SOLO en la lib
-    dshd-core, sin CLI) para resolver/terminalizar filas 'prepared' stale a
-    destinatarios RETIRADOS de forma controlada (append-only) — emergente de la
-    clase prepared-stuck fb-117/137; la población m-3034/m-3037 a f4595b15
-    (destinatario retirado) se resolvió 09-08 por supersede/delivered (WATCH C2
-    m-3265) SIN script ad-hoc; la higiene FUTURA pasa por esta lane —
-    next: internal-programming-head.
+    m-3271, 09-08) — CERRADO 09-09** (cadena `5ab20ea` CLI + `a60cb4d` adenda
+    hosts retirados; drenaje --apply EXPRESO del host m-3019/m-3022 →
+    preparedStuckRemaining=0; el CLI y su uso NO se duplican aquí — ya
+    documentados en §7) — CERRADO.
   - **fb-56** (interrupted-post/canary-kill — re-drive + FASE0) · **O2 nudge**
     (lane fbd-nudge-o2 LPC `8e03c04d` — ceremonia 09-07; base foldeada
-    `0e2e735`) · **zombie rule pooler** (gap 403→errorClass en probeInvalidKeys;
+    `0e2e735`; estado verificado 09-09: ver §5) · **zombie rule pooler** (gap 403→errorClass en probeInvalidKeys;
     pooler master cubre parcial: `8da7363` tombstone P2 + `094cbf8`
     PROBE-FAILED marker) · **m-423** (rotación host PARTIAL — archive corto;
     settle del sidecar; R10 tocó los seams de archive) · **fb-32** (refinamiento
     residual del guard tras el fix `91bc5a8`) · **qi-silence m-2347** (clase
     watchdog qi-silence — datapoint m-2347 a verificar con QD) · **fb-75** (gate
-    billingDown `5fc59b5` pooler master + HALT LPC; cierre formal post-ceremonia).
+    billingDown — **NOTA CIERRE FORMAL 09-09**: piezas aterrizadas ola 09-07 —
+    O1 `0ee5a26` + pooler `5fc59b5` + HALT LPC; el RECORD QD fb-75 sigue
+    en-estudio (QH#10 09-08 — ver ítem «pooler-capacity»).
 
 - **POST-DAG — cola nueva (DAG del IPH):**
   - **DI-by-services CERRADO (73f60d9, deploy canary 11:17Z — MISIÓN 8/8)**:
@@ -482,8 +519,9 @@
     RETIRADO) RESUELTA por supersede/delivered — WATCH C2 m-3265 (m-3034
     delivered al host vivo 671b6ac5 14:26:27Z · m-3037 cubierto por el
     supersede m-3040 terminal+delivered · residuales = historia append-only
-    NO-accionable); higiene futura = lane fb-253 (markDelivery tooling),
-    NO script ad-hoc (ver §1).
+    NO-accionable); higiene = lane fb-253 CERRADO 09-09 (CLI `5ab20ea` +
+    `a60cb4d`; drenaje --apply host m-3019/m-3022 → preparedStuckRemaining=0),
+    NO script ad-hoc (ver §1 ítem).
   - **fb-64 (execRoots + stateDir READ-ONLY — corroborado EN VIVO por builder-2
     09-02; aditivo, QH sin riesgo fb-55) — SCOPING/DISGNÓSTICO EN CURSO
     (explore-deep-4 09-02)**: discrepancia a diagnosticar: el código declara
@@ -619,7 +657,7 @@ fold-ins 09-04 (7d5bb70/91bc5a8/0e2e735/3386f7b/c19cde4) · pool-grading M1
 fb-167 watchdog · fb-132 gate/wake-seam settle · P-LATCH fb-154/155/157).
 Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
 
-## 3. PENDIENTE-OWNER (decisiones — estado al 09-08)
+## 3. PENDIENTE-OWNER (decisiones — estado al 09-09)
 
 - **GUI modo monitoreo (owner 09-01) — CERRADO (2026-09-04)**: decisión owner
   «SÍ (cerrada — NO reabrir)» registrada en el job doc (docs/departments/
@@ -658,7 +696,9 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   gate declinado/diferido) · **stable → no** · **ventana → solo q-i-118 + ruta
   estable** · **pool 46/74/74 mensual + DS-fallback nota** (anotadas en §4 y
   en la entrada 09-08).
-- **:3080 + stable-update (19 releases pendientes)** — actualización estable
+- **:3080 + stable-update (25 releases pendientes al 09-09 — monitor 09-09:
+  dshmarket 1.21.2→1.45.1 [25] + smooth-stream 0.3.4→0.6.0 [6]; 19 al 09-08)**
+  — actualización estable
   pendiente de decisión/programación (ver veredicto RD alpha.4; HOLD 0.1.1-rc.2
   documentado en ROADMAP 09-01).
 - **settings revert (provider→opencode-zen con Go vivo) — PREGUNTA PARKEADA
@@ -713,6 +753,14 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   stale (`health-heartbeat.json`/`posts.json`/`config-presets` 09-03, clase
   fb-134 CERRADO) queda SIN archivar hasta decisión owner; NO unificar el
   `.dsh/reports` legacy sin decisión (D-6 «no-tocar»).
+- **fb-285 (QD, 09-09 — limpieza GLOBAL del ghost-store /root/.deepartments) —
+  ABIERTO, PENDIENTE-OWNER** (hermana global de fb-136/fb-284; record QD):
+  debris huérfano de una instalación previa en la raíz del workspace
+  (hosts/messages/posts/restart-registry/health-alerts*/secrets//departments —
+  mtimes 08-23→09-06; el store vivo es /.deepartments; familia fb-134) —
+  decisión OWNER: **purgar completo vs anotar/archivar**; cualquier purga debe
+  revisar/neutralizar el dir `secrets/` sin exponer credenciales (convención
+  fb-16, no borrar a ciegas). Ver ENTRADA 09-09.
 - CERRADOS: publish 0.1.0 (efd579b) · D5 · P1 · tool-goal retirado · API key
   DeepSeek (fallback real) · restart 05:23:31Z (owner: ignorar — watch si
   reaparecen; restart-registry lo deja visible) · cause restarts 08-31
@@ -792,7 +840,17 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   sobre abort de vida → dead-letter — CERRADO-foldeado (0e2e735 fold-ins
   tramo 3 09-04**: dead-letter retired, life-abort, dedup + fix guard
   dual-surface getSessionEvents en nudgeTurnOf) + **lane fbd-nudge-o2
-  LISTO-PARA-COMMIT (`8e03c04d`, ceremonia 09-07)** (ambos tocan tools.ts).
+  LISTO-PARA-COMMIT (`8e03c04d`, ceremonia 09-07)** (ambos tocan tools.ts) —
+  **ESTADO VERIFICADO 09-09 (register-sync)**: la id `8e03c04d` NO resuelve
+  como objeto git; la SEMÁNTICA del nudge dead-letter O2 (CANCEL/vida-abort
+  no-nudgeable + post retirado nunca nudged) YA está en main vía `0e2e735`
+  (fold 09-04) + `692bcaa` (09-07, ANCESTRO de HEAD; tools.ts post-execute +
+  test o2-nudge-deadletter) · wt-fbd-nudge-o2 conserva un delta SIN commitear
+  sobre base 562d994 (tools.ts +27/-6, invoke.test.js +21,
+  r4-abort-intents.test.js +35) que es una VARIANTE propia (NUDGE_LIFE_ABORT_
+  CLASSES autónomo, NO presente en main) → lo que falta = VERIFY del host del
+  solape wt-vs-main (¿el delta añade algo post-`692bcaa` o es variante
+  superseded?) + COMMIT del remanente o CERRAR la lane como absorbida.
   + **mejora watchdog: mission-stalled (10-min) dispara falso positivo sobre
   entregas no-wake-gated por diseño (records bajo de feedback al QH drenan al
   próximo wake — caso m-410/fb-89) — CERRADA (WFD `4d03b43` 09-05: franja-
