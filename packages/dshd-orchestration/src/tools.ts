@@ -918,28 +918,43 @@ function nudgeTurnOf(exec: unknown): number {
   return turns
 }
 
+/** O2-ALIGN — the KNOWN abort-reason CLASSES of the R4 classifier
+ * (tool-intents.ts `classifyToolAbortReason`): interruption · cancel · churn ·
+ * read-only abort · abort · aborted. ANY message that classifies to one of
+ * these is a LIFE-ABORT (the runtime killed the turn — the W9-b `Agent.cancel`
+ * 'interrupted' abort, a harness abort/kill, an explicit user cancel, a
+ * killed/stopped/terminated/restarted turn) — never an actionable tool error.
+ * The known-classes set is the SINGLE source of truth shared by the nudge gate
+ * and the R4 settle (`isNudgeLifeAbort` is the predicate BOTH call): they agree
+ * on what a life-abort is. PURE. */
+const NUDGE_LIFE_ABORT_CLASSES = new Set(['interruption', 'cancel', 'churn', 'read-only abort', 'abort', 'aborted'])
+
 /** O2 — whether the errored result is a LIFE-ABORT (the runtime killed the
  * turn — the W9-b `Agent.cancel` 'interrupted' abort, a harness abort/kill,
  * an explicit turn/tool CANCEL — the 'cancelled' approval class
- * `approval for tool "<name>" was cancelled`, dsh-tools) instead of a tool
- * error the post can act on. A killed/cancelled turn cannot act on its own
- * abort → the feedback nudge is never appended to it. The abort markers are
+ * `approval for tool "<name>" was cancelled`, dsh-tools — or a churn/kill of
+ * the process: 'stopped'/'terminated'/'restart') instead of a tool error the
+ * post can act on. A killed/cancelled turn cannot act on its own abort → the
+ * feedback nudge is never appended to it. The abort markers are
  * distinguishable in the error/result object TWO ways (B3-P2 verification):
  *   (i)  an explicit `aborted: true` marker on the exec OR the result (the
  *        defensive flag path — a shape the harness cancel family may set);
- *   (ii) the error message word-family of the canonical R4 abort taxonomy
- *        (`classifyToolAbortReason`, tool-intents.ts): interrupt · abort ·
- *        kill · cancel — NOT the churn words ('terminated'/'stopped'/
- *        'restart'), which have no demonstrated post-execute message shape
- *        (bare-word matching would suppress real tool errors), and NEVER bare
- *        'timeout' (a genuine tool timeout IS an actionable error — only the
- *        'aborted' word of e.g. «The operation was aborted due to timeout»
- *        suppresses). PURE. */
+ *   (ii) the error message CLASSIFIED against the canonical R4 abort taxonomy
+ *        (`classifyToolAbortReason`, tool-intents.ts): the result is a
+ *        life-abort iff the classifier returns one of `NUDGE_LIFE_ABORT_CLASSES`
+ *        — the FULL known family (interruption / cancel / churn / read-only
+ *        abort / abort / aborted), NOT the regex-only word subset (O2-ALIGN:
+ *        the churn class 'stopped'/'terminated'/'restart' is a killed turn the
+ *        bare-word gate skipped — the QD dead-letter family would nudge by
+ *        error). A message the classifier falls through to a raw excerpt is
+ *        NOT a life-abort (a bare 'timeout' or a genuine tool error stays
+ *        actionable — only a KNOWN class suppresses). PURE. */
 function isNudgeLifeAbort(exec: unknown, result: { isError: boolean; error?: { message?: string } }): boolean {
   if ((exec as { aborted?: unknown } | null)?.aborted === true) return true
   if ((result as { aborted?: unknown } | null)?.aborted === true) return true
   const message = typeof result?.error?.message === 'string' ? result.error.message : ''
-  return /\b(?:aborted?|interrupted?|killed|cancel(?:led?)?)\b/i.test(message)
+  const tool = (exec as { name?: unknown } | null)?.name
+  return NUDGE_LIFE_ABORT_CLASSES.has(classifyToolAbortReason(message, typeof tool === 'string' ? tool : ''))
 }
 
 /** LANE WFD (m-1416/QH — org.pacing) — the FRANJA GATE for a NEW nudge
@@ -1357,9 +1372,13 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         if (best === undefined) return // nothing to settle
         id = best.id
       }
-      const isAbort = isNudgeLifeAbort(exec, result as { isError: boolean; error?: { message?: string } })
+      const isAbort = result.isError && isNudgeLifeAbort(exec, result as { isError: boolean; error?: { message?: string } })
       const status = !result.isError ? 'settled' : isAbort ? 'aborted' : 'error'
-      const reason = isAbort ? classifyToolAbortReason(String(result.error?.message ?? ''), exec.name) : undefined
+      // The durable reason rides ONLY an ERRORED abort (a successful settle
+      // NEVER records a reason — the noise-guard contract — so the classifier
+      // fallback on an absent error message ('aborted') can never leak an
+      // 'aborted' reason into a success row).
+      const reason = !result.isError || !isAbort ? undefined : classifyToolAbortReason(String(result.error?.message ?? ''), exec.name)
       await appendToolIntent(stateDir, {
         kind: 'settle',
         id,

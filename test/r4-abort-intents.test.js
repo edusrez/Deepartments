@@ -399,6 +399,41 @@ test('R4-2 (abort READ-ONLY with durable reason): a read-only tool abort settles
 })
 
 // ===========================================================================
+// R4-O2-ALIGN (2026-09-06 — FEEDBACK-NUDGE O2 lane): the FULL abort family of
+// the R4 classifier (cancel / churn — 'the user cancelled…' / 'stopped' /
+// 'terminated' / 'restart') settles ABORTED with the durable class, the SAME
+// predicate (isNudgeLifeAbort) the nudge suppression aligns with — ONE
+// definition of a life-abort across the nudge and the settle.
+// ===========================================================================
+test('R4-O2-ALIGN (life-abort family settle): a CANCEL-class and a CHURN-class errored result settle the intent as ABORTED with the durable class reason (cancel / churn) — the isNudgeLifeAbort predicate now classifies the FULL classifier family (the nudge suppression and the settle share the same definition)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootPluginFromSrc(stateDir)
+    try {
+      await waitFor(() => env.agents.store.has('head-research-head'), 8000, 'research head materialized')
+      // (a) CANCEL class — an explicit user cancel settles ABORTED + cancel.
+      const cancelExec = intentExec('send_message', { to: ['research-head'], text: 'R4-O2 cancel' }, 'worker-2a')
+      await env.pluginCtx().waterfall('tools/pre-execute', cancelExec, () => Promise.resolve({ kind: 'allow' }))
+      await env.pluginCtx().waterfall('tools/post-execute', cancelExec, abortResult('the user cancelled ask_user_question'), () => Promise.resolve({ kind: 'accept' }))
+      // (b) CHURN class — a stopped/killed turn settles ABORTED + churn.
+      const churnExec = intentExec('dept_exec', { command: 'pwd' }, 'worker-2b')
+      await env.pluginCtx().waterfall('tools/pre-execute', churnExec, () => Promise.resolve({ kind: 'allow' }))
+      await env.pluginCtx().waterfall('tools/post-execute', churnExec, abortResult('the process was stopped'), () => Promise.resolve({ kind: 'accept' }))
+      const rows = await readToolIntents(stateDir)
+      const cancelSettle = rows.find((r) => r.kind === 'settle' && r.agent === 'worker-2a')
+      assert.ok(cancelSettle, 'the cancel-class intent settled')
+      assert.equal(cancelSettle.status, 'aborted', 'a cancel-class life-abort settles ABORTED')
+      assert.equal(cancelSettle.reason, 'cancel', 'the cancel settle carries the durable CANCEL class')
+      const churnSettle = rows.find((r) => r.kind === 'settle' && r.agent === 'worker-2b')
+      assert.ok(churnSettle, 'the churn-class intent settled')
+      assert.equal(churnSettle.status, 'aborted', 'a churn-class life-abort settles ABORTED')
+      assert.equal(churnSettle.reason, 'churn', 'the churn settle carries the durable CHURN class')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+// ===========================================================================
 // R4-3: the RE-DRIVE after an interruption — the write-ahead row is the
 // recoverable intent; re-issuing the SAME tool call with the persisted args
 // settles clean; an interruption between the two leaves the unsettled record.

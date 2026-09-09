@@ -23615,6 +23615,19 @@ test('FEEDBACK-NUDGE O2 (QD 09-03 — dedup + life-abort close): the SAME error 
       assert.equal(nudgeContexts(aborted.additionalContexts).length, 0, 'a life-abort (aborted turn) is never nudged')
       const interrupted = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('the operation was interrupted'), accept)
       assert.equal(nudgeContexts(interrupted.additionalContexts).length, 0, 'an interrupted-operation error is never nudged')
+      // (d) O2-ALIGN — the FULL abort family of the R4 classifier (tool-intents
+      // `classifyToolAbortReason`) is never nudged either — the cancel class
+      // and the churn/kill classes ('stopped' / 'terminated' / 'restart') are
+      // LIFE-ABORTS the regex-only gate missed (a killed turn reporting
+      // 'stopped' must not nudge — the QD dead-letter family).
+      const cancelled = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('the user cancelled ask_user_question'), accept)
+      assert.equal(nudgeContexts(cancelled.additionalContexts).length, 0, 'a user-cancel (cancel class) abort is never nudged')
+      const stoppedChurn = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('the process was stopped'), accept)
+      assert.equal(nudgeContexts(stoppedChurn.additionalContexts).length, 0, 'a stopped/killed (churn class) abort is never nudged')
+      const terminatedChurn = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('the operation was terminated'), accept)
+      assert.equal(nudgeContexts(terminatedChurn.additionalContexts).length, 0, 'a terminated (churn class) abort is never nudged')
+      const restartedChurn = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('agent restarted'), accept)
+      assert.equal(nudgeContexts(restartedChurn.additionalContexts).length, 0, 'a restarted (churn class) turn is never nudged')
     } finally {
       await dispose()
     }
@@ -23637,6 +23650,14 @@ test('FEEDBACK-NUDGE O2 (real path — dead-letter suppression): a RETIRED worke
         const liveExec = { name: 'dept_exec', arguments: { command: 'probe' }, agent: worker }
         const liveDecision = await pluginCtx().waterfall('tools/post-execute', liveExec, nudgeErrorResult('some live worker boom'), accept)
         assert.equal(nudgeContexts(liveDecision.additionalContexts).length, 1, 'a LIVE worker error still gets the nudge')
+
+        // (a2) a LIFE-ABORT errored result on the SAME live recipient (the
+        // O2-ALIGN family — cancel/churn/kill) is NEVER nudged even though the
+        // post is live and addressable: an abort de vida is not an actionable
+        // tool error, so the recipient must not receive a nudge for it.
+        const lifeExec = { name: 'dept_exec', arguments: { command: 'probe' }, agent: worker }
+        const liveAbortDecision = await pluginCtx().waterfall('tools/post-execute', lifeExec, nudgeErrorResult('the process was stopped (killed)'), accept)
+        assert.equal(nudgeContexts(liveAbortDecision.additionalContexts).length, 0, 'a LIFE-ABORT on a LIVE recipient is never nudged (not an actionable tool error)')
 
         // (b) retire the worker → a post-execute carrying the RETIRED post id is
         // NEVER nudged (no dead-letter splice — the QD-observed case).
