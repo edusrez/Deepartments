@@ -229,5 +229,16 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // curated dshd-core messages list, never `export *`), so the frozen count
   // stays 325 (verified: hasEarlierPendingPair is likewise ABSENT from
   // lib/invoke.js — the two gate helpers share the same non-surface status).
-  assert.equal(names.length, 325, `lib/invoke.js export count frozen at 325 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
+  // fb-235 (2026-09-09, R6 request-failure ATTRIBUTION — turn-error/finish-chunk
+  // additive fields): the pure attribution machinery reached the bundle surface
+  // through the SAME star re-export bridge src/core/health.ts — TWO new RUNTIME
+  // exports from dshd-health (deriveTurnErrorAttribution +
+  // TURN_ERROR_POOLER_JOIN_WINDOW_MS — the 2-min lastBare400 join window; the
+  // scanTurnErrorCaptures signature was EXTENDED with poolerState?, a
+  // count-neutral MOVE on the same name) — an INTENTIONAL, verified surface
+  // extension (325 → 327). The TurnErrorLastUsage / PoolerLastBare400Like
+  // interfaces are type-only and emit NO runtime export. The test import
+  // surface stays 234 (invoke.test.js imports nothing new from lib/invoke.js —
+  // tests 1 + 2 of this lock keep passing).
+  assert.equal(names.length, 327, `lib/invoke.js export count frozen at 327 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })
