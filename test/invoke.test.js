@@ -15796,7 +15796,18 @@ test('W8-c PART 1 turn-failure capture: a live post session whose turn/end ends 
     ]
     // fb-25 (b): the post snapshot carries its LIVE sessionId → the capture
     // threads the SESSION PROVENANCE (sessionId + turn) into the post-error row.
-    const posts = [{ postId: 'worker-a', sessionId: 'session-worker-a-1', retired: false, events, inboxTs: [] }]
+    // fb-251 — a SECOND post in the BARRE-400 class: its fatal turn/end carries
+    // { message:'400 status code (no body)', code:'CONTEXT_WINDOW_EXCEEDED' }
+    // (pi-ai MISCLASSIFIES the empty 400 as context overflow — the row must
+    // expose the classification next to the provider text).
+    const bare400Events = [
+      { type: 'turn/start', time: T0 - 50_000, data: { turn: 1 } },
+      { type: 'turn/end', time: T0 - 30_000, data: { turn: 1, reason: { kind: 'error', error: { message: '400 status code (no body)', code: 'CONTEXT_WINDOW_EXCEEDED' } } } }
+    ]
+    const posts = [
+      { postId: 'worker-a', sessionId: 'session-worker-a-1', retired: false, events, inboxTs: [] },
+      { postId: 'worker-b', sessionId: 'session-worker-b-1', retired: false, events: bare400Events, inboxTs: [] }
+    ]
     const tick = (nowMs) => runHealthDaemonTick({
       now: () => nowMs,
       stateDir,
@@ -15806,22 +15817,33 @@ test('W8-c PART 1 turn-failure capture: a live post session whose turn/end ends 
       notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
       logger: { warn: (m) => warns.push(m) }
     })
-    // Tick 1 → the turn error is captured → a post-error row + an ALERT.
+    // Tick 1 → the turn errors are captured → one post-error row each + an ALERT each.
     await tick(T0)
     const errors = readPostErrorsFile(stateDir)
-    assert.equal(errors.length, 1, 'one post-error row recorded for the turn error')
-    assert.equal(errors[0].postId, 'worker-a', 'the row carries the postId')
-    assert.match(errors[0].error, /malformed template reference/, 'the row carries the turn/end error message')
-    assert.equal(errors[0].sessionId, 'session-worker-a-1', 'fb-25 (b): the row carries the SESSION the failed turn belonged to')
-    assert.equal(errors[0].turn, 1, 'fb-25 (b): the row carries the failed TURN number')
-    assert.equal(alerts.length, 1, 'the daemon ALERTED the host')
+    assert.equal(errors.length, 2, 'one post-error row per errored post (worker-a + worker-b)')
+    // worker-a — the LEGACY capture shape (reason WITHOUT a code) is unchanged (R6).
+    const rowA = errors.find((r) => r.postId === 'worker-a')
+    assert.ok(rowA, 'the worker-a row is recorded')
+    assert.match(rowA.error, /malformed template reference/, 'the row carries the turn/end error message')
+    assert.equal(rowA.sessionId, 'session-worker-a-1', 'fb-25 (b): the row carries the SESSION the failed turn belonged to')
+    assert.equal(rowA.turn, 1, 'fb-25 (b): the row carries the failed TURN number')
+    assert.equal(rowA.code, undefined, 'fb-251 R6: a capture WITHOUT a code still writes the legacy {ts,postId,error} row (no code key)')
+    // worker-b — the BARRE-400 row EXPOSES the pi-ai classification next to the text.
+    const rowB = errors.find((r) => r.postId === 'worker-b')
+    assert.ok(rowB, 'the worker-b (bare-400) row is recorded')
+    assert.equal(rowB.error, '400 status code (no body)', 'fb-251: the row keeps the RAW provider error text')
+    assert.equal(rowB.code, 'CONTEXT_WINDOW_EXCEEDED', 'fb-251: the row ALSO carries the pi-ai classification code (round-trip: capture → append → readPostErrorsFile)')
+    assert.equal(rowB.sessionId, 'session-worker-b-1', 'the bare-400 row carries its session provenance')
+    assert.equal(rowB.turn, 1, 'the bare-400 row carries its turn')
+    assert.equal(alerts.length, 1, 'the daemon ALERTED the host with ONE aggregate frame for the tick (both errored posts ride the same bus frame)')
     assert.match(alerts[0].frame, /post-error: worker-a/, 'the alert names the failed post')
+    assert.match(alerts[0].frame, /post-error: worker-b/, 'the SAME frame ALSO names the bare-400 post (a distinct finding, one aggregate alert)')
     assert.match(alerts[0].frame, /\[session session-worker-a-1 turn 1 \(\d{2}:\d{2}Z\)\]/, 'fb-25 (b): the alert frame shows the SESSION PROVENANCE — the host sees the error belonged to that (possibly archived) session')
     assert.equal(warns.length, 0, 'a fully-resolvable capture+alert emits no warns')
-    // Tick 2 (the SAME turn, inside the fresh-window) → NO double row, NO re-alert.
+    // Tick 2 (the SAME turns, inside the fresh-window) → NO double rows, NO re-alert.
     await tick(T0 + 5000)
-    assert.equal(readPostErrorsFile(stateDir).length, 1, 'the same turn is NOT double-captured')
-    assert.equal(alerts.length, 1, 'a second tick does NOT re-alert (capture+alert dedupe)')
+    assert.equal(readPostErrorsFile(stateDir).length, 2, 'the same turns are NOT double-captured (dedupe holds for BOTH posts)')
+    assert.equal(alerts.length, 1, 'a second tick does NOT re-alert (capture+alert dedupe — still the ONE original frame)')
   })
 })
 
@@ -15919,6 +15941,19 @@ test('W8-c PART 1 scanTurnErrorCaptures: tails a live session log for the MOST-R
   assert.match(capture.error, /no provider/, 'the most-recent ERROR turn is returned (not the ok one)')
   assert.equal(scanTurnErrorCaptures([{ type: 'turn/end', time: T0, data: { turn: 1, reason: { kind: 'ok' } } }], 'p2'), undefined, 'a non-error turn/end is NOT captured')
   assert.equal(scanTurnErrorCaptures([], 'p3'), undefined, 'an empty log → no capture (never throws)')
+  // fb-251 — the BARRE-400 class: the fatal turn/end carries
+  // { message:'400 status code (no body)', code:'CONTEXT_WINDOW_EXCEEDED' }
+  // (pi-ai MISCLASSIFIES the empty 400 as context overflow — overflow.js:60
+  // Cerebras pattern). The capture MUST keep the classification next to the
+  // raw provider text so the post-error row exposes it.
+  const bare400 = scanTurnErrorCaptures([
+    { type: 'turn/end', time: T0, data: { turn: 1, reason: { kind: 'error', error: { message: '400 status code (no body)', code: 'CONTEXT_WINDOW_EXCEEDED' } } } }
+  ], 'p-bare400')
+  assert.equal(bare400?.error, '400 status code (no body)', 'fb-251: the capture keeps the RAW provider error text')
+  assert.equal(bare400?.code, 'CONTEXT_WINDOW_EXCEEDED', 'fb-251: the capture ALSO keeps the pi-ai classification code')
+  // R6 additive: a reason WITHOUT a code → the capture omits code (undefined).
+  const noCode = scanTurnErrorCaptures([{ type: 'turn/end', time: T0, data: { turn: 1, reason: { kind: 'error', message: 'no provider' } } }], 'p-nocode')
+  assert.equal(noCode?.code, undefined, 'fb-251 R6: a reason WITHOUT a code → the capture carries NO code key')
 })
 
 test('W8-c PART 2 stale-live watchdog: a catalog-live post with pending addressed messages AND no session writes for >= N min is a STALLED post (alerts once/30min, re-alerts after the window); does NOT alert with no pending messages or when NOT silent', async () => {

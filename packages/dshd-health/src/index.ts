@@ -116,6 +116,14 @@ export interface PostErrorEntry {
   messageId?: string
   /** The captured error message. */
   error: string
+  /** fb-251 — the captured error CLASSIFICATION (the turn/end failure code,
+   * e.g. CONTEXT_WINDOW_EXCEEDED) when the provider error carried one. The
+   * bare-400 class: pi-ai MISCLASSIFIES a «400 status code (no body)» as
+   * CONTEXT_WINDOW_EXCEEDED (the Cerebras pattern in overflow.js:60 matches
+   * ANY provider's empty 400 — not a real overflow), so recording the code
+   * NEXT to the raw provider text exposes the classification instead of
+   * hiding it. Additive (R6) — the {ts,postId,error} shape never changes. */
+  code?: string
   /** fb-25 (b) — the SESSION PROVENANCE of the failed turn (when known): the
    * session id whose event log carried the turn/end error. The turn-error
    * capture attaches it from the post's live session at capture time, so the
@@ -172,6 +180,7 @@ function parsePostErrorLines(lines: readonly string[]): PostErrorEntry[] {
       postId: entry.postId,
       ...(typeof entry.messageId === 'string' ? { messageId: entry.messageId } : {}),
       error: typeof entry.error === 'string' ? entry.error : '',
+      ...(typeof entry.code === 'string' ? { code: entry.code } : {}),
       ...(typeof entry.sessionId === 'string' ? { sessionId: entry.sessionId } : {}),
       ...(typeof entry.turn === 'number' && Number.isFinite(entry.turn) ? { turn: entry.turn } : {}),
       ...(typeof entry.jobId === 'string' ? { jobId: entry.jobId } : {}),
@@ -1745,6 +1754,14 @@ export interface TurnErrorCapture {
   postId: string
   /** The captured error message (the turn/end reason message/code). */
   error: string
+  /** fb-251 — the captured error CLASSIFICATION (the turn/end failure code,
+   * e.g. CONTEXT_WINDOW_EXCEEDED) when the reason carried one (the error
+   * surface's code — the LlmError failure.code, errorSurface.code). The
+   * bare-400 class: pi-ai classifies «400 status code (no body)» as
+   * CONTEXT_WINDOW_EXCEEDED (a MISCLASSIFICATION, not a real overflow) — the
+   * row exposing it next to the provider text makes the class legible.
+   * Absent → omitted (R6). */
+  code?: string
   /** The turn/end event ts (ms epoch). */
   ts: number
   /** fb-25 (b) — the TURN NUMBER of the captured turn/end event (the turn that
@@ -1804,12 +1821,27 @@ export function scanTurnErrorCaptures(events: readonly HealthSessionEvent[], pos
             : (typeof errorSurface.code === 'string' && errorSurface.code !== '')
               ? errorSurface.code
               : `${String(kind ?? 'error')} (turn ${String(turn ?? '?')})`
+    // fb-251 — the error CLASSIFICATION: prefer the error surface's code (the
+    // LlmError failure.code / the nested reason.error.code the harness writes —
+    // dsh-agent-loop lib/index.js:582-588), falling back to the top-level
+    // reason.code (the backward-compat field). The bare-400 class: the fatal
+    // turn/end carries { message:'400 status code (no body)',
+    // code:'CONTEXT_WINDOW_EXCEEDED' } — a pi-ai MISCLASSIFICATION (overflow.js
+    // Cerebras pattern) the post-error row must expose NEXT to the provider
+    // text. Absent → the capture omits code (R6).
+    const code =
+      (typeof errorSurface.code === 'string' && errorSurface.code !== '')
+        ? errorSurface.code
+        : (typeof reason.code === 'string' && reason.code !== '')
+          ? reason.code
+          : undefined
     return {
       postId,
       error: message,
       ts,
       ...(typeof turn === 'number' && Number.isFinite(turn) ? { turn } : {}),
       ...(typeof sessionId === 'string' && sessionId !== '' ? { sessionId } : {}),
+      ...(code !== undefined ? { code } : {}),
       key: `${postId}:turn-error:${typeof turn === 'number' ? String(turn) : '?'}:${ts}`
     }
   }
@@ -6986,6 +7018,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
             ts: capture.ts,
             postId: capture.postId,
             error: capture.error,
+            ...(capture.code !== undefined ? { code: capture.code } : {}),
             ...(capture.sessionId !== undefined ? { sessionId: capture.sessionId } : {}),
             ...(capture.turn !== undefined ? { turn: capture.turn } : {})
           }, nowMs)
@@ -7020,6 +7053,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
               ts: capture.ts,
               postId: capture.postId,
               error: capture.error,
+              ...(capture.code !== undefined ? { code: capture.code } : {}),
               ...(capture.sessionId !== undefined ? { sessionId: capture.sessionId } : {}),
               ...(capture.turn !== undefined ? { turn: capture.turn } : {})
             }, nowMs)
