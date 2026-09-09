@@ -3570,6 +3570,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     defaultWorkerTitle,
     workerReasoningContentPreflightError,
     workerPoolerDispatchBlockError,
+    // LANE GATE DURO franja (post-mortem PEAK 2026-09-09, ítem 1): the shared
+    // step-0c PEAK gate + annotated-override ledger (dept_post_create's seam —
+    // threaded through the toolsDeps.spawn Pick to the tools factory).
+    franjaDispatchGate,
     resolveRoleTemplate
   } = spawnSurface
 
@@ -3647,7 +3651,11 @@ export function applyInvoke(ctx: Context, config: Config) {
       departmentJobExists,
       defaultWorkerTitle,
       workerReasoningContentPreflightError,
-      workerPoolerDispatchBlockError
+      workerPoolerDispatchBlockError,
+      // LANE GATE DURO franja (post-mortem PEAK 2026-09-09, ítem 1): the
+      // step-0c PEAK gate + annotated-override ledger (dept_post_create's
+      // shared seam — the tools factory wires it through this member).
+      franjaDispatchGate
     },
     // SUB-BATCH 3: 15 new DIRECT deps (all defined BEFORE this position — the
     // catalog registry, the QD dice probability, the live head-progress/host

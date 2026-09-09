@@ -504,6 +504,9 @@ export interface ToolsFactoryDeps {
     | 'defaultWorkerTitle'
     | 'workerReasoningContentPreflightError'
     | 'workerPoolerDispatchBlockError'
+    // LANE GATE DURO franja (post-mortem PEAK 2026-09-09, ítem 1): the step-0c
+    // PEAK gate + annotated-override ledger (dept_post_create's seam).
+    | 'franjaDispatchGate'
   >
   /** THE durable post/host catalog store (BY REFERENCE — the registry the
    * retire/archive + the durable-registry reconcile closures consume:
@@ -1138,7 +1141,11 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       departmentJobExists,
       defaultWorkerTitle,
       workerReasoningContentPreflightError,
-      workerPoolerDispatchBlockError
+      workerPoolerDispatchBlockError,
+      // LANE GATE DURO franja (post-mortem PEAK 2026-09-09, ítem 1): the SHARED
+      // step-0c PEAK gate + annotated-override ledger — dept_post_create (the
+      // legacy head tool) uses the SAME seam as the two spawn engines.
+      franjaDispatchGate
     },
     registry,
     qualityWorkerInspectProbability,
@@ -2019,7 +2026,8 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           postId: { type: 'string', required: true, description: 'Short slug for the worker, e.g. "researcher-alpha" (unique; not already registered).' },
           role: { type: 'string', required: true, description: 'The worker role, e.g. "rank-and-file researcher".' },
           prompt: { type: 'string', description: 'Initial assignment to the worker (alias of firstMessage).' },
-          firstMessage: { type: 'string', description: 'The worker\'s initial assignment, delivered as a durable bus message addressed to it.' }
+          firstMessage: { type: 'string', description: 'The worker\'s initial assignment, delivered as a durable bus message addressed to it.' },
+          peakOverride: { type: 'string', description: 'LANE GATE DURO franja (org.pacing): an ANNOTATED override — a NON-EMPTY justification that authorizes this dispatch inside a PEAK window. Without it a dispatch in PEAK is BLOCKED (new spawns/despachos pause in PEAK); with it the dispatch proceeds AND the override is recorded durably in <stateDir>/pacing-overrides.jsonl (auditable — every exemption leaves a trace; an empty reason is never accepted). Only relevant inside PEAK.' }
         },
         output: {
           schema: {
@@ -2080,6 +2088,20 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           // spawns a worker whose first call would 429/503.
           const poolerDispatchBlock = workerPoolerDispatchBlockError()
           if (poolerDispatchBlock !== undefined) throw new Error(`[deepartments] ${poolerDispatchBlock}`)
+          // 0c. LANE GATE DURO franja (post-mortem PEAK 2026-09-09, ítem 1): the
+          // LEGACY head tool shares the SAME PEAK gate + annotated-override
+          // ledger as the two spawn engines (spawn.franjaDispatchGate — ONE
+          // closure, one audit ledger). ALWAYS gated (dept_post_create is a
+          // HEAD tool — no daemon route calls it). EARLY — BEFORE any
+          // agents.create: nothing is registered/materialized.
+          const franjaGateError = await franjaDispatchGate({
+            tool: 'dept_post_create',
+            peakOverride: args.peakOverride,
+            agentId: headId,
+            departmentId: department?.id ?? '',
+            postId: args.postId
+          })
+          if (franjaGateError !== undefined) throw new Error(franjaGateError)
           const handle = await agents.create({
             sessionId: String(SessionId(sessionId)),
             meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: WORKER_PRESET_ID },
@@ -2292,7 +2314,8 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         name: 'dept_job_run',
         description: 'Execute ONE versioned JOB of YOUR department (spec 004 §5.4 — manual execution; the W1 scheduler daemon uses the SAME engine for cron auto-fires): read the job definition <jobId>.md in the department jobDir (config org.departments[].jobDir; default <repoRoot>/docs/departments/<your-department-id>/jobs), validate its role against presets/departments/<your-department>/<role>.md, and materialize a WORKER exactly like dept_worker_spawn with role = the definition role, task = the JOB BODY (the full concrete assignment), jobId recorded, slug = the job id (deduped -2, -3… including retired), title = the HUMAN frontmatter title. Returns the worker id + session id + title + job id + the definition path. IDEMPOTENCY: a job already running (a LIVE, non-retired job worker of your department with that jobId) is NOT duplicated — it errors `job already running: <workerId>` (retire it explicitly with dept_worker_retire to restart). Missing job / broken frontmatter / unknown role → loud error (a versioned definition with a syntax error must fail the run, never spawn a task-less worker). `schedule` does NOT gate this run: a manual dept_job_run executes the job regardless of its `schedule`, and a cron-scheduled job auto-fires via the scheduler daemon. Registered ONLY in the head own-layer.',
         parameters: {
-          jobId: { type: 'string', required: true, description: 'The job definition id (the file <jobId>.md in the department jobDir — e.g. "monitor-dsh-updates").' }
+          jobId: { type: 'string', required: true, description: 'The job definition id (the file <jobId>.md in the department jobDir — e.g. "monitor-dsh-updates").' },
+          peakOverride: { type: 'string', description: 'LANE GATE DURO franja (org.pacing): an ANNOTATED override — a NON-EMPTY justification that authorizes this run inside a PEAK window. Without it a run in PEAK is BLOCKED (new spawns/despachos pause in PEAK); with it the run proceeds AND the override is recorded durably in <stateDir>/pacing-overrides.jsonl (auditable — every exemption leaves a trace; an empty reason is never accepted). Only relevant inside PEAK.' }
         },
         output: {
           schema: {
@@ -2320,9 +2343,12 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           if (department === void 0) throw new Error(`[deepartments] dept_job_run: head "${headId}" has no CONFIGURED department — the job directory cannot be resolved`)
           const jobId = String(args.jobId ?? '').trim()
           if (jobId === '') throw new Error('[deepartments] dept_job_run: `jobId` is required')
-          // The SHARED job-run engine — the SAME path the W1 scheduler uses for
-          // an automatic fire (no drift between manual and auto execution).
-          const result = await runJobForDepartment(department, headEntry, jobId, { callerSessionId: agent.id as string, signal: exec.signal })
+          // LANE GATE DURO franja (post-mortem PEAK 2026-09-09, ítem 1): the
+          // head-tool route ARMS the engine's step-0c PEAK gate (`gatePacing:
+          // true` — the W1 scheduler auto-fires pass NO flag and stay EXEMPT by
+          // design, D1) and threads the annotated override (audited durably in
+          // pacing-overrides.jsonl by the engine).
+          const result = await runJobForDepartment(department, headEntry, jobId, { callerSessionId: agent.id as string, signal: exec.signal, gatePacing: true, peakOverride: args.peakOverride })
           // O3(a) (VALLE 09-07 — job-runs visibility): stamp the MANUAL re-run
           // in the SAME `<stateDir>/job-runs-state.json` ledger the scheduler
           // tick writes for AUTO-runs (flat {jobId: lastRunAtMs} — the SAME
@@ -2354,7 +2380,8 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           role: { type: 'string', required: true, description: 'The role template name, e.g. "researcher" — must be a file presets/departments/<your-department>/<role>.md.' },
           task: { type: 'string', description: 'The one-off assignment: injected into the worker persona AND delivered as its first bus message.' },
           jobId: { type: 'string', description: 'Set when the worker runs a versioned job (F4); becomes the slug base and is recorded on the entry.' },
-          title: { type: 'string', description: 'Sidebar row title (overrides the default "<RoleDisplay>: <mission>" — the role capitalized + the first line of the task, cut to ~70 chars).' }
+          title: { type: 'string', description: 'Sidebar row title (overrides the default "<RoleDisplay>: <mission>" — the role capitalized + the first line of the task, cut to ~70 chars).' },
+          peakOverride: { type: 'string', description: 'LANE GATE DURO franja (org.pacing): an ANNOTATED override — a NON-EMPTY justification that authorizes this spawn inside a PEAK window. Without it a spawn in PEAK is BLOCKED (new spawns/despachos pause in PEAK); with it the spawn proceeds AND the override is recorded durably in <stateDir>/pacing-overrides.jsonl (auditable — every exemption leaves a trace; an empty reason is never accepted). Only relevant inside PEAK.' }
         },
         output: {
           schema: {
@@ -2383,9 +2410,11 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           if (department === void 0) throw new Error(`[deepartments] dept_worker_spawn: head "${headId}" has no CONFIGURED department — the role template tree (presets/departments/<department-id>/) cannot be resolved`)
           const role = String(args.role ?? '').trim()
           if (role === '') throw new Error('[deepartments] dept_worker_spawn: `role` is required (a role template name, e.g. "researcher")')
-          // The SHARED worker-spawn engine — the EXACT path dept_job_run uses and
-          // the parallel-monitor daemon uses for its researcher workers, so there
-          // is no tool-vs-scheduler-vs-daemon drift on registration/pin/delivery.
+          // LANE GATE DURO franja (post-mortem PEAK 2026-09-09, ítem 1): the
+          // head-tool route ARMS the engine's step-0c PEAK gate (`gatePacing:
+          // true` — the parallel-monitor daemon passes NO flag and stays EXEMPT
+          // by design, D1) and threads the annotated override (audited durably
+          // in pacing-overrides.jsonl by the engine).
           const result = await spawnWorkerForDepartment(department, headEntry, {
             role,
             task: args.task,
@@ -2393,7 +2422,9 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
             ...(args.title !== void 0 ? { title: String(args.title) } : {}),
             callerAgentId: agent.id as string,
             senderSessionId: agent.id as string,
-            signal: exec.signal
+            signal: exec.signal,
+            gatePacing: true,
+            peakOverride: args.peakOverride
           })
           return { ...result, activeMembers: activeCatalogMembers() }
         }

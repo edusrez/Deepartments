@@ -49,7 +49,7 @@ const MIRROR_SITES = Object.freeze([
   { file: 'packages/dshd-orchestration/src/delivery.ts', declAt: 334, role: 'origin' },
   { file: 'packages/dshd-orchestration/src/tools.ts', declAt: 278, role: 'mirror' },
   { file: 'packages/dshd-orchestration/src/boot.ts', declAt: 115, role: 'mirror' },
-  { file: 'packages/dshd-orchestration/src/spawn.ts', declAt: 86, role: 'mirror' }
+  { file: 'packages/dshd-orchestration/src/spawn.ts', declAt: 93, role: 'mirror' }
 ])
 
 const USERMESSAGE_DECL = 'followup(message: UserMessage): void'

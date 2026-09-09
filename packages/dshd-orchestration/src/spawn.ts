@@ -33,7 +33,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
-import { readFile } from 'node:fs/promises'
+import { readFile, appendFile, mkdir, stat, rename, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
@@ -57,6 +57,13 @@ import {
   resolvePositiveKnob
 } from 'dshd-health'
 import { sanitizePromptLiterals } from 'dshd-core'
+// LANE GATE DURO franja (post-mortem PEAK 2026-09-09, ítem 1): the SAME pure
+// UTC pacing machinery the wake-pack franja line, the health daemon and the
+// wfd-nudge gate use (`isPeakAt` + `pacingWindowFromConfig` + `pacingStateAt`
+// — ONE source of truth, zero drift; the P4 `deepartments.pacing` policy
+// service is resolved service-first at the seam with this pure fallback).
+import { isPeakAt, pacingWindowFromConfig, pacingStateAt } from 'dshd-core'
+import type { PacingConfigLike, PacingWindowOptions } from 'dshd-core'
 import type { CoordinatorConfig, DepartmentConfig, Config } from './org-types.js'
 import type { MessagesStore } from 'dshd-core'
 import type { DeliverySurface } from './delivery.js'
@@ -184,13 +191,42 @@ export interface SpawnSurface {
     department: DepartmentConfig,
     headEntry: PostEntry,
     jobId: string,
-    opts?: { callerSessionId?: string; signal?: AbortSignal }
+    opts?: {
+      callerSessionId?: string
+      signal?: AbortSignal
+      /** LANE GATE DURO franja: `true` arms the PEAK gate (the dept_job_run
+       * tool route); ABSENT/undefined = the daemon routes (scheduler auto-
+       * fires) stay EXEMPT by design (D1 — they pass no flag). */
+      gatePacing?: boolean
+      /** The ANNOTATED override: a NON-EMPTY justification that authorizes
+       * this dispatch inside a PEAK window (recorded durably in
+       * pacing-overrides.jsonl). Absent in PEAK → the dispatch is BLOCKED. */
+      peakOverride?: string
+      /** Injectable clock (tests; production defaults to Date.now()). */
+      nowMs?: number
+    }
   ) => Promise<{ workerId: string; sessionId: string; title: string; jobId: string; role: string; jobPath: string }>
   /** Spawn a DISPOSABLE department worker — the shared dept_worker_spawn engine. */
   spawnWorkerForDepartment: (
     department: DepartmentConfig,
     headEntry: PostEntry,
-    opts: { role: string; task?: string; title?: string; jobId?: string; callerAgentId?: string; senderSessionId?: string; signal?: AbortSignal }
+    opts: {
+      role: string
+      task?: string
+      title?: string
+      jobId?: string
+      callerAgentId?: string
+      senderSessionId?: string
+      signal?: AbortSignal
+      /** LANE GATE DURO franja: `true` arms the PEAK gate (the
+       * dept_worker_spawn tool route); ABSENT/undefined = the parallel-monitor
+       * daemon route stays EXEMPT by design (D1 — it passes no flag). */
+      gatePacing?: boolean
+      /** The ANNOTATED override (a NON-EMPTY reason; recorded durably). */
+      peakOverride?: string
+      /** Injectable clock (tests; production defaults to Date.now()). */
+      nowMs?: number
+    }
   ) => Promise<{ workerId: string; sessionId: string; title: string }>
   /** The runtime calendar state (always `{entries:[...]}`, never throws). */
   readCalendar: () => CalendarState
@@ -211,6 +247,32 @@ export interface SpawnSurface {
    * design). Consumed by the delivery factory (materializePost) so a restarted
    * role-template worker is never silently messaging-only. */
   resolveRoleTemplate: (departmentId: string, role: string) => Promise<{ id: string; title: string; tools?: string[]; persona: string; path: string } | undefined>
+  /** LANE GATE DURO franja — the step-0c PEAK gate + the ANNOTATED-override
+   * ledger for NEW head spawns/dispatches (the dept_worker_spawn /
+   * dept_job_run engines AND the legacy dept_post_create tool share ONE
+   * closure — a future caller of the seam inherits the control). Returns the
+   * EARLY error string when the dispatch is BLOCKED (undefined = pass); when
+   * the override authorized the dispatch, the durable ledger row is written
+   * (<stateDir>/pacing-overrides.jsonl) + a logger.warn — D3: NEVER a message.
+   * An empty reason is never accepted: in PEAK it returns the
+   * non-empty-justification BLOCK error (a silent override is impossible). */
+  franjaDispatchGate: (args: {
+    /** The authorizing tool name ('dept_job_run' | 'dept_worker_spawn' |
+     * 'dept_post_create'). */
+    tool: string
+    /** The ANNOTATED override (NON-EMPTY justification). */
+    peakOverride?: string
+    /** Injectable clock (tests; production defaults to Date.now()). */
+    nowMs?: number
+    /** The authorizing head entry postId. */
+    agentId: string
+    /** The dispatch department id. */
+    departmentId: string
+    /** The worker postId when known at gate time. */
+    postId?: string
+    /** The jobId when the dispatch runs a versioned job. */
+    jobId?: string
+  }) => Promise<string | undefined>
 }
 
 /** Disposer closure per tool the head own-layer registers. The moved zone
@@ -221,6 +283,102 @@ export interface SpawnSurface {
  * (the export-parity surface of lib/invoke.js stays 259 — a type-only export
  * never emits to the compiled lib). */
 export type HeadToolDisposers = { dispose: () => void }
+
+// =============================================================================
+// LANE GATE DURO franja (post-mortem PEAK 2026-09-09, ítem 1 — D-Q6: «no
+// suplir la sanción temporal con autorizaciones ajenas»). The HARD PEAK gate
+// for NEW head spawns/dispatches with an ANNOTATED override: the PURE franja
+// predicate + the durable override ledger live here (module-scope; the
+// factory-local gate closure `franjaDispatchBlock`/`franjaDispatchGate` in the
+// factory body consumes them). The predicate is the EXACT semantic twin of the
+// wfd-nudge gate `nudgeFranjaDeferred` (tools.ts) — same dshd-core machinery:
+//   - org.pacing ABSENT → FALSE (the pre-pacing legacy: an undeclared franja
+//     cannot gate — no-op, 0 regression);
+//   - enabled === false → FALSE (the explicit knob DISARM restores the
+//     pre-pacing behavior);
+//   - else → PEAK ⇔ isPeakAt(nowMs, pacingWindowFromConfig(pacing)) (the code
+//     defaults Mon-Fri hours {1,2,3,6,7,8,9} UTC ± the 30-min edge buffer).
+// =============================================================================
+
+/** The override-ledger filename under the runtime stateDir (audit evidence the
+ * QD digest reads — D3: ledger + logger ONLY, never a message on override). */
+export const PACING_OVERRIDES_FILE = 'pacing-overrides.jsonl'
+
+/** The bounded record cap of pacing-overrides.jsonl (the tool-intents sidecar
+ * trim discipline: append + trim the OLDEST rows once the file exceeds the
+ * cap — a frequency audit window is far below this cap). */
+export const PACING_OVERRIDES_MAX_LINES = 2000
+
+/** The conservative BYTE guard for the trim (2 KiB per row bound — the
+ * append hot path never reads the whole file per write). */
+export const PACING_OVERRIDES_MAX_BYTES = PACING_OVERRIDES_MAX_LINES * 2048
+
+/** ONE durable override row of the pacing-overrides.jsonl ledger:
+ * {ts, tool, agentId, departmentId, postId|jobId, reason, franja}. */
+export interface PacingOverrideRow {
+  /** The gate decision instant (ms epoch). */
+  ts: number
+  /** The tool whose dispatch the override authorized
+   * ('dept_job_run' | 'dept_worker_spawn' | 'dept_post_create'). */
+  tool: string
+  /** The AUTHORIZING head (the headEntry postId — who signed the override). */
+  agentId: string
+  /** The department of the dispatch. */
+  departmentId: string
+  /** The worker postId when known at gate time (dept_worker_spawn without a
+   * jobId uses the raw role as the slug base; dept_post_create its postId). */
+  postId?: string
+  /** The jobId when the dispatch runs a versioned job (dept_job_run; or the
+   * jobId of a job worker). */
+  jobId?: string
+  /** The NON-EMPTY justification (an override without a reason never passes). */
+  reason: string
+  /** The franja of the instant: always peak:true here (an override only ever
+   * fires inside PEAK) + the «hasta HH:MM UTC» + the merged peak span. */
+  franja: { peak: true; untilHhMm: string; span: string }
+}
+
+/** PURE — the franja GATE predicate: `true` ⇔ the org is inside a PEAK window
+ * at `nowMs`. EXACT semantic twin of `nudgeFranjaDeferred` (tools.ts) — the
+ * same source of truth, zero drift: ABSENT org.pacing → the pre-pacing legacy
+ * (false — an undeclared franja cannot gate); enabled:false → the DISARM
+ * (false — pre-pacing restore); else → isPeakAt. `nowMs` paramétrico → the
+ * tests inject a fixed clock (hermetic). NEVER throws (a malformed window
+ * falls back to the code defaults inside the pacing module). */
+export function franjaGateDeferred(pacing: PacingConfigLike | undefined, nowMs: number): boolean {
+  if (pacing === undefined) return false
+  if (pacing.enabled === false) return false
+  return isPeakAt(new Date(nowMs), pacingWindowFromConfig(pacing))
+}
+
+/** APPEND ONE override row to the ledger (mkdir + appendFile — the
+ * tool-intents sidecar write-ahead pattern tool-intents.ts:149-176). Then,
+ * when the file exceeds PACING_OVERRIDES_MAX_LINES, REWRITE atomically
+ * (tmp + rename) keeping the newest rows. NEVER throws (the audit write must
+ * never break the already-approved dispatch). */
+export async function appendPacingOverrideLedger(stateDir: string, row: PacingOverrideRow): Promise<void> {
+  try {
+    const filePath = path.join(stateDir, PACING_OVERRIDES_FILE)
+    await mkdir(path.dirname(filePath), { recursive: true })
+    await appendFile(filePath, JSON.stringify(row) + '\n', 'utf8')
+    let size = 0
+    try {
+      size = (await stat(filePath)).size
+    } catch {
+      return
+    }
+    if (size <= PACING_OVERRIDES_MAX_BYTES) return
+    const text = await readFile(filePath, 'utf8')
+    const lines = text.split('\n').filter((line) => line.trim() !== '')
+    if (lines.length <= PACING_OVERRIDES_MAX_LINES) return
+    const kept = lines.slice(-PACING_OVERRIDES_MAX_LINES)
+    const tmpPath = `${filePath}.tmp-${Date.now()}`
+    await writeFile(tmpPath, kept.join('\n') + '\n', 'utf8')
+    await rename(tmpPath, filePath)
+  } catch {
+    /* best-effort: the audit write must never break the approved dispatch */
+  }
+}
 
 /**
  * Build the SPAWN ORCHESTRATION surface on the apply fiber (AGENTS.md rule 4
@@ -401,6 +559,84 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     return block === undefined ? undefined : block.reason
   }
 
+  /** LANE GATE DURO franja (post-mortem PEAK 2026-09-09, ítem 1 — D-Q6 «no
+   * suplir la sanción temporal con autorizaciones ajenas»): the P4
+   * substitutable pacing policy, service-first (the health daemon consumes the
+   * SAME service by tick, dshd-health:7820-7826); absent → the pure fallback
+   * (R6). NOTE: the window IS passed to the service (the surface accepts
+   * options — the DEFAULT service honors the org.pacing window; a substituted
+   * policy decides itself). */
+  const pacingSurface = ctx.get('deepartments.pacing', false) as
+    | { isPeakAt(date: Date, options?: PacingWindowOptions): boolean }
+    | undefined
+
+  /** LANE GATE DURO franja — the PEAK-gate verdict at the dispatch instant:
+   *   - org.pacing ABSENT → pass (the pre-pacing legacy — 0 regression for
+   *     every composition without the knob);
+   *   - enabled === false → pass (the explicit knob DISARM);
+   *   - VALLE → pass;
+   *   - PEAK without a NON-EMPTY peakOverride → BLOCKED (the EARLY error that
+   *     cites the franja + the peakOverride parameter — nothing is ever
+   *     created/registered before this step);
+   *   - PEAK with a NON-EMPTY peakOverride → the ANNOTATED override (the
+   *     caller records it durably — an override is the exception of
+   *     emergency/recovery, and every one leaves an auditable trace). */
+  const franjaDispatchBlock = (opts: { peakOverride?: string; nowMs?: number }): { blocked?: string; override?: { reason: string; nowMs: number; untilHhMm: string; span: string } } => {
+    const pacing = config.org?.pacing
+    if (pacing === undefined) return {}
+    if (pacing.enabled === false) return {}
+    const nowMs = opts.nowMs ?? Date.now()
+    const window = pacingWindowFromConfig(pacing)
+    const peak = pacingSurface !== undefined
+      ? pacingSurface.isPeakAt(new Date(nowMs), window)
+      : isPeakAt(new Date(nowMs), window)
+    if (!peak) return {}
+    const reason = String(opts.peakOverride ?? '').trim()
+    if (reason === '') {
+      const state = pacingStateAt(new Date(nowMs), window)
+      return {
+        blocked: `[deepartments] franja PEAK (org.pacing): nuevos spawns/despachos pausados en PEAK (hasta ${state.untilHhMm} UTC) — autoriza con el parámetro peakOverride y una justificación NO vacía (cada override queda anotado y auditable en pacing-overrides.jsonl)`
+      }
+    }
+    const state = pacingStateAt(new Date(nowMs), window)
+    return { override: { reason, nowMs, untilHhMm: state.untilHhMm, span: state.span } }
+  }
+
+  /** LANE GATE DURO franja — the step-0c gate seam (shared by the two spawn
+   * engines + the legacy dept_post_create tool): BLOCKED → the EARLY error
+   * string (the caller throws it); pass → undefined; an override used →
+   * durable ledger row + logger.warn (D3 — never a message; the QD digest
+   * audits pacing-overrides.jsonl, the host reads it in syncs). FAIL-SOFT
+   * discipline: a ledger persist failure NEVER rejects the already-approved
+   * dispatch (the append is best-effort — the tool proceeds). */
+  const franjaDispatchGate = async (args: {
+    tool: string
+    peakOverride?: string
+    nowMs?: number
+    agentId: string
+    departmentId: string
+    postId?: string
+    jobId?: string
+  }): Promise<string | undefined> => {
+    const verdict = franjaDispatchBlock({ peakOverride: args.peakOverride, nowMs: args.nowMs })
+    if (verdict.blocked !== undefined) return verdict.blocked
+    if (verdict.override !== undefined) {
+      const row: PacingOverrideRow = {
+        ts: verdict.override.nowMs,
+        tool: args.tool,
+        agentId: args.agentId,
+        departmentId: args.departmentId,
+        ...(args.postId !== undefined ? { postId: args.postId } : {}),
+        ...(args.jobId !== undefined ? { jobId: args.jobId } : {}),
+        reason: verdict.override.reason,
+        franja: { peak: true, untilHhMm: verdict.override.untilHhMm, span: verdict.override.span }
+      }
+      await appendPacingOverrideLedger(stateDir, row)
+      ctx.logger.warn(`[deepartments] franja PEAK (org.pacing): OVERRIDE anotado — ${args.tool} (${args.postId ?? args.jobId ?? ''}) autorizado por ${args.agentId} — «${verdict.override.reason}» — fila en ${PACING_OVERRIDES_FILE}`)
+    }
+    return undefined
+  }
+
   /** fb-29 (ARCHITECTURE HONESTY — the 2026-08-31 empty-scope incident): a
    * worker role MUST resolve a NON-EMPTY tool scope before ANY materialization.
    * The worker's allow-scope derives from the role template's frontmatter
@@ -437,7 +673,7 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     department: DepartmentConfig,
     headEntry: PostEntry,
     jobId: string,
-    opts: { callerSessionId?: string; signal?: AbortSignal } = {}
+    opts: { callerSessionId?: string; signal?: AbortSignal; gatePacing?: boolean; peakOverride?: string; nowMs?: number } = {}
   ): Promise<{ workerId: string; sessionId: string; title: string; jobId: string; role: string; jobPath: string }> => {
     if (agents === void 0) throw new Error('[deepartments] dept_job_run requires the agents service')
     // 0. fb-9 pre-flight (BEFORE anything — never a mid-mission 400): reject
@@ -454,6 +690,28 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     // the job worker's first call.
     const poolerDispatchBlock = workerPoolerDispatchBlockError()
     if (poolerDispatchBlock !== undefined) throw new Error(`[deepartments] ${poolerDispatchBlock}`)
+    // 0c. LANE GATE DURO franja (post-mortem PEAK 2026-09-09, ítem 1): a NEW
+    // dispatch decided by a HEAD never launches inside a PEAK window unless it
+    // carries an ANNOTATED override (peakOverride — a NON-EMPTY
+    // justification; the override is recorded durably in the audit ledger
+    // pacing-overrides.jsonl). EARLY — BEFORE the definition read, the role
+    // validation, the idempotency pass, ANY agents.create: nothing is
+    // registered. ARMED ONLY by the head-tool route (`gatePacing: true` — the
+    // dept_job_run execute passes it); the W1 scheduler auto-fires pass NO
+    // flag → EXEMPT by design (D1 — the deterministic cron cadence is the
+    // re-anchored post-mortem ítem 3; gating it in PEAK without a paced-skip
+    // seal would storm the 30s tick retries, risk r2 of the trace).
+    if (opts.gatePacing === true) {
+      const franjaGateError = await franjaDispatchGate({
+        tool: 'dept_job_run',
+        peakOverride: opts.peakOverride,
+        nowMs: opts.nowMs,
+        agentId: headEntry.postId,
+        departmentId: department.id,
+        jobId
+      })
+      if (franjaGateError !== undefined) throw new Error(franjaGateError)
+    }
     // 1. Read + parse the definition FIRST (loud: missing/broken → fail).
     const definition = await readJobDefinitionFile(repoRoot, department, jobId)
     // 2. Role validation against the department role template tree.
@@ -554,7 +812,7 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
   const spawnWorkerForDepartment = async (
     department: DepartmentConfig,
     headEntry: PostEntry,
-    opts: { role: string; task?: string; title?: string; jobId?: string; callerAgentId?: string; senderSessionId?: string; signal?: AbortSignal }
+    opts: { role: string; task?: string; title?: string; jobId?: string; callerAgentId?: string; senderSessionId?: string; signal?: AbortSignal; gatePacing?: boolean; peakOverride?: string; nowMs?: number }
   ): Promise<{ workerId: string; sessionId: string; title: string }> => {
     if (agents === void 0) throw new Error('[deepartments] dept_worker_spawn requires the agents service')
     // 0. fb-9 pre-flight (BEFORE any materialization — never a mid-mission 400):
@@ -570,6 +828,27 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     // snapshot certifies no workspace can serve the worker's first call.
     const poolerDispatchBlock = workerPoolerDispatchBlockError()
     if (poolerDispatchBlock !== undefined) throw new Error(`[deepartments] ${poolerDispatchBlock}`)
+    // 0c. LANE GATE DURO franja (post-mortem PEAK 2026-09-09, ítem 1): a NEW
+    // worker decided by a HEAD never materializes inside a PEAK window unless
+    // the dispatch carries an ANNOTATED override (peakOverride — NON-EMPTY;
+    // recorded durably in pacing-overrides.jsonl). EARLY — BEFORE the role
+    // read, the slug dedup, ANY agents.create: nothing is registered. ARMED
+    // ONLY by the head-tool route (`gatePacing: true` — the dept_worker_spawn
+    // execute passes it); the parallel-monitor daemon passes NO flag → EXEMPT
+    // by design (D1 — an event-driven daemon with its own storm guard, not a
+    // head dispatch).
+    if (opts.gatePacing === true) {
+      const franjaGateError = await franjaDispatchGate({
+        tool: 'dept_worker_spawn',
+        peakOverride: opts.peakOverride,
+        nowMs: opts.nowMs,
+        agentId: headEntry.postId,
+        departmentId: department.id,
+        ...(opts.jobId !== undefined ? { jobId: String(opts.jobId) } : {}),
+        ...(opts.jobId === undefined ? { postId: String(opts.role ?? '').trim() } : {})
+      })
+      if (franjaGateError !== undefined) throw new Error(franjaGateError)
+    }
     const role = String(opts.role ?? '').trim()
     if (role === '') throw new Error('[deepartments] dept_worker_spawn: `role` is required (a role template name, e.g. "researcher")')
     // Role template is resolved BEFORE any create: a missing/malformed role file
@@ -1030,6 +1309,7 @@ export function createSpawnOrchestration(ctx: Context, deps: SpawnFactoryDeps): 
     defaultWorkerTitle,
     workerReasoningContentPreflightError,
     workerPoolerDispatchBlockError,
+    franjaDispatchGate,
     resolveRoleTemplate
   }
 }
