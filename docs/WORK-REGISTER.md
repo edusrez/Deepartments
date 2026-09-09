@@ -256,6 +256,55 @@
 > stable-profile 19 → 25 releases al 09-09** (monitor 09-09: dshmarket
 > 1.21.2→1.45.1 + smooth-stream 0.3.4→0.6.0) · **O2-nudge fbd-nudge-o2
 > `8e03c04d` LISTO-PARA-COMMIT pendiente del host** (verify+commit; ver §5).
+> **ENTRADA 09-09 — CIERRE DE OLA (tarde/noche; IPD builder-227, lane register-sync
+> cierre 09-09; docs-only, 0 commits, LISTO-PARA-COMMIT — verify + add EXPLÍCITO de
+> docs/WORK-REGISTER.md + docs/ROADMAP.md)** — fase de cierre de la jornada 09-09
+> absorbida (la mañana YA registrada en `c431b72` — NO se re-absorbe): **`6e156a9`
+> docs(register) NORMA worktree-fuente absorbido (§7, guard fb-20; candidata QD
+> D-Q3-IPH) — CERRADO** · **`8718ed1` docs POST-MORTEM PEAK ADOPTADO (D-Q6, owner→host
+> m-3813; WORK-REGISTER §5 ítem + ROADMAP 09-09 tail) — CERRADO** · **`90a06dc` mirror
+> PERMISOS HOST (cordis.patch.yml:86-88 — PUSH PERMANENTE + DELEGACIÓN TOTAL +
+> persistencia; owner 09-09; lane IPH item 1) — CERRADO** + SOURCES.md RD (`1504a2b`
+> — ajeno al bundle, absorbido por el host) · **O2-ALIGN `9420964` ACTIVADO** (plugin
+> add perfil dev; canary 14:08:18Z PASS: capas dsh-deepartments l.638 + dsh-key-pooler
+> l.738; /v1/models 200; pooler ok 4/4) — CERRADO · **Pooler P2/P2b DEPLOY** (repo
+> dsh-key-pooler, HEAD `d22afcf` + `7596881` ancestro; verificado post-canary:
+> lib==proceso, guard P2b lib/proxy.js:1337-1338, region-gate P2 :1208/:1250; tests
+> sweep.test.js:361-367/:395-410) — CERRADO · **Hot-patch fb-251** (pi-ai overflow.js +
+> compaction-basic:803 — node_modules, NO repo; cargado con el canary 14:08:18Z;
+> reviewer PASS) — CERRADO con FLAG de persistencia (se pierde en reinstall; candidato
+> upstream register, ver cola) · **Ítem 1 permisos host COMPLETO** (mirror `90a06dc` +
+> preset local /opt/dsh/.dsh-dev/.agent-presets/deepartments/agent.cordis.yml «Owner
+> permissions (permanent)» l.101-112; backup
+> agent.cordis.yml.bak-permissions-20260909-141540) · **Ítem 4 purga projcache
+> CERRADO-COMO-DIFERIDO** (decisión host, adenda al cierre de ola): «purga
+> session_projcache.json PENDIENTE de ventana natural de mantenimiento (perfil dev
+> parado — opción b del hallazgo; la política restarts-solo-VALLE del post-mortem
+> adoptado la refuerza) — 13 ids retirados (lista en reporte
+> /root/.deepartments/departments/internal-programming/reports/builder/2026-09-09-
+> projcache-purge-9bd29c54.md), backup
+> /opt/dsh/.dsh-dev/storages/session_projcache.json.bak-projcache-purge-20260909-
+> 141354 como evidencia, daemon-autoritativo republica el fichero (in-process delete
+> = opción a si algún día se hace en vivo)» · **fb-293/294/295 DX path-not-found**
+> (familia fb-292/269/135 — hint de descubrimiento consolidado; lane guard/harness
+> candidata). **KPI 09-09: abiertos/cerrados/balance = 17/1/+16** (criterio: store vivo
+> /.deepartments/feedback.jsonl, snapshot 09-09 ~14:22Z — ABIERTOS = creados 09-09 UTC
+> con estado no-terminal (17 de los 18 creados hoy; fb-302 duplicado excluido);
+> CERRADOS = terminales con updatedAt 09-09 UTC en el store vivo (1 = fb-302
+> duplicado); balance = 17 − 1 = +16; NOTA DE CRITERIO: el store evicta terminales al
+> archive — feedback-archive.jsonl suma 15 terminales updatedAt 09-09 (7 resuelto + 8
+> duplicado, 05:56–13:49Z), mayoría cierres de la MAÑANA ya absorbidos en `c431b72`
+> (fb-272/fb-284) y la colisión de id fb-285/fb-286 post-CORTE impide un dedupe
+> cross-store fiable → cerrados-del-día con archive (≈16, balance ≈+1) NO fiable).
+> **COLA NUEVA (4 ítems breves — ver §5):** (i) quality-daily no-fire 08:00Z 09-09 =
+> idempotency-skip «quality-daily-8 ya corriendo» (worker retirado, stamp stale en
+> job-runs) → lane higiene job-runs (clase O3-b/auto-heal no-fire) · (ii) fb-300/fb-301
+> rematerialización post-smart_restart NO reconstituye toolset (worker Y head, restart
+> 14:08:18Z; fb-301 transitorio confirmado por el head; contrato fb-18 «toolset
+> esperado por rol») → lane host-plane/IPD register/preset-pass · (iii) wording
+> CRITICAL RULE 2 + Workflow step 4 del preset host (ask_user_question
+> «Non-negotiable» vs DELEGACIÓN TOTAL `90a06dc`) → lane BAJA staged próxima rotación
+> (deploy-time) · (iv) hot-patch fb-251 persistencia upstream (register).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
@@ -863,6 +912,21 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   orden 1→3→4→2; ver ROADMAP. Fuentes: reporte
   /home/esuarez/projects/deepartments/.dsh/reports/quality/2026-09-09-
   postmortem-peak.md + cordis.patch.yml org.pacing.
+- **COLA NUEVA 09-09 (register-sync cierre de ola, IPD builder-227 — 4 ítems breves;
+  detalle en la ENTRADA de cierre arriba):**
+  - **(i) lane higiene job-runs (clase O3-b/auto-heal no-fire) — EN COLA**: scheduler
+    quality-daily no-fire 08:00Z 09-09 = idempotency-skip «quality-daily-8 ya
+    corriendo» (worker retirado, stamp stale en job-runs).
+  - **(ii) fb-300/fb-301 rematerialización post-smart_restart NO reconstituye toolset —
+    EN COLA**: worker Y head tras el restart 14:08:18Z; fb-301 transitorio confirmado
+    por el head; contrato fb-18 «toolset esperado por rol» — lane host-plane/IPD
+    register/preset-pass.
+  - **(iii) wording preset host — EN COLA (decisión del host)**: precisar CRITICAL
+    RULE 2 + Workflow step 4 (ask_user_question «Non-negotiable» vs DELEGACIÓN TOTAL
+    `90a06dc`) — lane BAJA staged próxima rotación (deploy-time).
+  - **(iv) hot-patch fb-251 persistencia upstream — EN COLA**: el hot-patch node_modules
+    (pi-ai overflow.js + compaction-basic:803) se pierde en reinstall; candidato
+    upstream register.
 - **Rotación host m-423 PARTIAL (veredicto QD 09-03) — EN COLA (P2)**: el
   archive de dept_sleep corta ~85 líneas de la cola zombie final (incl.
   m-426 delivered post-retirement; acks a host rotado 'prepared') —
