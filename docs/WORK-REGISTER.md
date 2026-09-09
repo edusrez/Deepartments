@@ -246,9 +246,9 @@
 > lane de ajuste) · **fb-284 RESUELTO 09-09** (marker ghost-store anotado:
 > rename reversible capacity-gate-state.json →
 > .stale-2026-09-09-annotated-fb284, fuera de parseo, NO purga) · **fb-285
-> ABIERTO (QD, limpieza GLOBAL ghost-store /root/.deepartments — debris
-> huérfano 08-23→09-06 incl. secrets/; PENDIENTE-OWNER: purgar vs
-> anotar/archivar; revisión secrets/ fb-16)** · **fb-234 CERRADO-absorbido**
+> CERRADO-anotado 09-09** (limpieza GLOBAL ghost-store /root/.deepartments —
+> decisión host ANOTAR-no-purgar: 19 mv `.stale-2026-09-09-fb285-*` host-plane —
+> ver ítem §3) · **fb-234 CERRADO-absorbido**
 > (su next: host CUBIERTO por 6397fb5 + cadena VALLE — ver ítem §1) ·
 > **fb-75 nota de cierre formal** (gate billingDown aterrizado O1 `0ee5a26` +
 > pooler `5fc59b5` + HALT LPC `7c6d3376` — el record QD fb-75 permanece
@@ -857,18 +857,30 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   PAIR, Tesla Cybercab Austin); de-dup verificado (+17 URLs, +5 topics);
   presentar a la vuelta junto con el estado post-crisis y fb-75.
 - **fb-136 — footprint stale del top-level de /root/.deepartments (archivo
-  OPCIONAL → decisión OWNER; w-3/af4757c + STORES-MAP.md §1)**: el footprint
-  stale (`health-heartbeat.json`/`posts.json`/`config-presets` 09-03, clase
-  fb-134 CERRADO) queda SIN archivar hasta decisión owner; NO unificar el
-  `.dsh/reports` legacy sin decisión (D-6 «no-tocar»).
+  OPCIONAL → decisión OWNER; w-3/af4757c + STORES-MAP.md §1) — ABSORBIDO por la
+  decisión fb-285 (CERRADO-anotado 09-09)**: el footprint stale
+  (`health-heartbeat.json`/`posts.json`/`config-presets` 09-03, clase fb-134
+  CERRADO) = el MISMO footprint resuelto por fb-285 (ANOTAR-no-purgar; esos
+  archivos entraron en los 19 mv `.stale-2026-09-09-fb285-*` host-plane) → sin
+  archivo/acción propia; sigue vigente NO unificar el `.dsh/reports` legacy sin
+  decisión (D-6 «no-tocar»).
 - **fb-285 (QD, 09-09 — limpieza GLOBAL del ghost-store /root/.deepartments) —
-  ABIERTO, PENDIENTE-OWNER** (hermana global de fb-136/fb-284; record QD):
-  debris huérfano de una instalación previa en la raíz del workspace
+  CERRADO-anotado 09-09** (hermana global de fb-136/fb-284; record QD): debris
+  huérfano de una instalación previa en la raíz del workspace
   (hosts/messages/posts/restart-registry/health-alerts*/secrets//departments —
   mtimes 08-23→09-06; el store vivo es /.deepartments; familia fb-134) —
-  decisión OWNER: **purgar completo vs anotar/archivar**; cualquier purga debe
-  revisar/neutralizar el dir `secrets/` sin exponer credenciales (convención
-  fb-16, no borrar a ciegas). Ver ENTRADA 09-09.
+  **decisión HOST (DELEGACIÓN TOTAL owner 09-09) = ANOTAR-no-purgar**, ejecutada
+  en ZONA HOST-PLANE: **19 mv reversibles `.stale-2026-09-09-fb285-<basename>`
+  aplicados por el HOST (~15:3xZ 09-09)** — 18 archivos ghost + el dir
+  `secrets/` ENTERO renombrado SIN listar (fb-16, modo 700 preservado
+  `drwx------`) · por qué host: dept_exec de los workers DENIEGA el top-level de
+  /root/.deepartments (guard OUT_OF_SCOPE; precedente fb-284) · pre-check 0
+  escritores activos (mtimes 08-23→09-06) · `departments/` EXCLUIDO (VIVO —
+  reports 09-09; fb-285 lo lumped por error) · marker fb-284 NO tocado ·
+  `/.deepartments` (stateDir live) INTACTO. **LECCIÓN DE SCOPE (futuras lanes de
+  higiene del ghost-store)**: el top-level de /root/.deepartments es ZONA
+  HOST-PLANE para renames — los workers no la alcanzan por dept_exec
+  (OUT_OF_SCOPE): ejecución por el HOST, anotación docs por IPD.
 - CERRADOS: publish 0.1.0 (efd579b) · D5 · P1 · tool-goal retirado · API key
   DeepSeek (fallback real) · restart 05:23:31Z (owner: ignorar — watch si
   reaparecen; restart-registry lo deja visible) · cause restarts 08-31
