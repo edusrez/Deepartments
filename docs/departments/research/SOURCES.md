@@ -60,7 +60,15 @@ deployment's `web_fetch`. Verified datapoints from research rounds
 domain burns the 30 s tool budget every round — consult this table BEFORE
 fetching a press release, never after. Updated 2026-09-08 (fb-211 + fb-236,
 dictamen QH aceptado: openai.com + aireleasetracker.com + es.dataconomy.com +
-pricepertoken.com/model-releases).
+pricepertoken.com/model-releases). Updated 2026-09-09 (fb-286 + fb-297,
+dictámenes QH aceptados: media.defense.gov + ainvest.com + regla de
+presupuesto para dominios 403).
+
+**Budget rule for 403 anti-bot domains (fb-286, 2026-09-09):** ONE attempt max
+per domain per round — a single HTTP 403 confirms the state and exhausts the
+attempt; never retry the same domain in the same round (a delivery like a gov
+CSA advisory is not fetch-able from this IP). Capture via search-provider
+snippets + dated secondaries instead.
 
 | Domain | Status | Observed behavior | Fallback |
 |---|---|---|---|
@@ -71,6 +79,8 @@ pricepertoken.com/model-releases).
 | `aireleasetracker.com` | **UNRELIABLE** | HTTP 429 rate-limited (round 09-07; fb-211) | one attempt max, then tracker cross-check via search snippet |
 | `es.dataconomy.com` | **BLOCKED** | HTTP 403 anti-bot (round 09-08, fb-236; corroboración GPT-6 Astra) | do not attempt; use dated secondaries (e.g. gadgetsnow/digitaltrends) |
 | `pricepertoken.com/model-releases` | **UNRELIABLE** | HTTP 404 URL drift (round 09-08; fb-236) | do not attempt; use ThursdAI / aireleasetracker for release-gap checks |
+| `media.defense.gov` | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (round 09-09; fb-286) — gov advisories (e.g. CSA) not fetch-able | one attempt max; capture via search-provider + dated secondaries |
+| `www.ainvest.com` | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (round 09-09; fb-297) | one attempt max; capture via search-provider snippet |
 | `01net`, `finance.yahoo.com`, `cionfluence.com` | reliable mirrors | HTTP 200 from this environment (fb-96/98) | OK as last-resort mirrors |
 | vendor primary (blog/repo/model card) | **preferred** | e.g. `ridgesecurity.ai` blog etc. (fb-103/104) | FIRST choice for press releases |
 | API/JSON endpoints (`api.github.com`, `registry.npmjs.org`) | preferred | machine-readable (monitor-dsh-updates) | FIRST choice for registry/data |
