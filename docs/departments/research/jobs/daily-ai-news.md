@@ -3,7 +3,7 @@ id: daily-ai-news
 title: Daily AI news brief (fresh, de-duplicated)
 role: researcher
 description: Produce a daily morning brief of FRESH AI news (new model releases/launches, key benchmarks, notable services/APIs, software/harness frameworks) with primary sources, de-duplicated against the prior briefs, and hand the Research Head a 3-5 bullet summary.
-schedule: '0 9 * * *'
+schedule: '30 11 * * *'
 owner: research-head
 outbox: reports/daily-news/<YYYY-MM-DD>.md
 ---
@@ -14,7 +14,7 @@ Task for the worker the Research Head materializes with this job (role:
 `researcher` — persona: `presets/departments/research/researcher.md`; the
 general protocol — web-first investigation, citations, memo, sleep — is that
 persona's, this body is the concrete task). The Research Head schedules this
-job every morning at **09:00 GMT/UTC** (cron `0 9 * * *`); the brief flows to
+job every morning at **11:30 GMT/UTC** (cron `30 11 * * *`); the brief flows to
 the Asistente through the head.
 
 ## Objective
@@ -90,8 +90,10 @@ last ~**48h** and explain **why it matters** per item.
   (do not attempt; capture via search-provider content + dated secondaries),
   `aireleasetracker.com` = 429 rate-limited (one attempt max, then cross-check
   via search snippet), `businesswire.com` = 30 s timeout (one attempt max),
-  `tmcnet.com`/`zexprwire.com` = 403 (do not attempt). Table normally grows with
-  each round — check it every time.
+  `tmcnet.com`/`zexprwire.com` = 403 (do not attempt), `media.defense.gov` =
+  403 (do not attempt; capture via search-provider + dated secondaries),
+  `www.ainvest.com` = 403 (one attempt max, then search snippet). Table
+  normally grows with each round — check it every time.
 
 ## Report
 

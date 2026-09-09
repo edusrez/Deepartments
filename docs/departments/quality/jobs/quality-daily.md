@@ -3,7 +3,7 @@ id: quality-daily
 title: Quality daily digest
 role: quality-inspector
 description: "Consolidate post-errors, stalled posts, delivery failures and prior inspection results into a once-a-day quality digest. Post-error delta is diffed from health-alerts.jsonl (post-errors.jsonl is subject to log-rotation and no longer diff-able)."
-schedule: '0 8 * * *'
+schedule: '0 11 * * *'
 owner: quality-head
 outbox: .dsh/reports/quality/<YYYY-MM-DD>-quality-daily.md
 ---

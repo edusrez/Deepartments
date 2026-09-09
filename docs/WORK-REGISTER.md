@@ -305,6 +305,54 @@
 > CRITICAL RULE 2 + Workflow step 4 del preset host (ask_user_question
 > «Non-negotiable» vs DELEGACIÓN TOTAL `90a06dc`) → lane BAJA staged próxima rotación
 > (deploy-time) · (iv) hot-patch fb-251 persistencia upstream (register).
+> **ENTRADA 09-09 — CIERRE DEL BLOQUE 1 (IPD builder-230, lane register-sync cierre
+> bloque 1 09-09; docs-only, 0 commits, LISTO-PARA-COMMIT — verify + add EXPLÍCITO de
+> docs/WORK-REGISTER.md + docs/ROADMAP.md)** — cierre del BLOQUE 1 (VALLE) absorbido:
+> las 2 lanes IPD del bloque CERRADAS + decisiones host reconciliadas + fb-51 §1/§3
+> (STALE) + notas QD; NO re-absorbe mañana/ola (ya en `c431b72` + `adfccc3`):
+> **pooler-capacity / reserva de keys → CERRADO-en-entrega (LISTO-PARA-COMMIT)** —
+> implementación builder-228 run `09ebe790` (reporte reports/builder/2026-09-09-
+> pooler-capacity-09ebe790.md) + gate reviewer-118 PASS (reporte reports/reviewer/
+> 2026-09-09-pooler-capacity-review-2f59ba26.md): reserve SOFT durable — UN campo
+> `reserve` en PoolSnapshot con `ReserveRecord.level` low/critical (naming conforme
+> decisión host 4/scope head, dictamen reviewer) · `diagnoseReserve` PURA pool.ts:1144+
+> · defaults `RESERVE_DEFAULT_*` 0.25/25/10 configurables (config.ts) · `refreshReserve`
+> + seam único poolSnapshotWithHalt proxy.ts:955 · status GET /__keypool/status ·
+> cadencia usage-poll · logs `[key-pooler] RESERVE` + `onReserveAlert` · 0 cambios
+> eligible/select/servicio · build tsc OK + npm test 213/213 (0 regresiones). Repo
+> dsh-key-pooler HEAD `d22afcf`. Consumidor deepartments (gate) DIFERIDO a junción
+> host-move rc.2 (cierre formal fb-75). Verificación opcional post-deploy: estado live
+> (2 keys 86/87% mensual) debería emitir reserve LOW · **re-ancla cron digests +
+> higiene job-runs → CERRADA por ambas partes** (lane builder-229 `dfe6e38a`; §5 cola
+> (i) ya CERRADO — NO duplicado): re-ancla quality-daily `'0 11 * * *'` (11:00Z) +
+> daily-ai-news `'30 11 * * *'` (11:30Z), fuera de PEAK efectivo 00:30-10:30Z
+> (org.pacing + espejo pooler); no-fire 09-09 = idempotencia correcta (intento
+> redundante vs worker LIVE de ronda EXITOSA — hipótesis stamp-stale REFUTADA); O3-b
+> NO-fix; QH decisión owner: NO re-run quality-daily 09-09 (digest EXISTE m-3601 —
+> re-run habría sobreescrito outbox); RD cerró cuerpo daily-ai-news.md (11:30 GMT/UTC)
+> + sync dominios (fb-286/297) · **DECISIONES DEL HOST (bloque 1, DELEGACIÓN TOTAL
+> owner 09-09) RECONCILIADAS**: rc.1 family HOLD rc.2 confirmado (sin ejecución) ·
+> stable-web constraint mantenida esta jornada · verdict D-Q2 CLEAN (builder-227) ·
+> fb-285 scope en bloque 2 con inventario · pooler umbrales 0.25/25/10 soft ADOPTADOS
+> · **fb-51 RECONCILIADO §1/§3 (STALE)**: D1 PUBLICADO 09-06 (owner presente) +
+> revisión host PASS (Discussion #5826 verificada live por el host) → §1 ítem fb-51
+> (DIFERIDO/no-publicar) = STALE → CERRADO-en-hechos (§1) + §3 port ACTUALIZADO;
+> RESTO fb-51 = owner-grade SOLO (fork re-push opcional · issue interno #NN · merge
+> upstream vía instancia interna DeepSeek) → PENDIENTE-OWNER (sin inventar #NN) ·
+> **fb-306** (QD bajo/mejora — snapshot pre-rotation PARTIAL: incluir result+turn/end;
+> lane runtime) — UNA línea, ref record durable del backlog · **fb-307** (QD
+> bajo/mejora — misdiagnóstico «no-fire/stamp stale» propagado desde handoff del host
+> ~14:23Z; práctica: verificar contra digest/outbox ANTES de declarar no-fire) — ref ·
+> **NOTAS QD (2, del D-Q2 builder-228 CLEAN, inspector-159/7937f168)**: (a) ítem
+> metadatos archive tools[] — 2º datapoint (builder-227 §3.4 + builder-228): el campo
+> tools[] del retire record omite `edit` pese a usos reales (5 y 35) → consumidores
+> del archive NO deben usar tools[] como inventario fiable de tools usadas; (b)
+> truncation journal — 4º caso D-Q2 consecutivo (223/224/227/228, corta en memo-call
+> seq 71078; clase x8 del día; zstd fuente de verdad) + sugerencia opcional no urgente
+> (incluir reason del turn/end en el journal) · **§1 «pooler-capacity» CERRADO-en-
+> entrega** (DAG — ítem cerrado como entregado; gate consumidor diferido; ver su ítem
+> §1). **Sin referencias abiertas «next: internal-programming-head» de las 2 lanes**
+> tras esta entrada (verificado).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
@@ -345,7 +393,10 @@
   - **fb-190 (mejora protocolo rotación — no pre-anunciar)** — next: internal-programming-head — CERRADO (reporte d007c408)
   - **fb-51 (thread bilingüe + branch portador — REVISIÓN del host ANTES de
     publicar; no publicar sin su visto bueno)** — next: host —
-    DIFERIDO (revisión-host parkeada-owner → push-day)
+    CERRADO-en-hechos (RECONCILIACIÓN CIERRE BLOQUE 1 09-09: D1 PUBLICADO 09-06
+    con owner presente + revisión host PASS — Discussion #5826 verificada live
+    por el host; el DIFERIDO/no-publicar era STALE — ver ENTRADA CIERRE BLOQUE 1;
+    RESTO fb-51 owner-grade → §3 port PENDIENTE-OWNER)
   - **QI-48 (registry post-cierre lane)** — next: internal-programming-head —
     CERRADO (reporte e1f3838e)
   - **§5.5 (opcional)** — next: internal-programming-head —
@@ -445,7 +496,11 @@
     sigue EN-ESTUDIO — última verificación QH#10 09-08: watch QD activo,
     cierre del record = verificación QD del fix) · owner
     top-up; R3 · NO re-trabajar el pipeline delivery (ec2d405 ya en main y
-    operando) — next: internal-programming-head.
+    operando) — next: host (commit repo dsh-key-pooler, add explícito del
+    host) — CERRADO-en-entrega (CIERRE BLOQUE 1 09-09 — implementación
+    LISTO-PARA-COMMIT, builder-228 09ebe790 + reviewer-118 PASS 2f59ba26; el
+    gate consumidor deepartments queda DIFERIDO a junción host-move rc.2 —
+    cierre formal fb-75; ver ENTRADA CIERRE BLOQUE 1).
   - **fb-253 (higiene programática de deliveries — markDelivery CLI; record QH
     m-3271, 09-08) — CERRADO 09-09** (cadena `5ab20ea` CLI + `a60cb4d` adenda
     hosts retirados; drenaje --apply EXPRESO del host m-3019/m-3022 →
@@ -724,9 +779,13 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   (workspace IPD, hashes verificados); **DECISIONES AUTÓNOMAS 09-06 (owner
   ausente)**: señalización GitHub Discussions PRIMARIA + branch portador en
   fork + hot-patch local + rebase search-core P2 — thread/branch preparados
-  para REVISIÓN del host antes de publicar; **push-day POST-CEREMONIA 09-07**
-  (owner); acción del HOST (clone/PR/rebuild del monorepo — no construible
-  desde los roots del lane).
+  para REVISIÓN del host antes de publicar; **RECONCILIACIÓN CIERRE BLOQUE 1
+  09-09**: D1 PUBLICADO 09-06 (owner presente) + revisión host PASS (Discussion
+  #5826 verificada live por el host) — la parte «publicar» quedó CERRADA-en-
+  hechos (§1 OLA POST-PREP); **RESTO fb-51 = owner-grade SOLO** (fork re-push/
+  push-day opcional · issue interno #NN sin inventar · merge upstream vía
+  instancia interna DeepSeek) — PENDIENTE-OWNER; acción del HOST (clone/PR/
+  rebuild del monorepo — no construible desde los roots del lane).
 - **billing top-up CRÍTICO → GESTIONADO 09-03 + AHORA RELEVANTE (09-05/09-06)**:
   oc-6 = **key NUEVA del owner (OPENCODE_GO_KEY_6 / ws6, instalada 09-06 —
   la única elegible, weekly real 10→25% invisible al pool: bypass directo
@@ -914,9 +973,24 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   postmortem-peak.md + cordis.patch.yml org.pacing.
 - **COLA NUEVA 09-09 (register-sync cierre de ola, IPD builder-227 — 4 ítems breves;
   detalle en la ENTRADA de cierre arriba):**
-  - **(i) lane higiene job-runs (clase O3-b/auto-heal no-fire) — EN COLA**: scheduler
-    quality-daily no-fire 08:00Z 09-09 = idempotency-skip «quality-daily-8 ya
-    corriendo» (worker retirado, stamp stale en job-runs).
+  - **(i) lane higiene job-runs (clase O3-b/auto-heal no-fire) — CERRADO 09-09
+    (lane «re-ancla cron digests + higiene job-runs», builder-229 dfe6e38a)**: RE-ANCLA
+    quality-daily `'0 8 * * *'` → `'0 11 * * *'` (11:00Z, confirmado quality-head
+    m-3935/3937) y daily-ai-news `'0 9 * * *'` → `'30 11 * * *'` (11:30Z, confirmado
+    research-head m-3938) — ambos fuera de PEAK efectivo 00:30-10:30Z (org.pacing +
+    espejo dsh-key-pooler peakWindows 01:00-04:00 ∪ 06:00-10:00 + peakBufferMs
+    1800000; espejo SIN ajuste, solo anotado). NO-FIRE INVESTIGADO: el idempotency-
+    skip «quality-daily-8 ya corriendo» (ts 1788940821442 = 08:00:21.442Z 09-09) fue
+    un INTENTO REDUNDANTE contra el worker LIVE de la ronda cron 08:00:17Z EXITOSA
+    (quality-daily-8 materializado 08:00:17.952Z, round completado 08:23:16Z m-3601,
+    retirado por QD 08:23:19.355Z — posts-retired-archive prunedAt 1788942199355);
+    el stamp job-runs quality-daily:1788940817887 es CORRECTO (ronda del día, nada
+    stale que limpiar; digest 09-09 reporte 2026-09-09-quality-daily.md completado).
+    FIX DE CÓDIGO: NO aplica — runningJobWorker ya excluye workers retirados
+    (spawn.ts:331 `retired !== true`) y el latch zombie offline está cubierto por el
+    P-LATCH (tools.ts:4733, boot+drain); forzar un cambio rompería la idempotencia
+    real (nunca 2 workers vivos del mismo job). Ver reports/builder/2026-09-09-
+    reanchor-digests-dfe6e38a.md.
   - **(ii) fb-300/fb-301 rematerialización post-smart_restart NO reconstituye toolset —
     EN COLA**: worker Y head tras el restart 14:08:18Z; fb-301 transitorio confirmado
     por el head; contrato fb-18 «toolset esperado por rol» — lane host-plane/IPD
