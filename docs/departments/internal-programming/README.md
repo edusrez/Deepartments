@@ -26,6 +26,7 @@ in `presets/departments/internal-programming/ARCHITECTURE.md`.
 ```
 docs/departments/internal-programming/
 ├── README.md      ← this file (layout + job-definition convention)
+├── INCIDENT-PLAYBOOK.md ← incident classes runbook (session archives map, bare-400 class, escalation checklists)
 └── jobs/          ← versioned job definitions, one file per job
     ├── weekly-repo-health.md
     └── version-watch.md
