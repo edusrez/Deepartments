@@ -117,14 +117,25 @@ forwards it.
    heartbeat lo omite, dejarlo en la lista de ESCALATION para que el Asistente
    lo lea con `systemctl show <unit> -p NRestarts`) y **crashStreak** (≥ 3 =
    posible crash-loop en curso — escalar). **Sweep** (FINISHER 2026-09-04,
-   addendum 4 — dato de salud del cierre fb-27): el sweep de re-entrega NO-boot
-   de la lane ② reporta `sweep: {armed, cycles, lastCycleTs?, preparedStuckRemaining?}`
-   — `armed` = el intervalo está activo, `cycles` = ciclos `sweepDue` completados,
-   `lastCycleTs` = el último ciclo, `preparedStuckRemaining` = el residuo
-   prepared-stuck (> 10 min) del último ciclo — **el criterio de CLOSURE fb-27
-   es `preparedStuckRemaining` = 0** (el sweep re-impulsa por sí mismo; exceso
-   sostenido → escalar como alerta de cola). Si el heartbeat omite `sweep` (una
-   composición sin sweep), reportarlo como ausente, nunca adivinarlo.
+   addendum 4 — health datum for the fb-27 closure): the lane-② NO-boot
+   redelivery sweep reports `sweep: {armed, cycles, lastCycleTs?,
+   preparedStuckRemaining?}` — `armed` = the interval is active, `cycles` =
+   completed `sweepDue` cycles, `lastCycleTs` = the last cycle,
+   `preparedStuckRemaining` = the prepared-stuck (> 10 min) residue of the
+   last cycle — **the CLOSURE criterion fb-27 is ACCIONABLE residue = 0**:
+   discount from the integer the held-class the heartbeat already delivers
+   (`dormantHeld` ∪ `noWakeHeld` ∪ `gatedHeld` — they cannot reach 0 by
+   design: a dormant/no-wake/gated recipient drains at its next REAL wake),
+   and escalate ONLY a residue those classes leave unexplained that persists
+   ≥ ~8h (1 digest cycle) — transient congestion is never an escalation. A
+   prepared row addressed to a RETIRED recipient (a post in posts.json or a
+   host-session in hosts.json) is NOT a held-class residue — it is
+   structurally non-terminalizable by the sweep and is settled by the
+   operator-run mark-delivery CLI (fb-253, append-only 'terminal', ALTO-1
+   guard): report it as an ACCIONABLE residue (visible via `posts.json` ∪
+   `hosts.json`), never as dormant/no-wake/gated. If the heartbeat omits
+   `sweep` (a composition without a sweep), report it as absent, never guess
+   it.
 
 ## Report
 

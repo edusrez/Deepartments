@@ -22,9 +22,13 @@
  *     1. its LATEST delivery row (the last row for the pair wins — a later
  *        'delivered'/'resumed'/'self'/'terminal' shadows an earlier row)
  *        `needsRedelivery` ('prepared' | 'failed');
- *     2. the recipient is a RETIRED post in `<stateDir>/posts.json`
- *        (registry.ts PostEntryPersisted — `retired: true` is the exact flag
- *        markPostRetired writes; posts.json maps postId → entry);
+ *     2. the recipient is a RETIRED recipient — a retired post in
+ *        `<stateDir>/posts.json` (registry.ts PostEntryPersisted —
+ *        `retired: true` is the exact flag markPostRetired writes; posts.json
+ *        maps postId → entry) UNION a retired host-session in
+ *        `<stateDir>/hosts.json` (the host registry — an entry keyed by
+ *        host-session id is retired exactly when it carries `retired: true`;
+ *        the KEYS are the recipient ids used in deliveries.jsonl);
  *     3. the ALTO-1 rebind guard passes: the CURRENT messages.jsonl record
  *        for the message EXISTS and its `to` includes the recipient (a stale
  *        sidecar row whose record was trimmed, or rebound to a DIFFERENT
@@ -98,9 +102,40 @@ export function parseRetiredPostsText(text, label = 'posts.json') {
   return retired
 }
 
-/** Read the RETIRED post-id set from `<stateDir>/posts.json` — the stateDir
- * canary: a MISSING posts.json aborts loud (a wrong --stateDir fails HERE,
- * never as a silent 0-candidate hygiene run). */
+/** Parse the hosts-registry TEXT (`<stateDir>/hosts.json`) into the RETIRED
+ * host-session-id set. Shape: a JSON object keyed by host-session id
+ * (`{ [hostSessionId]: { sessionId, roomId, ..., retired?: true, retiredAt?,
+ * rotatedTo? } }`) plus possibly a top-level `schemaVersion` number. A host is
+ * retired exactly when its entry carries `retired: true` (the flag the host
+ * rotation writes). The KEYS are the recipient ids deliveries.jsonl uses for
+ * host-session recipients. THROWS loud on a malformed/non-object registry: an
+ * operator tool must never silently conclude "no retired hosts" on a corrupt
+ * or wrong store. */
+export function parseRetiredHostsText(text, label = 'hosts.json') {
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    throw new Error(`mark-delivery ABORT — ${label} malformed (${error instanceof Error ? error.message : String(error)}): the RETIRED set is undeterminable; nothing was written`)
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`mark-delivery ABORT — ${label} is not a hosts-registry object: the RETIRED set is undeterminable; nothing was written`)
+  }
+  const retired = new Set()
+  for (const [hostId, entry] of Object.entries(parsed)) {
+    if (entry !== null && typeof entry === 'object' && entry.retired === true) retired.add(hostId)
+  }
+  return retired
+}
+
+/** Read the RETIRED recipient-id set from `<stateDir>/posts.json` UNION
+ * `<stateDir>/hosts.json` — posts.json remains the stateDir canary: a MISSING
+ * posts.json aborts loud (a wrong --stateDir fails HERE, never as a silent
+ * 0-candidate hygiene run). hosts.json is additive: a MISSING hosts.json
+ * contributes no retired host-session ids (a hosts-less store is a legitimate
+ * posts-only scope — the canary still guards the path), while a MALFORMED
+ * hosts.json aborts loud (corruption must never shrink the RETIRED set
+ * silently). */
 export function readRetiredPostIds(stateDir) {
   const filePath = path.join(stateDir, 'posts.json')
   let text
@@ -112,7 +147,17 @@ export function readRetiredPostIds(stateDir) {
     }
     throw new Error(`mark-delivery ABORT — cannot read ${filePath}: ${error instanceof Error ? error.message : String(error)}; nothing was written`)
   }
-  return parseRetiredPostsText(text, filePath)
+  const retired = parseRetiredPostsText(text, filePath)
+  const hostsPath = path.join(stateDir, 'hosts.json')
+  let hostsText
+  try {
+    hostsText = readFileSync(hostsPath, 'utf8')
+  } catch (error) {
+    if (error !== null && typeof error === 'object' && error.code === 'ENOENT') return retired
+    throw new Error(`mark-delivery ABORT — cannot read ${hostsPath}: ${error instanceof Error ? error.message : String(error)}; nothing was written`)
+  }
+  for (const hostId of parseRetiredHostsText(hostsText, hostsPath)) retired.add(hostId)
+  return retired
 }
 
 /**
@@ -166,7 +211,8 @@ export function readRecordsById(stateDir) {
  *      (a later delivered/resumed/self/terminal row shadows an earlier
  *      'prepared'/'failed'; one PAIR is evaluated, never one row);
  *   2. the latest status `needsRedelivery` ('prepared' | 'failed');
- *   3. the recipient is in the RETIRED post-id set;
+ *   3. the recipient is in the RETIRED recipient-id set (posts.json ∪
+ *      hosts.json — retired post ids UNION retired host-session ids);
  *   4. ALTO-1 rebind guard — the CURRENT record for the message EXISTS and its
  *      `to` includes the recipient (a trimmed/rebound stale row is skipped).
  * Optional `recipientScope` narrows to ONE recipient id; a non-retired scope
@@ -244,7 +290,7 @@ export async function main(argv) {
   const modeLabel = isApply ? (dryRun ? 'APPLY (dry-run — nothing written)' : 'APPLY') : 'LIST (dry probe, nothing written)'
   out.push(`fb-253 mark-delivery — ${modeLabel}`)
   out.push(`  stateDir: ${stateDir}`)
-  out.push(`  retired recipients in posts.json: ${retired.size}${recipient !== undefined ? ` (scoped to --recipient ${recipient})` : ''}`)
+  out.push(`  retired recipients (posts.json ∪ hosts.json): ${retired.size}${recipient !== undefined ? ` (scoped to --recipient ${recipient})` : ''}`)
   out.push(`  candidate pairs (latest needsRedelivery → retired recipient → record guard OK): ${candidates.length}`)
   for (const c of candidates) out.push(`    ${c.messageId} → ${c.recipientId}  (was ${c.status})`)
   if (candidates.length === 0) {

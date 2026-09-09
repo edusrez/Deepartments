@@ -257,3 +257,124 @@ test('fb-253: a scoped apply settles ONLY the scoped retired recipient, leaving 
   const appended = after.split('\n').filter(Boolean).slice(10).map((line) => JSON.parse(line))
   assert.deepEqual(appended.map((row) => [row.messageId, row.recipientId]), [['m-101', 'worker-gone'], ['m-107', 'worker-gone']], 'only the scoped retired recipient\'s pairs are settled')
 })
+
+// ---- hosts.json UNION fixtures (fb-253 addendum: retired HOST-sessions) ----
+// hosts.json shape (live store): an object keyed by host-session id (the
+// recipient ids deliveries.jsonl uses) + a numeric `schemaVersion` marker. A
+// host is retired exactly when its entry carries retired:true (retiredAt +
+// rotatedTo are rotation metadata — the retired KEY is the recipient, the
+// chain state never un-retires it). Fixture: host-session-gone (retired,
+// rotatedTo consumed → its successor is ALSO retired), host-session-gone2
+// (retired, rotatedTo → the LIVE host — the chain the QD criterion (1) calls
+// "consumed": the mailbox already rotated through to the live successor),
+// host-session-live (NOT retired — must never be included), schemaVersion.
+const FIXTURE_HOSTS = {
+  'host-session-gone': { sessionId: 'session-gone-uuid', roomId: 'board', retired: true, retiredAt: 1000, rotatedTo: 'host-session-gone2' },
+  'host-session-gone2': { sessionId: 'session-gone2-uuid', roomId: 'board', retired: true, retiredAt: 2000, rotatedTo: 'host-session-live' },
+  'host-session-live': { sessionId: 'session-live-uuid', roomId: 'board' },
+  schemaVersion: 2
+}
+// Records: every pair has a CURRENT record whose to[] includes the recipient —
+// the ALTO-1 guard passes for ALL of them, so only the RETIRED-set membership
+// discriminates (m-303 → the LIVE host must fall out on the retired check).
+const FIXTURE_HOST_MESSAGES = [
+  { id: 'm-301', seq: 301, ts: 3000, from: 'internal-programming-head', to: ['host-session-gone'], text: 'a', kind: 'agent' },
+  { id: 'm-302', seq: 302, ts: 3001, from: 'internal-programming-head', to: ['host-session-gone2'], text: 'b', kind: 'agent' },
+  { id: 'm-303', seq: 303, ts: 3002, from: 'internal-programming-head', to: ['host-session-live'], text: 'c', kind: 'agent' },
+  { id: 'm-304', seq: 304, ts: 3003, from: 'internal-programming-head', to: ['worker-gone'], text: 'd', kind: 'agent' }
+].map((record) => JSON.stringify(record)).join('\n') + '\n'
+const FIXTURE_HOST_DELIVERIES = [
+  ['m-301', 'host-session-gone', 'prepared', 3000],
+  ['m-302', 'host-session-gone2', 'prepared', 3001],
+  ['m-303', 'host-session-live', 'prepared', 3002],
+  ['m-304', 'worker-gone', 'prepared', 3003]
+].map(([messageId, recipientId, status, ts]) => JSON.stringify({ messageId, recipientId, status, ts })).join('\n') + '\n'
+
+async function makeHostsFixtureDir(t) {
+  const dir = await mkdtemp(path.join(tmpdir(), 'mark-delivery-cli-hosts-'))
+  await writeFile(path.join(dir, 'posts.json'), JSON.stringify(FIXTURE_POSTS, null, 2))
+  await writeFile(path.join(dir, 'hosts.json'), JSON.stringify(FIXTURE_HOSTS, null, 2))
+  await writeFile(path.join(dir, 'messages.jsonl'), FIXTURE_HOST_MESSAGES)
+  await writeFile(path.join(dir, 'deliveries.jsonl'), FIXTURE_HOST_DELIVERIES)
+  t.after(async () => { await rm(dir, { recursive: true, force: true }) })
+  return dir
+}
+
+test('fb-253 (hosts union): parseRetiredHostsText builds the RETIRED host-session set — retired:true keys only, the schemaVersion marker and LIVE hosts excluded', async () => {
+  const mod = await import('../scripts/mark-delivery-cli.mjs')
+  const retired = mod.parseRetiredHostsText(JSON.stringify(FIXTURE_HOSTS))
+  assert.deepEqual([...retired].sort(), ['host-session-gone', 'host-session-gone2'], 'only the retired:true host-session ids are in the set')
+  assert.ok(!retired.has('host-session-live'), 'a LIVE host is never in the set')
+  assert.ok(!retired.has('schemaVersion'), 'the numeric schemaVersion marker is never treated as a host id')
+  assert.throws(() => mod.parseRetiredHostsText('{not json'), /malformed/, 'malformed hosts.json → loud abort')
+  assert.throws(() => mod.parseRetiredHostsText(JSON.stringify(['a'])), /not a hosts-registry object/, 'a JSON array is not a hosts registry → loud abort')
+})
+
+test('fb-253 (hosts union): readRetiredPostIds merges posts.json ∪ hosts.json — retired hosts join retired posts, a MISSING hosts.json still yields the posts-only set', async (t) => {
+  const mod = await import('../scripts/mark-delivery-cli.mjs')
+  const dir = await makeHostsFixtureDir(t)
+  const retired = mod.readRetiredPostIds(dir)
+  assert.deepEqual([...retired].sort(), ['host-session-gone', 'host-session-gone2', 'worker-gone'], 'the union = retired posts ∪ retired host-sessions')
+  // Missing hosts.json is a legitimate posts-only store (never an abort):
+  const postsOnly = await mkdtemp(path.join(tmpdir(), 'mark-delivery-cli-nohosts-'))
+  t.after(async () => { await rm(postsOnly, { recursive: true, force: true }) })
+  await writeFile(path.join(postsOnly, 'posts.json'), JSON.stringify(FIXTURE_POSTS))
+  const postsSet = mod.readRetiredPostIds(postsOnly)
+  assert.deepEqual([...postsSet], ['worker-gone'], 'no hosts.json → the posts-only retired set (backward compatible)')
+})
+
+test('fb-253 (hosts union): selectSettleCandidates lists prepared rows to RETIRED HOST-sessions (incl. a consumed-rotatedTo chain) — a LIVE host is never a candidate, retired posts stay included', async () => {
+  const mod = await import('../scripts/mark-delivery-cli.mjs')
+  const rows = parseDeliveryRows(FIXTURE_HOST_DELIVERIES)
+  const recordsById = new Map(parseMessageRecords(FIXTURE_HOST_MESSAGES).map((record) => [record.id, record]))
+  const retired = new Set(['host-session-gone', 'host-session-gone2', 'worker-gone'])
+  const candidates = mod.selectSettleCandidates(rows, recordsById, retired)
+  const ids = candidates.map((candidate) => candidate.messageId).sort()
+  assert.deepEqual(ids, ['m-301', 'm-302', 'm-304'], 'the retired HOST pairs (m-301/m-302) AND the retired POST pair (m-304) are candidates')
+  assert.ok(!ids.includes('m-303'), 'a prepared row to a LIVE host-session is NEVER a candidate — the FIFO gate and live-queue isolation hold')
+  assert.ok(candidates.every((c) => c.status === 'prepared'), 'the pair status is untouched — the CLI never re-marks anything')
+})
+
+test('fb-253 (hosts union): the CLI --list shows the union candidates and --apply settles them append-only, leaving the LIVE host untouched', async (t) => {
+  const dir = await makeHostsFixtureDir(t)
+  const list = runCli(['--list', '--stateDir', dir])
+  assert.match(list, /retired recipients \(posts\.json ∪ hosts\.json\): 3/, 'the union count is reported')
+  assert.match(list, /m-301 → host-session-gone\s+\(was prepared\)/, 'the retired-host pair is listed')
+  assert.match(list, /m-302 → host-session-gone2\s+\(was prepared\)/, 'the consumed-rotatedTo chain host is listed (retired key is the recipient)')
+  assert.match(list, /m-304 → worker-gone\s+\(was prepared\)/, 'the retired post pair is still listed')
+  assert.match(list, /candidate pairs .*: 3/, 'exactly THREE candidates')
+  assert.doesNotMatch(list, /m-303/, 'the LIVE host pair is never a candidate')
+
+  const before = await readFile(path.join(dir, 'deliveries.jsonl'), 'utf8')
+  const apply = runCli(['--apply', '--stateDir', dir])
+  assert.match(apply, /applied 3 terminal row/, 'three terminal rows applied')
+  const after = await readFile(path.join(dir, 'deliveries.jsonl'), 'utf8')
+  const beforeLines = before.split('\n').filter(Boolean)
+  const afterLines = after.split('\n').filter(Boolean)
+  assert.equal(afterLines.length, beforeLines.length + 3, 'exactly THREE rows appended — nothing rewritten')
+  assert.deepEqual(afterLines.slice(0, beforeLines.length), beforeLines, 'the FIRST rows are byte-identical (append-only)')
+  const appended = afterLines.slice(beforeLines.length).map((line) => JSON.parse(line))
+  assert.deepEqual(
+    appended.map((row) => [row.messageId, row.recipientId, row.status]),
+    [
+      ['m-301', 'host-session-gone', 'terminal'],
+      ['m-302', 'host-session-gone2', 'terminal'],
+      ['m-304', 'worker-gone', 'terminal']
+    ],
+    'ONLY the retired-host/retired-post pairs get \'terminal\' — the LIVE host is never touched'
+  )
+  // Idempotent: a re-run now lists 0 candidates.
+  const second = runCli(['--list', '--stateDir', dir])
+  assert.match(second, /candidate pairs .*: 0/, 'idempotent — the terminal rows shadow the stale prepared rows')
+})
+
+test('fb-253 (hosts union): a MALFORMED hosts.json aborts loud — corruption must never shrink the RETIRED set silently', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'mark-delivery-cli-badhosts-'))
+  t.after(async () => { await rm(dir, { recursive: true, force: true }) })
+  await writeFile(path.join(dir, 'posts.json'), JSON.stringify(FIXTURE_POSTS))
+  await writeFile(path.join(dir, 'hosts.json'), '{not json')
+  await writeFile(path.join(dir, 'messages.jsonl'), FIXTURE_MESSAGES)
+  await writeFile(path.join(dir, 'deliveries.jsonl'), FIXTURE_DELIVERIES)
+  const badHosts = runCliFail(['--list', '--stateDir', dir])
+  assert.match(badHosts, /hosts\.json malformed/, 'malformed hosts.json → loud abort (nothing written)')
+})
