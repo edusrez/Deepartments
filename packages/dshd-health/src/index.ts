@@ -6798,6 +6798,54 @@ export function buildPacingTransitionFrame(state: PacingState, deferredCount?: n
   return `[From deepartments] Pacing VALLE: reanuda los despachos a departamentos${count}; franja VALLE — próximo PEAK hasta ${state.untilHhMm} UTC`
 }
 
+/** DRAIN-VALLE (post-mortem PEAK ítem 2 — the cola→VALLE complement of the
+ * franja GATE, aba670b): build the fan-out frame delivered to each next-actor
+ * head at the franja→VALLE transition. «VALLE abierto — reanuda tu lane»: the
+ * deferred dispatches ARE the WORK-REGISTER pending items (cordis.patch.yml
+ * org.pacing — «NO new data queue»), so the transition monitor wakes the
+ * ACTORS of the non-gated pending items and the deferred queue flows WITHOUT
+ * the host re-opening the pipeline (the 09-07 gap: VALLE opened m-2535
+ * «diferidos 101» and the host manually re-opened each head). `count` = the
+ * non-gated pending items naming THIS actor; `totalPending` (optional) = the
+ * register-wide pending count (the same N the host notice carries) for
+ * context — UNDEFINED → the totals line is omitted (the register was not
+ * legible). PURE. Module-private (the frozen export surface — export-parity
+ * caps the bundle surface; the tick tests exercise it through the daemon). */
+function buildPacingValleDrainFrame(count: number, totalPending?: number): string {
+  const total = totalPending === undefined ? '' : `; pendientes totales del register: ${totalPending}`
+  return `[From deepartments] Pacing VALLE: VALLE abierto — reanuda tu lane; ${count} ítem(s) pending a tu nombre (cola del WORK-REGISTER)${total}`
+}
+
+/** DRAIN-VALLE — the fan-out census: the ACTOR recipients of the non-gated
+ * pending WORK-REGISTER items. Reuses the EXACT scanWorkRegisterIdle item
+ * classes (activeItems / knownIds / the actor-idle filter — see the census
+ * comment at the scan above): a recipient is an item that is (a) OPEN (no
+ * closure marker — the already-executed lanes are respected, never
+ * re-drained), (b) NON-gated (not under a §3 PENDIENTE-OWNER section), and
+ * (c) whose `next:` header names a KNOWN non-retired post (the actor-idle
+ * class, fb-184 item 4). EXCLUDED: the settlement class (next: host — the
+ * host notice carries the N), items whose next-actor is absent/unknown
+ * (generic pending — same host-notice coverage) and retired posts. Each
+ * recipient carries the count of items naming IT (the frame's «N ítem(s)
+ * pending a tu nombre»). PURE — never throws (a non-register-shaped doc →
+ * []). Sorted by postId for a deterministic fan-out. Module-private (the
+ * frozen export surface). */
+function collectValleDrainRecipients(registerText: string, posts: readonly { postId: string; retired?: boolean }[]): { postId: string; count: number }[] {
+  const items = parseWorkRegisterItems(registerText)
+  const knownIds = new Set(posts.filter((p) => p.retired !== true).map((p) => p.postId))
+  const byActor = new Map<string, number>()
+  for (const item of items) {
+    const actor = item.nextActor
+    if (item.closed === true) continue
+    if (item.gated === true) continue
+    if (actor === undefined || /^host\b/i.test(actor) || !knownIds.has(actor)) continue
+    byActor.set(actor, (byActor.get(actor) ?? 0) + 1)
+  }
+  return [...byActor.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([postId, count]) => ({ postId, count }))
+}
+
 // ---------------------------------------------------------------------------
 // HARDENING-401 (fb-39, 2026-09-01) — the CAPACITY GATE (pooler capacity
 // CRÍTICO) transition monitor. MOLDE FRANJA PEAK: the same transition-monitor
@@ -7856,6 +7904,46 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
               }
               try {
                 await deps.notifyHost(live, buildPacingTransitionFrame(pacingState, deferredCount), PACING_TRANSITION_KEY)
+                // DRAIN-VALLE (post-mortem PEAK ítem 2 — the cola→VALLE
+                // fan-out): the VALLE-transition ALSO wakes the ACTOR heads of
+                // the non-gated pending WORK-REGISTER items (the deferred
+                // dispatches ARE those items — the config's «NO new data
+                // queue»), so the pipeline re-opens WITHOUT the host manually
+                // re-addressing each head (the 09-07 gap). The census reuses
+                // the scanWorkRegisterIdle classes (parseWorkRegisterItems +
+                // the activeItems/knownIds actor-idle filter): the
+                // settlements (next: host), the §3-gated and the closed items
+                // are EXCLUDED (the host notice carries the totals; the
+                // already-executed / override lanes are respected — never
+                // re-drained, idempotent: notify ≠ spawn). Cadence: ONE
+                // emission per transition — the 'pacing-transition' ledger key
+                // dedupes the WHOLE emission (host notice + fan-out) inside
+                // HEALTH_DEDUPE_WINDOW_MS — a BORDER event, never a per-tick
+                // loop (the r2 cronIsDue lesson). No-perdible: this runs
+                // BEFORE the baseline/ledger advance ⇒ a failure retries on
+                // the next transition detection; QUEUE semantics (no interrupt
+                // on heads — the L2/L3 contract); absent notifyPost /
+                // workRegisterPath → conservative no-op (the host frame still
+                // carries the N).
+                if (franja === 'valle' && deps.notifyPost !== undefined && deps.workRegisterPath !== undefined) {
+                  let registerText = ''
+                  try {
+                    registerText = readFileSync(deps.workRegisterPath, 'utf8')
+                  } catch {
+                    registerText = ''
+                  }
+                  const recipients = collectValleDrainRecipients(registerText, posts)
+                  if (recipients.length > 0) {
+                    const totalPending = countPendingWorkRegister(registerText)
+                    for (const recipient of recipients) {
+                      try {
+                        await deps.notifyPost(recipient.postId, buildPacingValleDrainFrame(recipient.count, totalPending), { sourceKey: PACING_TRANSITION_KEY })
+                      } catch (error: unknown) {
+                        deps.logger?.warn(`[deepartments] system-health: pacing VALLE drain delivery to "${recipient.postId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+                      }
+                    }
+                  }
+                }
                 nextState[PACING_TRANSITION_KEY] = nowMs
                 stateChanged = true
                 await writePacingState(deps.stateDir, { franja, at: nowMs })
