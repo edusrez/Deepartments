@@ -15788,11 +15788,14 @@ test('W8-c PART 1 turn-failure capture: a live post session whose turn/end ends 
     const warns = []
     const hosts = [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }]
     // A simulated post turn that ends in an ERROR (the malformed-reference class).
+    // fb-235 — worker-a's times sit ~5 min BEFORE the bare-400 pair so the
+    // lastBare400 TIME-WINDOW join (2 min) can never mis-attribute the pooler
+    // key to worker-a's unrelated error (the stale-record R6 guard).
     const events = [
-      { type: 'user/message', time: T0 - 60_000, data: {} },
-      { type: 'turn/start', time: T0 - 50_000, data: { turn: 1 } },
-      { type: 'assistant/message', time: T0 - 40_000, data: { message: { content: '…' } } },
-      { type: 'turn/end', time: T0 - 30_000, data: { turn: 1, reason: { kind: 'error', message: 'malformed template reference' } } }
+      { type: 'user/message', time: T0 - 360_000, data: {} },
+      { type: 'turn/start', time: T0 - 350_000, data: { turn: 1 } },
+      { type: 'assistant/message', time: T0 - 340_000, data: { message: { content: '…' } } },
+      { type: 'turn/end', time: T0 - 330_000, data: { turn: 1, reason: { kind: 'error', message: 'malformed template reference' } } }
     ]
     // fb-25 (b): the post snapshot carries its LIVE sessionId → the capture
     // threads the SESSION PROVENANCE (sessionId + turn) into the post-error row.
@@ -15800,20 +15803,42 @@ test('W8-c PART 1 turn-failure capture: a live post session whose turn/end ends 
     // { message:'400 status code (no body)', code:'CONTEXT_WINDOW_EXCEEDED' }
     // (pi-ai MISCLASSIFIES the empty 400 as context overflow — the row must
     // expose the classification next to the provider text).
+    // fb-235 — the same fixture now carries the REQUEST ATTRIBUTION: the
+    // session event's top-level cwd (the workspace), a request/header BEFORE
+    // the failure (the route), and the last assistant/chunk usage (lastUsage).
     const bare400Events = [
+      { type: 'session', time: T0 - 60_000, cwd: '/root/.deepartments/departments/quality' },
       { type: 'turn/start', time: T0 - 50_000, data: { turn: 1 } },
+      { type: 'request/header', time: T0 - 45_000, data: { header: { config: { provider: 'opencode-zen', model: 'deepseek-v4-flash', maxTokens: 262144 } } } },
+      { type: 'assistant/chunk', time: T0 - 35_000, data: { turn: 1, step: 1, chunk: { type: 'usage', usage: { inputTokens: 15234, outputTokens: 0, cacheReadTokens: 98304 } } } },
       { type: 'turn/end', time: T0 - 30_000, data: { turn: 1, reason: { kind: 'error', error: { message: '400 status code (no body)', code: 'CONTEXT_WINDOW_EXCEEDED' } } } }
     ]
     const posts = [
       { postId: 'worker-a', sessionId: 'session-worker-a-1', retired: false, events, inboxTs: [] },
       { postId: 'worker-b', sessionId: 'session-worker-b-1', retired: false, events: bare400Events, inboxTs: [] }
     ]
+    // fb-235 — the POOLER interceptor: the pooler's DURABLE lastBare400 record
+    // (keyPooler-state.json — the read seam is the EXISTING readPoolerStateFile
+    // over deps.poolerStatePath; the tick joins it by the time window: the
+    // record ts == worker-b's turn/end ts, the bare-400 ≈ turn/end identity).
+    // The snapshot is HEALTHY for the pooler-capacity scan the same tick runs
+    // (1 usable key, no usage → no HALT/outage finding).
+    const poolerStatePath = path.join(stateDir, 'fixtures', 'keyPooler-state.json')
+    await mkdir(path.dirname(poolerStatePath), { recursive: true })
+    await writeFile(poolerStatePath, JSON.stringify({
+      updatedAt: new Date(T0).toISOString(),
+      keys: {
+        'oc-6': { id: 'oc-6', workspace: 'ws6', invalid: false, blockedUntil: 0, cooldownUntil: 0, usageWeekly: null, usageMonthly: null, billingBlocked: false }
+      },
+      lastBare400: { ts: T0 - 30_000, keyId: 'oc-6', keyWorkspace: 'ws6' }
+    }), 'utf8')
     const tick = (nowMs) => runHealthDaemonTick({
       now: () => nowMs,
       stateDir,
       bootId: 'boot-w8c-1',
       hosts,
       posts,
+      poolerStatePath,
       notifyHost: async (hostEntry, frame) => { alerts.push({ hostEntry, frame }) },
       logger: { warn: (m) => warns.push(m) }
     })
@@ -15828,6 +15853,10 @@ test('W8-c PART 1 turn-failure capture: a live post session whose turn/end ends 
     assert.equal(rowA.sessionId, 'session-worker-a-1', 'fb-25 (b): the row carries the SESSION the failed turn belonged to')
     assert.equal(rowA.turn, 1, 'fb-25 (b): the row carries the failed TURN number')
     assert.equal(rowA.code, undefined, 'fb-251 R6: a capture WITHOUT a code still writes the legacy {ts,postId,error} row (no code key)')
+    assert.equal(rowA.route, undefined, 'fb-235 R6: a capture WITHOUT a request/header writes no route key (the legacy row shape)')
+    assert.equal(rowA.workspace, undefined, 'fb-235 R6: a capture without a session cwd writes no workspace key')
+    assert.equal(rowA.keyId, undefined, 'fb-235 R6: worker-a\'s error is OUTSIDE the lastBare400 time window (5 min earlier) → the join guard rejects the stale record, no keyId (worker-b keeps it)')
+    assert.equal(rowA.lastUsage, undefined, 'fb-235 R6: a capture without a usage chunk writes no lastUsage key')
     // worker-b — the BARRE-400 row EXPOSES the pi-ai classification next to the text.
     const rowB = errors.find((r) => r.postId === 'worker-b')
     assert.ok(rowB, 'the worker-b (bare-400) row is recorded')
@@ -15835,6 +15864,11 @@ test('W8-c PART 1 turn-failure capture: a live post session whose turn/end ends 
     assert.equal(rowB.code, 'CONTEXT_WINDOW_EXCEEDED', 'fb-251: the row ALSO carries the pi-ai classification code (round-trip: capture → append → readPostErrorsFile)')
     assert.equal(rowB.sessionId, 'session-worker-b-1', 'the bare-400 row carries its session provenance')
     assert.equal(rowB.turn, 1, 'the bare-400 row carries its turn')
+    assert.equal(rowB.route, 'opencode-zen/deepseek-v4-flash', 'fb-235: the bare-400 row carries the ROUTE (provider/model of the LAST request/header preceding the turn/end — round-trip through the JSONL)')
+    assert.equal(rowB.workspace, '/root/.deepartments/departments/quality', 'fb-235: the bare-400 row carries the session WORKSPACE (the session event cwd)')
+    assert.equal(rowB.keyId, 'oc-6', 'fb-235: the row carries the OPAQUE pooler key id (the lastBare400 TIME-WINDOW join — an id by construction, never the sk-… value)')
+    assert.equal(rowB.keyWorkspace, 'ws6', 'fb-235: the row carries the pooler key workspace')
+    assert.deepEqual(rowB.lastUsage, { inputTokens: 15234, cacheReadTokens: 98304 }, 'fb-235: the row carries the LAST assistant/chunk usage before the failure (inputTokens + cacheReadTokens — round-trip through the JSONL)')
     assert.equal(alerts.length, 1, 'the daemon ALERTED the host with ONE aggregate frame for the tick (both errored posts ride the same bus frame)')
     assert.match(alerts[0].frame, /post-error: worker-a/, 'the alert names the failed post')
     assert.match(alerts[0].frame, /post-error: worker-b/, 'the SAME frame ALSO names the bare-400 post (a distinct finding, one aggregate alert)')
@@ -15946,14 +15980,62 @@ test('W8-c PART 1 scanTurnErrorCaptures: tails a live session log for the MOST-R
   // (pi-ai MISCLASSIFIES the empty 400 as context overflow — overflow.js:60
   // Cerebras pattern). The capture MUST keep the classification next to the
   // raw provider text so the post-error row exposes it.
+  // fb-235 — the same fixture now carries the REQUEST ATTRIBUTION: the session
+  // event's top-level cwd (workspace), a request/header before the failure
+  // (route) and the last usage chunk (lastUsage — cacheReadTokens ABSENT here:
+  // the additive shape omits it).
   const bare400 = scanTurnErrorCaptures([
+    { type: 'session', time: T0 - 60_000, cwd: '/root/.deepartments/departments/quality' },
+    { type: 'request/header', time: T0 - 59_000, data: { header: { config: { provider: 'opencode-zen', model: 'deepseek-v4-flash', maxTokens: 262144 } } } },
+    { type: 'assistant/chunk', time: T0 - 30_000, data: { turn: 1, step: 1, chunk: { type: 'usage', usage: { inputTokens: 0, outputTokens: 0 } } } },
     { type: 'turn/end', time: T0, data: { turn: 1, reason: { kind: 'error', error: { message: '400 status code (no body)', code: 'CONTEXT_WINDOW_EXCEEDED' } } } }
   ], 'p-bare400')
   assert.equal(bare400?.error, '400 status code (no body)', 'fb-251: the capture keeps the RAW provider error text')
   assert.equal(bare400?.code, 'CONTEXT_WINDOW_EXCEEDED', 'fb-251: the capture ALSO keeps the pi-ai classification code')
+  assert.equal(bare400?.route, 'opencode-zen/deepseek-v4-flash', 'fb-235: the capture derives the request ROUTE (provider/model of the last request/header before the turn/end)')
+  assert.equal(bare400?.workspace, '/root/.deepartments/departments/quality', 'fb-235: the capture derives the session WORKSPACE from the session event cwd')
+  assert.deepEqual(bare400?.lastUsage, { inputTokens: 0 }, 'fb-235: the capture keeps the LAST usage before the failure (cacheReadTokens absent → omitted, additive)')
   // R6 additive: a reason WITHOUT a code → the capture omits code (undefined).
   const noCode = scanTurnErrorCaptures([{ type: 'turn/end', time: T0, data: { turn: 1, reason: { kind: 'error', message: 'no provider' } } }], 'p-nocode')
   assert.equal(noCode?.code, undefined, 'fb-251 R6: a reason WITHOUT a code → the capture carries NO code key')
+  // fb-235 — the LONG-SESSION attribution: the request/header of a LONG
+  // session sits BEYOND the bounded capture tail (TURN_ERROR_CAPTURE_MAX_TAIL
+  // = 30 — the zstd seq 10 vs turn/end seq 701 case), so the route/workspace/
+  // lastUsage lookup MUST scan the FULL event log; and the keyId joins from
+  // the pooler's durable lastBare400 record by the TIME WINDOW (bare-400 ts ≈
+  // turn/end ts — TURN_ERROR_POOLER_JOIN_WINDOW_MS).
+  const longLog = [
+    { type: 'session', time: T0 - 120_000, cwd: '/root/.deepartments/departments/quality' },
+    { type: 'request/header', time: T0 - 115_000, data: { header: { config: { provider: 'opencode-zen', model: 'deepseek-v4-flash', maxTokens: 262144 } } } }
+  ]
+  for (let k = 0; k < 40; k++) {
+    longLog.push({ type: 'tool/call', time: T0 - 100_000 + k * 1000, data: { turn: 1, step: (k % 3) + 1, name: 'read', arguments: '{}' } })
+  }
+  longLog.push({ type: 'assistant/chunk', time: T0 - 60_000, data: { turn: 1, step: 3, chunk: { type: 'usage', usage: { inputTokens: 15234, outputTokens: 0, cacheReadTokens: 98304 } } } })
+  longLog.push({ type: 'assistant/chunk', time: T0 - 59_999, data: { turn: 1, step: 3, chunk: { type: 'finish', reason: { kind: 'error', failure: { message: '400 status code (no body)', code: 'INVALID_REQUEST' } } } } })
+  longLog.push({ type: 'turn/end', time: T0 - 59_000, data: { turn: 1, reason: { kind: 'error', error: { message: '400 status code (no body)', code: 'INVALID_REQUEST' } } } })
+  const attributed = scanTurnErrorCaptures(longLog, 'p-attrib', 'session-p-attrib', {
+    updatedAt: new Date(T0).toISOString(),
+    keys: {},
+    lastBare400: { ts: T0 - 59_000, keyId: 'oc-6', keyWorkspace: 'ws6' }
+  })
+  assert.equal(attributed?.route, 'opencode-zen/deepseek-v4-flash', 'fb-235: the request/header is found EVEN BEYOND the tail-30 (the FULL-log lookup — the long-session zstd seq 10 vs 701 case)')
+  assert.equal(attributed?.workspace, '/root/.deepartments/departments/quality', 'fb-235: the session cwd rides the long-session capture too')
+  assert.deepEqual(attributed?.lastUsage, { inputTokens: 15234, cacheReadTokens: 98304 }, 'fb-235: the LAST usage before the failure is captured (inputTokens + cacheReadTokens)')
+  assert.equal(attributed?.keyId, 'oc-6', 'fb-235: the keyId JOINS from the pooler lastBare400 when its ts ≈ the turn/end ts (the time-window join)')
+  assert.equal(attributed?.keyWorkspace, 'ws6', 'fb-235: the pooler key workspace rides the join')
+  // R6 guards — an event log without the attribution sources never fabricates
+  // a field, and a STALE lastBare400 never attributes a later unrelated error.
+  const noHeader = scanTurnErrorCaptures([{ type: 'turn/end', time: T0, data: { turn: 1, reason: { kind: 'error', message: 'no provider' } } }], 'p-noheader')
+  assert.equal(noHeader?.route, undefined, 'fb-235 R6: no request/header → the capture carries NO route key')
+  assert.equal(noHeader?.workspace, undefined, 'fb-235 R6: no session cwd → the capture carries NO workspace key')
+  assert.equal(noHeader?.lastUsage, undefined, 'fb-235 R6: no usage chunk → the capture carries NO lastUsage key')
+  const staleJoin = scanTurnErrorCaptures([{ type: 'turn/end', time: T0, data: { turn: 1, reason: { kind: 'error', message: 'no provider' } } }], 'p-stale', undefined, {
+    updatedAt: new Date(T0).toISOString(),
+    keys: {},
+    lastBare400: { ts: T0 - 2 * 60 * 60 * 1000, keyId: 'oc-6', keyWorkspace: 'ws6' }
+  })
+  assert.equal(staleJoin?.keyId, undefined, 'fb-235 R6: a lastBare400 OUTSIDE the time window never attributes a later turn/end (the stale-record guard)')
 })
 
 test('W8-c PART 2 stale-live watchdog: a catalog-live post with pending addressed messages AND no session writes for >= N min is a STALLED post (alerts once/30min, re-alerts after the window); does NOT alert with no pending messages or when NOT silent', async () => {

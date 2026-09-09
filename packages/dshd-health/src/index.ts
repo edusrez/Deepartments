@@ -140,6 +140,30 @@ export interface PostErrorEntry {
   /** W8-c scheduler-visibility: the no-fire reason ('no head' |
    * 'idempotency-skip' | the thrown error text). */
   reason?: string
+  /** fb-235 — the ROUTE of the request that failed: `provider/model` from the
+   * LAST `request/header` event PRECEDING the failed turn/end (the harness
+   * persists it in the session log — dsh-agent-loop lib:733-741,
+   * header.config={provider,model,...}; the post-deploy zstd seq 10:
+   * 'opencode-zen/deepseek-v4-flash'). Absent → omitted (R6). */
+  route?: string
+  /** fb-235 — the WORKSPACE the failed turn ran in: the session's cwd (the
+   * session event's TOP-LEVEL `cwd` field — dsh-session lib, the zstd seq 0:
+   * '/root/.deepartments/departments/quality'). Absent → omitted (R6). */
+  workspace?: string
+  /** fb-235 — the OPAQUE pooler key id of the failed request (`oc-<N>` — the
+   * pooler's anonymized-by-construction id derived from env, config.ts:274-282;
+   * NEVER the sk-… value, fb-16). Joined via the pooler's durable
+   * `lastBare400` record when its ts ≈ the turn/end ts (the time-window join
+   * TURN_ERROR_POOLER_JOIN_WINDOW_MS). Absent → omitted (R6). */
+  keyId?: string
+  /** fb-235 — the key's workspace within the pool (`ws-<N>`, from the same
+   * lastBare400 join). Absent → omitted (R6). */
+  keyWorkspace?: string
+  /** fb-235 — the LAST `assistant/chunk` USAGE the session saw BEFORE the
+   * failed turn/end (the usage pair of the request that errored; fb-251: a
+   * rejected request reports usage(0,0) — never a real consumption). Absent →
+   * omitted (R6). */
+  lastUsage?: TurnErrorLastUsage
 }
 
 export const POST_ERRORS_FILE = 'post-errors.jsonl'
@@ -175,6 +199,10 @@ function parsePostErrorLines(lines: readonly string[]): PostErrorEntry[] {
     }
     const entry = parsed as Record<string, unknown>
     if (typeof entry.ts !== 'number' || typeof entry.postId !== 'string') continue
+    // fb-235 — the lastUsage object round-trips only when it carries a valid
+    // finite usage pair (the reader-side validation mirrors the append-side
+    // shape; malformed → omitted, never a crash).
+    const lastUsage = parseLastUsage(entry.lastUsage)
     out.push({
       ts: entry.ts,
       postId: entry.postId,
@@ -184,10 +212,46 @@ function parsePostErrorLines(lines: readonly string[]): PostErrorEntry[] {
       ...(typeof entry.sessionId === 'string' ? { sessionId: entry.sessionId } : {}),
       ...(typeof entry.turn === 'number' && Number.isFinite(entry.turn) ? { turn: entry.turn } : {}),
       ...(typeof entry.jobId === 'string' ? { jobId: entry.jobId } : {}),
-      ...(typeof entry.reason === 'string' ? { reason: entry.reason } : {})
+      ...(typeof entry.reason === 'string' ? { reason: entry.reason } : {}),
+      // fb-235 — the request attribution fields (aditivo R6): string fields
+      // round-trip when present.
+      ...(typeof entry.route === 'string' ? { route: entry.route } : {}),
+      ...(typeof entry.workspace === 'string' ? { workspace: entry.workspace } : {}),
+      ...(typeof entry.keyId === 'string' ? { keyId: entry.keyId } : {}),
+      ...(typeof entry.keyWorkspace === 'string' ? { keyWorkspace: entry.keyWorkspace } : {}),
+      ...(lastUsage !== undefined ? { lastUsage } : {})
     })
   }
   return out
+}
+
+/** fb-235 — the last `assistant/chunk` USAGE the session observed BEFORE the
+ * failed turn/end: the request-level usage pair the harness persists verbatim
+ * ({type:'usage', usage:{inputTokens, outputTokens, cacheReadTokens?}} —
+ * dsh-agent-loop lib:621-625, the TokenUsage shape). Trace fb-251: a REJECTED
+ * request reports usage(0,0) — never a real consumption — so this pair is the
+ * failed request's own accounting, not session consumption evidence. */
+export interface TurnErrorLastUsage {
+  /** The usage `inputTokens` (finite number when the provider reported it). */
+  inputTokens?: number
+  /** The usage `cacheReadTokens` (finite number when the provider reported it —
+   * the TokenUsage optional field, absent on a never-cached request). */
+  cacheReadTokens?: number
+}
+
+/** Pure validator of a persisted lastUsage object (the reader-side twin of the
+ * capture-side extraction): non-object / no finite field → undefined (omitted,
+ * R6 — a malformed lastUsage never breaks a row). */
+function parseLastUsage(raw: unknown): TurnErrorLastUsage | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const usage = raw as Record<string, unknown>
+  const inputTokens = typeof usage.inputTokens === 'number' && Number.isFinite(usage.inputTokens) ? usage.inputTokens : undefined
+  const cacheReadTokens = typeof usage.cacheReadTokens === 'number' && Number.isFinite(usage.cacheReadTokens) ? usage.cacheReadTokens : undefined
+  if (inputTokens === undefined && cacheReadTokens === undefined) return undefined
+  return {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {})
+  }
 }
 
 /** Read `<stateDir>/post-errors.jsonl` → the bounded post-error rows, in file
@@ -1475,6 +1539,13 @@ export interface HealthSessionEvent {
   /** The event ts (ms epoch) — the session log's write timestamp. */
   time?: number
   data?: unknown
+  /** fb-235 — the session's WORKSPACE (the session event's TOP-LEVEL `cwd`,
+   * dsh-session lib — the zstd seq 0 carries
+   * '/root/.deepartments/departments/quality'). Declared as the ONLY extra
+   * top-level field the health scan reads (structural — the harness session
+   * events also carry id/createdAt/version/agentPreset, which the safeguards
+   * never touch). Absent → no workspace attribution (R6). */
+  cwd?: string
 }
 
 /** One catalog post's snapshot inputs for the health safeguards. */
@@ -1748,6 +1819,13 @@ export function scanStalledPosts(
 export const TURN_ERROR_FRESH_WINDOW_MS = 10 * 60 * 1000
 /** W8-c PART 1 — the bounded tail of the session log scanned per post per tick. */
 export const TURN_ERROR_CAPTURE_MAX_TAIL = 30
+/** fb-235 — the TIME-WINDOW of the keyId join: the pooler's durable
+ * `lastBare400.ts` is attributed to the post-error row when it is ≈ the
+ * turn/end ts (a bare-400 is the response OF the failed request — the proxy
+ * records it ms before the finish/turn-end error frame lands). 2 min is
+ * generous (the same turn) yet tight (a STALE record from a PREVIOUS bare-400
+ * never joins a later unrelated turn/end). */
+export const TURN_ERROR_POOLER_JOIN_WINDOW_MS = 2 * 60 * 1000
 
 /** A turn-error capture candidate: the post + a fresh turn/end error reason. */
 export interface TurnErrorCapture {
@@ -1774,6 +1852,26 @@ export interface TurnErrorCapture {
    * live sessionId at scan time). Absent → omitted (R6 — capture without
    * provenance degrades to the legacy shape, never breaks). */
   sessionId?: string
+  /** fb-235 — the REQUEST attribution of the failed turn (the lane P2 row
+   * enrichment; the trace 99ba9d32 §4a). Every field is additive (R6): an
+   * event log / pooler state WITHOUT the source data omits the field, never
+   * breaking the legacy capture shape. */
+  /** fb-235 — the request ROUTE `provider/model` of the LAST `request/header`
+   * PRECEDING the failed turn/end (derived from the FULL event log — the
+   * tail-30 TURN_ERROR_CAPTURE_MAX_TAIL does NOT reach the request/header of
+   * a long session — the zstd seq 10 vs turn/end seq 701). */
+  route?: string
+  /** fb-235 — the session WORKSPACE (the session event's top-level `cwd`). */
+  workspace?: string
+  /** fb-235 — the OPAQUE pooler key id (`oc-<N>`) joined from the pooler's
+   * durable `lastBare400` record when its ts ≈ this turn/end ts (the
+   * TURN_ERROR_POOLER_JOIN_WINDOW_MS window — the pooler writes it at the
+   * fb-235 point, proxy.ts:2298-2303). */
+  keyId?: string
+  /** fb-235 — the key's pool workspace (`ws-<N>`, the same lastBare400 join). */
+  keyWorkspace?: string
+  /** fb-235 — the LAST `assistant/chunk` usage BEFORE the failed turn/end. */
+  lastUsage?: TurnErrorLastUsage
   /** A stable dedupe key for the captured (postId, turn) pair — a turn that
    * already produced a post-error row is never double-captured. */
   key: string
@@ -1790,7 +1888,7 @@ export interface TurnErrorCapture {
  * / `session.seq` (the rc.1+ session surface; the `events` getter is gone from
  * 0.1.2-rc.1 on) — in the daemon tick, so the cleanest available
  * observation point is a bounded per-tick tail-scan there. */
-export function scanTurnErrorCaptures(events: readonly HealthSessionEvent[], postId: string, sessionId?: string): TurnErrorCapture | undefined {
+export function scanTurnErrorCaptures(events: readonly HealthSessionEvent[], postId: string, sessionId?: string, poolerState?: PoolerSnapshotLike): TurnErrorCapture | undefined {
   const tail = events.slice(-TURN_ERROR_CAPTURE_MAX_TAIL)
   for (let i = tail.length - 1; i >= 0; i--) {
     const event = tail[i]
@@ -1835,6 +1933,14 @@ export function scanTurnErrorCaptures(events: readonly HealthSessionEvent[], pos
         : (typeof reason.code === 'string' && reason.code !== '')
           ? reason.code
           : undefined
+    // fb-235 — the REQUEST attribution (route/workspace/keyId/lastUsage): the
+    // FULL event log is scanned (NOT the tail-30 — TURN_ERROR_CAPTURE_MAX_TAIL
+    // never reaches the request/header of a LONG session, the zstd seq 10 vs
+    // the turn/end seq 701) for the LAST request/header + session cwd + usage
+    // chunk PRECEDING this turn/end; the pooler's durable lastBare400 record
+    // joins by the time window (bare-400 ts ≈ turn/end ts).
+    const turnEndIndex = events.length - tail.length + i
+    const attribution = deriveTurnErrorAttribution(events, turnEndIndex, ts, poolerState)
     return {
       postId,
       error: message,
@@ -1842,10 +1948,97 @@ export function scanTurnErrorCaptures(events: readonly HealthSessionEvent[], pos
       ...(typeof turn === 'number' && Number.isFinite(turn) ? { turn } : {}),
       ...(typeof sessionId === 'string' && sessionId !== '' ? { sessionId } : {}),
       ...(code !== undefined ? { code } : {}),
+      ...(attribution.route !== undefined ? { route: attribution.route } : {}),
+      ...(attribution.workspace !== undefined ? { workspace: attribution.workspace } : {}),
+      ...(attribution.keyId !== undefined ? { keyId: attribution.keyId } : {}),
+      ...(attribution.keyWorkspace !== undefined ? { keyWorkspace: attribution.keyWorkspace } : {}),
+      ...(attribution.lastUsage !== undefined ? { lastUsage: attribution.lastUsage } : {}),
       key: `${postId}:turn-error:${typeof turn === 'number' ? String(turn) : '?'}:${ts}`
     }
   }
   return undefined
+}
+
+/** fb-235 — derive the REQUEST ATTRIBUTION of a failed turn/end from the FULL
+ * session event log + the pooler snapshot (READ-ONLY). Scanning BACKWARD from
+ * the turn/end index it finds the LAST `request/header` event (→ route =
+ * `data.header.config.provider/model` — dsh-agent-loop lib:733-741), the LAST
+ * event carrying a session cwd (→ workspace — the session event's TOP-LEVEL
+ * `cwd`, dsh-session lib), and the LAST `assistant/chunk` usage event (→
+ * lastUsage — the harness persists the stream chunk verbatim, lib:621-625,
+ * `chunk.usage={inputTokens, outputTokens, cacheReadTokens?}`); then joins the
+ * pooler's durable `lastBare400` record when its ts ≈ the turn/end ts
+ * (TURN_ERROR_POOLER_JOIN_WINDOW_MS — the pooler writes it at the bare-400,
+ * dsh-key-pooler proxy.ts:2298-2303). PURE, never throws: every malformed
+ * shape degrades to an ABSENT field (R6 — the legacy capture shape never
+ * breaks). */
+export function deriveTurnErrorAttribution(
+  events: readonly HealthSessionEvent[],
+  turnEndIndex: number,
+  turnEndTs: number,
+  poolerState?: PoolerSnapshotLike
+): { route?: string; workspace?: string; keyId?: string; keyWorkspace?: string; lastUsage?: TurnErrorLastUsage } {
+  let route: string | undefined
+  let workspace: string | undefined
+  let lastUsage: TurnErrorLastUsage | undefined
+  for (let i = turnEndIndex - 1; i >= 0; i--) {
+    const event = events[i]
+    if (route === undefined && event.type === 'request/header') {
+      const data = (typeof event.data === 'object' && event.data !== null ? event.data : {}) as Record<string, unknown>
+      const header = (typeof data.header === 'object' && data.header !== null ? data.header : {}) as Record<string, unknown>
+      const config = (typeof header.config === 'object' && header.config !== null ? header.config : {}) as Record<string, unknown>
+      const provider = typeof config.provider === 'string' && config.provider !== '' ? config.provider : undefined
+      const model = typeof config.model === 'string' && config.model !== '' ? config.model : undefined
+      if (provider !== undefined && model !== undefined) route = `${provider}/${model}`
+      else if (provider !== undefined) route = provider
+      else if (model !== undefined) route = model
+    }
+    if (workspace === undefined && typeof event.cwd === 'string' && event.cwd !== '') {
+      workspace = event.cwd
+    }
+    if (lastUsage === undefined && event.type === 'assistant/chunk') {
+      const data = (typeof event.data === 'object' && event.data !== null ? event.data : {}) as Record<string, unknown>
+      const chunk = (typeof data.chunk === 'object' && data.chunk !== null ? data.chunk : {}) as Record<string, unknown>
+      if (chunk.type === 'usage') {
+        const usage = (typeof chunk.usage === 'object' && chunk.usage !== null ? chunk.usage : {}) as Record<string, unknown>
+        const inputTokens = typeof usage.inputTokens === 'number' && Number.isFinite(usage.inputTokens) ? usage.inputTokens : undefined
+        const cacheReadTokens = typeof usage.cacheReadTokens === 'number' && Number.isFinite(usage.cacheReadTokens) ? usage.cacheReadTokens : undefined
+        if (inputTokens !== undefined || cacheReadTokens !== undefined) {
+          lastUsage = {
+            ...(inputTokens !== undefined ? { inputTokens } : {}),
+            ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {})
+          }
+        }
+      }
+    }
+    if (route !== undefined && workspace !== undefined && lastUsage !== undefined) break
+  }
+  // keyId join — the pooler's DURABLE bare-400 record (keyPooler-state.json,
+  // read via the existing READ-ONLY seam readPoolerStateFile): {ts, keyId:
+  // 'oc-<N>', keyWorkspace:'ws<N>'} — the OPAQUE ids (config.ts:274-282),
+  // NEVER the sk-… value (fb-16). The time-window join ties the record to THIS
+  // turn/end (a bare-400 ts ≈ turn/end ts): a STALE record from a previous
+  // incident never attributes a later unrelated error (R6 → omitted).
+  let keyId: string | undefined
+  let keyWorkspace: string | undefined
+  const lastBare400 = poolerState?.lastBare400
+  if (
+    lastBare400 !== undefined && lastBare400 !== null &&
+    typeof lastBare400 === 'object' &&
+    typeof lastBare400.keyId === 'string' && lastBare400.keyId !== '' &&
+    typeof lastBare400.ts === 'number' && Number.isFinite(lastBare400.ts) &&
+    Math.abs(lastBare400.ts - turnEndTs) <= TURN_ERROR_POOLER_JOIN_WINDOW_MS
+  ) {
+    keyId = lastBare400.keyId
+    keyWorkspace = typeof lastBare400.keyWorkspace === 'string' && lastBare400.keyWorkspace !== '' ? lastBare400.keyWorkspace : undefined
+  }
+  return {
+    ...(route !== undefined ? { route } : {}),
+    ...(workspace !== undefined ? { workspace } : {}),
+    ...(keyId !== undefined ? { keyId } : {}),
+    ...(keyWorkspace !== undefined ? { keyWorkspace } : {}),
+    ...(lastUsage !== undefined ? { lastUsage } : {})
+  }
 }
 
 /** The dedupe ledger of turn-error capture: `postId:turn-error:<turn>:<ts>` →
@@ -3864,6 +4057,29 @@ export interface PoolerSnapshotLike {
    * proxy.ts:843-850). Absent OR null reads not-halted; a non-null record is
    * the durable fail-stop (same no-age treatment as billingDown). */
   halted?: PoolerHaltLike | null
+  /** fb-235 (lane P2) — the pooler's durable LAST-BARE-400 record, written at
+   * the fb-235 proxy point (dsh-key-pooler proxy.ts:2298-2303) when a
+   * provider 400 is BARE (empty / non-JSON body — the no-diagnostic class).
+   * `keyId` is the OPAQUE pool id `oc-<N>` (config.ts:274-282 — anonymized by
+   * construction; the sk-… VALUE is never written, fb-16) and `keyWorkspace`
+   * the pool workspace `ws-<N>`. The turn-error capture (scanTurnErrorCaptures)
+   * joins it to the post-error row by the TIME WINDOW (bare-400 ts ≈ turn/end
+   * ts — TURN_ERROR_POOLER_JOIN_WINDOW_MS). Absent OR null → no join. */
+  lastBare400?: PoolerLastBare400Like | null
+}
+
+/** fb-235 — the pooler's durable last-bare-400 record (see PoolerSnapshotLike
+ * lastBare400). STRUCTURAL mirror of the pooler's Bare400Record
+ * (dsh-key-pooler pool.ts «PoolerBare400Record», written at the proxy fb-235
+ * point). Fields optional by mirror convention (readPoolerStateFile casts
+ * blindly — the scan only reads; the pooler owns every write). */
+export interface PoolerLastBare400Like {
+  /** Epoch ms of the bare-400 response (the record ts — the join key). */
+  ts?: number
+  /** The opaque pooler key id ('oc-6' — NEVER the sk-… value). */
+  keyId?: string
+  /** The key's pool workspace ('ws6'). */
+  keyWorkspace?: string
 }
 
 /** Read the pooler's `keyPooler-state.json` snapshot. Absent / unreadable /
@@ -7000,10 +7216,15 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     if (turnErrorCaptureEnabled) {
       try {
         const captureState = readTurnErrorsState(deps.stateDir)
+        // fb-235 — the pooler snapshot for the keyId JOIN (READ-ONLY via the
+        // existing seam; absent path → undefined → the capture omits keyId, R6):
+        // read ONCE per tick for every post's capture (the same file the
+        // pooler-capacity scan reads later in this tick).
+        const poolerState = deps.poolerStatePath !== undefined ? readPoolerStateFile(deps.poolerStatePath) : undefined
         let changed = false
         for (const post of posts) {
           if (post.retired === true) continue
-          const capture = scanTurnErrorCaptures(post.events ?? [], post.postId, post.sessionId)
+          const capture = scanTurnErrorCaptures(post.events ?? [], post.postId, post.sessionId, poolerState)
           if (capture === undefined) continue
           // A turn already captured (and still fresh) is not re-recorded.
           const lastCaptured = captureState[capture.key]
@@ -7020,7 +7241,14 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
             error: capture.error,
             ...(capture.code !== undefined ? { code: capture.code } : {}),
             ...(capture.sessionId !== undefined ? { sessionId: capture.sessionId } : {}),
-            ...(capture.turn !== undefined ? { turn: capture.turn } : {})
+            ...(capture.turn !== undefined ? { turn: capture.turn } : {}),
+            // fb-235 — the request ATTRIBUTION (aditivo R6: absent → the
+            // legacy {ts,postId,error,...} row is written unchanged).
+            ...(capture.route !== undefined ? { route: capture.route } : {}),
+            ...(capture.workspace !== undefined ? { workspace: capture.workspace } : {}),
+            ...(capture.keyId !== undefined ? { keyId: capture.keyId } : {}),
+            ...(capture.keyWorkspace !== undefined ? { keyWorkspace: capture.keyWorkspace } : {}),
+            ...(capture.lastUsage !== undefined ? { lastUsage: capture.lastUsage } : {})
           }, nowMs)
           captureState[capture.key] = nowMs
           changed = true
@@ -7043,7 +7271,7 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         if (catchupEnabled && isBootTick) {
           for (const post of posts) {
             if (post.retired === true) continue
-            const capture = scanTurnErrorCaptures(post.events ?? [], post.postId, post.sessionId)
+            const capture = scanTurnErrorCaptures(post.events ?? [], post.postId, post.sessionId, poolerState)
             if (capture === undefined) continue
             // Only a BOUNDED-old error (within the look-back) is caught up.
             if (nowMs - capture.ts > catchupWindowMs) continue
@@ -7055,7 +7283,14 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
               error: capture.error,
               ...(capture.code !== undefined ? { code: capture.code } : {}),
               ...(capture.sessionId !== undefined ? { sessionId: capture.sessionId } : {}),
-              ...(capture.turn !== undefined ? { turn: capture.turn } : {})
+              ...(capture.turn !== undefined ? { turn: capture.turn } : {}),
+              // fb-235 — the request ATTRIBUTION (aditivo R6 — see the live
+              // capture call-site above).
+              ...(capture.route !== undefined ? { route: capture.route } : {}),
+              ...(capture.workspace !== undefined ? { workspace: capture.workspace } : {}),
+              ...(capture.keyId !== undefined ? { keyId: capture.keyId } : {}),
+              ...(capture.keyWorkspace !== undefined ? { keyWorkspace: capture.keyWorkspace } : {}),
+              ...(capture.lastUsage !== undefined ? { lastUsage: capture.lastUsage } : {})
             }, nowMs)
             captureState[capture.key] = nowMs
             changed = true
