@@ -179,7 +179,14 @@ export function resolveQualityWorkerInspectProbability(config: unknown): number 
 export type QualityInspectDirectiveSurface =
   | { kind: 'worker-retired'; workerPostId: string; sessionId: string; archived: boolean; deliverable?: 'none' | 'report' }
   | { kind: 'head-slept'; headPostId: string; sessionId: string; sleepEpoch: number }
-  | { kind: 'host-rotated'; oldSessionId: string; newSessionId: string; oldHostId: string; newHostId: string; sleepEpoch: number; archiveOk?: boolean }
+  // fb-473 (2026-09-10): the HOST-rotation mirror gains the SAME traceability
+  // triad the head mirror has had since fb-25 (a): the caller's `reason`, its
+  // `reasonVerified` cross-check stamp (computed in the EMITTER against the OLD
+  // host session's durable projection — one single source of truth:
+  // `verifyRotateReason`), and `fromSessionId` (the EMITTING session = the OLD
+  // one, carried to the DELIVERY FRAME source — never to this text). All three
+  // OPTIONAL: an emitter that omits them renders the pre-fix frame byte-identically.
+  | { kind: 'host-rotated'; oldSessionId: string; newSessionId: string; oldHostId: string; newHostId: string; sleepEpoch: number; archiveOk?: boolean; reason?: string; reasonVerified?: 'verified' | 'unverified' | 'unavailable'; fromSessionId?: string }
   // M-A (2026-08-28): the HEAD-ROTATION mirror — `dept_head_rotate` (the
   // host-plane context-refresh tool) emits this on the `host-rotated` pattern
   // (spec 007 §6.3, D-Q3): an ACTIVE head session rotation is inspected at
@@ -188,6 +195,23 @@ export type QualityInspectDirectiveSurface =
   // cannot loop).
   | { kind: 'head-rotated'; headPostId: string; oldSessionId: string; newSessionId: string; archiveOk?: boolean; reason?: string; reasonVerified?: 'verified' | 'unverified' | 'unavailable' }
   | { kind: 'post-error'; postId: string; messageId: string; error: string }
+
+/** The ONE label vocabulary of the rotation-reason verification stamp — the
+ * appendix BOTH rotation families render (`head rotated` since fb-25 (a),
+ * `host rotated` since fb-473). Extracted so the two emitters can never diverge:
+ * an unstamped surface renders NOTHING (R6 — the legacy frame never changes).
+ * 'verified' = a cited figure/fraction matches the OLD session's real usage;
+ * 'unverified' = a REAL negative (a figure was checked and does NOT match);
+ * 'unavailable' = there was nothing to verify (no figure, no datum). */
+export function verifyLabelFor(stamp: 'verified' | 'unverified' | 'unavailable' | undefined): string {
+  return stamp === undefined
+    ? ''
+    : stamp === 'verified'
+      ? ' [reason verified]'
+      : stamp === 'unverified'
+        ? ' [reason unverified vs archive]'
+        : ' [reason unverifiable]'
+}
 
 /** The human-readable directive frame for a surface (pure — testable). */
 export function qualityInspectDirectiveText(surface: QualityInspectDirectiveSurface): string {
@@ -217,20 +241,20 @@ export function qualityInspectDirectiveText(surface: QualityInspectDirectiveSurf
     case 'head-slept':
       return `Quality inspect: head slept (post ${surface.headPostId}, session ${surface.sessionId}, sleepEpoch ${surface.sleepEpoch})`
     case 'host-rotated':
-      return `Quality inspect: host rotated (old session ${surface.oldSessionId} → new session ${surface.newSessionId}, host ${surface.oldHostId} → ${surface.newHostId}, sleepEpoch ${surface.sleepEpoch}, archiveOk ${surface.archiveOk ?? false})`
+      // fb-473 (2026-09-10): R6 — the pre-fix frame stays a BYTE-IDENTICAL
+      // PREFIX; the reason + the verification-stamp label are APPENDED at the
+      // END, exactly like the fb-25 (a) tails of the head mirror. The emitting
+      // session is NOT re-stated here (the frame already names `old session X`);
+      // it travels in the delivery FRAME source (`source.senderSessionId`).
+      return `Quality inspect: host rotated (old session ${surface.oldSessionId} → new session ${surface.newSessionId}, host ${surface.oldHostId} → ${surface.newHostId}, sleepEpoch ${surface.sleepEpoch}, archiveOk ${surface.archiveOk ?? false}${surface.reason === undefined ? '' : `, reason ${surface.reason}`}${verifyLabelFor(surface.reasonVerified)})`
     case 'head-rotated': {
       // fb-25 (a): the reason CROSS-CHECK stamp — `reasonVerified` (computed in
       // the emit against the old session's durable token-meter projection) is a
       // CLEAR appendix so the QH/inspector never takes an unverified figure for
       // the session's real usage. Absent (legacy surface/emitter) → NO appendix
-      // (R6 — the existing frame never changes).
-      const verifyLabel = surface.reasonVerified === undefined
-        ? ''
-        : surface.reasonVerified === 'verified'
-          ? ' [reason verified]'
-          : surface.reasonVerified === 'unverified'
-            ? ' [reason unverified vs archive]'
-            : ' [reason unverifiable]'
+      // (R6 — the existing frame never changes). fb-473: the labels come from
+      // the SHARED `verifyLabelFor` (one vocabulary for both rotation families).
+      const verifyLabel = verifyLabelFor(surface.reasonVerified)
       return `Quality inspect: head rotated (post ${surface.headPostId}, old session ${surface.oldSessionId} → new session ${surface.newSessionId}, archiveOk ${surface.archiveOk ?? false}${surface.reason === undefined ? '' : `, reason ${surface.reason}`}${verifyLabel})`
     }
     case 'post-error':

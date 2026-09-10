@@ -239,7 +239,10 @@ export async function settleRetiredHostDeliveries(
 export type LifecycleQualityInspectSurface =
   | { kind: 'worker-retired'; workerPostId: string; sessionId: string; archived: boolean }
   | { kind: 'head-slept'; headPostId: string; sessionId: string; sleepEpoch: number }
-  | { kind: 'host-rotated'; oldSessionId: string; newSessionId: string; oldHostId: string; newHostId: string; sleepEpoch: number; archiveOk?: boolean }
+  // fb-473: the new host-rotation members are OPTIONAL in this mirror (the
+  // `await ctx.maybeEmitQualityInspectDirective({…})` below must keep typing
+  // against BOTH this subset and the real `QualityInspectDirectiveSurface`).
+  | { kind: 'host-rotated'; oldSessionId: string; newSessionId: string; oldHostId: string; newHostId: string; sleepEpoch: number; archiveOk?: boolean; reason?: string; reasonVerified?: 'verified' | 'unverified' | 'unavailable'; fromSessionId?: string }
   | { kind: 'post-error'; postId: string; messageId: string; error: string }
 
 /** The DSH session-header positional origin shape the sleep guard inspects
@@ -347,8 +350,13 @@ export interface LifecycleService {
    * tool body. */
   sleepMember(_args: Record<string, never>, exec: LifecycleExecLike): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }>
   /** dept_sleep core on the host plane — the subagent guard + HOST ROTATION
-   * branch + legacy-in-place fallback + (preserved) head-path fallback. */
-  sleepHost(_args: Record<string, never>, exec: LifecycleExecLike): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }>
+   * branch + legacy-in-place fallback + (preserved) head-path fallback. fb-473:
+   * the OPTIONAL `args.reason` (the host's own statement of WHY it rotates) is
+   * threaded into the QD `host-rotated` directive surface — the ONLY source of
+   * that datum (neither `HostRotationOutcome` nor the journal carries it); the
+   * VERIFICATION STAMP is NOT computed here (the emitter owns it — one single
+   * source of truth, and this deps contract stays untouched). */
+  sleepHost(args: { reason?: string } | undefined, exec: LifecycleExecLike): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }>
   /** dept_sleep_all core (B1) — the org-wide quiet-sleep orchestration the
    * Asistente owns. For every CONFIGURED department head entry (root permanent
    * head, never a disposable worker), EXCLUDING `quality-head` (stays live as
@@ -507,7 +515,7 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
       return { room: entry.roomId, member: memberId, memoPath: ctx.journalPath(memberId), sleepEpoch: entry.sleepEpoch }
     },
 
-    async sleepHost(_args, exec) {
+    async sleepHost(args, exec) {
       const agent = exec.agent
       if (!agent) throw new Error('dept_sleep requires a calling agent (exec.agent was undefined)')
       // ---- Task T4: REFUSE a TRANSIENT SUBAGENT. A one-shot delegated worker
@@ -685,7 +693,17 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
             oldHostId: hostId,
             newHostId: rotation.newHostId,
             sleepEpoch: rotation.sleepEpoch,
-            archiveOk: rotation.archive?.ok === true
+            archiveOk: rotation.archive?.ok === true,
+            // fb-473 (a): the caller's reason, VERBATIM (the emitter renders it
+            // after the pre-fix frame and computes its verification stamp). The
+            // key is only ADDED when present so the surface of a reason-less
+            // call is byte-equivalent to the pre-fix one (R6).
+            ...(typeof args?.reason === 'string' && args.reason.trim() !== '' ? { reason: args.reason } : {}),
+            // fb-473 (b): the EMITTING session = the OLD (rotating) session —
+            // the emitter passes it as the delivery's `senderSessionId` (the row
+            // itself has no session field: the register shape is
+            // {id,seq,ts,from,to,text,kind}).
+            fromSessionId: sessionId
           })
           return { room: existing?.roomId ?? 'board', member: rotation.newHostId, memoPath: rotation.newJournalPath, sleepEpoch: rotation.sleepEpoch }
         }

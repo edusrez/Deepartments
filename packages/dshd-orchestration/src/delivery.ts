@@ -614,6 +614,20 @@ export interface DeliveryFactoryDeps {
    * LATEST LANDED delivery (a batch item's landing is 'prepared' — the engine
    * `onDelivered` hook fires only for delivered/resumed). */
   drainRecipientQueue?: (recipientId: string) => Promise<number> | number
+  /** fb-473 (D1, option A): the fb-25 rotation-reason cross-check (module-scope
+   * pure helper of invoke.ts, passed BY REFERENCE — the SAME function the
+   * `dept_head_rotate` tool receives, so both rotation families verify through
+   * ONE implementation). The emitter stamps `host-rotated` surfaces with it. */
+  verifyRotateReason: (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number) => 'verified' | 'unverified' | 'unavailable'
+  /** fb-473: the durable session-projection mirror path resolver (module-scope
+   * pure helper of invoke.ts — `<dirname(sessionsRoot)>/storages/
+   * session_projcache.json`). */
+  resolveSessionProjCachePath: (stateDir: string, persistenceRoot?: string) => string
+  /** fb-473: the M-A fb-50 monitor calibration the «N% de contexto» reason form
+   * verifies against (`health.contextCompletionReserve`; absent → 0 → the plain
+   * projection fraction, legacy). The SAME knob the `dept_head_rotate` tool
+   * reads, wired from the config at the deliveryDeps position. */
+  contextCompletionReserve?: number
 }
 
 /** The delivery surface the rest of applyInvoke consumes at the SAME positions
@@ -1016,6 +1030,9 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     HOST_AGENT_OPTIONS,
     HEAD_DEFAULT_SESSION_TITLE,
     STUCK_HEAD_MS,
+    verifyRotateReason,
+    resolveSessionProjCachePath,
+    contextCompletionReserve,
     drainRecipientQueue
   } = deps
 
@@ -2434,13 +2451,58 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
           // a verification failure never blocks the directive — reason verbatim
         }
       }
+      // fb-473 (c) — the HOST-rotation reason VERIFICATION STAMP. The
+      // `head rotated` family receives `reasonVerified` PRE-COMPUTED from its
+      // tool (tools.ts `dept_head_rotate`); the `host rotated` family has no
+      // tool-side compute seam (its emitters are `lifecycle.sleepHost` + this
+      // factory's plugin mirror), so the stamp is computed HERE — in the
+      // EMITTER — with the SAME `verifyRotateReason` function and the SAME
+      // mirror resolution, so the two families can never diverge in semantics
+      // or in label vocabulary (`verifyLabelFor`).
+      // R6: applied to `host-rotated` ONLY. The `head rotated` semantics (and
+      // therefore every existing `head rotated` row) are UNTOUCHED.
+      // SEMANTICS (fb-473 D2): 'unavailable' = there is NOTHING to verify (no
+      // figure/fraction in the reason, no mirror datum, an unprojected session)
+      // — a reason without a figure is NEVER stamped 'unverified'; 'unverified'
+      // is reserved for a REAL negative (a figure that was checked and does NOT
+      // match). Non-fatal by construction: the helper is pure and degrades to
+      // 'unavailable', so the stamp can never block the directive.
+      // (d3) RESIDUAL: `verified` means the reason matches the DURABLE PROJECTION at the instant of EMIT (the mirror row carries NO datum timestamp — only `identity.createdAt`) — NEVER the session's instantaneous truth; the stamp is persisted in the append-only row, so a later mirror mutation cannot move it.
+      if (surface.kind === 'host-rotated') {
+        try {
+          const persistence = ctx.get('sessionPersistence') as { root?: string } | undefined
+          const projCachePath = resolveSessionProjCachePath(stateDir, persistence?.root)
+          // Spread the NARROWED `surface` (not the widened `surfaceToFrame`) so
+          // the result re-forms the `host-rotated` union member with its `kind`
+          // discriminator: the fb-118 verified-reason override of a surface that
+          // arrived WITH a reason is preserved, `reasonVerified` is the ONLY key
+          // this stamp adds/overwrites.
+          surfaceToFrame = {
+            ...surfaceToFrame,
+            ...surface,
+            reasonVerified: verifyRotateReason(surface.reason, surface.oldSessionId, projCachePath, contextCompletionReserve)
+          }
+        } catch {
+          // a stamp failure never blocks the directive — the frame renders
+          // WITHOUT the appendix (R6), never with a fabricated verdict.
+        }
+      }
       const text = qualityInspectDirectiveText(surfaceToFrame)
       // fb-118 re-derivation (wave-b, main @ a641964): the O2 MICRO-LANE
       // (ea48a67) hoisted the directive append into the OUTER `record` declared
       // above (line 1802) — the verify-cite block assigns to it instead of
       // declaring a shadowing const.
       record = await store.append({ from: 'deepartments', to: ['quality-head'], text, kind: 'agent' })
-      await busDeliverToPost(qualityHead, `[From deepartments → quality-head]: ${text}`, record, void 0)
+      // fb-473 (b) — the EMITTING SESSION. The durable row has NO session field
+      // (the register shape is {id,seq,ts,from,to,text,kind}: the session is not
+      // re-stated in the TEXT either — the `host rotated` frame already names
+      // `old session X`), so the emitting session is attributed at the DELIVERY
+      // FRAME: `source.senderSessionId` (what agent_messages / the GUI render).
+      // `fromSessionId` is set by the caller that KNOWS it (lifecycle.sleepHost =
+      // the OLD host session); when absent the argument stays `void 0` — NEVER a
+      // present `undefined` key (the W7-B class, jsonSafeMessageSource :1659-1669).
+      const fromSessionId = (surface as { fromSessionId?: string }).fromSessionId
+      await busDeliverToPost(qualityHead, `[From deepartments → quality-head]: ${text}`, record, fromSessionId === undefined ? void 0 : fromSessionId)
       // MICRO-LANE O2 (deliveries-emitter-row, 2026-09-06): the emitter
       // previously wrote NO delivery sidecar (0 deliveries.jsonl rows for the
       // made directives m-2282/2283/2355/2395 — the O2 observability gap), so a
@@ -2667,6 +2729,34 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       }
     }
     return { kind: 'unknown' }
+  }
+
+  /** DRENAJE (2026-09-10 — the ORPHAN closure, host decision: OBLIGATORIO).
+   * The OBSERVER of the reroute terminalization. The FLIP ITSELF lives in the
+   * delivery engine (dshd-core `delivery.ts`, its reroute branch): the engine
+   * reads the SUCCESSOR's pair status and, when it landed, marks the RETIRED
+   * id's pair 'terminal' — a pure status flip, never a re-delivery. It owns the
+   * flip because only it holds the record id and the sidecar seam, and because
+   * that makes the closure CLASS-GENERAL and ORIGIN-INDEPENDENT: it holds for
+   * EVERY caller (send_message, the boot re-drive, the sweep, the drain) with no
+   * per-caller wiring, so a future variant of "retired address with a live
+   * successor" cannot reopen the orphan class.
+   *
+   * WHY THE PAIR IS ORPHANED WITHOUT IT: `resolveBusCatalogRoute` re-routes a
+   * retired host-family address to the live successor (fb-58 F-3 / m-331 — the
+   * `host-session-<uuid>` ROLE intent), and the engine delivers the record TO
+   * THE SUCCESSOR, while its write-ahead mark was keyed to the RETIRED id and
+   * its final mark is keyed to `recipientId` (the same retired id): the
+   * successor is marked on its own pair and the retired id's pair keeps a
+   * 'prepared' row FOREVER (`needsRedelivery`) — the measured permanent-orphan
+   * class, m-4028 (≈24 h, also the sweep's `oldestPreparedTs`), m-4763
+   * (60.2 min) and m-4769 (58.7 min), each with its record CORRECTLY delivered
+   * to the live successor.
+   *
+   * This shell-side seam only OBSERVES (deliverable-grade logging for the
+   * post-deploy exposure runs) — nothing depends on it for correctness. */
+  const observeRerouteTerminalization = (retiredRecipientId: string, successorId: string): void => {
+    ctx.logger.info(`[deepartments] reroute terminalization observed: retired host "${retiredRecipientId}" → live successor "${successorId}" (the engine settled the retired-id pair 'terminal'; the orphan class is closed at the reroute seam)`)
   }
 
   /**
@@ -2946,7 +3036,11 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       // AFTER the final sidecar mark (the composed dshd-core engine receives it
       // via the `deepartments.deliverDeps` holder — R6 parity); it drains the
       // recipient's 'prepared' queue fire-and-forget (non-fatal, capped).
-      onDelivered: (recipientId: string) => fireQueueDrain(recipientId)
+      onDelivered: (recipientId: string) => fireQueueDrain(recipientId),
+      // DRENAJE (2026-09-10 — the ORPHAN closure): the observer of the reroute
+      // terminalization the ENGINE performs once per LANDED reroute (the flip
+      // closes the retired id's otherwise-permanent 'prepared' pair).
+      onRerouted: observeRerouteTerminalization
     })
   })()
 

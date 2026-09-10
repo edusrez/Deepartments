@@ -688,8 +688,10 @@ export function createBootOrchestration(ctx: Context, deps: BootFactoryDeps): Bo
 
   const sleepTool = (hostPlane: boolean) => defineTool({
     name: 'dept_sleep',
-    description: 'Sleep (dormir): persist your memory to your journal (dept_memo_write MUST be called first — this is enforced) and mark yourself for a context RESET. Conclude the turn after calling this; on your NEXT wake you are recreated as a FRESH incarnation. For a department HEAD (F8): your live AgentHandle is disposed, your durable session is ARCHIVED server-side (the sidebar row disappears, the journal + messages stay), and your next wake creates a NEW session — you keep your identity but get a fresh context. A disposable WORKER keeps the legacy cold-resume of the same session (worker retire is the separate archive path). For the HOST Asistente (host plane) it ROTATES the host session (spec 002): the old session is retired + archived server-side and a NEW session seeded with the re-keyed journal becomes the registered host (durable host sleepEpoch set on the new entry), then the turn concludes (falls back to the legacy in-place reset when the rotation cannot run). Rejects loudly if no journal has been saved.',
-    parameters: {},
+    description: 'Sleep (dormir): persist your memory to your journal (dept_memo_write MUST be called first — this is enforced) and mark yourself for a context RESET. Conclude the turn after calling this; on your NEXT wake you are recreated as a FRESH incarnation. For a department HEAD (F8): your live AgentHandle is disposed, your durable session is ARCHIVED server-side (the sidebar row disappears, the journal + messages stay), and your next wake creates a NEW session — you keep your identity but get a fresh context. A disposable WORKER keeps the legacy cold-resume of the same session (worker retire is the separate archive path). For the HOST Asistente (host plane) it ROTATES the host session (spec 002): the old session is retired + archived server-side and a NEW session seeded with the re-keyed journal becomes the registered host (durable host sleepEpoch set on the new entry), then the turn concludes (falls back to the legacy in-place reset when the rotation cannot run). Rejects loudly if no journal has been saved. Optional `reason`: your own statement of WHY you sleep/rotate (host rotation) — it is recorded in the QD `host rotated` directive mirror with a verification stamp.',
+    parameters: {
+      reason: { type: 'string', description: 'Optional. WHY you are sleeping/rotating (e.g. "context wall — ~60% of the window", "owner asked for a restart"), recorded in the log AND in the QD `host rotated` directive mirror with a verification stamp cross-checked against the OLD session\'s durable token-meter projection (the figure/fraction you cite is LABELED [reason verified] / [reason unverified vs archive] / [reason unverifiable] — so cite the real number or cite none).' }
+    },
     output: {
       schema: {
         type: 'object',
@@ -703,9 +705,9 @@ export function createBootOrchestration(ctx: Context, deps: BootFactoryDeps): Bo
       },
       render: (_args, value) => [{ type: 'text', text: `sleeping: ${value.member} marked for context reset (epoch ${value.sleepEpoch}); journal: ${value.memoPath}` } as const]
     },
-    async execute(_args, exec): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }> {
-      if (hostPlane) return lifecycle.sleepHost(_args, exec as Parameters<typeof lifecycle.sleepHost>[1])
-      return lifecycle.sleepMember(_args, exec as Parameters<typeof lifecycle.sleepMember>[1])
+    async execute(args, exec): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }> {
+      if (hostPlane) return lifecycle.sleepHost(args, exec as Parameters<typeof lifecycle.sleepHost>[1])
+      return lifecycle.sleepMember(args as Parameters<typeof lifecycle.sleepMember>[0], exec as Parameters<typeof lifecycle.sleepMember>[1])
     }
   })
 

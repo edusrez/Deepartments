@@ -3936,6 +3936,14 @@ export function applyInvoke(ctx: Context, config: Config) {
     // its `redeliverDrainQueue` is bound to `redeliverPendingDeliveries`, the
     // SAME DeliveryRedeliverer the sweep tick drives — a fire on an empty queue
     // is a pure no-op, and a missing hook degrades to NO-OP inside the factory).
+    // fb-473 (D1 option A) — the HOST-rotation reason verification stamp is
+    // computed in the delivery EMITTER with these two fb-25 helpers (the SAME
+    // by-reference pair the tools factory receives at :579/:1192 — one single
+    // source of truth for both rotation families) plus the M-A fb-50 monitor
+    // calibration (the same `config.health` knob the dept_head_rotate tool reads).
+    verifyRotateReason,
+    resolveSessionProjCachePath,
+    contextCompletionReserve: (config.health as { contextCompletionReserve?: number } | undefined)?.contextCompletionReserve,
     drainRecipientQueue: (recipientId) => toolsSurface.redeliverDrainQueue(recipientId)
   }
   ctx.get('deepartments.deliveryDeps', false)?.register(deliveryDeps)

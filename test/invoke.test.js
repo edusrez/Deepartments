@@ -20799,6 +20799,290 @@ test('QD host rotation ALWAYS emits one quality-inspect directive (host = "H", n
   })
 })
 
+// --- fb-473 (2026-09-10): the `host rotated` DIRECTIVE traceability -----
+// (a) `reason` — the host-plane `dept_sleep` accepts an OPTIONAL reason, threaded
+//     into the directive surface (it was `parameters: {}` literal);
+// (b) the EMITTING session in the durable register — the record is session-less
+//     by schema, so the session rides the FRAME source (`source.senderSessionId`,
+//     busDeliverToPost's 4th arg — `void 0` before the fix);
+// (c) the VERIFICATION STAMP — computed in the EMITTER (one single source of
+//     truth: the same `verifyRotateReason` the `head rotated` path uses) and
+//     rendered with the SAME label vocabulary (`[reason verified]` /
+//     `[reason unverified vs archive]` / `[reason unverifiable]`).
+// R6: the pre-fix frame stays a BYTE-IDENTICAL prefix — the new tails are appended
+// at the END (`archiveOk …)` → `…, reason … [label])`).
+test('fb-473 dept_sleep (host plane) — the OPTIONAL `reason` reaches the durable `host rotated` directive: the row carries `, reason <verbatim>` + the verification stamp appendix, the pre-fix frame stays a byte-identical prefix, and with NO mirror datum the stamp is `unavailable` → `[reason unverifiable]` (NEVER a fabricated `unverified`)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir)
+    try {
+      const host = env.agents.put(fakeParentAgent())
+      const sleepTool = env.root.tools.get('dept_sleep')
+      const signal = new AbortController().signal
+      const oldHostId = `host-${host.id}`
+      await seedJournal(stateDir, oldHostId, 'FB-473-HOST-ROTATION-MEMORY')
+      const realSession = Session.create(SessionId(String(host.id)))
+      realSession.append('user/message', { role: 'user', content: [{ type: 'text', text: 'prior turn' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
+      host.session = realSession
+      let concluded = false
+      const reason = 'fb-473 hermetic host rotation — umbral de contexto'
+      const result = await sleepTool.execute({ reason }, { agent: host, signal, concludeTurn: () => { concluded = true } })
+      assert.ok(concluded, 'the host turn concluded')
+      assert.match(result.member, /^host-session-/, 'the rotation returned the NEW host id')
+
+      // (1) The DURABLE REGISTER row — text = the directive frame VERBATIM.
+      const dirs = await qualityDirectives(stateDir)
+      const hostDirs = dirs.filter((d) => d.text.startsWith('Quality inspect: host rotated'))
+      assert.equal(hostDirs.length, 1, 'exactly ONE host-rotated directive row in the durable register')
+      const frame = hostDirs[0].text
+      assert.ok(frame.endsWith(')'), 'the host-rotated frame is still a single parenthesized sentence')
+      // (a) reason: `, reason <verbatim>` appended AFTER the pre-fix frame.
+      assert.ok(frame.includes(`, reason ${reason}`), `the durable row carries the caller's reason verbatim — got: ${frame}`)
+      // (c) the stamp appendix — the SAME vocabulary as the `head rotated` control.
+      assert.match(frame, /\[reason (verified|unverified vs archive|unverifiable)\]/, `the durable row carries the verification-stamp appendix — got: ${frame}`)
+      // This hermetic env ships NO session_projcache mirror → NOTHING to verify:
+      // the ONE correct stamp is `unavailable` ('no datum'), never a fabricated
+      // `unverified` (fb-473 D2: `unverified` is a REAL negative — checked, fails).
+      assert.match(frame, /\[reason unverifiable\]/, `no mirror datum → [reason unverifiable] — got: ${frame}`)
+      assert.ok(!frame.includes('[reason unverified vs archive]'), 'a datum-less reason is NEVER stamped as a real negative (unverified)')
+      // R6: the pre-fix frame is a BYTE-IDENTICAL PREFIX — only tails were added.
+      const baseFrame = `Quality inspect: host rotated (old session ${host.id} → new session ${String(result.member).replace(/^host-/, '')}, host ${oldHostId} → ${result.member}, sleepEpoch `
+      assert.ok(frame.startsWith(baseFrame), `R6 — the pre-fix frame must remain a byte-identical prefix; got: ${frame}`)
+      assert.ok(/archiveOk (true|false)(,|\s)/.test(frame), `archiveOk keeps its pre-fix position (right before the appended tails) — got: ${frame}`)
+
+      // (2) The RENDER is discriminating (pure): the SAME host-rotated surface with
+      // each stamp renders each label at the END, and an UNSTAMPED surface renders
+      // the LEGACY frame byte-identically.
+      const baseHost = { kind: 'host-rotated', oldSessionId: 'host-session-old', newSessionId: 'session-new', oldHostId: 'host-host-session-old', newHostId: 'host-session-new', sleepEpoch: 7, archiveOk: true, reason: 'r' }
+      assert.match(qualityInspectDirectiveText({ ...baseHost, reasonVerified: 'verified' }), /, reason r \[reason verified\]\)$/, 'the verified stamp renders its label at the END of the frame')
+      assert.match(qualityInspectDirectiveText({ ...baseHost, reasonVerified: 'unverified' }), /, reason r \[reason unverified vs archive\]\)$/, 'the unverified stamp renders its label')
+      assert.match(qualityInspectDirectiveText({ ...baseHost, reasonVerified: 'unavailable' }), /, reason r \[reason unverifiable\]\)$/, 'the unavailable stamp renders its label')
+      assert.equal(
+        qualityInspectDirectiveText({ kind: 'host-rotated', oldSessionId: 'host-session-old', newSessionId: 'session-new', oldHostId: 'host-host-session-old', newHostId: 'host-session-new', sleepEpoch: 7, archiveOk: true }),
+        'Quality inspect: host rotated (old session host-session-old → new session session-new, host host-host-session-old → host-session-new, sleepEpoch 7, archiveOk true)',
+        'R6 — a host-rotated surface WITHOUT reason/stamp renders the LEGACY frame byte-identically'
+      )
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('fb-473 dept_sleep (host plane) — the EMITTING SESSION travels to the deliverable FRAME source (`source.senderSessionId` = the OLD session, never a present `undefined` — W7-B) while the durable ROW keeps the raw directive text (no session field in the record schema)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir)
+    try {
+      const host = env.agents.put(fakeParentAgent())
+      const sleepTool = env.root.tools.get('dept_sleep')
+      const signal = new AbortController().signal
+      const oldHostId = `host-${host.id}`
+      await seedJournal(stateDir, oldHostId, 'FB-473-FRAME-SOURCE-MEMORY')
+      const realSession = Session.create(SessionId(String(host.id)))
+      realSession.append('user/message', { role: 'user', content: [{ type: 'text', text: 'prior turn' }], source: { kind: 'user' } }, { surfaceOp: 'append' })
+      host.session = realSession
+      await sleepTool.execute({ reason: 'fb-473 frame-source leg' }, { agent: host, signal, concludeTurn: () => {} })
+
+      // (b) The durable ROW: no session field exists in `MessageRecord` (the
+      // register shape is {id,seq,ts,from,to,text,kind}) — measured, stated.
+      const dirs = await qualityDirectives(stateDir)
+      const row = dirs.filter((d) => d.text.startsWith('Quality inspect: host rotated')).at(-1)
+      assert.ok(row, 'the host-rotated directive row exists')
+      assert.deepEqual(Object.keys(row).sort(), ['from', 'id', 'kind', 'seq', 'text', 'to', 'ts'], `the durable row schema is unchanged (no session field) — got keys: ${Object.keys(row).join(',')}`)
+      assert.equal(row.from, 'deepartments')
+      assert.deepEqual(row.to, ['quality-head'])
+      assert.ok(!('senderSessionId' in row) && !('sessionId' in row), 'the row carries NO session field (the directive TEXT is the only session carrier: `old session …`)')
+
+      // The FRAME source: the 4th arg of busDeliverToPost = the OLD (rotating)
+      // session — where the delivery attribution actually lands.
+      const qh = env.agents.store.get('head-quality-head')
+      assert.ok(qh, 'the quality-head agent is materialized (the directive recipient)')
+      await waitFor(() => (qh.inboxMessages ?? []).length >= 1, 5000, 'the framed directive reached the quality-head inbox')
+      const wake = qh.inboxMessages.at(-1)
+      assert.match(wake.content[0].text, /^\[From deepartments → quality-head\]: Quality inspect: host rotated \(old session /, 'the framed delivery carries the directive')
+      assert.equal(
+        wake.source.senderSessionId,
+        String(host.id),
+        `source.senderSessionId must be the EMITTING (old) session — got: ${String(wake.source.senderSessionId)}`
+      )
+      assert.ok(Object.hasOwn(wake.source, 'senderSessionId'), 'the key is PRESENT and carries the session (never a present-undefined key — W7-B)')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('fb-473 dept_sleep (host plane) — the STAMP discriminates against the real MIRROR datum: a reason citing the session\'s real projection → `verified`; a DELIBERATELY WRONG figure (789k vs the real ~190k) → `unverified` (a REAL negative, never `verified`); a reason with NO figure → `unavailable`', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir, { persistenceRoot: path.join(stateDir, 'sessions') })
+    try {
+      const sleepTool = env.root.tools.get('dept_sleep')
+      const signal = new AbortController().signal
+      // The OLD session's durable projection mirror (the SAME path the emitter
+      // resolves: persistence.root = <stateDir>/sessions → <stateDir>/storages/
+      // session_projcache.json) with the row for the OLD host session.
+      const host = env.agents.put(fakeParentAgent())
+      const oldHostId = `host-${host.id}`
+      await seedJournal(stateDir, oldHostId, 'FB-473-STAMP-MEMORY')
+      await seedProjCache(stateDir, { [String(host.id)]: 190_213 })
+
+      /** Rotate the SAME host session and return the durable host-rotated frame. */
+      const rotate = async (reason) => {
+        host.session = Session.create(SessionId(String(host.id)))
+        await sleepTool.execute({ reason }, { agent: host, signal, concludeTurn: () => {} })
+        const records = await qualityDirectives(stateDir)
+        return records.filter((d) => d.text.startsWith('Quality inspect: host rotated')).at(-1)?.text ?? ''
+      }
+
+      // (1) POSITIVE — the figure matches (within ±15%) the real projection. NB
+      // the token figure is the RESERVE-INDEPENDENT cote (the body branch, not
+      // the `N% de contexto` branch whose fraction reads the completion reserve).
+      const verifiedFrame = await rotate('rotación por el muro de contexto (~190k input tokens)')
+      assert.match(verifiedFrame, /\[reason verified\]/, `a figure matching the real projection must stamp VERIFIED — got: ${verifiedFrame}`)
+      assert.ok(!verifiedFrame.includes('[reason unverified'), `a matching figure is never unverified — got: ${verifiedFrame}`)
+
+      // (2) NEGATIVE CONTROL — a figure FAR above the real datum: checked and fails.
+      const unverifiedFrame = await rotate('rotación por el muro: ~789k tokens de input en el contexto')
+      assert.match(unverifiedFrame, /\[reason unverified vs archive\]/, `a WRONG figure must stamp UNVERIFIED — got: ${unverifiedFrame}`)
+      assert.ok(!unverifiedFrame.includes('[reason verified]'), `a wrong figure is never verified — got: ${unverifiedFrame}`)
+
+      // (3) NO FIGURE / NO PCT — there is nothing to check: 'unavailable', never
+      // a fabricated negative (fb-473 D2).
+      const unavailableFrame = await rotate('memo fresco escrito y confirmado (sin cifra de contexto)')
+      assert.match(unavailableFrame, /\[reason unverifiable\]/, `a figure-less reason must stamp UNAVAILABLE (unverifiable) — got: ${unavailableFrame}`)
+      assert.ok(!unavailableFrame.includes('[reason unverified vs archive]'), `a figure-less reason is NEVER reported as a real negative — got: ${unavailableFrame}`)
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+// --- fb-473 (d) — THE INSTANT OF THE READ, THE NO-CHANGE PROPERTY, THE RESIDUAL
+// (d1) THE ONE DATUM `verifyRotateReason` reads: the durable session-projection
+//      mirror row `tables.sessions[<oldSessionId>].rows.contextPressure.val`
+//      (`max(0, pressureTokens + surfaceTokens − sampledSurfaceTokens)`; the
+//      «N% de contexto» form also reads `val.contextWindow`; the FALLBACK is
+//      `rows.tokenUsage.val.last.buckets.cacheReadTokens`) in the file resolved by
+//      `resolveSessionProjCachePath` (`<dirname(persistence.root)>/storages/
+//      session_projcache.json`). The row's ONLY wall-clock is `identity.createdAt`
+//      (`contextPressure.seq` is a COUNTER, not a clock): the mirror carries NO
+//      timestamp of the DATUM's last update — measured, not assumed.
+// (d2) The stamp is computed ONCE — at EMIT — and PERSISTED in the durable row
+//      (append-only register): mutating the mirror row of the SAME `oldSessionId`
+//      AFTER the emission CANNOT move the stamp of the row already emitted
+//      (assert of NO-CHANGE). The mutation is MATERIAL — the CURRENT mirror flips
+//      the verdict — so a «lazy» re-derivation would FAIL this block.
+// (d3) THE RESIDUAL, with the fact in front: `verified` in the row means «the
+//      reason matched the DURABLE PROJECTION at the instant of EMIT» — NEVER «it
+//      matches the session's instantaneous truth» (the projection can be older by
+//      lag, and the row carries no datum timestamp to bound it).
+// ENMIENDA 2: ONE row constructor (`store.append` inside the ONE
+//      `maybeEmitQualityInspectDirective`, orchestration/delivery.ts) emits BOTH
+//      prefixes — the LITERAL row of each family is asserted side by side here;
+//      the stamp guard is `if (surface.kind === 'host-rotated')`, so `head rotated`
+//      is NOT touched (its label vocabulary is the shared `verifyLabelFor`).
+test('fb-473 (d) — the STAMP is computed ONCE at emit and PERSISTED: mutating the mirror row of the SAME oldSessionId AFTER the emission cannot move the already-emitted row (NO-CHANGE) although the mutation IS material (the CURRENT mirror flips the verdict); the ONE row constructor emits BOTH `host rotated` and `head rotated` prefixes (literal row of each family); residual declared', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const persistenceRoot = path.join(stateDir, 'sessions')
+    const env = await bootWithQD(stateDir, { persistenceRoot })
+    try {
+      const signal = new AbortController().signal
+      // (d1) THE DATUM + its resolution — the SAME two the emitter uses.
+      const projCachePath = resolveSessionProjCachePath(stateDir, persistenceRoot)
+      const host = env.agents.put(fakeParentAgent())
+      const oldSessionId = String(host.id)
+      const headPostId = 'research-head'
+      const oldHeadSessionId = `head-${headPostId}`
+      const reason = 'rotación por el muro de contexto (~190k input tokens)'
+      await seedJournal(stateDir, `host-${oldSessionId}`, 'FB-473-D2-MEMORY')
+      await seedJournal(stateDir, headPostId, 'FB-473-D2-HEAD-MEMORY')
+      await seedProjCache(stateDir, { [oldSessionId]: 190_213, [oldHeadSessionId]: 190_213 })
+
+      // (i) EMIT both rotation families against the SAME seeded mirror.
+      await env.root.tools.get('dept_head_rotate').execute({ postId: headPostId, reason }, { agent: host, signal })
+      host.session = Session.create(SessionId(oldSessionId))
+      await env.root.tools.get('dept_sleep').execute({ reason }, { agent: host, signal, concludeTurn: () => {} })
+
+      const rowsAtEmit = await qualityDirectives(stateDir)
+      const listAtEmit = JSON.stringify(rowsAtEmit.map((r) => r.text))
+      const hostRow = rowsAtEmit.filter((r) => r.text.startsWith('Quality inspect: host rotated')).at(-1)
+      const headRow = rowsAtEmit.filter((r) => r.text.startsWith('Quality inspect: head rotated')).at(-1)
+      assert.ok(hostRow !== undefined, `the host-rotated directive row exists — register: ${listAtEmit}`)
+      assert.ok(headRow !== undefined, `the head-rotated directive row exists — register: ${listAtEmit}`)
+
+      // ENMIENDA 2 (ii) — ONE register schema / ONE append call site: the two
+      // LITERAL rows of the two prefixes, side by side.
+      assert.deepEqual(
+        Object.keys(hostRow).sort(),
+        Object.keys(headRow).sort(),
+        `both families are rows of the SAME register shape\n  LITERAL host rotated: ${JSON.stringify(hostRow)}\n  LITERAL head rotated: ${JSON.stringify(headRow)}`
+      )
+      assert.ok(hostRow.text.startsWith('Quality inspect: host rotated'), `LITERAL host row: ${hostRow.text}`)
+      assert.ok(headRow.text.startsWith('Quality inspect: head rotated'), `LITERAL head row: ${headRow.text}`)
+
+      // X — the stamp captured AT EMIT, in both families, SAME vocabulary.
+      assert.match(hostRow.text, /\[reason verified\]/, `X (host, at emit) — got: ${hostRow.text}`)
+      assert.match(headRow.text, /\[reason verified\]/, `X (head, at emit) — got: ${headRow.text}`)
+
+      // (d1) THE TWO TIMESTAMPS: the directive row's emission `ts`, and the ONLY
+      // wall-clock the mirror ROW carries (`identity.createdAt`).
+      const mirrorAtEmit = JSON.parse(await readFile(projCachePath, 'utf8'))
+      const mirrorRow = mirrorAtEmit.tables.sessions[oldSessionId]
+      const mirrorCreatedAt = mirrorRow.identity.createdAt
+      const mirrorDatumSeq = mirrorRow.rows.contextPressure.seq
+      const cpAtEmit = mirrorRow.rows.contextPressure.val
+      const projectedAtEmit = cpAtEmit.pressureTokens + cpAtEmit.surfaceTokens - cpAtEmit.sampledSurfaceTokens
+      assert.equal(typeof hostRow.ts, 'number', 'the directive ROW carries the emission wall-clock `ts`')
+      assert.equal(typeof mirrorCreatedAt, 'number', 'the mirror ROW carries `identity.createdAt` (its ONLY wall-clock)')
+      assert.ok(hostRow.ts >= mirrorCreatedAt, `the emission (${hostRow.ts}) is AFTER the mirror row identity (${mirrorCreatedAt})`)
+      assert.equal(projectedAtEmit, 190_213, `the datum the stamp was verified against IS this mirror row — got: ${projectedAtEmit}`)
+      assert.equal(verifyRotateReason(reason, oldSessionId, projCachePath), 'verified', 'X is reproducible from the datum AS OF the emission')
+
+      // (ii) MUTATE the mirror row of the SAME oldSessionId — AFTER the emission.
+      const mutateMirrorRow = (parsed, sessionId, projected) => {
+        const row = parsed.tables.sessions[sessionId]
+        assert.ok(row !== undefined, `the mirror row for ${sessionId} exists`)
+        row.rows.contextPressure.val = { surfaceTokens: 0, contextWindow: 1_048_576, pressureTokens: projected, sampledSurfaceTokens: 0 }
+        row.rows.tokenUsage.val.last.buckets.cacheReadTokens = projected
+      }
+      const mutated = JSON.parse(await readFile(projCachePath, 'utf8'))
+      mutateMirrorRow(mutated, oldSessionId, 789_000)
+      mutateMirrorRow(mutated, oldHeadSessionId, 789_000)
+      await writeFile(projCachePath, JSON.stringify(mutated), 'utf8')
+
+      // (iii) MATERIALITY CONTROL — the datum really MOVED: the CURRENT mirror
+      // now flips BOTH verdicts (so the no-change assert below is not vacuous).
+      assert.equal(verifyRotateReason(reason, oldSessionId, projCachePath), 'unverified', 'the mutated datum flips the host verdict (the mutation IS material)')
+      assert.equal(verifyRotateReason(reason, oldHeadSessionId, projCachePath), 'unverified', 'the mutated datum flips the head verdict too')
+      assert.equal(verifyRotateReason('muro de contexto ~789k tokens de input', oldSessionId, projCachePath), 'verified', 'the datum really moved to the mutated figure (789k)')
+
+      // (iii bis) RE-READ the durable rows from disk — X must NOT move.
+      const rowsAfter = await qualityDirectives(stateDir)
+      const hostAfter = rowsAfter.find((r) => r.id === hostRow.id)
+      const headAfter = rowsAfter.find((r) => r.id === headRow.id)
+      assert.ok(hostAfter !== undefined && headAfter !== undefined, 'both directive rows are still in the register after the mutation')
+      assert.equal(hostAfter.text, hostRow.text, `(d2) NO-CHANGE: the already-emitted HOST row did not move (X is PERSISTED, not re-derived) — got: ${hostAfter.text}`)
+      assert.equal(headAfter.text, headRow.text, `(d2) NO-CHANGE: the already-emitted HEAD row did not move either — got: ${headAfter.text}`)
+      assert.equal(hostAfter.ts, hostRow.ts, '(d1) the row emission wall-clock is immutable (append-only register)')
+      assert.equal(headAfter.ts, headRow.ts, '(d1) the head row emission wall-clock is immutable too')
+      assert.match(hostAfter.text, /\[reason verified\]/, `X unchanged after the mutation — got: ${hostAfter.text}`)
+      assert.ok(!hostAfter.text.includes('[reason unverified'), `(d3) the row reports the datum AS OF EMIT, never the mutated one — got: ${hostAfter.text}`)
+
+      // (d3) THE RESIDUAL as a MEASURED FACT: the row says `[reason verified]`
+      // while the SAME reason against the CURRENT mirror is `unverified` — i.e.
+      // the stamp is a statement about the durable PROJECTION at emit time, never
+      // about the session's instantaneous truth.
+      assert.equal(hostAfter.text, hostRow.text, 'the row text is byte-identical after the mutation')
+      assert.equal(verifyRotateReason(reason, oldSessionId, projCachePath), 'unverified', '(d3) residual: the ROW speaks of the projection AT EMIT, not of the current mirror')
+
+      // The mutation appended NOTHING to the register (one row per family).
+      const rowsFinal = await qualityDirectives(stateDir)
+      assert.equal(rowsFinal.filter((r) => r.text.startsWith('Quality inspect: host rotated')).length, 1, 'exactly ONE host-rotated row: the mirror mutation appends nothing')
+      assert.equal(rowsFinal.filter((r) => r.text.startsWith('Quality inspect: head rotated')).length, 1, 'exactly ONE head-rotated row: the mirror mutation appends nothing')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
 // --- B1: dept_sleep_all (host plane) — org-wide quiet-sleep orchestration -----
 // The Asistente owns the coordinated quiet-sleep. `dept_sleep_all` durably marks
 // EVERY configured department head (EXCLUDING quality-head, which stays live as
