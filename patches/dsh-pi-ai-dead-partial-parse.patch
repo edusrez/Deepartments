@@ -1,0 +1,26 @@
+--- a/dist/api/openai-completions.js
++++ b/dist/api/openai-completions.js
+@@ -391,7 +391,22 @@
+                             if (toolCall.function?.arguments) {
+                                 delta = toolCall.function.arguments;
+                                 block.partialArgs = (block.partialArgs ?? "") + toolCall.function.arguments;
+-                                block.arguments = parseStreamingJson(block.partialArgs);
++                                /* LOCAL PATCH (deepartments 2026-09-10) — the per-delta parse
++                                   that used to run here was DEAD WORK. `block.arguments` is read
++                                   only by finishBlock() below (the authoritative parse of the
++                                   COMPLETE buffer) and, for custom-input blocks, by
++                                   getCustomToolCallInput() — which reads the object that
++                                   appendCustomToolCallInput() sets, never this one. The sole
++                                   consumer of the streaming event (dsh-llm-pi-ai,
++                                   case "toolcall_delta") emits `argumentsDelta: event.delta`,
++                                   the RAW text, and reads `event.partial` only for the block's
++                                   id/name. So the parsed value was never observed.
++                                   Re-parsing the whole accumulated buffer on every delta is
++                                   O(n^2): measured over 1,399 real tool calls, 795,109 deltas
++                                   (up to 11,055 in ONE call) scanned 3,116 MB to produce
++                                   2.54 MB of arguments — a 1,228x amplification. Now
++                                   `arguments` stays at its initial {} until finishBlock()
++                                   parses the complete buffer, which is unchanged. */
+                             }
+                             else if (toolCall.custom?.input) {
+                                 const nextInput = getCustomToolCallInput(block) + toolCall.custom.input;

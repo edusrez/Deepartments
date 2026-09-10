@@ -1,0 +1,3 @@
+# name	target-relative-to-package-root	package-root	md5-pristine	md5-patched	patch-file
+session-list-parallel	node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js	/usr/lib/node_modules/@deepseek-ai/dsh	251f69dffe5e89d975631a6f0c1fec9d	e555ad0ca433d57a619fed25eb46e7f4	dsh-session-persistence-list-parallel.patch
+pi-ai-dead-partial-parse	dist/api/openai-completions.js	/usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@earendil-works/pi-ai	0aec18cf7e5d1fdc75ef626438e21c5a	588c82f90b2fe6f25d9bebd9f29a10c0	dsh-pi-ai-dead-partial-parse.patch

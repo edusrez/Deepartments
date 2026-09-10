@@ -1,0 +1,71 @@
+--- a/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js
++++ b/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js
+@@ -1061,11 +1061,32 @@
+ 		signal?.throwIfAborted();
+ 		await this.ensureRootEncoding();
+ 		signal?.throwIfAborted();
+-		const artifacts = [];
+-		const ids = /* @__PURE__ */ new Set();
++		/* LOCAL PATCH (deepartments): bounded-concurrency session probe.
++		   Serially the loop below costs ~4-8 filesystem round trips PER SESSION
++		   (two existence probes + the independently compressed header frame + the
++		   stored-identity assert). With 2,400+ session directories that is tens of
++		   thousands of sequential event-loop turns; on a busy loop the QUEUEING
++		   dominates and session.list takes seconds. The per-directory work is
++		   stateless (each helper opens and closes its own handle), so it is safe to
++		   run concurrently. Only the duplicate-id fold stays sequential, so the
++		   first duplicate in DIRECTORY ORDER is still the one reported. */
++		const dirs = [];
+ 		for (const project of await this.listProjectDirs(signal)) {
+ 			signal?.throwIfAborted();
+-			for (const dir of await this.listSessionDirs(project, signal)) {
++			for (const dir of await this.listSessionDirs(project, signal)) dirs.push(dir);
++		}
++		signal?.throwIfAborted();
++		/* 32 in flight hides the per-directory latency while staying far below the
++		   descriptor limit (this service runs with 524288) and leaving the pool free
++		   for other handlers. */
++		const concurrency = 64;
++		const results = new Array(dirs.length);
++		let cursor = 0;
++		const probe = async () => {
++			for (;;) {
++				const index = cursor++;
++				if (index >= dirs.length) return;
++				const dir = dirs[index];
+ 				signal?.throwIfAborted();
+ 				const opposite = join(dir, `session${logSuffix(this.oppositeCompression())}`);
+ 				const oppositeExists = await this.exists(opposite);
+@@ -1082,17 +1103,28 @@
+ 				if (meta === void 0) continue;
+ 				await this.assertStoredIdentity(path, meta, void 0, signal);
+ 				signal?.throwIfAborted();
+-				if (ids.has(meta.id)) throw new Error(`duplicate JSONL session id "${meta.id}" appears in multiple project directories`);
+-				ids.add(meta.id);
+-				artifacts.push({
++				results[index] = {
+ 					header: meta,
+ 					path
+-				});
++				};
+ 			}
++		};
++		await Promise.all(Array.from({
++			length: Math.max(1, Math.min(concurrency, dirs.length))
++		}, probe));
++		signal?.throwIfAborted();
++		const artifacts = [];
++		const ids = /* @__PURE__ */ new Set();
++		for (const entry of results) {
++			if (entry === void 0) continue;
++			if (ids.has(entry.header.id)) throw new Error(`duplicate JSONL session id "${entry.header.id}" appears in multiple project directories`);
++			ids.add(entry.header.id);
++			artifacts.push(entry);
+ 		}
+ 		signal?.throwIfAborted();
+ 		return artifacts;
+ 	}
++
+ 	/** Atomically write the header line + first batch (temp-write, fsync, publish). */
+ 	async materialize(meta, events) {
+ 		const project = projectDir(this.root, meta.cwd);
