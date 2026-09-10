@@ -240,5 +240,13 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // interfaces are type-only and emit NO runtime export. The test import
   // surface stays 234 (invoke.test.js imports nothing new from lib/invoke.js —
   // tests 1 + 2 of this lock keep passing).
-  assert.equal(names.length, 327, `lib/invoke.js export count frozen at 327 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
+  // fb-473 (2026-09-10, 05cb3cb — the fb-473 trace pipeline): ADDED the ONE
+  // rotation-reason label helper (verifyLabelFor from dshd-quality — the shared
+  // ' [reason verified] / [reason unverified vs archive] / [reason unverifiable]'
+  // vocabulary, extracted so the head-rotated and host-rotated emitters can never
+  // diverge; flows through the same star re-export bridge src/core/quality.ts) —
+  // an INTENTIONAL, verified surface extension (327 → 328), name-measured: it is
+  // the ONLY export the commit adds (its src/invoke.ts +8 lines are internal
+  // deliveryDeps wiring, and the host-rotation surface fields are type-only).
+  assert.equal(names.length, 328, `lib/invoke.js export count frozen at 328 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })
