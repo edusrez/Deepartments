@@ -68,6 +68,10 @@ import {
   classifyG2LegacyRows,
   deliveryStatus
 } from '../packages/dshd-core/src/messages.ts'
+// The SEND-path engine: imported DYNAMICALLY (the module-hook registration at
+// the top must run FIRST — a static import is hoisted above it and the src
+// graph then fails to link; the same discipline the sibling lane tests use).
+const { createDeliveryEngine } = await import('../packages/dshd-core/src/delivery.ts')
 
 // ---------------------------------------------------------------------------
 // Shared helpers: temp stateDir + the lane2-style redeliverer stub harness.
@@ -444,4 +448,136 @@ test('w7-fb132 (iii-g2): the G2 classification is UNCHANGED — the in-flight pa
   const cls2 = classifyG2LegacyRows(afterSettle, T0, 600_000, () => true)
   assert.deepEqual(cls2.settleStaleDust, [afterSettle[0]], 'the pair-latest \'terminal\' (a dead-end settle) turns the old prepared dust stale-dust → G2 washes it IN PLACE')
   assert.equal(cls2.keptInFlight + cls2.keptFresh, 0, 'no in-flight rows remain after the settle (the pair resolved terminal)')
+})
+// ---------------------------------------------------------------------------
+// (iv) THE DRENADE-LANE ANCHOR (2026-09-10, run token 251c6342) — the noWake
+// INTENT must survive the WHOLE path, not just the write-ahead row:
+//   (a) the SEND of a FIFO-gated noWake writes TWO 'prepared' rows — the gate
+//       branch (delivery.ts markFinal 'prepared') used to write the SECOND one
+//       WITHOUT the flag, so the pair-LATEST of a deliberate noWake became
+//       indistinguishable from a crash-class pair (the m-4547 defect);
+//   (b) the RE-DRIVE (the seam `deps.deliver`) had NO channel to carry the
+//       intent at all — drivePair/drainRecipientQueue re-marked 'prepared'
+//       WITHOUT the flag over a pair that was noWake;
+//   (c) the DRAIN at the recipient's next REAL wake re-drives the recorded pair
+//       WITH the flag: the engine takes its noWake branch (skip as the ordered
+//       no-wake), never the crash-class FIFO degradation.
+//
+// STATUS (2026-09-10, run token 251c6342 — the fix lane's own isolation run):
+//   (iv-a) is ACTIVE and GREEN — it anchors the send-path fix (delivery.ts
+//          markFinal 'prepared' in the FIFO-gate branch now passes `opts`).
+//   (iv-b)/(iv-c) are `todo`: RED against the current tree, by DESIGN. They
+//          pin the NEXT required contract — the re-drive intent channel — whose
+//          implementation COLLIDES with two documented house contracts (the P2
+//          live-splice exception and the O1/P1-EXT-EXT tool-level cases of
+//          wake-seam-mitigation.test.js, which demand 'delivered' for a noWake
+//          row of a LIVE/running recipient: passing the intent into the
+//          engine's no-wave branch suppresses that splice — measured 12/2
+//          red). Resolving the seal-vs-route conflation is an engine/
+//          orchestration CONTRACT DECISION, reported by this lane, not taken
+//          here. These two tests are written to go GREEN the moment that
+//          decision lands; until then they must NOT be read as a regression.
+// ---------------------------------------------------------------------------
+test('w7-fb132 (iv-a): the SEND of a FIFO-gated noWake marks EVERY row it writes with noWake:true — the gate branch must not strip the intent (the pair-latest may not become crash-class)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const marks = []
+    const deps = {
+      stateDir,
+      logger: { info: () => {}, warn: () => {} },
+      markPrepared: async (record, recipientId, opts) => { marks.push({ status: 'prepared', opts }); return markDelivery(stateDir, record.id, recipientId, 'prepared', Date.now(), opts?.noWake === true) },
+      markFinal: async (record, recipientId, status, opts) => { marks.push({ status, opts }); return markDelivery(stateDir, record.id, recipientId, status, Date.now(), opts?.noWake === true) },
+      resolveChild: async () => false,
+      deliverChild: async () => 'delivered',
+      resolveCatalogRoute: () => ({ kind: 'post', entry: { postId: 'rx', sessionId: 'session-rx', retired: false } }),
+      busProfileFor: () => ({ kind: 'post', memberId: 'rx' }),
+      deliverPost: async () => 'prepared',
+      deliverHost: async () => 'prepared',
+      // The FIFO gate fires for m-9: its earlier pair m-8 is still 'prepared'.
+      pendingEarlierSeq: async () => true,
+      pendingEarlierSeqDetail: async () => 8,
+      recipientMaterialized: () => true
+    }
+    const engine = createDeliveryEngine(deps)
+    // The gating head (m-8) seeded as an EARLIER pending prepared pair.
+    await markDelivery(stateDir, 'm-8', 'rx', 'prepared')
+    const status = await engine.deliverOrQueue('rx', record('m-9', 9, ['rx']), { noWake: true })
+    assert.equal(status, 'prepared', 'the FIFO-gated noWake degrades to the queue (\'prepared\') — it never wakes')
+    const rows = (await readRows(stateDir)).filter((x) => x.messageId === 'm-9' && x.recipientId === 'rx')
+    assert.equal(rows.length, 2, 'the gated send writes EXACTLY two rows (the write-ahead + the gate branch)')
+    assert.equal(rows.filter((x) => x.noWake === true).length, 2, 'BOTH rows carry noWake:true — the gate branch (markFinal \'prepared\') must pass the intent exactly like the final mark of the normal branch')
+    assert.equal(rows[rows.length - 1].noWake, true, 'the pair-LATEST (the row the re-drive discriminator reads) carries the flag')
+    assert.equal(marks[marks.length - 1].opts?.noWake, true, 'the gate-branch markFinal received the noWake intent (the call-site contract)')
+  })
+})
+
+test('w7-fb132 (iv-b) [TODO — blocked on the engine contract decision]: the RE-DRIVE seam CARRIES the intent — a noWake pair driven by drivePair re-marks its rows WITH the flag (and stays noWake on the pair-latest)', { todo: 'RED by design: the re-drive intent channel needs the engine seal-vs-route contract decision (see the (iv) header — 2 house contracts collide)' }, async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = Date.now()
+    await seed(stateDir, {
+      records: [record('m-1', 1, ['rx'])],
+      rows: [row('m-1', 'rx', 'prepared', T0 - 40 * 60_000, true)]
+    })
+    // The REAL-seam mimic (write-ahead 'prepared' → gate → final) + the intent
+    // channel: the seam receives the row's intent and marks BOTH rows with it.
+    const calls = { deliver: [], informs: [], warns: [] }
+    const seam = async (rec, recipientId, callerSessionId, noWake) => {
+      calls.deliver.push({ messageId: rec.id, recipientId, noWake })
+      await markDelivery(stateDir, rec.id, recipientId, 'prepared', Date.now(), noWake === true)
+      if (await makeGate(stateDir, new Map([['rx', [1]]]))(recipientId, rec.seq)) {
+        await markDelivery(stateDir, rec.id, recipientId, 'prepared', Date.now(), noWake === true)
+        return 'prepared'
+      }
+      await markDelivery(stateDir, rec.id, recipientId, 'delivered', Date.now(), noWake === true)
+      return 'delivered'
+    }
+    const r = redeliverer(stateDir, {
+      // P2 drain exception: the recipient is ALREADY running — no wake happens,
+      // so the noWake pair is legally driven by the sweep.
+      recipientRunning: () => true,
+      deliver: seam
+    })
+    r.__records('m-1', record('m-1', 1, ['rx']))
+    await r.sweepDue(T0)
+    assert.equal(calls.deliver.length, 1, 'the noWake pair of a RUNNING recipient is genuinely re-driven (the P2 drain exception)')
+    const rows = await readRows(stateDir)
+    assert.equal(rows.filter((x) => x.messageId === 'm-1' && x.status !== 'terminal').length, 2, 'the genuine re-drive writes its write-ahead + final rows')
+    assert.ok(rows.filter((x) => x.messageId === 'm-1' && x.status !== 'terminal').every((x) => x.noWake === true), 'BOTH re-drive rows keep noWake:true — the seam must carry the intent, never re-mark the pair crash-class')
+    assert.equal(await deliveryStatus(stateDir, 'm-1', 'rx'), 'delivered', 'the pair lands delivered')
+    assert.equal(rows.filter((x) => x.noWake === true).length, 3, 'the seeded write-ahead + the two re-drive rows all carry the flag (the original intent is never lost across the re-drive)')
+  })
+})
+
+test('w7-fb132 (iv-c) [TODO — blocked on the engine contract decision]: the DRAIN at the recipient\'s next REAL wake re-drives the recorded noWake pair WITH the flag — the engine takes its ORDERED no-wake branch, never the crash-class FIFO degradation', { todo: 'RED by design: same blocked contract as (iv-b) — the drain forwards no intent until the seal-vs-route conflation is resolved' }, async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = Date.now()
+    await seed(stateDir, {
+      records: [record('m-1', 1, ['rx']), record('m-2', 2, ['rx'])],
+      // BOTH pairs hold a 'prepared' ledger row — `pendingForRecipient` derives
+      // the drain candidates FROM the sidecar rows (a pair with no row is not a
+      // candidate), exactly like the live m-4547 pair.
+      rows: [
+        row('m-1', 'rx', 'prepared', T0 - 40 * 60_000, true),
+        row('m-2', 'rx', 'prepared', T0 - 20 * 60_000, true)
+      ]
+    })
+    const calls = { deliver: [], informs: [], warns: [] }
+    const seam = async (rec, recipientId, callerSessionId, noWake) => {
+      calls.deliver.push({ messageId: rec.id, recipientId, noWake })
+      await markDelivery(stateDir, rec.id, recipientId, 'prepared', Date.now(), noWake === true)
+      await markDelivery(stateDir, rec.id, recipientId, 'delivered', Date.now(), noWake === true)
+      return 'delivered'
+    }
+    const r = redeliverer(stateDir, { deliver: seam })
+    r.__records('m-1', record('m-1', 1, ['rx']))
+    r.__records('m-2', record('m-2', 2, ['rx']))
+    // The drain is the wake primitive's own fire — it consults NO liveness
+    // guard (the wake that just happened IS the liveness).
+    assert.equal(await r.drainRecipientQueue('rx'), 2, 'the drain re-drives BOTH pairs in FIFO order (m-1 head-first, then m-2)')
+    const rows = await readRows(stateDir)
+    const preparedRows = rows.filter((x) => x.status !== 'terminal')
+    assert.equal(preparedRows.filter((x) => x.messageId === 'm-2').length, 3, 'the drained m-2 pair keeps its ORIGINAL write-ahead row (the send that parked it) + gains the re-drive\'s write-ahead + its final row')
+    assert.equal(preparedRows.filter((x) => x.messageId === 'm-2').every((x) => x.noWake === true), true, 'the m-2 pair re-driven by the DRAIN keeps noWake:true end-to-end — EVERY row it owns')
+    assert.equal(rows.filter((x) => x.noWake === true).length, 6, 'the whole path is flagged: the 2 seeded write-ahead rows + 2 m-1 drain rows + 2 m-2 drain rows (the intent survives send AND re-drive AND drain)')
+    assert.equal(await deliveryStatus(stateDir, 'm-2', 'rx'), 'delivered', 'the drained pair lands delivered')
+  })
 })
