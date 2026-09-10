@@ -20,3 +20,4 @@ pnpm-workspace.yaml
 # test-run artifacts (git hygiene, 09-01)
 .run-*.log
 .run-*.summary
+/reports/
