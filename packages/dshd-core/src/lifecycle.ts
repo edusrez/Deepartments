@@ -347,8 +347,17 @@ export interface LifecycleService {
    * falls back to `hostIdForSession`). */
   memoWrite(args: { summary: string; decisions?: string[]; constraints?: string[]; openItems?: string[]; currentStep?: string }, exec: LifecycleExecLike, hostAware: boolean): Promise<{ room: string; member: string; memoPath: string }>
   /** dept_sleep core for a registered post (head or worker) — the head own-layer
-   * tool body. */
-  sleepMember(_args: Record<string, never>, exec: LifecycleExecLike): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }>
+   * tool body. fb-473 FIX-FORWARD (2026-09-10): the `dept_sleep` tool table
+   * declares the OPTIONAL `reason` for BOTH planes (`sleepTool(hostPlane)` shares
+   * ONE `parameters` object — boot.ts), so the post plane RECEIVES it too and
+   * this signature must say so; it is the twin that was left UN-widened while
+   * `sleepHost` (:359) was widened with it. DECLARED DECISION — the datum is
+   * shape-validated and then DROPPED on this plane: the `head-slept` QD surface
+   * this method emits (:513) has NO `reason` field to carry it to (unlike
+   * `host-rotated`/`head-rotated`), and nothing else here consumes it. A new
+   * surface field is deliberately NOT invented — the `head-slept` contract
+   * belongs to the QD, not to this lane. */
+  sleepMember(args: { reason?: string } | undefined, exec: LifecycleExecLike): Promise<{ room: string; member: string; memoPath: string; sleepEpoch: number }>
   /** dept_sleep core on the host plane — the subagent guard + HOST ROTATION
    * branch + legacy-in-place fallback + (preserved) head-path fallback. fb-473:
    * the OPTIONAL `args.reason` (the host's own statement of WHY it rotates) is
@@ -395,7 +404,20 @@ export function createLifecycleService(ctx: LifecycleCtx): LifecycleService {
     // own-layer dept_sleep is no longer registered (invoke.ts) — heads/workers
     // stay idle|running. KEPT (never remove): a post entry carrying a legacy
     // sleepEpoch on disk must still resurrect through the same marking paths.
-    async sleepMember(_args, exec) {
+    async sleepMember(args, exec) {
+      // fb-473 FIX-FORWARD (2026-09-10) — the post plane shares the tool table's
+      // OPTIONAL `reason` (see the interface doc above). It is shape-validated
+      // here (the harness does NOT pre-reject a malformed arg against the
+      // declared schema) and then DECLARED DROPPED: the `head-slept` directive
+      // emitted below (:513) has no `reason` field, so there is no sink for it
+      // on this plane — it is neither fabricated into that surface nor persisted
+      // anywhere else. A legacy no-arg call (the R6 resurrection path) is
+      // unaffected: the guard only fires on a PROVIDED-but-malformed value.
+      if (args?.reason !== undefined) {
+        if (typeof args.reason !== 'string' || args.reason.trim() === '') {
+          throw new Error('[deepartments] dept_sleep: invalid `reason` — when provided it must be a non-empty string')
+        }
+      }
       const agent = exec.agent
       if (!agent) throw new Error('dept_sleep requires a calling agent (exec.agent was undefined)')
       const memberId = ctx.postIdForChild(agent.id as string)

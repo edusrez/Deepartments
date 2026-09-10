@@ -1213,7 +1213,24 @@ export interface DeliveryRedelivererDeps {
   resolveCallerSessionId(from: string): string
   /** The LIVE delivery seam: deliver ONE record to ONE recipient and record the
    * final sidecar status (deliverBusRecord in invoke.ts — the ACTIVE path, step
-   * c; the guard only re-runs it for eligible pairs). Returns the final status. */
+   * c; the guard only re-runs it for eligible pairs). Returns the final status.
+   *
+   * DRENAJE (2026-09-10) — RE-DRIVE INTENT CHANNEL: the contract of THIS
+   * parameter is INTENTIONALLY ABSENT, and the reason is a reported open
+   * decision, not an oversight. A re-drive currently cannot carry the pair's
+   * recorded `noWake` intent (m-707), because the production seam's `opts.noWake`
+   * is not a record-only seal: the engine takes its no-wake branch and returns
+   * 'prepared' WITHOUT splicing (delivery.ts:655). Forwarding this row's
+   * intent would therefore suppress the splice the re-drive exists to perform
+   * and would invert the house contract «a noWake row of a LIVE/running
+   * recipient re-drives to delivered (the live splice HONORS the intent)»
+   * (test/wake-seam-mitigation.test.js: the O1 B3 sweep-dormancy case and the
+   * tool-level P1-EXT-EXT case — both 14/14 green without the 4th argument and
+   * deterministically 12/2 red with it; the lane's isolation run). Addition of
+   * a 4th optional `noWake` argument is TYPE-COMPATIBLE the moment the
+   * seal-vs-route conflation is resolved (a row-seal that does not veto the
+   * authorized splice) — the engine/orchestration contract decision this lane
+   * reports rather than takes. */
   deliver(record: MessageRecord, recipientId: string, callerSessionId: string): Promise<DeliveryStatus>
 }
 
@@ -1501,6 +1518,27 @@ export class DeliveryRedeliverer {
       }
       try {
         const callerSessionId = this.deps.resolveCallerSessionId(record.from)
+        // DRENAJE (2026-09-10) — RE-DRIVE INTENT: deliberately NOT forwarded.
+        // The engine's `noWake` option is NOT a row-seal-only record: it makes
+        // `deliverOrQueue` take its no-wake branch and RETURN 'prepared'
+        // WITHOUT splicing (dshd-core delivery.ts:655, the WIRED no-wake gate).
+        // Passing this row's intent there would suppress exactly the splice the
+        // re-drive exists to perform, inverting two documented contracts:
+        //   - P2's own exception above («the ONLY drain is recipientRunning ===
+        //     true — already live; re-driving SPLICES into its live session, so
+        //     the intent is HONORED, not violated»);
+        //   - the house contract asserted by test/wake-seam-mitigation.test.js
+        //     «O1 (B3 sweep-dormancy, class ACK — the real m-2433 case)» and
+        //     the tool-level P1-EXT-EXT case: a noWake row of a LIVE/running
+        //     recipient re-drives to 'DELIVERED' (both measured 14/14 green
+        //     with this line WITHOUT the 4th argument, and deterministically
+        //     12/2 RED with it — the fix lane's isolation run, 2026-09-10).
+        // Resolving the seal-vs-route conflation (a row-seal that does NOT veto
+        // the authorized splice) needs an ORCHESTRATION/ENGINE CONTRACT
+        // DECISION — reported, not taken here. What DOES hold without it: the
+        // send-path fix marks BOTH send rows noWake (delivery.ts:535/:589), so
+        // the pair-latest of a parked no-wake send is no longer crash-class and
+        // the P2 guard recognizes the intent (the m-4547 defect).
         const status = await this.deps.deliver(record, row.recipientId, callerSessionId)
         logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) → ${status}`)
       } catch (error: unknown) {
@@ -1583,6 +1621,12 @@ export class DeliveryRedeliverer {
           break
         }
         const callerSessionId = this.deps.resolveCallerSessionId(record.from)
+        // DRENAJE (2026-09-10) — SAME decision as drivePair above: the drain
+        // is the wake-time re-drive and its splice is the wake, so it does NOT
+        // forward the row's intent into the engine's no-wake branch (that
+        // branch would return 'prepared' without the splice — see the full
+        // rationale in drivePair). The row-seal-vs-route conflation is the
+        // reported open decision.
         const status = await this.deps.deliver(record, row.recipientId, callerSessionId)
         logger.info(`[deepartments] drain ${recipientId}: ${pairLabel} (was prepared) → ${status}${drained + 1 < limited.length ? ' — FIFO head-first: the next pair is now ungated' : ''}`)
         drained++

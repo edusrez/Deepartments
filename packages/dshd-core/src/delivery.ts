@@ -49,6 +49,9 @@
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 import type { DeliveryStatus, MessageRecord } from './messages.js'
+// DRENAJE (2026-09-10): the reroute terminalization reads the SUCCESSOR's pair
+// status before closing the retired id's pair (never close what did not land).
+import { deliveryStatus } from './messages.js'
 import type { PostEntry, HostEntry } from './registry.js'
 // FASE 2 step (d): the messaging ACL is a PURE module (./acl.js — busProfileFor /
 // aclDenyGround / canSend / aclDenyReason). The delivery engine imports the pure
@@ -359,6 +362,38 @@ export interface DeliveryEngineDeps {
    * dispatcher the wake primitives use; absent → a NO-OP (the drain-on-wake
    * contract stays merely documentary in a minimal composition). */
   onDelivered?: (recipientId: string) => void
+  /** DRENAJE (2026-09-10 — the ORPHAN class, host decision: OBLIGATORIO) —
+   * OPTIONAL: the REROUTE TERMINALIZATION seam. Fired ONCE after a delivery to
+   * a RETIRED host-family address was RE-ROUTED to the live successor and the
+   * successor's pair reached a LANDED final status ('delivered' | 'resumed').
+   * @param retiredRecipientId the RETIRED host id the record was addressed to
+   *   (whose write-ahead 'prepared' row the reroute leaves behind);
+   * @param successorId the live successor entry that ACTUALLY received it.
+   *
+   * WHY THIS EXISTS: `resolveCatalogRoute` re-routes a retired host-family
+   * address to the live successor (fb-58 F-3 / m-331 — the Asistente ROLE), and
+   * the engine's `reroute` branch then delivers the record TO THE SUCCESSOR —
+   * but BOTH its sidecar marks (the write-ahead `markPrepared` and the final
+   * `markFinal`) are keyed to `recipientId`, i.e. the RETIRED id: the FIRST
+   * ('prepared') and the FINAL ('delivered'|'resumed') land on DIFFERENT pairs.
+   * The retired id's pair therefore keeps a 'prepared' row FOREVER
+   * (`needsRedelivery` — the permanent-orphan class: measured 2026-09-10,
+   * m-4028 ≈ 24 h / m-4763 / m-4769, each with its record CORRECTLY delivered
+   * to the live successor and its old-id pair never closed), which re-arms the
+   * ~10-min prepared-stuck sweep and the health watchdog on a message that was
+   * in fact DELIVERED. This hook is the closure: the wiring settles the retired
+   * id's pair 'terminal' (a pure status flip — the CONTENT is already
+   * delivered; NEVER a re-delivery, which would duplicate it).
+   *
+   * The CLASS is general and ORIGIN-INDEPENDENT: the ENGINE owns the flip and
+   * performs it for EVERY landed reroute (any caller — send_message, the boot
+   * re-drive, the sweep, the drain — no per-caller wiring and no per-variant
+   * patch), so a future variant of a "retired address with a live successor"
+   * cannot reopen the orphan class. This dep is only the OBSERVER seam for the
+   * shell (an optional piggyback — no shell-side settlement is required for the
+   * closure to hold). Fail-soft both ways: the flip is already done when this
+   * fires; an absent dep or a THROW → warn only. */
+  onRerouted?: (retiredRecipientId: string, successorId: string) => void
 }
 
 /** The delivery engine: the single bus delivery seam. */
@@ -400,6 +435,11 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
   return {
     async deliverOrQueue(recipientId, record, opts = {}): Promise<DeliveryStatus> {
       const framed = frameBusRecord(record)
+      /** DRENAJE (2026-09-10 — the ORPHAN closure): the route KIND of THIS
+       * delivery, reported by `catalogRoute` (undefined for the child route /
+       * a minimal composition). The final-mark seam below keys the
+       * reroute terminalization on it. */
+      const routeOut: { kind?: string; successorId?: string } = {}
       // Persist-before-deliver (D4): the write-ahead 'prepared' row is on disk
       // BEFORE any route/wake, so a crash mid-fan-out re-delivers idempotently.
       // m-707: a WIRED no-wake delivery marks BOTH its sidecar rows no-wake
@@ -532,7 +572,19 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
               }
               opts.gateReason?.('fifo', bySeq)
               deps.logger.info(`[deepartments] bus delivery FIFO gate: ${record.id} → ${recipientId} has an EARLIER non-final (prepared) seq${bySeq !== undefined ? ` (m-${bySeq})` : ''} — queued BEHIND (no-wake 'prepared'), the inbox splice stays in seq order (fb-117)`)
-              await deps.markFinal(record, recipientId, 'prepared')
+              // DRENAJE (2026-09-10): the gate branch is the SECOND row of a
+              // FIFO-gated delivery — the pair-LATEST the re-drive
+              // discriminator reads (`latestPerPair` → hasEarlierPendingPair /
+              // gatingHeadIsNoWake → `row.noWake === true`). Marking it WITHOUT
+              // the intent made a DELIBERATE noWake indistinguishable from a
+              // crash-class pending pair: the sweep no longer recognized the
+              // intent (P2 guard bypassed → the ~10-min preparedStuck re-drive),
+              // the health watchdog lost the exclusion, and the drain re-marked
+              // the pair crash-class. Everything downstream keys off the ROW,
+              // not off the caller — so the record of the intent must be
+              // COMPLETE here. Passes `opts` exactly like the normal-branch
+              // final mark below.
+              await deps.markFinal(record, recipientId, 'prepared', opts.noWake === true ? { noWake: true } : undefined)
               return 'prepared'
             }
           }
@@ -556,12 +608,51 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
             // IS durable — persisted before the route). The observer never gates.
             if (status === 'failed') opts.failedGround?.('child')
           } else {
-            status = await catalogRoute(deps, recipientId, record, framed, opts)
+            status = await catalogRoute(deps, recipientId, record, framed, opts, routeOut)
           }
         } else {
-          status = await catalogRoute(deps, recipientId, record, framed, opts)
+          status = await catalogRoute(deps, recipientId, record, framed, opts, routeOut)
         }
-        await deps.markFinal(record, recipientId, status, opts.noWake === true ? { noWake: true } : undefined)
+        // DRENAJE (2026-09-10 — the ORPHAN closure, class-general). THIS is the
+        // pair's real FINAL mark (the one that shadows every earlier row). A
+        // delivery to a RETIRED host-family address is RE-ROUTED to the live
+        // successor and lands THERE (the successor's own pair is marked
+        // 'delivered' by the host primitive), so marking THIS pair with the
+        // landed status would leave the RETIRED id's write-ahead 'prepared' row
+        // as the pair-final of an id that can never receive — the measured
+        // PERMANENT-ORPHAN class (m-4028 ≈ 24 h / m-4763 / m-4769, each with its
+        // record correctly delivered to the successor). When that successor pair
+        // REALLY landed, the retired pair's final word is 'terminal' (the
+        // re-drive's own dead-settle policy; a pure STATUS FLIP — the content is
+        // already delivered, NEVER re-delivered). Class, not symptom: this is
+        // the SINGLE final-mark seam, so it holds for EVERY caller (send_message,
+        // boot re-drive, sweep, drain) and for any future "dead address with a
+        // live successor" variant. Gated on the LANDED class: a failed/prepared
+        // reroute keeps the existing re-drive semantics untouched.
+        // The route KIND comes from `catalogRoute`'s additive out-param — this
+        // is the SINGLE final-mark seam, so the closure holds for every caller.
+        let retiredReroute = false
+        const successorId = routeOut.successorId
+        if (routeOut.kind === 'reroute' && successorId !== undefined && (status === 'delivered' || status === 'resumed')) {
+          let landed: DeliveryStatus | null = null
+          try {
+            landed = await deliveryStatus(deps.stateDir, record.id, successorId)
+          } catch (error: unknown) {
+            deps.logger.warn(`[deepartments] reroute terminalization: successor-status read for ${record.id} → "${successorId}" failed (pair kept with its own final — never close what did not land): ${error instanceof Error ? error.message : String(error)}`)
+          }
+          if (landed === 'delivered' || landed === 'resumed') {
+            retiredReroute = true
+            deps.logger.info(`[deepartments] reroute terminalization: ${record.id} → retired host "${recipientId}" settled 'terminal' — the record was DELIVERED to the live successor "${successorId}" (the retired-id pair was the permanent-'prepared' ORPHAN; pure status flip, NO re-delivery)`)
+            if (deps.onRerouted !== void 0) {
+              try {
+                deps.onRerouted(recipientId, successorId)
+              } catch (error: unknown) {
+                deps.logger.warn(`[deepartments] onRerouted observer for the retired host "${recipientId}" threw (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+              }
+            }
+          }
+        }
+        await deps.markFinal(record, recipientId, retiredReroute ? 'terminal' : status, retiredReroute || opts.noWake !== true ? undefined : { noWake: true })
         // FB-132 (wake-on-delivered 2026-09-06): the landed-delivery wake hook —
         // AFTER the final mark (the current pair is settled, so the drain can
         // never re-drive it). Fire-and-forget + non-fatal: an absent hook → a
@@ -586,7 +677,16 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
         // recipient can see), never the in-memory flow. The mark itself is
         // guarded: if the sidecar is down the original error still propagates.
         try {
-          await deps.markFinal(record, recipientId, 'failed')
+          // DRENAJE (2026-09-10): same call-site family as the gate branch —
+          // the 'failed' row is the pair-LATEST, so it must carry the intent
+          // too. Reachable with `opts.noWake === true` only on a THROW that
+          // escapes before `catalogRoute`'s own noWake handling (the noWake-
+          // reroute path returns 'failed' WITHOUT a row — see the noWake gate
+          // in `catalogRoute`): a genuine sidecar/write failure. The row is
+          // what the sweep/drain/health read; a bare row would silently
+          // re-classify a deliberate no-wake as crash-class. Consistency is
+          // also what R6 requires of the two marks.
+          await deps.markFinal(record, recipientId, 'failed', opts.noWake === true ? { noWake: true } : undefined)
         } catch (markError: unknown) {
           deps.logger.warn(`[deepartments] bus delivery 'failed' mark for ${record.id} → ${recipientId} could not be persisted (the sidecar write itself failed): ${markError instanceof Error ? markError.message : String(markError)}`)
         }
@@ -613,7 +713,11 @@ async function catalogRoute(
   recipientId: string,
   record: MessageRecord,
   framed: string,
-  opts: DeliverOrQueueOptions
+  opts: DeliverOrQueueOptions,
+  /** DRENAJE (2026-09-10): additive out-param — the resolved route KIND, read
+   * by the caller's final-mark seam (the reroute terminalization). Absent → the
+   * caller simply does not learn the kind (safe default: no terminalization). */
+  routeOut?: { kind?: string; successorId?: string }
 ): Promise<DeliveryStatus> {
   const route = deps.resolveCatalogRoute(recipientId)
   if (route.kind === 'unknown') {
@@ -692,5 +796,22 @@ async function catalogRoute(
   if (route.kind === 'post') {
     return deps.deliverPost(route.entry, framed, record, opts.senderSessionId, interrupt)
   }
-  return deps.deliverHost(route.entry, framed, record, opts.senderSessionId, interrupt)
+  // DRENAJE (2026-09-10 — cierre del lado CORE, fix-forward): aquí vivía un
+  // segundo bloque `if (route.kind === 'post')` BYTE-IDÉNTICO al de arriba. Era
+  // CÓDIGO MUERTO (el primer `if` ya retorna ⇒ TS2367 «'"host" | "reroute"' y
+  // '"post"' no se solapan» + TS2339 sobre `never`), no una copia con intención
+  // distinta: eliminarlo NO cambia una sola entrega — el camino SANO (post →
+  // deliverPost; host/reroute → deliverHost) queda byte-idéntico.
+  const hostStatus = await deps.deliverHost(route.entry, framed, record, opts.senderSessionId, interrupt)
+  // DRENAJE (2026-09-10 — the ORPHAN closure): report the resolved route KIND
+  // through the caller's out-param, so `deliverOrQueue`'s SINGLE final-mark
+  // seam knows this was a REROUTE and does not overwrite the retired pair with
+  // a landed status (see the terminalization there). The status value itself is
+  // returned UNCHANGED (this is an additive report; no row, no shape, and no
+  // byte of the delivery result changes).
+  if (routeOut !== undefined) {
+    routeOut.kind = route.kind
+    if (route.kind === 'reroute') routeOut.successorId = route.entry.hostId
+  }
+  return hostStatus
 }

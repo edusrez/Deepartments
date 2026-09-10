@@ -778,7 +778,13 @@ function buildDeliverLazy(ctx: Context, deliverDeps: DepsHolder<Partial<Delivery
     // wires `onDelivered` → fireQueueDrain → drainRecipientQueue at the tools
     // factory register). OPTIONAL: absent → the engine fires nothing (a minimal
     // composition keeps the delivery byte-identical).
-    ...(bound.onDelivered !== undefined ? { onDelivered: bound.onDelivered } : {})
+    ...(bound.onDelivered !== undefined ? { onDelivered: bound.onDelivered } : {}),
+    // DRENAJE (2026-09-10 — the ORPHAN closure): the optional reroute-
+    // terminalization OBSERVER, forwarded verbatim from the bundle's bucket-(c)
+    // holder (R6 parity with the hooks above). The FLIP itself is the engine's
+    // (its reroute branch) and needs no shell wiring. ABSENT → the engine still
+    // closes the orphan pair (the shell only loses the observation line).
+    ...(bound.onRerouted !== undefined ? { onRerouted: bound.onRerouted } : {})
   })
 }
 
