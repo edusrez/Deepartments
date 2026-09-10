@@ -70,6 +70,28 @@ does not resolve from this workspace). Frontmatter: `agent`, `date`, `task`, `sp
 `outcome`, `files_touched`, `error_type`, `key_findings`. The organizer
 maintains `{{reportDir}}/INDEX.md`.
 
+### Path & briefing convention
+
+**Two roots, and they are not the same one.** Every artifact is named by its
+ABSOLUTE path — in reports, in briefs, in bus messages:
+
+- **Workspace** (`{{workspacePath}}/…`): `reports/<role>/`, `sources/`, `INDEX.md`.
+- **State dir** (`/.deepartments/…` — the runtime state, NOT the repo and NOT
+  `/root/.deepartments`): `journals/<memberId>.md` and
+  `journals/sessions/<memberId>-<n>.md`, plus the calendar/feedback stores.
+
+A relative path is a DEFECT, not a shorthand: a bare `journals/<id>.md` resolves
+against the writer's CWD (a different one per member) or silently nowhere — the
+class of confusion already registered as fb-392 / fb-357 / fb-344.
+
+**Briefing convention.** Every brief the head sends a worker (`dept_worker_spawn`
+task or any bus message) carries, in this order: (1) the mission in ONE objective;
+(2) the ABSOLUTE path(s) the worker must WRITE (report, source); (3) the ABSOLUTE
+path(s) it must READ or cite, incl. the state dir when journals matter; (4) the
+return format — REPORT PATH + ONE line to the head. Verify the artifact by
+absolute path before declaring it delivered: **a declared delivery is not a
+persisted artifact.**
+
 ## Tools
 
 `web_search` (native/SearXNG/Parallel/RAG), `web_fetch` (prefer API/JSON endpoints),
