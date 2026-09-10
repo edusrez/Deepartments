@@ -103,6 +103,33 @@ are cached); user edits to `cordis.patch.yml` are HMR. All dsh commands for deve
    applies ONLY to root agents (heads and workers): a transient subagent is NOT
    an ACL subject — never apply the worker ACL to a child, nor treat a worker
    root as a child.
+11. **Model-pin coherence (I-MP) — additive-first catalog.** Every
+    `(provider, model)` pair the runtime can resolve MUST exist in the
+    provider's LIVE catalog at EVERY instant. The resolved pins are:
+    `agent-default-model`, the coordinator rows,
+    `org.workerAgentOptions`/`org.hostAgentOptions`, the
+    `WORKER_AGENT_OPTIONS`/`HOST_AGENT_OPTIONS` code constants, the deployed
+    preset rows and the live session handles. **"Every instant" includes the
+    intermediate state of a multi-file changeset** — a live catalog that is a
+    forbidden SUBSET of the deployed pins IS a down state (incident 2026-09-10:
+    the live `settings.yaml` stopped admitting `deepseek-v4-flash` while the
+    deployed bundle still pinned it → every head/worker turn died with
+    `UNKNOWN_MODEL` for 96-101 min and NO agent could repair it, because
+    repairing needs turns — total self-lockout). Therefore: catalog edits are
+    **ADDITIVE-FIRST** — add the new id, and retire an id ONLY AFTER the deploy
+    is verified AND the live handles have been re-materialized (a write that
+    RETIRES an id still referenced by a deployed, persisted or in-flight pin is
+    forbidden); the immediate-effect (live) writes travel CONTIGUOUSLY and
+    immediately before the ONE `smart_restart` canary — never before
+    `pnpm build`/`plugin add`; and a model rotation is INCOMPLETE until the
+    sessions that pinned the old id are retired + re-materialized (a handle
+    materialized pre-fix keeps its pinned model: fb-332). **The ORDER rule
+    («atomic», or «live always after the deploy») is NECESSARY BUT NOT
+    SUFFICIENT**: the symmetric counterexample — the same subtractive catalog
+    edit applied AFTER the deploy — freezes the org identically, so the
+    invariant, not the order, is what makes the transition safe. Enforced by the
+    pre-flight guard `MPC-PREFLIGHT` (`docs/VERIFICATION-LADDER.md` §2.5):
+    never restart with `P ⊄ C`.
 
 Details and rationale for each rule: skill `dsh-plugin-dev`
 (`.dsh/skills/dsh-plugin-dev/SKILL.md`).

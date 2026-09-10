@@ -129,6 +129,62 @@ instruction is a one-shot event, the old anti-loop exclusion was sleep-specific.
    `dept_memo_write` first. Workers and unconfigured posts are rejected loudly;
    a head can never rotate (host-plane ACL).
 
+## Model rotation (org-wide) — additive-first catalog + mandatory roster sweep
+
+> Incident-derived ritual (2026-09-10: the org was frozen 96-101 min because a
+> SUBTRACTIVE live catalog edit landed before the bundle that pinned the old id;
+> canonical record **fb-332**, class verdict = amplified recurrence of **fb-42**,
+> subclass **C1 «atomicity staging-live ↔ deploy»**). Norm: `AGENTS.md` rule 11
+> (invariant I-MP) + `docs/VERIFICATION-LADDER.md` §2.5 (the `MPC-PREFLIGHT`
+> pre-flight step). The Asistente runs this ritual; the IPD owns the changeset.
+
+**Phases (the order IS the safety mechanism — the live phase is contiguous and
+last before the single switch):**
+
+1. **repo/bundle only** — constant (`packages/dshd-orchestration/src/presets.ts`),
+   config rows, presets, test-pin sync. Harmless to the running runtime (the
+   effect lands at the restart).
+2. **build + `plugin add`** — `pnpm build` (or `pnpm build:root-check` when
+   `packages/` src is touched) + `dsh plugin --profile deepartments-dev add …`.
+3. **ADDITIVE live catalog edit** — add the NEW id to the live catalog
+   (`settings.yaml` → `llm-pi-ai.providers[<provider>].models[]`) and KEEP the
+   legacy id admitted. Harmless by construction: the pins in flight are still
+   admitted (`pines ⊆ catálogo`).
+4. **the ONE `smart_restart {canary:true, cause:'deploy'}`** — the single
+   observable switching point. Live writes must never precede `pnpm build` /
+   `plugin add`: the gate admits per request, so a subtractive edit invalidates
+   the deployed pins in ~15 s while the bundle takes minutes to catch up, and
+   the org self-locks out (repairing needs turns, and turns go through the same
+   gate).
+5. **verify** — `--dump-config` coherence (new id in host/heads/workers/twin) +
+   canary PASS + real runtime activity.
+6. **MANDATORY roster sweep (fb-332) — retire + re-materialize stranded
+   handles.** The sweep is **PART OF THE PROCEDURE, not an extra**: a session
+   MATERIALIZED pre-fix keeps the old model pinned in its HANDLE (the handle
+   does not re-resolve from the global config), so its turns keep failing AFTER
+   the fix and the canary PASS — evidence: builder-247 failed its turn 3 at
+   12:54:13.925Z, 87 s after the recovery boot. Remedy: `dept_worker_retire` +
+   fresh spawn (the new materialization carries the new id); for a head,
+   `dept_head_rotate` after its `dept_memo_write`. **Discriminator: read the
+   pin/model RESOLVED PER TURN — never the sessionId birth date.** A long-lived
+   head reuses its session directory across the rotation and its handles
+   re-resolve at materialization, so the birth-date criterion yields
+   **systematic false positives** (the 09-10 sweep: the 3 heads' current
+   sessionIds were born pre-fix while their per-turn `provider`/`model` resolved
+   `opencode-zen`/`deepseek-flash` with 0 legacy fields → 4 permanent FPs with
+   the naive criterion vs 0 real stranded). Verify every live post, then record
+   the outcome (0 stranded / list of retired+re-materialized handles).
+7. **retire the legacy id** — separate lane, only after 1-6 are green (and
+   never in the same step as the additive edit: a retirement clause must not
+   travel with an additive clause, because the executor applies both together).
+
+**Never edit the live catalog subtractively while any deployed, persisted or
+in-flight pin references the id**; that intermediate state is a forbidden state
+(equivalent to being down), and the order rule alone — «atomic», or «live
+always after the deploy» — is NECESSARY BUT NOT SUFFICIENT (the symmetric
+counterexample freezes the org identically). Before the restart, run the
+`MPC-PREFLIGHT` pre-flight (§2.5): `P ⊄ C` ⇒ do NOT restart, fail loud.
+
 ## Key principles
 
 - **Asistente = interface/coordinator.** It translates the owner's vision into

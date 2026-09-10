@@ -472,6 +472,74 @@
 > pooler; el pricing nuevo NO dispara re-evaluación en esta lane) · (v)
 > **GOAT/CommandCode NO se adopta ahora + WATCH** (fin de los 4x de docs/go, anuncio
 > post-17-09, WorkBuddy como 3er partner; el smoke GOAT condicional queda PARQUEADO).
+> **ENTRADA 09-10 — INCIDENTE DE CONGELACIÓN DEL ORG POR ROTACIÓN DE CATÁLOGO
+> SUBTRACTIVA (IPD, lane prevention-docs; docs-only, 0 commits, LISTO-PARA-COMMIT —
+> commitea el host; **NO se re-absorbe lo ya absorbido**: la ENTRADA 09-10 de la
+> ROTACIÓN DE MODELO (arriba) NO se duplica — esta entrada añade la CLASE, la
+> PREVENCIÓN y las lanes abiertas del incidente, y la ola de stable-web :3080
+> sigue NO abierta)** — **INCIDENTE**: el org quedó congelado **96-101 min**
+> (ventana 11:11:34→12:52:46Z · inicio causal **11:20:58.109Z** · recuperación
+> **canary PASS 12:52:43.186Z + boot 12:52:46Z**, bootId 2d06fce7…,
+> `recoveryCause "deploy"`) por **CAUSA RAÍZ = escritura LIVE SUBTRACTIVA del
+> catálogo de 11:20:58Z** (el `settings.yaml` vivo BORRA `deepseek-v4-flash` y
+> `deepseek-v4-flash-vision-exp` del provider `opencode-zen`) **con el bundle
+> desplegado AÚN pinneando el legacy** (constantes `WORKER_AGENT_OPTIONS`/
+> `HOST_AGENT_OPTIONS` + filas de coordinador) → `pi-ai provider "opencode-zen"
+> has no configured model "deepseek-v4-flash"` (`UNKNOWN_MODEL`) en cada turno de
+> head/worker (la puerta de admisión del adapter valida POR PETICIÓN; el
+> productor del pin sólo cambia con build+`plugin add`+restart) ·
+> **VEREDICTO DE CLASE**: **recurrencia AMPLIFICADA de fb-42** — MISMO invariante
+> (un pin resuelto por el runtime NO existe en el catálogo vivo del provider) y
+> misma firma, con **MECANISMO nuevo** = **subclase C1 «atomicidad staging-live ↔
+> deploy»** (el catálogo vivo se vuelve SUBCONJUNTO de los pines desplegados)
+> frente a la subclase C0 del 09-01 (pin adelantado al catálogo en un mint) —
+> **NO es clase nueva** (registro operativo **fb-332** fallo/alto/abierto
+> `related:[fb-42,fb-25,fb-167]`; veredicto QD consolidado 09-10 con 2
+> inspectores) · **EVIDENCIA DURA**: primer turno muerto **11:21:13.223Z**
+> (builder-247 turn 2, 15 s tras la escritura; el fallo REALMENTE primero es
+> quality-daily-10 **11:21:12.984Z**, 239 ms antes, NO registrado en los stores
+> centrales) · **101 min de INACTIVIDAD con 0 turnos** de agentes
+> (11:21:13Z→12:40:35Z — el único turno del host en la ventana, turn 33
+> 12:40:36.046Z, TAMBIÉN falló; auto-bloqueo: reparar exige turnos y la puerta de
+> admisión los mataba) · **alerta +92 min** (el post-error de 11:21:13Z se alertó
+> a las **12:53:47Z**, y sólo porque el tick corrió post-boot; `health-alerts`
+> con 0 filas entre 11:14:34Z y 12:52:46Z = 98 min de ceguera, y `deliveries`
+> marcaba `delivered` wakes que NUNCA ejecutaron turno) · **residuo post-fix
+> 12:54:13.925Z** (builder-247, handle materializado PRE-fix, vuelve a fallar con
+> el fix YA desplegado → remedio manual `dept_worker_retire` + spawn fresh
+> builder-248) · **canary 12:52:46Z** (la recuperación la disparó un **nudge
+> manual del OWNER 12:41:00.377Z**; ningún watchdog la detectó, y el host fue el
+> único actor capaz de reparar por accidente arquitectónico → amplificación de
+> **fb-167**) · subregistro de stores (1 de 3 fallos en los stores centrales) y
+> escritura live de 12:40:49.718Z NO atribuible en el audit trail ·
+> **REMEDIACIÓN**: fix del host con el orden correcto (constantes → 6 ficheros
+> live → build → `plugin add` → `smart_restart canary`) y **F5
+> owner-autorizada** — ya descritas en la ENTRADA de la rotación, NO
+> re-absorbidas aquí · **PREVENCIÓN INSTITUCIONAL (esta lane, docs-only)**:
+> `AGENTS.md` **regla 11** (invariante I-MP «pines ⊆ catálogo vivo en TODO
+> instante, incluido el estado intermedio de un changeset» + **catálogo
+> ADITIVO-FIRST** + re-materialización de handles; la regla-orden «atómico» o
+> «live después del deploy» es NECESARIA pero **NO SUFICIENTE** — contraejemplo
+> simétrico: la edición subtractiva rompe por ambos órdenes) +
+> `docs/VERIFICATION-LADDER.md` **§2.5** (paso TIERED pre-flight
+> pines↔catálogo, mecanismo = guard `MPC-PREFLIGHT`, con el criterio P5 del
+> **pin resuelto por turno**, nunca la fecha de nacimiento del sessionId) + skill
+> `deepartments-workflow` (**ritual de rotación de modelo en 7 fases** con
+> **sweep del roster OBLIGATORIO**: retirar + re-materializar handles stranded,
+> fb-332) · **LANES ABIERTAS**: **MPC-PREFLIGHT (código, IPD — prioridad ALTA;
+> spec QD §4.2 con aceptación A1-A8: enumerador de pines P1-P6 +
+> pre-flight bloqueante + write-guard del catálogo subtractivo + puerta de boot
+> loud-durable + extensión del probe R2 a create/resume + P5 handles)** ·
+> **fb-337 (detección — mejora/alto/abierto, emisor quality-head; watchdog
+> `delivery-no-turn-after-N-min` + `plane-no-turn-after-N-min` + audit de
+> write-completeness de health-alerts; spec de 302 líneas entregada al IPD,
+> **SERIAL** respecto a MPC-PREFLIGHT porque ambas tocan `index.ts` +
+> export-parity)** · **REDACTOR (esta entrada — normativa docs-only del
+> incidente; el cierre ACOPLADO del assert `test/invoke.test.js:6926` + skill
+> viaja como changeset futuro, NO tocado aquí)** — records:
+> **fb-332** (clase/handle stranded + apply parcial) · **fb-337** (detección) ·
+> **fb-42** (familia; pendiente de anotar la subclase C1) · **fb-167** (SPOF del
+> host amplificado).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 

@@ -78,6 +78,72 @@ HEAD era byte-idéntico a 7693beaa) — la mejora no habría cambiado ese veredi
 pero elimina el punto ciego diagnóstico (diagnóstico completo del guard:
 builder-107 b48b3e05 §4).
 
+## 2.5 Pre-flight de coherencia pines↔catálogo — paso 2.5 TIERED (guard `MPC-PREFLIGHT`, familia fb-42 subclase C1)
+
+> **Paso TIERED NUEVO.** Se intercala en la ladder de `AGENTS.md` § TIERED
+> verification entre el paso 2 (`dsh plugin … add`) y el paso 3
+> (`--dump-config`), y es **BLOQUEANTE** antes de cualquier fase live (escritura
+> del catálogo/presets vivos) y antes de cualquier `smart_restart`.
+> **Referencia cruzada: `AGENTS.md` regla 11** (invariante I-MP — todo pin
+> resuelto por el runtime existe en el catálogo vivo del provider en TODO
+> instante, incluido el estado intermedio de un changeset; catálogo
+> ADITIVO-FIRST; fase live contigua antes del único restart; la regla-orden es
+> necesaria pero NO suficiente). Spec y aceptación del guard: §4.2 (A1-A8) de
+> `.dsh/reports/quality/2026-09-10-incidente-congelacion-modelo-prevencion.md`.
+
+**Qué comprueba.** El invariante I-MP sobre el **conjunto** de pines `P` (no
+una sola ruta) contra los **catálogos vivos** `C`:
+`∀ (provider p, model m) ∈ P : m ∈ C(p)` — y, por separado,
+`p ∈ registeredProviders` (clase NO_ADAPTER, se reporta distinta).
+
+Tramos de `P` (cada uno con evidencia del incidente 09-10):
+
+| # | Tramo | Fuente canónica |
+|---|---|---|
+| P1 | `agent-default-model` | `settings.yaml` vivo + `cordis.patch.yml` raíz + presets |
+| P2 | filas de coordinador + `org.workerAgentOptions`/`org.hostAgentOptions` | `--dump-config` del perfil (`packages/dshd-core/cordis.patch.yml` + mirror `-min`) |
+| P3 | constantes `WORKER_AGENT_OPTIONS`/`HOST_AGENT_OPTIONS` | **importadas del bundle** (`packages/dshd-orchestration/src/presets.ts`) — cero drift por literales duplicados |
+| P4 | presets live | `.agent-presets/**` del home dev |
+| P5 | handles persistidos de sesiones vivas | **el pin RESUELTO POR TURNO**, nunca la fecha de nacimiento del sessionId |
+| P6 | presets staged/twin + plugins hermanos | `profiles/*/cordis.patch.yml` · `dsh-key-pooler` |
+
+Lado `C`: `settings.yaml` → `llm-pi-ai.providers[p].models[].id`, leído por las
+DOS vías — estática (`--dump-config` del perfil) y runtime
+(`ctx.get('llm').listModels(p)`, la primitiva del probe R2) — **exigiendo
+coincidencia**; la discrepancia entre ambas es en sí misma un hallazgo.
+
+**Dónde se ejecuta** (4 puertas, mismo núcleo puro): ① **deploy pre-flight
+BLOQUEANTE** — dos ejecuciones, antes de la fase live y después de
+`pnpm build`+`plugin add`, siempre **antes** del `smart_restart`: si `P ⊄ C` el
+deploy **aborta** (exit ≠ 0, línea accionable con provider+model+tramo) y
+**nunca** se reinicia; ② **write-guard** del catálogo: rechazar un guardado que
+RETIRA un id referenciado por un pin desplegado (ADD nunca bloquea); ③ **boot**:
+auto-verificación LOUD + DURABLE (alerta + finding con la lista de pares
+ausentes) — no niega el arranque, pero **jamás** un «ok» silencioso;
+④ **mint/materialización**: el probe R2 existente, extendido a
+create/resume y con re-resolución del modelo del handle al re-materializar
+(P5/fb-332).
+
+**Qué hace al fallar:** fail-loud, nunca degradar; **prohibido el fail-open** en
+las puertas ①②. El guard es **read-only estricto** (no auto-edita
+`settings.yaml`, no auto-restaura legacy, no reinicia): sólo lee y bloquea/avisa.
+
+**Criterio P5 (anti-falso-positivo, obligatorio).** El discriminador de «sesión
+stranded / handle stale» es el **pin resuelto por turno** (el handle
+re-resuelve al materializar), NO la fecha de nacimiento del sessionId: un head
+longevo reutiliza su directorio de sesión a través de la rotación, así que el
+criterio ingenuo da **4 falsos positivos permanentes** (sweep 09-10: los 3
+heads con sessionId pre-fix pero turnos resolviendo `opencode-zen`/
+`deepseek-flash`, 0 campos legacy; 0 stranded reales). Con ese baseline de
+cero-FP se fija la aceptación A4.
+
+**Por qué es un PASO y no un aviso.** En el incidente 09-10 pasaron **15 s**
+entre la escritura live del catálogo (11:20:58.109Z) y el primer turno muerto
+(11:21:12.984Z), y **83 min** hasta el build de la pierna que la hacía verdad:
+la puerta de admisión puede invalidar el productor en segundos, así que la
+comprobación tiene que correr en el punto de acción (escritura/deploy), no en el
+plan.
+
 ## 3. Lección de proceso — rotación de head (fb-115)
 
 `dept_head_rotate` rechaza correctamente una rotación cuyo target NO está idle/

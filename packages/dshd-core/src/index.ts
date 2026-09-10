@@ -170,7 +170,8 @@ export interface OrgConfig {
    * ({provider, model, reasoningEffort?}, the SAME shape as
    * coordinator.agentOptions). Delivered VERBATIM via `deepartments.org` so
    * the presets surface resolves it ORG-DRIVEN (the code literals as the
-   * fallback). Absent → code defaults (opencode-zen / deepseek-v4-flash / max). */
+   * fallback). Absent → the WORKER_AGENT_OPTIONS code defaults in presets.ts
+   * (opencode-zen / deepseek-flash / max). */
   workerAgentOptions?: {
     provider?: string
     model?: string
@@ -178,9 +179,9 @@ export interface OrgConfig {
   }
   /** R4 — the default HOST model route (the D4 dormant-host resume
    * AgentOptions). Same shape as the worker route. Absent → code defaults
-   * (opencode-zen / deepseek-v4-flash / max — the RUNTIME TRUTH aligned in
-   * LANE 0.2.3; the pre-R4 vision-exp literal was stale, the config rows run
-   * the host on flash). */
+   * (opencode-zen / deepseek-flash / max — the HOST_AGENT_OPTIONS RUNTIME
+   * TRUTH in presets.ts), aligned in LANE 0.2.3; the pre-R4 vision-exp
+   * literal was stale, the config rows run the host on flash). */
   hostAgentOptions?: {
     provider?: string
     model?: string
