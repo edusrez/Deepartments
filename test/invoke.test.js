@@ -8374,10 +8374,19 @@ test('fb-33 (crash-safety): the preset-fixture snapshot is git-HEAD-based — a 
     await restore()
     assert.equal(await readFile(F10_ARCHITECTURE_PATH, 'utf8'), head.data, 'the file is byte-identical to HEAD after the absolute finally')
   }
-  // The untracked execbuilder role fixture: its pristine HEAD state is ABSENCE
-  // (the file is a test-only fixture, never part of the repo tree).
+  // The execbuilder role fixture IS a tracked repo file (added on purpose in
+  // f668508, 2026-09-07 — `git ls-files` lists it and `git show HEAD:<path>`
+  // exits 0), so its pristine HEAD state is that CONTENT, never ABSENCE: the
+  // restore writes those exact HEAD bytes back (identical to bytes this test
+  // writes, so the worktree stays clean) and must NEVER delete the file.
+  // READ THE TREE, never a hand-copied literal: the expected blob is resolved
+  // from git here, cross-checked against the bytes the fixture writes.
   const execHead = gitHeadPresetContent('presets/departments/research/execbuilder.md')
-  assert.equal(execHead.kind, 'absent', 'the untracked execbuilder fixture resolves to kind:"absent" at HEAD (restore removes it, never leaves it behind)')
+  assert.equal(execHead.kind, 'content', 'the TRACKED execbuilder fixture resolves to kind:"content" at HEAD (restore re-writes its HEAD bytes, it must never delete the file)')
+  const execHeadBlob = execFileSync('git', ['-C', F10_REPO_ROOT, 'rev-parse', 'HEAD:presets/departments/research/execbuilder.md'], { encoding: 'utf8' }).trim()
+  assert.equal(execHeadBlob, '23809956475569027f4ec75db307edbc4f3a08a1', 'the execbuilder fixture blob resolved AT HEAD (git rev-parse HEAD:<path>)')
+  assert.equal(execHead.data, EXEC_ROLE_FRONTMATTER, 'the HEAD bytes ARE the bytes this fixture writes — restoring them is byte-idempotent (the worktree stays clean)')
+  assert.equal(execFileSync('git', ['-C', F10_REPO_ROOT, 'hash-object', '--stdin'], { input: execHead.data, encoding: 'utf8' }).trim(), execHeadBlob, 'git hash-object of the HEAD bytes equals the HEAD blob (the literal above is the measured blob, not a guess)')
 })
 
 test('fb-33 (abort-path guard, R6 pattern): a fixture write followed by an ABORTED body (a mid-test throw between the write and the end — the interrupted-run class) STILL restores the REAL preset — the restore lives in `finally`, so it fires even when the test dies after the write; the untracked execbuilder fixture returns to ABSENCE after the same abort', async () => {
