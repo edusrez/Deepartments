@@ -240,13 +240,13 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // interfaces are type-only and emit NO runtime export. The test import
   // surface stays 234 (invoke.test.js imports nothing new from lib/invoke.js —
   // tests 1 + 2 of this lock keep passing).
-  // fb-473 (2026-09-10, 05cb3cb — the fb-473 trace pipeline): ADDED the ONE
-  // rotation-reason label helper (verifyLabelFor from dshd-quality — the shared
-  // ' [reason verified] / [reason unverified vs archive] / [reason unverifiable]'
-  // vocabulary, extracted so the head-rotated and host-rotated emitters can never
-  // diverge; flows through the same star re-export bridge src/core/quality.ts) —
-  // an INTENTIONAL, verified surface extension (327 → 328), name-measured: it is
-  // the ONLY export the commit adds (its src/invoke.ts +8 lines are internal
-  // deliveryDeps wiring, and the host-rotation surface fields are type-only).
+  // LOCK CORRECTED 327 → 328 (05cb3cb, fb-473): the lock held 327 CORRECTLY at
+  // 8aba9dd. 05cb3cb extended the surface with verifyLabelFor (source
+  // dshd-quality/src/index.ts:206; it reaches the superset through the star
+  // re-export bridge src/core/quality.ts — NO `export` line was written in
+  // invoke.ts, and test/invoke.test.js does not import it) and the rebuild
+  // propagated it into lib/invoke.js ⇒ 328. The bump is INTENTIONAL and verified
+  // (3/3), NOT an off-by-one at freeze time: the name-level source diff
+  // 8aba9dd→HEAD is +verifyLabelFor / −0.
   assert.equal(names.length, 328, `lib/invoke.js export count frozen at 328 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })
