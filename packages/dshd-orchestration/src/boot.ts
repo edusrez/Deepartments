@@ -1096,7 +1096,16 @@ export function createBootOrchestration(ctx: Context, deps: BootFactoryDeps): Bo
   // =========================================================================
   // MPC-PREFLIGHT (puerta 3): registra el guard de coherencia pines↔catálogo
   // sobre el MISMO `hostsLoaded` que el zone usa (justo tras el cold-load).
-  registerMpcBootPinCoherenceGate(ctx, hostsLoaded, { stateDir, org, healthDisabled: (config.health as { enabled?: boolean } | undefined)?.enabled === false })
+  // F3 (gate unit-2): se le pasan ADEMÁS los dos handles ya presentes en esta
+  // fábrica (hosts/agents) para que la alerta DEGRADED se ENTREGUE al host vivo
+  // (followup) y no quede sólo en un canal write-only.
+  registerMpcBootPinCoherenceGate(ctx, hostsLoaded, {
+    stateDir,
+    org,
+    healthDisabled: (config.health as { enabled?: boolean } | undefined)?.enabled === false,
+    ...(hosts !== undefined ? { hosts: hosts as unknown as { values(): Iterable<{ hostId?: string; sessionId?: string; retired?: boolean }> } } : {}),
+    ...(agents !== undefined ? { agents: agents as unknown as { get(id: string): { followup(message: unknown): void } | undefined } } : {})
+  })
 
   return {
     subagents,
@@ -1147,6 +1156,9 @@ export function createBootOrchestration(ctx: Context, deps: BootFactoryDeps): Bo
 // Import LOCAL (fuera del bloque de imports del head — el anchor de
 // followup-contract.test.js en boot.ts:115 se preserva).
 import { renderRunReport, runMpcPreflightSync } from './model-pins-runner.js'
+// F3 (gate unit-2): la ENTREGA REAL al host necesita el constructor canónico de
+// mensaje del harness (el mismo que usan buildPresenceMessage / busUserMessage).
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 //
 // FUERA de la zona VERBATIM del factory (el movement-lock de boot-factory.test.js
 // congela su texto byte a byte): este hook es una puerta NUEVA, no parte del
@@ -1163,8 +1175,18 @@ import { renderRunReport, runMpcPreflightSync } from './model-pins-runner.js'
 // el invariante `pines ⊆ catálogo vivo` en el momento en que el bundle se
 // materializa y, si no se cumple, deja una MARCA DEGRADED visible + un finding
 // durable en el canal existente (`<stateDir>/health-alerts.jsonl`) con la lista
-// de pares ausentes — CON interrupt al host (el carrier del hallazgo; la entrega
-// la ejecuta el daemon de salud, dueño del canal y seam de la lane fb-337).
+// de pares ausentes.
+//
+// CORRECCIÓN DEL GATE unit-2 (F3) — LO QUE ANTES DECÍA AQUÍ ERA FALSO: el
+// comentario afirmaba que «la entrega la ejecuta el daemon de salud, dueño del
+// canal». NO es así: ese canal es WRITE-ONLY (`appendHealthAlertAudit`,
+// packages/dshd-health/src/index.ts; NADIE lee `health-alerts.jsonl` en todo el
+// árbol), así que escribir la fila NO entrega nada al host. La entrega se hace
+// AHORA explícitamente: el wiring inyecta `hostAlertSink` (abajo) y el runner lo
+// LLAMA cuando el gate está degradado; el resultado de esa llamada (entregado o
+// no, con su error) queda escrito en el mark durable
+// `<stateDir>/mpc-preflight-state.json` → `hostAlertDelivery`. La fila del canal
+// sigue siendo el registro durable; el SINK es la entrega.
 //
 // NO bloquea el arranque: negar el arranque es un modo de fallo PEOR — se pierde
 // el actor capaz de reparar (el auto-bloqueo del incidente). Tampoco sustituye
@@ -1175,7 +1197,17 @@ import { renderRunReport, runMpcPreflightSync } from './model-pins-runner.js'
 export function registerMpcBootPinCoherenceGate(
   ctx: Context,
   hostsLoaded: Promise<unknown>,
-  options: { stateDir: string; org: Config['org']; healthDisabled?: boolean }
+  options: {
+    stateDir: string
+    org: Config['org']
+    healthDisabled?: boolean
+    /** Los dos handles que la ENTREGA (F3) necesita para alcanzar al host vivo:
+     * el registro (para localizar la entrada del host NO retirado) y el mapa de
+     * agentes (para su handle). Ambos son OPCIONALES: sin ellos la puerta sigue
+     * funcionando y el recibo durable declara «no live host handle». */
+    hosts?: { values(): Iterable<{ hostId?: string; sessionId?: string; retired?: boolean }> }
+    agents?: { get(id: string): { followup(message: unknown): void } | undefined }
+  }
 ): void {
   // `health.enabled: false` DISABLES the whole health plane (the daemon writes
   // nothing: no heartbeat, no alert). The coherence gate belongs to that plane:
@@ -1184,6 +1216,29 @@ export function registerMpcBootPinCoherenceGate(
   // existing test («health.enabled:false → NO daemon (no heartbeat, no
   // alert)»). A DISABLED scan is never a degraded scan.
   if (options.healthDisabled === true) return
+  /** La ENTREGA REAL (F3, gate unit-2): un followup al handle del HOST VIVO —
+   * el mismo canal que `notifyHostPresence` (boot.ts) y que el bus de
+   * delivery.ts (`target.followup(...)`). NO se hace el resume D4 de un host
+   * dormante (esa ruta es del motor de delivery: resucitar al host desde una
+   * puerta de boot es otro contrato): si no hay handle vivo el sink LANZA y el
+   * recibo durable (`hostAlertDelivery`) queda con `delivered:false` + la razón
+   * — nunca un «entregado» falso. */
+  const deliverToLiveHost = (frame: { message: string; missing: string[]; postId: string }): void => {
+    const hosts = options.hosts
+    const agentsMap = options.agents
+    const live = hosts === undefined
+      ? []
+      : [...hosts.values()].filter((entry) => entry.retired !== true && entry.sessionId !== undefined && agentsMap?.get(String(entry.sessionId)) !== undefined)
+    const target = live.length === 0 ? undefined : agentsMap?.get(String(live[0]?.sessionId))
+    if (target === undefined) throw new Error('no live host handle at boot (the durably written frame + the DEGRADED mark are the signal; the delivery engine is the one that resumes a dormant host)')
+    target.followup(
+      createUserMessage({
+        content: [{ type: 'text', text: `[MPC-PREFLIGHT ${frame.postId}] ${frame.missing.length} pin(s) missing/unverified at boot\n${frame.message}` }],
+        source: { kind: 'plugin', plugin: 'deepartments', form: 'notice', summary: `MPC-PREFLIGHT integrity alert: ${frame.missing.length} pin(s) missing/unverified.` }
+      })
+    )
+    ctx.logger.warn(`[deepartments] MPC-PREFLIGHT boot gate: integrity alert DELIVERED to the live host (${frame.postId}, ${frame.missing.length} pin(s))`)
+  }
   const run = (): void => {
     try {
       const envHome = process.env.DSH_HOME
@@ -1194,6 +1249,10 @@ export function registerMpcBootPinCoherenceGate(
       // un stateDir ya retirado (el contrato de los tests herméticos lo caza).
       // La vía RUNTIME (llm.listModels) es asíncrona y NO se consulta aquí: se
       // declara explícitamente como problema (nunca un ok silencioso).
+      // `hostAlertSink` (F3, gate unit-2): la ENTREGA REAL al host. Síncrona
+      // como el resto de la puerta (una promesa que aterrice tras el dispose
+      // escribiría en un stateDir retirado) y sin poder tumbar el arranque: el
+      // runner captura la excepción y la marca en `hostAlertDelivery`.
       const result = runMpcPreflightSync({
         mode: 'boot',
         stateDir: options.stateDir,
@@ -1203,7 +1262,8 @@ export function registerMpcBootPinCoherenceGate(
           agentPresetsDir: path.join(home, '.agent-presets'),
           profilesDir: path.join(home, 'profiles')
         },
-        org: options.org
+        org: options.org,
+        hostAlertSink: deliverToLiveHost
       })
       if (result.decision === 'allow') {
         ctx.logger.info(`[deepartments] MPC-PREFLIGHT boot gate: I-MP verified (${result.pinCount} pins, ${result.auxiliaryCount} auxiliary read-only pins)`)

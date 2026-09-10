@@ -104,6 +104,42 @@ export interface LiveCatalogSource {
   providers: Record<string, ProviderCatalog>
 }
 
+/**
+ * LAS RUTAS **BUILT-IN** DEL HARNESS (fix-forward F6, gate unit-2): un provider
+ * que NO está en `llm-pi-ai.providers` de settings.yaml no es «desconocido» si
+ * lo REGISTRA un paquete del propio bundle. Medición que obliga a esta fuente
+ * (`reports/explore-deep/2026-09-10-p6-aux-pins-keypooler-probe-twin-profile-08e5bcf3.md`):
+ * el twin `deepartments-dev-headless` fija `deepseek-official/deepseek-v4-flash-vision-exp`
+ * y `deepseek-official` SÍ existe como ruta built-in
+ * (`@deepseek-ai/dsh-llm-deepseek`, `PROVIDER = "deepseek-official"`,
+ * `DEFAULT_MODELS` de 3 ids) ⇒ el `AUX(unknown)` era un artefacto de la mitad
+ * ESTÁTICA (settings.yaml sólo declara pi-ai), no un hallazgo real.
+ *
+ * ALCANCE DELIBERADAMENTE CONSERVADOR (una allowlist corta, no un descubrimiento
+ * automático): sólo la ruta que el incidente/twin realmente pinnea y sus ids por
+ * defecto. No es una lista mantenible a mano sin control: el test comprueba los
+ * ids contra el `DEFAULT_MODELS` del paquete bundled y FALLA si derivan.
+ */
+export const BUILTIN_DEEPSEEK_PROVIDER = 'deepseek-official'
+
+/** Los ids por defecto del adapter built-in `deepseek-official` (ver el
+ * comment de arriba: el adapter los anuncia cuando el settings namespace
+ * `llm-deepseek` no trae una lista explícita). */
+export const BUILTIN_DEEPSEEK_MODELS = ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'] as const
+
+/** La fuente de catálogo de las rutas built-in. Va SIEMPRE LA ÚLTIMA en la
+ * lista de fuentes: sólo rellena lo que ninguna fuente live (settings.yaml /
+ * runtime llm.listModels / un `--catalog` explícito) resolvió, y así jamás
+ * tapa ni enmascara un catálogo vivo. */
+export const BUILTIN_CATALOG_SOURCE_ID = 'builtin-adapter'
+
+export function builtinCatalogSource(): LiveCatalogSource {
+  return {
+    id: BUILTIN_CATALOG_SOURCE_ID,
+    providers: { [BUILTIN_DEEPSEEK_PROVIDER]: { models: [...BUILTIN_DEEPSEEK_MODELS], registered: true } }
+  }
+}
+
 /** El veredicto del comparador para UN pin — vocabulario del probe R2. */
 export type ModelPinVerdictKind =
   | 'ok'
@@ -125,11 +161,38 @@ export interface ModelPinVerdict {
   check: string
   /** La línea accionable (provider + model + tramo + quién lo fija). */
   detail: string
+  /** F6 — la declaración de BENIGNIDAD escrita que cubre a este pin (la
+   * superficie `<stateDir>/mpc-pin-declarations.json`). Presente ⇒ el informe lo
+   * muestra como «declared benign + reason»; el veredicto NO cambia. El tipo es
+   * estructural (el runner es el dueño del lector: cero import circular). */
+  declaration?: { provider: string; model: string; reason: string; declaredBy?: string; declaredAt?: string; expiresAt?: string }
 }
 
 /** La disposición de una PUERTA. `blocked` = exit ≠ 0 (puertas 1-2 y
  * mint); `degraded` = NO bloquea pero JAMÁS un ok silencioso (puerta 3 boot). */
 export type ModelPinGateDecision = 'allow' | 'blocked' | 'degraded'
+
+/**
+ * F8 (gate unit-2) — el SELLO DE ENTRADA del informe: qué `settings.yaml`, qué
+ * patches, qué perfil y qué fuentes de catálogo se leyeron, con su `ts`. Un
+ * informe cuyo §2.5 no es datable es exactamente la familia de «detalle caduco»
+ * (fb-352/fb-356): no se puede saber si mide el árbol que se cree.
+ */
+export interface ModelPinInputsStamp {
+  /** El `ts` de la ejecución (el mismo que lleva la marca durable). */
+  ts: number
+  /** El `settings.yaml` leído (o la cadena vacía si no se leyó ninguno). */
+  settingsYaml: string
+  /** Los patches de perfil/bundle leídos, en orden. */
+  patches: string[]
+  /** El perfil nombrado en la invocación ('' cuando no se nombró). */
+  profile: string
+  /** El id de cada fuente de catálogo consultada (incluye las suplidas vía
+   * `--catalog` y la built-in cuando aporta). */
+  catalogSources: string[]
+  /** La vía RUNTIME (`llm.listModels`) SÍ se consultó en esta ejecución. */
+  runtimeCatalogConsulted: boolean
+}
 
 /** El informe completo del guard (la ÚNICA estructura que el wiring consume). */
 export interface ModelPinCoherenceReport {
@@ -288,15 +351,37 @@ export function comparePinsAgainstCatalogSources(pins: readonly ModelPin[], sour
  *    falta ⇒ `degraded` (alerta + finding durable + marca DEGRADED).
  *  - 'mint' (puerta 4, R2 conservado): `blocked` con ausentes (el caller de
  *    mint ABORTA fail-loud); 'ok'/'retrofitted' los decide el caller.
+ *
+ * F5 (fix-forward del gate unit-2): en 'deploy-preflight' la COINCIDENCIA de
+ * ambas vías es el invariante, así que la AUSENCIA de la vía RUNTIME también
+ * BLOQUEA (`runtimeSourcePresent === false`). Antes el PROBLEM sólo se acumulaba
+ * y el CLI salía 0: una mitad estática sola es un «ok» silencioso, que es
+ * exactamente el fallo del 09-10. Para la mitad runtime ausente NO se usa
+ * `degraded` (sería indistinguible de un «allow con aviso») y NO hay escape
+ * hatch: las dos salidas legítimas son correr in-process con `llm`, o suplir el
+ * catálogo con `--catalog`.
+ *
+ * MATIZ CORREGIDO (defecto de precisión MEDIDO por el gate unit-2 — este
+ * comentario decía que `degraded` «está reservada a la puerta de BOOT», y es
+ * INEXACTO): 'deploy-preflight' SÍ devuelve `degraded` —para los pines NO
+ * VERIFICABLES, `unverifiable.length > 0`, abajo— y el CLI lo mapea a EXIT=2
+ * (`scripts/mpc-preflight.mjs`: un `deploy` nunca sale 0 con `degraded`). La
+ * distinción real es «`blocked` = violación o evidencia ausente / `degraded` =
+ * no verificable», no «`degraded` = sólo boot».
  */
 export function decide({
   phase,
   verdicts,
-  staticSourcePresent
+  staticSourcePresent,
+  runtimeSourcePresent
 }: {
   phase: 'deploy-preflight' | 'boot' | 'mint'
   verdicts: readonly ModelPinVerdict[]
   staticSourcePresent: boolean
+  /** La vía RUNTIME (`llm.listModels`) se consultó. `undefined` = el caller no
+   * la mira (comportamiento previo, sin cambio); `false` = NO corrió ⇒ en
+   * deploy-preflight BLOQUEA. */
+  runtimeSourcePresent?: boolean
 }): { decision: ModelPinGateDecision; message: string } {
   const missing = verdicts.filter((v) => v.kind === 'unknown-model')
   const unverifiable = verdicts.filter((v) => v.kind === 'unknown')
@@ -306,6 +391,12 @@ export function decide({
       return {
         decision: 'blocked',
         message: `[MPC-PREFLIGHT] ABORTED (fail-loud, never fail-open): NO static catalog source could be read — the invariant pines ⊆ live catalog is UNVERIFIED and a prohibited subset may be active; fix the catalog path/parse and re-run (a deploy must never restart with the invariant unverified)`
+      }
+    }
+    if (runtimeSourcePresent === false) {
+      return {
+        decision: 'blocked',
+        message: `[MPC-PREFLIGHT] ABORTED (I-MP UNVERIFIED — the RUNTIME half was NOT consulted): the static catalog alone (settings.yaml) is NOT evidence of the live adapter catalog, so a prohibited subset could be active while the static ids still resolve; the deploy must NOT proceed (DO NOT restart). Two legitimate exits: (1) run the guard IN-PROCESS with the live llm primitive — runMpcPreflight({ llm: ctx.llm }) (model-pins-runner.ts; the runtime source llm.listProviders()/llm.listModels() is the probe R2 route) — or (2) supply that catalog to the CLI as JSON: --catalog <json> (shape { "id": "runtime-llm", "providers": { "<provider>": { "models": ["<id>"], "registered": true } } }). There is deliberately NO flag to deploy with the static half alone`
       }
     }
     if (missing.length > 0) {
@@ -351,16 +442,34 @@ export function decide({
   return { decision: 'allow', message: '' }
 }
 
+/** Las fuentes que NO son la vía estática (settings.yaml): la vía runtime
+ * (`runtime-llm`) y un catálogo suplido por el caller (`--catalog`, id libre).
+ * TODAS cuentan como «la mitad runtime/live se consultó» para el gate F5, porque
+ * cada una declara el REGISTRO del adapter en lugar de los ids estáticos del
+ * fichero.
+ *
+ * NO cuenta la fuente built-in (`builtin-adapter`): es una declaración ESTÁTICA
+ * de las rutas del bundle, no evidencia del catálogo vivo — si contara, un
+ * deploy sin `llm` ni `--catalog` pasaría el gate con la mitad estática sola
+ * (exactamente el fail-open que el gate unit-2 exige cerrar). */
+export function runtimeHalfConsulted(sources: readonly LiveCatalogSource[]): boolean {
+  return sources.some((s) => s.id !== 'settings-yaml' && s.id !== BUILTIN_CATALOG_SOURCE_ID)
+}
+
 /** El informe PURO completo: compara + decide. El caller (runner/wiring) le
  * añade los handles P5 (que son dinámicos) y los efectos (alerta/finding). */
 export function buildCoherenceReport({
   pins,
   sources,
-  phase
+  phase,
+  explicitRuntimeSources
 }: {
   pins: readonly ModelPin[]
   sources: readonly LiveCatalogSource[]
   phase: 'deploy-preflight' | 'boot' | 'mint'
+  /** El caller suplió una fuente de catálogo NO estática (p.ej. `--catalog`):
+   * satisface la mitad runtime del gate F5 aunque no exista `runtime-llm`. */
+  explicitRuntimeSources?: boolean
 }): ModelPinCoherenceReport {
   const verdicts = comparePinsAgainstCatalogSources(pins, sources)
   const { decision, message } = decide({
@@ -369,7 +478,10 @@ export function buildCoherenceReport({
     // §4.2: el pre-flight usa la vía ESTÁTICA (--dump-config / settings.yaml) y
     // exige coincidencia; una composición SOLO-runtime (sin fuente estática) no
     // puede establecer el invariante y NO pasa en silencio.
-    staticSourcePresent: sources.some((s) => s.id !== 'runtime-llm' && Object.keys(s.providers).length > 0)
+    staticSourcePresent: sources.some((s) => s.id !== 'runtime-llm' && Object.keys(s.providers).length > 0),
+    // F5: con el conjunto vacío de fuentes el bloqueo por «sin fuente estática»
+    // ya es el mensaje correcto; el gate runtime sólo se evalúa con fuentes.
+    runtimeSourcePresent: sources.length === 0 ? undefined : runtimeHalfConsulted(sources) || explicitRuntimeSources === true
   })
   return {
     verdicts,
