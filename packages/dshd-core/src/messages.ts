@@ -827,6 +827,88 @@ export function gatingHeadIsNoWake(
   return undefined
 }
 
+/** fb-467 (2026-09-10 — the GATEADO-BEHIND-AN-ORPHAN lane, run token f76ac64b):
+ * the delivery-queue seq of ONE sidecar row parsed STRICTLY from its `m-<seq>`
+ * id — NO ts fallback. `undefined` for a non-parseable legacy id: the two
+ * ORPHAN discriminators below (`gatingHeadLandedAt` / `landedOutsideAddressees`)
+ * are fail-soft BY CONSTRUCTION — a row whose queue position cannot be derived
+ * simply never fires them, so a legacy id keeps the pre-fix behavior (the gate
+ * applies, no rescue) instead of being placed by a timestamp. */
+function strictRowSeq(row: DeliveryRow): number | undefined {
+  const match = /^m-(\d+)$/.exec(row.messageId)
+  if (match === null) return undefined
+  return Number(match[1])
+}
+
+/** The pair-LATEST row of ONE (messageId, recipientId) pair — the same
+ * `latestPerKey` view the gate predicates, the sweep and G2 share (a row
+ * shadowed by a later row of the same pair is never read). Read-only helper
+ * (module-private). */
+function pairLatestRow(rows: readonly DeliveryRow[], messageId: string, recipientId: string): DeliveryRow | undefined {
+  let latest: DeliveryRow | undefined
+  for (const row of rows) {
+    if (row.messageId !== messageId || row.recipientId !== recipientId) continue
+    latest = row
+  }
+  return latest
+}
+
+/** Whether a delivery status is a LANDED final (the content actually reached
+ * the recipient — 'delivered' or the sleep-boundary 'resumed'). */
+function isLandedStatus(status: DeliveryStatus): boolean {
+  return status === 'delivered' || status === 'resumed'
+}
+
+/** fb-467 — the GATING HEAD of the FIFO gate resolved from the SIDECAR ROWS:
+ * the EARLIEST strictly-earlier seq (< `seq`) whose pair-LATEST row at
+ * `recipientId` is still 'prepared' (the exact pair `hasEarlierPendingPair`
+ * fires on, resolved from the rows instead of the store's seq index). The
+ * legacy/mixed content of the queue sorts on the row id (`strictRowSeq` + the
+ * `ts` fallback of `deliverySeqOf` for the ORDER); a row set with NO derivable
+ * head → `undefined` (fail-soft — the caller then keeps the pre-fix behavior).
+ * MODULE-PRIVATE on purpose: the fb-467 rescue must NOT grow the package's
+ * export surface (the frozen `export-parity` pin of the `lib/invoke.js`
+ * superset); the engine resolves the same head with its own local reader. */
+function gatingHeadOf(rows: readonly DeliveryRow[], recipientId: string, seq: number): DeliveryRow | undefined {
+  const latest = new Map<string, DeliveryRow>()
+  for (const row of rows) latest.set(deliveryKey(row), row)
+  let head: DeliveryRow | undefined
+  for (const row of latest.values()) {
+    if (row.recipientId !== recipientId) continue
+    if (row.status !== 'prepared') continue
+    const rowSeq = strictRowSeq(row)
+    if (rowSeq === undefined || rowSeq >= seq) continue
+    if (head === undefined || deliverySeqOf(row) < deliverySeqOf(head)) head = row
+  }
+  return head
+}
+
+/** fb-467 (2026-09-10) — the ORPHAN RESIDUE of ONE pair: the recipient the
+ * pair's record ALREADY LANDED at although the record NEVER addressed it (the
+ * retired-host RE-ROUTE — `route.kind === 'reroute'` delivers to the live
+ * successor, an address the record's own `to[]` does not list), or `undefined`.
+ * An addressed pair in that state can NEVER receive (the resolver re-routes
+ * every attempt) and MUST NOT be re-driven (the content is already at the
+ * successor — a re-drive would DUPLICATE it); its final word is the SAME
+ * 'terminal' the delivery seam's reroute terminalization writes — a pure status
+ * flip. PURE read over the sidecar; `addressed` = the record's own `to[]`. A
+ * multi-recipient send lists EVERY addressee in `to[]`, so a fan-out sibling's
+ * landed row is never an orphan residue; determinism: the lexicographically
+ * smallest landed-elsewhere recipient wins (stable across passes).
+ * MODULE-PRIVATE (see `gatingHeadOf` — no export-surface growth). */
+function landedOutsideAddressees(rows: readonly DeliveryRow[], messageId: string, addressed: readonly string[]): string | undefined {
+  const latest = new Map<string, DeliveryRow>()
+  for (const row of rows) latest.set(deliveryKey(row), row)
+  let landedAt: string | undefined
+  for (const row of latest.values()) {
+    if (row.messageId !== messageId) continue
+    if (!isLandedStatus(row.status)) continue
+    if (addressed.includes(row.recipientId)) continue
+    if (landedAt === undefined || row.recipientId < landedAt) landedAt = row.recipientId
+  }
+  return landedAt
+}
+
 /** fb-117 (fold-in tramo 3A) — the DELIVERY-QUEUE SEQUENCE of one sidecar row
  * (module-private — the sweep batch sort key): the numeric seq parsed from the
  * record id `m-<seq>` (messages.ts §3.3 — the durable per-recipient FIFO
@@ -1304,6 +1386,24 @@ export interface DeliveryRedelivererDeps {
  *       `pendingEarlierSeq` dep (the engine's own fb-117 gate predicate);
  *       absent → the gate-blind legacy re-drive (R6).
  */
+/** fb-467 (2026-09-10 — the GATEADO-BEHIND-AN-ORPHAN lane): the PER-PASS ctx a
+ * re-drive pass hands to `drivePair` — the pass's OWN sidecar row snapshot plus
+ * the per-pass record cache. Both are READ-ONLY inputs of the two orphan
+ * discriminators (the residue settle + the orphan-address bypass) and exist so a
+ * pass never re-reads what it already read; a boot/sweep pass that omits the ctx
+ * degrades to a lazy read (same semantics, one extra read per discriminant). */
+interface PassContext {
+  rows: readonly DeliveryRow[]
+  records: Map<string, MessageRecord | undefined>
+}
+
+// ─── [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] ───────────────────────
+// The version stamp of the fb-467 observability lines (the sweep's held classes
+// BY ID + the re-drive decisions). Separate from the fix and behavior-neutral by
+// construction: log-only, no row, no settle, no deliver — verified by an
+// identical ledger signature with and without this changeset.
+const FB467_INSTRUMENTATION_STAMP = 'fb467-i1'
+// ─── [end fb-467 INSTRUMENTATION header] ──────────────────────────────────────
 export class DeliveryRedeliverer {
   private readonly deps: DeliveryRedelivererDeps
   private readonly baseDelayMs: number
@@ -1329,6 +1429,12 @@ export class DeliveryRedeliverer {
   // cannot discriminate. Never synthesized: ABSENT until a cycle actually
   // computed it (the heartbeat omits it pre-first-cycle).
   private lastSweepPreparedSummary: { oldestPreparedTs?: number; dormantHeld: number; noWakeHeld: number; gatedHeld: number } | undefined
+  // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] the LAST cycle's held
+  // classes BY ID (the discriminator the single integer cannot give: WHICH pair
+  // is `dormantHeld` vs `gatedHeld`). Purely observational — it is never read by
+  // a decision and never returned by `sweepState()` (whose frozen shape is
+  // untouched).
+  private lastSweepHeldIds: { dormant: string[]; noWake: string[]; gated: string[] } = { dormant: [], noWake: [], gated: [] }
   // FB-132 (wake-on-delivered 2026-09-06 — the drain-on-wake lane, 2nd half):
   // the per-recipient RE-ENTRANCY GUARD of `drainRecipientQueue` (R1 — the
   // drain → deliver → wake → drain recursion): a recipient id present here is
@@ -1383,6 +1489,47 @@ export class DeliveryRedeliverer {
     }
   }
 
+  /** fb-467 — the PER-PASS context of the re-drive loop: the pass's OWN row
+   * snapshot (the pass already read the sidecar — the orphan discriminators must
+   * not re-read it per pair) and the per-pass record cache (the same record is
+   * consulted by the ALTO-1 guard and by the orphan-evidence scan). */
+  private async passRows(passCtx?: PassContext): Promise<readonly DeliveryRow[]> {
+    if (passCtx !== undefined) return passCtx.rows
+    return await this.readSidecarRows()
+  }
+
+  /** fb-467 — the pass-cached record read (the ALTO-1 guard's seam; a boot/sweep
+   * pass resolves the same record at most once). */
+  private async passRecord(messageId: string, passCtx?: PassContext): Promise<MessageRecord | undefined> {
+    if (passCtx === undefined) return await this.deps.getRecord(messageId)
+    if (passCtx.records.has(messageId)) return passCtx.records.get(messageId)
+    const record = await this.deps.getRecord(messageId)
+    passCtx.records.set(messageId, record)
+    return record
+  }
+
+  /** fb-467 — the ORPHAN-ADDRESS evidence: whether ANY pair of `recipientId`
+   * (its pair-LATEST rows in the pass snapshot) is a residue — its record LANDED
+   * at an address the record itself never addressed (the retired-host RE-ROUTE:
+   * the live successor took the content while the addressed pair kept its
+   * 'prepared' row). That evidence identifies the address as an ORPHAN that can
+   * never receive and never wakes (see the B3 bypass in `drivePair`). Fail-soft:
+   * an absent record (trimmed — the ALTO-1 class) or an unreadable row set can
+   * never create the evidence. */
+  private async orphanAddressEvidence(recipientId: string, passCtx?: PassContext): Promise<boolean> {
+    const rows = await this.passRows(passCtx)
+    if (rows.length === 0) return false
+    const latest = new Map<string, DeliveryRow>()
+    for (const row of rows) latest.set(deliveryKey(row), row)
+    for (const row of latest.values()) {
+      if (row.recipientId !== recipientId) continue
+      const record = await this.passRecord(row.messageId, passCtx)
+      if (record === void 0) continue
+      if (landedOutsideAddressees(rows, row.messageId, record.to) !== undefined) return true
+    }
+    return false
+  }
+
   /** The attempt-count of one pair in the storm window (the pair's own sidecar
    * rows — the attempt ledger). */
   private pairAttempts(rows: readonly DeliveryRow[], messageId: string, recipientId: string): number {
@@ -1395,8 +1542,12 @@ export class DeliveryRedeliverer {
    * logs and is swallowed (the pass must never block the boot/tick). fb-132:
    * a pair whose re-drive is still FIFO-GATED behind an earlier-seq pending
    * pair SETTLES 'terminal' here (never re-marks 'prepared' into a gated
-   * inbox — the fb-150 spool); only a genuine (ungated) attempt re-drives. */
-  private async drivePair(row: DeliveryRow, attempts: number, nowMs: number, source: string): Promise<void> {
+   * inbox — the fb-150 spool); only a genuine (ungated) attempt re-drives.
+   * fb-467 (2026-09-10): `passCtx` carries the pass's OWN row snapshot + the
+   * per-pass record cache, which the TWO orphan discriminators read (the
+   * residue settle and the orphan-address bypass — see the call sites). It is
+   * OPTIONAL (absent → a lazy sidecar read, the same fail-soft semantics). */
+  private async drivePair(row: DeliveryRow, attempts: number, nowMs: number, source: string, passCtx?: PassContext): Promise<void> {
     const { stateDir, logger } = this.deps
     const pairLabel = `${row.messageId} → ${row.recipientId}`
     try {
@@ -1404,7 +1555,7 @@ export class DeliveryRedeliverer {
       // ONLY a pair whose CURRENT record exists AND actually addresses the
       // recipient — a stale row (its record trimmed, or the current record never
       // addressed this recipient) is SKIPPED, never driven (the m-728 class).
-      const record = await this.deps.getRecord(row.messageId)
+      const record = await this.passRecord(row.messageId, passCtx)
       if (record === void 0 || !record.to.includes(row.recipientId)) return
       // W7-A + C8′ (order matters — a DEAD recipient is settled regardless of
       // backoff/exhaustion: re-attempting a dead recipient is pointless; the
@@ -1413,6 +1564,28 @@ export class DeliveryRedeliverer {
         await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal')
         logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) → 'terminal' — recipient is dead/unknown (no longer a live catalog member), settled once and never re-attempted`)
         return
+      }
+      // fb-467 (2026-09-10 — the GATEADO-BEHIND-AN-ORPHAN lane): the ORPHAN
+      // RESIDUE. The pair's record ALREADY LANDED at an address the record
+      // NEVER addressed — the retired-host RE-ROUTE (the live successor took the
+      // content) — while THIS addressed pair is still 'prepared': the DRENAJE
+      // terminalization requires the successor's pair to be landed at the final
+      // mark and the successor lands +37 s LATER (the measured window overlap,
+      // family fb-117/fb-137: «filas `prepared` sin terminal»). The addressed
+      // address can never receive again (every attempt re-routes) and NEVER
+      // wakes, so the residue is settled 'terminal' HERE — the SAME final word
+      // the delivery seam's reroute terminalization writes, and NEVER a
+      // re-drive (the content is already at the successor: re-driving would
+      // DUPLICATE it). Order matters: this precedes every hold below, and the
+      // B3 dormancy guard would otherwise park the residue FOREVER. */
+      if (row.status === 'prepared') {
+        const rows = await this.passRows(passCtx)
+        const landedAt = landedOutsideAddressees(rows, row.messageId, record.to)
+        if (landedAt !== undefined) {
+          await markDelivery(stateDir, row.messageId, row.recipientId, 'terminal')
+          logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was prepared) → 'terminal' — ORPHAN RESIDUE (fb-467): the record already LANDED at "${landedAt}", an address it never addressed (the retired-host re-route); a pure STATUS FLIP, never a re-delivery`)
+          return
+        }
       }
       // LANE ② (b) — MAX-ATTEMPTS STOP-WITH-ALERT: beyond the cap the automatic
       // re-drive STOPS for the pair (one terminal + a loud warn — the alert;
@@ -1430,7 +1603,29 @@ export class DeliveryRedeliverer {
       // recognizable from the row itself; dormancy needs the extra catalog
       // read). Both guards skip; drivePair only drains a noWake row into a
       // recipient that is CURRENTLY RUNNING (already live — no wake happens).
-      if (this.deps.recipientDormant?.(row.recipientId) === true && row.status === 'prepared') return
+      // fb-467 (2026-09-10): the hold is CORRECT for an address that will really
+      // wake (a POST's sleepEpoch, a live host's unmaterialized handle) — and
+      // PERMANENT for an ORPHAN ADDRESS (a retired host-family id whose rotation
+      // chain resolves a live successor: `recipientCatalogAlive` is TRUE — it is
+      // re-routable, fb-58 F-3 — while the entry keeps its `sleepEpoch` and has
+      // no live handle, so the B3 guard parks its queue FOREVER and no drain can
+      // ever fire: the address never wakes). The ORPHAN-ADDRESS evidence is the
+      // pair-set of THAT address: it already contains a residue (a pair whose
+      // record landed outside its own addressees — where the head closed). With
+      // the evidence, the dormancy hold is BYPASSED for the pairs behind it: the
+      // re-drive re-routes to the live successor (never a wake of the dead
+      // address) — the rescue the sender cannot perform (it cannot name the
+      // successor). No evidence → byte-identical pre-fix behavior.
+      if (this.deps.recipientDormant?.(row.recipientId) === true && row.status === 'prepared') {
+        const orphan = await this.orphanAddressEvidence(row.recipientId, passCtx)
+        if (!orphan) {
+          // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] the hold by ID + the
+          // class + the liveness probes of the decision (log-only).
+          logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] drive-hold ${source} id=${row.messageId} recipient=${row.recipientId} class=dormantHeld dormant=true running=${String(this.deps.recipientRunning?.(row.recipientId) === true)} orphanAddress=false`)
+          return
+        }
+        logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) — B3 dormancy hold BYPASSED (fb-467): "${row.recipientId}" is an ORPHAN ADDRESS (the re-route successor already took another pair's content) and can never wake; the re-drive re-routes instead of holding forever`)
+      }
       // P2 (fb-131 — WAKE-SEAM lane): the no-wake-until-wake guard — a row whose
       // LATEST transition carries the explicit `noWake` flag (m-707 write-ahead
       // semantics) is the sender's ORDERED no-wake intent: it must drain at the
@@ -1505,6 +1700,16 @@ export class DeliveryRedeliverer {
           }
           if (headNoWake === true) {
             logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) FIFO-gated behind a NO-WAKE head — the ALWAYS-WAKE re-drive is the real wake (m-2415); proceeding to deliver (the no-wake head stays durable and drains with this wake in seq order)`)
+          } else if (await this.orphanAddressEvidence(row.recipientId, passCtx)) {
+            // fb-467 (2026-09-10): the pair is gated behind an ORPHAN head — the
+            // address ALREADY lost a pair's content at the live successor (the
+            // re-route), so the gating head is a permanent residue that can never
+            // drain here (its final word is the 'terminal' flip above, and the
+            // address never wakes). Holding this pair would park it FOREVER:
+            // proceed to the GENUINE deliver — the engine's own orphan-head
+            // discriminator skips its gate for the same reason and the delivery
+            // re-routes to the live successor (never a wake of the dead address).
+            logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) GATE-HOLD BYPASSED (fb-467) — the gating head is an ORPHAN RESIDUE ("${row.recipientId}" already lost another pair's content at its live successor); proceeding to deliver (the re-drive re-routes, never wakes the dead address)`)
           } else {
             // 2nd-half criterion (WAKE-ON-DELIVERED): skip WITHOUT settle — a
             // settle to 'terminal' would LOSE the pair of an ALIVE recipient
@@ -1512,6 +1717,9 @@ export class DeliveryRedeliverer {
             // No row is written (the state stays 'prepared' — a drain
             // candidate); the P4 summary counts the class `gatedHeld`.
             logger.info(`[deepartments] ${source} re-delivery: ${pairLabel} (was ${row.status}) held gatedHeld — FIFO-gated behind an earlier-seq pending pair of an ALIVE recipient (fb-132/wake-on-delivered: skip without settle; the record stays durable 'prepared' and drains at the recipient's next REAL wake)`)
+            // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] the hold by ID +
+            // class + the liveness probes the guard read (log-only).
+            logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] drive-hold ${source} id=${row.messageId} recipient=${row.recipientId} class=gatedHeld dormant=${String(this.deps.recipientDormant?.(row.recipientId) === true)} running=${String(this.deps.recipientRunning?.(row.recipientId) === true)} orphanAddress=false`)
             return
           }
         }
@@ -1693,10 +1901,12 @@ export class DeliveryRedeliverer {
       // terminal) shadows an earlier prepared/failed row.
       const latestPerKey = new Map<string, DeliveryRow>()
       for (const row of rows) latestPerKey.set(`${row.messageId}\u0000${row.recipientId}`, row)
+      // fb-467: the pass ctx (the SAME rows snapshot + the per-pass record cache).
+      const bootCtx: PassContext = { rows, records: new Map() }
       for (const row of latestPerKey.values()) {
         if (!needsRedelivery(row.status)) continue
         const attempts = this.pairAttempts(rows, row.messageId, row.recipientId)
-        await this.drivePair(row, attempts, Date.now(), 'boot')
+        await this.drivePair(row, attempts, Date.now(), 'boot', bootCtx)
       }
       // LANE ②-bis — the G2 legacy drain seed runs at boot too (the host
       // decision: the 843-row pre-boot 'prepared' backlog settles IN RUNTIME,
@@ -1768,8 +1978,12 @@ export class DeliveryRedeliverer {
         return deliverySeqOf(a.row) - deliverySeqOf(b.row)
       })
       let drove = 0 // the re-drive counter (the observability half of the ledger)
+      // fb-467 (2026-09-10): the per-pass ctx of the re-drive loop — the rows
+      // snapshot read above + the record cache (the ALTO-1 guard, the residue
+      // settle and the orphan-address evidence share ONE read per record).
+      const sweepCtx: PassContext = { rows, records: new Map() }
       for (const { row, attempts } of due) {
-        await this.drivePair(row, attempts, nowMs, 'sweep')
+        await this.drivePair(row, attempts, nowMs, 'sweep', sweepCtx)
         drove++
       }
       // LANE ②-bis — the G2 legacy drain runs AFTER the re-drive loop, so the
@@ -1785,6 +1999,11 @@ export class DeliveryRedeliverer {
       // (the same pre-settle `rows` snapshot as the residue — consistent); the
       // heartbeat reports each held class separately.
       this.lastSweepPreparedSummary = await this.summarizePreparedState(rows, nowMs)
+      // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] the held classes BY ID
+      // (dormantHeld vs gatedHeld vs noWakeHeld — WHICH pair is held and why),
+      // one line per cycle, emitted after the classification and read by no
+      // decision (log-only).
+      logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] sweep-held-by-id cycle=${this.sweepCycle} dormantHeld=[${this.lastSweepHeldIds.dormant.join(' ')}] noWakeHeld=[${this.lastSweepHeldIds.noWake.join(' ')}] gatedHeld=[${this.lastSweepHeldIds.gated.join(' ')}]`)
       const held = this.lastSweepPreparedSummary
       if (drove > 0 || g2.settled > 0 || g2.skippedRebind > 0) {
         logger.info(`[deepartments] redelivery sweep cycle: drove ${drove} pairs; G2 legacy settle ${g2.settled} (${g2.settledStaleDust} stale-dust + ${g2.settledDeadEnd} dead-end) → 'terminal' (no-wake), skipped-rebind ${g2.skippedRebind}; in-flight kept ${g2.keptInFlight}, fresh kept ${g2.keptFresh}; prepared-stuck>${Math.round(this.legacyAgeMs / 60000)}min remaining ${g2.preparedStuckRemaining}${held.oldestPreparedTs !== undefined ? `; oldestPreparedTs=${new Date(held.oldestPreparedTs).toISOString()}` : ''}${held.dormantHeld > 0 ? `; dormantHeld=${held.dormantHeld}` : ''}${held.noWakeHeld > 0 ? `; noWakeHeld=${held.noWakeHeld}` : ''}${held.gatedHeld > 0 ? `; gatedHeld=${held.gatedHeld}` : ''}`)
@@ -1856,11 +2075,13 @@ export class DeliveryRedeliverer {
     let dormantHeld = 0
     let noWakeHeld = 0
     let gatedHeld = 0
+    // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] the same classes BY ID.
+    const heldIds: { dormant: string[]; noWake: string[]; gated: string[] } = { dormant: [], noWake: [], gated: [] }
     for (const row of latestKey.values()) {
       if (row.status !== 'prepared') continue
       if (oldestPreparedTs === undefined || row.ts < oldestPreparedTs) oldestPreparedTs = row.ts
-      if (row.noWake === true) noWakeHeld++
-      if (this.deps.recipientDormant?.(row.recipientId) === true) dormantHeld++
+      if (row.noWake === true) { noWakeHeld++; heldIds.noWake.push(`${row.messageId}→${row.recipientId}`) }
+      if (this.deps.recipientDormant?.(row.recipientId) === true) { dormantHeld++; heldIds.dormant.push(`${row.messageId}→${row.recipientId}`) }
       if (this.deps.pendingEarlierSeq === undefined) continue
       // The fb-132 gate class: pair-latest 'prepared' of an ALIVE recipient
       // with an EARLIER-seq pending pair. Skip the self hold (drivePair
@@ -1869,11 +2090,12 @@ export class DeliveryRedeliverer {
       try {
         const record = await this.deps.getRecord(row.messageId)
         if (record === void 0 || !record.to.includes(row.recipientId) || row.recipientId === record.from) continue
-        if (await this.deps.pendingEarlierSeq(row.recipientId, record.seq)) gatedHeld++
+        if (await this.deps.pendingEarlierSeq(row.recipientId, record.seq)) { gatedHeld++; heldIds.gated.push(`${row.messageId}→${row.recipientId}`) }
       } catch (error: unknown) {
         this.deps.logger.warn(`[deepartments] gatedHeld classification failed for ${row.messageId} → ${row.recipientId} (not counted gated — fail-soft): ${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    this.lastSweepHeldIds = heldIds // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY]
     return { ...(oldestPreparedTs !== undefined ? { oldestPreparedTs } : {}), dormantHeld, noWakeHeld, gatedHeld }
   }
 

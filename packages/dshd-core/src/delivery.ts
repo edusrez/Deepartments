@@ -49,9 +49,27 @@
 //
 // NO export default (pitfall 0001 — breaks `inject`).
 import type { DeliveryStatus, MessageRecord } from './messages.js'
+// ─── [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] ───────────────────────
+// The version stamp of the fb-467 observability lines: EVERY instrumentation
+// line below carries it, so a decision can be traced to the build that took it
+// (the lane's «sello de versión por decisión»). This changeset is DELIBERATELY
+// separate from the fix and is behavior-neutral BY CONSTRUCTION: it only calls
+// the logger. It adds no read, no write, no gate, no route — a delivery cannot
+// observe it (verified: the ledger signature of the fixture is byte-identical
+// with and without it).
+const FB467_INSTRUMENTATION_STAMP = 'fb467-i1'
+// ─── [end fb-467 INSTRUMENTATION header] ──────────────────────────────────────
 // DRENAJE (2026-09-10): the reroute terminalization reads the SUCCESSOR's pair
 // status before closing the retired id's pair (never close what did not land).
-import { deliveryStatus } from './messages.js'
+// fb-467 (2026-09-10): the ORPHAN-HEAD discriminator of the FIFO gate reads the
+// SAME sidecar seam (the parsed rows) — the engine has no store, so the gate's
+// row view comes from here (read-only, fail-soft). `parseDeliveryRows` /
+// `resolveDeliveriesPath` / `deliveryStatus` are PRE-EXISTING exports: the
+// fb-467 rescue deliberately adds NO new export to this package (the frozen
+// `export-parity` pin of the `lib/invoke.js` superset must not grow).
+import { deliveryStatus, parseDeliveryRows, resolveDeliveriesPath } from './messages.js'
+import type { DeliveryRow } from './messages.js'
+import { readFile } from 'node:fs/promises'
 import type { PostEntry, HostEntry } from './registry.js'
 // FASE 2 step (d): the messaging ACL is a PURE module (./acl.js — busProfileFor /
 // aclDenyGround / canSend / aclDenyReason). The delivery engine imports the pure
@@ -558,8 +576,43 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
             } catch (error: unknown) {
               deps.logger.warn(`[deepartments] bus delivery no-wake-head discriminator failed for ${record.id} → ${recipientId} (the FIFO gate applies — safe default): ${error instanceof Error ? error.message : String(error)}`)
             }
+            // fb-467 — the ORPHAN-HEAD discriminator's resolved successor (the
+            // address the gating head ALREADY landed at — undefined = no orphan
+            // head: the gate applies exactly as today).
+            let orphanHeadAt: string | undefined
+            // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] the gate decision
+            // line: the ID + the recipient + the liveness probes the gate used
+            // (host liveness) + the batch verdict, emitted ONCE per gated
+            // delivery, before any branch (log-only — no delivery can observe it).
+            deps.logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] gate-decision id=${record.id} recipient=${recipientId} seq=${record.seq} gated=true materialized=${String(materialized)} runningLive=${String(batchRunning)} batchEligible=${String(opts.batchEligible === true)} noWake=${String(opts.noWake === true)} interrupt=${String(opts.interrupt ?? false)}`)
             if (headNoWake === true) {
               deps.logger.info(`[deepartments] bus delivery FIFO gate SKIPPED for ${record.id} → ${recipientId}: the gating head is a NO-WAKE row (noWake:true) — the ALWAYS-WAKE is the real wake and the no-wake head drains with it in seq order (m-2415 — it never blocks)`)
+            } else if ((orphanHeadAt = await orphanHeadLandedAtSuccessor(deps, recipientId, record.seq)) !== undefined) {
+              // fb-467 (2026-09-10 — the GATEADO-BEHIND-AN-ORPHAN lane, run token
+              // f76ac64b): WHERE THE HEAD CLOSED. The gating head's pair at THIS
+              // recipient is still 'prepared', but the head ALREADY LANDED at
+              // `orphanHeadAt` — the LIVE SUCCESSOR this recipient's route
+              // resolves (a RETIRED host-family address: `resolveCatalogRoute` →
+              // kind 'reroute'). The head is therefore an ORPHAN RESIDUE: its
+              // content reached the successor through the re-route while its
+              // addressed pair never got its terminal (the DRENAJE
+              // terminalization needs the successor's pair landed at the final
+              // mark and the successor lands +37 s later — the measured window
+              // overlap of fb-117/fb-137, «filas `prepared` sin terminal»). This
+              // address can NEVER receive again (every attempt re-routes) and
+              // NEVER wakes: retaining this delivery behind such a head would
+              // park it FOREVER — the gate branch's `markFinal('prepared')` +
+              // `return` is exactly the defect the lane measured («el gateado no
+              // llega a la ruta»). The gate is SKIPPED: the delivery proceeds to
+              // the route, lands at the live successor and its own pair closes
+              // 'terminal' through the SAME DRENAJE closure below — the ordering
+              // the fb-117 gate protects is moot (nothing can ever splice into a
+              // dead address) and the SKIP is confined to the reroute class, so
+              // every SANE delivery keeps the gate byte-identically.
+              deps.logger.info(`[deepartments] bus delivery FIFO gate SKIPPED for ${record.id} → ${recipientId}: the gating head closed at the REROUTE SUCCESSOR "${orphanHeadAt}" (fb-467 — the head is an orphan residue of a retired host address, the addressed pair can never receive; this delivery reaches the route instead of parking behind it forever)`)
+              // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] the skip verdict
+              // with the CATALOG route that produced it + the probes (log-only).
+              deps.logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] gate-verdict id=${record.id} recipient=${recipientId} verdict=skip-orphan-head route=reroute successor=${orphanHeadAt} materialized=${String(materialized)} runningLive=${String(batchRunning)}`)
             } else {
               // P1 (fb-131 — Candidate B observability): resolve the gating seq
               // best-effort (the 'tras m-<seq>' detail of the tool result) + fire
@@ -572,6 +625,18 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
               }
               opts.gateReason?.('fifo', bySeq)
               deps.logger.info(`[deepartments] bus delivery FIFO gate: ${record.id} → ${recipientId} has an EARLIER non-final (prepared) seq${bySeq !== undefined ? ` (m-${bySeq})` : ''} — queued BEHIND (no-wake 'prepared'), the inbox splice stays in seq order (fb-117)`)
+              // [fb-467 INSTRUMENTATION — changeset A2, READ-ONLY] the hold verdict
+              // by ID: the gating seq + the probes + the catalog verdict that did
+              // NOT fire (the head is NOT an orphan residue). Log-only AND
+              // fail-soft: the extra catalog read is wrapped, so a probe error can
+              // never reach the delivery.
+              let fb467CatalogKind = 'unknown'
+              try {
+                fb467CatalogKind = (deps.resolveCatalogRoute(recipientId) as { kind?: string }).kind ?? 'unknown'
+              } catch {
+                fb467CatalogKind = 'probe-failed'
+              }
+              deps.logger.info(`[deepartments] [${FB467_INSTRUMENTATION_STAMP}] gate-verdict id=${record.id} recipient=${recipientId} verdict=hold-gated bySeq=${bySeq !== undefined ? `m-${bySeq}` : 'unknown'} route=${fb467CatalogKind} materialized=${String(materialized)} runningLive=${String(batchRunning)}`)
               // DRENAJE (2026-09-10): the gate branch is the SECOND row of a
               // FIFO-gated delivery — the pair-LATEST the re-drive
               // discriminator reads (`latestPerPair` → hasEarlierPendingPair /
@@ -696,6 +761,96 @@ export function createDeliveryEngine(deps: DeliveryEngineDeps): DeliveryEngine {
         throw error
       }
     }
+  }
+}
+
+/** fb-467 — the delivery-queue seq of ONE sidecar row parsed STRICTLY from its
+ * `m-<seq>` id (module-private, engine side). `undefined` for a non-parseable
+ * legacy id: the orphan discriminator below is fail-soft BY CONSTRUCTION — a row
+ * whose queue position cannot be derived simply never fires it, so a legacy id
+ * keeps the pre-fix behavior (the gate applies). */
+function fb467StrictRowSeq(row: DeliveryRow): number | undefined {
+  const match = /^m-(\d+)$/.exec(row.messageId)
+  if (match === null) return undefined
+  return Number(match[1])
+}
+
+/** fb-467 — the pair-LATEST row of ONE (messageId, recipientId) pair (the same
+ * `latestPerKey` view the gate predicates use). Module-private, read-only. */
+function fb467PairLatestRow(rows: readonly DeliveryRow[], messageId: string, recipientId: string): DeliveryRow | undefined {
+  let latest: DeliveryRow | undefined
+  for (const row of rows) {
+    if (row.messageId !== messageId || row.recipientId !== recipientId) continue
+    latest = row
+  }
+  return latest
+}
+
+/** fb-467 (2026-09-10 — the GATEADO-BEHIND-AN-ORPHAN lane, run token f76ac64b):
+ * WHERE THE HEAD CLOSED — the ORPHAN-HEAD discriminator of the FIFO gate.
+ * Returns the address at which the GATING HEAD already landed — the LIVE
+ * SUCCESSOR this recipient's catalog route resolves — when:
+ *   1. the recipient's route is a REROUTE (`resolveCatalogRoute` → kind
+ *      'reroute': a RETIRED host-family address whose rotation chain resolves a
+ *      live successor — fb-58 F-3 / m-331; `entry.hostId` IS that successor), and
+ *   2. the gating head (the EARLIEST strictly-earlier seq whose pair-LATEST row
+ *      at `recipientId` is still 'prepared' — the exact pair the gate fired on)
+ *      ALREADY has a LANDED pair ('delivered'|'resumed') at that successor.
+ *
+ * That combination is the permanent ORPHAN RESIDUE: the head's content reached
+ * the live successor through the re-route while its ADDRESSED pair kept its
+ * write-ahead 'prepared' row (the DRENAJE terminalization needs the successor's
+ * pair landed at the final mark and the successor lands +37 s later — the
+ * measured window overlap of fb-117/fb-137, «filas `prepared` sin terminal»).
+ * The addressed address can never receive again and never wakes, so retaining a
+ * later delivery behind it parks the delivery FOREVER; the caller SKIPS the gate
+ * for it (and the delivery lands at the successor, closing 'terminal' through
+ * the SAME DRENAJE closure). The engine resolves the head from the parsed
+ * sidecar itself — it has no store — and reads only `entry.hostId` as the other
+ * recipient, so a multi-recipient fan-out sibling can never be mistaken for the
+ * re-route.
+ *
+ * CONFINED TO THE REROUTE CLASS BY CONSTRUCTION: a SANE recipient (a live post
+ * or a live host — kind 'post'/'host') can never satisfy (1), so its gate stays
+ * byte-identical (the host's CONTROL gate of the lane) and costs ZERO reads.
+ * FAIL-SOFT: any route or sidecar read error returns `undefined` → the gate
+ * applies exactly as before (the ordering fix must never break a delivery).
+ * MODULE-PRIVATE on purpose (see the import note: no export-surface growth). */
+async function orphanHeadLandedAtSuccessor(
+  deps: DeliveryEngineDeps,
+  recipientId: string,
+  seq: number
+): Promise<string | undefined> {
+  let route: CatalogRoute
+  try {
+    route = deps.resolveCatalogRoute(recipientId)
+  } catch (error: unknown) {
+    deps.logger.warn(`[deepartments] orphan-head discriminator: catalog route of "${recipientId}" could not be resolved (the FIFO gate applies — safe default): ${error instanceof Error ? error.message : String(error)}`)
+    return undefined
+  }
+  if (route.kind !== 'reroute') return undefined
+  const successorId = route.entry.hostId
+  if (successorId === undefined) return undefined
+  try {
+    const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(deps.stateDir), 'utf8'))
+    const latest = new Map<string, DeliveryRow>()
+    for (const row of rows) latest.set(`${row.messageId}\u0000${row.recipientId}`, row)
+    let head: DeliveryRow | undefined
+    for (const row of latest.values()) {
+      if (row.recipientId !== recipientId || row.status !== 'prepared') continue
+      const rowSeq = fb467StrictRowSeq(row)
+      if (rowSeq === undefined || rowSeq >= seq) continue
+      if (head === undefined || rowSeq < (fb467StrictRowSeq(head) ?? Number.MAX_SAFE_INTEGER)) head = row
+    }
+    if (head === undefined) return undefined
+    const landedAt = fb467PairLatestRow(rows, head.messageId, successorId)
+    if (landedAt === undefined) return undefined
+    if (landedAt.status !== 'delivered' && landedAt.status !== 'resumed') return undefined
+    return successorId
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined // nothing ever sent
+    deps.logger.warn(`[deepartments] orphan-head discriminator: the delivery sidecar read for ${recipientId} failed (the FIFO gate applies — safe default): ${error instanceof Error ? error.message : String(error)}`)
+    return undefined
   }
 }
 
