@@ -62,7 +62,10 @@ fetching a press release, never after. Updated 2026-09-08 (fb-211 + fb-236,
 dictamen QH aceptado: openai.com + aireleasetracker.com + es.dataconomy.com +
 pricepertoken.com/model-releases). Updated 2026-09-09 (fb-286 + fb-297,
 dictámenes QH aceptados: media.defense.gov + ainvest.com + regla de
-presupuesto para dominios 403).
+presupuesto para dominios 403). **Updated 2026-09-10** (fb-329 + fb-330 + fb-333
++ fb-334 + fb-370 + fb-410, dictámenes QH aceptados: `linux.do`,
+`status.opencode.ai`, `www.investing.com`, `reuters.com`, `reddit.com/.json`,
+`www.googblogs.com` + la **taxonomía de clase 403-vs-401/captcha**).
 
 **Budget rule for 403 anti-bot domains (fb-286, 2026-09-09):** ONE attempt max
 per domain per round — a single HTTP 403 confirms the state and exhausts the
@@ -70,17 +73,34 @@ attempt; never retry the same domain in the same round (a delivery like a gov
 CSA advisory is not fetch-able from this IP). Capture via search-provider
 snippets + dated secondaries instead.
 
+**Failure-class taxonomy (fb-334, 2026-09-10 — no son la misma clase):**
+**403 anti-bot plano** (tmcnet, zexprwire, openai.com, ainvest, media.defense,
+investing.com, linux.do, googblogs.com) → no reintentar, snippet/mirror;
+**401 + captcha challenge (DataDome)** (reuters.com) → perfil de fallo y
+reintento DISTINTOS: el 401+captcha es un *challenge* de sesión, no un bloqueo
+de contenido, y un reintento puede consumir presupuesto sin cambiar el
+resultado; **fetch failed / host no resoluble** (status.opencode.ai) → no es
+anti-bot, es inalcanzable desde este entorno; **403 en el propio endpoint
+`.json`** (reddit.com) → el hint de la tool induce un bucle de sugerencia (clase
+documentada también en `sources/v4-1-flash-official.md:300`).
+
 | Domain | Status | Observed behavior | Fallback |
 |---|---|---|---|
 | `businesswire.com` (www + secure) | **UNRELIABLE** | systematic 30 s timeout (fb-96/102/104) | one attempt max, then vendor primary |
 | `tmcnet.com` | **BLOCKED** | HTTP 403 anti-bot (fb-97/103) | do not attempt; use mirror list |
 | `zexprwire.com` | **BLOCKED** | HTTP 403 anti-bot (fb-98) | do not attempt; use mirror list |
-| `openai.com` (openai.com/index/*) | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (rounds 08-25, 09-06, 09-07, 09-08; fb-211) | do not attempt; capture via search-provider content + dated secondaries |
+| `openai.com` (openai.com/index/*) | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (rounds 08-25, 09-06, 09-07, 09-08, 09-10; fb-211) | do not attempt; capture via search-provider content + dated secondaries |
 | `aireleasetracker.com` | **UNRELIABLE** | HTTP 429 rate-limited (round 09-07; fb-211) | one attempt max, then tracker cross-check via search snippet |
 | `es.dataconomy.com` | **BLOCKED** | HTTP 403 anti-bot (round 09-08, fb-236; corroboración GPT-6 Astra) | do not attempt; use dated secondaries (e.g. gadgetsnow/digitaltrends) |
 | `pricepertoken.com/model-releases` | **UNRELIABLE** | HTTP 404 URL drift (round 09-08; fb-236) | do not attempt; use ThursdAI / aireleasetracker for release-gap checks |
 | `media.defense.gov` | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (round 09-09; fb-286) — gov advisories (e.g. CSA) not fetch-able | one attempt max; capture via search-provider + dated secondaries |
 | `www.ainvest.com` | **BLOCKED** | HTTP 403 anti-bot vs datacenter IP (round 09-09; fb-297) | one attempt max; capture via search-provider snippet |
+| `linux.do` | **BLOCKED** | HTTP 403 (round 09-10; fb-329) — 1 intento, abandonado | do not attempt; su contenido (comunidad CN) ES legible por el **mirror `locdd.com`** (Discourse JSON, HTTP 200) |
+| `status.opencode.ai` | **UNREACHABLE** | fetch failed desde este entorno; **sin status page verificable**, y no distinguible como DNS vs anti-bot (round 09-10; fb-330) | do not attempt; usar el patrón del status-page-repo (p. ej. Upptime en GitHub) o el releases API |
+| `www.investing.com` | **BLOCKED** | **403 anti-bot plano** vs datacenter IP (round 09-10; fb-333) | do not attempt; snippet del search-provider o mirror fechado |
+| `reuters.com` | **BLOCKED (variante de clase)** | **HTTP 401 + captcha DataDome** (round 09-10; fb-334) — challenge de sesión, NO bloqueo de contenido | do not attempt (el reintento no cambia el resultado); usar **secundarias fechadas** (p. ej. digest The Neuron) + snippet |
+| `reddit.com` (incl. `.json`) | **BLOCKED** | HTTP 403 también en el endpoint `.json` que el propio hint de la tool recomienda (round 09-10; fb-370) ⇒ **bucle de sugerencia** | do not attempt; snippets + secundarias; la clase ya constaba en `sources/v4-1-flash-official.md:300` |
+| `www.googblogs.com` | **BLOCKED** | HTTP 403 anti-bot (round 09-10; fb-410) — espejo NO oficial de blogs de Google | do not attempt; el **blog primario** `developers.googleblog.com` responde 200 (misma pieza) |
 | `01net`, `finance.yahoo.com`, `cionfluence.com` | reliable mirrors | HTTP 200 from this environment (fb-96/98) | OK as last-resort mirrors |
 | vendor primary (blog/repo/model card) | **preferred** | e.g. `ridgesecurity.ai` blog etc. (fb-103/104) | FIRST choice for press releases |
 | API/JSON endpoints (`api.github.com`, `registry.npmjs.org`) | preferred | machine-readable (monitor-dsh-updates) | FIRST choice for registry/data |
@@ -91,6 +111,29 @@ page (`businesswire.com` — expect the timeout, one attempt max) → ③
 known-working mirrors (table above) → ④ wire-syndication **search snippets**
 (`web_search`) to confirm publication/date. Never guess a date or URL; record
 the current state of any source that changed or is unreachable.
+
+### Clase «200-inservible» (fb-333/334 round + organizer 2026-09-10)
+
+Cuantificado por el organizador sobre las rondas del 2026-09-10: **13 de 25
+fetches quemados (52 %) fueron HTTP 200 INÚTILES** (shell JS, sección truncada,
+cuerpo vacío) — es la clase DOMINANTE y **una tabla domain→status no puede
+expresarla** (el dominio "funciona"). Datapoints y workarounds verificados:
+
+| Fuente | Comportamiento 200-inservible | Workaround verificado |
+|---|---|---|
+| `gov.ca.gov` | 200 con **cuerpo servido truncado** (SB 813 / AB 1405, round 09-10) | usar **secundarias fechadas**; marcar la redacción estatutaria como UNVERIFIED |
+| `docs.hetzner.com` (SPA Gatsby) | 200 con **cuerpo vacío** | **proxy de renderizado de texto `https://r.jina.ai/<url>`** (mismo contenido, HTTP 200) — usado y verificado el 09-10 |
+| `www.hetzner.com` (páginas de producto) | 200 con los **€ inyectados por JavaScript** (precio en blanco) | `r.jina.ai/<url>` para render; para **precios de plan**, la tabla PRIMARIA de `docs.hetzner.com/.../price-adjustment` |
+| `suno.com/blog/v6` | 404 por **URL drift** | ruta correcta `/blog/introducing-v6` |
+| `status.commandcode.ai` | 200 en HTML pero **sin lista de incidentes por fetch**; `/api/incidents` → 404 | vía machine-readable = el **repo del status page** (Upptime) |
+| `cve.org`, `nvd.nist.gov` (detalle) | cve.org JS-only; **NVD detail = shell 200 vacío** | **endpoint primario CVE = `https://cveawg.mitre.org/api/cve/<CVE-ID>`** (JSON, fb-377) |
+
+**Regla:** ante un 200 con contenido inservible, **no reintentar el mismo
+fetch** — saltar directamente al workaround de la fila (render proxiado,
+endpoint machine-readable o secundaria fechada). El arreglo de mayor impacto
+para esta clase es de **motor** (timeout configurable, tolerancia a
+`application/javascript`, seguimiento de redirects), no documental: techo del
+arreglo por tabla ≈2-3 % de ahorro frente al 52 % de esta clase.
 
 **Scope note:** `web_fetch` itself is harness tooling — this table is
 documentation only, 0 code changes. A per-call configurable timeout /
