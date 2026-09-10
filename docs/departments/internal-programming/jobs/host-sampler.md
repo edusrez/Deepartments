@@ -5,7 +5,7 @@ role: builder
 description: VERIFY the host-health sampler's liveness (coverage, rotation) — its life is owned by the systemd unit dsh-host-sampler.service (Restart=always) — and run the documented slow-call cross-read over the period; report the verdicts (FLAT = the machine is not the cause, PRESSURE = sizing has a basis) to the Internal Programming Head.
 schedule: '15 */6 * * *'
 owner: internal-programming-head
-outbox: reports/builder/<YYYY-MM-DD>-host-sampler-custody.md
+outbox: reports/builder/<YYYY-MM-DD>-host-sampler-custody-<token>.md
 ---
 
 # Host-health sampler custody + slow-call cross-read
@@ -20,7 +20,10 @@ is that persona's, this body is the concrete task).
 SAMPLING is done by the detached process `scripts/host-sampler.mjs` (a job round
 can only materialize an LLM worker — it cannot sample every 45 s). Its LIFE is
 owned by the dedicated systemd unit `dsh-host-sampler.service`
-(`Restart=always`, `RestartSec=15`, start limit 5/300 s, **MainPID in its OWN
+(`Restart=always`, `RestartSec=15`, **`StartLimitIntervalSec=0` = NO start limit**
+⇒ the unit **self-repairs** (a failed start is retried every `RestartSec=15`
+indefinitely, so it never latches into `failed` and the rescue recipe needs
+**no `systemctl reset-failed`**); **MainPID in its OWN
 cgroup** `/system.slice/dsh-host-sampler.service` — so a restart of the daemon
 no longer SIGTERMs it); this job **VERIFIES** that life and turns the data into
 a decision. The norm — schema, rotation caps and the READING CRITERION — is
@@ -39,7 +42,15 @@ restate it**.
 
 1. **Liveness** (the FULL protocol, in this order — the norm §6 is its durable
    copy):
-   - `systemctl is-active dsh-host-sampler` ⇒ **PRIMARY** life signal.
+   - `systemctl is-active dsh-host-sampler` ⇒ **PRIMARY** life signal, and it is
+     read as a **STRICT EQUALITY to `active`** (`is-active` **== `active`**):
+     **never** "it is not `failed`", **never** "it is not inactive". **The
+     reason is `StartLimitIntervalSec=0`** (no start limit, above): a unit in a
+     pathological restart loop does **not** read `failed` — it reads
+     **`activating`** (the auto-restart state) — so a lax check would report
+     ALIVE a sampler that has not started for hours. **`activating` OR `failed`
+     ⇒ INVESTIGATE**, and the fine discriminator is the **FRESHNESS OF THE
+     SERIES** (next bullet, `≤ 90 s`), which says whether it is really SAMPLING.
    - **FRESHNESS OF `/.deepartments/host-health.jsonl` is the truth of the
      SAMPLING** (one row PER TICK; measured deltas 45,0 s): last row within
      **≤ 2 x intervalSec (90 s) = HEALTHY**; **> 3 x (135 s) = INVESTIGATE**.
@@ -61,6 +72,10 @@ restate it**.
      process, its cwd, its flags and the log append targets. Use it when
      `is-active` is not `active`, or when the pidfile names a **DEAD** pid while
      the unit is `active`.
+   - **No `systemctl reset-failed` is needed** (`StartLimitIntervalSec=0`, above:
+     the unit never latches into `failed`, it keeps retrying every 15 s) — and if
+     `is-active` reads **`activating`** the unit is **ALREADY self-repairing**:
+     investigate the CAUSE via the series freshness before restarting anything.
    - **The manual launch is the LAST RESORT** (only when no sampler is alive and
      the unit is unavailable): the script has an **anti-double-sampling guard**
      and REFUSES a manual start while the pidfile names a live process
@@ -87,8 +102,10 @@ restate it**.
 
 ## Report
 
-Write `reports/builder/<YYYY-MM-DD>-host-sampler-custody.md` in the department
-workspace, frontmatter in the project report convention (`agent: builder`,
+Write `reports/builder/<YYYY-MM-DD>-host-sampler-custody-<token>.md` in the
+department workspace (`<token>` = your run token, fb-28 — the job runs every 6 h,
+so WITHOUT the suffix two rounds of the same day **overwrite** each other's
+report), frontmatter in the project report convention (`agent: builder`,
 `date`, `task: host-sampler`, `spec_ref:
 docs/departments/internal-programming/HOST-SAMPLER.md`, `outcome`,
 `files_touched`, `error_type`, `key_findings`), then the body: liveness +

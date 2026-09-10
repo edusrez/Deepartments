@@ -44,7 +44,7 @@ The sampling is therefore done by the **detached OS process**; the agenda job
 
 | unit | what it declares |
 |---|---|
-| `dsh-host-sampler.service` | `Restart=always` + `RestartSec=15` (start limit `5/300 s`), `User=root`, `WorkingDirectory=/home/esuarez/projects/deepartments`, `ExecStart=/usr/bin/node scripts/host-sampler.mjs --state-dir /.deepartments --interval 45 --quiet --log /.deepartments/host-sampler.log`, stdout+stderr `append:`ed to that same log, and **MainPID in its OWN cgroup** `/system.slice/dsh-host-sampler.service` |
+| `dsh-host-sampler.service` | `Restart=always` + `RestartSec=15` + **`StartLimitIntervalSec=0` (NO start limit ⇒ the unit retries indefinitely and is self-repairing; the recipe needs NO `systemctl reset-failed`)**, `User=root`, `WorkingDirectory=/home/esuarez/projects/deepartments`, `ExecStart=/usr/bin/node scripts/host-sampler.mjs --state-dir /.deepartments --interval 45 --quiet --log /.deepartments/host-sampler.log`, stdout+stderr `append:`ed to that same log, and **MainPID in its OWN cgroup** `/system.slice/dsh-host-sampler.service` |
 
 The failure this closes: the sampler used to live inside the
 `dsh-deepartments-dev.service` cgroup (`KillMode=control-group`), so **every
@@ -52,8 +52,15 @@ restart of the daemon SIGTERMed it** — 4 measured deaths in 71 min and
 **69,7 min of blindness (48,8 % of the span)**. The unit's own cgroup covers
 **100 % of those measured deaths**.
 
+**No start limit (correction of 2026-09-10 — the unit used to declare
+`5/300 s`):** with `StartLimitIntervalSec=0` the unit **self-repairs** — a start
+that fails is retried every `RestartSec=15` **indefinitely** and the unit never
+latches into `failed`, so the rescue recipe needs **no `systemctl reset-failed`**
+(and must not rely on `failed` as its trigger — see §6).
+
 Read it back on the **SERIES**, never on the log: `systemctl is-active
-dsh-host-sampler` (PRIMARY life signal) · `cat
+dsh-host-sampler` **== `active`** (PRIMARY life signal — a **STRICT EQUALITY**
+test: `failed` **or `activating`** is NOT alive, see §6 for the reason) · `cat
 /.deepartments/host-health.jsonl.pid` vs the live process (`pgrep -af
 host-sampler`: the SAME live pid, and no second one) · last row of
 `/.deepartments/host-health.jsonl` younger than `2 x intervalSec` = 90 s
@@ -279,17 +286,30 @@ are what makes the others interpretable.
 ## 6. Maintenance
 
 - **Liveness (the protocol, in this order):** (1) `systemctl is-active
-  dsh-host-sampler` = the **PRIMARY** life signal; (2) **freshness of
+  dsh-host-sampler` = the **PRIMARY** life signal, and it is read as a **STRICT
+  EQUALITY to `active`** — `is-active` **== `active`**, **NEVER** "it is not
+  `failed`" and **never** "it is not inactive". **The reason is
+  `StartLimitIntervalSec=0` (§2):** with NO start limit a unit in a
+  pathological restart loop does **not** read `failed` — it reads
+  **`activating`** (the auto-restart state) — so a lax check would report
+  **ALIVE** a sampler that has not started for hours. Hence **`activating` OR
+  `failed` ⇒ INVESTIGATE**, and the **fine discriminator is the FRESHNESS OF
+  THE SERIES** (item (2) below: `<stateDir>/host-health.jsonl`
+  `<= 2 x intervalSec` = 90 s), which is what says whether it is really
+  SAMPLING; (2) **freshness of
   `<stateDir>/host-health.jsonl` is the truth of the SAMPLING** (one row per
   tick): last row `<= 2 x intervalSec` (90 s) = **HEALTHY**, `> 3 x` (135 s) =
   **INVESTIGATE** — this is criterion (a) of §4; (3) the pidfile must name a
   **live** pid matching the unit's MainPID (anti-double-sampler); (4) the log
   line is **AUXILIARY** (a heartbeat every ~20 ticks, §2) — its age is not
-  evidence of death. **The LIFE is guaranteed by the unit's `Restart=always`;
-  the custodian job (every 6 h) VERIFIES it and, when the pidfile names a DEAD
-  pid while the unit is `active`, restarts via `systemctl restart
-  dsh-host-sampler`** — the §2 manual launch is the LAST RESORT (a manual launch
-  with a live sampler is REFUSED by the script's anti-double-sampling guard).
+  evidence of death. **The LIFE is guaranteed by the unit's `Restart=always`
+  with `StartLimitIntervalSec=0` (self-repairing: a failed start is retried
+  every `RestartSec=15` indefinitely and the unit never latches into `failed`,
+  so the recipe needs NO `systemctl reset-failed`); the custodian job (every 6 h)
+  VERIFIES it and, when the pidfile names a DEAD pid while the unit is `active`,
+  restarts via `systemctl restart dsh-host-sampler`** — the §2 manual launch is
+  the LAST RESORT (a manual launch with a live sampler is REFUSED by the
+  script's anti-double-sampling guard).
 - **Never** point it at the stable profile `/opt/dsh/.dsh` (out of scope) and
   never at the web profile: the target is the DEV deployment (`--profile
   deepartments-dev`, `--state-dir /.deepartments`).
