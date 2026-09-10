@@ -342,9 +342,9 @@ function buildToolsFactory({ stateDir, posts = [], agents = new Map(), hosts = n
 }
 
 /** Build ONE presets factory over the given byPost/agents/hosts/stateDir. */
-function buildPresetsFactory({ stateDir, posts = [], agents = new Map(), hosts = new Map() }) {
+async function buildPresetsFactory({ stateDir, posts = [], agents = new Map(), hosts = new Map() }) {
   const ctx = stubFactoryCtx(factoryDisposers)
-  const presets = createPresetsOrchestration(ctx, {
+  const presets = await createPresetsOrchestration(ctx, {
     config: { health: {} },
     org: { departments: [], pacing: undefined },
     stateDir,
@@ -418,7 +418,7 @@ test('dual-surface [sites 7-8] assembleHeartbeat: the REAL presets factory — l
       const agents = new Map([['session-host-1', { session: c.surface(events).s, status: 'idle' }]])
       const posts = new Map([['post-1', postEntry('post-1', 'session-post-1')]])
       const hosts = new Map([['host-1', { hostId: 'host-1', sessionId: 'session-host-1', retired: false }]])
-      const presets = buildPresetsFactory({ stateDir, posts, agents, hosts })
+      const presets = await buildPresetsFactory({ stateDir, posts, agents, hosts })
       const section = presets.assembleHeartbeat('host-1')
       assert.ok(typeof section === 'string' && section.length > 0, `${c.name}: assembleHeartbeat returned a section (no throw — the incident site was the W6 heartbeat)`)
       assert.ok(section.includes(c.line), `${c.name}: the wake-pack heartbeat carries the detected surface («${c.line}»)`)
@@ -426,7 +426,7 @@ test('dual-surface [sites 7-8] assembleHeartbeat: the REAL presets factory — l
     }
     // none — no live session anywhere: 'none' + no throw.
     const hosts = new Map([['host-1', { hostId: 'host-1', sessionId: 'session-host-1', retired: false }]])
-    const presetsNone = buildPresetsFactory({ stateDir, posts: new Map([['post-1', postEntry('post-1', 'session-post-1')]]), agents: new Map(), hosts })
+    const presetsNone = await buildPresetsFactory({ stateDir, posts: new Map([['post-1', postEntry('post-1', 'session-post-1')]]), agents: new Map(), hosts })
     const sectionNone = presetsNone.assembleHeartbeat('host-1')
     assert.ok(typeof sectionNone === 'string', 'none: assembleHeartbeat no-throw with NO live session')
     assert.ok(sectionNone.includes('- session surface: none'), 'none: the drift line reports «none» honestly')

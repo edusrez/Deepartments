@@ -210,6 +210,20 @@ export interface LlmPiAiProviderSettings {
    * misconfiguration (the m-603 green-false case) instead of passing. Set only
    * when the key is present in compat (true | false). */
   requiresReasoningContentOnAssistantMessages?: boolean
+  /** MPC-PREFLIGHT (2026-09-10, fb-42 subclase C1 — the org-freeze incident):
+   * the provider's LIVE MODEL CATALOG as declared by the `models:` list
+   * (`providers.<p>.models[].id` — the ADMISSION gate the adapter validates
+   * PER REQUEST). The coherence guard (`pines ⊆ catálogo vivo`) reads this
+   * field as its STATIC source; the runtime source is the same catalog through
+   * `llm.listModels(provider)`.
+   *
+   * ADDITIVE ONLY (R6): the field is set ONLY when the provider declares a
+   * non-empty id list, and the string-id form of an entry (`- deepseek-flash`)
+   * is accepted exactly like the descriptor form (`- id: deepseek-flash`),
+   * because pi-ai accepts both. A profile without a `models:` block keeps the
+   * pre-MPC shape byte-identical (the key stays ABSENT — the pre-fb-9
+   * deep-equal assertions on {baseURL?, maxRetries?} stay green). */
+  modelIds?: string[]
 }
 
 /** fb-9 — the synthetic postId under which the boot-assert writes ONE drift
@@ -300,8 +314,25 @@ export function parseLlmPiAiProviderSettings(text: string): Record<string, LlmPi
         mode = 'providers'
       } else {
         const listMatch = /^-\s+(.+)$/.exec(trimmed)
-        if (listMatch && (modelIndent < 0 || indent === modelIndent)) {
+        const listIndentOk = modelIndent >= 0 ? indent === modelIndent : indent > modelsIndent
+        if (listMatch && listIndentOk) {
           modelIndent = indent
+          // MPC-PREFLIGHT: a `models:` list item is a MODEL ENTRY — resolve its
+          // id. pi-ai accepts BOTH the descriptor (`- id: deepseek-flash`, whose
+          // remaining keys continue on the following more-indented lines or run
+          // inline in braces) and the bare scalar (`- deepseek-flash`).
+          // Skipping the entry (the pre-MPC behavior) is exactly what left the
+          // guard unable to compare `pines ⊆ catálogo`. A list item whose first
+          // key is NOT `id` contributes NO id (never a key name, never an index).
+          const entry = listMatch[1] ?? ''
+          const descriptorId = /^id\s*:\s*(.+?)\s*(?:,|\})?$/.exec(entry)
+          const bare = !entry.includes(':')
+          const id = descriptorId !== null
+            ? unquoteYamlScalar(descriptorId[1] ?? '')
+            : (bare ? unquoteYamlScalar(entry) : '')
+          if (id !== '' && current !== undefined && !(current.modelIds ?? []).includes(id)) {
+            current.modelIds = [...(current.modelIds ?? []), id]
+          }
           continue /* a model list item — its reasoningEfforts feed the provider union */
         }
         const effortsMatch = /^reasoningEfforts\s*:\s*(.*)$/.exec(trimmed)

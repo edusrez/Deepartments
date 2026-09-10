@@ -43,12 +43,17 @@ import path from 'node:path'
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('../', import.meta.url)))
 
 /** The five AgentLike mirror sites that must declare the SAME followup type.
- * delivery.ts is the ORIGIN; the other four are the mirrors that drifted. */
+ * delivery.ts is the ORIGIN; the other four are the mirrors that drifted.
+ * MPC-PREFLIGHT (2026-09-10): the delivery.ts anchor moved 334 → 341 and the
+ * boot.ts anchor 115 → 116 — the guard's durable session-artifact readers
+ * (findSessionArtifact / decodeZstdArtifact / resolvedRoutePinFromSessionLog +
+ * node:fs stat) are imported in the same import block; no declaration was
+ * touched. */
 const MIRROR_SITES = Object.freeze([
   { file: 'src/invoke.ts', declAt: 826, role: 'origin-of-coupling' },
-  { file: 'packages/dshd-orchestration/src/delivery.ts', declAt: 334, role: 'origin' },
+  { file: 'packages/dshd-orchestration/src/delivery.ts', declAt: 367, role: 'origin' },
   { file: 'packages/dshd-orchestration/src/tools.ts', declAt: 278, role: 'mirror' },
-  { file: 'packages/dshd-orchestration/src/boot.ts', declAt: 115, role: 'mirror' },
+  { file: 'packages/dshd-orchestration/src/boot.ts', declAt: 116, role: 'mirror' },
   { file: 'packages/dshd-orchestration/src/spawn.ts', declAt: 93, role: 'mirror' }
 ])
 

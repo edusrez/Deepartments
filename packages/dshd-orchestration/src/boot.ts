@@ -86,6 +86,7 @@ import type { WorkspaceRegistryLike } from 'dshd-core'
 import { buildPresenceMessage } from 'dshd-core'
 import { resolveQualityWorkerInspectProbability } from 'dshd-quality'
 import type { PresenceState } from 'dshd-gui'
+import os from 'node:os'
 
 // ---------------------------------------------------------------------------
 // Local structural mirrors of the bundle-local harness views (src/invoke.ts
@@ -1093,6 +1094,10 @@ export function createBootOrchestration(ctx: Context, deps: BootFactoryDeps): Bo
   // destructure re-binds them at the same position (presets/spawn/tools/
   // delivery factories + the daemons read the SAME bindings).
   // =========================================================================
+  // MPC-PREFLIGHT (puerta 3): registra el guard de coherencia pines↔catálogo
+  // sobre el MISMO `hostsLoaded` que el zone usa (justo tras el cold-load).
+  registerMpcBootPinCoherenceGate(ctx, hostsLoaded, { stateDir, org, healthDisabled: (config.health as { enabled?: boolean } | undefined)?.enabled === false })
+
   return {
     subagents,
     agents,
@@ -1134,4 +1139,87 @@ export function createBootOrchestration(ctx: Context, deps: BootFactoryDeps): Bo
     HOST_ATTACH_REPAIR_TIMEOUT_MS,
     repairHostWorkspaceAttach
   }
+}
+
+// -----------------------------------------------------------------------------
+// MPC-PREFLIGHT — PUERTA 3 (BOOT): verificación I-MP completa, NO bloqueante.
+//
+// Import LOCAL (fuera del bloque de imports del head — el anchor de
+// followup-contract.test.js en boot.ts:115 se preserva).
+import { renderRunReport, runMpcPreflightSync } from './model-pins-runner.js'
+//
+// FUERA de la zona VERBATIM del factory (el movement-lock de boot-factory.test.js
+// congela su texto byte a byte): este hook es una puerta NUEVA, no parte del
+// movimiento del zone. Se registra sobre el `hostsLoaded` que el factory RETORNA
+// — el MISMO instante (justo tras el cold-load de registry/hosts) que el zone
+// usaba para sus hooks de boot.
+//
+// El núcleo puro vive en ./model-pins.ts y el runner con I/O en
+// ./model-pins-runner.ts; la composición de tick de dshd-health la reserva la
+// lane fb-337 (serial detrás de ésta) — este paquete NO la toca.
+//
+// El incidente 09-10 congeló el org 96-101 min y el canal de alertas quedó mudo:
+// el fallo NO fue falta de información, fue un SILENCIO. Esta puerta comprueba
+// el invariante `pines ⊆ catálogo vivo` en el momento en que el bundle se
+// materializa y, si no se cumple, deja una MARCA DEGRADED visible + un finding
+// durable en el canal existente (`<stateDir>/health-alerts.jsonl`) con la lista
+// de pares ausentes — CON interrupt al host (el carrier del hallazgo; la entrega
+// la ejecuta el daemon de salud, dueño del canal y seam de la lane fb-337).
+//
+// NO bloquea el arranque: negar el arranque es un modo de fallo PEOR — se pierde
+// el actor capaz de reparar (el auto-bloqueo del incidente). Tampoco sustituye
+// modelos en silencio (§4.2 «Qué hace al fallar»).
+// READ-ONLY sobre el home vivo (A6): sólo lee; sus escrituras son la marca + la
+// fila de alerta, ambas bajo el stateDir del runtime.
+// -----------------------------------------------------------------------------
+export function registerMpcBootPinCoherenceGate(
+  ctx: Context,
+  hostsLoaded: Promise<unknown>,
+  options: { stateDir: string; org: Config['org']; healthDisabled?: boolean }
+): void {
+  // `health.enabled: false` DISABLES the whole health plane (the daemon writes
+  // nothing: no heartbeat, no alert). The coherence gate belongs to that plane:
+  // writing the durable finding in a composition whose health is explicitly
+  // disabled would contradict the config — and the contract is frozen by an
+  // existing test («health.enabled:false → NO daemon (no heartbeat, no
+  // alert)»). A DISABLED scan is never a degraded scan.
+  if (options.healthDisabled === true) return
+  const run = (): void => {
+    try {
+      const envHome = process.env.DSH_HOME
+      const home = envHome !== undefined && envHome.trim() !== '' ? envHome.trim() : path.join(os.homedir(), '.dsh')
+      // SÍNCRONO a propósito: la comprobación —y sus dos escrituras durables—
+      // se completan DENTRO del tick en que la puerta corre. Un residuo
+      // asíncrono aterrizaría después del dispose del contexto y escribiría en
+      // un stateDir ya retirado (el contrato de los tests herméticos lo caza).
+      // La vía RUNTIME (llm.listModels) es asíncrona y NO se consulta aquí: se
+      // declara explícitamente como problema (nunca un ok silencioso).
+      const result = runMpcPreflightSync({
+        mode: 'boot',
+        stateDir: options.stateDir,
+        persist: true,
+        paths: {
+          settingsYaml: path.join(home, 'settings.yaml'),
+          agentPresetsDir: path.join(home, '.agent-presets'),
+          profilesDir: path.join(home, 'profiles')
+        },
+        org: options.org
+      })
+      if (result.decision === 'allow') {
+        ctx.logger.info(`[deepartments] MPC-PREFLIGHT boot gate: I-MP verified (${result.pinCount} pins, ${result.auxiliaryCount} auxiliary read-only pins)`)
+      } else {
+        // NUNCA un ok silencioso: el resultado degradado queda en el log (fail
+        // loud), en la fila durable del canal de alertas y en la marca DEGRADED.
+        ctx.logger.warn(`[deepartments] MPC-PREFLIGHT boot gate: DEGRADED — ${renderRunReport(result)}`)
+      }
+      for (const problem of result.problems) {
+        ctx.logger.warn(`[deepartments] MPC-PREFLIGHT boot gate: ${problem}`)
+      }
+    } catch (error: unknown) {
+      // La puerta de boot NO puede tumbar el arranque (y una excepción sería un
+      // silencio más): warn explícito.
+      ctx.logger.warn(`[deepartments] MPC-PREFLIGHT boot gate failed (non-fatal — the boot proceeds): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  hostsLoaded.then(() => { void run() }, () => { void run() })
 }

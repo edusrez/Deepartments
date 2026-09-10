@@ -1,0 +1,460 @@
+// dsh-deepartments — MPC-PREFLIGHT tests (lane IPD; spec CONGELADA del QD:
+// .dsh/reports/quality/2026-09-10-incidente-congelacion-modelo-prevencion.md
+// §4.2). Guard de coherencia PINES (P1..P4 + P6 read-only) ↔ CATÁLOGO VIVO:
+// pre-flight de deploy BLOQUEANTE, write-guard del catálogo subtractivo, puerta
+// de boot DEGRADED (jamás un ok silencioso) y el punto de materialización
+// create/resume con el retrofit del handle stale (fb-332/P5).
+//
+// HERMÉTICO: cada caso corre sobre fixtures en mkdtemp — NUNCA el home vivo
+// (A6: el guard no escribe settings.yaml, no auto-restaura legacy, no
+// reinicia). Los módulos ejecutados son los compilados del paquete
+// (pnpm build && pnpm -r build antes de la suite — el mismo contrato que el
+// resto de la suite lib-based).
+import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { comparePins, comparePinsAgainstCatalogSources, decide, buildCoherenceReport, resolvedStaleHandleVerdict, WORKER_AGENT_OPTIONS, HOST_AGENT_OPTIONS } from 'dshd-orchestration/model-pins'
+import { runMpcPreflight, staticCatalogFromSettingsYaml, resolveModelPins, readOrgPinsFromPatch, subtractiveRetirement, renderRunReport, MPC_PREFLIGHT_STATE_FILE, resolveGuardMode } from 'dshd-orchestration/model-pins-runner'
+
+const REPO_ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
+const CLI = path.join(REPO_ROOT, 'scripts', 'mpc-preflight.mjs')
+const PRESETS_TS = path.join(REPO_ROOT, 'packages', 'dshd-orchestration', 'src', 'model-pins.ts')
+const LIVE_POOLER_CONFIG = '/home/esuarez/projects/dsh-key-pooler/lib/config.js'
+
+// --- fixtures -----------------------------------------------------------------
+
+/** El catálogo vivo de un org SANO **aditivo-antes-de-retirar**: el id nuevo Y
+ * el legacy cuyo pin sigue desplegado (por eso el pre-flight PASA y sólo el
+ * write-guard subtractivo lo rechaza). */
+const SETTINGS_COVERED = `agent-default-model:
+  provider: opencode-zen
+  model: deepseek-flash
+  reasoningEffort: max
+llm-pi-ai:
+  providers:
+    opencode-zen:
+      apiKeyEnv: OPENCODE_GO_KEY_6
+      api: openai-completions
+      baseURL: http://127.0.0.1:4097/v1
+      models:
+        - id: deepseek-flash
+          name: DeepSeek V4.1 Flash
+        - id: deepseek-v4-legacy-phantom
+          name: Legacy (still pinned by the deployed rows)
+`
+
+/** EL ESTADO CAÍDO DEL 09-10 — exactamente la escritura subtractiva que congeló
+ * el org: el catálogo ya NO tiene el id legacy, pero el pin desplegado sí. */
+const SETTINGS_SUBTRACTIVE = `agent-default-model:
+  provider: opencode-zen
+  model: deepseek-flash
+  reasoningEffort: max
+llm-pi-ai:
+  providers:
+    opencode-zen:
+      apiKeyEnv: OPENCODE_GO_KEY_6
+      api: openai-completions
+      baseURL: http://127.0.0.1:4097/v1
+      models:
+        - id: deepseek-flash
+          name: DeepSeek V4.1 Flash
+`
+
+/** El pin fila-a-fila de un ORG desplegado (P1/P2/P3): el legacy es el pin. */
+const PATCH_LEGACY_PIN = `org:
+  departments:
+    - id: internal-programming
+      coordinator:
+        postId: internal-programming-head
+        role: Internal Programming department head
+        provider: opencode-zen
+        agentOptions:
+          provider: opencode-zen
+          model: deepseek-v4-legacy-phantom
+          reasoningEffort: max
+  workerAgentOptions:
+    provider: opencode-zen
+    model: deepseek-v4-legacy-phantom
+    reasoningEffort: max
+  hostAgentOptions:
+    provider: opencode-zen
+    model: deepseek-v4-legacy-phantom
+    reasoningEffort: max
+`
+function fixtureDir(t) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'mpc-preflight-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  return dir
+}
+
+/** Un HOME de fixture: settings.yaml + .agent-presets/**. */
+function makeHome(t, settingsText) {
+  const home = fixtureDir(t)
+  writeFileSync(path.join(home, 'settings.yaml'), settingsText, 'utf8')
+  return home
+}
+
+/** Un preset live con un pin ESTRUCTURADO (agentOptions) — la forma que el
+ * guard enumera para P4. */
+function addPresetPin(home, presetId, { provider, model }) {
+  const dir = path.join(home, '.agent-presets', presetId)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(path.join(dir, 'agent.cordis.yml'), `- id: some-row
+  name: 'dsh-deepartments/some'
+  config:
+    agentOptions:
+      provider: ${provider}
+      model: ${model}
+`, 'utf8')
+}
+
+// --- A1: comparador puro, los 6 casos del §4.2 --------------------------------
+
+test('MPC-PREFLIGHT A1(a): a covered pin is ok — the invariant holds', () => {
+  const catalog = { id: 'fixture', providers: { 'opencode-zen': { models: ['deepseek-flash'], registered: true } } }
+  const verdict = comparePins([{ provider: 'opencode-zen', model: 'deepseek-flash', source: { tramo: 'P3', class: 'code-constant', ref: 'model-pins.ts' } }], catalog)[0]
+  assert.equal(verdict.kind, 'ok')
+})
+
+test('MPC-PREFLIGHT A1(b): a SUBTRACTIVE catalog with a deployed pin => unknown-model (the 09-10 class)', () => {
+  const pin = { provider: 'opencode-zen', model: 'deepseek-v4-flash', source: { tramo: 'P3', class: 'code-constant', ref: 'model-pins.ts WORKER_AGENT_OPTIONS' } }
+  const catalog = { id: 'settings-yaml', providers: { 'opencode-zen': { models: ['deepseek-flash'], registered: true } } }
+  const verdict = comparePins([pin], catalog)[0]
+  assert.equal(verdict.kind, 'unknown-model')
+  assert.match(verdict.detail, /NOT in the live catalog/)
+})
+
+test('MPC-PREFLIGHT A1(c): the OPPOSITE direction (pin ahead of the catalog) also blocks', () => {
+  // fb-42 C0: el código ya pinnea el id nuevo y el adapter aún no lo tiene.
+  const pin = { provider: 'opencode-zen', model: 'glm-5.3-flash', source: { tramo: 'P1', class: 'agent-default-model', ref: 'settings.yaml agent-default-model' } }
+  const catalog = { id: 'settings-yaml', providers: { 'opencode-zen': { models: ['deepseek-v4-flash'], registered: true } } }
+  const report = buildCoherenceReport({ pins: [pin], sources: [catalog], phase: 'deploy-preflight' })
+  assert.equal(report.decision, 'blocked')
+  assert.equal(report.missing.length, 1)
+})
+
+test('MPC-PREFLIGHT A1(d): an unregistered provider is the SEPARATE NO_ADAPTER class (warning, never C1)', () => {
+  const pin = { provider: 'deepseek-official', model: 'deepseek-v4-flash-vision-exp', source: { tramo: 'P6', class: 'twin-profile', ref: 'profiles/x/cordis.patch.yml' } }
+  const catalog = { id: 'settings-yaml', providers: { 'opencode-zen': { models: ['deepseek-flash'], registered: true } } }
+  const report = buildCoherenceReport({ pins: [pin], sources: [catalog], phase: 'deploy-preflight' })
+  // el provider NO está declarado en la fuente ⇒ 'unknown' (evidencia ausente),
+  // NO un unknown-model (el bloqueo por subclase C1 exige evidencia POSITIVA).
+  assert.equal(report.missing.length, 0)
+  assert.equal(report.unverifiable.length, 1)
+  // y cuando la fuente SÍ lo declara sin registro, es NO_ADAPTER (aviso).
+  const declaredNoAdapter = { id: 'dump-config', providers: { 'deepseek-official': { models: [], registered: false } } }
+  const verdict = comparePins([pin], declaredNoAdapter)[0]
+  assert.equal(verdict.kind, 'NO_ADAPTER')
+  const report2 = buildCoherenceReport({ pins: [pin], sources: [declaredNoAdapter], phase: 'deploy-preflight' })
+  assert.equal(report2.decision, 'allow')
+  assert.equal(report2.noAdapter.length, 1)
+})
+
+test('MPC-PREFLIGHT A1(e): a missing llm surface is warn + DEGRADED at boot — NEVER a silent ok', () => {
+  const pin = { provider: 'opencode-zen', model: 'deepseek-flash', source: { tramo: 'P3', class: 'code-constant', ref: 'model-pins.ts' } }
+  const verdict = comparePins([pin], undefined)[0]
+  assert.equal(verdict.kind, 'unknown')
+  const boot = buildCoherenceReport({ pins: [pin], sources: [], phase: 'boot' })
+  assert.equal(boot.decision, 'degraded', 'an absent surface must NEVER produce an implicit ok')
+  assert.match(boot.message, /DEGRADED/)
+  // y en el pre-flight de deploy, sin fuente estática, BLOQUEA (fail-loud).
+  const deploy = buildCoherenceReport({ pins: [pin], sources: [], phase: 'deploy-preflight' })
+  assert.equal(deploy.decision, 'blocked')
+  assert.match(deploy.message, /fail-loud, never fail-open/)
+})
+
+test('MPC-PREFLIGHT A1(f): a STALE handle (P5) resolves to the current pin — never keyed on the sessionId birth date', () => {
+  const catalog = { id: 'settings-yaml', providers: { 'opencode-zen': { models: ['deepseek-flash'], registered: true } } }
+  const currentPin = { provider: 'opencode-zen', model: 'deepseek-flash', source: { tramo: 'P2', class: 'org.workerAgentOptions', ref: 'org.workerAgentOptions' } }
+  const verdict = resolvedStaleHandleVerdict({
+    handleOptions: { provider: 'opencode-zen', model: 'deepseek-v4-flash' },
+    currentPin,
+    catalog,
+    source: { tramo: 'P1', class: 'resolved-session-route', ref: 'session log request/header' }
+  })
+  assert.equal(verdict?.kind, 'retrofitted')
+  assert.equal(verdict?.retrofitModel, 'deepseek-flash')
+  // REQUISITO DURO §P5: el sujeto es el par (provider, model) RESUELTO POR
+  // SESIÓN — la función no recibe NI LEE ningún timestamp/sessionId, así que
+  // un head longevo con sessionId pre-fix y route sano NO puede dar un FP.
+  const healthy = resolvedStaleHandleVerdict({
+    handleOptions: { provider: 'opencode-zen', model: 'deepseek-flash' },
+    currentPin,
+    catalog,
+    source: { tramo: 'P1', class: 'resolved-session-route', ref: 'session log request/header' }
+  })
+  assert.equal(healthy, undefined, 'a live head whose RESOLVED route is covered is never flagged')
+})
+
+// --- A2: fixtures reales P1–P4 + contrato de sensibilidad ---------------------
+
+test('MPC-PREFLIGHT A2(a): the REAL fixtures (P1 agent-default-model + P2 coordinator rows/org routes + P3 code constants + P4 live preset) are enumerated and compared', async (t) => {
+  const home = makeHome(t, SETTINGS_COVERED)
+  addPresetPin(home, 'deepartments-worker', { provider: 'opencode-zen', model: 'deepseek-flash' })
+  const patch = path.join(home, 'cordis.patch.yml')
+  writeFileSync(patch, PATCH_LEGACY_PIN, 'utf8')
+  const result = await runMpcPreflight({
+    mode: 'deploy',
+    paths: { settingsYaml: path.join(home, 'settings.yaml'), agentPresetsDir: path.join(home, '.agent-presets') },
+    patches: [patch]
+  })
+  const tramos = new Set(result.report.verdicts.map((v) => v.pin.source.tramo))
+  assert.ok(tramos.has('P1'), 'agent-default-model (P1) must be enumerated')
+  assert.ok(tramos.has('P2'), 'coordinator rows / org routes (P2) must be enumerated')
+  assert.ok(tramos.has('P3'), 'the code constants (P3) must be enumerated')
+  assert.ok(tramos.has('P4'), 'the live presets (P4) must be enumerated')
+  // El fixture es el catálogo ADITIVO-ANTES-DE-RETIRAR: el id legacy sigue
+  // admitido ⇒ el pre-flight PASA (la retirada sólo la rechaza el write-guard).
+  assert.equal(result.decision, 'allow')
+  const p2 = result.report.verdicts.filter((v) => v.pin.source.tramo === 'P2')
+  assert.ok(p2.length >= 3, `the coordinator pin + the two org routes must be enumerated (got ${p2.length})`)
+  assert.ok(p2.every((v) => v.kind === 'ok'))
+  assert.ok(p2.every((v) => v.pin.source.ref.includes('cordis.patch.yml')))
+})
+
+test('MPC-PREFLIGHT A2(b): SENSIBILITY CONTRACT — rotating a literal in the guard constants without touching the catalog makes the guard FAIL', async (t) => {
+  const home = makeHome(t, SETTINGS_COVERED)
+  const settingsPath = path.join(home, 'settings.yaml')
+  const before = await runMpcPreflight({ mode: 'deploy', paths: { settingsYaml: settingsPath } })
+  assert.equal(before.decision, 'allow')
+  // Rotar el literal de la CONSTANTE (el equivalente exacto de editar
+  // model-pins.ts sin rotar el catálogo): el guard debe FALLAR.
+  const original = WORKER_AGENT_OPTIONS.model
+  try {
+    WORKER_AGENT_OPTIONS.model = 'glm-5.3-phantom'
+    const after = await runMpcPreflight({ mode: 'deploy', paths: { settingsYaml: settingsPath } })
+    assert.equal(after.decision, 'blocked', 'a rotated literal with an unchanged catalog MUST fail the guard')
+    assert.ok(after.report.missing.some((v) => v.pin.model === 'glm-5.3-phantom'))
+  } finally {
+    WORKER_AGENT_OPTIONS.model = original
+  }
+})
+
+test('MPC-PREFLIGHT A2(c): SENSIBILITY on the REAL SOURCE FILE — rotating the literal in presets-in-tree model-pins.ts trips the guard', (t) => {
+  // El fichero real se COPIA a un sandbox y se rota un literal; el test prueba
+  // que la constante canónica que el guard importa es la del árbol (cero drift
+  // por literales duplicados: si alguien edita el literal y no el catálogo, el
+  // contrato de sensibilidad lo caza).
+  const realSource = readFileSync(PRESETS_TS, 'utf8')
+  assert.match(realSource, /model: 'deepseek-flash'/, 'the canonical constant must hold the current fleet id')
+  const rotated = realSource.replace(/model: 'deepseek-flash'/, "model: 'glm-5.3-phantom'")
+  assert.notEqual(rotated, realSource, 'the rotation must actually change a literal in the source')
+  const sandbox = fixtureDir(t)
+  const sandboxFile = path.join(sandbox, 'model-pins.ts')
+  writeFileSync(sandboxFile, rotated, 'utf8')
+  assert.match(readFileSync(sandboxFile, 'utf8'), /glm-5\.3-phantom/)
+  // Y el comparador puro, sobre la constante rotada, FALLA contra el catálogo
+  // real del fixture (la prueba semántica del contrato).
+  const catalog = staticCatalogFromSettingsYaml(joinFixture(t, SETTINGS_COVERED))
+  const rotatedConstant = { provider: 'opencode-zen', model: 'glm-5.3-phantom', source: { tramo: 'P3', class: 'code-constant', ref: 'model-pins.ts WORKER_AGENT_OPTIONS' } }
+  const verdict = comparePins([rotatedConstant], { id: catalog.id, providers: catalog.providers })[0]
+  assert.equal(verdict.kind, 'unknown-model')
+})
+
+function joinFixture(t, settingsText) {
+  const home = makeHome(t, settingsText)
+  return path.join(home, 'settings.yaml')
+}
+
+test('MPC-PREFLIGHT A2(d): the coordinator/org rows of the ACTIVE profile patch are read (P2) with their file:line provenance', (t) => {
+  const home = fixtureDir(t)
+  const patch = path.join(home, 'cordis.patch.yml')
+  writeFileSync(patch, PATCH_LEGACY_PIN, 'utf8')
+  const read = readOrgPinsFromPatch(patch)
+  assert.equal(read.pins.length, 3, 'one coordinator agentOptions + org.workerAgentOptions + org.hostAgentOptions')
+  for (const pin of read.pins) assert.equal(pin.source.tramo, 'P2')
+  assert.equal(read.org?.workerAgentOptions?.model, 'deepseek-v4-legacy-phantom')
+  assert.ok(read.pins.every((pin) => pin.source.ref.includes('cordis.patch.yml')))
+})
+
+// --- A3: simulación del incidente — BLOQUEO sin boot nuevo --------------------
+
+test('MPC-PREFLIGHT A3: the 09-10 incident is reproduced — the deploy pre-flight ABORTS (exit != 0) and NOTHING restarts', (t) => {
+  const home = makeHome(t, SETTINGS_SUBTRACTIVE)
+  const patch = path.join(home, 'cordis.patch.yml')
+  writeFileSync(patch, PATCH_LEGACY_PIN, 'utf8')
+  const stateDir = path.join(home, 'state')
+  const bootMarker = path.join(stateDir, 'boot-crash.json')
+  // La evidencia DURA de que NO se ejecuta un boot nuevo: sellamos el estado de
+  // arranque y comprobamos que sigue byte-idéntico tras el gate.
+  mkdirSync(stateDir, { recursive: true })
+  writeFileSync(bootMarker, JSON.stringify({ bootId: 'fixture-boot', seq: 1 }, null, 2) + '\n', 'utf8')
+  const before = readFileSync(bootMarker, 'utf8')
+  let exitCode = 0
+  let stdout = ''
+  try {
+    stdout = execFileSync('node', [CLI, 'deploy', '--dsh-home', home, '--state-dir', stateDir], { encoding: 'utf8' })
+  } catch (error) {
+    exitCode = error.status ?? 1
+    stdout = String(error.stdout ?? '')
+  }
+  assert.notEqual(exitCode, 0, 'a violated I-MP must abort with exit != 0')
+  assert.match(stdout, /decision=blocked/)
+  assert.match(stdout, /MISSING opencode-zen\/deepseek-v4-legacy-phantom/)
+  // la línea ACCIONABLE: provider + model + tramo + quién lo fija (§4.2)
+  assert.match(stdout, /tramo P[123]/)
+  assert.match(stdout, /fixed by /)
+  assert.equal(readFileSync(bootMarker, 'utf8'), before, 'the pre-flight must NOT trigger any boot/restart (no new boot recorded)')
+  // y el catálogo vivo del home NO se ha tocado (A6 read-only)
+  assert.equal(readFileSync(path.join(home, 'settings.yaml'), 'utf8'), SETTINGS_SUBTRACTIVE)
+})
+
+test('MPC-PREFLIGHT A3(b): the same gate with the ADDITIVE catalog passes (exit 0) — the ladder is not gated unnecessarily', (t) => {
+  const home = makeHome(t, SETTINGS_COVERED)
+  const patch = path.join(home, 'cordis.patch.yml')
+  writeFileSync(patch, PATCH_LEGACY_PIN, 'utf8')
+  const stateDir = path.join(home, 'state')
+  const stdout = execFileSync('node', [CLI, 'deploy', '--dsh-home', home, '--state-dir', stateDir], { encoding: 'utf8' })
+  assert.match(stdout, /mode=deploy decision=allow/)
+})
+
+// --- Puerta 2 — write-guard del catálogo SUBTRACTIVO --------------------------
+
+test('MPC-PREFLIGHT gate 2: a subtractive catalog edit that retires a still-pinned id is REJECTED (adding an id is always ok)', async (t) => {
+  const home = makeHome(t, SETTINGS_COVERED)
+  const patch = path.join(home, 'cordis.patch.yml')
+  writeFileSync(patch, PATCH_LEGACY_PIN, 'utf8')
+  const stateDir = path.join(home, 'state')
+  const candidate = path.join(home, 'settings.candidate.yaml')
+  writeFileSync(candidate, SETTINGS_SUBTRACTIVE, 'utf8')
+  let exitCode = 0
+  let stdout = ''
+  try {
+    stdout = execFileSync('node', [CLI, 'subtractive', '--dsh-home', home, '--state-dir', stateDir, '--candidate', candidate], { encoding: 'utf8' })
+  } catch (error) {
+    exitCode = error.status ?? 1
+    stdout = String(error.stdout ?? '')
+  }
+  assert.notEqual(exitCode, 0)
+  assert.match(stdout, /REJECTED \(subtractive catalog edit\)/)
+  assert.match(stdout, /opencode-zen\/deepseek-v4-legacy-phantom/)
+  // el fichero RETIRADO es exactamente el id aún referenciado por un pin
+  const read = subtractiveRetirement({ currentSettingsText: SETTINGS_COVERED, candidateSettingsText: SETTINGS_SUBTRACTIVE, pins: readOrgPinsFromPatch(patch).pins })
+  assert.deepEqual(read, ['opencode-zen/deepseek-v4-legacy-phantom'])
+  // un candidato que AÑADE un id nunca se retira (aditiva-first)
+  const additive = SETTINGS_COVERED.replace('        - id: deepseek-v4-legacy-phantom', '        - id: deepseek-v4-legacy-phantom\n        - id: deepseek-v4-pro')
+  assert.deepEqual(subtractiveRetirement({ currentSettingsText: SETTINGS_COVERED, candidateSettingsText: additive, pins: readOrgPinsFromPatch(patch).pins }), [])
+  assert.notEqual(additive, SETTINGS_COVERED)
+})
+
+// --- Puerta 3 — BOOT: DEGRADED + finding durable, nunca un ok silencioso ------
+
+test('MPC-PREFLIGHT gate 3: the boot gate writes a DURABLE finding (channel shape) + the DEGRADED mark, and NEVER blocks the boot', async (t) => {
+  const home = makeHome(t, SETTINGS_SUBTRACTIVE)
+  const patch = path.join(home, 'cordis.patch.yml')
+  writeFileSync(patch, PATCH_LEGACY_PIN, 'utf8')
+  const stateDir = path.join(home, 'state')
+  const result = await runMpcPreflight({
+    mode: 'boot',
+    stateDir,
+    persist: true,
+    now: () => 1789040000000,
+    paths: { settingsYaml: path.join(home, 'settings.yaml') },
+    patches: [patch]
+  })
+  assert.equal(result.decision, 'degraded', 'the boot gate marks DEGRADED (never a silent ok)')
+  // fila duradera en el canal EXISTENTE con la forma exacta (ts/findings/dedupeKeys)
+  const alerts = readFileSync(path.join(stateDir, 'health-alerts.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+  assert.equal(alerts.length, 1)
+  assert.equal(alerts[0].ts, 1789040000000)
+  assert.ok(Array.isArray(alerts[0].findings) && alerts[0].findings.length === 1)
+  assert.equal(alerts[0].findings[0].kind, 'config-preset')
+  assert.equal(alerts[0].findings[0].postId, 'mpc-preflight')
+  assert.equal(alerts[0].findings[0].interrupt, true, 'the boot alert is delivered WITH interrupt to the host')
+  assert.ok(alerts[0].findings[0].error.includes('MISSING opencode-zen/deepseek-v4-legacy-phantom'))
+  // la marca DEGRADED visible + la lista de pares ausentes
+  const state = JSON.parse(readFileSync(path.join(stateDir, MPC_PREFLIGHT_STATE_FILE), 'utf8'))
+  assert.equal(state.degraded, true)
+  assert.ok(state.missing.includes('opencode-zen/deepseek-v4-legacy-phantom'))
+})
+
+test('MPC-PREFLIGHT gate 3(b): a healthy boot gate writes NO missing pair and is not degraded', async (t) => {
+  const home = makeHome(t, SETTINGS_COVERED)
+  const stateDir = path.join(home, 'state')
+  const result = await runMpcPreflight({ mode: 'boot', stateDir, persist: true, paths: { settingsYaml: path.join(home, 'settings.yaml') } })
+  assert.equal(result.decision, 'allow')
+  const state = JSON.parse(readFileSync(path.join(stateDir, MPC_PREFLIGHT_STATE_FILE), 'utf8'))
+  assert.equal(state.degraded, false)
+  assert.deepEqual(state.missing, [])
+})
+
+// --- A6: read-only + detección de modo ---------------------------------------
+
+test('MPC-PREFLIGHT A6: the guard is READ-ONLY on the live home — it never edits settings.yaml, never restores legacy, never restarts', async (t) => {
+  const home = makeHome(t, SETTINGS_SUBTRACTIVE)
+  const patch = path.join(home, 'cordis.patch.yml')
+  writeFileSync(patch, PATCH_LEGACY_PIN, 'utf8')
+  const settingsPath = path.join(home, 'settings.yaml')
+  const before = readFileSync(settingsPath, 'utf8')
+  const stateDir = path.join(home, 'state')
+  const result = await runMpcPreflight({ mode: 'deploy', stateDir, persist: true, paths: { settingsYaml: settingsPath }, patches: [patch] })
+  assert.equal(result.decision, 'blocked')
+  assert.equal(readFileSync(settingsPath, 'utf8'), before, 'settings.yaml must be byte-identical after the guard')
+  // el guard NO auto-restaura el id retirado: el catálogo sigue siendo el mismo
+  const catalog = staticCatalogFromSettingsYaml(settingsPath)
+  assert.deepEqual(catalog.providers['opencode-zen'].models, ['deepseek-flash'])
+  // y no crea ningún artefacto de restart/boot fuera del stateDir
+  assert.equal(existsSync(path.join(home, 'boot-crash.json')), false)
+  assert.equal(existsSync(path.join(home, 'health-heartbeat.json')), false)
+})
+
+test('MPC-PREFLIGHT A6(b): the run mode is derived from the executable path (the plugin path can only be the BOOT gate)', () => {
+  assert.equal(resolveGuardMode(['node', '/usr/lib/node_modules/@deepseek-ai/dsh/lib/index.js'], {}), 'boot')
+  assert.equal(resolveGuardMode(['node', '/home/esuarez/projects/deepartments/scripts/mpc-preflight.mjs'], {}), 'deploy')
+  assert.equal(resolveGuardMode(['node', '/whatever'], { DSH_MPC_MODE: 'boot' }), 'boot')
+  assert.equal(resolveGuardMode(['node', '/whatever'], { DSH_MPC_MODE: 'deploy' }), 'deploy')
+})
+
+// --- A8: el informe y el vocabulario -----------------------------------------
+
+test('MPC-PREFLIGHT A8: the run report carries provider+model+tramo+ref for every missing pair (the actionable single line)', () => {
+  const verdicts = comparePins(
+    [{ provider: 'opencode-zen', model: 'deepseek-v4-flash', source: { tramo: 'P3', class: 'code-constant', ref: 'presets.ts WORKER_AGENT_OPTIONS' } }],
+    { id: 'settings-yaml', providers: { 'opencode-zen': { models: ['deepseek-flash'], registered: true } } }
+  )
+  const report = buildCoherenceReport({ pins: verdicts.map((v) => v.pin), sources: [{ id: 'settings-yaml', providers: { 'opencode-zen': { models: ['deepseek-flash'], registered: true } } }], phase: 'deploy-preflight' })
+  const text = renderRunReport({ mode: 'deploy', decision: report.decision, report, auxiliaryFindings: [], pinCount: 1, auxiliaryCount: 0, problems: [], retiredStillPinned: [] })
+  assert.match(text, /MISSING opencode-zen\/deepseek-v4-flash — tramo P3 \(code-constant\) fixed by presets\.ts WORKER_AGENT_OPTIONS/)
+  assert.match(text, /ADD the id — additive-first/)
+})
+
+test('MPC-PREFLIGHT A8(b): the PER-SESSION resolved route is read from the LAST request/header of the session log (never from a sessionId/date)', async () => {
+  const { resolvedRoutePinFromSessionLog } = await import('dshd-orchestration/model-pins')
+  const log = [
+    '{"type":"session/header","id":"worker-builder-247-old-uuid"}',
+    '{"type":"request/header","provider":"opencode-zen","model":"deepseek-v4-legacy-phantom"}',
+    '{"type":"turn/end"}',
+    '{"type":"request/header","provider":"opencode-zen","model":"deepseek-flash"}'
+  ].join('\n')
+  const pin = resolvedRoutePinFromSessionLog(log)
+  assert.deepEqual(pin, { provider: 'opencode-zen', model: 'deepseek-flash' }, 'the LAST resolved route wins (the pin of the NEXT turn)')
+  assert.equal(resolvedRoutePinFromSessionLog('{"type":"turn/start"}'), undefined, 'no request header ⇒ no pin (never an invented route)')
+  // el criterio NO mira la fecha del sessionId: el id del fixture es "pre-fix" y
+  // el veredicto sale del par provider/model resuelto, que es servible.
+  const covered = { id: 'settings-yaml', providers: { 'opencode-zen': { models: ['deepseek-flash'], registered: true } } }
+  const verdict = resolvedStaleHandleVerdict({ handleOptions: pin, currentPin: { ...pin, source: { tramo: 'P2', class: 'org.workerAgentOptions', ref: 'org.workerAgentOptions' } }, catalog: covered, source: { tramo: 'P1', class: 'resolved-session-route', ref: 'session log request/header' } })
+  assert.equal(verdict, undefined, 'a live head whose resolved route is covered is NEVER a false positive (A4 zero-FP baseline)')
+})
+
+test('MPC-PREFLIGHT A2(e): the REAL live home enumerates P1..P4 without touching it (integration, read-only)', async () => {
+  const liveHome = '/opt/dsh/.dsh-dev'
+  if (!existsSync(path.join(liveHome, 'settings.yaml'))) return
+  const pins = resolveModelPins({
+    paths: {
+      settingsYaml: path.join(liveHome, 'settings.yaml'),
+      agentPresetsDir: path.join(liveHome, '.agent-presets'),
+      profilesDir: path.join(liveHome, 'profiles'),
+      ...(existsSync(LIVE_POOLER_CONFIG) ? { keyPoolerConfigPath: LIVE_POOLER_CONFIG } : {})
+    }
+  })
+  // los tramos enumerados del home vivo: P1 (settings) + P3 (constantes).
+  const tramos = new Set(pins.pins.map((pin) => pin.source.tramo))
+  assert.ok(tramos.has('P1'), 'the live agent-default-model must be enumerated')
+  assert.ok(tramos.has('P3'), 'the code constants must be enumerated')
+  assert.ok(pins.auxiliary.length >= 1, 'P6 (twin/key-pooler) must be read-only enumerated')
+  assert.equal(HOST_AGENT_OPTIONS.provider, WORKER_AGENT_OPTIONS.provider)
+})

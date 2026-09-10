@@ -34,6 +34,8 @@ import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
 
 // LANE 0.2.2 (gap 2) — the bundle bridges resolve to the owning packages
@@ -93,6 +95,37 @@ import type { QualityInspectDirectiveSurface } from 'dshd-quality'
 import { jsonSafeMessageSource, sanitizePromptLiterals } from 'dshd-core'
 import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import type { DepartmentConfig, CoordinatorConfig } from './org-types.js'
+
+// MPC-PREFLIGHT (P5/fb-332): the durable session-artifact readers used to
+// resolve the PER-SESSION pinned route (the last request/header) — the ONLY
+// correct subject of the stale-handle check (never the sessionId birth date).
+// The EXTRACTION is PURE and lives in ./model-pins.ts (the guard's core); the
+// load is LAZY (dynamic import — the idiom this codebase already uses for
+// optional services) because a STATIC relative `.js` sibling pulled into THIS
+// module's static graph is not rewritten by the src-native test loader.
+import { findSessionArtifact, decodeZstdArtifact } from 'dshd-core'
+import { stat } from 'node:fs/promises'
+
+/** LOADING SEAM (duplicated from presets.ts, same reasoning): a STATIC relative
+ * `.js` sibling in THIS module's static graph is not rewritten by the src-native
+ * test loader (`test/ts-src-loader.mjs` hooks the DYNAMIC graph), and a plain
+ * `createRequire` resolves only the COMPILED sibling — so the guard core is
+ * resolved lazily through BOTH forms with the `.ts` fallback (the «.js or .ts»
+ * seam dshd-core/session-cleanup.ts uses). Resolution happens ONCE. */
+type ModelPinsCore = {
+  resolvedRoutePinFromSessionLog: (text: string) => { provider: string; model: string } | undefined
+}
+let modelPinsCore: ModelPinsCore | undefined
+const loadModelPinsCore = (): ModelPinsCore => {
+  if (modelPinsCore !== undefined) return modelPinsCore
+  const req = createRequire(fileURLToPath(import.meta.url))
+  try {
+    modelPinsCore = req('./model-pins.js') as ModelPinsCore
+  } catch {
+    modelPinsCore = req('./model-pins.ts') as ModelPinsCore
+  }
+  return modelPinsCore
+}
 
 // ---------------------------------------------------------------------------
 // fb-118 (verify id+ts BEFORE citing a message in a directive): the QD
@@ -811,14 +844,122 @@ export function probeRotationMintModel(
     })
 }
 
+/** MPC-PREFLIGHT (guard de coherencia pines↔catálogo, fb-42 subclase C1 —
+ * incidente 09-10) — la puerta 4 del §4.2 en el punto de MATERIALIZACIÓN
+ * create/resume de heads Y workers. Ese punto (materializePost, la rama COLD
+ * que crea/resume) es EL hueco por el que pasó el incidente: hoy sólo hay probe
+ * en el fresh-mint de head (:1023) y en dept_head_rotate (tools.ts:6758), y el
+ * 09-10 golpeó turnos de agentes YA vivos + la re-materialización post-fix.
+ *
+ * Semántica (conserva R2 y añade el camino P5/fb-332):
+ *  - el modelo del RESOLVED route está en el catálogo ⇒ 'ok' (materializa igual);
+ *  - está AUSENTE pero el seed model está ⇒ se materializa con el seed model
+ *    (retrofit + aviso), EXACTAMENTE la semántica R2;
+ *  - el HANDLE PERSISTIDO trae un modelo ausente Y el pin actual SÍ está ⇒
+ *    RE-RESUELVE al pin actual + aviso (mitiga fb-332/P5 SIN exigir un retire
+ *    manual) — es el caso del builder-247, que falló a las 12:54:13Z CON el fix
+ *    desplegado porque su handle pre-fix seguía pinneando el legacy;
+ *  - ninguno de los dos existe ⇒ 'unknown-model' (el caller avisa fail-loud).
+ *
+ * El SUJETO es SIEMPRE el par (provider, model) que el handle va a pedir en su
+ * próximo turno — NUNCA la fecha de nacimiento del sessionId (requisito duro
+ * del §P5: los heads longevos reutilizan directorio de sesión y ese criterio
+ * ingenuo produce 4 falsos positivos permanentes sobre heads vivos).
+ *
+ * PURE (nunca lanza); el caller decide el efecto. EXPORTED package-internal. */
+export function resolvedModelHandleVerdict(
+  postId: string,
+  agentOptions: AgentOptionsLike,
+  currentPin: AgentOptionsLike | undefined,
+  handleOptions: AgentOptionsLike | undefined,
+  llm: LlmModelProbeSurface | undefined,
+  logger: { warn: (message: string) => void; info: (message: string) => void }
+): Promise<{ kind: 'ok'; options: AgentOptionsLike } | { kind: 'retrofitted'; options: AgentOptionsLike; from: string; to: string; staleHandle: boolean } | { kind: 'unknown-model'; provider: string; model: string; fallbackModel: string }> {
+  const provider = typeof agentOptions?.provider === 'string' ? agentOptions.provider : ''
+  const model = typeof agentOptions?.model === 'string' ? agentOptions.model : ''
+  const sameRoute = (a: string | undefined, b: string | undefined): boolean => (a ?? '').toLowerCase() === (b ?? '').toLowerCase()
+  const handleProvider = typeof handleOptions?.provider === 'string' ? handleOptions.provider : ''
+  const handleModel = typeof handleOptions?.model === 'string' ? handleOptions.model : ''
+  const handleStaleCandidate = handleProvider !== '' && handleModel !== '' && !sameRoute(handleModel, model)
+  return probeRotationMintModel(postId, agentOptions, currentPin ?? agentOptions, llm, logger).then((probe) => {
+    if (probe.kind === 'retrofitted') {
+      if (handleStaleCandidate) {
+        logger.warn(`[deepartments] materialization pin guard "${postId}": STALE HANDLE (fb-332/P5) — the route this session last resolved (${handleProvider}/${handleModel}) is not servable; re-resolving the handle to the CURRENT pin (${probe.to}) at re-materialization (no manual retire needed)`)
+        return { kind: 'retrofitted', options: probe.options, from: `${handleProvider}/${handleModel}`, to: probe.to, staleHandle: true } as const
+      }
+      logger.warn(`[deepartments] materialization pin guard "${postId}": the resolved route was stale — retrofit to the seed model "${probe.to}" applied (R2 semantics preserved)`)
+      return { kind: 'retrofitted', options: probe.options, from: probe.from, to: probe.to, staleHandle: false } as const
+    }
+    if (probe.kind === 'unknown-model' && handleStaleCandidate) {
+      // P5: el handle persistido lleva un route distinto del resolved actual y
+      // NINGUNO de los dos es servible — el caller avisa fail-loud (el fix
+      // global no cubre ese handle).
+      return { kind: 'unknown-model', provider: handleProvider, model: handleModel, fallbackModel: probe.fallbackModel } as const
+    }
+    return probe
+  })
+}
+
+/** MPC-PREFLIGHT (P5/fb-332) — el pin RESUELTO POR SESIÓN, leído de la fuente
+ * durable: la ÚLTIMA línea `request/header` del artefacto de sesión (el
+ * provider/model con el que el próximo turno construye su request). La
+ * EXTRACCIÓN pura vive en ./model-pins.ts (`resolvedRoutePinFromSessionLog`).
+ *
+ * Dos vías, en orden: (1) `ctx.sessionPersistence.readRaw(sessionId)` (la vía
+ * NATIVA del runtime, sin I/O de fichero — la misma que la tool list ya usa);
+ * (2) el artefacto en disco (`sessionPersistence.root` + findSessionArtifact),
+ * ACOTADO: sólo se decodifica si existe y pesa ≤ 64 MB (por encima, un warn y
+ * `undefined`, jamás un throw ni una lectura sin cota).
+ *
+ * Devuelve `undefined` cuando no hay artefacto o no se puede leer: el guard lo
+ * trata como «handle route desconocido» (aviso), nunca como «servible». */
+export const MPC_SESSION_ARTIFACT_READ_LIMIT_BYTES = 64 * 1024 * 1024
+
+async function readResolvedSessionRoutePin(
+  ctx: Context,
+  sessionId: string
+): Promise<{ provider: string; model: string } | undefined> {
+  if (sessionId === '') return undefined
+  const { resolvedRoutePinFromSessionLog } = loadModelPinsCore()
+  const persistence = ctx.get('sessionPersistence', false) as
+    | { root?: string; readRaw?: (id: SessionId, signal?: AbortSignal) => Promise<{ content: string } | undefined> }
+    | undefined
+  const raw = persistence?.readRaw
+  if (typeof raw === 'function') {
+    try {
+      const read = await raw(SessionId(sessionId))
+      if (typeof read?.content === 'string' && read.content !== '') {
+        const pin = resolvedRoutePinFromSessionLog(read.content)
+        if (pin !== undefined) return pin
+      }
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] session-pin guard: readRaw failed for ${sessionId} (${error instanceof Error ? error.message : String(error)}) — falling back to the on-disk artifact`)
+    }
+  }
+  const sessionsRoot = typeof persistence?.root === 'string' && persistence.root !== '' ? persistence.root : undefined
+  if (sessionsRoot === undefined) return undefined
+  try {
+    const artifactPath = await findSessionArtifact(sessionsRoot, sessionId)
+    if (artifactPath === undefined) return undefined
+    const info = await stat(artifactPath)
+    if (info.size > MPC_SESSION_ARTIFACT_READ_LIMIT_BYTES) {
+      ctx.logger.warn(`[deepartments] session-pin guard: artifact for ${sessionId} exceeds the ${MPC_SESSION_ARTIFACT_READ_LIMIT_BYTES}-byte guard budget — the resolved per-session route was NOT read (stale-handle detection skipped for this session)`)
+      return undefined
+    }
+    return resolvedRoutePinFromSessionLog(await decodeZstdArtifact(await readFile(artifactPath)))
+  } catch (error: unknown) {
+    ctx.logger.warn(`[deepartments] session-pin guard: could not read the resolved route for ${sessionId} (${error instanceof Error ? error.message : String(error)}) — stale-handle detection skipped for this session`)
+    return undefined
+  }
+}
+
 /**
  * Build the DELIVERY ORCHESTRATION surface on the apply fiber (AGENTS.md rule 4
  * — no module-global mutable state; invoked by applyInvoke at the SAME fiber
  * position where the hoisted zone used to live). The closures below are the
  * ORIGINAL zone closures, moved VERBATIM — the diff is movement-only.
  */
-export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryDeps): DeliverySurface {
-  const {
+export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryDeps): DeliverySurface {  const {
     stateDir,
     agents,
     subagents,
@@ -1381,6 +1522,21 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
         : headSetup(entry.postId, entry.roomId, role, headPreset, dept)
       const agentOptions = resolveMaterializeAgentOptions(coordinator?.agentOptions)
       const preset: string = isWorker ? WORKER_PRESET_ID : headPreset
+      // MPC-PREFLIGHT (puerta 4, §4.2) — EL HUECO POR EL QUE PASÓ EL INCIDENTE:
+      // este punto de create/resume de heads Y workers NO tenía ningún probe (el
+      // 09-10 golpeó turnos de agentes ya vivos y su re-materialización). El
+      // guard resuelve el pin RESUELTO POR SESIÓN de la fuente durable (nunca
+      // por la fecha del sessionId, §P5) y aplica la semántica R2 + el retrofit
+      // del handle stale al pin actual (fb-332) — sin sustitución silenciosa.
+      const handleRoutePin = await readResolvedSessionRoutePin(ctx, String(sessionId))
+      const materializePinProbe = await resolvedModelHandleVerdict(entry.postId, agentOptions, agentOptions, handleRoutePin, ctx.get('llm', false), ctx.logger)
+      if (materializePinProbe.kind === 'unknown-model') {
+        ctx.logger.warn(
+          `[deepartments] materialization pin guard "${entry.postId}": provider "${materializePinProbe.provider}" is registered but NEITHER the pinned model "${materializePinProbe.model}" NOR the seed model "${materializePinProbe.fallbackModel}" is in the live catalog — the session was STILL materialized (fb-42/C1: an unrepaired actor loses the ability to repair the org; the turn will fail with 'pi-ai <provider> has no configured model')` +
+          ` — ADD the id to the live catalog (additive-first) or rotate the pin`
+        )
+      }
+      const materializeOptions: AgentOptionsLike = materializePinProbe.kind === 'unknown-model' ? agentOptions : materializePinProbe.options
       let handle: AgentHandleLike | undefined
       // F5 (spec 004 §6.2 L1): the FRESH-create fallback of a bus wake lands the
       // re-materialized session in ITS department workspace (a worker by its
@@ -1417,7 +1573,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
         handle = await agents.create({
           sessionId: rotatedSessionId,
           meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: preset },
-          agentOptions,
+          agentOptions: materializeOptions,
           setup
         })
         if (handle !== void 0) byHeadHandle.set(rotatedSessionId, handle)
@@ -1441,13 +1597,13 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
         return { target: rotatedTarget, resumed: true }
       }
       try {
-        handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions, setup })
+        handle = await agents.resume({ resumeSessionId: String(sessionId), agentOptions: materializeOptions, setup })
       } catch (error: unknown) {
         ctx.logger.warn(`[deepartments] ${isWorker ? 'worker' : 'head'} "${entry.postId}" bus wake-resume failed, creating fresh: ${error instanceof Error ? error.message : String(error)}`)
         handle = await agents.create({
           sessionId: String(sessionId),
           meta: { cwd: deptCwd !== '' ? deptCwd : await resolveWorkspaceRootPath(), origin: undefined, agentPreset: preset },
-          agentOptions,
+          agentOptions: materializeOptions,
           setup
         }).catch((createError: unknown) => {
           // B5 — a WORKER whose create throws "has no provider/model" is the
@@ -2004,7 +2160,19 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
         // intermittently empty — see HOST_AGENT_OPTIONS). The D4 setup does NOT
         // installSelection, so a non-empty `this.options` is the ONLY carrier.
         // Mirror WORKER_AGENT_OPTIONS (heads/workers) so the host is symmetric.
-        const resumed = await agents.resume({ resumeSessionId: sessionId, setup, agentOptions: HOST_AGENT_OPTIONS })
+        //
+        // MPC-PREFLIGHT (puerta 4, §4.2): el MISMO guard de materialización que
+        // la rama head/worker — el host es un punto de materialización más, y su
+        // handle stale (fb-332) se re-resuelve al pin actual en vez de exigir un
+        // retire manual. El sujeto es el pin RESUELTO POR SESIÓN (§P5), nunca la
+        // fecha del sessionId.
+        const hostHandlePin = await readResolvedSessionRoutePin(ctx, sessionId)
+        const hostPinProbe = await resolvedModelHandleVerdict(hostEntry.hostId, HOST_AGENT_OPTIONS, HOST_AGENT_OPTIONS, hostHandlePin, ctx.get('llm', false), ctx.logger)
+        if (hostPinProbe.kind === 'unknown-model') {
+          ctx.logger.warn(`[deepartments] materialization pin guard "${hostEntry.hostId}" (host D4 resume): provider "${hostPinProbe.provider}" is registered but NEITHER the pinned model "${hostPinProbe.model}" NOR the seed model "${hostPinProbe.fallbackModel}" is in the live catalog — the host is STILL resumed (never deny the repairing actor) but its next turn will fail with 'pi-ai <provider> has no configured model'; ADD the id to the live catalog (additive-first)`)
+        }
+        const hostResumeOptions: AgentOptionsLike = hostPinProbe.kind === 'unknown-model' ? HOST_AGENT_OPTIONS : hostPinProbe.options
+        const resumed = await agents.resume({ resumeSessionId: sessionId, setup, agentOptions: hostResumeOptions })
         // LANE ② (addendum QD D-Q3 — the m-437/438 ZOMBIE class): the D4 path
         // previously DROPPED the resumed handle, so a HOST session's handle was
         // NEVER in byHeadHandle — the rotation's disposeHeadHandleOnce could

@@ -305,7 +305,25 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
     // stays `opencode-zen`) — plus the F7 doc comment that cites the route.
     // Literal-only: no closure, no dep, no surface member moved. md5
     // 587d608b… → 4f37c5820ac0c372480eb62e48250a0e (same span, literal-only).
-    assert.equal(md5, '4f37c5820ac0c372480eb62e48250a0e', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation, the LANE 0.2.3 R4 one-line HOST literal alignment, the R5 DUAL-read session-surface, the R7 getSessionEvents-collapse + surface-probe, the R9 fb-308 session-log finalize re-freeze, the R10 fb-306 rotation-close seal re-freeze AND the R11 LANE ROTACIÓN DE MODELO deepseek-flash literal re-freeze (md5 4f37c582…)')
+    // Zone md5 RE-FROZE R12 (LANE MPC-PREFLIGHT, 2026-09-10 — the model-pin ↔
+    // live-catalog coherence guard, fb-42 subclase C1): the TWO model-route
+    // constants (WORKER_AGENT_OPTIONS / HOST_AGENT_OPTIONS) became REFERENCES to
+    // the single source in ./model-pins.ts (the guard's tramo P3 imports those
+    // SAME objects — the «cero drift por literales duplicados» requirement of
+    // the frozen spec) + the two doc comments were rewritten to carry that
+    // provenance. VALUES byte-identical (opencode-zen / deepseek-flash / max),
+    // no closure moved and no surface member was added or removed. md5
+    // 4f37c582… → dc8d350b1df79d2c9d64b6591eb967de (same span, const-reference
+    // + comment-only).
+    // Zone md5 RE-FROZE R12b (LANE MPC-PREFLIGHT, same lane — the LOADING SEAM):
+    // the two constants are now resolved through the guard core's LAZY «.js or
+    // .ts» createRequire seam (a STATIC relative `.js` sibling in this factory's
+    // static graph is not rewritten by the src-native test loader), so the
+    // in-zone text gained the resolution lines + their provenance comment.
+    // STILL plumbing/literal only: no closure, no dep and no surface member
+    // moved; the resolved values are byte-identical. md5 dc8d350b… →
+    // bc1388f8d322f9569ccf5f9fd505ae1f (same span, loader-seam-only).
+    assert.equal(md5, 'bc1388f8d322f9569ccf5f9fd505ae1f', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation, the LANE 0.2.3 R4 one-line HOST literal alignment, the R5 DUAL-read session-surface, the R7 getSessionEvents-collapse + surface-probe, the R9 fb-308 session-log finalize re-freeze, the R10 fb-306 rotation-close seal re-freeze, the R11 LANE ROTACIÓN DE MODELO deepseek-flash literal re-freeze AND the R12/R12b LANE MPC-PREFLIGHT const-reference + loading-seam re-freeze (md5 bc1388f8…)')
     // The D1 deviation is present and documented: the factory's repoRoot
     // initializer carries THREE '..' (module-position-dependent, identical
     // value — the factory lives 3 levels under the repo root).

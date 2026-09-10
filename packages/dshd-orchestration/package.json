@@ -7,6 +7,14 @@
   "types": "lib/index.d.ts",
   "exports": {
     ".": "./lib/index.js",
+    "./model-pins": {
+      "types": "./lib/model-pins.d.ts",
+      "default": "./lib/model-pins.js"
+    },
+    "./model-pins-runner": {
+      "types": "./lib/model-pins-runner.d.ts",
+      "default": "./lib/model-pins-runner.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

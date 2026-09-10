@@ -69,6 +69,7 @@
  * service surface the brief planned via ctx.provide is deferred to the hito-4
  * package migration; the seams are the returned PresetsSurface members).
  */
+import { createRequire } from 'node:module'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { mkdir, readFile, writeFile, readdir, copyFile, stat, rename, unlink, appendFile } from 'node:fs/promises'
@@ -106,6 +107,34 @@ import type { PostEntry, HostEntry } from 'dshd-core'
 import type { MessagesStore } from 'dshd-core'
 import type { DeliverySurface } from './delivery.js'
 import type { Config, CoordinatorConfig, DepartmentConfig } from './org-types.js'
+// MPC-PREFLIGHT (fb-42 subclase C1): the model-route CONSTANTS (tramo P3) live
+// in the guard's pure module (./model-pins.ts) so the guard and the runtime can
+// never drift by a duplicated literal.
+//
+// LOADING SEAM (deviation from a static import, deliberate and documented): a
+// STATIC relative `.js` sibling pulled into THIS module's static graph is not
+// rewritten by the src-native test loader (`test/ts-src-loader.mjs` hooks only
+// the DYNAMIC graph), and a plain `createRequire` resolves only the COMPILED
+// sibling — so the guard core is resolved lazily through BOTH forms with the
+// `.ts` fallback, the same «.js or .ts» seam `dshd-core/session-cleanup.ts`
+// uses. Resolution happens ONCE, at the first factory construction (the values
+// are then frozen into the surface exactly as before — R6: same names, same
+// values, opencode-zen / deepseek-flash / max).
+type ModelPinsCore = {
+  WORKER_AGENT_OPTIONS: { provider: string; model: string; reasoningEffort?: string }
+  HOST_AGENT_OPTIONS: { provider: string; model: string; reasoningEffort?: string }
+}
+let modelPinsCore: ModelPinsCore | undefined
+const loadModelPinsCore = (): ModelPinsCore => {
+  if (modelPinsCore !== undefined) return modelPinsCore
+  const req = createRequire(fileURLToPath(import.meta.url))
+  try {
+    modelPinsCore = req('./model-pins.js') as ModelPinsCore
+  } catch {
+    modelPinsCore = req('./model-pins.ts') as ModelPinsCore
+  }
+  return modelPinsCore
+}
 
 // ---------------------------------------------------------------------------
 // Local structural mirrors of the bundle-local harness views (src/invoke.ts
@@ -311,38 +340,31 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
    * but framed as a temporary rank-and-file researcher). Materialized into the
    * harness-home user preset root alongside the head preset. */
   const WORKER_PRESET_ID = 'deepartments-worker'
-  /** F7 (owner decision 2026-08-23 — provider migration to opencode-zen): the
-   * runtime-materialized department workers run the SAME provider/model route
-   * as the coordinator (cordis.patch.yml — opencode-zen /
-   * deepseek-flash, reasoningEffort max). ONE source shared by
-   * the three spawn paths (dept_post_create, dept_job_run, dept_worker_spawn)
-   * so the worker route cannot drift from the config again. */
-  const WORKER_AGENT_OPTIONS: AgentOptionsLike = {
-    provider: 'opencode-zen',
-    model: 'deepseek-flash',
-    reasoningEffort: 'max'
-  }
-  /** VARIANT-2 (2026-08-24) — post-restart host AgentOptions intermittently
-   * empty: the plugin's OWN D4 dormant-host bus delivery (busDeliverToHost)
-   * resumes the host with `agents.resume({ resumeSessionId, setup })` and NO
-   * agentOptions → `agent.options = {}` → the dsh-agent-loop request waterfall
-   * throws `agent "session-<uuid>" has no provider/model` at the first
-   * post-boot materialization. The D4 setup only mounts the 'deepartments'
-   * preset and does NOT installSelection, so `agent.options` MUST be the
-   * carrier — mirror heads/workers (WORKER_AGENT_OPTIONS /
-   * coordinator.agentOptions) to make the HOST symmetric: pass the FULL
-   * constant (provider/model/reasoningEffort) at the D4 resume (invoke.ts:8760)
-   * so `this.options` is non-empty at EVERY host materialization → the
-   * request waterfall returns it → no `no provider/model`. NOTE:
-   * defaultModelSelection().agentOptions() (dsh-host-apiproxy) DROPS
-   * reasoningEffort — pass the FULL constant, not a provider/model-only
-   * partial. ONE source shared by the D4 host resume so the host route cannot
-   * drift from the config again (mirrors the F7 WORKER_AGENT_OPTIONS). */
-  const HOST_AGENT_OPTIONS: AgentOptionsLike = {
-    provider: 'opencode-zen',
-    model: 'deepseek-flash',
-    reasoningEffort: 'max'
-  }
+  // F7 (owner decision 2026-08-23 — provider migration to opencode-zen): the
+  // runtime-materialized department workers run the SAME provider/model route
+  // as the coordinator (cordis.patch.yml — opencode-zen / deepseek-flash,
+  // reasoningEffort max). VARIANT-2 (2026-08-24): the D4 dormant-host resume
+  // (busDeliverToHost, delivery.ts:2007) resumes the host with NO agentOptions
+  // → `agent.options = {}` → the dsh-agent-loop waterfall throws
+  // `agent "session-<uuid>" has no provider/model` at the first post-boot
+  // materialization, so the HOST passes the FULL constant (pass
+  // provider/model/reasoningEffort: defaultModelSelection().agentOptions()
+  // DROPS reasoningEffort).
+  //
+  // MPC-PREFLIGHT (lane IPD): the TWO constants ALREADY LIVED HERE, and the
+  // incident 09-10 showed why a guard that re-declares them as literals is
+  // worthless (lib/presets.js:71/92 still pinned the legacy id at 12:41Z while
+  // the catalog had already rotated). They are now REFERENCES to the SINGLE
+  // SOURCE in ./model-pins.ts — the guard's tramo P3 imports those SAME objects
+  // (the «cero drift por literales duplicados» requirement of the frozen spec)
+  // — loaded LAZILY (dynamic import, the idiom this codebase already uses for
+  // optional services). A STATIC relative `.js` sibling in this module's static
+  // graph is NOT rewritten by the src-native test loader; the lazy form resolves
+  // in BOTH worlds (the built lib AND `node --loader test/ts-src-loader.mjs`).
+  // NAMES and VALUES are unchanged (R6: opencode-zen / deepseek-flash / max).
+  const { WORKER_AGENT_OPTIONS: WORKER_AGENT_OPTIONS_CONST, HOST_AGENT_OPTIONS: HOST_AGENT_OPTIONS_CONST } = loadModelPinsCore()
+  const WORKER_AGENT_OPTIONS: AgentOptionsLike = WORKER_AGENT_OPTIONS_CONST
+  const HOST_AGENT_OPTIONS: AgentOptionsLike = HOST_AGENT_OPTIONS_CONST
   /** fb-6 (QH — the resume/re-materialization "has no provider/model" class):
    * the ONE materializePost AgentOptions resolution point — the configured
    * `coordinator?.agentOptions` when it carries a USABLE provider/model, else

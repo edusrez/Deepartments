@@ -3485,6 +3485,11 @@ export function applyInvoke(ctx: Context, config: Config) {
     }
   }
   ctx.get('deepartments.presetsDeps', false)?.register(presetsDeps)
+  // MPC-PREFLIGHT (2026-09-10): the factory stays SYNCHRONOUS — the model-route
+  // constants it hands to spawn/tools/delivery are the SINGLE SOURCE in
+  // dshd-orchestration/model-pins.ts, loaded through the factory's own lazy
+  // `createRequire` seam (a static relative `.js` sibling in the factory's
+  // static graph is not rewritten by the src-native test loader).
   const presetsSurface: PresetsSurface = (ctx.get('deepartments.presets', false) as PresetsSurface | undefined) ?? createPresetsOrchestration(ctx, presetsDeps)
   const {
     HOST_AGENT_OPTIONS,
