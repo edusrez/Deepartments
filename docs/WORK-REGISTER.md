@@ -907,17 +907,23 @@
     tools.ts:1393 raw.add(stateDir) incluye stateDir; deny
     /root/.deepartments = workspace by-design, no stateDir; QD q-i-20 no
     re-abre)** · GUI monitor job gui-monitor-mode CERRADO (2026-09-04).
-- **fb-545 (13 rojos pre-existentes de `test/invoke.test.js` en HEAD `39ba33b` — LANE DE
-  CLASIFICACIÓN, **CERRADA-en-clasificación**; docs-only, 0 commits, 0 ediciones;
-  reporte + DOBLE gate de reviewer, ronda 1 y ronda 2) — resultado **12 OBSOLETO**
+- **fb-548 (CANÓNICO; `fb-545` = el original ARCHIVADO como duplicado suyo:
+  `duplicate_of: fb-548`, `cerrado_por: quality-head` — medido por el host en el
+  ledger y corroborado por el dedupe del backlog: LIVE, `abierto`,
+  `triage_owner: internal-programming-head`) — 13 rojos pre-existentes de
+  `test/invoke.test.js` en HEAD `39ba33b` — LANE DE CLASIFICACIÓN,
+  **CERRADA-en-clasificación**; docs-only, 0 commits, 0 ediciones; reporte +
+  DOBLE gate de reviewer, ronda 1 y ronda 2 — resultado **12 OBSOLETO**
   (por DISEÑO 10: #16, #78, #113, #149, #157, #185, #301, #459, #503, #517 · por
   FIXTURE 2: #116, #118) · **1 REAL (#151)** · **0 FALSO-RACE**.**
   Los **13 presentes SIEMPRE** (14/14 presencias en ronda 1 y ronda 2 —
   2 suites + 2 aisladas + las 3 limpias del reviewer ronda 2): el reviewer de
   ronda 2 corrió la suite completa **3 veces, secuencial y sola**
   (23:19:16 / 23:20:29 / 23:25:25 UTC, **568/533/13/22 EXIT=1 las TRES**, los
-  mismos 13 rojos y un solo bloque TAP) ⇒ **la baseline 13 SÍ se reproduce**;
-  lo que existe es un **flake INTERMITENTE FUERA de los 13**, NO una baseline 14.
+  mismos 13 rojos y un solo bloque TAP) ⇒ **la baseline 13 SÍ se reproduce** y es
+  la **declarable**: **13 rojos CON NOMBRE** (los mismos en 3/3), **NUNCA una
+  cifra suelta**; lo que existe es un **flake INTERMITENTE FUERA de los 13**
+  (clase con dueño, ver (4)), NO una baseline 14.
   Claves medidas: **#116/#118 = OBSOLETO-por-fixture** (el reviewer lo reprodujo
   con instrumento PROPIO: `[R2-MOUNT]`=0, `[R2-APPLY]`=0, `[R2-AUDITDIR]`=0,
   `[R2-REJECT]`=7 y literal del `catch` **byte-equivalente**) · **10/10** presets
@@ -931,27 +937,46 @@
   baseline, ya corregido) `/root/.deepartments/departments/internal-programming/reports/reviewer/2026-09-10-fb545-ronda2-review.md`
   (run token `d3d3cd00`).
   **FOLLOW-UPS ABIERTOS (sin lane asignada; los abre esta línea)**:
-  (1) **fixture de #116/#118/#113** — hacer resolubles las filas del preset en el
-  entorno hermético **o** asertar el montaje con un campo de razón de no-montaje
-  (`unmountableReason`; nota de exactitud: ese símbolo NO existe hoy en el árbol —
-  la razón medida en el producto vive en `preset.broken`,
-  `node_modules/@deepseek-ai/dsh-agent-presets/lib/index.js:406/:413/:1406-1409`),
-  porque hoy el fallo de montaje es invisible y el fixture se cree «montado»;
-  (2) **`#151` y `#82` comparten raíz** — `ensureAllHeads` fire-and-forget
-  (`packages/dshd-orchestration/src/tools.ts:5421-5422`, sin await ni catch;
-  terminales distintos: `createScope`/`INACTIVE_EFFECT` vs `Object.setup`/`without
-  inject`) ⇒ **candidato a feedback propio** (rechazo huérfano cobrado al test que
-  corre); (3) **pregunta de DISEÑO de `#517`** — si la lane F8 pretende que un close
-  directive despierte en boot a un head dormido, entonces **#517 sería REAL y la
-  guarda B3 el bug** (hoy se clasifica OBSOLETO-por-diseño por esa guarda); (4)
-  **flake intermitente fuera de los 13** — #82, #100, #168, #173, #174, #175, #547,
-  #340 (sin tasa afirmada); (5) **A2c** — título del bloque HERMANO
+  (1) **fixture de #116/#118/#113 — DECISIÓN (ii) del host**: los tests deben
+  **asertar el estado real** (`preset.broken`;
+  `node_modules/@deepseek-ai/dsh-agent-presets/lib/index.js:406`/`:413`/`:1406-1409`;
+  **`unmountableReason` NO existe**) y **dejar de afirmar un montaje que la suite
+  hermética no puede producir**; **NO** hacer montables las filas (hoy el fallo de
+  montaje es invisible y el fixture se cree «montado»);
+  (2) **`#151` y `#82` — `fb-580` (canónico)**: una ficha, dos manifestaciones,
+  raíz común `packages/dshd-orchestration/src/tools.ts:5421-5422`
+  (`ensureAllHeads` fire-and-forget, sin await ni catch; terminales distintos:
+  `createScope`/`INACTIVE_EFFECT` vs `Object.setup`/`without inject`) ⇒ el **fix va
+  DESPUÉS de la misión C**, con test que reproduzca el `unhandledRejection`;
+  (3) **`#517` — PRECONDICIÓN DECLARADA (decisión del host)**: permanece
+  **OBSOLETO-por-diseño**; **si una lane futura reintroduce semántica F8/sueño de
+  head**, entonces **`#517` pasa a REAL y la guarda B3 pasa a ser el bug** (el sleep
+  de heads está **RETIRADO desde el LOTE A**; sólo el host rota);
+  (4) **CLASE FLAKE fuera de los 13 — `fb-581` (canónico; dueño QD)**: baseline
+  declarable = **13 rojos CON NOMBRE** (los mismos en 3/3: 568 tests/533 pass/13
+  fail/22 skipped, EXIT=1), **NUNCA una cifra suelta**; extras **intermitentes y
+  variables** (0, 0, +2 ⇒ `#82`/`#100`; en concurrencia 15/16/16 con
+  `#340`/`#168`/`#173`/`#174`/`#175`/`#547`); **constraint del host: la suite SIEMPRE
+  secuencial y en solitario**; **criterio QD**: antes de clasificar **REAL** cualquier
+  rojo futuro ⇒ **N≥3 corridas secuenciales y en solitario + dos columnas**; límite
+  declarado: N=3 **no** permite estimar tasa;
+  (5) **A2c** — título del bloque HERMANO
   `test/invoke.test.js:8355` (`fb-33` crash-safety) factualmente falso y
   autocontradictorio con su propio cuerpo; (6) **docstring stale**
   `test/invoke.test.js:10827-10828` (`snapshotRoleTemplate`, ejemplo de
-  `execbuilder.md` «restores to ABSENCE»). **NOTA `fb-548`**:
-  «`fb-548` = restatement del IPD; dirección del pliegue pendiente de confirmación
-  del host» (la contradicción es real; el host la resolverá en su misión C).
+  `execbuilder.md` «restores to ABSENCE»);
+  (7) **HUECO ESTRUCTURAL con dueño (QD) — canónico `fb-582`** (`fb-579` = el
+  original del IPD, ARCHIVADO como duplicado suyo: `duplicate_of: fb-582`,
+  `cerrado_por: quality-head`): en la suite hermética **NINGÚN preset se monta
+  (10/10 rechazos)** ⇒ hoy ningún test puede probar que una fila de preset **se
+  APLICA** ⇒ un preset roto y uno correcto producen **el mismo verde**; y `fb-435`
+  añade interferencia (la suite además **REVIERTE** ediciones no commiteadas de
+  `presets/**`) — pista de cierre: el rechazo viene del **walk en disco del
+  pre-flight** (4 filas MISSING reales vs `dsh-deepartments/subagent` importable por
+  Node). **NOTA `fb-548` (RESUELTA — medida en el ledger)**: el **canónico** es
+  `fb-548` (LIVE, `abierto`, `triage_owner: internal-programming-head`) y `fb-545`
+  queda **ARCHIVADO como duplicado suyo**; ya NO hay «pliegue pendiente de
+  confirmación del host».
   — next: internal-programming-head
 - **CERRADOS en esta cola (no pedir de nuevo):** M4 (system-idle),
   M-A (context-threshold + dept_head_rotate), PACING (peak/valle),
