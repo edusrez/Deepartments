@@ -3752,7 +3752,12 @@ export function applyInvoke(ctx: Context, config: Config) {
       get resolveBusChild() { return deliverySurface.resolveBusChild },
       get deliverBusChild() { return deliverySurface.deliverBusChild },
       get freshMintHead() { return deliverySurface.freshMintHead },
-      get enqueueHostWake() { return deliverySurface.enqueueHostWake }
+      get enqueueHostWake() { return deliverySurface.enqueueHostWake },
+      // fb-300/fb-301 (VALLE 09-09 — rematerialización de toolset post-smart_restart):
+      // the toolset-reassertion action (the boot heal's re-derivation seam — the
+      // delivery surface member built at the delivery factory position; the
+      // tools factory's runToolsetReassertion dereferences it at CALL time).
+      get reassertPostToolset() { return deliverySurface.reassertPostToolset }
     }
   }
   ctx.get('deepartments.toolsDeps', false)?.register(toolsDeps)
@@ -3879,6 +3884,10 @@ export function applyInvoke(ctx: Context, config: Config) {
     workerSetup,
     resolveMaterializeAgentOptions,
     resolveRoleTemplate,
+    // fb-300/fb-301 (VALLE 09-09 — rematerialización de toolset post-smart_restart):
+    // the resume-seam toolset-assertion dep (the same by-reference channel the
+    // tools factory consumes): the toolset-audit writer for the 'unarmed' rows.
+    appendToolsetAudit,
     resolveDepartmentWorkspaceCwd,
     resolveWorkspaceRootPath,
     rotateArchivedHeadSessionId,

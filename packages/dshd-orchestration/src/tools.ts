@@ -665,6 +665,11 @@ export interface ToolsFactoryDeps {
     deliverBusChild: DeliverySurface['deliverBusChild']
     freshMintHead: DeliverySurface['freshMintHead']
     enqueueHostWake: DeliverySurface['enqueueHostWake']
+    /** fb-300/fb-301 (VALLE 09-09): the DeliverySurface's toolset-reassertion
+     * action — the boot heal's re-derivation seam (dispose+cold / in-place
+     * re-arm), built at the DELIVERY factory position, AFTER this factory,
+     * dereferenced only at CALL time (the boot wiring fires post-boot). */
+    reassertPostToolset: DeliverySurface['reassertPostToolset']
   }
 }
 
@@ -748,6 +753,15 @@ export interface ToolsSurface {
    * wiring fires it after the redelivery drain; the W1 daemon effect drains it
    * at dispose. NEVER throws. */
   schedulerLatchReconcile: (opts?: { now?: () => number }) => Promise<void>
+  /** fb-300/fb-301 (VALLE 09-09 — rematerialización de toolset post-smart_restart):
+   * the BOOT HEAL pass — re-derives the toolset of every LIVE post whose
+   * session never passed the deepartments setup seam (the harness-restored
+   * "AGENT REGISTRY ONLY" smart-restart shape): dispose + cold-resume when
+   * IDLE + unarmed, in-place re-arm for a registry-only session, warn+defer for
+   * a RUNNING target (never disarmed — fb-301). The bundle's boot wiring fires
+   * it AFTER the redelivery drain; the tests drive it directly via the surface.
+   * NEVER throws. */
+  runToolsetReassertion: (opts?: { now?: () => number }) => Promise<void>
   /** The W6 health daemon's per-tick live inputs (posts / hostRunning /
    * sessionContexts / hostWaits builders) + the ALERT delivery closure + the
    * static per-process health deps (pooler state path / boot id). */
@@ -1258,6 +1272,10 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   const deliverBusChild: ToolsFactoryDeps['late']['deliverBusChild'] = (...args) => late.deliverBusChild(...args)
   const freshMintHead: ToolsFactoryDeps['late']['freshMintHead'] = (...args) => late.freshMintHead(...args)
   const enqueueHostWake: ToolsFactoryDeps['late']['enqueueHostWake'] = (wake) => late.enqueueHostWake(wake)
+  // fb-300/fb-301 (VALLE 09-09): the toolset-reassertion thunk (the boot heal's
+  // re-derivation seam — dereferenced at CALL time, post-boot; the delivery
+  // surface member is built at the delivery factory position, AFTER this one).
+  const reassertPostToolset: ToolsFactoryDeps['late']['reassertPostToolset'] = (entry, opts) => late.reassertPostToolset(entry, opts)
 
   // --- LANE FEEDBACK-NUDGE (opción B — ROADMAP.md:663): the `tools/post-execute`
   // waterfall registration. SOLO cuando una tool LANZA error se anexa un
@@ -5156,6 +5174,41 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     }
   }
 
+  /** fb-300/fb-301 (VALLE 09-09 — rematerialización de toolset post-smart_restart;
+   * clase fb-18 contrato): the BOOT HEAL pass. Every NON-retired post whose LIVE
+   * session did NOT pass through the deepartments setup seam — a harness-
+   * restored "AGENT REGISTRY ONLY" session (the smart-restart resume shape,
+   * boot.ts:943-944; the shape that left builder-221 post-restart without
+   * dept_exec — 0 audit rows) — is RE-DERIVED against the fb-18 role-toolset
+   * contract via the delivery seam `reassertPostToolset`: mismatch AND IDLE →
+   * dispose + cold-resume (the full setup re-derivation + audit — the same
+   * proven cold path); a RUNNING target is NEVER disarmed (fb-301 — a mid-turn
+   * agent is deferred to its next idle wake); an ARMED target is a no-op (the
+   * fast-path B of durable custom tools stands). Runs SEQUENCED AFTER the
+   * redelivery drain: a post with a pending 'prepared'/'failed' delivery is
+   * re-materialized COLD with the full setup by the redelivery FIRST — the heal
+   * only catches the posts it left live-but-unarmed (an idle worker with no
+   * pending delivery — the exact fb-300 case). Non-fatal per post + per pass;
+   * exposed on the ToolsSurface (the boot wiring + the tests drive it). */
+  const runToolsetReassertion = async (opts: { now?: () => number } = {}): Promise<void> => {
+    try {
+      if (agents === void 0) return
+      for (const [postId, entry] of byPost) {
+        if (entry.retired === true) continue
+        try {
+          const reasserted = await reassertPostToolset(entry, opts)
+          if (reasserted.outcome !== 'armed' && reasserted.outcome !== 'not-live') {
+            ctx.logger.info(`[deepartments] toolset reassertion: "${postId}" → ${reasserted.outcome}${reasserted.missing.length > 0 ? ` (missing [${reasserted.missing.join(', ')}])` : ''}`)
+          }
+        } catch (error: unknown) {
+          ctx.logger.warn(`[deepartments] toolset reassertion for "${postId}" failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] toolset reassertion reconcile failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   // Boot: materialize the head preset and every configured head once the
   // registries (posts/hosts) have cold-loaded — and re-drive any crash-pending
   // bus deliveries (see the re-delivery driver below). Head materialization no
@@ -5175,6 +5228,13 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       () => { void runOfflineWorkerReapReconcile(); void runSchedulerLatchReconcile() },
       () => { void runOfflineWorkerReapReconcile(); void runSchedulerLatchReconcile() }
     )
+    // fb-300/fb-301 (VALLE 09-09 — rematerialización de toolset post-smart_restart):
+    // the TOOLSET REASSERTION heal — SEQUENCED AFTER the redelivery drain (a
+    // pending post is re-materialized COLD with the full setup by the
+    // redelivery FIRST; the heal catches the posts it left live-but-unarmed —
+    // the harness-restored "AGENT REGISTRY ONLY" sessions). See
+    // runToolsetReassertion above.
+    void runToolsetReassertion()
     // LANE ② (item 2 — "re-drive no-boot-only"): the NON-BOOT redelivery
     // SWEEP is armed at factory build (startRedeliverySweep above — the
     // ctx.effect must register in-fiber); the pending failed/prepared pairs
@@ -7058,6 +7118,9 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     // LATCH-RECONCILE closure — the boot wiring fires it post-redelivery; the
     // bundle's W1 daemon effect drains it at dispose.
     schedulerLatchReconcile: runSchedulerLatchReconcile,
+    // fb-300/fb-301 (VALLE 09-09): the TOOLSET REASSERTION boot-heal pass — the
+    // boot wiring fires it post-redelivery; the tests drive it directly.
+    runToolsetReassertion,
     buildHealthPosts,
     buildHostRunning,
     buildSessionContexts,

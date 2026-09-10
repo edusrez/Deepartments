@@ -30,6 +30,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { createUserMessage, boundContextSummary } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { randomUUID } from 'node:crypto'
@@ -308,7 +309,6 @@ function sanitizeDirectiveReasonCites(reason: string, verdicts: Map<string, Cite
   }
   return out
 }
-
 // ---------------------------------------------------------------------------
 // Local structural mirrors of the bundle-local harness views (src/invoke.ts
 // declares these at module scope but does NOT export them — the export-parity
@@ -371,6 +371,48 @@ interface AgentsLike {
     setup?: (agentCtx: Context) => unknown
     signal?: AbortSignal
   }): Promise<AgentHandleLike>
+}
+
+// ---------------------------------------------------------------------------
+// fb-300/fb-301 (VALLE 09-09 — rematerialización de toolset post-smart_restart;
+// clase fb-18 contrato): the RESUME-SEAM toolset-assertion contract — the
+// MODULE-PRIVATE constants + PURE kernel the materializePost resume guard AND
+// the boot heal share. The own-layer names installHeadBoardTools registers on
+// EVERY post own layer (bus + feedback-emit + calendar + memo — tools.ts:2869-
+// 3058) are the SETUP SIGNAL: a session the harness restored into the agent
+// registry WITHOUT the deepartments setup (the smart-restart "AGENT REGISTRY
+// ONLY" resume shape — boot.ts:943-944) shows the preset/global capability
+// tools but NONE of the own-layer names — so the own-layer probes are the
+// DISCRIMINATOR (the globals are visible on both, the restrict mask only ever
+// REMOVES visibility). Head adds the manager-gated owns; the allowExec-gated
+// seam pair is derived (P2-ENTRY: a role that declares dept_exec also gets
+// dept_zstd_read). 0 new module exports — the bundle export-parity lock
+// (lib/invoke.js at 327) and the frozen CUT-4 zone stay untouched; the pure
+// kernel is exercised THROUGH the factory surface in the tests. Placement:
+// AFTER the structural mirrors block (never above it — the followup-contract
+// lock anchors delivery.ts:334).
+// ---------------------------------------------------------------------------
+const RESUME_UNIVERSAL_OWN_LAYER_PROBES: readonly string[] = [
+  'send_message', 'agent_messages', 'dept_who', 'dept_memo_write',
+  'dept_feedback', 'dept_calendar_add', 'dept_calendar_list', 'dept_calendar_remove'
+]
+/** The manager (head) own-layer additions: the feedbackHeadTools pair + the
+ * batch-3a department-lifecycle tools + the M2.3 secretary. */
+const RESUME_HEAD_OWN_LAYER_PROBES: readonly string[] = [
+  'dept_feedback_list', 'dept_feedback_update', 'dept_post_create', 'dept_post_retire',
+  'dept_worker_spawn', 'dept_worker_retire', 'dept_job_list', 'dept_job_run', 'dept_monitor_list', 'secretary'
+]
+/** The allowExec-gated seam pair (installHeadBoardTools opens the SAME gate for
+ * dept_exec and dept_zstd_read when the role allow-list declares dept_exec). */
+const RESUME_EXEC_GATE_PAIR: readonly string[] = ['dept_exec', 'dept_zstd_read']
+
+/** PURE — the missing-expected-tools verdict (the assertWorkerToolsetResult
+ * shape, spawn.ts:1231): `visible === undefined` (no live-scope oracle — a
+ * capability-less composition without a scope key) degrades to `[]` (never a
+ * false-positive heal / guard). Never throws. */
+function missingPostTools(expected: readonly string[], visible: readonly string[] | undefined): string[] {
+  if (visible === undefined) return []
+  return expected.filter((name) => !visible.includes(name))
 }
 
 /** Structural view of the `agentPresets` service surface (mirrors the
@@ -441,6 +483,12 @@ export interface DeliveryFactoryDeps {
    * exists (a LEGACY dept_post_create free-form-role worker — board-only by
    * design, never failed). */
   resolveRoleTemplate: (departmentId: string, role: string) => Promise<{ id: string; title: string; tools?: string[]; persona: string; path: string } | undefined>
+  /** fb-300/fb-301 — the toolset-audit channel (src/toolset-audit.ts module-scope
+   * appendToolsetAudit, passed by reference — the SAME channel the postSetup
+   * waypoints write): the resume-seam 'unarmed'/'heal' waypoint rows. The
+   * audit covers the healed post so the fb-300 class is observable (the pre-fix
+   * evidence gap: 0 audit rows post-restart). */
+  appendToolsetAudit: (stateDir: string | undefined, entry: Record<string, unknown>) => void
   /** Resolve the duplicate-safe materialization AgentOptions (coordinator →
    * WORKER_AGENT_OPTIONS fallback). */
   resolveMaterializeAgentOptions: (candidate: AgentOptionsLike | undefined) => AgentOptionsLike
@@ -626,6 +674,37 @@ export interface DeliverySurface {
   busEnsureHostForCaller: (callerAgent: { id: string; session?: { header?: SessionHeaderWithOrigin } }) => string
   /** The 1..20 fan-out guard (spec §4.4). */
   assertBusFanOut: (to: readonly string[]) => number
+  /** fb-300/fb-301 (VALLE 09-09 — rematerialización de toolset post-smart_restart):
+   * the TOOLSET REASSERTION action shared by the materializePost resume guard
+   * and the boot heal (`runToolsetReassertion`, tools.ts). Verifies a POST's
+   * live session against the fb-18 role-toolset contract — the expected names
+   * are the OWN-LAYER probes installHeadBoardTools registers (the setup seam's
+   * fingerprint: the awaited postSetup closure runs mount → probe → restrict →
+   * own-layer in ONE body, so the own-layer landing proves the whole derivation
+   * ran; the ENV-DEPENDENT preset globals are deliberately NOT checked — a
+   * harness-restored session shows them too, the fb-300 evidence: read/grep/
+   * glob OK; the worker DECLARED allow-list still resolves through
+   * resolveMaterializeWorkerTools — the B durable `entry.tools` fast-path
+   * FIRST and never bypassed — for the allowExec-gated pair derivation) and
+   * heals a session the setup-derivation seam never ran on (the harness-
+   * restored "AGENT REGISTRY ONLY" shape):
+   *   - 'armed' — the expected toolset is present (exact no-op — the fast-path
+   *     B of durable custom tools stands);
+   *   - 'dispose-cold' — an IDLE unarmed session whose handle the bundle owns
+   *     (byHeadHandle) was DISPOSED and COLD re-materialized (the full setup
+   *     re-derivation + audit — the same proven cold path);
+   *   - 'rearm-inplace' — a registry-only restored session (no bundle handle —
+   *     the AgentRegistry exposes no per-agent detach) was re-armed IN PLACE
+   *     with the same setup derivation on its live ctx (the apply-standing
+   *     precedent; safe: an unarmed scope was never restricted/own-layer-
+   *     registered — no double mask);
+   *   - 'running-deferred' — a RUNNING target is NEVER disarmed (fb-301 — a
+   *     mid-turn agent is left for its next idle wake; the wake continues on
+   *     the degraded toolset instead of interrupting a real turn);
+   *   - 'not-live' — no live session (no-op).
+   * `missing` = the missing expected names (never empty on a heal). NEVER
+   * throws; `opts.now` fixes the audit timestamp (tests). */
+  reassertPostToolset: (entry: PostEntry, opts?: { now?: () => number }) => Promise<{ outcome: 'not-live' | 'armed' | 'dispose-cold' | 'rearm-inplace' | 'running-deferred'; missing: string[] }>
 }
 
 /** O1 (LANE ② — the auto-retire-on-delivery race, 3 samples today 34→16→3ms):
@@ -759,6 +838,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     workerSetup,
     resolveMaterializeAgentOptions,
     resolveRoleTemplate,
+    appendToolsetAudit,
     resolveDepartmentWorkspaceCwd,
     resolveWorkspaceRootPath,
     rotateArchivedHeadSessionId,
@@ -1023,6 +1103,161 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     return undefined
   }
 
+  // ---------------------------------------------------------------------------
+  // fb-300/fb-301 — the RESUME-SEAM TOOLSET ASSERTION (the fb-18 contract
+  // mirrored at the resume/live path — the shared kernel of the materializePost
+  // resume guard AND the `reassertPostToolset` surface member the boot heal
+  // (tools.ts runToolsetReassertion) drives). M2.4 dual-dsh-scope + the
+  // capability-less degradation follow the spawn.ts:1204 agentScopeKey pattern:
+  // a stub composition without a scope key degrades to `undefined` (no-oracle →
+  // `missing: []` → the guard/heal become a no-op, 0 regressions).
+  // ---------------------------------------------------------------------------
+  /** The agent scope key read (mirrors tools.ts `agentScopeOf` :2843 — the M2.4
+   * dual-dsh-scope fallback: `scopeOf(agentCtx)` in hermetic (one instance),
+   * `agentCtx.agent` in the live profile (the harness's real scope key)).
+   * DEFENSIVE (spawn.ts:1196-1216): a minimal stub composition (no dsh-scope,
+   * no `agent` binding) degrades to `undefined`, never throws. */
+  const agentScopeKeyOf = (agentCtx: Context): object | undefined => {
+    try {
+      const viaScope = scopeOf(agentCtx)
+      if (viaScope !== void 0) return viaScope
+    } catch {
+      // scopeOf unavailable for this ctx → fall through
+    }
+    try {
+      return (agentCtx as unknown as { agent?: object }).agent
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The fb-18 role-EXPECTED resume toolset for a post — the DERIVATION-SEAM
+   * FINGERPRINT: the OWN-LAYER names installHeadBoardTools registers
+   * (universal for every post + the manager-gated head additions + the
+   * allowExec-gated pair when the role DECLARES dept_exec — a role that
+   * declares it also gets dept_zstd_read, P2-ENTRY). The declared capability
+   * names (HEAD_BASE_TOOLS / the role's read/write/…) are deliberately NOT in
+   * the expected set: they are ENVIRONMENT-DEPENDENT preset contributions
+   * (absent in hermetic compositions, masked/visible per restrict in live) and
+   * therefore CANNOT discriminate the resumed-unarmed class (an unarmed
+   * session shows the globals too — the fb-300 evidence: read/grep/glob OK —
+   * while NONE of the own-layer names exist on it). The own-layer registration
+   * is the setup seam's irrevocable fingerprint: the awaited postSetup closure
+   * runs mount → probe → restrict → installHeadBoardTools in ONE body, so the
+   * own-layer landing proves the whole derivation ran. The worker declared
+   * LIST still resolves through resolveMaterializeWorkerTools (the B durable
+   * `entry.tools` fast-path is NEVER bypassed) for the exec-gate derivation. */
+  const expectedPostResumeTools = async (entry: PostEntry, role: string, dept: DepartmentConfig | undefined, isWorker: boolean): Promise<string[]> => {
+    if (isWorker) {
+      const declared = await resolveMaterializeWorkerTools(entry, role, dept)
+      const execGate = declared !== undefined && declared.includes('dept_exec') ? RESUME_EXEC_GATE_PAIR : []
+      return [...new Set([...RESUME_UNIVERSAL_OWN_LAYER_PROBES, ...execGate])]
+    }
+    return [...new Set([...RESUME_UNIVERSAL_OWN_LAYER_PROBES, ...RESUME_HEAD_OWN_LAYER_PROBES])]
+  }
+
+  /** The shared CHECK: expected-vs-lived knowns — { missing, expected } for one
+   * LIVE post. `missing.length === 0` = the session passed the derivation seam
+   * (armed); a non-empty list = the harness resumed it WITHOUT the deepartments
+   * setup (the fb-300/301 class). No live-scope oracle → missing [] (no-op). */
+  const reassertPostToolsetCore = async (entry: PostEntry, live: { ctx: Context }, isWorker: boolean): Promise<{ missing: string[]; expected: string[] }> => {
+    const role = coordinatorForPost(entry.postId)?.role ?? entry.role ?? 'department worker'
+    const expected = await expectedPostResumeTools(entry, role, departmentForEntry(entry), isWorker)
+    const key = agentScopeKeyOf(live.ctx)
+    if (key === void 0) return { missing: [], expected }
+    const visible = expected.filter((name) => live.ctx.tools.get(name, key) !== undefined)
+    return { missing: missingPostTools(expected, visible), expected }
+  }
+
+  /** The registry-only FALLBACK (a harness-restored session the bundle cannot
+   * dispose — the AgentRegistry exposes no public per-agent detach and
+   * resume/create reject an already-live id): RE-DERIVE IN PLACE — re-run the
+   * SAME setup derivation (preset mount → restrict allow-list → own-layer
+   * install → audit) on the session's LIVE ctx (the apply-standing precedent,
+   * src/subagent.ts:295-338). SAFE: an unarmed scope was NEVER restricted nor
+   * own-layer registered (no double mask, no duplicate insert — the design's
+   * documented fear of re-applying restrict applies only to an ARMED scope,
+   * which never reaches here). Best-effort: a throw (e.g. a partially-armed
+   * mid-setup-kill session with a duplicate section) is warned; the session
+   * stays degraded until the next boot heal / cold wake — the wake itself is
+   * never broken. */
+  const rearmLivePostInPlace = async (entry: PostEntry, live: { ctx: Context }, isWorker: boolean): Promise<void> => {
+    const role = coordinatorForPost(entry.postId)?.role ?? entry.role ?? 'department worker'
+    const dept = departmentForEntry(entry)
+    const workerTools = isWorker ? await resolveMaterializeWorkerTools(entry, role, dept) : undefined
+    const setup = isWorker
+      ? workerSetup(entry.postId, entry.roomId, role, { department: dept, ...(workerTools !== undefined ? { tools: workerTools } : {}) })
+      : headSetup(entry.postId, entry.roomId, role, entry.agentPreset ?? PRESET_ID, dept)
+    try {
+      await setup(live.ctx)
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] ${isWorker ? 'worker' : 'head'} "${entry.postId}" IN-PLACE toolset re-arm on the restored session FAILED (fb-300/fb-301 — the session stays degraded until the next boot heal / cold wake): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** The SHARED reassertion CORE (the boot heal + the materializePost resume
+   * guard share it): verify the live session's toolset against the fb-18
+   * contract and heal an IDLE unarmed session:
+   *   - 'armed' — the expected toolset is present (exact no-op — the fast-path
+   *     B of durable custom tools stands);
+   *   - 'running' — a RUNNING target is NEVER disarmed (fb-301 — a mid-turn
+   *     agent is left for its next idle wake); warn + audit, no mutation;
+   *   - 'disposed' — an unarmed session whose handle the bundle owns
+   *     (byHeadHandle) was DISPOSED (the registry entry released → the caller
+   *     falls to the COLD re-derivation);
+   *   - 'rearmed' — a registry-only restored session (no bundle handle) was
+   *     re-armed IN PLACE (the same setup derivation on its live ctx).
+   * Writes the 'unarmed' audit row on a heal. `missing` is the non-empty list
+   * on a heal / [] otherwise. NEVER throws. */
+  const reassertLivePostCore = async (entry: PostEntry, live: { ctx: Context; status: string }, isWorker: boolean, nowMs: () => number): Promise<{ verdict: 'armed' | 'running' | 'disposed' | 'rearmed'; missing: string[] }> => {
+    const kind = isWorker ? 'worker' : 'head'
+    const sessionId = String(SessionId(entry.sessionId))
+    if (live.status === 'running') {
+      // fb-301 — never disarm an agent MID-TURN (a real turn in flight): warn +
+      // audit and defer to the next idle wake (the running gate CONTRADICTS the
+      // fb-301 rotation-cut class: a mid-turn target is never disposed).
+      ctx.logger.warn(`[deepartments] ${kind} "${entry.postId}" resumed LIVE with a toolset the setup-derivation seam did not verify while its turn is RUNNING — NOT disarmed (fb-301); the heal re-arms it at the next idle wake`)
+      appendToolsetAudit(stateDir, { wp: 'unarmed', postId: entry.postId, kind, ts: nowMs(), reason: 'running-deferred' })
+      return { verdict: 'running', missing: [] }
+    }
+    const { missing, expected } = await reassertPostToolsetCore(entry, live, isWorker)
+    if (missing.length === 0) return { verdict: 'armed', missing: [] }
+    ctx.logger.warn(`[deepartments] ${kind} "${entry.postId}" resumed LIVE with a DEGRADED toolset — the deepartments setup never ran on this session (fb-300/fb-301); missing expected tool(s): [${missing.join(', ')}] (expected ${expected.length} name(s))`)
+    await disposeHeadHandle(sessionId)
+    if (agents === void 0 || agents.get(sessionId) === undefined) {
+      // (1) the bundle owned the handle (byHeadHandle) → the dispose released the
+      // registry entry → the caller falls to the COLD re-derivation (the full
+      // setup re-run + audit — the proven cold path, delivery.ts:1113-1115).
+      appendToolsetAudit(stateDir, { wp: 'unarmed', postId: entry.postId, kind, ts: nowMs(), reason: 'dispose-cold', missing: missing.join(',') })
+      return { verdict: 'disposed', missing }
+    }
+    // (2) the harness-restored registry-only session (no bundle handle) → the
+    // in-place re-arm (same derivation, live ctx).
+    appendToolsetAudit(stateDir, { wp: 'unarmed', postId: entry.postId, kind, ts: nowMs(), reason: 'rearm-inplace', missing: missing.join(',') })
+    await rearmLivePostInPlace(entry, live, isWorker)
+    return { verdict: 'rearmed', missing }
+  }
+
+  /** The SHARED REASSERTION ACTION (the surface member the boot heal drives;
+   * see the DeliverySurface member doc for the outcome semantics). 'disposed'
+   * is completed here by re-materializing COLD through materializePost (the
+   * re-derivation writes its own toolset-final audit); a rearmed/armed/running
+   * live target is left in place. NEVER throws. */
+  const reassertPostToolset = async (entry: PostEntry, opts: { now?: () => number } = {}): Promise<{ outcome: 'not-live' | 'armed' | 'dispose-cold' | 'rearm-inplace' | 'running-deferred'; missing: string[] }> => {
+    const nowMs = opts.now ?? (() => Date.now())
+    if (agents === void 0) return { outcome: 'not-live', missing: [] }
+    const isWorker = entry.provider === 'worker'
+    const live = agents.get(String(SessionId(entry.sessionId)))
+    if (live === void 0) return { outcome: 'not-live', missing: [] }
+    const { verdict, missing } = await reassertLivePostCore(entry, live, isWorker, nowMs)
+    if (verdict === 'armed') return { outcome: 'armed', missing: [] }
+    if (verdict === 'running') return { outcome: 'running-deferred', missing: [] }
+    if (verdict === 'rearmed') return { outcome: 'rearm-inplace', missing }
+    // 'disposed' → complete the heal with the COLD re-materialization.
+    await materializePost(entry)
+    return { outcome: 'dispose-cold', missing }
+  }
+
   /**
    * The SHARED post-materialization core of the wakePost seam (spec §4.3 step 2
    * — "EXACTLY wakePost"): respawn-from-sleep (dispose stale handle, clear
@@ -1096,7 +1331,37 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       resumed = true
     }
     const sessionId = SessionId(entry.sessionId)
-    const live = agents.get(String(sessionId))
+    // fb-300/fb-301 (VALLE 09-09 — rematerialización de toolset post-smart_restart;
+    // clase fb-18 contrato): the GUARD at the LIVE resume branch. A session the
+    // harness restored into the agent registry WITHOUT the deepartments setup
+    // (the smart-restart "AGENT REGISTRY ONLY" resume shape — boot.ts:943-944)
+    // must NEVER be accepted as-is: its toolset never passed through the
+    // derivation seam (postSetup tools.ts:2869-3058 — the own-layer
+    // dept_exec/dept_zstd_read/secretary + the restrict allow-list are absent →
+    // the fb-300 "unknown tool dept_exec" class). When the expected role
+    // toolset is MISSING from the live scope and the target is IDLE, the live
+    // handle is disposed and the wake FALLS THROUGH to the COLD derivation
+    // below (the re-resume re-runs the full setup + audit — delivery.ts:1113-
+    // 1115). A RUNNING target is NEVER disarmed (fb-301 — a mid-turn agent is
+    // left for the boot heal at its next idle wake; the wake continues on the
+    // degraded toolset instead of interrupting a real turn). An ARMED live
+    // target stays the fast-path (the durable custom-tools fast-path B, :1008,
+    // is never bypassed: the expected set resolves through
+    // resolveMaterializeWorkerTools, B belt-and-suspenders first). A
+    // registry-only restored session (no bundle handle) is re-armed in place.
+    let live = agents.get(String(sessionId))
+    if (live !== void 0) {
+      const guard = await reassertLivePostCore(entry, live, isWorker, () => Date.now())
+      if (guard.verdict === 'disposed') {
+        // the unarmed live handle was disposed (the registry entry released by
+        // the handle's own teardown) → fall through to the COLD re-derivation
+        live = undefined
+      }
+      // 'armed' (fast-path — the wake proceeds on the live target as before) /
+      // 'rearmed' (the registry-only session was re-armed IN PLACE — the wake
+      // proceeds on the SAME live target, now armed) / 'running' (deferred —
+      // the wake continues on the live target) → keep the live target.
+    }
     if (live === void 0) {
       const role = coordinator?.role ?? entry.role ?? 'department worker'
       const headPreset = entry.agentPreset ?? PRESET_ID
@@ -2606,6 +2871,9 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     flushBatchFor,
     batchState: () => [...batchDrain.keys()],
     busEnsureHostForCaller,
-    assertBusFanOut
+    assertBusFanOut,
+    // fb-300/fb-301 (VALLE 09-09): the toolset-reassertion action the boot heal
+    // (tools.ts runToolsetReassertion) drives — see the DeliverySurface doc.
+    reassertPostToolset
   }
 }
