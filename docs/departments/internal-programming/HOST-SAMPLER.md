@@ -20,11 +20,12 @@ anything — the **READING CRITERION** (§4). The agenda job
 | artifact | what it is |
 |---|---|
 | `scripts/host-sampler.mjs` | the **sampler process**: one JSON line every 30-60 s (default 45 s) into the stateDir JSONL |
+| `dsh-host-sampler.service` | the **systemd unit that OWNS the sampler's LIFE** (`Restart=always`, own cgroup) — §2 |
 | `scripts/host-slowcall-correlate.mjs` | the **recipe**: for a slow tool call, the host state in +/-60 s **and the verdict** |
 | `<stateDir>/host-health.jsonl` | the series (stateDir = `/.deepartments` in the DEV deployment) |
 | `<stateDir>/host-sampler.log` | bounded status log (same trim policy) |
 | `<stateDir>/host-health.jsonl.pid` | single-instance lock (a second sampler refuses to start) |
-| `docs/departments/internal-programming/jobs/host-sampler.md` | the **custodian job** (agenda: liveness + periodic cross-read) |
+| `docs/departments/internal-programming/jobs/host-sampler.md` | the **custodian job** (agenda: liveness VERIFICATION + periodic cross-read) |
 
 **NOT this lane:** the QD's tool-timing watchdog
 (`docs/departments/quality/TOOL-TIMING-WATCHDOG.md`) OWNS the timing metric
@@ -32,13 +33,42 @@ anything — the **READING CRITERION** (§4). The agenda job
 cross-check. This lane **consumes** the same intent/settle pairing (§4.1) and
 adds the **host window**; it duplicates no timing instrumentation.
 
-## 2. Runner: the sampling is a PROCESS, not a job round
+## 2. Runner: the sampling is a PROCESS, and its LIFE is systemd's (not the job's)
 
 A department JOB fires through `runJobForDepartment`, which **materializes an
 LLM worker** — it cannot sample every 45 s (that would be a worker per tick).
-The sampling is therefore done by the **detached OS process**; the agenda job is
-its **custodian**, not its engine. Launch (the deployment's way — survives the
-launching shell):
+The sampling is therefore done by the **detached OS process**; the agenda job
+**VERIFIES** it — it neither sustains it nor restarts it as its first resource.
+
+**Since 2026-09-10 the life is owned by a dedicated systemd unit:**
+
+| unit | what it declares |
+|---|---|
+| `dsh-host-sampler.service` | `Restart=always` + `RestartSec=15` (start limit `5/300 s`), `User=root`, `WorkingDirectory=/home/esuarez/projects/deepartments`, `ExecStart=/usr/bin/node scripts/host-sampler.mjs --state-dir /.deepartments --interval 45 --quiet --log /.deepartments/host-sampler.log`, stdout+stderr `append:`ed to that same log, and **MainPID in its OWN cgroup** `/system.slice/dsh-host-sampler.service` |
+
+The failure this closes: the sampler used to live inside the
+`dsh-deepartments-dev.service` cgroup (`KillMode=control-group`), so **every
+restart of the daemon SIGTERMed it** — 4 measured deaths in 71 min and
+**69,7 min of blindness (48,8 % of the span)**. The unit's own cgroup covers
+**100 % of those measured deaths**.
+
+Read it back on the **SERIES**, never on the log: `systemctl is-active
+dsh-host-sampler` (PRIMARY life signal) · `cat
+/.deepartments/host-health.jsonl.pid` vs the live process (`pgrep -af
+host-sampler`: the SAME live pid, and no second one) · last row of
+`/.deepartments/host-health.jsonl` younger than `2 x intervalSec` = 90 s
+(HEALTHY), `> 3 x` = 135 s (INVESTIGATE).
+
+**The log is AUXILIARY:** `logLine` emits a **heartbeat every ~20 ticks (~15 min
+at 45 s)** — `state.ticks % 20 === 1` (`scripts/host-sampler.mjs:728`), NOT one
+line per tick — so the age of the last log line is **NOT** evidence of death and
+must never be used as a liveness test (the old "log row younger than
+`3 x intervalSec`" test would declare a healthy sampler dead at ~2 minutes).
+
+**Manual launch — LAST RESORT** (only with the unit unavailable and no sampler
+alive): the script has an **anti-double-sampling guard** and REFUSES a manual
+start while the pidfile names a live process (`another sampler is alive …
+refusing to double-sample`, `scripts/host-sampler.mjs:680-686`):
 
 ```bash
 cd /home/esuarez/projects/deepartments && \
@@ -47,8 +77,6 @@ cd /home/esuarez/projects/deepartments && \
     --log /.deepartments/host-sampler.log >>/.deepartments/host-sampler.log 2>&1 < /dev/null &
 ```
 
-Read it back: `tail -3 /.deepartments/host-sampler.log` ·
-`wc -l /.deepartments/host-health.jsonl` · `pgrep -af host-sampler`.
 One-shot (for a check, no loop): `node scripts/host-sampler.mjs --once --quiet`.
 
 ## 3. JSONL schema (v1)
@@ -115,6 +143,17 @@ capacity signal above, and any of:
 **FLAT** — the window is **FULLY covered** and NO signal of either family fires.
 `FULLY covered` = at least one sample and no hole larger than
 `3 x intervalSec` (including the two boundaries).
+
+> **TWO different `x intervalSec` criteria — do not confuse them.** (a)
+> **Liveness FRESHNESS** (§6, about the SAMPLER): the series is alive if the last
+> row is within **`2 x intervalSec` = 90 s**; beyond **`3 x` = 135 s** it is
+> INVESTIGATE (restart via the unit). (b) **Window COVERAGE** (this §4, about a
+> CALL): a verdict may be FLAT only if the call window hides **no hole larger
+> than `3 x intervalSec` = 135 s**. In practice: (a) answers "is the sampler
+> alive right now?" — the criterion the custodian job applies; (b) answers "may
+> THIS window's verdict be trusted?" — a perfectly healthy sampler can still
+> leave a hole inside a window, and a hole makes a NEGATIVE verdict
+> INSUFFICIENT, never "flat".
 
 **INSUFFICIENT** — no verdict. Either **no sample at all** in the window
 (before the sampler's first row / after its last row / a hole), or **no signal
@@ -239,9 +278,18 @@ are what makes the others interpretable.
 
 ## 6. Maintenance
 
-- **Liveness:** last row `ts` should be younger than `3 x intervalSec`; the
-  pidfile must name a live process; the custodian job (every 6 h) checks both and
-  restarts the sampler with the §2 command if it is dead.
+- **Liveness (the protocol, in this order):** (1) `systemctl is-active
+  dsh-host-sampler` = the **PRIMARY** life signal; (2) **freshness of
+  `<stateDir>/host-health.jsonl` is the truth of the SAMPLING** (one row per
+  tick): last row `<= 2 x intervalSec` (90 s) = **HEALTHY**, `> 3 x` (135 s) =
+  **INVESTIGATE** — this is criterion (a) of §4; (3) the pidfile must name a
+  **live** pid matching the unit's MainPID (anti-double-sampler); (4) the log
+  line is **AUXILIARY** (a heartbeat every ~20 ticks, §2) — its age is not
+  evidence of death. **The LIFE is guaranteed by the unit's `Restart=always`;
+  the custodian job (every 6 h) VERIFIES it and, when the pidfile names a DEAD
+  pid while the unit is `active`, restarts via `systemctl restart
+  dsh-host-sampler`** — the §2 manual launch is the LAST RESORT (a manual launch
+  with a live sampler is REFUSED by the script's anti-double-sampling guard).
 - **Never** point it at the stable profile `/opt/dsh/.dsh` (out of scope) and
   never at the web profile: the target is the DEV deployment (`--profile
   deepartments-dev`, `--state-dir /.deepartments`).
