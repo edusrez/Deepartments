@@ -3477,6 +3477,29 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // retired (the daemon skips retired posts AND the dispose empties the events
       // — see captureRetiredPostTurnError). Never throws / non-fatal to the retire.
       await captureRetiredPostTurnError(stateDir, entry.sessionId, postId)
+      // M2 (2026-09-10 — B3, the CONCURRENT double-retire): the idempotent
+      // early-return above (:3472) is separated from the durable mark below
+      // (:3507) by THIS await ⇒ two CONCURRENT retirePost calls for the SAME
+      // post can BOTH pass the guard and BOTH run the worker branch. The double
+      // call is REACHABLE in the boot wiring: runOfflineWorkerReapReconcile and
+      // runSchedulerLatchReconcile are launched TOGETHER (:5295 —
+      // `void runOfflineWorkerReapReconcile(); void runSchedulerLatchReconcile()`)
+      // and both select a dead QUIESCENT job worker (the A2 reap subject is also
+      // a latch subject when the worker carries a jobId); two concurrent
+      // `dept_worker_retire` tool calls reach the same window. Mark/archive/
+      // settle are idempotent (registry.markPostRetired early-returns on an
+      // already-retired entry :1597 and the archive/settle are no-ops), but the
+      // retire-dice ledger row (:3584) and the `worker-retired` QD directive
+      // (:3592) have NO per-post dedupe ⇒ a DOUBLE dice row and up to 2
+      // directives for ONE retire. Re-check AFTER the await by RE-READING the
+      // shared registry (a fresh byPost.get — the exact Map the passes iterate,
+      // boot.ts `const byPost = registry.byPost`; the fresh read is ALSO what
+      // keeps this check from being folded away by the earlier narrowing of
+      // `entry`): the winning caller's mark sets `entry.retired = true`
+      // SYNCHRONOUSLY on that SAME entry (registry.ts:1598) BEFORE any of its
+      // later awaits, so the loser returns the SAME idempotent no-op the
+      // pre-await guard returns (mark, never erase — retire semantics unchanged).
+      if (byPost.get(postId)?.retired === true) return { postId, retired: true }
       // MARK, NOT ERASE (F1): the registry entry stays; the live catalog filters.
       // The store owns the durable MARK (retired:true + manager-ledger prune +
       // persist) — it never erases a post from the catalog. O4 (m-952 + D-Q2
@@ -4706,6 +4729,126 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     }
   }
 
+  /** FIX 2026-09-10 (the ORPHANED-QUIESCENT fast lane — the code face of the
+   * worker-lifecycle hygiene measurement) — the PENDING-WAKE census read: the
+   * set of recipient ids that still hold at least ONE delivery row needing a
+   * re-drive (`needsRedelivery`: prepared/failed). The bus delivery IS the only
+   * wake seam, so a recipient ABSENT from this set can NEVER be woken again:
+   * its offline state is a PROOF of death, not a timeout. `undefined` = the
+   * sidecar could not be read → the caller fast-lanes NOTHING this census (an
+   * unknown wake state is never accepted as a death proof). Never throws. */
+  const readPendingWakeRecipients = async (): Promise<Set<string> | undefined> => {
+    try {
+      let text: string
+      try {
+        text = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Set() // nothing ever sent → no possible wake
+        return undefined
+      }
+      const latestPerKey = new Map<string, DeliveryRow>()
+      for (const row of parseDeliveryRows(text)) latestPerKey.set(`${row.messageId}\u0000${row.recipientId}`, row)
+      const pending = new Set<string>()
+      for (const row of latestPerKey.values()) if (needsRedelivery(row.status)) pending.add(row.recipientId)
+      return pending
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] offline-reap: pending-wake census read failed (non-fatal — the fast lane is skipped this census): ${error instanceof Error ? error.message : String(error)}`)
+      return undefined
+    }
+  }
+
+  /** M2 (2026-09-10 — the B1 REMEDY): the CLOSED-ROUND PROOF census read.
+   *
+   * WHAT IT FIXES. The first form of the fast lane used «no delivery row still
+   * needing a re-drive» as a PROOF of death (`readPendingWakeRecipients`
+   * above). That predicate is FALSE and it is refuted by the very evidence that
+   * motivated the lane: a post WITHOUT a live handle is, by contract, a
+   * DORMANT recipient that a FUTURE delivery RE-MATERIALIZES —
+   * `packages/dshd-orchestration/src/delivery.ts:1938-1939` («A DORMANT
+   * recipient (live === undefined) needs no abort — the followup below wakes it
+   * immediately») through `materializePost` (:1954, status 'resumed' :1967).
+   * The census reads rows of the PRESENT; the wake seam it claims to model is a
+   * row of the FUTURE. MEASURED counterexample (the author's own evidence):
+   * `quality-inspector-199` carried `delivered m-4831` @16:46:22Z and was woken
+   * by `resumed m-4840` @16:52:03Z ⇒ the 16:51:28Z boot census would have
+   * RETIRED it (a durable mark) and the m-4840 directive would have landed on
+   * the DEAD-recipient path (:6154-6156) — the lane would have killed a wake
+   * that really happened. A post with a clean queue and no handle may be
+   * WAITING for its next directive: that is the whole contract of a dormant
+   * (the measured ADDENDUM shape: the QD head dispatched m-4840 to a dormant
+   * inspector).
+   *
+   * WHAT IT READS INSTEAD — positive proof of a CLOSED ROUND, taken at the seam
+   * where a round actually closes: the worker's OWN outbound delivery to its
+   * MANAGER head (the code's own round-close/retire trigger —
+   * `delivery.ts:1988-1996`, «the delivery itself is the retire trigger»). A
+   * post carrying that proof is a post the system ALREADY decided to retire and
+   * FAILED to (a missed auto-retire); the fast lane only re-applies the mark
+   * the round-close seam owes. A post WITHOUT the proof is a mere DORMANT and
+   * is left to the 72h wall-clock window above (retirement on a clock, never on
+   * the absence of a row).
+   *
+   * THE PROOF IS INVALIDATED BY ANY LATER DELIVERY EVENT touching the post (a
+   * re-opened round): 199's own `resumed m-4840` AFTER its `delivered m-4831`
+   * is exactly that shape, and it is why the round-close proof must be the
+   * LAST event of the post.
+   *
+   * Returns the set of `${workerPostId}\u0000${managerPostId}` pairs carrying
+   * the proof. `undefined` = the message store or the sidecar could not be read
+   * → the caller fast-lanes NOTHING this census (an unknown state is never
+   * accepted as a death proof). Never throws. */
+  const readClosedRoundProofs = async (): Promise<Set<string> | undefined> => {
+    try {
+      let records: MessageRecord[]
+      try {
+        records = await loadMessageRecords(resolveMessagesPath(stateDir))
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Set() // no message ever sent → no round ever closed
+        return undefined
+      }
+      const senderById = new Map<string, string>()
+      for (const record of records) senderById.set(record.id, record.from)
+      let text: string
+      try {
+        text = await readFile(resolveDeliveriesPath(stateDir), 'utf8')
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Set() // no delivery ever recorded → no round ever closed
+        return undefined
+      }
+      const latestPerKey = new Map<string, DeliveryRow>()
+      // The LAST delivery event per participant (a post participates BOTH as a
+      // recipient of the directives addressed to it and as the sender of what it
+      // delivered): the round-close proof only holds while NOTHING re-opened the
+      // round afterwards (an inbound directive row with a LATER ts is the
+      // re-open).
+      const lastEventTs = new Map<string, number>()
+      for (const row of parseDeliveryRows(text)) {
+        latestPerKey.set(`${row.messageId}\u0000${row.recipientId}`, row)
+        const seenRecipient = lastEventTs.get(row.recipientId)
+        if (seenRecipient === undefined || row.ts > seenRecipient) lastEventTs.set(row.recipientId, row.ts)
+        const sender = senderById.get(row.messageId)
+        if (sender !== undefined) {
+          const seenSender = lastEventTs.get(sender)
+          if (seenSender === undefined || row.ts > seenSender) lastEventTs.set(sender, row.ts)
+        }
+      }
+      const proofs = new Set<string>()
+      for (const row of latestPerKey.values()) {
+        // ONLY a SUCCESS row closes the round at the delivery seam: 'prepared'/
+        // 'failed' is a wake still owed, 'terminal' is a settle of a dead pair.
+        if (row.status !== 'delivered' && row.status !== 'resumed') continue
+        const sender = senderById.get(row.messageId)
+        if (sender === undefined || sender === row.recipientId) continue
+        if (lastEventTs.get(sender) !== row.ts) continue // a LATER event re-opened the round
+        proofs.add(`${sender}\u0000${row.recipientId}`)
+      }
+      return proofs
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] offline-reap: closed-round proof census read failed (non-fatal — the fast lane is skipped this census): ${error instanceof Error ? error.message : String(error)}`)
+      return undefined
+    }
+  }
+
   /** fb-78 A2 (owner decision 2026-09-03 — default OFF, conservative; m-228
    * respected) — the OFFLINE-WORKER REAP: the wall-clock census SIBLING of
    * runGhostSuspectReconcile (same boot-only family, same ledger pattern) for
@@ -4785,6 +4928,68 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           delete verdict.ledger[postId]
         } catch (retireError: unknown) {
           ctx.logger.warn(`[deepartments] offline-reap: auto-retire of "${postId}" failed (non-fatal): ${retireError instanceof Error ? retireError.message : String(retireError)}`)
+        }
+      }
+      // ----------------------------------------------------------------------
+      // FIX 2026-09-10 — the CLOSED-ROUND fast lane (worker-lifecycle hygiene).
+      // MEASURED DEFECT: a worker whose round DIES (restart-killed / crashed /
+      // drained mid-directive) stays NON-RETIRED in the LIVE catalog — never
+      // archived (the archive lives in the retire path, :3538), its sidebar row
+      // visible, still addressable, and its directives never drained. The
+      // wall-clock window above DOES catch the class, but only after
+      // `maxOfflineMs` (72h default) — measured live 2026-09-10:
+      // quality-inspector-195/197/198/199/200/201 were offline 16:41-17:06, all
+      // six stamped in <stateDir>/offline-reap-state.json, all six still
+      // live-catalog until the host retired them BY HAND at 17:13.
+      //
+      // THE PREDICATE (M2 — the B1 REMEDY; the first form of this lane was
+      // reviewed and REFUTED): «no pending delivery row ⇒ death is PROOF» is
+      // FALSE. A post without a live handle is a DORMANT recipient that a
+      // FUTURE delivery re-materializes (delivery.ts:1938-1939 + :1954), so a
+      // clean queue says NOTHING about tomorrow; the census sees the present,
+      // the wake seam is a row of the future. Measured counterexample in this
+      // lane's own evidence: quality-inspector-199 (`delivered m-4831`
+      // @16:46:22Z, then the wake `resumed m-4840` @16:52:03Z) would have been
+      // RETIRED by the 16:51:28Z census and the m-4840 wake would have died on
+      // the DEAD-recipient path (:6154-6156).
+      //
+      // WHAT REPLACES IT — POSITIVE PROOF OF ABANDONMENT: the round CLOSED, and
+      // it closed at the round-close seam (the worker's own report delivery to
+      // its manager head, delivery.ts:1988-1996) — read as a durable proof by
+      // readClosedRoundProofs above, and INVALIDATED by any later delivery
+      // event touching the post (a re-opened round). A post carrying the proof
+      // is a post the system ALREADY decided to retire and failed to (a missed
+      // auto-retire); a post WITHOUT it is a mere DORMANT and stays with the
+      // 72h wall-clock window above — retirement on PROOF, never on the absence
+      // of a row. The retire itself is the SAME shared retirePost seam (mark,
+      // never erase + the unconditional archive + the delivery settle — the
+      // retire semantics are untouched) and the lane stays INSIDE the owner's
+      // `org.offlineReap` gate: an OFF knob keeps this lane OFF too (no profile
+      // changes behavior silently).
+      // ----------------------------------------------------------------------
+      const pendingWakeRecipients = await readPendingWakeRecipients()
+      const closedRoundProofs = await readClosedRoundProofs()
+      if (pendingWakeRecipients !== undefined && closedRoundProofs !== undefined && agents !== void 0) {
+        for (const [postId, entry] of byPost) {
+          if (entry.provider !== 'worker' || entry.retired === true) continue
+          if (entry.sleepEpoch !== void 0) continue // dormant-by-design is NEVER a subject (the computeDeptWhoState mirror above)
+          if (pendingWakeRecipients.has(postId)) continue // a wake is still possible → the window class above owns it
+          // THE B1 GATE: the retirement demands PROOF OF A CLOSED ROUND (this
+          // post's own report reached its manager head and nothing re-opened the
+          // round). The ABSENCE of a delivery row is NOT proof — a dormant post
+          // is woken by its next directive.
+          const managerId = entry.managerId
+          if (managerId === void 0 || !closedRoundProofs.has(`${postId}\u0000${managerId}`)) continue
+          // The liveness re-check: NO handle THIS INSTANT → dead. No await
+          // between this check and retirePost (the fb-68 discipline).
+          if (agents.get(String(SessionId(entry.sessionId))) !== undefined) continue
+          try {
+            await retirePost(postId, byPost.get(managerId)?.sessionId ?? 'deepartments-offline-reap')
+            ctx.logger.warn(`[deepartments] offline-reap (fast lane): auto-retired CLOSED-ROUND worker "${postId}" — no live handle, no sleepEpoch, no pending wake delivery AND its round CLOSED by PROOF (its own report reached manager "${managerId}"), reaped on the round-close proof instead of waiting ${Math.round(maxOfflineMs / 3_600_000)}h`)
+            delete verdict.ledger[postId] // a retired post is no longer a census subject
+          } catch (retireError: unknown) {
+            ctx.logger.warn(`[deepartments] offline-reap (fast lane): auto-retire of "${postId}" failed (non-fatal): ${retireError instanceof Error ? retireError.message : String(retireError)}`)
+          }
         }
       }
       for (const postId of verdict.cleared) {
