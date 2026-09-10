@@ -8298,8 +8298,9 @@ const F10_GLOBAL_TOOLS = ['web_search', 'web_fetch', 'read', 'write', 'glob', 'g
 
 /** Pristine content of ONE repo preset file FROM GIT HEAD (fb-33): returns the
  * exact HEAD bytes of a tracked file, `{ kind: 'absent' }` for a path NOT in
- * HEAD (its pristine worktree state is absence — e.g. the untracked execbuilder
- * fixture), or `undefined` when git itself is unavailable (non-git checkout) —
+ * HEAD (its pristine worktree state is absence — e.g. a role template that was
+ * never committed; the TRACKED execbuilder fixture resolves to `content`, never
+ * `absent`), or `undefined` when git itself is unavailable (non-git checkout) —
  * the fallback then keeps the pre-fb-33 worktree-snapshot semantics so the
  * tests still pass on a plain checkout. The snapshot is NEVER taken from the
  * worktree file: an interrupted run may have already corrupted that file (the
@@ -8389,7 +8390,7 @@ test('fb-33 (crash-safety): the preset-fixture snapshot is git-HEAD-based — a 
   assert.equal(execFileSync('git', ['-C', F10_REPO_ROOT, 'hash-object', '--stdin'], { input: execHead.data, encoding: 'utf8' }).trim(), execHeadBlob, 'git hash-object of the HEAD bytes equals the HEAD blob (the literal above is the measured blob, not a guess)')
 })
 
-test('fb-33 (abort-path guard, R6 pattern): a fixture write followed by an ABORTED body (a mid-test throw between the write and the end — the interrupted-run class) STILL restores the REAL preset — the restore lives in `finally`, so it fires even when the test dies after the write; the untracked execbuilder fixture returns to ABSENCE after the same abort', async () => {
+test('fb-33 (abort-path guard, R6 pattern): a fixture write followed by an ABORTED body (a mid-test throw between the write and the end — the interrupted-run class) STILL restores the REAL preset — the restore lives in `finally`, so it fires even when the test dies after the write; the TRACKED execbuilder fixture returns to its exact git-HEAD BYTES — PRESENT, never ABSENCE — after the same abort', async () => {
   // The fb-33 class the reviewers confirmed (R7/R10 "NO tocados"): the OLD
   // pattern's restore depended on the test reaching the end — an abort/pánico
   // between the write and the restore left the fixture in the worktree. This
@@ -8418,7 +8419,16 @@ test('fb-33 (abort-path guard, R6 pattern): a fixture write followed by an ABORT
   const after = await readFile(F10_ARCHITECTURE_PATH, 'utf8')
   assert.equal(after, head.data, 'AFTER the aborted body the REAL ARCHITECTURE.md is byte-identical to git HEAD (the finally restore fired)')
   assert.notEqual(after, fixture, 'the fixture did NOT survive the abort (the restore is not end-of-test dependent)')
-  // The untracked execbuilder fixture: same abort window → restore to ABSENCE.
+  // The execbuilder role fixture IS a tracked repo file (see the fb-33
+  // crash-safety block above): the SAME abort window ends with the restore
+  // re-writing its exact HEAD bytes — the file is PRESENT and byte-identical to
+  // HEAD, never ABSENCE (a tracked path is NEVER deleted by the restore).
+  // READ THE TREE, never a hand-copied literal: the expectation is resolved from
+  // git here too (HEAD content + the blob its bytes hash to).
+  const execHead = gitHeadPresetContent('presets/departments/research/execbuilder.md')
+  assert.equal(execHead.kind, 'content', 'the TRACKED execbuilder fixture resolves to kind:"content" at HEAD (the restore RE-WRITES its HEAD bytes; it must never delete the file)')
+  const execHeadBlob = execFileSync('git', ['-C', F10_REPO_ROOT, 'rev-parse', 'HEAD:presets/departments/research/execbuilder.md'], { encoding: 'utf8' }).trim()
+  assert.equal(execFileSync('git', ['-C', F10_REPO_ROOT, 'hash-object', '--stdin'], { input: execHead.data, encoding: 'utf8' }).trim(), execHeadBlob, 'git hash-object of the resolved HEAD bytes equals the HEAD blob (the expectation is resolved from git, never a hand-copied literal)')
   const restoreExec = await snapshotRoleTemplate(EXEC_ROLE)
   let execAborted = false
   try {
@@ -8431,7 +8441,8 @@ test('fb-33 (abort-path guard, R6 pattern): a fixture write followed by an ABORT
     await restoreExec()
   }
   assert.equal(execAborted, true, 'the execbuilder abort fired')
-  await assert.rejects(access(EXEC_ROLE_PATH), { code: 'ENOENT' }, 'after the abort the untracked execbuilder.md is ABSENT (never left in the worktree)')
+  const execAfter = await readFile(EXEC_ROLE_PATH, 'utf8')
+  assert.equal(execAfter, execHead.data, 'after the abort the TRACKED execbuilder.md is PRESENT and byte-identical to its git-HEAD bytes (the finally restore re-wrote them; it NEVER deletes the file, so absence is impossible by construction)')
 })
 
 /** Read ONE systemPrompt section by name for a post's scoped context. */
