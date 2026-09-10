@@ -353,6 +353,61 @@
 > entrega** (DAG — ítem cerrado como entregado; gate consumidor diferido; ver su ítem
 > §1). **Sin referencias abiertas «next: internal-programming-head» de las 2 lanes**
 > tras esta entrada (verificado).
+> **ENTRADA 09-09 — CIERRE DE JORNADA (IPD, lane register-sync de bloque; docs-only,
+> 0 commits, LISTO-PARA-COMMIT — verify + add EXPLÍCITO de docs/WORK-REGISTER.md +
+> docs/ROADMAP.md)** — cierre final de la jornada 09-09 absorbido (la mañana `c431b72`,
+> el CIERRE DE OLA y el CIERRE DEL BLOQUE 1 NO se re-absorben; landings → lane/worker):
+> **LANE RED export-parity** `14d7bee` (fix de main-RED; builder-234 e20bb76c;
+> reviewer-120 PASS m-4067 / reporte `51bd7238`) — causa raíz `55361e4` (fb-235
+> attribution del predecesor) rompió la paridad de exports; aritmética exacta
+> **325→327** (reporte builder-234 m-4056: 2 exports runtime nuevos por el star
+> re-export bridge; scanTurnErrorCaptures = MOVE count-neutral; interfaces type-only
+> sin runtime) → `14d7bee` restaura main VERDE (lock 3/3, canon 524/15/22 intacto) ·
+> **fb-308 «journal-writer finalizeSessionLog (4 dim.)»** `bab3ca9` (builder-236
+> b6b25157; reviewer-121 PASS `2c44c81c`) — las 4 dimensiones: (1) crash-safe tail
+> (header end_seq/end_time EXACTO vs zstd real post-dispose), (2) journal SIN cota
+> (seal aditivo final:true/turn_end_reason/zstd_final_seq — CUT-4/zstd/archive
+> INTOCADOS), (3) re-emisión snapshot (nombre único por sesión — dimensión 3
+> RE-EMITIDA vía fb-311/m-4049, aterrizada en este commit; el record fb-311 queda
+> abierto como mejora de proceso «transmitida ≠ procesada»), (4) finalize session-log
+> (plano host, hooks H1/H2/H3 — retirePost/rotación host/sleep de head); desglose
+> exacto en explore-deep-73 `3d93f627` + builder-236; **record QH ya enviado con
+> evidencia post-commit** (fb-308 resuelto 09-09 20:37Z, host m-4123) ·
+> **fb-306/N1 rotation-close dept_sleep SUCCESS** `fe9d388` (builder-237 364bc3bb;
+> reviewer-122 PASS `82c4c17e`; 8 archivos, 0 zstd) — C1 (settle 'settled' sin
+> post-error: isHostRotationClosed PURE module-private) + C2 (seal aditivo
+> sleep_result success(rotation) — presets.ts:667) + C3 (marker durable hosts.json
+> oldEntry sleepResult:'success' — session-rotation.ts + registry.ts); fb-306
+> RESUELTO 09-09 20:37Z · **GATE DURO franja** (post-mortem PEAK ítem 1) `aba670b` —
+> loop: builder-239 `5de54871` **FAIL condicionado** (reviewer-123 `bb61e2c3`: freeze
+> fb-266 declAt desincronizado 86→93 por el diff) → fix builder-240 `a34aa0fe` →
+> re-gate **PASS** (reviewer-124 `a52b9162`, m-4144) — paso 0c EARLY en los 3 seams
+> (runJobForDepartment/spawnWorkerForDepartment/dept_post_create; override anotado +
+> ledger pacing-overrides.jsonl; daemons exentos por construcción) · **DRAIN-VALLE**
+> (post-mortem PEAK ítem 2) `bf8efa5` (builder-241 99071311; reviewer-125 PASS 7/7,
+> m-4157 / `c7ec39ca`) — fan-out notifyPost a heads de pendientes WORK-REGISTER al
+> cruzar franja→VALLE → **POST-MORTEM PEAK 4/4 COMPLETO** (1 GATE DURO `aba670b` ·
+> 2 DRAIN-VALLE `bf8efa5` · 3 re-ancla digests · 4 restarts-solo-VALLE — 3 y 4 ya
+> formalizados antes, ver ROADMAP 09-09) · **fb-300/fb-301 toolset reassertion
+> own-layer** `853c12e` (builder-242 2a975be5; reviewer-126 PASS `7d18f18a`, m-4184) —
+> clase worker+head (registro/preset-pass post-restart: boot heal + guard ramo-live en
+> materializePost; 0 exports nuevos, parity 327); **records QD fb-300/fb-301 CERRADOS
+> conjuntamente con evidencia post-commit** → cola §5 (ii) CERRADA con esta entrada ·
+> **fb-51 CERRADO DEFINITIVO 09-09 (decisión host m-4149)** — redacción canónica
+> sustituida en §1/§3 (ver apartado 2): «fb-51 CERRADO 09-09 por decisión host (fix
+> público Discussion #5826; issue #NN opcional; merge upstream no perseguido)»; RESTO
+> owner-grade opcional PENDIENTE-OWNER (fork re-push · push-day · merge vía instancia
+> interna), SIN #NN inventado · **KPI 09-09 (al cierre de jornada, snapshot store vivo
+> 09-10 ~00:55Z)** — 24/13/+11 con el mismo criterio de la entrada previa (ABIERTOS =
+> creados 09-09 UTC estado no-terminal excl. duplicados = 24; CERRADOS = terminales
+> updatedAt 09-09 en el store vivo = 13 [fb-302/fb-306/fb-308/fb-310/fb-312/fb-313/
+> fb-314/fb-316/fb-317/fb-319/fb-320/fb-321/fb-322 — incl. fb-308/fb-306 resueltos
+> 20:37Z]; balance = 24−13 = +11; difiere del snapshot 14:22Z de la ola (17/1/+16) por
+> los cierres de la tarde/noche; NOTA: el cierre QD de fb-300/fb-301 consta en esta
+> ENTRADA (no aún terminal en el store) + archive NO fiable — misma nota del criterio)
+> · **NOTA WATCH fb-235: sigue ABIERTO** — cierra con el primer bare-400 post-deploy
+> (deploy diferido VALLE largo 09-10; verificación reserve LOW 86/87% del
+> pooler-capacity ENCOLADA).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 
@@ -393,10 +448,10 @@
   - **fb-190 (mejora protocolo rotación — no pre-anunciar)** — next: internal-programming-head — CERRADO (reporte d007c408)
   - **fb-51 (thread bilingüe + branch portador — REVISIÓN del host ANTES de
     publicar; no publicar sin su visto bueno)** — next: host —
-    CERRADO-en-hechos (RECONCILIACIÓN CIERRE BLOQUE 1 09-09: D1 PUBLICADO 09-06
-    con owner presente + revisión host PASS — Discussion #5826 verificada live
-    por el host; el DIFERIDO/no-publicar era STALE — ver ENTRADA CIERRE BLOQUE 1;
-    RESTO fb-51 owner-grade → §3 port PENDIENTE-OWNER)
+    CERRADO 09-09 por decisión host (fix público Discussion #5826; issue #NN
+    opcional; merge upstream no perseguido) — ver ENTRADA CIERRE DE JORNADA
+    (decisión host m-4149); RESTO fb-51 owner-grade opcional → §3
+    PENDIENTE-OWNER (sin inventar #NN)
   - **QI-48 (registry post-cierre lane)** — next: internal-programming-head —
     CERRADO (reporte e1f3838e)
   - **§5.5 (opcional)** — next: internal-programming-head —
@@ -779,12 +834,14 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
   (workspace IPD, hashes verificados); **DECISIONES AUTÓNOMAS 09-06 (owner
   ausente)**: señalización GitHub Discussions PRIMARIA + branch portador en
   fork + hot-patch local + rebase search-core P2 — thread/branch preparados
-  para REVISIÓN del host antes de publicar; **RECONCILIACIÓN CIERRE BLOQUE 1
-  09-09**: D1 PUBLICADO 09-06 (owner presente) + revisión host PASS (Discussion
-  #5826 verificada live por el host) — la parte «publicar» quedó CERRADA-en-
-  hechos (§1 OLA POST-PREP); **RESTO fb-51 = owner-grade SOLO** (fork re-push/
-  push-day opcional · issue interno #NN sin inventar · merge upstream vía
-  instancia interna DeepSeek) — PENDIENTE-OWNER; acción del HOST (clone/PR/
+  para REVISIÓN del host antes de publicar; **RECONCILIACIÓN FINAL 09-09 (decisión
+  host m-4149 — CIERRE DEFINITIVO)**: D1 PUBLICADO 09-06 (owner presente) + revisión
+  host PASS (Discussion #5826 verificada live) → **fb-51 CERRADO 09-09 por decisión
+  host (fix público Discussion #5826; issue #NN opcional; merge upstream no
+  perseguido)** — la parte «publicar» quedó CERRADA (§1 OLA POST-PREP, actualizado
+  a CERRADO); **RESTO fb-51 = owner-grade OPCIONAL** (fork re-push/push-day ·
+  merge upstream vía instancia interna DeepSeek · issue interno #NN sin inventar)
+  — PENDIENTE-OWNER; acción del HOST (clone/PR/
   rebuild del monorepo — no construible desde los roots del lane).
 - **billing top-up CRÍTICO → GESTIONADO 09-03 + AHORA RELEVANTE (09-05/09-06)**:
   oc-6 = **key NUEVA del owner (OPENCODE_GO_KEY_6 / ws6, instalada 09-06 —
@@ -1004,15 +1061,24 @@ Fase modular 0.2.x = solo BACKLOG/owner (§3/§5).
     real (nunca 2 workers vivos del mismo job). Ver reports/builder/2026-09-09-
     reanchor-digests-dfe6e38a.md.
   - **(ii) fb-300/fb-301 rematerialización post-smart_restart NO reconstituye toolset —
-    EN COLA**: worker Y head tras el restart 14:08:18Z; fb-301 transitorio confirmado
-    por el head; contrato fb-18 «toolset esperado por rol» — lane host-plane/IPD
-    register/preset-pass.
+    CERRADO 09-09 (`853c12e`, builder-242 2a975be5, reviewer-126 PASS `7d18f18a`,
+    m-4184)**: toolset reassertion OWN-LAYER clase worker+head — boot heal
+    runToolsetReassertion (tools.ts:5193-5230) + guard ramo-live en materializePost
+    (delivery.ts:1346-1366), probes own-layer discriminadoras, disposed GATEADO por
+    running (fb-301), 0 exports nuevos (parity 327); registro/preset-pass
+    post-restart; **records QD fb-300/fb-301 CERRADOS conjuntamente con evidencia
+    post-commit** — cola §5 (ii) CERRADA con el CIERRE DE JORNADA.
   - **(iii) wording preset host — EN COLA (decisión del host)**: precisar CRITICAL
     RULE 2 + Workflow step 4 (ask_user_question «Non-negotiable» vs DELEGACIÓN TOTAL
     `90a06dc`) — lane BAJA staged próxima rotación (deploy-time).
   - **(iv) hot-patch fb-251 persistencia upstream — EN COLA**: el hot-patch node_modules
     (pi-ai overflow.js + compaction-basic:803) se pierde en reinstall; candidato
     upstream register.
+- **REGISTER-SYNC PENDIENTE (quedan para el siguiente register-sync de bloque)**:
+  UX fb-loop FASE 2 (dedupe/UX del loop de feedback, tras la FASE 1 `2164944` 09-08)
+  · candidato-3 fb-253 (siguiente mejora del mark-delivery, tras el CLI `5ab20ea`)
+  · refs cruzadas fb-308/fb-309 (journal-writer finalizeSessionLog vs la familia
+  fb-309 de sesión — cotejo pendiente). No absorbidas en el CIERRE DE JORNADA 09-09.
 - **Rotación host m-423 PARTIAL (veredicto QD 09-03) — EN COLA (P2)**: el
   archive de dept_sleep corta ~85 líneas de la cola zombie final (incl.
   m-426 delivered post-retirement; acks a host rotado 'prepared') —
