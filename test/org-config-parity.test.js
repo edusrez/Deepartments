@@ -136,7 +136,7 @@ test('D5 org-config parity (single-source): the R4 agent-options (workerAgentOpt
     const min = normalize(extractKey(minRow, key))
     assert.ok(core.length > 0 && min.length > 0, `both SHARED source rows MUST declare org.${key} (the R4 route, single source)`)
     assert.equal(min, core, `org.${key} must be identical between the dshd-core row (source) and the dshd-core-min row (fallback)`)
-    assert.ok(min.includes('deepseek-v4-flash'), `org.${key} declares the runtime truth deepseek-v4-flash (aligned with the dump-config reality)`)
+    assert.ok(min.includes('deepseek-flash'), `org.${key} declares the runtime truth deepseek-flash (aligned with the dump-config reality)`)
   }
 })
 

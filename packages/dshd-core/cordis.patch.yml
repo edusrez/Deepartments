@@ -72,7 +72,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash
+                  model: deepseek-flash
                   reasoningEffort: max
             - id: internal-programming
               name: Internal Programming
@@ -93,7 +93,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash
+                  model: deepseek-flash
                   reasoningEffort: max
             - id: quality
               name: Quality Department
@@ -114,7 +114,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash
+                  model: deepseek-flash
                   reasoningEffort: max
           # Posts retention (A3/C2): keep the 50 newest RETIRED entries in
           # posts.json; archive older ones to posts-retired-archive.jsonl
@@ -144,18 +144,18 @@
           # R4 (providers → org config, LANE 0.2.3): the DEFAULT worker/host
           # model route — declared in the org (single source), resolved
           # org-driven in dshd-orchestration presets.ts (literals as code
-          # fallback). deepseek-v4-flash = the RUNTIME TRUTH (verified via the
+          # fallback). deepseek-flash = the RUNTIME TRUTH (verified via the
           # dev --dump-config: the host agent-default-model + persona + the
           # coordinator rows all run flash; the pre-R4 HOST literal vision-exp
           # was stale). MUST mirror packages/dshd-core-min/cordis.patch.yml
           # (org-config-parity locks the equality).
           workerAgentOptions:
             provider: opencode-zen
-            model: deepseek-v4-flash
+            model: deepseek-flash
             reasoningEffort: max
           hostAgentOptions:
             provider: opencode-zen
-            model: deepseek-v4-flash
+            model: deepseek-flash
             reasoningEffort: max
           # MISSION GRANT (owner-approved, chat del owner 09-03 «Actualiza el
           # stable con la versión actual»): dept_exec access to the STABLE home

@@ -2886,8 +2886,8 @@ test('dept_post_create (head): a head creates a DISPOSABLE worker root agent (se
       // so the worker's own attach matches by cwd equality too.
       assert.equal(createCall.meta.cwd, stateDir, 'the worker is created under the workspace-root cwd (resolveWorkspaceRootPath), not the repo root')
       // F7 (provider migration): the runtime-minted worker is created with the
-      // coordinator-aligned agentOptions (opencode-zen / vision-exp / max).
-      assert.deepEqual(createCall.agentOptions, { provider: 'opencode-zen', model: 'deepseek-v4-flash', reasoningEffort: 'max' }, 'worker agentOptions = opencode-zen / deepseek-v4-flash / reasoningEffort max (coordinator alignment)')
+      // coordinator-aligned agentOptions (opencode-zen / deepseek-flash / max).
+      assert.deepEqual(createCall.agentOptions, { provider: 'opencode-zen', model: 'deepseek-flash', reasoningEffort: 'max' }, 'worker agentOptions = opencode-zen / deepseek-flash / reasoningEffort max (coordinator alignment)')
 
       // Durable registry: disposable entry (roomId is the INERT legacy field).
       const posts = await readPosts(stateDir)
@@ -6988,12 +6988,12 @@ test('E2 vocab fix (c): buildSubagentOrientation identity names the ORG (org: de
   assert.match(DIRECTORY_ACL_NOTE, /ACL head↔head/, 'the ACL note constant is exported (skill mirror + pack share it)')
 })
 
-test('E2 model fix (d): the deepartments HEAD + WORKER preset literals name deepseek-v4-flash (the runtime reality), NOT deepseek-v4-flash-vision-exp', async () => {
+test('E2 model fix (d): the deepartments HEAD + WORKER preset literals name deepseek-flash (the runtime reality), NOT deepseek-v4-flash-vision-exp', async () => {
   const headPreset = await readFile(path.join(REPO_ROOT, 'presets', 'deepartments-head', 'agent.cordis.yml'), 'utf8')
   const workerPreset = await readFile(path.join(REPO_ROOT, 'presets', 'deepartments-worker', 'agent.cordis.yml'), 'utf8')
   for (const [label, text] of [['head preset', headPreset], ['worker preset', workerPreset]]) {
-    assert.match(text, /Model: deepseek-v4-flash \(provider opencode-zen, reasoning max\)/, `${label}: the persona names deepseek-v4-flash (heads/workers run flash, not vision-exp)`)
-    assert.ok(!text.includes('deepseek-v4-flash-vision-exp'), `${label}: NO vision-exp literal remains (runtime reality is flash — invoke.ts WORKER_AGENT_OPTIONS)`)
+    assert.match(text, /Model: deepseek-flash \(provider opencode-zen, reasoning max\)/, `${label}: the persona names deepseek-flash (heads/workers run flash, not vision-exp)`)
+    assert.ok(!text.includes('deepseek-v4-flash-vision-exp'), `${label}: NO vision-exp literal remains (runtime reality is deepseek-flash — invoke.ts WORKER_AGENT_OPTIONS)`)
   }
 })
 
@@ -8224,10 +8224,10 @@ test('F3 dept_worker_spawn: a head spawns a worker of its department (role templ
 
       // F7 (provider migration): the spawned worker is created with the
       // coordinator-aligned agentOptions — a discriminating assert on the
-      // runtime materialization route (opencode-zen / vision-exp / max).
+      // runtime materialization route (opencode-zen / deepseek-flash / max).
       const spawnCall = agents.createCalls.find((c) => String(c.sessionId) === workerSid)
       assert.ok(spawnCall, 'dept_worker_spawn issued one ctx.agents.create for the worker')
-      assert.deepEqual(spawnCall.agentOptions, { provider: 'opencode-zen', model: 'deepseek-v4-flash', reasoningEffort: 'max' }, 'dept_worker_spawn worker agentOptions = opencode-zen / deepseek-v4-flash / reasoningEffort max (coordinator alignment)')
+      assert.deepEqual(spawnCall.agentOptions, { provider: 'opencode-zen', model: 'deepseek-flash', reasoningEffort: 'max' }, 'dept_worker_spawn worker agentOptions = opencode-zen / deepseek-flash / reasoningEffort max (coordinator alignment)')
 
       // F3 persona mechanism (spec §7.4): the ROLE TEMPLATE body + the task are
       // injected as a systemPrompt section (the persona delta; the worker still
@@ -9445,7 +9445,7 @@ test('F4b dept_job_run: materializes the job worker (definition role task = the 
       // coordinator-aligned agentOptions (same discriminating assert as F3).
       const runCreate = agents.createCalls.find((c) => String(c.sessionId) === jobSid)
       assert.ok(runCreate, 'dept_job_run issued one ctx.agents.create for the job worker')
-      assert.deepEqual(runCreate.agentOptions, { provider: 'opencode-zen', model: 'deepseek-v4-flash', reasoningEffort: 'max' }, 'dept_job_run worker agentOptions = opencode-zen / deepseek-v4-flash / reasoningEffort max (coordinator alignment)')
+      assert.deepEqual(runCreate.agentOptions, { provider: 'opencode-zen', model: 'deepseek-flash', reasoningEffort: 'max' }, 'dept_job_run worker agentOptions = opencode-zen / deepseek-flash / reasoningEffort max (coordinator alignment)')
     } finally {
       await dispose()
     }
@@ -19716,12 +19716,12 @@ test('fb-6 seam fallback: a department-less/legacy worker (durable session prese
       const resumeCall = agents.resumeCalls.find((c) => String(c.resumeSessionId) === wsid)
       assert.ok(resumeCall.agentOptions, 'the resume carries agentOptions (was UNDEFINED pre-fix — the empty waterfall)')
       assert.equal(resumeCall.agentOptions.provider, 'opencode-zen', 'fallback provider = WORKER_AGENT_OPTIONS.provider')
-      assert.equal(resumeCall.agentOptions.model, 'deepseek-v4-flash', 'fallback model = WORKER_AGENT_OPTIONS.model')
+      assert.equal(resumeCall.agentOptions.model, 'deepseek-flash', 'fallback model = WORKER_AGENT_OPTIONS.model')
       assert.equal(resumeCall.agentOptions.reasoningEffort, 'max', 'fallback reasoningEffort = max (the FULL constant, not a provider/model-only partial)')
       const target = agents.store.get(wsid)
       assert.ok(target !== undefined, 'worker materialized')
       assert.equal(target.options.provider, 'opencode-zen', 'materialized agent.options.provider is non-empty (the dsh-agent-loop request-waterfall carrier)')
-      assert.equal(target.options.model, 'deepseek-v4-flash', 'materialized agent.options.model is non-empty')
+      assert.equal(target.options.model, 'deepseek-flash', 'materialized agent.options.model is non-empty')
       // A SUCCESSFUL materialization clears the unusable mark (recovery).
       assert.deepEqual(readUnusableSessionsMark(stateDir), {}, 'the prior B5 mark was CLEARED by the successful materialization (never over-retired)')
     } finally {
@@ -19760,12 +19760,12 @@ test('fb-6 forensics: when the WORKER_AGENT_OPTIONS fallback ALSO fails (the fre
       const marks = readUnusableSessionsMark(stateDir)
       assert.ok(marks['forensic-alpha'], 'the B5 unusable mark is recorded for the worker')
       assert.match(marks['forensic-alpha'].error, /has no provider\/model/, 'the mark still classifies as the no-provider/model class (classification unchanged)')
-      assert.match(marks['forensic-alpha'].error, /agentOptions=\{"provider":"opencode-zen","model":"deepseek-v4-flash","reasoningEffort":"max"\}/, 'the mark carries the resolved AgentOptions VERBATIM (JSON)')
+      assert.match(marks['forensic-alpha'].error, /agentOptions=\{"provider":"opencode-zen","model":"deepseek-flash","reasoningEffort":"max"\}/, 'the mark carries the resolved AgentOptions VERBATIM (JSON)')
       // ...and the post-error row carries the SAME forensic context.
       const rows = readPostErrorsFile(stateDir).filter((r) => r.postId === 'forensic-alpha')
       assert.equal(rows.length, 1, 'one post-error row for the worker')
       assert.match(rows[0].error, /has no provider\/model/, 'the post-error classifies as the no-provider/model class')
-      assert.match(rows[0].error, /agentOptions=\{"provider":"opencode-zen","model":"deepseek-v4-flash"/, 'the post-error carries the resolved AgentOptions JSON')
+      assert.match(rows[0].error, /agentOptions=\{"provider":"opencode-zen","model":"deepseek-flash"/, 'the post-error carries the resolved AgentOptions JSON')
     } finally {
       await dispose()
     }
@@ -21027,7 +21027,7 @@ test('HOST-SIDE FIRST-WAKE FIX config guard: the bundled patch overrides the COR
   assert.ok(sp.block.includes('persona:'), 'the system-prompt row carries a persona')
   assert.ok(!sp.block.includes('{{model}}'), 'the system-prompt persona does NOT reference the unbound {{model}} variable')
   assert.ok(!sp.block.includes('{ {model}}'), 'the system-prompt persona does NOT reference the broken-brace { {model}} rendering')
-  assert.ok(sp.block.includes('deepseek-v4-flash'), 'the system-prompt persona names the literal model')
+  assert.ok(sp.block.includes('deepseek-flash'), 'the system-prompt persona names the literal model')
   assert.ok(sp.block.includes('{{cwd}}'), 'the system-prompt persona references the bound working-directory var {{cwd}}')
 
   // (b) The default model MUST be pinned explicitly (provider + model both set),
@@ -21035,7 +21035,7 @@ test('HOST-SIDE FIRST-WAKE FIX config guard: the bundled patch overrides the COR
   // settings document loads (a base default behind a loaded-but-empty settings
   // section would otherwise be emptied).
   assert.ok(adm.block.includes('provider: opencode-zen'), 'the agent-default-model row pins provider opencode-zen')
-  assert.ok(adm.block.includes('model: deepseek-v4-flash'), 'the agent-default-model row pins model deepseek-v4-flash')
+  assert.ok(adm.block.includes('model: deepseek-flash'), 'the agent-default-model row pins model deepseek-flash')
 })
 
 test('HOST-SIDE FIRST-WAKE FIX real-Loader regression: the plugin materializes its own heads/workers with a MODEL-BOUND session (provider + model never empty) — the plugin side must never regress to an unbound model', async () => {
@@ -22735,7 +22735,7 @@ test('R2 fb-42/25 mint probe (a — FAIL-LOUD, the phantom-model rotation class)
       const signal = new AbortController().signal
       await assert.rejects(
         env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'R2 probe (a)' }, { agent: host, signal }),
-        /dept_head_rotate: "research-head" ABORTED \(fb-42 class\): provider "stub-coord" is registered but NEITHER model "deepseek-v4-flash" NOR the known seed model "deepseek-v4-flash" is configured in the adapter catalog/,
+        /dept_head_rotate: "research-head" ABORTED \(fb-42 class\): provider "stub-coord" is registered but NEITHER model "deepseek-v4-flash" NOR the known seed model "deepseek-flash" is configured in the adapter catalog/,
         'the rotation FAILS LOUD with the clear fb-42 reason (provider + both models named)'
       )
       // NO phantom mint: no new session row, the old entry untouched.
@@ -22880,7 +22880,7 @@ test('fb-118 (D2+D3 — the fb-45 class, "ids imprecisos en directivas"): a CONF
   })
 })
 
-test('R2 fb-42/25 mint probe (c — RETROFIT, the glm-5.3-flash exact class): the org configures a model the live adapter does NOT know (glm-5.3-flash) while the known seed model (deepseek-v4-flash) IS configured → the rotation commits but the fresh head is minted with the SEED model — the phantom model is NEVER materialized', async () => {
+test('R2 fb-42/25 mint probe (c — RETROFIT, the glm-5.3-flash exact class): the org configures a model the live adapter does NOT know (glm-5.3-flash) while the known seed model (deepseek-flash) IS configured → the rotation commits but the fresh head is minted with the SEED model — the phantom model is NEVER materialized', async () => {
   await withTempStateDir(async (stateDir) => {
     const postId = 'research-head'
     const oldSessionId = 'head-research-head'
@@ -22895,7 +22895,7 @@ test('R2 fb-42/25 mint probe (c — RETROFIT, the glm-5.3-flash exact class): th
         coordinator: { postId, role: 'Research department head', provider: 'stub-coord', agentOptions: { provider: 'stub-coord', model: 'glm-5.3-flash' } }
       }]
     }
-    const env = await bootPlugin(stateDir, { org, llmListProviders: [{ id: 'stub-coord', name: 'Stub Coord' }], llmListModels: ['deepseek-v4-flash'] })
+    const env = await bootPlugin(stateDir, { org, llmListProviders: [{ id: 'stub-coord', name: 'Stub Coord' }], llmListModels: ['deepseek-flash'] })
     await waitFor(() => env.agents.store.has('head-research-head'), 5000, 'research head materialized at boot')
     try {
       const host = fakeParentAgent()
@@ -22904,7 +22904,7 @@ test('R2 fb-42/25 mint probe (c — RETROFIT, the glm-5.3-flash exact class): th
       assert.notEqual(result.sessionId, oldSessionId, 'the rotate COMMITS (the retrofit is a valid fallback, never a block)')
       const mint = env.agents.createCalls.filter((c) => String(c.sessionId) === result.sessionId)[0]
       assert.ok(mint, 'the fresh mint ran')
-      assert.deepEqual(mint.agentOptions, { provider: 'stub-coord', model: 'deepseek-v4-flash' }, 'the fresh head is minted with the KNOWN SEED model (deepseek-v4-flash) — glm-5.3-flash is NEVER materialized as the minted model')
+      assert.deepEqual(mint.agentOptions, { provider: 'stub-coord', model: 'deepseek-flash' }, 'the fresh head is minted with the KNOWN SEED model (deepseek-flash) — glm-5.3-flash is NEVER materialized as the minted model')
       const fresh = env.agents.store.get(result.sessionId)
       assert.ok(fresh, 'the fresh head is live (with the retargeted model)')
     } finally {

@@ -56,20 +56,20 @@ test('R4 (providers → org config): org.workerAgentOptions / org.hostAgentOptio
     const org = {
       departments: [],
       // A DISTINGUISHABLE probe route: if the surface returned the code
-      // literal (deepseek-v4-flash) the asserts below fail — the org-driven
+      // literal (deepseek-flash) the asserts below fail — the org-driven
       // read is the point being proven.
-      workerAgentOptions: { provider: 'opencode-zen', model: 'deepseek-v4-flash-r4-worker-probe', reasoningEffort: 'max' },
-      hostAgentOptions: { provider: 'opencode-zen', model: 'deepseek-v4-flash-r4-host-probe', reasoningEffort: 'max' }
+      workerAgentOptions: { provider: 'opencode-zen', model: 'deepseek-flash-r4-worker-probe', reasoningEffort: 'max' },
+      hostAgentOptions: { provider: 'opencode-zen', model: 'deepseek-flash-r4-host-probe', reasoningEffort: 'max' }
     }
     const { pluginCtx, dispose } = await bootWithOrg(stateDir, org)
     try {
       const presets = pluginCtx().get('deepartments.presets')
       assert.ok(presets !== undefined, 'deepartments.presets resolves (the orchestration factory surface)')
-      assert.equal(presets.WORKER_AGENT_OPTIONS.model, 'deepseek-v4-flash-r4-worker-probe', 'WORKER_AGENT_OPTIONS resolves the ORG-DECLARED worker route (org.workerAgentOptions wins over the code literal)')
+      assert.equal(presets.WORKER_AGENT_OPTIONS.model, 'deepseek-flash-r4-worker-probe', 'WORKER_AGENT_OPTIONS resolves the ORG-DECLARED worker route (org.workerAgentOptions wins over the code literal)')
       assert.equal(presets.WORKER_AGENT_OPTIONS.provider, 'opencode-zen', 'the org-declared worker provider is resolved')
-      assert.equal(presets.HOST_AGENT_OPTIONS.model, 'deepseek-v4-flash-r4-host-probe', 'HOST_AGENT_OPTIONS resolves the ORG-DECLARED host route (org.hostAgentOptions wins over the code literal)')
+      assert.equal(presets.HOST_AGENT_OPTIONS.model, 'deepseek-flash-r4-host-probe', 'HOST_AGENT_OPTIONS resolves the ORG-DECLARED host route (org.hostAgentOptions wins over the code literal)')
       // The materializePost fallback follows the ORG-resolved worker route.
-      assert.equal(presets.resolveMaterializeAgentOptions({}).model, 'deepseek-v4-flash-r4-worker-probe', 'resolveMaterializeAgentOptions falls back to the ORG-RESOLVED worker route')
+      assert.equal(presets.resolveMaterializeAgentOptions({}).model, 'deepseek-flash-r4-worker-probe', 'resolveMaterializeAgentOptions falls back to the ORG-RESOLVED worker route')
     } finally {
       dispose()
     }
@@ -78,14 +78,14 @@ test('R4 (providers → org config): org.workerAgentOptions / org.hostAgentOptio
   }
 })
 
-test('R4 (providers → org config): an org WITHOUT the R4 fields falls back to the CODE literals (deepseek-v4-flash both — the runtime truth; the pre-R4 vision-exp host literal is GONE) — the compose-untouched contract', async () => {
+test('R4 (providers → org config): an org WITHOUT the R4 fields falls back to the CODE literals (deepseek-flash both — the runtime truth; the pre-R4 vision-exp host literal is GONE) — the compose-untouched contract', async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), 'deepartments-r4-default-'))
   try {
     const { pluginCtx, dispose } = await bootWithOrg(stateDir, { departments: [] })
     try {
       const presets = pluginCtx().get('deepartments.presets')
-      assert.equal(presets.WORKER_AGENT_OPTIONS.model, 'deepseek-v4-flash', 'absent org.workerAgentOptions → the code literal (deepseek-v4-flash)')
-      assert.equal(presets.HOST_AGENT_OPTIONS.model, 'deepseek-v4-flash', 'absent org.hostAgentOptions → the code literal (deepseek-v4-flash — the runtime truth; NO vision-exp anywhere)')
+      assert.equal(presets.WORKER_AGENT_OPTIONS.model, 'deepseek-flash', 'absent org.workerAgentOptions → the code literal (deepseek-flash)')
+      assert.equal(presets.HOST_AGENT_OPTIONS.model, 'deepseek-flash', 'absent org.hostAgentOptions → the code literal (deepseek-flash — the runtime truth; NO vision-exp anywhere)')
       assert.equal(presets.WORKER_AGENT_OPTIONS.reasoningEffort, 'max', 'the code-default reasoning effort is max')
     } finally {
       dispose()

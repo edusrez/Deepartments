@@ -408,6 +408,70 @@
 > · **NOTA WATCH fb-235: sigue ABIERTO** — cierra con el primer bare-400 post-deploy
 > (deploy diferido VALLE largo 09-10; verificación reserve LOW 86/87% del
 > pooler-capacity ENCOLADA).
+> **ENTRADA 09-10 — ROTACIÓN DE MODELO DEL ORG → `deepseek-flash` (IPD, lane
+> model-rotation; changeset atómico LISTO-PARA-COMMIT, 0 commits — commitea el host;
+> reanudación post-incidente; **NO se re-absorbe lo ya absorbido** — lo ya registrado en
+> las ENTRADAS 09-07→09-09 NO se duplica y la ola de stable-web :3080 se declara NO
+> abierta en esta entrada)** — el ORG entero (HOST + heads + workers) corre el id
+> NUEVO **`deepseek-flash`** (`opencode-go/deepseek-flash`): **UN solo id MULTIMODAL**
+> que sustituye a los DOS legacy (`deepseek-v4-flash` en heads/workers +
+> `deepseek-v4-flash-vision-exp` en el host) — los legacy quedan **RETIRED** (siguen
+> aceptados como nombre, pero fuera de la config: id nuevo inequívoco) · proveedor
+> **SIN tocar** (`opencode-zen` = ruta GO vía pooler :4097 → upstream
+> opencode.ai/zen/go/v1; **GO-ONLY**, no está en Zen PAYG) · **`reasoning_effort max`
+> INTACTO** en TODAS las entradas (verificado byte a byte en los 3 sitios: settings
+> `agent-default-model` + `llm-deepseek`, filas org de los 2 paquetes, y las personas
+> desplegadas) · **pricing Go NUEVO**: $0.15/$0.60/$0.003 off-peak · $0.30/$1.20/$0.006
+> peak · **Usage $15 meter x4** (docs Go 09-10) · **NOTA F5**: la edición de
+> `packages/dshd-orchestration/src/presets.ts` (`WORKER_AGENT_OPTIONS` +
+> `HOST_AGENT_OPTIONS` → `deepseek-flash`) es del HOST, **owner-autorizada** y queda
+> **NO REVERTIDA** (runtime truth; se describe en el gate post-hoc) · **caveat RD**:
+> opencode **#48180/#48093** (HTTP 400 opaco al combinar reasoning_content echo-back +
+> reasoning_effort en sesiones multi-turno con tools = **correlación fb-235**) →
+> **smoke post-deploy del host** (si 400 → mitigación; si no → datapoint de cierre) ·
+> **scope clarification (el scope literal del mandato era INCOMPLETO)**: las
+> definiciones de modelo de heads/workers NO viven en el `cordis.patch.yml` raíz sino
+> en **`packages/dshd-core/cordis.patch.yml` + su mirror `packages/dshd-core-min/`**
+> (row `agentOptions` ×3 + `workerAgentOptions` + `hostAgentOptions`, parity-locked
+> por `test/org-config-parity.test.js`) — sin esos 2 ficheros la rotación NO cambia el
+> runtime · + los presets base head/worker + 13 ficheros de `presets/departments/**` +
+> el **catálogo `settings.yaml`** (clase **fb-42/25**: el id DEBE existir en el
+> catálogo del proveedor o la rotación cae en el retrofit phantom-model) + el **twin
+> `deepartments-dev-headless`**: sus 2 filas `tool-subagent-test`/`tool-subagent-test-fork`
+> (`profiles/deepartments-dev-headless/cordis.patch.yml:33/:42`) llevan
+> `model: deepseek-v4-flash-vision-exp` porque su provider es **`deepseek-official`**
+> (api.deepseek.com), donde ese id es el nombre PROPIO de la API oficial — quedan
+> **INTACTAS por decisión host y FUERA del scope de la rotación** (la rotación es la ruta
+> `opencode-zen`) → NO es una rotación incompleta (criterio: `deepseek-flash` en la ruta
+> `opencode-zen` para agentes/heads/workers/`agent-default-model`/`probeModel`) · **test-pin
+> sync**: los 9
+> asserts que pinneaban los literales legacy se sincronizaron al id nuevo (dept_post_create
+> / F3 dept_worker_spawn / F4b dept_job_run / fb-6 seam + forensics / R2 fb-42/25 probes
+> (a)+(c) / R4 code literals / re-freeze md5 de la zona PRESETS del factory) RESPETANDO
+> la semántica de cada test — las fixtures con `stub-coord` y los logs de sesión
+> sintéticos NO se tocan · **NOTA INCIDENTE**: el org quedó congelado 11:16→12:52Z por
+> **STAGING INCOMPLETO** (settings.yaml con solo `deepseek-flash` mientras el bundle
+> deployado seguía pinneado al legacy → «pi-ai provider opencode-zen has no configured
+> model deepseek-v4-flash» en cada turno); el host desplegó el fix **canary PASS, boot
+> 12:52:46Z** · **PROCEDIMIENTO (wording del host — NO es un extra)**: al re-staging de
+> modelos, **retirar + re-materializar las sesiones vivas ES PARTE DEL PROCEDIMIENTO, no
+> un extra** — una sesión MATERIALIZADA pre-fix conserva el modelo legacy en su HANDLE
+> (el handle no se re-resuelve del config global) → turnos fallidos aunque la resolución
+> global ya esté arreglada; **remedio: `dept_worker_retire` + respawn fresh** (la
+> re-materialización se lleva el id nuevo) · **auditoría de roster post-deploy SIN
+> sesiones stranded** (verificado por el host): las pre-fix ya estaban retiradas
+> (builder-247 por IPD; quality-daily-10 / quality-inspector-174 / quality-daily-9
+> offline-retired) y los VIVOS son TODOS post-fix (builder-248, daily-ai-news-11,
+> quality-inspector-175/176, quality-daily-11; heads respondiendo).
+> **DECISIONES HOST 09-10 (5)** — (i) **buffer franja 30 min MANTENIDO** · (ii)
+> **stable-web :3080 = LANE IPD PROGRAMADA** — próximo **VALLE** tras la rotación
+> VERDE (ola de 25 releases dshmarket **1.21.2→1.45.1** + smooth-stream
+> **0.3.4→0.6.0**; sentinel RAG pre-boot auto-index off o 0.4.0-rc.1 + denylist;
+> canary) — **NO ejecutar la ola ahora** (esta entrada NO la abre) · (iii) **fb-51 (c)
+> vía interna = NO ACTION** · (iv) **franja PEAK/VALLE sin cambio** (espejo del
+> pooler; el pricing nuevo NO dispara re-evaluación en esta lane) · (v)
+> **GOAT/CommandCode NO se adopta ahora + WATCH** (fin de los 4x de docs/go, anuncio
+> post-17-09, WorkBuddy como 3er partner; el smoke GOAT condicional queda PARQUEADO).
 
 ## 1. IPD — cola activa (DAG seriado, lección fb-20: UN lane a la vez)
 

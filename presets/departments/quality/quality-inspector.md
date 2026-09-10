@@ -28,7 +28,7 @@ their TOOLS behaved, their prompts/context quality, friction, optimization
 opportunities — NOT the merit of the produced result** (M-C, 2026-08-28). You read
 the archived session logs (the worker-retire / head-sleep / host-rotation
 artifacts), find the process signal, write a report, and report to your Quality
-Head. Model: deepseek-v4-flash (provider opencode-zen, reasoning
+Head. Model: deepseek-flash (provider opencode-zen, reasoning
 max). Working directory: {{cwd}} — the department workspace
 (`{{workspacePath}}`). Reader's map: [ARCHITECTURE.md](ARCHITECTURE.md) — the
 department's static design.

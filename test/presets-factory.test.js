@@ -297,7 +297,15 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
     // host's dept_sleep is the semantic SUCCESS, never reclassifying a genuine
     // error) and (c) the doc comments of both closures. md5
     // 3ca3116b… → 587d608b10e304403c93892fed6554c7 (same span, additive).
-    assert.equal(md5, '587d608b10e304403c93892fed6554c7', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation, the LANE 0.2.3 R4 one-line HOST literal alignment, the R5 DUAL-read session-surface, the R7 getSessionEvents-collapse + surface-probe, the R9 fb-308 session-log finalize re-freeze AND the R10 fb-306 rotation-close seal re-freeze (md5 587d608b…)')
+    // Zone md5 RE-FROZE R11 (LANE ROTACIÓN DE MODELO ORG, 2026-09-10 — the
+    // deepseek-flash migration): the zone gained THREE lines — the two MODEL
+    // literals `WORKER_AGENT_OPTIONS.model` + `HOST_AGENT_OPTIONS.model`
+    // aligned from the legacy id to the single multimodal id `deepseek-flash`
+    // (it replaces BOTH legacy ids; reasoningEffort stays `max`, provider
+    // stays `opencode-zen`) — plus the F7 doc comment that cites the route.
+    // Literal-only: no closure, no dep, no surface member moved. md5
+    // 587d608b… → 4f37c5820ac0c372480eb62e48250a0e (same span, literal-only).
+    assert.equal(md5, '4f37c5820ac0c372480eb62e48250a0e', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation, the LANE 0.2.3 R4 one-line HOST literal alignment, the R5 DUAL-read session-surface, the R7 getSessionEvents-collapse + surface-probe, the R9 fb-308 session-log finalize re-freeze, the R10 fb-306 rotation-close seal re-freeze AND the R11 LANE ROTACIÓN DE MODELO deepseek-flash literal re-freeze (md5 4f37c582…)')
     // The D1 deviation is present and documented: the factory's repoRoot
     // initializer carries THREE '..' (module-position-dependent, identical
     // value — the factory lives 3 levels under the repo root).

@@ -314,12 +314,12 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
   /** F7 (owner decision 2026-08-23 — provider migration to opencode-zen): the
    * runtime-materialized department workers run the SAME provider/model route
    * as the coordinator (cordis.patch.yml — opencode-zen /
-   * deepseek-v4-flash, reasoningEffort max). ONE source shared by
+   * deepseek-flash, reasoningEffort max). ONE source shared by
    * the three spawn paths (dept_post_create, dept_job_run, dept_worker_spawn)
    * so the worker route cannot drift from the config again. */
   const WORKER_AGENT_OPTIONS: AgentOptionsLike = {
     provider: 'opencode-zen',
-    model: 'deepseek-v4-flash',
+    model: 'deepseek-flash',
     reasoningEffort: 'max'
   }
   /** VARIANT-2 (2026-08-24) — post-restart host AgentOptions intermittently
@@ -340,7 +340,7 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
    * drift from the config again (mirrors the F7 WORKER_AGENT_OPTIONS). */
   const HOST_AGENT_OPTIONS: AgentOptionsLike = {
     provider: 'opencode-zen',
-    model: 'deepseek-v4-flash',
+    model: 'deepseek-flash',
     reasoningEffort: 'max'
   }
   /** fb-6 (QH — the resume/re-materialization "has no provider/model" class):

@@ -45,7 +45,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash
+                  model: deepseek-flash
                   reasoningEffort: max
             - id: internal-programming
               name: Internal Programming
@@ -64,7 +64,7 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash
+                  model: deepseek-flash
                   reasoningEffort: max
             - id: quality
               name: Quality Department
@@ -83,20 +83,20 @@
                 provider: opencode-zen
                 agentOptions:
                   provider: opencode-zen
-                  model: deepseek-v4-flash
+                  model: deepseek-flash
                   reasoningEffort: max
           # R4 (providers → org config, LANE 0.2.3): the DEFAULT worker/host
           # model route — declared in the org (single source), resolved
           # org-driven in dshd-orchestration presets.ts (literals as code
-          # fallback). deepseek-v4-flash = the RUNTIME TRUTH (verified via
+          # fallback). deepseek-flash = the RUNTIME TRUTH (verified via
           # --dump-config: the host rows + agent-default-model run flash).
           workerAgentOptions:
             provider: opencode-zen
-            model: deepseek-v4-flash
+            model: deepseek-flash
             reasoningEffort: max
           hostAgentOptions:
             provider: opencode-zen
-            model: deepseek-v4-flash
+            model: deepseek-flash
             reasoningEffort: max
           # P1 rewire-pooler: the pooler baseURL — the endpoint-drift exemption
           # route (mirrors the dshd-core row; MUST stay equal — the parity
