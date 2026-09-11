@@ -617,9 +617,12 @@ export interface DeliveryFactoryDeps {
   /** fb-473 (D1, option A): the fb-25 rotation-reason cross-check (module-scope
    * pure helper of invoke.ts, passed BY REFERENCE — the SAME function the
    * `dept_head_rotate` tool receives, so both rotation families verify through
-   * ONE implementation). The emitter stamps `host-rotated` surfaces with it. */
-  verifyRotateReason: (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number) => 'verified' | 'unverified' | 'unavailable'
-  /** fb-473: the durable session-projection mirror path resolver (module-scope
+   * ONE implementation). The emitter stamps `host-rotated` surfaces with it.
+   * LANE DEL SELLO (PIECE 2): it also accepts `reasonProvenance` (WHERE the cited
+   * figure was read from) and may answer with the richer outcome (the dep is
+   * wired to the seal wrapper, which reduces to the stamp) ⇒ the emitter
+   * normalizes to the three-value stamp exactly like the tool does. */
+  verifyRotateReason: (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number, reasonProvenance?: { sessionId: string; rowSeq?: number; ts?: number }) => 'verified' | 'unverified' | 'unavailable' | { stamp: 'verified' | 'unverified' | 'unavailable' }  /** fb-473: the durable session-projection mirror path resolver (module-scope
    * pure helper of invoke.ts — `<dirname(sessionsRoot)>/storages/
    * session_projcache.json`). */
   resolveSessionProjCachePath: (stateDir: string, persistenceRoot?: string) => string
@@ -2569,7 +2572,14 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
           surfaceToFrame = {
             ...surfaceToFrame,
             ...surface,
-            reasonVerified: verifyRotateReason(surface.reason, surface.oldSessionId, projCachePath, contextCompletionReserve)
+            // LANE DEL SELLO (PIECE 2): the verifier may answer with the richer
+            // outcome (the seal wrapper is wired here) — the FRAME carries only
+            // the three-value stamp, NEVER a fourth label (the QD vocabulary of
+            // `verifyLabelFor` is exactly three).
+            reasonVerified: ((): 'verified' | 'unverified' | 'unavailable' => {
+              const verdict = verifyRotateReason(surface.reason, surface.oldSessionId, projCachePath, contextCompletionReserve)
+              return typeof verdict === 'string' ? verdict : verdict.stamp
+            })()
           }
         } catch {
           // a stamp failure never blocks the directive — the frame renders

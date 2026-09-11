@@ -371,6 +371,46 @@ interface SessionHeaderWithOrigin {
  * alias that is not importable without a cycle). */
 type ReasonVerificationStamp = 'verified' | 'unverified' | 'unavailable'
 
+/** LANE DEL SELLO (PIECE 2) — MIRROR of the bundle-local
+ * `ReasonVerificationOutcome` (src/invoke.ts): the richer verdict the reason
+ * verifier now returns — the three-value `stamp` PLUS the provenance
+ * adjudication (which session's projection decided the verdict, the own token
+ * `verified-against-declared-origin` when the citation closed against a DECLARED
+ * origin, and the declared origin's R'). The DEP may carry EITHER shape (the raw
+ * helper or the seal wrapper that already reduced it to its stamp) ⇒ the
+ * consumer normalizes defensively through `reasonVerifyStamp` below. */
+type ReasonVerificationVerdict = ReasonVerificationStamp | {
+  stamp: ReasonVerificationStamp
+  /** WHICH session's projection decided the verdict. */
+  referenceScope?: string
+  /** The own token when the citation closed against a DECLARED origin. */
+  reasonVerifiedToken?: string
+  /** The declared origin + its projection (when one was declared and resolved). */
+  declaredReferenceSessionId?: string
+  declaredReference?: number
+  /** TRUE when the declared origin did NOT resolve to an incarnation. */
+  declaredOriginUnresolved?: boolean
+}
+
+/** LANE DEL SELLO (PIECE 2) — WHERE the figure a rotation reason cites was READ
+ * FROM (mirror of the bundle-local `ReasonDatumProvenance`). The reason is FREE
+ * TEXT and names no session, so a figure belonging to another incarnation of the
+ * same post would be audited against the incumbent with nobody able to say why;
+ * a caller that KNOWS the origin declares it here. ABSENT = legacy behavior. */
+interface ReasonDatumProvenanceArg {
+  /** The sessionId the cited figure was read from. */
+  sessionId: string
+  /** The mirror row's write counter observed at the declared origin. */
+  rowSeq?: number
+  /** The instant the figure was read at the declared origin (ms epoch). */
+  ts?: number
+}
+
+/** LANE DEL SELLO (PIECE 2) — reduce a reason-veracity verdict to its
+ * three-value stamp (the ONE label vocabulary the QD mirror renders). */
+const reasonVerifyStamp = (verdict: ReasonVerificationVerdict): ReasonVerificationStamp =>
+  typeof verdict === 'string' ? verdict : verdict.stamp
+
 /** Mirror of the bundle-local `CatalogRow` (src/invoke.ts — the dept_who /
  * roster row builder's row shape; a module-scope local alias that is not
  * importable without a cycle). */
@@ -575,8 +615,11 @@ export interface ToolsFactoryDeps {
   roleForSessionLive: (sessionId: string) => SubagentRole
   /** The rotation journal-status stamp (module-scope pure helper of invoke.ts). */
   headRotationJournalStatus: (journalText: string, nowMs: number) => { timestamp?: string; stale: boolean }
-  /** The fb-25 rotation-reason cross-check (module-scope pure helper). */
-  verifyRotateReason: (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number) => ReasonVerificationStamp
+  /** The fb-25 rotation-reason cross-check (module-scope pure helper). LANE DEL
+   * SELLO (PIECE 2): it also accepts `reasonProvenance` (WHERE the cited figure
+   * was read from) and may answer with the richer outcome (the dep is wired to
+   * the seal wrapper, which reduces to the stamp) ⇒ consumers normalize. */
+  verifyRotateReason: (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number, reasonProvenance?: ReasonDatumProvenanceArg) => ReasonVerificationVerdict
   /** The session-projcache path resolver (module-scope pure helper). */
   resolveSessionProjCachePath: (stateDir: string, persistenceRoot?: string) => string
   /** R10 (fb-82) — the DURABLE workspace domain file resolver
@@ -6703,13 +6746,21 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   const healthSessionProjections = ctx.get('sessionProjections') as SessionProjectionsLike | undefined
   const buildSessionContexts = (): SessionContextInput[] | undefined => {
     if (healthSessionProjections === undefined) return undefined
-    const rowOf = (session: unknown, id: { postId?: string; hostId?: string }): SessionContextInput | undefined => {
+    const rowOf = (session: unknown, id: { postId?: string; hostId?: string }, sessionId: string): SessionContextInput | undefined => {
       const snap = healthSessionProjections.snapshot(session)
       const view = snap?.values?.contextPressure
       if (view === undefined || typeof view !== 'object') return undefined
       const v = view as { contextWindow?: unknown; pressureTokens?: unknown; projectedTokens?: unknown }
       return {
         ...id,
+        // LANE DEL SELLO (PIECE 3 — the producer): the SESSION the numbers were
+        // read from. Without it the context-threshold alert cites a FIGURE with
+        // NO FRAME: the `error` names the AGENT, so a caller quoting the figure
+        // verbatim could not declare where it read it — the provenance was
+        // impossible for anyone (the reason the seal's provenance parameter had
+        // no source). The row is the very session resolved for this member, so
+        // this is the honest incarnation of the published numbers.
+        ...(sessionId !== '' ? { sessionId } : {}),
         ...(typeof v.contextWindow === 'number' && Number.isFinite(v.contextWindow) ? { contextWindow: v.contextWindow } : {}),
         ...(typeof v.pressureTokens === 'number' && Number.isFinite(v.pressureTokens) ? { pressureTokens: v.pressureTokens } : {}),
         ...(typeof v.projectedTokens === 'number' && Number.isFinite(v.projectedTokens) ? { projectedTokens: v.projectedTokens } : {})
@@ -6720,14 +6771,14 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       if (entry.retired === true) continue
       const live = agents?.get(entry.sessionId)
       if (live?.session === undefined) continue
-      const row = rowOf(live.session, { postId })
+      const row = rowOf(live.session, { postId }, String(entry.sessionId))
       if (row !== undefined) out.push(row)
     }
     for (const entry of hosts.values()) {
       if (entry.retired === true) continue
       const live = agents?.get(entry.sessionId)
       if (live?.session === undefined) continue
-      const row = rowOf(live.session, { hostId: entry.hostId })
+      const row = rowOf(live.session, { hostId: entry.hostId }, String(entry.sessionId))
       if (row !== undefined) out.push(row)
       break
     }
@@ -6978,6 +7029,22 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     parameters: {
       postId: { type: 'string', required: true, description: 'The CONFIGURED department head postId to rotate (e.g. "quality-head", "internal-programming-head"). A worker or an unconfigured post is rejected loudly.' },
       reason: { type: 'string', description: 'Optional reason for the rotation (recorded in the log + the QD mirror).' },
+      // LANE DEL SELLO (PIECE 2 — THE PRODUCER OF THE PROVENANCE): without this
+      // declaration the seal consumer had NO source (the reason is free text and
+      // names no session; the context-threshold ALERT names the AGENT, not the
+      // session), so a figure read from ANOTHER incarnation was audited against
+      // the incumbent with no way to say so — the previous attempt was reverted
+      // for exactly this. Declaring it here makes the provenance ACHIEVABLE.
+      reasonProvenance: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'Optional — WHERE the figure your reason cites was READ FROM (the session that produced it). The reason is free text and names no session; when the figure comes from an ALERT (e.g. a context-threshold row), declare the session that alert published (`sessionId`). Omitted → the previous behavior, exactly. The DISCRIMINATOR is never «did you declare?» but «does the declared origin DIFFER from the session audited?»: a declaration EQUAL to the audited head session is redundant (normal verification); a DIFFERENT incarnation of the same post is verified against THAT origin and sealed as such (its own token `verified-against-declared-origin` + the mandatory `referenceScope` in the seal row) — never as a certification of the incumbent; a declared session that is NOT an incarnation of this post earns NO token (the reason is stamped unverified and the seal cause names the unresolved declaration).',
+        properties: {
+          sessionId: { type: 'string', required: true, description: 'The sessionId the cited figure was read from (e.g. the session published by the context-threshold alert row).' },
+          rowSeq: { type: 'number', description: 'Optional: the mirror row write-counter observed at that origin (the drift discriminator).' },
+          ts: { type: 'number', description: 'Optional: the instant (ms epoch) the figure was read at that origin.' }
+        }
+      },
       wait: { type: 'boolean', description: 'Optional (fb-735): DEFER instead of refusing — re-read the SAME live-handle signal the free-window check uses (effect-free: it never sends a message or wakes anyone) until the head\'s turn really closes, then rotate in that same window. Bounded by `waitMaxMs`; when the budget is spent the call returns the SAME loud RUNNING refusal and states what it observed (running-since + last-wake + waitedMs). Absent → the current behavior, exactly: the R8 settle-wait (default 5s) and then the loud refusal.' },
       waitMaxMs: { type: 'number', description: 'Optional (fb-735): hard cap in milliseconds on a `wait:true` deferral (default 120000, the smart_restart default). Ignored without `wait:true`. An absent/invalid value falls back to the default (a wait is never unbounded); an explicit 0 (or <= 0) is NOT the default — it spends no budget, so a running head refuses IMMEDIATELY reporting only the few ms elapsed. It caps the WHOLE deferral (the R8 settle window is inside it).' }
     },
@@ -7004,15 +7071,23 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           // fb-25 (a): the reason CROSS-CHECK stamp ('verified' | 'unverified' |
           // 'unavailable') — the reason figure vs the OLD session's real usage.
           reasonVerified: { type: 'string' },
+          // LANE DEL SELLO (PIECES 1+2, ADDITIVE): WHICH session's projection
+          // decided the verdict ('audited' = the rotated incumbent, the ONLY
+          // scope that can produce 'verified'; 'declared-origin' = the caller
+          // declared a DIFFERENT incarnation as the figure's origin) + the own
+          // token + the declared origin. Absent when no provenance was declared.
+          reasonReferenceScope: { type: 'string' },
+          reasonVerifiedToken: { type: 'string' },
+          declaredReferenceSessionId: { type: 'string' },
           // fb-735: how long a `wait:true` deferral actually lasted (ms) before
           // the turn closed — ABSENT when no `wait` was requested (never a fake
           // 0, exactly the smart_restart accounting).
           waitedMs: { type: 'number' }
         }
       },
-      render: (_args, value) => [{ type: 'text', text: `rotated ${value.postId}: ${value.previousSessionId} → ${value.sessionId} (archived ${value.archived}); journal ${value.journal.path}${value.journal.stale ? ' STALE — memo no actualizado, journal previo' : ' (fresh)'}${value.reason !== undefined ? `; reason: ${value.reason}` : ''}${value.reasonVerified !== undefined ? `; reason verified: ${value.reasonVerified}` : ''}${value.waitedMs !== undefined ? `; waited ${value.waitedMs}ms for the live turn to close` : ''}` } as const]
+      render: (_args, value) => [{ type: 'text', text: `rotated ${value.postId}: ${value.previousSessionId} → ${value.sessionId} (archived ${value.archived}); journal ${value.journal.path}${value.journal.stale ? ' STALE — memo no actualizado, journal previo' : ' (fresh)'}${value.reason !== undefined ? `; reason: ${value.reason}` : ''}${value.reasonVerified !== undefined ? `; reason verified: ${value.reasonVerified}` : ''}${value.reasonReferenceScope !== undefined ? ` (scope ${value.reasonReferenceScope}${value.declaredReferenceSessionId !== undefined ? ` — declared origin ${value.declaredReferenceSessionId}` : ''}${value.reasonVerifiedToken !== undefined ? `, token ${value.reasonVerifiedToken}` : ''})` : ''}${value.waitedMs !== undefined ? `; waited ${value.waitedMs}ms for the live turn to close` : ''}` } as const]
     },
-    async execute(args, exec): Promise<{ postId: string; sessionId: string; previousSessionId: string; archived: boolean; journal: { path: string; timestamp?: string; stale: boolean }; reason?: string; reasonVerified: ReasonVerificationStamp; waitedMs?: number }> {
+    async execute(args, exec): Promise<{ postId: string; sessionId: string; previousSessionId: string; archived: boolean; journal: { path: string; timestamp?: string; stale: boolean }; reason?: string; reasonVerified: ReasonVerificationStamp; reasonReferenceScope?: string; reasonVerifiedToken?: string; declaredReferenceSessionId?: string; waitedMs?: number }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_head_rotate requires a calling agent (exec.agent was undefined)')
       // ACL (map §3): HOST-plane — only the Asistente itself (no registered
@@ -7162,7 +7237,17 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // the «N% de contexto» reason form verifies against the SAME
       // (projected + reserve)/window fraction the context-threshold alert
       // composed (absent knob → 0 → the plain-projection fraction, legacy).
-      const reasonVerified = verifyRotateReason(args.reason, sessionId, projCachePath, (config.health as { contextCompletionReserve?: number } | undefined)?.contextCompletionReserve)
+      // LANE DEL SELLO (PIECE 3 → PIECE 2): `args.reasonProvenance` — the session
+      // the caller declares as the figure's ORIGIN — is threaded into the SAME
+      // call, so the verdict is computed (and the seal row sealed) against the
+      // right incarnation. THIS is the seam that was MISSING before the revert:
+      // the consumer existed and the producer did not.
+      const reasonVerdict = verifyRotateReason(args.reason, sessionId, projCachePath, (config.health as { contextCompletionReserve?: number } | undefined)?.contextCompletionReserve, args.reasonProvenance)
+      const reasonVerified = reasonVerifyStamp(reasonVerdict)
+      // The provenance adjudication the verifier reported (absent on a legacy /
+      // audited verdict) — surfaced in the result so the host sees WHICH scope
+      // decided the seal without reading the ledger.
+      const reasonProvenanceOutcome = typeof reasonVerdict === 'string' ? undefined : reasonVerdict
       // QD mirror (spec 007 §6.3, D-Q3 — the host-rotated pattern): a head
       // rotation is inspected at 100%. Non-fatal (the emitter wraps itself).
       await maybeEmitQualityInspectDirective({
@@ -7182,6 +7267,12 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         archived,
         journal: { path: journalPathFor(args.postId), ...(journalStatus.timestamp !== undefined ? { timestamp: journalStatus.timestamp } : {}), stale: journalStatus.stale },
         reasonVerified,
+        // LANE DEL SELLO (PIECES 1+2, ADDITIVE — absent on a legacy verdict, so
+        // the pre-lane result shape is byte-identical): WHICH scope decided the
+        // seal + the own token + the declared origin.
+        ...(reasonProvenanceOutcome?.referenceScope !== undefined ? { reasonReferenceScope: reasonProvenanceOutcome.referenceScope } : {}),
+        ...(reasonProvenanceOutcome?.reasonVerifiedToken !== undefined ? { reasonVerifiedToken: reasonProvenanceOutcome.reasonVerifiedToken } : {}),
+        ...(reasonProvenanceOutcome?.declaredReferenceSessionId !== undefined ? { declaredReferenceSessionId: reasonProvenanceOutcome.declaredReferenceSessionId } : {}),
         ...(args.reason !== undefined ? { reason: args.reason } : {}),
         // fb-735: the wait this call really spent — present ONLY under
         // `wait:true` (an absent field, never a fabricated 0, so a `wait:false`

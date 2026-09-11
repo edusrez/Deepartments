@@ -472,7 +472,20 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     // UNCHANGED (md5 63aeb795f694c8cad29b94dd1605402c →
     // ba3da7b71dc8d71a6db42361b015ccc6; byte-synced with
     // scripts/zone-md5-manifest.json:11 in the SAME change — the header rule).
-    assert.equal(md5, 'ba3da7b71dc8d71a6db42361b015ccc6', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + the VALLE 09-07 FB-198 T1 failedGround observer + prepared (wake-failed) / failed:<ground> envelope + id-truth assertion + the LOOP FASE 1 feedback dedupe/duplicado/bridge-adjacent tool span + the fb-775 dept_feedback_update CLOSED-SET org validator (md5 ba3da7b71dc8d71a6db42361b015ccc6)')
+    // Zone md5 RE-FROZE (2026-09-11, LANE DEL SELLO / `reasonProvenance`,
+    // IPD builder-322): DECLARED INTENTIONAL in-span changes to the
+    // `dept_head_rotate` tool body — (1) the `reasonProvenance` parameter
+    // schema (the OPTIONAL declared ORIGIN session of the figure the free-text
+    // `reason` cites: sessionId + rowSeq + ts, additionalProperties:false);
+    // (2) the call-site threading of that declaration into verifyRotateReason
+    // (the seam that was MISSING when the consumer-only attempt was reverted);
+    // (3) the ADDITIVE output fields `reasonReferenceScope` /
+    // `reasonVerifiedToken` / `declaredReferenceSessionId` + their render
+    // suffix + the `execute` result type. A caller that declares NOTHING gets
+    // the pre-lane verdict and result shape byte-identically. md5
+    // ba3da7b71dc8d71a6db42361b015ccc6 → 8c82d814bd9bbad309688174564fc5d1;
+    // byte-synced with scripts/zone-md5-manifest.json:11 in the SAME change.
+    assert.equal(md5, '8c82d814bd9bbad309688174564fc5d1', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + the VALLE 09-07 FB-198 T1 failedGround observer + prepared (wake-failed) / failed:<ground> envelope + id-truth assertion + the LOOP FASE 1 feedback dedupe/duplicado/bridge-adjacent tool span + the fb-775 dept_feedback_update CLOSED-SET org validator + the LANE DEL SELLO reasonProvenance declared-origin contract (parameter schema + call-site threading + the ADDITIVE reasonReferenceScope/reasonVerifiedToken/declaredReferenceSessionId outputs) (md5 8c82d814bd9bbad309688174564fc5d1)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface
@@ -499,7 +512,12 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
   // deps, all defined BEFORE the factory position or module-scope of
   // invoke.ts: the host-plane tool builders + the bus/wakepack/registry/
   // lifecycle closures + the module-scope pure helpers).
-  for (const dep of ['sleepTool,', 'subagents,', 'wakePackService,', 'hostIdForSession,', 'readJournal,', 'journalPathFor,', 'refreshPresence,', 'savePresence,', 'notifyHostPresence,', 'presenceCache,', 'assembleHeartbeat,', 'roleForSessionLive,', 'headRotationJournalStatus,', 'verifyRotateReason,', 'resolveSessionProjCachePath,', 'deliverDaemonNotice,', 'captureSchedulerAutoRunFailure,', 'buildCatalogRows,', 'wakePackInjected,', 'deferredSleepReplace,', 'computeHostSleepSurfacePlan,', 'readPresenceStateFile,', 'ensureHost,', 'writeJournal,', 'bumpHostSleepCounter,', 'bumpPostSleepCounter,']) {
+  // NOTE (forma, no paso): verifyRotateReason se pasa ahora como ADAPTADOR
+  // inline (`verifyRotateReason: (...) => verifyRotateReason(...).stamp`) porque
+  // el contrato declarado exige reducir al `stamp` de tres valores; el paso por
+  // referencia SE MANTIENE (cambió la EXPRESIÓN, no el PASO) y el re-envuelo con
+  // observeReasonSealDatum(ctx.logger, verifyRotateReason) vive en src/invoke.ts:4469.
+  for (const dep of ['sleepTool,', 'subagents,', 'wakePackService,', 'hostIdForSession,', 'readJournal,', 'journalPathFor,', 'refreshPresence,', 'savePresence,', 'notifyHostPresence,', 'presenceCache,', 'assembleHeartbeat,', 'roleForSessionLive,', 'headRotationJournalStatus,', 'verifyRotateReason:', 'resolveSessionProjCachePath,', 'deliverDaemonNotice,', 'captureSchedulerAutoRunFailure,', 'buildCatalogRows,', 'wakePackInjected,', 'deferredSleepReplace,', 'computeHostSleepSurfacePlan,', 'readPresenceStateFile,', 'ensureHost,', 'writeJournal,', 'bumpHostSleepCounter,', 'bumpPostSleepCounter,']) {
     assert.ok(invoke.includes(dep), `the invocation passes ${dep.replace(',', '')} by reference (CUT4 direct dep)`)
   }
   // The compiled bundle still exports the SAME superset (the export-parity lock

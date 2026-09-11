@@ -1107,6 +1107,82 @@ export type ReasonVerificationStamp = 'verified' | 'unverified' | 'unavailable'
  * the old session's real usage — mission guidance: ±10-15%). */
 export const REASON_VERIFY_TOLERANCE = 0.15
 
+/** LANE DEL SELLO (PIECE 2 — the TOOL contract carries it) — WHERE the figure a
+ * rotation `reason` cites was READ FROM. The reason is FREE TEXT: it names no
+ * session, and the alert a caller quotes it from names the AGENT, not the
+ * session ⇒ a figure belonging to ANOTHER incarnation of the same post would be
+ * audited against the incumbent and stamped `unverified` with nobody able to
+ * say why. A caller that KNOWS the origin declares it here.
+ * ⚠️ ADJUDICATED ACCEPTANCE (the QD): the discriminator is NEVER «was a
+ * provenance declared?» — it is «does the DECLARED origin DIFFER from the
+ * audited INCUMBENT?». A declaration equal to the incumbent is REDUNDANT and
+ * changes nothing (an identical route must not read differently); a DIFFERENT
+ * origin is a DIFFERENT measurement and is sealed as such (`referenceScope` +
+ * its own token). Absent parameter → byte-identical legacy behavior. */
+export interface ReasonDatumProvenance {
+  /** The sessionId the cited figure was read from (`reason` provenance). */
+  sessionId: string
+  /** The mirror ROW write-counter observed at the declared origin (the drift
+   * discriminator, same meaning as the seal row's `rowSeq`). */
+  rowSeq?: number
+  /** The instant the figure was read at the declared origin (ms epoch). */
+  ts?: number
+}
+
+/** LANE DEL SELLO (PIECE 2) — THE OWN TOKEN: the label of a verdict that closed
+ * the citation against the DECLARED ORIGIN (a DIFFERENT incarnation of the same
+ * post) instead of the audited incumbent. It is a DECLARATION of scope, not a
+ * re-verdict: «la cifra citada es de su origen declarado y allí cierra». */
+export type ReasonVerifiedToken = 'verified-against-declared-origin'
+
+/** LANE DEL SELLO — WHICH session's projection the verdict was computed against.
+ * `audited` = the caller's incumbent `oldSessionId` (the ONLY scope that can
+ * produce `verified`: a rotation verifies what it rotates). `declared-origin` =
+ * the session the caller declared as the figure's origin — a DIAGNOSTIC scope:
+ * the row seals it explicitly so nobody reads a same-labelled row as a
+ * certification of the incumbent. */
+export type ReasonReferenceScope = 'audited' | 'declared-origin'
+
+/** LANE DEL SELLO (PIECES 1+2) — EVERYTHING one reason-verification decided,
+ * not just the label: the stamp, the scope its reference came from, the OWN
+ * TOKEN when the citation closed against a DECLARED origin, and the declared
+ * reference the seal row needs. The wrapper consumes it to compose the row; the
+ * PUBLIC return keeps the three-value `stamp` (see the note on
+ * `verifyRotateReason` — the token never becomes a fourth stamp value). */
+export interface ReasonVerificationOutcome {
+  stamp: ReasonVerificationStamp
+  /** Present ONLY when the citation closed against the declared origin. */
+  reasonVerifiedToken?: ReasonVerifiedToken
+  /** WHICH session's projection decided the verdict (absent → the audited one). */
+  referenceScope?: ReasonReferenceScope
+  /** R (the projection of the DECLARED origin) the verdict compared against. */
+  declaredReference?: number
+  /** The declared origin the row is about (kept even when unresolvable). */
+  declaredReferenceSessionId?: string
+  /** TRUE when a provenance WAS declared, DIFFERED from the incumbent, and the
+   * mirror does NOT project that session (not an incarnation of this post ⇒ no
+   * own token, no certification — see `reasonSealCauseFor`). */
+  declaredOriginUnresolved?: boolean
+  /** ⚠️ THE RATIO THAT PRODUCED THE STAMP — always the citation against the
+   * AUDITED incumbent (the stamp is the audit's decision, never the diagnosis's:
+   * see `referenceScope`). Reported so the seal row's `executedRatio` is the
+   * magnitude the verdict really rests on. Absent when no ratio was compared. */
+  executedRatio?: number
+  /** The ratio of the citation against the DECLARED origin's projection R′ — the
+   * magnitude the OWN TOKEN rests on (`≤ tolerance` ⇒ the figure really closes
+   * against the session it declares). DIAGNOSTIC: it never produces the stamp. */
+  declaredRatio?: number
+}
+
+/** Normalize a `reasonProvenance` argument to its declared sessionId. Anything
+ * else (absent, a non-object, an empty/non-string sessionId) → undefined, i.e.
+ * «no provenance declared» ⇒ the legacy route, EXACTLY. Never throws. */
+function declaredProvenanceSessionId(provenance: unknown): string | undefined {
+  if (provenance === undefined || provenance === null || typeof provenance !== 'object') return undefined
+  const sessionId = (provenance as { sessionId?: unknown }).sessionId
+  return typeof sessionId === 'string' && sessionId !== '' ? sessionId : undefined
+}
+
 /** The tolerantly-parseable token figure of a rotation reason: an optional
  * `~`, a 1-7 digit number (thousands separators `.`/`,` accepted), an optional
  * `k`/`K` suffix ("~789k", "789,959", "1.048.576"). Sub-thousand matches
@@ -1389,16 +1465,44 @@ const resolveWorkspaceStatePath = (stateDir: string, persistenceRoot?: string): 
  * and the pct branch then takes the reserve the CITATION carries inline
  * (`monitorOperandsInReason`) — a READ-TIME COMPENSATION, not a wiring fix
  * (fb-818 stays open). fb-426 (B): the cited pct's domain is the branch's own
- * operand domain (`maxContextPct`), never a bare 100. */
-export function verifyRotateReason(reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number): ReasonVerificationStamp {
-  if (typeof reason !== 'string' || reason.trim() === '') return 'unavailable'
-  if (typeof oldSessionId !== 'string' || oldSessionId === '') return 'unavailable'
-  if (typeof projCachePath !== 'string' || projCachePath === '') return 'unavailable'
+ * operand domain (`maxContextPct`), never a bare 100.
+ * LANE DEL SELLO (PIECES 1+2, ADDITIVE): `reasonProvenance` names the session
+ * the cited figure was READ FROM. It changes NO verdict rule — the stamp is
+ * STILL computed against the audited incumbent (`oldSessionId`) with the SAME
+ * tolerance and branch order; what it adds is the ABILITY TO TELL the two
+ * findings apart. ⚠️ D(HARD): when the declared origin is a DIFFERENT
+ * incarnation, the OWN TOKEN (`verified-against-declared-origin`) decides the
+ * case and the row carries `referenceScope: 'declared-origin'` — the figure must
+ * be re-derivable against the session it came from. fb-810 (measured): resolving
+ * the citation across the post's other incarnations as a CERTIFICATION turns a
+ * TRUE positive into a FALSE negative (audited row 38681 fails at ratio 17.03
+ * while the sibling 96d977f4 passes at 0.018579). ⇒ THE STAMP IS ALWAYS THE
+ * AUDIT'S: it is computed against the INCUMBENT and NEVER against the declared
+ * origin — `audited` is the ONLY scope that can produce `verified` (letting the
+ * lineage certify is what converts a TRUE positive into a FALSE negative). A
+ * DIFFERING declaration yields the DIAGNOSIS, never a verdict: the row carries
+ * `referenceScope: 'declared-origin'`, the declared session + its R′, the declared
+ * ratio, and — when the figure really closes against ITS OWN origin — the OWN
+ * TOKEN `verified-against-declared-origin` (a TOKEN, never the `stamp`; the cause
+ * says explicitly that the figure is NOT wrong). El diagnóstico de encarnación es
+ * DIAGNÓSTICO, NUNCA certificación.
+ * ⚠️ THE OWN TOKEN IS NOT A FOURTH STAMP VALUE. `ReasonVerificationStamp` is
+ * exported AND mirrored (`tools.ts`), and the QD's `verifyLabelFor` renders
+ * exactly three labels with a bare `else`: a fourth member would (a) break the
+ * mirrors and (b) fall into that `else` and render `[reason unverifiable]` —
+ * i.e. the own token would be published as the very false negative fb-810
+ * reverted. So `stamp` stays in the SAME three-value vocabulary (it names the
+ * DECISION of the audit) and the token + scope travel in the OUTCOME, where the
+ * seal row persists and prints them — the surface a re-verifier reads. */
+export function verifyRotateReason(reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number, reasonProvenance?: ReasonDatumProvenance): ReasonVerificationOutcome {
+  if (typeof reason !== 'string' || reason.trim() === '') return { stamp: 'unavailable' }
+  if (typeof oldSessionId !== 'string' || oldSessionId === '') return { stamp: 'unavailable' }
+  if (typeof projCachePath !== 'string' || projCachePath === '') return { stamp: 'unavailable' }
   let parsed: unknown
   try {
     parsed = JSON.parse(readFileSync(projCachePath, 'utf8')) as unknown
   } catch {
-    return 'unavailable'
+    return { stamp: 'unavailable' }
   }
   // THE SUBJECT IS THE CALLER'S INCUMBENT — `oldSessionId`, the session this
   // rotation is auditing. fb-810 (measured): resolving the citation across the
@@ -1408,7 +1512,22 @@ export function verifyRotateReason(reason: unknown, oldSessionId: string, projCa
   // read `unverified` would read `verified`). The lineage is a DIAGNOSTIC at
   // most, NEVER a certification.
   const reference = projectedUsageForSession(parsed, oldSessionId)
-  if (!(reference !== undefined && reference > 0)) return 'unavailable'
+  if (!(reference !== undefined && reference > 0)) return { stamp: 'unavailable' }
+  // LANE DEL SELLO (PIECE 2) — the acceptance adjudicated by the QD: the
+  // DISCRIMINATOR is not «was a provenance declared?» but «does the DECLARED
+  // origin DIFFER from the audited INCUMBENT?». A declaration EQUAL to the
+  // incumbent is REDUNDANT — it selects the SAME route (normal `verified`), and
+  // treating an identical route differently would be noise. A DIFFERENT one is a
+  // DIFFERENT MEASUREMENT: the reference is projected against THAT session and
+  // the verdict is caused/tokened as such.
+  // A declared origin that is NOT an incarnation of this post (no projected
+  // row) NEVER earns the own token (`unverified` + its own cause): that check is
+  // what keeps the own token from becoming a refrendo con otro nombre — the
+  // lineage resolver had it, and a declaration that skipped it would not.
+  const declaredSessionId = declaredProvenanceSessionId(reasonProvenance)
+  const declaredDiffers = declaredSessionId !== undefined && declaredSessionId !== oldSessionId
+  const declaredReference = declaredDiffers ? projectedUsageForSession(parsed, declaredSessionId) : undefined
+  const declaredMeasurable = declaredReference !== undefined && declaredReference > 0
   // fb-426 (A) — THE RESERVE THE CITATION WAS COMPOSED WITH. The caller knob is
   // honoured first (unchanged); when it is ABSENT — the MEASURED production state,
   // the knob never crosses the plugin boundary — the citation's OWN inline
@@ -1417,6 +1536,28 @@ export function verifyRotateReason(reason: unknown, oldSessionId: string, projCa
   const reserve = typeof completionReserve === 'number' && Number.isFinite(completionReserve) && completionReserve > 0
     ? completionReserve
     : citedOperands !== undefined && citedOperands.reserve > 0 ? citedOperands.reserve : 0
+  // Compose the outcome for a case where a provenance WAS declared and DIFFERED.
+  // ⚠️ THE STAMP IS STILL THE AUDIT'S: it is computed against the INCUMBENT
+  // (`auditedStamp`) and NEVER against the declared origin — `audited` is the ONLY
+  // scope that can produce `verified` (the hard condition; fb-810 measured that
+  // letting the lineage certify converts a TRUE positive into a FALSE negative).
+  // What the declaration adds is the DIAGNOSIS: the row says WHICH session's
+  // projection the figure belongs to (`referenceScope` + the declared session +
+  // R′) and, when the figure really closes THERE, the OWN TOKEN. `declared-origin`
+  // scope: the row must say which session its reference comparison came from (a
+  // row sealing the incumbent's sessionId with a figure of ANOTHER session, and
+  // nothing saying so, is exactly the irreproducible row this lane closes).
+  const withDeclaredScope = (auditedStamp: ReasonVerificationStamp, declaredRatio: number | undefined, unresolved = false): ReasonVerificationOutcome => ({
+    stamp: auditedStamp,
+    referenceScope: 'declared-origin',
+    declaredReferenceSessionId: declaredSessionId,
+    ...(declaredMeasurable ? { declaredReference } : {}),
+    ...(!declaredMeasurable && unresolved ? { declaredOriginUnresolved: true } : {}),
+    ...(declaredRatio !== undefined ? { declaredRatio } : {}),
+    ...(declaredRatio !== undefined && declaredRatio <= REASON_VERIFY_TOLERANCE
+      ? { reasonVerifiedToken: 'verified-against-declared-origin' as const }
+      : {})
+  })
   const figure = extractRotateReasonTokenFigure(reason)
   if (figure !== undefined) {
     // fb-426 B (MEASURED): this branch RETURNS FIRST — the pct branch below
@@ -1427,22 +1568,50 @@ export function verifyRotateReason(reason: unknown, oldSessionId: string, projCa
     // (r = 0/262144/532443/700000/1000000 → the SAME stamp), so the two
     // branches must be read as two instruments, never as one calibrated scale.
     const ratio = Math.abs(figure - reference) / reference
-    return ratio <= REASON_VERIFY_TOLERANCE ? 'verified' : 'unverified'
+    const auditedStamp: ReasonVerificationStamp = ratio <= REASON_VERIFY_TOLERANCE ? 'verified' : 'unverified'
+    if (declaredDiffers) {
+      // The token asks ONE question about the declaration: does the cited figure
+      // close against the session it names? An unresolvable declaration (not an
+      // incarnation of this post) earns NO token — the cause names it (that check
+      // is what keeps the own token from becoming a refrendo con otro nombre).
+      if (!declaredMeasurable) return { ...withDeclaredScope(auditedStamp, undefined, true), executedRatio: ratio }
+      const declaredRatio = Math.abs(figure - (declaredReference as number)) / (declaredReference as number)
+      return { ...withDeclaredScope(auditedStamp, declaredRatio), executedRatio: ratio }
+    }
+    return { stamp: auditedStamp, executedRatio: ratio }
   }
   // fb-25 GAP-2 (R2) — the «N% de contexto» reason form: the reason carries NO
   // token-scale figure, only a percentage → verify the pct against the old
   // session's real fraction (projected + the completion reserve over the
   // session's context window — the monitor's own percentage formula).
   const context = projectedUsageContextForSession(parsed, oldSessionId)
-  if (context === undefined) return 'unavailable'
+  if (context === undefined) return { stamp: 'unavailable' }
   const pct = extractRotateReasonPercent(reason, maxContextPct(context.contextWindow, reserve))
   if (pct !== undefined) {
     const actualPct = (context.projected + reserve) / context.contextWindow
-    if (!(actualPct > 0)) return 'unavailable'
+    if (!(actualPct > 0)) return { stamp: 'unavailable' }
     const ratio = Math.abs(pct / 100 - actualPct) / actualPct
-    return ratio <= REASON_VERIFY_TOLERANCE ? 'verified' : 'unverified'
+    // The pct branch declares the SAME rule: the stamp is the AUDITED decision
+    // (never the declared origin's), and a differing declaration adds the scope +
+    // the own token when the cited percentage closes against ITS OWN origin.
+    const auditedPctStamp: ReasonVerificationStamp = ratio <= REASON_VERIFY_TOLERANCE ? 'verified' : 'unverified'
+    const declaredPctRatio = (): number | undefined => {
+      if (declaredSessionId === undefined) return undefined
+      const declaredContext = projectedUsageContextForSession(parsed, declaredSessionId)
+      if (declaredContext === undefined) return undefined
+      const declaredActual = (declaredContext.projected + reserve) / declaredContext.contextWindow
+      if (!(declaredActual > 0)) return undefined
+      return Math.abs(pct / 100 - declaredActual) / declaredActual
+    }
+    if (declaredDiffers) {
+      if (!declaredMeasurable) return { ...withDeclaredScope(auditedPctStamp, undefined, true), executedRatio: ratio }
+      const declaredRatio = declaredPctRatio()
+      if (declaredRatio === undefined) return { ...withDeclaredScope(auditedPctStamp, undefined, true), executedRatio: ratio }
+      return { ...withDeclaredScope(auditedPctStamp, declaredRatio), executedRatio: ratio }
+    }
+    return { stamp: auditedPctStamp, executedRatio: ratio }
   }
-  return 'unavailable'
+  return { stamp: 'unavailable' }
 }
 
 // ---------------------------------------------------------------------------
@@ -1521,6 +1690,30 @@ interface ReasonDatumSealRow {
    * session (`sessionId`) alone. */
   reference: number
   referenceBasis: string
+  /** LANE DEL SELLO (PIECES 1+2) — WHICH session's projection the verdict used:
+   * `audited` (the row's own `sessionId`, the ONLY scope that can produce
+   * `verified`) or `declared-origin` (the caller declared a DIFFERENT
+   * incarnation as the figure's origin). ABSENT = the legacy row (no provenance
+   * was declared) — byte-identical to the pre-lane shape. Written ALWAYS when a
+   * provenance was declared AND differed: a row whose `sessionId` and whose
+   * `reference` come from DIFFERENT sessions must SAY SO, or no re-verifier can
+   * reproduce the verdict. */
+  referenceScope?: ReasonReferenceScope
+  /** The own token when the citation closed against the DECLARED origin
+   * (`verified-against-declared-origin`) — a declaration of scope, never a
+   * certification of the incumbent. Absent on every `audited` row. */
+  reasonVerifiedToken?: ReasonVerifiedToken
+  /** The session the caller DECLARED as the figure's origin (the row's own
+   * `sessionId` is ALWAYS the audited incumbent — the two differ exactly when
+   * `referenceScope` is `declared-origin`). */
+  declaredReferenceSessionId?: string
+  /** R' — the projection of the DECLARED origin the verdict actually compared
+   * against (present when it resolved). */
+  declaredReference?: number
+  /** TRUE when a provenance was declared, DIFFERED, and does NOT resolve to an
+   * incarnation of this post (no projected row): the figure was NOT certified
+   * anywhere — DIAGNOSTIC evidence, never a token (see `reasonSealCauseFor`). */
+  declaredOriginUnresolved?: boolean
   /** The mirror row's write counter at read time (drift discriminator). */
   rowSeq?: number
   /** The mirror FILE mtime at read time (corroborating bound only). */
@@ -1533,8 +1726,14 @@ interface ReasonDatumSealRow {
    * ≥1000 exists, so the reserve is INERT), 'pct' = the «N% de contexto»
    * branch (the completion reserve DECIDES it), 'none' = no figure at all. */
   branch: 'figure' | 'pct' | 'none'
-  /** The ratio the executed branch ACTUALLY compared against the tolerance. */
+  /** The ratio the executed branch ACTUALLY compared against the tolerance to
+   * produce the STAMP — always the citation against the AUDITED reference (the
+   * ONLY scope that can yield `verified`). */
   executedRatio?: number
+  /** The declared origin's OWN ratio: the magnitude the own token rests on
+   * (`reasonVerifiedToken` is present iff this is ≤ `tolerance`). DIAGNOSTIC —
+   * it never produced the stamp. Written only when a provenance travelled. */
+  declaredRatio?: number
   /** The tolerance IN FORCE at `datumTs` (the criterion is frozen, never moved:
    * recorded so a re-verifier re-applies the SAME criterion, not today's). */
   tolerance: number
@@ -1579,9 +1778,38 @@ interface ReasonDatumSealRow {
  * the branch + the executed operand + the reserve + (fb-810 i) the PROVENANCE of
  * the cited figure, NEVER from the label alone: `unverified` from the figure
  * branch and `unverified` from the pct branch are two different findings and must
- * read as two different causes. */
-function reasonSealCauseFor(branch: 'figure' | 'pct' | 'none', executedRatio: number | undefined, reserveSource: 'caller' | 'citation' | 'absent'): string {
+ * read as two different causes.
+ * LANE DEL SELLO (PIECE 1 — THE HONEST CAUSE): the provenance must be part of
+ * the derivation, because the SAME executed-ratio finding means OPPOSITE things
+ * depending on WHERE the figure was measured. MEASURED (the case this lane
+ * exists for): a reason citing a figure that is CORRECT AND VERBATIM from its
+ * OWN alert — composed on a DIFFERENT incarnation of the same post — was sealed
+ * `figure-outside-tolerance … the figure … missed R`, i.e. the row TRANSPORTED a
+ * FIGURE failure when what happened was a CHANGE OF SUBJECT. The figure was not
+ * wrong; it belonged to another incarnation. That cause is now its own:
+ * `figure-provenance-mismatch`, which NAMES the incarnation that carries the
+ * figure and says EXPLICITLY that the figure is NOT wrong. */
+function reasonSealCauseFor(
+  branch: 'figure' | 'pct' | 'none',
+  executedRatio: number | undefined,
+  reserveSource: 'caller' | 'citation' | 'absent',
+  provenance?: { declaredSessionId?: string | undefined; declaredReference?: number | undefined; unresolved?: boolean | undefined }
+): string {
   if (branch === 'none') return 'no-figure-in-reason'
+  const declaredSessionId = provenance?.declaredSessionId
+  // THE PROVENANCE-CAUSED CAUSE (PIECE 1): decided by WHERE the figure was read,
+  // not by the ratio — and it takes precedence over the ratio-derived labels
+  // BELOW, because those would describe a FIGURE failure the row did not measure.
+  if (typeof declaredSessionId === 'string' && declaredSessionId !== '') {
+    if (provenance?.unresolved === true) {
+      return `figure-provenance-mismatch (declared origin ${declaredSessionId} does NOT resolve to an incarnation of this post — the figure was NOT certified anywhere: NO own token, NO reference; DIAGNOSTIC only)`
+    }
+    const declaredRefNote = typeof provenance?.declaredReference === 'number'
+      ? ` (its own projection R' = ${provenance.declaredReference})`
+      : ''
+    const verb = branch === 'figure' ? 'figure' : 'fraction'
+    return `figure-provenance-mismatch (the cited ${verb} belongs to the incarnation ${declaredSessionId}${declaredRefNote} — the figure is NOT wrong: it is CORRECT and verbatim from ITS OWN alert; the subject changed, and the audited incumbent sealed in this row does not carry it. DIAGNOSTIC: audited is the ONLY scope that can produce verified)`
+  }
   if (executedRatio === undefined) return `${branch}-branch-without-operand`
   const within = executedRatio <= REASON_VERIFY_TOLERANCE
   if (branch === 'figure') {
@@ -1600,7 +1828,9 @@ function reasonSealCauseFor(branch: 'figure' | 'pct' | 'none', executedRatio: nu
  * unreadable/absent mirror, an unprojected session, a degenerate (≤0) datum or
  * a missing path has NOTHING to seal (the same conservative degradation as the
  * stamp itself: 'unavailable'). Never throws. */
-function reasonSealRowFor(args: { path: string; sessionId: string; reason: unknown; stamp: ReasonVerificationStamp; datumTs: number; completionReserve?: number }): ReasonDatumSealRow | undefined {
+function reasonSealRowFor(args: { path: string; sessionId: string; reason: unknown; outcome: ReasonVerificationOutcome; datumTs: number; completionReserve?: number }): ReasonDatumSealRow | undefined {
+  const stamp = args.outcome.stamp
+  const outcome = args.outcome
   try {
     const parsed = JSON.parse(readFileSync(args.path, 'utf8')) as unknown
     // THE SUBJECT IS THE CALLER'S INCUMBENT (fb-810, reverted): the datum is
@@ -1648,6 +1878,12 @@ function reasonSealRowFor(args: { path: string; sessionId: string; reason: unkno
         if (actualPct > 0) executedRatio = Math.abs(pctFigure / 100 - actualPct) / actualPct
       }
     }
+    // ⚠️ `executedRatio` IS THE APPRECIATED RATIO — always the citation against
+    // the AUDITED reference, because that is the magnitude the STAMP rests on
+    // (`audited` is the only scope that can produce `verified`). The declared
+    // origin's own ratio rides SEPARATELY (`declaredRatio`): it is the magnitude
+    // the OWN TOKEN rests on, and keeping them apart is what makes the row
+    // readable instead of contradictory.
     return {
       v: REASON_SEAL_ROW_VERSION,
       seal: 'reason-datum',
@@ -1670,8 +1906,23 @@ function reasonSealRowFor(args: { path: string; sessionId: string; reason: unkno
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(reservePresent ? { completionReserve: reserve } : {}),
       completionReserveSource: reserveSource,
-      cause: reasonSealCauseFor(branch, executedRatio, reserveSource),
-      stamp: args.stamp,
+      // LANE DEL SELLO (PIECES 1+2) — THE PROVENANCE OF THE VERDICT, in the row:
+      // which session's projection decided it (absent = the legacy audited row),
+      // the own token when the citation closed against a DECLARED origin, and the
+      // declared session + its R'. Written ONLY when a provenance really travelled
+      // (an `audited` verdict writes NO extra key: byte-identical legacy row).
+      ...(outcome.referenceScope !== undefined ? { referenceScope: outcome.referenceScope } : {}),
+      ...(outcome.reasonVerifiedToken !== undefined ? { reasonVerifiedToken: outcome.reasonVerifiedToken } : {}),
+      ...(outcome.declaredReferenceSessionId !== undefined ? { declaredReferenceSessionId: outcome.declaredReferenceSessionId } : {}),
+      ...(outcome.declaredReference !== undefined ? { declaredReference: outcome.declaredReference } : {}),
+      ...(outcome.declaredOriginUnresolved === true ? { declaredOriginUnresolved: true } : {}),
+      // The DECLARED origin's own ratio — the magnitude the own token rests on
+      // (written only when a declaration really travelled).
+      ...(outcome.declaredRatio !== undefined ? { declaredRatio: outcome.declaredRatio } : {}),
+      cause: reasonSealCauseFor(branch, executedRatio, reserveSource, outcome.referenceScope === 'declared-origin'
+        ? { declaredSessionId: outcome.declaredReferenceSessionId, declaredReference: outcome.declaredReference, unresolved: outcome.declaredOriginUnresolved === true }
+        : undefined),
+      stamp,
       reason: text
     }
   } catch {
@@ -1684,22 +1935,34 @@ function reasonSealRowFor(args: { path: string; sessionId: string; reason: unkno
  * logger and APPEND the sealed row to the ledger, then return the SAME stamp.
  * The wrapper NEVER throws and NEVER changes the verdict (zero behavior change):
  * a failure of the seal (unwritable ledger, no logger) is swallowed — the
- * rotation must never block on its own evidence (critical-unblock rule). */
+ * rotation must never block on its own evidence (critical-unblock rule).
+ * LANE (PIECES 1+2) — the wrapper TRANSPORTS `reasonProvenance` (the 5th arg)
+ * unchanged into the verifier AND into the row/log: the provenance travels
+ * through the CALL-SITE seam (this wrapper is the call site of the tool family),
+ * so the seal row can say WHICH session's projection decided the verdict. */
 function observeReasonSealDatum(
   logger: unknown,
-  verify: (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number) => ReasonVerificationStamp
-): (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number) => ReasonVerificationStamp {
-  return (reason, oldSessionId, projCachePath, completionReserve) => {
-    const stamp = verify(reason, oldSessionId, projCachePath, completionReserve)
+  verify: (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number, reasonProvenance?: ReasonDatumProvenance) => ReasonVerificationOutcome | ReasonVerificationStamp
+): (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number, reasonProvenance?: ReasonDatumProvenance) => ReasonVerificationStamp {
+  return (reason, oldSessionId, projCachePath, completionReserve, reasonProvenance) => {
+    const verdict = verify(reason, oldSessionId, projCachePath, completionReserve, reasonProvenance)
+    // The dep may answer with the rich outcome OR the plain stamp (a composition
+    // that wires the raw helper vs one that wires this wrapper): normalize ONCE,
+    // here, so the row has both the label and the provenance adjudication.
+    const outcome: ReasonVerificationOutcome = typeof verdict === 'string' ? { stamp: verdict } : verdict
+    const stamp = outcome.stamp
     try {
       if (typeof projCachePath === 'string' && projCachePath !== '' && typeof oldSessionId === 'string' && oldSessionId !== '') {
         const datumTs = Date.now()
-        const row = reasonSealRowFor({ path: projCachePath, sessionId: oldSessionId, reason, stamp, datumTs, ...(typeof completionReserve === 'number' ? { completionReserve } : {}) })
+        const row = reasonSealRowFor({ path: projCachePath, sessionId: oldSessionId, reason, outcome, datumTs, ...(typeof completionReserve === 'number' ? { completionReserve } : {}) })
         if (row !== undefined) {
           const info = (logger as { info?: (...args: unknown[]) => void } | undefined)?.info
           if (typeof info === 'function') {
             try {
-              info.call(logger, `[deepartments] reason seal — RUTA ${row.path} · R ${row.reference} · datumTs ${row.datumTsIso} · rowSeq ${row.rowSeq ?? 'n/a'} · branch ${row.branch} · figure ${row.citedFigure ?? 'n/a'} · ratio ${row.executedRatio === undefined ? 'n/a' : row.executedRatio.toFixed(5)} · tol ${row.tolerance} · reserve ${row.completionReserveSource}(${row.completionReserve ?? 0}) · cause ${row.cause} · ${row.stamp}`)
+              // (4) THE LOG PRINTS IT: the scope + the declared session ride the
+              // operator-facing line too, so a rotation in silence still leaves a
+              // readable trail of WHICH incarnation decided the seal.
+              info.call(logger, `[deepartments] reason seal — RUTA ${row.path} · R ${row.reference} · datumTs ${row.datumTsIso} · rowSeq ${row.rowSeq ?? 'n/a'} · branch ${row.branch} · figure ${row.citedFigure ?? 'n/a'} · ratio ${row.executedRatio === undefined ? 'n/a' : row.executedRatio.toFixed(5)} · tol ${row.tolerance} · reserve ${row.completionReserveSource}(${row.completionReserve ?? 0}) · scope ${row.referenceScope ?? 'audited'} · declaredOrigin ${row.declaredReferenceSessionId ?? 'n/a'} · declaredR ${row.declaredReference ?? 'n/a'} · token ${row.reasonVerifiedToken ?? 'n/a'} · cause ${row.cause} · ${row.stamp}`)
             } catch {
               // never throws (a broken logger never blocks a rotation)
             }
@@ -4106,7 +4369,18 @@ export function applyInvoke(ctx: Context, config: Config) {
     assembleHeartbeat,
     roleForSessionLive,
     headRotationJournalStatus,
-    verifyRotateReason,
+    // LANE DEL SELLO (PIECES 1+2) — the reason verifier the tools factory
+    // receives. The module helper answers with the RICH outcome (label + which
+    // session's projection decided it + the own token when the citation closed
+    // against a DECLARED origin); the deps contract of the tools factory is the
+    // three-value STAMP (the label the QD mirror renders — never a fourth value),
+    // so this seam reduces it. The declared `reasonProvenance` argument is
+    // FORWARDED VERBATIM (extra optional parameter: assignable to the narrower
+    // declared contract, and the ONLY path by which the provenance reaches the
+    // verifier from `dept_head_rotate`). It is then RE-WRAPPED below by
+    // `observeReasonSealDatum`, which is where the seal row is written.
+    verifyRotateReason: (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number, reasonProvenance?: ReasonDatumProvenance) =>
+      verifyRotateReason(reason, oldSessionId, projCachePath, completionReserve, reasonProvenance).stamp,
     resolveSessionProjCachePath,
     resolveWorkspaceStatePath,
     deliverDaemonNotice,
@@ -4184,8 +4458,16 @@ export function applyInvoke(ctx: Context, config: Config) {
   // only notes the RUTA + R + datumTs. A `verify` that is not a function (a
   // composition that passed nothing) degrades to a NO-OP wrapper — never a
   // changed dep.
+  // ⚠️ LANE (PIECES 1+2) — THE WRAPPER WRAPS THE **RAW** VERIFIER, not the dep
+  // value: the dep literal above reduces the verdict to its three-value stamp
+  // (that is the factories' declared contract), while the wrapper needs the RICH
+  // OUTCOME to compose a row that carries the scope/own token. Wrapping the dep
+  // value DROPPED the provenance (MEASURED: the row sealed `scope audited` and a
+  // bare token-less `verified` for a citation that had declared another
+  // incarnation). Wrapping the module helper is the same by-reference pair — one
+  // implementation, both rotation families — with the outcome intact.
   toolsDeps.verifyRotateReason = typeof toolsDeps.verifyRotateReason === 'function'
-    ? observeReasonSealDatum(ctx.logger, toolsDeps.verifyRotateReason)
+    ? observeReasonSealDatum(ctx.logger, verifyRotateReason)
     : toolsDeps.verifyRotateReason
   ctx.get('deepartments.toolsDeps', false)?.register(toolsDeps)
   const toolsSurface: ToolsSurface = (ctx.get('deepartments.tools', false) as ToolsSurface | undefined) ?? createToolsOrchestration(ctx, toolsDeps)
@@ -4363,7 +4645,11 @@ export function applyInvoke(ctx: Context, config: Config) {
     // by-reference pair the tools factory receives at :579/:1192 — one single
     // source of truth for both rotation families) plus the M-A fb-50 monitor
     // calibration (the same `config.health` knob the dept_head_rotate tool reads).
-    verifyRotateReason,
+    // LANE DEL SELLO (PIECES 1+2) — same reduction as the tools seam above: the
+    // emitter contract is the three-value stamp, the helper answers the rich
+    // outcome, and the optional `reasonProvenance` is forwarded verbatim.
+    verifyRotateReason: (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number, reasonProvenance?: ReasonDatumProvenance) =>
+      verifyRotateReason(reason, oldSessionId, projCachePath, completionReserve, reasonProvenance).stamp,
     resolveSessionProjCachePath,
     contextCompletionReserve: (config.health as { contextCompletionReserve?: number } | undefined)?.contextCompletionReserve,
     drainRecipientQueue: (recipientId) => toolsSurface.redeliverDrainQueue(recipientId)
@@ -4375,8 +4661,12 @@ export function applyInvoke(ctx: Context, config: Config) {
   // emit and 279485 at the QH's re-read): from here on, the row that leaves the
   // emitter carries the DATUM INSTANT with the figure. Identical verdict, one
   // ADDITIONAL statement, the literal above untouched.
+  // ⚠️ LANE (PIECES 1+2) — same as the tools seam: the wrapper wraps the RAW
+  // verifier (the outcome-producing module helper), NOT the dep value (which the
+  // literal above reduced to the three-value stamp), so the seal row can carry
+  // the reference scope + own token.
   deliveryDeps.verifyRotateReason = typeof deliveryDeps.verifyRotateReason === 'function'
-    ? observeReasonSealDatum(ctx.logger, deliveryDeps.verifyRotateReason)
+    ? observeReasonSealDatum(ctx.logger, verifyRotateReason)
     : deliveryDeps.verifyRotateReason
   ctx.get('deepartments.deliveryDeps', false)?.register(deliveryDeps)
   const deliverySurface = (ctx.get('deepartments.delivery', false) as DeliverySurface | undefined) ?? createDeliveryOrchestration(ctx, deliveryDeps)

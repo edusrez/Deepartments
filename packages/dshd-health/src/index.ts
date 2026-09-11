@@ -1132,7 +1132,11 @@ export interface HealthFinding {
    * (the row whose `error` text + `count` the alert shows), when the row carried
    * it (the turn-error capture writes sessionId+turn). The host alert frame uses
    * it to show "this error is from the ARCHIVED session <id> turn <n>" —
-   * pointing at the FRESH session is impossible once the provenance exists. */
+   * pointing at the FRESH session is impossible once the provenance exists.
+   * LANE DEL SELLO (ADDITIVE) — the `context-threshold` finding ALSO carries it:
+   * the session that PRODUCED the cited figure/pct (the row's own `sessionId`,
+   * published by the scan), so the alert names WHAT the figure was measured on
+   * and a caller quoting it verbatim can declare its origin. */
   sessionId?: string
   /** fb-25 (b) — the turn number of the post-error group's witness row (when
    * the row carried it). */
@@ -5076,6 +5080,20 @@ export interface SessionContextInput {
   /** The hostId (the live host's OWN row — no postId; the M4
    * host-not-a-pseudo-post rule). */
   hostId?: string
+  /** LANE DEL SELLO — la sesión (encarnación) que PRODUJO los números de esta
+   * fila: the sessionId of the LIVE session the projection row was read from
+   * (the bundle's `buildSessionContexts` reads `agents.get(entry.sessionId)`
+   * and the row's `sessionId` is the very entry it resolved). WITHOUT this the
+   * alert cites a FIGURE out of a session that the alert does not name: the
+   * `error` line names the AGENT (`quality-head`), never the session, so a
+   * caller that quotes the figure VERBATIM from the alert cannot declare where
+   * it read it — the provenance is not DERIVABLE by anyone (measured
+   * 2026-09-11: the referenced alert rows carry kind/key/postId/ts/error and
+   * NO sessionId). Published by this producer so the caller CAN declare it;
+   * absent (an older wiring) → the finding carries no sessionId, exactly as
+   * before (ADDITIVE).
+   */
+  sessionId?: string
   /** The session contextWindow (the denominator, carried by the projection
    * from the last request/context — never read from settings.yaml here). */
   contextWindow?: number
@@ -5220,10 +5238,21 @@ export function scanContextThreshold(input: ContextThresholdScanInput): ContextT
     // first/emergency semantics + the «cada 10% más» tier+1 re-alert, both
     // intact. The SHARED 30-min window on the finding key is the re-crossing
     // cooldown (a re-crossing of a tier alerted < 30 min ago is swallowed).
+    // LANE DEL SELLO (fb-825, ADDITIVE — the frozen literals above are NOT
+    // touched): the finding PUBLISHES the session that PRODUCED the figure
+    // (`row.sessionId`, the incarnation the projection was read from). This one
+    // `push` serves TWO cases — an UPWARD crossing AND a FIRST observation — and
+    // the `error` line states NEITHER; this lane does NOT reword that line (a
+    // frozen assertion asserts it by substring, and rewording would read as a
+    // different finding). The distinction is published STRUCTURALLY instead: the
+    // finding carries `sessionId` (the figure's frame) and the caller can
+    // declare its origin; the ambiguity of the shared literal is neither
+    // worsened nor asserted away.
     findings.push({
       kind: 'context-threshold',
       key: contextThresholdKey(agentId, band),
       ...(row.postId !== undefined ? { postId: row.postId } : { hostId: row.hostId }),
+      ...(typeof row.sessionId === 'string' && row.sessionId !== '' ? { sessionId: row.sessionId } : {}),
       ts: input.nowMs,
       error: `${agentId} ${Math.round(pct * 100)}% (${projected}${reserve > 0 ? `+${reserve}` : ''}/${row.contextWindow}) — cruce b${band}`
     })
