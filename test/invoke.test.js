@@ -16124,6 +16124,88 @@ test('fb-25 GAP-2 (R2 — inspect 2026-09-04 IPH f7863559): the «N% de contexto
   })
 })
 
+test('fb-426 B (D-Q3 2026-09-10, host rotation m-5782 — MEASURED two columns): the reason-verification stamp is decided BY BRANCH — a reason carrying ANY digit run ≥1000 (the extractor takes the FIRST one) enters the token-figure branch and RETURNS BEFORE the pct/reserve branch (the reserve is INERT on it: 5 reserves → the SAME stamp), while a pct-only reason lands on the «N% de contexto» branch where the fb-50 completionReserve IS load-bearing; and the measured population mismatch is asentado with literals (wire figure 270299 vs the durable projection 363577 ⇒ ratio 0.2566)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const rotateOld = 'session-0e677bb0-7aa6-4e2d-9c92-0ba3fde6f901'
+    // THE LITERAL DURABLE ROW of the measured rotation (read 2026-09-11 from
+    // <DSH_HOME>/storages/session_projcache.json — the SAME file `verifyRotateReason`
+    // reads): projected = pressureTokens + surfaceTokens − sampledSurfaceTokens.
+    const PRESSURE = 363_191
+    const SURFACE = 291_384
+    const SAMPLED = 290_998
+    const WINDOW = 1_048_576
+    const PROJECTED = PRESSURE + SURFACE - SAMPLED
+    assert.equal(PROJECTED, 363_577, 'the durable reference is 363577 (363191+291384−290998) — the literal reference of the case')
+    const projCachePath = resolveSessionProjCachePath(stateDir, path.join(stateDir, 'sessions'))
+    await mkdir(path.dirname(projCachePath), { recursive: true })
+    await writeFile(projCachePath, JSON.stringify({
+      unit: { name: 'session_projcache', version: 3 },
+      global: null,
+      tables: {
+        sessions: {
+          [rotateOld]: {
+            identity: { createdAt: Date.now() },
+            rows: {
+              sessionStats: { ver: 1, seq: 229_367, val: { turns: 14, steps: 68, lastTurn: 14, openStep: null } },
+              tokenUsage: { ver: 1, seq: 229_367, val: { last: { turn: 14, step: 1, buckets: { cacheReadTokens: 363_008, uncachedInputTokens: 183, outputTokens: 409, cacheWriteTokens: 0 } } } },
+              contextPressure: { ver: 4, seq: 229_367, val: { surfaceTokens: SURFACE, contextWindow: WINDOW, pressureTokens: PRESSURE, sampledSurfaceTokens: SAMPLED } }
+            }
+          }
+        }
+      }
+    }), 'utf8')
+    const RESERVES = [0, 262_144, 532_443, 700_000, 1_000_000]
+    // (a) THE FIGURE BRANCH — a reason citing the monitor's WIRE-VIEW figure (the
+    // «51% (b5) = 270299 tokens usados» prose of m-5782, no smaller ≥1000 run).
+    const wireFigure = 'Contexto: el monitor reporto 51% (b5) = 270299 tokens usados'
+    assert.equal((Math.abs(270_299 - PROJECTED) / PROJECTED).toFixed(5), '0.25656', 'the literal ratio |270299−363577|/363577 = 0.25656 (> 0.15)')
+    for (const r of RESERVES) {
+      assert.equal(verifyRotateReason(wireFigure, rotateOld, projCachePath, r), 'unverified', `the figure branch is RESERVE-INSENSITIVE: r=${r} → unverified (it returns before the reserve is ever read)`)
+    }
+    assert.equal(verifyRotateReason(wireFigure, rotateOld, projCachePath), 'unverified', 'the 3-arg legacy call → the same unverified (BRANCH, not reserve)')
+    // (b) THE PCT BRANCH — a reason with NO digit run ≥1000 at all: the fb-50
+    // reserve IS load-bearing, and its two columns are the calibration switch.
+    const pctOnly = 'Contexto al 51% (cruce b5).'
+    const withReserve = (PROJECTED + 262_144) / WINDOW
+    const plain = PROJECTED / WINDOW
+    assert.equal((Math.abs(0.51 - withReserve) / withReserve).toFixed(6), '0.145348', 'with the monitor calibration: (363577+262144)/1048576 = 59.6734% vs «51%» → 0.145348 ≤ 0.15')
+    assert.equal((Math.abs(0.51 - plain) / plain).toFixed(6), '0.470868', 'with reserve 0 (what the call site passes when the knob does not reach it): the PLAIN fraction 34.6734% vs «51%» → 0.470868')
+    assert.equal(verifyRotateReason(pctOnly, rotateOld, projCachePath, 262_144), 'verified', 'pct-only + reserve 262144 → VERIFIED (the reserve decides THIS branch)')
+    assert.equal(verifyRotateReason(pctOnly, rotateOld, projCachePath, 0), 'unverified', 'pct-only + reserve 0 → UNVERIFIED (the reserve decides THIS branch — the fb-426 asymmetry, in its own branch)')
+    assert.equal(verifyRotateReason(pctOnly, rotateOld, projCachePath), 'unverified', 'the 3-arg legacy call == reserve 0')
+    // (c) THE MEASURED VERBATIM REASON (m-5782, byte-verbatim as carried by the
+    // `dept_sleep` tool call and mirrored in the QD directive): it cites digit
+    // runs ≥1000 in prose ⇒ the FIGURE branch decides and the reserve is inert.
+    // MEASURED CORRECTION (run token a3c2bb7d): the FIRST ≥1000 digit run is NOT
+    // the wire figure 270299 — it is the fragment 21815 of the cited md5 hex
+    // `358fa66e021815f8045cc6b…` ⇒ the branch's EXECUTED ratio is
+    // |21815−363577|/363577 = 0.94003, not 0.2566. Both give the same stamp, so
+    // the VERDICT never moved — the ATTRIBUTION did (the spurious-figure class,
+    // fb-426 family cause (1) — the extractor reads a non-usage number as a
+    // usage claim). Documented, NOT fixed here (a behaviour change of the stamp
+    // is its own lane).
+    const verbatim = 'Rotacion propia tras cumplir la condicion que me puse (mision A commiteada por mi: 00decec, verificada por bytes). Esta rotacion es la que produce el par real de fb-473: rotacion de HOST emitida por codigo POST-activacion de B1 (artefacto lib/tools.js md5 358fa66e021815f8045cc6bda69998db, operativo desde el reinicio de 22:30:56 con canary PASSED). Contexto: el monitor reporto 51% (b5) = 270299 tokens usados + 262144 de reserva sobre 1048576 => uso real 25,8%. Journal fresco con los 11 decisiones de la sesion y las dos instrucciones del primer acto del sucesor.'
+    assert.equal((Math.abs(21_815 - PROJECTED) / PROJECTED).toFixed(5), '0.94000', 'the EXECUTED ratio of the verbatim reason: the md5 fragment 21815 vs 363577')
+    for (const r of RESERVES) {
+      assert.equal(verifyRotateReason(verbatim, rotateOld, projCachePath, r), 'unverified', `the verbatim reason: r=${r} → unverified (the figure branch wins; the reserve is unobservable)`)
+    }
+    // The md5 fragment ALONE hijacks the branch — the mechanism, isolated:
+    assert.equal(verifyRotateReason('rotacion propia; artefacto md5 358fa66e021815f8045cc6bda69998db', rotateOld, projCachePath, 262_144), 'unverified', 'a cited md5 hex contains the digit run 21815 (≥1000) ⇒ it IS read as the usage claim (spurious figure) → unverified')
+    assert.equal(verifyRotateReason('rotacion propia; sin cifras en la prosa', rotateOld, projCachePath, 262_144), 'unavailable', 'no figure AND no pct → UNAVAILABLE (nothing to verify — never a fabricated negative)')
+    // (d) the QD control «verbatim SIN 270299», RE-MEASURED: removing the wire
+    // figure does NOT hand the decision to the pct branch (262144, 1048576 and
+    // the md5 fragment are still ≥1000) ⇒ the claim «sin 270299 ⇒ verified» does
+    // NOT reproduce as stated; `verified` needs a reason with NO ≥1000 run.
+    const withoutWire = verbatim.split('270299').join('')
+    assert.equal(verifyRotateReason(withoutWire, rotateOld, projCachePath, 262_144), 'unverified', 'removing 270299 keeps the FIGURE branch alive (21815/262144/1048576 are still ≥1000) → unverified, NOT verified')
+    assert.equal(verifyRotateReason('Contexto al 51% (cruce b5). Journal fresco; sin cifras de uso.', rotateOld, projCachePath, 262_144), 'verified', 'the ONLY form that reaches the pct branch AND verifies: no ≥1000 run + the monitor calibration')
+    // (e) SAME instrument, TWO populations — the stamp measures the ALIGNMENT of
+    // the cited figure with the reference, never the correctness of the citation.
+    assert.equal(verifyRotateReason('el monitor reporto 270299 tokens usados', rotateOld, projCachePath), 'unverified', 'the WIRE-VIEW figure vs the durable reference → unverified (ratio 0.25656)')
+    assert.equal(verifyRotateReason('el monitor reporto 363577 tokens usados', rotateOld, projCachePath), 'verified', 'the DURABLE figure itself → verified (ratio 0) ⇒ the same instrument, two populations')
+  })
+})
+
 test('W8-c PART 1 scanTurnErrorCaptures: tails a live session log for the MOST-RECENT turn/end ERROR (an ok reason → undefined)', () => {
   const T0 = 1_000_000_000_000
   const good = [

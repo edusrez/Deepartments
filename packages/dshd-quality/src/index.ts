@@ -201,7 +201,12 @@ export type QualityInspectDirectiveSurface =
  * `host rotated` since fb-473). Extracted so the two emitters can never diverge:
  * an unstamped surface renders NOTHING (R6 — the legacy frame never changes).
  * 'verified' = a cited figure/fraction matches the OLD session's real usage;
- * 'unverified' = a REAL negative (a figure was checked and does NOT match);
+ * 'unverified' = the cited figure/fraction MISSES the verifier's reference (the
+ * durable projection the mirror holds at verify time) beyond ±0.15 — NOT proof
+ * that the reason is false: the reason may quote the monitor's WIRE-VIEW frame
+ * of an EARLIER instant while the mirror row carries NO datum timestamp, so two
+ * POPULATIONS/INSTANTS are compared as one magnitude (fb-426 B, measured — the
+ * m-5782 verbatim reason cites 270299 and the verifier reads 363577);
  * 'unavailable' = there was nothing to verify (no figure, no datum). */
 export function verifyLabelFor(stamp: 'verified' | 'unverified' | 'unavailable' | undefined): string {
   return stamp === undefined

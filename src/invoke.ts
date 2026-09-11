@@ -1265,7 +1265,17 @@ const resolveWorkspaceStatePath = (stateDir: string, persistenceRoot?: string): 
  * degenerate (≤0) usage datum → 'unavailable'; a figure matching the old
  * session's projected/used tokens within ±REASON_VERIFY_TOLERANCE → 'verified';
  * any other figure (a different session's numbers, an impossible state) →
- * 'unverified'. fb-25 GAP-2 (R2): a message-id digit run (`m-1056`) is NEVER a
+ * 'unverified'. fb-426 B (2026-09-11, MEASURED): 'unverified' means the cited
+ * figure MISSES the reference THIS function reads — the durable projection the
+ * mirror holds at VERIFY time — and NEVER (by itself) that the reason is false:
+ * the reference is re-derived from the persisted row, which carries NO datum
+ * timestamp, while the reason may quote the monitor's WIRE-VIEW frame of an
+ * EARLIER instant (m-5782: the reason cites 270299 and the mirror answers
+ * 363577 ⇒ ratio 0.2566 — and, worse, the first ≥1000 digit run of that reason
+ * is a fragment of a cited md5 hex, 21815 ⇒ the branch's executed ratio is
+ * 0.9400, insensitive to the reserve). Two populations/instants compared as one
+ * magnitude ⇒ the stamp is a mismatch report, not a verdict on the emitter.
+ * fb-25 GAP-2 (R2): a message-id digit run (`m-1056`) is NEVER a
  * figure (the m-1058 spurious-'unverified' case — an id-only reason degrades
  * to 'unavailable' instead), and the «N% de contexto» reason form is verified
  * against the old session's REAL fraction — `(projected + completionReserve) /
@@ -1289,6 +1299,13 @@ export function verifyRotateReason(reason: unknown, oldSessionId: string, projCa
   if (!(reference !== undefined && reference > 0)) return 'unavailable'
   const figure = extractRotateReasonTokenFigure(reason)
   if (figure !== undefined) {
+    // fb-426 B (MEASURED): this branch RETURNS FIRST — the pct branch below
+    // (and with it `completionReserve`) is UNREACHABLE as soon as the reason
+    // carries ANY digit run ≥1000 (the extractor takes the FIRST one, even a
+    // non-usage number: a fragment of a cited md5 hex, the context window, the
+    // reserve). Consequence: for such a reason the reserve is INERT
+    // (r = 0/262144/532443/700000/1000000 → the SAME stamp), so the two
+    // branches must be read as two instruments, never as one calibrated scale.
     const ratio = Math.abs(figure - reference) / reference
     return ratio <= REASON_VERIFY_TOLERANCE ? 'verified' : 'unverified'
   }
