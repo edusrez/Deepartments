@@ -5380,18 +5380,47 @@ export function scanMissionStalled(input: MissionStallScanInput): HealthFinding[
 // pattern): the BUNDLE exposes `deps.mainRed` = buildMainRedState(repoRoot)
 // with { readHeadSha() (git rev-parse HEAD), runLocks(paths) (node --test PER
 // lock — a separate invocation per lock so the FAILED lock is named in the
-// frame; results per file {file, ok}; ONE single execution per new sha) }. The
-// TICK materializes { headSha, lastSeenSha, firstSeenMs, lockResults } and the
+// frame; results per file {file, ok}; ONE single execution per new sha, plus
+// AT MOST ONE bounded re-execution while the red persists — see the
+// «1 + 1» LATCH below) }. The
+// TICK materializes { headSha, lastSeenSha, firstSeenMs, redLocks, redWindows,
+// lockResults } and the
 // SCAN (PURE, NEVER throws) decides the finding + the NEXT durable state:
 //   - FIRST RUN (state has no lastSeenSha) → BASELINE only: record the current
 //     HEAD sha, NO lock run, NO alert — the scan NEVER alerts at boot (a boot
 //     mid-red cannot know when the commit landed; the M4/pacing first-boot
 //     precedent). The NEXT new commit is what the watchdog detects.
-//   - SAME sha at HEAD (no new commit) → NOTHING (the locks are NOT re-run — 1
-//     ejecución por sha nuevo); a remembered RED state keeps RE-EMITTING the
-//     finding (the SHARED health-alerts ledger gives the 30-min re-alert
-//     cadence while the broken commit stays at HEAD — the dedupe key
-//     `main-red:<sha>`).
+//   - SAME sha at HEAD (no new commit) → NO new commit re-verification: a
+//     remembered RED state keeps RE-EMITTING the finding (the SHARED
+//     health-alerts ledger gives the 30-min re-alert cadence while the broken
+//     commit stays at HEAD — the dedupe key `main-red:<sha>`) — PLUS the
+//     fb-633 «1 + 1» LATCH:
+//
+// «1 + 1» LATCH (fb-633, 2026-09-11 — DECLARATIVE AMENDMENT of the cost
+// invariant, NOT a silent patch): the invariant «1 ejecución de locks por sha
+// nuevo» becomes «1 + 1 con rojo persistente». THE FICHE (measured by the host,
+// session 59): a red detected for an ENVIRONMENTAL cause (the fb-628 pooler-HALT
+// coupling, the fb-174/fb-95 transient-lock class) stayed latched for HOURS on a
+// quiet commit day because the only way out was a NEW commit; the SAME detection
+// was re-alerted 10+ times («detectado en 30 min» → … → 321 min) — alarm fatigue
+// on the one semaphore that must wake someone when a real commit breaks main.
+// WHY THE CEILING IS STILL BOUNDED (and this is why «1 + 1» is admissible while
+// a per-poll re-run is not): the trigger is NOT demand and NOT a poll — it is a
+// COUNTED WINDOW, and the counter is DURABLE and scoped to the sha
+// (`MainRedState.redWindows`, written ONLY on its increment pass), so the ceiling
+// is 2 by construction — it does not depend on process lifetime (a restart
+// cannot re-arm it) nor on the number of polls. After the ONE re-execution the
+// latch is SPENT for that (sha, red): no further automatic re-execution until
+// the sha changes. The result is CONSUMED: if the locks PASS the red is declared
+// LIFTED (redLocks + redWindows dropped ⇒ the re-alerts stop); if they still
+// FAIL the red stands and re-alerts every 30 min exactly as before. OBSERVABLE
+// (the second guardrail): the tick logs
+// `RE-VERIFY (red persisted N windows) -> CLEARED | STILL RED` so an operator
+// can tell «still red because still broken» from «still red because nobody
+// looked».
+//   - SAME sha, a window that did NOT reach the latch → the counter advances
+//     (an INCREMENT pass: `changed: true` — it IS persisted, the ceiling lives
+//     in the FILE and not in the process).
 //   - NEW sha (HEAD ≠ last-seen) → the tick ran the FAST locks for this sha;
 //     a failed lock → the finding + the state advances { lastSeenSha: new,
 //     firstSeenMs: nowMs } (+ redLocks = the failed lock files); all green →
@@ -5438,6 +5467,18 @@ export function mainRedKey(sha: string): string {
   return `${MAIN_RED_KEY_PREFIX}${sha}`
 }
 
+/** fb-633 (2026-09-11) — THE «1 + 1» LATCH WINDOW: how many CONSECUTIVE red
+ * scan windows of the SAME sha arm the ONE bounded re-execution of the fast
+ * locks (never a per-poll re-run). 6 windows × the default `mainRedPollMs`
+ * (300000 = 5 min) = 30 min ≈ `HEALTH_DEDUPE_WINDOW_MS`, i.e. the single
+ * re-verification lands exactly when the red would otherwise START re-alerting:
+ * a TRANSIENT red (the fb-628 pooler-HALT coupling / fb-174 lock-flake class)
+ * is therefore LIFTED before it becomes the measured 10+-re-alert storm, while a
+ * genuinely broken sha keeps its 30-min re-alert cadence untouched.
+ * NOT a `health.*` knob (the lane's agreed surface is closed) and NOT
+ * re-exported (the lib/invoke.js export count is frozen by test/export-parity). */
+const MAIN_RED_REVERIFY_WINDOWS = 6
+
 /** M-6 — the main-red durable state: the last-seen HEAD sha + when it was
  * first seen (the «detectado en N min» anchor — the system-idle firstQuietTs
  * precedent) + the REMEMBERED red locks (only while the current last-seen sha
@@ -5452,10 +5493,24 @@ export interface MainRedState {
   /** The lock files that FAILED for the current lastSeenSha (present ONLY
    * while the broken commit is RED — the durable re-alert memory). */
   redLocks?: string[]
+  /** fb-633 — the «1 + 1» LATCH COUNTER: how many consecutive scan windows the
+   * CURRENT lastSeenSha has been RED, SATURATED at `MAIN_RED_REVERIFY_WINDOWS`
+   * (reaching it = the ONE bounded re-execution was CONSUMED and the latch is
+   * SPENT — no further automatic re-execution until the sha changes). SCOPED TO
+   * THE SHA BY CONSTRUCTION: it lives in the SAME durable record as
+   * `lastSeenSha` and the NEW-sha branch rebuilds the state ⇒ a counter never
+   * drags across commits. ABSENT → 0 (a green sha, or a red durable state
+   * written before this field existed: the latch simply arms from the next
+   * window). Present ONLY while `redLocks` is (a green sha has no red window). */
+  redWindows?: number
 }
 
 /** Read `<stateDir>/main-red-state.json` → `{ lastSeenSha?, firstSeenMs?,
- * redLocks? }`. Absent / unreadable / malformed → {} (never throws). */
+ * redLocks?, redWindows? }`. Absent / unreadable / malformed → {} (never
+ * throws). WHITELIST READER: every durable field must be named here explicitly
+ * — writing `redWindows` without copying it here would leave the latch counter
+ * invisible to the scan (it would read `undefined` on every pass and the «1 + 1»
+ * re-verification would never fire). */
 export function readMainRedState(stateDir: string): MainRedState {
   try {
     const parsed = JSON.parse(readFileSync(path.join(stateDir, MAIN_RED_STATE_FILE), 'utf8')) as Record<string, unknown>
@@ -5465,6 +5520,13 @@ export function readMainRedState(stateDir: string): MainRedState {
     if (Array.isArray(parsed.redLocks)) {
       const redLocks = parsed.redLocks.filter((x): x is string => typeof x === 'string' && x !== '')
       if (redLocks.length > 0) out.redLocks = redLocks
+    }
+    // fb-633 — the «1 + 1» latch counter (the durable half of the bounded-cost
+    // guarantee: keeping it in the FILE is what makes the ceiling 2 instead of
+    // |daemon restarts|). A non-positive / non-finite value is dropped: an
+    // absent counter IS 0 and the latch arms from the next window.
+    if (typeof parsed.redWindows === 'number' && Number.isFinite(parsed.redWindows) && parsed.redWindows > 0) {
+      out.redWindows = Math.floor(parsed.redWindows)
     }
     return out
   } catch {
@@ -5494,7 +5556,9 @@ export interface MainRedRuntime {
   readHeadSha(): string | undefined
   /** Run the FAST locks (node --test PER lock — a separate invocation per lock
    * so the failed lock is named in the frame; result per file {file, ok}).
-   * NEVER throws. ONE single execution per new sha. */
+   * NEVER throws. ONE execution per new sha, plus AT MOST ONE bounded
+   * re-execution while a SAME-sha red persists (the fb-633 «1 + 1» latch —
+   * never per poll). */
   runLocks(paths: readonly string[]): Promise<readonly MainRedLockResult[]>
 }
 
@@ -5509,9 +5573,19 @@ export interface MainRedScanInput {
   firstSeenMs?: number
   /** The remembered red locks of the current lastSeenSha (state.redLocks). */
   redLocks?: readonly string[]
+  /** fb-633 — the durable «1 + 1» latch counter of lastSeenSha
+   * (state.redWindows; ABSENT/undefined → 0 windows: the latch is ARMED). The
+   * scan is PURE ⇒ the counter MUST arrive by input and leave by `state`, and
+   * the tick MUST thread it (dropping it at the call-site makes every pass read
+   * `undefined`, the counter never reaches the window and the ONE
+   * re-verification never fires). */
+  redWindows?: number
   /** The lock-run results for a NEW sha (the tick ran deps.mainRed.runLocks
-   * ONLY when headSha ≠ last-seen — 1 ejecución por sha nuevo; a same-sha tick
-   * passes an EMPTY list). */
+   * ONLY when headSha ≠ last-seen — 1 ejecución por sha nuevo) OR for the ONE
+   * SAME-sha re-verification window (fb-633: the tick runs them when the latch
+   * counter reaches `MAIN_RED_REVERIFY_WINDOWS`; every other same-sha tick
+   * passes an EMPTY list, which is exactly what tells the pure scan that no
+   * re-verification was executed on that pass). */
   lockResults: readonly MainRedLockResult[]
   /** The clock (ms epoch) — stamped into the finding ts + the N minutes. */
   nowMs: number
@@ -5522,50 +5596,143 @@ export interface MainRedScanInput {
 export interface MainRedScanResult {
   findings: HealthFinding[]
   state: MainRedState
+  /** TRUE only on an INCREMENT pass of the latch counter (or on the pass that
+   * CONSUMES it — which IS an increment pass: the counter advances to the
+   * window). A spent latch / a green state reports `false` and the durable file
+   * is left untouched (the tick writes only when changed ⇒ a counter that is
+   * computed but not reported here is never persisted, and the ceiling silently
+   * degrades). */
   changed: boolean
+  /** fb-633 — the OUTCOME of the ONE bounded re-verification, present ONLY on
+   * the window that CONSUMED the latch. The tick logs it as
+   * `RE-VERIFY (red persisted N windows) -> CLEARED | STILL RED` (the
+   * observability guardrail: «still red because still broken» vs «still red
+   * because nobody looked»). ABSENT on every other pass. */
+  reverify?: { windows: number; outcome: 'CLEARED' | 'STILL RED' }
+}
+
+/** fb-633 — THE «detectado en N min» MAGNITUDE, in ONE expression shared by
+ * BOTH branches (the defect it replaces: the NEW-sha branch computed
+ * `(input.nowMs - input.nowMs)`, a self-subtraction that is 0 by construction —
+ * two branches claiming to report the same datum through two different
+ * formulas, one of them a no-op). The magnitude is the AGE OF THE DETECTION:
+ * `nowMs` minus the epoch the sha UNDER REPORT was first seen at HEAD, i.e. the
+ * elapsed time since that sha became the sha the watchdog was watching —
+ * NEVER «how long the failure itself has been happening» (unknowable from here:
+ * the commit time is not materialized) and never a constant 0. Called with the
+ * sha's own anchor (SAME-sha branch: the durable `firstSeenMs`; NEW-sha branch:
+ * the anchor the returned state is creating on that very pass) so a caller can
+ * never mix one sha's age with another's. */
+function mainRedAgeMinutes(nowMs: number, shaFirstSeenMs: number | undefined): number {
+  return Math.round((nowMs - (shaFirstSeenMs ?? nowMs)) / 60000)
 }
 
 /** M-6 — scan the post-commit red condition (PURE, NEVER throws):
  *  - FIRST RUN (no lastSeenSha) → BASELINE only — record the current HEAD,
  *    NEVER alert at boot;
  *  - SAME sha at HEAD → a remembered RED state re-emits the finding (the
- *    shared 30-min ledger re-alerts while the broken commit stays at HEAD); a
- *    green state → nothing (no lock re-run — 1 ejecución por sha nuevo);
+ *    shared 30-min ledger re-alerts while the broken commit stays at HEAD) and
+ *    the fb-633 «1 + 1» latch counts the windows: on the window that reaches
+ *    `MAIN_RED_REVERIFY_WINDOWS` (and ONLY there) the tick-supplied re-run
+ *    results are CONSUMED — all green → the red is LIFTED (the state drops
+ *    redLocks/redWindows and the re-alerts stop), any failure → STILL RED (the
+ *    fresh failures replace the memory, the latch is SPENT); a green state →
+ *    nothing (no lock re-run — 1 ejecución por sha nuevo);
  *  - NEW sha at HEAD → the fresh lock results decide: any failed lock → the
- *    `main-red` finding + the state advances (redLocks remembered); all green
- *    → the state advances SILENTLY.
+ *    `main-red` finding + the state advances (redLocks remembered, the latch
+ *    counter RESTARTS at 0 for the new sha); all green → the state advances
+ *    SILENTLY.
  * The finding error carries the FULL owner-facing line («main rojo post-commit
- * <sha> — lock <X> falló (detectado en <N> min)» — N = round((nowMs -
- * firstSeenMs)/60000)) so every 30-min re-alert stays informative. */
+ * <sha> — lock <X> falló (detectado en <N> min)» — N = the age of the DETECTION
+ * via `mainRedAgeMinutes`) so every 30-min re-alert stays informative. */
 export function scanMainRed(input: MainRedScanInput): MainRedScanResult {
   // FIRST RUN — the scan NEVER alerts at boot (a boot mid-red cannot know when
   // the commit landed; the M4/pacing first-boot precedent). Baseline only.
   if (input.lastSeenSha === undefined) {
     return { findings: [], state: { lastSeenSha: input.headSha, firstSeenMs: input.nowMs }, changed: true }
   }
-  // SAME sha at HEAD — NO new commit. The locks are NOT re-run (1 ejecución
-  // por sha nuevo); a remembered RED state keeps re-emitting the finding (the
-  // shared 30-min ledger gives the re-alert cadence while it stays broken).
+  // SAME sha at HEAD — NO new commit, so no re-verification by default (the
+  // cost invariant); a remembered RED state keeps re-emitting the finding (the
+  // shared 30-min ledger gives the re-alert cadence while it stays broken) and
+  // the «1 + 1» LATCH counts the red windows (fb-633, see the block comment).
   if (input.headSha === input.lastSeenSha) {
     const red = input.redLocks ?? []
     if (red.length === 0) {
+      // GREEN same-sha: no red window exists ⇒ no counter, nothing to persist.
       return { findings: [], state: { lastSeenSha: input.lastSeenSha, firstSeenMs: input.firstSeenMs }, changed: false }
     }
-    const minutes = Math.round((input.nowMs - (input.firstSeenMs ?? input.nowMs)) / 60000)
-    return {
-      findings: [{
-        kind: 'main-red',
-        key: mainRedKey(input.headSha),
-        ts: input.nowMs,
-        error: `main rojo post-commit ${input.headSha} — lock ${red.join(', ')} falló (detectado en ${minutes} min)`
-      }],
-      state: { lastSeenSha: input.lastSeenSha, firstSeenMs: input.firstSeenMs, redLocks: [...red] },
+    // The age of the DETECTION is anchored to THIS sha (state.firstSeenMs) —
+    // the SAME single expression the NEW-sha branch uses.
+    const ageMinutes = mainRedAgeMinutes(input.nowMs, input.firstSeenMs)
+    const finding: HealthFinding = {
+      kind: 'main-red',
+      key: mainRedKey(input.headSha),
+      ts: input.nowMs,
+      error: `main rojo post-commit ${input.headSha} — lock ${red.join(', ')} falló (detectado en ${ageMinutes} min)`
+    }
+    const spent = (windows: number): MainRedScanResult => ({
+      // THE LATCH IS SPENT: the ONE bounded re-execution of this (sha, red) has
+      // already been consumed. NOTHING is re-run and NOTHING is persisted (the
+      // increment pass is the only pass that writes) — this is the arm that
+      // keeps the ceiling at 2 no matter how many polls the red survives.
+      findings: [finding],
+      state: { lastSeenSha: input.lastSeenSha, firstSeenMs: input.firstSeenMs, redLocks: [...red], redWindows: windows },
       changed: false
+    })
+    const windows = input.redWindows ?? 0
+    if (windows >= MAIN_RED_REVERIFY_WINDOWS) return spent(windows)
+    const nextWindows = windows + 1
+    const reRun = input.lockResults ?? []
+    if (nextWindows === MAIN_RED_REVERIFY_WINDOWS && reRun.length > 0) {
+      // ═══ THE ONE (AND ONLY) RE-VERIFICATION OF THIS (sha, red) ═══
+      // The result is CONSUMED here: a green re-run LIFTS the red (the durable
+      // memory AND the counter go, so the 30-min re-alerts stop); a failing
+      // re-run keeps the red with the FRESH failures and SPENDS the latch.
+      const stillRed = reRun.filter((r) => r.ok !== true).map((r) => r.file)
+      if (stillRed.length === 0) {
+        return {
+          findings: [],
+          state: { lastSeenSha: input.lastSeenSha, firstSeenMs: input.firstSeenMs },
+          changed: true,
+          reverify: { windows: nextWindows, outcome: 'CLEARED' }
+        }
+      }
+      return {
+        findings: [{
+          ...finding,
+          error: `main rojo post-commit ${input.headSha} — lock ${stillRed.join(', ')} falló (detectado en ${ageMinutes} min)`
+        }],
+        state: { lastSeenSha: input.lastSeenSha, firstSeenMs: input.firstSeenMs, redLocks: stillRed, redWindows: nextWindows },
+        changed: true,
+        reverify: { windows: nextWindows, outcome: 'STILL RED' }
+      }
+    }
+    if (nextWindows === MAIN_RED_REVERIFY_WINDOWS) {
+      // The window IS due but no re-run results arrived (the tick could not
+      // execute them): the latch stays ARMED (the counter does NOT advance, so
+      // the next window is due again) — marking it spent here would strand the
+      // red forever with no re-verification ever executed.
+      return {
+        findings: [finding],
+        state: { lastSeenSha: input.lastSeenSha, firstSeenMs: input.firstSeenMs, redLocks: [...red], redWindows: windows },
+        changed: false
+      }
+    }
+    // An ORDINARY red window: the counter ADVANCES and IS PERSISTED
+    // (`changed: true`) — the «1 + 1» ceiling lives in the FILE, so a daemon
+    // restart cannot re-arm it.
+    return {
+      findings: [finding],
+      state: { lastSeenSha: input.lastSeenSha, firstSeenMs: input.firstSeenMs, redLocks: [...red], redWindows: nextWindows },
+      changed: true
     }
   }
   // NEW commit at HEAD — the tick ran the FAST locks for THIS sha. A failed
   // lock → the finding + the red memory; all green → the state advances
-  // silently (a green commit is the goal, never an alert).
+  // silently (a green commit is the goal, never an alert). The state is REBUILT
+  // here (no redLocks/redWindows carried over) ⇒ the red memory AND the latch
+  // counter are SCOPED TO THE SHA BY CONSTRUCTION: a spent latch of the previous
+  // commit can never disarm — nor skip — the new sha's own window count.
   const failed = input.lockResults.filter((r) => r.ok !== true).map((r) => r.file)
   const state: MainRedState = {
     lastSeenSha: input.headSha,
@@ -5575,7 +5742,13 @@ export function scanMainRed(input: MainRedScanInput): MainRedScanResult {
   if (failed.length === 0) {
     return { findings: [], state, changed: true }
   }
-  const minutes = Math.round((input.nowMs - input.nowMs) / 60000)
+  // THE MAGNITUDE (fb-633 item 2, was `Math.round((input.nowMs - input.nowMs) /
+  // 60000)`): the age of the DETECTION measured from the anchor of the sha under
+  // report — and for a NEW sha that anchor is being CREATED on this very pass
+  // (`state.firstSeenMs = input.nowMs`), so the first alert of a commit reports
+  // the honest 0 min «detected now» and the number then GROWS on the SAME-sha
+  // re-emits. One expression, shared with the branch above.
+  const minutes = mainRedAgeMinutes(input.nowMs, state.firstSeenMs)
   return {
     findings: [{
       kind: 'main-red',
@@ -7653,13 +7826,16 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // `mainRedPollMs` bucket; a re-fire inside the SAME bucket skips it). The
     // I/O (git HEAD + node --test per lock) lives in `deps.mainRed`, OUTSIDE
     // the pure scan: the tick materializes { headSha, lastSeenSha, firstSeenMs,
-    // lockResults } and runs the locks ONLY on a NEW sha (1 ejecución por sha
-    // nuevo); the first run is a BASELINE (never alerts at boot). Its own
-    // durable state main-red-state.json (lastSeenSha + firstSeenMs + redLocks)
-    // persists ONLY on change (the turn-errors pattern); the SHARED
-    // health-alerts ledger never holds the red window (its 2h prune would drop
-    // a long one). The 30-min RE-ALERT cadence comes from the SHARED dedupe
-    // key `main-red:<sha>` while the broken commit stays at HEAD.
+    // redLocks, redWindows, lockResults } and runs the locks ONLY on a NEW sha
+    // (1 ejecución por sha nuevo) OR on the ONE «1 + 1» latch window (fb-633:
+    // a SAME-sha red that persisted `MAIN_RED_REVERIFY_WINDOWS` windows — the
+    // ceiling stays a CONSTANT, 2, and the counter is durable so a restart
+    // cannot re-arm it); the first run is a BASELINE (never alerts at boot). Its
+    // own durable state main-red-state.json (lastSeenSha + firstSeenMs +
+    // redLocks + redWindows) persists ONLY on change (the turn-errors pattern);
+    // the SHARED health-alerts ledger never holds the red window (its 2h prune
+    // would drop a long one). The 30-min RE-ALERT cadence comes from the SHARED
+    // dedupe key `main-red:<sha>` while the broken commit stays at HEAD.
     let mainRedFindings: HealthFinding[] = []
     if (mainRedEnabled && deps.mainRed !== undefined && currentMainRedBucket !== prevMainRedBucket) {
       try {
@@ -7667,19 +7843,39 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
         const headSha = deps.mainRed.readHeadSha()
         if (headSha !== undefined) {
           // The fast locks run ONLY when HEAD moved to a NEW sha (never on the
-          // first run — baseline; never re-run for the same sha — 1 ejecución
-          // por sha nuevo). A same-sha / first-run tick passes NO results.
+          // first run — baseline; 1 ejecución por sha nuevo) OR when the fb-633
+          // «1 + 1» latch fires: the SAME sha is RED and the durable red-window
+          // counter is one step short of the window (a red that persists N
+          // windows) — ONE bounded re-execution per (sha, red state), NEVER per
+          // poll. Every other same-sha tick passes NO results, which is what
+          // tells the pure scan that no re-verification was executed.
           const isNewSha = mainRedState.lastSeenSha !== undefined && headSha !== mainRedState.lastSeenSha
-          const lockResults = isNewSha ? await deps.mainRed.runLocks(mainRedLocks) : []
+          const reverifyDue =
+            !isNewSha &&
+            (mainRedState.redLocks?.length ?? 0) > 0 &&
+            (mainRedState.redWindows ?? 0) + 1 === MAIN_RED_REVERIFY_WINDOWS
+          const lockResults = (isNewSha || reverifyDue) ? await deps.mainRed.runLocks(mainRedLocks) : []
           const mainRedScan = scanMainRed({
             headSha,
             lastSeenSha: mainRedState.lastSeenSha,
             firstSeenMs: mainRedState.firstSeenMs,
             redLocks: mainRedState.redLocks,
+            // fb-633 — THE COUNTER MUST BE THREADED HERE: the durable
+            // red-window count is what arms the single re-verification. Dropping
+            // it would make the scan read `undefined` on every pass, so the
+            // counter would restart at 0 each window and the re-verification
+            // would never fire (a latch that never latches).
+            redWindows: mainRedState.redWindows,
             lockResults: lockResults as readonly MainRedLockResult[],
             nowMs
           })
           mainRedFindings = mainRedScan.findings
+          // The OBSERVABILITY guardrail of the latch (fb-633): the operator must
+          // be able to tell «still red because still broken» from «still red
+          // because nobody looked».
+          if (mainRedScan.reverify !== undefined) {
+            deps.logger?.warn(`[deepartments] system-health: RE-VERIFY (red persisted ${mainRedScan.reverify.windows} windows) -> ${mainRedScan.reverify.outcome}`)
+          }
           if (mainRedScan.changed) await writeMainRedState(deps.stateDir, mainRedScan.state)
         }
       } catch (error: unknown) {
