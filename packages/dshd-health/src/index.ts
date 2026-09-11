@@ -4326,6 +4326,15 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
   }
   const usable = keys.filter((k) => !k.invalid && (Number(k.blockedUntil) || 0) <= nowMs && (Number(k.cooldownUntil) || 0) <= nowMs)
   const usableCount = usable.length
+  // fb-635 (QH/q-i-241, 2026-09-11) — THE SAME PREDICATE, THE SECOND CONSUMER.
+  // This producer used to decide Go-ONLY while the dispatch gate
+  // (`resolvePoolerDispatchBlock`) counts declared channels too: after the fb-630
+  // fix the gate lifted the HALT and the dispatch resumed, yet THIS alert kept
+  // announcing «HALT (m-2333)» — one datum, two verdicts, and a post-mortem
+  // reading the alert would reach a conclusion the runtime no longer holds.
+  // The predicate is NOT re-implemented here: `poolerServingChannels` is the one
+  // source both consumers read (exactly the unification the QH demanded).
+  const servingChannels = poolerServingChannels(state, nowMs)
   // (3) THE 0-USABLE OUTAGE (spec 09-04 — the FIXED exception) — 0 usable
   // = OUTAGE TOTAL → critical. With zero usable there is no computable quota,
   // so the scarcity decides — the «todas-secas» class (HARDENING-401/fb-39, the
@@ -4335,7 +4344,10 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
   // at all; the pooler returns 503 to every call), it is the CERTAIN
   // no-service state; resume when a fresh key resolves (the owner's «espera
   // hasta: (a) el owner añade keys»).
-  if (usableCount === 0) {
+  // fb-635: «no key at all» now means NO serving source at all — an outage with
+  // a healthy channel is NOT the certain no-service state (the gate doesn't
+  // block it either: same predicate, same verdict).
+  if (usableCount === 0 && servingChannels.length === 0) {
     return [{
       kind: 'pooler-capacity',
       key: POOLER_CAPACITY_KEY_CRITICAL,
@@ -4357,7 +4369,7 @@ export function scanPoolerCapacity(statePath: string, nowMs: number, knobs: Pool
   // never a halt trigger (unknown ≠ halt; the maxima-machina default).
   const haltWeekly = resolvePositiveKnob(knobs.haltWeeklyAvailablePercent, POOLER_CAPACITY_DEFAULT_GLOBAL_REMAINING_PERCENT)
   const haltMonthly = resolvePositiveKnob(knobs.haltMonthlyAvailablePercent, POOLER_CAPACITY_DEFAULT_WEEKLY_REMAINING_PERCENT)
-  if (usableCount === 1) {
+  if (usableCount === 1 && servingChannels.length === 0) {
     const only = usable[0]
     const weeklyPct = typeof only.usageWeekly?.percent === 'number' ? only.usageWeekly.percent : undefined
     const monthlyPct = typeof only.usageMonthly?.percent === 'number' ? only.usageMonthly.percent : undefined

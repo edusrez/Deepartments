@@ -29,7 +29,25 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { resolvePoolerDispatchBlock, poolerServingChannels } from '../lib/invoke.js'
+import { resolvePoolerDispatchBlock, poolerServingChannels, scanPoolerCapacity } from '../lib/invoke.js'
+
+// fb-635 (QH/q-i-241, 2026-09-11): THE SECOND CONSUMER. `scanPoolerCapacity` is
+// the ALERT producer — the surface an operator (or a post-mortem) reads. It used
+// to decide Go-ONLY while the dispatch gate counted channels, so after the fb-630
+// fix the gate lifted the HALT and THIS kept announcing «HALT (m-2333)»: one
+// datum, two verdicts. The convergence tests at the end of this file lock the two
+// surfaces to the SAME verdict — the unification the QH demanded (the predicate
+// is not re-implemented: both call `poolerServingChannels`).
+const SCAN_KNOBS = {
+  stateStaleMs: 3_600_000,
+  haltWeeklyAvailablePercent: 20,
+  haltMonthlyAvailablePercent: 10,
+  warningUsableKeys: 1,
+  okUsableKeys: 2,
+  blockedKeysInWindow: 3,
+  criticalGlobalRemainingPercent: 20,
+  criticalWeeklyRemainingPercent: 10
+}
 
 // A fixed instant: every scenario builds its snapshot relative to it, so the
 // cooldown boundary below is exact rather than clock-dependent.
@@ -233,4 +251,67 @@ test('fb-630 (13): poolerServingChannels is the gate’s ONLY capability predica
     ['a', 'e'],
     'only enabled + not-halted + past-cooldown channels are serving'
   )
+})
+
+// ---------------------------------------------------------------------------
+// fb-635 — THE TWO CONSUMERS MUST AGREE. The gate (`resolvePoolerDispatchBlock`)
+// decides whether work can START; the alert producer (`scanPoolerCapacity`) tells
+// a HUMAN what the pool is doing. Both must read the SAME capacity predicate:
+// a divergence means the dispatch resumes while the alert keeps announcing a pause
+// (or, worse, a post-mortem concludes from the alert that the org was down when it
+// was serving). Each case asserts the pair, not one of them.
+// ---------------------------------------------------------------------------
+
+/** Assert the gate verdict and the alert presence agree for one snapshot. */
+async function assertConvergent(stateDir, { keys, channels, expectBlocked, label }) {
+  const file = await snapshot(stateDir, { keys, channels })
+  const gate = resolvePoolerDispatchBlock(file, NOW, KNOBS)
+  const alerts = scanPoolerCapacity(file, NOW, SCAN_KNOBS)
+  const gateBlocked = gate !== undefined
+  assert.equal(
+    gateBlocked,
+    expectBlocked,
+    `${label}: gate expected ${expectBlocked ? 'BLOCKED' : 'OPEN'}, got ${gateBlocked ? `blocked (${gate.reason})` : 'open'}`
+  )
+  assert.equal(
+    alerts.length > 0,
+    expectBlocked,
+    `${label}: the ALERT must ${expectBlocked ? 'fire' : 'stay silent'} — the two consumers must not diverge (fb-635)`
+  )
+}
+
+test('fb-635 (1): a SERVING channel ⇒ the gate is OPEN *and* the alert is SILENT (the live case after the fix)', async () => {
+  await withStateDir(async (stateDir) => {
+    await assertConvergent(stateDir, { keys: { 'oc-15': thinKey() }, channels: [channel()], expectBlocked: false, label: 'thin Go + healthy channel' })
+  })
+})
+
+test('fb-635 (2): a DRY channel ⇒ gate BLOCKS *and* the alert FIRES (fail-stop intact on BOTH surfaces)', async () => {
+  await withStateDir(async (stateDir) => {
+    await assertConvergent(stateDir, { keys: { 'oc-15': thinKey() }, channels: [channel({ halted: true })], expectBlocked: true, label: 'thin Go + dry channel' })
+  })
+})
+
+test('fb-635 (3): no declared channels ⇒ both surfaces are the PRE-FIX Go-only verdict', async () => {
+  await withStateDir(async (stateDir) => {
+    await assertConvergent(stateDir, { keys: { 'oc-15': thinKey() }, expectBlocked: true, label: 'thin Go, no channels' })
+  })
+})
+
+test('fb-635 (4): ZERO usable Go + a serving channel ⇒ both surfaces say «not blocked» (the outage needs NO serving source)', async () => {
+  await withStateDir(async (stateDir) => {
+    await assertConvergent(stateDir, { keys: { 'oc-15': blockedKey() }, channels: [channel()], expectBlocked: false, label: 'no usable Go + healthy channel' })
+  })
+})
+
+test('fb-635 (5): ZERO usable Go + a DRY channel ⇒ both surfaces BLOCK (the «todas-secas» class is untouched)', async () => {
+  await withStateDir(async (stateDir) => {
+    await assertConvergent(stateDir, { keys: { 'oc-15': blockedKey() }, channels: [channel({ halted: true })], expectBlocked: true, label: 'no usable Go + dry channel' })
+  })
+})
+
+test('fb-635 (6): a channel in COOLDOWN ⇒ both surfaces BLOCK (a cooling channel is not capacity anywhere)', async () => {
+  await withStateDir(async (stateDir) => {
+    await assertConvergent(stateDir, { keys: { 'oc-15': thinKey() }, channels: [channel({ cooldownUntil: NOW + 1 })], expectBlocked: true, label: 'thin Go + cooling channel' })
+  })
 })
