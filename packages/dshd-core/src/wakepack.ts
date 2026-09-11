@@ -229,11 +229,20 @@ export function sanitizePromptLiterals(text: string): string {
  * The owner-presence directive line, injected alongside the state in BOTH the
  * presence-change node (`buildPresenceMessage`, A4) and wake-pack section 2
  * (`buildWakePack`) so the host is told how to act on the CURRENT state.
+ *
+ * OWNER-AWAY READING (owner directive, 2026-09-11): the absent branch states
+ * that the absence removes the ASK, never the DECISION — the host decides
+ * EVERYTHING autonomously, does NOT park items as blockers, and reports the
+ * list of decisions taken (with their why) on the owner's return; only MONEY
+ * (a spend or a commitment) still waits for the owner's word. The technical
+ * fact of the A3 gate is unchanged (`ask_user_question` is still DENIED while
+ * the owner is away — `askUserGuardReason`, src/invoke.ts) and is stated as
+ * such: the denial removes the question channel, not the authority to decide.
  */
 export function presenceGuidance(present: boolean): string {
   return present
     ? 'Owner guidance: make the most of the presence — share any question you have (none is fine — no need to force it) or report what was done while the owner was away.'
-    : 'Owner guidance: work autonomously as far as you can; you will be notified when the owner returns. If a question needs the owner, park it in PENDIENTE-OWNER (your journal / WORK-REGISTER §3) and present it when the owner returns — ask_user_question is denied while the owner is away.'
+    : 'Owner guidance: the owner is away — his absence removes the ASK, never the DECISION: you (the host) take ALL the decisions autonomously. ask_user_question is denied while the owner is away, so do NOT ask and do NOT park anything in PENDIENTE-OWNER as a blocker — decide, record each decision together with its why, and on his return present the list of decisions taken (he may revert any of them or open new tasks). The ONLY exception is money: a spend or a commitment of money still requires his word.'
 }
 
 /**

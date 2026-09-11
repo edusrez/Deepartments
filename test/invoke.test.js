@@ -7008,7 +7008,19 @@ test('Batch W4 pure: buildWakePack renders the `## Owner presence: present|absen
   // Absent case: header + absent guidance.
   const absent = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x', ownerPresence: 'absent' })
   assert.match(absent, /## Owner presence: absent/, 'the wake pack names the ABSENT owner-presence state')
-  assert.match(absent, /Owner guidance: work autonomously as far as you can/, 'the ABSENT state appends the absent guidance line')
+  // OWNER-AWAY READING (owner directive, 2026-09-11): the old guidance parked
+  // the question in PENDIENTE-OWNER as a BLOCKER. The new one states that the
+  // absence removes the ASK, never the DECISION — the host decides everything,
+  // parks nothing as a blocker, and reports the decisions on the owner's return
+  // (money stays the ONLY exception). The technical fact of the A3 gate (the
+  // denial itself) is unchanged and still stated verbatim.
+  assert.match(absent, /Owner guidance: the owner is away — his absence removes the ASK, never the DECISION/, 'the ABSENT state appends the absent guidance line (the absence removes the ASK, not the DECISION)')
+  assert.match(absent, /you \(the host\) take ALL the decisions autonomously/, 'the absent guidance grants FULL autonomous decision authority to the host')
+  assert.ok(!absent.includes('park it in PENDIENTE-OWNER'), 'the absent guidance NO LONGER parks a question in PENDIENTE-OWNER (the old blocker reading is gone)')
+  assert.match(absent, /do NOT park anything in PENDIENTE-OWNER as a blocker/, 'the absent guidance forbids parking a NON-money item as a blocker')
+  assert.match(absent, /present the list of decisions taken/, "the absent guidance asks for the LIST of the decisions taken on the owner's return")
+  assert.match(absent, /ONLY exception is money/, "the absent guidance keeps the ONE exception (money) that still requires the owner's word")
+  assert.match(absent, /ask_user_question is denied while the owner is away/, 'the absent guidance still states the TECHNICAL fact of the A3 gate (the denial is unchanged)')
   assert.ok(!absent.includes('## Owner presence: present'), 'absent case does NOT carry the present label')
   assert.ok(!absent.includes('Owner guidance: make the most of the presence'), 'absent case does NOT carry the present guidance')
   // A mixed-case trimmed value is normalized to lowercase before the comparison.
