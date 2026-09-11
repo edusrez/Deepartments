@@ -1157,6 +1157,51 @@ export interface HealthFinding {
    * dispatch — the actors are ALERTED with the census + suggested actor, the
    * actor decides (the «never dispatches» rule). */
   recipients?: string[]
+  /** LANE HEALTH (usable-window) — the DENOMINATOR the `context-threshold`
+   * percentage was computed against (the row's own `contextWindow`, carried by
+   * the session projection). The band IS a boundary of this denominator, so a
+   * figure quoted WITHOUT it is not comparable across rows: MEASURED in the
+   * live ledger, 212 of 215 historical `cruce b` rows were computed over
+   * /1048576 while 3 were computed over /1000000 (two host sessions on another
+   * provider) — the same `b10` names two different requests. Publishing it lets
+   * a consumer COMPARE (or declare the datum NO DERIVABLE for the historical
+   * rows that carry it only inside the `error` prose). ADDITIVE: the frozen
+   * `error` literal stays byte-identical; ABSENT on every non-context kind. */
+  contextWindow?: number
+  /** LANE HEALTH (usable-window) — the projected numerator base the percentage
+   * was computed from (the wire-view `projectedTokens` when present, else the
+   * raw-state formula, else the surface-only fallback — the scan's own
+   * precedent order). Published so `pct` is RE-DERIVABLE from the finding
+   * alone: `pct = (contextProjectedTokens + contextReserveTokens) /
+   * contextWindow`. */
+  contextProjectedTokens?: number
+  /** LANE HEALTH (usable-window) — the completion RESERVE added to the
+   * numerator (0 when the knob is absent/invalid — the legacy numerator). */
+  contextReserveTokens?: number
+  /** LANE HEALTH (usable-window) — the UTILIZABLE window = `contextWindow −
+   * contextReserveTokens`: the budget the NEXT request's prompt must fit in
+   * (the reserve is consumed by the completion). It is the boundary
+   * `beyondUsableWindow` measures against, and the denominator the host's
+   * directive names («la ventana UTILIZABLE = límite − reserve»). */
+  usableWindowTokens?: number
+  /** LANE HEALTH (usable-window) — THE CONSEQUENCE, stated structurally: true
+   * iff `contextProjectedTokens + contextReserveTokens > contextWindow`, i.e.
+   * the pressure ALREADY exceeds the limit this row was computed against ⇒ the
+   * NEXT request of this session is REJECTED (input + completion cannot fit).
+   * Published on EVERY context-threshold finding (false = possible), so the
+   * band becomes interpretable without re-deriving the arithmetic: `cruce b10`
+   * is the last rung and MEASURED rows there carried fractions of 1.00–1.01,
+   * while b8/b9 rows were strictly below the limit (838860/1048576 and
+   * 943989/1048576 — the request FITS). Note `b10` does NOT imply this flag:
+   * at exactly `pct == 1.0` the request still fits (`>`, not `≥`). */
+  beyondUsableWindow?: boolean
+  /** LANE HEALTH (usable-window) — the OPERATIONAL INSTRUCTION, published ONLY
+   * when `beyondUsableWindow === true`: the stable machine token
+   * `'compact-or-rotate'` (compact the session's context, or rotate the post to
+   * a fresh session). This is the last rung's actionable consequence, which the
+   * shared `error` literal states for NO band (its wording is frozen — see the
+   * scan's own comment). ABSENT on every other finding. */
+  contextAction?: string
 }
 
 /** One alert audit line appended to `<stateDir>/health-alerts.jsonl`. */
@@ -5178,7 +5223,23 @@ export function contextThresholdKey(agentId: string, band: number): string {
  * carries the per-(member, tier) dedupe key and an informative error line
  * (`<agent> <pct>% (<proj>[/+reserve]/<win>) — cruce b<band>`). The returned
  * `latches` map is the NEXT per-member tier state (the tick persists it ONLY
- * when `changed` — the system-idle ledger pattern). */
+ * when `changed` — the system-idle ledger pattern).
+ *
+ * LANE HEALTH (usable-window, 2026-09-11) — THE NO-RETURN POINT, NAMED. The
+ * reserve is ALREADY inside the numerator (`effective = projected + reserve`,
+ * `pct = effective / contextWindow`), so the bands are computed OVER the
+ * magnitude that includes it and the point where the next request becomes
+ * IMPOSSIBLE is `projected + reserve > contextWindow` ⇔ `pct > 1` ⇔ **b10** (at
+ * the real 1048576/262144 calibration: `projected > 786432`). The rungs BELOW
+ * it are genuinely possible, not «sana but impossible»: b9 spans effective
+ * [943718, 1048576) and b8 [838860, 943718) — both `< contextWindow`. The
+ * algebra is therefore NOT recalibrated here (no second reserve, no moved
+ * bands): what the shared `error` literal cannot say is the CONSEQUENCE, and
+ * that is published ADDITIVELY as `beyondUsableWindow` + `contextAction` +
+ * `usableWindowTokens`, alongside the FRAME (`contextWindow`,
+ * `contextProjectedTokens`, `contextReserveTokens`) so a figure quoted from a
+ * row is comparable to another row's (MEASURED: 212 of 215 historical rows over
+ * /1048576, 3 over /1000000). */
 export function scanContextThreshold(input: ContextThresholdScanInput): ContextThresholdScanResult {
   const findings: HealthFinding[] = []
   const latches: ContextTierLatches = { ...(input.tierLatches ?? {}) }
@@ -5248,13 +5309,32 @@ export function scanContextThreshold(input: ContextThresholdScanInput): ContextT
     // finding carries `sessionId` (the figure's frame) and the caller can
     // declare its origin; the ambiguity of the shared literal is neither
     // worsened nor asserted away.
+    // LANE HEALTH (usable-window, ADDITIVE — the frozen `error` literal is NOT
+    // touched): the finding also PUBLISHES the FRAME the figure was measured in
+    // (the denominator + the numerator operands + the UTILIZABLE window) and the
+    // CONSEQUENCE at the last rung. The shared literal names none of them: it
+    // reads `cruce b10` exactly like `cruce b5`, while b10 is the band whose next
+    // request is REJECTED. `beyondUsableWindow` states that structurally, and
+    // `contextAction` carries the instruction (compact or rotate) ONLY when true.
+    const beyondUsableWindow = effective > row.contextWindow
+    const usableWindow = row.contextWindow - reserve
     findings.push({
       kind: 'context-threshold',
       key: contextThresholdKey(agentId, band),
       ...(row.postId !== undefined ? { postId: row.postId } : { hostId: row.hostId }),
       ...(typeof row.sessionId === 'string' && row.sessionId !== '' ? { sessionId: row.sessionId } : {}),
       ts: input.nowMs,
-      error: `${agentId} ${Math.round(pct * 100)}% (${projected}${reserve > 0 ? `+${reserve}` : ''}/${row.contextWindow}) — cruce b${band}`
+      error: `${agentId} ${Math.round(pct * 100)}% (${projected}${reserve > 0 ? `+${reserve}` : ''}/${row.contextWindow}) — cruce b${band}`,
+      // LANE HEALTH (usable-window): the DENOMINATOR travels WITH the figure
+      // (comparability across rows/frames), the numerator operands make `pct`
+      // re-derivable, and the consequence + its action are declared at the rung
+      // where they matter.
+      contextWindow: row.contextWindow,
+      contextProjectedTokens: projected,
+      contextReserveTokens: reserve,
+      usableWindowTokens: usableWindow,
+      beyondUsableWindow,
+      ...(beyondUsableWindow ? { contextAction: 'compact-or-rotate' } : {})
     })
     latches[agentId] = band
     changed = true

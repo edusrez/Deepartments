@@ -485,7 +485,20 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     // the pre-lane verdict and result shape byte-identically. md5
     // ba3da7b71dc8d71a6db42361b015ccc6 → 8c82d814bd9bbad309688174564fc5d1;
     // byte-synced with scripts/zone-md5-manifest.json:11 in the SAME change.
-    assert.equal(md5, '8c82d814bd9bbad309688174564fc5d1', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + the VALLE 09-07 FB-198 T1 failedGround observer + prepared (wake-failed) / failed:<ground> envelope + id-truth assertion + the LOOP FASE 1 feedback dedupe/duplicado/bridge-adjacent tool span + the fb-775 dept_feedback_update CLOSED-SET org validator + the LANE DEL SELLO reasonProvenance declared-origin contract (parameter schema + call-site threading + the ADDITIVE reasonReferenceScope/reasonVerifiedToken/declaredReferenceSessionId outputs) (md5 8c82d814bd9bbad309688174564fc5d1)')
+    // Zone md5 RE-FROZE (2026-09-11, LANE fb-831 / observability renders,
+    // IPD builder-325 run token c5ee5274): DECLARED INTENTIONAL in-span changes
+    // to the `dept_who` tool body — the render published NONE of the
+    // schema-declared identity fields (`sessionId` is REQUIRED; `departmentId`/
+    // `role`/`jobId` are declared), so it LIED about its own declared shape and
+    // the head could not classify the roster nor attribute a worker to its
+    // manager. The fix is an ADDITIVE `{...}` per-row tail (a present value
+    // verbatim, an ABSENT optional field DECLARED as `-`); EVERY pre-existing
+    // token, the header prefix and the m-64/m-228 state semantics are
+    // byte-identical. The other two fb-831 loci (dept_monitor_list /
+    // dept_job_list) live OUTSIDE this span and did NOT move this hash. md5
+    // 8c82d814bd9bbad309688174564fc5d1 → c61523c4fa5a71b772441da05b2bcf58;
+    // byte-synced with scripts/zone-md5-manifest.json:11 in the SAME change.
+    assert.equal(md5, 'c61523c4fa5a71b772441da05b2bcf58', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + the VALLE 09-07 FB-198 T1 failedGround observer + prepared (wake-failed) / failed:<ground> envelope + id-truth assertion + the LOOP FASE 1 feedback dedupe/duplicado/bridge-adjacent tool span + the fb-775 dept_feedback_update CLOSED-SET org validator + the LANE DEL SELLO reasonProvenance declared-origin contract (parameter schema + call-site threading + the ADDITIVE reasonReferenceScope/reasonVerifiedToken/declaredReferenceSessionId outputs) + the fb-831 dept_who declared-field render tail (the REQUIRED sessionId + departmentId/role/jobId, absent keys declared as `-`) (md5 c61523c4fa5a71b772441da05b2bcf58)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface

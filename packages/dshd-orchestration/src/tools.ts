@@ -2306,7 +2306,21 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
             const lines = value.jobs.map((job) => {
               if (job.error !== void 0) return `  - ${job.id} (${job.path}) — ERROR: ${job.error}`
               const meta = [job.status, job.role].filter(Boolean).join(', ')
-              return `  - ${job.id} — "${job.title}" (${meta}) [${job.path}]`
+              // fb-831 (c): the render used to publish a SUBSET of the schema
+              // (title/status/role/path) and SILENTLY hid `schedule` — the ONE
+              // field that decides whether a job AUTO-FIRES (a 5-field cron
+              // fires via the scheduler daemon; a human schedule never does).
+              // The declared surface now rides the line as an ADDITIVE tail: a
+              // present value VERBATIM, an ABSENT optional key DECLARED as `-`
+              // (never hidden — the golden rule of this lane).
+              const declared = (name: string, v: string | undefined): string => `${name}:${v === void 0 ? '-' : v}`
+              const tail = [
+                declared('description', job.description),
+                declared('schedule', job.schedule),
+                declared('owner', job.owner),
+                declared('outbox', job.outbox)
+              ].join(' | ')
+              return `  - ${job.id} — "${job.title}" (${meta}) [${job.path}] {${tail}}`
             })
             return [{ type: 'text', text: `jobs (${value.jobs.length}) in ${value.jobDir}:\n${lines.join('\n')}` } as const]
           }
@@ -2696,7 +2710,29 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
               }
             }
           },
-          render: (_args, value) => [{ type: 'text', text: `${(value.monitors ?? []).length} parallel monitor(s): ${(value.monitors ?? []).map((m) => `${m.id}${m.monitorId !== undefined ? ` (${m.monitorId})` : ''}`).join(', ')}` } as const]
+          render: (_args, value) => {
+            // fb-831 (b): the schema declares `query` REQUIRED plus the whole
+            // runtime state (monitorId/lastFiredAt/lastPolledAt/cursor/
+            // lastEventCount) and the description PROMISES it — the render
+            // published only id + monitorId, so the tool answered a narrower
+            // question than it says it answers. The declared surface is added
+            // as an ADDITIVE tail (the pre-existing header + list stay
+            // byte-identical): a present value VERBATIM (a ZERO is a VALUE and
+            // is printed — omitting a zero value is the correct omission, never
+            // a field), an ABSENT optional key DECLARED as `-`, never hidden.
+            const monitors = value.monitors ?? []
+            const head = `${monitors.length} parallel monitor(s): ${monitors.map((m) => `${m.id}${m.monitorId !== undefined ? ` (${m.monitorId})` : ''}`).join(', ')}`
+            const declared = (name: string, v: string | number | undefined): string => `${name}:${v === void 0 ? '-' : String(v)}`
+            const details = monitors.map((m) => `  - ${m.id} {${[
+              declared('query', m.query),
+              declared('monitorId', m.monitorId),
+              declared('lastFiredAt', m.lastFiredAt),
+              declared('lastPolledAt', m.lastPolledAt),
+              declared('cursor', m.cursor),
+              declared('lastEventCount', m.lastEventCount)
+            ].join(' | ')}}`)
+            return [{ type: 'text', text: monitors.length === 0 ? head : `${head}\n${details.join('\n')}` } as const]
+          }
         },
         async execute(): Promise<{ monitors: Array<{ id: string; query: string; monitorId?: string; lastFiredAt?: number; lastPolledAt?: number; cursor?: string; lastEventCount?: number }> }> {
           const monitors = resolveParallelMonitorConfig((config as unknown as { parallel?: ParallelConfig }).parallel)
@@ -6263,8 +6299,23 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         // replaces the flat `, live`/`, offline` + `, sleeping` combination, so a
         // member never renders the contradictory "live, sleeping" nor "live,
         // retired" (m-228) — `retired` and `YOU` stay as separate markers.
+        // fb-831 (a): the render published NONE of the schema-declared identity
+        // fields — `sessionId` is REQUIRED by the schema and `departmentId`/
+        // `role`/`jobId` are declared, so without them the head could not
+        // classify the roster nor attribute a worker to its manager, and the
+        // render LIED about its own declared shape. They ride the row as an
+        // ADDITIVE `{...}` tail (every pre-existing token/prefix stays
+        // byte-identical — m-64/m-228 have prefix+locks on them): a present
+        // value VERBATIM, an ABSENT optional field DECLARED as `-` (never
+        // hidden), and the REQUIRED sessionId always printed.
+        const declared = (name: string, v: string | undefined): string => `${name}:${v === void 0 ? '-' : v}`
         const lines = value.members.map((member) =>
-          `  - ${member.agentId} (${member.kind}, "${member.title}"${member.state === 'running' ? ', running' : member.state === 'idle' ? ', idle' : member.state === 'sleeping' ? ', sleeping' : ', offline'}${(member as { liveStatus?: string }).liveStatus !== undefined ? `, handle:${(member as { liveStatus?: string }).liveStatus}` : ''}${member.retired === true ? ', retired' : ''}${member.you ? ', YOU' : ''})`)
+          `  - ${member.agentId} (${member.kind}, "${member.title}"${member.state === 'running' ? ', running' : member.state === 'idle' ? ', idle' : member.state === 'sleeping' ? ', sleeping' : ', offline'}${(member as { liveStatus?: string }).liveStatus !== undefined ? `, handle:${(member as { liveStatus?: string }).liveStatus}` : ''}${member.retired === true ? ', retired' : ''}${member.you ? ', YOU' : ''}) {${[
+            declared('sessionId', member.sessionId),
+            declared('departmentId', (member as { departmentId?: string }).departmentId),
+            declared('role', (member as { role?: string }).role),
+            declared('jobId', (member as { jobId?: string }).jobId)
+          ].join(' | ')}}`)
         const retiredCount = value.retiredCount ?? 0
         // C1 (m-264): the header adds the sleeping/offline-hidden count — the
         // NON-retired rows the DEFAULT active view hides (the caller's own
