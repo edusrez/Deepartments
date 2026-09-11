@@ -24994,3 +24994,81 @@ test('LANE SELLO (d) — DOCUMENTED TRAP (family fb-591): the token extractor ta
     assert.equal(verifyRotateReason('cifra del frame 272006 medida al instante 2026-09-11T14:37:01Z', 'sess-dated', mirrorPath), 'verified', '(d) the citation RULE the lane prescribes: the figure FIRST (272006 is run #1, ratio 0.02678 ≤ 0.15 → verified) — the date AFTER it is never read, so the citation stays TRUE')
   })
 })
+
+// ---------------------------------------------------------------------------
+// fb-426 (A)+(B) — LA CITA LLEVA SU PROPIA CALIBRACIÓN (lane builder-317).
+// ---------------------------------------------------------------------------
+// ROW 5 OF THE LIVE LEDGER, VERBATIM (`/opt/dsh/.dsh-dev/storages/session_projcache.json.seals.jsonl`,
+// datumTsIso 2026-09-11T19:04:18.800Z): sessionId head-internal-programming-head-6595a29d,
+// reference 807501, `citedScale: "none"`, `cause: "no-figure-in-reason"`, `stamp: "unavailable"` —
+// for a reason whose OWN arithmetic cites the monitor fraction: «context-threshold 101% (cruce
+// b10, dentro de la reserva)». Two separate defects, both MEASURED in that one row:
+//   (B) the guard `value > 100` DISCARDED the 101 (the docstring's declared domain was
+//       `0 < N ≤ 100`), so the instrument never reached the pct branch — and the caller
+//       concluded the FALSE cause «no-figure-in-reason» for a reason that DOES cite a figure;
+//   (A) the pct branch needs the monitor's completion reserve `(projected + reserve) / window`,
+//       and the caller knob `health.contextCompletionReserve` lives on the dshd-health plugin
+//       row (profiles/departments-dev/cordis.patch.yml:151) while BOTH verification call sites
+//       read the DEEPARTMENTS plugin's `config.health` — a different Config object with no
+//       `health` section ⇒ undefined (MEASURED: EVERY production row of the ledger says
+//       `completionReserveSource: "absent"`, including the rows whose reason cites `+262144`).
+test('fb-426 (A)+(B) — ROW 5 REPLAYED: the cited 101% enters the pct branch (the FALSE cause «no-figure-in-reason» dies and the row NAMES 101 as its cited figure), and the SAME reason + the SAME mirror flips to `verified` as soon as the monitor calibration reaches the branch — the citation was TRUE at 102.0%', async () => {
+  const R = 807_501
+  const REASON = 'context-threshold 101% (cruce b10, dentro de la reserva) — el head ha superado su ventana; rotacion en silencio (fb-190) para que la lane de builder-316 aterrice en una sesion con presupuesto'
+  const oldSessionId = 'head-research-head'
+  const postId = 'research-head'
+  // ---- BOOT A: the MEASURED PRODUCTION STATE — the knob the call site reads
+  // (`config.health` of the DEEPARTMENTS plugin) carries no `health` section at
+  // all, so the branch runs with NO reserve (every production row of the ledger
+  // says `completionReserveSource: "absent"`). ---------------------------------
+  await withTempStateDir(async (stateDir) => {
+    await seedJournal(stateDir, postId, 'ROTATE-SEED: fb-426 (A)+(B) row 5 — no calibration.')
+    await seedProjCache(stateDir, { [oldSessionId]: R })
+    const mirrorPath = resolveSessionProjCachePath(stateDir, path.join(stateDir, 'sessions'))
+    const env = await bootWithQD(stateDir, { persistenceRoot: path.join(stateDir, 'sessions') })
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      const rotate = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: REASON }, { agent: host, signal })
+      const [row] = (await readFile(`${mirrorPath}.seals.jsonl`, 'utf8')).trim().split('\n').map((line) => JSON.parse(line))
+      // (B) THE FALSE CAUSE IS DEAD: the reason DID cite a figure, and now the
+      // branch the guard used to make unreachable is the one that answered.
+      assert.notEqual(rotate.reasonVerified, 'unavailable', '(B) PRE-FIX the guard discarded the 101 ⇒ `unavailable` with cause «no-figure-in-reason» — a FALSE cause for a reason that cites a figure')
+      assert.equal(row.branch, 'pct', '(B) the row names the pct branch — the branch the bare `> 100` guard made unreachable')
+      assert.equal(row.pctCited, 101, '(B) the cited percentage the guard DISCARDED is now sealed (101)')
+      assert.equal(row.citedScale, 'pct')
+      assert.doesNotMatch(row.cause, /no-figure-in-reason/, `(B) THE FALSE CAUSE IS GONE — got: ${row.cause}`)
+      assert.match(row.cause, /^pct-outside-tolerance/, `(B) the honest cause: the citation EXISTS and misses the fraction the branch can form without a calibration — got: ${row.cause}`)
+      assert.match(row.cause, /reserve ABSENT/, '(A) …and the cause NAMES the missing operand the branch needed')
+      assert.equal(row.completionReserveSource, 'absent', '(A) MEASURED PRODUCTION STATE: no reserve reached this call (the knob never crosses the plugin boundary)')
+      assert.ok(Math.abs(row.actualPct - R / 1_048_576) < 1e-9, `(A) the fraction it could form was the plain projection ${(R / 1_048_576).toFixed(5)} — 31.2% away from the cited 101%, which is WHY the calibration decides`)
+      // (B) …and the guard still refuses what is NOT a context percentage: the
+      // token figure of «697485%» never enters as its tail fragment.
+      assert.equal(verifyRotateReason(`muro de contexto: 11% y ademas una cifra gorda ${R}%`, oldSessionId, mirrorPath), 'verified', '(B) the FIRST pct-shaped run (11%) is the citation, not the tail «501%» of the 6-digit figure ⇒ the branch stays on the pct the reason really cites')
+    } finally {
+      await env.dispose()
+    }
+  })
+  // ---- BOOT B: the SAME reason, the SAME mirror, the calibration PRESENT ----
+  await withTempStateDir(async (stateDir) => {
+    await seedJournal(stateDir, postId, 'ROTATE-SEED: fb-426 (A)+(B) row 5 — with the monitor calibration.')
+    await seedProjCache(stateDir, { [oldSessionId]: R })
+    const mirrorPath = resolveSessionProjCachePath(stateDir, path.join(stateDir, 'sessions'))
+    const env = await bootWithQD(stateDir, { persistenceRoot: path.join(stateDir, 'sessions'), health: { contextCompletionReserve: 262_144 } })
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      const rotate = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: REASON }, { agent: host, signal })
+      const [row] = (await readFile(`${mirrorPath}.seals.jsonl`, 'utf8')).trim().split('\n').map((line) => JSON.parse(line))
+      assert.equal(rotate.reasonVerified, 'verified', '(A) with the monitor calibration on the config the call site reads, the SAME reason + mirror VERIFIES — the row-5 citation was TRUE')
+      assert.equal(row.completionReserveSource, 'caller', '(A) the reserve that decided it is the caller knob — recorded as such')
+      assert.equal(row.completionReserve, 262_144)
+      assert.ok(Math.abs(row.actualPct - ((R + 262_144) / 1_048_576)) < 1e-9, `(A) the monitor fraction the branch formed: (807501 + 262144) / 1048576 = ${row.actualPct}`)
+      assert.ok(Math.abs(row.actualPct - 1.0200) < 0.0001, `(A)+(B) THE NUMBER THAT MATTERS: cited 101% vs the branch's 102.0% ⇒ the citation is TRUE and > 100% BY CONSTRUCTION (the reserve is counted) — ratio ${row.executedRatio.toFixed(5)}`)
+      assert.ok(row.executedRatio <= REASON_VERIFY_TOLERANCE, `the ratio inside the frozen tolerance (${row.executedRatio.toFixed(5)} ≤ ${REASON_VERIFY_TOLERANCE})`)
+      assert.match(row.cause, /^pct-within-tolerance/, `the measured cause — got: ${row.cause}`)
+    } finally {
+      await env.dispose()
+    }
+  })
+})

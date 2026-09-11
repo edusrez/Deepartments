@@ -1182,14 +1182,77 @@ function extractRotateReasonTokenFigure(reason: string): number | undefined {
  * ("60% de contexto", "~62%", "18%", "95.1%"). */
 const REASON_PERCENT_RE = /~?\s*(\d{1,3}(?:[.,]\d{1,3})?)\s*%/g
 
-/** Extract the FIRST percentage figure (0 < N ≤ 100) a rotation reason cites
- * — the «N% de contexto» claimed pressure. Returns undefined when the reason
- * carries no percentage (a pct outside (0,100] is never a context figure). */
-function extractRotateReasonPercent(reason: string): number | undefined {
+/** fb-426 (A) — THE MONITOR'S OWN OPERANDS, read FROM THE CITATION. The
+ * context-threshold alert composes its reason as
+ * `<pct>% (<projected>+<reserve>/<window>)` — the reserve INCLUDED, verbatim in
+ * the MEASURED reasons of the live ledger («context-threshold cruce b9 (92%:
+ * 697485+262144/1048576)», «Cruce de umbral de contexto b5 (50% —
+ * 267303+262144/1048576)», «Contexto al 51% (268447+262144/1048576, cruce b5)»).
+ * The pct branch needs that SAME reserve to recompute the fraction the citation
+ * claims, and it cannot take it from the caller knob:
+ * `health.contextCompletionReserve` exists on the dshd-health plugin row alone
+ * (profiles/departments-dev/cordis.patch.yml:151, the MONITOR's own config),
+ * while BOTH verification call sites read `config.health` of the DEEPARTMENTS
+ * plugin config — a DIFFERENT Config object with no `health` section ⇒
+ * `undefined` (MEASURED in the ledger: `completionReserveSource: "absent"` on
+ * every production row, including the two whose reason cites the reserve —
+ * the pct branch then compares against a fraction the monitor NEVER composed).
+ * The citation carries its own calibration: this reader names it. */
+const REASON_MONITOR_OPERANDS_RE = /(\d{1,9})\s*\+\s*(\d{1,9})\s*\/\s*(\d{1,9})/
+
+/** Extract the monitor's inline operands (`projected+reserve/window`) from a
+ * rotation reason. Undefined when the reason carries none (a free-form «N%»). */
+function monitorOperandsInReason(reason: string): { projected: number; reserve: number; window: number } | undefined {
+  const m = REASON_MONITOR_OPERANDS_RE.exec(reason)
+  if (m === null) return undefined
+  const projected = Number(m[1])
+  const reserve = Number(m[2])
+  const window = Number(m[3])
+  if (!Number.isFinite(projected) || !Number.isFinite(reserve) || !Number.isFinite(window)) return undefined
+  if (!(window > 0)) return undefined
+  return { projected, reserve, window }
+}
+
+/** fb-426 (B) — THE CEILING of a «N% de contexto» citation, NAMED BY THE BRANCH'S
+ * OWN OPERAND DOMAIN. The pct branch compares the cited pct against
+ * `(projected + completionReserve) / contextWindow`, whose domain is NOT (0, 1]:
+ * the reserve is ADDED to a projection that can already fill the window, so the
+ * fraction exceeds 1 BY CONSTRUCTION whenever the reserve is counted — and the
+ * MEASURED citations say exactly that («context-threshold 101% (cruce b10, dentro
+ * de la reserva)», row 5 of the live ledger, over the row 807501/1048576 with the
+ * monitor reserve 262144 ⇒ the fraction is 102.0%). A bare `> 100` guard therefore
+ * DISCARDED the citations of the over-threshold rotations — the very rotations
+ * whose why the seal is the only evidence of — and the caller then concluded the
+ * FALSE cause `no-figure-in-reason` for a reason that cites a figure.
+ * THE DOMAIN, derived (not invented): `projected ≤ window ∧ reserve ≤ window`
+ * ⇒ the fraction ≤ 2 ⇒ the cited pct ≤ 200. With the operands DECLARED in the
+ * citation (its own `+<reserve>/<window>`) the SAME formula gives the tighter
+ * reach (101% is well inside the 125.0% reach of the real calibration). */
+const CONTEXT_PCT_MAX = 200
+
+function maxContextPct(contextWindow: number | undefined, reserve: number): number {
+  if (contextWindow === undefined || !Number.isFinite(contextWindow) || !(contextWindow > 0)) return CONTEXT_PCT_MAX
+  const counted = Number.isFinite(reserve) && reserve > 0 ? reserve : contextWindow
+  return Math.min(CONTEXT_PCT_MAX, 100 * ((contextWindow + counted) / contextWindow))
+}
+
+/** Extract the FIRST percentage figure (0 < N ≤ `maxPct`) a rotation reason
+ * cites — the «N% de contexto» claimed pressure. Returns undefined when the
+ * reason carries no percentage (a pct outside the domain is never a context
+ * figure). fb-426 (B): the domain's ceiling comes from the pct branch's own
+ * operand domain (`maxContextPct`), NEVER from a bare 100; and a match that is
+ * the TAIL of a longer digit run is NOT a percentage — the regex is `\d{1,3}`, so
+ * the 6-digit token figure of «697485%» matched only its last three digits
+ * (`485`), and accepting that would be reading a TOKEN figure as a context
+ * percentage (the guard must keep rejecting what is not one, so the fix names the
+ * correct figure instead of accepting any number). */
+function extractRotateReasonPercent(reason: string, maxPct: number = CONTEXT_PCT_MAX): number | undefined {
   for (const match of reason.matchAll(REASON_PERCENT_RE)) {
+    const digitAt = (match.index ?? 0) + match[0].indexOf(match[1])
+    if (digitAt > 0 && /\d/.test(reason[digitAt - 1])) continue
     const raw = match[1].replace(',', '.')
     const value = Number(raw)
-    if (!Number.isFinite(value) || value <= 0 || value > 100) continue
+    if (!Number.isFinite(value) || value <= 0 || value > maxPct) continue
     return value
   }
   return undefined
@@ -1321,7 +1384,12 @@ const resolveWorkspaceStatePath = (stateDir: string, persistenceRoot?: string): 
  * fraction) — with the SAME ±tolerance. `completionReserve` is OPTIONAL: a
  * caller that knows the reserved-pressure monitor calibration (the wiring
  * reads `health.contextCompletionReserve`) passes it; a 3-arg call keeps the
- * LEGACY plain-fraction semantics. */
+ * LEGACY plain-fraction semantics. fb-426 (A): that knob lives on the
+ * dshd-health plugin row alone, so BOTH production call sites read `undefined`
+ * and the pct branch then takes the reserve the CITATION carries inline
+ * (`monitorOperandsInReason`) — a READ-TIME COMPENSATION, not a wiring fix
+ * (fb-818 stays open). fb-426 (B): the cited pct's domain is the branch's own
+ * operand domain (`maxContextPct`), never a bare 100. */
 export function verifyRotateReason(reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number): ReasonVerificationStamp {
   if (typeof reason !== 'string' || reason.trim() === '') return 'unavailable'
   if (typeof oldSessionId !== 'string' || oldSessionId === '') return 'unavailable'
@@ -1332,8 +1400,23 @@ export function verifyRotateReason(reason: unknown, oldSessionId: string, projCa
   } catch {
     return 'unavailable'
   }
+  // THE SUBJECT IS THE CALLER'S INCUMBENT — `oldSessionId`, the session this
+  // rotation is auditing. fb-810 (measured): resolving the citation across the
+  // post's other incarnations was TRIED AND REVERTED — it would turn a TRUE
+  // positive into a FALSE positive (the audited row 38681 fails at ratio 17.03
+  // while the sibling 96d977f4 passes at 0.018579, so the same citation that must
+  // read `unverified` would read `verified`). The lineage is a DIAGNOSTIC at
+  // most, NEVER a certification.
   const reference = projectedUsageForSession(parsed, oldSessionId)
   if (!(reference !== undefined && reference > 0)) return 'unavailable'
+  // fb-426 (A) — THE RESERVE THE CITATION WAS COMPOSED WITH. The caller knob is
+  // honoured first (unchanged); when it is ABSENT — the MEASURED production state,
+  // the knob never crosses the plugin boundary — the citation's OWN inline
+  // operands supply it.
+  const citedOperands = monitorOperandsInReason(reason)
+  const reserve = typeof completionReserve === 'number' && Number.isFinite(completionReserve) && completionReserve > 0
+    ? completionReserve
+    : citedOperands !== undefined && citedOperands.reserve > 0 ? citedOperands.reserve : 0
   const figure = extractRotateReasonTokenFigure(reason)
   if (figure !== undefined) {
     // fb-426 B (MEASURED): this branch RETURNS FIRST — the pct branch below
@@ -1348,13 +1431,12 @@ export function verifyRotateReason(reason: unknown, oldSessionId: string, projCa
   }
   // fb-25 GAP-2 (R2) — the «N% de contexto» reason form: the reason carries NO
   // token-scale figure, only a percentage → verify the pct against the old
-  // session's real fraction (projected + the optional completion reserve over
-  // the session's context window — the monitor's own percentage formula).
-  const pct = extractRotateReasonPercent(reason)
+  // session's real fraction (projected + the completion reserve over the
+  // session's context window — the monitor's own percentage formula).
+  const context = projectedUsageContextForSession(parsed, oldSessionId)
+  if (context === undefined) return 'unavailable'
+  const pct = extractRotateReasonPercent(reason, maxContextPct(context.contextWindow, reserve))
   if (pct !== undefined) {
-    const context = projectedUsageContextForSession(parsed, oldSessionId)
-    if (context === undefined) return 'unavailable'
-    const reserve = typeof completionReserve === 'number' && Number.isFinite(completionReserve) && completionReserve > 0 ? completionReserve : 0
     const actualPct = (context.projected + reserve) / context.contextWindow
     if (!(actualPct > 0)) return 'unavailable'
     const ratio = Math.abs(pct / 100 - actualPct) / actualPct
@@ -1435,7 +1517,8 @@ interface ReasonDatumSealRow {
   /** The RUTA of the durable mirror the datum came from. */
   path: string
   sessionId: string
-  /** R — the reference the mirror answered at `datumTs`. */
+  /** R — the reference the mirror answered at `datumTs`, read from the audited
+   * session (`sessionId`) alone. */
   reference: number
   referenceBasis: string
   /** The mirror row's write counter at read time (drift discriminator). */
@@ -1463,10 +1546,15 @@ interface ReasonDatumSealRow {
   pctCited?: number
   actualPct?: number
   contextWindow?: number
-  /** The reserve the call-site ACTUALLY passed (0/absent = the knob never
-   * reached this row: the pct branch then uses the plain-projection fraction). */
+  /** The reserve that actually reached the verdict: the caller's knob, or the
+   * one the CITATION carries inline (fb-426 A). */
   completionReserve?: number
-  completionReserveSource: 'caller' | 'absent'
+  /** fb-426 A — where the reserve that decided a pct verdict came from: the
+   * caller's knob, the citation's own inline operands, or nothing at all (the
+   * MEASURED production state — the knob lives on the dshd-health plugin row and
+   * never crosses to the config this call site reads: fb-818 remains OPEN, this
+   * only COMPENSATES AT READ TIME for citations that declare their operands). */
+  completionReserveSource: 'caller' | 'citation' | 'absent'
   /** ⭐ THE DISCRIMINATOR the seal exists for: WHY this stamp came out. Two
    * reasons can carry the SAME label `unverified` from TWO DIFFERENT causes
    * (fb-591) — the family (figure vs pct) and, inside pct, whether the reserve
@@ -1474,17 +1562,25 @@ interface ReasonDatumSealRow {
    * `tolerance`) answers «which instrument said this, and with what operands»
    * without re-reading a mirror that has since MOVED. */
   cause: string
-  /** The verdict the instrument returned for that citation at `datumTs`. */
-  stamp: ReasonVerificationStamp
-  /** The reason VERBATIM (never truncated: the extractor's input is the text). */
+  /** The verdict the instrument returned for that citation at `datumTs`.
+   * ⚠️ READING CONTRACT (fb-810 (E)): this row attests the VERIFICATION of the
+   * citation AT THE INSTANT OF DECIDING — the stamp is an INPUT of the rotation
+   * (it is published as `[reason verified]` and steers the caller), which is why
+   * the row is written BEFORE the effect BY DESIGN and carries NO effect marker.
+   * A seal row is therefore NEVER proof that a rotation happened; it is proof of
+   * what the instrument answered when the caller decided. Pair it with the
+   * durable session/rotation records (`dept_who`, the archived session dir, the
+   * tool-intent settle row) to read an OUTCOME. */
+  stamp: ReasonVerificationStamp  /** The reason VERBATIM (never truncated: the extractor's input is the text). */
   reason: string
 }
 
 /** The CAUSE label of one sealed verdict (the discriminator above). Derived from
- * the branch + the executed operand + the reserve, NEVER from the label alone:
- * `unverified` from the figure branch and `unverified` from the pct branch are
- * two different findings and must read as two different causes. */
-function reasonSealCauseFor(branch: 'figure' | 'pct' | 'none', executedRatio: number | undefined, reservePresent: boolean): string {
+ * the branch + the executed operand + the reserve + (fb-810 i) the PROVENANCE of
+ * the cited figure, NEVER from the label alone: `unverified` from the figure
+ * branch and `unverified` from the pct branch are two different findings and must
+ * read as two different causes. */
+function reasonSealCauseFor(branch: 'figure' | 'pct' | 'none', executedRatio: number | undefined, reserveSource: 'caller' | 'citation' | 'absent'): string {
   if (branch === 'none') return 'no-figure-in-reason'
   if (executedRatio === undefined) return `${branch}-branch-without-operand`
   const within = executedRatio <= REASON_VERIFY_TOLERANCE
@@ -1493,11 +1589,10 @@ function reasonSealCauseFor(branch: 'figure' | 'pct' | 'none', executedRatio: nu
       ? 'figure-within-tolerance (reserve INERT on this branch — it returned first)'
       : 'figure-outside-tolerance (reserve INERT on this branch — the figure, not the reserve, missed R)'
   }
-  return within
-    ? 'pct-within-tolerance'
-    : reservePresent
-      ? 'pct-outside-tolerance (reserve PRESENT — the fraction with the reserve still missed the cited pct)'
-      : 'pct-outside-tolerance (reserve ABSENT → 0 — the MONITOR fraction may be unreachable with a plain projection: CHECK THE KNOB BEFORE READING A REAL NEGATIVE)'
+  if (within) return 'pct-within-tolerance'
+  if (reserveSource === 'caller') return 'pct-outside-tolerance (reserve PRESENT — the fraction with the reserve still missed the cited pct)'
+  if (reserveSource === 'citation') return 'pct-outside-tolerance (reserve READ FROM THE CITATION — the fraction the monitor composed with its own reserve still missed the cited pct; the KNOB never reached this call — fb-818 open)'
+  return 'pct-outside-tolerance (reserve ABSENT → 0, the reason cites no operands — the MONITOR fraction may be unreachable with a plain projection: CHECK THE CALIBRATION BEFORE READING A REAL NEGATIVE)'
 }
 
 /** Compose the sealed datum row for one seal computation. It READS the mirror
@@ -1508,6 +1603,8 @@ function reasonSealCauseFor(branch: 'figure' | 'pct' | 'none', executedRatio: nu
 function reasonSealRowFor(args: { path: string; sessionId: string; reason: unknown; stamp: ReasonVerificationStamp; datumTs: number; completionReserve?: number }): ReasonDatumSealRow | undefined {
   try {
     const parsed = JSON.parse(readFileSync(args.path, 'utf8')) as unknown
+    // THE SUBJECT IS THE CALLER'S INCUMBENT (fb-810, reverted): the datum is
+    // read from `args.sessionId` — the session THIS rotation audits.
     const reference = projectedUsageForSession(parsed, args.sessionId)
     if (!(reference !== undefined && reference > 0)) return undefined
     const rows = sessionProjCacheRow(parsed, args.sessionId)
@@ -1522,10 +1619,20 @@ function reasonSealRowFor(args: { path: string; sessionId: string; reason: unkno
     }
     const text = typeof args.reason === 'string' ? args.reason : ''
     const tokenFigure = extractRotateReasonTokenFigure(text)
-    const pctFigure = tokenFigure === undefined ? extractRotateReasonPercent(text) : undefined
+    // fb-426 (A): the reserve the VERDICT saw — the caller's knob, else the
+    // citation's own inline operands (the MEASURED production state: the knob
+    // lives on the dshd-health plugin row and never crosses to this config).
+    const declaredReservePresent = typeof args.completionReserve === 'number' && Number.isFinite(args.completionReserve) && args.completionReserve > 0
+    const citedOperands = monitorOperandsInReason(text)
+    const citedReservePresent = !declaredReservePresent && citedOperands !== undefined && citedOperands.reserve > 0
+    const reservePresent = declaredReservePresent || citedReservePresent
+    const reserve = declaredReservePresent ? args.completionReserve as number : citedReservePresent ? (citedOperands as { reserve: number }).reserve : 0
+    const reserveSource: 'caller' | 'citation' | 'absent' = declaredReservePresent ? 'caller' : citedReservePresent ? 'citation' : 'absent'
+    // fb-426 (B): the SAME ceiling the verdict used (`maxContextPct`), so the row
+    // never re-labels a citation the instrument accepted (or refused).
+    const win = finiteNumber((rows?.contextPressure as { val?: Record<string, unknown> } | undefined)?.val?.contextWindow)
+    const pctFigure = tokenFigure === undefined ? extractRotateReasonPercent(text, maxContextPct(win, reserve)) : undefined
     const cited = tokenFigure !== undefined ? tokenFigure : pctFigure
-    const reservePresent = typeof args.completionReserve === 'number' && Number.isFinite(args.completionReserve) && args.completionReserve > 0
-    const reserve = reservePresent ? args.completionReserve as number : 0
     const branch: 'figure' | 'pct' | 'none' = tokenFigure !== undefined ? 'figure' : pctFigure !== undefined ? 'pct' : 'none'
     // The operand the executed branch compared — recomputed from the SAME row
     // under the SAME rule (a re-verifier checks the arithmetic, not the label).
@@ -1535,8 +1642,6 @@ function reasonSealRowFor(args: { path: string; sessionId: string; reason: unkno
     if (branch === 'figure' && tokenFigure !== undefined) {
       executedRatio = Math.abs(tokenFigure - reference) / reference
     } else if (branch === 'pct' && pctFigure !== undefined) {
-      const cpVal = (rows?.contextPressure as { val?: Record<string, unknown> } | undefined)?.val
-      const win = cpVal === undefined || typeof cpVal !== 'object' ? undefined : finiteNumber(cpVal.contextWindow)
       if (win !== undefined && win > 0) {
         contextWindow = win
         actualPct = (reference + reserve) / win
@@ -1564,8 +1669,8 @@ function reasonSealRowFor(args: { path: string; sessionId: string; reason: unkno
       ...(actualPct !== undefined ? { actualPct } : {}),
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(reservePresent ? { completionReserve: reserve } : {}),
-      completionReserveSource: reservePresent ? 'caller' as const : 'absent' as const,
-      cause: reasonSealCauseFor(branch, executedRatio, reservePresent),
+      completionReserveSource: reserveSource,
+      cause: reasonSealCauseFor(branch, executedRatio, reserveSource),
       stamp: args.stamp,
       reason: text
     }
