@@ -323,7 +323,27 @@ test('presets-factory: the PRESETS ZONE (per-head presets + journal T1 + wake-pa
     // STILL plumbing/literal only: no closure, no dep and no surface member
     // moved; the resolved values are byte-identical. md5 dc8d350b… →
     // bc1388f8d322f9569ccf5f9fd505ae1f (same span, loader-seam-only).
-    assert.equal(md5, 'bc1388f8d322f9569ccf5f9fd505ae1f', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation, the LANE 0.2.3 R4 one-line HOST literal alignment, the R5 DUAL-read session-surface, the R7 getSessionEvents-collapse + surface-probe, the R9 fb-308 session-log finalize re-freeze, the R10 fb-306 rotation-close seal re-freeze, the R11 LANE ROTACIÓN DE MODELO deepseek-flash literal re-freeze AND the R12/R12b LANE MPC-PREFLIGHT const-reference + loading-seam re-freeze (md5 bc1388f8…)')
+    // Zone md5 RE-FROZE R13 (fb-422, 2026-09-11 — THE GHOST-STORE LOCATOR FIX):
+    // the FOUR in-span path constructors (journalPathFor / archivePathFor /
+    // indexPathFor / sessionLogPathFor) no longer join the raw `stateDir`; they
+    // join the ASSEMBLY-time constant `canonicalStateDir = path.resolve(stateDir)`
+    // declared at the TOP of the factory — OUTSIDE this frozen span (the span is
+    // byte-identical apart from the four identifier substitutions, which is
+    // exactly what this re-freeze records). WHY: a constructor is a FUNCTION, so
+    // its body runs at the CALL SITE — with the relative `stateDir:
+    // .deepartments` (fb-134) it returned a RELATIVE path that only resolved
+    // from cwd `/`, while the DAEMON writes the store at `/.deepartments`:
+    // measured, the memo render printed `.deepartments/journals/quality-head.md`
+    // and an agent reading it from /root or the repo MISSED the existing file
+    // (the LOCATOR class, not a persistence failure). The constant implements
+    // the wakepack.ts:727-738 invariant (resolve ONLY at assembly, in the daemon
+    // whose cwd DEFINES the store; NEVER in an agent process — host=/root,
+    // workers=the department workspace, CLI=the repo, where it would anchor the
+    // GHOST store fb-242/fb-222 quarantined). ADDITIVE: `path.resolve` is
+    // idempotent, so an already-absolute stateDir (hermetic tests) passes
+    // through unchanged and the daemon writes where it wrote. md5 bc1388f8… →
+    // 403b95b5f9b05ed7069c8b3671f05b36 (same span, four-identifier substitution).
+    assert.equal(md5, '403b95b5f9b05ed7069c8b3671f05b36', 'the embedded presets zone is byte-identical to HEAD applyInvoke 3022-3919 with the D1 repoRoot deviation, the LANE 0.2.3 R4 one-line HOST literal alignment, the R5 DUAL-read session-surface, the R7 getSessionEvents-collapse + surface-probe, the R9 fb-308 session-log finalize re-freeze, the R10 fb-306 rotation-close seal re-freeze, the R11 LANE ROTACIÓN DE MODELO deepseek-flash literal re-freeze, the R12/R12b LANE MPC-PREFLIGHT const-reference + loading-seam re-freeze AND the R13 fb-422 GHOST-STORE LOCATOR fix (the four journal/archive constructors now consume the assembly-time `canonicalStateDir`, so they return ABSOLUTE paths from any cwd — md5 403b95b5…)')
     // The D1 deviation is present and documented: the factory's repoRoot
     // initializer carries THREE '..' (module-position-dependent, identical
     // value — the factory lives 3 levels under the repo root).

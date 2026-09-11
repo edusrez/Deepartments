@@ -303,6 +303,22 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
     late
   } = deps
 
+  // GHOST-STORE PATH-ANCHORING — the SAME rule as dshd-core/src/wakepack.ts:727-738.
+  // The canonical stateDir is resolved HERE, at ASSEMBLY time: this factory runs
+  // in the DAEMON process, the process whose cwd DEFINES the store (cordis.patch.yml
+  // declares `stateDir: .deepartments` RELATIVE by design — fb-134 — and the systemd
+  // units run with WorkingDirectory=/ → the EFFECTIVE store is `/.deepartments`).
+  // The FOUR path constructors below (journalPathFor / archivePathFor / indexPathFor
+  // / sessionLogPathFor) consume THIS constant, which is the whole point: a relative
+  // stateDir must NEVER be resolved in an AGENT process, whose cwd is non-canonical
+  // and would spawn the GHOST/parallel tree class (host=/root, workers=the department
+  // workspace, CLI=the repo — fb-242/fb-222, the fb-285 `/.root` quarantine).
+  // INVARIANT: never move this `path.resolve` into a constructor BODY. A constructor
+  // is a FUNCTION, so its body runs at the CALL SITE (an agent process) — that is
+  // precisely the ghost store this anchoring prevents. Idempotent: an already-absolute
+  // stateDir (hermetic tests with temp dirs) passes through unchanged.
+  const canonicalStateDir = path.resolve(stateDir)
+
   // The LATE seam — resolved AT CALL TIME through the accessor object (the
   // DeliverySurface member is built LATER on this fiber; the zone dereferences
   // it only when the wake-pack assembly fires — post-boot — so the apply-scope
@@ -519,7 +535,7 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
   // handoff note, not the relevo witness).
 
   /** Durable path of a post's long-term memory journal. */
-  const journalPathFor = (memberId: string): string => path.join(stateDir, 'journals', `${memberId}.md`)
+  const journalPathFor = (memberId: string): string => path.join(canonicalStateDir, 'journals', `${memberId}.md`)
 
   // --- Task T1: SESSION MEMORY ARCHIVE (append-only history + one-cycle session
   // log + searchable index). Best-effort/non-fatal everywhere: a failure here
@@ -535,14 +551,14 @@ export function createPresetsOrchestration(ctx: Context, deps: PresetsFactoryDep
   const MAX_FILE_BYTES = 512 * 1024
 
   /** Path of one member's append-only archive. */
-  const archivePathFor = (memberId: string): string => path.join(stateDir, 'journals', 'archive', `${memberId}.md`)
+  const archivePathFor = (memberId: string): string => path.join(canonicalStateDir, 'journals', 'archive', `${memberId}.md`)
   /** Path of the per-member search index. */
-  const indexPathFor = (): string => path.join(stateDir, 'journals', 'index.json')
+  const indexPathFor = (): string => path.join(canonicalStateDir, 'journals', 'index.json')
   /** Path of one member+ordinal one-cycle session log. The ordinal may carry
    * the fb-308 per-session tail (`<wakeCounter>-<sessionTail>`) when the
    * canonical `-NN.md` name is already claimed by a DIFFERENT session — see
    * resolveSessionLogPath. */
-  const sessionLogPathFor = (memberId: string, wakeCounter: number | string): string => path.join(stateDir, 'journals', 'sessions', `${memberId}-${wakeCounter}.md`)
+  const sessionLogPathFor = (memberId: string, wakeCounter: number | string): string => path.join(canonicalStateDir, 'journals', 'sessions', `${memberId}-${wakeCounter}.md`)
 
   /** Deterministic per-write UNIQUE archive marker so interleaved appends across
    * the shared stateDir stay parseable (spec §Artifacts (a) — each

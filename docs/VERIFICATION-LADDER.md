@@ -397,3 +397,208 @@ de fix no la cerraron antes). Regla: para verificar un aislamiento, enumerar
 las filas del config del SUBPROCESO (fila propia / org default service-first /
 env / absoluto) y resolver el stateDir EFECTIVO de cada una — el stateDir
 heredado por default es tan touchpoint como una ruta explícita.
+
+## 11. Absence evidence — a `grep` negative over a `.gitignore` tree is INVALID by default (fb-765, 2026-09-11)
+
+> **THE RULE.** `grep` **without an explicit target path** is a WALK of the tree,
+> and that walk honours `.gitignore`. The tool's argv is `--json
+> --regexp=<pattern>` plus an optional `--glob=<include>` and an optional
+> `-- <path>` — it passes **neither `--no-ignore`, nor `--hidden`, nor the VCS
+> excludes** that its sibling `glob` uses (`--files … --no-ignore --hidden …`).
+> So a 0 from a whole-tree `grep` means *"matched nothing it was willing to look
+> at"* — **never** *"does not exist"*. **No absence may be concluded from it.**
+> And this repo ignores `lib/` (`.gitignore:7`), `.dsh/reports/` (`.gitignore:2`),
+> `client/` and `packages/dshd-gui/client/`, so a whole-tree `grep` is blind to
+> the compiled build output, to every report under `.dsh/reports/` and to the
+> built client bundle.
+>
+> **LIFETIME — state this whenever the rule is cited.** This step is the
+> **IMMEDIATE mitigation**, in force TODAY for every agent. The upstream fix is
+> **now a repo patch of our own** (`patches/dsh-tool-fs-search-*.patch`, the
+> A-HARNESS fingerprint-gated chain — §11.6), and the day that patch is applied
+> **`grep` stops being blind IN THAT INSTALLATION**. The rule does not die with
+> the patch: it still covers **other installations/trees** and **`glob`'s own
+> blind classes** (R2/R3), which no argv patch touches. Expiry + renewal
+> condition: §11.6.
+
+**Why it matters (the class, not the tool).** A slow search is VISIBLE and
+self-correcting; **a silent false negative becomes a LIE in a report** ("this
+symbol does not exist", "nothing calls this", "the guard is absent") — and the
+next lane builds on that lie. This is the fb-729 class (presence mistaken for
+effect) with the polarity reversed: absence mistaken for a fact.
+
+### 11.1 The canonical case, with the measured numbers (this repo, 2026-09-11, run token `aaf91de1`)
+
+**(a) The trap — a whole-tree `grep` returns 0.** The string exists, in a file
+that `.gitignore` hides:
+
+```text
+$ grep pattern="one search costs a complete model turn" path=/home/esuarez/projects/deepartments
+No matches found                                   # ← THE TRAP: 0 matches
+
+$ git check-ignore -v .dsh/reports/explore-deep/2026-08-16-dsh-web-tool.md
+.gitignore:2:.dsh/reports/	.dsh/reports/explore-deep/2026-08-16-dsh-web-tool.md
+```
+
+**(b) The procedure — with the LITERAL path the evidence appears:**
+
+```text
+$ grep pattern="one search costs a complete model turn" path=/home/esuarez/projects/deepartments/.dsh/reports/explore-deep/2026-08-16-dsh-web-tool.md
+Found 1 match
+/home/esuarez/projects/deepartments/.dsh/reports/explore-deep/2026-08-16-dsh-web-tool.md
+Line 32: ... with the native web_search_20250305 server tool — one search costs a complete model turn (maxTokens 4096, maxUses 5)."
+```
+
+The same asymmetry in CODE shape (`capacityGateStanza`, the compiled form exists
+only in the ignored `lib/`): whole-tree `grep` returns **2 matches, both in
+`packages/dshd-orchestration/src/delivery.ts`** (`:2460`, `:2585`), **zero in
+`lib/`**; with the compiled-only form as the pattern and the literal path as the
+target it returns **1 match**, `packages/dshd-orchestration/lib/delivery.js:1842`
+(the same line `read` shows with a literal path). Cross-check against the
+vendored ripgrep binary itself, which proves the argv class independently of the
+tool wrapper:
+
+```text
+$ rg --no-config --json --regexp="one search costs a complete model turn" .
+0 matches (exit 1)          # default argv = the tool's argv = .gitignore honoured
+$ rg --no-config --json --regexp="…" -- .dsh/reports/explore-deep/2026-08-16-dsh-web-tool.md
+1 match
+$ rg --no-config --json --regexp="…" --no-ignore .
+1 match                     # what the sibling `glob` argv class would have seen
+```
+
+**(c) What the doctrine requires before any absence claim** — §11.2 below. The
+step is MANDATORY; (a)/(b) above are its reproduction, not an anecdote.
+
+### 11.2 The mandatory confirmation procedure (run it BEFORE writing «does not exist»)
+
+1. **R1 — never conclude from the walk.** A whole-tree `grep` (or `rg`) 0 is a
+   SEÑAL, not a proof. It is admissible only AFTER the same pattern has been
+   tested against the literal path of the place the thing would live, or against
+   a `grep`/`read` whose explicit target is that path.
+2. **R2 — `glob` is NOT an existence oracle either (fb-415).** `glob` false-
+   negatives when the FIRST SEGMENT of the pattern carries a wildcard: pattern
+   `*/package.json` over this repo returns **«No files found»** while
+   `packages/dshd-core/package.json` exists and `ls -l`/`read` return it.
+3. **R3 — `glob` does not see SYMLINKED directories (fb-763).** `glob` on the
+   LITERAL path `packages/dshd-orchestration/node_modules/dshd-core/package.json`
+   returns **«No files found»**, while `read` of that SAME path returns the file
+   content — two tools of one turn contradicting each other about existence.
+4. **OPERATIVE RULE: for EXISTENCE use `read` (or `ls`/`dept_exec ls`) with a
+   LITERAL path; `glob` is used to DISCOVER, never to decide existence.** If a
+   doctrine prescribed `glob` to confirm, it would prescribe an instrument with
+   its own silent false negatives — i.e. it would repeat the very defect it
+   exists to prevent.
+
+### 11.3 The closing sentence an agent must be able to apply
+
+> **«This symbol/file does not exist» is only assertable if it was checked with
+> `read` (or `ls`) on the LITERAL path, or with a `grep` whose explicit target
+> was that path — never from a `grep` that walked a tree with a `.gitignore`.**
+
+### 11.4 The useful contrast (and what is NOT claimed)
+
+- `glob` **does** see ignored and hidden files (`--no-ignore --hidden`): over this
+  repo `glob` pattern `packages/dshd-orchestration/lib/*.js` returns the
+  gitignored compiled files. So the doctrine mandates `read` **not** because
+  `glob` is broken here, but because `glob` has its OWN false-negative classes
+  (R2/R3 above), and `read` has none for a literal path.
+- **Not claimed:** that a `grep` with an explicit path always finds the FILE
+  (rg still refuses binary/ignored-by-`--glob` targets). The walk IS
+  deterministic — the blindness geometry is STABLE (§11.2), and that is
+  measured, not assumed: three archived whole-tree `grep` calls in the lane that
+  produced §11.1, and four further control calls, each returned byte-identical
+  results across its repeats, with **0 hits under `lib/`** in both groups. The
+  ignored-path hit once read as non-determinism came from a DIFFERENT call whose
+  target was an ignored file NAMED LITERALLY, its result later fused with the
+  whole-tree call's (`fb-780`, closed `descartado`): a PROVENANCE failure of the
+  READER, not an instability of the instrument. The rule therefore stands
+  unchanged — an instrument whose 0 does not even reproduce run-to-run is not
+  evidence of anything — and gains its mirror: **neither is a 0 whose provenance
+  was never checked.**
+- **Upstream defect (fb-765 / fb-766) — and it is FIXABLE FROM HERE.** The argv
+  asymmetry lives in the harness package `@deepseek-ai/dsh-tool-fs-search`
+  (`buildGrepCommand` lacks `--no-ignore`/`--hidden`/`GLOB_VCS_EXCLUDES`; its
+  sibling `buildGlobCommand` has them). This repo **already patches that exact
+  file three times** — `patches/dsh-tool-fs-search-anchor-literal-glob.patch`,
+  `patches/dsh-tool-fs-search-path-not-found.patch`,
+  `patches/dsh-tool-fs-search-fb51-direct-edit-normalize.patch` — through the
+  **A-HARNESS chain of `scripts/reapply-dsh-patches-a-harness.sh`**, a
+  **fingerprint-gated re-apply whose declared purpose is to survive `dsh`
+  upgrades** (`patches/README.md:3-7`). The same file is a zone of
+  `scripts/zone-md5-manifest.json` (id `a-harness-tool-fs-search-index`) under
+  **re-freeze discipline in the SAME change that delivers a patch**. So: the
+  fix is a repo patch (argv parity with the sibling, not an invented argv) and
+  the report goes upstream **with** the patch — a defect of origin, fixed on our
+  side AND reported. The "do not touch the vendored file" reasoning applies only
+  to an **unversioned hand edit** — exactly what the fingerprint-gated chain
+  exists to replace.
+- The upstream report text (defect, lines, affected versions, measured effect,
+  the D-765 proposal) is copy-paste ready at
+  `.dsh/reports/explore-deep/2026-09-11-fb765-fb766-dsh-tool-fs-search-grep-ignore-asymmetry-aaf91de1.md`.
+- Provenance: IPD lane fb-765, builder-311, run token `aaf91de1`, 2026-09-11.
+  Every figure above was measured in this repo on that date; the two code cases
+  were verified with the native `read` tool on the literal path, never with the
+  walk being documented.
+
+### 11.5 Blindness table — pick the instrument whose blind class does not contain your question
+
+The rule above is easier to apply as a property of the INSTRUMENTS than as an
+exception to memorise. Every discovery instrument we have is blind to a
+DIFFERENT class, and none of them is blind to everything:
+
+| Instrument | BLIND to | Still SEES |
+|---|---|---|
+| `grep` **without an explicit target path** (a WALK) | everything `.gitignore` ignores **and** everything hidden — canonical case: `lib/` (`.gitignore:7`) | tracked, non-ignored files |
+| `grep` **with an explicit path** (file or dir named on the command line) | — the named target is searched directly | the target's content, ignored or not |
+| `glob` | directories reached through a **SYMLINK** (fb-763) · patterns whose **FIRST SEGMENT carries a wildcard** (fb-415: `*/package.json` ⇒ «No files found») | ignored + hidden files (`--no-ignore --hidden`), VCS metadata dirs excluded |
+| `read` / `ls` on a **LITERAL** path | — no known silent false negative for EXISTENCE | the file itself (content / existence) |
+| the **deployed artifact** (`lib/`, `client/`, `packages/dshd-gui/client/`) | — | nothing by accident: it is gitignored, so **every NEGATIVE claim about deployed code requires the OWNER's path** (from the build config or a report), never a walk |
+
+**TIE-BREAK RULE — when two instruments contradict each other about EXISTENCE,
+`read` wins.** (Measured instance: `glob` «No files found» on the LITERAL
+`packages/dshd-orchestration/node_modules/dshd-core/package.json` while `read`
+of that same path returns the file — fb-763.)
+
+**Conclusion to carry: no instrument of ours is blind-ZERO.** Each is blind to
+one class; the procedure is to ask *which class my question falls in* and pick
+the instrument that is not blind there. The default for the question "does X
+exist?" is `read` on a literal path.
+
+### 11.6 Doctrine lifetime — expiry date, renewal condition, and what outlives it
+
+A safeguard with an **expiry** and a written **reason** is worth more than an
+eternal rule without one: a rule that lapses silently gets OVER-APPLIED by the
+successor, and a rule that outlives its reason gets ignored. So:
+
+- **IN FORCE TODAY.** §11.1-§11.5 protect every agent now, including every
+  installation where the patch below has not landed. This step is not optional
+  while it is in force.
+- **EXPIRY (per installation).** The day the fb-765 patch — `grep` adopting the
+  sibling's argv — is applied to an installation, a whole-tree `grep` there
+  **stops being blind to ignored/hidden paths**, and the primary trap of §11.1(a)
+  disappears. Applied state is per-tree and fingerprint-gated; it is checked, not
+  assumed: `scripts/reapply-dsh-patches-a-harness.sh --check` (`PASS` = every
+  target is at its applied fingerprint).
+- **RENEWAL CONDITION (why the expiry is not a one-way door).** The chain is
+  fingerprint-gated on the installed tree's md5s: a `dsh` upgrade that rewrites
+  the file leaves the patch **PENDING until it is re-applied** (the script
+  reports `NOT APPLIED` / `PARTIAL`). In that window the blindness is BACK. An
+  upgrade is therefore a renewal event for this rule, not a retirement of it.
+- **WHAT OUTLIVES THE PATCH (the rule is not obsolete after it lands):**
+  1. **Other trees.** Any installation, checkout, container or CI runner without
+     the patch keeps the behaviour — including trees where we are not the ones
+     deciding what is applied.
+  2. **`glob`'s own blind classes are NOT fixed by any `grep` patch** — fb-415
+     (wildcard first segment) and fb-763 (symlinked directories) live in
+     `buildGlobCommand`/the matcher, and stay as measured. §11.2 R2/R3 and the
+     tie-break rule of §11.5 remain permanently load-bearing.
+  3. **The deployed artifact is still gitignored** — the last row of the §11.5
+     table is a property of THIS repo, not of the tool, and no upstream fix
+     changes it.
+- **History of this correction (so the successor does not re-inherit the
+  mistake):** the first draft of this section framed the defect as "vendored ⇒
+  not ours ⇒ report only". That premise was FALSE and is corrected here: the
+  repo's A-HARNESS patch chain exists precisely to carry such fixes across
+  upgrades (`patches/README.md:3-7`), and it already carries three patches for
+  this same file.

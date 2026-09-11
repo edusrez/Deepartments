@@ -143,6 +143,25 @@ are cached); user edits to `cordis.patch.yml` are HMR. All dsh commands for deve
     pre-flight guard `MPC-PREFLIGHT` (`docs/VERIFICATION-LADDER.md` §2.5):
     never restart with `P ⊄ C`.
 
+12. **Absence is a POSITIVE claim (fb-765).** A whole-tree `grep` honours
+    `.gitignore`, so a 0 there is never evidence of absence — this repo ignores
+    `lib/`, `.dsh/reports/`, `client/` and `packages/dshd-gui/client/`. Before
+    asserting that a symbol or file «does not exist», confirm it with `read` (or
+    `ls`) on the LITERAL path, or with a `grep` whose explicit target is that
+    path. `glob` is NOT an existence oracle either — it false-negatives on a
+    wildcard first segment (fb-415) and on symlinked directories (fb-763): use
+    `glob` to DISCOVER, never to decide existence; when two instruments
+    contradict each other about existence, `read` wins. Rule, measured cases and
+    the per-instrument blindness table: `docs/VERIFICATION-LADDER.md` §11.
+    **LIFETIME:** this is the IMMEDIATE mitigation — the upstream fix is a repo
+    patch of our own (the A-HARNESS chain `patches/dsh-tool-fs-search-*.patch`,
+    re-applied by `scripts/reapply-dsh-patches-a-harness.sh`, which also already
+    carries three patches for that same file); it protects today, it lapses per
+    installation once that patch is applied — and is RENEWED by every `dsh`
+    upgrade that makes the patch pending — while the `glob` classes (fb-415 /
+    fb-763) and the gitignored deployed artifact are outside the patch's scope
+    and keep this rule alive permanently (docs/VERIFICATION-LADDER.md §11.6).
+
 Details and rationale for each rule: skill `dsh-plugin-dev`
 (`.dsh/skills/dsh-plugin-dev/SKILL.md`).
 

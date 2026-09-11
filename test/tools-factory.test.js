@@ -455,7 +455,24 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     // dept_head_rotate body (description + error path + comments + the wait
     // parameters) moved. md5 9f233795da55d3e28c74b4629c9b2144 →
     // 63aeb795f694c8cad29b94dd1605402c.
-    assert.equal(md5, '63aeb795f694c8cad29b94dd1605402c', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + the VALLE 09-07 FB-198 T1 failedGround observer + prepared (wake-failed) / failed:<ground> envelope + id-truth assertion + the LOOP FASE 1 feedback dedupe/duplicado/bridge-adjacent tool span (md5 63aeb795f694c8cad29b94dd1605402c)')
+    // Zone md5 RE-FROZE fb-775 (2026-09-11 — `dept_feedback_update`
+    // UNKNOWN-KEY REJECTION, IPD builder-314): ONE INTENTIONAL in-span change —
+    // the CLOSED-SET ORG validator of `dept_feedback_update`, reusing the
+    // canonical dept_memo_write pattern of the SAME package (boot.ts:612
+    // MEMO_WRITE_EXPECTED_FIELDS, :623 memoWriteArgsViolations, :648 the
+    // expected-fields trailer): the FEEDBACK_UPDATE_EXPECTED_FIELDS const + the
+    // PURE feedbackUpdateArgsViolations (the `"<key>" is not a declared property
+    // (additionalProperties: false)` phrasing) + the expected-fields trailer +
+    // the FIRST-statement wiring in `execute` (before ANY authority check or
+    // transition computation) + the tool-description sentence. The defect it
+    // closes: an UNDECLARED key (`notes_qh` for `notas_qh`) travelled untouched
+    // into the WHITELIST reads and the TERMINAL transition to `duplicado`
+    // applied anyway, silently dropping the note — a FALSE SUCCESS over an
+    // IRREVERSIBLE close. The feedback transition semantics are otherwise
+    // UNCHANGED (md5 63aeb795f694c8cad29b94dd1605402c →
+    // ba3da7b71dc8d71a6db42361b015ccc6; byte-synced with
+    // scripts/zone-md5-manifest.json:11 in the SAME change — the header rule).
+    assert.equal(md5, 'ba3da7b71dc8d71a6db42361b015ccc6', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + the VALLE 09-07 FB-198 T1 failedGround observer + prepared (wake-failed) / failed:<ground> envelope + id-truth assertion + the LOOP FASE 1 feedback dedupe/duplicado/bridge-adjacent tool span + the fb-775 dept_feedback_update CLOSED-SET org validator (md5 ba3da7b71dc8d71a6db42361b015ccc6)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface

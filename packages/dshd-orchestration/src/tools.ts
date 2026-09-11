@@ -5742,9 +5742,43 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    * (→ `duplicado`, QH-only, evidence merged into the canonical tail);
    * `related`/`triage_owner`/`resolution`/`frozen` are the new metadata
    * fields (`frozen` is the QH-only stale-review escape). */
+  //
+  // fb-775 (QD, ALTO — the FALSE-SUCCESS-OVER-AN-IRREVERSIBLE-CLOSE class): the
+  // COMPLETE argument surface of dept_feedback_update, enforced by the ORG
+  // validator below (the canonical dept_memo_write pattern of the SAME package —
+  // boot.ts:612 MEMO_WRITE_EXPECTED_FIELDS, :623 memoWriteArgsViolations, :648
+  // the expected-fields trailer, wired at :680). The harness parameter schema is
+  // implicitly OPEN (`parameterSchemaSpecToJsonSchema`, dsh-tools, emits NO
+  // `additionalProperties: false`), so an UNDECLARED key travelled UNTOUCHED into
+  // `execute`, where the WHITELIST reads (`args.notas_qh`, …) never inspected the
+  // rest of the object and `store.update` ran anyway: with the typo `notes_qh`
+  // the tool applied the TERMINAL transition to `duplicado` and LOST the note —
+  // it CONFIRMED what it did NOT do, over a terminal close.
+  const FEEDBACK_UPDATE_EXPECTED_FIELDS = ['id', 'estado', 'notas_qh', 'escalado', 'escalado_a', 'duplicate_of', 'related', 'triage_owner', 'resolution', 'frozen'] as const
+
+  /** PURE (never throws): enumerate EVERY violation of the dept_feedback_update
+   * args against the CLOSED-set contract — every UNDECLARED key, phrased with the
+   * legacy harness fragment the memo validator keeps
+   * (`"<key>" is not a declared property (additionalProperties: false)`) so the
+   * house assertions match one wording across both tools. */
+  const feedbackUpdateArgsViolations = (args: Record<string, unknown>): string[] => {
+    const violations: string[] = []
+    for (const key of Object.keys(args)) {
+      if (!(FEEDBACK_UPDATE_EXPECTED_FIELDS as readonly string[]).includes(key)) {
+        violations.push(`"${key}" is not a declared property (additionalProperties: false)`)
+      }
+    }
+    return violations
+  }
+
+  /** fb-775 — the expected-fields trailer the update validator appends, so the
+   * caller sees the COMPLETE contract (the culprit key + every valid one) in ONE
+   * message and corrects without re-reading the docs (the fb-223 rationale). */
+  const FEEDBACK_UPDATE_EXPECTED_FIELDS_LABEL = FEEDBACK_UPDATE_EXPECTED_FIELDS.join(', ')
+
   const feedbackUpdateTool = defineTool({
     name: 'dept_feedback_update',
-    description: 'Transition the state of one durable feedback record (append-only): each change appends a NEW tail line with the SAME id, a bumped `updatedAt`, and the new `estado`. AUTHORITY (spec §4): only `quality-head` may pass a record to a TERMINAL estado (`resuelto` | `descartado` | `duplicado` — it stamps `cerrado_por` = the caller); a department head (non-QH) may set `en-estudio`; a reopen (`estado` → `abierto`) is legal only from `en-estudio` (with new evidence) and ONLY for quality-head, and is NEVER allowed from a terminal state. LOOP FASE 1 (RD spec §4): `duplicate_of` marks the record as a duplicate (estado → `duplicado`, QH-only — the record\'s evidence is merged into the canonical tail, emisor + origen fb-XXX); `related` (REPLACE the cross-links), `triage_owner` (the triage responsibility), `resolution` (how/why it was closed — the auto-close-by-reference flow records the delivery link here) and `frozen` (QH-only lifecycle flag: a frozen record is never stale-closed nor nudged — the K8s /lifecycle frozen escape) are the new metadata fields. `notas_qh`/`escalado`/`escalado_a` stay unchanged. WORKER callers are rejected. Returns the updated FeedbackRecord.',
+    description: 'Transition the state of one durable feedback record (append-only): each change appends a NEW tail line with the SAME id, a bumped `updatedAt`, and the new `estado`. AUTHORITY (spec §4): only `quality-head` may pass a record to a TERMINAL estado (`resuelto` | `descartado` | `duplicado` — it stamps `cerrado_por` = the caller); a department head (non-QH) may set `en-estudio`; a reopen (`estado` → `abierto`) is legal only from `en-estudio` (with new evidence) and ONLY for quality-head, and is NEVER allowed from a terminal state. LOOP FASE 1 (RD spec §4): `duplicate_of` marks the record as a duplicate (estado → `duplicado`, QH-only — the record\'s evidence is merged into the canonical tail, emisor + origen fb-XXX); `related` (REPLACE the cross-links), `triage_owner` (the triage responsibility), `resolution` (how/why it was closed — the auto-close-by-reference flow records the delivery link here) and `frozen` (QH-only lifecycle flag: a frozen record is never stale-closed nor nudged — the K8s /lifecycle frozen escape) are the new metadata fields. `notas_qh`/`escalado`/`escalado_a` stay unchanged. WORKER callers are rejected. Unknown keys are rejected — the closed argument surface is `id`/`estado`/`notas_qh`/`escalado`/`escalado_a`/`duplicate_of`/`related`/`triage_owner`/`resolution`/`frozen` (an undeclared key rejects the WHOLE call and applies ZERO transition, so a typo can never close a record without its justification). Returns the updated FeedbackRecord.',
     parameters: {
       id: { type: 'string', required: true, description: 'The feedback record id (fb-<seq>).' },
       estado: { type: 'string', description: 'The target estado: "abierto" | "en-estudio" | "resuelto" | "descartado" | "duplicado" (duplicado requires `duplicate_of`).' },
@@ -5759,6 +5793,16 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     },
     output: { schema: feedbackRecordSchema, render: feedbackUpdateRender },
     async execute(args, exec): Promise<FeedbackRecord> {
+      // fb-775 — the ORG validator runs FIRST (before ANY authority check,
+      // transition computation or store write): a call carrying an UNDECLARED key
+      // is refused as a WHOLE and has ZERO side effects — the measured defect
+      // applied a TERMINAL close (and dropped the note) from a call this check
+      // must reject. The reject is emitted BEFORE the `duplicado requires
+      // duplicate_of` gate, so the culprit key is always the reported one.
+      const violations = feedbackUpdateArgsViolations(args as Record<string, unknown>)
+      if (violations.length > 0) {
+        throw new Error(`[deepartments] dept_feedback_update: invalid arguments — ${violations.join('; ')}; expected fields: ${FEEDBACK_UPDATE_EXPECTED_FIELDS_LABEL}`)
+      }
       const agent = exec.agent
       if (!agent) throw new Error('dept_feedback_update requires a calling agent (exec.agent was undefined)')
       const postId = postIdForChild(agent.id as string)

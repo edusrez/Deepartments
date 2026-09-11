@@ -1,0 +1,319 @@
+# === dsh-departments patch: dsh-tool-fs-search GREP SCOPE DECLARATION (fb-765) ===
+#
+# WHAT THIS FIXES
+#   A whole-tree `grep` answered 0 matches for a symbol that EXISTS in a path
+#   ripgrep ignores (`.gitignore`), with nothing in the result distinguishing
+#   "it is not there" from "it was never looked for". Measured on the installed
+#   tree (2026-09-11): the compiled-only symbol `__publicField` matches 0 files
+#   under ripgrep's default rules and 1 file with `--no-ignore` (a gitignored
+#   `lib/` artifact); a `grep` for a symbol in the gitignored
+#   packages/dshd-orchestration/lib/delivery.js returned only its non-ignored
+#   hits. A silent false negative becomes a LIE in a report.
+#
+# WHAT THIS PATCH DOES — AND WHAT IT DELIBERATELY DOES NOT
+#   `buildGrepCommand`'s ARGV IS NOT TOUCHED (D-765-R1): honoring `.gitignore`
+#   is the established norm for content search (5/5 reference tools honor it;
+#   0/5 widen it), the narrower walk is the cheaper one, and `--no-ignore
+#   --hidden` would descend into `.git/objects` because ripgrep prunes VCS
+#   metadata only through the dotfile rule. The discarded "argv parity with
+#   buildGlobCommand" direction would have raised scan cost AND exposed VCS
+#   metadata; the sibling `glob` argv is untouched here too.
+#   What changes is the OUTPUT: every `grep` result — INCLUDING a zero-match
+#   one — now carries a SCOPE DECLARATION stating what was not searched, why,
+#   and how many files.
+#
+# HOW THE DECLARATION IS MEASURED (bounded, attributed, never fatal)
+#   After the search, three `rg --files` LISTING passes (no content read, no
+#   match records) differing only in the two scope switches the search has off:
+#     default = ignore rules on, dotfiles hidden  -> the set the search walked
+#     hidden  = + --hidden                        -> + what the dotfile rule removed
+#     all     = + --no-ignore                     -> + what the ignore rules removed
+#   The include filter and the search root mirror the real call, so the counts
+#   are THIS call's scope. GLOB_VCS_EXCLUDES is pinned in all three passes:
+#   ripgrep prunes `.git/` only by the dotfile rule, so without the pin the
+#   `all` pass counts VCS internals as content files (measured: 8884 -> 14432
+#   listed paths on one repository) and the declaration would overstate scope.
+#   Cost is a fraction of the search itself (measured 25-70 ms per listing pass
+#   against ~26 ms for the search on a 14k-file tree) and every pass is bounded
+#   by the SAME deployment caps as the search (rawOutputMaxBytes, graceMs,
+#   stderrMaxBytes, cooperative timeout). A pass that cannot complete NEVER
+#   fails the search: the reason returns by error CODE and the declaration says
+#   the count could not be measured — a silent 0 would be this same defect with
+#   another name (verified: a shrunk rawOutputMaxBytes yields a declaration
+#   naming SEARCH_RAW_OUTPUT_OVERFLOW).
+#
+# ADDITIVE / COMPATIBILITY
+#   The match body, the `Found X of Y` header and the spill-recovery footer are
+#   byte-identical to before; the declaration is a final paragraph appended to
+#   the model-facing text. A canonical value WITHOUT a `scope` field (an older
+#   replayed session) renders exactly as before. `presentationMeta` (the search
+#   card) is deliberately NOT extended: `meta` is serialized with the session
+#   log and re-sent on every request, so the declaration rides in the text. The
+#   new `scope` field is declared in the tool's output schema (not required).
+#
+# TARGET FILES
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-fs-search/lib/index.js
+#
+# FINGERPRINTS (md5)  [path-not-found-applied rc.2 (the live base) -> patched]
+#  index.js           576e8e66b7a33e15fff58663c672272f -> d8d4dd6860a6cd5102f5ba9a517a06ac
+#
+# ADDITIVE: applies ON TOP of dsh-tool-fs-search-path-not-found.patch (the base
+# IS that patch's applied state, the live fingerprint 576e8e66…) and therefore
+# on top of the anchor + fb-51-normalize chain preceding it. No hunk touches
+# buildGlobCommand or `buildGrepCommand`'s argv. The zone
+# `a-harness-tool-fs-search-index` of scripts/zone-md5-manifest.json is
+# RE-FROZEN to d8d4dd6860a6cd5102f5ba9a517a06ac in the SAME change that
+# delivers this patch.
+#
+# LINE NUMBERS are those of the INSTALLED (locally patched, 576e8e66…) file,
+# NOT those of the pristine upstream tarball.
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -918,6 +918,19 @@
+ * `--json` record parsing, per-line preview retention, match retention,
+ * grouping, and formatting; process concerns stay behind `ctx.subprocess`.
+ *
++* ## Scope is DECLARED, not silently narrowed (fb-765, D-765-R1)
++*
++* The search argv keeps ripgrep's defaults: `--no-ignore` / `--hidden` are NOT
++* passed, because honoring `.gitignore` is what every reference content-search
++* tool does and because widening the walk both adds scan cost and exposes VCS
++* metadata (ripgrep prunes `.git/` only through the dotfile rule, so
++* `--no-ignore --hidden` descends into it). What made the default dangerous was
++* the SILENCE: a whole-tree search answered 0 matches for a symbol that exists
++* in an ignored path, indistinguishable from a real absence. This module
++* therefore MEASURES its own scope ({@link measureGrepScope}) and DECLARES it
++* in every result ({@link formatScopeNote}): what was not searched, why, and
++* how many files.
++*
+ * @module @deepseek-ai/dsh-tool-fs-search/grep
+ */
+ /**
+@@ -969,7 +982,14 @@
+ * {@link GrepInput.include}) is a plain argv element — no shell layer exists,
+ * so no quoting applies; the pattern and include ride in `--flag=value` form
+ * and the target behind `--`, so a leading-dash value can never be parsed as
+-* a flag.
++* a flag. The argv is the ONE place scope is decided, and it keeps ripgrep's
++* defaults: ignore rules honored, dotfiles hidden. `--no-ignore` / `--hidden`
++* are deliberately NOT added here (fb-765, D-765-R1): honoring `.gitignore` is
++* the established norm for content search, the narrower walk is the cheaper
++* one, and `--no-ignore --hidden` would descend into `.git/objects` (ripgrep
++* prunes VCS metadata by the dotfile rule alone). The defect this module fixes
++* is not the narrower default — it is that the default was INVISIBLE; the
++* declaration is delivered in the result by {@link formatScopeNote}.
+ *
+ * @param input - the validated arguments.
+ * @returns the complete ripgrep argument vector (excluding the binary itself).
+@@ -981,6 +1001,108 @@
+ 	return parts;
+ }
+ /**
++ * Build one `rg --files` listing argv for the grep SCOPE DECLARATION (fb-765).
++ *
++ * The declaration answers "what did this search NOT look at", so the three
++ * passes differ ONLY in the two switches that decide scope and are both off in
++ * the real search: `default` (ignore rules on, dotfiles hidden) is the file set
++ * the search walked; `hidden` adds `--hidden` (the files the dotfile rule
++ * removed); `all` adds `--no-ignore` too (the files the ignore rules removed).
++ * The include filter and the search root mirror the real call, so the counts
++ * describe THIS call's scope rather than a generic repository census.
++ *
++ * {@link GLOB_VCS_EXCLUDES} is pinned in all three passes. ripgrep prunes
++ * `.git/` only through the dotfile rule, so the `all` pass would otherwise walk
++ * VCS internals and report them as content files the search skipped (measured:
++ * 8884 -> 14432 listed paths on one repository). A measurement must never
++ * inflate the number it declares.
++ *
++ * @param input - the validated grep arguments.
++ * @param mode - the listing scope: `default`, `hidden` or `all`.
++ * @returns the complete ripgrep argument vector (excluding the binary itself).
++ */
++function buildScopeListingCommand(input, mode) {
++	const parts = ["--files"];
++	if (input.include !== void 0) parts.push(`--glob=${input.include}`);
++	if (mode !== "default") parts.push("--hidden");
++	if (mode === "all") parts.push("--no-ignore");
++	parts.push(...GLOB_VCS_EXCLUDES.flatMap((name) => [`--glob=!**/${name}`, `--glob=!**/${name}/**`]));
++	if (input.path !== void 0) parts.push("--", input.path);
++	return parts;
++}
++/** Count the listed paths of an `rg --files` run (one path per line). */
++function countListedPaths(stdout) {
++	let count = 0;
++	for (const line of stdout.split("\n")) if (line.length > 0) count += 1;
++	return count;
++}
++/**
++ * Measure the scope of one `grep` call — best effort, never fatal.
++ *
++ * Three bounded `rg --files` listings ({@link buildScopeListingCommand}) give
++ * the searched file count, the files removed by the dotfile rule and the files
++ * removed by the ignore rules. The measurement is a listing, not a second
++ * search: it reads no file contents and emits no match records, so it costs a
++ * fraction of the search it describes (measured ~25-70 ms per pass against
++ * ~26 ms for the search itself on a 14k-file tree) and it is bounded by the
++ * SAME deployment caps the search uses (`rawOutputMaxBytes`, `graceMs`,
++ * `stderrMaxBytes`, the cooperative tool timeout).
++ *
++ * A pass that cannot complete — raw-output cap, timeout, caller abort — NEVER
++ * fails the search: the reason is returned by error CODE and the declaration
++ * then says the count could not be measured. Reporting a bare 0, or omitting
++ * the line, would be this same defect with another name.
++ *
++ * @param ctx - the plugin context; execution uses its `subprocess` service.
++ * @param exec - the tool-execution context; supplies the session cwd and the abort signal.
++ * @param input - the validated grep arguments (target and include filter).
++ * @param caps - the deployment's resolved grep caps.
++ * @returns the measured scope, or `{ target, unavailable }` with the reason code.
++ */
++async function measureGrepScope(ctx, exec, input, caps) {
++	const target = input.path === void 0 ? "." : input.path;
++	const count = async (mode) => countListedPaths((await runRipgrep(ctx, exec, "grep", buildScopeListingCommand(input, mode), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes)).stdout);
++	try {
++		const searched = await count("default");
++		const withHidden = await count("hidden");
++		const all = await count("all");
++		return {
++			target,
++			searched,
++			hiddenSkipped: Math.max(0, withHidden - searched),
++			ignoredSkipped: Math.max(0, all - withHidden)
++		};
++	} catch (error) {
++		const reason = error instanceof SearchError ? error.code : "the listing pass failed";
++		ctx.logger.warn(`tool-fs-search: grep scope declaration unavailable for ${target} (${reason}): ${String(error)}`);
++		return {
++			target,
++			unavailable: reason
++		};
++	}
++}
++/**
++ * Render the scope declaration appended to every `grep` result (fb-765).
++ *
++ * It is ATTRIBUTABLE in-band: it names the tool (`grep`), the cause
++ * (ripgrep's ignore rules / the dotfile rule) and the counts, so the fact
++ * survives even when a downstream layer replaces a result with a generic
++ * message — a bare "N files were ignored" would not separate "the search was
++ * scoped" from "the call was slow".
++ *
++ * A value without a measured scope (an older replayed result) renders no
++ * declaration at all, exactly as before.
++ *
++ * @param scope - the `scope` field of the canonical value, or `undefined`.
++ * @returns the declaration line, or `undefined` when there is none to render.
++ */
++function formatScopeNote(scope) {
++	if (scope === void 0) return void 0;
++	const cause = "ripgrep's ignore rules (.gitignore/.ignore/.rgignore, honored only inside a git repository)";
++	if (scope.unavailable !== void 0) return `Scope: grep searched under ${scope.target} with ${cause} applied, so ignored files were NOT searched; the excluded-file count could not be measured (${scope.unavailable}). Name a path inside an ignored location to search it.`;
++	return `Scope: grep searched ${scope.searched} file(s) under ${scope.target}; ${cause} excluded ${scope.ignoredSkipped} file(s) and the dotfile/hidden rule excluded ${scope.hiddenSkipped} file(s) — those files were NOT searched. VCS metadata is never searched; name a path inside an ignored location to search it.`;
++}
++/**
+ * The uniform malformed-output failure: raw `rg --json` is an internal
+ * transport, so missing or invalid response fields cause a search failure, not a partial result.
+ */
+@@ -1078,10 +1200,24 @@
+ 	if (!retained.truncated) return `${header}\n\n${body}`;
+ 	return `${header}\n\n${body}\n\n(${spillRef !== void 0 ? `Full grep result stored at: ${spillRef.locator}. ${spillRef.retrievalHint}` : "The complete result could not be saved; narrow pattern, path, or include to see more."})`;
+ }
+-/** Format one already-retained match list for the Native surface. */
+-function formatRetainedGrep(retained, spillRef) {
+-	if (retained.seen === 0) return "No matches found";
+-	return formatGrepOutput(retained, spillRef);
++/**
++ * Format one already-retained match list for the Native surface, with the
++ * scope declaration appended when the call measured one (fb-765).
++ *
++ * The addition is purely additive: the match body, the `Found X of Y` header
++ * and the spill-recovery footer are byte-identical to before, and a value
++ * carrying no scope renders exactly as it used to. The declaration matters
++ * MOST on the zero-match branch ("No matches found") — the answer an
++ * undeclared ignored scope turns into a false "it does not exist".
++ *
++ * @param retained - the retention outcome over every parsed match.
++ * @param spillRef - the saved complete-result reference, or `undefined` when unsaved.
++ * @param scopeNote - the scope declaration, or `undefined` when none was measured.
++ * @returns the model-facing text.
++ */
++function formatRetainedGrep(retained, spillRef, scopeNote) {
++	const body = retained.seen === 0 ? "No matches found" : formatGrepOutput(retained, spillRef);
++	return scopeNote === void 0 ? body : `${body}\n\n${scopeNote}`;
+ }
+ /**
+ * Pending-call presentation: a search card titled by the pattern (and target /
+@@ -1128,11 +1264,11 @@
+ 	ctx.systemPrompt.section({
+ 		name: "tool:grep",
+ 		order: 104,
+-		text: "Use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context. An empty result means the pattern matched nothing under an existing path; an error \"path not found: <path>\" means the search path does not exist; \"pattern rejected\" means the pattern is invalid."
++		text: "Use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context. A result carries its Scope line: files excluded by ripgrep's ignore rules (.gitignore and friends) were NOT searched, so an empty result is not proof of absence — name a path inside the ignored location to search it. An empty result otherwise means the pattern matched nothing under an existing path; an error \"path not found: <path>\" means the search path does not exist; \"pattern rejected\" means the pattern is invalid."
+ 	});
+ 	const tool = defineTool({
+ 		name: "grep",
+-		description: `Search file contents with a ripgrep regular expression. Returns matching lines with line numbers, grouped by file. Returns the first ${caps.maxMatches} matches inline; a capped result reports where the complete match list was saved. Use read on a matched file for surrounding context.`,
++		description: `Search file contents with a ripgrep regular expression. Returns matching lines with line numbers, grouped by file. Every result also declares the scope that was searched — how many files ripgrep searched and how many its ignore rules excluded — so a zero-match answer is never proof of absence. Returns the first ${caps.maxMatches} matches inline; a capped result reports where the complete match list was saved. Use read on a matched file for surrounding context.`,
+ 		parameters: {
+ 			pattern: {
+ 				type: "string",
+@@ -1174,17 +1310,35 @@
+ 							}
+ 						}
+ 					}
++				}, scope: {
++					type: "object",
++					additionalProperties: false,
++					properties: {
++						target: {
++							type: "string",
++							required: true
++						},
++						searched: { type: "integer" },
++						hiddenSkipped: { type: "integer" },
++						ignoredSkipped: { type: "integer" },
++						unavailable: { type: "string" }
++					}
+ 				} }
+ 			},
+ 			render: (_args, value) => [{
+ 				type: "text",
+-				text: formatRetainedGrep(retainGrepMatches(value.matches, caps.maxMatches, caps.maxLineBytes))
++				text: formatRetainedGrep(retainGrepMatches(value.matches, caps.maxMatches, caps.maxLineBytes), void 0, formatScopeNote(value.scope))
+ 			}],
+ 			presentationMeta: (_args, value) => grepSearchMeta(retainGrepMatches(value.matches, caps.maxMatches, caps.maxLineBytes), caps.maxMetaBytes)
+ 		},
+ 		async execute(args, exec) {
+-			const run = await runRipgrep(ctx, exec, "grep", buildGrepCommand(parseGrepArgs(args)), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes);
+-			if (run.noMatches) return { matches: [] };
++			const input = parseGrepArgs(args);
++			const run = await runRipgrep(ctx, exec, "grep", buildGrepCommand(input), caps.rawOutputMaxBytes, caps.graceMs, caps.stderrMaxBytes);
++			const scope = await measureGrepScope(ctx, exec, input, caps);
++			if (run.noMatches) return {
++				matches: [],
++				scope
++			};
+ 			const all = [];
+ 			for (const raw of parseGrepMatches(run.stdout)) {
+ 				const match = {
+@@ -1194,7 +1348,10 @@
+ 				};
+ 				all.push(match);
+ 			}
+-			return { matches: all };
++			return {
++				matches: all,
++				scope
++			};
+ 		},
+ 		presentCall: presentGrepCall,
+ 		presentResult: presentGrepResult
+@@ -1215,7 +1372,7 @@
+ 			kind: "accept",
+ 			content: [{
+ 				type: "text",
+-				text: formatRetainedGrep(retainGrepMatches(matches, caps.maxMatches, caps.maxLineBytes), spillRef)
++				text: formatRetainedGrep(retainGrepMatches(matches, caps.maxMatches, caps.maxLineBytes), spillRef, formatScopeNote(value.scope))
+ 			}],
+ 			...decision.additionalContexts !== void 0 ? { additionalContexts: decision.additionalContexts } : {}
+ 		};

@@ -18,6 +18,15 @@
 #   patches/dsh-tool-fs-search-path-not-found.patch           dsh-tool-fs-search (SEARCH_PATH_NOT_FOUND
 #     class — applied ON TOP of the anchor patch; its pristine fingerprint is
 #     the anchor-applied state c1ecd7ac…, applied = 576e8e66…; VALLE 09-08 lane)
+#   patches/dsh-tool-fs-search-grep-scope-declaration.patch    dsh-tool-fs-search (GREP
+#     SCOPE DECLARATION, fb-765 / D-765-R1: the grep ARGV is NOT changed — honoring
+#     .gitignore is the norm, so the fix is that the tool now DECLARES its scope in
+#     the output: three bounded `rg --files` listing passes measure how many files
+#     were searched and how many ripgrep's ignore rules / the dotfile rule excluded,
+#     and every result (including a zero-match one) carries that statement; a pass
+#     that cannot complete is reported LOUDLY by error code instead of a silent 0;
+#     its pristine fingerprint is the path-not-found-applied state 576e8e66…,
+#     applied = d8d4dd68…; VALLE 09-11 lane)
 #   patches/dsh-tool-fs-search-fb51-direct-edit-normalize.patch  (ONE-TIME: live
 #     direct-edit state -> compiled payload form; the durable patch is the
 #     anchor-literal-glob one above, based on the reconstructed pristine)
@@ -124,6 +133,7 @@ A_HARNESS=(
   "node_modules/@deepseek-ai/dsh-web lib/types/types.d.ts dsh-web-fetch-request-timeout.patch 622e5d50256c200cc289dbfa35f0b43c f74e2a0b1f4356cfca6fbc157d684020"
   "node_modules/@deepseek-ai/dsh-tool-fs-search lib/index.js dsh-tool-fs-search-anchor-literal-glob.patch 9d92d79d19288c8c3d6f353ff4516923 c1ecd7ac43eaf7923af050eee8249673 669590376ecc9d9e1d9fb9f3531100e2"
   "node_modules/@deepseek-ai/dsh-tool-fs-search lib/index.js dsh-tool-fs-search-path-not-found.patch c1ecd7ac43eaf7923af050eee8249673 576e8e66b7a33e15fff58663c672272f"
+  "node_modules/@deepseek-ai/dsh-tool-fs-search lib/index.js dsh-tool-fs-search-grep-scope-declaration.patch 576e8e66b7a33e15fff58663c672272f d8d4dd6860a6cd5102f5ba9a517a06ac"
   "node_modules/@deepseek-ai/dsh-tool-fs-search lib/types/glob.d.ts dsh-tool-fs-search-anchor-literal-glob.patch abb3e1903c42e878cb7bc76cece2ad90 ac12dc59628e934777f224164c5459fd 5d10ebee03e200ad16929e0291206efa"
   "node_modules/@deepseek-ai/dsh-app-boot lib/index.js dsh-app-boot-watch-patch-layers.patch f89b0aa41c566589162295578ebb8749 a4f6123a217ac6f4e4cc7280a0d547dc"
   "node_modules/@deepseek-ai/dsh-app-boot lib/types/index.d.ts dsh-app-boot-watch-patch-layers.patch 5ed502c91a525f05367730f28b10e160 027fdc1cc3b47982027997f7902e2150"
