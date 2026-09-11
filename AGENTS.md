@@ -26,11 +26,18 @@ are organized*. Context: [docs/IDEA.md](docs/IDEA.md) (the idea),
 ## Structure
 
 - `package.json` — name `dsh-deepartments`, version `0.1.0` (first stable,
-  released 2026-08-29; the 8 `packages/dshd-*` remain `0.1.0-rc.1`, their
-  inter-peer graph `^0.1.0-rc.1` internally consistent), `type: module`,
+  released 2026-08-29), `type: module`,
   `main: lib/index.js`, `dsh.bundle` (patch → `cordis.patch.yml`),
-  `peerDependencies` on the rc channel (`^0.1.0-rc.x`; a `^0.0.1` does not
-  match rc).
+  `peerDependencies` on the rc channel (read the DECLARED ranges from the
+  `package.json` files themselves — this file deliberately does not restate
+  them: a restated range goes stale, and a literal `^0.1.0-rc.x` is already
+  short once the deployment widens to the `0.1.5-rc.x` line). The
+  `packages/dshd-*` set is DERIVED, never enumerated here — glob
+  `packages/dshd-*/package.json` for the real count, the versions and the
+  inter-peer graph (internally consistent), and read the profile manifest
+  for which of them are deployed. Derived example (2026-09-11,
+  non-normative): that glob resolved **10** packages, all `0.1.0-rc.1`, of
+  which 9 are declared in the dev profile and `dshd-core-min` is not.
 - `cordis.patch.yml` — the configuration layer: top-level YAML array of
   patch entries; the row references the package by name (`name:
   dsh-deepartments`).
@@ -87,8 +94,13 @@ are cached); user edits to `cordis.patch.yml` are HMR. All dsh commands for deve
 5. **Tests that go through the real Loader** (never only manual mount).
 6. Development and smoke in the isolated DSH_HOME `/opt/dsh/.dsh-dev` (`deepartments-dev` GUI profile, port 3090; `deepartments-dev-headless` twin for CLI smoke). Never against the web profile in use.
 7. Isolate renamable services: `ctx.get('webServer') ?? ctx.get('httpServer')`.
-8. `peerDependencies` on the rc channel (`^0.1.0-rc.x`) and **CLI pin**:
-   `npx -p @deepseek-ai/dsh@0.1.1-rc.2`.
+8. `peerDependencies` on the rc channel — the range is the one DECLARED in the
+   `package.json` files (not restated here: it widens with the target line) —
+   and run the CLI from the registry's **channel**, not from a version
+   literal: `npx -p @deepseek-ai/dsh@next` (read the channel's current
+   version from `https://registry.npmjs.org/@deepseek-ai/dsh` when a literal
+   is needed in a report). A pinned `@<version>` restated in this file goes
+   stale, and the previous pin did.
 9. **Never poll subagents.** After dispatching via `subagent`/`subagent_fork`
    (always-async, no blocking), END THE TURN. Do not run `sleep`,
    `list_agents`, `job_list`, `cat`/`grep` loops to check completion. The
