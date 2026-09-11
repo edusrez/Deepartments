@@ -248,5 +248,17 @@ test('export-parity: the lib/invoke.js export COUNT is frozen (no unintended sup
   // propagated it into lib/invoke.js ⇒ 328. The bump is INTENTIONAL and verified
   // (3/3), NOT an off-by-one at freeze time: the name-level source diff
   // 8aba9dd→HEAD is +verifyLabelFor / −0.
-  assert.equal(names.length, 328, `lib/invoke.js export count frozen at 328 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
+  // LOCK CORRECTED 328 → 329 (de47df6, fb-630): the surface was extended by
+  // `poolerServingChannels` (source packages/dshd-health/src/index.ts:4139; it
+  // reaches the superset through the star re-export bridge src/core/health.ts —
+  // NO `export` line was written in invoke.ts). MEASURED, not assumed: the
+  // runtime export count of lib/invoke.js is 329, and the name-level source diff
+  // of the commit that introduced it (69e104a→468d274) is `+export function
+  // poolerServingChannels` / −0. The sibling `+export interface PoolerChannelLike`
+  // is TYPE-ONLY and emits no runtime export (same rule as the comment above).
+  // NOTE (the honest part): this lock FIRED as a real «main rojo» on 468d274 and
+  // the alert was CORRECT — a frozen-surface lock exists precisely to make an
+  // intentional extension a deliberate, documented act. The bump below is that
+  // act, verified by the 13-case suite test/fb-630-parity-channel-capacity.test.js.
+  assert.equal(names.length, 329, `lib/invoke.js export count frozen at 329 (got ${names.length}) — a decoupling step must not grow/shrink the superset`)
 })
