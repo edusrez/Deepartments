@@ -429,7 +429,33 @@ test('tools-factory: the TOOLS ZONE CUTS 1+2+3 were hoisted VERBATIM into the or
     // + the update render surface. The feedback store (dshd-feedback) is a
     // DIFFERENT lock; the bridge emission lives in the store, NOT here. md5
     // f919606a… → 9f233795da55d3e28c74b4629c9b2144.
-    assert.equal(md5, '9f233795da55d3e28c74b4629c9b2144', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + the VALLE 09-07 FB-198 T1 failedGround observer + prepared (wake-failed) / failed:<ground> envelope + id-truth assertion + the LOOP FASE 1 feedback dedupe/duplicado/bridge-adjacent tool span (md5 9f233795da55d3e28c74b4629c9b2144)')
+    // Zone md5 RE-FROZE LOTE 2 (fb-737 + fb-735, 2026-09-11 — the head-rotate
+    // retry-doctrine replacement + the wait-parameter surface): a DECLARED
+    // INTENTIONAL in-span change, NOT a side effect of the move. The in-span
+    // dept_head_rotate definition changed on exactly the surfaces fb-737 and
+    // fb-735 target: (1) fb-737 — the OLD retry doctrine is GONE from ALL
+    // THREE surfaces it lived in: the tool `description` string (the
+    // «if the head declared ready, an immediate retry is legitimate» reading
+    // REMOVED, replaced by the fb-190 rotation-in-silence norm — every refusal
+    // now names ONE action on an OBSERVABLE signal, never an `if` on «the head
+    // declared ready», a condition NO signal carries: an unobservable
+    // condition IS a loop instruction), the ERROR PATH (the RUNNING refusal
+    // `throw new Error(...)` — the tailPastBound «an immediate retry is
+    // legitimate» clause dropped) and the COMMENT block (the FINALIZATION-TAIL
+    // / tailPastBound retry rationale replaced by the fb-737 WHY-it-is-gone
+    // note); (2) fb-735 — the BOUNDED `wait:true` deferral surface: the `wait`
+    // / `waitMaxMs` / `waitedMs` parameters + the resolveHeadRotateWaitMaxMs
+    // resolver (default 120000; an explicit 0 spends no budget → the immediate
+    // refusal, never a zero-length wait) + the bounded poll helper returning
+    // `{idle, waitedMs, timedOut, polls}` over the SAME live-handle signal the
+    // free-window check reads (ONE reader, TWO arms) + the waitedMs-bearing
+    // refusal message. The rotation/archive/journal semantics are UNCHANGED;
+    // src/invoke.ts is UNTOUCHED by this batch and the fb-735 helper block
+    // lives OUTSIDE this span (tools.ts:3176-3239) — only the in-span
+    // dept_head_rotate body (description + error path + comments + the wait
+    // parameters) moved. md5 9f233795da55d3e28c74b4629c9b2144 →
+    // 63aeb795f694c8cad29b94dd1605402c.
+    assert.equal(md5, '63aeb795f694c8cad29b94dd1605402c', 'the embedded CUT4 zone matches the LANE 0.2.3b re-freeze + the session-surface reads + the LANE ② sweep/O1 additions + the R4 DUAL-read + the R6 getSessionEvents-collapse + the R9 WAKE-SEAM send_message prepared-class enrichment + the R10 R2 probe/pre-check additions + the R8-RACE liveness-race liveStatus + settle-wait additions + the R11 WAKE-SEAM P1-EXT managerId row + the R12 sweep-dormancy host-only recipientDormantForRedeliver wrapper + 2 re-delivery injections + the VALLE 09-07 BATCH-DRAIN batchEligible flag + prepared-class envelope + the VALLE 09-07 HEAD-TOOLING fb-216/223 memo-validator move + O4 legacy title + fb-220 rotate diagnostics + fb-209a dept_repo_state registration + the VALLE 09-07 FB-198 T1 failedGround observer + prepared (wake-failed) / failed:<ground> envelope + id-truth assertion + the LOOP FASE 1 feedback dedupe/duplicado/bridge-adjacent tool span (md5 63aeb795f694c8cad29b94dd1605402c)')
   }
   // The invocation is at the SAME fiber position with the inline R6 fallback
   // (service-first 'deepartments.tools' → the factory) and the ToolsSurface

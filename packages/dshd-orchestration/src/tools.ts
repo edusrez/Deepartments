@@ -3173,6 +3173,70 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     return Number.isFinite(n) && n >= 0 ? n : 5_000
   }
 
+  /** The R8 settle-wait poll interval (ms) — the leg the DEFAULT (no `wait`)
+   *  rotation keeps, byte-identical to the pre-fb-735 loop. */
+  const HEAD_ROTATE_SETTLE_POLL_MS = 150
+
+  /** fb-735 — the `wait:true` deferral caps of dept_head_rotate, COPIED from
+   * `smart_restart` (dsh-smart-restart src/boot.ts: `DEFAULT_WAIT_MAX_MS` /
+   * `WAIT_POLL_MS` + src/index.ts `resolveWaitMaxMs`) — the same declared
+   * defaults, the same resolution rules, never reinvented: an absent/invalid
+   * `waitMaxMs` falls back to the declared default so a `wait` can NEVER run
+   * unbounded by accident, and an explicit 0 is NOT the default (it spends no
+   * budget → the immediate refusal, the "no zero-length wait" rule). */
+  const HEAD_ROTATE_WAIT_MAX_MS = 120_000
+  const HEAD_ROTATE_WAIT_POLL_MS = 1_000
+
+  /** Resolve the effective `waitMaxMs` cap of a `wait:true` deferral (the
+   *  smart-restart `resolveWaitMaxMs` semantics: absent → the declared default;
+   *  a non-finite/negative value → the default with a loud log). */
+  const resolveHeadRotateWaitMaxMs = (value: number | undefined): number => {
+    if (value === undefined) return HEAD_ROTATE_WAIT_MAX_MS
+    if (!Number.isFinite(value) || value < 0) {
+      ctx.logger.warn(`[deepartments] dept_head_rotate: invalid waitMaxMs (${String(value)}); using the default ${HEAD_ROTATE_WAIT_MAX_MS}ms`)
+      return HEAD_ROTATE_WAIT_MAX_MS
+    }
+    return value
+  }
+
+  /** fb-735 — the BOUNDED wait for the target head's LIVE handle to stop being
+   *  `running`, the dept_head_rotate counterpart of the smart-restart
+   *  `waitForIdle` (same contract: `{idle, waitedMs, timedOut, polls}`, the
+   *  cap never overslept, WAITED-ONLY-AS-LONG-AS-REAL accounting, `idle` on the
+   *  FIRST read → `waitedMs: 0`).
+   *
+   *  PASSIVE by construction: its ONLY interaction with the harness is
+   *  re-reading the injected live-status closure between sleeps — it creates no
+   *  turn, wakes nobody, sends nothing (the same effect-free reader the guard
+   *  and `dept_who` consume: `agents.get(sid)?.status === 'running'`). A spent
+   *  budget is NEVER a partial action: it returns `idle:false, timedOut:true`
+   *  and the CALLER decides (here: the loud refusal that states what it saw). */
+  const headRotateWaitForIdle = async (opts: {
+    readRunning: () => boolean
+    maxMs: number
+    pollMs?: number
+    now?: () => number
+    sleep: (ms: number) => Promise<void>
+  }): Promise<{ idle: boolean; waitedMs: number; timedOut: boolean; polls: number }> => {
+    const now = opts.now ?? Date.now
+    const maxMs = Number.isFinite(opts.maxMs) && opts.maxMs > 0 ? opts.maxMs : 0
+    const pollMs = opts.pollMs !== undefined && Number.isFinite(opts.pollMs) && opts.pollMs > 0
+      ? opts.pollMs
+      : HEAD_ROTATE_WAIT_POLL_MS
+    if (!opts.readRunning()) return { idle: true, waitedMs: 0, timedOut: false, polls: 0 }
+    if (maxMs === 0) return { idle: false, waitedMs: 0, timedOut: true, polls: 0 }
+    const start = now()
+    let polls = 0
+    for (;;) {
+      const elapsed = now() - start
+      if (elapsed >= maxMs) break
+      await opts.sleep(Math.min(pollMs, maxMs - elapsed))
+      polls += 1
+      if (!opts.readRunning()) return { idle: true, waitedMs: now() - start, timedOut: false, polls }
+    }
+    return { idle: false, waitedMs: now() - start, timedOut: true, polls }
+  }
+
   /** DEADLOCK FIX (2026-08-26) — the BOUNDED `disposeHeadHandleOnce` join for
    * the sleep respawn. Returns true when the detach settled before the bound;
    * false on timeout. A timeout can NEVER corrupt the respawn: the fresh
@@ -6769,14 +6833,28 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // heads only (a worker / unconfigured post rejects loudly), idle only (a
   // RUNNING head is rotated in a free window, never mid-turn).
 
-  /** fb-220 (QD 2026-09-07 — head-tooling OBSERVABILITY, R8 intact): the
-   * RUNNING-rejection DIAGNOSTICS of dept_head_rotate. The host must
-   * distinguish (a) a turn that kept 'running' THROUGH the settle bound (a
-   * FINALIZATION TAIL past the bound — a legitimate immediate retry when the
-   * head declared ready) from (b) a NEW turn that a fresh wake started DURING
-   * the wait (wait for it to close). The rejection carries two purely
-   * observational signals — NEVER a behavior gate (the rejection itself is
-   * byte-identical; only the message gains detail):
+  /** fb-220 (QD 2026-09-07 — head-tooling OBSERVABILITY, R8 intact) + fb-737
+   * (the CURRENT norm, fb-190 ROTACIÓN EN SILENCIO — docs/VERIFICATION-LADDER.md
+   * :169-186): the RUNNING-rejection DIAGNOSTICS of dept_head_rotate. The host
+   * must be able to TELL (a) a turn that kept 'running' THROUGH the whole bound
+   * (a FINALIZATION TAIL past the bound — a tail the wait already covered) from
+   * (b) a NEW turn that a fresh wake started DURING the wait — WITHOUT a second
+   * dept_who+alert cycle.
+   *
+   * fb-737: this helper is ALSO the reason the OLD retry prescription was
+   * removed — it exposes ONLY `runningSinceMs`, `lastWakeMs` and
+   * `tailPastBound`, i.e. NO observable signal whatsoever of «the head declared
+   * ready». A prescription conditioned on an UNOBSERVABLE signal is not
+   * executable by the reader: it degenerates into a LOOP INSTRUCTION (the
+   * «condición de reintento NO OBSERVABLE ⇒ instrucción de bucle» class; it
+   * cost the host two failed rotations). Any future diagnosis/guidance added
+   * here MUST ride on these observables (or on `dept_who`'s `liveStatus`), and
+   * must name ONE action on an OBSERVABLE condition — never a second
+   * un-evaluable `if` next to it.
+   *
+   * The rejection carries these purely observational signals — NEVER a behavior
+   * gate (the rejection CLASS is unchanged: the same loud RUNNING refusal;
+   * only its message gains detail / replaces the stale prescription):
    *   - running-since: the LAST `turn/start` session-event time of the live
    *     handle (the current turn's start — the harness driver appends
    *     turn/start when a phase begins); fallback the last `user/message`
@@ -6786,11 +6864,14 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    *     last message delivered INTO the inbox — the wake/feed arrival);
    *     fallback the durable journal frontmatter `last_wake` (readJournal —
    *     DURABLE, survives a cold registration), then unknown.
-   * `tailPastBound` = the running turn STARTED BEFORE the settle-wait window
-   * began (runningSince < waitStart): the wait already covered the whole turn
-   * — a tail past the bound. A turn that started WITHIN the window is a NEW
-   * wake turn. Best-effort: a throwing read / absent event/entry degrades to
-   * 'unknown' — never a different rejection. */
+   * `tailPastBound` = the running turn STARTED BEFORE the wait window began
+   * (runningSince < waitStart), where `waitStart` = now − the bound ACTUALLY
+   * awaited (opts.settleWaitMs: the R8 settle window by default, the full
+   * `waitMaxMs` budget under fb-735 `wait:true`): the wait already covered the
+   * whole turn — a tail past the bound. A turn that started WITHIN the window
+   * is a NEW wake turn (the fb-735 spent-budget refusal appends the waitedMs of
+   * that same window at the CALL site). Best-effort: a throwing read / absent
+   * event/entry degrades to 'unknown' — never a different rejection. */
   const headRotateRunningDiagnostics = async (
     live: AgentLike,
     postId: string,
@@ -6849,10 +6930,12 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
 
   const globalHeadRotate = ctx.tools.register(defineTool({
     name: 'dept_head_rotate',
-    description: 'Rotate a CONFIGURED department head (HOST plane, Asistente only): an ACTIVE context refresh — the head\'s durable session is fresh-minted (NEW session id) seeded with its LAST durable journal, the old session is archived server-side, and the department title stays pinned; the postId/identity, journal and messages are untouched (archive ≠ delete) and NO sleepEpoch is set (a rotation is NOT sleep). The fresh head lands LIVE but BOOT-QUIET: its first turn starts on the NEXT message/daemon wake (the journal is already in its context as the seed). Use it on CONTEXT-THRESHOLD crossing (>= 50% of the window, e.g. the QH) or on instruction; confirm the head is IDLE first (dept_who) — a running head is rejected loudly. R8 (fb-143/144/145): the free-window check RE-VERIFIES automatically with a bounded settle-wait (DEEPARTMENTS_HEAD_ROTATE_SETTLE_MS, default 5s) — the dept_who snapshot and the rotate check read the SAME live handle signal, so a head that just DECLARED ready (or that a wake turned running between the dept_who read and the rotate) may still be `running` for its FINALIZATION TAIL; the rotate waits that tail out in the same window and proceeds when the turn closes, while a turn still running past the bound is rejected with the clear reason (never rotate a REAL in-flight turn). The LAST durable journal is ALWAYS used and the rotation NEVER delays for a fresh memo (the critical-unblock rule — a context-blocked head may not run dept_memo_write): ask the head for dept_memo_write BEFORE rotating when it is operative and the window permits, and watch the returned `journal.stale` marker ("memo no actualizado — journal previo"). Emits a Quality-inspect directive to quality-head (100% mandate).',
+    description: 'Rotate a CONFIGURED department head (HOST plane, Asistente only): an ACTIVE context refresh — the head\'s durable session is fresh-minted (NEW session id) seeded with its LAST durable journal, the old session is archived server-side, and the department title stays pinned; the postId/identity, journal and messages are untouched (archive ≠ delete) and NO sleepEpoch is set (a rotation is NOT sleep). The fresh head lands LIVE but BOOT-QUIET: its first turn starts on the NEXT message/daemon wake (the journal is already in its context as the seed). Use it on CONTEXT-THRESHOLD crossing (>= 50% of the window, e.g. the QH) or on instruction; confirm the head is IDLE first (dept_who) — a running head is rejected loudly. R8 (fb-143/144/145): the free-window check RE-VERIFIES automatically with a bounded settle-wait (DEEPARTMENTS_HEAD_ROTATE_SETTLE_MS, default 5s) — the dept_who snapshot and the rotate check read the SAME live handle signal, so a head that just DECLARED ready (or that a wake turned running between the dept_who read and the rotate) may still be `running` for its FINALIZATION TAIL; the rotate waits that tail out in the same window and proceeds when the turn closes, while a turn still running past the bound is rejected with the clear reason (never rotate a REAL in-flight turn). fb-190 (ROTACIÓN EN SILENCIO — docs/VERIFICATION-LADDER.md:169-186, the CURRENT norm) + fb-115 (re-check right before rotating): do NOT announce the rotation to the outgoing head in its own turn — the announcement WAKES it (a materialization) and dept_head_rotate then rejects with RUNNING (a SELF-INDUCED race; the head announcing the rotation can never be absent from the window it announces into). The correct procedure: dept_who shows liveStatus idle (REAL idle — a head that just declared ready may still be running its finalization tail) → re-check right before rotating → rotate IN SILENCE → greet the FRESH head with the orienting handoff (its seed/journal IS the orientation, so a pre-rotation announcement is redundant AND harmful). fb-735: pass wait:true to DEFER instead of refusing — the same free-window check re-reads the SAME live handle until the turn really closes, bounded by waitMaxMs (default 120000; an explicit 0 spends no budget → the immediate refusal, never a zero-length wait); the rotation proceeds once the turn closes (waitedMs on the result), and a spent budget refuses with the SAME loud reason STATING WHAT IT OBSERVED (running-since + last-wake + waitedMs). No refusal asks the reader to evaluate an unobservable condition (fb-737: NO signal anywhere says «the head declared ready» — such an `if` is a loop instruction): each names ONE action on an OBSERVABLE signal — re-consult dept_who and rotate only on a row whose liveStatus is idle. The LAST durable journal is ALWAYS used and the rotation NEVER delays for a fresh memo (the critical-unblock rule — a context-blocked head may not run dept_memo_write): ask the head for dept_memo_write BEFORE rotating when it is operative and the window permits, and watch the returned `journal.stale` marker ("memo no actualizado — journal previo"). Emits a Quality-inspect directive to quality-head (100% mandate).',
     parameters: {
       postId: { type: 'string', required: true, description: 'The CONFIGURED department head postId to rotate (e.g. "quality-head", "internal-programming-head"). A worker or an unconfigured post is rejected loudly.' },
-      reason: { type: 'string', description: 'Optional reason for the rotation (recorded in the log + the QD mirror).' }
+      reason: { type: 'string', description: 'Optional reason for the rotation (recorded in the log + the QD mirror).' },
+      wait: { type: 'boolean', description: 'Optional (fb-735): DEFER instead of refusing — re-read the SAME live-handle signal the free-window check uses (effect-free: it never sends a message or wakes anyone) until the head\'s turn really closes, then rotate in that same window. Bounded by `waitMaxMs`; when the budget is spent the call returns the SAME loud RUNNING refusal and states what it observed (running-since + last-wake + waitedMs). Absent → the current behavior, exactly: the R8 settle-wait (default 5s) and then the loud refusal.' },
+      waitMaxMs: { type: 'number', description: 'Optional (fb-735): hard cap in milliseconds on a `wait:true` deferral (default 120000, the smart_restart default). Ignored without `wait:true`. An absent/invalid value falls back to the default (a wait is never unbounded); an explicit 0 (or <= 0) is NOT the default — it spends no budget, so a running head refuses IMMEDIATELY reporting only the few ms elapsed. It caps the WHOLE deferral (the R8 settle window is inside it).' }
     },
     output: {
       schema: {
@@ -6876,12 +6959,16 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           reason: { type: 'string' },
           // fb-25 (a): the reason CROSS-CHECK stamp ('verified' | 'unverified' |
           // 'unavailable') — the reason figure vs the OLD session's real usage.
-          reasonVerified: { type: 'string' }
+          reasonVerified: { type: 'string' },
+          // fb-735: how long a `wait:true` deferral actually lasted (ms) before
+          // the turn closed — ABSENT when no `wait` was requested (never a fake
+          // 0, exactly the smart_restart accounting).
+          waitedMs: { type: 'number' }
         }
       },
-      render: (_args, value) => [{ type: 'text', text: `rotated ${value.postId}: ${value.previousSessionId} → ${value.sessionId} (archived ${value.archived}); journal ${value.journal.path}${value.journal.stale ? ' STALE — memo no actualizado, journal previo' : ' (fresh)'}${value.reason !== undefined ? `; reason: ${value.reason}` : ''}${value.reasonVerified !== undefined ? `; reason verified: ${value.reasonVerified}` : ''}` } as const]
+      render: (_args, value) => [{ type: 'text', text: `rotated ${value.postId}: ${value.previousSessionId} → ${value.sessionId} (archived ${value.archived}); journal ${value.journal.path}${value.journal.stale ? ' STALE — memo no actualizado, journal previo' : ' (fresh)'}${value.reason !== undefined ? `; reason: ${value.reason}` : ''}${value.reasonVerified !== undefined ? `; reason verified: ${value.reasonVerified}` : ''}${value.waitedMs !== undefined ? `; waited ${value.waitedMs}ms for the live turn to close` : ''}` } as const]
     },
-    async execute(args, exec): Promise<{ postId: string; sessionId: string; previousSessionId: string; archived: boolean; journal: { path: string; timestamp?: string; stale: boolean }; reason?: string; reasonVerified: ReasonVerificationStamp }> {
+    async execute(args, exec): Promise<{ postId: string; sessionId: string; previousSessionId: string; archived: boolean; journal: { path: string; timestamp?: string; stale: boolean }; reason?: string; reasonVerified: ReasonVerificationStamp; waitedMs?: number }> {
       const agent = exec.agent
       if (!agent) throw new Error('dept_head_rotate requires a calling agent (exec.agent was undefined)')
       // ACL (map §3): HOST-plane — only the Asistente itself (no registered
@@ -6919,25 +7006,65 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // settle window (finalization tail / short wake turn) is a FREE WINDOW in
       // the same call — the rotation proceeds; a turn STILL running past the
       // bound is a REAL turn → the SAME loud rejection.
+      // fb-735: TWO arms, ONE reader — the SAME live-handle signal
+      // (`agents.get(sessionId)?.status === 'running'`) that dept_who derives
+      // its row from, so the wait re-verifies exactly what the protocol read.
+      //   - DEFAULT (no `wait`): the legacy R8 settle-wait, UNCHANGED
+      //     (DEEPARTMENTS_HEAD_ROTATE_SETTLE_MS, default 5s, 150ms polls) —
+      //     zero behavior change (R6).
+      //   - `wait:true` (fb-735): the smart_restart `wait` semantics — the call
+      //     DEFERS instead of refusing, bounded by `waitMaxMs` (default
+      //     120000; an explicit 0 spends no budget → the immediate refusal).
+      //     The budget CAPS THE WHOLE DEFERRAL (the settle window is inside
+      //     it), and `waitedMs` is the wall-clock actually waited — the honest
+      //     accounting, never a nominal bound.
       const settleWaitMs = headRotateSettleWaitMs()
-      if (settleWaitMs > 0) {
-        const settleDeadline = Date.now() + settleWaitMs
-        for (;;) {
-          const live = agents?.get(sessionId)
-          if (live === undefined || live.status !== 'running') break
-          if (Date.now() >= settleDeadline) break
-          await new Promise((resolve) => setTimeout(resolve, 150))
+      const waitRequested = args.wait === true
+      const waitBudgetMs = waitRequested ? resolveHeadRotateWaitMaxMs(args.waitMaxMs) : 0
+      const waitBoundMs = waitRequested ? waitBudgetMs : settleWaitMs
+      let waitedMs: number | undefined
+      if (waitBoundMs > 0) {
+        const waited = await headRotateWaitForIdle({
+          readRunning: () => {
+            const candidate = agents?.get(sessionId)
+            return candidate !== undefined && candidate.status === 'running'
+          },
+          maxMs: waitBoundMs,
+          pollMs: waitRequested ? HEAD_ROTATE_WAIT_POLL_MS : HEAD_ROTATE_SETTLE_POLL_MS,
+          sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+        })
+        if (waitRequested) {
+          waitedMs = waited.waitedMs
+          ctx.logger.info(`[deepartments] dept_head_rotate: "${args.postId}" wait:true deferred ${waited.waitedMs}ms of the ${waitBoundMs}ms budget (${waited.polls} poll(s)) — ${waited.idle ? 'the turn closed: proceeding with the rotation' : 'still RUNNING: refusing with the observed diagnostics'}`)
         }
       }
       const live = agents?.get(sessionId)
       if (live !== undefined && live.status === 'running') {
-        // fb-220 (QD 2026-09-07 — OBSERVABILITY only; R8/fb-115 intact): the
-        // rejection exposes the running-since + the last wake so the host can
-        // distinguish a FINALIZATION TAIL past the bound (an immediate retry is
-        // legitimate after a fresh «ready» declaration) from a NEW wake turn
-        // (wait for it to close) WITHOUT a second dept_who+alert cycle.
-        const diag = await headRotateRunningDiagnostics(live, args.postId, { settleWaitMs, now: Date.now() })
-        throw new Error(`[deepartments] dept_head_rotate: "${args.postId}" is RUNNING (state ${live.status}) — rotate only in a free window (head idle; re-check dept_who); running since ${diag.runningSinceLabel}${diag.tailPastBound ? ` (started BEFORE the settle window — the turn ran through the whole bound: a tail past the bound; if the head declared ready, an immediate retry is legitimate)` : ` (started WITHIN the settle window — a NEW turn; wait for it to close)`}; last wake ${diag.lastWakeLabel}`)
+        // fb-220 (QD 2026-09-07 — OBSERVABILITY only; R8/fb-115 intact) +
+        // fb-737/fb-190 (the CURRENT norm — docs/VERIFICATION-LADDER.md:169-186
+        // ROTACIÓN EN SILENCIO): the rejection exposes the running-since + the
+        // last wake (and, under `wait:true`, the waitedMs of the budget it just
+        // spent) so the host distinguishes a FINALIZATION TAIL past the bound
+        // from a NEW wake turn WITHOUT a second dept_who+alert cycle.
+        //
+        // fb-737 — WHY the old prescription is GONE, not merely reworded: it
+        // closed the tail branch with a retry conditioned on «the head declared
+        // ready». That condition is UNOBSERVABLE: headRotateRunningDiagnostics
+        // exposes ONLY runningSinceMs/lastWakeMs/tailPastBound, and no other
+        // instrument reports such a declaration. A prescription asking the
+        // executor to evaluate an `if` whose signal the instrument does not give
+        // it is not guidance — it is a LOOP INSTRUCTION (class: «condición de
+        // reintento NO OBSERVABLE ⇒ instrucción de bucle»; measured cost: 2
+        // failed rotations for the host). The fix is SUBSTITUTION, never an
+        // append: ONE action, on an OBSERVABLE signal (dept_who `liveStatus`).
+        const diag = await headRotateRunningDiagnostics(live, args.postId, { settleWaitMs: waitBoundMs, now: Date.now() })
+        const boundNote = diag.tailPastBound
+          ? ' (started BEFORE the settle window — the wait covered the whole turn: a tail past the bound)'
+          : ' (started WITHIN the settle window — a NEW turn, not a tail)'
+        const budgetNote = waitRequested
+          ? `; waitedMs ${Math.round(waitedMs ?? 0)}ms of the ${waitBoundMs}ms wait budget — the turn did NOT close inside it`
+          : ''
+        throw new Error(`[deepartments] dept_head_rotate: "${args.postId}" is RUNNING (state ${live.status}) — rotate only in a free window (head idle; re-check dept_who); running since ${diag.runningSinceLabel}${boundNote}; last wake ${diag.lastWakeLabel}${budgetNote}. fb-190 (ROTACIÓN EN SILENCIO, docs/VERIFICATION-LADDER.md:169-186) + fb-115: do NOT announce the rotation to the outgoing head in its own turn — the announcement WAKES it and RE-INDUCES this RUNNING rejection (a self-induced race). ONE action, on an observable signal: re-consult dept_who and rotate only on a row whose liveStatus is idle (a REAL idle; a head that just declared ready can still be running its finalization tail).`)
       }
       // Journal — CRITICAL-UNBLOCK RULE: always use the LAST durable journal,
       // never delay for a fresh memo (a context-over-threshold head — the QH
@@ -7011,7 +7138,11 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         archived,
         journal: { path: journalPathFor(args.postId), ...(journalStatus.timestamp !== undefined ? { timestamp: journalStatus.timestamp } : {}), stale: journalStatus.stale },
         reasonVerified,
-        ...(args.reason !== undefined ? { reason: args.reason } : {})
+        ...(args.reason !== undefined ? { reason: args.reason } : {}),
+        // fb-735: the wait this call really spent — present ONLY under
+        // `wait:true` (an absent field, never a fabricated 0, so a `wait:false`
+        // call keeps the pre-fb-735 result shape byte-for-byte).
+        ...(waitedMs !== undefined ? { waitedMs } : {})
       }
     }
   }))
