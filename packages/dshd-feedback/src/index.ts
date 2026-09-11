@@ -471,6 +471,17 @@ export interface FeedbackOpenOptions {
  * Boot via `open()` (load + prune-terminal-to-archive + index); the ONLY writer
  * is `append()`/`update()` (single-process; no locking — same contract as the
  * MessagesStore).
+ *
+ * IDENTITY, NOT POSITION (fb-690 id-collision fix): an `fb-<seq>` id is an
+ * IDENTITY — it must name ONE logical record forever. Because the prune moves
+ * terminal records to `<stateDir>/feedback-archive.jsonl` (out of the live
+ * file), a counter seeded from the LIVE FILE ALONE rewinds to the first free
+ * position after a prune and re-issues ids that already exist in the archive
+ * (measured: 22 ids live in BOTH files in the live profile — e.g. `fb-690`
+ * exists live AND archived+`resuelto` as two different records). The counter is
+ * therefore seeded from the UNION live ∪ archive (`knownIds`) and every
+ * allocation is guarded: a candidate id that already exists is REJECTED and the
+ * conflicting record(s) ENUMERATED — never resolved by file order.
  */
 export class FeedbackStore {
   private readonly stateDir: string
@@ -480,6 +491,15 @@ export class FeedbackStore {
   private readonly logger: FeedbackStoreLogger | undefined
   private records: FeedbackRecord[] = []
   private readonly byId = new Map<string, FeedbackRecord>()
+  /** The ARCHIVE tails by id (read at boot — the id-identity ledger half of the
+   * census; LIVE-only seeding is the fb-690 bug). */
+  private readonly archivedById = new Map<string, FeedbackRecord[]>()
+  /** Every id ever allocated = live ∪ archive: the allocation guard + counter seed. */
+  private readonly knownIds = new Set<string>()
+  /** Set when the archive census was UNREADABLE at boot: the store still boots
+   * (reads keep working) but NEW allocations are REFUSED until the census can be
+   * read — never a silent live-only seed that could re-issue an archived id. */
+  private archiveCensusError: string | undefined
   private nextSeq = 0
 
   private constructor(stateDir: string, filePath: string, archivePath: string, liveCap: number, logger: FeedbackStoreLogger | undefined) {
@@ -494,8 +514,9 @@ export class FeedbackStore {
    * Boot entry: load `<stateDir>/feedback.jsonl`, prune terminal records beyond
    * the live cap to the archive (non-destructive — backup + append + atomic
    * rewrite), then build the live-by-id index and seed the append counter from
-   * the max seq + 1. Missing file → empty store. A malformed non-final line
-   * throws loud; a trailing partial line is dropped.
+   * the max seq + 1 OF LIVE ∪ ARCHIVE (fb-690 fix: an id that exists in the
+   * archive is NEVER re-issued). Missing file → empty store. A malformed
+   * non-final line throws loud; a trailing partial line is dropped.
    */
   static async open(stateDir: string, opts: FeedbackOpenOptions = {}): Promise<FeedbackStore> {
     const filePath = resolveFeedbackPath(stateDir)
@@ -506,7 +527,9 @@ export class FeedbackStore {
       const pruned = await store.pruneToCap(records)
       if (pruned) records = await loadFeedbackRecords(filePath)
     }
-    store.load(records)
+    // The archive census is read AFTER the prune (records evicted by THIS boot
+    // are already in the archive and must count as allocated ids).
+    store.load(records, await store.loadArchiveCensus())
     return store
   }
 
@@ -535,6 +558,7 @@ export class FeedbackStore {
   async append(input: FeedbackInput): Promise<FeedbackRecord> {
     this.validateInput(input)
     const seq = this.nextSeq
+    await this.assertIdAvailable(`fb-${seq}`)
     const ts = Date.now()
     const record: FeedbackRecord = {
       id: `fb-${seq}`,
@@ -720,15 +744,104 @@ export class FeedbackStore {
     }
   }
 
-  private load(records: FeedbackRecord[]): void {
-    this.records = records
-    this.byId.clear()
-    this.nextSeq = 0
-    for (const record of records) {
-      this.byId.set(record.id, record) // latest tail wins (file order = append order)
+  /**
+   * Read the ARCHIVE half of the id census (the live half is `this.byId`).
+   * A missing archive is a legitimate EMPTY census (nothing was ever pruned).
+   * A MALFORMED archive is NOT degraded silently: it is recorded and every NEW
+   * allocation is REFUSED (see `assertIdAvailable`) — an unreadable census
+   * cannot prove a candidate id is free, and an id must NEVER be reused.
+   */
+  private async loadArchiveCensus(): Promise<FeedbackRecord[]> {
+    try {
+      const archived = await loadFeedbackRecords(this.archivePath)
+      this.archiveCensusError = undefined
+      return archived
+    } catch (error: unknown) {
+      this.archiveCensusError = error instanceof Error ? error.message : String(error)
+      this.logger?.warn(`[deepartments] feedback: the ARCHIVE id census (${path.basename(this.archivePath)}) is UNREADABLE (${this.archiveCensusError}) — the counter CANNOT be seeded against the archive, so NEW record allocation is REFUSED (fail-loud; never a live-only seed that could re-issue an archived id). Fix (or remove) the archive and retry.`)
+      return []
+    }
+  }
+
+  /** Merge archive tails into the census: every archived id is KNOWN (never
+   * free), grouped by id (append order) for the conflict enumeration. */
+  private mergeArchived(archived: readonly FeedbackRecord[]): void {
+    for (const record of archived) {
+      const group = this.archivedById.get(record.id)
+      if (group === undefined) this.archivedById.set(record.id, [record])
+      else group.push(record)
+      this.knownIds.add(record.id)
       const seq = parseFeedbackSeq(record.id)
       if (seq >= this.nextSeq) this.nextSeq = seq + 1
     }
+  }
+
+  /**
+   * The allocation guard (fb-690 fix, acceptance 3): REJECT and ENUMERATE a
+   * candidate id that already exists — never choose a side by file order, never
+   * overwrite, never silently skip to another id. A degraded archive census is
+   * re-attempted HERE (one read, only on the degraded path) so a transient
+   * archive failure can never produce a reused id.
+   */
+  private async assertIdAvailable(id: string): Promise<void> {
+    if (this.archiveCensusError !== undefined) {
+      this.mergeArchived(await this.loadArchiveCensus())
+      if (this.archiveCensusError !== undefined) {
+        throw new Error(`[deepartments] feedback: REFUSING to allocate "${id}" — the archive census (${path.basename(this.archivePath)}) is unreadable (${this.archiveCensusError}); an id that exists in the archive must NEVER be re-issued and without the census we cannot prove "${id}" is free. Fix (or remove) the archive and retry.`)
+      }
+    }
+    if (!this.knownIds.has(id)) return
+    const conflicts: string[] = []
+    const liveRecord = this.byId.get(id)
+    if (liveRecord !== undefined) {
+      conflicts.push(`LIVE (emisor=${liveRecord.emisor}, createdAt=${liveRecord.createdAt}, estado=${liveRecord.estado})`)
+    }
+    const archivedGroup = this.archivedById.get(id)
+    if (archivedGroup !== undefined) {
+      const identities = [...new Set(archivedGroup.map((record) => `${record.emisor}@${record.createdAt}`))]
+      conflicts.push(`ARCHIVE (${archivedGroup.length} tail(s): ${identities.join(', ')})`)
+    }
+    throw new Error(`[deepartments] feedback: REFUSING to allocate "${id}" — the id ALREADY EXISTS (${conflicts.join(' | ')}). A feedback id is an IDENTITY, not a position: a NEW record never reuses a live or archived id (the counter is seeded from LIVE ∪ ARCHIVE). Conflicting record(s) ENUMERATED — no side is chosen by file order.`)
+  }
+
+  /**
+   * Build the in-memory views + the id census. The counter is seeded from the
+   * MAX seq of LIVE ∪ ARCHIVE + 1 (fb-690 fix) so a prune can never rewind it,
+   * and ids living in BOTH files as DIFFERENT records (disjoint identities) are
+   * ENUMERATED once — the store never picks which of the two "owns" the id.
+   */
+  private load(records: FeedbackRecord[], archived: readonly FeedbackRecord[] = []): void {
+    this.records = records
+    this.byId.clear()
+    this.archivedById.clear()
+    this.knownIds.clear()
+    this.nextSeq = 0
+    for (const record of records) {
+      this.byId.set(record.id, record) // latest tail wins (file order = append order)
+      this.knownIds.add(record.id)
+      const seq = parseFeedbackSeq(record.id)
+      if (seq >= this.nextSeq) this.nextSeq = seq + 1
+    }
+    this.mergeArchived(archived)
+    this.reportIdCollisions()
+  }
+
+  /** Enumerate (loudly, once per boot) the ids that exist in BOTH files as
+   * different records: same id, DISJOINT identity sets (emisor@createdAt) = the
+   * id was REUSED after a prune. An OVERLAPPING identity is a benign duplicated
+   * tail (a crash between the archive append and the live rewrite), not a
+   * collision. Nothing is fixed here — the census only makes the class VISIBLE. */
+  private reportIdCollisions(): void {
+    const collisions: string[] = []
+    for (const [id, liveRecord] of this.byId) {
+      const archivedGroup = this.archivedById.get(id)
+      if (archivedGroup === undefined) continue
+      const archivedIdentities = archivedGroup.map((record) => `${record.emisor}@${record.createdAt}`)
+      if (archivedIdentities.includes(`${liveRecord.emisor}@${liveRecord.createdAt}`)) continue
+      collisions.push(`${id} [LIVE ${liveRecord.emisor}@${liveRecord.createdAt} vs ARCHIVE ${[...new Set(archivedIdentities)].join(', ')}]`)
+    }
+    if (collisions.length === 0) return
+    this.logger?.warn(`[deepartments] feedback ID COLLISION: ${collisions.length} id(s) exist in BOTH the live file and the archive as DIFFERENT records — the id was REUSED after a prune (an id is an IDENTITY, not a position). ENUMERATED (no side chosen by file order): ${collisions.join(' ; ')}. The counter is seeded PAST every known id (live ∪ archive), so none of these is ever re-issued.`)
   }
 
   /** The prune-to-cap (R6): when the live file exceeds `liveCap`, evict the

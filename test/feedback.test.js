@@ -338,6 +338,130 @@ test('open: default live cap is DEFAULT_LIVE_CAP (200)', () => {
   assert.equal(DEFAULT_LIVE_CAP, 200)
 })
 
+// --- id census / identity, not position (fb-690) -----------------------------
+//
+// An `fb-<seq>` id is an IDENTITY: the prune moves terminal records OUT of the
+// live file into the archive, so a counter seeded from the LIVE FILE ALONE
+// rewinds to the first free position and re-issues ids that already exist in the
+// archive. MEASURED in the live profile (2026-09-11): 22 ids live in BOTH files
+// as DIFFERENT records — `fb-690` is the materialized case (LIVE: research-head
+// / abierto→duplicado; ARCHIVE: host-session-… / abierto→resuelto). These tests
+// pin: (a) the counter is seeded from LIVE ∪ ARCHIVE, (b) a taken id is
+// REJECTED + ENUMERATED (never resolved by file order), (c) the collision is
+// surfaced at boot, (d) an unreadable archive census refuses allocation.
+
+test('fb-690 (a): the append counter is seeded from LIVE ∪ ARCHIVE — an id that exists ONLY in the archive is never re-issued', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // LIVE: only fb-2 (the prune moved fb-0/fb-1 and 3..5 to the archive).
+    await writeFile(resolveFeedbackPath(stateDir), jsonl([fbRecord(2, { estado: 'abierto' })]), 'utf8')
+    await writeFile(
+      resolveFeedbackArchivePath(stateDir),
+      jsonl([fbRecord(0, { estado: 'resuelto' }), fbRecord(1, { estado: 'descartado' }), fbRecord(5, { estado: 'resuelto' })]),
+      'utf8'
+    )
+    const store = await FeedbackStore.open(stateDir)
+    assert.equal(store.size, 1, 'the LIVE view holds only the live record')
+    const created = await store.append({ emisor: 'w1', tipo: 'fallo', severidad: 'alto', resumen: 'post-prune' })
+    assert.equal(created.id, 'fb-6', 'seeded from live ∪ archive (max seq 5 + 1) — NOT from the live max (fb-2 → fb-3, a REUSED id)')
+  })
+})
+
+test('fb-690 (b): the REAL fb-690 case — the boot census ENUMERATES the id collision and the next id is past every known id', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The REAL records (verbatim ids/emisores/createdAt measured 2026-09-11).
+    const liveFb690 = fbRecord(690, {
+      emisor: 'research-head',
+      estado: 'duplicado',
+      duplicate_of: 'fb-688',
+      createdAt: 1789133283558,
+      updatedAt: 1789133600063
+    })
+    await writeFile(resolveFeedbackPath(stateDir), jsonl([liveFb690]), 'utf8')
+    const archivedFb690 = [
+      fbRecord(690, { emisor: 'host-session-243eb508-6fde-4b25-8c82-8068e3bae3fd', estado: 'abierto', createdAt: 1789130461211, updatedAt: 1789130461211 }),
+      fbRecord(690, { emisor: 'host-session-243eb508-6fde-4b25-8c82-8068e3bae3fd', estado: 'en-estudio', createdAt: 1789130461211, updatedAt: 1789131000000 }),
+      fbRecord(690, { emisor: 'host-session-243eb508-6fde-4b25-8c82-8068e3bae3fd', estado: 'resuelto', cerrado_por: 'quality-head', createdAt: 1789130461211, updatedAt: 1789131632447 })
+    ]
+    await writeFile(resolveFeedbackArchivePath(stateDir), jsonl(archivedFb690), 'utf8')
+
+    const warned = []
+    const store = await FeedbackStore.open(stateDir, { logger: { warn: (message) => warned.push(message) } })
+    const collisionWarn = warned.find((message) => message.includes('ID COLLISION'))
+    assert.ok(collisionWarn !== undefined, 'the boot census surfaces the id collision (loud, once)')
+    assert.match(collisionWarn, /fb-690/, 'the colliding id is named')
+    assert.match(collisionWarn, /research-head@1789133283558/, 'the LIVE identity is enumerated')
+    assert.match(collisionWarn, /host-session-243eb508-6fde-4b25-8c82-8068e3bae3fd@1789130461211/, 'the ARCHIVE identity is enumerated')
+    // NO side is chosen: the live view is unchanged (the live tail) and the id is never re-issued.
+    assert.equal(store.get('fb-690').emisor, 'research-head', 'the live view keeps the LIVE record (no side picked by file order)')
+    const created = await store.append({ emisor: 'w1', tipo: 'fallo', severidad: 'alto', resumen: 'post fb-690' })
+    assert.equal(created.id, 'fb-691', 'the counter is seeded from live ∪ archive — fb-690 is NEVER re-issued')
+  })
+})
+
+test('fb-690 (c): a REWOUND counter is REFUSED + ENUMERATED, with NOTHING written (the regression shape)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const liveFb690 = fbRecord(690, {
+      emisor: 'research-head',
+      estado: 'duplicado',
+      createdAt: 1789133283558,
+      updatedAt: 1789133600063
+    })
+    await writeFile(resolveFeedbackPath(stateDir), jsonl([liveFb690]), 'utf8')
+    await writeFile(
+      resolveFeedbackArchivePath(stateDir),
+      jsonl([fbRecord(690, { emisor: 'host-session-243eb508-6fde-4b25-8c82-8068e3bae3fd', estado: 'resuelto', createdAt: 1789130461211, updatedAt: 1789131632447 })]),
+      'utf8'
+    )
+    const store = await FeedbackStore.open(stateDir)
+    assert.equal(store.get('fb-691'), undefined)
+    // The prune of 2026-09-11 13:10:28 archived fb-680..fb-706 and returned the
+    // counter to 680 — i.e. the position was RE-USED although the ids were
+    // archived. Reproduce that REWOUND counter directly (state, not file order).
+    store.nextSeq = 690
+    await assert.rejects(
+      () => store.append({ emisor: 'w2', tipo: 'fallo', severidad: 'medio', resumen: 'must be refused' }),
+      (error) => {
+        assert.match(error.message, /REFUSING to allocate "fb-690"/, 'the taken id is rejected')
+        assert.match(error.message, /LIVE \(emisor=research-head/, 'the LIVE conflicting record is enumerated')
+        assert.match(error.message, /ARCHIVE \(1 tail\(s\): host-session-243eb508-6fde-4b25-8c82-8068e3bae3fd@1789130461211\)/, 'the ARCHIVE conflicting record is enumerated')
+        assert.match(error.message, /IDENTITY, not a position/, 'the refusal states the invariant')
+        return true
+      }
+    )
+    // Reject means REJECT: the refused allocation wrote no line and no index entry.
+    const lines = (await readFile(resolveFeedbackPath(stateDir), 'utf8')).split('\n').filter(Boolean)
+    assert.equal(lines.length, 1, 'nothing was appended for the refused allocation')
+    assert.equal(store.get('fb-690').createdAt, 1789133283558, 'the live record is untouched')
+  })
+})
+
+test('fb-690 (d): an id duplicated as the SAME record (benign tail) is NOT reported as a collision; an unreadable archive census REFUSES allocation', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // A crash between the archive append and the live rewrite duplicates a tail
+    // (same emisor@createdAt on both sides) — that is NOT an id collision.
+    await writeFile(resolveFeedbackPath(stateDir), jsonl([fbRecord(0, { estado: 'resuelto' })]), 'utf8')
+    await writeFile(resolveFeedbackArchivePath(stateDir), jsonl([fbRecord(0, { estado: 'resuelto' })]), 'utf8')
+    const warned = []
+    const benign = await FeedbackStore.open(stateDir, { logger: { warn: (message) => warned.push(message) } })
+    assert.equal(warned.some((message) => message.includes('ID COLLISION')), false, 'an overlapping identity is a duplicated tail, not a collision')
+    assert.equal((await benign.append({ emisor: 'w1', tipo: 'fallo', severidad: 'bajo', resumen: 'x' })).id, 'fb-1')
+
+    // A MALFORMED archive: the store still opens (reads keep working) but the
+    // census cannot prove an id is free → allocation FAILS LOUD (never a
+    // silent live-only seed that could re-issue an archived id).
+    await writeFile(resolveFeedbackArchivePath(stateDir), 'NOT JSON\n' + jsonl([fbRecord(9)]), 'utf8')
+    const degradedWarn = []
+    const degraded = await FeedbackStore.open(stateDir, { logger: { warn: (message) => degradedWarn.push(message) } })
+    assert.equal(degraded.get('fb-0').estado, 'resuelto', 'reads keep working on a degraded census')
+    assert.equal(degradedWarn.some((message) => message.includes('UNREADABLE')), true, 'the degraded census is loud')
+    await assert.rejects(
+      () => degraded.append({ emisor: 'w1', tipo: 'fallo', severidad: 'bajo', resumen: 'x' }),
+      /REFUSING to allocate "fb-2".*census.*unreadable/s,
+      'an unreadable archive census refuses allocation (fail-loud, never reuse)'
+    )
+  })
+})
+
 test('parseFeedbackRecords: tolerates a trailing partial line (crash mid-append)', () => {
   const parsed = parseFeedbackRecords(jsonl([fbRecord(0)]) + '{"id": "fb-1", "trunca')
   assert.equal(parsed.length, 1)
