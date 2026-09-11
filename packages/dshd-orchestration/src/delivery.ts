@@ -2378,6 +2378,95 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     return { noWake: true } // medio / bajo
   }
 
+  // ---------------------------------------------------------------------------
+  // fb-696 (D-Q3, 2026-09-11) — the QUALITY INSPECT directive CONSULTS THE
+  // CAPACITY GATE: the directive carries the gate's VERDICT + its INSTANT, and a
+  // SUSTAINED halt does NOT force a REAL head turn.
+  // ---------------------------------------------------------------------------
+  // THE MEASURED DEFECT (QH .dsh/reports/quality/2026-09-11-dq3-rotacion-qh-*.md
+  // §5): the directive was emitted WITHOUT looking at the capacity gate, so with
+  // the pool in HALT it forced a REAL quality-head turn; the head's normal
+  // compliance (deploying inspectors) ended in a post-error, which appended a NEW
+  // post-error record and therefore emitted ANOTHER directive toward the QH → a
+  // RATE-BOUNDED DRIP (NOT an unbounded loop: the post-error emit is gated on a
+  // NEW `appendPostErrorDeduped` record, delivery.ts:2313/2321, deduped by
+  // (postId, class)).
+  // ONE PREDICATE (hard condition, fb-635: two predicates diverge): the SAME
+  // `workerPoolerDispatchBlockError` closure the three dispatch seams already
+  // consume (spawn.ts:538-560 → the imported `resolvePoolerDispatchBlock`,
+  // spawn.ts:549; passed to this factory at invoke.ts:3927, the SAME instance the
+  // tools factory gets at invoke.ts:3676 and the resume seam uses at
+  // delivery.ts:1451). NO second reader, NO duplicated predicate, NO new import.
+  // THE CONTAINMENT IS THE GATE, NEVER THE DEDUPE (acceptance e, family fb-712):
+  // the recording dedupe above stays byte-identically untouched — what stops the
+  // drip is the SUSTAINED-BLOCK verdict suppressing the WAKE.
+  /** A sustained halt needs MORE THAN ONE blocked reading: an ISOLATED no-ok
+   * never contains anything (fb-707 — a single no-ok is a 30 s peer-channel
+   * cooldown, not a verdict). Two arms, both requiring ≥2 CONSECUTIVE blocked
+   * readings with NO clear reading in between:
+   *   - SPREAD: the 1st and the 2nd blocked readings are ≥ `WINDOW` apart (the
+   *     HALT has HELD across the window — the containment of a sparse drip,
+   *     whose directives are spaced by the recording dedupe window);
+   *   - FAST: `FAST` consecutive blocked readings however close together (three
+   *     INDEPENDENT reads of the pooler snapshot, all blocked — the containment
+   *     when the drip is dense; also the arm a hermetic test can drive without a
+   *     wall-clock wait).
+   * DECLARED DECISION (no config knob): the thresholds are frozen constants in
+   * this factory — adding a `health.*` knob would widen the deps surface
+   * (DeliveryFactoryDeps carries no `config`, unlike SpawnFactoryDeps.config at
+   * spawn.ts:148) and that is a scope decision for the host, not for this lane. */
+  const CAPACITY_GATE_SUSTAINED_MIN_OBSERVATIONS = 2
+  const CAPACITY_GATE_SUSTAINED_WINDOW_MS = 120_000
+  const CAPACITY_GATE_SUSTAINED_FAST_OBSERVATIONS = 3
+  /** The CONSECUTIVE-blocked ledger of THIS apply (never module-global — AGENTS.md
+   * rule 4): `sinceMs` = the instant of the FIRST blocked reading of the current
+   * streak, `consecutive` = how many blocked readings it holds. A CLEAR reading
+   * resets both (the pool recovered: the next halt starts a fresh streak). */
+  const capacityGateStreak: { sinceMs?: number; consecutive: number } = { consecutive: 0 }
+  /** fb-696 — read the gate verdict ONCE per emit through the EXISTING reader and
+   * fold the streak. NEVER THROWS: a reader throw degrades to `clear` (the
+   * pre-fix behavior — the emitter's NONTHROW contract is untouched). */
+  const capacityGateVerdict = (nowMs: number): { blocked: boolean; reason?: string; instant: string; sustained: boolean } => {
+    let reason: string | undefined
+    try {
+      reason = workerPoolerDispatchBlockError()
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] quality-inspect capacity-gate read failed (the directive proceeds as if CLEAR — the pre-fix path): ${error instanceof Error ? error.message : String(error)}`)
+      reason = undefined
+    }
+    const blocked = reason !== undefined
+    if (!blocked) {
+      capacityGateStreak.sinceMs = undefined
+      capacityGateStreak.consecutive = 0
+    } else {
+      capacityGateStreak.consecutive += 1
+      capacityGateStreak.sinceMs ??= nowMs
+    }
+    const sinceMs = capacityGateStreak.sinceMs
+    const spread = blocked && capacityGateStreak.consecutive >= CAPACITY_GATE_SUSTAINED_MIN_OBSERVATIONS && sinceMs !== undefined && nowMs - sinceMs >= CAPACITY_GATE_SUSTAINED_WINDOW_MS
+    const fast = blocked && capacityGateStreak.consecutive >= CAPACITY_GATE_SUSTAINED_FAST_OBSERVATIONS
+    return {
+      blocked,
+      ...(reason !== undefined ? { reason } : {}),
+      instant: new Date(nowMs).toISOString(),
+      sustained: spread || fast
+    }
+  }
+  /** fb-696 — the ADDITIVE tail the directive carries (acceptance a: the VERDICT
+   * + ITS INSTANT). APPENDED, never prepended: the qi-silence watchdog counts the
+   * directive by `text.startsWith(QUALITY_INSPECT_WORKER_RETIRED_PREFIX)`
+   * (dshd-health readQiDirectiveCount, index.ts:4664-4669) and the rotation
+   * families are asserted by prefix (R6) — a prefix would break BOTH. */
+  const capacityGateStanza = (verdict: { blocked: boolean; reason?: string; instant: string; sustained: boolean }): string => {
+    const head = verdict.blocked
+      ? `BLOCKED — ${verdict.reason ?? 'pool gate blocked the dispatch'}`
+      : 'clear (the pool gate does NOT block a dispatch)'
+    const sustained = verdict.sustained
+      ? '; SUSTAINED — the pool gate blocks EVERY dispatch, so do NOT deploy inspectors now: inspect IN-HEAD at your next real wake (this directive is DURABLE but was NOT woken — it drains at your next real wake)'
+      : ''
+    return ` (capacity-gate verdict: ${head}${sustained} @ ${verdict.instant})`
+  }
+
   const maybeEmitQualityInspectDirective = async (surface: QualityInspectDirectiveSurface): Promise<void> => {
     // MICRO-LANE O2 (deliveries-emitter-row, 2026-09-06): the delivery-sidecar
     // row the directive path writes needs the record id in BOTH the success
@@ -2487,7 +2576,13 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
           // WITHOUT the appendix (R6), never with a fabricated verdict.
         }
       }
-      const text = qualityInspectDirectiveText(surfaceToFrame)
+      // fb-696 (acceptance a): THE GATE VERDICT + ITS INSTANT. Read HERE — after
+      // the two early returns above (a dropped directive never advances the
+      // streak) and BEFORE the frame, so the emitted directive states the gate at
+      // THE INSTANT OF EMIT. Read through the EXISTING reader (see the header
+      // note above): NO second predicate.
+      const gateVerdict = capacityGateVerdict(Date.now())
+      const text = `${qualityInspectDirectiveText(surfaceToFrame)}${capacityGateStanza(gateVerdict)}`
       // fb-118 re-derivation (wave-b, main @ a641964): the O2 MICRO-LANE
       // (ea48a67) hoisted the directive append into the OUTER `record` declared
       // above (line 1802) — the verify-cite block assigns to it instead of
@@ -2502,6 +2597,24 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       // the OLD host session); when absent the argument stays `void 0` — NEVER a
       // present `undefined` key (the W7-B class, jsonSafeMessageSource :1659-1669).
       const fromSessionId = (surface as { fromSessionId?: string }).fromSessionId
+      // fb-696 (acceptance b) — THE CONTAINMENT, AND IT IS THE GATE (acceptance e):
+      // under a SUSTAINED halt the directive is NOT woken. The direction `the
+      // Asistente's wait contract» learns from the QH report: do NOT wake for what
+      // cannot be paid. The record IS durable (appended above) and the pair is
+      // marked 'prepared' + noWake:true — EXACTLY the WIRED noWake queue semantics
+      // (dshd-core delivery.ts:910-940): the content is persisted, nothing is
+      // materialized, and it DRAINS at the quality-head's next REAL wake (the
+      // FB-132 drain; the m-2415 no-wake-head discriminator keeps a later
+      // ALWAYS-WAKE ungated behind this row). NO dedupe involvement whatsoever:
+      // `appendPostErrorDeduped` and its (postId, class) window are untouched —
+      // the drip stops because the WAKE stops, not because the counter hides it.
+      // NOTHING is subtracted: the dice, the two early returns, the record, the
+      // frame and every non-sustained path are byte-identical.
+      if (gateVerdict.sustained) {
+        await markDelivery(stateDir, record.id, 'quality-head', 'prepared', undefined, true)
+        ctx.logger.warn(`[deepartments] quality-inspect directive to "quality-head" DEFERRED (gate SUSTAINED: ${gateVerdict.reason ?? 'pool blocked'} @ ${gateVerdict.instant}) — record ${record.id} is durable, NO wake (the head keeps its real turn for work that can be paid); it drains at the next REAL wake`)
+        return
+      }
       await busDeliverToPost(qualityHead, `[From deepartments → quality-head]: ${text}`, record, fromSessionId === undefined ? void 0 : fromSessionId)
       // MICRO-LANE O2 (deliveries-emitter-row, 2026-09-06): the emitter
       // previously wrote NO delivery sidecar (0 deliveries.jsonl rows for the

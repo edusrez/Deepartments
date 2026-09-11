@@ -24547,3 +24547,450 @@ test('FEEDBACK-NUDGE (persona guide, 1c): the deepartments worker + head persona
     assert.ok(text.includes('proposing an improvement to the Quality Department with dept_feedback'), `${label} preset points to dept_feedback for reports / improvements`)
   }
 })
+
+// ===========================================================================
+// fb-696 (D-Q3, 2026-09-11) — LA DIRECTIVA DE QUALITY INSPECT CONSULTA EL GATE
+// DE CAPACIDAD: el frame lleva el VEREDICTO del gate Y SU INSTANTE, y un HALT
+// SOSTENIDO no fuerza un turno REAL del head.
+// ===========================================================================
+// LA CLASE MEDIDA (QH, .dsh/reports/quality/2026-09-11-dq3-rotacion-qh-*.md §5):
+// la directiva se emitia SIN mirar el gate de capacidad => con el pool en HALT
+// obligaba al head a un turno REAL; su cumplimiento normal (desplegar
+// inspectores) terminaba en post-error, que al APENDAR un registro NUEVO emitia
+// OTRA directiva => un GOTEO DE TASA ACOTADA (NO un bucle infinito: el disparo
+// esta bajo `if (appended)`, delivery.ts:2313/2321, y la deduplicacion es por
+// (postId, clase)).
+//
+// LO QUE ESTOS DOS TESTS FIJAN (aceptaciones de la mision):
+//   (a) el frame emitido lleva `(capacity-gate verdict: ... @ <ISO>)` — el
+//       veredicto Y SU INSTANTE, leidos en el instante del emit;
+//   (b) en HALT SOSTENIDO la directiva NO se despierta: el registro queda
+//       DURABLE + par 'prepared' con `noWake: true` (la semantica de cola
+//       no-wake-until-wake) => el head NO recibe el turno;
+//   (c) el goteo se rompe: la contencion es EL GATE, no el dedupe — el
+//       `appendPostErrorDeduped` no se toca ni se consulta en la decision;
+//   (d) NADA SUSTRACTIVO: el camino sano (pool claro) queda byte-identical —
+//       una fila `terminal`, entrega real, cero supresion;
+//   (e) el veredicto AISLADO no contiene (fb-707: un `no-ok` suelto es cooldown
+//       de 30 s de un canal peer) => la PRIMERA lectura bloqueada se entrega.
+//
+// El caso testigo real (por eso (a) no es precaucion teorica): 14:47:42Z,
+// `builder-303` recibio `503 KeyPoolerExhausted` al emitirsele trabajo SIN
+// consultar el gate y quemo un turno pagado con el pool CERRADO.
+
+/** HALT crudo (m-2333 / fb-630): EXACTAMENTE UNA key usable, con weekly
+ * consumido 82% => 18% disponible < 20 => HALT. Las otras dos van bloqueadas
+ * MUY por delante del reloj REAL (un `blockedUntil` en el pasado NO bloquea:
+ * la key volveria a contar como usable y con 3 usables no hay HALT), asi que
+ * `eligibleKeys === 1`. */
+const fb696HaltKeys = () => {
+  const blockedUntil = Date.now() + 86_400_000
+  return {
+    'oc-6': {
+      id: 'oc-6',
+      workspace: 'ws6',
+      invalid: false,
+      blockedUntil: 0,
+      cooldownUntil: 0,
+      usageWeekly: { status: 'ok', percent: 82 },
+      usageMonthly: { status: 'ok', percent: 83 }
+    },
+    'oc-13': { id: 'oc-13', workspace: 'ws13', invalid: false, blockedUntil, cooldownUntil: 0 },
+    'oc-14': { id: 'oc-14', workspace: 'ws14', invalid: false, blockedUntil, cooldownUntil: 0 }
+  }
+}
+
+/** Pool SANO: la MISMA unica key usable pero con 10%/20% consumido => 90%/80%
+ * disponible => el gate NO bloquea (cero avisos outside HALT). */
+const fb696HealthyKeys = () => {
+  const keys = fb696HaltKeys()
+  keys['oc-6'].usageWeekly = { status: 'ok', percent: 10 }
+  keys['oc-6'].usageMonthly = { status: 'ok', percent: 20 }
+  return keys
+}
+
+/** Las filas del sidecar de UNA directiva (par messageId -> quality-head). */
+async function fb696RowsFor(stateDir, messageId) {
+  try {
+    const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+    return rows.filter((r) => r.messageId === messageId && r.recipientId === 'quality-head')
+  } catch (error) {
+    if (error?.code === 'ENOENT') return []
+    throw error
+  }
+}
+
+/** Rota el head de research y devuelve la ULTIMA directiva `head rotated`
+ * (100% mandate — sin dado) + sus filas de entrega. */
+async function fb696Rotate(env, stateDir, host, signal, reason) {
+  await env.root.tools.get('dept_head_rotate').execute({ postId: 'research-head', reason }, { agent: host, signal })
+  const dirs = (await qualityDirectives(stateDir)).filter((d) => /head rotated/.test(d.text))
+  const directive = dirs.at(-1)
+  assert.ok(directive, `the head-rotated directive was emitted (${reason})`)
+  return { directive, rows: await fb696RowsFor(stateDir, directive.id) }
+}
+
+test('fb-696 (a/b/c/d/e) — el frame lleva el VEREDICTO del gate + SU INSTANTE; la primera lectura bloqueada SI se entrega (un no-ok aislado no contiene, fb-707) y a partir del HALT SOSTENIDO la directiva NO se despierta (registro durable + par prepared/noWake:true, CERO intento de entrega) — y un pool que se recupera VUELVE a entregar (el veredicto se relee por emit)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const poolerPath = path.join(stateDir, POOLER_STATE_FILE)
+    await writePoolerFixture(stateDir, fb696HaltKeys())
+    const env = await bootWithQD(stateDir, { health: { poolerStateFilePath: poolerPath, poolerDispatchEnabled: true } })
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      await seedJournal(stateDir, 'research-head', 'FB-696 capacity-gate memory')
+      const t0 = Date.now()
+
+      // (1) LA PRIMERA lectura bloqueada — un `no-ok` AISLADO: NO contiene
+      // (fb-707). La directiva se entrega como siempre (fila `terminal`, que es
+      // como el emisor marca TODO intento de entrega — O2) y su frame declara el
+      // veredicto SIN proclamar sostenibilidad.
+      const r1 = await fb696Rotate(env, stateDir, host, signal, 'fb-696 r1 (primer bloqueo)')
+      assert.ok(r1.directive.text.startsWith('Quality inspect: head rotated (post research-head'), `R6 — el frame legacy sigue siendo PREFIJO byte-identical: ${r1.directive.text}`)
+      assert.match(r1.directive.text, /\(capacity-gate verdict: BLOCKED — pool: HALT — 1 usable key oc-6 \(weekly available 18% < 20%\)/, `(a) el frame lleva el veredicto REAL del gate (el MISMO predicado que el despacho) — got: ${r1.directive.text}`)
+      assert.match(r1.directive.text, / @ \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\)$/, `(a) el frame lleva SU INSTANTE en ISO — got: ${r1.directive.text}`)
+      const instant = Date.parse(/@ (\S+?)\)$/.exec(r1.directive.text)[1])
+      assert.ok(Number.isFinite(instant) && instant >= t0 - 5000 && instant <= Date.now() + 5000, `(a) el instante es el del EMIT (dentro de la ventana del test) — got: ${new Date(instant).toISOString()}`)
+      assert.ok(!/SUSTAINED/.test(r1.directive.text), '(e) un bloqueo AISLADO no se proclama sostenido — no se contiene nada (fb-707)')
+      assert.equal(r1.rows.filter((r) => r.status === 'prepared').length, 0, '(e) la primera lectura bloqueada SI se intento entregar: CERO filas `prepared`')
+      assert.equal(r1.rows.filter((r) => r.status === 'terminal').length, 1, '(e) y su fila es UNA `terminal` (el comportamiento del emisor, O2 — sin cambios)')
+
+      // (2) HALT SOSTENIDO: rotaciones sucesivas. A partir del punto en que la
+      // racha se sostiene, cada directiva queda DURABLE pero NO se despierta.
+      const runs = [r1]
+      for (const label of ['r2', 'r3', 'r4']) runs.push(await fb696Rotate(env, stateDir, host, signal, `fb-696 ${label} (HALT sostenido)`))
+      const suppressed = runs.filter((r) => r.rows.some((x) => x.status === 'prepared'))
+      assert.ok(suppressed.length >= 2, `(b) en HALT SOSTENIDO las directivas dejan de despertar al head — suprimidas: ${suppressed.length}/${runs.length}`)
+      for (const run of suppressed) {
+        // (b) EL PAR NO-WAKE: durable + 'prepared' + noWake:true = la semantica
+        // de cola (NO se materializa; drena en el proximo wake REAL).
+        const prepared = run.rows.filter((r) => r.status === 'prepared')
+        assert.equal(prepared.length, 1, `(b) EXACTAMENTE UNA fila 'prepared' para la directiva diferida — got: ${JSON.stringify(run.rows)}`)
+        assert.equal(prepared[0].noWake, true, '(b) la fila lleva el intento NO-WAKE (la cola drena al proximo wake real, no se materializa)')
+        assert.equal(run.rows.filter((r) => r.status === 'terminal' || r.status === 'failed').length, 0, '(b) CERO `terminal`/`failed`: la entrega NI SE INTENTO (no hay un intento fallido que vuelva a llenar post-errors)')
+        // (a) el veredicto sostenido viaja en el TEXTO del registro durable.
+        assert.match(run.directive.text, /; SUSTAINED — the pool gate blocks EVERY dispatch, so do NOT deploy inspectors now: inspect IN-HEAD at your next real wake/, `(a/b) el registro durable dice «inspecciona EN CABEZA» — got: ${run.directive.text}`)
+      }
+
+      // (c/d) LA CONTENCION ES EL GATE, NO EL DEDUPE: el driver son ROTACIONES
+      // (registros NUEVOS; `appendPostErrorDeduped` no interviene aqui ni se ha
+      // tocado). La prueba de que no es el dedupe: la primera rotacion bloqueada
+      // SI se entrego aunque su emision no paso por ningun dedupe, y las
+      // posteriores se contienen por la RACHA del gate.
+      assert.equal(runs[0].rows.filter((r) => r.status === 'terminal').length, 1, '(c) la contencion no puede venir del dedupe: r1 se entrego (registro nuevo, sin dedupe) y solo se contiene cuando el GATE se sostiene')
+      assert.ok(suppressed.every((r) => runs.indexOf(r) > 0), '(c) la supresion empieza en la racha, nunca en la primera lectura')
+
+      // (e) DISCRIMINADOR DECISIVO GATE-vs-DEDUPE (lo pidio el IPH, y con razon:
+      // un test que pasa PORQUE el dedupe oculta el goteo no prueba (e), prueba
+      // el dedupe). Aqui se mide lo CONTRARIO de lo que haria un dedupe: los
+      // REGISTROS SIGUEN NACIENTES uno por rotacion, ninguno deduplicado,
+      // MIENTRAS la entrega se detiene. Si la contencion fuese el dedupe, la
+      // senal cesaria; cesa la ENTREGA, no el registro — y con la senal intacta,
+      // un inspector puede reconstruir la cadena a posteriori (fb-712: el dedupe
+      // DESTRUYE los contadores; el gate NO).
+      const allDirs = (await qualityDirectives(stateDir)).filter((d) => /head rotated/.test(d.text))
+      assert.equal(allDirs.length, runs.length, `(e) UN registro NUEVO por CADA rotacion (n=${runs.length}): los registros NO se deduplican — lo contenido es la ENTREGA, nunca la senal`)
+      assert.equal(new Set(allDirs.map((d) => d.id)).size, runs.length, '(e) cada directiva tiene un id DISTINTO (son emisiones reales, no re-escrituras de un mismo registro)')
+      assert.ok(allDirs.every((d) => /capacity-gate verdict:/.test(d.text)), '(e/a) TODOS los registros conservan el veredicto + su instante (la senal se conserva INTACTA mientras se contiene la entrega)')
+      assert.ok(allDirs.some((d) => /; SUSTAINED —/.test(d.text)), '(e) el veredicto SOSTENIDO queda ESCRITO en el registro durable, no solo en el log: la contencion es auditable a posteriori')
+
+      // PRUEBA DE EFECTO (fb-696): con FB696_PROBE=1 se vuelca lo que REALMENTE
+      // se emitio (texto de la directiva + filas del sidecar), no la existencia
+      // de un simbolo. Sin la env var: cero salida (no estorba).
+      if (process.env.FB696_PROBE === '1') {
+        for (const [i, run] of runs.entries()) {
+          const rows = run.rows.map((r) => `${r.status}${r.noWake === true ? '/noWake' : ''}`).join(',') || '(no rows)'
+          console.log(`[FB696-PROBE] emit#${i + 1} rows=[${rows}] text=${run.directive.text}`)
+        }
+        console.log(`[FB696-PROBE] registros durables totales=${allDirs.length} ids distintos=${new Set(allDirs.map((d) => d.id)).size} (NINGUNO deduplicado)`)
+      }
+
+      // (d) RECUPERACION: el veredicto se RELEE por emit y una lectura CLARA
+      // resetea la racha => se vuelve a entregar (nada quedo pegado).
+      await writePoolerFixture(stateDir, fb696HealthyKeys())
+      const r5 = await fb696Rotate(env, stateDir, host, signal, 'fb-696 r5 (pool recuperado)')
+      assert.match(r5.directive.text, /\(capacity-gate verdict: clear \(the pool gate does NOT block a dispatch\) @ /, `(a/d) tras la recuperacion el veredicto es CLARO — got: ${r5.directive.text}`)
+      assert.ok(!/SUSTAINED/.test(r5.directive.text), '(d) la racha se resetea con una lectura clara — no queda un «sostenido» pegado')
+      assert.equal(r5.rows.filter((r) => r.status === 'terminal').length, 1, '(d) y la entrega vuelve a ocurrir (fila `terminal`)')
+      assert.equal(r5.rows.filter((r) => r.status === 'prepared').length, 0, '(d) sin rastro de supresion en el camino recuperado')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('fb-696 (d) ZERO REGRESSION — con el pool CLARO la directiva se entrega SIEMPRE (cuatro rotaciones seguidas): una terminal por directiva, CERO prepared, el frame declara clear y NUNCA proclama sostenido', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const poolerPath = path.join(stateDir, POOLER_STATE_FILE)
+    await writePoolerFixture(stateDir, fb696HealthyKeys())
+    const env = await bootWithQD(stateDir, { health: { poolerStateFilePath: poolerPath, poolerDispatchEnabled: true } })
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      await seedJournal(stateDir, 'research-head', 'FB-696 zero-regression memory')
+      for (const label of ['r1', 'r2', 'r3', 'r4']) {
+        const run = await fb696Rotate(env, stateDir, host, signal, `fb-696 clear ${label}`)
+        assert.match(run.directive.text, /\(capacity-gate verdict: clear \(the pool gate does NOT block a dispatch\) @ \d{4}-\d{2}-\d{2}T/, `(a/d) el veredicto claro viaja en la directiva (${label}) — got: ${run.directive.text}`)
+        assert.ok(!/SUSTAINED/.test(run.directive.text), `(d) un pool sano NUNCA proclama sostenido (${label})`)
+        assert.equal(run.rows.filter((r) => r.status === 'terminal').length, 1, `(d) la directiva se entrega (UNA fila terminal) — ${label}`)
+        assert.equal(run.rows.filter((r) => r.status === 'prepared').length, 0, `(d) CERO supresion con el pool claro — ${label}`)
+      }
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// LANE DEL SELLO — `datumTs` (2026-09-11): the reason seal becomes
+// RE-VERIFIABLE AFTER THE FACT.
+// ---------------------------------------------------------------------------
+// THE MEASURED FAILURE these tests close (bus, 2026-09-11): the host rotated
+// citing «cifra del frame 270210 medida al instante 14:37:01Z contra proyección
+// durable 272006 (deriva 0,66 %)» and the seal stamped `verified`; MINUTES LATER
+// the QH re-read the SAME instrument over the SAME session and the mirror
+// answered 279485 — the inspector reproduced the VERDICT, never the CITED FIGURE
+// («reproduzco el veredicto, no la cifra exacta declarada»). ROOT CAUSE: the
+// mirror row is `{ver, seq, val}` — NO datum timestamp — so the number is
+// UNDATED and mutates in place while the session runs. A cited figure without
+// its instant is not re-verifiable by ANYONE, not even by its emitter.
+// The fix (ADDITIVE, zero behavior change) seals the DATUM with the figure: the
+// RUTA of the mirror, R, `datumTs` (the read instant), the row's write counter
+// (the drift discriminator) and the stamp. A THIRD PARTY holding the citation
+// re-verifies it after the session moved on.
+test('LANE SELLO (a)+(b): a rotation seal PRINTS the RUTA + the reference R and PERSISTS a dated datum row (`datumTs`) in the ledger derived from that RUTA — and a THIRD PARTY, re-reading the mirror AFTER the session drifted (272006 → 279485, the QH case), re-verifies the CITED FIGURE from the seal alone (today it cannot: the live mirror now answers a DIFFERENT number)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const postId = 'research-head'
+    const oldSessionId = 'head-research-head'
+    // The host's REAL case (272006 at emit / 279485 at the QH's re-read).
+    const R_AT_EMIT = 272_006
+    const R_AT_RE_READ = 279_485
+    const CITED = 270_210
+    await seedJournal(stateDir, postId, 'ROTATE-SEED: datum seal test.')
+    await seedProjCache(stateDir, { [oldSessionId]: R_AT_EMIT })
+    const mirrorPath = resolveSessionProjCachePath(stateDir, path.join(stateDir, 'sessions'))
+    const ledgerPath = `${mirrorPath}.seals.jsonl`
+    const env = await bootWithQD(stateDir, { persistenceRoot: path.join(stateDir, 'sessions') })
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      const logged = []
+      const disposeExporter = env.root.logger.exporter({ levels: { default: 4 }, export: (message) => { logged.push(message) } })
+      const readSealRows = async () => (await readFile(ledgerPath, 'utf8')).trim().split('\n').map((line) => JSON.parse(line))
+      /** The THIRD PARTY's independent mirror read: the documented reference
+       * formula re-implemented OUTSIDE the code under test (a re-verifier does
+       * not get to call the instrument's private helpers). */
+      const liveReferenceOf = async (sessionId) => {
+        const parsed = JSON.parse(await readFile(mirrorPath, 'utf8'))
+        const rows = parsed.tables.sessions[sessionId].rows
+        const cp = rows.contextPressure.val
+        return Math.max(0, cp.pressureTokens + cp.surfaceTokens - cp.sampledSurfaceTokens)
+      }
+      // (a) BEFORE the fix this citation was the ONLY artifact: a reason with a
+      // figure whose reference the emitter alone could see. The rotation (the
+      // REAL tool, the REAL sealed dep) commits as always.
+      const t0 = Date.now()
+      const r1 = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: `context-threshold 51% — la cifra del frame fue ${CITED} medida al instante 14:37:01Z contra la proyeccion durable (deriva 0,66%)` }, { agent: host, signal })
+      const t1 = Date.now()
+      disposeExporter()
+      // ZERO behavior change: the verdict is the pre-fix arithmetic
+      // (|270210 − 272006| / 272006 = 0.00665 ≤ REASON_VERIFY_TOLERANCE).
+      assert.equal(r1.reasonVerified, 'verified', 'the verdict is UNCHANGED by the seal (the wrapper returns the helper\'s own stamp)')
+      assert.ok(Math.abs(CITED - R_AT_EMIT) / R_AT_EMIT <= REASON_VERIFY_TOLERANCE, 'the fixture is inside the untouched threshold')
+      // (a) it PRINTS the RUTA + the reference R (what could not be cited today).
+      const sealLine = logged.map((m) => String(m?.args?.[0] ?? '')).find((text) => text.includes('reason seal — RUTA'))
+      assert.ok(sealLine !== undefined, 'the seal PRINTS a line carrying the RUTA (acceptance a)')
+      assert.match(sealLine, new RegExp(`RUTA ${mirrorPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'the printed line names the exact mirror RUTA')
+      assert.match(sealLine, new RegExp(`R ${R_AT_EMIT}`), 'the printed line names the reference R the instrument compared against')
+      assert.match(sealLine, /datumTs \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/, 'the printed line names the DATUM INSTANT')
+      // OPT-IN literal dump (LANE_SELLO_DUMP=1): the exact line the seal PRINTED
+      // and the exact third-party re-verification message — the evidence of the
+      // EFFECT (never of a field name's mere presence) for a report/third party.
+      if (process.env.LANE_SELLO_DUMP === '1') {
+        console.log(`[LANE-SELLO DUMP] printed: ${sealLine}\n[LANE-SELLO DUMP] the live mirror now answers ${R_AT_RE_READ} (it answered ${R_AT_EMIT} at the seal) ⇒ the cited figure is UNRECOVERABLE from the mirror; from the SEALED row: cited ${CITED} vs sealed R ${R_AT_EMIT} ⇒ ratio ${(Math.abs(CITED - R_AT_EMIT) / R_AT_EMIT).toFixed(5)} <= tolerance ${REASON_VERIFY_TOLERANCE} ⇒ THE CITATION SURVIVES RE-VERIFICATION`)
+      }
+      // (b) the row is DURABLE at the path DERIVED from the cited RUTA.
+      const rows1 = await readSealRows()
+      assert.equal(rows1.length, 1, 'exactly ONE sealed datum row for ONE rotation')
+      const seal = rows1[0]
+      assert.equal(seal.path, mirrorPath, '(b) the row carries the RUTA of the mirror the datum came from')
+      assert.equal(seal.sessionId, oldSessionId)
+      assert.equal(seal.reference, R_AT_EMIT, '(b) the row carries R — the datum the instrument compared the figure against')
+      assert.equal(seal.citedFigure, CITED, 'the row carries the figure EXTRACTED from the reason (the instrument\'s own extractor)')
+      assert.equal(seal.stamp, 'verified', 'the row carries the verdict returned at datumTs')
+      assert.equal(seal.datumTsIso, new Date(seal.datumTs).toISOString(), 'datumTs is a real instant (epoch ms + its ISO form agree)')
+      assert.ok(seal.datumTs >= t0 && seal.datumTs <= t1, '(b) datumTs lies INSIDE the rotation window (it is the READ instant, not a fabricated one)')
+      assert.equal(typeof seal.rowSeq, 'number', 'the row records the mirror row\'s write counter (drift discriminator)')
+      assert.equal(typeof seal.mirrorMtimeMs, 'number', 'the row records the mirror file mtime (a corroborating bound)')
+      assert.match(seal.referenceBasis, /projectedUsageForSession/, 'the row states the reference FORMULA, so the re-verifier recomputes R the same way')
+      // ---- THE DRIFT: the session keeps running (the QH's later read) --------
+      const driftedSeq = seal.rowSeq + 1
+      await writeFile(mirrorPath, JSON.stringify({
+        unit: { name: 'session_projcache', version: 3 },
+        global: null,
+        tables: {
+          sessions: {
+            [oldSessionId]: {
+              identity: { createdAt: Date.now() },
+              rows: {
+                sessionStats: { ver: 1, seq: driftedSeq, val: { turns: 15, steps: 70, lastTurn: 15, openStep: null } },
+                tokenUsage: { ver: 1, seq: driftedSeq, val: { last: { turn: 15, step: 1, buckets: { cacheReadTokens: R_AT_RE_READ, uncachedInputTokens: 0, outputTokens: 0, cacheWriteTokens: 0 } } } },
+                contextPressure: { ver: 4, seq: driftedSeq, val: { surfaceTokens: Math.round(R_AT_RE_READ * 0.6), contextWindow: 1048576, pressureTokens: R_AT_RE_READ - Math.round(R_AT_RE_READ * 0.6) + Math.round(R_AT_RE_READ * 0.5), sampledSurfaceTokens: Math.round(R_AT_RE_READ * 0.5) } }
+              }
+            }
+          }
+        }
+      }), 'utf8')
+      const liveNow = await liveReferenceOf(oldSessionId)
+      assert.equal(liveNow, R_AT_RE_READ, 'the mirror MOVED (272006 → 279485) — the exact QH case: a later read answers a DIFFERENT reference')
+      assert.notEqual(liveNow, seal.reference, 'TODAY\'S FAILURE, MEASURED: the live mirror no longer answers the cited reference, so the cited FIGURE is unrecoverable from the mirror alone')
+      // ---- A THIRD PARTY re-verifies the CITED FIGURE from the seal ----------
+      const sealedRatio = Math.abs(seal.citedFigure - seal.reference) / seal.reference
+      assert.ok(sealedRatio <= REASON_VERIFY_TOLERANCE, `THE SUCCESS CRITERION: a third party holding the citation re-verifies the CITED FIGURE (${seal.citedFigure} vs the SEALED R ${seal.reference} @ ${seal.datumTsIso}, ratio ${sealedRatio.toFixed(5)} ≤ ${REASON_VERIFY_TOLERANCE}) AFTER the session drifted to ${liveNow}`)
+      assert.ok(Math.abs(seal.citedFigure - liveNow) / liveNow <= REASON_VERIFY_TOLERANCE, 'the verdict still reproduces against the drifted mirror (279485) — which is WHY the pre-fix instrument could reproduce the verdict and never the figure')
+      assert.ok(seal.reference !== liveNow, 'the seal is what makes the two instants DISTINGUISHABLE (the drift is now provable, not invisible)')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('LANE SELLO (b) — the delivery-side dep seals the HOST-rotation datum END-TO-END: a REAL host rotation (`dept_sleep` host plane → the `host rotated` emitter, fb-473) writes the dated row, and the emitted directive reproduces the SAME verdict as the sealed operands (content asserted, never the mere presence of a field name)', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const env = await bootWithQD(stateDir, { persistenceRoot: path.join(stateDir, 'sessions') })
+    try {
+      const sleepTool = env.root.tools.get('dept_sleep')
+      const signal = new AbortController().signal
+      const host = env.agents.put(fakeParentAgent())
+      const oldHostId = `host-${host.id}`
+      await seedJournal(stateDir, oldHostId, 'FB-473-STAMP-MEMORY')
+      // R = 272006 — the host's OWN case (the datum the emitter compared against).
+      await seedProjCache(stateDir, { [String(host.id)]: 272_006 })
+      const mirrorPath = resolveSessionProjCachePath(stateDir, path.join(stateDir, 'sessions'))
+      const CITED = 270_210
+      host.session = Session.create(SessionId(String(host.id)))
+      const t0 = Date.now()
+      await sleepTool.execute({ reason: `context-threshold — la cifra del frame fue ${CITED} medida al instante 14:37:01Z` }, { agent: host, signal, concludeTurn: () => {} })
+      const t1 = Date.now()
+      // The EMITTED directive (the artifact the QH reads) still carries the
+      // verdict computed by the delivery-side dep — unchanged by the seal.
+      const records = await qualityDirectives(stateDir)
+      const frame = records.filter((d) => d.text.startsWith('Quality inspect: host rotated')).at(-1)?.text ?? ''
+      assert.match(frame, /\[reason verified\]/, `the host-rotated frame carries the unchanged verdict — got: ${frame}`)
+      // The SEALED datum row that same emit wrote (content, not symbol presence).
+      const rows = (await readFile(`${mirrorPath}.seals.jsonl`, 'utf8')).trim().split('\n').map((line) => JSON.parse(line))
+      assert.equal(rows.length, 1, 'the host-rotation emit sealed EXACTLY ONE datum row (the delivery-side dep is wrapped too)')
+      const seal = rows[0]
+      assert.equal(seal.path, mirrorPath, 'the sealed row names the RUTA the emitter read')
+      assert.equal(seal.sessionId, String(host.id))
+      assert.equal(seal.reference, 272_006, 'the sealed row carries the emitter-instant R (272006)')
+      assert.equal(seal.citedFigure, CITED, 'the sealed row carries the cited figure (270210)')
+      assert.equal(seal.branch, 'figure', 'the sealed row says WHICH instrument ran (the token branch)')
+      assert.equal(seal.completionReserveSource, 'absent', 'the host call-site passes no reserve to this branch — recorded, so the cause is attributable')
+      assert.equal(seal.reserveInertForFigureBranch, true, 'the sealed row states the reserve is INERT on the figure branch (fb-426 B)')
+      assert.ok(seal.datumTs >= t0 && seal.datumTs <= t1, 'datumTs is the emit-instant read, inside the emit window')
+      // A THIRD PARTY re-verifies the CITED FIGURE from the seal alone.
+      const ratio = Math.abs(seal.citedFigure - seal.reference) / seal.reference
+      assert.ok(ratio <= seal.tolerance, `a third party re-verifies the cited figure from the seal (${seal.citedFigure} vs sealed R ${seal.reference} @ ${seal.datumTsIso}: ${ratio.toFixed(5)} ≤ ${seal.tolerance})`)
+      assert.equal(seal.stamp, 'verified', 'the sealed stamp agrees with the frame the QH reads')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('LANE SELLO (b) BRANCH DISCRIMINATOR — the SAME label `unverified` comes from TWO instruments with DIFFERENT causes: the sealed row says WHICH branch ran and WITH WHICH operands, so a re-verifier distinguishes «the figure missed R» from «the pct missed the fraction because the reserve never reached the row» (the QH case: ratio 0,5527 without reserve → `unverified`; 0,0572 with reserve 262144 → `verified`)', async () => {
+  const postId = 'research-head'
+  const sessionId = 'head-research-head'
+  const pctReason = 'context-threshold: la sesión estaba al 51% de contexto'
+  // R = 318000 over a 1048576 window (the fb-25 D2 fixture shape): the plain
+  // fraction is 30,32%, the fraction WITH the monitor reserve (262144) is 55,33%.
+  const ROW = 318_000
+  const readSeals = async (mirrorPath) => (await readFile(`${mirrorPath}.seals.jsonl`, 'utf8')).trim().split('\n').map((line) => JSON.parse(line))
+  // ---- BOOT A: NO `health.contextCompletionReserve` knob on the row the
+  // call-sites read (the MEASURED production state the QD reported: the
+  // calibration lives on the dshd-health row) --------------------------------
+  await withTempStateDir(async (stateDir) => {
+    await seedJournal(stateDir, postId, 'ROTATE-SEED: branch discriminator.')
+    await seedProjCache(stateDir, { [sessionId]: ROW })
+    const mirrorPath = resolveSessionProjCachePath(stateDir, path.join(stateDir, 'sessions'))
+    const env = await bootWithQD(stateDir, { persistenceRoot: path.join(stateDir, 'sessions') })
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      // (i) THE FIGURE BRANCH — a token figure far from R.
+      const figRotate = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: 'muro de contexto: ~789k tokens de input' }, { agent: host, signal })
+      assert.equal(figRotate.reasonVerified, 'unverified', 'the figure branch stamps unverified (the verdict is NOT changed by the seal)')
+      await seedProjCache(stateDir, { [figRotate.sessionId]: ROW })
+      // (ii) THE PCT BRANCH, reserve ABSENT — the SAME label, a DIFFERENT instrument.
+      const pctRotate = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: pctReason }, { agent: host, signal })
+      assert.equal(pctRotate.reasonVerified, 'unverified', 'the pct branch ALSO stamps unverified — the label alone never said which instrument said it (fb-591)')
+      const rows = await readSeals(mirrorPath)
+      assert.equal(rows.length, 2, 'TWO sealed rows: two seal computations at two instants')
+      const [fig, pctNoReserve] = rows
+      // THE DISCRIMINATOR: same label, different branch, different cause.
+      assert.equal(fig.stamp, 'unverified')
+      assert.equal(fig.branch, 'figure', '(b) the figure-branch row names ITS instrument')
+      assert.match(fig.cause, /^figure-outside-tolerance/, `(b) the cause names the figure family — got: ${fig.cause}`)
+      assert.equal(fig.reserveInertForFigureBranch, true, '(b) the reserve can never be blamed on this branch (fb-426 B: it returns first)')
+      assert.equal(fig.completionReserveSource, 'absent', '(b) …and the row records that no reserve was passed — attributable evidence')
+      assert.equal(pctNoReserve.stamp, 'unverified')
+      assert.equal(pctNoReserve.branch, 'pct', '(b) the pct-branch row names ITS instrument')
+      assert.match(pctNoReserve.cause, /^pct-outside-tolerance/, `(b) the cause names the pct family — got: ${pctNoReserve.cause}`)
+      assert.equal(pctNoReserve.completionReserveSource, 'absent', '(b) THE CAUSE IS ATTRIBUTABLE: the reserve never reached the row')
+      assert.notEqual(fig.cause, pctNoReserve.cause, '(b) two `unverified` labels, TWO causes — «which instrument, and why» is answerable from the sealed rows alone')
+      assert.notEqual(fig.branch, pctNoReserve.branch)
+      // The operands a re-verifier checks (arithmetic, not labels).
+      assert.ok(Math.abs(fig.executedRatio - Math.abs(789_000 - ROW) / ROW) < 1e-9, `the figure row seals the ratio it executed (${fig.executedRatio})`)
+      assert.ok(Math.abs(pctNoReserve.actualPct - (ROW / 1_048_576)) < 1e-9, `the pct row seals the REAL fraction it formed with NO reserve (${pctNoReserve.actualPct})`)
+      assert.ok(pctNoReserve.executedRatio > REASON_VERIFY_TOLERANCE, `…and the ratio that produced the negative (${pctNoReserve.executedRatio.toFixed(5)})`)
+      for (const row of rows) assert.equal(row.tolerance, REASON_VERIFY_TOLERANCE, '(c) every row records the FROZEN criterion it applied (0.15, never moved)')
+    } finally {
+      await env.dispose()
+    }
+  })
+  // ---- BOOT B: the SAME reason, the SAME mirror, the reserve PRESENT on the
+  // row the call-sites read (boot knob) — the label FLIPS, and the sealed row
+  // says why ------------------------------------------------------------------
+  await withTempStateDir(async (stateDir) => {
+    await seedJournal(stateDir, postId, 'ROTATE-SEED: branch discriminator (reserve present).')
+    await seedProjCache(stateDir, { [sessionId]: ROW })
+    const mirrorPath = resolveSessionProjCachePath(stateDir, path.join(stateDir, 'sessions'))
+    const env = await bootWithQD(stateDir, { persistenceRoot: path.join(stateDir, 'sessions'), health: { contextCompletionReserve: 262_144 } })
+    try {
+      const host = fakeParentAgent()
+      const signal = new AbortController().signal
+      const rotate = await env.root.tools.get('dept_head_rotate').execute({ postId, reason: pctReason }, { agent: host, signal })
+      assert.equal(rotate.reasonVerified, 'verified', 'with the reserve on the CONFIG the call-site reads, the SAME reason + mirror flips to verified (the pct branch is reserve-DECIDED)')
+      const [row] = await readSeals(mirrorPath)
+      assert.equal(row.branch, 'pct')
+      assert.equal(row.completionReserve, 262_144, '(b) the reserve that decided the verdict is sealed WITH it')
+      assert.equal(row.completionReserveSource, 'caller')
+      assert.match(row.cause, /^pct-within-tolerance/, `(b) the cause says the fraction WITH the reserve matched — got: ${row.cause}`)
+      assert.ok(Math.abs(row.actualPct - ((ROW + 262_144) / 1_048_576)) < 1e-9, `the row seals the monitor fraction (projected + reserve) / window = ${row.actualPct}`)
+      assert.ok(row.executedRatio <= REASON_VERIFY_TOLERANCE, `the sealed ratio reproduces the flip (${row.executedRatio.toFixed(5)} ≤ ${REASON_VERIFY_TOLERANCE})`)
+      assert.ok(row.executedRatio < 0.5527, 'the no-reserve ratio of the QH case (0.5527) is now traceable to the KNOB, not to the emitter')
+    } finally {
+      await env.dispose()
+    }
+  })
+})
+
+test('LANE SELLO (d) — DOCUMENTED TRAP (family fb-591): the token extractor takes the FIRST digit run ≥1000, so a DATE BEFORE THE FIGURE POISONS the reason (real model 2026-09-11 → «2026»): the REAL figure matches R within tolerance yet the seal stamps `unverified` — and on a SMALL session the very same date manufactures a SPURIOUS POSITIVE', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const mirrorPath = resolveSessionProjCachePath(stateDir, path.join(stateDir, 'sessions'))
+    // ONE seeding call for BOTH rows (the fixture rewrite is whole-file).
+    await seedProjCache(stateDir, { 'sess-dated': 279_485, 'sess-small': 2_032 })
+    // The poisoned reason: the DATE is the first run ≥1000 (the extractor never
+    // looks for the run next to a unit/token word, and never tries later runs).
+    const poisoned = '2026-09-11 — sesión rotada; la cifra del frame fue ~272k tokens'
+    assert.equal(verifyRotateReason(poisoned, 'sess-dated', mirrorPath), 'unverified', '(d) the extractor takes «2026» (a DATE FRAGMENT) ⇒ |2026 − 279485| / 279485 = 0.99275 > 0.15 ⇒ a SPURIOUS NEGATIVE, although the real figure ~272k is 0.02678 away')
+    // The SAME reason WITHOUT the date: the real figure verifies (proof the
+    // stamp above is an artifact of the date, not of the figure).
+    assert.equal(verifyRotateReason('sesión rotada; la cifra del frame fue ~272k tokens', 'sess-dated', mirrorPath), 'verified', '(d) the very same figure passes as soon as the date is gone ⇒ the date — not the figure — produced the verdict')
+    // (2) THE SPURIOUS POSITIVE (fb-591): a SMALL session whose R ≈ the date run.
+    assert.equal(verifyRotateReason(poisoned, 'sess-small', mirrorPath), 'verified', '(d) on R = 2032 the SAME date run gives |2026 − 2032| / 2032 = 0.00295 ≤ 0.15 ⇒ `verified` — a verdict about a DATE read as a corroboration of a token figure (the fb-591 trap)')
+    // A date AFTER the figure is harmless only because the figure is run #1.
+    assert.equal(verifyRotateReason('cifra del frame 272006 medida al instante 2026-09-11T14:37:01Z', 'sess-dated', mirrorPath), 'verified', '(d) the citation RULE the lane prescribes: the figure FIRST (272006 is run #1, ratio 0.02678 ≤ 0.15 → verified) — the date AFTER it is never read, so the citation stays TRUE')
+  })
+})

@@ -67,6 +67,13 @@ import { mkdir, readFile, writeFile, readdir, copyFile, stat, rename, unlink, ap
 // readFileSync keeps that contract; ENOENT = the department has no
 // architecture (omit the section, never an error).
 import { readFileSync, existsSync, realpathSync } from 'node:fs'
+// LANE DEL SELLO (datumTs, 2026-09-11) — the two ADDITIONAL sync primitives the
+// reason-datum seal needs: `appendFileSync` (the durable seal ledger row) and
+// `statSync` (the mirror file's mtime, a corroborating bound — never the datum
+// instant). ADDED as a SECOND import statement from the SAME module on purpose:
+// the lane's contract is an ADDITIONS-ONLY diff (a single `<` line = FAIL), so
+// the existing import line above stays byte-identical.
+import { appendFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -1122,6 +1129,36 @@ function isMessageIdPrefixed(reason: string, matchIndex: number): boolean {
   return !/[A-Za-z0-9_\-]/.test(reason[matchIndex - 3])
 }
 
+// ⚠️ (d) LANE DEL SELLO (2026-09-11) — DOCUMENTED TRAP: THE EXTRACTOR TAKES THE
+// **FIRST** DIGIT RUN ≥1000, WHATEVER IT MEANS ⇒ A **DATE BEFORE THE FIGURE
+// POISONS THE REASON**. The extractor below returns the first matched run that
+// survives the two filters (`m-`/`M-` message-id prefix; value < 1000 after the
+// `k` normalization) — it does NOT try the LATER runs, it does NOT prefer the
+// run next to a unit/token word, and it has NO notion of a date. Worked model on
+// the REAL case of this lane (reference R = 279485 tokens, the durable
+// projection the mirror holds):
+//
+//   reason  "2026-09-11 — sesión rotada, la cifra del frame fue ~272k tokens"
+//   run #1  «2026»  ← a FRAGMENT OF THE DATE (≥1000, not `m-`-prefixed) ⇒ TAKEN
+//   run #2  «272k»  ← the REAL claimed figure 272000 ⇒ NEVER REACHED
+//
+//   ratio = |2026 − 279485| / 279485 = 0.99275 > REASON_VERIFY_TOLERANCE (0.15)
+//   ⇒ the seal stamps 'unverified' for a reason whose REAL figure (272000)
+//     misses R by 0.0266 — i.e. the DATE produced a SPURIOUS NEGATIVE.
+//
+// The mirror image is the SPURIOUS POSITIVE (family fb-591, the trap that
+// already manufactured one on 2026-09-11 — corrected with the IPD measurement
+// and the QH's in-source verification): on a SMALL session whose R happens to
+// land near the run (e.g. R = 2032) the very same date run «2026» gives
+// ratio = |2026 − 2032| / 2032 = 0.003 ≤ 0.15 ⇒ 'verified' — a verdict about a
+// DATE, read as a corroboration of a token figure.
+//
+// THIS LANE ONLY **DOCUMENTS** THE TRAP: the extractor's behaviour is NOT
+// changed (widening/narrowing it would MOVE THE CRITERION — the seal exists to
+// freeze the criterion, not to calibrate it; acceptance (c): the threshold
+// REASON_VERIFY_TOLERANCE stays 0.15 and the branch order stays as measured).
+// The mitigation is a CITATION rule: cite the figure WITH its instant and
+// NEVER put a date before it inside the reason.
 /** Extract the FIRST token-scale figure (≥1000 after a `k` normalization) a
  * rotation reason cites — the leading claimed usage figure. A message-id
  * digit run (`m-<digits>`, fb-25 GAP-2) is NEVER a usage figure. Returns
@@ -1324,6 +1361,256 @@ export function verifyRotateReason(reason: unknown, oldSessionId: string, projCa
     return ratio <= REASON_VERIFY_TOLERANCE ? 'verified' : 'unverified'
   }
   return 'unavailable'
+}
+
+// ---------------------------------------------------------------------------
+// LANE DEL SELLO — `datumTs` (2026-09-11): THE REASON SEAL BECOMES
+// RE-VERIFIABLE AFTER THE FACT.
+// ---------------------------------------------------------------------------
+// MEASURED FAILURE (the case this lane exists for, verbatim from the bus): the
+// host rotated with a reason citing «cifra del frame 270210 medida al instante
+// 14:37:01Z contra proyección durable 272006 (deriva 0,66 %)» and the seal
+// stamped `verified`. MINUTES LATER the QH re-read the SAME instrument on the
+// SAME session and the mirror answered **279485** — so the inspector reproduced
+// the VERDICT (both ratios ≤ 0.15) but NOT the CITED FIGURE: «mi lectura del
+// espejo es posterior al emit ⇒ reproduzco el veredicto, no la cifra exacta
+// declarada (272006)». ROOT CAUSE (measured on the live mirror
+// `/opt/dsh/.dsh-dev/storages/session_projcache.json`): the mirror ROW is
+// `{ver, seq, val}` — it carries NO timestamp — so the projected/used datum is
+// an UNDATED number that MUTATES IN PLACE while the session keeps running.
+// ⇒ a cited figure could not be aligned to the instant at which it was true —
+// for ANYONE, not even for the emitter that read it.
+//
+// FIX (this block, ADDITIVE): every reason-seal computation ALSO seals the
+// DATUM it compared against:
+//   - the RUTA of the mirror the datum was read from,
+//   - R — the reference the mirror answered at that instant,
+//   - `datumTs` — the instant the datum was READ (the only instant this row can
+//     honestly carry, since `val` holds no timestamp; declared as such),
+//   - `rowSeq` — the row's own write counter, the DRIFT DISCRIMINATOR: a later
+//     read with a HIGHER seq and a DIFFERENT R proves the row MOVED, which is
+//     exactly what happened 272006 → 279485,
+//   - `mirrorMtimeMs` — the whole-file mtime, a corroborating bound ONLY (the
+//     file is shared by every session, so it is never the datum instant),
+//   - the extracted cited figure + the stamp the instrument returned.
+// The seal is PRINTED (ctx.logger.info — the RUTA + R + datumTs line) and
+// PERSISTED as ONE JSON line in the durable ledger DERIVED from the cited path
+// (`<mirror>.seals.jsonl`), so a third party holding the citation finds it
+// without any extra configuration. Never throws, never blocks the rotation
+// (critical-unblock rule), and the wrapped helper returns the SAME stamp: ZERO
+// behavior change for both rotation families (head + host).
+//
+// DELIBERATELY NOT DONE: the threshold (`REASON_VERIFY_TOLERANCE`), the branch
+// order and the completion reserve are UNTOUCHED. A datum without an instant is
+// fixed by NOTING the instant — never by re-calibrating the criterion. The
+// sealing helper is also NOT EXPORTED on purpose: the lib/invoke.js export
+// surface is frozen by the export-parity lock (test/export-parity.test.js), so
+// this lane adds ZERO exports (it is reachable through the public tools, and
+// through the durable ledger for a third party).
+const REASON_SEAL_LEDGER_SUFFIX = '.seals.jsonl'
+
+/** The version of the sealed-datum row shape (bump on any field change). */
+const REASON_SEAL_ROW_VERSION = 1
+
+/** The reference formula recorded INSIDE every sealed row, verbatim, so a
+ * re-verifier recomputes R with the SAME rule the instrument used (it is the
+ * `projectedUsageForSession` priority order, transcribed once). */
+const REASON_SEAL_REFERENCE_BASIS = 'projectedUsageForSession: max(0, contextPressure.pressureTokens + surfaceTokens - sampledSurfaceTokens) [PRIMARY], fallback tokenUsage.last.buckets.cacheReadTokens'
+
+/** The durable SEAL LEDGER path derived from the mirror path itself
+ * (`<mirror>.seals.jsonl`) — derived, never configured: the citation carries the
+ * RUTA, and the RUTA resolves the ledger. */
+function reasonSealLedgerPath(projCachePath: string): string {
+  return `${projCachePath}${REASON_SEAL_LEDGER_SUFFIX}`
+}
+
+/** ONE sealed datum row: the citation that survives the session's own drift. */
+interface ReasonDatumSealRow {
+  v: number
+  seal: 'reason-datum'
+  /** The instant the datum (R) was READ — ms epoch. */
+  datumTs: number
+  /** The same instant in ISO-8601 UTC (citable form). */
+  datumTsIso: string
+  /** The RUTA of the durable mirror the datum came from. */
+  path: string
+  sessionId: string
+  /** R — the reference the mirror answered at `datumTs`. */
+  reference: number
+  referenceBasis: string
+  /** The mirror row's write counter at read time (drift discriminator). */
+  rowSeq?: number
+  /** The mirror FILE mtime at read time (corroborating bound only). */
+  mirrorMtimeMs?: number
+  /** The figure the reason cites, extracted by the instrument's own extractor. */
+  citedFigure?: number
+  citedScale: 'tokens' | 'pct' | 'none'
+  /** WHICH INSTRUMENT produced the stamp — the two branches are TWO INSTRUMENTS
+   * (fb-426 B): 'figure' = the token branch (RETURNS FIRST whenever a digit run
+   * ≥1000 exists, so the reserve is INERT), 'pct' = the «N% de contexto»
+   * branch (the completion reserve DECIDES it), 'none' = no figure at all. */
+  branch: 'figure' | 'pct' | 'none'
+  /** The ratio the executed branch ACTUALLY compared against the tolerance. */
+  executedRatio?: number
+  /** The tolerance IN FORCE at `datumTs` (the criterion is frozen, never moved:
+   * recorded so a re-verifier re-applies the SAME criterion, not today's). */
+  tolerance: number
+  /** figure branch only: TRUE — the branch returned before the reserve was read
+   * (fb-426 B), so the reserve can NEVER be a cause of a figure-branch verdict. */
+  reserveInertForFigureBranch?: boolean
+  /** pct branch operands: the cited percentage and the REAL fraction the
+   * instrument formed as `(projected + reserve) / contextWindow`. */
+  pctCited?: number
+  actualPct?: number
+  contextWindow?: number
+  /** The reserve the call-site ACTUALLY passed (0/absent = the knob never
+   * reached this row: the pct branch then uses the plain-projection fraction). */
+  completionReserve?: number
+  completionReserveSource: 'caller' | 'absent'
+  /** ⭐ THE DISCRIMINATOR the seal exists for: WHY this stamp came out. Two
+   * reasons can carry the SAME label `unverified` from TWO DIFFERENT causes
+   * (fb-591) — the family (figure vs pct) and, inside pct, whether the reserve
+   * was even present. A re-verifier reading `cause` (with `branch`, `executedRatio`,
+   * `tolerance`) answers «which instrument said this, and with what operands»
+   * without re-reading a mirror that has since MOVED. */
+  cause: string
+  /** The verdict the instrument returned for that citation at `datumTs`. */
+  stamp: ReasonVerificationStamp
+  /** The reason VERBATIM (never truncated: the extractor's input is the text). */
+  reason: string
+}
+
+/** The CAUSE label of one sealed verdict (the discriminator above). Derived from
+ * the branch + the executed operand + the reserve, NEVER from the label alone:
+ * `unverified` from the figure branch and `unverified` from the pct branch are
+ * two different findings and must read as two different causes. */
+function reasonSealCauseFor(branch: 'figure' | 'pct' | 'none', executedRatio: number | undefined, reservePresent: boolean): string {
+  if (branch === 'none') return 'no-figure-in-reason'
+  if (executedRatio === undefined) return `${branch}-branch-without-operand`
+  const within = executedRatio <= REASON_VERIFY_TOLERANCE
+  if (branch === 'figure') {
+    return within
+      ? 'figure-within-tolerance (reserve INERT on this branch — it returned first)'
+      : 'figure-outside-tolerance (reserve INERT on this branch — the figure, not the reserve, missed R)'
+  }
+  return within
+    ? 'pct-within-tolerance'
+    : reservePresent
+      ? 'pct-outside-tolerance (reserve PRESENT — the fraction with the reserve still missed the cited pct)'
+      : 'pct-outside-tolerance (reserve ABSENT → 0 — the MONITOR fraction may be unreachable with a plain projection: CHECK THE KNOB BEFORE READING A REAL NEGATIVE)'
+}
+
+/** Compose the sealed datum row for one seal computation. It READS the mirror
+ * (never writes) and degrades to `undefined` on ANY failure — an
+ * unreadable/absent mirror, an unprojected session, a degenerate (≤0) datum or
+ * a missing path has NOTHING to seal (the same conservative degradation as the
+ * stamp itself: 'unavailable'). Never throws. */
+function reasonSealRowFor(args: { path: string; sessionId: string; reason: unknown; stamp: ReasonVerificationStamp; datumTs: number; completionReserve?: number }): ReasonDatumSealRow | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(args.path, 'utf8')) as unknown
+    const reference = projectedUsageForSession(parsed, args.sessionId)
+    if (!(reference !== undefined && reference > 0)) return undefined
+    const rows = sessionProjCacheRow(parsed, args.sessionId)
+    const cpSeq = (rows?.contextPressure as { seq?: unknown } | undefined)?.seq
+    const tuSeq = (rows?.tokenUsage as { seq?: unknown } | undefined)?.seq
+    const rowSeq = typeof cpSeq === 'number' ? cpSeq : typeof tuSeq === 'number' ? tuSeq : undefined
+    let mirrorMtimeMs: number | undefined
+    try {
+      mirrorMtimeMs = statSync(args.path).mtimeMs
+    } catch {
+      mirrorMtimeMs = undefined
+    }
+    const text = typeof args.reason === 'string' ? args.reason : ''
+    const tokenFigure = extractRotateReasonTokenFigure(text)
+    const pctFigure = tokenFigure === undefined ? extractRotateReasonPercent(text) : undefined
+    const cited = tokenFigure !== undefined ? tokenFigure : pctFigure
+    const reservePresent = typeof args.completionReserve === 'number' && Number.isFinite(args.completionReserve) && args.completionReserve > 0
+    const reserve = reservePresent ? args.completionReserve as number : 0
+    const branch: 'figure' | 'pct' | 'none' = tokenFigure !== undefined ? 'figure' : pctFigure !== undefined ? 'pct' : 'none'
+    // The operand the executed branch compared — recomputed from the SAME row
+    // under the SAME rule (a re-verifier checks the arithmetic, not the label).
+    let executedRatio: number | undefined
+    let contextWindow: number | undefined
+    let actualPct: number | undefined
+    if (branch === 'figure' && tokenFigure !== undefined) {
+      executedRatio = Math.abs(tokenFigure - reference) / reference
+    } else if (branch === 'pct' && pctFigure !== undefined) {
+      const cpVal = (rows?.contextPressure as { val?: Record<string, unknown> } | undefined)?.val
+      const win = cpVal === undefined || typeof cpVal !== 'object' ? undefined : finiteNumber(cpVal.contextWindow)
+      if (win !== undefined && win > 0) {
+        contextWindow = win
+        actualPct = (reference + reserve) / win
+        if (actualPct > 0) executedRatio = Math.abs(pctFigure / 100 - actualPct) / actualPct
+      }
+    }
+    return {
+      v: REASON_SEAL_ROW_VERSION,
+      seal: 'reason-datum',
+      datumTs: args.datumTs,
+      datumTsIso: new Date(args.datumTs).toISOString(),
+      path: args.path,
+      sessionId: args.sessionId,
+      reference,
+      referenceBasis: REASON_SEAL_REFERENCE_BASIS,
+      ...(rowSeq !== undefined ? { rowSeq } : {}),
+      ...(mirrorMtimeMs !== undefined ? { mirrorMtimeMs } : {}),
+      ...(cited !== undefined ? { citedFigure: cited } : {}),
+      citedScale: tokenFigure !== undefined ? 'tokens' as const : pctFigure !== undefined ? 'pct' as const : 'none' as const,
+      branch,
+      ...(executedRatio !== undefined ? { executedRatio } : {}),
+      tolerance: REASON_VERIFY_TOLERANCE,
+      ...(branch === 'figure' ? { reserveInertForFigureBranch: true } : {}),
+      ...(pctFigure !== undefined ? { pctCited: pctFigure } : {}),
+      ...(actualPct !== undefined ? { actualPct } : {}),
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
+      ...(reservePresent ? { completionReserve: reserve } : {}),
+      completionReserveSource: reservePresent ? 'caller' as const : 'absent' as const,
+      cause: reasonSealCauseFor(branch, executedRatio, reservePresent),
+      stamp: args.stamp,
+      reason: text
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/** LANE DEL SELLO — wrap a reason-verification helper with the datum SEAL: call
+ * it (identical args), PRINT the RUTA + R + datumTs line through the plugin
+ * logger and APPEND the sealed row to the ledger, then return the SAME stamp.
+ * The wrapper NEVER throws and NEVER changes the verdict (zero behavior change):
+ * a failure of the seal (unwritable ledger, no logger) is swallowed — the
+ * rotation must never block on its own evidence (critical-unblock rule). */
+function observeReasonSealDatum(
+  logger: unknown,
+  verify: (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number) => ReasonVerificationStamp
+): (reason: unknown, oldSessionId: string, projCachePath?: string, completionReserve?: number) => ReasonVerificationStamp {
+  return (reason, oldSessionId, projCachePath, completionReserve) => {
+    const stamp = verify(reason, oldSessionId, projCachePath, completionReserve)
+    try {
+      if (typeof projCachePath === 'string' && projCachePath !== '' && typeof oldSessionId === 'string' && oldSessionId !== '') {
+        const datumTs = Date.now()
+        const row = reasonSealRowFor({ path: projCachePath, sessionId: oldSessionId, reason, stamp, datumTs, ...(typeof completionReserve === 'number' ? { completionReserve } : {}) })
+        if (row !== undefined) {
+          const info = (logger as { info?: (...args: unknown[]) => void } | undefined)?.info
+          if (typeof info === 'function') {
+            try {
+              info.call(logger, `[deepartments] reason seal — RUTA ${row.path} · R ${row.reference} · datumTs ${row.datumTsIso} · rowSeq ${row.rowSeq ?? 'n/a'} · branch ${row.branch} · figure ${row.citedFigure ?? 'n/a'} · ratio ${row.executedRatio === undefined ? 'n/a' : row.executedRatio.toFixed(5)} · tol ${row.tolerance} · reserve ${row.completionReserveSource}(${row.completionReserve ?? 0}) · cause ${row.cause} · ${row.stamp}`)
+            } catch {
+              // never throws (a broken logger never blocks a rotation)
+            }
+          }
+          try {
+            appendFileSync(reasonSealLedgerPath(row.path), `${JSON.stringify(row)}\n`, 'utf8')
+          } catch {
+            // never throws (an unwritable ledger never blocks a rotation)
+          }
+        }
+      }
+    } catch {
+      // never throws (the seal is best-effort BY CONTRACT)
+    }
+    return stamp
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3782,6 +4069,19 @@ export function applyInvoke(ctx: Context, config: Config) {
       get reassertPostToolset() { return deliverySurface.reassertPostToolset }
     }
   }
+  // LANE DEL SELLO (datumTs, 2026-09-11) — the tools-side wrap of the SAME
+  // by-reference pair: the dept_head_rotate tool (`packages/dshd-orchestration/
+  // src/tools.ts:6994`) now computes its stamp through this sealed helper, so
+  // the HEAD-rotation family seals the datum exactly like the host family does.
+  // REASSIGNMENT of the dep AFTER the literal (it is a `let`-free `const` object
+  // property — ADDITIVE, one new statement; the literal above stays untouched):
+  // the verdict is IDENTICAL (the wrapper returns what the helper returned), it
+  // only notes the RUTA + R + datumTs. A `verify` that is not a function (a
+  // composition that passed nothing) degrades to a NO-OP wrapper — never a
+  // changed dep.
+  toolsDeps.verifyRotateReason = typeof toolsDeps.verifyRotateReason === 'function'
+    ? observeReasonSealDatum(ctx.logger, toolsDeps.verifyRotateReason)
+    : toolsDeps.verifyRotateReason
   ctx.get('deepartments.toolsDeps', false)?.register(toolsDeps)
   const toolsSurface: ToolsSurface = (ctx.get('deepartments.tools', false) as ToolsSurface | undefined) ?? createToolsOrchestration(ctx, toolsDeps)
   const {
@@ -3963,6 +4263,16 @@ export function applyInvoke(ctx: Context, config: Config) {
     contextCompletionReserve: (config.health as { contextCompletionReserve?: number } | undefined)?.contextCompletionReserve,
     drainRecipientQueue: (recipientId) => toolsSurface.redeliverDrainQueue(recipientId)
   }
+  // LANE DEL SELLO (datumTs, 2026-09-11) — the delivery-side wrap of the SAME
+  // pair: the HOST-rotation emitter (`packages/dshd-orchestration/src/
+  // delivery.ts:2572`, fb-473) computes its stamp through this sealed helper.
+  // The host rotation is THE case of this lane (the mirror answered 272006 at
+  // emit and 279485 at the QH's re-read): from here on, the row that leaves the
+  // emitter carries the DATUM INSTANT with the figure. Identical verdict, one
+  // ADDITIONAL statement, the literal above untouched.
+  deliveryDeps.verifyRotateReason = typeof deliveryDeps.verifyRotateReason === 'function'
+    ? observeReasonSealDatum(ctx.logger, deliveryDeps.verifyRotateReason)
+    : deliveryDeps.verifyRotateReason
   ctx.get('deepartments.deliveryDeps', false)?.register(deliveryDeps)
   const deliverySurface = (ctx.get('deepartments.delivery', false) as DeliverySurface | undefined) ?? createDeliveryOrchestration(ctx, deliveryDeps)
   const {
