@@ -49,7 +49,12 @@
             peakWindows:
               weekday: [1, 2, 3, 4, 5]
               hours: [1, 2, 3, 6, 7, 8, 9]
-            peakBufferMs: 1800000
+            # BUFFER DE BORDE = 0 (owner 2026-09-11): estaba en el default
+            # 1800000 (30 min en AMBOS bordes). El owner lo señaló como tiempo de
+            # VALLE perdido: con el buffer, los despachos quedaban cerrados hasta
+            # las 10:30Z aunque el PEAK nominal acaba a las 10:00Z (y simétrico
+            # antes de las 06:00Z). Las VENTANAS no cambian — solo el borde.
+            peakBufferMs: 0
         # Quality Department runtime block (D-Q2, spec 007 §4.1): the worker-
         # archive inspection dice probability. CODE-DEFAULT-CAPABLE — ABSENT →
         # the code default 0.25; present → that value (the D-Q3 head/host 100%

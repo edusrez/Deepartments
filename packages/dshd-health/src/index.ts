@@ -4102,6 +4102,53 @@ export interface PoolerSnapshotLike {
    * joins it to the post-error row by the TIME WINDOW (bare-400 ts ≈ turn/end
    * ts — TURN_ERROR_POOLER_JOIN_WINDOW_MS). Absent OR null → no join. */
   lastBare400?: PoolerLastBare400Like | null
+  /** PARIDAD (2026-09-11, fb-630) — the SERVING capacity of the pooler's
+   *  DECLARED emergency channels (`channels:` in its config), projected by the
+   *  pooler's ONE state-write seam onto every snapshot. WHY IT EXISTS: `keys`
+   *  carries ONLY the Go pool, so the dispatch gate saw «1 usable key» and
+   *  applied the HALT while a declared channel was `enabled`, `peer: true` and
+   *  serving live traffic (`peerRotation.slots` in /__keypool/status) ⇒ the org
+   *  paused new dispatches with real capacity available unused. Absent (an older
+   *  pooler / no declared channels) is EQUIVALENT to an empty list: Go-only,
+   *  byte-identical to the pre-fix verdict. Secret-free by construction (id +
+   *  booleans + a deadline). */
+  channels?: PoolerChannelLike[]
+}
+
+/** PARIDAD (2026-09-11) — one declared channel's serve-ability, as the pooler
+ *  projects it onto its state file (mirror of the pooler's ChannelCapacityRecord,
+ *  written in `poolSnapshotWithHalt`). Use {@link poolerServingChannels}. */
+export interface PoolerChannelLike {
+  id?: string
+  /** `false`/absent → the channel is declared but switched off (never serves). */
+  enabled?: boolean
+  /** `true` → the channel is a declared PAR of the Go pool (its slot takes part
+   *  in the 1/(n+1) rotation). */
+  peer?: boolean
+  /** The channel's OWN fail-stop flag (dry / insufficient balance). */
+  halted?: boolean
+  /** Cooldown deadline (epoch ms; 0/absent = not cooling down). */
+  cooldownUntil?: number
+}
+
+/** PARIDAD (2026-09-11, fb-630) — the channels that can serve RIGHT NOW: declared
+ *  AND enabled AND not halted AND past their cooldown. This is the «extra
+ *  capacity» the dispatch gate counts next to the Go keys — the fail-stop
+ *  semantics are preserved: a channel that is off, dry or cooling down still
+ *  counts for NOTHING (the «todas-secas» case keeps blocking). */
+export function poolerServingChannels(
+  state: PoolerSnapshotLike | undefined,
+  nowMs: number
+): PoolerChannelLike[] {
+  const channels = state?.channels
+  if (!Array.isArray(channels)) return []
+  return channels.filter((ch) =>
+    ch !== null &&
+    typeof ch === 'object' &&
+    ch.enabled === true &&
+    ch.halted !== true &&
+    (Number(ch.cooldownUntil) || 0) <= nowMs
+  )
 }
 
 /** fb-235 — the pooler's durable last-bare-400 record (see PoolerSnapshotLike
@@ -4476,7 +4523,25 @@ export function resolvePoolerDispatchBlock(
   // KeyPoolerExhausted / 429-primer-call class). CERTAIN → block (the m-2333
   // rewrite keeps the no-service outage: there is no key AT ALL, not a «pool
   // bajo» aviso — the owner's «espera hasta (a) el owner añade keys»).
-  if (usable.length === 0) {
+  // PARIDAD (2026-09-11, fb-630) — THE SECOND SOURCE OF CAPACITY. The `keys`
+  // above are the GO pool only; a DECLARED emergency channel that is enabled,
+  // not halted and past its cooldown is REAL serving capacity (it takes part in
+  // the 1/(n+1) rotation — `peerRotation.slots` in /__keypool/status is the live
+  // proof). Counting it here is what makes the verdict an honest «the org has
+  // (almost) nothing to serve with» instead of a Go-only one: with a healthy
+  // channel the org has TWO serving sources, so the m-2333 «exactly one key
+  // left» premise does NOT hold and the dispatch is NOT paused (the owner's
+  // directive: the CommandCode key counts as a key of the pool).
+  // The FAIL-STOP SEMANTICS ARE UNTOUCHED in both directions: a channel that is
+  // disabled, dry (`halted`) or cooling down counts for NOTHING — so the
+  // «todas-secas» outage (0 Go + 0 channels) still blocks, and so does the
+  // Go-only composition with no declared channels (absent `channels` ⇒ 0 ⇒ the
+  // pre-fix verdict byte-for-byte).
+  const servingChannels = poolerServingChannels(state, nowMs)
+  // (1) NO serving source at all — every workspace blocked/cooldown/invalid AND
+  // no channel able to serve; the FIRST call of the spawn would find nothing
+  // (the 503 KeyPoolerExhausted / 429-primer-call class). CERTAIN → block.
+  if (usable.length === 0 && servingChannels.length === 0) {
     return { reason: atQuotaReason(keys, keys.length, '0 usable keys — all blocked/cooldown/invalid') }
   }
   // (2) m-2333 THE HALT — the ONLY availability gate: EXACTLY ONE usable key
@@ -4490,7 +4555,11 @@ export function resolvePoolerDispatchBlock(
   // 100% available → NO HALT).
   const haltWeekly = resolvePositiveKnob(knobs.haltWeeklyAvailablePercent, POOLER_CAPACITY_DEFAULT_GLOBAL_REMAINING_PERCENT)
   const haltMonthly = resolvePositiveKnob(knobs.haltMonthlyAvailablePercent, POOLER_CAPACITY_DEFAULT_WEEKLY_REMAINING_PERCENT)
-  if (usable.length === 1) {
+  // The m-2333 HALT fires on «EXACTLY ONE usable source left» — so a serving
+  // channel (see `servingChannels` above) SATISFIES the ≥2 premise and lifts it.
+  // The reason string cites the channel by id, so the operator sees WHY the org
+  // is not paused (and which capacity is carrying it).
+  if (usable.length === 1 && servingChannels.length === 0) {
     const only = usable[0]
     const weeklyPct = typeof only.usageWeekly?.percent === 'number' ? only.usageWeekly.percent : undefined
     const monthlyPct = typeof only.usageMonthly?.percent === 'number' ? only.usageMonthly.percent : undefined
