@@ -11806,7 +11806,12 @@ test('W6 runHealthDaemonTick: heartbeat written; scans post-errors + delivery-fa
     // Audit line written.
     const auditRows = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l))
     assert.equal(auditRows.length, 1, 'one audit line per alert')
-    assert.deepEqual(auditRows[0].dedupeKeys.sort(), [dfKey, 'post-error:research-head'], 'the audit records the dedupe keys (the delivery-failed one signed — fb-198 T2)')
+    // fb-466 (LANE E): the class-less post-error identity IS the finding key
+    // (`post-error:<postId>:<error-hash>`) — the audit dedupeKeys and the ledger
+    // entry name the SAME identity the alert dedupes on (one group of one error
+    // text, never the pre-fb-466 bare `post-error:<postId>` whose hash lived only
+    // in the ledger).
+    assert.deepEqual(auditRows[0].dedupeKeys.sort(), [dfKey, researchIdentity], 'the audit records the dedupe keys (the post-error one now the class-less identity key — fb-466; the delivery-failed one signed — fb-198 T2)')
     assert.equal(auditRows[0].ts, T0, 'the audit carries the alert ts')
     // Tick 2 @ T0 (inside the 30min dedupe window) → ≤1 alert per identity: NOTHING new.
     await tick(T0)
@@ -16041,7 +16046,7 @@ test('W8-c PART 1 turn-failure capture: a live post session whose turn/end ends 
   })
 })
 
-test('fb-25 (b) post-error PROVENANCE: scanPostErrorFindings carries rows[0] sessionId/turn into the finding and buildHealthAlertFrame renders `[session <id> turn <n> (HH:MMZ)]` — the host sees the error belongs to the ARCHIVED session; LEGACY rows without provenance render the current frame (R6), and the group identity/grouping never changes', async () => {
+test('fb-25 (b) post-error PROVENANCE: scanPostErrorFindings carries the witness row sessionId/turn into the finding and buildHealthAlertFrame renders `[session <id> turn <n> (HH:MMZ)]` — the host sees the error belongs to the ARCHIVED session; the fb-466 grouping keys a class-less post per error TEXT (so the aggregate never mixes two texts) and EVERY bullet carries exactly one anchor (with provenance, or the fb-466 dated form)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 28, 15, 0, 0).getTime()
     // The m-1109 shape: rows of the ARCHIVED 50ee8585 session (turn 166/167),
@@ -16050,14 +16055,23 @@ test('fb-25 (b) post-error PROVENANCE: scanPostErrorFindings carries rows[0] ses
     await appendPostError(stateDir, { ts: T0 - 120_000, postId: 'quality-head', error: '400: ... 789959 tokens from the input messages ...', sessionId: oldSession, turn: 166 }, T0)
     await appendPostError(stateDir, { ts: T0 - 60_000, postId: 'quality-head', error: '400: ... 790202 tokens ...', sessionId: oldSession, turn: 167 }, T0)
     const findings = scanPostErrorFindings(stateDir, T0)
-    assert.equal(findings.length, 1, 'the two rows STILL group into ONE (postId,class) finding — grouping unchanged')
-    assert.equal(findings[0].kind, 'post-error')
-    assert.equal(findings[0].key, 'post-error:quality-head', 'the legacy per-post dedupe key is unchanged (identity never touched)')
-    assert.equal(findings[0].sessionId, oldSession, 'rows[0] sessionId rides the finding')
-    assert.equal(findings[0].turn, 166, 'rows[0] turn rides the finding')
+    // fb-466 (LANE E): the two rows are DIFFERENT texts, so each is its own
+    // homogeneous group — the pre-fb-466 mixed aggregate (count 2 naming only the
+    // older text) is exactly the over-attribution the ficha closes.
+    assert.equal(findings.length, 2, 'fb-466: two DISTINCT error texts of one postId → TWO homogeneous findings')
+    const alt = findings.find((f) => f.error.includes('790202'))
+    assert.ok(alt !== undefined, 'the alternative text has its own finding')
+    assert.equal(alt.count, 1, 'each finding counts ONLY the rows carrying its own text')
+    assert.equal(alt.key, `post-error:quality-head:${errorIdentityHash(alt.error)}`, 'the class-less identity is the finding key (fb-466)')
+    const finding = findings.find((f) => f.error.includes('789959'))
+    assert.equal(finding.kind, 'post-error')
+    assert.equal(finding.count, 1, 'the 789959 finding counts its OWN row')
+    assert.equal(finding.sessionId, oldSession, 'the witness row sessionId rides the finding')
+    assert.equal(finding.turn, 166, 'the witness row turn rides the finding')
     const frame = buildHealthAlertFrame(findings)
-    assert.match(frame, /- post-error: quality-head \(2 in window\): 400: ... 789959 tokens from the input messages ... \[session head-quality-head-50ee8585-492e-4d35-8ac5-947cec4d7dbc turn 166 \(\d{2}:\d{2}Z\)\]/, 'the frame shows the ARCHIVED-session provenance — the host cannot attribute the error to the fresh session')
-    // LEGACY rows without provenance → the CURRENT frame (no bracket, no field).
+    assert.match(frame, /- post-error: quality-head \(1 in window\): 400: ... 789959 tokens from the input messages ... \[session head-quality-head-50ee8585-492e-4d35-8ac5-947cec4d7dbc turn 166 \(\d{2}:\d{2}Z\)\]/, 'the frame shows the ARCHIVED-session provenance — the host cannot attribute the error to the fresh session')
+    // LEGACY rows without provenance → the fb-466 DATED anchor (never an
+    // anchor-less bullet: the requirement that closes the ficha).
     await rm(path.join(stateDir, POST_ERRORS_FILE), { force: true })
     await appendPostError(stateDir, { ts: T0 - 60_000, postId: 'worker-a', error: 'legacy error text' }, T0)
     const legacy = scanPostErrorFindings(stateDir, T0)
@@ -16065,12 +16079,12 @@ test('fb-25 (b) post-error PROVENANCE: scanPostErrorFindings carries rows[0] ses
     assert.equal(legacy[0].sessionId, undefined, 'no provenance on legacy rows (the field is omitted)')
     assert.equal(legacy[0].turn, undefined)
     const legacyFrame = buildHealthAlertFrame(legacy)
-    assert.ok(!legacyFrame.includes('[session'), 'a legacy row renders the CURRENT frame (no provenance bracket)')
-    assert.match(legacyFrame, /- post-error: worker-a \(1 in window\): legacy error text/, 'the legacy frame text is byte-intact (R6)')
+    assert.ok(!legacyFrame.includes('[session'), 'a legacy row renders no session provenance bracket')
+    assert.match(legacyFrame, /- post-error: worker-a \(1 in window\): legacy error text \[2026-08-28T14:59Z\]/, 'the legacy bullet carries the fb-466 DATED anchor (literal: the row ts in UTC, YYYY-MM-DDTHH:MMZ)')
   })
 })
 
-test('fb-25 REGRESIÓN 3 (IPH m-1194 — the head\'s OWN live case): internal-programming-head with MIXED-class rows (2× 400 from the PREVIOUS session a30b6627 + 1 interrupted-restart) → ONE post-error finding count 3 (the mixed grouping is NOT redesigned — the dedupe/identity never changes), whose frame shows the OLD-session provenance; and the m-1194 mirror reason (~787k) is stamped UNVERIFIED against the old session\'s real projection (~2xx-3xxk)', async () => {
+test('fb-25 REGRESIÓN 3 (IPH m-1194 — the head\'s OWN live case): internal-programming-head with MIXED-class rows (2× 400 from the PREVIOUS session a30b6627 + 1 interrupted-restart) → ONE post-error finding count 3 (the mixed grouping is NOT redesigned — the dedupe/identity never changes), whose frame shows the OLD-session provenance; FB-466 (LANE E): the grouping NOW yields ONE finding PER ERROR TEXT (count 1 each, its OWN anchor), and the m-1194 mirror reason (~787k) is stamped UNVERIFIED against the old session\'s real projection (~2xx-3xxk)', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = new Date(2026, 7, 28, 21, 20, 0).getTime()
     // The m-1194 shape (head datapoint 2026-08-28): the two 400 rows are from
@@ -16081,11 +16095,24 @@ test('fb-25 REGRESIÓN 3 (IPH m-1194 — the head\'s OWN live case): internal-pr
     await appendPostError(stateDir, { ts: T0 - 90_000, postId: 'internal-programming-head', error: '400: ... 787897 tokens ...', sessionId: errSession, turn: 213 }, T0)
     await appendPostError(stateDir, { ts: T0 - 30_000, postId: 'internal-programming-head', error: 'interrupted-post: interrupted turn 1 (no turn/end — stopped by a restart)' }, T0)
     const findings = scanPostErrorFindings(stateDir, T0)
-    assert.equal(findings.length, 1, 'the 3 rows (2× 400 + interrupted, all class-undefined) group into ONE (postId) finding — the mixed grouping is PRESERVED (point 6: not redesigned)')
-    assert.equal(findings[0].count, 3, 'count 3 — exactly the m-1194 alert shape')
-    assert.equal(findings[0].sessionId, errSession, 'rows[0] (the oldest 400) carries the OLD-session provenance — the host sees the alert re-emits the PREVIOUS session\'s errors')
+    // fb-466 (LANE E): the m-1194 alert was "3 in window" naming ONE of THREE
+    // heterogeneous errors — exactly the over-attribution this lane closes.
+    // Three distinct texts -> three homogeneous findings, each counting its own.
+    assert.equal(findings.length, 3, 'fb-466: los 3 textos de error distintos son TRES findings homogeneos')
+    assert.equal(findings[0].count, 1, 'fb-466: cada finding cuenta SOLO su propio texto (nunca 3 heterogeneos juntos)')
+    assert.equal(findings[1].count, 1, 'fb-466: cada finding cuenta SOLO su propio texto')
+    assert.equal(findings[2].count, 1, 'fb-466: cada finding cuenta SOLO su propio texto')
+    assert.equal(findings[0].key, `post-error:internal-programming-head:${errorIdentityHash(findings[0].error)}`, 'la identidad sin clase es la key del finding (fb-466)')
+    assert.equal(findings[0].ts, T0 - 120_000, 'el ancla temporal es la fila del PROPIO texto del grupo')
+    const f400 = findings.find((f) => f.error.includes('787606'))
+    assert.equal(f400.sessionId, errSession, 'the witness row of the 400 finding carries the OLD-session provenance (fb-25 b)')
+    assert.equal(f400.turn, 212, 'the witness row turn rides the finding')
+    const fInterrupted = findings.find((f) => f.error.includes('interrupted-post'))
+    assert.equal(fInterrupted.sessionId, undefined, 'the interrupted-restart finding has no session provenance (its own row carried none)')
     const frame = buildHealthAlertFrame(findings)
-    assert.match(frame, /- post-error: internal-programming-head \(3 in window\): 400: ... 787606 tokens from the input messages ... \[session head-internal-programming-head-a30b6627-c1e7-4d2f-b3a8-6f4d2e0a9b3c turn 212 \(\d{2}:\d{2}Z\)\]/, 'the frame shows the ARCHIVED a30b6627 session provenance (the m-1193 re-alert can never be attributed to the fresh session)')
+    assert.match(frame, /- post-error: internal-programming-head \(1 in window\): 400: ... 787606 tokens from the input messages ... \[session head-internal-programming-head-a30b6627-c1e7-4d2f-b3a8-6f4d2e0a9b3c turn 212 \(\d{2}:\d{2}Z\)\]/, 'the 400 bullet names its own text, counts 1 and shows the ARCHIVED a30b6627 session provenance')
+    assert.match(frame, /- post-error: internal-programming-head \(1 in window\): interrupted-post: interrupted turn 1 \(no turn\/end — stopped by a restart\) \[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z\]$/, 'the interrupted bullet carries its OWN dated anchor (fb-466: ninguna vineta sin ancla)')
+    assert.ok(!frame.includes('(3 in window)'), 'ningun bullet declara "3 in window": la cifra ya no mezcla errores heterogeneos')
     // (a) the MIRROR stamp for m-1194: the rotate old session (57bed534) really
     // projected ~2xx-3xxk, never 787k → the reason would be stamped UNVERIFIED.
     const rotateOld = 'head-internal-programming-head-57bed534-8f4a-4b2c-9d1e-3c5a7b0d2e1f'
@@ -19385,13 +19412,15 @@ test('fb-68 A1 appendPostErrorDeduped concurrency: 2 PARALLEL calls with DIFFERE
   })
 })
 
-test('W8-i scanPostErrorFindings: the "session not found" class groups per (post+class) key; a generic class keeps the legacy per-post key', async () => {
+test('W8-i + fb-466 scanPostErrorFindings: the "session not found" class groups per (post+class) key (the class key is TEXT-INDEPENDENT); a class-less error groups per (post + error-TEXT hash) — the fb-466 homogeneous key', async () => {
   await withTempStateDir(async (stateDir) => {
     const T0 = 1_700_000_000_000
+    const genericError = 'could not be materialized'
+    const genericKey = `post-error:host-a:${errorIdentityHash(genericError)}`
     await writeFile(path.join(stateDir, 'post-errors.jsonl'), [
       JSON.stringify({ ts: T0, postId: 'host-a', messageId: 'm-1', error: 'session "s" not found' }),
       JSON.stringify({ ts: T0 + 1000, postId: 'host-a', messageId: 'm-2', error: 'session "s" not found' }),
-      JSON.stringify({ ts: T0 + 2000, postId: 'host-a', error: 'could not be materialized' }),
+      JSON.stringify({ ts: T0 + 2000, postId: 'host-a', error: genericError }),
       JSON.stringify({ ts: T0, postId: 'head-b', error: 'boom' })
     ].join('\n') + '\n', 'utf8')
     const findings = scanPostErrorFindings(stateDir, T0 + 10_000)
@@ -19399,11 +19428,16 @@ test('W8-i scanPostErrorFindings: the "session not found" class groups per (post
     assert.ok(notFound, 'the not-found rows group into a per-(post+class) finding')
     assert.equal(notFound.count, 2, 'both not-found rows count together')
     assert.equal(notFound.postId, 'host-a', 'the not-found finding carries the host postId')
-    const generic = findings.find((f) => f.key === 'post-error:host-a')
-    assert.ok(generic, 'the generic class keeps the legacy per-post key')
+    const generic = findings.find((f) => f.key === genericKey)
+    assert.ok(generic, 'the class-less finding carries the fb-466 identity key (postId + error-text hash)')
     assert.equal(generic.count, 1, 'the generic row is its own group')
-    const headB = findings.find((f) => f.key === 'post-error:head-b')
-    assert.ok(headB, 'a distinct post with a generic error keeps the legacy key')
+    assert.equal(generic.error, genericError, 'the generic finding names its own text')
+    // fb-466: the class-less key carries the ERROR-TEXT hash (the group identity),
+    // so the audit/ledger identity and the naming bullet can never disagree.
+    assert.equal(generic.key, `post-error:host-a:${errorIdentityHash('could not be materialized')}`, 'the class-less key is the fb-466 identity (postId + error-text hash)')
+    const headB = findings.find((f) => f.postId === 'head-b' && f.error === 'boom')
+    assert.ok(headB !== undefined, 'a distinct post with a class-less error is its own finding')
+    assert.equal(headB.key, `post-error:head-b:${errorIdentityHash('boom')}`, 'the other post carries its own fb-466 identity key')
   })
 })
 
@@ -23988,7 +24022,7 @@ test('fb-30 CATCH-UP (tick): the FIRST tick of a NEW boot (no heartbeat → cold
     await run(T0, 'boot-cu-1')
     assert.equal(alerts.length, 1, 'the boot tick ALERTS the caught-up old error')
     assert.match(alerts[0], /^\[From deepartments\] System-health ALERT:/, 'the catch-up rides the system-health alert seam')
-    assert.match(alerts[0], /- CATCH-UP post-error: research-head \(1 in window\): session "s-gap" not found/, 'the FRAME is the catch-up bullet (frame propio) — never the live bullet')
+    assert.match(alerts[0], /- CATCH-UP post-error: research-head \(1 in window\): session "s-gap" not found \[CATCH-UP \d{4}-\d{2}-\d{2}\]$/, 'the FRAME is the catch-up bullet (frame propio) and carries the fb-466 CATCH-UP dated anchor (never the live bullet)')
     const state = readHealthAlertsState(stateDir)
     assert.equal(state['post-error:research-head:session-not-found'], T0, 'the catch-up advances the SAME shared-ledger identity a live post-error alert would')
     const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
@@ -24037,6 +24071,195 @@ test('fb-30 CATCH-UP (gate + non-boot + WIDENED capture): health.catchupEnabled:
     assert.match(alerts[0], /\[session sess-b turn 7 \(\d{2}:\d{2}Z\)\]/, 'the gap row carries the fb-25 session+turn provenance')
     assert.equal(readPostErrorsFile(stateDir).length, 0, 'the live file never holds the >2h gap row (C9 discard)')
     assert.ok(readPostErrorsArchiveFile(stateDir).some((r) => r.postId === 'worker-b' && r.error === 'gap turn error'), 'the gap turn-error is durably ARCHIVED (the evidence home the catch-up scan reads)')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// fb-466 (LANE E, 2026-09-11 — builder-287, run token 1981005a): the post-error
+// AGGREGATE COMPOSITION. Measured defect (q-i-212, run token 1d5b5d19): the
+// aggregate took `ts` = the group's NEWEST row but `error` = `rows[0]` = the
+// OLDEST row, and for a class-less error the anti-repeat identity is the HASH
+// OF THE SHOWN TEXT (`:7716-7722`) — so when the oldest row of the 2 h window
+// expired the identity changed (`f9822ff1` → `3e3e1ded`) and a FRESH alert was
+// emitted for a 2 h old error; while the «N in window» mixed N HETEROGENEOUS
+// errors of the same postId and named only one. The four tests below: (1)
+// resurrection (2 columns: pure scan identity + the daemon tick's ledger), (2)
+// heterogeneity, (3) the anchor is NEVER empty, (4) no regression of the
+// STABLE-CLASS identity (M3/spec §2.4, `post-error:<postId>:<class>`).
+// ---------------------------------------------------------------------------
+
+test('fb-466 (1) RESURRECCIÓN: caducar la fila MÁS VIEJA de la ventana de 2 h NO emite alerta nueva — el agregado sin clase agrupa por (postId, hash del texto del error), así que la identidad no depende de una fila AJENA; control: un texto de error NUEVO sí alerta', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // The measured fb-466 shape (reproducido en el demo RED con la lib PRE-fix:
+    // identidad `post-error:quality-head:4b3a560a` → `f9822ff1` — el segundo
+    // valor es EXACTAMENTE el que midió q-i-212/1d5b5d19): la fila más VIEJA
+    // (E1, en el borde de las 2 h) caduca entre las dos re-lecturas y el texto
+    // que aporta `rows[0]` cambia al de E2.
+    const T0 = new Date(2026, 8, 10, 17, 41, 0).getTime()
+    const E1 = 'session "head-quality-head" already exists'
+    const E2 = 'interrupted-post: interrupted turn 52 (no turn/end — stopped by a restart)'
+    const identityE1 = `post-error:quality-head:${errorIdentityHash(E1)}`
+    const identityE2 = `post-error:quality-head:${errorIdentityHash(E2)}`
+    const T1 = T0 + HEALTH_ERROR_WINDOW_MS + 1
+    await appendPostError(stateDir, { ts: T0 - HEALTH_ERROR_WINDOW_MS, postId: 'quality-head', error: E1 }, T0)
+    await appendPostError(stateDir, { ts: T0 - 60_000, postId: 'quality-head', error: E2 }, T0)
+    assert.notEqual(identityE1, identityE2, 'las dos identidades son distintas (dos errores distintos)')
+    // (I) LA MEDIDA PURA: la re-lectura tras la caducidad NO puede cambiar la
+    // composición del agregado (error/count/key/ts del MISMO grupo).
+    const before = scanPostErrorFindings(stateDir, T0)
+    const e1Before = before.find((f) => f.key === identityE1)
+    const e2Before = before.find((f) => f.key === identityE2)
+    assert.ok(e1Before !== undefined && e2Before !== undefined, 'tick 1: cada texto de error es su PROPIO grupo (nunca un grupo mixto)')
+    assert.equal(e1Before.error, E1, 'tick 1: el grupo E1 nombra E1')
+    assert.equal(e1Before.count, 1, 'tick 1: el grupo E1 cuenta SÓLO su fila')
+    assert.equal(e1Before.ts, T0 - HEALTH_ERROR_WINDOW_MS, 'tick 1: el ancla temporal del grupo E1 es SU fila (no la de E2)')
+    assert.equal(e2Before.error, E2, 'tick 1: el grupo E2 nombra E2')
+    assert.equal(e2Before.count, 1, 'tick 1: el grupo E2 cuenta SÓLO su fila')
+    const after = scanPostErrorFindings(stateDir, T1)
+    const e1After = after.find((f) => f.key === identityE1)
+    const e2After = after.find((f) => f.key === identityE2)
+    assert.equal(e1After, undefined, 'tras la caducidad: el grupo E1 ya no está en la ventana viva (2 h exactas — borde inclusivo)')
+    assert.equal(e2After, undefined, 'tras la caducidad: la fila de E2 también ha caducado (appendPostError la ARCHIVA al escribir la fila nueva — evidencia durable, nunca borrada)')
+    // y el grupo E2 SIGUE EXISTIENDO con la MISMA identidad — ahora en el pase de
+    // catch-up sobre el archivo: la caducidad de la fila AJENA no lo re-identifica.
+    const catchupE2 = scanHealthCatchup(stateDir, T1, HEALTH_CATCHUP_WINDOW_MS).find((f) => f.error === E2)
+    assert.ok(catchupE2 !== undefined, 'el grupo E2 sigue existiendo (archivado) — la ventana viva cambia, la IDENTIDAD no')
+    assert.equal(catchupE2.key, identityE2, 'el grupo E2 conserva su identidad en el archivo (misma key = mismo hash del MISMO texto)')
+    assert.equal(catchupE2.count, 1, 'el grupo E2 conserva su count')
+    // (II) LA MEDIDA DE EMISIÓN (dos columnas: el ledger + el conteo de alertas).
+    const alerts = []
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-fb466-resurrect',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      notifyHost: async (hostEntry, frame) => { alerts.push(frame) },
+      logger: { warn: () => {} }
+    })
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'tick 1 (T0): ONE grouped alert frame (las dos identidades son net-new)')
+    const stateAtT0 = readHealthAlertsState(stateDir)
+    assert.deepEqual(Object.keys(stateAtT0).sort(), [identityE1, identityE2].sort(), 'tick 1: el ledger avanza LAS DOS identidades homogéneas')
+    await tick(T1)
+    assert.equal(alerts.length, 1, 'tick 2 (T0+2h): caducar la fila más vieja NO produce alerta nueva (fb-466 CARA 1 — pre-fix aquí salía una alerta de un error de 2 h)')
+    assert.deepEqual(readHealthAlertsState(stateDir), stateAtT0, 'tick 2: el ledger queda byte-igual (ninguna identidad nueva)')
+    // CONTROL (una prueba que pasaría igual sin el cambio no es una prueba): un
+    // texto de error NUEVO sí alerta de inmediato.
+    await appendPostError(stateDir, { ts: T1, postId: 'quality-head', error: '503: KeyPoolerExhausted' }, T1)
+    await tick(T1)
+    assert.equal(alerts.length, 2, 'control: un texto de error NUEVO alerta de inmediato (la identidad es por texto, no un silenciador)')
+    assert.match(alerts.at(-1), /- post-error: quality-head \(1 in window\): 503: KeyPoolerExhausted/, 'control: el bullet nuevo nombra el texto nuevo')
+  })
+})
+
+test('fb-466 (2) HETEROGENEIDAD: N errores DISTINTOS del mismo postId NO se cuentan juntos — cada texto de error es su propio finding y sólo se nombra el que se cuenta', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 10, 17, 41, 0).getTime()
+    // The measured fb-466 window: 1 session collision + 1 KeyPoolerExhausted + 1 pool-quota.
+    const E1 = 'session "s" already exists'
+    const E2 = '503: KeyPoolerExhausted'
+    const E3 = '[deepartments] pool: workspaces ws6,ws15 at quota'
+    await appendPostError(stateDir, { ts: T0 - 631_500, postId: 'quality-head', error: E1 }, T0)
+    await appendPostError(stateDir, { ts: T0 - 10_643, postId: 'quality-head', error: E2 }, T0)
+    await appendPostError(stateDir, { ts: T0 - 11_493, postId: 'quality-head', error: E3 }, T0)
+    const findings = scanPostErrorFindings(stateDir, T0)
+    assert.equal(findings.length, 3, 'three heterogeneous errors of ONE postId → THREE findings (never one count-3 aggregate)')
+    for (const [error, ts] of [[E1, T0 - 631_500], [E2, T0 - 10_643], [E3, T0 - 11_493]]) {
+      const finding = findings.find((f) => f.error === error)
+      assert.ok(finding !== undefined, `the finding names its own error text: ${error}`)
+      assert.equal(finding.count, 1, `«1 in window» — the count describes the SAME group the bullet names (${error})`)
+      assert.equal(finding.ts, ts, `the bullet ts is the row of THAT error (${error})`)
+      assert.equal(finding.key, `post-error:quality-head:${errorIdentityHash(error)}`, 'the finding key is the homogeneous identity')
+    }
+    const alerts = []
+    await runHealthDaemonTick({
+      now: () => T0,
+      stateDir,
+      bootId: 'boot-fb466-hetero',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      notifyHost: async (hostEntry, frame) => { alerts.push(frame) },
+      logger: { warn: () => {} }
+    })
+    assert.equal(alerts.length, 1, 'ONE grouped alert frame carries the three homogeneous findings')
+    const lines = alerts[0].split('\n').filter((line) => line.includes('post-error: quality-head'))
+    assert.equal(lines.length, 3, 'the frame holds THREE bullets (one per error), never one mixed bullet')
+    for (const [i, error] of [E1, E2, E3].entries()) {
+      assert.ok(lines[i].includes(`(1 in window): ${error}`), `bullet ${i + 1} names its own text AND counts exactly that text: «${lines[i]}»`)
+    }
+    const audit = (await readFile(path.join(stateDir, 'health-alerts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l))
+    assert.deepEqual(
+      audit.at(-1).dedupeKeys.sort(),
+      [E1, E2, E3].map((error) => `post-error:quality-head:${errorIdentityHash(error)}`).sort(),
+      'the audit dedupeKeys are the THREE homogeneous identities (they can never disagree with the naming bullet)'
+    )
+  })
+})
+
+test('fb-466 (3) ANCLA NUNCA VACÍA: todo bullet post-error lleva exactamente UNA ancla — la forma con procedencia (byte-intacta), la forma con fecha (sin procedencia) y CATCH-UP <fecha> (el look-back) — y un bullet heterogéneo no puede existir', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 10, 17, 41, 0).getTime()
+    const session = 'head-quality-head-50ee8585'
+    await appendPostError(stateDir, { ts: T0 - 120_000, postId: 'post-with-prov', error: 'error con procedencia', sessionId: session, turn: 166 }, T0)
+    await appendPostError(stateDir, { ts: T0 - 60_000, postId: 'post-sin-prov', error: 'error sin procedencia' }, T0)
+    const findings = scanPostErrorFindings(stateDir, T0)
+    const frame = buildHealthAlertFrame(findings)
+    const withProv = frame.split('\n').find((line) => line.includes('post-with-prov'))
+    const withoutProv = frame.split('\n').find((line) => line.includes('post-sin-prov'))
+    assert.equal((withProv.match(/\[/g) ?? []).length, 1, 'con procedencia: EXACTAMENTE una ancla')
+    assert.match(withProv, /^\- post-error: post-with-prov \(1 in window\): error con procedencia \[session head-quality-head-50ee8585 turn 166 \(\d{2}:\d{2}Z\)\]$/, 'la forma con procedencia es BYTE-IDÉNTICA a la pre-fb-466 (R6)')
+    assert.equal((withoutProv.match(/\[/g) ?? []).length, 1, 'sin procedencia: TAMBIÉN exactamente una ancla (el requisito que cierra la ficha)')
+    assert.match(withoutProv, /^\- post-error: post-sin-prov \(1 in window\): error sin procedencia \[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z\]$/, 'la forma de fecha es la fila testigo en UTC: [YYYY-MM-DDTHH:MMZ]')
+    // (b) the CATCH-UP form: a row OLDER than 2 h (inside the 24 h look-back)
+    // with NO provenance → the dated catch-up anchor.
+    await appendPostError(stateDir, { ts: T0 - 3 * 3600_000, postId: 'post-catchup', error: 'gap sin procedencia' }, T0)
+    const catchup = scanHealthCatchup(stateDir, T0, HEALTH_CATCHUP_WINDOW_MS).find((f) => f.postId === 'post-catchup')
+    assert.ok(catchup !== undefined, 'the old row is caught up')
+    assert.equal(catchup.catchup, true, 'the catch-up marker rides the finding')
+    const catchupFrame = buildHealthAlertFrame([catchup])
+    // Two CATCH-UP marks: the bullet's own prefix and the anchor — and the
+    // bullet's LAST bracket is the anchor (nothing renders after it).
+    assert.equal((catchupFrame.match(/CATCH-UP /g) ?? []).length, 2, 'catch-up: DOS marcas CATCH-UP (el prefijo del bullet + el ancla)')
+    assert.match(catchupFrame, /\[CATCH-UP \d{4}-\d{2}-\d{2}\]$/, 'la ÚLTIMA ancla del bullet es la forma de fecha de catch-up')
+    assert.match(
+      catchupFrame,
+      /^\- CATCH-UP post-error: post-catchup \(1 in window\): gap sin procedencia \[CATCH-UP \d{4}-\d{2}-\d{2}\]$/m,
+      'la forma de catch-up es [CATCH-UP <fecha>] — el look-back puede ser de hasta 24 h, así que una hora suelta sería ambigua'
+    )
+    // (c) a catch-up WITH provenance keeps the session/turn anchor (never two anchors).
+    await appendPostError(stateDir, { ts: T0 - 4 * 3600_000, postId: 'post-catchup-2', error: 'gap con procedencia', sessionId: 's-archived', turn: 9 }, T0)
+    const catchup2 = scanHealthCatchup(stateDir, T0, HEALTH_CATCHUP_WINDOW_MS).find((f) => f.postId === 'post-catchup-2')
+    const catchup2Frame = buildHealthAlertFrame([catchup2])
+    assert.equal((catchup2Frame.match(/\[session /g) ?? []).length, 1, 'catch-up con procedencia: UNA sola ancla de sesión (la procedencia gana — nunca se añade la forma de fecha)')
+    assert.match(catchup2Frame, /\[session s-archived turn 9 \(\d{2}:\d{2}Z\)\]$/, 'la procedencia gana sobre la forma de fecha (preferencia declarada)')
+  })
+})
+
+test('fb-466 (4) NO-REGRESIÓN de la identidad por CLASE ESTABLE (M3/spec §2.4): un error con clase sigue agrupando por (postId, clase) — key, count y ledger `post-error:<postId>:<class>` intactos, por mucho que el texto embeba una variable por intento', async () => {
+  await withTempStateDir(async (stateDir) => {
+    const T0 = new Date(2026, 8, 10, 17, 41, 0).getTime()
+    await appendPostError(stateDir, { ts: T0 - 120_000, postId: 'host-a', error: 'session "s-1" not found' }, T0)
+    await appendPostError(stateDir, { ts: T0 - 60_000, postId: 'host-a', error: 'session "s-2" not found' }, T0)
+    const findings = scanPostErrorFindings(stateDir, T0)
+    assert.equal(findings.length, 1, 'the two not-found rows (DIFFERENT texts, same class) stay ONE group (the W8-i fix is untouched)')
+    assert.equal(findings[0].key, `post-error:host-a:${POST_ERROR_CLASS_SESSION_NOT_FOUND}`, 'the key is the STABLE-CLASS key (never the text hash)')
+    assert.equal(findings[0].count, 2, 'both not-found rows count together')
+    const alerts = []
+    const tick = (nowMs) => runHealthDaemonTick({
+      now: () => nowMs,
+      stateDir,
+      bootId: 'boot-fb466-class',
+      hosts: [{ hostId: 'host-asst', sessionId: 's-live', roomId: 'board' }],
+      notifyHost: async (hostEntry, frame) => { alerts.push(frame) },
+      logger: { warn: () => {} }
+    })
+    await tick(T0)
+    assert.equal(alerts.length, 1, 'ONE alert for the class identity')
+    const state = readHealthAlertsState(stateDir)
+    assert.ok(state[`post-error:host-a:${POST_ERROR_CLASS_SESSION_NOT_FOUND}`] !== undefined, 'the ledger key is the STABLE-CLASS identity (the 1 h retry-loop fix never regresses)')
+    // The rotate-per-attempt text (a NEW session id, same class) MUST NOT alert again.
+    await appendPostError(stateDir, { ts: T0 + 60_000, postId: 'host-a', error: 'session "s-3" not found' }, T0 + 60_000)
+    await tick(T0 + 60_000)
+    assert.equal(alerts.length, 1, 'a third not-found with a NEW session id in its text does NOT re-alert (the class identity is text-independent)')
   })
 })
 

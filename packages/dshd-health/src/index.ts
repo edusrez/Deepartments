@@ -1116,21 +1116,26 @@ export interface HealthFinding {
   hostId?: string
   /** The messageId (delivery-failed) — the bus record that failed delivery. */
   messageId?: string
-  /** The most-recent row ts of the group (ms epoch). */
+  /** The finding's anchored row ts (ms epoch) — for a post-error finding the ts
+   * of the group's WITNESS row (the row whose `error` text + `count` the alert
+   * shows; fb-466 — pre-fb-466 this was the group's most-recent row while the
+   * error came from the oldest one: two rows of a mixed group). */
   ts: number
   /** The captured error message (post-error / config-preset — the unbound
    * template variable names; the literal double-brace token is never written). */
   error?: string
-  /** The grouped row count (post-error / stalled-post / config-preset). */
+  /** The grouped row count (post-error / stalled-post / config-preset — for a
+   * post-error group the count of the rows that carry the SHOWN error identity:
+   * the same error class, or the same error text; fb-466). */
   count?: number
-  /** fb-25 (b) — the SESSION PROVENANCE of the post-error group's rows[0] (the
-   * row whose `error` text + `count` the alert shows), when the row carried it
-   * (the turn-error capture writes sessionId+turn). The host alert frame uses
+  /** fb-25 (b) — the SESSION PROVENANCE of the post-error group's WITNESS row
+   * (the row whose `error` text + `count` the alert shows), when the row carried
+   * it (the turn-error capture writes sessionId+turn). The host alert frame uses
    * it to show "this error is from the ARCHIVED session <id> turn <n>" —
    * pointing at the FRESH session is impossible once the provenance exists. */
   sessionId?: string
-  /** fb-25 (b) — the turn number of the post-error group's rows[0] (when the
-   * row carried it). */
+  /** fb-25 (b) — the turn number of the post-error group's witness row (when
+   * the row carried it). */
   turn?: number
   /** fb-30 — the BOOT CATCH-UP marker: true ONLY on findings produced by the
    * boot catch-up pass (durable rows OUTSIDE the live 2 h window, WITHIN the
@@ -3228,12 +3233,87 @@ export interface HealthDaemonDeps {
   logger?: { warn(message: string): void; info(message: string): void }
 }
 
-/** Group fresh post-errors inside HEALTH_ERROR_WINDOW_MS, deduped per postId
- * (multiple rows for the same postId within the window → ONE finding). W8-i: a
- * DISTINCT error class (e.g. 'session not found') gets its OWN per-(post+class)
- * dedupe key `post-error:<postId>:<class>` so a repeated not-found attempt
- * never re-alerts per attempt; the generic class keeps the legacy
- * `post-error:<postId>` key (existing behavior unchanged).
+/** fb-466 (LANE E, 2026-09-11) — HOMOGENEOUS post-error grouping (the single
+ * source of the scan's grouping, shared by the LIVE scan and the boot CATCH-UP
+ * pass). Rows are grouped per `postId` PLUS the error IDENTITY:
+ *   - STABLE class (`postErrorClass` non-undefined, e.g. 'session not found')
+ *     → `${postId}\u0000${class}` (W8-i, unchanged: a repeated not-found attempt
+ *     never re-alerts per attempt);
+ *   - NO stable class → `${postId}\u0000${errorIdentityHash(error)}` (fb-466):
+ *     every DISTINCT error text of a post is its OWN group, so a group's rows
+ *     all carry the SAME error text BY CONSTRUCTION.
+ * WHY (the measured defect, fichas fb-466 `:3262-3264` + `:7716-7722`): the
+ * pre-fb-466 grouping was the bare `postId` for class-less errors, so one group
+ * mixed HETEROGENEOUS errors and the aggregate was composed of three different
+ * rows (`ts` = newest row, `error` = `rows[0]` = OLDEST row, `count` = ALL
+ * rows). Two measured consequences: (1) OVER-ATTRIBUTION — «N in window» named
+ * ONE error while counting N different ones; (2) RESURRECTION — the anti-repeat
+ * identity is the hash of the SHOWN error text, so when the oldest row of the
+ * 2 h window expired the shown text (and therefore the hash) CHANGED and a
+ * FRESH alert was emitted for a 2 h old error (the q-i-212 measurement:
+ * `f9822ff1` → `3e3e1ded`). With the hash in the group key both close by
+ * construction: an unrelated row expiring can no longer change the group's
+ * error text/hash/count, and a genuinely NEW error text is what produces a new
+ * identity (the correct alert).
+ * Homogeneous BY CONSTRUCTION, so the composition below is coherent: the
+ * witness row (see below) is ONE row, and its `error` + `ts` + `count` +
+ * provenance all describe the SAME group.
+ * The finding `key` uses the SAME identity shape (`post-error:<postId>:<hash>`
+ * for the class-less case) so the audit `dedupeKeys`, the ledger entry and the
+ * error-naming bullet can never disagree; a class-less finding WITHOUT an error
+ * text keeps the legacy `post-error:<postId>` key (R6).
+ * PURE. Order-stable: groups follow the first row of each group (file order). */
+function groupPostErrorRows(rows: readonly PostErrorEntry[]): HealthFinding[] {
+  const byGroup = new Map<string, PostErrorEntry[]>()
+  for (const row of rows) {
+    const cls = postErrorClass(row.error)
+    // fb-466: the class-undefined case is keyed by the error-text identity hash
+    // (NOT the bare postId) — homogeneous groups, see the block comment.
+    const groupKey = cls === undefined ? `${row.postId}\u0000${errorIdentityHash(row.error)}` : `${row.postId}\u0000${cls}`
+    const list = byGroup.get(groupKey) ?? []
+    list.push(row)
+    byGroup.set(groupKey, list)
+  }
+  const findings: HealthFinding[] = []
+  for (const [groupKey, groupRows] of byGroup) {
+    const split = groupKey.indexOf('\u0000')
+    const postId = split === -1 ? groupKey : groupKey.slice(0, split)
+    const suffix = split === -1 ? undefined : groupKey.slice(split + 1)
+    // The STABLE CLASS is what distinguishes a class suffix from a text hash.
+    const cls = suffix !== undefined && postErrorClass(groupRows[0].error) !== undefined ? suffix : undefined
+    const hash = suffix !== undefined && cls === undefined ? suffix : errorIdentityHash(groupRows[0].error)
+    // The WITNESS row — the row whose error text the alert names, so the
+    // bullet's provenance, its ts and the counted rows all belong to THIS group.
+    // It is the OLDEST (file-order first) row: the shape fb-25 (b) and the
+    // m-1194 bullets already expose (R6), and now stable against a LATER row of
+    // the same group (the pre-fb-466 `ts` mixed the newest row with the oldest
+    // row's text: the same (key, ts) pair could render DIFFERENT error strings
+    // 60 s apart — the measured second column of fb-466).
+    const witness = groupRows[0]
+    findings.push({
+      kind: 'post-error',
+      key: cls !== undefined ? `post-error:${postId}:${cls}` : hash === '' ? `post-error:${postId}` : `post-error:${postId}:${hash}`,
+      postId,
+      ts: witness.ts,
+      error: witness.error,
+      count: groupRows.length,
+      // fb-25 (b): the PROVENANCE of the witness row (the row whose error text
+      // the alert shows) rides ONLY when the row carried it — additive (R6).
+      ...(typeof witness.sessionId === 'string' && witness.sessionId !== '' ? { sessionId: witness.sessionId } : {}),
+      ...(typeof witness.turn === 'number' && Number.isFinite(witness.turn) ? { turn: witness.turn } : {})
+    })
+  }
+  return findings
+}
+
+/** Group fresh post-errors inside HEALTH_ERROR_WINDOW_MS into HOMOGENEOUS
+ * findings (see `groupPostErrorRows`): W8-i — a distinct error CLASS gets its
+ * OWN per-(post+class) identity `post-error:<postId>:<class>` so a repeated
+ * not-found attempt never re-alerts per attempt; fb-466 — a class-less post's
+ * DISTINCT error texts get their OWN per-(post+error-text) identity
+ * `post-error:<postId>:<errorIdentityHash>` (the pre-fb-466 bare-postId grouping
+ * both over-attributed the `count` and resurrected an alert when the oldest row
+ * expired; see the groupPostErrorRows block).
  * Bug A (defense-in-depth): a `retiredHostIds` set of RETIRED host ids is
  * threaded in so a LEGACY post-error row for a retired host on disk (e.g. a
  * pre-rotation row) is never a finding/alert — a retired host is terminal (W7
@@ -3242,34 +3322,7 @@ export interface HealthDaemonDeps {
 export function scanPostErrorFindings(stateDir: string, nowMs: number, retiredHostIds?: ReadonlySet<string>): HealthFinding[] {
   const inWindow = readPostErrorsFile(stateDir).filter((row) => nowMs - row.ts <= HEALTH_ERROR_WINDOW_MS)
   const fresh = retiredHostIds === undefined ? inWindow : inWindow.filter((row) => !retiredHostIds.has(row.postId))
-  const byGroup = new Map<string, PostErrorEntry[]>()
-  for (const row of fresh) {
-    const cls = postErrorClass(row.error)
-    const groupKey = cls === undefined ? row.postId : `${row.postId}\u0000${cls}`
-    const list = byGroup.get(groupKey) ?? []
-    list.push(row)
-    byGroup.set(groupKey, list)
-  }
-  const findings: HealthFinding[] = []
-  for (const [groupKey, rows] of byGroup) {
-    const split = groupKey.indexOf('\u0000')
-    const postId = split === -1 ? groupKey : groupKey.slice(0, split)
-    const cls = split === -1 ? undefined : groupKey.slice(split + 1)
-    findings.push({
-      kind: 'post-error',
-      key: cls === undefined ? `post-error:${postId}` : `post-error:${postId}:${cls}`,
-      postId,
-      ts: rows.reduce((max, row) => Math.max(max, row.ts), 0),
-      error: rows[0].error,
-      count: rows.length,
-      // fb-25 (b): the PROVENANCE of rows[0] (the row whose error text the alert
-      // shows) rides ONLY when the row carried it — additive, the legacy
-      // postId-only grouping/identity never changes (R6).
-      ...(typeof rows[0].sessionId === 'string' && rows[0].sessionId !== '' ? { sessionId: rows[0].sessionId } : {}),
-      ...(typeof rows[0].turn === 'number' && Number.isFinite(rows[0].turn) ? { turn: rows[0].turn } : {})
-    })
-  }
-  return findings
+  return groupPostErrorRows(fresh)
 }
 
 /** The delivery-row read seam of one health scan (C6). A `DeliveryRowsReader`
@@ -3724,37 +3777,20 @@ export function scanHealthCatchup(
 ): HealthFinding[] {
   const findings: HealthFinding[] = []
   // (1) post-errors + the C9 archive: exactly the rows STRICTLY older than the
-  // live window and within the bounded look-back.
+  // live window and within the bounded look-back. fb-466: the grouping is the
+  // SHARED homogeneous helper — the catch-up pass and the live scan can never
+  // disagree on a post-error identity (same class per (post+class), same
+  // error-text hash per (post+error text)).
   const oldPostErrors = [...readPostErrorsFile(stateDir), ...readPostErrorsArchiveFile(stateDir)]
     .filter((row) => nowMs - row.ts > HEALTH_ERROR_WINDOW_MS && nowMs - row.ts <= windowMs)
   const postErrors = retiredHostIds === undefined ? oldPostErrors : oldPostErrors.filter((row) => !retiredHostIds.has(row.postId))
-  const byGroup = new Map<string, PostErrorEntry[]>()
-  for (const row of postErrors) {
-    const cls = postErrorClass(row.error)
-    const groupKey = cls === undefined ? row.postId : `${row.postId}\u0000${cls}`
-    const list = byGroup.get(groupKey) ?? []
-    list.push(row)
-    byGroup.set(groupKey, list)
-  }
-  for (const [groupKey, rows] of byGroup) {
-    const split = groupKey.indexOf('\u0000')
-    const postId = split === -1 ? groupKey : groupKey.slice(0, split)
-    const cls = split === -1 ? undefined : groupKey.slice(split + 1)
-    findings.push({
-      kind: 'post-error',
-      key: cls === undefined ? `post-error:${postId}` : `post-error:${postId}:${cls}`,
-      postId,
-      ts: rows.reduce((max, row) => Math.max(max, row.ts), 0),
-      error: rows[0].error,
-      count: rows.length,
-      catchup: true,
-      // fb-25 (b): the provenance of rows[0] rides the finding (additive, the
-      // live-scan rule) so the CATCH-UP bullet shows the archived-session
-      // provenance the same way.
-      ...(typeof rows[0].sessionId === 'string' && rows[0].sessionId !== '' ? { sessionId: rows[0].sessionId } : {}),
-      ...(typeof rows[0].turn === 'number' && Number.isFinite(rows[0].turn) ? { turn: rows[0].turn } : {})
-    })
-  }
+  findings.push(
+    // The witness row's provenance (fb-25 b) already rides each grouped finding
+    // (additive, the live-scan rule) so the CATCH-UP bullet shows the
+    // archived-session provenance the same way; `catchup: true` is the pass's
+    // OWN marker (the frame renders its CATCH-UP bullet).
+    ...groupPostErrorRows(postErrors).map((finding) => ({ ...finding, catchup: true }))
+  )
   // (2) delivery-failed rows: the same window rule (the live scan's
   // whitelist filter — only 'failed' is ever an anomaly).
   const oldDeliveries = readDeliveryRowsFull(stateDir)
@@ -6575,18 +6611,32 @@ export function buildHealthAlertFrame(findings: HealthFinding[]): string {
       // missed-window recovery from a fresh anomaly; the LIVE bullets are
       // byte-intact (the marker is additive, R6).
       const prefix = finding.catchup === true ? 'CATCH-UP ' : ''
-      // fb-25 (b): the SESSION PROVENANCE — when the finding's rows[0] carried
-      // sessionId/turn, the frame appends `[session <id> turn <n> (HH:MMZ)]` so
-      // the host sees the error belongs to an ARCHIVED session (never the fresh
-      // one). Legacy rows WITHOUT provenance render the current text (R6).
-      // The time label derives from the finding ts (the group's most-recent row
-      // ts, UTC HH:MM).
+      // fb-25 (b): the SESSION PROVENANCE — when the finding's witness row
+      // carried sessionId/turn, the frame appends `[session <id> turn <n>
+      // (HH:MMZ)]` so the host sees the error belongs to an ARCHIVED session
+      // (never the fresh one).
+      // fb-466 (LANE E) — THE ANCHOR IS NEVER EMPTY (the requirement that closes
+      // the ficha): a post-error bullet ALWAYS carries exactly ONE anchor, so
+      // the host can never read a bullet without knowing WHEN/WHICH session it
+      // speaks about. Three mutually exclusive forms, in preference order:
+      //   (1) provenance (sessionId and/or turn present) → `[session <id>[ turn
+      //       <n>] (<HH:MMZ>)]` — BYTE-IDENTICAL to the pre-fb-466 shape (R6);
+      //   (2) a CATCH-UP finding without provenance → `[CATCH-UP <fecha>]`
+      //       (the boot look-back may be up to 24 h old: a bare HH:MM would be
+      //       ambiguous) — the date is the witness row's UTC date;
+      //   (3) any other post-error without provenance → `[<fecha-hora>]` with
+      //       the witness row's UTC date-time (`YYYY-MM-DDTHH:MMZ`).
+      // The time label derives from the WITNESS row's ts (the group's own row —
+      // the one whose error text AND count the bullet shows; the pre-fb-466
+      // label used the newest row's ts while naming the oldest row's text).
       const provenance: string[] = []
       if (finding.sessionId !== undefined) provenance.push(`session ${finding.sessionId}`)
       if (finding.turn !== undefined) provenance.push(`turn ${finding.turn}`)
-      const provenanceLabel = provenance.length === 0
-        ? ''
-        : ` [${provenance.join(' ')} (${new Date(finding.ts).toISOString().slice(11, 16)}Z)]`
+      const provenanceLabel = provenance.length > 0
+        ? ` [${provenance.join(' ')} (${new Date(finding.ts).toISOString().slice(11, 16)}Z)]`
+        : finding.catchup === true
+          ? ` [CATCH-UP ${new Date(finding.ts).toISOString().slice(0, 10)}]`
+          : ` [${new Date(finding.ts).toISOString().slice(0, 16)}Z]`
       return `- ${prefix}post-error: ${finding.postId} (${finding.count ?? 1} in window)${detail}${provenanceLabel}`
     }
     if (finding.kind === 'delivery-failed') {
@@ -7712,6 +7762,15 @@ export async function runHealthDaemonTick(deps: HealthDaemonDeps): Promise<void>
     // delivery-failed / stalled / config-preset findings the identity IS the
     // existing finding key and the legacy per-key 30min window is preserved
     // (already identity-typed; do not regress).
+    // fb-466 (LANE E): the scan now GROUPS a class-less post's distinct error
+    // texts separately, so the finding's `error` is the text of the group's OWN
+    // rows (never another error's) and the hash below is STABLE for as long as
+    // that error text stays in the window: an UNRELATED row expiring can no
+    // longer change the identity (the measured resurrection `f9822ff1` →
+    // `3e3e1ded`). The hash and the finding `key` are the SAME function of the
+    // SAME text, so the ledger entry, the audit `dedupeKeys` and the bullet's
+    // named error always describe one group. The stable-class identity is
+    // UNTOUCHED (no regression of the 1h retry-loop fix).
     if (findings.length > 0) {
       const identityOf = (finding: HealthFinding): string => {
         if (finding.kind !== 'post-error') return finding.key
