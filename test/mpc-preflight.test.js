@@ -253,6 +253,86 @@ test('MPC-PREFLIGHT A1(e): a missing llm surface is warn + DEGRADED at boot — 
   assert.match(deploy.message, /fail-loud, never fail-open/)
 })
 
+test('MPC-PREFLIGHT A1(v)-CONTRACT: a READABLE static half with the RUNTIME half NOT consulted is NEVER `allow` at deploy (the real shape of every CLI run)', async (t) => {
+  // A1(v) del §4.2:236, en su forma REAL. El test histórico del fichero
+  // (`sources: []`, el caso (e) de arriba) mide AUSENCIA TOTAL de fuente, no el
+  // caso que el 100% de las corridas reales produce: la mitad ESTÁTICA legible
+  // (settings.yaml) SIN la mitad runtime. Esta es la forma que el CLI manda
+  // cuando nadie suple `--catalog`/`llm`, y es exactamente donde el guard salía
+  // `allow` + `degraded:false` (fail-open medido por la verificación
+  // independiente fb-359). A1(v) exige: «o bloquea, o fail-loud declarado con la
+  // razón» — NUNCA un allow implícito.
+  const pin = { provider: 'opencode-zen', model: 'deepseek-flash', source: { tramo: 'P3', class: 'code-constant', ref: 'model-pins.ts' } }
+  const staticOnly = { id: 'settings-yaml', providers: { 'opencode-zen': { models: ['deepseek-flash'], registered: true } } }
+  // PUERTA 1-2 (deploy, BLOQUEANTE): NUNCA allow con la mitad runtime sin
+  // consultar. Se asserta el núcleo PURO (el contrato de la decisión).
+  const deploy = buildCoherenceReport({ pins: [pin], sources: [staticOnly], phase: 'deploy-preflight' })
+  assert.notEqual(deploy.decision, 'allow', 'a static-only composition must NEVER be a green light at the deploy gate (prohibido el fail-open en las puertas 1-2)')
+  assert.equal(deploy.decision, 'blocked')
+  assert.match(deploy.message, /RUNTIME half was NOT consulted/, 'the reason must be declared loudly')
+  // PUERTA 3 (boot): no bloquea (se perdería el actor que repara) pero JAMÁS un
+  // ok silencioso. En boot el artefacto autoritativo es el RUN del runner —que
+  // lleva el flag `degraded` + el PROBLEM explícito—, no `report.decision`
+  // (el boot sano sigue siendo `allow`: lo que nunca falta es el latido de la
+  // mitad no consultada).
+  const home = makeHome(t, SETTINGS_COVERED)
+  const boot = await runMpcPreflight({ mode: 'boot', paths: { settingsYaml: path.join(home, 'settings.yaml') } })
+  assert.equal(boot.decision, 'allow')
+  assert.equal(boot.inputs.runtimeCatalogConsulted, false, 'the fixture composition has NO runtime source (the real shape)')
+  assert.equal(boot.degraded, true, 'never a silent ok: the half-runtime flag is set')
+  assert.ok(boot.problems.some((p) => p.includes('the RUNTIME catalog source is absent')), 'the unconsulted half is DECLARED in the report')
+  // y el núcleo puro en boot tampoco produce un mensaje vacío de permiso: la
+  // mitad ausente es un PROBLEM del run, no una línea de «ok».
+  const bootReport = buildCoherenceReport({ pins: [pin], sources: [staticOnly], phase: 'boot' })
+  assert.equal(bootReport.missing.length, 0)
+})
+
+test('MPC-PREFLIGHT A1(g): when the TWO consulted halves DISAGREE the deploy BLOCKS (the design requires COINCIDENCE — a union verdict is a fail-open)', () => {
+  // §4.2:221 / `docs/VERIFICATION-LADDER.md` §2.5: el pre-flight de deploy exige
+  // la COINCIDENCIA de las dos vías «y la discrepancia entre ambas es en sí misma
+  // un hallazgo». Un comparador de UNIÓN (ok porque AL MENOS UNA fuente resuelve)
+  // deja que la mitad runtime —la única que habla del catálogo REAL del adapter—
+  // NIEGUE un modelo mientras la estática lo admite ⇒ `allow`. Es el residuo del
+  // mismo fail-open que cerró F5: allí faltaba la mitad, aquí la mitad miente.
+  const pin = { provider: 'opencode-zen', model: 'deepseek-flash', source: { tramo: 'P3', class: 'code-constant', ref: 'model-pins.ts WORKER_AGENT_OPTIONS' } }
+  const staticOk = { id: 'settings-yaml', providers: { 'opencode-zen': { models: ['deepseek-flash'], registered: true } } }
+  const runtimeOk = { id: 'runtime-llm', providers: { 'opencode-zen': { models: ['deepseek-flash'], registered: true } } }
+  const runtimeDenies = { id: 'runtime-llm', providers: { 'opencode-zen': { models: ['deepseek-v4-flash'], registered: true } } }
+  const staticDenies = { id: 'settings-yaml', providers: { 'opencode-zen': { models: ['deepseek-v4-flash'], registered: true } } }
+  // (1) la estática admite y la runtime NIEGA ⇒ BLOQUEO (no un allow por unión).
+  const vetoed = buildCoherenceReport({ pins: [pin], sources: [staticOk, runtimeDenies], phase: 'deploy-preflight' })
+  assert.equal(vetoed.discrepancies.length, 1, 'the disagreement is DETECTED (never silently unioned away)')
+  assert.equal(vetoed.decision, 'blocked', 'a consulted source that DENIES the model must block the deploy')
+  assert.match(vetoed.message, /DISAGREE/)
+  assert.match(vetoed.discrepancies[0].detail, /DENIED by \[runtime-llm\]/)
+  assert.match(vetoed.discrepancies[0].detail, /settings-yaml/)
+  // (2) la dirección SIMÉTRICA (la estática niega, la runtime admite) BLOQUEA igual.
+  const symmetric = buildCoherenceReport({ pins: [pin], sources: [staticDenies, runtimeOk], phase: 'deploy-preflight' })
+  assert.equal(symmetric.discrepancies.length, 1)
+  assert.equal(symmetric.decision, 'blocked')
+  // (3) las DOS coincidiendo ⇒ allow sin discrepancias (cero falso positivo).
+  const agreed = buildCoherenceReport({ pins: [pin], sources: [staticOk, runtimeOk], phase: 'deploy-preflight' })
+  assert.equal(agreed.decision, 'allow')
+  assert.equal(agreed.discrepancies.length, 0)
+  // (4) una sola fuente (la otra no se consultó) NO es una discrepancia: es el
+  // caso F5 (bloqueo por mitad ausente), que se prueba aparte.
+  const single = buildCoherenceReport({ pins: [pin], sources: [staticOk], phase: 'deploy-preflight' })
+  assert.equal(single.discrepancies.length, 0)
+  assert.equal(single.decision, 'blocked')
+  // (5) en boot la discrepancia DEGRADA (no bloquea el arranque — se perdería el
+  // actor que repara — pero JAMÁS un ok silencioso).
+  const boot = buildCoherenceReport({ pins: [pin], sources: [staticOk, runtimeDenies], phase: 'boot' })
+  assert.equal(boot.decision, 'degraded')
+  // (6) la fuente built-in (una declaración ESTÁTICA de las rutas del bundle, no
+  // un catálogo live) NO es autoridad para negar: su papel es rellenar lo que
+  // ninguna fuente live resolvió, y su lista por defecto no puede vetar un
+  // catálogo vivo (si vetara, el tramo P6/twin del §4.2 rompería la decisión).
+  const builtinOnly = { id: 'builtin-adapter', providers: { 'opencode-zen': { models: [], registered: true } } }
+  const withBuiltin = buildCoherenceReport({ pins: [pin], sources: [staticOk, runtimeOk, builtinOnly], phase: 'deploy-preflight' })
+  assert.equal(withBuiltin.discrepancies.length, 0)
+  assert.equal(withBuiltin.decision, 'allow')
+})
+
 test('MPC-PREFLIGHT A1(f): a STALE handle (P5) resolves to the current pin — never keyed on the sessionId birth date', () => {
   const catalog = { id: 'settings-yaml', providers: { 'opencode-zen': { models: ['deepseek-flash'], registered: true } } }
   const currentPin = { provider: 'opencode-zen', model: 'deepseek-flash', source: { tramo: 'P2', class: 'org.workerAgentOptions', ref: 'org.workerAgentOptions' } }
@@ -429,6 +509,32 @@ test('MPC-PREFLIGHT F5: without the RUNTIME half —no llm, no --catalog— the 
   assert.match(stdout, /--catalog <json>/)
   // y NO existe un flag de «desplegar con la mitad estática»
   assert.match(stdout, /NO flag to deploy with the static half alone/)
+})
+
+test('MPC-PREFLIGHT F5-bis (CLI, end-to-end): the deploy CLI exits 2 when the SUPPLIED live catalog DENIES a pin the static half admits', (t) => {
+  // El caso REAL del CLI: las dos mitades están presentes (settings.yaml legible
+  // + `--catalog` declarado por el ritual) y NO coinciden. Antes de este gate el
+  // veredicto era de UNIÓN ⇒ exit 0 («una mitad certifica y se declara allow»).
+  const home = makeHome(t, SETTINGS_COVERED)
+  const patch = path.join(home, 'cordis.patch.yml')
+  writeFileSync(patch, PATCH_LEGACY_PIN, 'utf8')
+  const stateDir = path.join(home, 'state')
+  const catalogPath = path.join(home, 'catalog-deny.json')
+  // El catálogo vivo declarado por el shell admite el LEGACY pero NIEGA el id de
+  // flota (`deepseek-flash`) que la mitad estática sí resuelve.
+  writeFileSync(catalogPath, JSON.stringify({ id: 'runtime-llm', providers: { 'opencode-zen': { models: ['deepseek-v4-legacy-phantom'], registered: true } } }), 'utf8')
+  let exitCode = 0
+  let stdout = ''
+  try {
+    stdout = execFileSync('node', [CLI, 'deploy', '--dsh-home', home, '--state-dir', stateDir, '--catalog', catalogPath], { encoding: 'utf8' })
+  } catch (error) {
+    exitCode = error.status ?? 1
+    stdout = String(error.stdout ?? '')
+  }
+  assert.equal(exitCode, 2, 'the denial of a consulted catalog must BLOCK the deploy (never masked by the static half)')
+  assert.match(stdout, /decision=blocked/)
+  assert.match(stdout, /DISAGREE/)
+  assert.match(stdout, /runtime-llm/)
 })
 
 test('MPC-PREFLIGHT F5(b) + F5(c): the guard BLOCKS without the runtime half, PASSES with an in-process llm, and reads the `--catalog` bridge (three documented forms)', async (t) => {
@@ -678,6 +784,47 @@ test('MPC-PREFLIGHT gate 3(b): a HEALTHY boot gate writes NO durable row at all 
   assert.ok(result.problems.some((p) => p.includes('the RUNTIME catalog source')), 'the unverified half is declared LOUD in the report (never a silent ok)')
 })
 
+test('MPC-PREFLIGHT gate 3(c): the durable DEGRADED mark is CLEARED by the next HEALTHY boot (a latch that outlives its finding LIES about the current tree)', async (t) => {
+  // Fact (iv) de la verificación independiente: la «marca DEGRADED visible» no
+  // tenía consumidor y, escrita una vez, sobrevivía a la reparación del árbol
+  // (nadie la borraba): un lector humano del fichero concluía «DEGRADED» con el
+  // árbol ya coherente — la clase de «detalle caduco» (fb-352/356). El guard es
+  // el LECTOR de su propio latch: en un boot sin nada que decir, si existe una
+  // marca previa degradada, la REESCRIBE como sana (y sin tocar el canal
+  // compartido). Sin marca previa NO escribe nada (contrato F4).
+  const home = makeHome(t, SETTINGS_SUBTRACTIVE)
+  const settingsPath = path.join(home, 'settings.yaml')
+  const patch = path.join(home, 'cordis.patch.yml')
+  writeFileSync(patch, PATCH_LEGACY_PIN, 'utf8')
+  const stateDir = path.join(home, 'state')
+  const markPath = path.join(stateDir, MPC_PREFLIGHT_STATE_FILE)
+  const ledgerPath = path.join(stateDir, 'health-alerts.jsonl')
+  // (1) el árbol ROTO (catálogo sin el id legacy + pin desplegado que lo pide):
+  // marca DEGRADED + UNA fila del canal.
+  const broken = await runMpcPreflight({ mode: 'boot', stateDir, persist: true, now: () => 1789040000000, paths: { settingsYaml: settingsPath }, patches: [patch] })
+  assert.equal(broken.decision, 'degraded')
+  const degradedMark = JSON.parse(readFileSync(markPath, 'utf8'))
+  assert.equal(degradedMark.degraded, true)
+  assert.equal(readFileSync(ledgerPath, 'utf8').trim().split('\n').length, 1)
+  // (2) el árbol se REPARA (aditivo: el catálogo recupera el id aún pinnado).
+  writeFileSync(settingsPath, SETTINGS_COVERED, 'utf8')
+  const healthy = await runMpcPreflight({ mode: 'boot', stateDir, persist: true, now: () => 1789040009000, paths: { settingsYaml: settingsPath }, patches: [patch] })
+  assert.equal(healthy.decision, 'allow')
+  // (3) la marca deja de MENTIR: latch limpiado, con la procedencia del latche
+  // anterior (nunca un borrado silencioso) y sin fila nueva en el canal.
+  const cleared = JSON.parse(readFileSync(markPath, 'utf8'))
+  assert.equal(cleared.degraded, false, 'a recovered tree must not keep advertising DEGRADED')
+  assert.equal(cleared.decision, 'allow')
+  assert.equal(cleared.ts, 1789040009000)
+  assert.deepEqual(cleared.clearedFrom, { ts: 1789040000000, mode: 'boot', decision: 'degraded', missing: degradedMark.missing })
+  assert.deepEqual(cleared.missing, [])
+  assert.equal(readFileSync(ledgerPath, 'utf8').trim().split('\n').length, 1, 'clearing the latch writes NO channel row (the shared ledger is not the latch)')
+  // (4) y un boot sano SIN marca previa sigue sin escribir nada (contrato F4).
+  const freshStateDir = path.join(home, 'state-fresh')
+  await runMpcPreflight({ mode: 'boot', stateDir: freshStateDir, persist: true, now: () => 1789040010000, paths: { settingsYaml: settingsPath }, patches: [patch] })
+  assert.equal(existsSync(path.join(freshStateDir, MPC_PREFLIGHT_STATE_FILE)), false, 'F4 preserved: no mark is created on a healthy boot')
+})
+
 // --- F4 (2ª pasada) — LA PUERTA REAL: registerMpcBootPinCoherenceGate /
 // --- runMpcPreflightSync SIN catalogSources (el único objeto que produce la fila
 // --- fantasma que el reviewer midió en §5, líneas 144-159). --------------------
@@ -774,28 +921,35 @@ test('MPC-PREFLIGHT F4-REAL(c): POSITIVE — the REAL boot GATE with a REAL find
 // --- A6: read-only + detección de modo ---------------------------------------
 
 test('MPC-PREFLIGHT A6: the guard is READ-ONLY on the live home — it never edits settings.yaml, never restores legacy, never restarts', async (t) => {
-  const home = makeHome(t, SETTINGS_SUBTRACTIVE)
+  const home = makeHome(t, SETTINGS_COVERED)
   const patch = path.join(home, 'cordis.patch.yml')
   writeFileSync(patch, PATCH_LEGACY_PIN, 'utf8')
   const settingsPath = path.join(home, 'settings.yaml')
   const before = readFileSync(settingsPath, 'utf8')
   const stateDir = path.join(home, 'state')
-  // El catálogo SUPLIDO del fixture es el ADITIVO (declara el id legacy aún
-  // pinneado) ⇒ el gate de deploy PASA y lo que se prueba aquí es que el guard
-  // es read-only sobre el home, no la disposición del gate.
+  // F5-bis: el catálogo SUPLIDO del fixture tiene que COINCIDIR con la mitad
+  // estática (no basta con que sea aditivo): el diseño exige la coincidencia de
+  // las dos vías y una discrepancia ES un hallazgo. Antes esta fixture suplía un
+  // catálogo que contradecía al static (admitía el legacy que el fichero ya no
+  // declaraba) y el `allow` salía de la UNIÓN — es decir el fixture codificaba
+  // el defecto que F5-bis cierra. Con las dos mitades de acuerdo, el gate PASA y
+  // lo que se prueba aquí es que el guard es read-only sobre el home.
+  const agreeingCatalog = { id: 'fixture-catalog', providers: { 'opencode-zen': { models: ['deepseek-flash', 'deepseek-v4-legacy-phantom'], registered: true } } }
   const result = await runMpcPreflight({
     mode: 'deploy',
     stateDir,
     persist: true,
     paths: { settingsYaml: settingsPath },
-    catalogSources: [{ id: 'fixture-catalog-additive', providers: { 'opencode-zen': { models: ['deepseek-flash', 'deepseek-v4-legacy-phantom'], registered: true } } }],
+    catalogSources: [agreeingCatalog],
     patches: [patch]
   })
+  assert.equal(result.report.discrepancies.length, 0, 'the two halves COINCIDE in this fixture (no disagreement invented)')
   assert.equal(result.decision, 'allow')
   assert.equal(readFileSync(settingsPath, 'utf8'), before, 'settings.yaml must be byte-identical after the guard')
-  // el guard NO auto-restaura el id retirado: el catálogo sigue siendo el mismo
+  // el guard NO auto-restaura ni poda el catálogo: el settings.yaml sigue
+  // declarando EXACTAMENTE los ids que el fixture escribió
   const catalog = staticCatalogFromSettingsYaml(settingsPath)
-  assert.deepEqual(catalog.providers['opencode-zen'].models, ['deepseek-flash'])
+  assert.deepEqual(catalog.providers['opencode-zen'].models, ['deepseek-flash', 'deepseek-v4-legacy-phantom'])
   // y no crea ningún artefacto de restart/boot fuera del stateDir
   assert.equal(existsSync(path.join(home, 'boot-crash.json')), false)
   assert.equal(existsSync(path.join(home, 'health-heartbeat.json')), false)

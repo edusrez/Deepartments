@@ -112,6 +112,18 @@ DOS vías — estática (`--dump-config` del perfil) y runtime
 (`ctx.get('llm').listModels(p)`, la primitiva del probe R2) — **exigiendo
 coincidencia**; la discrepancia entre ambas es en sí misma un hallazgo.
 
+**Estado de implementación (2026-09-11, lane MPC-PREFLIGHT) — el contrato de
+exit del CLI `scripts/mpc-preflight.mjs`, medido:** `0` = I-MP verificado por las
+DOS mitades; **`2` = BLOQUEO** en `deploy`/`check` — pares `pines ⊄ catálogo`
+(evidencia positiva), **ninguna fuente estática legible**, **la mitad RUNTIME no
+consultada** (sin `llm` in-process y sin `--catalog`) o **las dos mitades
+consultadas DISCREPANDO** (una resuelve el pin y la otra lo niega: el veto de un
+catálogo consultado nunca queda tapado por el `ok` del otro); `3` = REJECTED por
+el write-guard subtractivo; `4` = el `--catalog` nombrado no se pudo leer. La
+puerta ③ (boot) **nunca bloquea**: degrada (alerta con interrupt al host vivo +
+fila durable + marca) y su latch se **limpia** en el siguiente boot sano, para no
+seguir anunciando DEGRADED con el árbol ya reparado.
+
 **Dónde se ejecuta** (4 puertas, mismo núcleo puro): ① **deploy pre-flight
 BLOQUEANTE** — dos ejecuciones, antes de la fase live y después de
 `pnpm build`+`plugin add`, siempre **antes** del `smart_restart`: si `P ⊄ C` el

@@ -204,6 +204,18 @@ export interface ModelPinCoherenceReport {
   /** Los pares que NINGUNA fuente pudo resolver (surface ausente) — información,
    * nunca permiso para callar: la puerta de BOOT degrada con ellos. */
   unverifiable: ModelPinVerdict[]
+  /** F5-bis — los pines sobre los que las fuentes CONSULTADAS **NO COINCIDEN**:
+   * una fuente LIVE los RESUELVE y otra los NIEGA (evidencia POSITIVA de
+   * discrepancia). El diseño (§4.2:221, VERIFICATION-LADDER §2.5) exige la
+   * **COINCIDENCIA** de las dos vías y declara que «la discrepancia entre ambas
+   * es en sí misma un hallazgo»; sin este conjunto, el comparador de UNIÓN
+   * (`ok` porque AL MENOS UNA fuente resuelve) deja que la mitad runtime —la
+   * única que habla del catálogo REAL del adapter— niegue un modelo mientras la
+   * estática lo admite, y el deploy sale `allow`: el residuo del fail-open que
+   * F5 cerró para la mitad AUSENTE. Un pin de este conjunto NO está en `missing`
+   * (no TODAS las fuentes lo niegan): son clases distintas y se reportan
+   * distintas. */
+  discrepancies: ModelPinVerdict[]
   decision: ModelPinGateDecision
   /** La línea única accionable (vacía cuando decision === 'allow'). */
   message: string
@@ -296,15 +308,28 @@ export function comparePins(pins: readonly ModelPin[], catalog: LiveCatalogSourc
 }
 
 /**
- * El veredicto de coherencia sobre N fuentes: el pin es `ok` cuando AL MENOS
- * una fuente lo resuelve; es `unknown-model` cuando TODAS las fuentes que
- * declaran su provider lo niegan (evidencia POSITIVA de ausencia); y es
- * `unknown` cuando ninguna fuente declara el provider (surface ausente).
+ * El veredicto de cobertura sobre N fuentes: el pin es `ok` cuando AL MENOS una
+ * fuente lo resuelve (la cobertura es una UNIÓN: una fuente que NO declara el
+ * provider es SILENCIO, no una negación); es `unknown-model` cuando TODAS las
+ * fuentes que declaran su provider lo niegan (evidencia POSITIVA de ausencia); y
+ * es `unknown` cuando ninguna fuente declara el provider (surface ausente).
  *
  * Esta distinción es la que separa un bloqueo legítimo de un falso positivo:
  * un `unknown-model` es una discrepancia DECLARADA (hallazgo), un `unknown` es
  * ausencia de evidencia (aviso + DEGRADED en boot, bloqueo sólo cuando NO
  * existe ninguna fuente estática).
+ *
+ * ⚠ F5-bis — LA UNIÓN ES SÓLO LA REGLA DE COBERTURA, NO LA DECISIÓN: cuando dos
+ * fuentes LIVE declaran el MISMO provider y **discrepan** (una resuelve y otra
+ * niega), el diseño exige la COINCIDENCIA de ambas vías y la discrepancia es un
+ * hallazgo. Ese caso NO lo resuelve esta función (que devuelve `ok` por el
+ * cortocircuito de la unión): lo detecta `catalogSourceDisagreements`, que
+ * `buildCoherenceReport` publica en `report.discrepancies`. La prosa anterior a
+ * F5-bis afirmaba que la unión bastaba y contradecía a §4.2:221 (y al header del
+ * CLI, y a `VERIFICATION-LADDER.md` §2.5) — medido: estática `ok` + runtime
+ * NEGANDO ⇒ `allow`/exit 0, es decir la mitad runtime era DECISIVAMENTE INERTE
+ * justo en la clase que congeló el org (ids estáticos que resuelven mientras el
+ * adapter niega el modelo).
  */
 export function comparePinsAgainstCatalogSources(pins: readonly ModelPin[], sources: readonly LiveCatalogSource[]): ModelPinVerdict[] {
   return pins.map((pin): ModelPinVerdict => {
@@ -337,6 +362,51 @@ export function comparePinsAgainstCatalogSources(pins: readonly ModelPin[], sour
       detail: perSource[0]?.detail ?? 'catalog sources could not resolve the provider — pin not verified'
     }
   })
+}
+
+/**
+ * F5-bis — LAS DISCREPANCIAS entre las fuentes LIVE consultadas. Devuelve, por
+ * cada pin, un veredicto de HALLAZGO cuando AL MENOS una fuente live lo RESUELVE
+ * y AL MENOS otra lo NIEGA (`unknown-model`) — es decir el `P ∩ C` de una vía
+ * contradice al de la otra.
+ *
+ * REGLAS (deliberadas, no negociables):
+ *  - Se exigen **≥ 2 fuentes LIVE**: con una sola fuente no hay nada que
+ *    contrastar (ese caso es el gate F5 de la mitad ausente, que se resuelve
+ *    aparte y BLOQUEA).
+ *  - La fuente `builtin-adapter` NO es autoridad de negación: es una declaración
+ *    ESTÁTICA de las rutas del bundle, va SIEMPRE la última y su papel declarado
+ *    es RELLENAR lo que ninguna fuente live resolvió. Si pudiera vetar, un
+ *    catálogo vivo (que declara un provider con ids distintos de los defaults
+ *    del paquete) rompería la decisión del perfil activo por el tramo P6/twin.
+ *  - Sólo se cuenta la negación POSITIVA (`unknown-model`): una fuente que no
+ *    declara el provider es silencio (`unknown`), no una negación.
+ */
+function catalogSourceDisagreements(
+  pins: readonly ModelPin[],
+  sources: readonly LiveCatalogSource[],
+  verdicts: readonly ModelPinVerdict[]
+): ModelPinVerdict[] {
+  const live = sources.filter((source) => source.id !== BUILTIN_CATALOG_SOURCE_ID)
+  if (live.length < 2) return []
+  const out: ModelPinVerdict[] = []
+  pins.forEach((pin, index) => {
+    const perSource = live.map((source) => comparePins([pin], source)[0] as ModelPinVerdict)
+    const resolving = perSource.filter((v) => v.kind === 'ok')
+    const denying = perSource.filter((v) => v.kind === 'unknown-model')
+    if (resolving.length === 0 || denying.length === 0) return
+    const base = verdicts[index]
+    if (base === undefined) return
+    out.push({
+      ...base,
+      kind: 'unknown-model',
+      // `check` nombra a las fuentes que NIEGAN (el dato que el mensaje único y
+      // la marca durable citan sin re-parsear la prosa del `detail`).
+      check: denying.map((v) => v.check).join('+'),
+      detail: `${pinLabel(pin)} — tramo ${pin.source.tramo} (${pin.source.class}): resolved by [${resolving.map((v) => v.check).join(', ')}] and DENIED by [${denying.map((v) => v.check).join(', ')}] — the consulted catalogs must COINCIDE (§4.2:221): a disagreement is itself the finding`
+    })
+  })
+  return out
 }
 
 /**
@@ -373,7 +443,8 @@ export function decide({
   phase,
   verdicts,
   staticSourcePresent,
-  runtimeSourcePresent
+  runtimeSourcePresent,
+  discrepancies
 }: {
   phase: 'deploy-preflight' | 'boot' | 'mint'
   verdicts: readonly ModelPinVerdict[]
@@ -382,10 +453,16 @@ export function decide({
    * la mira (comportamiento previo, sin cambio); `false` = NO corrió ⇒ en
    * deploy-preflight BLOQUEA. */
   runtimeSourcePresent?: boolean
+  /** F5-bis — los pines sobre los que las fuentes LIVE consultadas DISCREPAN
+   * (una resuelve, otra niega). `undefined` = sin contraste (una sola fuente):
+   * comportamiento previo, sin cambio. Con ≥1 ⇒ deploy BLOQUEA y boot DEGRADA
+   * (la coincidencia de las dos vías es el invariante, §4.2:221). */
+  discrepancies?: readonly ModelPinVerdict[]
 }): { decision: ModelPinGateDecision; message: string } {
   const missing = verdicts.filter((v) => v.kind === 'unknown-model')
   const unverifiable = verdicts.filter((v) => v.kind === 'unknown')
   const noAdapter = verdicts.filter((v) => v.kind === 'NO_ADAPTER')
+  const disagreed = [...(discrepancies ?? [])]
   if (phase === 'deploy-preflight') {
     if (!staticSourcePresent) {
       return {
@@ -403,6 +480,18 @@ export function decide({
       return {
         decision: 'blocked',
         message: `[MPC-PREFLIGHT] ABORTED (I-MP violated): ${missing.length} model pin(s) are NOT in the live catalog — the deploy must NOT proceed (DO NOT restart). Missing: ${missing.map((v) => actionablePinLine(v)).join(' | ')}. Fix the LIVE CATALOG (ADD the id — additive-first: never remove an id still referenced by a deployed pin) or rotate the pin, then re-run`
+      }
+    }
+    if (disagreed.length > 0) {
+      // Línea ACCIONABLE y CORTA (§4.2): provider/model + las fuentes que
+      // discrepan; el detalle por pin (tramo + `fixed by file:line`) va en las
+      // líneas `DISAGREEMENT` del informe — nunca 11 veces dentro del mensaje
+      // único.
+      const labels = [...new Set(disagreed.map((v) => pinLabel(v.pin)))]
+      const deniers = [...new Set(disagreed.flatMap((v) => (v.check === '' ? [] : v.check.split('+'))))]
+      return {
+        decision: 'blocked',
+        message: `[MPC-PREFLIGHT] ABORTED (I-MP violated — the consulted catalog sources DISAGREE): ${labels.join(', ')} (${disagreed.length} pin row(s)) is/are RESOLVED by one consulted source and DENIED by [${deniers.join(', ')}] — the invariant requires the two ways to COINCIDE (§4.2:221), so a consulted catalog that denies the model must BLOCK the deploy (never masked by the half that admits it; DO NOT restart). See the DISAGREEMENT line(s) for tramo + the file that fixes each pin. Fix the DISAGREEMENT (the live adapter catalog is the authority: if it denies the model, rotate the pin OR add the model additively — never deploy on the union), then re-run`
       }
     }
     if (unverifiable.length > 0) {
@@ -430,10 +519,11 @@ export function decide({
   }
   // phase === 'boot' — NON-blocking (denying the boot loses the repairing
   // actor) but NEVER a silent ok: a degraded mark is mandatory.
-  if (missing.length > 0 || unverifiable.length > 0) {
+  if (missing.length > 0 || unverifiable.length > 0 || disagreed.length > 0) {
     const parts: string[] = []
     if (missing.length > 0) parts.push(`${missing.length} missing: ${missing.map((v) => actionablePinLine(v)).join(' | ')}`)
     if (unverifiable.length > 0) parts.push(`${unverifiable.length} unverified: ${unverifiable.map((v) => actionablePinLine(v)).join(' | ')}`)
+    if (disagreed.length > 0) parts.push(`${disagreed.length} DISAGREEING source pair(s): ${disagreed.map((v) => v.detail ?? actionablePinLine(v)).join(' | ')}`)
     return {
       decision: 'degraded',
       message: `[MPC-PREFLIGHT] DEGRADED (I-MP not fully verified at boot — the boot is NOT denied, the repairing actor must survive): ${parts.join(' ;; ')}`
@@ -472,9 +562,14 @@ export function buildCoherenceReport({
   explicitRuntimeSources?: boolean
 }): ModelPinCoherenceReport {
   const verdicts = comparePinsAgainstCatalogSources(pins, sources)
+  // F5-bis — el contraste entre las fuentes LIVE: la unión de arriba decide la
+  // COBERTURA, no la COINCIDENCIA. Se calcula ANTES de decidir para que un veto
+  // de una vía consultada no pueda quedar enmascarado por el `ok` de la otra.
+  const discrepancies = catalogSourceDisagreements(pins, sources, verdicts)
   const { decision, message } = decide({
     phase,
     verdicts,
+    discrepancies,
     // §4.2: el pre-flight usa la vía ESTÁTICA (--dump-config / settings.yaml) y
     // exige coincidencia; una composición SOLO-runtime (sin fuente estática) no
     // puede establecer el invariante y NO pasa en silencio.
@@ -488,6 +583,7 @@ export function buildCoherenceReport({
     missing: verdicts.filter((v) => v.kind === 'unknown-model'),
     noAdapter: verdicts.filter((v) => v.kind === 'NO_ADAPTER'),
     unverifiable: verdicts.filter((v) => v.kind === 'unknown'),
+    discrepancies,
     decision,
     message
   }

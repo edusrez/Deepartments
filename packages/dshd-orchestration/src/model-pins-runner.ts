@@ -1003,18 +1003,69 @@ function assembleRun(deps: MpcPreflightRunDeps, runtimeSource: LiveCatalogSource
  *  (2) un id retirado aún pinneado, o
  *  (3) un pin no verificable CUANDO existe al menos una fuente de catálogo
  *      declarada ADEMÁS de la built-in (se leyó un catálogo real y aun así ese
- *      provider no aparece en él). Sin `settings.yaml` ni `--catalog` ni `llm`
- *      sólo queda la built-in ⇒ el guard no puede establecer el invariante y NO
- *      le pone un sello de alarma al host: eso vive en el log DEGRADED y en la
- *      marca durable, que es donde va un «no pude verificar». */
+ *      provider no aparece en él), o
+ *  (4) F5-bis: una DISCREPANCIA entre las fuentes LIVE consultadas (una resuelve
+ *      y otra NIEGA el mismo pin): es evidencia POSITIVA — dos catálogos
+ *      consultados no pueden contradecirse en silencio. Sin `settings.yaml` ni
+ *      `--catalog` ni `llm` sólo queda la built-in ⇒ el guard no puede establecer
+ *      el invariante y NO le pone un sello de alarma al host: eso vive en el log
+ *      DEGRADED y en la marca durable, que es donde va un «no pude verificar». */
 export function hasPositiveIntegrityFinding(result: {
-  report: { missing: readonly unknown[]; unverifiable: readonly unknown[] }
+  report: { missing: readonly unknown[]; unverifiable: readonly unknown[]; discrepancies?: readonly unknown[] }
   retiredStillPinned: readonly string[]
   inputs: { catalogSources: readonly string[] }
 }): boolean {
   if (result.retiredStillPinned.length > 0) return true
   if (result.report.missing.length > 0) return true
+  if ((result.report.discrepancies ?? []).length > 0) return true
   return result.report.unverifiable.length > 0 && result.inputs.catalogSources.some((id) => id !== BUILTIN_CATALOG_SOURCE_ID)
+}
+
+/** LEE la marca durable del guard (su propio latch). `undefined` cuando no
+ * existe o no se puede parsear: un latch ilegible NO se inventa — y tampoco
+ * bloquea (la marca es un aviso, no una fuente de decisión). */
+export function readMpcPreflightStateSync(stateDir: string): Record<string, unknown> | undefined {
+  const filePath = path.join(stateDir, MPC_PREFLIGHT_STATE_FILE)
+  if (!existsSync(filePath)) return undefined
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(filePath, 'utf8'))
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    return parsed as Record<string, unknown>
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * GATE 3(c) — LIMPIAR EL LATCH CADUCADO. Un run sin nada que decir (boot sano)
+ * REESCRIBE como sana una marca previa que declaraba DEGRADED, dejando la
+ * procedencia (`clearedFrom`) para que la limpieza sea auditable. Es la única
+ * defensa contra el defecto medido: la marca se escribía una vez y sobrevivía
+ * para siempre, con el árbol ya reparado (el fichero no tenía NINGÚN lector).
+ * Nunca lanza y nunca escribe si no hay marca previa degradada.
+ */
+function clearStaleDegradedMark(stateDir: string, result: MpcPreflightRunResult, context: { ts: number; mode: MpcPreflightMode }): void {
+  const previous = readMpcPreflightStateSync(stateDir)
+  if (previous === undefined || previous.degraded !== true) return
+  const { ts, mode } = context
+  writeMpcPreflightStateSync(stateDir, {
+    ts,
+    mode,
+    decision: result.report.decision,
+    degraded: false,
+    missing: [],
+    pins: result.report.verdicts.map((verdict) => pinLabel(verdict.pin)),
+    message: '',
+    retiredStillPinned: [],
+    disagreements: [],
+    inputs: result.inputs,
+    clearedFrom: {
+      ts: previous.ts ?? null,
+      mode: previous.mode ?? null,
+      decision: previous.decision ?? null,
+      missing: Array.isArray(previous.missing) ? previous.missing : []
+    }
+  })
 }
 
 /** LOS EFECTOS DURABLES (fila del canal + marca DEGRADED + entrega al host).
@@ -1055,7 +1106,17 @@ function applyDurableEffects(
   // (ver el bloque de arriba)—. `missing` ya incluye los pares AUSENTES del
   // informe Y los id retirados aún pinneados.
   const worthWriting = mode !== 'boot' || result.decision !== 'allow' || missing.length > 0 || retiredStillPinned.length > 0
-  if (!worthWriting) return
+  if (!worthWriting) {
+    // GATE 3(c) — EL LATCH NO PUEDE MENTIR: si este run no tiene nada que decir
+    // pero existe una marca PREVIA que declaraba DEGRADED, se REESCRIBE como sana
+    // (con la procedencia del latche anterior). Nadie más lee ese fichero; sin
+    // esta limpieza, una marca escrita una sola vez sobrevive para siempre a la
+    // reparación del árbol y cualquier lector humano concluye «DEGRADED» con el
+    // árbol coherente (la clase «detalle caduco», fb-352/fb-356). Sin marca
+    // previa NO se escribe nada (contrato F4: un boot sano no deja artefacto).
+    clearStaleDegradedMark(stateDir, result, { ts, mode })
+    return
+  }
   const key = `mpc-preflight:${mode}`
   appendMpcAlertRowSync(stateDir, {
     ts,
@@ -1105,6 +1166,9 @@ function applyDurableEffects(
     pins: result.report.verdicts.map((verdict) => pinLabel(verdict.pin)),
     message: result.report.message,
     retiredStillPinned,
+    // F5-bis — las discrepancias entre las fuentes LIVE consultadas viajan a la
+    // marca durable (son hallazgo propio, no un `ok` de unión).
+    disagreements: result.report.discrepancies.map((verdict) => ({ pin: pinLabel(verdict.pin), detail: verdict.detail })),
     // F8 — el sello de entrada, DENTRO de la marca durable: la marca y el informe
     // comparten los mismos `ts`/entradas (nunca un §2.5 no datable).
     inputs: result.inputs,
@@ -1230,6 +1294,10 @@ export function renderRunReport(result: MpcPreflightRunResult): string {
   )
   if (result.report.message !== '') lines.push(result.report.message)
   for (const verdict of result.report.missing) lines.push(`  MISSING ${pinLabel(verdict.pin)} — tramo ${verdict.pin.source.tramo} (${verdict.pin.source.class}) fixed by ${verdict.pin.source.ref}`)
+  // F5-bis: la DISCREPANCIA entre las fuentes LIVE consultadas (una resuelve,
+  // otra niega) es un hallazgo propio y se imprime como tal (antes se diluía en
+  // un `ok` de unión).
+  for (const verdict of result.report.discrepancies) lines.push(`  DISAGREEMENT ${verdict.detail}`)
   for (const verdict of result.report.unverifiable) lines.push(`  UNVERIFIED ${pinLabel(verdict.pin)} — tramo ${verdict.pin.source.tramo} (${verdict.pin.source.class}): ${verdict.detail}`)
   for (const verdict of result.report.noAdapter) lines.push(`  NO_ADAPTER ${pinLabel(verdict.pin)} — ${verdict.detail}`)
   for (const verdict of result.auxiliaryFindings) {

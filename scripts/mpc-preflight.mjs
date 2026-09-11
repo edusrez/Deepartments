@@ -54,7 +54,12 @@
 //       mentía): el 2 NO es exclusivo de `blocked` — en `deploy` un
 //       `decision === 'degraded'` (pin NO VERIFICABLE, no violación) también
 //       sale 2 (abajo, el mapa real): un `deploy` nunca sale 0 con `degraded`.
-//       NO se reinicia.
+//       —F5-bis— BLOQUEA TAMBIÉN cuando las DOS mitades consultadas
+//       **DISCREPAN** (una resuelve el pin y la otra lo NIEGA): el invariante
+//       exige que COINCIDAN (§4.2:221) y la discrepancia es en sí misma un
+//       hallazgo, así que el veto de un catálogo consultado NUNCA queda tapado
+//       por el `ok` del otro (ese `allow` por unión fue el residuo del fail-open
+//       de F5: la mitad runtime era decisivamente inerte). NO se reinicia.
 //   3 = REJECTED por el write-guard subtractivo (se retira un id aún
 //       referenciado por un pin desplegado, sin DSH_MPC_PHASE=subtractive-after-deploy).
 //   4 = el `--catalog` nombrado no se pudo leer/parsear (fail-loud: pedir el
