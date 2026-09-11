@@ -7001,7 +7001,21 @@ test('Batch W4 pure: buildWakePack renders the `## Owner presence: present|absen
   // Present case: header + present guidance.
   const present = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x', ownerPresence: 'present' })
   assert.match(present, /## Owner presence: present/, 'the wake pack names the PRESENT owner-presence state')
-  assert.match(present, /Owner guidance: make the most of the presence/, 'the PRESENT state appends the present guidance line')
+  // PERMANENT-AUTONOMY READING (owner directive, 2026-09-11): the PRESENT
+  // branch is the SISTER of the absent one — SAME protocol, different channel.
+  // Presence no longer makes asking the default mode: the host decides ALWAYS
+  // and COMMUNICATES what it decided; the question is an OPTION of the owner,
+  // never a toll paid by the host; reporting is NOT suppressed; money stays the
+  // ONLY exception. The A3 technical fact is NOT touched: the question channel
+  // exists while the owner is present.
+  assert.match(present, /Owner guidance: the owner is present — his presence changes the CHANNEL, never the DECISION/, 'the PRESENT state appends the present guidance line (the presence changes the CHANNEL, not the DECISION)')
+  assert.match(present, /you \(the host\) take ALL the decisions autonomously/, 'the present guidance grants FULL autonomous decision authority to the host — identical to the absent branch')
+  assert.match(present, /Deciding is the DEFAULT mode and no question is a toll/, 'the present guidance makes DECIDING the default mode (asking is no longer the default)')
+  assert.match(present, /ask_user_question is available while he is present, but it is his OPTION/, 'the present guidance states the TECHNICAL fact: the question channel EXISTS while the owner is present — and it is an OPTION, not a permission gate')
+  assert.ok(!present.includes('park anything in PENDIENTE-OWNER as a blocker'), 'the present guidance does NOT reuse the absent-only PENDIENTE-OWNER parking wording (same protocol, distinct channel)')
+  assert.match(present, /keep reporting to him what was decided and why/, 'the present guidance does NOT suppress the INFORMAR — reporting what was decided survives the presence')
+  assert.match(present, /The ONLY exception is money/, 'the present guidance keeps the ONE exception (money) — identical to the absent branch')
+  assert.ok(!present.includes('Owner guidance: make the most of the presence'), 'the OLD present guidance (asking as the default mode) is GONE')
   assert.match(present, /## Deepartments wake pack/, 'present case still opens with the identity header')
   assert.ok(!present.includes('## Owner presence: absent'), 'present case does NOT carry the absent label')
   assert.ok(!present.includes('Owner guidance: work autonomously'), 'present case does NOT carry the absent guidance')
@@ -7021,12 +7035,16 @@ test('Batch W4 pure: buildWakePack renders the `## Owner presence: present|absen
   assert.match(absent, /present the list of decisions taken/, "the absent guidance asks for the LIST of the decisions taken on the owner's return")
   assert.match(absent, /ONLY exception is money/, "the absent guidance keeps the ONE exception (money) that still requires the owner's word")
   assert.match(absent, /ask_user_question is denied while the owner is away/, 'the absent guidance still states the TECHNICAL fact of the A3 gate (the denial is unchanged)')
+  // PRESENT ≠ opposite of ABSENT: ONE protocol, TWO channels. The two branches
+  // must share the DECISION-and-COMMUNICATE core (never two philosophies).
+  assert.match(absent, /you \(the host\) take ALL the decisions autonomously/, 'COHERENCE: the absent branch shares the identical decision authority clause with the present branch')
+  assert.match(absent, /The ONLY exception is money/, 'COHERENCE: the absent branch shares the identical money-only exception with the present branch')
+  assert.ok(!absent.includes('the owner is present'), 'absent case does NOT carry the present guidance (the presence/channel clause is present-only)')
   assert.ok(!absent.includes('## Owner presence: present'), 'absent case does NOT carry the present label')
-  assert.ok(!absent.includes('Owner guidance: make the most of the presence'), 'absent case does NOT carry the present guidance')
   // A mixed-case trimmed value is normalized to lowercase before the comparison.
   const mixed = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x', ownerPresence: '  Present  ' })
   assert.match(mixed, /## Owner presence: present/, 'a mixed-case presence value is normalized to lowercase')
-  assert.match(mixed, /Owner guidance: make the most of the presence/, 'a mixed-case PRESENT value appends the present guidance')
+  assert.match(mixed, /Owner guidance: the owner is present/, 'a mixed-case PRESENT value appends the present guidance')
   // A supplied value that is neither present nor absent → ONLY the header line (unchanged behavior).
   const unknown = buildWakePack({ memberId: 'h', role: 'host', messageDelta: '', roster: 'x', ownerPresence: 'maybe' })
   assert.match(unknown, /## Owner presence: maybe/, 'an unknown presence value renders ONLY the header line')

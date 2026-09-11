@@ -230,18 +230,23 @@ export function sanitizePromptLiterals(text: string): string {
  * presence-change node (`buildPresenceMessage`, A4) and wake-pack section 2
  * (`buildWakePack`) so the host is told how to act on the CURRENT state.
  *
- * OWNER-AWAY READING (owner directive, 2026-09-11): the absent branch states
- * that the absence removes the ASK, never the DECISION — the host decides
- * EVERYTHING autonomously, does NOT park items as blockers, and reports the
- * list of decisions taken (with their why) on the owner's return; only MONEY
- * (a spend or a commitment) still waits for the owner's word. The technical
- * fact of the A3 gate is unchanged (`ask_user_question` is still DENIED while
- * the owner is away — `askUserGuardReason`, src/invoke.ts) and is stated as
- * such: the denial removes the question channel, not the authority to decide.
+ * PERMANENT-AUTONOMY READING (owner directive, 2026-09-11): BOTH branches
+ * state the SAME protocol — the host decides EVERYTHING autonomously, does NOT
+ * park items as blockers, and COMMUNICATES what was decided (with its why);
+ * only MONEY (a spend or a commitment) still waits for the owner's word.
+ * Presence changes the CHANNEL, never the DECISION: the absent branch says the
+ * absence removes the ASK (the host reports the list of decisions taken on his
+ * return), the present branch says the presence does NOT turn a decision into a
+ * question (asking is an OPTION of the owner, never a toll the host pays, and
+ * reporting is never suppressed). NEVER two philosophies: the technical fact of
+ * the A3 gate is unchanged and stated as such — `ask_user_question` is DENIED
+ * while the owner is away (`askUserGuardReason`, src/invoke.ts) and available
+ * while he is present, i.e. the denial removes the question channel, not the
+ * authority to decide.
  */
 export function presenceGuidance(present: boolean): string {
   return present
-    ? 'Owner guidance: make the most of the presence — share any question you have (none is fine — no need to force it) or report what was done while the owner was away.'
+    ? 'Owner guidance: the owner is present — his presence changes the CHANNEL, never the DECISION: you (the host) take ALL the decisions autonomously, exactly as when he is away. Deciding is the DEFAULT mode and no question is a toll: ask_user_question is available while he is present, but it is his OPTION (a cheap way for him to be asked) and never a gate you must pay before acting — do NOT ask by default and do NOT park anything as a blocker. Decide, record each decision together with its why, and keep reporting to him what was decided and why (his presence suppresses NO reporting). The ONLY exception is money: a spend or a commitment of money still requires his word.'
     : 'Owner guidance: the owner is away — his absence removes the ASK, never the DECISION: you (the host) take ALL the decisions autonomously. ask_user_question is denied while the owner is away, so do NOT ask and do NOT park anything in PENDIENTE-OWNER as a blocker — decide, record each decision together with its why, and on his return present the list of decisions taken (he may revert any of them or open new tasks). The ONLY exception is money: a spend or a commitment of money still requires his word.'
 }
 
