@@ -4568,11 +4568,23 @@ export function resolvePoolerDispatchBlock(
     const weeklyLow = weeklyAvail !== undefined && weeklyAvail < haltWeekly
     const monthlyLow = monthlyAvail !== undefined && monthlyAvail < haltMonthly
     if (weeklyLow || monthlyLow) {
+      // PRECISION (fb-632, host 2026-09-11 — reported by the IPH): the literal
+      // used to join BOTH comparisons with «or», presenting a comparison that
+      // may be FALSE as if it were true (live case: weekly 18% vs 20% holds,
+      // monthly 17% vs 10% does NOT) and never said WHICH one fired. The RULE
+      // was always correct — the diagnosis was not. Now only the arms that
+      // ACTUALLY hold are named, each with its own magnitude label, so the
+      // operator (and every report quoting the literal) can attribute the cause
+      // without recomputing it. Rule, thresholds and the single-arm phrasing
+      // are unchanged: with exactly one arm holding — the only case the old text
+      // described honestly — the output stays byte-identical.
+      const arms: string[] = []
+      if (weeklyLow) arms.push(`weekly available ${Math.round(weeklyAvail as number)}% < ${haltWeekly}%`)
+      if (monthlyLow) arms.push(`monthly available ${Math.round(monthlyAvail as number)}% < ${haltMonthly}%`)
       return {
         reason:
           `pool: HALT — 1 usable key ${only.id ?? '(unknown)'} ` +
-          `(weekly available ${weeklyAvail === undefined ? 'unknown' : `${Math.round(weeklyAvail)}%`} < ${haltWeekly}% ` +
-          `or monthly available ${monthlyAvail === undefined ? 'unknown' : `${Math.round(monthlyAvail)}%`} < ${haltMonthly}%) — ` +
+          `(${arms.join(' and ')}) — ` +
           `NO new dispatches until ≥2 usable keys or new keys are added`
       }
     }
