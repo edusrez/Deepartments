@@ -1,0 +1,76 @@
+# === dsh-deepartments patch: dsh-tool-fs-search NO-COLLAPSE class (fb-444 + fb-458) ===
+#
+# WHAT THIS FIXES
+#   `classifyRunFailure`'s path-cause branch DISCARDED the diagnosis it already
+#   had in memory. When the tool could not NAME the missing object — no
+#   `-- <path>` target (the search root is the session cwd) AND rg's IO stderr
+#   carrying no extractable `rg: <path>: IO error` — the message COLLAPSED to
+#   the bare literal `path not found: the search target`, while the branch that
+#   does NOT recognise the error emitted the WHOLE stderr excerpt (`:90`). The
+#   tool was therefore MORE informative when it did not know what happened than
+#   when it did. The remedy already existed three lines below; this patch
+#   extends that property to the path-cause branch, where and only where the
+#   message cannot name its object (variant C).
+#
+# WHAT IT DOES — AND WHAT IT DELIBERATELY DOES NOT
+#   CODE channel (the one consumers branch on): UNCHANGED. The branch is only
+#   entered BY positive evidence of absence (rg's own ENOENT / IO-error stderr),
+#   so `SEARCH_PATH_NOT_FOUND` stays correct; the fix is of MESSAGE, not of
+#   taxonomy — no new code, no re-classification.
+#   TEXT channel: `const named = searchTarget ?? <reported path>` names the
+#   object for the message, so a NAMEABLE object renders BYTE-IDENTICAL to
+#   before (measured delta +0 B). Only the unnameable case gains a suffix.
+#   ADDITIVE (suffix only): the stable prefix keeps every token it had and the
+#   excerpt rides along in the same `: <stderr>` shape the unrecognised branch
+#   already emits. Nothing is reordered, removed or reworded — the suite asserts
+#   by substring, never by equality.
+#   The literal `the search target` itself is NOT touched (it fabricates
+#   certainty; it is flagged as an ADJACENT defect, ticketed separately), and
+#   the invalid-pattern branch (`patternRejectionLine`) is out of scope.
+#
+# EVIDENCE OF EFFECT (measured through the real code path, not a transcription)
+#   unit (fork `src/`, vitest resolves the package to `src/` via tsconfig
+#   paths, NO build): the unnameable case renders
+#     before: `Error: grep: path not found: the search target`             46 B
+#     after : `Error: grep: path not found: the search target: rg: No such
+#              file or directory (os error 2)`                            90 B
+#     => +44 B (+95.7 %) in the unnameable case ONLY; +0 B in the nameable one.
+#   `packages/fs/tool-fs-search/tests/tools.spec.ts`: 136/136 pass (134
+#   pre-existing + 2 new, one per sub-path of the touched branch).
+#
+# TARGET FILES
+#   <npm-root>/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-tool-fs-search/lib/index.js
+#
+# FINGERPRINTS (md5)  [grep-scope-declaration-applied rc.2 (the live base) -> patched]
+#  index.js           d8d4dd6860a6cd5102f5ba9a517a06ac -> 18648e034d6449930c3f3efff561bf7b
+#
+# ADDITIVE: applies ON TOP of dsh-tool-fs-search-grep-scope-declaration.patch
+# (the base IS that patch's applied state, the live fingerprint d8d4dd68…) and
+# therefore on top of the path-not-found + anchor + fb-51-normalize chain
+# preceding it. This is a HAND PORT, hunk to hunk, of the durable source fix in
+# the fork (`packages/fs/tool-fs-search/src/search-core.ts`); the two copies are
+# NOT interchangeable (live rc.2 built vs fork 0.1.3-alpha.1 with
+# `hasGlobMetachars()`), so NO FILE is ever copied between the trees.
+# The zone `a-harness-tool-fs-search-index` of scripts/zone-md5-manifest.json
+# must be re-frozen to 18648e034d6449930c3f3efff561bf7b in the SAME change that
+# applies this patch to the runtime (that manifest and
+# scripts/reapply-dsh-patches-a-harness.sh live in the deepartments repo, which
+# this lane is forbidden to write to — the re-freeze is flagged for the head).
+#
+# LINE NUMBERS are those of the INSTALLED (locally patched, d8d4dd68…) file,
+# NOT those of the pristine upstream tarball.
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -86,7 +86,11 @@
+ function classifyRunFailure(toolName, exitCode, stderrText, stderrTruncated, searchTarget) {
+ 	const stderr = stderrExcerpt(stderrText, stderrTruncated);
+ 	if (/regex parse error|error parsing glob/i.test(stderr)) return new SearchError(`${toolName} pattern rejected: ${patternRejectionLine(stderr)}`, "SEARCH_INVALID_PATTERN");
+-	if (/no such file or directory|IO error for operation on .*no such file/i.test(stderr)) return new SearchError(`${toolName}: path not found: ${searchTarget ?? (/rg: ([^:]+): IO error/i.exec(stderr)?.[1] ?? "the search target")}`, "SEARCH_PATH_NOT_FOUND");
++	if (/no such file or directory|IO error for operation on .*no such file/i.test(stderr)) {
++		const named = searchTarget ?? /rg: ([^:]+): IO error/i.exec(stderr)?.[1];
++		if (named !== void 0) return new SearchError(`${toolName}: path not found: ${named}`, "SEARCH_PATH_NOT_FOUND");
++		return new SearchError(`${toolName}: path not found: the search target: ${stderr}`, "SEARCH_PATH_NOT_FOUND");
++	}
+ 	return new SearchError(`${toolName} search failed (exit ${exitCode})${stderr.length > 0 ? `: ${stderr}` : ""}`, "SEARCH_FAILED");
+ }
+ function patternRejectionLine(stderr) {
