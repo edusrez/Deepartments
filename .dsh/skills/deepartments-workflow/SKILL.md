@@ -167,8 +167,10 @@ the rotation archives the outgoing session); `wait:true` (fb-735, on main via
 `wait:true`» is FORBIDDEN here — it makes the rotation WAIT for a fresh memo,
 i.e. it visibly breaks the critical-unblock rule of step 4. `wait:true` stays a
 RED option for the fb-115 announce-race only, never a substitute for this order.
-**KNOWN PENDING (NOT aligned by this document):** the LIVE tool description
-`tools.ts:7079` still ends with the retired prescription ("ask the head for
+**KNOWN PENDING (NOT aligned by this document):** the `dept_head_rotate` tool
+description (its `description:` literal in
+`packages/dshd-orchestration/src/tools.ts`) still ends with the retired
+prescription ("ask the head for
 `dept_memo_write` BEFORE rotating when it is operative and the window permits")
 — it sits INSIDE the frozen span `CUT-4` (the `banner`→`close` literal pair in
 `scripts/zone-md5-manifest.json`, md5
@@ -177,8 +179,9 @@ offset-INDEPENDENT, so a pure line shift leaves it intact and only a real
 content drift moves it; the span slid +33 lines between `4fb3af0^` and HEAD
 and every bare number quoted for it has rotted since), so it can only be
 aligned at the host's
-re-freeze; the same retired wording also lives in the pure-helper comment
-`src/invoke.ts:1059`. THIS section is the norm; those two are pending alignment.
+re-freeze; the same retired wording also lives in the pure-helper comment of
+`src/invoke.ts` (the head-rotation WHY-ORDER block). THIS section is the norm;
+those two are pending alignment.
 
 **Honest cost of the inverted order (declared, not hidden):** the seed is more
 often `journal.stale` (`tools.ts:7248`/`:7319`; 30-min window,
