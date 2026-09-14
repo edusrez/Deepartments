@@ -169,8 +169,13 @@ RED option for the fb-115 announce-race only, never a substitute for this order.
 **KNOWN PENDING (NOT aligned by this document):** the LIVE tool description
 `tools.ts:7079` still ends with the retired prescription ("ask the head for
 `dept_memo_write` BEFORE rotating when it is operative and the window permits")
-— it sits INSIDE the frozen span `CUT-4` (`tools.ts:5616→:7353`, md5
-`c61523c4fa5a71b772441da05b2bcf58`), so it can only be aligned at the host's
+— it sits INSIDE the frozen span `CUT-4` (the `banner`→`close` literal pair in
+`scripts/zone-md5-manifest.json`, md5
+`c61523c4fa5a71b772441da05b2bcf58` — the CONTENT-ADDRESSED anchor:
+offset-INDEPENDENT, so a pure line shift leaves it intact and only a real
+content drift moves it; the span slid +33 lines between `4fb3af0^` and HEAD
+and every bare number quoted for it has rotted since), so it can only be
+aligned at the host's
 re-freeze; the same retired wording also lives in the pure-helper comment
 `src/invoke.ts:1059`. THIS section is the norm; those two are pending alignment.
 
