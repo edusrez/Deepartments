@@ -67,8 +67,9 @@ import type {
   BusSurface,
   BusDeliveryFailedGround
 } from 'dshd-core'
-import { busProfileFor as aclBusProfileFor, aclDenyGround as aclDenyGroundImpl } from 'dshd-core'
+import { busProfileFor as aclBusProfileFor, aclDenyGround as aclDenyGroundImpl, isMutedHostSender } from 'dshd-core'
 import type { BusCatalogLens } from 'dshd-core'
+import { appendRegistryAnomalyRow, REGISTRY_ANOMALY } from 'dshd-core'
 import { FeedbackStore } from 'dshd-feedback'
 import type { FeedbackTipo, FeedbackSeveridad } from 'dshd-feedback'
 import { createLifecycleService, buildSleepJournalMessage } from 'dshd-core'
@@ -2794,6 +2795,33 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
   const busProfileFor = aclService?.busProfileFor ?? ((memberId: string): BusMemberProfile => aclBusProfileFor(memberId, busCatalogLens))
   const aclDenyGround = aclService?.aclDenyGround ?? aclDenyGroundImpl
 
+  /** fb-946 (CRITICO — HOST MUDO) — THE BACKSTOP DETECTOR at the delivery seam.
+   * The PRIMARY detector is the registry's (`ensureHost` refuses a host-shaped
+   * registration: the proven divergence, wired to a durable anomaly row + a
+   * logger.error). This one guards the OTHER ordering: a host-shaped sender the
+   * catalog cannot classify whose address is NOT resolvable as a recipient
+   * either — i.e. the ACL is about to deny EVERY recipient of a send the host
+   * actually attempted. Impossible in a healthy process (a host outranks every
+   * recipient, acl.ts `aclDenyGround`), so it is a FACT-anomaly, not a symptom.
+   *
+   * DEDUPED PER SENDER+SEND by construction: it runs at most once per catalog
+   * route resolution, and the durable row is the evidence (the alert consumer is
+   * out of this lane — see REGISTRY_ANOMALIES_FILE). Never throws. */
+  const emitMuteHostBackstop = (sender: BusMemberProfile, recipientId: string): void => {
+    try {
+      appendRegistryAnomalyRow(stateDir, {
+        ts: Date.now(),
+        kind: REGISTRY_ANOMALY.MUTE_HOST_SENDER,
+        memberId: sender.memberId,
+        reason: 'unclassified-host-shaped-sender',
+        detail: `send from the host-shaped member "${sender.memberId}" to "${recipientId}" while the catalog classifies the sender 'unclassified' (the ACL denies EVERY recipient in that branch) — the delivery seam observed the mute (fb-946 backstop; the primary detector is the registry ensureHost refusal)`
+      })
+      ctx.logger.error(`[deepartments] HOST MUTE ANOMALY (fb-946, delivery backstop): the sender "${sender.memberId}" is host-shaped but UNCLASSIFIED — every recipient is denied (spec 004 §5.6); the catalog and the durable hosts.json have diverged. ALERT: the Asistente is mute until the catalog is refreshed (restart, or the live hosts.json re-read).`)
+    } catch (error: unknown) {
+      ctx.logger.warn(`[deepartments] fb-946 mute-host backstop could not emit its durable anomaly row (non-fatal): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   /** The bus catalog-route resolver (spec §4.2 route 2): resolve a recipient
    * against the DURABLE catalog — posts.json (head/worker) then non-retired
    * hosts.json — PLUS the Issue-1 (owner m-331) host-family re-route: a
@@ -2905,14 +2933,22 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     senderSessionId: string | undefined,
     signal?: AbortSignal,
     opts?: DeliveryInterruptOptions & { noWake?: boolean }
-  ): Promise<DeliveryStatus> =>
-    delivery.deliverOrQueue(recipientId, record, {
+  ): Promise<DeliveryStatus> => {
+    // fb-946 BACKSTOP: the engine is about to deliver a record whose SENDER the
+    // ACL classifies — an unclassified HOST-SHAPED sender is the mute (every
+    // recipient denied), so the anomaly is emitted here too (the primary
+    // detector is the registry `ensureHost` refusal; this one covers the
+    // origin-independent re-drive paths).
+    const senderProfile = busProfileFor(record.from)
+    if (isMutedHostSender(senderProfile)) emitMuteHostBackstop(senderProfile, recipientId)
+    return await delivery.deliverOrQueue(recipientId, record, {
       callerAgentId,
       senderSessionId,
       signal,
       interrupt: opts?.interrupt,
       noWake: opts?.noWake
     })
+  }
 
   /** The live parent Agent for the native-route followup (the caller is the
    * direct parent, per the route resolution above). Resolved from the agents

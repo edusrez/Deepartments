@@ -18,7 +18,7 @@
 // `RegistryStore`; nothing mutates a module-level binding across apply calls.
 //
 // NO export default (pitfall 0001 — breaks `inject`).
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, mkdirSync, appendFileSync } from 'node:fs'
 import { copyFile, writeFile, rename, readFile, appendFile, mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -27,6 +27,78 @@ import { checkStoreFileStale, type StoreFileReadOpts, assertStoreProfile, storeP
 
 /** Prefix of a runtime host-address registry entry: `host-<sessionId>`. */
 export const HOST_ID_PREFIX = 'host-'
+
+// ---------------------------------------------------------------------------
+// fb-946 — THE REGISTRY ANOMALY CHANNEL (the host-mute detector's durable sink)
+//
+// WHY A SECOND CHANNEL AND NOT `health-alerts.jsonl`: that channel is
+// WRITE-ONLY — nobody reads it in the whole tree (see the boot.ts gate note at
+// `registerMpcBootPinCoherenceGate`); it is a record, not a signal. The registry
+// layer cannot deliver a frame either (it owns no transport — it is the pure
+// durable catalog). So the detector needs a channel that a reader can consume
+// WITHOUT new coupling: this ONE file, append-only (O_APPEND: no read-modify-
+// write, so the F9 lost-row race is impossible by construction), one row per
+// anomaly emission. Adding a watcher later needs only this file.
+//
+// NOT A DEDUPE CHANNEL: rows are append-only evidence. The EMISSION is
+// dedupe-free ON PURPOSE (see `appendRegistryAnomalyRow`) — a mute host makes
+// every send impossible, so the one-per-event record is the honest one.
+// ---------------------------------------------------------------------------
+
+/** The durable registry-anomaly file (`<stateDir>/registry-anomalies.jsonl`). */
+export const REGISTRY_ANOMALIES_FILE = 'registry-anomalies.jsonl'
+
+/** The registry-anomaly KINDS (the detector taxonomy). */
+export const REGISTRY_ANOMALY = {
+  /** fb-946: a HOST-SHAPED sender the catalog cannot classify (an impossible
+   * state in a healthy process) — the Asistente is MUTE (every recipient is
+   * denied by the conservative `unclassified-sender` branch). */
+  MUTE_HOST_SENDER: 'mute-host-sender'
+} as const
+
+/** ONE registry-anomaly row. */
+export interface RegistryAnomalyRow {
+  ts: number
+  kind: string
+  memberId: string
+  reason: string
+  detail?: string
+}
+
+/** Append ONE row to `<stateDir>/registry-anomalies.jsonl` — append-only, one
+ * line, SYNCHRONOUS (the anomaly is emitted from a tool-call path whose stateDir
+ * must not outlive the write), never throws. An emission failure loses the ROW,
+ * never the caller's operation. */
+export function appendRegistryAnomalyRow(stateDir: string, row: RegistryAnomalyRow): void {
+  try {
+    mkdirSync(stateDir, { recursive: true })
+    appendFileSync(path.join(stateDir, REGISTRY_ANOMALIES_FILE), `${JSON.stringify(row)}\n`, 'utf8')
+  } catch {
+    /* a persistence failure never throws into the caller (the caller logs) */
+  }
+}
+
+/** Read the durable registry-anomaly rows (best-effort, never throws — a
+ * malformed line is skipped, an absent file is an empty list). */
+export function readRegistryAnomalyRows(stateDir: string): RegistryAnomalyRow[] {
+  let text: string
+  try {
+    text = readFileSync(path.join(stateDir, REGISTRY_ANOMALIES_FILE), 'utf8')
+  } catch {
+    return []
+  }
+  const rows: RegistryAnomalyRow[] = []
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') continue
+    try {
+      const parsed = JSON.parse(line) as RegistryAnomalyRow
+      if (parsed !== null && typeof parsed === 'object' && typeof parsed.kind === 'string') rows.push(parsed)
+    } catch {
+      /* torn/foreign line — skipped, never fatal */
+    }
+  }
+  return rows
+}
 
 /** Prefix of a department head's STABLE root-agent session id: `head-<postId>`.
  * Deterministic and namespaced (never collides with host/room/parent sessions),
@@ -1415,6 +1487,13 @@ export interface EnsureHostExtras {
    * Called ONLY after the registration guards pass, exactly where the
    * pre-extraction ensureHost pinned the title. */
   pinHostTitle?(sessionId: string): void
+  /** fb-946 — the MUTE-HOST ALERT sink: the store OWNS the durable anomaly
+   * channel (`appendRegistryAnomalyRow`), so the hooked implementation is the
+   * transport. Called ONLY at the PROVEN divergence — a registration was
+   * refused AND the durable `hosts.json` still holds a live host row this
+   * process's catalog does not know (the state in which every send from the
+   * Asistente is denied with nothing persisted). Absent → no emission. */
+  onMuteHostAnomaly?(anomaly: RegistryAnomalyRow): void
 }
 
 /** The DURABLE REGISTRY — the single source of the hosts/posts catalog.
@@ -1439,6 +1518,17 @@ export class RegistryStore {
   readonly byChild = new Map<string, string>()
   /** The host registry (hostId → entry). */
   readonly hosts = new Map<string, HostEntry>()
+  /** fb-946 (LIVE-CATALOG COHERENCE) — the DURABLE host rows whose absence from
+   * the IN-MEMORY catalog forced a registration REFUSAL, keyed `hostId →
+   * sessionId`. Empty in every healthy process. Non-empty is the MUTE STATE: a
+   * host session the durable `hosts.json` knows and this process does not (the
+   * mid-boot registration/recovery class — see `refreshHostsFromDurable`). The
+   * detector reads it to raise the immediate unambiguous alert. */
+  readonly pendingUnseenHostRows = new Map<string, string>()
+  /** fb-946 — the PER-MEMBER detector latch (see the emission site): the mute
+   * anomaly is emitted ONCE per host per mute episode, then re-armed when the
+   * divergence heals. Never a global mute switch — a relapse alerts again. */
+  private readonly muteAnomalyEmitted = new Set<string>()
   /** The hostId-by-session reverse index (session → hostId). */
   readonly hostForSession = new Map<string, string>()
   /** `<stateDir>/posts.json`. */
@@ -1695,26 +1785,272 @@ export class RegistryStore {
     return removed
   }
 
+  /** fb-946 (CRITICO — HOST MUDO) — the LIVE-CATALOG COHERENCE refresh: adopt
+   * every DURABLE `hosts.json` row this process's in-memory catalog is MISSING,
+   * so a host registration/rotation/recovery that landed the file AFTER this
+   * process booted is healed WITHOUT a restart.
+   *
+   * THE CLASS IT CLOSES (not the case): the in-memory `hosts` Map is filled by
+   * the boot cold load and is otherwise only written by our OWN mutators. A row
+   * written by ANY other path — a concurrent recovery/twin, a CLI, a rotation
+   * committed before this process's boot finished — is invisible to the ACL
+   * lens (`busProfileFor` reads THIS Map), while the durable catalog `dept_who`
+   * renders stays correct. That divergence is exactly fb-946: `busProfileFor`
+   * falls through to `unclassified` and the conservative unclassified-sender
+   * branch (acl.ts `aclDenyGround`) DENIES EVERY recipient → the Asistente goes
+   * mute in complete silence, with nothing looking broken.
+   *
+   * SYNCHRONOUS ON PURPOSE: it runs INSIDE the refusing `ensureHost` call, at
+   * the one instant the divergence is provable — the caller's very next line
+   * classifies the sender. An async catch-up would resolve one microtask too
+   * late and the in-flight send would still be denied (and every send until it
+   * happened to land outside the window).
+   *
+   * MERGE-ONLY for the ROW ITSELF, never a reset: a known entry is never
+   * REPLACED (a row we know is at least as FRESH as the file we wrote
+   * ourselves), and the DURABLE file is NEVER written (no resurrection, no
+   * write amplification, no read-modify-write race against the writer we are
+   * catching up to). Reuses the SAME field-for-field restore as the boot loader
+   * + the R6 rotation-schema validation, so an adopted entry is
+   * indistinguishable from a boot restore.
+   *
+   * ONE EXCEPTION — STALE-RETIREMENT SYNC: when the durable file marks a row
+   * RETIRED that this process still holds LIVE, the in-memory marker is brought
+   * up to date. The durable `hosts.json` is the AUTHORITATIVE rotation record
+   * (the same doctrine `isHostRetiredOnDisk` states), and a live-vs-durable
+   * divergence is precisely this lane's incident: keeping a superseded row LIVE
+   * leaves TWO live hosts in memory, so the single-live guard blocks the
+   * successor and the host stays mute. Retiring it is monotonic (a retirement is
+   * never undone here) and never touches the file.
+   *
+   * Returns the number of durable rows adopted (0 = the catalog was already
+   * coherent). Never throws (an absent/unreadable/malformed file is a no-op). */
+  refreshHostsFromDurable(): number {
+    let parsed: Record<string, unknown>
+    try {
+      parsed = JSON.parse(readFileSync(this.hostsPath, 'utf8')) as Record<string, unknown>
+      validateHostsRotationFile(parsed)
+    } catch {
+      return 0 // absent/unreadable/malformed — nothing to adopt (never fatal)
+    }
+    let adopted = 0
+    for (const [hostId, raw] of Object.entries(parsed)) {
+      if (hostId === 'schemaVersion') continue
+      if (raw === null || typeof raw !== 'object') continue
+      const entry = raw as Omit<HostEntry, 'hostId'>
+      if (typeof entry.sessionId !== 'string' || typeof entry.roomId !== 'string') continue
+      if (!hostId.startsWith(HOST_ID_PREFIX)) continue
+      if (hostId.slice(HOST_ID_PREFIX.length) !== entry.sessionId) continue
+      const known = this.hosts.get(hostId)
+      if (known !== void 0) {
+        // STALE-RETIREMENT SYNC (see the doc above): the durable rotation is
+        // authoritative — a row we still hold live but the file retires is
+        // retired HERE too, so the single-live guard can see the successor.
+        if (entry.retired === true && known.retired !== true) {
+          this.hosts.set(hostId, {
+            ...known,
+            retired: true,
+            ...(typeof entry.retiredAt === 'number' ? { retiredAt: entry.retiredAt } : {}),
+            ...(typeof entry.rotatedTo === 'string' ? { rotatedTo: entry.rotatedTo } : {})
+          })
+          this.deps.logger.warn(
+            `[deepartments] hosts catalog SYNCED from the durable hosts.json: ${hostId} was still held LIVE in memory but the durable rotation record retires it (rotatedTo ${typeof entry.rotatedTo === 'string' ? entry.rotatedTo : 'unknown'}) — the stale-live marker is retired IN MEMORY (the durable file is authoritative; fb-946)`
+          )
+        }
+        continue // MERGE-ONLY: a known row is never replaced
+      }
+      const sleepEpoch = typeof entry.sleepEpoch === 'number' ? entry.sleepEpoch : undefined
+      const boundarySeq = typeof entry.boundarySeq === 'number' ? entry.boundarySeq : undefined
+      const deferredJournalSeed = typeof entry.deferredJournalSeed === 'string' ? entry.deferredJournalSeed : undefined
+      const retired = entry.retired === true
+      const retiredAt = typeof entry.retiredAt === 'number' ? entry.retiredAt : undefined
+      const rotatedTo = typeof entry.rotatedTo === 'string' ? entry.rotatedTo : undefined
+      const previousSessionId = typeof entry.previousSessionId === 'string' ? entry.previousSessionId : undefined
+      const sleepResult = entry.sleepResult === 'success' ? 'success' as const : undefined
+      this.hosts.set(hostId, {
+        hostId,
+        sessionId: entry.sessionId,
+        roomId: entry.roomId,
+        ...(sleepEpoch !== void 0 ? { sleepEpoch } : {}),
+        ...(boundarySeq !== void 0 ? { boundarySeq } : {}),
+        ...(deferredJournalSeed !== void 0 ? { deferredJournalSeed } : {}),
+        ...(entry.webUiCleanupPending === true ? { webUiCleanupPending: true } : {}),
+        ...(retired ? { retired: true } : {}),
+        ...(retiredAt !== void 0 ? { retiredAt } : {}),
+        ...(rotatedTo !== void 0 ? { rotatedTo } : {}),
+        ...(previousSessionId !== void 0 ? { previousSessionId } : {}),
+        ...(sleepResult !== void 0 ? { sleepResult } : {})
+      })
+      this.hostForSession.set(entry.sessionId, hostId)
+      adopted++
+    }
+    if (adopted > 0) {
+      this.deps.logger.warn(
+        `[deepartments] hosts catalog REFRESHED from the durable hosts.json: ${adopted} host row(s) this process had NOT seen (registered after its boot) were adopted into the live catalog — the ACL lens is coherent again WITHOUT a restart (fb-946)`
+      )
+    }
+    return adopted
+  }
+
+  /** fb-946 — record the DURABLE host rows this process's catalog does NOT know,
+   * from the raw `hosts.json`. Called when a registration was REFUSED.
+   *
+   * TWO divergence kinds are counted, because either one alone can produce the
+   * mute and only BOTH together make the refusal genuine:
+   *   1. a durable LIVE host row this catalog has never seen (the recovery that
+   *      registered/adopted a host after our boot);
+   *   2. a row the DURABLE record RETIRES while this catalog still holds it LIVE
+   *      (the durable rotation committed after our boot — a stale-live marker
+   *      that would block its own successor on the single-live guard).
+   * A non-zero result means the in-memory catalog is STALE and must be refreshed
+   * before any refusal is issued; ZERO means the divergence the incident
+   * consists of is absent — i.e. the refusal would MUTE this host, which is the
+   * detector's fact. Never throws (`{}` = unreadable/malformed → treated as no
+   * divergence, the conservative reading). */
+  private recordUnseenDurableHostRows(claimedSessionId: string): Map<string, string> {
+    const diverged = new Map<string, string>()
+    let parsed: Record<string, unknown>
+    try {
+      parsed = JSON.parse(readFileSync(this.hostsPath, 'utf8')) as Record<string, unknown>
+      validateHostsRotationFile(parsed)
+    } catch {
+      return diverged
+    }
+    for (const [hostId, raw] of Object.entries(parsed)) {
+      if (hostId === 'schemaVersion') continue
+      if (raw === null || typeof raw !== 'object') continue
+      const entry = raw as { sessionId?: unknown; retired?: unknown }
+      if (typeof entry.sessionId !== 'string' || entry.sessionId === '') continue
+      if (hostId === `${HOST_ID_PREFIX}${claimedSessionId}`) continue // the caller's OWN row — that is a mint, not a diverged row
+      const known = this.hosts.get(hostId)
+      if (known === void 0) {
+        if (entry.retired !== true) diverged.set(hostId, entry.sessionId) // (1) a durable LIVE row we never saw
+        continue
+      }
+      if (entry.retired === true && known.retired !== true) diverged.set(hostId, entry.sessionId) // (2) durably retired, still live in memory
+    }
+    this.pendingUnseenHostRows.clear()
+    for (const [hostId, sessionId] of diverged) this.pendingUnseenHostRows.set(hostId, sessionId)
+    return diverged
+  }
+
   /** Lazy host registration — the SINGLE-LIVE-HOST guard + rotation MERGE
    * semantics (see the pre-extraction ensureHost contract). Calls
    * `extras.pinHostTitle` (if supplied) ONLY after the guards pass, exactly
    * where the pre-extraction ensureHost pinned the title, and persists. Returns
-   * the host's member id. */
+   * the host's member id.
+   *
+   * fb-946 (CRITICO — HOST MUDO): EVERY guard below is decided against the
+   * DURABLE-AWARE catalog, never a boot snapshot. The in-memory `hosts` Map is
+   * filled by the boot cold load and is otherwise only written by our OWN
+   * mutators, so a registration/rotation/recovery that landed `hosts.json`
+   * AFTER this process booted is invisible to it — and the ACL lens
+   * (`busProfileFor` reads THIS Map) then classifies the live Asistente as
+   * `unclassified`, DENYING every recipient in silence (the incident). The
+   * discipline below is: a guard that would REFUSE first re-reads the durable
+   * record, and the refusal is only ever issued on evidence that was re-read. */
   ensureHost(sessionId: string, roomId: string, extras: EnsureHostExtras = {}): string {
     const hostId = `${HOST_ID_PREFIX}${sessionId}`
-    const existing = this.hosts.get(hostId)
-    if (existing?.retired === true) {
-      this.deps.logger.warn(`[deepartments] ensureHost: refusing to re-register retired host ${hostId} (rotated to ${existing.rotatedTo ?? 'unknown'}) — the session stays a plain session`)
+    /** Re-read the durable registry (merge-only) so the judgement is made
+     * against the truthful record. Returns whether the catalog CHANGED (a row
+     * adopted, or a stale-live marker retired) — the signal that the previous
+     * in-memory judgement must be discarded. */
+    const syncFromDurable = (why: string): boolean => {
+      const before = new Map(this.hosts)
+      this.refreshHostsFromDurable()
+      let changed = before.size !== this.hosts.size
+      if (!changed) {
+        for (const [id, entry] of this.hosts) {
+          const previous = before.get(id)
+          if (previous === undefined || (previous.retired === true) !== (entry.retired === true)) { changed = true; break }
+        }
+      }
+      if (!changed) return false
+      this.deps.logger.warn(
+        `[deepartments] ensureHost: the live catalog was REFRESHED from the durable hosts.json before deciding (${why}) — the in-memory view was STALE (fb-946: a registered host is never mute)`
+      )
+      return true
+    }
+
+    // Guard 1 — the RETIRED re-registration refusal. Decided on the DURABLE
+    // record: a session our (possibly stale) memory retires may be the LIVE
+    // successor the durable file re-published after our boot. The durable
+    // re-read is UNCONDITIONAL here (a refusal on a stale retirement would mute
+    // the Asistente exactly like the incident — and it is the ONLY cheap way to
+    // learn that a row we hold RETIRED was re-published LIVE).
+    //
+    // COST (measured, why it is affordable): one `readFileSync` of hosts.json
+    // (~30 kB in the live org) + one JSON.parse, per `ensureHost` call — and
+    // `ensureHost` runs once per host-plane tool call (`dept_who`,
+    // `send_message`), i.e. ONCE PER MODEL TURN, never per recipient and never
+    // on a hot inner loop. It buys the class-closing property: no host
+    // registration decision is ever made on a stale snapshot.
+    if (this.hosts.get(hostId) !== void 0) syncFromDurable('a re-registration was requested')
+    const retiredNow = this.hosts.get(hostId)
+    if (retiredNow?.retired === true) {
+      this.deps.logger.warn(`[deepartments] ensureHost: refusing to re-register retired host ${hostId} (rotated to ${retiredNow.rotatedTo ?? 'unknown'}) — the session stays a plain session`)
       return hostId
     }
-    // Single-live-host guard: a NEW registration while another non-retired host
-    // entry exists must NOT mint a second live host (wake-12→13).
-    if (existing === undefined) {
-      for (const candidate of this.hosts.values()) {
-        if (candidate.retired !== true && candidate.sessionId !== sessionId) {
-          this.deps.logger.warn(`[deepartments] ensureHost: refusing new host registration ${hostId} — live host already exists: ${candidate.hostId}; the session stays a plain session`)
-          return candidate.hostId
+
+    // Guard 2 — the SINGLE-LIVE-HOST guard (wake-12→13): a NEW registration
+    // while another live host exists must NOT mint a second live host. fb-946:
+    // before refusing, the durable rows this process never saw are adopted and
+    // the guard is RE-EVALUATED — a registration decided on a boot snapshot is
+    // never final.
+    for (let pass = 0; pass < 2; pass++) {
+      if (this.hosts.get(hostId) !== void 0) break // the durable refresh explained the caller (or it was already known)
+      const blocking = [...this.hosts.values()].find((candidate) => candidate.retired !== true && candidate.sessionId !== sessionId)
+      if (blocking === undefined) break // no live host left — this session may register
+      if (pass > 0) {
+        // The refresh did NOT explain the caller: the refusal stands (the
+        // genuine single-live guard). The refusal OUTCOME is IDENTICAL to the
+        // pre-fix one (the existing live host id is returned) — only the
+        // catalog has been made coherent.
+        this.deps.logger.warn(`[deepartments] ensureHost: refusing new host registration ${hostId} — live host already exists: ${blocking.hostId}; the session stays a plain session`)
+        return blocking.hostId
+      }
+      const unseen = this.recordUnseenDurableHostRows(sessionId)
+      if (unseen.size === 0) {
+        // fb-946 — THE DETECTOR (by the FACT, not the symptom): about to REFUSE
+        // a host-shaped registration while the durable hosts.json holds NO live
+        // host row this catalog is missing. That combination is IMPOSSIBLE in a
+        // healthy process (a host refused while the durable host set carries
+        // nothing we do not already know = the in-memory catalog and the durable
+        // registry DIVERGED — the state in which every send from this host is
+        // denied with NOTHING persisted), so the alert fires HERE, at the first
+        // affected catalog call, instead of 15+ minutes later from an
+        // inactivity watchdog.
+        //
+        // DEDUPED PER MEMBER (this.muteAnomalyEmitted): a mute host calls
+        // `ensureHost` on EVERY catalog tool call, so an un-deduped emission
+        // would append one identical row per call — the incident's 3 sends would
+        // become 3 rows over 3 sends and thousands over a long mute. The FIRST
+        // emission is the signal (immediate, by the fact); the repeat is noise
+        // (the durable row + the logger.error already carry it). Cleared when the
+        // divergence heals (the adoption path below), so a LATER relapse alerts
+        // again — this is a per-mute latch, never a global mute switch.
+        if (!this.muteAnomalyEmitted.has(hostId)) {
+          this.muteAnomalyEmitted.add(hostId)
+          extras.onMuteHostAnomaly?.({
+            ts: Date.now(),
+            kind: REGISTRY_ANOMALY.MUTE_HOST_SENDER,
+            memberId: hostId,
+            reason: 'unclassified-host-shaped-sender',
+            detail: `ensureHost refused the host-shaped session ${sessionId} (in-memory live host: ${blocking.hostId}) while the durable hosts.json holds NO live host row this process does not already know — the in-memory catalog and the durable registry have DIVERGED (fb-946): every send from this host is denied by the ACL unclassified-sender branch, with nothing persisted`
+          })
         }
+        this.deps.logger.warn(`[deepartments] ensureHost: refusing new host registration ${hostId} — live host already exists: ${blocking.hostId}; the session stays a plain session`)
+        return blocking.hostId
+      }
+      // Durable live rows this process NEVER saw: adopt them (merge-only) and
+      // let the guard re-decide — the current session may be one of them.
+      this.deps.logger.warn(
+        `[deepartments] ensureHost: ${unseen.size} live host row(s) in hosts.json were registered AFTER this process booted and are ABSENT from the in-memory catalog (${[...unseen.keys()].join(', ')}) — refreshing the live catalog BEFORE deciding (fb-946: a registered host is never mute)`
+      )
+      this.refreshHostsFromDurable()
+      if (this.hosts.get(hostId) !== void 0) {
+        this.pendingUnseenHostRows.clear()
+        this.muteAnomalyEmitted.delete(hostId) // the divergence healed — re-arm the detector
       }
     }
     // U4 — pin the durable "Asistente" title (ctx-dependent side effect; the
@@ -1723,9 +2059,17 @@ export class RegistryStore {
     // MERGE (relay-fix): preserve every field ensureHost does not own and
     // refresh only the durable identity (hostId/sessionId). roomId is assigned
     // ONLY at CREATE (host-roomId latch fix).
-    this.hosts.set(hostId, existing === undefined
-      ? { hostId, sessionId, roomId }
-      : { ...existing, hostId, sessionId })
+    const known = this.hosts.get(hostId)
+    if (known === undefined) {
+      this.hosts.set(hostId, { hostId, sessionId, roomId })
+    } else {
+      this.hosts.set(hostId, { ...known, hostId, sessionId })
+      if (known.retired !== true) {
+        this.deps.logger.warn(
+          `[deepartments] ensureHost: ${hostId} was published by another writer after this process booted — the session is now the adopted LIVE host (the previously-refusing in-memory view was stale; fb-946)`
+        )
+      }
+    }
     this.hostForSession.set(sessionId, hostId)
     this.persistHosts()
     return hostId

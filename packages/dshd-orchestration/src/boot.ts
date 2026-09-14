@@ -78,6 +78,10 @@ import path from 'node:path'
 import type { Config, CoordinatorConfig, DepartmentConfig, PostsRetentionConfig, DeptWhoState } from './org-types.js'
 import { RegistryStore, pickLiveHostEntry } from 'dshd-core'
 import type { PostEntry, HostEntry } from 'dshd-core'
+// fb-946 (CRITICO — HOST MUDO): the durable ANOMALY channel + the row type the
+// mute-host detector writes through the `ensureHost` hook below.
+import { appendRegistryAnomalyRow } from 'dshd-core'
+import type { RegistryAnomalyRow } from 'dshd-core'
 import { findSessionArtifact, runSleepCleanup } from 'dshd-core'
 import { shouldClearCleanupPending } from 'dshd-core'
 import type { LifecycleService } from 'dshd-core'
@@ -786,6 +790,16 @@ export function createBootOrchestration(ctx: Context, deps: BootFactoryDeps): Bo
             ctx.logger.warn(`[deepartments] ensureHost: host session title pin failed for ${sid} (non-fatal — host registration continues)`)
           }
         }
+      },
+      // fb-946 — THE MUTE-HOST DETECTOR SINK. The registry store owns the
+      // durable anomaly row (it is the pure durable-catalog layer, with no
+      // transport); THIS is the wiring: a last-resort LOGGER.ERROR that reaches
+      // whoever tails the plugin's log (the immediate signal the incident
+      // lacked) + the durable row any reader can consume. Fires ONLY at the
+      // PROVEN divergence — never on the healthy refusal.
+      onMuteHostAnomaly: (anomaly: RegistryAnomalyRow) => {
+        appendRegistryAnomalyRow(stateDir, anomaly)
+        ctx.logger.error(`[deepartments] HOST MUTE ANOMALY (fb-946): ${anomaly.detail} — ALERT: the Asistente cannot reach ANY recipient until the catalog is refreshed (a restart heals it; the live hosts.json re-read is the durable fix). Row: ${anomaly.kind}/${anomaly.memberId}`)
       }
     })
 

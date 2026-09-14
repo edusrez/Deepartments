@@ -48,6 +48,32 @@ export interface BusCatalogLens {
   departmentForPost(postId: string): { id?: string } | undefined
 }
 
+/** Whether a member id is HOST-FAMILY by shape (`host-<sessionId>`, the
+ * deterministic runtime host address — `HOST_ID_PREFIX` in ./registry.js,
+ * inlined here so the pure ACL module keeps ZERO imports beyond the PostEntry
+ * type). Used by the fb-946 mute detector: a host-shaped caller that the
+ * catalog cannot classify is a diverged catalog, never a foreign session. */
+export function isHostShapedMember(memberId: string): boolean {
+  return memberId.startsWith('host-')
+}
+
+/** fb-946 (CRITICO — HOST MUDO) — THE ANOMALY FACT: the sender is HOST-SHAPED
+ * (`host-…`, the runtime host address class) yet the catalog classifies it
+ * `unclassified`. In a healthy process that is IMPOSSIBLE: every host-shaped
+ * caller of a catalog tool either has its `hosts.json` row in the live catalog
+ * (`kind: 'host'`) or is a session the catalog legitimately does not know —
+ * and a host-shaped id it does not know is exactly the divergence that mutes
+ * the Asistente. The send that follows is DENIED for EVERY recipient (the
+ * conservative `unclassified-sender` branch of `aclDenyGround`), so the sender
+ * sees a `none` sentinel with NOTHING persisted and NOTHING delivered.
+ *
+ * This is the detector seam (the FACT, not the symptom): callers wire it to an
+ * immediate + durable alert, so a mute host is caught at the FIRST send instead
+ * of by an inactivity watchdog 15 minutes later. PURE (no I/O, no logging). */
+export function isMutedHostSender(sender: BusMemberProfile): boolean {
+  return sender.kind === 'unclassified' && isHostShapedMember(sender.memberId)
+}
+
 /** Classify a catalog member into its bus profile (spec 004 §5.6). A worker's
  * department is its DURABLE link (recorded at create from the creating head's
  * config department); a configured head derives it from config

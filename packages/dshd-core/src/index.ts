@@ -16,7 +16,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { readFile } from 'node:fs/promises'
 import { RegistryStore } from './registry.js'
-import { busProfileFor, aclDenyGround, aclDenyReason, canSend } from './acl.js'
+import { busProfileFor, aclDenyGround, aclDenyReason, canSend, isHostShapedMember, isMutedHostSender } from './acl.js'
 import type { BusCatalogLens, BusMemberProfile } from './acl.js'
 import { createLifecycleService, buildSleepJournalMessage, journalPathFor } from './lifecycle.js'
 import type { LifecycleCtx, LifecycleService } from './lifecycle.js'
@@ -43,13 +43,14 @@ import { installBundlePatchWatchdog } from './bundle-patches.js'
 import { assertStoreProfile, storeProfileLabel } from './store-profile.js'
 
 // acl.js defines `busProfileFor`/`aclDenyGround`/`aclDenyReason`/`canSend` (+
-// types `BusMemberProfile`/`BusCatalogLens`); delivery.js RE-EXPORTS the same
-// four functions and two types for consumer convenience. Under a plain
+// the fb-946 mute-detector predicates `isHostShapedMember`/`isMutedHostSender`)
+// and the types `BusMemberProfile`/`BusCatalogLens`; delivery.js RE-EXPORTS the
+// same four functions and two types for consumer convenience. Under a plain
 // `export *` a name re-exported from two modules is AMBIGUOUS and silently
 // dropped, so acl's surface is re-exported EXPLICITLY here (a non-star export
 // takes precedence over any star export), which resolves the collision to one
 // binding. Everything else flows through star exports.
-export { busProfileFor, aclDenyGround, aclDenyReason, canSend } from './acl.js'
+export { busProfileFor, aclDenyGround, aclDenyReason, canSend, isHostShapedMember, isMutedHostSender } from './acl.js'
 export type { BusMemberProfile, BusCatalogLens } from './acl.js'
 
 export * from './registry.js'
