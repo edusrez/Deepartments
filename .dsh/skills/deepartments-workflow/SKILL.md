@@ -104,9 +104,15 @@ instruction is a one-shot event, the old anti-loop exclusion was sleep-specific.
 
 **The host's routine (window permitting):**
 1. Confirm the head is IDLE (`dept_who`) — a RUNNING head is rejected loudly
-   (rotate in a free window, never mid-turn).
-2. If the head is operative, ask it for `dept_memo_write` FIRST (send_message)
-   so the rotation seeds the freshest memo.
+   (rotate in a free window, never mid-turn). The window must be free of YOUR OWN
+   traffic as well (step 2).
+2. **RETIRED STEP — NEVER ask the outgoing head for `dept_memo_write` in this
+   window.** This step used to read *"If the head is operative, ask it for
+   `dept_memo_write` FIRST (send_message) so the rotation seeds the freshest
+   memo"* — that instruction IS the defect (OPT-1, 2026-09-14): the request is
+   itself a WAKE, so the head turns RUNNING and step 3 is rejected. The memo is
+   requested from the FRESH head, in the handoff of step 5 — for the measured
+   code chain see "Why the memo request comes AFTER the rotation" below.
 3. Call `dept_head_rotate {postId, reason}`. The tool: bounded-disposes the old
    live handle → server-side archives the old session → FRESH-MINTS a new
    session (`head-<postId>-<uuid>`) seeded with the head's LAST durable journal
@@ -119,15 +125,62 @@ instruction is a one-shot event, the old anti-loop exclusion was sleep-specific.
    be able to run `dept_memo_write`. The result surfaces
    `journal.stale` ("memo no actualizado — journal previo") when the seeded
    journal predates the freshness window; request the refresh at the first
-   opportunity, never to unblock.
+   opportunity, never to unblock. Under the inverted order that "first
+   opportunity" IS step 5 (the fresh head's first turn) — this rule is
+   REINFORCED, never relaxed: nothing in steps 1-3 may ever wait on a memo.
 5. **No immediate wake:** the fresh head lands LIVE but BOOT-QUIET (its first
    turn starts on the NEXT message/daemon wake — the journal is already in its
    context as the seed + the wake pack is injected at pre-step). Greet it with
-   the substantive message right after (the "resume" handoff); it re-orients
+   the substantive message right after (the "resume" handoff) **and ask the
+   FRESH head for its `dept_memo_write` in that same first turn**: the outgoing
+   head's session is already archived, so the fresh head persists the durable
+   journal the NEXT rotation will seed from (the memo does not have to exist
+   BEFORE the rotation — the rotation must never wait for it). It re-orients
    from the seeded journal in its first turn (M-B hook).
 6. A head with NO durable journal at all fails loudly — request a
-   `dept_memo_write` first. Workers and unconfigured posts are rejected loudly;
-   a head can never rotate (host-plane ACL).
+   `dept_memo_write` first **and rotate in a LATER turn, never in the same one**
+   (this is the ONE legitimate "memo first": `tools.ts:7245-7246`). Workers and
+   unconfigured posts are rejected loudly; a head can never rotate (host-plane
+   ACL).
+
+**Why the memo request comes AFTER the rotation (measured code chain, 2026-09-14
+— do NOT "fix" the order back):** `send_message` →
+`packages/dshd-orchestration/src/tools.ts:6091-6092` → `deliverOrQueue` →
+`busDeliverToPost` → **`delivery.ts:1968 target.followup(...)` = THE WAKE** (the
+`AgentLike` contract declares `followup` at `delivery.ts:367`; the engine's only
+turn-waiting primitive, `whenIdle()`, is declared at `delivery.ts:369` and is
+NEVER invoked on this delivery path — grep: the declaration is its ONLY
+occurrence in `delivery.ts`) ⇒ the host's `send_message` **RETURNS BEFORE the
+head closes its turn**, and the very next step then reads the SAME `running`
+signal (`packages/dshd-orchestration/src/boot.ts:546` in the `dept_who` row ·
+rotate guard `tools.ts:7198-7200` and `:7211-7212`) → **rejection
+`tools.ts:7237`** after the bounded settle of 5 s (`tools.ts:3249-3253`).
+Aggravating: messaging a head does NOT manufacture a free window — a
+batch-eligible send to a RUNNING recipient is not spliced 1:1, it is QUEUED
+(`delivery.ts:1906-1921`) and every settle flush is ANOTHER turn. This is an
+ORDER defect (deterministic chain, a race is not needed), not a contention bug —
+the fix is the order. Rejected alternatives: `noWake:true` (the tool's own gate
+declares it INAPPLICABLE to a legitimate work delivery — `tools.ts:5977` — and
+the rotation archives the outgoing session); `wait:true` (fb-735, on main via
+`fe044e0`) is a compliant path ON ITS OWN, but the composition «ask first +
+`wait:true`» is FORBIDDEN here — it makes the rotation WAIT for a fresh memo,
+i.e. it visibly breaks the critical-unblock rule of step 4. `wait:true` stays a
+RED option for the fb-115 announce-race only, never a substitute for this order.
+**KNOWN PENDING (NOT aligned by this document):** the LIVE tool description
+`tools.ts:7079` still ends with the retired prescription ("ask the head for
+`dept_memo_write` BEFORE rotating when it is operative and the window permits")
+— it sits INSIDE the frozen span `CUT-4` (`tools.ts:5616→:7353`, md5
+`c61523c4fa5a71b772441da05b2bcf58`), so it can only be aligned at the host's
+re-freeze; the same retired wording also lives in the pure-helper comment
+`src/invoke.ts:1059`. THIS section is the norm; those two are pending alignment.
+
+**Honest cost of the inverted order (declared, not hidden):** the seed is more
+often `journal.stale` (`tools.ts:7248`/`:7319`; 30-min window,
+`HEAD_ROTATE_JOURNAL_STALE_MS` — `src/invoke.ts:1066`), because the outgoing
+head's last-minute state is no longer folded in before the rotation. That is the
+correct price to pay: a rotation that always lands with a ≤30-min-old seed beats
+a rotation that self-blocks on a fresh one. Step 6 remains the ONLY legitimate
+"memo first" — and even there the rotation happens in a LATER turn.
 
 ## Model rotation (org-wide) — additive-first catalog + mandatory roster sweep
 
@@ -165,7 +218,10 @@ last before the single switch):**
    the fix and the canary PASS — evidence: builder-247 failed its turn 3 at
    12:54:13.925Z, 87 s after the recovery boot. Remedy: `dept_worker_retire` +
    fresh spawn (the new materialization carries the new id); for a head,
-   `dept_head_rotate` after its `dept_memo_write`. **Discriminator: read the
+   `dept_head_rotate` FIRST (in silence — fb-190) and ask for its
+   `dept_memo_write` in the handoff to the FRESH head: ordering the memo first
+   re-creates the self-blocking window (see "Head rotation" → "Why the memo
+   request comes AFTER the rotation"). **Discriminator: read the
    pin/model RESOLVED PER TURN — never the sessionId birth date.** A long-lived
    head reuses its session directory across the rotation and its handles
    re-resolve at materialization, so the birth-date criterion yields
