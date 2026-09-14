@@ -139,7 +139,8 @@ instruction is a one-shot event, the old anti-loop exclusion was sleep-specific.
    from the seeded journal in its first turn (M-B hook).
 6. A head with NO durable journal at all fails loudly — request a
    `dept_memo_write` first **and rotate in a LATER turn, never in the same one**
-   (this is the ONE legitimate "memo first": `tools.ts:7245-7246`). Workers and
+   (this is the ONE legitimate "memo first": the `no durable journal` guard in
+   the `dept_head_rotate` body). Workers and
    unconfigured posts are rejected loudly; a head can never rotate (host-plane
    ACL).
 
