@@ -415,7 +415,7 @@ interface AgentsLike {
 // EVERY post own layer (bus + feedback-emit + calendar + memo — tools.ts:2869-
 // 3058) are the SETUP SIGNAL: a session the harness restored into the agent
 // registry WITHOUT the deepartments setup (the smart-restart "AGENT REGISTRY
-// ONLY" resume shape — boot.ts:943-944) shows the preset/global capability
+// ONLY" resume shape — unmarked in source, no longer greppable) shows the preset/global capability
 // tools but NONE of the own-layer names — so the own-layer probes are the
 // DISCRIMINATOR (the globals are visible on both, the restrict mask only ever
 // REMOVES visibility). Head adds the manager-gated owns; the allowExec-gated
@@ -424,7 +424,7 @@ interface AgentsLike {
 // (lib/invoke.js at 327) and the frozen CUT-4 zone stay untouched; the pure
 // kernel is exercised THROUGH the factory surface in the tests. Placement:
 // AFTER the structural mirrors block (never above it — the followup-contract
-// lock anchors delivery.ts:334).
+// lock anchors the `AgentLike` `followup(message: UserMessage)` member).
 // ---------------------------------------------------------------------------
 const RESUME_UNIVERSAL_OWN_LAYER_PROBES: readonly string[] = [
   'send_message', 'agent_messages', 'dept_who', 'dept_memo_write',
@@ -1496,7 +1496,7 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
     // fb-300/fb-301 (VALLE 09-09 — rematerialización de toolset post-smart_restart;
     // clase fb-18 contrato): the GUARD at the LIVE resume branch. A session the
     // harness restored into the agent registry WITHOUT the deepartments setup
-    // (the smart-restart "AGENT REGISTRY ONLY" resume shape — boot.ts:943-944)
+    // (the smart-restart "AGENT REGISTRY ONLY" resume shape — unmarked in source, no longer greppable)
     // must NEVER be accepted as-is: its toolset never passed through the
     // derivation seam (postSetup tools.ts:2869-3058 — the own-layer
     // dept_exec/dept_zstd_read/secretary + the restrict allow-list are absent →
@@ -2393,14 +2393,14 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
   // compliance (deploying inspectors) ended in a post-error, which appended a NEW
   // post-error record and therefore emitted ANOTHER directive toward the QH → a
   // RATE-BOUNDED DRIP (NOT an unbounded loop: the post-error emit is gated on a
-  // NEW `appendPostErrorDeduped` record, delivery.ts:2313/2321, deduped by
+  // NEW `appendPostErrorDeduped` record, deduped by
   // (postId, class)).
   // ONE PREDICATE (hard condition, fb-635: two predicates diverge): the SAME
   // `workerPoolerDispatchBlockError` closure the three dispatch seams already
-  // consume (spawn.ts:538-560 → the imported `resolvePoolerDispatchBlock`,
-  // spawn.ts:549; passed to this factory at invoke.ts:3927, the SAME instance the
-  // tools factory gets at invoke.ts:3676 and the resume seam uses at
-  // delivery.ts:1451). NO second reader, NO duplicated predicate, NO new import.
+  // consume (spawn.ts `workerPoolerDispatchBlockError` → the imported
+  // `resolvePoolerDispatchBlock` call; passed to this factory as the SAME instance
+  // the tools factory gets and the resume seam uses). NO second reader, NO
+  // duplicated predicate, NO new import.
   // THE CONTAINMENT IS THE GATE, NEVER THE DEDUPE (acceptance e, family fb-712):
   // the recording dedupe above stays byte-identically untouched — what stops the
   // drip is the SUSTAINED-BLOCK verdict suppressing the WAKE.

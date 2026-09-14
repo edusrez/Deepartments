@@ -1067,7 +1067,8 @@ export async function writePresenceStateFile(stateDir: string, state: PresenceSt
 // NOTHING ever waits on a memo (critical-unblock), at any step. The retired
 // wording — "ask for dept_memo_write BEFORE rotating when the head is operative
 // and the window permits" — must NOT be reintroduced: its remaining twin is the
-// LIVE tool description `tools.ts:7079`, which sits INSIDE the frozen CUT-4 span
+// LIVE `dept_head_rotate` tool description in `packages/dshd-orchestration/src/tools.ts`
+// (the tool's `description:` literal), which sits INSIDE the frozen CUT-4 span
 // and can only be aligned at the host's re-freeze. The STALE marker below tells
 // the host when the seeded journal predates the freshness window, so it can
 // request a refresh FROM THE FRESH HEAD at the first opportunity without
@@ -1419,7 +1420,7 @@ function finiteNumber(value: unknown): number | undefined {
 
 /** fb-25 (a) — resolve the DURABLE session-projection mirror path
  * (`<stateHome>/storages/session_projcache.json`) the SAME way the web-UI
- * sleep-cleanup wiring resolves it (:2730 — persistence.root sessions root →
+ * sleep-cleanup wiring resolves it (its own resolution — persistence.root sessions root →
  * state home → storages). Exported so the tool wiring and the tests share ONE
  * resolution (no tested/production drift). */
 export function resolveSessionProjCachePath(stateDir: string, persistenceRoot?: string): string {
@@ -4757,13 +4758,13 @@ export function applyInvoke(ctx: Context, config: Config) {
     // FB-132 (wake-on-delivered 2026-09-06 — the 2nd-half drain-on-wake lane):
     // the LATE-BOUND DRAIN hook the delivery factory's REAL-wake primitives
     // fire (busDeliverToPost / busDeliverToHost success + the rotation wake).
-    // Resolved ONLY at fire time (the tools surface was built above — :3585;
+    // Resolved ONLY at fire time (the tools surface was built above — `const toolsSurface`;
     // its `redeliverDrainQueue` is bound to `redeliverPendingDeliveries`, the
     // SAME DeliveryRedeliverer the sweep tick drives — a fire on an empty queue
     // is a pure no-op, and a missing hook degrades to NO-OP inside the factory).
     // fb-473 (D1 option A) — the HOST-rotation reason verification stamp is
     // computed in the delivery EMITTER with these two fb-25 helpers (the SAME
-    // by-reference pair the tools factory receives at :579/:1192 — one single
+    // by-reference pair the tools factory receives — one single
     // source of truth for both rotation families) plus the M-A fb-50 monitor
     // calibration (the same `config.health` knob the dept_head_rotate tool reads).
     // LANE DEL SELLO (PIECES 1+2) — same reduction as the tools seam above: the
@@ -4777,7 +4778,7 @@ export function applyInvoke(ctx: Context, config: Config) {
   }
   // LANE DEL SELLO (datumTs, 2026-09-11) — the delivery-side wrap of the SAME
   // pair: the HOST-rotation emitter (`packages/dshd-orchestration/src/
-  // delivery.ts:2572`, fb-473) computes its stamp through this sealed helper.
+  // delivery.ts`, its `reasonVerified` computation, fb-473) computes its stamp through this sealed helper.
   // The host rotation is THE case of this lane (the mirror answered 272006 at
   // emit and 279485 at the QH's re-read): from here on, the row that leaves the
   // emitter carries the DATUM INSTANT with the figure. Identical verdict, one
@@ -5057,8 +5058,8 @@ export function applyInvoke(ctx: Context, config: Config) {
           // FB-234 (2026-09-09, GAP #2): the bundle's bootId — the SAME id
           // stamped into boot-crash.json at apply start (healthBootId). The
           // composed dshd-health tick must be told it explicitly, or it falls
-          // back to its own per-apply randomUUID (index.ts:7855) and the
-          // recoveryCause bootId-guard (index.ts:6810-6811) fails → the
+          // back to its own per-apply randomUUID (its own bootId mint) and the
+          // recoveryCause bootId-guard (the dshd-health `bootStamp.bootId` check) fails → the
           // boot-real registry row reads 'unknown' instead of 'canary'.
           bootId?: string
           hosts?: Iterable<HostEntry>
@@ -5251,9 +5252,9 @@ export function applyInvoke(ctx: Context, config: Config) {
             // the composed dshd-health tick must use the SAME bootId the bundle
             // stamped into boot-crash.json at apply start (healthBootId — the
             // bundle randomUUID, tools.ts) — the dshd-health recoveryCause guard
-            // (index.ts:6810-6811) requires `bootStamp.bootId === deps.bootId`.
+            // (the dshd-health guard) requires `bootStamp.bootId === deps.bootId`.
             // Without this, dshd-health falls back to its OWN per-apply
-            // randomUUID (index.ts:7855) → the guard fails → recoveryCause
+            // randomUUID (its own per-apply bootId mint) → the guard fails → recoveryCause
             // undefined → the boot-real registry row reads 'unknown' instead of
             // 'canary'. The inline fallback below (runHealthDaemonTick) already
             // passes bootId: healthBootId — this closes the composed path.
@@ -5355,14 +5356,14 @@ export function applyInvoke(ctx: Context, config: Config) {
             // C6: the bounded tail reader (absent → the legacy full read).
             deliveryRowsReader: deliveryRowsTailReader,
             // M1 (a) — the pooler-capacity watchdog READS the pooler's OWN state
-            // file (join(DSH_HOME||cwd,'keyPooler-state.json') — dshHome() at
-            // :2542), SOLO-LECTURA (the pooler owns every write; the watchdog
+            // file (join(DSH_HOME||cwd,'keyPooler-state.json') — read through the dshHome() dep),
+            // SOLO-LECTURA (the pooler owns every write; the watchdog
             // never writes it). The `health.poolerStateFilePath` knob overrides
             // the path; absent dep → the scan is a no-op (hermetic tick tests).
             poolerStatePath: healthPoolerStatePath,
             // M1 (b) — the qi-silence watchdog shares the SAME worker-inspect dice
-            // p as the directive EMITTER (single source of truth, resolved at
-            // :1819) so its rate-aware minimum (P(0|p) ≤ 5% → ceil(ln(.05)/ln(1-p)))
+            // p as the directive EMITTER (single source of truth — the per-apply
+            // resolution) so its rate-aware minimum (P(0|p) ≤ 5% → ceil(ln(.05)/ln(1-p)))
             // tracks the real trigger probability; absent dep → 0.25 code default.
             qiDirectiveRate: qualityWorkerInspectProbability,
             // The daemon is NOT a catalog member, so the bus ACL would deny it —
