@@ -146,22 +146,37 @@ instruction is a one-shot event, the old anti-loop exclusion was sleep-specific.
 
 **Why the memo request comes AFTER the rotation (measured code chain, 2026-09-14
 — do NOT "fix" the order back):** `send_message` →
-`packages/dshd-orchestration/src/tools.ts:6091-6092` → `deliverOrQueue` →
-`busDeliverToPost` → **`delivery.ts:1968 target.followup(...)` = THE WAKE** (the
-`AgentLike` contract declares `followup` at `delivery.ts:367`; the engine's only
-turn-waiting primitive, `whenIdle()`, is declared at `delivery.ts:369` and is
+the `send_message` seam in `packages/dshd-orchestration/src/tools.ts` (the
+`delivery.deliverOrQueue(recipient, record, …)` call under the «send_message
+routes through» comment) → `busDeliverToPost` → **`target.followup(...)` = THE
+WAKE — and it is THREE call sites, not one** (`delivery.ts`: the `materializePost`
+resume path, the plain idle/dormant path — the one carrying the «No pending
+batch» comment, i.e. the ordinary `send_message` — and the host-materialization
+path), each of them a `target.followup(busUserMessage(record, framed,
+senderSessionId))` call (the
+`AgentLike` contract declares the `followup(message: UserMessage)` member
+immediately above `cancel` and `whenIdle`; the engine's only
+turn-waiting primitive, `whenIdle()`, is declared right there and is
 NEVER invoked on this delivery path — grep: the declaration is its ONLY
 occurrence in `delivery.ts`) ⇒ the host's `send_message` **RETURNS BEFORE the
 head closes its turn**, and the very next step then reads the SAME `running`
-signal (`packages/dshd-orchestration/src/boot.ts:546` in the `dept_who` row ·
-rotate guard `tools.ts:7198-7200` and `:7211-7212`) → **rejection
-`tools.ts:7237`** after the bounded settle of 5 s (`tools.ts:3249-3253`).
+signal (the `buildCatalogRows()` liveness read in
+`packages/dshd-orchestration/src/boot.ts` — the SAME call the `dept_who` row
+renders from · rotate guard in `tools.ts` — the
+`dept_who`-snapshot read and the free-window re-check read the SAME live-handle
+signal) ⇒ **the RUNNING rejection** after the bounded settle (the
+`DEEPARTMENTS_HEAD_ROTATE_SETTLE_MS` window of the free-window check, the
+`HEAD_ROTATE_SETTLE_POLL_MS` bounded re-verify).
 Aggravating: messaging a head does NOT manufacture a free window — a
 batch-eligible send to a RUNNING recipient is not spliced 1:1, it is QUEUED
-(`delivery.ts:1906-1921`) and every settle flush is ANOTHER turn. This is an
+(the `batchDrain` / `flushBatchFor` accumulation seam — the «BATCH-DRAIN»
+«ACCUMULATION seam (eslabón 1 of the 1:1)» comment block in `delivery.ts`) and
+every settle flush is ANOTHER turn. This is an
 ORDER defect (deterministic chain, a race is not needed), not a contention bug —
 the fix is the order. Rejected alternatives: `noWake:true` (the tool's own gate
-declares it INAPPLICABLE to a legitimate work delivery — `tools.ts:5977` — and
+declares it INAPPLICABLE to a legitimate work delivery — the `noWake` parameter
+schema of `send_message`, whose own description carries the «explicit opt-in
+gate» note — and
 the rotation archives the outgoing session); `wait:true` (fb-735, on main via
 `fe044e0`) is a compliant path ON ITS OWN, but the composition «ask first +
 `wait:true`» is FORBIDDEN here — it makes the rotation WAIT for a fresh memo,
@@ -184,8 +199,10 @@ re-freeze; the same retired wording also lives in the pure-helper comment of
 those two are pending alignment.
 
 **Honest cost of the inverted order (declared, not hidden):** the seed is more
-often `journal.stale` (`tools.ts:7248`/`:7319`; 30-min window,
-`HEAD_ROTATE_JOURNAL_STALE_MS` — `src/invoke.ts:1066`), because the outgoing
+often `journal.stale` (the `stale` flag returned by
+`headRotationJournalStatus()` — the `journal.stale` field the rotate render
+prints as «STALE — memo no actualizado, journal previo»; 30-min window,
+`HEAD_ROTATE_JOURNAL_STALE_MS` in `src/invoke.ts`), because the outgoing
 head's last-minute state is no longer folded in before the rotation. That is the
 correct price to pay: a rotation that always lands with a ≤30-min-old seed beats
 a rotation that self-blocks on a fresh one. Step 6 remains the ONLY legitimate
