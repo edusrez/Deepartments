@@ -113,7 +113,10 @@ test('r6-tree-integrity (P2-HYGIENE): the per-zone md5 MANIFEST exists, carries 
   const current = zoneMd5WithMarkers(readFileSync(path.join(REPO_ROOT, cut4.file), 'utf8'), cut4.banner, cut4.close)
   assert.equal(current, cut4.md5, 'the manifest frozen md5 matches the CURRENT source zone md5 (no drift-to-commit today)')
   // (d) the manifest frozen value equals the FROZEN TEST literal — the freeze
-  // lock (tools-factory.test.js:348) and the manifest must move in the SAME
+  // lock (the `assert.equal(md5, ...)` literal in tools-factory.test.js; cited by
+  // that assertion itself, NOT by line number: the number rotted twice already —
+  // it was `:348` in this comment and in scripts/zone-md5-manifest.json while the
+  // literal had drifted to `:501`) and the manifest must move in the SAME
   // commit (a re-freeze that forgets one of the two fails this test).
   const freezeTest = readFileSync(path.join(REPO_ROOT, 'test', 'tools-factory.test.js'), 'utf8')
   assert.match(freezeTest, new RegExp(`'${cut4.md5}'`), 'the manifest frozen md5 is the SAME value the freeze lock asserts (byte-synced re-freeze)')

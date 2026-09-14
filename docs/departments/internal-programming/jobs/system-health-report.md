@@ -144,6 +144,14 @@ forwards it.
    referenciada — es la verificación de ese fix por la vía del guard. Ojo: la RUTA
    no es un secreto, el CONTENIDO sí; el contenido de un `EnvironmentFile=` NO es
    accesible por esta propiedad (solo por `Environment`, que sigue DENEGADO).
+   **`EnvironmentFiles` puede volver VACÍA aun estando en la allow-list: vacío NO es prueba de que
+   no haya `EnvironmentFile=`; la verificación es por D-Bus con el detector root.**
+   Motivo, con la evidencia re-corrible (medición de la QD, informe D-Q2,
+   `quality-inspector-306`): **(a)** `systemctl show <unit> -p EnvironmentFiles`
+   devolvió `exit 0` SIN NINGUNA LÍNEA, **CUATRO VECES**, incluida la forma desnuda
+   sobre la unit ACTIVA; **(b)** en una llamada combinada de SEIS propiedades
+   devolvió **SÓLO CINCO líneas**. La propiedad sigue sin emitir ⇒ el lector NO
+   puede distinguir «no hay `EnvironmentFile=`» de «no se emite la propiedad».
    **NUNCA `systemctl show <unit>` sin `-p`**: sin `-p` systemd vuelca TODAS las
    propiedades, `Environment=` incluida — el entorno de la unit EN CLARO,
    legible sin privilegio (fb-690: el modo 0600 de la unit NO protege nada,
