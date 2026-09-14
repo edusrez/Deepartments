@@ -223,13 +223,15 @@ import type { HeadToolDisposers, SpawnSurface } from './spawn.js'
 import {
   appendToolIntent,
   classifyToolAbortReason,
+  classifyToolErrorCause,
   projectToolIntentArgs,
   readToolIntents,
   recordToolAbortInterruptDetail,
   scanAbortedToolIntents,
   toolIntentTarget,
   TOOL_ABORT_DEDUPE_KEY_PREFIX,
-  TOOL_ABORT_POST_ID
+  TOOL_ABORT_POST_ID,
+  type ToolErrorCause
 } from './tool-intents.js'
 // dshd-feedback (SUB-BATCH 4 — the feedback tools zone): the store + the
 // terminal-estado predicate + the record/option types the 3 feedback tool
@@ -1383,7 +1385,8 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   })
 
   // =========================================================================
-  // LANE R4 («aborts sin detalle + clase O1» — fb-69/70/81/83/110/111/126/133):
+  // LANE R4 («aborts sin detalle + clase O1» — fb-69/70/81/83/110/111/126/133)
+  // + fb-957 (the ERROR-row CAUSE):
   // THE WRITE-AHEAD TOOL-INTENT SEAM. On the HARNESS TOOL-DISPATCH pipeline the
   // deepartments agents run, EVERY tool call of an agent (head/worker/host —
   // the whole class, incl. operation tools and pure READS) is written to the
@@ -1401,6 +1404,12 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   //     AND surfaces a deduped post-error row the W6 daemon scans into the
   //     health report — nothing is a flat «tool call aborted» without a
   //     trace anymore.
+  //   - fb-957 (2026-09-14): an ERROR settle also records a CLOSED CAUSE key
+  //     (`cause` — the enum in tool-intents.ts), so the failure rate BY CAUSE
+  //     is measurable; `reason` stays reserved to the abort taxonomy and a
+  //     SUCCESSFUL settle records NEITHER (the noise-guard contract). The long
+  //     form (`args`) still rides the sibling intent row of the SAME `id` —
+  //     the join is the canonical diagnostic path, the cause is its summary.
   // Fail-soft discipline (both listeners): a sidecar/record failure NEVER
   // blocks, denies, or alters a tool dispatch or a downstream decision — the
   // write-ahead is additive observability (wrap + warn + delegate). The
@@ -1436,11 +1445,19 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
     }
   }
 
+  /** fb-957 — the ERROR-row cause: the PURE closed-set classifier over the
+   * structured signal the settle point actually holds (`error.info.code`, plus
+   * our own byte-locked guard-deny prefix). Nothing is reconstructed from the
+   * tool's own output here — a class the settle point cannot DERIVE stays
+   * 'other' (see classifyToolErrorCause). */
+  const toolErrorCause = (result: { isError: boolean; error?: { message?: string; info?: { name?: string; code?: string } } | null }): ToolErrorCause =>
+    classifyToolErrorCause(result.error)
+
   /** The settle transition (post-execute, AFTER the downstream next()). Finds
    * the intent by callId (the harness pipeline is the SAME exec pre→post), else
    * the LATEST unsettled intent for (agent, tool) — the tolerant path for a
    * callId-less exec. Never throws. */
-  const settleToolIntent = async (exec: { callId?: unknown; name: string; agent?: { id?: unknown } | null }, result: { isError: boolean; error?: { message?: string } | null }): Promise<void> => {
+  const settleToolIntent = async (exec: { callId?: unknown; name: string; agent?: { id?: unknown } | null }, result: { isError: boolean; error?: { message?: string; info?: { name?: string; code?: string } } | null }): Promise<void> => {
     try {
       const agentId = String(exec.agent?.id ?? '')
       if (agentId === '') return
@@ -1483,6 +1500,21 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // fallback on an absent error message ('aborted') can never leak an
       // 'aborted' reason into a success row).
       const reason = !result.isError || !isAbort ? undefined : classifyToolAbortReason(String(result.error?.message ?? ''), exec.name)
+      // fb-957 — THE ERROR-ROW CAUSE (the lane's contract change, declared
+      // here in the SAME change): `reason` above is RESERVED to the abort
+      // taxonomy and `cause` is the CLOSED error enum, each riding exactly ONE
+      // status — a SUCCESSFUL settle carries NEITHER (the noise-guard contract
+      // is unchanged: 1 335 successful settles at the 2026-09-14T22:24Z cut
+      // of the sidecar, none of them carrying a cause).
+      // The cause is derived AT THIS POINT (never reconstructed later): the
+      // structured `error.info.code` the harness/plugins own, or our own
+      // byte-locked guard-deny prefix — and 'other' when nothing derivable
+      // exists. What is NOT derivable here stays 'other' BY DESIGN: the
+      // provider/network and shell-failure families never reach this row as an
+      // error at all (a non-zero command exit is a RESULT, not a throw —
+      // dsh-tool-bash/lib/index.js:36-43 and tools.ts's own dept_exec `!ok`
+      // branch return it as a success).
+      const cause = status !== 'error' ? undefined : toolErrorCause(result)
       await appendToolIntent(stateDir, {
         kind: 'settle',
         id,
@@ -1490,6 +1522,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         agent: agentId,
         status,
         ...(reason !== undefined ? { reason } : {}),
+        ...(cause !== undefined ? { cause } : {}),
         ts
       })
       // The DURABLE ABORT REASON (objective 2): on a live-abort, the reason

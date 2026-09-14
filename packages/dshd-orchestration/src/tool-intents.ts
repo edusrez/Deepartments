@@ -24,7 +24,19 @@
  * Row shapes (append-only, one row per transition — the deliveries.jsonl
  * pattern):
  *   {kind:'intent', id, tool, agent, memberId, target, args, ts}
- *   {kind:'settle', id, tool, agent, status:'settled'|'error'|'aborted', reason?, ts}
+ *   {kind:'settle', id, tool, agent, status:'settled'|'error'|'aborted', reason?, cause?, ts}
+ *
+ * CONTRACT (fb-957, 2026-09-14 — the cause/abort split; read this before
+ * touching either field): the two diagnostics are MUTUALLY EXCLUSIVE and each
+ * rides exactly ONE status.
+ *   - `reason` (the abort taxonomy, R4) rides ONLY an `aborted` settle (a
+ *     life-abort: interruption / cancel / churn / read-only abort / abort). A
+ *     SUCCESSFUL settle NEVER records a reason (the noise-guard contract).
+ *   - `cause` (the closed ERROR enum, fb-957) rides ONLY an `error` settle.
+ *     It is a CLOSED enum key — NEVER free text (the sibling `intent` row of
+ *     the SAME `id` already carries the capped `args`, so the long form is
+ *     reachable by join and must not be duplicated here).
+ *   - a `settled` row carries NEITHER.
  *
  * NO export default (pitfall 0001 — breaks `inject`).
  */
@@ -63,6 +75,42 @@ export const TOOL_ABORT_POST_ID = 'tool-abort-intent'
  * aborts within HEALTH_DEDUPE_WINDOW_MS collapse to ONE surfaced row). */
 export const TOOL_ABORT_DEDUPE_KEY_PREFIX = 'tool-abort:'
 
+/** fb-957 — the CLOSED cause enum of an ERRORED settle. Every value is
+ * DERIVABLE at the point the settle row is written (see
+ * {@link classifyToolErrorCause}); a cause the settle point cannot derive is
+ * NOT in this enum — it degrades to 'other'. The enum is the measurement
+ * contract: a failure rate BY CAUSE is computed from it, so a value may only be
+ * added together with the structured signal that derives it. */
+export type ToolErrorCause =
+  | 'guard-denied'
+  | 'tool-unknown'
+  | 'schema-invalid'
+  | 'output-invalid'
+  | 'timeout'
+  | 'path-not-found'
+  | 'other'
+
+/** The enum as a runtime list (a CLOSED set — the display order). */
+export const TOOL_ERROR_CAUSES: readonly ToolErrorCause[] = [
+  'guard-denied',
+  'tool-unknown',
+  'schema-invalid',
+  'output-invalid',
+  'timeout',
+  'path-not-found',
+  'other'
+]
+
+/** The byte-locked prefix EVERY dept_exec / dept_zstd_read scope denial
+ * carries: `src/invoke.ts:3002/3013/3024/3036/3042/3057/3064` (deptExecDenyReason)
+ * + `:3133` (deptZstdReadDenyReason), thrown as a PLAIN Error by
+ * `packages/dshd-orchestration/src/tools.ts:1964/2044` — and pinned
+ * byte-identically by the guard tests (e.g. test/r5-dx-guards.test.js:115). A
+ * guard denial is therefore the ONE cause anchored to a MESSAGE (the scope
+ * guards leave no structured code: dsh-tools/lib/index.js:2501-2511 sets
+ * `error.info` only for a HarnessError). */
+export const GUARD_DENY_REASON_PREFIX = 'OUT_OF_SCOPE / DENIED'
+
 /** One write-ahead INTENT row (persist BEFORE dispatch). */
 export interface ToolIntentStartRow {
   kind: 'intent'
@@ -92,8 +140,17 @@ export interface ToolIntentSettleRow {
   agent: string
   status: 'settled' | 'error' | 'aborted'
   /** The durable ABORT REASON when status === 'aborted' (interruption / cancel
-   * / churn / read-only abort / the raw abort message excerpt). */
+   * / churn / read-only abort / the raw abort message excerpt). NEVER present
+   * on a successful settle (the noise-guard contract) and never on an error
+   * settle — see {@link ToolErrorCause}. */
   reason?: string
+  /** fb-957 — the CLOSED cause key of an ERRORED settle (status === 'error').
+   * Absent on 'settled' and on 'aborted' rows: the abort taxonomy is `reason`
+   * and the two diagnostics never mix. Shorter than a free-text reason BY
+   * CONSTRUCTION (a key of {@link TOOL_ERROR_CAUSES}) — the failure rate by
+   * cause is measurable from this field while the long form stays reachable
+   * through the sibling intent row of the SAME id. */
+  cause?: ToolErrorCause
   ts: number
 }
 
@@ -274,6 +331,72 @@ export function classifyToolAbortReason(message: string, tool: string): string {
  * set names the harness fs/read family + the deepartments read-only tools. */
 export function isReadOnlyTool(tool: string): boolean {
   return /^(read|glob|grep|readFile|web_fetch|dept_zstd_read|dept_who|agent_messages|dept_calendar_list|dept_memo_read)$/.test(tool)
+}
+
+/** fb-957 — the STRUCTURED error code → the closed cause enum. Only the codes
+ * the harness / the wrapped plugins ACTUALLY own are mapped; every other code
+ * degrades to 'other' (never the raw code — the field stays a closed enum).
+ * Anchors (file:line, all in the loaded harness):
+ *   - `UNKNOWN_TOOL` — dsh-tools/lib/index.js:2427-2437 (ToolNotFoundError;
+ *     a model call naming a tool the scope does not resolve);
+ *   - `INVALID_ARGS` — dsh-tools/lib/index.js:811-818 (ToolArgsError, the
+ *     model-generated arguments failed the declared parameter schema);
+ *   - `INVALID_TOOL_OUTPUT` — dsh-tools/lib/index.js:2440-2448 (ToolOutputError)
+ *     plus `:2450-2452` (a throwing render / presentationMeta);
+ *   - `TOOL_TIMEOUT` — dsh-tool-call-timeout-policy/lib/index.js:80-107 (the
+ *     timeout plugin's structured replacement result);
+ *   - the fs FAMILY (`FS_*`) — dsh-fs/lib/types/types.d.ts:162 declares the
+ *     closed `FsErrorCode` union (`FS_NOT_FOUND` / `FS_EDIT_NOT_FOUND` /
+ *     `FS_NOT_DIRECTORY` / `FS_SANDBOX_DENIED` / `FS_PERMISSION_DENIED` / …)
+ *     and dsh-fs/lib/index.js:34-40 shows FsError extends HarnessError — so the
+ *     code DOES reach `error.info.code`; `SEARCH_PATH_NOT_FOUND` —
+ *     dsh-tool-fs-search/lib/index.js:65-71 + :89/:174.
+ * The fs family is mapped by its DECLARED prefix/marker convention (the
+ * vocabulary the harness itself owns), never by a guessed phrase. PURE. */
+export function causeFromToolErrorCode(code: string): ToolErrorCause {
+  if (code === 'UNKNOWN_TOOL') return 'tool-unknown'
+  if (code === 'INVALID_ARGS') return 'schema-invalid'
+  if (code === 'INVALID_TOOL_OUTPUT') return 'output-invalid'
+  if (code === 'TOOL_TIMEOUT') return 'timeout'
+  if (code === 'SEARCH_PATH_NOT_FOUND') return 'path-not-found'
+  if (code.startsWith('FS_')) {
+    if (code.includes('NOT_FOUND') || code.includes('NOT_DIRECTORY')) return 'path-not-found'
+    if (code.includes('DENIED')) return 'guard-denied'
+    return 'other'
+  }
+  return 'other'
+}
+
+/** fb-957 — the PURE cause classifier of an ERRORED tool settle. It reads ONLY
+ * the structured signal the settle point holds:
+ *   (1) `error.info.code` — the `{name, code}` pair dsh-tools/lib/index.js:2501-2511
+ *       attaches to a HarnessError (the fs/search/timeout/tools families all
+ *       carry one; the code is the harness's OWN vocabulary);
+ *   (2) the top-level `code` arm — a body may throw a HarnessError-shaped VALUE
+ *       the registry does not wrap into `error.info`;
+ *   (3) our own byte-locked guard-deny PREFIX ({@link GUARD_DENY_REASON_PREFIX}),
+ *       the ONE message-anchored rule: src/invoke.ts:3002-3064 throws PLAIN
+ *       Errors (no code) whose phrase is pinned byte-identically by
+ *       test/r5-dx-guards.test.js:115.
+ * Everything else is 'other' — a class this point cannot DERIVE is never
+ * invented. In particular the harness marks NO structural difference between a
+ * `tools/pre-execute` deny / a `tools.guard()` denial (dsh-tools/lib/index.js:
+ * :3116-3128 materializes `error: {message: denialReason}` with NO info) and a
+ * body that throws the same plain string — so only OUR OWN guard phrase is
+ * claimed. Likewise `provider` / `network` leave NO tool-layer marker at all
+ * (the cloud-4xx class is classified at the JOB layer: packages/dshd-jobs/src/
+ * index.ts:530 CLASS_OUTAGE_REASON_RE), and a failed shell command is not even
+ * an error row (dsh-tool-bash/lib/index.js:36-43: «Non-zero exits are reported,
+ * not errored … only infrastructure failures (spawn errors, aborts) surface as
+ * isError results»). PURE. */
+export function classifyToolErrorCause(error: unknown): ToolErrorCause {
+  const record = (error ?? {}) as { message?: unknown; info?: unknown; code?: unknown }
+  const info = (record.info ?? {}) as { code?: unknown }
+  if (typeof info.code === 'string' && info.code !== '') return causeFromToolErrorCode(info.code)
+  if (typeof record.code === 'string' && record.code !== '') return causeFromToolErrorCode(record.code)
+  const message = typeof record.message === 'string' ? record.message : ''
+  if (message.includes(GUARD_DENY_REASON_PREFIX)) return 'guard-denied'
+  return 'other'
 }
 
 /** The write-ahead args projection (capped + truncation marker; lossless JSON
