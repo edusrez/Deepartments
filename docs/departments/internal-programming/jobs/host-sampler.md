@@ -57,7 +57,11 @@ restate it**.
      A missing/younger-than-expected series is a FINDING, not a formality.
    - **`pidfile == MainPID`** (anti-double-sampler): the pid in
      `/.deepartments/host-health.jsonl.pid` and `pgrep -af host-sampler` must
-     name the SAME live process — and there must be no second one.
+     name the SAME live process — and there must be no second one. The unit's own
+     **`MainPID`** is readable by a worker with the inert form
+     `systemctl show dsh-host-sampler -p MainPID` (read-only and ALLOWED — while
+     `systemctl show` WITHOUT `-p` is DENIED, because it dumps every property
+     including `Environment=`: NEVER ask for that dump).
    - The line in `/.deepartments/host-sampler.log` is **AUXILIARY**: it is a
      **HEARTBEAT every ~20 ticks (~15 min at 45 s)** — `state.ticks % 20 === 1`
      — and NOT one line per tick, so **its age is NOT evidence of death**. The
@@ -67,17 +71,38 @@ restate it**.
 2. **Coverage** — count rows in the period, compute the largest gap and the
    declared cadence (`intervalSec`), and count rows with a non-empty `errors[]`.
    Report the numbers, not an adjective.
-3. **Restart if dead — VIA THE UNIT** (the inverse of the old recipe):
-   - **The path is `systemctl restart dsh-host-sampler`** — the unit owns the
-     process, its cwd, its flags and the log append targets. Use it when
-     `is-active` is not `active`, or when the pidfile names a **DEAD** pid while
-     the unit is `active`.
-   - **No `systemctl reset-failed` is needed** (`StartLimitIntervalSec=0`, above:
-     the unit never latches into `failed`, it keeps retrying every 15 s) — and if
+3. **If the sampler is dead — REPORT AND ESCALATE: the RESTART IS THE
+   HOST/OWNER'S ACTION** (fb-960: this branch is written so that a WORKER's part
+   of it is HONEST AND EXECUTABLE — a worker cannot restart the unit and must
+   not try):
+   - **`systemctl restart dsh-host-sampler` is NOT available to a worker.** It
+     is a MUTATING verb and the `dept_exec` guard DENIES it (the only permitted
+     forms are READ-ONLY: `systemctl is-active <unit>`, and the inert-property
+     read `systemctl show <unit> -p MainPID|NRestarts|ExecMainStartTimestamp|
+     FragmentPath|DropInPaths|EnvironmentFiles`). The unit still owns the process, its cwd, its flags and the
+     log append targets — and the ACTION is the **Asistente/owner's**. Do NOT
+     attempt it with any other mechanism, and do not touch the daemon
+     (`dsh-deepartments-dev`) either.
+   - **What the worker DOES when `is-active` is not `active`**, or when the
+     pidfile names a **DEAD** pid while the unit is `active`, or when the series
+     is stale beyond 3 x `intervalSec`: (1) collect the measured evidence —
+     the `is-active` reading **with its instant**, the health-series delta, the
+     pidfile pid vs `pgrep -af host-sampler`; (2) put the restart request on the
+     report's **ESCALATION** list, naming the unit + that evidence, so the head
+     forwards it to the Asistente/owner; (3) wait for the unit's own
+     `Restart=always`/`RestartSec=15` self-repair and re-read `is-active` on the
+     NEXT pass — that self-repair is the sampler's designed rescue, not a
+     worker's job.
+   - **`systemctl reset-failed` is NOT needed** (`StartLimitIntervalSec=0`,
+     above: the unit never latches into `failed`, it keeps retrying every 15 s)
+     — **and it is not available to a worker either** (mutating). If
      `is-active` reads **`activating`** the unit is **ALREADY self-repairing**:
-     investigate the CAUSE via the series freshness before restarting anything.
-   - **The manual launch is the LAST RESORT** (only when no sampler is alive and
-     the unit is unavailable): the script has an **anti-double-sampling guard**
+     investigate the CAUSE via the series freshness, and **do not** treat it as
+     a repair to perform.
+   - **The manual launch is the LAST RESORT and NEVER a substitute for the
+     escalation** (only when no sampler is alive and the unit is unavailable —
+     the escalation above STILL goes out, naming it as a manual rescue): the
+     script has an **anti-double-sampling guard**
      and REFUSES a manual start while the pidfile names a live process
      (`another sampler is alive … refusing to double-sample`): `cd
      /home/esuarez/projects/deepartments && setsid nohup node

@@ -28,10 +28,21 @@ forwards it.
 
 ## What to check
 
-1. **Service units (liveness — NO `systemctl`).** `systemctl` is DENIED by the
-   `dept_exec` guard (command denylist) — you MUST NOT run it, and must NOT
-   attempt to get around the guard. Determine liveness via ALLOWED means, in
-   this order:
+1. **Service units (liveness — only the READ-ONLY `systemctl` forms).** The
+   `dept_exec` guard DENIES every `systemctl` form EXCEPT two READ-ONLY ones:
+   `systemctl is-active <unit>` and the INERT-property read
+   `systemctl show <unit> -p <MainPID|NRestarts|ExecMainStartTimestamp|FragmentPath|DropInPaths|EnvironmentFiles>`
+   (the property list is CLOSED — anything else is denied. The last two are
+   PATH-VALUED: `DropInPaths` lists the drop-in files that APPLY to this unit and
+   `EnvironmentFiles` lists the `EnvironmentFile=` paths it loads — file PATHS
+   only, never file content). `systemctl show
+   <unit>` WITHOUT `-p` is DENIED **on purpose**: it dumps EVERY property,
+   `Environment=` included (fb-690 — the unit's environment in clear text,
+   readable without privilege; the unit file's 0600 mode protects nothing because
+   the vector is systemd itself) — **NEVER dump the environment, and never ask
+   for the full dump**. Every MUTATING verb (start/stop/restart/enable/disable/
+   daemon-reload/…) is DENIED to a worker, and you must NOT attempt to get
+   around the guard. Determine liveness via ALLOWED means, in this order:
    - **Primary liveness: HTTP 200 on the DEV local endpoint(s)** (`web_fetch`;
      the dev web server serving this deployment).
    - **Process presence** via allowed commands (`ps`/`pgrep` on the unit's
@@ -39,7 +50,8 @@ forwards it.
      plugin), matched to the unit's expected working directory.
    - **Reading the systemd unit state files** if reachable (e.g.
      `/run/systemd/system/*.service`, `/etc/systemd/system/*.service`) — read
-     only, to confirm the unit exists/Enabled — never `systemctl`.
+     only, to confirm the unit exists/Enabled — never with a MUTATING
+     `systemctl`.
    **Enabled/disabled reading (verified by the Asistente).** The unit's
    **is-enabled** state is read from the unit state files (a `[Installed]` /
    `WantedBy=` row + the symlinks in `/etc/systemd/system/*.wants/`), NOT from
@@ -55,10 +67,12 @@ forwards it.
    expected; no escalation`), and NEVER put it on the ESCALATION list. A
    decommissioned unit whose state file read matches the expected `disabled` is
    HEALTHY-expected, not an anomaly.
-   If the authoritative `systemctl is-active` state is strictly required for a
-   unit, add it to the report's **ESCALATION** list instead of running it (only
-   the Asistente/owner may run `systemctl`). Record the unit's name(s) as you
-   actually verified them.
+   `systemctl is-active <unit>` **IS available to a worker** (fb-958): when the
+   authoritative state is strictly required for a unit, RUN it, and record the
+   unit's name(s) as you actually verified them (reading + instant). A state the
+   read-only forms cannot answer (a MUTATING verb, `--user`, a unit-less
+   `show -p`, or a property outside the inert whitelist) goes on the report's
+   **ESCALATION** list — only the Asistente/owner may run those.
 2. **Endpoints.** HTTP 200 on the DEV local URL(s) of this deployment
    (`web_fetch`; use the dev web server origin, not the public/stable one).
    Report each URL + its status. A non-200/redirect is a finding.
@@ -114,8 +128,29 @@ forwards it.
    `0.1.1-rc.2-legacy` / `both` / `none` — un drift código-vs-runtime aparece
    AQUÍ, antes del churn), **NRestarts** (el contador systemd que el daemon lee
    una vez por boot cuando `DEEPARTMENTS_SYSTEMD_UNIT` está configurado; si el
-   heartbeat lo omite, dejarlo en la lista de ESCALATION para que el Asistente
-   lo lea con `systemctl show <unit> -p NRestarts`) y **crashStreak** (≥ 3 =
+   heartbeat lo omite, dejarlo:
+   **LEELO TU MISMO** con la forma read-only que el guard SI acepta
+   (`systemctl show <unit> -p NRestarts`); las propiedades admitidas son SOLO
+   estas seis: `MainPID`, `NRestarts`, `ExecMainStartTimestamp`, `FragmentPath`,
+   `DropInPaths`, `EnvironmentFiles`.
+   **`DropInPaths` / `EnvironmentFiles` (fb-958, lane de cierre — las dos que el
+   incidente fb-690 necesitó):** las DOS son PATH-VALUED — devuelven RUTAS de
+   fichero, jamás contenido (medido: `DropInPaths` es `as` y `EnvironmentFiles`
+   `a(sb)` = {ruta, ignoreOnReplace}; cada elemento medido era una ruta absoluta,
+   con CERO `=` y CERO espacios). Sirven para lo que ninguna otra propiedad
+   admitida puede responder: **`DropInPaths`** dice QUÉ drop-ins aplican a la unit
+   (los secretos de fb-690 estaban repartidos en 1 unit + 5 drop-ins) y
+   **`EnvironmentFiles`** DEMUESTRA que la migración a `EnvironmentFile=` está
+   referenciada — es la verificación de ese fix por la vía del guard. Ojo: la RUTA
+   no es un secreto, el CONTENIDO sí; el contenido de un `EnvironmentFile=` NO es
+   accesible por esta propiedad (solo por `Environment`, que sigue DENEGADO).
+   **NUNCA `systemctl show <unit>` sin `-p`**: sin `-p` systemd vuelca TODAS las
+   propiedades, `Environment=` incluida — el entorno de la unit EN CLARO,
+   legible sin privilegio (fb-690: el modo 0600 de la unit NO protege nada,
+   porque el vector es systemd). **NUNCA volcar el entorno; usa
+   `MainPID`/`NRestarts`/`ExecMainStartTimestamp`.** Si la lectura es imposible
+   (unidad ausente, guard denegando), va a la lista de ESCALATION con el motivo)
+   y **crashStreak** (≥ 3 =
    posible crash-loop en curso — escalar). **Sweep** (FINISHER 2026-09-04,
    addendum 4 — health datum for the fb-27 closure): the lane-② NO-boot
    redelivery sweep reports `sweep: {armed, cycles, lastCycleTs?,
@@ -153,7 +188,8 @@ project report convention (`agent: builder`, `date`, `task: system-health-report
   with the new messageIds/postIds;
 - the **versions table** (package / deployed / published / delta / verdict);
 - the **ESCALATION list** — anything that needs the Asistente (e.g. a unit whose
-  authoritative state is unverifiable without `systemctl`) and any real anomaly.
+  authoritative state the two READ-ONLY forms cannot answer, or a MUTATING
+  action a worker may not run) and any real anomaly.
 
 Update the ledger file so the next run's delta is computable. Reference prior
 report paths you build on (≤ 3 per category).
@@ -167,9 +203,18 @@ Asistente. You report only to your head (ACL).
 
 ## Constraints
 
-- **NEVER run `systemctl`** (or `systemctl is-active`/`reboot`/`sudo`/etc.) —
-  the `dept_exec` guard denies them; a strictly-required authoritative state goes
-  on the ESCALATION list.
+- **Only the two READ-ONLY `systemctl` forms** are available: `systemctl
+  is-active <unit>` and `systemctl show <unit> -p <MainPID|NRestarts|
+  ExecMainStartTimestamp|FragmentPath|DropInPaths|EnvironmentFiles>`.
+  Everything else is DENIED by the
+  `dept_exec` guard (`reboot`/`sudo`/etc. likewise): every MUTATING verb, `--user`,
+  `systemctl show <unit>` WITHOUT `-p` (it dumps `Environment=` — fb-690), and any
+  property outside that inert whitelist. The list is CLOSED: a MIXED list
+  (`-p EnvironmentFiles,Environment`), a SECOND `-p`, the glued `--property=…`
+  form and an off-case name are all DENIED — the two PATH-VALUED names
+  (`DropInPaths`/`EnvironmentFiles`) carry file PATHS only, never content, and
+  never buy `Environment`. A strictly-required authoritative state
+  those forms cannot answer goes on the ESCALATION list.
 - **Never touch the stable profile `/opt/dsh/.dsh`** — DEV profile only, and only
   read for manifests/versions.
 - Read-only for the repos and the state dirs; no code edits, no commits.
