@@ -217,3 +217,28 @@ node scripts/a-harness-smoke.mjs                   # 10/10 post-apply
 Post-apply the `zone-md5-manifest.json` `a-harness-*` zones must be re-frozen
 to the applied fingerprints (they are frozen at the live pre-apply values so
 the guard passes NOW and flags the apply loudly until re-frozen).
+
+## fb-251 bare-400 guard — REGISTERED 2026-09-14 (fb-854 durability lane)
+
+Two more files of the **installed** tree are covered by the TSV manifest
+(`scripts/reapply-deepartments-patches.sh`), not by the A-HARNESS chain:
+
+| Patch | Target (relative to package root) | Package root |
+|---|---|---|
+| `dsh-pi-ai-fb251-bare400-overflow.patch` | `dist/utils/overflow.js` | `…/node_modules/@earendil-works/pi-ai` |
+| `dsh-compaction-basic-fb251-bare400-guard.patch` | `lib/index.js` | `…/node_modules/@deepseek-ai/dsh-compaction-basic` |
+
+**Why they are here.** Both files had been **hand-edited** in the installed tree
+on 2026-08-21 (backups `*.bak-fb251-1788961604`) to fix fb-251: the overflow
+classifier accepted a bare `400/413 status code (no body)` as
+CONTEXT_WINDOW_EXCEEDED, and the compaction trigger then ran compaction over
+failures compaction cannot fix. Neither edit was in any manifest, so the ONLY
+mechanism that restores this tree after a `dsh` upgrade restored every other
+patch and left the guard at its pristine bytes — **the guard silently vanished
+with each upgrade** (fb-854: durability doctrine, `docs/VERIFICATION-LADDER.md` §12).
+
+**Renewal condition.** `scripts/reapply-deepartments-patches.sh --check` must
+report all four rows `PATCHED`; a `dsh` upgrade leaves the two guard rows
+`PRISTINE` (loss) or `FAIL` (upstream drifted → port by hand, like every other
+patch in this directory). The action is the same as for the chains above:
+`apply`, then restart the service.

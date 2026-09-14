@@ -48,6 +48,30 @@
 #                             Verified: accumulating and parsing once reproduces the
 #                             recorded final arguments in 375/375 comparable real
 #                             tool calls.
+#   pi-ai-fb251-bare400-overflow - narrows the CONTEXT-OVERFLOW classifier's bare
+#                             no-body 400/413 pattern (pi-ai dist/utils/overflow.js).
+#                             Upstream, a bare "400/413 status code (no body)" is
+#                             accepted as overflow on its own, but that text is the
+#                             OpenAI SDK's GENERIC rendering of ANY empty-body
+#                             400/413 - so non-context failures were labeled
+#                             CONTEXT_WINDOW_EXCEEDED and drove useless compaction
+#                             (fb-251). The pattern now requires real context/limit
+#                             wording in the SAME message; the verbatim upstream
+#                             context 400 ("maximum context length is N tokens.
+#                             However, you requested M tokens ...") still
+#                             classifies as overflow (measured).
+#   compaction-basic-fb251-bare400-guard
+#                             - the matching defense on the compaction trigger
+#                             (dsh-compaction-basic lib/index.js): the
+#                             `agent/request-error` overflow path returns early on
+#                             that same bare no-body text instead of running
+#                             compaction over a failure compaction cannot fix.
+#                             REGISTERED 2026-09-14 (fb-854 durability lane,
+#                             builder-330): both files had been HAND-EDITED in the
+#                             installed tree (backups *.bak-fb251-1788961604) and
+#                             were NOT in this manifest, so the only mechanism that
+#                             restores the tree after a `dsh` upgrade restored every
+#                             OTHER patch and left the guard at its pristine bytes.
 #
 set -euo pipefail
 
@@ -57,7 +81,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PATCH_DIR="${REPO_ROOT}/patches"
 MANIFEST="${PATCH_DIR}/deepartments-maintenance.tsv"
 
-usage() { sed -n '3,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,82p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 [[ -f "${MANIFEST}" ]] || { echo "FAIL: manifest missing: ${MANIFEST}" >&2; exit 1; }
 

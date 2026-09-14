@@ -1,0 +1,27 @@
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -3,6 +3,11 @@
+ import { BlockAssembler, CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, assertNever, contentHasImage, createUserMessage, deepFreeze, errorChain } from "@deepseek-ai/dsh-llm";
+ import { randomUUID } from "node:crypto";
+ import { isDeepStrictEqual } from "node:util";
++// fb-251 bare-400: the OpenAI SDK renders ANY upstream 400/413 with an empty
++// body as "400/413 status code (no body)" - a non-context failure that was
++// being mislabeled CONTEXT_WINDOW_EXCEEDED; compaction cannot fix it (see
++// @earendil-works/pi-ai dist/utils/overflow.js for the classification fix).
++const BARE400_NO_BODY_RE = /^4(?:00|13)\s*(?:status code)?\s*\(no body\)/i;
+ //#region lib/types/config.js
+ /**
+ * Load-time validation and routed-model policy resolution for compaction-basic.
+@@ -801,6 +806,12 @@
+ 		});
+ 		ctx.on("agent/request-error", async ({ agent, failure, signal }, next) => {
+ 			if (failure.code !== CONTEXT_WINDOW_EXCEEDED_CODE || signal.aborted) return next();
++			// fb-251 bare-400 defense: even when labeled CONTEXT_WINDOW_EXCEEDED, a
++			// "400/413 status code (no body)" failure is the OpenAI SDK's generic
++			// empty-body 400/413 text - NOT a real context overflow. Do not run
++			// compaction over it; pass the original error through so the provider
++			// can retry or the agent fails honestly.
++			if (BARE400_NO_BODY_RE.test(failure.message)) return next();
+ 			this.overflowAgents.set(agent.session, agent);
+ 			const target = routedTarget(agent.session);
+ 			if (target === void 0) return next();

@@ -602,3 +602,39 @@ successor, and a rule that outlives its reason gets ignored. So:
   repo's A-HARNESS patch chain exists precisely to carry such fixes across
   upgrades (`patches/README.md:3-7`), and it already carries three patches for
   this same file.
+
+## 12. Guard durability — a fix in the installed tree is DURABLE only when a manifest row names it (fb-854, 2026-09-14, run token `0b1247cb`)
+
+**The question this section answers** (and the one «está en el fichero» does NOT):
+after the next `dsh` upgrade / reinstall, does the fix COME BACK?
+
+**Measured case (fb-854 durability lane).** Two files of the installed runtime
+carried the fb-251 bare-400 guard — `…/node_modules/@earendil-works/pi-ai/dist/utils/overflow.js`
+and `…/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js` — applied by
+hand on 2026-08-21 (install-mtime backups `*.bak-fb251-1788961604`). Neither was
+in `patches/deepartments-maintenance.tsv`, the only manifest the re-apply
+mechanism reads. Experiment: a canary mirror of the installed tree at its
+PRISTINE bytes (the two guard files restored from their backups, the two
+manifest targets reverse-patched), then
+`DSH_PATCH_ROOT_PREFIX=<canary> scripts/reapply-deepartments-patches.sh apply`
+— the script's own documented test seam (`reapply-deepartments-patches.sh:68`).
+Result: the two registered patches came back (`md5` → `e555ad0c…`, `588c82f9…`),
+and the two guard files stayed at their pristine bytes (`a68c27ce…`,
+`ff16728d…`). **The guard did not survive a reinstall.** After registering the
+two rows + patch files, the same experiment on a fresh canary returns all four
+`PATCHED`, each `md5` byte-identical to the live file.
+
+**The rule.** A change to the installed tree is durable **only** through the
+registered mechanism (a `patches/*.patch` + `patches/deepartments-maintenance.tsv`
+row + the script's fingerprint gates). "It is in the file" is evidence of
+PRESENCE, never of durability: the next `install`/`deploy`/`plugin add`
+replaces those bytes. State a fix's durability by naming the mechanism that
+RESTORES it, and prove it by running that mechanism against a reinstall-like
+canary — not by reading the file.
+
+**Corollary (both directions).** (a) A hand-edit is not a fix; it is a fix with
+an expiry nobody wrote down. (b) The mechanism is REPO code and needs no
+restart, but the restored TARGET does (a lib file of the running daemon is read
+at boot): `apply` alone leaves the daemon on the old bytes until the service is
+restarted — the same pending-state the A-HARNESS chain documents.
+
