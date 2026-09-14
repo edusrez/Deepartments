@@ -2284,7 +2284,7 @@ function deptExecMatchInQuotes(cmd: string, tokenStart: number): boolean {
  *     ZERO `=` and ZERO whitespace — i.e. a PATH, never content.
  *   - `EnvironmentFiles` is typed `a(sb)` — an array of the STRUCT {string,
  *     boolean} = {path, ignoreOnReplace}, i.e. structurally a path plus a flag; it
- *     declares on the Mount/Service/Socket/Swap interfaces (228 units here). In
+ *     declares on the Mount/Service/Socket/Swap interfaces. In
  *     every non-empty sample the string field was an absolute path with ZERO `=`
  *     and ZERO whitespace, paired 1:1 with its boolean. The FILE CONTENT of an
  *     `EnvironmentFile=` is NOT exposed by this property — systemd consumes it
