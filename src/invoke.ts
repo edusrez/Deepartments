@@ -1056,10 +1056,22 @@ export async function writePresenceStateFile(stateDir: string, state: PresenceSt
 // rotation for a fresh memo (the critical-unblock rule: a context-over-threshold
 // head — e.g. the QH — may not be able to run dept_memo_write at all, so a
 // rotation that waited on a memo could never unblock it). The host's workflow
-// asks for `dept_memo_write` BEFORE rotating when the head is operative and the
-// window permits; the STALE marker below tells the host when the seeded journal
-// predates the freshness window, so it can request a refresh at the first
-// opportunity without blocking the unblock.
+// ROTATES IN SILENCE (fb-190 — sub-norm ROTACION EN SILENCIO,
+// docs/VERIFICATION-LADDER.md §3.1, 2026-09-06) and asks the FRESH head for its
+// `dept_memo_write` in the handoff: the memo request comes AFTER the rotation,
+// NEVER before it. Asking the OUTGOING head sends it a message, and that send
+// wakes it (materialization) while the rotate guard reads the SAME `running`
+// signal, so requesting the memo first re-creates the deterministic
+// self-blocking rejection the rotation exists to clear (fb-190/fb-115 family;
+// why-order chain: SKILL.md «Why the memo request comes AFTER the rotation»).
+// NOTHING ever waits on a memo (critical-unblock), at any step. The retired
+// wording — "ask for dept_memo_write BEFORE rotating when the head is operative
+// and the window permits" — must NOT be reintroduced: its remaining twin is the
+// LIVE tool description `tools.ts:7079`, which sits INSIDE the frozen CUT-4 span
+// and can only be aligned at the host's re-freeze. The STALE marker below tells
+// the host when the seeded journal predates the freshness window, so it can
+// request a refresh FROM THE FRESH HEAD at the first opportunity without
+// blocking the unblock.
 /** The freshness window for a rotation journal: `timestamp:` older than this →
  * `headRotationJournalStatus` reports `stale:true` (a "memo no actualizado —
  * journal previo" notice rides the tool result + the QD mirror). */
@@ -2246,24 +2258,49 @@ function deptExecMatchInQuotes(cmd: string, tokenStart: number): boolean {
   return inSingle || inDouble
 }
 
-/** fb-958 (QD, m-11064 item 2): the EXPLICIT, CLOSED whitelist of INERT
- * `systemctl show` properties the read-only carve-out may read — the exact four
- * the job docs prescribe (MainPID / NRestarts / ExecMainStartTimestamp /
- * FragmentPath). Every one of them is unit METADATA; NONE of them can carry the
- * process environment. `Environment`/`EnvironmentFiles`/`PassEnvironment`/… and
- * every other property stay OUT of this list, so the fb-690 leak vector
- * (`systemctl show <unit>` — NO `-p` — dumps EVERY property, `Environment=`
- * included: DEEPINFRA_TOKEN + provider keys in clear text, readable WITHOUT
- * privilege, the unit file's 0600 mode protecting nothing because the vector is
- * systemd itself) can never be reached through this lane. Names are EXACT and
- * case-sensitive (systemd property names are). Module-private on purpose: the
- * compiled `lib/invoke.js` export surface is frozen (export-parity lock, 329
- * names) — a new export would be export drift. */
+/** fb-958 (QD, m-11064 item 2) + fb-958 closure lane (2026-09-14): the EXPLICIT,
+ * CLOSED whitelist of INERT `systemctl show` properties the read-only carve-out
+ * may read — SIX names, each one a unit METADATA/property-of-the-file field;
+ * NONE of them can carry the process environment or any environment CONTENT.
+ * `Environment`/`PassEnvironment`/`ExecStart`/… and every other property stay
+ * OUT of this list, so the fb-690 leak vector (`systemctl show <unit>` — NO `-p`
+ * — dumps EVERY property, `Environment=` included: DEEPINFRA_TOKEN + provider
+ * keys in clear text, readable WITHOUT privilege, the unit file's 0600 mode
+ * protecting nothing because the vector is systemd itself) can never be reached
+ * through this lane. Names are EXACT and case-sensitive (systemd property names
+ * are). Module-private on purpose: the compiled `lib/invoke.js` export surface is
+ * frozen (export-parity lock, 329 names) — a new export would be export drift.
+ *
+ * THE TWO ADDED NAMES — PATH-VALUED, PROVEN BY MEASUREMENT (fb-690's own
+ * incident, builder-332 lane, needed both and could get neither):
+ * `DropInPaths` (which drop-in files APPLY to the unit — the fb-690 secrets were
+ * spread over 1 unit + 5 drop-ins) and `EnvironmentFiles` (the property that
+ * PROVES an `EnvironmentFile=` migration took effect: it lists the env files the
+ * unit loads). They were admitted on EVIDENCE, never on symmetry:
+ *   - `DropInPaths` is typed `as` (array of strings) by systemd's own D-Bus
+ *     introspection; measured across the live system, every element of every
+ *     non-empty sample was an ABSOLUTE PATH that EXISTS AS A FILE (the dept unit:
+ *     6 elements under `/etc/systemd/system/dsh-departments-dev.service.d/`), with
+ *     ZERO `=` and ZERO whitespace — i.e. a PATH, never content.
+ *   - `EnvironmentFiles` is typed `a(sb)` — an array of the STRUCT {string,
+ *     boolean} = {path, ignoreOnReplace}, i.e. structurally a path plus a flag; it
+ *     declares on the Mount/Service/Socket/Swap interfaces (228 units here). In
+ *     every non-empty sample the string field was an absolute path with ZERO `=`
+ *     and ZERO whitespace, paired 1:1 with its boolean. The FILE CONTENT of an
+ *     `EnvironmentFile=` is NOT exposed by this property — systemd consumes it
+ *     into the environment, which is reachable ONLY through `Environment` (and
+ *     `PassEnvironment`), and both of those stay DENIED. A listed path may be
+ *     ABSENT on disk (that is `EnvironmentFile=-<path>`'s ignore-if-missing
+ *     semantics) — absence is not content either.
+ * A path is NOT a secret; a key=value IS. If `EnvironmentFiles` could ever carry
+ * anything but a path, it would be OUT of this list. */
 const SYSTEMCTL_INERT_PROPERTIES: readonly string[] = [
   'MainPID',
   'NRestarts',
   'ExecMainStartTimestamp',
-  'FragmentPath'
+  'FragmentPath',
+  'DropInPaths',
+  'EnvironmentFiles'
 ]
 
 /** Whether the command is a SINGLE READ-ONLY `systemctl` form — the
@@ -3017,11 +3054,15 @@ export function deptExecDenyReason(command: string, cwd: string, allowedRoots: r
   // (2b) systemctl — ONLY the READ-ONLY forms are permitted: `systemctl
   // is-active <unit>` and (fb-958) the INERT property read `systemctl show
   // <unit> -p <inert-props>` with the CLOSED whitelist of
-  // SYSTEMCTL_INERT_PROPERTIES (`show` WITHOUT `-p` dumps `Environment=` and is
-  // DENIED). EVERY mutating systemctl form stays DENIED (the Asistente/owner
+  // SYSTEMCTL_INERT_PROPERTIES — the four metadata names PLUS the two
+  // PATH-VALUED ones (`DropInPaths`/`EnvironmentFiles`, admitted on measurement
+  // there); `show` WITHOUT `-p` dumps `Environment=` and is
+  // DENIED. EVERY mutating systemctl form stays DENIED (the Asistente/owner
   // owns those). The denylist already ran, so a mutating token is caught above.
+  // The message NAMES the whitelist it enforces, so the guard's own doc cannot
+  // drift from the list (doc ≠ guard is the class this lane exists to close).
   if (lower.includes('systemctl') && !isReadOnlySystemctl(cmd)) {
-    return 'OUT_OF_SCOPE / DENIED — command contains a denied systemctl form (only the read-only `systemctl is-active <unit>` and `systemctl show <unit> -p <MainPID|NRestarts|ExecMainStartTimestamp|FragmentPath>` are permitted; mutating forms are the Asistente/owner\'s)'
+    return 'OUT_OF_SCOPE / DENIED — command contains a denied systemctl form (only the read-only `systemctl is-active <unit>` and `systemctl show <unit> -p <MainPID|NRestarts|ExecMainStartTimestamp|FragmentPath|DropInPaths|EnvironmentFiles>` are permitted; `show` without `-p` dumps the environment and is DENIED; mutating forms are the Asistente/owner\'s)'
   }
   // (2c) fb-62 (IPH — token-guard refinement): the ROOT-WIPE `rm -rf /` — the
   // legacy loose denylist substring over-blocked every SCOPED cleanup (`rm -rf

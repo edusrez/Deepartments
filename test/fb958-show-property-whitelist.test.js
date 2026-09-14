@@ -36,6 +36,22 @@
 // `--user`, a second `-p`, an extra property behind a valid one, a property that
 // is not the exact whitelisted NAME (case matters to systemd).
 //
+// CLOSURE LANE ADDENDUM (builder-336, 2026-09-14 — `-p` whitelist widened to SIX
+// by MEASUREMENT): the fb-958 fix shipped with FOUR names and thereby DENIED the
+// two properties the fb-690 incident itself needed — `DropInPaths` (which drop-in
+// files apply: the incident's secrets sat in 1 unit + 5 drop-ins) and
+// `EnvironmentFiles` (the proof that an `EnvironmentFile=` migration took effect).
+// Both are now admitted BECAUSE their values were measured to be file PATHS, never
+// content (DropInPaths `as`; EnvironmentFiles `a(sb)` = {path, ignoreOnReplace} —
+// every measured element an absolute path, zero `=`, zero whitespace; the FILE
+// CONTENT of an EnvironmentFile= is only ever reachable through `Environment`,
+// which stays DENIED). The negatives therefore WIDEN with the whitelist: the MIXED
+// lists `-p EnvironmentFiles,Environment` / `-p DropInPaths,Environment`, the glued
+// `--property=` carrying either, a second `-p`, and off-case/empty/trailing-comma
+// variants of the TWO NEW NAMES are all locked as DENIED below. An allow-list is
+// widened by evidence; if any of these negatives ever passes, the change is WORSE
+// than the gap it closed and must be reverted.
+//
 // FILE NAME (deliberate): this file is NOT named `…-systemctl-….test.js`
 // because the dept_exec veto is a RAW SUBSTRING check (`lower.includes(...)`,
 // src/invoke.ts:3015) — a command line that merely MENTIONS the word is denied,
@@ -58,13 +74,28 @@ const ROOTS = ['/home/esuarez/projects', '/root/.deepartments', '/usr/lib/node_m
 const CWD = '/home/esuarez/projects/deepartments'
 const UNIT = 'dsh-deepartments-dev'
 
-/** The four INERT properties the whitelist admits (no environment, no paths
- * outside the unit's own metadata, no secrets). */
-const INERT = ['MainPID', 'NRestarts', 'ExecMainStartTimestamp', 'FragmentPath']
+/** The SIX INERT properties the whitelist admits: four unit-METADATA names (the
+ * QD-mandated originals) plus — fb-958 CLOSURE LANE, admitted ON MEASUREMENT, not
+ * on symmetry — the two PATH-VALUED ones. None of the six can carry the process
+ * environment or any environment CONTENT; see the closure test at the end of this
+ * file for the measurement that justified the two new names. */
+const INERT = ['MainPID', 'NRestarts', 'ExecMainStartTimestamp', 'FragmentPath', 'DropInPaths', 'EnvironmentFiles']
+
+/** The two PATH-VALUED names the closure lane added, with the fb-690 incident that
+ * needed them: `DropInPaths` = WHICH drop-in files apply (fb-690's secrets lived in
+ * 1 unit + 5 drop-ins; without it nobody can even enumerate what applies), and
+ * `EnvironmentFiles` = the property that PROVES an `EnvironmentFile=` migration
+ * took effect. Both are paths + flags; neither exposes file CONTENT. */
+const INERT_PATH_VALUED = ['DropInPaths', 'EnvironmentFiles']
 
 /** Properties that MUST stay denied — every one of them can carry the process
- * environment or otherwise widen the surface (fb-690). */
-const LEAKY = ['Environment', 'EnvironmentFiles', 'PassEnvironment', 'ExecStart', 'ExecStartPre', 'User', 'WorkingDirectory', 'LoadState']
+ * environment or otherwise widen the surface (fb-690). `Environment` is the
+ * content-bearing one; `PassEnvironment`/`ExecStart`/`ExecStartPre` are the other
+ * routes to that same environment. (`EnvironmentFiles`/`DropInPaths` were MOVED
+ * OUT of this list by the closure lane, on measurement — their elements are
+ * absolute paths, never content, and the leak they could be mistaken for is
+ * EXACTLY the MIXED list, which stays denied below.) */
+const LEAKY = ['Environment', 'PassEnvironment', 'ExecStart', 'ExecStartPre', 'User', 'WorkingDirectory', 'LoadState']
 
 /** A form the guard must ALLOW: the helper says read-only AND the real veto
  * returns undefined (no deny reason). */
@@ -204,10 +235,12 @@ test('fb-958 (e)+(f)+(g) no SMUGGLING: `;` / `&&` / `|`, `$(...)` / backticks / 
   assertDenied(`/usr/bin/grep -n "systemctl show" ${UNIT}.txt`, 'an unanchored systemctl mention (parity with the pre-existing veto)')
 })
 
-test('fb-958 whitelist CLOSURE: the admitted property set is EXACTLY the four inert names — no property outside it is ever read-only', () => {
+test('fb-958 whitelist CLOSURE: the admitted property set is EXACTLY the six inert names — no property outside it is ever read-only', () => {
   // The accepted set is enumerated here EXPLICITLY; a widened whitelist (any new
-  // name reaching true) must fail this test, not silently ship.
-  assert.deepEqual(INERT, ['MainPID', 'NRestarts', 'ExecMainStartTimestamp', 'FragmentPath'], 'the inert whitelist is the QD-mandated four')
+  // name reaching true) must fail this test, not silently ship. The CLOSURE LANE
+  // raised the count 4 -> 6 by measurement (DropInPaths/EnvironmentFiles), and the
+  // assertion below is the guard against an UNMEASURED seventh name.
+  assert.deepEqual(INERT, ['MainPID', 'NRestarts', 'ExecMainStartTimestamp', 'FragmentPath', 'DropInPaths', 'EnvironmentFiles'], 'the inert whitelist is the four metadata names + the two measured PATH-VALUED names')
   for (const p of INERT) assert.equal(isReadOnlySystemctl(`systemctl show ${UNIT} -p ${p}`), true, `${p} must be read-only`)
   for (const p of LEAKY) assert.equal(isReadOnlySystemctl(`systemctl show ${UNIT} -p ${p}`), false, `${p} must NEVER be read-only`)
   // The doc-prescribed EXACT line (the acceptance that ties doc to guard: the
@@ -216,4 +249,65 @@ test('fb-958 whitelist CLOSURE: the admitted property set is EXACTLY the four in
   assertAllowed(DOC_FORM)
   const DOC_FORM_SAMPLER = 'systemctl is-active dsh-host-sampler'
   assertAllowed(DOC_FORM_SAMPLER)
+})
+
+test('fb-958 CLOSURE LANE: `DropInPaths` and `EnvironmentFiles` are ADMITTED (the two properties the fb-690 incident needed: which drop-ins apply, and whether the `EnvironmentFile=` migration is referenced)', () => {
+  // RED BEFORE THIS LANE (measured with the shipped four-name whitelist):
+  // `systemctl show <unit> -p DropInPaths` → isReadOnlySystemctl === false and the
+  // veto returned DENIED. That red is what justifies the widening; these positives
+  // were failing before the change and are green after it.
+  for (const p of INERT_PATH_VALUED) {
+    assertAllowed(`systemctl show ${UNIT} -p ${p}`)
+    assertAllowed(`systemctl show ${UNIT} --property ${p}`)
+  }
+  // Both together, and in a larger INERT-only list — every name is whitelisted.
+  assertAllowed(`systemctl show ${UNIT} -p ${INERT_PATH_VALUED.join(',')}`)
+  assertAllowed(`systemctl show ${UNIT} -p ${INERT.join(',')}`)
+  // Option BEFORE the unit, and both separators (parity with the originals).
+  assertAllowed(`systemctl show -p ${INERT_PATH_VALUED.join(',')} ${UNIT}`)
+  assertAllowed(`systemctl show --property ${INERT_PATH_VALUED.join(',')} ${UNIT}`)
+  // The `EnvironmentFile=` VERIFICATION the fb-690 closure needs: the property is
+  // readable, and the runbook can now assert the migration is referenced.
+  assertAllowed(`systemctl show dsh-deepartments-dev -p EnvironmentFiles`)
+  // And the fb-690 CHARACTERIZATION: which drop-in files apply to the unit.
+  assertAllowed(`systemctl show dsh-deepartments-dev -p DropInPaths`)
+})
+
+test('fb-958 CLOSURE LANE NEGATIVES: widening the whitelist did NOT widen the guard — the content-bearing and mixed forms stay DENIED (each one means REVERT, not ship)', () => {
+  // (a)-(h) of the closure-lane mandate, verbatim. If ANY of these passes, the
+  // change is worse than the gap and must be reverted.
+  assertDenied(`systemctl show ${UNIT}`, '(a) show with NO -p — the fb-690 full dump')
+  assertDenied(`systemctl show ${UNIT} -p Environment`, '(b) -p Environment — the content-bearing property')
+  assertDenied(`systemctl show ${UNIT} -p EnvironmentFiles,Environment`, '(c) MIXED list: the newly-admitted EnvironmentFiles must NOT buy Environment')
+  assertDenied(`systemctl show ${UNIT} -p DropInPaths,Environment`, '(d) MIXED list: the newly-admitted DropInPaths must NOT buy Environment')
+  assertDenied(`systemctl show ${UNIT} -p ExecStart`, '(e) -p ExecStart')
+  assertDenied(`systemctl show ${UNIT} -p ExecStartPre`, '(f) -p ExecStartPre')
+  assertDenied(`systemctl show ${UNIT} -p DropInPaths -p Environment`, '(g) a SECOND -p cannot widen the list')
+  assertDenied(`systemctl show ${UNIT} --property=Environment`, '(h) glued --property=Environment')
+  // The MIXED-list family around the two NEW names — the exact shape that would
+  // look almost right in a diff (and reversed order too).
+  assertDenied(`systemctl show ${UNIT} -p Environment,EnvironmentFiles`, 'mixed, Environment first behind the new name')
+  assertDenied(`systemctl show ${UNIT} -p Environment,DropInPaths`, 'mixed, Environment first behind DropInPaths')
+  assertDenied(`systemctl show ${UNIT} -p MainPID,DropInPaths,Environment`, 'mixed, the leak LAST after two whitelisted names')
+  assertDenied(`systemctl show ${UNIT} --property=DropInPaths,Environment`, 'glued --property= list carrying Environment')
+  assertDenied(`systemctl show ${UNIT} --property=EnvironmentFiles,Environment`, 'glued --property= list carrying Environment')
+  assertDenied(`systemctl show ${UNIT} -p EnvironmentFile`, 'EnvironmentFile (singular) is NOT EnvironmentFiles')
+  assertDenied(`systemctl show ${UNIT} -p EnvironmentFiles.Path`, 'a dotted lookalike of the new name')
+  assertDenied(`systemctl show ${UNIT} -p DropInPath`, 'DropInPath (singular) is NOT DropInPaths')
+  assertDenied(`systemctl show ${UNIT} -p dropinpaths`, 'the new names are case-sensitive too')
+  assertDenied(`systemctl show ${UNIT} -p environmentfiles`, 'the new names are case-sensitive too')
+  assertDenied(`systemctl show ${UNIT} -p DropInPaths,`, 'trailing comma after a newly-admitted name')
+  assertDenied(`systemctl show ${UNIT} -p ,EnvironmentFiles`, 'leading comma before a newly-admitted name')
+  assertDenied(`systemctl show ${UNIT} -p DropInPaths,,EnvironmentFiles`, 'empty element between the two new names')
+  assertDenied(`systemctl show ${UNIT} -p DropInPaths extra`, 'an extra bare token after the new name')
+  assertDenied(`systemctl show ${UNIT} -p DropInPaths; id`, 'chaining behind the new name')
+  assertDenied(`systemctl show ${UNIT} -p DropInPaths\nid`, 'newline smuggling behind the new name')
+  // The content-bearing routes that exist ALONGSIDE Environment stay out too.
+  for (const p of ['PassEnvironment', 'EnvironmentFilesExtra']) {
+    assertDenied(`systemctl show ${UNIT} -p ${p}`, `${p} must stay denied`)
+  }
+  // Mutating verbs are untouched by the widening.
+  for (const v of ['start', 'stop', 'restart', 'reload', 'disable', 'daemon-reload', 'set-property', 'set-environment', 'unset-environment']) {
+    assertDenied(`systemctl ${v} ${UNIT}`, `mutating verb ${v} must stay denied`)
+  }
 })
