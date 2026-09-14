@@ -2103,9 +2103,10 @@ export const DEPT_EXEC_DEFAULT_ROOTS: readonly string[] = [
  * the substring `halt` matched the identifier), and a PATH-SHAPED pattern (a
  * future entry starting with `/`, e.g. `/etc`) matches a WHOLE PATH SEGMENT —
  * `/etc` vs `/etcetera/…` never confused, and a `/…/` regex literal never
- * trips it. `systemctl` is deliberately NOT in this list: the single READ-ONLY
- * `systemctl is-active <unit>` form is permitted (non-mutating confirmation)
- * and is carved out in `deptExecDenyReason` via `isReadOnlySystemctl`; every
+ * trips it. `systemctl` is deliberately NOT in this list: the READ-ONLY forms are
+ * permitted (non-mutating confirmation `systemctl is-active <unit>`, plus
+ * fb-958's inert property read `systemctl show <unit> -p <inert-props>`) and
+ * are carved out in `deptExecDenyReason` via `isReadOnlySystemctl`; every
  * MUTATING systemctl form (start/stop/restart/enable/disable/daemon-reload/
  * mask/…) is still denied there. fb-62 (IPH — token-guard refinement): the
  * root-wipe «rm -rf /» is deliberately NOT a loose token here EITHER — a
@@ -2245,19 +2246,95 @@ function deptExecMatchInQuotes(cmd: string, tokenStart: number): boolean {
   return inSingle || inDouble
 }
 
-/** Whether the command is the SINGLE READ-ONLY `systemctl is-active <unit>` form
- * (non-mutating confirmation). Matches EXACTLY the spec pattern
- * `systemctl` + whitespace + `is-active` (word-boundary) then ANY non-`;|&`
- * tail, ANCHORED to the whole (trimmed) command line, so there is NOTHING else
- * on the same line — no `;`/`|`/`&` chaining, no leading/other command, no
- * `systemctl status`/`restart`/`start`/`stop`/`enable`/`disable`/
- * `daemon-reload`/`mask`. An optional path prefix ending in `/` (e.g.
- * `/usr/bin/systemctl`) is tolerated; `sudo`/`reboot` etc. are caught by the
- * denylist BEFORE this carve-out, and the denylist itself is a substring check
- * so a mutating token elsewhere in the command is never smuggled past it. */
+/** fb-958 (QD, m-11064 item 2): the EXPLICIT, CLOSED whitelist of INERT
+ * `systemctl show` properties the read-only carve-out may read — the exact four
+ * the job docs prescribe (MainPID / NRestarts / ExecMainStartTimestamp /
+ * FragmentPath). Every one of them is unit METADATA; NONE of them can carry the
+ * process environment. `Environment`/`EnvironmentFiles`/`PassEnvironment`/… and
+ * every other property stay OUT of this list, so the fb-690 leak vector
+ * (`systemctl show <unit>` — NO `-p` — dumps EVERY property, `Environment=`
+ * included: DEEPINFRA_TOKEN + provider keys in clear text, readable WITHOUT
+ * privilege, the unit file's 0600 mode protecting nothing because the vector is
+ * systemd itself) can never be reached through this lane. Names are EXACT and
+ * case-sensitive (systemd property names are). Module-private on purpose: the
+ * compiled `lib/invoke.js` export surface is frozen (export-parity lock, 329
+ * names) — a new export would be export drift. */
+const SYSTEMCTL_INERT_PROPERTIES: readonly string[] = [
+  'MainPID',
+  'NRestarts',
+  'ExecMainStartTimestamp',
+  'FragmentPath'
+]
+
+/** Whether the command is a SINGLE READ-ONLY `systemctl` form — the
+ * non-mutating confirmation `systemctl is-active <unit>` or, fb-958, the INERT
+ * property read `systemctl show <unit> -p <inert-props>`. ANCHORED and
+ * DENY-BY-DEFAULT: the command is TOKENIZED and both forms are matched by
+ * grammar, never by `startsWith`.
+ *
+ * (0) Sheet metacharacters — `;|&` + `$(…)`/backticks + quotes/braces/redirects
+ * and EVERY control char (newline/CR/TAB) — deny OUTRIGHT: the accepted grammar
+ * needs none of them. This also closes the pre-existing smuggling hole of the
+ * old `[^;|&]*` tail (`systemctl is-active x` + a NEWLINE + a second command
+ * used to ride the carve-out).
+ * (1) `systemctl is-active <unit>` — the pre-existing carve-out, unchanged in
+ * what it accepts (any metachar-free tail), so the B2 parity tests hold.
+ * (2) `systemctl show <unit> [-p|--property <list>]` — admitted ONLY with an
+ * explicit `-p`/`--property` whose value is a comma list whose EVERY name is in
+ * `SYSTEMCTL_INERT_PROPERTIES`. `show` WITHOUT `-p` is the fb-690 full dump and
+ * is DENIED; the `=`-glued `--property=Environment` is outside the grammar and
+ * DENIED; ANY other option (`--user`/`--system`/`--no-pager`/…), a SECOND
+ * `-p`, a missing value, an extra bare token, a quoted property, an off-case
+ * name, an empty list element and anything that is not exactly one `systemctl`
+ * with one verb are DENIED.
+ *
+ * Every MUTATING form (start/stop/restart/reload/try-restart/enable/disable/
+ * mask/unmask/daemon-reload/kill/reset-failed/set-property/isolate/… — and any
+ * verb this function does not name) stays DENIED: the repair of a unit is the
+ * Asistente/owner's, NEVER this lane. An optional path prefix ending in `/`
+ * (e.g. `/usr/bin/systemctl`) is tolerated; `sudo`/`reboot` etc. are caught by
+ * the denylist BEFORE this carve-out, and the denylist itself is a substring
+ * check so a mutating token elsewhere in the command is never smuggled past
+ * it. */
 export function isReadOnlySystemctl(command: string): boolean {
   const cmd = String(command ?? '').trim()
-  return /^(?:[A-Za-z0-9_./:=]*\/)?systemctl\s+is-active\b[^;|&]*$/i.test(cmd)
+  if (cmd === '') return false
+  // (0) shell metacharacters + control characters (newline/CR/TAB) — deny.
+  if (/[;|&`$(){}<>'"\\]/.test(cmd) || /[\u0000-\u001f\u007f]/.test(cmd)) return false
+  const tokens = cmd.split(' ')
+  const bin = tokens[0]
+  // token[0] is `systemctl`, tolerating an optional path prefix ending in `/`.
+  if (bin === undefined || !/^(?:[A-Za-z0-9_./:=]*\/)?systemctl$/i.test(bin)) return false
+  const verb = (tokens[1] ?? '').toLowerCase()
+  // (1) the pre-existing read-only form: any metachar-free tail.
+  if (verb === 'is-active') return true
+  // (2) the INERT property read — `show` only, `-p` only, whitelist only.
+  if (verb !== 'show') return false
+  let seenUnit = false
+  let properties: string | undefined
+  for (let i = 2; i < tokens.length; i++) {
+    const token = tokens[i] as string
+    if (token === '') continue
+    if (token === '-p' || token === '--property') {
+      // the option takes exactly ONE value and may appear ONCE
+      if (properties !== undefined) return false
+      const value = tokens[i + 1]
+      if (value === undefined || value === '') return false
+      properties = value
+      i++
+      continue
+    }
+    // ANY other option (--user/--system/--no-pager/-a/… or a glued `--property=`)
+    if (token.startsWith('-')) return false
+    // exactly ONE bare token: the unit name
+    if (seenUnit || !/^[A-Za-z0-9][A-Za-z0-9_.@:-]*$/.test(token)) return false
+    seenUnit = true
+  }
+  // NO `-p` ⇒ `systemctl show <unit>` dumps EVERY property (`Environment=`
+  // included — the fb-690 leak): DENIED, never negotiated.
+  if (!seenUnit || properties === undefined) return false
+  const names = properties.split(',')
+  return names.length > 0 && names.every((name) => SYSTEMCTL_INERT_PROPERTIES.includes(name))
 }
 
 /** The stable-instance state-token — any reference DENIES with the explicit
@@ -2937,11 +3014,14 @@ export function deptExecDenyReason(command: string, cwd: string, allowedRoots: r
     }
   }
   const lower = cmd.toLowerCase()
-  // (2b) systemctl — ONLY the read-only `systemctl is-active <unit>` form is
-  // permitted; every mutating systemctl form stays DENIED (the Asistente/owner
+  // (2b) systemctl — ONLY the READ-ONLY forms are permitted: `systemctl
+  // is-active <unit>` and (fb-958) the INERT property read `systemctl show
+  // <unit> -p <inert-props>` with the CLOSED whitelist of
+  // SYSTEMCTL_INERT_PROPERTIES (`show` WITHOUT `-p` dumps `Environment=` and is
+  // DENIED). EVERY mutating systemctl form stays DENIED (the Asistente/owner
   // owns those). The denylist already ran, so a mutating token is caught above.
   if (lower.includes('systemctl') && !isReadOnlySystemctl(cmd)) {
-    return 'OUT_OF_SCOPE / DENIED — command contains a denied systemctl form (only the read-only `systemctl is-active <unit>` is permitted; mutating forms are the Asistente/owner\'s)'
+    return 'OUT_OF_SCOPE / DENIED — command contains a denied systemctl form (only the read-only `systemctl is-active <unit>` and `systemctl show <unit> -p <MainPID|NRestarts|ExecMainStartTimestamp|FragmentPath>` are permitted; mutating forms are the Asistente/owner\'s)'
   }
   // (2c) fb-62 (IPH — token-guard refinement): the ROOT-WIPE `rm -rf /` — the
   // legacy loose denylist substring over-blocked every SCOPED cleanup (`rm -rf

@@ -47,6 +47,11 @@ import { rememberRole, normalizeRole, roleForSession, ROLE_CONTRACTS } from '../
 import { qualityInspectDecision, resolveQualityWorkerInspectProbability, qualityInspectDirectiveText, QUALITY_WORKER_INSPECT_DEFAULT_PROBABILITY, QUALITY_INSPECT_ENV_VAR } from '../lib/invoke.js'
 import { deliverDaemonNotice, readUnusableSessionsMark, markUnusableWorkerSession, clearUnusableWorkerSession, UNUSABLE_SESSIONS_FILE } from '../lib/invoke.js'
 import { RegistryStore } from '../lib/invoke.js'
+// fb-946 (CRITICO — HOST MUDO): the durable anomaly channel + its row taxonomy
+// are imported DYNAMICALLY inside the fb-946 tests (see the block at the end of
+// this file), never at the top level: the whole fb-946 surface must be absent-safe
+// so this file LOADS on the pre-fix tree and every fb-946 test fails as a REAL
+// ASSERTION instead of a module-resolution error.
 import { headRotationJournalStatus, HEAD_ROTATE_JOURNAL_STALE_MS, verifyRotateReason, resolveSessionProjCachePath, REASON_VERIFY_TOLERANCE } from '../lib/invoke.js'
 import { readLlmPiAiProviderSettings, resolveReasoningContentPreflight, REASONING_CONTENT_PREFLIGHT_POST_ID } from '../lib/invoke.js'
 // MICRO-LANE O2 (2026-09-06): the qi-silence watchdog directive counter — imported
@@ -25069,6 +25074,207 @@ test('fb-426 (A)+(B) — ROW 5 REPLAYED: the cited 101% enters the pct branch (t
       assert.match(row.cause, /^pct-within-tolerance/, `the measured cause — got: ${row.cause}`)
     } finally {
       await env.dispose()
+    }
+  })
+})
+
+// --- fb-946 (CRITICO) HOST MUDO — the mid-boot host registration --------------
+//
+// THE INCIDENT (fb-946, host-session-b648ce2e, 2026-09-14): a host recovery
+// rewrote /.deepartments/hosts.json 7 minutes AFTER the live process's boot. The
+// in-memory `hosts` Map is filled by the BOOT cold load and is otherwise only
+// written by `RegistryStore.ensureHost` — which REFUSED to mint a row when
+// another live host existed and NEVER re-read the durable file. The durable
+// catalog (what `dept_who` renders → the org looked HEALTHY) and the ACL lens
+// (what `busProfileFor` classifies on) DIVERGED: `busProfileFor(hostId)` fell
+// through to `unclassified` and the conservative unclassified-sender branch
+// (packages/dshd-core/src/acl.ts:120) DENIED EVERY recipient. Three host sends
+// returned the `none` sentinel, NOTHING was persisted, the org was
+// undeliverable — until a restart. NOTHING detected it (the only backstop was an
+// inactivity watchdog 15+ minutes later).
+//
+// ACCEPTANCE (the test that must FAIL on the pre-fix tree): a host row
+// REGISTERED AFTER BOOT leaves host → head sends PERMITTED, with NO restart.
+// The measured pre-fix RED is in
+// reports/builder/2026-09-14-fb946-host-mute-e096809a.md.
+
+test('fb-946 (a) GUARD (false-positive pin) — a session the boot catalog holds RETIRED is STILL CLASSIFIED as a host (never `unclassified`): the mid-boot recovery re-publishing it LIVE does not disturb host → head delivery, and NO anomaly is raised', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // WHY THIS TEST EXISTS: the fb-946 mute is NOT "any stale host row". A row
+    // the catalog HOLDS — even one marked RETIRED — still classifies
+    // `kind:'host'` (busProfileFor's membership test), so the ACL keeps allowing
+    // host → everyone. The mute needs the row ABSENT from the in-memory catalog
+    // (scenario (b): a DIFFERENT session holds the only live row). Pinning this
+    // distinction is what keeps the detector from crying wolf on the healthy case.
+    const hostSessionId = String(SessionId(randomUUID()))
+    const hostId = `host-${hostSessionId}`
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      schemaVersion: 2,
+      [hostId]: { sessionId: hostSessionId, roomId: 'board', sleepEpoch: Date.now() - 2000, retired: true, retiredAt: Date.now() - 1000, rotatedTo: 'host-session-successor-unresolved' }
+    }, null, 2))
+
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'research head materialized at boot')
+      const head = agents.store.get('head-research-head')
+      const host = agents.put(fakeParentAgent(hostSessionId))
+      assert.equal(host.id, hostSessionId, 'the caller IS the durable host session')
+
+      // MID-BOOT HOST RECOVERY: the row is RE-PUBLISHED LIVE after boot.
+      await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+        schemaVersion: 2,
+        [hostId]: { sessionId: hostSessionId, roomId: 'board' }
+      }, null, 2))
+      assert.equal(readDurableHostEntries(stateDir).filter((h) => h.retired !== true).length, 1, 'the durable hosts.json NOW carries the session as the LIVE host row')
+
+      const signal = new AbortController().signal
+      const headWakesBefore = head.inboxMessages.length
+      const result = await root.tools.get('send_message').execute(
+        { to: ['research-head'], text: 'PROGRAMMING REQUEST (the host must always reach a head)' },
+        { agent: host, signal }
+      )
+
+      assert.notEqual(result.messageId, 'none', 'the send PERSISTED a record (never the all-denied `none` sentinel)')
+      assert.equal(result.delivered['research-head'], 'delivered', 'host → head is DELIVERED')
+      await waitFor(() => head.inboxMessages.length === headWakesBefore + 1, 5000, 'the head was WOKEN by the host message')
+      assert.equal((await import('../lib/core/registry.js')).readRegistryAnomalyRows(stateDir).length, 0, 'a `host`-CLASSIFIED sender is NOT an anomaly — the detector stays silent')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-946 (b) ACCEPTANCE (THE ORACLE) — a host row registered/rotated AFTER boot for a session ABSENT from the boot catalog leaves host → head PERMITTED with NO restart: the stale live host is superseded, the record persists and the head is woken, never the `none` sentinel', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // (i) A hosts.json holding a LIVE host row for a DIFFERENT (stale) session —
+    // what the boot cold load restores, and what the incident's in-memory
+    // registry held while the recovery rotated to the CURRENT session.
+    const staleSessionId = String(SessionId(randomUUID()))
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+      schemaVersion: 2,
+      [`host-${staleSessionId}`]: { sessionId: staleSessionId, roomId: 'board' }
+    }, null, 2))
+
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'research head materialized at boot')
+      const head = agents.store.get('head-research-head')
+      const host = agents.put(fakeParentAgent())
+      const hostId = `host-${host.id}`
+      const staleHostId = `host-${staleSessionId}`
+
+      // (ii) THE RECOVERY: the durable file is rewritten to the CURRENT host
+      // session with the EXACT production rotation shape S3/S7 writes (the old
+      // entry retired + chained; the new live entry carrying previousSessionId
+      // + its sleepEpoch — validateHostsRotationFile requires the pair), AFTER
+      // the process booted.
+      await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+        schemaVersion: 2,
+        [staleHostId]: { sessionId: staleSessionId, roomId: 'board', sleepEpoch: Date.now() - 2000, retired: true, retiredAt: Date.now() - 1000, rotatedTo: hostId },
+        [hostId]: { sessionId: host.id, roomId: 'board', sleepEpoch: Date.now() - 1000, previousSessionId: staleSessionId }
+      }, null, 2))
+
+      // (iii) The host (the DURABLY live, never-in-memory session) sends.
+      const signal = new AbortController().signal
+      const headWakesBefore = head.inboxMessages.length
+      const result = await root.tools.get('send_message').execute(
+        { to: ['research-head'], text: 'the recovered host must be able to talk' },
+        { agent: host, signal }
+      )
+
+      assert.equal(result.delivered['research-head'], 'delivered', 'host → head DELIVERED after the mid-boot recovery (no restart)')
+      assert.notEqual(result.messageId, 'none', 'the record is durable (never the all-denied sentinel)')
+      await waitFor(() => head.inboxMessages.length === headWakesBefore + 1, 5000, 'the head was woken')
+      assert.match(head.inboxMessages.at(-1).content[0].text, new RegExp(`^\\[From ${hostId}`), 'the sender attribution is the CURRENT host id (the recovered row), not the stale one')
+
+      // No second live host was minted: the stale entry was superseded by the
+      // durable rotation, never left live next to the adopted row.
+      const hosts = await readHosts(stateDir)
+      assert.equal(hosts[staleHostId]?.retired, true, 'the stale entry stays retired (the durable rotation is honored)')
+      assert.equal(hosts[hostId]?.retired, undefined, 'the adopted host row is the single live host')
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-946 (c) DETECTOR — a host-shaped session REFUSED a host registration while the durable hosts.json carries NO live host row this catalog does not already know (an IMPOSSIBLE state in a healthy process) raises the immediate durable MUTE_HOST_SENDER anomaly at the FIRST affected catalog call, never only the 15-min idle watchdog', async () => {
+  await withTempStateDir(async (stateDir) => {
+    // hosts.json carries NO host at all: the pre-recovery durable set.
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({ schemaVersion: 2 }, null, 2))
+
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'research head materialized at boot')
+      const signal = new AbortController().signal
+      const whoTool = root.tools.get('dept_who')
+
+      // (a) The FIRST host-shaped session registers normally (no live host yet,
+      // the durable set empty) — a HEALTHY registration: NO anomaly.
+      const first = agents.put(fakeParentAgent())
+      await whoTool.execute({}, { agent: first, signal })
+      assert.equal((await import('../lib/core/registry.js')).readRegistryAnomalyRows(stateDir).length, 0, 'the first (healthy) registration emits NO anomaly row')
+
+      // (b) A SECOND host-shaped session while a live host exists — and the
+      // durable hosts.json knows NOTHING about either. The refusal is the MUTE:
+      // the second session stays `unclassified` (host-shaped) forever, so every
+      // send it attempts is denied. THIS is the fact the detector must catch.
+      const second = agents.put(fakeParentAgent())
+      const secondId = `host-${second.id}`
+      await whoTool.execute({}, { agent: second, signal })
+
+      const det = await import('../lib/core/registry.js')
+      const rows = det.readRegistryAnomalyRows(stateDir).filter((row) => row.kind === det.REGISTRY_ANOMALY.MUTE_HOST_SENDER)
+      assert.equal(rows.length, 1, `exactly ONE immediate durable MUTE_HOST_SENDER row (got ${rows.length})`)
+      assert.equal(rows[0].memberId, secondId, 'the alert names the refused host-shaped member id')
+      assert.equal(rows[0].reason, 'unclassified-host-shaped-sender', 'the alert carries the anomaly reason (the ground the ACL would report)')
+      assert.equal(typeof rows[0].ts, 'number', 'the alert is timestamped')
+      assert.match(String(rows[0].detail), /DIVERGED/, 'the alert explains the divergence, not just the symptom')
+
+      // The row is DURABLE (the channel a reader consumes) and APPEND-ONLY.
+      // Read through the CORE BRIDGE at CALL time (never a top-level import):
+      // the whole fb-946 surface is loaded dynamically so this file LOADS on the
+      // pre-fix tree and every fb-946 test fails as a REAL ASSERTION, not a
+      // module-resolution error (the honest RED).
+      const anomaly = await import('../lib/core/registry.js')
+      const raw = await readFile(path.join(stateDir, anomaly.REGISTRY_ANOMALIES_FILE), 'utf8')
+      assert.equal(raw.split('\n').filter((line) => line.trim() !== '').length, 1, `${anomaly.REGISTRY_ANOMALIES_FILE} holds exactly the one emitted row`)
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test('fb-946 (d) DETECTOR — NO false positive: the HEALTHY mid-boot registration (a host row written to hosts.json AFTER boot for the CALLING session) is ADOPTED — the send DELIVERS and ZERO anomaly rows are emitted', async () => {
+  await withTempStateDir(async (stateDir) => {
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({ schemaVersion: 2 }, null, 2))
+
+    const { root, agents, dispose } = await bootPlugin(stateDir)
+    try {
+      await waitFor(() => agents.store.has('head-research-head'), 5000, 'research head materialized at boot')
+      const host = agents.put(fakeParentAgent())
+      const hostId = `host-${host.id}`
+      // The recovery: the row lands AFTER boot for the CALLING session.
+      await writeFile(path.join(stateDir, 'hosts.json'), JSON.stringify({
+        schemaVersion: 2,
+        [hostId]: { sessionId: host.id, roomId: 'board' }
+      }, null, 2))
+
+      const result = await root.tools.get('send_message').execute(
+        { to: ['research-head'], text: 'healthy probe' },
+        { agent: host, signal: new AbortController().signal }
+      )
+
+      assert.equal(result.delivered['research-head'], 'delivered', 'the adopted host delivers (the HEAL, not just the alert)')
+      assert.equal((await import('../lib/core/registry.js')).readRegistryAnomalyRows(stateDir).length, 0, 'the healed path emits NO anomaly row (the detector never cries wolf)')
+      const rows = parseDeliveryRows(await readFile(resolveDeliveriesPath(stateDir), 'utf8'))
+      assert.equal(rows.some((row) => String(row.status).startsWith('failed')), false, 'no failed delivery pair for the healed host')
+    } finally {
+      await dispose()
     }
   })
 })
