@@ -130,10 +130,18 @@ memo — the norm fixes the hole).
   state — results summary, decisions, anomalies, follow-up queue, report paths
   — so the next round picks up where this one left off. The memo lands at
   `<stateDir>/journals/<yourPostId>.md`.
-- At the START of the round, before researching, search the journal store for
-  this job's prior memos (glob `journals/monitor-dsh-updates*`) AND the head's
-  memo (`journals/research-head.md`) to pick up the carried state; then build
-  on the prior reports (Constraints).
+- At the START of the round, before researching, read this job's prior memos
+  AND the head's memo to pick up the carried state. **Use the ABSOLUTE path:**
+  the journal store is `<stateDir>/journals/` — concretely `/.deepartments/journals/`
+  — which is NOT under the department workspace. `reports/` and `sources/` ARE
+  workspace-relative; **journals are not**. So:
+  `glob(pattern="monitor-dsh-updates*.md", path="/.deepartments/journals")` and
+  `read("/.deepartments/journals/research-head.md")`. A relative glob like
+  `journals/monitor-dsh-updates*` resolves against the workspace and returns NOTHING — that
+  is a FALSE NEGATIVE, not an absent store. **The head's memo is the channel by
+  which the head's standing policy reaches this job: if it cannot be read, the
+  policy is unreachable and the job will re-ask questions already answered.**
+  Then build on the prior reports (Constraints).
 
 ## Constraints
 
