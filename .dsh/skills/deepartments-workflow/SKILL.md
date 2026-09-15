@@ -167,6 +167,20 @@ renders from · rotate guard in `tools.ts` — the
 signal) ⇒ **the RUNNING rejection** after the bounded settle (the
 `DEEPARTMENTS_HEAD_ROTATE_SETTLE_MS` window of the free-window check, the
 `HEAD_ROTATE_SETTLE_POLL_MS` bounded re-verify).
+
+**ADDENDUM OF PRECISION (2026-09-15 — purely ADDED by the successor host; nothing
+above is rewritten).** The sentence above names `buildCatalogRows()` as «the SAME
+call the `dept_who` row renders from», and at ROW level that holds: `dept_who`
+renders BY ITERATING it — the literal `for (const row of buildCatalogRows())` in
+`tools.ts`. What the sentence names loosely is the LIVENESS: inside that call the
+row's `state` is COMPUTED — `computeDeptWhoState({…})`, the literal occurring
+twice in `boot.ts` (the host row and the post row) — while the row's VERBATIM
+live-handle token is COMPUTED ONE LEVEL ABOVE, in `dept_who`'s own render loop in
+`tools.ts`, as the literal `const liveStatus = row.live && agents !== void 0`. So
+the ROW comes from `buildCatalogRows()`, and the VERBATIM token the rotate guard
+reads is the one `dept_who` derives from it; `buildCatalogRows()` itself does not
+compute that token. (Each count was measured with a sentinel + exit codes in one
+invocation; anchors cited BY LITERAL, never by line — doctrine 36.)
 Aggravating: messaging a head does NOT manufacture a free window — a
 batch-eligible send to a RUNNING recipient is not spliced 1:1, it is QUEUED
 (the `batchDrain` / `flushBatchFor` accumulation seam — the «BATCH-DRAIN»
