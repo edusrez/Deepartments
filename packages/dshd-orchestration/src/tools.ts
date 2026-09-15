@@ -7474,6 +7474,38 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
   // the scheduler/parallel paths). An unresolved head → conservative no-op
   // (never fabricated). NEVER throws. (Defined OUTSIDE the frozen CUT-4 zone so
   // the tools-factory byte-identical md5 lock is untouched.)
+  //
+  // fb-759 (SELF-DIRECTED NOTICE — the self-sustaining wake): the ROUTING of
+  // this notice is NOT uniform, and the asymmetry is the defect. A WORKER's
+  // turn/end error resolves to its MANAGER (`entry.managerId`) — a DIFFERENT
+  // post, which must keep being WOKEN: that wake is the mechanism by which a
+  // head notices a dead worker and re-wakes it WITHOUT re-deploying it (the
+  // `builder-304` save). A HEAD's own turn/end error, however, resolves to
+  // ITSELF (its `managerId` is absent and its department coordinator IS the
+  // head) ⇒ `headId === postId`, and the ALWAYS-WAKE delivery WOKE THE POST
+  // WHOSE TURN HAD JUST DIED, starting a fresh turn — the notice's recipient is
+  // its own author. Measured (head-internal-programming-head, session
+  // `dafa5d83-f547-4a27-8183-7a63b18c6c71`): turn/end error at 21:46:00.631Z
+  // (turn 72) → the notice spliced at 21:46:10.049Z (`m-11028`, `to:
+  // ["internal-programming-head"]`) → `turn/start {"turn":73}` at 21:46:10.050Z
+  // → died at 21:46:37.660Z → notice `m-11032` → turn 75 → … Each iteration is
+  // a NEW `${postId}:${turn}` dedupe identity, so the dedupe ledger
+  // (turn-end-notify-state.json) bounds NOTHING: it is correct and it is not
+  // the obstacle (QD report, .dsh/reports/quality/2026-09-14-bucle-qh-y-host-mudo.md
+  // §3, §5 — the instance EXTREME: ~820 turns / ~21 h; class owners fb-759 /
+  // fb-847 / fb-854).
+  //
+  // THE FIX, AND ITS EXACT SCOPE (the hard rule — losing it ships a
+  // regression): `noWake` ONLY when the notice is SELF-DIRECTED (`headId ===
+  // postId`, i.e. `to` = the very post whose turn failed). The MANAGER notice
+  // stays ALWAYS-WAKE, untouched. The self-directed notice keeps its DURABLE
+  // record (store.append above) and its delivery pair is written by the engine
+  // as `prepared` + `noWake:true` — the fb-696 / m-707 no-wake semantics: the
+  // content is persisted, nothing is materialized, and it drains at that post's
+  // next REAL wake (the FB-132 drain). Traceability is preserved by
+  // construction: the post-error row, the health ALERT to the live host and the
+  // `turn-end-notify-state.json` ledger are all UNTOUCHED — only the wake is not
+  // spent on the post that just failed.
   const healthNotifyHead = async (postId: string, frame: string): Promise<void> => {
     try {
       const entry = byPost.get(postId)
@@ -7488,6 +7520,29 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       if (headEntry === void 0) return
       const store = await messagesStoreReady
       const record = await store.append({ from: 'deepartments', to: [headId], text: frame, kind: 'agent' })
+      // fb-759 — THE SELF-DIRECTED BRANCH: the ONLY difference from the
+      // pre-fix delivery is the wake. `deliverOrQueue(..., noWake:true)` persists
+      // the pair 'prepared' + noWake and returns BEFORE the route, so neither
+      // `materializePost` nor a followup is reached (dshd-core
+      // src/delivery.ts — the noWake gate) ⇒ no new turn for a post whose turn
+      // just died. `late.delivery` is the SAME single delivery seam
+      // send_message / deliverBusRecord consume (lazy: dereferenced HERE, at
+      // call time, never at construction — the TDZ pattern of this factory).
+      const selfDirected = headId === postId
+      if (selfDirected) {
+        ctx.logger.warn(`[deepartments] system-health: turn-error notification for "${postId}" is SELF-DIRECTED (to === the post whose turn failed) — delivered NO-WAKE (fb-759: the record is durable, the wake is not spent on the post that just failed; the manager notice path stays always-wake)`)
+        const status = await late.delivery.deliverOrQueue(headId, record, {
+          callerAgentId: 'deepartments',
+          noWake: true,
+          gateReason: (reason) => {
+            ctx.logger.info(`[deepartments] system-health: self-directed turn-error notice ${record.id} → "${headId}" queued (class: ${reason})`)
+          }
+        })
+        if (status !== 'prepared') {
+          ctx.logger.warn(`[deepartments] system-health: self-directed turn-error notice ${record.id} → "${headId}" resolved "${status}" (expected 'prepared' — the record is durable in the store and the health ALERT path is unaffected)`)
+        }
+        return
+      }
       await busDeliverToPost(headEntry, frame, record, void 0)
     } catch (error: unknown) {
       ctx.logger.warn(`[deepartments] system-health: turn-error head notification for "${postId}" failed: ${error instanceof Error ? error.message : String(error)}`)
