@@ -1744,10 +1744,21 @@ test('Fix A2 stuck-head recovery (bus): a live-but-stuck head is disposed + cold
       process.env.DEEPARTMENTS_TEST_NOW = String(T0)
 
       // Send 1: first observation of the running head — the bus records the
-      // progress baseline and delivers; NOT judged stuck yet.
+      // progress baseline and ACCEPTS the message; NOT judged stuck yet.
+      // VALLE 09-07 (BATCH-DRAIN) contract update: a live RUNNING recipient is
+      // the batch condition (an ALWAYS-WAKE no-interrupt send to it accumulates
+      // until the settle — `delivery.ts:1920`, the same predicate that keeps the
+      // stuck-head recovery below reachable, `isHeadStuck` false here), so the
+      // first send reports the batch class and NEVER splices into the live
+      // inbox. The contract is already pinned green in
+      // `test/batch-drain.test.js:399-401` — this oracle encoded the OLD
+      // delivery surface ('delivered' inline).
       const r1 = await sendTool.execute({ to: [postId], text: 'first' }, { agent: { id: 'host-any', session: { header: {} } }, signal })
-      assert.equal(r1.delivered[postId], 'delivered', 'first delivery accepted on the frozen-loop incarnation')
-      await waitFor(() => frozenHead.inboxMessages.length >= 1, 5000, 'first delivery enqueued on the frozen-loop incarnation')
+      assert.equal(r1.delivered[postId], 'prepared (batch-until-settle)', 'first delivery accepted (accumulated) on the frozen-loop incarnation — the batch class, not an inline splice')
+      await waitFor(async () => {
+        const accepted = await loadMessageRecords(resolveMessagesPath(stateDir))
+        return accepted.some((r) => r.text === 'first')
+      }, 5000, 'first delivery durably accepted on the frozen-loop incarnation (write-ahead — the record survives the dispose+resume below)')
       assert.equal(agents.store.get(sid), frozenHead, 'healthy live head is NOT disposed on first observation')
       assert.equal(agents.resumeCalls.length, resumeBefore, 'no cold-resume while the head still looks healthy')
 
@@ -20036,10 +20047,18 @@ test('W9-b (c): a LIVE mid-turn recipient with interrupt:FALSE (default) is QUEU
         { to: ['research-head'], text: 'QUEUED behind the current work' },
         { agent: { id: 'host-any', session: { header: {} } }, signal }
       )
-      assert.equal(r.delivered['research-head'], 'delivered', 'the default (queue) message is delivered')
-      await waitFor(() => head.inboxMessages.length === inboxBefore + 1, 5000, 'the message is enqueued')
+      // VALLE 09-07 (BATCH-DRAIN) contract update: the QUEUE the test pins IS
+      // the batch queue — an ALWAYS-WAKE no-interrupt send to a live RUNNING
+      // recipient accumulates until the settle (`delivery.ts:1920`), so the
+      // sender sees the batch class and NOTHING is spliced into the live inbox
+      // (the strongest form of 'queued behind the current work'). The pre-batch
+      // oracle here ('delivered' inline) encoded the retired delivery surface;
+      // the class is pinned green in `test/batch-drain.test.js:399-401`.
+      assert.equal(r.delivered['research-head'], 'prepared (batch-until-settle)', 'the default (queue) message is QUEUED as the batch class (accumulated until the settle — never an inline splice)')
+      assert.equal(head.inboxMessages.length, inboxBefore, 'the queued message is NOT spliced into the live inbox while the turn is in flight (the batch waits for the settle)')
       assert.equal(head.cancelCalls.length, cancelBefore, 'interrupt:FALSE (default) → NO abort (the current turn is NOT preempted — queue semantics)')
-      assert.match(head.inboxMessages.at(-1).content[0].text, /^\[From .* → research-head\]: QUEUED behind the current work/, 'the queued message is delivered')
+      const queued = await loadMessageRecords(resolveMessagesPath(stateDir))
+      assert.ok(queued.some((r) => r.text === 'QUEUED behind the current work'), 'the queued message is durably recorded (write-ahead — it drains at the settle, never lost)')
     } finally {
       await dispose()
     }
