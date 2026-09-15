@@ -1,0 +1,196 @@
+# === dsh-deepartments patch: dsh-session-persistence-jsonl bounded-concurrency
+#     listArtifacts, RE-ANCHORED to the 0.1.5 FLAT form ===
+#
+# fichero
+#   node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js
+#   (applied with `-p1` FROM THE PACKAGE DIRECTORY, header paths `a/lib/index.js`
+#    / `b/lib/index.js` — the row 3B shape, NOT the nested 0.1.1 header path of
+#    the superseded dsh-session-persistence-list-parallel.patch)
+#
+# FINGERPRINTS (md5 of lib/index.js)
+#   antes   9f672813da6eafbd8f9f7625c0548b3d
+#   después 6fc06bfb4fb64ce664331a80af5f9c0f
+#
+# FUENTE DEL PRE (in-scope, byte-exact — no assumption)
+#   Published npm tarball:
+#     https://registry.npmjs.org/@deepseek-ai/dsh-session-persistence-jsonl/-/dsh-session-persistence-jsonl-0.1.5-rc.2.tgz
+#     tarball md5                ff2a41ae9258335592aad6ade2fd4ba4
+#     package/lib/index.js md5   9f672813da6eafbd8f9f7625c0548b3d   <-- the PRE
+#   The PRE above is the md5 MEASURED inside the downloaded tarball (3361 lines),
+#   and it is INDEPENDENTLY CORROBORATED by this repo's own ROW 17 header comment
+#   (scripts/reapply-dsh-0.1.5-rc.2-patches.sh:652), which declared the same
+#   9f672813… as the 0.1.5 pre-state before this patch existed.
+#
+# WHICH ROW TOUCHES THIS FILE (measured, not assumed)
+#   Grepping scripts/reapply-dsh-0.1.5-rc.2-patches.sh for every row that
+#   resolves to `@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js` returns
+#   EXACTLY ONE row: ROW 17 (row_session_persist, :659-677). ROW 17 is
+#   CONTEXT-ABSENT on 0.1.5 and therefore NEVER WRITES (its context grep at :662
+#   fails on the 0.1.5 body and it returns 1 before guarded_patch at :671).
+#   NO OTHER ROW touches this package. => the PRE is the pristine tarball md5.
+#
+# PORTE DIRECTO O RE-PORTE CON ADAPTACIÓN?
+#   **RE-PORTE CON ADAPTACIÓN** (declared, not hidden).
+#
+# WHY THE OLD PATCH CANNOT BE APPLIED (the measured CONTEXT-ABSENT)
+#   patches/dsh-session-persistence-list-parallel.patch was written for the
+#   0.1.1 GLOBAL tree. Its header path is NESTED and its hunks carry 0.1.1 LINE
+#   NUMBERS (@@ -1061,11 and @@ -1082,17) and, decisively, a 0.1.1 BODY:
+#     - the per-directory probe was `const opposite = join(dir, …); const
+#       oppositeExists = await this.exists(opposite); … const meta = …;
+#       await this.assertStoredIdentity(path, meta, void 0, signal);` and it
+#       pushed `{ header: meta, path }`;
+#     - its hunk#1 CONTEXT (`for (const dir of await this.listSessionDirs(project,
+#       signal)) {` followed by the `opposite` probe) no longer exists.
+#   MEASURED on the 0.1.5 tarball copy: hunk#1 fuzz-applies and hunk#2 REJECTS —
+#   exactly the CONTEXT-ABSENT the HOST measured, and exactly the FRANKENSTEIN
+#   guarded_patch exists to refuse.
+#
+# WHY A NEW PATCH FILE AND NOT AN EDIT OF THE OLD ONE (same decision as the two
+#   lane-precedents: dsh-tool-fs-search-grep-scope-reclosure and
+#   dsh-tool-fs-edit-dx-remedies-0.1.5-reanchor)
+#   0.1.5 REWROTE listArtifacts. The 0.1.5 body does the per-directory work with
+#   a different set of helpers:
+#     :2868  const selected = await this.resolveGenerationInDirectory(dir, signal);
+#     :2872  header = await this.readGenerationHeader(selected, void 0, signal);
+#     :2882  path: selected.sourcePath
+#   There is NO `this.exists(opposite)` probe, NO `oppositeCompression()` probe,
+#   NO `meta` binding and NO direct `assertStoredIdentity` call in the loop (it
+#   moved INSIDE readGenerationHeader at :2922). Re-introducing the 0.1.1 body
+#   would be INVENTING code that 0.1.5 does not have, which the mission forbids.
+#   The old patch file is left UNTOUCHED and ROW 17 is left at CONTEXT-ABSENT
+#   (never forced).
+#
+# WHAT THE RE-PORT ADAPTS (semantics conserved, shape conserved)
+#   CONSERVED BYTE-IDENTICALLY from the proven GLOBAL 0.1.1 form (:1064-1072,
+#   :1082) — this is the whole point of the re-port, the EFFECT and its mechanism:
+#     - the enumeration prefetch: `const dirs = []` + the same
+#       `for (const project of await this.listProjectDirs(signal))` outer loop
+#       that now PUSHES instead of probing inline, + `signal?.throwIfAborted();`;
+#     - `const concurrency = 64;` (the GLOBAL's measured value — :1082);
+#     - `const results = new Array(dirs.length); let cursor = 0;` and the
+#       worker-pool `probe` closure: `const index = cursor++; if (index >=
+#       dirs.length) return; const dir = dirs[index];`
+#     - `await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency,
+#       dirs.length)) }, probe));`
+#     - the ORDER-PRESERVING sequential fold over `results` (skip `void 0`), which
+#       keeps the duplicate-id contract: the FIRST duplicate in DIRECTORY ORDER is
+#       the one reported, and the thrown message is the SAME string BYTE-IDENTICAL.
+#     - the results are written at their OWN index (`results[index] = …`), so the
+#       returned `artifacts` order is the directory order — a CONTRACT, not an
+#       accident (see the reader's measurement in the run report).
+#   ADAPTED (only this): the BODY INSIDE the probe closure is the 0.1.5 body —
+#   `resolveGenerationInDirectory` + `readGenerationHeader(selected, void 0,
+#   signal)` + the SessionFormatUnsupportedError skip + `results[index] = {
+#   header, path: selected.sourcePath }`. The two `continue` guards and the
+#   `signal?.throwIfAborted()` per iteration are kept in place, unchanged.
+#
+# THE EFFECT IS THE READER'S TO MEASURE BY EXECUTION (not this header's claim)
+#   POST-apply, `listArtifacts` must OVERLAP its per-directory probes: with N
+#   directories in flight the observed concurrency must be > 1 (bounded by 64),
+#   against the PRISTINE, which executes them one at a time (observed concurrency
+#   1). The mechanism is the `probe` pool above; the reader re-measures it by
+#   RUNNING the extracted method on a fixture (see the run report §effect).
+#
+# ADDITIVE / COMPATIBILITY
+#   Same method, same signature, same return type (`Array<{header, path}>`), same
+#   order, same duplicate-detection semantics and same thrown message. Only the
+#   SCHEDULING of the per-directory probes changes (serial -> bounded parallel).
+#   No export list, schema, systemPrompt or description changes; nothing outside
+#   `listArtifacts` is touched.
+#
+# WHAT THIS PATCH DOES NOT COVER (declared)
+#   - It does NOT reintroduce the 0.1.1 per-directory body (the `exists(opposite)`
+#     compression probe, the `meta` binding, the direct `assertStoredIdentity`
+#     call). Those helpers are not part of the 0.1.5 loop; forcing them would be
+#     invention. The 0.1.5 equivalents live inside readGenerationHeader (:2890).
+#   - It does NOT carry the old 0.1.1 patch's trailing whitespace addition (the
+#     stray `+` blank line its hunk#2 added before `/** Atomically write the header
+#     line + first batch…`). Unrelated to the effect; dropped deliberately.
+#   - It does NOT change listProjectDirs / listSessionDirs /
+#     resolveGenerationInDirectory / readGenerationHeader / assertStoredIdentity
+#     or any other method.
+#   - It does NOT change the ABORT semantics: an abort observed inside a losing
+#     probe rejects `Promise.all` exactly as the serial loop rejected on its next
+#     iteration. Declared as UNCHANGED, not as proved.
+#   - It does NOT declare a md5 for any tree it was not measured against. POST was
+#     measured by applying THIS file, with `-p1` from the package directory, to an
+#     in-scope copy of the published tarball's lib/index.js.
+#   - It does NOT cover the OTHER persistence packages: only
+#     dsh-session-persistence-jsonl/lib/index.js.
+#
+# IDEMPOTENCY: NOT a property of this file. Idempotency is enforced by the SCRIPT
+#   ROW's presence gate, which greps for this patch's own signature
+#   (`LOCAL PATCH (deepartments): bounded-concurrency session probe`) and reports
+#   NOOP. Never re-apply this file blindly (raw `patch` is NOT idempotent on these
+#   files — MEASURED elsewhere in the script's header).
+#
+# LINE NUMBERS are those of the PRE state (9f672813…, the pristine 0.1.5 file)
+#   — NOT the GLOBAL's and NOT the old patch's 0.1.1 numbers.
+#
+# --- end of header; the unified diff follows ---
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -2859,11 +2859,31 @@
+ 		signal?.throwIfAborted();
+ 		await this.ensureRootEncoding();
+ 		signal?.throwIfAborted();
+-		const artifacts = [];
+-		const ids = /* @__PURE__ */ new Set();
++		/* LOCAL PATCH (deepartments): bounded-concurrency session probe.
++		   Serially the loop below costs a generation resolve plus a header read and
++		   its stored-identity assert PER SESSION, so with thousands of session
++		   directories session.list spends whole seconds in sequential event-loop
++		   turns. The per-directory work is stateless (each helper opens and closes
++		   its own handle), so it is safe to run concurrently. Only the duplicate-id
++		   fold stays sequential, so the first duplicate in DIRECTORY ORDER is still
++		   the one reported. */
++		const dirs = [];
+ 		for (const project of await this.listProjectDirs(signal)) {
+ 			signal?.throwIfAborted();
+-			for (const dir of await this.listSessionDirs(project, signal)) {
++			for (const dir of await this.listSessionDirs(project, signal)) dirs.push(dir);
++		}
++		signal?.throwIfAborted();
++		/* 64 in flight hides the per-directory latency while staying far below the
++		   descriptor limit (this service runs with 524288) and leaving the pool free
++		   for other handlers. */
++		const concurrency = 64;
++		const results = new Array(dirs.length);
++		let cursor = 0;
++		const probe = async () => {
++			for (;;) {
++				const index = cursor++;
++				if (index >= dirs.length) return;
++				const dir = dirs[index];
+ 				signal?.throwIfAborted();
+ 				const selected = await this.resolveGenerationInDirectory(dir, signal);
+ 				if (selected === void 0) continue;
+@@ -2875,13 +2895,23 @@
+ 					throw error;
+ 				}
+ 				if (header === void 0) continue;
+-				if (ids.has(header.id)) throw new Error(`duplicate JSONL session id "${header.id}" appears in multiple project directories`);
+-				ids.add(header.id);
+-				artifacts.push({
++				results[index] = {
+ 					header,
+ 					path: selected.sourcePath
+-				});
++				};
+ 			}
++		};
++		await Promise.all(Array.from({
++			length: Math.max(1, Math.min(concurrency, dirs.length))
++		}, probe));
++		signal?.throwIfAborted();
++		const artifacts = [];
++		const ids = /* @__PURE__ */ new Set();
++		for (const entry of results) {
++			if (entry === void 0) continue;
++			if (ids.has(entry.header.id)) throw new Error(`duplicate JSONL session id "${entry.header.id}" appears in multiple project directories`);
++			ids.add(entry.header.id);
++			artifacts.push(entry);
+ 		}
+ 		signal?.throwIfAborted();
+ 		return artifacts;
