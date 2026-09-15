@@ -24,3 +24,6 @@ pnpm-workspace.yaml
 
 # Local scratch dumps (never committed; 23 MB of agent/reviewer dumps measured 09-15)
 scratch/
+
+# Atomic-write staging dirs of the harness fs writer (dsh-fs-local writeFileAtomic: `.<basename>.<pid>.<uuid>.tmpdir`, created INSIDE the target's dir; transient + untracked, never committed; 09-15)
+*.tmpdir/
