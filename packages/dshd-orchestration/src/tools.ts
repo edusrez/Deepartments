@@ -995,6 +995,30 @@ function nudgeTurnOf(exec: unknown): number {
  * on what a life-abort is. PURE. */
 const NUDGE_LIFE_ABORT_CLASSES = new Set(['interruption', 'cancel', 'churn', 'read-only abort', 'abort', 'aborted'])
 
+/** fb-1PROC (2026-09-15) — the STRUCTURED EFFECT of an errored tool result:
+ * the `error.info.code` / top-level `code` the harness itself owns (dsh-tools
+ * TOOL_ABORTED / TOOL_ABORTED_BEFORE_DISPATCH, dsh-tools/lib/index.js:3552-3584)
+ * plus the explicit `aborted` marker the exec or the result may carry. The
+ * settle point and the nudge gate BOTH thread it into the classifier, so the
+ * 'churn' class is decided by whether a kill ACTUALLY reached the call in
+ * flight — never by a word in the message (the measured false-positive family:
+ * a plain body error / a path naming a `restart-…` artefact classified 'churn').
+ * PURE (module-private — 0 new exports, the export-parity lock stays intact). */
+function toolAbortSignal(
+  exec: unknown,
+  result: { error?: { message?: string; info?: { name?: string; code?: string } } | null | undefined } | undefined
+): { code?: string; topLevelCode?: string; aborted?: boolean } {
+  const error = (result?.error ?? {}) as { info?: { code?: unknown }; code?: unknown }
+  const infoCode = typeof error.info?.code === 'string' && error.info.code !== '' ? error.info.code : undefined
+  const topLevelCode = typeof error.code === 'string' && error.code !== '' ? error.code : undefined
+  const aborted = (exec as { aborted?: unknown } | null)?.aborted === true || (result as { aborted?: unknown } | null)?.aborted === true
+  return {
+    ...(infoCode !== undefined ? { code: infoCode } : {}),
+    ...(topLevelCode !== undefined ? { topLevelCode } : {}),
+    ...(aborted ? { aborted: true } : {})
+  }
+}
+
 /** O2 — whether the errored result is a LIFE-ABORT (the runtime killed the
  * turn — the W9-b `Agent.cancel` 'interrupted' abort, a harness abort/kill,
  * an explicit turn/tool CANCEL — the 'cancelled' approval class
@@ -1014,13 +1038,18 @@ const NUDGE_LIFE_ABORT_CLASSES = new Set(['interruption', 'cancel', 'churn', 're
  *        bare-word gate skipped — the QD dead-letter family would nudge by
  *        error). A message the classifier falls through to a raw excerpt is
  *        NOT a life-abort (a bare 'timeout' or a genuine tool error stays
- *        actionable — only a KNOWN class suppresses). PURE. */
-function isNudgeLifeAbort(exec: unknown, result: { isError: boolean; error?: { message?: string } }): boolean {
+ *        actionable — only a KNOWN class suppresses).
+ * fb-1PROC (2026-09-15): the classifier is fed the STRUCTURED EFFECT
+ * ({@link toolAbortSignal}) the result carries, so the two call sites (this
+ * gate and the R4 settle) keep ONE definition of a life-abort AND the 'churn'
+ * reading is decided by the real kill signal rather than by a word in the
+ * message. PURE. */
+function isNudgeLifeAbort(exec: unknown, result: { isError: boolean; error?: { message?: string; info?: { name?: string; code?: string } } }): boolean {
   if ((exec as { aborted?: unknown } | null)?.aborted === true) return true
   if ((result as { aborted?: unknown } | null)?.aborted === true) return true
   const message = typeof result?.error?.message === 'string' ? result.error.message : ''
   const tool = (exec as { name?: unknown } | null)?.name
-  return NUDGE_LIFE_ABORT_CLASSES.has(classifyToolAbortReason(message, typeof tool === 'string' ? tool : ''))
+  return NUDGE_LIFE_ABORT_CLASSES.has(classifyToolAbortReason(message, typeof tool === 'string' ? tool : '', toolAbortSignal(exec, result)))
 }
 
 /** fb-306 — the ROTATION-CLOSE class gate (PURE): `true` iff the host's
@@ -1499,7 +1528,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
       // NEVER records a reason — the noise-guard contract — so the classifier
       // fallback on an absent error message ('aborted') can never leak an
       // 'aborted' reason into a success row).
-      const reason = !result.isError || !isAbort ? undefined : classifyToolAbortReason(String(result.error?.message ?? ''), exec.name)
+      const reason = !result.isError || !isAbort ? undefined : classifyToolAbortReason(String(result.error?.message ?? ''), exec.name, toolAbortSignal(exec, result))
       // fb-957 — THE ERROR-ROW CAUSE (the lane's contract change, declared
       // here in the SAME change): `reason` above is RESERVED to the abort
       // taxonomy and `cause` is the CLOSED error enum, each riding exactly ONE

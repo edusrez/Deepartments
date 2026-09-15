@@ -243,9 +243,16 @@ function intentExec(name, args, agentId, callId = `call-${randomUUID()}`) {
   return { callId, rootCallId: callId, name, arguments: args, agent: { id: agentId }, signal: new AbortController().signal }
 }
 
-/** A minimal errored ToolExecutionResult in the life-abort family. */
-function abortResult(message = 'tool call aborted') {
-  return { isError: true, error: { message }, content: [{ type: 'text', text: `Error: ${message}` }] }
+/** A minimal errored ToolExecutionResult in the life-abort family. `code` is
+ * the STRUCTURED kill signal (`error.info.code` — the harness vocabulary
+ * ABORTED / ABORTED_BEFORE_DISPATCH); fb-1PROC (2026-09-15): the churn class is
+ * decided by that effect, not by the wording of `message`. */
+function abortResult(message = 'tool call aborted', code) {
+  return {
+    isError: true,
+    error: { message, ...(code !== undefined ? { info: { name: 'AbortError', code } } : {}) },
+    content: [{ type: 'text', text: `Error: ${message}` }]
+  }
 }
 
 function successResult() {
@@ -268,11 +275,14 @@ async function seedHostsJson(stateDir, data) {
 // ===========================================================================
 // R4 PURE half — classifier / scanner / projection / target / parse.
 // ===========================================================================
-test('R4 PURE (abort-reason classifier): the durable REASON classes — interruption / cancel / churn / read-only abort / abort / raw excerpt — map from the harness abort messages; a READ-ONLY tool yields the read-only class (fb-111), an interruption yields interruption, a cancel yields cancel', () => {
+test('R4 PURE (abort-reason classifier): the durable REASON classes — interruption / cancel / churn / read-only abort / abort / raw excerpt — map from the harness abort messages; a READ-ONLY tool yields the read-only class (fb-111), an interruption yields interruption, a cancel yields cancel; fb-1PROC (2026-09-15): the CHURN class is decided by the STRUCTURED kill signal (the harness ABORTED code / explicit flag) TOGETHER WITH the kill vocabulary — the words alone never produce churn', () => {
   assert.equal(classifyToolAbortReason('The tool call was interrupted after it was recorded', 'send_message'), 'interruption', 'an interrupted call is classified interruption')
   assert.equal(classifyToolAbortReason('the user cancelled ask_user_question', 'ask_user_question'), 'cancel', 'an explicit user cancel is classified cancel')
-  assert.equal(classifyToolAbortReason('the process was stopped', 'dept_exec'), 'churn', 'a stopped/killed turn is classified churn')
-  assert.equal(classifyToolAbortReason('tool call aborted before dispatch', 'read'), 'read-only abort', 'a READ-ONLY tool abort is its own class (fb-111 pure-read)')
+  assert.equal(classifyToolAbortReason('the process was stopped', 'dept_exec', { code: 'ABORTED' }), 'churn', 'a stopped/killed turn — the harness kill signal PLUS the wording — is classified churn')
+  assert.equal(classifyToolAbortReason('the process was stopped', 'dept_exec', { code: 'ABORTED_BEFORE_DISPATCH' }), 'churn', 'the pre-dispatch kill code + the wording is churn too (the effect, not the position)')
+  assert.equal(classifyToolAbortReason('the process was stopped', 'dept_exec', { aborted: true }), 'churn', 'the explicit aborted flag + the wording is churn (the flag path)')
+  assert.equal(classifyToolAbortReason('the process was stopped', 'dept_exec'), 'the process was stopped', 'fb-1PROC: WITHOUT the structured signal the wording alone does NOT decide churn — the honest reading is the raw excerpt (the pre-fix rule classified a path naming a restart artefact as churn)')
+  assert.equal(classifyToolAbortReason('tool call aborted before dispatch', 'read', { code: 'ABORTED_BEFORE_DISPATCH' }), 'read-only abort', 'a READ-ONLY tool abort is its own class (fb-111 pure-read)')
   assert.equal(classifyToolAbortReason('tool call aborted before dispatch', 'send_message'), 'abort', 'a generic aborted call is classified abort')
   assert.equal(classifyToolAbortReason('', 'dept_who'), 'aborted', 'an EMPTY message degrades to a stable class (never a flat empty reason)')
   assert.equal(isReadOnlyTool('read'), true, 'read is read-only')
@@ -422,10 +432,13 @@ test('R4-O2-ALIGN (life-abort family settle): a CANCEL-class and a CHURN-class e
       const cancelExec = intentExec('send_message', { to: ['research-head'], text: 'R4-O2 cancel' }, 'worker-2a')
       await env.pluginCtx().waterfall('tools/pre-execute', cancelExec, () => Promise.resolve({ kind: 'allow' }))
       await env.pluginCtx().waterfall('tools/post-execute', cancelExec, abortResult('the user cancelled ask_user_question'), () => Promise.resolve({ kind: 'accept' }))
-      // (b) CHURN class — a stopped/killed turn settles ABORTED + churn.
+      // (b) CHURN class — a stopped/killed turn settles ABORTED + churn. fb-1PROC
+      // (2026-09-15): the errored result carries the harness's own abort CODE
+      // (the STRUCTURED kill effect the classifier now requires): the wording
+      // alone no longer elects churn, so the fixture carries BOTH.
       const churnExec = intentExec('dept_exec', { command: 'pwd' }, 'worker-2b')
       await env.pluginCtx().waterfall('tools/pre-execute', churnExec, () => Promise.resolve({ kind: 'allow' }))
-      await env.pluginCtx().waterfall('tools/post-execute', churnExec, abortResult('the process was stopped'), () => Promise.resolve({ kind: 'accept' }))
+      await env.pluginCtx().waterfall('tools/post-execute', churnExec, abortResult('the process was stopped', 'ABORTED'), () => Promise.resolve({ kind: 'accept' }))
       const rows = await readToolIntents(stateDir)
       const cancelSettle = rows.find((r) => r.kind === 'settle' && r.agent === 'worker-2a')
       assert.ok(cancelSettle, 'the cancel-class intent settled')

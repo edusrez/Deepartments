@@ -53,6 +53,7 @@ import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { HarnessError } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
@@ -407,7 +408,12 @@ test('fb-957 (noise guard + the reason/cause split): a SUCCESSFUL settle carries
     const env = await bootPluginFromSrc(stateDir)
     try {
       env.root.tools.register(fixtureTool('fb957-fixture-ok', () => ({ ok: true })))
-      env.root.tools.register(fixtureTool('fb957-fixture-churn', () => { throw new Error('the process was stopped') }))
+      // fb-1PROC (2026-09-15): the fixture models a KILLED turn, so it throws the
+      // harness's own error shape (HarnessError, dsh-llm) carrying the canonical
+      // abort CODE the effect is read from — the wording alone is not evidence of
+      // a kill anymore (and a plain Error's `info` never reaches the result: the
+      // registry derives `error.info` from `instanceof HarnessError`).
+      env.root.tools.register(fixtureTool('fb957-fixture-churn', () => { throw new HarnessError('the process was stopped', 'ABORTED') }))
       const agent = env.agents.put(probeAgent('worker-builder-fb957-split'))
       const okId = `call-fb957-${randomUUID()}`
       const churnId = `call-fb957-${randomUUID()}`
@@ -423,7 +429,7 @@ test('fb-957 (noise guard + the reason/cause split): a SUCCESSFUL settle carries
       assert.equal(ok.cause, undefined, 'a SUCCESSFUL settle carries NO cause (the noise-guard contract is unchanged)')
       assert.equal(ok.reason, undefined, 'a SUCCESSFUL settle carries NO reason (unchanged)')
       assert.equal(churn.status, 'aborted', 'a killed/stopped turn settles ABORTED (the R4 life-abort family)')
-      assert.equal(churn.reason, 'churn', 'the abort keeps its durable REASON')
+      assert.equal(churn.reason, 'churn', 'the abort keeps its durable REASON (structured kill signal + the wording — fb-1PROC)')
       assert.equal(churn.cause, undefined, 'an abort row carries NO cause — the two diagnostics never mix')
     } finally {
       await env.dispose()

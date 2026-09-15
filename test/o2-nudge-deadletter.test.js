@@ -86,8 +86,16 @@ function nudgeExec(name = 'probe_tool', agent = { id: 'probe-agent' }) {
 }
 
 /** An errored ToolExecutionResult (the shape a thrown/denied tool yields). */
-function nudgeErrorResult(message = 'boom') {
-  return { isError: true, error: { message }, content: [{ type: 'text', text: `Error: ${message}` }] }
+/** An errored tool result for the nudge waterfall. `code` is the STRUCTURED
+ * kill signal (`error.info.code` — the harness vocabulary ABORTED /
+ * ABORTED_BEFORE_DISPATCH); fb-1PROC (2026-09-15): a LIFE-ABORT is decided by
+ * that effect, never by a word in `message`. */
+function nudgeErrorResult(message = 'boom', code) {
+  return {
+    isError: true,
+    error: { message, ...(code !== undefined ? { info: { name: 'AbortError', code } } : {}) },
+    content: [{ type: 'text', text: `Error: ${message}` }]
+  }
 }
 
 /** The nudge additionalContexts among a decision's contexts. */
@@ -160,8 +168,9 @@ test('O2 NUDGE DEAD-LETTER (a) life-abort → NO nudge: the real harness abort m
       // (iii) the W9-b cancel close (the interrupted-tool-result closer).
       const interrupted = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('The tool call was interrupted after it was recorded, but no result was durably recorded.'), accept)
       assert.equal(nudgeContexts(interrupted.additionalContexts).length, 0, 'the W9-b interrupted-tool-result close is a life-abort — never nudged')
-      // (iv) the churn/restart-kill class.
-      const killed = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('the process was killed by restart'), accept)
+      // (iv) the churn/restart-kill class (fb-1PROC: WITH the structured kill
+      // code — the wording alone is not evidence that a kill happened).
+      const killed = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('the process was killed by restart', 'ABORTED'), accept)
       assert.equal(nudgeContexts(killed.additionalContexts).length, 0, 'a killed-by-restart turn is a life-abort — never nudged')
       // (v) the CANCEL class — the real dsh-tools approval shape (B3-P2 gap
       // closed: «approval for tool "<name>" was cancelled») + the R4 cancel

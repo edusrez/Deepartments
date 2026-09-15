@@ -307,20 +307,87 @@ export function scanAbortedToolIntents(rows: readonly ToolIntentRow[], nowMs: nu
   return findings
 }
 
+/** The STRUCTURED EFFECT of one tool call — whether a kill/signal actually
+ * reached the call in flight, and whether the kill ACHIEVED its effect. Read
+ * from the result/exec object the settle point holds, NEVER from the message
+ * wording (see {@link classifyToolAbortReason}): the `error.info.code` /
+ * `error.code` the harness itself owns, plus the explicit `aborted` flag a
+ * cancelled exec/result may carry. */
+export interface ToolAbortSignal {
+  /** `error.info.code` (the harness vocabulary — dsh-tools TOOL_ABORTED /
+   * TOOL_ABORTED_BEFORE_DISPATCH; dsh-tools/lib/index.js:3552-3584). */
+  code?: string
+  /** The top-level `code` arm (a HarnessError-shaped value the registry did
+   * not wrap into `error.info`). */
+  topLevelCode?: string
+  /** The explicit cancellation marker on the exec OR the result (the
+   * defensive flag path isNudgeLifeAbort already honours). */
+  aborted?: boolean
+}
+
+/** The harness abort CODES — the text-independent vocabulary of an in-flight
+ * cancellation (dsh-tools/lib/index.js:2432/:2434 + the two canonical results
+ * at :3552-3584). A call whose result carries one of these WAS killed in
+ * flight; a call whose MESSAGE merely says «restart» was not. */
+const TOOL_ABORT_CODES = new Set(['ABORTED', 'ABORTED_BEFORE_DISPATCH'])
+
+/** The kill/turn-stop VOCABULARY. It is evidence of the EFFECT only together
+ * with the structured kill signal — see {@link classifyToolAbortReason}: it
+ * names WHAT the kill ended, it never establishes that a kill happened. */
+const TOOL_KILL_VOCABULARY_RE = /killed|terminated|stopped by|process was stopped|restart/i
+
+/** fb-1PROC (2026-09-15) — THE KILL EFFECT of one tool call, read from the
+ * STRUCTURED signal ONLY: either the harness cancellation code (a REAL
+ * in-flight kill: the signal arrived after the body started → ABORTED, or
+ * before it → ABORTED_BEFORE_DISPATCH) or the explicit `aborted` marker. PURE.
+ * NOTHING else counts — in particular a kill WORD in the message does not: the
+ * measured false-positive class (2026-09-15) is a completed/plainly-errored
+ * call whose message or path merely NAMED a `restart-window` artefact and was
+ * still classified 'churn'. */
+export function toolAbortSignalFrom(signal: ToolAbortSignal | undefined): boolean {
+  if (signal === undefined) return false
+  if (signal.aborted === true) return true
+  if (typeof signal.code === 'string' && TOOL_ABORT_CODES.has(signal.code)) return true
+  return typeof signal.topLevelCode === 'string' && TOOL_ABORT_CODES.has(signal.topLevelCode)
+}
+
 /** The PURE abort-REASON classifier (objective 2 — the durable reason the
- * abort family lacked). Maps the harness abort message + the tool name to a
- * stable class:
+ * abort family lacked). Maps the harness abort message + the tool name + THE
+ * EFFECT to a stable class:
+ *   churn (a kill/signal ACTUALLY reached the call in flight AND the message
+ *          names the turn end the kill caused — a killed / terminated /
+ *          stopped turn, a restart/process stop),
  *   interruption (W9-b / harness interrupt),
  *   cancel (an explicit user cancel),
- *   churn (a killed / terminated / stopped turn — restarts, process stops),
  *   read-only abort (a READ-ONLY tool aborted — the fb-111 pure-read class),
  *   abort (a generic «tool call aborted»),
- *   else the raw message excerpt (capped) — NEVER a flat empty reason. */
-export function classifyToolAbortReason(message: string, tool: string): string {
+ *   else the raw message excerpt (capped) — NEVER a flat empty reason.
+ * fb-1PROC (2026-09-15) — THE CLASSIFICATION IS BY EFFECT, NOT BY WORDING:
+ * the pre-fix rule was `if (/killed|terminated|stopped by|process was
+ * stopped|restart/i.test(text)) return 'churn'` over the WHOLE message, with no
+ * position and no provenance, so a plain body error / a path / a command that
+ * NAMED a `restart-…` artefact was classified 'churn' (the measured
+ * false-positive family), while the REAL in-flight aborts — whose harness
+ * message is the bare «tool call aborted» / «tool call aborted before
+ * dispatch» (dsh-tools/lib/index.js:3552-3584, code ABORTED /
+ * ABORTED_BEFORE_DISPATCH) — were NOT churn at all: the effect was invisible.
+ * The churn class therefore requires the STRUCTURED kill signal
+ * ({@link toolAbortSignalFrom}: the harness code — ABORTED after the body
+ * started, ABORTED_BEFORE_DISPATCH before it — or the explicit flag) AND the
+ * kill vocabulary, which then names WHAT the kill ended (a restart/process
+ * stop). WITHOUT the signal the word decides NOTHING: a text-only caller (an
+ * un-upgraded one) degrades to the honest reading ('abort' / the raw excerpt),
+ * NEVER to a guessed 'churn' — the same text belongs to both the killed and the
+ * merely-named class, so electing one of them from the text is precisely the
+ * defect. The family is NOT vacated: BOTH in-flight kill shapes classify
+ * 'churn' when the message names the turn end, and the vetted call sites
+ * (tools.ts settle + nudge gate) always thread the real effect. */
+export function classifyToolAbortReason(message: string, tool: string, signal?: ToolAbortSignal): string {
   const text = message.trim()
+  const killEffect = toolAbortSignalFrom(signal)
+  if (killEffect && TOOL_KILL_VOCABULARY_RE.test(text)) return 'churn'
   if (/interrupt/i.test(text)) return 'interruption'
   if (/cancel/i.test(text)) return 'cancel'
-  if (/killed|terminated|stopped by|process was stopped|restart/i.test(text)) return 'churn'
   if (/abort|before dispatch|tool call aborted/i.test(text)) {
     return isReadOnlyTool(tool) ? 'read-only abort' : 'abort'
   }

@@ -24345,9 +24345,16 @@ function nudgeExec(name = 'probe_tool', agent = { id: 'probe-agent' }) {
   return { name, arguments: {}, agent }
 }
 
-/** An errored ToolExecutionResult (the shape a thrown/denied tool yields). */
-function nudgeErrorResult(message = 'boom') {
-  return { isError: true, error: { message }, content: [{ type: 'text', text: `Error: ${message}` }] }
+/** An errored tool result for the nudge waterfall. `code` is the STRUCTURED
+ * kill signal (`error.info.code` — the harness vocabulary ABORTED /
+ * ABORTED_BEFORE_DISPATCH); fb-1PROC (2026-09-15): a LIFE-ABORT is decided by
+ * that effect, never by a word in `message`. */
+function nudgeErrorResult(message = 'boom', code) {
+  return {
+    isError: true,
+    error: { message, ...(code !== undefined ? { info: { name: 'AbortError', code } } : {}) },
+    content: [{ type: 'text', text: `Error: ${message}` }]
+  }
 }
 
 /** The nudge additionalContexts among a decision's/result's contexts (the
@@ -24504,14 +24511,17 @@ test('FEEDBACK-NUDGE O2 (QD 09-03 — dedup + life-abort close): the SAME error 
       // `classifyToolAbortReason`) is never nudged either — the cancel class
       // and the churn/kill classes ('stopped' / 'terminated' / 'restart') are
       // LIFE-ABORTS the regex-only gate missed (a killed turn reporting
-      // 'stopped' must not nudge — the QD dead-letter family).
+      // 'stopped' must not nudge — the QD dead-letter family). fb-1PROC
+      // (2026-09-15): a LIFE-ABORT is decided by the STRUCTURED kill effect, so
+      // the killed-turn fixtures carry the harness abort code — the wording
+      // alone is not evidence that a kill happened.
       const cancelled = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('the user cancelled ask_user_question'), accept)
       assert.equal(nudgeContexts(cancelled.additionalContexts).length, 0, 'a user-cancel (cancel class) abort is never nudged')
-      const stoppedChurn = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('the process was stopped'), accept)
+      const stoppedChurn = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('the process was stopped', 'ABORTED'), accept)
       assert.equal(nudgeContexts(stoppedChurn.additionalContexts).length, 0, 'a stopped/killed (churn class) abort is never nudged')
-      const terminatedChurn = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('the operation was terminated'), accept)
+      const terminatedChurn = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('the operation was terminated', 'ABORTED'), accept)
       assert.equal(nudgeContexts(terminatedChurn.additionalContexts).length, 0, 'a terminated (churn class) abort is never nudged')
-      const restartedChurn = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('agent restarted'), accept)
+      const restartedChurn = await pluginCtx().waterfall('tools/post-execute', exec, nudgeErrorResult('agent restarted', 'ABORTED_BEFORE_DISPATCH'), accept)
       assert.equal(nudgeContexts(restartedChurn.additionalContexts).length, 0, 'a restarted (churn class) turn is never nudged')
     } finally {
       await dispose()
@@ -24540,8 +24550,10 @@ test('FEEDBACK-NUDGE O2 (real path — dead-letter suppression): a RETIRED worke
         // O2-ALIGN family — cancel/churn/kill) is NEVER nudged even though the
         // post is live and addressable: an abort de vida is not an actionable
         // tool error, so the recipient must not receive a nudge for it.
+        // fb-1PROC (2026-09-15): the killed-turn fixture carries the harness
+        // abort code — the wording alone is not evidence of a kill.
         const lifeExec = { name: 'dept_exec', arguments: { command: 'probe' }, agent: worker }
-        const liveAbortDecision = await pluginCtx().waterfall('tools/post-execute', lifeExec, nudgeErrorResult('the process was stopped (killed)'), accept)
+        const liveAbortDecision = await pluginCtx().waterfall('tools/post-execute', lifeExec, nudgeErrorResult('the process was stopped (killed)', 'ABORTED'), accept)
         assert.equal(nudgeContexts(liveAbortDecision.additionalContexts).length, 0, 'a LIFE-ABORT on a LIVE recipient is never nudged (not an actionable tool error)')
 
         // (b) retire the worker → a post-execute carrying the RETIRED post id is
