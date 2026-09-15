@@ -81,6 +81,36 @@ upgrading, fixing or watching (improvements, breaking changes, regressions).
    the next round had to correct). If the installed kernel cannot be located
    or read, declare the check NOT MEASURED. A range that does not match the
    current rc line caused `ERESOLVE` problems before — same class of check.
+5. **Watch conditions with a pinned reference value** — each condition below
+   carries its verification command INLINE and the measurement must be DATED
+   in the report (a report without the measurement date cannot support a
+   delta):
+   - **(a) that `dist-tags.next` has MOVED from `0.1.5-rc.2`** — the pinned
+     reference is `next = 0.1.5-rc.2`; verify with
+     `npm view @deepseek-ai/dsh dist-tags` and compare the value of the tag
+     `next` against the pin. This is the movement of a CONCRETE VALUE
+     (`next` relative to `0.1.5-rc.2`), and it is NOT the same thing as
+     watching that `dist-tags` exists generically (items 1–3 already do that
+     in the `dist-tags` block): a `dist-tags` block was present in every
+     round that missed the move.
+   - **(b) the APPEARANCE of `0.1.6-alpha.2` / `0.1.6-rc.1`** — future
+     candidate ONLY, record it as a candidate while it is ABSENT, **WITH NO
+     ACTION** (never an upgrade recommendation on the bare appearance of a
+     version string): `npm view @deepseek-ai/dsh versions` (or the same
+     `dist-tags` command as (a)), dated.
+     **The appearance is recorded ONLY in the round in which it APPEARS, and
+     while it is ABSENT it generates NO item — its continued absence is never
+     reported** (reason, measured twice today: a well-written rule executed
+     BACKWARDS through an obvious reading).
+6. **Form shape of the summary — ADITIVO / SUSTRACTIVO / RENOMBRADO /
+   BREAKING** — separate these four classes whenever the source DECLARES
+   them; a summary that enumerates N items in additive form while omitting
+   the breaking surface is a FALSE summary. Reason: the summary of
+   `0.1.6-alpha.1` enumerated 10 items with additive shape and kept silent
+   the largest breaking surface published to date (it removes E2B, renames
+   PTC without an alias, changes the DeepSeek default protocol) ⇒ an
+   additive summary does not hide "something": it hides THE HALF THAT
+   BREAKS (**`fb-1394`**).
 
 ## Report
 
@@ -91,7 +121,11 @@ each other (a same-day sibling round risked exactly that on 2026-09-10). The
 token-free path `reports/researcher/<YYYY-MM-DD>-dsh-updates.md` remains as a
 POINTER that names the real report of that day. (`reports/` = the department
 workspace reports dir; your cwd is the department workspace.) Frontmatter in the
-project report convention (`agent: researcher`, `date`, `task: dsh-updates`,
+project report convention (`agent: researcher`, `date`, **`instant` — the
+COMPLETE ISO-8601 instant of the round (`2026-09-16T09:0x:xxZ`), written in
+addition to `date`, which stays exactly as it is** (a report with only `date:`
+went stale in 31 minutes and produced a false correction — **`fb-1399`**),
+`task: dsh-updates`,
 `spec_ref: docs/departments/research/jobs/monitor-dsh-updates.md`,
 `outcome`, `files_touched`, `error_type`, `key_findings`), then the body:
 
