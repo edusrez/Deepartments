@@ -4025,6 +4025,109 @@ export const QI_SILENCE_CENSUS_KEY = '__qi-silence-census'
  * (now - 0 is beyond any window) and is never re-stamped; it lives until the
  * post leaves the retired catalog (the prune-by-catalog rule). */
 export const QI_SILENCE_PRIMED_MS = 0
+// ---------------------------------------------------------------------------
+// fb-270 (2026-09-08, QD — the DENOMINATOR fix). The declarations below are
+// deliberately MODULE-PRIVATE (no `export`): `src/core/health.ts` is an
+// `export * from 'dshd-health'` bridge into `lib/invoke.js`, whose export count
+// is FROZEN by test/export-parity.test.js (329). This lane is a pure DEFECT
+// FIX — it must not grow the bundle surface, so the new helpers stay internal
+// and are exercised END-TO-END through the already-exported `scanQiSilence`
+// (a real `retire-dice.jsonl` on a temp stateDir). A future lane that wants
+// them public owns the deliberate, documented lock bump.
+// ---------------------------------------------------------------------------
+
+/** The durable, append-only retire-dice ledger `retire-dice.jsonl` (written by
+ * `registry.appendRetireDice`, dshd-core) — ONE row per REAL worker retire:
+ * `{postId, retireRoll, retireProb, retireEmitted, reason?, ts}`. Its `ts` IS
+ * the retirement instant (posts.json carries no retiredAt) and its `reason` IS
+ * the retire's structural class — the two facts the denominator needs and the
+ * catalog cannot supply. */
+const QI_SILENCE_DICE_LEDGER_FILE = 'retire-dice.jsonl'
+/** The F6 EXCLUSION class label `appendRetireDice` stamps on a quality-head
+ * worker retire (`entry.managerId === 'quality-head'`, tools.ts retirePost):
+ * such a retire NEVER emits a directive BY DESIGN, so it is structurally
+ * INELIGIBLE for the qi-silence premise. Counting it as «silence» measures the
+ * watchdog's own denominator, not a trigger outage. */
+const QI_SILENCE_REASON_QD_WORKER = 'qd-worker'
+/** The QD head's postId: the `managerId` of every quality-head worker
+ * (inspector / quality job worker = the F6 exclusion subject). It names the
+ * INELIGIBLE class of the retired+worker catalog in the `reason`-free fallback
+ * path (no retire-dice ledger available). */
+const QI_SILENCE_QUALITY_HEAD_ID = 'quality-head'
+
+/** ONE retire-dice ledger row, reduced to the fields the qi-silence denominator
+ * needs. `eligible` is the crux: an INELIGIBLE row (the F6 `qd-worker` class)
+ * must enter neither the count nor the premise. */
+interface QiSilenceDiceRow {
+  postId: string
+  /** The retire instant (epoch-ms — the ledger row's own `ts`). */
+  ts: number
+  /** FALSE ⟺ the retire is the F6 `qd-worker` class (a quality-head worker
+   * retire — a directive was NEVER due). */
+  eligible: boolean
+  /** The retire's dice outcome: TRUE ⟺ roll < p ⇒ a directive WAS due. */
+  emitted: boolean
+}
+
+/** Read the DURABLE retire-dice ledger and reduce it to the rows whose retire
+ * instant falls INSIDE `(nowMs - windowMs, nowMs]`. Returns the rows, or
+ * `undefined` when the ledger is ABSENT / unreadable / holds NO parseable row
+ * (⇒ the caller falls back to the catalog-observation denominator: an absent
+ * ledger must never be read as «zero retirements», which would silently mute
+ * the watchdog). An EXISTING ledger with zero rows in the window returns `[]`
+ * (that IS the honest answer — no retire happened in the window). NEVER throws.
+ *
+ * ELIGIBILITY: ONLY `reason === 'qd-worker'` is ineligible. Any other value —
+ * INCLUDING the ABSENT field (pre-F2 rows, which the append-only ledger NEVER
+ * rewrites and whose own contract declares them readable) — is an ELIGIBLE
+ * `dice` retire: «absent ≠ excluded», so a real retirement is never silently
+ * dropped and a genuine silence can never be hidden. */
+function readQiRetireDice(stateDir: string, windowMs: number, nowMs: number): QiSilenceDiceRow[] | undefined {
+  let text: string
+  try {
+    text = readFileSync(path.join(stateDir, QI_SILENCE_DICE_LEDGER_FILE), 'utf8')
+  } catch {
+    return undefined
+  }
+  const rows: QiSilenceDiceRow[] = []
+  let sawRow = false
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed === '') continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      continue // a torn/partial line (a crash mid-append) → skip, never throw
+    }
+    if (typeof parsed !== 'object' || parsed === null) continue
+    const row = parsed as Record<string, unknown>
+    if (typeof row.postId !== 'string' || row.postId === '') continue
+    if (typeof row.ts !== 'number' || !Number.isFinite(row.ts)) continue
+    sawRow = true
+    // The window is `(nowMs - windowMs, nowMs]` — CLOSED at nowMs. A row stamped
+    // in the FUTURE is not a retirement in this window: it is a clock skew, or
+    // (as in a replay of a past alert) a ledger that already holds LATER rows.
+    // Without this arm such a row silently joins the denominator.
+    if (row.ts > nowMs || nowMs - row.ts > windowMs) continue
+    rows.push({
+      postId: row.postId,
+      ts: row.ts,
+      eligible: row.reason !== QI_SILENCE_REASON_QD_WORKER,
+      emitted: row.retireEmitted === true
+    })
+  }
+  return sawRow ? rows : undefined
+}
+
+/** P(X = 0 directives | n ELIGIBLE retires, p) = (1-p)^n: the exact bound the
+ * rate-aware minimum encodes, reported IN THE ALERT TEXT so a human reading the
+ * alert can reconstruct the count without opening the code. PURE. */
+function qiSilenceZeroProbability(rate: number, eligible: number): number {
+  if (!Number.isFinite(rate) || rate <= 0) return 1
+  if (!Number.isFinite(eligible) || eligible <= 0) return 1
+  return Math.pow(1 - rate, eligible)
+}
 
 /** One key of the pooler snapshot — STRUCTURAL (only the fields the watchdog
  * reads, so the pooler's own type never hard-depends on this package). */
@@ -4742,11 +4845,26 @@ export interface QiSilenceScanInput {
 
 /** The qi-silence scan result: the findings (≤1 per tick, key `qi-silence`),
  * the NEXT ledger, and whether the ledger CHANGED (the tick persists only then —
- * the turn-errors pattern: 1914-1935). */
+ * the turn-errors pattern: 1914-1935), PLUS the fb-270 denominator breakdown
+ * (the numbers the premise was actually tested against — so a caller/test can
+ * assert the count without re-deriving it from the alert text). */
 export interface QiSilenceScanResult {
   findings: HealthFinding[]
   ledger: QiSilenceState
   changed: boolean
+  /** The ELIGIBLE retires-in-window the premise tested (the finding's `count`). */
+  eligible: number
+  /** The total retired+worker retires observed in the window (eligible +
+   * excluded) — the PRE-FIX denominator, kept for the alert text. */
+  observed: number
+  /** The structurally-INELIGIBLE retires excluded from the denominator (the F6
+   * `qd-worker` class). */
+  excluded: number
+  /** The eligible retires whose dice said a directive WAS due (roll < p) — the
+   * actionable refinement reported in the alert text. */
+  expected: number
+  /** Which denominator produced `eligible`. */
+  source: 'dice-ledger' | 'catalog'
 }
 
 /** M1-b — scan the qi-silence condition: retirements in the window (the
@@ -4776,11 +4894,20 @@ export interface QiSilenceScanResult {
  * post NEVER re-count and NEVER re-stamp (the ledger entry IS the retirement —
  * the latent re-count bug of the incident). NEVER throws. */
 export function scanQiSilence(input: QiSilenceScanInput): QiSilenceScanResult {
+  // NB (fb-270): `retiredWorkers` stays the FULL retired+worker population — it
+  // drives the observation ledger's stamps AND its prune-by-catalog rule (a
+  // narrower set would evict every qd-worker entry on every tick). ONLY the
+  // COUNTING below is narrowed to the ELIGIBLE population.
   const retiredWorkers = input.posts.filter((p) => p.provider === 'worker' && p.retired === true)
   const retiredPostIds = new Set(retiredWorkers.map((p) => p.postId))
   const ledger = { ...input.ledger }
   let changed = false
   let inWindow = 0
+  // fb-270 — the ELIGIBLE subset of the catalog-observation count: an F6
+  // qd-worker retire (`managerId === 'quality-head'`) NEVER emits a directive,
+  // so it can never be part of a «retirements elapsed with zero directives»
+  // premise. Tracked in PARALLEL so the ledger machinery above stays untouched.
+  let inWindowEligible = 0
   const censusMs = ledger[QI_SILENCE_CENSUS_KEY]
   if (censusMs === undefined) {
     // THE BOOT CENSUS (the FIRST tick — no marker in the ledger): the already-
@@ -4803,13 +4930,16 @@ export function scanQiSilence(input: QiSilenceScanInput): QiSilenceScanResult {
     // PRIMED entry (0) NEVER counts (now - 0 is beyond any window) — the census
     // is not a retirement event and re-observations never re-count.
     for (const post of retiredWorkers) {
+      const ineligible = post.managerId === QI_SILENCE_QUALITY_HEAD_ID
       const firstSeen = ledger[post.postId]
       if (firstSeen === undefined) {
         ledger[post.postId] = input.nowMs
         changed = true
         inWindow += 1
+        if (!ineligible) inWindowEligible += 1
       } else if (firstSeen !== QI_SILENCE_PRIMED_MS && input.nowMs - firstSeen <= input.windowMs) {
         inWindow += 1
+        if (!ineligible) inWindowEligible += 1
       }
     }
   }
@@ -4820,19 +4950,71 @@ export function scanQiSilence(input: QiSilenceScanInput): QiSilenceScanResult {
       changed = true
     }
   }
+  // -------------------------------------------------------------------------
+  // fb-270 — THE DENOMINATOR (the fix; canonical fb-270, QD 2026-09-08).
+  //
+  // THE DEFECT: the pre-fix count treated EVERY retired+worker post as a
+  // potential directive emitter. But a quality-head worker retire is the F6
+  // exclusion (tools.ts retirePost — `entry.managerId !== 'quality-head' &&`
+  // gates the draw): its directive is suppressed BY DESIGN, so it is
+  // structurally INELIGIBLE. Feeding it to a P(0 directives | n, p) bound
+  // inflates the denominator → the watchdog measures its own bookkeeping
+  // instead of the trigger it guarantees. Reproduced live (2026-09-15T02:17:14Z,
+  // `health-alerts.jsonl`, count=11): the window held 6 `dice` + 5 `qd-worker`
+  // rows, ZERO eligible retirements had a directive due ⇒ the pre-fix
+  // P(X=0 | n=11) ≈ 4.2% alarm was really P(X=0 | n=6) ≈ 17.8% — pure dice.
+  //
+  // THE ELIGIBLE DENOMINATOR, in order of authority:
+  //   (1) THE DURABLE LEDGER `retire-dice.jsonl` — the append-only record the
+  //       O2/F2 lane wrote for EXACTLY this discrimination: it carries the
+  //       retire's real `ts` (not a first-seen approximation) AND its `reason`
+  //       class (the F6 label). Preferred whenever readable. Read IN-PROCESS,
+  //       exactly like the directive count's `messages.jsonl` read — so this
+  //       fix stays confined to THIS function and its module-private helpers:
+  //       no caller/tick change, hence no edit inside another lane's zones.
+  //   (2) THE CATALOG FALLBACK (no usable ledger) — the post-census delta,
+  //       minus the F6 class (`managerId === 'quality-head'`).
+  // Neither path may ever UNDER-count eligibility: an F6 post without a
+  // recoverable `managerId`, or a ledger row with an ABSENT `reason`, stays
+  // ELIGIBLE — the conservative direction for a trigger guarantee.
+  // -------------------------------------------------------------------------
+  const diceRows = readQiRetireDice(input.stateDir, input.windowMs, input.nowMs)
+  let eligible = inWindowEligible
+  let observed = inWindow
+  let expected = 0
+  let source: 'dice-ledger' | 'catalog' = 'catalog'
+  if (diceRows !== undefined) {
+    source = 'dice-ledger'
+    observed = diceRows.length
+    eligible = diceRows.filter((row) => row.eligible).length
+    expected = diceRows.filter((row) => row.eligible && row.emitted).length
+  }
+  const excluded = observed - eligible
   const directives = readQiDirectiveCount(input.stateDir, input.windowMs, input.nowMs)
   const findings: HealthFinding[] = []
-  if (inWindow > 0 && inWindow >= input.minRetires && directives === 0) {
+  if (eligible > 0 && eligible >= input.minRetires && directives === 0) {
     const windowMinutes = Math.round(input.windowMs / 60000)
+    // fb-270 — the alert must let a human RECONSTRUCT the count without opening
+    // the code: the ELIGIBLE denominator, the excluded F6 class, the retires
+    // whose directive was actually DUE, and the exact P(X=0) the bound encodes.
+    const provenance = source === 'dice-ledger'
+      ? `denominator from ${QI_SILENCE_DICE_LEDGER_FILE} (durable ledger)`
+      : `denominator from the catalog post-census delta (no ${QI_SILENCE_DICE_LEDGER_FILE})`
+    const zeroProbability = (qiSilenceZeroProbability(input.rate, eligible) * 100).toFixed(2)
     findings.push({
       kind: 'qi-silence',
       key: QI_SILENCE_KEY,
       ts: input.nowMs,
-      count: inWindow,
-      error: `${inWindow} worker retire(s) in ${windowMinutes} min with zero quality-inspect directive(s) (workerInspectProbability=${input.rate}, min retires ${input.minRetires})`
+      count: eligible,
+      error:
+        `${eligible} worker retire(s) in ${windowMinutes} min with zero quality-inspect directive(s) ` +
+        `(workerInspectProbability=${input.rate}, min retires ${input.minRetires}) — ${provenance}: ` +
+        `${eligible} ELIGIBLE of ${observed} worker retire(s) in window, ${excluded} qd-worker excluded ` +
+        `(F6, managerId=${QI_SILENCE_QUALITY_HEAD_ID}, never emits by design); ${expected} eligible retire(s) ` +
+        `had retireEmitted=true (roll < p — a directive was DUE); P(X=0 | n=${eligible}, p=${input.rate}) = ${zeroProbability}%`
     })
   }
-  return { findings, ledger, changed }
+  return { findings, ledger, changed, eligible, observed, excluded, expected, source }
 }
 
 // ---------------------------------------------------------------------------
