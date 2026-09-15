@@ -2928,6 +2928,86 @@ function deptExecPathTokens(command: string): string[] {
   return tokens
 }
 
+/** fb-1289 (QD inspector / IPH — the GUARD DEFECT: an evadable denial) — the
+ * RELATIVE-UPWARD path words of a command. `deptExecPathTokens` above extracts
+ * ONLY `/`-leading words, so a relative multi-segment traversal (`../x/y`) was
+ * NEVER scope-inspected: the SAME destination got two verdicts (its absolute
+ * form DENIED, its `../` form ALLOWED). This scan yields exactly the words
+ * whose DESTINATION the absolute scan cannot see — a word that (a) is not
+ * `/`-leading, (b) is MULTI-SEGMENT (carries a `/`) and (c) has an UPWARD
+ * (`..`) path SEGMENT. Deliberately narrow, to add no new false-positive
+ * family:
+ *   - a `..` glued INSIDE a filename (`notes..txt`, `main..feature`) is not a
+ *     SEGMENT → never a traversal, never checked;
+ *   - a bare `..` (the argument of `cd ..`) is NOT multi-segment → stays with
+ *     the shell's own navigation semantics (its target is a cwd, not a path
+ *     this scan can resolve lexically);
+ *   - a word carrying a shell metachar/variable/glob (a `$V/../x` form, or a
+ *     glob segment like `..` + `*`) is
+ *     statically UNRESOLVABLE → stays HEURISTIC (never denied), exactly the
+ *     posture of the absolute-token path for an unresolvable word;
+ *   - the CONTENT-context skips the absolute scan already applies are honored
+ *     (a pattern-flag value, a git commit message), so the guard stays
+ *     FORM-BLIND: a skipped absolute token's relative twin is skipped too.
+ * Module-private (NOT exported — the frozen lib/invoke.js export count must not
+ * grow; exercised through the public `deptExecDenyReason`). */
+function deptExecRelativePathTokens(command: string): string[] {
+  const tokens: string[] = []
+  const cmd = deptExecMaskArithmetic(String(command ?? ''))
+  const re = /(^|[\s|&;'`"()<>])([^\s|&;'`"()<>]+)/g
+  for (const match of cmd.matchAll(re)) {
+    const token = match[2]
+    if (typeof token !== 'string' || token === '') continue
+    // `/`-leading words are the absolute scan's own tokens (never re-checked).
+    if (token.startsWith('/')) continue
+    // An expansion/variable/glob word cannot be resolved → stay heuristic.
+    if (DEPT_EXEC_TOKEN_METACHAR.test(token)) continue
+    // Only a MULTI-SEGMENT word can carry an upward path SEGMENT.
+    if (!token.includes('/')) continue
+    if (!token.split('/').includes('..')) continue
+    const tokenStart = match.index + (match[1]?.length ?? 0)
+    // The same content-context skips as the absolute-token scan (symmetry).
+    if (deptExecIsPatternFlagValue(cmd, tokenStart)) continue
+    if (deptExecIsQuotedCommitMessage(cmd, tokenStart)) continue
+    tokens.push(token)
+  }
+  return tokens
+}
+
+/** fb-1289 — resolve a RELATIVE path word against `base` the way the KERNEL
+ * resolves it, NOT lexically. Components are walked left to right and every
+ * EXISTING prefix is upgraded to its `realpath`, so a SYMLINKED component
+ * resolves to its TARGET before a following `..` is applied — a difference that
+ * is REAL: with a purely lexical `path.resolve`, a word `link/../secret.txt`
+ * (where `link` is a symlink to an out-of-root directory) is judged as if
+ * `link/..` were the cwd's parent, while the shell actually opens the LINK's
+ * parent — an out-of-root destination the lexical reading calls in-root. A
+ * component that does not exist has nothing to resolve and is applied lexically
+ * — the same tolerant posture as `deptExecCanonicalToken`, which then realpaths
+ * the final path when it exists. Pure + never throws. Module-private (the
+ * frozen lib export count must not grow). */
+function deptExecResolvePhysical(base: string, word: string): string {
+  let cur = String(base ?? '')
+  for (const part of String(word ?? '').split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') {
+      cur = path.dirname(cur)
+      continue
+    }
+    const next = path.resolve(cur, part)
+    if (!existsSync(next)) {
+      cur = next
+      continue
+    }
+    try {
+      cur = realpathSync(next)
+    } catch {
+      cur = next
+    }
+  }
+  return cur
+}
+
 /** The `/dev` device-sink tokens that are ALWAYS allowed by the abs-path scope
  * check — they are not paths under scope control (writing/reading `/dev/null`,
  * `/dev/stdout`, `/dev/stderr`, `/dev/zero`, `/dev/tty` is harmless and is the
@@ -3104,6 +3184,31 @@ export function deptExecDenyReason(command: string, cwd: string, allowedRoots: r
       // packages/» — to the deny (APPEND-ONLY: non-packages tokens keep the
       // byte-identical phrase, so every existing deny-regex still matches).
       return `OUT_OF_SCOPE / DENIED — command references absolute path "${token}" outside a scoped dept_exec root (escalate via the Asistente / owner approval)${deptExecPackageDiscoveryHint(token, target)}`
+    }
+  }
+  // (5) fb-1289 (QD inspector / IPH — the GUARD DEFECT: an evadable denial).
+  // The loops above decide on the TEXTUAL FORM of a path: check (4) inspects
+  // only `/`-leading words, so the SAME destination was DENIED in absolute form
+  // and ALLOWED via `../` (`cat ../../../../etc/hostname` ran). Each
+  // multi-segment relative word with an upward (`..`) segment is therefore
+  // CANONICALIZED FIRST — resolved against the REALPATH'd cwd with every
+  // EXISTING component upgraded to its realpath (`deptExecResolvePhysical`: the
+  // KERNEL's own resolution order, so symlinks resolve BEFORE a following `..`),
+  // then the existing `deptExecCanonicalToken` realpath — and ONLY THEN are the
+  // stable + containment checks applied, to the resolved DESTINATION. Deny by
+  // destination, never by spelling: one destination ⇒ one verdict, both forms.
+  for (const word of deptExecRelativePathTokens(cmd)) {
+    const target = deptExecCanonicalToken(deptExecResolvePhysical(cwd, word))
+    // `/dev/null` & friends reached relatively are still the whitelisted sinks.
+    if (DEPT_EXEC_DEV_WHITELIST.has(target)) continue
+    // The stable profile is protected at its RESOLVED destination — a
+    // `../`-traversal into `/opt/dsh/.dsh` is denied by THIS rule (its own
+    // phrase), exactly like its absolute twin.
+    if (isStablePath(target) && !stableHomeGranted) {
+      return 'OUT_OF_SCOPE / DENIED — the stable profile is protected — requires explicit owner approval via the Asistente'
+    }
+    if (!roots.some((root) => isPathInside(target, root))) {
+      return `OUT_OF_SCOPE / DENIED — command references relative path "${word}" resolving to "${target}" outside a scoped dept_exec root (escalate via the Asistente / owner approval)`
     }
   }
   return undefined
