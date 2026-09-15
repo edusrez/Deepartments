@@ -2999,7 +2999,43 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
    * whenever `scopeOf` is shadow-unreadable. The fallback keeps the waypoints
    * on the agent's OWN layer in both worlds: hermetic (scopeOf resolves — one
    * instance) and live (scopeOf → undefined → `agentCtx.agent`). */
-  const agentScopeOf = (agentCtx: Context): object | undefined => scopeOf(agentCtx) ?? (agentCtx as unknown as { agent?: object }).agent
+  const agentScopeOf = (agentCtx: Context): object | undefined => {
+    const viaScope = scopeOf(agentCtx)
+    if (viaScope !== void 0) return viaScope
+    // DEFENSIVE (mirrors spawn.ts `agentScopeKey` — the SAME house pattern):
+    // this branch is reached ONLY when `scopeOf` already returned undefined —
+    // the NORMAL multi-instance state of the live profile — and the harness
+    // 0.1.5 API-drift (`ReactLoopAgent` dropped `ctx.extend({ agent: this })`,
+    // dsh-agent-loop/lib/index.js:762) means the STRING property `agent` no
+    // longer exists, so reading it on a live cordis Context THROWS «cannot get
+    // property "agent" without inject» (the host's fatal load failure). Degrade
+    // to `undefined` — exactly the value this fallback already meant (no
+    // live-scope oracle) — never throw. NOT a behavior change on any
+    // non-throwing path. The SYMBOL read above (`scopeOf` → `ctx[kScope]`) is
+    // measured NOT to throw, so it is deliberately left unguarded.
+    try {
+      return (agentCtx as unknown as { agent?: object }).agent
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The `scopeKeySource` seam classifier (M2.4), extracted so ALL THREE audit
+   * waypoints (post-mount / probe / toolset-final) read through ONE guarded
+   * site: 'scopeOf' (hermetic — one module instance), 'ctx-agent' (live — the
+   * harness's own key object), 'unscoped' (neither seam resolves). The `.agent`
+   * read is guarded for the SAME measured reason as `agentScopeOf` (0.1.5
+   * removed the binding), and the degraded answer stays the `'unscoped'` the
+   * inline ternary already meant — identical observable value on every
+   * non-throwing path. */
+  const scopeKeySourceOf = (agentCtx: Context): 'scopeOf' | 'ctx-agent' | 'unscoped' => {
+    if (scopeOf(agentCtx) !== void 0) return 'scopeOf'
+    try {
+      return (agentCtx as unknown as { agent?: unknown }).agent === void 0 ? 'unscoped' : 'ctx-agent'
+    } catch {
+      return 'unscoped'
+    }
+  }
 
   /** P2-ENTRY (fb-29 — QD nudge #2, «el entry durable del retiro sub-registra
    * dept_zstd_read»): the CANONICAL effective-toolset candidate set — the names
@@ -3073,7 +3109,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         kind,
         presetId,
         ts: Date.now(),
-        scopeKeySource: scopeOf(agentCtx) === void 0 ? (agentCtx as unknown as { agent?: unknown }).agent === void 0 ? 'unscoped' : 'ctx-agent' : 'scopeOf',
+        scopeKeySource: scopeKeySourceOf(agentCtx),
         secretary: agentCtx.tools.get('secretary', agentScopeOf(agentCtx)) === void 0 ? 'no' : 'yes'
       })
       // (0) Tool restriction: a root agent has no startContinuable toolFilter,
@@ -3150,7 +3186,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
         kind,
         allow: allowList.join(','),
         allowCount: allowList.length,
-        scopeKeySource: scopeOf(agentCtx) === void 0 ? (agentCtx as unknown as { agent?: unknown }).agent === void 0 ? 'unscoped' : 'ctx-agent' : 'scopeOf',
+        scopeKeySource: scopeKeySourceOf(agentCtx),
         secretary: DENIED_POST_TOOLS.has('secretary')
           ? 'dropped(denied)'
           : OWN_LAYER_POST_TOOLS.has('secretary')
@@ -3203,7 +3239,7 @@ export function createToolsOrchestration(ctx: Context, deps: ToolsFactoryDeps): 
           kind,
           count: visible.length,
           ownVisible,
-          scopeKeySource: scopeOf(agentCtx) === void 0 ? (agentCtx as unknown as { agent?: unknown }).agent === void 0 ? 'unscoped' : 'ctx-agent' : 'scopeOf',
+          scopeKeySource: scopeKeySourceOf(agentCtx),
           secretary: visible.includes('secretary') ? 'yes' : 'no',
           send_message: visible.includes('send_message') ? 'yes' : 'no',
           names: visible.join(',')
