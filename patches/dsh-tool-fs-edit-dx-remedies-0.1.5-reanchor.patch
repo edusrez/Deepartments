@@ -1,0 +1,144 @@
+# === dsh-deepartments patch: dsh-tool-fs edit-DX remedy for FS_EDIT_NOT_FOUND,
+#     RE-ANCHORED to the 0.1.5 BRANCH form (fb-827 / fb-85/89/108) ===
+#
+# fichero
+#   node_modules/@deepseek-ai/dsh-tool-fs/lib/index.js
+#
+# FINGERPRINTS (md5)
+#   antes   229f3b817c6b2d25669263cc8e8622cc
+#   después ca7f5f955d0f2e4a5323b583e781e7cc
+#
+# FUENTE DEL PRE (in-scope, byte-exact — no assumption)
+#   Published npm tarball:
+#     https://registry.npmjs.org/@deepseek-ai/dsh-tool-fs/-/dsh-tool-fs-0.1.5-rc.2.tgz
+#     tarball md5     1f05fc9259ea6356848fa247775f97d7
+#     package/lib/index.js md5  229f3b817c6b2d25669263cc8e8622cc   <-- the PRE
+#   The PRE above is the md5 MEASURED inside the downloaded tarball, and it is
+#   INDEPENDENTLY CORROBORATED by this repo's own ROW 3 header comment
+#   (scripts/reapply-dsh-0.1.5-rc.2-patches.sh:218), which declared the same
+#   229f3b81… as the 0.1.5 pre-state before this patch existed.
+#
+# WHICH ROW TOUCHES THIS FILE (the mission's condition 1, measured not assumed)
+#   Searching scripts/reapply-dsh-0.1.5-rc.2-patches.sh for every row whose
+#   `rel`/`dir` resolves to `@deepseek-ai/dsh-tool-fs/lib/index.js` returns
+#   EXACTLY ONE row: ROW 3 (row_tool_fs_old, :227-236). ROW 3 is CONTEXT-ABSENT
+#   on 0.1.5 and therefore NEVER WRITES (it returns 1 before reaching
+#   guarded_patch at :233). NO OTHER ROW touches this file: the whole 0.1.5 CHAIN rows (6..9)
+#   and row 3b operate on a DIFFERENT package,
+#   `@deepseek-ai/dsh-tool-fs-search/lib/index.js`, whose applied md5
+#   (a182162d… after row 3b) is a fingerprint of that other file and cannot
+#   invalidate this PRE. => the PRE is the pristine tarball md5, and a POST-3b
+#   tree still holds dsh-tool-fs/lib/index.js at 229f3b81… unchanged.
+#
+# WHAT THIS FIXES — the FACE is the FS_EDIT_NOT_FOUND remedy text (fb-827)
+#   In the tree IN EXECUTION (GLOBAL 0.1.1-rc.2, lib/index.js md5 103b0b86…) the
+#   remedy map carries three codes, and the third appends this text VERBATIM
+#   (GLOBAL :547):
+#     "read the file, then retry with the exact literal
+#      (the hint names what the file holds near the anchor)"
+#   The 0.1.5 tree to be switched EMITS NOTHING for FS_EDIT_NOT_FOUND: its
+#   remediateFsError (:545-550) carries only TWO branches, and the code
+#   FS_EDIT_NOT_FOUND does not occur in the file at all (MEASURED: 0 matches).
+#   A failed literal edit therefore reaches the model as the bare provider
+#   sentence `old_string was not found in "<path>"`, with no recovery
+#   instruction — while the INSTRUMENT half of that effect (the hint itself,
+#   produced by dsh-fs-local's nearestLiteralHint) IS ALREADY PORTED in the
+#   0.1.5 tree. The promise is the missing half; without it the model is never
+#   told to re-read and retry with the exact literal, which is exactly the
+#   failure fb-827 documents.
+#
+# WHY A NEW PATCH FILE AND NOT THE OLD ONE (paralelo exacto a grep-scope)
+#   patches/dsh-tool-fs-edit-dx-remedies.patch was written against the 0.1.1
+#   shape, where that region was a REMEDIES const map. 0.1.5 REWROTE it into a
+#   chain of explicit `if (error.code === …)` branches and gave
+#   remediateFsError a second parameter `displayPath` — which is why ROW 3
+#   reports CONTEXT-ABSENT (its anchor `The remedy appended to each remediable
+#   failure code` does not exist in 0.1.5) and why that ABSENCE IS CORRECT: the
+#   guarded_patch gate refused a Frankenstein. This file re-anchors the SAME
+#   effect to the branch form. The old patch file is left UNTOUCHED and ROW 3 is
+#   left at CONTEXT-ABSENT (mission condition 2: not forced).
+#
+# HOW IT IS RE-PORTED (declared adaptation, semantics conserved)
+#   The GLOBAL's REMEDIES-map lookup is equivalent to one more branch. This
+#   patch therefore APPENDS a third branch to the existing chain, using the
+#   GLOBAL's remedy string BYTE-IDENTICALLY and the GLOBAL's own composition
+#   shape `${error.message} — ${remedy}` (GLOBAL :565), so the resulting
+#   message is character-for-character what the GLOBAL emits for this code.
+#   The two PREVIOUS branches are kept BYTE-IDENTICAL (no reword): the fb-89
+#   rewordings of FS_STALE_VERSION / FS_NOT_OBSERVED that the old patch also
+#   carried are NOT ported here (see "what this patch does not cover"), because
+#   the named face of this re-port is FS_EDIT_NOT_FOUND and the mission
+#   requires the two prior branches intact.
+#   Two DOC edits accompany it, because a doc that says "the two" while three
+#   branches exist is the same label/behaviour contradiction class as B1:
+#     - the function doc block gains the FS_EDIT_NOT_FOUND sentence;
+#     - `@returns … for the two guarded-mutation codes` -> `… for the
+#       remediable guarded-mutation codes` (the GLOBAL's own wording).
+#
+# THE EFFECT IS THE READER'S TO MEASURE (not this header's claim)
+#   POST-apply, remediateFsError must emit, for a code FS_EDIT_NOT_FOUND:
+#     `${error.message} — read the file, then retry with the exact literal
+#       (the hint names what the file holds near the anchor)`
+#   and for FS_NOT_OBSERVED / FS_STALE_VERSION its two pre-existing strings BYTE
+#   -IDENTICAL to the pre-state. Both are re-measured from the RESULTING FILE in
+#   the run report, not asserted from this comment.
+#
+# ADDITIVE / COMPATIBILITY
+#   Purely additive to the failure path: with the branch appended, a code that
+#   is none of the three still falls through to `return error` untouched, and
+#   the FsError CODE is preserved on all three (machine routing keeps working).
+#   No export list, schema, systemPrompt or description changes.
+#
+# WHAT THIS PATCH DOES NOT COVER (declared)
+#   - It does NOT port the fb-89 REWORDINGS of FS_STALE_VERSION /
+#     FS_NOT_OBSERVED (GLOBAL :545-546). Those two strings in 0.1.5 are the
+#     inline forms `… — re-read the file, then retry` and `cannot modify "…":
+#     file has not been read — read the file, then retry`; changing them is a
+#     DIFFERENT effect and would mutate the two prior branches this mission
+#     requires intact. FLAGGED, NOT FIXED (scope discipline).
+#   - It does NOT port the hint itself (`nearestLiteralHint` / `hintSnippet` /
+#     `boundedEditDistance`). That is the INSTRUMENT half, it lives in
+#     `@deepseek-ai/dsh-fs-local/lib/index.js`, and it is ALREADY PORTED
+#     (patch dsh-fs-local-edit-dx-hints, ROW 1). This patch is the PROMISE half
+#     only, in the OTHER package — which is precisely fb-827's two-package
+#     split.
+#   - It does NOT change the hint's 2 000-line edit-distance cap that fb-827's
+#     QD note identifies as the root cause of the hint being absent on large
+#     files. That is a cost decision owned by the upstream package.
+#   - It does NOT touch lib/types/error.d.ts: the 0.1.5 package's declaration
+#     for this module carries no per-code remedy surface.
+#   - It does NOT declare a md5 for any tree it was not measured against. POST
+#     was measured by applying THIS file to the in-scope tarball copy.
+#
+# IDEMPOTENCY: NOT a property of this file. Idempotency is enforced by the
+#   SCRIPT ROW's presence gate, which greps for `FS_EDIT_NOT_FOUND` and reports
+#   NOOP. Never re-apply this file blindly.
+#
+# LINE NUMBERS are those of the PRE state (229f3b81…, the pristine 0.1.5 file)
+#   — NOT the GLOBAL's and NOT the old patch's 0.1.1 numbers.
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -535,17 +535,19 @@
+ * Render the stable model-facing diagnostic for a guarded-mutation failure.
+ * `FS_STALE_VERSION` keeps the provider's reason and appends its re-read
+ * remedy. `FS_NOT_OBSERVED` replaces operation-specific policy/provider text
+-* with one path-aware reason and read remedy. The original error remains the
+-* cause, and both diagnostics preserve its code for machine routing. Anything
+-* else passes through untouched.
++* with one path-aware reason and read remedy. `FS_EDIT_NOT_FOUND` keeps the
++* provider's reason and appends the exact-literal edit remedy. The original error
++* remains the cause, and each diagnostic preserves its code for machine routing.
++* Anything else passes through untouched.
+ * @param error - the caught value from a write/edit execution.
+ * @param displayPath - the resolved target path shown to the model.
+-* @returns a remediated `FsError` for the two guarded-mutation codes, else the original value.
++* @returns a remediated `FsError` for the remediable guarded-mutation codes, else the original value.
+ */
+ function remediateFsError(error, displayPath) {
+ 	if (!(error instanceof FsError)) return error;
+ 	if (error.code === "FS_NOT_OBSERVED") return new FsError(`cannot modify "${displayPath}": file has not been read — read the file, then retry`, error.code, { cause: error });
+ 	if (error.code === "FS_STALE_VERSION") return new FsError(`${error.message} — re-read the file, then retry`, error.code, { cause: error });
++	if (error.code === "FS_EDIT_NOT_FOUND") return new FsError(`${error.message} — read the file, then retry with the exact literal (the hint names what the file holds near the anchor)`, error.code, { cause: error });
+ 	return error;
+ }
+ //#endregion

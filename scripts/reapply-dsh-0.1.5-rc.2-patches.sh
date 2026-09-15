@@ -36,12 +36,25 @@
 #   scripts/reapply-dsh-0.1.5-rc.2-patches.sh --check [TREE]
 #   scripts/reapply-dsh-0.1.5-rc.2-patches.sh apply   [TREE]
 #   TREE defaults to $DSH_DEV_TREE or the canonical path below.
-#   --check : report each row (APPLIED / NOOP / CONTEXT-ABSENT / PRE-UNKNOWN)
+#   --check : REPORT ONLY — THIS MODE NEVER WRITES. It runs each row's own
+#             presence gate and, for a row that would land, proves the hunks with
+#             `patch --dry-run` (which writes nothing) and reports WOULD-APPLY.
+#             A --check run leaves every file BYTE-IDENTICAL to how it found it.
+#             States: APPLIED / NOOP / WOULD-APPLY / CONTEXT-ABSENT / SKIP.
 #   apply   : apply every row whose context is present; loud+exit 1 otherwise.
+#
+# (The check-mode wording above is a CONTRACT, not a remark: it was measured
+# false once — `--check` applied for real and mutated the tree while its banner
+# claimed "rows are REPORTED, not applied". DRY_RUN below is the enforcement.)
 #
 set -euo pipefail
 
-CANONICAL_TREE="/opt/dsh/.dsh-dev/trees/deepartments-dev-0.1.5-rc.2"
+# The deployment tree. MEASURED 2026-09-15: the 0.1.5-rc.2 tree lives at
+# /opt/dsh/trees/deepartments-dev-0.1.5-rc.2 — the path the host moved it TO.
+# The previous value pointed at the pre-move location (/opt/dsh/.dsh-dev/trees/…),
+# which no longer exists: a pointer that had stopped pointing at what it believed.
+# Keep this in step with the move (DSH_DEV_TREE still overrides).
+CANONICAL_TREE="/opt/dsh/trees/deepartments-dev-0.1.5-rc.2"
 TREE="${DSH_DEV_TREE:-${CANONICAL_TREE}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -55,8 +68,29 @@ N="${TREE}/node_modules"
 
 md5_of() { md5sum "$1" 2>/dev/null | cut -d' ' -f1; }
 
+# --- the check/apply SEPARATION (B1) ---------------------------------------
+# EVERY write in this script is funnelled through DRY_RUN:
+#   DRY_RUN=1 (--check) : no write path is reachable. `patch` runs with
+#                         --dry-run ONLY (writes nothing), and the two anchored
+#                         `sed -i` inserts are skipped after their gates pass.
+#                         A row that would land is reported WOULD-APPLY.
+#   DRY_RUN=0 (apply)   : the real writes happen.
+# MEASURED DEFECT this exists to kill: the check mode used to run its rows
+# un-gated, so a `--check` MUTATED the tree (it applied) while the banner
+# promised "rows are REPORTED, not applied" — a prudent operator using --check
+# precisely to avoid touching the tree was, without knowing it, deploying.
+DRY_RUN=1
+[[ "${MODE}" == "apply" ]] && DRY_RUN=0
+# NOTE: `patch` has NO short form for --dry-run (`-D` is --ifdef, a DIFFERENT and
+# file-rewriting option — never use it here). This is the ONLY dry-run spelling.
+DRYFLAG=""
+[[ "${DRY_RUN}" -eq 1 ]] && DRYFLAG="--dry-run"
+
 # --- counters ---------------------------------------------------------------
-APPLIED=0; NOOP=0; ABSENT=0; BAD=0
+APPLIED=0; NOOP=0; ABSENT=0; BAD=0; WOULD=0
+# Set by guarded_patch: the outcome of the last call ("APPLIED" / "WOULD-APPLY"),
+# so a caller can label its row from what actually happened rather than assume.
+GP_STATE=""
 
 # anchored_sed <file> <context> <sed-expr>
 # Applies a `sed` ONLY to lines containing <context> (the owner's precedent:
@@ -64,6 +98,7 @@ APPLIED=0; NOOP=0; ABSENT=0; BAD=0
 # scope — see /opt/dsh/reapply-patch.sh:5-10).
 anchored_sed() {
   local f="$1" ctx="$2" expr="$3"
+  if [[ "${DRY_RUN}" -eq 1 ]]; then return 0; fi
   sed -i "/${ctx}/${expr}" "$f"
 }
 
@@ -82,16 +117,33 @@ anchored_sed() {
 #   (2) only then apply for real, and force a RESTORE if the post-state cannot
 #       be confirmed by the caller's own md5 check.
 #
-# Returns 0 when the patch was fully applied, 1 otherwise. NEVER leaves a
-# partially patched file.
+# Returns 0 when the patch was fully applied (or, under DRY_RUN, would be),
+# 1 otherwise. NEVER leaves a partially patched file. Under DRY_RUN it writes
+# NOTHING at all and sets GP_STATE=WOULD-APPLY instead of APPLIED.
 guarded_patch() {
   local dir="$1" pfile="$2"; shift 2
   [[ -f "${pfile}" ]] || { echo "  (patch file missing: ${pfile})" >&2; return 1; }
   if ! ( cd "${dir}" && patch -p1 -f --dry-run "$@" < "${pfile}" ) >/dev/null 2>&1; then
     return 1
   fi
+  if [[ "${DRY_RUN}" -eq 1 ]]; then GP_STATE="WOULD-APPLY"; return 0; fi
   ( cd "${dir}" && patch -p1 -f "$@" < "${pfile}" ) >/dev/null 2>&1 || return 1
+  GP_STATE="APPLIED"
   return 0
+}
+
+# report_applied <row-name>
+# Emits the row's outcome line, HONESTLY labelled: WOULD-APPLY in check mode,
+# APPLIED when the bytes were really written. Never let a dry run print APPLIED
+# — that label/behaviour mismatch is the defect this file now guards against.
+report_applied() {
+  if [[ "${GP_STATE}" == "WOULD-APPLY" ]]; then
+    echo "WOULD-APPLY  $1 (all hunks would apply; --check wrote NOTHING)"
+    WOULD=$((WOULD+1))
+  else
+    echo "APPLIED      $1"
+    APPLIED=$((APPLIED+1))
+  fi
 }
 
 # row <id> <pkgroot> <relfile> <patchfile> <expect-missing-md5-or-'-'>
@@ -120,13 +172,14 @@ row_fs_local() {
   local P="${PATCH_DIR}/dsh-fs-local-edit-dx-hints.patch"
   local PRE=424c540f945117bf63ea28a10ee6ab7b POST=4696abf96dba760a7c3dabc7b0a7ebb8
   local cur; cur="$(md5_of "${dir}/${rel}")"
-  if [[ "${cur}" == "${POST}" ]]; then echo "NOOP         dsh-fs-local-edit-dx-hints (already applied)"; return 0; fi
+  if [[ "${cur}" == "${POST}" ]]; then echo "NOOP         dsh-fs-local-edit-dx-hints (already applied)"; NOOP=$((NOOP+1)); return 0; fi
   # the context anchor this patch needs, from the patch body itself
   if ! grep -q 'old_string was not found in' "${dir}/${rel}"; then
     echo "CONTEXT-ABSENT dsh-fs-local-edit-dx-hints — 'old_string was not found' not in ${rel}; NOT forcing" >&2
     ABSENT=$((ABSENT+1)); return 1
   fi
-  ( cd "${dir}" && patch -p1 -f < "${P}" ) >/dev/null || { echo "FAIL dsh-fs-local-edit-dx-hints (patch rejected)" >&2; BAD=$((BAD+1)); return 1; }
+  ( cd "${dir}" && patch -p1 -f ${DRYFLAG} < "${P}" >/dev/null 2>&1 ) || { echo "FAIL dsh-fs-local-edit-dx-hints (patch rejected)" >&2; BAD=$((BAD+1)); return 1; }
+  if [[ "${DRY_RUN}" -eq 1 ]]; then echo "WOULD-APPLY  dsh-fs-local-edit-dx-hints (hunk would apply; --check wrote NOTHING)"; WOULD=$((WOULD+1)); return 0; fi
   [[ "$(md5_of "${dir}/${rel}")" == "${POST}" ]] && { echo "APPLIED      dsh-fs-local-edit-dx-hints"; APPLIED=$((APPLIED+1)); } \
     || { echo "FAIL dsh-fs-local-edit-dx-hints post-md5 $(md5_of "${dir}/${rel}") != ${POST}" >&2; BAD=$((BAD+1)); return 1; }
 }
@@ -142,7 +195,7 @@ row_fs_obs() {
   local dir="${N}/@deepseek-ai/dsh-fs-observation-policy" rel="lib/index.js"
   local PRE=03a757a7ef920657faf01ab3f959eb1e POST=aeec8df679864aaee3408b2cb8229f03
   local cur; cur="$(md5_of "${dir}/${rel}")"
-  if [[ "${cur}" == "${POST}" ]]; then echo "NOOP         dsh-fs-observation-policy (already applied)"; return 0; fi
+  if [[ "${cur}" == "${POST}" ]]; then echo "NOOP         dsh-fs-observation-policy (already applied)"; NOOP=$((NOOP+1)); return 0; fi
   local ctx='edit requires reading'
   if ! grep -q "${ctx}" "${dir}/${rel}"; then
     echo "CONTEXT-ABSENT dsh-fs-observation-policy — '${ctx}' not in ${rel}; NOT forcing" >&2
@@ -152,8 +205,9 @@ row_fs_obs() {
   # uses `patch` for BYTE-EXACTNESS: an equivalent anchored `sed` was measured
   # to reproduce the INTENT but not the exact bytes (2cf2397a… vs aeec8df6…),
   # and a byte-exact post-state is what the fingerprint check can verify.
-  ( cd "${dir}" && patch -p1 -f < "${PATCH_DIR}/dsh-fs-observation-policy-not-observed-message.patch" ) >/dev/null \
+  ( cd "${dir}" && patch -p1 -f ${DRYFLAG} < "${PATCH_DIR}/dsh-fs-observation-policy-not-observed-message.patch" >/dev/null 2>&1 ) \
     || { echo "FAIL dsh-fs-observation-policy (patch rejected)" >&2; BAD=$((BAD+1)); return 1; }
+  if [[ "${DRY_RUN}" -eq 1 ]]; then echo "WOULD-APPLY  dsh-fs-observation-policy (hunk would apply; --check wrote NOTHING)"; WOULD=$((WOULD+1)); return 0; fi
   [[ "$(md5_of "${dir}/${rel}")" == "${POST}" ]] && { echo "APPLIED      dsh-fs-observation-policy"; APPLIED=$((APPLIED+1)); } \
     || { echo "FAIL dsh-fs-observation-policy post-md5 $(md5_of "${dir}/${rel}") != ${POST}" >&2; BAD=$((BAD+1)); return 1; }
 }
@@ -165,17 +219,80 @@ row_fs_obs() {
 #   MEASURED 0.1.5: **CONTEXT-ABSENT** — upstream reworded the remedy map
 #   ('The remedy appended to each remediable failure code's message' no longer
 #   matches; the 0.1.5 file already carries a THIRD wording). NOT ported.
+#   => This row's OLD patch (the 0.1.1 REMEDIES-map form) is NOT the one that
+#      delivers the 0.1.5 effect. It is KEPT at CONTEXT-ABSENT, UNFORCED
+#      (asserted by row_tool_fs_old, which never writes), and the SAME face is
+#      delivered by ROW 3B below, re-anchored to the 0.1.5 BRANCH form.
 # ===========================================================================
-row_tool_fs() {
+row_tool_fs_old() {
   local dir="${N}/@deepseek-ai/dsh-tool-fs" rel="lib/index.js"
   if ! grep -q 'The remedy appended to each remediable failure code' "${dir}/${rel}"; then
     echo "CONTEXT-ABSENT dsh-tool-fs-edit-dx-remedies — upstream rewrote the REMEDIES block in 0.1.5; NOT forcing" >&2
     ABSENT=$((ABSENT+1)); return 1
   fi
   if guarded_patch "${dir}" "${PATCH_DIR}/dsh-tool-fs-edit-dx-remedies.patch"; then
-  echo "APPLIED      dsh-tool-fs-edit-dx-remedies"; APPLIED=$((APPLIED+1));
+    report_applied dsh-tool-fs-edit-dx-remedies
   else
     echo "FAIL dsh-tool-fs-edit-dx-remedies" >&2; BAD=$((BAD+1)); return 1;
+  fi
+}
+
+# ===========================================================================
+# ROW 3B — dsh-tool-fs: FS_EDIT_NOT_FOUND edit-DX remedy RE-ANCHORED to the
+#          0.1.5 BRANCH form (fb-827) — the re-port of ROW 3's effect.
+#   fichero: node_modules/@deepseek-ai/dsh-tool-fs/lib/index.js
+#   md5: pre 229f3b817c6b2d25669263cc8e8622cc -> post ca7f5f955d0f2e4a5323b583e781e7cc
+#   SOURCE OF THE PRE (in-scope, byte-exact): published npm tarball
+#     @deepseek-ai/dsh-tool-fs/-/dsh-tool-fs-0.1.5-rc.2.tgz (md5 1f05fc92…);
+#     its package/lib/index.js is 229f3b81… — measured, and corroborated by this
+#     script's own ROW 3 header.
+#   WHICH ROWS TOUCH THIS FILE: ROW 3 (3B's own predecessor) and 3B only. The
+#     0.1.5 CHAIN rows (6..9) and 3b edit a DIFFERENT package
+#     (@deepseek-ai/dsh-tool-fs-search), so POST-3b state cannot invalidate this
+#     PRE. MEASURED, not assumed.
+#   ENGINE: the proven guarded_patch pattern (--dry-run FIRST, apply ONLY if
+#     EVERY hunk lands) + a PRESENCE GATE for idempotency.
+#   IDEMPOTENCY GATE: `FS_EDIT_NOT_FOUND` is this patch's own signature and its
+#     ABSENCE is what makes the patch applicable, so its PRESENCE short-circuits
+#     to NOOP. Never re-apply this file blindly (raw `patch` is NOT idempotent
+#     on these files — MEASURED elsewhere in this script).
+# ===========================================================================
+row_tool_fs_remedies() {
+  local dir="${N}/@deepseek-ai/dsh-tool-fs" rel="lib/index.js"
+  local F="${dir}/${rel}"
+  local PRE=229f3b817c6b2d25669263cc8e8622cc
+  local POST=ca7f5f955d0f2e4a5323b583e781e7cc
+  # -- presence gate FIRST (idempotency): already-applied -> NOOP, no write ----
+  if grep -q 'FS_EDIT_NOT_FOUND' "${F}"; then
+    # POST fingerprint too: a file carrying the code but not the declared bytes
+    # is a silent drift, not a NOOP.
+    if [[ "$(md5_of "${F}")" == "${POST}" ]]; then
+      echo "NOOP         dsh-tool-fs-edit-dx-remedies-0.1.5-reanchor (already applied)"
+      NOOP=$((NOOP+1))
+    else
+      echo "WARN         dsh-tool-fs-edit-dx-remedies-0.1.5-reanchor — FS_EDIT_NOT_FOUND present but md5 $(md5_of "${F}") != ${POST}; inspect" >&2
+      BAD=$((BAD+1)); return 1
+    fi
+    return 0
+  fi
+  # -- exact base check: the patch declares an EXACT PRE md5. Any other file is
+  #    not this patch's base -> declare, do NOT force (the anti-drag rule).
+  if [[ "$(md5_of "${F}")" != "${PRE}" ]]; then
+    echo "CONTEXT-ABSENT dsh-tool-fs-edit-dx-remedies-0.1.5-reanchor — md5 $(md5_of "${F}") is not the declared PRE ${PRE}; NOT forcing" >&2
+    ABSENT=$((ABSENT+1)); return 1
+  fi
+  if guarded_patch "${dir}" "${PATCH_DIR}/dsh-tool-fs-edit-dx-remedies-0.1.5-reanchor.patch"; then
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+      report_applied dsh-tool-fs-edit-dx-remedies-0.1.5-reanchor
+    elif [[ "$(md5_of "${F}")" == "${POST}" ]]; then
+      report_applied dsh-tool-fs-edit-dx-remedies-0.1.5-reanchor
+    else
+      echo "FAIL dsh-tool-fs-edit-dx-remedies-0.1.5-reanchor post-md5 $(md5_of "${F}") != ${POST}" >&2
+      BAD=$((BAD+1)); return 1
+    fi
+  else
+    echo "CONTEXT-ABSENT dsh-tool-fs-edit-dx-remedies-0.1.5-reanchor — a hunk rejects against the branch-shaped base; NOTHING WRITTEN" >&2
+    ABSENT=$((ABSENT+1)); return 1
   fi
 }
 
@@ -194,7 +311,7 @@ row_tool_web() {
     ABSENT=$((ABSENT+1)); return 1
   fi
   if guarded_patch "${dir}" "${PATCH_DIR}/dsh-tool-web-fetch-timeout-override.patch"; then
-  echo "APPLIED      dsh-tool-web-fetch-timeout-override"; APPLIED=$((APPLIED+1));
+    report_applied dsh-tool-web-fetch-timeout-override;
   else
     echo "FAIL dsh-tool-web-fetch-timeout-override" >&2; BAD=$((BAD+1)); return 1;
   fi
@@ -211,7 +328,7 @@ row_web() {
   local dir="${N}/@deepseek-ai/dsh-web" rel="lib/types/types.d.ts"
   local POST=f74e2a0b1f4356cfca6fbc157d684020
   local cur; cur="$(md5_of "${dir}/${rel}")"
-  if [[ "${cur}" == "${POST}" ]]; then echo "NOOP         dsh-web-fetch-request-timeout (already applied)"; return 0; fi
+  if [[ "${cur}" == "${POST}" ]]; then echo "NOOP         dsh-web-fetch-request-timeout (already applied)"; NOOP=$((NOOP+1)); return 0; fi
   local ctx='readonly url: string;'
   if ! grep -q "${ctx}" "${dir}/${rel}"; then
     echo "CONTEXT-ABSENT dsh-web-fetch-request-timeout — '${ctx}' not in ${rel}; NOT forcing" >&2
@@ -219,8 +336,9 @@ row_web() {
   fi
   # The context grep above is the GATE. Byte-exact application via `patch`
   # (measured clean: the 0.1.5 WebFetchRequest is still `{ readonly url }`).
-  ( cd "${dir}" && patch -p1 -f < "${PATCH_DIR}/dsh-web-fetch-request-timeout.patch" ) >/dev/null \
+  ( cd "${dir}" && patch -p1 -f ${DRYFLAG} < "${PATCH_DIR}/dsh-web-fetch-request-timeout.patch" >/dev/null 2>&1 ) \
     || { echo "FAIL dsh-web-fetch-request-timeout (patch rejected)" >&2; BAD=$((BAD+1)); return 1; }
+  if [[ "${DRY_RUN}" -eq 1 ]]; then echo "WOULD-APPLY  dsh-web-fetch-request-timeout (hunk would apply; --check wrote NOTHING)"; WOULD=$((WOULD+1)); return 0; fi
   [[ "$(md5_of "${dir}/${rel}")" == "${POST}" ]] && { echo "APPLIED      dsh-web-fetch-request-timeout"; APPLIED=$((APPLIED+1)); } \
     || { echo "WARN dsh-web-fetch-request-timeout post-md5 $(md5_of "${dir}/${rel}") != ${POST} (anchored sed shape differs; inspect)" >&2; BAD=$((BAD+1)); return 1; }
 }
@@ -253,9 +371,10 @@ row_fs_search() {
   # -- 1 anchor: context = the pristine buildGrepCommand shape
   if grep -q 'function anchorGlobPattern' "${F}"; then
     echo "NOOP         dsh-tool-fs-search-anchor-literal-glob (already applied)"
+    NOOP=$((NOOP+1))
   elif grep -q -- '--glob=${input.pattern}' "${F}"; then
     if guarded_patch "${dir}" "${P1}"; then
-  echo "APPLIED      dsh-tool-fs-search-anchor-literal-glob"; APPLIED=$((APPLIED+1));
+  report_applied dsh-tool-fs-search-anchor-literal-glob;
   else
     echo "FAIL anchor-literal-glob" >&2; BAD=$((BAD+1)); rc=1;
   fi
@@ -265,11 +384,12 @@ row_fs_search() {
   # -- 2 path-not-found: context = the plain classifyRunFailure (no SEARCH_PATH_NOT_FOUND)
   if grep -q 'SEARCH_PATH_NOT_FOUND' "${F}"; then
     echo "NOOP         dsh-tool-fs-search-path-not-found (already applied)"
+    NOOP=$((NOOP+1))
   elif grep -q 'function classifyRunFailure(toolName, exitCode, stderrText, stderrTruncated)' "${F}"; then
     # GUARDED: 3 of 6 hunks reject in 0.1.5, so a plain `patch` would leave a
     # frankenstein (MEASURED: 168d0afd… — not a declared fingerprint).
     if guarded_patch "${dir}" "${P2}"; then
-      echo "APPLIED      dsh-tool-fs-search-path-not-found"; APPLIED=$((APPLIED+1))
+      report_applied dsh-tool-fs-search-path-not-found
     else
       echo "CONTEXT-ABSENT dsh-tool-fs-search-path-not-found — 3/6 hunks reject in 0.1.5 (upstream moved classifyRunFailure + the grep doc block); NOTHING WRITTEN" >&2
       ABSENT=$((ABSENT+1)); rc=1
@@ -280,10 +400,11 @@ row_fs_search() {
   # -- 3 grep-scope (fb-765): context = the zero-match literal the patch wraps
   if grep -q 'function formatScopeNote' "${F}"; then
     echo "NOOP         dsh-tool-fs-search-grep-scope-declaration (already applied)"
+    NOOP=$((NOOP+1))
   elif grep -q 'if (retained.seen === 0) return "No matches found";' "${F}"; then
     # GUARDED: hunk #5 (the systemPrompt text) rejects in 0.1.5.
     if guarded_patch "${dir}" "${P3}"; then
-      echo "APPLIED      dsh-tool-fs-search-grep-scope-declaration"; APPLIED=$((APPLIED+1))
+      report_applied dsh-tool-fs-search-grep-scope-declaration
     else
       echo "CONTEXT-ABSENT dsh-tool-fs-search-grep-scope-declaration — hunk #5 (systemPrompt text) rejects in 0.1.5; NOTHING WRITTEN" >&2
       ABSENT=$((ABSENT+1)); rc=1
@@ -310,6 +431,7 @@ row_fs_search() {
   # so the gate MUST short-circuit on the POST state and never re-apply blindly.
   if grep -q 'function formatScopeNote' "${F}"; then
     echo "NOOP         dsh-tool-fs-search-grep-scope-reclosure (already applied)"
+    NOOP=$((NOOP+1))
   elif [[ "$(md5_of "${F}")" != "36bb46d4112901c20bd213d38c088303" ]]; then
     # The patch's PRE is an EXACT md5 (the anchor state). Any other file is not
     # this patch's base: declare and do NOT force (the anti-drag rule).
@@ -318,8 +440,12 @@ row_fs_search() {
   elif guarded_patch "${dir}" "${P3B}"; then
     # POST fingerprint: the patch declares a182162dd5ef7d2cc299a7d23015c1db. A
     # full-hunk apply that does NOT reproduce it is a silent drift, not success.
-    if [[ "$(md5_of "${F}")" == "a182162dd5ef7d2cc299a7d23015c1db" ]]; then
-      echo "APPLIED      dsh-tool-fs-search-grep-scope-reclosure"; APPLIED=$((APPLIED+1))
+    # UNDER --check NOTHING was written, so the file is still at its PRE by
+    # construction — the fingerprint check is meaningful only when bytes moved.
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+      report_applied dsh-tool-fs-search-grep-scope-reclosure
+    elif [[ "$(md5_of "${F}")" == "a182162dd5ef7d2cc299a7d23015c1db" ]]; then
+      report_applied dsh-tool-fs-search-grep-scope-reclosure
     else
       echo "FAIL dsh-tool-fs-search-grep-scope-reclosure post-md5 $(md5_of "${F}") != a182162dd5ef7d2cc299a7d23015c1db" >&2
       BAD=$((BAD+1)); rc=1
@@ -334,6 +460,7 @@ row_fs_search() {
   # base) — SKIP, never force.
   if grep -q 'const named = searchTarget' "${F}"; then
     echo "NOOP         dsh-tool-fs-search-no-collapse (already applied)"
+    NOOP=$((NOOP+1))
   elif [[ "$(md5_of "${F}")" == "36bb46d4112901c20bd213d38c088303" ]]; then
     # anchor-only state: the no-collapse base is absent -> declare, do not force.
     echo "SKIP         dsh-tool-fs-search-no-collapse (its pristine, the path-not-found-applied state, is not reachable in 0.1.5)" >&2
@@ -371,13 +498,14 @@ row_client_ui() {
   local dir="${N}/@deepseek-ai/dsh-client-ui-conversation" rel="lib/client.js"
   if grep -q 'id: event.data.id === void 0 ? String(event.seq)' "${dir}/${rel}"; then
     echo "NOOP         dsh-client-ui-conversation-input-message-identity (already applied)"; return 0
+    NOOP=$((NOOP+1))
   fi
   if ! grep -q 'input-message' "${dir}/${rel}"; then
     echo "CONTEXT-ABSENT dsh-client-ui-conversation-input-message-identity — the 'input-message' definition moved in 0.1.5; NOT forcing" >&2
     ABSENT=$((ABSENT+1)); return 1
   fi
   if guarded_patch "${dir}" "${PATCH_DIR}/dsh-client-ui-conversation-input-message-identity.patch"; then
-  echo "APPLIED      dsh-client-ui-conversation-input-message-identity"; APPLIED=$((APPLIED+1));
+    report_applied dsh-client-ui-conversation-input-message-identity;
   else
     echo "CONTEXT-ABSENT dsh-client-ui-conversation-input-message-identity (hunk rejected); NOT forcing" >&2; ABSENT=$((ABSENT+1)); return 1;
   fi
@@ -395,9 +523,10 @@ row_llm_deepseek() {
   local F="${dir}/${rel}"
   if grep -q 'issuedToolCallIds' "${F}"; then
     echo "NOOP         dsh-llm-deepseek-orphan-sweep (already applied)"
+    NOOP=$((NOOP+1))
   elif grep -q 'for (const result of toolResults) wire.push({' "${F}"; then
     if guarded_patch "${dir}" "${PATCH_DIR}/dsh-llm-deepseek-orphan-sweep.patch"; then
-  echo "APPLIED      dsh-llm-deepseek-orphan-sweep"; APPLIED=$((APPLIED+1));
+    report_applied dsh-llm-deepseek-orphan-sweep;
   else
     echo "FAIL dsh-llm-deepseek-orphan-sweep" >&2; BAD=$((BAD+1)); return 1;
   fi
@@ -406,9 +535,10 @@ row_llm_deepseek() {
   fi
   if grep -q 'function stripIncompleteToolCalls' "${F}"; then
     echo "NOOP         dsh-llm-deepseek-toolcall-strip (already applied)"
+    NOOP=$((NOOP+1))
   else
     if guarded_patch "${dir}" "${PATCH_DIR}/dsh-llm-deepseek-toolcall-strip.patch"; then
-  echo "APPLIED      dsh-llm-deepseek-toolcall-strip"; APPLIED=$((APPLIED+1));
+    report_applied dsh-llm-deepseek-toolcall-strip;
   else
     echo "FAIL dsh-llm-deepseek-toolcall-strip" >&2; BAD=$((BAD+1)); return 1;
   fi
@@ -434,6 +564,7 @@ row_compaction() {
   # the "already applied" signal; only a file with NEITHER is patched.
   if grep -q 'BARE400_NO_BODY_RE' "${F}"; then
     echo "NOOP         dsh-compaction-basic-fb251-bare400-guard (already applied)"; return 0
+    NOOP=$((NOOP+1))
   fi
   local ctx='if (failure.code !== CONTEXT_WINDOW_EXCEEDED_CODE || signal.aborted) return next();'
   if ! grep -qF "${ctx}" "${F}"; then
@@ -447,7 +578,12 @@ row_compaction() {
   fi
   # The guard line, ANCHORED to the request-error context line (the precedent's
   # shape: sed is scoped to the line that carries the context, never a global
-  # s///).
+  # s///). BOTH inserts are WRITES: under --check they are SKIPPED and the row
+  # reports WOULD-APPLY (the gates above are what make that a sound report).
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "WOULD-APPLY  dsh-compaction-basic-fb251-bare400-guard (both anchors present; --check wrote NOTHING)"
+    WOULD=$((WOULD+1)); return 0
+  fi
   sed -i "/$(printf '%s' "${ctx}" | sed 's/[][\.*^$/]/\\&/g')/a\\
 \t\t\tif (BARE400_NO_BODY_RE.test(failure.message)) return next();" "${F}"
   # The const, ANCHORED to the last import line.
@@ -473,6 +609,7 @@ row_pi_ai_overflow() {
   local F="${dir}/${rel}" POST=26189ad4cc510c1fd1de746464c7eedb
   if [[ "$(md5_of "${F}")" == "${POST}" ]]; then
     echo "NOOP         dsh-pi-ai-fb251-bare400-overflow (already applied)"; return 0
+    NOOP=$((NOOP+1))
   fi
   local ctx='/^4(?:00|13)\\s*(?:status code)?\\s*\\(no body\\)/i'
   if ! grep -qF '/^4(?:00|13)\s*(?:status code)?\s*\(no body\)/i' "${F}"; then
@@ -480,7 +617,7 @@ row_pi_ai_overflow() {
     ABSENT=$((ABSENT+1)); return 1
   fi
   if guarded_patch "${dir}" "${PATCH_DIR}/dsh-pi-ai-fb251-bare400-overflow.patch"; then
-  echo "APPLIED      dsh-pi-ai-fb251-bare400-overflow"; APPLIED=$((APPLIED+1));
+    report_applied dsh-pi-ai-fb251-bare400-overflow;
   else
     echo "FAIL dsh-pi-ai-fb251-bare400-overflow" >&2; BAD=$((BAD+1)); return 1;
   fi
@@ -496,13 +633,14 @@ row_pi_ai_parse() {
   local F="${dir}/${rel}"
   if grep -q 'LOCAL PATCH (deepartments 2026-09-10)' "${F}"; then
     echo "NOOP         dsh-pi-ai-dead-partial-parse (already applied)"; return 0
+    NOOP=$((NOOP+1))
   fi
   if ! grep -q 'block.arguments = parseStreamingJson(block.partialArgs);' "${F}"; then
     echo "CONTEXT-ABSENT dsh-pi-ai-dead-partial-parse — the per-delta parse line is not in ${rel}; NOT forcing" >&2
     ABSENT=$((ABSENT+1)); return 1
   fi
   if guarded_patch "${dir}" "${PATCH_DIR}/dsh-pi-ai-dead-partial-parse.patch"; then
-  echo "APPLIED      dsh-pi-ai-dead-partial-parse"; APPLIED=$((APPLIED+1));
+    report_applied dsh-pi-ai-dead-partial-parse;
   else
     echo "FAIL dsh-pi-ai-dead-partial-parse" >&2; BAD=$((BAD+1)); return 1;
   fi
@@ -531,7 +669,7 @@ row_session_persist() {
   # dry-run gate is what stops hunk#1's fuzz-apply from landing while hunk#2
   # rejects (the measured frankenstein: 9f672813 -> partial + a stray .rej).
   if guarded_patch "${TREE}" "${PATCH_DIR}/dsh-session-persistence-list-parallel.patch" -p1; then
-    echo "APPLIED      dsh-session-persistence-list-parallel"; APPLIED=$((APPLIED+1))
+    report_applied dsh-session-persistence-list-parallel
   else
     echo "CONTEXT-ABSENT dsh-session-persistence-list-parallel — hunk#2 rejects in the flat 0.1.5 tree; NOTHING WRITTEN" >&2
     ABSENT=$((ABSENT+1)); return 1
@@ -539,25 +677,35 @@ row_session_persist() {
 }
 
 # --- run every row; a failing row never aborts the sweep (we report ALL) ----
+# BOTH modes run the SAME row set. The old split silently DROPPED row_fs_local
+# from --check, so a check run reported an incomplete picture — a check must see
+# exactly what apply would do. (What differs between the modes is only whether a
+# write is reachable: DRY_RUN.)
 run_row() { "$@" || true; }
-if [[ "${MODE}" == "apply" ]]; then
-  run_row row_fs_local;        run_row row_fs_obs
-  run_row row_tool_fs;         run_row row_tool_web
-  run_row row_web;             run_row row_fs_search
-  run_row row_app_boot;        run_row row_client_ui
-  run_row row_llm_deepseek;    run_row row_compaction
-  run_row row_pi_ai_overflow;  run_row row_pi_ai_parse
-  run_row row_session_persist
-else
-  echo "(--check) rows are REPORTED, not applied: run 'apply' to patch."
-  run_row row_fs_obs;  run_row row_tool_fs; run_row row_tool_web
-  run_row row_web;     run_row row_fs_search; run_row row_app_boot
-  run_row row_client_ui; run_row row_compaction
-  run_row row_pi_ai_overflow; run_row row_pi_ai_parse; run_row row_session_persist
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+  echo "(--check) REPORT ONLY — this run writes NOTHING; a row that would land is reported WOULD-APPLY."
+  echo "(--check) run 'apply' to actually patch."
 fi
+run_row row_fs_local;        run_row row_fs_obs
+run_row row_tool_fs_old;     run_row row_tool_fs_remedies
+run_row row_tool_web
+run_row row_web;             run_row row_fs_search
+run_row row_app_boot;        run_row row_client_ui
+run_row row_llm_deepseek;    run_row row_compaction
+run_row row_pi_ai_overflow;  run_row row_pi_ai_parse
+run_row row_session_persist
 
 echo
-echo "### summary: applied=${APPLIED} noop=${NOOP} context-absent/skipped=${ABSENT} failed=${BAD}"
+echo "### summary: applied=${APPLIED} would-apply=${WOULD} noop=${NOOP} context-absent/skipped=${ABSENT} failed=${BAD}"
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+  echo "### (--check) WROTE NOTHING — applied=${APPLIED} must be 0 in this mode; would-apply=${WOULD} is what 'apply' would land."
+  # A non-zero `applied` here would mean a write escaped the DRY_RUN gate: that
+  # is the B1 contract broken, and it must be LOUD, not a footnote.
+  if [[ "${APPLIED}" -gt 0 ]]; then
+    echo "### CONTRACT VIOLATION: --check reported applied=${APPLIED} — a write escaped DRY_RUN." >&2
+    exit 2
+  fi
+fi
 if [[ "${ABSENT}" -gt 0 || "${BAD}" -gt 0 ]]; then
   echo "### NOT fully re-applied on 0.1.5-rc.2 — the rows above are the measurement." >&2
   exit 1
