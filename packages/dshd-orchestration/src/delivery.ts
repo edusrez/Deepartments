@@ -2459,7 +2459,9 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
   /** fb-696 — the ADDITIVE tail the directive carries (acceptance a: the VERDICT
    * + ITS INSTANT). APPENDED, never prepended: the qi-silence watchdog counts the
    * directive by `text.startsWith(QUALITY_INSPECT_WORKER_RETIRED_PREFIX)`
-   * (dshd-health readQiDirectiveCount, index.ts:4664-4669) and the rotation
+   * (dshd-health `readQiDirectiveCount` in `index.ts` — cited by SYMBOL, never
+   * by a line: the span that stood here was ROTTEN — it belongs to
+   * `QiSilenceState`, a DIFFERENT export) and the rotation
    * families are asserted by prefix (R6) — a prefix would break BOTH. */
   const capacityGateStanza = (verdict: { blocked: boolean; reason?: string; instant: string; sustained: boolean }): string => {
     const head = verdict.blocked
@@ -2606,7 +2608,10 @@ export function createDeliveryOrchestration(ctx: Context, deps: DeliveryFactoryD
       // FRAME: `source.senderSessionId` (what agent_messages / the GUI render).
       // `fromSessionId` is set by the caller that KNOWS it (lifecycle.sleepHost =
       // the OLD host session); when absent the argument stays `void 0` — NEVER a
-      // present `undefined` key (the W7-B class, jsonSafeMessageSource :1659-1669).
+      // present `undefined` key (the W7-B class: `dshd-core/src/wakepack.ts`
+      // `jsonSafeMessageSource` → `toJsonSafe`, which OMITS an `undefined` value
+      // instead of re-emitting the key — cited by SYMBOL: the bare span that
+      // stood here named NO destination file and was ROTTEN).
       const fromSessionId = (surface as { fromSessionId?: string }).fromSessionId
       // fb-696 (acceptance b) — THE CONTAINMENT, AND IT IS THE GATE (acceptance e):
       // under a SUSTAINED halt the directive is NOT woken. The direction `the

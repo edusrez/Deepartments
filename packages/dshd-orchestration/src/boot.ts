@@ -1170,7 +1170,10 @@ export function createBootOrchestration(ctx: Context, deps: BootFactoryDeps): Bo
 // MPC-PREFLIGHT — PUERTA 3 (BOOT): verificación I-MP completa, NO bloqueante.
 //
 // Import LOCAL (fuera del bloque de imports del head — el anchor de
-// followup-contract.test.js en boot.ts:115 se preserva).
+// followup-contract.test.js — la declaración `followup(message: UserMessage):
+// void` del `AgentLike`, citada POR MARCA y nunca por línea (la línea que
+// figuraba aquí era PODRIDA: a esa altura no vive la declaración) — se
+// preserva).
 import { renderRunReport, runMpcPreflightSync } from './model-pins-runner.js'
 // F3 (gate unit-2): la ENTREGA REAL al host necesita el constructor canónico de
 // mensaje del harness (el mismo que usan buildPresenceMessage / busUserMessage).
