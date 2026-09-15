@@ -46,6 +46,20 @@ test('r6-ladder-flat (fb-95): every repo reference to ts-src-loader.mjs in test/
   }
 })
 
+// ⚠️ THE LIST BELOW IS A *PHOTO*, NOT A RULE (fb-1063, instance #1095 — the
+// same class as fb-1053: a guard PHOTOGRAPHS a set and then compares it with a
+// world that keeps MOVING ⇒ what it can honestly report is drift AGAINST A
+// PHOTO, so it must name WHAT the set is, WHICH world it covers and WHEN the
+// photo was taken). This family was last written on the date below: every
+// self-registering test created AFTER it legitimately lands outside the photo,
+// and that is not a defect of the product — it is the instrument comparing the
+// present against a frozen past (fb-1063: NO-FALLO del producto / SÍ-DEFECTO
+// DEL INSTRUMENTO). Substantiating command, from the repo root:
+//   git log --reverse -S 'p2-snapshot-anchor.test.js' --format=%cs -- test/r6-ladder-flat.test.js | head -1
+// The assertion below keeps its TEETH (it still fails) and declares the
+// contract instead of pretending the world froze with the photo.
+const LANE2_FAMILY_PHOTO_AT = '2026-09-07'
+
 test('r6-ladder-flat (fb-95): the self-registering tests are lane-② src-native (their imports resolve into src, not the built lib)', () => {
   const testsDir = path.join(REPO_ROOT, 'test')
   const registerers = readdirSync(testsDir)
@@ -92,7 +106,13 @@ test('r6-ladder-flat (fb-95): the self-registering tests are lane-② src-native
     // self-registers the hook (the lane2 pattern).
     'p2-snapshot-anchor.test.js',
   ])
-  for (const f of registerers) {
-    assert.ok(laneFamily.has(f), `unexpected self-registerer ${f} — only the lane-②/src-native family may self-register the hook`)
-  }
+  // ONE assertion, over the WHOLE difference, with the set shape declared: the
+  // per-file `assert.ok(laneFamily.has(f))` loop this replaces failed on the
+  // FIRST unexpected file and hid the rest (the radius was invisible).
+  const unexpected = registerers.filter((f) => !laneFamily.has(f))
+  assert.deepEqual(
+    unexpected,
+    [],
+    `${unexpected.length} self-registering file(s) are NOT in the lane-② src-native family PHOTO of ${LANE2_FAMILY_PHOTO_AT} (${laneFamily.size} entries, last written that day) — the hook is self-registered by ${registerers.length} test files TODAY: what the set IS = the lane-② src-native tests that self-register the hook; what the contract IS = a self-registering file must be lane-②, and adding it to the laneFamily list IS the declaration (there is no other declaration site); what this RED does NOT mean = that the ladder convention drifted or that the product is broken (a file created AFTER the photo simply is not in it — fb-1063/#1095); next action = if the file(s) below are genuine lane-② src-native tests, add them to laneFamily and move the photo date to today, otherwise the assertion is doing its job. Rows: ${unexpected.join(', ')}`,
+  )
 })
